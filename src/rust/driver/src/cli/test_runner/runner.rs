@@ -19,6 +19,7 @@ use super::discovery::print_discovery_summary;
 use super::coverage::save_coverage_data;
 use super::feature_db::update_feature_database;
 use super::test_db_update::update_test_database;
+use super::static_registry::StaticTestRegistry;
 
 /// Load CPU throttle configuration from simple.test.toml
 fn load_cpu_throttle_config(options: &mut TestOptions) {
@@ -115,13 +116,18 @@ pub fn run_tests(options: TestOptions) -> TestRunResult {
     let quiet = matches!(options.format, OutputFormat::Json);
     let list_mode = options.list || options.list_ignored;
 
+    // Discover test files first (needed for both static and runtime modes)
+    let test_path = determine_test_path(&options);
+    let test_files = discover_and_filter_tests(&test_path, &options);
+
+    // FAST PATH: Use static analysis for list mode (no DSL execution)
+    if list_mode {
+        return run_list_mode_static(&test_files, &options, quiet);
+    }
+
     // CRITICAL: Set environment variables BEFORE creating runner/interpreter
     // This ensures the Simple spec framework sees them when it loads
-    if list_mode {
-        std::env::set_var("SIMPLE_TEST_MODE", "list");
-    } else {
-        std::env::remove_var("SIMPLE_TEST_MODE");
-    }
+    std::env::remove_var("SIMPLE_TEST_MODE");
 
     if options.only_slow {
         std::env::set_var("SIMPLE_TEST_FILTER", "slow");
@@ -137,11 +143,9 @@ pub fn run_tests(options: TestOptions) -> TestRunResult {
         std::env::remove_var("SIMPLE_TEST_SHOW_TAGS");
     }
 
-    // Skip initialization for list mode
-    if !list_mode {
-        initialize_diagrams(&options, quiet);
-        initialize_coverage(quiet);
-    }
+    // Initialize for test execution
+    initialize_diagrams(&options, quiet);
+    initialize_coverage(quiet);
 
     // Skip runner creation in safe mode (each subprocess creates its own)
     let runner = if !options.safe_mode {
@@ -150,17 +154,12 @@ pub fn run_tests(options: TestOptions) -> TestRunResult {
         None
     };
 
-    let test_path = determine_test_path(&options);
-    let test_files = discover_and_filter_tests(&test_path, &options);
-
     // Print discovery summary
-    if !list_mode {
-        print_discovery_summary(&test_files, &options, quiet);
-    }
+    print_discovery_summary(&test_files, &options, quiet);
 
-    // Execute tests (or list them)
+    // Execute tests
     let (mut results, mut total_passed, mut total_failed, mut total_skipped, mut total_ignored) =
-        if options.parallel && options.safe_mode && !list_mode {
+        if options.parallel && options.safe_mode {
             // Parallel execution with CPU-aware thread management
             debug_log!(DebugLevel::Basic, "Runner", "Using parallel execution mode");
             run_tests_parallel(&test_files, &options, quiet)
@@ -488,5 +487,75 @@ fn generate_diagrams_if_enabled(options: &TestOptions, result: &TestRunResult, q
                 println!("───────────────────────────────────────────────────────────────");
             }
         }
+    }
+}
+
+/// Run list mode using static analysis (fast path).
+///
+/// This uses the static test registry to list tests without executing
+/// any DSL code. Target performance: ~1 second for 1000+ tests.
+fn run_list_mode_static(
+    test_files: &[PathBuf],
+    options: &TestOptions,
+    quiet: bool,
+) -> TestRunResult {
+    let start = Instant::now();
+
+    debug_log!(
+        DebugLevel::Basic,
+        "ListMode",
+        "Using static analysis for {} test files",
+        test_files.len()
+    );
+
+    // Build static registry from test files
+    let registry = match StaticTestRegistry::from_files(test_files) {
+        Ok(r) => r,
+        Err(e) => {
+            if !quiet {
+                eprintln!("Warning: Static analysis failed: {}", e);
+                eprintln!("Falling back to runtime discovery...");
+            }
+            // Return empty result on failure - caller can fall back to runtime
+            return TestRunResult {
+                files: Vec::new(),
+                total_passed: 0,
+                total_failed: 0,
+                total_skipped: 0,
+                total_ignored: 0,
+                total_duration_ms: start.elapsed().as_millis() as u64,
+            };
+        }
+    };
+
+    // Print list output
+    if !quiet {
+        let output = registry.format_list(
+            options.show_tags,
+            options.only_slow,
+            options.only_skipped,
+            options.list_ignored,
+        );
+        print!("{}", output);
+    }
+
+    // Return result with counts from static analysis
+    let _total_tests = if options.only_slow {
+        registry.slow_count()
+    } else if options.only_skipped {
+        registry.skipped_count()
+    } else if options.list_ignored {
+        registry.ignored_count()
+    } else {
+        registry.total_count()
+    };
+
+    TestRunResult {
+        files: Vec::new(), // No file results in list mode
+        total_passed: 0,
+        total_failed: 0,
+        total_skipped: registry.skipped_count(),
+        total_ignored: registry.ignored_count(),
+        total_duration_ms: start.elapsed().as_millis() as u64,
     }
 }

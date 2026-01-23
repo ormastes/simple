@@ -8,6 +8,7 @@
 //! - `contracts`: Contract blocks, invariants, refinement types
 //! - `effects`: Effect and Capability types for effect system
 //! - `const_meta`: Compile-time metadata system for partial const support
+//! - `test_meta`: Static test metadata for compile-time test analysis
 
 // Module declarations
 pub mod const_meta;
@@ -17,6 +18,7 @@ pub mod definitions;
 pub mod effects;
 pub mod modules;
 pub mod statements;
+pub mod test_meta;
 
 // Re-export all public types from each module for convenience
 pub use const_meta::*;
@@ -26,3 +28,4 @@ pub use definitions::*;
 pub use effects::*;
 pub use modules::*;
 pub use statements::*;
+pub use test_meta::*;

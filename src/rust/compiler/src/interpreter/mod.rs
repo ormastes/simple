@@ -108,8 +108,9 @@ pub(crate) use interpreter_helpers::{
 #[path = "../interpreter_call/mod.rs"]
 mod interpreter_call;
 pub(crate) use interpreter_call::IN_NEW_METHOD;
+pub(crate) use interpreter_call::exec_block_value;
 use interpreter_call::{
-    bind_args, bind_args_with_injected, evaluate_call, exec_block_value, exec_function,
+    bind_args, bind_args_with_injected, evaluate_call, exec_function,
     exec_function_with_captured_env, exec_function_with_values, exec_lambda, instantiate_class, BDD_AFTER_EACH,
     BDD_BEFORE_EACH, BDD_CONTEXT_DEFS, BDD_COUNTS, BDD_INDENT, BDD_LAZY_VALUES, BDD_SHARED_EXAMPLES,
 };

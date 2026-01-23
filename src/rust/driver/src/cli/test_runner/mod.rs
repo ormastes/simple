@@ -16,6 +16,7 @@
 //! - `coverage` - Coverage tracking utilities
 //! - `feature_db` - Feature database updates
 //! - `test_db_update` - Test database updates
+//! - `static_registry` - Static test metadata for fast queries
 
 mod types;
 mod execution;
@@ -30,6 +31,7 @@ mod feature_db;
 mod test_db_update;
 mod cpu_monitor;
 mod parallel;
+pub mod static_registry;
 
 // Re-export public API for backward compatibility
 pub use types::{TestLevel, OutputFormat, TestOptions, TestFileResult, TestRunResult};
@@ -37,6 +39,7 @@ pub use execution::{parse_test_output, run_test_file};
 pub use runner::run_tests;
 pub use args::parse_test_args;
 pub use watch::watch_tests;
+pub use static_registry::StaticTestRegistry;
 
 // Re-export from parent modules
 use super::test_discovery;

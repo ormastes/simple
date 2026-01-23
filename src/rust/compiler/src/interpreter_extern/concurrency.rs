@@ -4,14 +4,17 @@
 // Channel operations for thread communication
 
 use crate::error::CompileError;
-use crate::interpreter::evaluate_expr;
 use crate::value::{Env, Value};
-use simple_parser::ast::{Argument, ClassDef, EnumDef, Expr, FunctionDef};
+use simple_parser::ast::{ClassDef, EnumDef, Expr, FunctionDef};
 use std::sync::mpsc::{channel, Sender, Receiver};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 use std::collections::HashMap;
+
+// Import interpreter functions from parent module
+// super::super refers to the interpreter module (super is interpreter_extern)
+use super::super::{evaluate_expr, exec_block_value};
 
 type Enums = HashMap<String, EnumDef>;
 type ImplMethods = HashMap<String, Vec<FunctionDef>>;
@@ -149,13 +152,21 @@ pub fn rt_thread_spawn_isolated2_with_context(
         local_env.insert(params[1].clone(), data2);
     }
 
-    // Execute the closure body
-    let result = evaluate_expr(&body, &mut local_env, functions, classes, enums, impl_methods)
+    // First evaluate the body expression to get a potentially BlockClosure value
+    let body_value = evaluate_expr(&body, &mut local_env, functions, classes, enums, impl_methods)
         .unwrap_or(Value::Nil);
+
+    // If it's a BlockClosure, execute it; otherwise use the value directly
+    let result = match &body_value {
+        Value::BlockClosure { .. } => {
+            exec_block_value(body_value.clone(), &mut local_env, functions, classes, enums, impl_methods)
+                .unwrap_or(Value::Nil)
+        }
+        _ => body_value,
+    };
 
     // Store the result
     THREAD_RESULTS.lock().unwrap().insert(handle_id, result);
-
     Ok(Value::Int(handle_id))
 }
 

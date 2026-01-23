@@ -13,6 +13,7 @@ pub mod interner;
 pub mod lexer;
 pub mod macro_registry;
 pub mod sui_parser;
+pub mod test_analyzer;
 pub mod token;
 
 // Parser implementation (split across multiple modules)
@@ -37,4 +38,5 @@ pub use lexer::*;
 pub use macro_registry::*;
 pub use parser_impl::{DebugMode, Parser, ParserMode, MAX_LOOP_ITERATIONS};
 pub use sui_parser::*;
+pub use test_analyzer::*;
 pub use token::*;
