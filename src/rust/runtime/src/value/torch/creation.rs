@@ -440,3 +440,232 @@ pub extern "C" fn rt_torch_cuda_synchronize(device: i32) -> i32 {
         TorchFfiError::NotAvailable as i32
     }
 }
+
+// ============================================================================
+// FFI Helper Functions: Dimension-Specific Tensor Creation
+// ============================================================================
+
+/// Create 1D random normal tensor
+#[no_mangle]
+pub extern "C" fn rt_torch_randn_1d(size: i64, dtype: i32, device: i32) -> u64 {
+    #[cfg(feature = "pytorch")]
+    {
+        let shape = [size];
+        let Some(kind) = dtype_from_code(dtype) else {
+            return 0;
+        };
+        let Some(dev) = device_from_code(device) else {
+            return 0;
+        };
+
+        let tensor = Tensor::randn(&shape, (kind, dev));
+        let handle = next_handle();
+        TENSOR_REGISTRY.lock().insert(handle, Arc::new(TensorWrapper(tensor)));
+        handle
+    }
+    #[cfg(not(feature = "pytorch"))]
+    {
+        let _ = (size, dtype, device);
+        0
+    }
+}
+
+/// Create 2D random normal tensor
+#[no_mangle]
+pub extern "C" fn rt_torch_randn_2d(rows: i64, cols: i64, dtype: i32, device: i32) -> u64 {
+    #[cfg(feature = "pytorch")]
+    {
+        let shape = [rows, cols];
+        let Some(kind) = dtype_from_code(dtype) else {
+            return 0;
+        };
+        let Some(dev) = device_from_code(device) else {
+            return 0;
+        };
+
+        let tensor = Tensor::randn(&shape, (kind, dev));
+        let handle = next_handle();
+        TENSOR_REGISTRY.lock().insert(handle, Arc::new(TensorWrapper(tensor)));
+        handle
+    }
+    #[cfg(not(feature = "pytorch"))]
+    {
+        let _ = (rows, cols, dtype, device);
+        0
+    }
+}
+
+/// Create 3D random normal tensor
+#[no_mangle]
+pub extern "C" fn rt_torch_randn_3d(d1: i64, d2: i64, d3: i64, dtype: i32, device: i32) -> u64 {
+    #[cfg(feature = "pytorch")]
+    {
+        let shape = [d1, d2, d3];
+        let Some(kind) = dtype_from_code(dtype) else {
+            return 0;
+        };
+        let Some(dev) = device_from_code(device) else {
+            return 0;
+        };
+
+        let tensor = Tensor::randn(&shape, (kind, dev));
+        let handle = next_handle();
+        TENSOR_REGISTRY.lock().insert(handle, Arc::new(TensorWrapper(tensor)));
+        handle
+    }
+    #[cfg(not(feature = "pytorch"))]
+    {
+        let _ = (d1, d2, d3, dtype, device);
+        0
+    }
+}
+
+/// Create 1D zeros tensor
+#[no_mangle]
+pub extern "C" fn rt_torch_zeros_1d(size: i64, dtype: i32, device: i32) -> u64 {
+    #[cfg(feature = "pytorch")]
+    {
+        let shape = [size];
+        let Some(kind) = dtype_from_code(dtype) else {
+            return 0;
+        };
+        let Some(dev) = device_from_code(device) else {
+            return 0;
+        };
+
+        let tensor = Tensor::zeros(&shape, (kind, dev));
+        let handle = next_handle();
+        TENSOR_REGISTRY.lock().insert(handle, Arc::new(TensorWrapper(tensor)));
+        handle
+    }
+    #[cfg(not(feature = "pytorch"))]
+    {
+        let _ = (size, dtype, device);
+        0
+    }
+}
+
+/// Create 2D zeros tensor
+#[no_mangle]
+pub extern "C" fn rt_torch_zeros_2d(rows: i64, cols: i64, dtype: i32, device: i32) -> u64 {
+    #[cfg(feature = "pytorch")]
+    {
+        let shape = [rows, cols];
+        let Some(kind) = dtype_from_code(dtype) else {
+            return 0;
+        };
+        let Some(dev) = device_from_code(device) else {
+            return 0;
+        };
+
+        let tensor = Tensor::zeros(&shape, (kind, dev));
+        let handle = next_handle();
+        TENSOR_REGISTRY.lock().insert(handle, Arc::new(TensorWrapper(tensor)));
+        handle
+    }
+    #[cfg(not(feature = "pytorch"))]
+    {
+        let _ = (rows, cols, dtype, device);
+        0
+    }
+}
+
+/// Create 3D zeros tensor
+#[no_mangle]
+pub extern "C" fn rt_torch_zeros_3d(d1: i64, d2: i64, d3: i64, dtype: i32, device: i32) -> u64 {
+    #[cfg(feature = "pytorch")]
+    {
+        let shape = [d1, d2, d3];
+        let Some(kind) = dtype_from_code(dtype) else {
+            return 0;
+        };
+        let Some(dev) = device_from_code(device) else {
+            return 0;
+        };
+
+        let tensor = Tensor::zeros(&shape, (kind, dev));
+        let handle = next_handle();
+        TENSOR_REGISTRY.lock().insert(handle, Arc::new(TensorWrapper(tensor)));
+        handle
+    }
+    #[cfg(not(feature = "pytorch"))]
+    {
+        let _ = (d1, d2, d3, dtype, device);
+        0
+    }
+}
+
+/// Create 1D ones tensor
+#[no_mangle]
+pub extern "C" fn rt_torch_ones_1d(size: i64, dtype: i32, device: i32) -> u64 {
+    #[cfg(feature = "pytorch")]
+    {
+        let shape = [size];
+        let Some(kind) = dtype_from_code(dtype) else {
+            return 0;
+        };
+        let Some(dev) = device_from_code(device) else {
+            return 0;
+        };
+
+        let tensor = Tensor::ones(&shape, (kind, dev));
+        let handle = next_handle();
+        TENSOR_REGISTRY.lock().insert(handle, Arc::new(TensorWrapper(tensor)));
+        handle
+    }
+    #[cfg(not(feature = "pytorch"))]
+    {
+        let _ = (size, dtype, device);
+        0
+    }
+}
+
+/// Create 2D ones tensor
+#[no_mangle]
+pub extern "C" fn rt_torch_ones_2d(rows: i64, cols: i64, dtype: i32, device: i32) -> u64 {
+    #[cfg(feature = "pytorch")]
+    {
+        let shape = [rows, cols];
+        let Some(kind) = dtype_from_code(dtype) else {
+            return 0;
+        };
+        let Some(dev) = device_from_code(device) else {
+            return 0;
+        };
+
+        let tensor = Tensor::ones(&shape, (kind, dev));
+        let handle = next_handle();
+        TENSOR_REGISTRY.lock().insert(handle, Arc::new(TensorWrapper(tensor)));
+        handle
+    }
+    #[cfg(not(feature = "pytorch"))]
+    {
+        let _ = (rows, cols, dtype, device);
+        0
+    }
+}
+
+/// Create 3D ones tensor
+#[no_mangle]
+pub extern "C" fn rt_torch_ones_3d(d1: i64, d2: i64, d3: i64, dtype: i32, device: i32) -> u64 {
+    #[cfg(feature = "pytorch")]
+    {
+        let shape = [d1, d2, d3];
+        let Some(kind) = dtype_from_code(dtype) else {
+            return 0;
+        };
+        let Some(dev) = device_from_code(device) else {
+            return 0;
+        };
+
+        let tensor = Tensor::ones(&shape, (kind, dev));
+        let handle = next_handle();
+        TENSOR_REGISTRY.lock().insert(handle, Arc::new(TensorWrapper(tensor)));
+        handle
+    }
+    #[cfg(not(feature = "pytorch"))]
+    {
+        let _ = (d1, d2, d3, dtype, device);
+        0
+    }
+}
