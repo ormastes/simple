@@ -254,4 +254,24 @@ Successfully fixed all TreeSitter tests:
 5. Converted test files from `skip` to `it` blocks
 6. Fixed instance vs static method calls in treesitter_lexer_spec.spl
 
+### Additional Implementation File Fixes (2026-01-23)
+
+7. **error_recovery.spl** - Fixed multiple issues:
+   - Removed trailing commas from enum variants (RecoveryStrategy, SyncPoint, ParserContext)
+   - Removed trailing commas from struct fields (ErrorRecovery, ErrorInfo, RecoveryAction)
+   - Changed `()` to `nil` in empty case branches
+   - Changed named arguments to positional in function calls
+   - Fixed Node.Error construction to use proper Node struct
+
+8. **edits.spl** - Fixed pattern matching syntax:
+   - Changed named patterns `DiffOp::Equal(start: s1, len: l1)` to positional `DiffOp::Equal(s1, l1)`
+   - Refactored inline if expressions to separate variables
+
+9. **grammar_compile.spl** - Fixed class definition:
+   - Changed `pass` placeholder to proper field `_placeholder: i32`
+   - Updated constructor to initialize the placeholder field
+
+10. **simple_grammar.spl** - Fixed multi-line if expression:
+    - Refactored `if ... else if ... else` expression to use `if/elif/else` statements
+
 All 53 TreeSitter tests now pass with 0 failures.
