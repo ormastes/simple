@@ -358,6 +358,7 @@ simple bug-gen
 ```bash
 make check         # fmt + lint + test (before commit)
 make check-full    # + coverage + duplication
+make test-all      # Run ALL tests: Rust + doc-tests + Simple/SSpec (excludes skip/slow/ignore)
 cargo test --workspace
 ./target/debug/simple script.spl
 ```

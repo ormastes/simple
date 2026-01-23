@@ -1,14 +1,15 @@
 # Simple Language Project - Development Commands
 #
 # Usage:
-#   make test        - Run all tests
+#   make test        - Run ALL tests (Rust + doc-tests + Simple/SSpec)
+#   make test-rust   - Run Rust tests only
 #   make coverage    - Generate test coverage report
 #   make duplication - Check for code duplication
 #   make lint        - Run clippy lints
 #   make check       - Run all checks (lint, test, duplication)
 #   make clean       - Clean build artifacts
 
-.PHONY: all test test-verbose test-unit test-integration test-system test-environment \
+.PHONY: all test test-rust test-verbose test-unit test-integration test-system test-environment \
         test-full test-full-quick test-full-coverage test-full-extended test-full-check \
         coverage coverage-html coverage-lcov coverage-json coverage-summary \
         coverage-unit coverage-integration coverage-system coverage-environment coverage-service coverage-merged coverage-all \
@@ -29,7 +30,20 @@ all: check
 # Testing
 # ============================================================================
 
+# Run ALL tests: Rust tests + Rust doc-tests + Simple/SSpec tests
+# Excludes: skip, slow/long-run (#[ignore]), and explicitly ignored tests
 test:
+	@echo "=== Running Rust Tests ==="
+	cargo test --workspace
+	@echo ""
+	@echo "=== Running Rust Doc-Tests ==="
+	cargo test --doc --workspace
+	@echo ""
+	@echo "=== Running Simple/SSpec Tests ==="
+	./target/debug/simple test
+
+# Run Rust tests only (faster, no Simple/SSpec)
+test-rust:
 	cargo test --workspace
 
 test-verbose:
@@ -586,7 +600,8 @@ help:
 	@echo "Simple Language Project - Available Commands"
 	@echo ""
 	@echo "Testing (807+ tests total):"
-	@echo "  make test               - Run all tests"
+	@echo "  make test               - Run ALL tests (Rust + doc-tests + Simple/SSpec)"
+	@echo "  make test-rust          - Run Rust tests only (faster)"
 	@echo "  make test-verbose       - Run tests with output"
 	@echo "  make test-unit          - Run all workspace unit tests"
 	@echo "  make test-integration   - Run integration tests only"

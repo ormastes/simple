@@ -57,6 +57,17 @@ pub enum LowerError {
     #[error("Unsupported feature: {0}")]
     Unsupported(String),
 
+    /// E1050: Use Python-style constructor instead of .new()
+    #[error("Use Python-style constructor `{class_name}(...)` instead of `{class_name}.new(...)`")]
+    UseConstructorNotNew { class_name: String },
+
+    /// E1051: Static method not supported in native compilation
+    #[error("Static method `{class_name}.{method_name}()` not yet supported in native compilation. Use interpreter mode or define as a free function")]
+    StaticMethodNotSupported {
+        class_name: String,
+        method_name: String,
+    },
+
     /// CTR-032: Impure function call in contract expression
     #[error(
         "Impure function call '{func_name}' in contract expression. Only #[pure] functions can be called in contracts"
