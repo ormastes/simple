@@ -168,6 +168,15 @@ pub fn parse_test_args(args: &[String]) -> TestOptions {
             arg if arg.starts_with("--cpu-threshold=") => {
                 options.cpu_threshold = arg.trim_start_matches("--cpu-threshold=").parse().unwrap_or(70);
             }
+            "--memory-threshold" => {
+                i += 1;
+                if i < args.len() {
+                    options.memory_threshold = args[i].parse().unwrap_or(70);
+                }
+            }
+            arg if arg.starts_with("--memory-threshold=") => {
+                options.memory_threshold = arg.trim_start_matches("--memory-threshold=").parse().unwrap_or(70);
+            }
             "--throttled-threads" => {
                 i += 1;
                 if i < args.len() {
@@ -273,6 +282,17 @@ mod tests {
         let args = vec!["--cpu-threshold=80".to_string()];
         let opts = parse_test_args(&args);
         assert_eq!(opts.cpu_threshold, 80);
+    }
+
+    #[test]
+    fn test_parse_memory_threshold() {
+        let args = vec!["--memory-threshold".to_string(), "60".to_string()];
+        let opts = parse_test_args(&args);
+        assert_eq!(opts.memory_threshold, 60);
+
+        let args = vec!["--memory-threshold=85".to_string()];
+        let opts = parse_test_args(&args);
+        assert_eq!(opts.memory_threshold, 85);
     }
 
     #[test]

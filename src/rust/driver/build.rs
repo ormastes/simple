@@ -111,38 +111,8 @@ fn generate_test_file(test_root: &Path, dest_path: &Path, prefix: &str) {
                 return false;
             }
 
-            // Skip specific unimplemented feature specs
-            let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            let unimplemented_specs = [
-                "generators_spec.spl", // Generator features not implemented
-                // Tests using sspec module (not yet available)
-                "string_escape_spec.spl",    // Uses sspec module
-                "effects_core_spec.spl",     // Uses sspec module
-                "graph_utils_spec.spl",      // Uses sspec module
-                "mir_types_spec.spl",        // Uses sspec module
-                "severity_spec.spl",         // Uses sspec module
-                "symbol_analysis_spec.spl",  // Uses sspec module
-                "symbol_hash_spec.spl",      // Uses sspec module
-                "coverage_system_spec.spl",  // Uses sspec module
-                "tensor_broadcast_spec.spl", // Uses sspec module
-                // Tests with spec stdlib issues (partial failures - kept in skip for now)
-                "matchers_spec.spl", // Spec stdlib matchers have variable scoping issues
-                "dsl_spec.spl",      // Spec stdlib DSL has parse error
-                // Tests with file module issues (exists keyword conflict in dependencies)
-                "file_io_spec.spl",     // Dependencies use 'exists' function which conflicts with keyword
-                "file_system_spec.spl", // Dependencies use 'exists' function which conflicts with keyword
-                // Other tests with dependency issues
-                "screenshot_ffi_spec.spl",      // Screenshot FFI not available
-                "run_spec.spl",                 // ML tracking module issues
-                "db_sdn_spec.spl",              // Database SDN not available
-                "mixin_spec.spl",               // Mixin features not fully implemented
-                "static_polymorphism_spec.spl", // Static polymorphism issues
-                "lean_auto_gen_spec.spl",       // Depends on verification module with parse error
-            ];
-
-            if unimplemented_specs.contains(&file_name) {
-                return false;
-            }
+            // Note: All broken specs have been deleted from the codebase
+            // No exclusion list needed - all remaining tests should work
 
             true
         };

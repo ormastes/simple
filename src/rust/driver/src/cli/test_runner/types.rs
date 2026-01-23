@@ -143,11 +143,13 @@ pub struct TestOptions {
     pub max_threads: usize,
     /// CPU usage percentage threshold to trigger throttling (0-100)
     pub cpu_threshold: u8,
+    /// Memory usage percentage threshold to trigger throttling (0-100)
+    pub memory_threshold: u8,
     /// Number of threads when throttled
     pub throttled_threads: usize,
-    /// Ignore CPU limits (full parallel mode)
+    /// Ignore CPU/memory limits (full parallel mode)
     pub full_parallel: bool,
-    /// Seconds between CPU usage checks
+    /// Seconds between resource usage checks
     pub cpu_check_interval: u64,
 }
 
@@ -189,6 +191,7 @@ impl Default for TestOptions {
             parallel: false,
             max_threads: 0, // Auto-detect
             cpu_threshold: 70,
+            memory_threshold: 70,
             throttled_threads: 1,
             full_parallel: false,
             cpu_check_interval: 5,

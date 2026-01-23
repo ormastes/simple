@@ -29,7 +29,7 @@ mod discovery;
 mod coverage;
 mod feature_db;
 mod test_db_update;
-mod cpu_monitor;
+mod resource_monitor;
 mod parallel;
 pub mod static_registry;
 
