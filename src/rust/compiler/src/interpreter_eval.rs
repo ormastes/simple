@@ -707,8 +707,6 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
             // Module system nodes
             Node::UseStmt(use_stmt) => {
                 // Handle runtime module loading
-                eprintln!("DEBUG eval: Processing import {:?}", use_stmt.path);
-
                 // Determine the binding name (alias or imported item name)
                 let binding_name = match &use_stmt.target {
                     ImportTarget::Single(name) => name.clone(),
@@ -735,27 +733,16 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                     &mut enums,
                 ) {
                     Ok(value) => {
-                        eprintln!(
-                            "DEBUG eval: Module loaded, value type: {}",
-                            match &value {
-                                Value::Dict(_) => "Dict",
-                                _ => "Other",
-                            }
-                        );
                         // Unpack module exports into current namespace
                         // This allows direct access like: import std.spec; ExecutionMode.Variant
                         if let Value::Dict(exports) = &value {
-                            eprintln!("DEBUG eval: Unpacking {} exports from {}", exports.len(), binding_name);
                             for (name, export_value) in exports {
-                                eprintln!("DEBUG eval:   - {}", name);
                                 env.insert(name.clone(), export_value.clone());
                                 // Also sync to MODULE_GLOBALS
                                 MODULE_GLOBALS.with(|cell| {
                                     cell.borrow_mut().insert(name.clone(), export_value.clone());
                                 });
                             }
-                        } else {
-                            eprintln!("DEBUG eval: Value is not a Dict, binding_name={}", binding_name);
                         }
                         // Also keep the module dict under its name for qualified access
                         env.insert(binding_name.clone(), value.clone());
@@ -768,7 +755,6 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                         // Module loading failed - log and use empty dict as fallback
                         // This allows the program to continue, with errors appearing
                         // when the module members are accessed
-                        eprintln!("DEBUG eval: Module loading FAILED for '{}': {:?}", binding_name, e);
                         tracing::debug!("Module loading failed for '{}': {:?}", binding_name, e);
                         let empty = Value::Dict(HashMap::new());
                         env.insert(binding_name.clone(), empty.clone());

@@ -40,11 +40,6 @@ pub(crate) fn evaluate_method_call(
     }
 
     let recv_val = evaluate_expr(receiver, env, functions, classes, enums, impl_methods)?.deref_pointer();
-    eprintln!(
-        "DEBUG evaluate_method_call: method={}, recv_val type={}",
-        method,
-        recv_val.type_name()
-    );
 
     // Handle module (Dict) method calls - look up function in module and use its captured_env
     if let Value::Dict(module_dict) = &recv_val {
