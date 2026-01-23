@@ -26,7 +26,7 @@ class UserService:
 
 fn main():
     # DI should inject Database automatically
-    let service = UserService.new()
+    let service = UserService()
     return 0
 "#;
 
@@ -71,7 +71,7 @@ class Service:
         return Self {}
 
 fn main():
-    let service = Service.new()  # Should fail - no binding for Logger
+    let service = Service()  # Should fail - no binding for Logger
     return 0
 "#;
 
@@ -114,7 +114,7 @@ class Service:
         return Self {}
 
 fn main():
-    let service = Service.new()
+    let service = Service()
     return 0
 "#;
 
@@ -233,8 +233,8 @@ class ServiceB:
 
 fn main():
     # Both services should get the SAME Config instance (singleton)
-    let serviceA = ServiceA.new()
-    let serviceB = ServiceB.new()
+    let serviceA = ServiceA()
+    let serviceB = ServiceB()
     return 0
 "#;
 
@@ -312,8 +312,8 @@ class ServiceB:
 
 fn main():
     # Both services should get DIFFERENT Logger instances (transient)
-    let serviceA = ServiceA.new()
-    let serviceB = ServiceB.new()
+    let serviceA = ServiceA()
+    let serviceB = ServiceB()
     return 0
 "#;
 
@@ -386,7 +386,7 @@ class ServiceB:
 
 fn main():
     # This should fail - circular dependency
-    let serviceA = ServiceA.new()
+    let serviceA = ServiceA()
     return 0
 "#;
 
@@ -440,7 +440,7 @@ class ServiceC:
 
 fn main():
     # This should fail - indirect circular dependency
-    let serviceA = ServiceA.new()
+    let serviceA = ServiceA()
     return 0
 "#;
 
@@ -494,7 +494,7 @@ class Service:
 
 fn main():
     # This should work - no circular dependency
-    let service = Service.new()
+    let service = Service()
     return 0
 "#;
 
@@ -542,7 +542,7 @@ class Service:
 
 fn main():
     # config is injected, manual_id must be provided
-    let service = Service.new(42)
+    let service = Service(42)
     return 0
 "#;
 
@@ -592,7 +592,7 @@ class Service:
 
 fn main():
     # Both config and logger are injected
-    let service = Service.new()
+    let service = Service()
     return 0
 "#;
 
@@ -639,7 +639,7 @@ class Service:
 
 fn main():
     # config is injected (middle param), id and name are manual
-    let service = Service.new(42, "test")
+    let service = Service(42, "test")
     return 0
 "#;
 
@@ -685,7 +685,7 @@ class Service:
 
 fn main():
     # Error: manual_id is not provided
-    let service = Service.new()
+    let service = Service()
     return 0
 "#;
 

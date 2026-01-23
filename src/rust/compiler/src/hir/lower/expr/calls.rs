@@ -15,6 +15,7 @@ impl Lowerer {
     /// Lower a function call expression to HIR
     ///
     /// Handles:
+    /// - Class/struct construction: ClassName(args) - Python-style constructors
     /// - Async/generator builtins (generator, future, await)
     /// - I/O builtins (print, println, eprint, eprintln)
     /// - Math/conversion builtins (abs, min, max, sqrt, etc.)
@@ -30,6 +31,24 @@ impl Lowerer {
     ) -> LowerResult<HirExpr> {
         // Check for special builtins: generator, future, spawn, await, print, etc.
         if let Expr::Identifier(name) = callee {
+            // Check if this is a class/struct constructor call: ClassName(args)
+            // Python-style construction: Service() calls the class constructor
+            if let Some(struct_ty) = self.module.types.lookup(name) {
+                // Lower arguments as positional field initializers
+                let mut fields_hir = Vec::new();
+                for arg in args {
+                    let field_hir = self.lower_expr(&arg.value, ctx)?;
+                    fields_hir.push(field_hir);
+                }
+                return Ok(HirExpr {
+                    kind: HirExprKind::StructInit {
+                        ty: struct_ty,
+                        fields: fields_hir,
+                    },
+                    ty: struct_ty,
+                });
+            }
+
             // Handle special async/generator builtins
             if let Some(result) = self.lower_async_builtin(name, args, ctx)? {
                 return Ok(result);

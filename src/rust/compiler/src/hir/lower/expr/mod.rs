@@ -73,6 +73,8 @@ impl Lowerer {
             Expr::Spawn(expr) => self.lower_spawn(expr, ctx),
             // Go expression: go(...) \params: or go \*:
             Expr::Go { args, params, body } => self.lower_go(args, params, body, ctx),
+            // Path expression: Type.method - provide helpful error for .new()
+            Expr::Path(segments) => self.lower_path(segments, ctx),
             _ => Err(LowerError::Unsupported(format!("{:?}", expr))),
         }
     }
@@ -220,5 +222,37 @@ impl Lowerer {
             },
             ty: TypeId::VOID,
         }))
+    }
+
+    // ============================================================================
+    // Path expressions (Type.method)
+    // ============================================================================
+
+    /// Lower a path expression like Type.method
+    ///
+    /// Provides helpful error messages for common mistakes:
+    /// - `ClassName.new()` should be `ClassName()` (Python-style constructor)
+    /// - Other static methods are not yet supported in native compilation
+    fn lower_path(&self, segments: &[String], _ctx: &mut FunctionContext) -> LowerResult<HirExpr> {
+        if segments.len() == 2 {
+            let class_name = &segments[0];
+            let method_name = &segments[1];
+
+            // Special case: ClassName.new() should be ClassName()
+            if method_name == "new" {
+                return Err(LowerError::UseConstructorNotNew {
+                    class_name: class_name.clone(),
+                });
+            }
+
+            // Other static methods not yet supported
+            return Err(LowerError::StaticMethodNotSupported {
+                class_name: class_name.clone(),
+                method_name: method_name.clone(),
+            });
+        }
+
+        // Generic path expression not supported
+        Err(LowerError::Unsupported(format!("Path expression {:?}", segments)))
     }
 }

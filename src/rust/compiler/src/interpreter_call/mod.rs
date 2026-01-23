@@ -199,13 +199,31 @@ pub(crate) fn evaluate_call(
             // This handles calls like Set.new() or Set.from_array()
             if let Some(methods) = impl_methods.get(module_name) {
                 if let Some(func) = methods.iter().find(|m| &m.name == field) {
-                    return core::exec_function(func, args, env, functions, classes, enums, impl_methods, None);
+                    // If calling a `new` method, mark it to prevent double execution via instantiate_class
+                    let is_new_method = field == "new";
+                    if is_new_method {
+                        core::IN_NEW_METHOD.with(|set| set.borrow_mut().insert(module_name.to_string()));
+                    }
+                    let result = core::exec_function(func, args, env, functions, classes, enums, impl_methods, None);
+                    if is_new_method {
+                        core::IN_NEW_METHOD.with(|set| set.borrow_mut().remove(module_name));
+                    }
+                    return result;
                 }
             }
             // Check for class static methods
             if let Some(class_def) = classes.get(module_name).cloned() {
                 if let Some(func) = class_def.methods.iter().find(|m| &m.name == field) {
-                    return core::exec_function(func, args, env, functions, classes, enums, impl_methods, None);
+                    // If calling a `new` method, mark it to prevent double execution via instantiate_class
+                    let is_new_method = field == "new";
+                    if is_new_method {
+                        core::IN_NEW_METHOD.with(|set| set.borrow_mut().insert(module_name.to_string()));
+                    }
+                    let result = core::exec_function(func, args, env, functions, classes, enums, impl_methods, None);
+                    if is_new_method {
+                        core::IN_NEW_METHOD.with(|set| set.borrow_mut().remove(module_name));
+                    }
+                    return result;
                 }
             }
 
@@ -277,14 +295,32 @@ pub(crate) fn evaluate_call(
             // Check for associated function call
             if let Some(methods) = impl_methods.get(type_name) {
                 if let Some(func) = methods.iter().find(|m| m.name == *method_name) {
-                    return core::exec_function(&func, args, env, functions, classes, enums, impl_methods, None);
+                    // If calling a `new` method, mark it to prevent double execution via instantiate_class
+                    let is_new_method = method_name == "new";
+                    if is_new_method {
+                        core::IN_NEW_METHOD.with(|set| set.borrow_mut().insert(type_name.to_string()));
+                    }
+                    let result = core::exec_function(&func, args, env, functions, classes, enums, impl_methods, None);
+                    if is_new_method {
+                        core::IN_NEW_METHOD.with(|set| set.borrow_mut().remove(type_name));
+                    }
+                    return result;
                 }
             }
 
             // Check for class associated function (static method)
             if let Some(class_def) = classes.get(type_name).cloned() {
                 if let Some(func) = class_def.methods.iter().find(|m| m.name == *method_name) {
-                    return core::exec_function(&func, args, env, functions, classes, enums, impl_methods, None);
+                    // If calling a `new` method, mark it to prevent double execution via instantiate_class
+                    let is_new_method = method_name == "new";
+                    if is_new_method {
+                        core::IN_NEW_METHOD.with(|set| set.borrow_mut().insert(type_name.to_string()));
+                    }
+                    let result = core::exec_function(&func, args, env, functions, classes, enums, impl_methods, None);
+                    if is_new_method {
+                        core::IN_NEW_METHOD.with(|set| set.borrow_mut().remove(type_name));
+                    }
+                    return result;
                 }
             }
 

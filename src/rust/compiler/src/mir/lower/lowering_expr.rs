@@ -526,12 +526,65 @@ impl<'a> MirLowerer<'a> {
             }
 
             HirExprKind::StructInit { ty, fields } => {
-                // Lower field expressions
+                // Lower field expressions first
                 let mut field_regs = Vec::new();
                 for field in fields {
                     field_regs.push(self.lower_expr(field)?);
                 }
 
+                // Check if this type has an @inject constructor (ClassName.new)
+                // If so, we need to call the constructor with DI injection
+                let type_name = self
+                    .type_registry
+                    .and_then(|registry| registry.get_type_name(*ty))
+                    .map(|s| s.to_string());
+
+                if let Some(ref class_name) = type_name {
+                    let constructor_name = format!("{}.new", class_name);
+                    if let Some(param_info) = self.inject_functions.get(&constructor_name).cloned() {
+                        // This type has an @inject constructor - call it with DI
+                        let mut final_args = Vec::new();
+                        let mut provided_idx = 0;
+
+                        for (param_idx, (param_ty, is_injectable)) in param_info.iter().enumerate() {
+                            if *is_injectable {
+                                // This parameter should be DI-injected
+                                if self.di_config.is_none() {
+                                    return Err(MirLowerError::Unsupported(format!(
+                                        "missing DI config for @inject constructor '{}'",
+                                        constructor_name
+                                    )));
+                                }
+                                let injected = self.resolve_di_arg(*param_ty, &constructor_name, param_idx)?;
+                                final_args.push(injected);
+                            } else {
+                                // This parameter should be provided by caller
+                                if provided_idx >= field_regs.len() {
+                                    return Err(MirLowerError::Unsupported(format!(
+                                        "missing argument at position {} for @inject constructor '{}'",
+                                        provided_idx, constructor_name
+                                    )));
+                                }
+                                final_args.push(field_regs[provided_idx]);
+                                provided_idx += 1;
+                            }
+                        }
+
+                        // Generate call to the @inject constructor
+                        return self.with_func(|func, current_block| {
+                            let dest = func.new_vreg();
+                            let block = func.block_mut(current_block).unwrap();
+                            block.instructions.push(MirInst::Call {
+                                dest: Some(dest),
+                                target: CallTarget::from_name(&constructor_name),
+                                args: final_args,
+                            });
+                            dest
+                        });
+                    }
+                }
+
+                // No @inject constructor - regular struct initialization
                 // Get struct type information from type registry
                 let (field_types, field_offsets, struct_size) = if let Some(registry) = self.type_registry {
                     if let Some(HirType::Struct {
