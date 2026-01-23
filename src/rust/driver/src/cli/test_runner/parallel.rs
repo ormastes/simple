@@ -77,12 +77,31 @@ pub struct ParallelExecutor {
 
 impl ParallelExecutor {
     /// Create a new parallel executor with the given configuration.
+    ///
+    /// Checks current memory usage at startup - if already above threshold,
+    /// starts with throttled thread count instead of max threads.
     pub fn new(config: ParallelConfig) -> Self {
-        let initial_threads = config.effective_max_threads();
+        let max_threads = config.effective_max_threads();
         let resource_monitor = if config.full_parallel {
             None // No monitoring needed in full parallel mode
         } else {
             Some(ResourceMonitor::new(config.check_interval))
+        };
+
+        // Check memory at startup - if already high, start throttled
+        let initial_threads = if config.full_parallel {
+            max_threads
+        } else {
+            let memory_usage = ResourceMonitor::measure_memory_once();
+            if memory_usage >= config.memory_threshold as f32 {
+                eprintln!(
+                    "Memory already at {:.0}% (>={:.0}%) - starting with {} thread(s)",
+                    memory_usage, config.memory_threshold, config.throttled_threads.max(1)
+                );
+                config.throttled_threads.max(1)
+            } else {
+                max_threads
+            }
         };
 
         Self {
