@@ -424,6 +424,7 @@ impl<'a> Parser<'a> {
     /// Parse lambda parameters (comma-separated identifiers before colon)
     /// Used by both trailing lambda and inline lambda parsing
     /// Supports \ *: for capture-all syntax
+    /// Supports \_ for wildcard/discard parameter
     pub(crate) fn parse_lambda_params(&mut self) -> Result<(Vec<LambdaParam>, bool), ParseError> {
         let mut params = Vec::new();
         let mut capture_all = false;
@@ -435,7 +436,13 @@ impl<'a> Parser<'a> {
         }
         // Check for no-param lambda: \: expr (also treated as capture-all)
         else if !self.check(&TokenKind::Colon) {
-            let name = self.expect_identifier()?;
+            // Check for wildcard parameter: \_
+            let name = if self.check(&TokenKind::Underscore) {
+                self.advance();
+                "_".to_string()
+            } else {
+                self.expect_identifier()?
+            };
             params.push(LambdaParam { name, ty: None });
             self.parse_remaining_lambda_params(&mut params)?;
         } else {
@@ -445,13 +452,19 @@ impl<'a> Parser<'a> {
         Ok((params, capture_all))
     }
 
-    /// Parse lambda parameters between pipes: |x| or |x, y|
+    /// Parse lambda parameters between pipes: |x| or |x, y| or |_|
     /// Called after the opening pipe has been consumed.
     pub(crate) fn parse_pipe_lambda_params(&mut self) -> Result<Vec<LambdaParam>, ParseError> {
         let mut params = Vec::new();
         // Check for no-param lambda: || expr
         if !self.check(&TokenKind::Pipe) {
-            let name = self.expect_identifier()?;
+            // Check for wildcard parameter: |_|
+            let name = if self.check(&TokenKind::Underscore) {
+                self.advance();
+                "_".to_string()
+            } else {
+                self.expect_identifier()?
+            };
             params.push(LambdaParam { name, ty: None });
             self.parse_remaining_lambda_params(&mut params)?;
         }

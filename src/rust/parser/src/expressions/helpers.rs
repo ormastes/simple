@@ -9,7 +9,13 @@ impl<'a> Parser<'a> {
     pub(super) fn parse_remaining_lambda_params(&mut self, params: &mut Vec<LambdaParam>) -> Result<(), ParseError> {
         while self.check(&TokenKind::Comma) {
             self.advance();
-            let name = self.expect_identifier()?;
+            // Support wildcard parameter: \x, _: or |x, _|
+            let name = if self.check(&TokenKind::Underscore) {
+                self.advance();
+                "_".to_string()
+            } else {
+                self.expect_identifier()?
+            };
             params.push(LambdaParam { name, ty: None });
         }
         Ok(())
