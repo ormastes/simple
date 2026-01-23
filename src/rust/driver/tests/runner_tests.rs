@@ -114,7 +114,7 @@ fn runner_handles_class_methods() {
     run_expect(
         r#"
 class Point:
-    fn value():
+    static fn value():
         return 7
 
 main = Point.value()

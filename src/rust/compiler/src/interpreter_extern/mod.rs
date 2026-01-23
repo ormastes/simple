@@ -55,6 +55,7 @@ pub mod concurrency;
 pub mod tui;
 pub mod repl;
 pub mod gpu;
+pub mod diagram;
 
 // Import parent interpreter types
 type Enums = HashMap<String, EnumDef>;
@@ -460,6 +461,22 @@ pub(crate) fn call_extern_function(
         "rt_vk_kernel_launch" => gpu::rt_vk_kernel_launch_fn(&evaluated),
         #[cfg(feature = "vulkan")]
         "rt_vk_kernel_launch_1d" => gpu::rt_vk_kernel_launch_1d_fn(&evaluated),
+
+        // ====================================================================
+        // Diagram FFI Functions (12 functions)
+        // ====================================================================
+        "rt_diagram_enable" => diagram::rt_diagram_enable(&evaluated),
+        "rt_diagram_disable" => diagram::rt_diagram_disable(&evaluated),
+        "rt_diagram_clear" => diagram::rt_diagram_clear(&evaluated),
+        "rt_diagram_is_enabled" => diagram::rt_diagram_is_enabled(&evaluated),
+        "rt_diagram_trace_method" => diagram::rt_diagram_trace_method(&evaluated),
+        "rt_diagram_trace_method_with_args" => diagram::rt_diagram_trace_method_with_args(&evaluated),
+        "rt_diagram_trace_return" => diagram::rt_diagram_trace_return(&evaluated),
+        "rt_diagram_mark_architectural" => diagram::rt_diagram_mark_architectural(&evaluated),
+        "rt_diagram_generate_sequence" => diagram::rt_diagram_generate_sequence(&evaluated),
+        "rt_diagram_generate_class" => diagram::rt_diagram_generate_class(&evaluated),
+        "rt_diagram_generate_arch" => diagram::rt_diagram_generate_arch(&evaluated),
+        "rt_diagram_free_string" => diagram::rt_diagram_free_string(&evaluated),
 
         // Unknown extern function
         _ => Err(common::unknown_function(name)),

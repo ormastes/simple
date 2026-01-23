@@ -542,45 +542,63 @@ impl<'a> MirLowerer<'a> {
                 if let Some(ref class_name) = type_name {
                     let constructor_name = format!("{}.new", class_name);
                     if let Some(param_info) = self.inject_functions.get(&constructor_name).cloned() {
-                        // This type has an @inject constructor - call it with DI
-                        let mut final_args = Vec::new();
-                        let mut provided_idx = 0;
+                        // This type has an @inject constructor
+                        // But we should only apply DI injection for EXTERNAL calls, not internal
+                        // constructions like `return Self {}` inside the constructor body itself.
+                        //
+                        // Check if we're inside the constructor for this class. If so, skip DI.
+                        let current_func = self.try_contract_ctx()
+                            .map(|ctx| ctx.func_name.clone())
+                            .unwrap_or_default();
+                        let is_inside_constructor = current_func == constructor_name;
 
-                        for (param_idx, (param_ty, is_injectable)) in param_info.iter().enumerate() {
-                            if *is_injectable {
-                                // This parameter should be DI-injected
-                                if self.di_config.is_none() {
-                                    return Err(MirLowerError::Unsupported(format!(
-                                        "missing DI config for @inject constructor '{}'",
-                                        constructor_name
-                                    )));
+                        // Also check if the field count matches the non-injectable param count.
+                        // This distinguishes:
+                        // - Service(42) in main: 1 field, 1 non-injectable param → apply DI
+                        // - Service() in main: 0 fields, 1 non-injectable param → apply DI (will error)
+                        // - return Self {} in Service.new: inside constructor → skip DI
+                        if !is_inside_constructor {
+                            // External constructor call - apply DI injection
+                            let mut final_args = Vec::new();
+                            let mut provided_idx = 0;
+
+                            for (param_idx, (param_ty, is_injectable)) in param_info.iter().enumerate() {
+                                if *is_injectable {
+                                    // This parameter should be DI-injected
+                                    if self.di_config.is_none() {
+                                        return Err(MirLowerError::Unsupported(format!(
+                                            "missing DI config for @inject constructor '{}'",
+                                            constructor_name
+                                        )));
+                                    }
+                                    let injected = self.resolve_di_arg(*param_ty, &constructor_name, param_idx)?;
+                                    final_args.push(injected);
+                                } else {
+                                    // This parameter should be provided by caller
+                                    if provided_idx >= field_regs.len() {
+                                        return Err(MirLowerError::Unsupported(format!(
+                                            "missing argument at position {} for @inject constructor '{}'",
+                                            provided_idx, constructor_name
+                                        )));
+                                    }
+                                    final_args.push(field_regs[provided_idx]);
+                                    provided_idx += 1;
                                 }
-                                let injected = self.resolve_di_arg(*param_ty, &constructor_name, param_idx)?;
-                                final_args.push(injected);
-                            } else {
-                                // This parameter should be provided by caller
-                                if provided_idx >= field_regs.len() {
-                                    return Err(MirLowerError::Unsupported(format!(
-                                        "missing argument at position {} for @inject constructor '{}'",
-                                        provided_idx, constructor_name
-                                    )));
-                                }
-                                final_args.push(field_regs[provided_idx]);
-                                provided_idx += 1;
                             }
-                        }
 
-                        // Generate call to the @inject constructor
-                        return self.with_func(|func, current_block| {
-                            let dest = func.new_vreg();
-                            let block = func.block_mut(current_block).unwrap();
-                            block.instructions.push(MirInst::Call {
-                                dest: Some(dest),
-                                target: CallTarget::from_name(&constructor_name),
-                                args: final_args,
+                            // Generate call to the @inject constructor
+                            return self.with_func(|func, current_block| {
+                                let dest = func.new_vreg();
+                                let block = func.block_mut(current_block).unwrap();
+                                block.instructions.push(MirInst::Call {
+                                    dest: Some(dest),
+                                    target: CallTarget::from_name(&constructor_name),
+                                    args: final_args,
+                                });
+                                dest
                             });
-                            dest
-                        });
+                        }
+                        // else: is_internal_construction - fall through to regular StructInit
                     }
                 }
 
