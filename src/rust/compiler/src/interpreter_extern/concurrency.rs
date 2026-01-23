@@ -4,12 +4,17 @@
 // Channel operations for thread communication
 
 use crate::error::CompileError;
-use crate::value::Value;
+use crate::interpreter::evaluate_expr;
+use crate::value::{Env, Value};
+use simple_parser::ast::{Argument, ClassDef, EnumDef, Expr, FunctionDef};
 use std::sync::mpsc::{channel, Sender, Receiver};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 use std::collections::HashMap;
+
+type Enums = HashMap<String, EnumDef>;
+type ImplMethods = HashMap<String, Vec<FunctionDef>>;
 
 // Global storage for thread handles, channels, and results
 lazy_static::lazy_static! {
@@ -73,10 +78,9 @@ pub fn rt_thread_spawn_isolated(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Int(handle_id))
 }
 
-/// Spawn isolated thread with 2 arguments
+/// Spawn isolated thread with 2 arguments (basic version without context)
 ///
-/// For now, this executes the closure synchronously and stores the result.
-/// Full multi-threaded evaluation requires more interpreter infrastructure.
+/// This version does not execute closures - use rt_thread_spawn_isolated2_with_context instead.
 pub fn rt_thread_spawn_isolated2(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() != 3 {
         return Err(CompileError::Runtime(
@@ -84,8 +88,38 @@ pub fn rt_thread_spawn_isolated2(args: &[Value]) -> Result<Value, CompileError> 
         ));
     }
 
+    // Generate handle ID
+    let mut next_id = NEXT_HANDLE_ID.lock().unwrap();
+    let handle_id = *next_id;
+    *next_id += 1;
+    drop(next_id);
+
+    // Without context, we can only store nil as result
+    THREAD_RESULTS.lock().unwrap().insert(handle_id, Value::Nil);
+
+    Ok(Value::Int(handle_id))
+}
+
+/// Spawn isolated thread with 2 arguments and interpreter context
+///
+/// Executes the closure synchronously with full interpreter context.
+/// The closure receives two data arguments and can perform any operation.
+pub fn rt_thread_spawn_isolated2_with_context(
+    args: &[Value],
+    _env: &mut Env,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Result<Value, CompileError> {
+    if args.len() != 3 {
+        return Err(CompileError::Runtime(
+            "rt_thread_spawn_isolated2 expects 3 arguments (closure, data1, data2)".to_string(),
+        ));
+    }
+
     // Extract the closure
-    let (params, body, mut captured_env) = match &args[0] {
+    let (params, body, captured_env) = match &args[0] {
         Value::Lambda { params, body, env } => (params.clone(), body.clone(), env.clone()),
         _ => {
             return Err(CompileError::Runtime(
@@ -104,11 +138,23 @@ pub fn rt_thread_spawn_isolated2(args: &[Value]) -> Result<Value, CompileError> 
     *next_id += 1;
     drop(next_id);
 
-    // TODO: For now, just store nil as the result
-    // Full closure evaluation requires more interpreter context (impl_methods, proper method resolution)
-    // The test expects the closure to execute and send a value through a channel
-    // For basic FFI validation, we'll return immediately
-    THREAD_RESULTS.lock().unwrap().insert(handle_id, Value::Nil);
+    // Execute the closure with bound parameters
+    let mut local_env = captured_env.clone();
+
+    // Bind parameters to data arguments
+    if params.len() >= 1 {
+        local_env.insert(params[0].clone(), data1);
+    }
+    if params.len() >= 2 {
+        local_env.insert(params[1].clone(), data2);
+    }
+
+    // Execute the closure body
+    let result = evaluate_expr(&body, &mut local_env, functions, classes, enums, impl_methods)
+        .unwrap_or(Value::Nil);
+
+    // Store the result
+    THREAD_RESULTS.lock().unwrap().insert(handle_id, result);
 
     Ok(Value::Int(handle_id))
 }
