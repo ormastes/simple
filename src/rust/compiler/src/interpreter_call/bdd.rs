@@ -834,7 +834,16 @@ pub(super) fn eval_bdd_builtin(
             Ok(Some(Value::Nil))
         }
         "__bdd_register_context" => {
-            let name = eval_arg(args, 0, Value::Str("".to_string()), env, functions, classes, enums, impl_methods)?;
+            let name = eval_arg(
+                args,
+                0,
+                Value::Str("".to_string()),
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )?;
             let name_str = match name {
                 Value::Str(s) => s,
                 Value::Symbol(s) => s,
@@ -847,7 +856,16 @@ pub(super) fn eval_bdd_builtin(
             Ok(Some(Value::Nil))
         }
         "__bdd_get_context" => {
-            let name = eval_arg(args, 0, Value::Str("".to_string()), env, functions, classes, enums, impl_methods)?;
+            let name = eval_arg(
+                args,
+                0,
+                Value::Str("".to_string()),
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )?;
             let name_str = match name {
                 Value::Str(s) => s,
                 Value::Symbol(s) => s,
@@ -874,7 +892,16 @@ pub(super) fn eval_bdd_builtin(
             Ok(Some(Value::Nil))
         }
         "__bdd_register_shared_examples" => {
-            let name = eval_arg(args, 0, Value::Str("".to_string()), env, functions, classes, enums, impl_methods)?;
+            let name = eval_arg(
+                args,
+                0,
+                Value::Str("".to_string()),
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )?;
             let name_str = match name {
                 Value::Str(s) => s,
                 Value::Symbol(s) => s,
@@ -887,7 +914,16 @@ pub(super) fn eval_bdd_builtin(
             Ok(Some(Value::Nil))
         }
         "__bdd_get_shared_examples" => {
-            let name = eval_arg(args, 0, Value::Str("".to_string()), env, functions, classes, enums, impl_methods)?;
+            let name = eval_arg(
+                args,
+                0,
+                Value::Str("".to_string()),
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )?;
             let name_str = match name {
                 Value::Str(s) => s,
                 Value::Symbol(s) => s,

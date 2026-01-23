@@ -210,9 +210,7 @@ fn measure_cpu_from_sysinfo() -> f32 {
 
 /// Get the number of available CPU cores.
 pub fn available_cores() -> usize {
-    std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(1)
+    std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1)
 }
 
 #[cfg(test)]

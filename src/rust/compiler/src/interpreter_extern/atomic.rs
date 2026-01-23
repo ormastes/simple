@@ -560,7 +560,10 @@ pub fn rt_atomic_store_fn(args: &[Value]) -> Result<Value, CompileError> {
         let ctx = ErrorContext::new()
             .with_code(codes::ARGUMENT_COUNT_MISMATCH)
             .with_help("rt_atomic_store requires exactly 2 arguments");
-        return Err(CompileError::semantic_with_context("rt_atomic_store expects 2 arguments".to_string(), ctx));
+        return Err(CompileError::semantic_with_context(
+            "rt_atomic_store expects 2 arguments".to_string(),
+            ctx,
+        ));
     }
     let atomic = value_to_runtime(&args[0]);
     let value = args[1].as_int()?;
@@ -576,7 +579,10 @@ pub fn rt_atomic_swap_fn(args: &[Value]) -> Result<Value, CompileError> {
         let ctx = ErrorContext::new()
             .with_code(codes::ARGUMENT_COUNT_MISMATCH)
             .with_help("rt_atomic_swap requires exactly 2 arguments");
-        return Err(CompileError::semantic_with_context("rt_atomic_swap expects 2 arguments".to_string(), ctx));
+        return Err(CompileError::semantic_with_context(
+            "rt_atomic_swap expects 2 arguments".to_string(),
+            ctx,
+        ));
     }
     let atomic = value_to_runtime(&args[0]);
     let value = args[1].as_int()?;
@@ -592,7 +598,10 @@ pub fn rt_atomic_compare_exchange_fn(args: &[Value]) -> Result<Value, CompileErr
         let ctx = ErrorContext::new()
             .with_code(codes::ARGUMENT_COUNT_MISMATCH)
             .with_help("rt_atomic_compare_exchange requires exactly 4 arguments");
-        return Err(CompileError::semantic_with_context("rt_atomic_compare_exchange expects 4 arguments".to_string(), ctx));
+        return Err(CompileError::semantic_with_context(
+            "rt_atomic_compare_exchange expects 4 arguments".to_string(),
+            ctx,
+        ));
     }
     let atomic = value_to_runtime(&args[0]);
     let expected = args[1].as_int()?;
@@ -601,7 +610,8 @@ pub fn rt_atomic_compare_exchange_fn(args: &[Value]) -> Result<Value, CompileErr
     // For now, return success as i64
     unsafe {
         let mut result: i64 = 0;
-        let success = simple_runtime::value::rt_atomic_compare_exchange(atomic, expected, new_value, &mut result as *mut i64);
+        let success =
+            simple_runtime::value::rt_atomic_compare_exchange(atomic, expected, new_value, &mut result as *mut i64);
         Ok(Value::Int(success))
     }
 }
@@ -612,7 +622,10 @@ pub fn rt_atomic_fetch_add_fn(args: &[Value]) -> Result<Value, CompileError> {
         let ctx = ErrorContext::new()
             .with_code(codes::ARGUMENT_COUNT_MISMATCH)
             .with_help("rt_atomic_fetch_add requires exactly 2 arguments");
-        return Err(CompileError::semantic_with_context("rt_atomic_fetch_add expects 2 arguments".to_string(), ctx));
+        return Err(CompileError::semantic_with_context(
+            "rt_atomic_fetch_add expects 2 arguments".to_string(),
+            ctx,
+        ));
     }
     let atomic = value_to_runtime(&args[0]);
     let delta = args[1].as_int()?;
@@ -628,7 +641,10 @@ pub fn rt_atomic_fetch_sub_fn(args: &[Value]) -> Result<Value, CompileError> {
         let ctx = ErrorContext::new()
             .with_code(codes::ARGUMENT_COUNT_MISMATCH)
             .with_help("rt_atomic_fetch_sub requires exactly 2 arguments");
-        return Err(CompileError::semantic_with_context("rt_atomic_fetch_sub expects 2 arguments".to_string(), ctx));
+        return Err(CompileError::semantic_with_context(
+            "rt_atomic_fetch_sub expects 2 arguments".to_string(),
+            ctx,
+        ));
     }
     let atomic = value_to_runtime(&args[0]);
     let delta = args[1].as_int()?;
@@ -644,7 +660,10 @@ pub fn rt_atomic_fetch_and_fn(args: &[Value]) -> Result<Value, CompileError> {
         let ctx = ErrorContext::new()
             .with_code(codes::ARGUMENT_COUNT_MISMATCH)
             .with_help("rt_atomic_fetch_and requires exactly 2 arguments");
-        return Err(CompileError::semantic_with_context("rt_atomic_fetch_and expects 2 arguments".to_string(), ctx));
+        return Err(CompileError::semantic_with_context(
+            "rt_atomic_fetch_and expects 2 arguments".to_string(),
+            ctx,
+        ));
     }
     let atomic = value_to_runtime(&args[0]);
     let mask = args[1].as_int()?;
@@ -660,7 +679,10 @@ pub fn rt_atomic_fetch_or_fn(args: &[Value]) -> Result<Value, CompileError> {
         let ctx = ErrorContext::new()
             .with_code(codes::ARGUMENT_COUNT_MISMATCH)
             .with_help("rt_atomic_fetch_or requires exactly 2 arguments");
-        return Err(CompileError::semantic_with_context("rt_atomic_fetch_or expects 2 arguments".to_string(), ctx));
+        return Err(CompileError::semantic_with_context(
+            "rt_atomic_fetch_or expects 2 arguments".to_string(),
+            ctx,
+        ));
     }
     let atomic = value_to_runtime(&args[0]);
     let mask = args[1].as_int()?;
@@ -721,7 +743,10 @@ pub fn rt_mutex_unlock_fn(args: &[Value]) -> Result<Value, CompileError> {
         let ctx = ErrorContext::new()
             .with_code(codes::ARGUMENT_COUNT_MISMATCH)
             .with_help("rt_mutex_unlock requires exactly 2 arguments");
-        return Err(CompileError::semantic_with_context("rt_mutex_unlock expects 2 arguments".to_string(), ctx));
+        return Err(CompileError::semantic_with_context(
+            "rt_mutex_unlock expects 2 arguments".to_string(),
+            ctx,
+        ));
     }
     let mutex = value_to_runtime(&args[0]);
     let new_value = value_to_runtime(&args[1]);
@@ -812,7 +837,10 @@ pub fn rt_rwlock_set_fn(args: &[Value]) -> Result<Value, CompileError> {
         let ctx = ErrorContext::new()
             .with_code(codes::ARGUMENT_COUNT_MISMATCH)
             .with_help("rt_rwlock_set requires exactly 2 arguments");
-        return Err(CompileError::semantic_with_context("rt_rwlock_set expects 2 arguments".to_string(), ctx));
+        return Err(CompileError::semantic_with_context(
+            "rt_rwlock_set expects 2 arguments".to_string(),
+            ctx,
+        ));
     }
     let rwlock = value_to_runtime(&args[0]);
     let new_value = value_to_runtime(&args[1]);

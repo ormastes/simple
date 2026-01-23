@@ -192,7 +192,12 @@ fn parse_bug_db_sdn(doc: &simple_sdn::SdnDocument) -> Result<BugDb, String> {
 
     let mut db = BugDb::new();
 
-    if let Some(SdnValue::Table { fields: Some(fields), rows, .. }) = bugs_table {
+    if let Some(SdnValue::Table {
+        fields: Some(fields),
+        rows,
+        ..
+    }) = bugs_table
+    {
         for row in rows {
             if row.len() < fields.len() {
                 continue; // Skip malformed rows
@@ -200,7 +205,9 @@ fn parse_bug_db_sdn(doc: &simple_sdn::SdnDocument) -> Result<BugDb, String> {
 
             // Helper to get field value
             let get_field = |name: &str| -> String {
-                fields.iter().position(|f| f == name)
+                fields
+                    .iter()
+                    .position(|f| f == name)
                     .and_then(|idx| row.get(idx))
                     .map(|v| match v {
                         SdnValue::String(s) => s.clone(),
@@ -213,7 +220,9 @@ fn parse_bug_db_sdn(doc: &simple_sdn::SdnDocument) -> Result<BugDb, String> {
             };
 
             let bug_id = get_field("bug_id");
-            if bug_id.is_empty() { continue; }
+            if bug_id.is_empty() {
+                continue;
+            }
 
             let status_str = get_field("status");
             let status = match status_str.as_str() {
@@ -246,34 +255,69 @@ fn parse_bug_db_sdn(doc: &simple_sdn::SdnDocument) -> Result<BugDb, String> {
             // Parse JSON-encoded complex fields
             let timing_impact: Option<TimingImpact> = {
                 let s = get_field("timing_impact");
-                if s.is_empty() { None } else { serde_json::from_str(&s).ok() }
+                if s.is_empty() {
+                    None
+                } else {
+                    serde_json::from_str(&s).ok()
+                }
             };
 
             let build_impact: Option<BuildImpact> = {
                 let s = get_field("build_impact");
-                if s.is_empty() { None } else { serde_json::from_str(&s).ok() }
+                if s.is_empty() {
+                    None
+                } else {
+                    serde_json::from_str(&s).ok()
+                }
             };
 
             let resolution: Option<BugResolution> = {
                 let s = get_field("resolution");
-                if s.is_empty() { None } else { serde_json::from_str(&s).ok() }
+                if s.is_empty() {
+                    None
+                } else {
+                    serde_json::from_str(&s).ok()
+                }
             };
 
             let reproducible_by: Vec<String> = get_field("reproducible_by")
-                .split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
             let related_tests: Vec<String> = get_field("related_tests")
-                .split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
             let related_bugs: Vec<String> = get_field("related_bugs")
-                .split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
             let related_features: Vec<String> = get_field("related_features")
-                .split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
             let tags: Vec<String> = get_field("tags")
-                .split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
 
             let assignee_str = get_field("assignee");
-            let assignee = if assignee_str.is_empty() { None } else { Some(assignee_str) };
+            let assignee = if assignee_str.is_empty() {
+                None
+            } else {
+                Some(assignee_str)
+            };
             let reporter_str = get_field("reporter");
-            let reporter = if reporter_str.is_empty() { None } else { Some(reporter_str) };
+            let reporter = if reporter_str.is_empty() {
+                None
+            } else {
+                Some(reporter_str)
+            };
 
             let record = BugRecord {
                 bug_id: bug_id.clone(),
@@ -342,13 +386,19 @@ pub fn save_bug_db(path: &Path, db: &BugDb) -> Result<(), String> {
             Severity::Trivial => "trivial",
         };
 
-        let timing_impact_json = bug.timing_impact.as_ref()
+        let timing_impact_json = bug
+            .timing_impact
+            .as_ref()
             .map(|t| serde_json::to_string(t).unwrap_or_default())
             .unwrap_or_default();
-        let build_impact_json = bug.build_impact.as_ref()
+        let build_impact_json = bug
+            .build_impact
+            .as_ref()
             .map(|b| serde_json::to_string(b).unwrap_or_default())
             .unwrap_or_default();
-        let resolution_json = bug.resolution.as_ref()
+        let resolution_json = bug
+            .resolution
+            .as_ref()
             .map(|r| serde_json::to_string(r).unwrap_or_default())
             .unwrap_or_default();
 
@@ -438,12 +488,7 @@ pub fn update_bug_status(db: &mut BugDb, bug_id: &str, status: BugStatus) -> Res
 }
 
 /// Mark bug as fixed
-pub fn mark_bug_fixed(
-    db: &mut BugDb,
-    bug_id: &str,
-    commit: String,
-    verified_by: Vec<String>,
-) -> Result<(), String> {
+pub fn mark_bug_fixed(db: &mut BugDb, bug_id: &str, commit: String, verified_by: Vec<String>) -> Result<(), String> {
     let bug = db
         .bugs
         .get_mut(bug_id)
@@ -464,10 +509,7 @@ pub fn mark_bug_fixed(
 /// Validate bug record
 pub fn validate_bug_record(bug: &BugRecord) -> Result<(), String> {
     if bug.reproducible_by.is_empty() {
-        return Err(format!(
-            "Bug {} has no reproducible test cases",
-            bug.bug_id
-        ));
+        return Err(format!("Bug {} has no reproducible test cases", bug.bug_id));
     }
 
     Ok(())
@@ -605,7 +647,10 @@ fn generate_bug_section(md: &mut String, bug: &BugRecord) {
     };
 
     md.push_str(&format!("### {} - {}\n\n", bug.bug_id, bug.title));
-    md.push_str(&format!("**Priority:** {} | **Severity:** {}\n", priority_str, severity_str));
+    md.push_str(&format!(
+        "**Priority:** {} | **Severity:** {}\n",
+        priority_str, severity_str
+    ));
     md.push_str(&format!("**Status:** {:?}\n", bug.status));
     md.push_str(&format!("**Created:** {}\n\n", bug.created));
 
@@ -627,7 +672,10 @@ fn generate_bug_section(md: &mut String, bug: &BugRecord) {
 
     // Timing impact
     if let Some(ref timing) = bug.timing_impact {
-        md.push_str(&format!("**Performance Impact:** {:+.1}% regression", timing.regression_pct));
+        md.push_str(&format!(
+            "**Performance Impact:** {:+.1}% regression",
+            timing.regression_pct
+        ));
         if timing.intermittent {
             md.push_str(" (intermittent)");
         }
@@ -754,12 +802,7 @@ mod tests {
         )
         .unwrap();
 
-        let result = mark_bug_fixed(
-            &mut db,
-            "bug_004",
-            "abc123".to_string(),
-            vec!["test_001".to_string()],
-        );
+        let result = mark_bug_fixed(&mut db, "bug_004", "abc123".to_string(), vec!["test_001".to_string()]);
         assert!(result.is_ok());
 
         let bug = db.bugs.get("bug_004").unwrap();
@@ -781,12 +824,7 @@ mod tests {
 
     #[test]
     fn test_validate_bug_record_fails_without_tests() {
-        let mut bug = BugRecord::new(
-            "bug_006".to_string(),
-            "Test".to_string(),
-            "Desc".to_string(),
-            vec![],
-        );
+        let mut bug = BugRecord::new("bug_006".to_string(), "Test".to_string(), "Desc".to_string(), vec![]);
 
         assert!(validate_bug_record(&bug).is_err());
     }

@@ -766,8 +766,7 @@ pub extern "C" fn rt_thread_spawn_limited(
     let thread_id = NEXT_THREAD_ID.fetch_add(1, Ordering::SeqCst);
 
     // Convert closure pointer to a function
-    let func: extern "C" fn(RuntimeValue) -> RuntimeValue =
-        unsafe { std::mem::transmute(closure_ptr) };
+    let func: extern "C" fn(RuntimeValue) -> RuntimeValue = unsafe { std::mem::transmute(closure_ptr) };
 
     // Clone data for the thread (deep copy for isolation)
     let copied_data = data.deep_copy();
@@ -783,11 +782,7 @@ pub extern "C" fn rt_thread_spawn_limited(
     } else {
         None
     };
-    let fd_lim = if fd_limit >= 0 {
-        Some(fd_limit as u64)
-    } else {
-        None
-    };
+    let fd_lim = if fd_limit >= 0 { Some(fd_limit as u64) } else { None };
     let thread_lim = if thread_limit >= 0 {
         Some(thread_limit as u64)
     } else {
@@ -847,8 +842,7 @@ pub extern "C" fn rt_thread_spawn_limited2(
     let thread_id = NEXT_THREAD_ID.fetch_add(1, Ordering::SeqCst);
 
     // Convert closure pointer to a function
-    let func: extern "C" fn(RuntimeValue, RuntimeValue) -> RuntimeValue =
-        unsafe { std::mem::transmute(closure_ptr) };
+    let func: extern "C" fn(RuntimeValue, RuntimeValue) -> RuntimeValue = unsafe { std::mem::transmute(closure_ptr) };
 
     // Clone data for the thread
     let copied_data1 = data1.deep_copy();
@@ -865,11 +859,7 @@ pub extern "C" fn rt_thread_spawn_limited2(
     } else {
         None
     };
-    let fd_lim = if fd_limit >= 0 {
-        Some(fd_limit as u64)
-    } else {
-        None
-    };
+    let fd_lim = if fd_limit >= 0 { Some(fd_limit as u64) } else { None };
     let thread_lim = if thread_limit >= 0 {
         Some(thread_limit as u64)
     } else {
@@ -948,18 +938,14 @@ pub extern "C" fn rt_thread_join_limited(handle: u64) -> RuntimeValue {
                                 .violation_type
                                 .store(VIOLATION_CPU_TIME as u64, Ordering::SeqCst);
                             if let Some(cpu_limit) = (*handle_ptr).cpu_time_limit {
-                                (*handle_ptr)
-                                    .violation_value
-                                    .store(cpu_limit, Ordering::SeqCst);
+                                (*handle_ptr).violation_value.store(cpu_limit, Ordering::SeqCst);
                             }
                         } else if msg.contains("memory") || msg.contains("allocation") {
                             (*handle_ptr)
                                 .violation_type
                                 .store(VIOLATION_MEMORY as u64, Ordering::SeqCst);
                             if let Some(mem_limit) = (*handle_ptr).memory_limit {
-                                (*handle_ptr)
-                                    .violation_value
-                                    .store(mem_limit, Ordering::SeqCst);
+                                (*handle_ptr).violation_value.store(mem_limit, Ordering::SeqCst);
                             }
                         } else {
                             (*handle_ptr)

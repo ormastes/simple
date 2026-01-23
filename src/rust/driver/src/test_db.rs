@@ -297,7 +297,12 @@ fn parse_test_db_sdn(doc: &simple_sdn::SdnDocument) -> Result<TestDb, String> {
 
     let mut db = TestDb::new();
 
-    if let Some(SdnValue::Table { fields: Some(fields), rows, .. }) = tests_table {
+    if let Some(SdnValue::Table {
+        fields: Some(fields),
+        rows,
+        ..
+    }) = tests_table
+    {
         for row in rows {
             if row.len() < fields.len() {
                 continue; // Skip malformed rows
@@ -305,7 +310,9 @@ fn parse_test_db_sdn(doc: &simple_sdn::SdnDocument) -> Result<TestDb, String> {
 
             // Helper to get field value
             let get_field = |name: &str| -> String {
-                fields.iter().position(|f| f == name)
+                fields
+                    .iter()
+                    .position(|f| f == name)
                     .and_then(|idx| row.get(idx))
                     .map(|v| match v {
                         SdnValue::String(s) => s.clone(),
@@ -318,7 +325,9 @@ fn parse_test_db_sdn(doc: &simple_sdn::SdnDocument) -> Result<TestDb, String> {
             };
 
             let test_id = get_field("test_id");
-            if test_id.is_empty() { continue; }
+            if test_id.is_empty() {
+                continue;
+            }
 
             let status_str = get_field("status");
             let status = match status_str.as_str() {
@@ -332,30 +341,55 @@ fn parse_test_db_sdn(doc: &simple_sdn::SdnDocument) -> Result<TestDb, String> {
             // Parse JSON-encoded complex fields
             let failure: Option<TestFailure> = {
                 let s = get_field("failure");
-                if s.is_empty() { None } else { serde_json::from_str(&s).ok() }
+                if s.is_empty() {
+                    None
+                } else {
+                    serde_json::from_str(&s).ok()
+                }
             };
 
             let execution_history: ExecutionHistory = {
                 let s = get_field("execution_history");
-                if s.is_empty() { ExecutionHistory::default() } else { serde_json::from_str(&s).unwrap_or_default() }
+                if s.is_empty() {
+                    ExecutionHistory::default()
+                } else {
+                    serde_json::from_str(&s).unwrap_or_default()
+                }
             };
 
             let timing: TimingData = {
                 let s = get_field("timing");
-                if s.is_empty() { TimingData::default() } else { serde_json::from_str(&s).unwrap_or_default() }
+                if s.is_empty() {
+                    TimingData::default()
+                } else {
+                    serde_json::from_str(&s).unwrap_or_default()
+                }
             };
 
             let timing_config: Option<TimingConfig> = {
                 let s = get_field("timing_config");
-                if s.is_empty() { None } else { serde_json::from_str(&s).ok() }
+                if s.is_empty() {
+                    None
+                } else {
+                    serde_json::from_str(&s).ok()
+                }
             };
 
             let related_bugs: Vec<String> = get_field("related_bugs")
-                .split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
             let related_features: Vec<String> = get_field("related_features")
-                .split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
             let tags: Vec<String> = get_field("tags")
-                .split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
 
             let record = TestRecord {
                 test_id: test_id.clone(),
@@ -404,12 +438,16 @@ pub fn save_test_db(path: &Path, db: &TestDb) -> Result<(), String> {
             TestStatus::Ignored => "ignored",
         };
 
-        let failure_json = record.failure.as_ref()
+        let failure_json = record
+            .failure
+            .as_ref()
             .map(|f| serde_json::to_string(f).unwrap_or_default())
             .unwrap_or_default();
         let history_json = serde_json::to_string(&record.execution_history).unwrap_or_default();
         let timing_json = serde_json::to_string(&record.timing).unwrap_or_default();
-        let timing_config_json = record.timing_config.as_ref()
+        let timing_config_json = record
+            .timing_config
+            .as_ref()
             .map(|c| serde_json::to_string(c).unwrap_or_default())
             .unwrap_or_default();
 
@@ -465,27 +503,30 @@ pub fn update_test_result(
 ) {
     let is_new = !db.records.contains_key(test_id);
 
-    debug_log!(DebugLevel::Trace, "TestDB", "    Record: {} ({})",
-        test_id, if is_new { "NEW" } else { "UPDATE" });
+    debug_log!(
+        DebugLevel::Trace,
+        "TestDB",
+        "    Record: {} ({})",
+        test_id,
+        if is_new { "NEW" } else { "UPDATE" }
+    );
 
-    let test = db.records.entry(test_id.to_string()).or_insert_with(|| {
-        TestRecord {
-            test_id: test_id.to_string(),
-            test_name: test_name.to_string(),
-            test_file: test_file.to_string(),
-            category: category.to_string(),
-            status,
-            last_run: chrono::Utc::now().to_rfc3339(),
-            failure: None,
-            execution_history: ExecutionHistory::default(),
-            timing: TimingData::default(),
-            timing_config: None,
-            related_bugs: Vec::new(),
-            related_features: Vec::new(),
-            tags: Vec::new(),
-            description: String::new(),
-            valid: true,
-        }
+    let test = db.records.entry(test_id.to_string()).or_insert_with(|| TestRecord {
+        test_id: test_id.to_string(),
+        test_name: test_name.to_string(),
+        test_file: test_file.to_string(),
+        category: category.to_string(),
+        status,
+        last_run: chrono::Utc::now().to_rfc3339(),
+        failure: None,
+        execution_history: ExecutionHistory::default(),
+        timing: TimingData::default(),
+        timing_config: None,
+        related_bugs: Vec::new(),
+        related_features: Vec::new(),
+        tags: Vec::new(),
+        description: String::new(),
+        valid: true,
     });
 
     let old_status = test.status;
@@ -496,8 +537,13 @@ pub fn update_test_result(
     test.failure = failure;
 
     if old_status != status {
-        debug_log!(DebugLevel::Trace, "TestDB", "      Status transition: {:?} -> {:?}",
-            old_status, status);
+        debug_log!(
+            DebugLevel::Trace,
+            "TestDB",
+            "      Status transition: {:?} -> {:?}",
+            old_status,
+            status
+        );
     }
 
     // Update execution history
@@ -525,11 +571,15 @@ pub fn update_test_result(
             (test.execution_history.failed as f64 / test.execution_history.total_runs as f64) * 100.0;
     }
 
-    debug_log!(DebugLevel::Trace, "TestDB", "      Execution history: {} runs, {} passed, {} failed ({:.1}% failure rate)",
+    debug_log!(
+        DebugLevel::Trace,
+        "TestDB",
+        "      Execution history: {} runs, {} passed, {} failed ({:.1}% failure rate)",
         test.execution_history.total_runs,
         test.execution_history.passed,
         test.execution_history.failed,
-        test.execution_history.failure_rate_pct);
+        test.execution_history.failure_rate_pct
+    );
 
     // Detect flaky tests (intermittent failures)
     let was_flaky = test.execution_history.flaky;
@@ -545,8 +595,14 @@ pub fn update_test_result(
 
     if test.timing.baseline_median != old_baseline && old_baseline > 0.0 {
         let change_pct = ((test.timing.baseline_median - old_baseline) / old_baseline) * 100.0;
-        debug_log!(DebugLevel::Trace, "TestDB", "      Timing: {}ms (baseline: {}ms, {:+.1}%)",
-            duration_ms, test.timing.baseline_median, change_pct);
+        debug_log!(
+            DebugLevel::Trace,
+            "TestDB",
+            "      Timing: {}ms (baseline: {}ms, {:+.1}%)",
+            duration_ms,
+            test.timing.baseline_median,
+            change_pct
+        );
     }
 
     test.valid = true;
@@ -567,21 +623,19 @@ fn detect_flaky_test(history: &ExecutionHistory) -> bool {
 }
 
 /// Update timing data for a test
-fn update_test_timing(
-    test: &mut TestRecord,
-    duration_ms: f64,
-    all_tests_run: bool,
-    config: &TestDbConfig,
-) {
+fn update_test_timing(test: &mut TestRecord, duration_ms: f64, all_tests_run: bool, config: &TestDbConfig) {
     // Get timing config (use test-specific or default)
     let timing_config = test.timing_config.as_ref().unwrap_or(&config.default_timing_config);
 
     // Add new run to history
-    test.timing.history.runs.insert(0, TimingRun {
-        timestamp: chrono::Utc::now().to_rfc3339(),
-        duration_ms,
-        outlier: false, // Will be determined later
-    });
+    test.timing.history.runs.insert(
+        0,
+        TimingRun {
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            duration_ms,
+            outlier: false, // Will be determined later
+        },
+    );
 
     // Keep only last N runs
     let max_size = timing_config.max_sample_size;
@@ -685,7 +739,10 @@ pub fn generate_test_result_docs(db: &TestDb, output_dir: &Path) -> Result<(), S
 
     // Header
     md.push_str("# Test Results\n\n");
-    md.push_str(&format!("**Generated:** {}\n", chrono::Local::now().format("%Y-%m-%d %H:%M:%S")));
+    md.push_str(&format!(
+        "**Generated:** {}\n",
+        chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
+    ));
 
     // Count tests by status
     let mut passed = 0;
@@ -753,7 +810,8 @@ pub fn generate_test_result_docs(db: &TestDb, output_dir: &Path) -> Result<(), S
             md.push_str(&format!("**File:** `{}`\n", test.test_file));
             md.push_str(&format!("**Category:** {}\n", test.category));
             md.push_str(&format!("**Failed:** {}\n", test.last_run));
-            md.push_str(&format!("**Flaky:** {} ({:.1}% failure rate)\n\n",
+            md.push_str(&format!(
+                "**Flaky:** {} ({:.1}% failure rate)\n\n",
                 if test.execution_history.flaky { "Yes" } else { "No" },
                 test.execution_history.failure_rate_pct
             ));
@@ -791,10 +849,7 @@ pub fn generate_test_result_docs(db: &TestDb, output_dir: &Path) -> Result<(), S
 
                 md.push_str(&format!(
                     "**Timing:** {:.1}ms (baseline: {:.1}ms, {:+.1}% {})\n\n",
-                    test.timing.last_run_time,
-                    test.timing.baseline_median,
-                    change_pct,
-                    indicator
+                    test.timing.last_run_time, test.timing.baseline_median, change_pct, indicator
                 ));
             }
 
@@ -812,7 +867,8 @@ pub fn generate_test_result_docs(db: &TestDb, output_dir: &Path) -> Result<(), S
         .iter()
         .filter_map(|t| {
             if t.timing.baseline_median > 0.0 {
-                let change_pct = ((t.timing.last_run_time - t.timing.baseline_median) / t.timing.baseline_median) * 100.0;
+                let change_pct =
+                    ((t.timing.last_run_time - t.timing.baseline_median) / t.timing.baseline_median) * 100.0;
                 if change_pct > db.config.default_timing_config.alert_threshold_pct {
                     Some((*t, change_pct))
                 } else {
@@ -835,10 +891,7 @@ pub fn generate_test_result_docs(db: &TestDb, output_dir: &Path) -> Result<(), S
         for (test, change_pct) in regressions.iter().take(10) {
             md.push_str(&format!(
                 "| {} | {:.1}ms | {:.1}ms | {:+.1}% | 🔴 ALERT |\n",
-                test.test_name,
-                test.timing.last_run_time,
-                test.timing.baseline_median,
-                change_pct
+                test.test_name, test.timing.last_run_time, test.timing.baseline_median, change_pct
             ));
         }
         md.push_str("\n");
@@ -874,11 +927,7 @@ pub fn generate_test_result_docs(db: &TestDb, output_dir: &Path) -> Result<(), S
 
             md.push_str(&format!(
                 "| {} | {:.1}ms | {:.1}ms | {:.1}% | {} |\n",
-                test.test_name,
-                test.timing.baseline_mean,
-                test.timing.baseline_std_dev,
-                cv_pct,
-                recommendation
+                test.test_name, test.timing.baseline_mean, test.timing.baseline_std_dev, cv_pct, recommendation
             ));
         }
         md.push_str("\n");
@@ -964,7 +1013,10 @@ pub fn generate_test_result_docs(db: &TestDb, output_dir: &Path) -> Result<(), S
     }
 
     if !regressions.is_empty() {
-        md.push_str(&format!("### Priority 2: Investigate Performance Regressions ({})\n\n", regressions.len()));
+        md.push_str(&format!(
+            "### Priority 2: Investigate Performance Regressions ({})\n\n",
+            regressions.len()
+        ));
         md.push_str("Tests showing significant slowdown compared to baseline:\n");
         for (test, change_pct) in regressions.iter().take(5) {
             md.push_str(&format!("- {} ({:+.1}%)\n", test.test_name, change_pct));
@@ -980,13 +1032,15 @@ pub fn generate_test_result_docs(db: &TestDb, output_dir: &Path) -> Result<(), S
         .collect();
 
     if !flaky_tests.is_empty() {
-        md.push_str(&format!("### Priority 3: Stabilize Flaky Tests ({})\n\n", flaky_tests.len()));
+        md.push_str(&format!(
+            "### Priority 3: Stabilize Flaky Tests ({})\n\n",
+            flaky_tests.len()
+        ));
         md.push_str("Tests with intermittent failures:\n");
         for test in flaky_tests.iter().take(5) {
             md.push_str(&format!(
                 "- {} ({:.1}% failure rate)\n",
-                test.test_name,
-                test.execution_history.failure_rate_pct
+                test.test_name, test.execution_history.failure_rate_pct
             ));
         }
         md.push_str("\n");

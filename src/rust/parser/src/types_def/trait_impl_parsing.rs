@@ -16,9 +16,7 @@ use super::super::Parser;
 /// Check if a function name follows constructor naming patterns
 /// These names are implicitly treated as static methods
 fn is_constructor_name(name: &str) -> bool {
-    matches!(name, "new" | "create" | "default" | "init")
-        || name.starts_with("from_")
-        || name.starts_with("with_")
+    matches!(name, "new" | "create" | "default" | "init") || name.starts_with("from_") || name.starts_with("with_")
 }
 
 impl<'a> Parser<'a> {

@@ -345,11 +345,11 @@ fn exec_assignment(
             ))
         }
     } else if let Expr::Index { receiver, index } = &assign.target {
-        // Handle index assignment: arr[i] = value or dict["key"] = value
+        // Handle index assignment: arr[i] = value or dict["key"] = value or self.dict[key] = value
         let value = evaluate_expr(&assign.value, env, functions, classes, enums, impl_methods)?;
         let index_val = evaluate_expr(index, env, functions, classes, enums, impl_methods)?;
 
-        // Get the container name (must be an identifier for now)
+        // Case 1: Plain identifier: arr[i] = value
         if let Expr::Identifier(container_name) = receiver.as_ref() {
             if let Some(container) = env.get(container_name).cloned() {
                 let new_container = match container {
@@ -416,12 +416,117 @@ fn exec_assignment(
                     ctx,
                 ))
             }
+        }
+        // Case 2: Field access: self.dict[key] = value or obj.arr[i] = value
+        else if let Expr::FieldAccess {
+            receiver: obj_expr,
+            field: field_name,
+        } = receiver.as_ref()
+        {
+            if let Expr::Identifier(obj_name) = obj_expr.as_ref() {
+                if let Some(obj_val) = env.get(obj_name).cloned() {
+                    match obj_val {
+                        Value::Object { class, mut fields } => {
+                            if let Some(container) = fields.get(field_name).cloned() {
+                                let new_container = match container {
+                                    Value::Array(mut arr) => {
+                                        let idx = index_val.as_int()? as usize;
+                                        if idx < arr.len() {
+                                            arr[idx] = value;
+                                        } else {
+                                            while arr.len() < idx {
+                                                arr.push(Value::Nil);
+                                            }
+                                            arr.push(value);
+                                        }
+                                        Value::Array(arr)
+                                    }
+                                    Value::Dict(mut dict) => {
+                                        let key = index_val.to_key_string();
+                                        dict.insert(key, value);
+                                        Value::Dict(dict)
+                                    }
+                                    Value::Tuple(mut tup) => {
+                                        let idx = index_val.as_int()? as usize;
+                                        if idx < tup.len() {
+                                            tup[idx] = value;
+                                            Value::Tuple(tup)
+                                        } else {
+                                            let ctx = ErrorContext::new()
+                                                .with_code(codes::INDEX_OUT_OF_BOUNDS)
+                                                .with_help(format!("tuple has {} element(s)", tup.len()))
+                                                .with_note(format!("index {} is out of bounds", idx));
+                                            return Err(CompileError::semantic_with_context(
+                                                format!(
+                                                    "index out of bounds: tuple index {} out of bounds (len={})",
+                                                    idx,
+                                                    tup.len()
+                                                ),
+                                                ctx,
+                                            ));
+                                        }
+                                    }
+                                    _ => {
+                                        let ctx = ErrorContext::new()
+                                            .with_code(codes::INVALID_ASSIGNMENT)
+                                            .with_help("index assignment requires an array, dict, or tuple");
+                                        return Err(CompileError::semantic_with_context(
+                                            format!(
+                                                "invalid assignment: cannot index assign to field `{}` of type {}",
+                                                field_name,
+                                                container.type_name()
+                                            ),
+                                            ctx,
+                                        ));
+                                    }
+                                };
+                                fields.insert(field_name.clone(), new_container);
+                                env.insert(obj_name.clone(), Value::Object { class, fields });
+                                Ok(Control::Next)
+                            } else {
+                                let ctx = ErrorContext::new()
+                                    .with_code(codes::INVALID_ASSIGNMENT)
+                                    .with_help("field does not exist on this object");
+                                Err(CompileError::semantic_with_context(
+                                    format!("invalid assignment: field `{}` not found on object", field_name),
+                                    ctx,
+                                ))
+                            }
+                        }
+                        _ => {
+                            let ctx = ErrorContext::new()
+                                .with_code(codes::INVALID_ASSIGNMENT)
+                                .with_help("field assignment requires an object with mutable access");
+                            Err(CompileError::semantic_with_context(
+                                "invalid assignment: cannot assign field index on non-object value",
+                                ctx,
+                            ))
+                        }
+                    }
+                } else {
+                    let ctx = ErrorContext::new()
+                        .with_code(codes::UNDEFINED_VARIABLE)
+                        .with_help("check that the variable is defined and in scope");
+                    Err(CompileError::semantic_with_context(
+                        format!("variable `{}` not found", obj_name),
+                        ctx,
+                    ))
+                }
+            } else {
+                let ctx = ErrorContext::new()
+                    .with_code(codes::INVALID_ASSIGNMENT)
+                    .with_help("index assignment on field access requires an identifier as the object");
+                Err(CompileError::semantic_with_context(
+                    "invalid assignment: complex field access not supported",
+                    ctx,
+                ))
+            }
         } else {
             let ctx = ErrorContext::new()
                 .with_code(codes::INVALID_ASSIGNMENT)
-                .with_help("index assignment requires an identifier as the container");
+                .with_help("index assignment requires an identifier or field access as the container");
             Err(CompileError::semantic_with_context(
-                "invalid assignment: index assignment requires identifier as container",
+                "invalid assignment: index assignment requires identifier or field access as container",
                 ctx,
             ))
         }

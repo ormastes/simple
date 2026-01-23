@@ -140,7 +140,7 @@ fn generate_test_file(test_root: &Path, dest_path: &Path, prefix: &str) {
                 "matchers_spec.spl", // Spec stdlib matchers have variable scoping issues
                 "dsl_spec.spl",      // Spec stdlib DSL has parse error
                 // Tests with file module issues (exists keyword conflict in dependencies)
-                "file_io_spec.spl",     // Dependencies use 'exists' function which conflicts with keyword
+                "file_io_spec.spl", // Dependencies use 'exists' function which conflicts with keyword
                 "file_system_spec.spl", // Dependencies use 'exists' function which conflicts with keyword
                 // Other tests with dependency issues
                 "screenshot_ffi_spec.spl",      // Screenshot FFI not available

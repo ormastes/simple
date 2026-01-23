@@ -29,9 +29,7 @@ lazy_static::lazy_static! {
 
 /// Get number of available CPU cores
 pub fn rt_thread_available_parallelism(_args: &[Value]) -> Result<Value, CompileError> {
-    let cores = thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(1);
+    let cores = thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
     Ok(Value::Int(cores as i64))
 }
 
@@ -39,15 +37,17 @@ pub fn rt_thread_available_parallelism(_args: &[Value]) -> Result<Value, Compile
 pub fn rt_thread_sleep(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() != 1 {
         return Err(CompileError::Runtime(
-            "rt_thread_sleep expects 1 argument (millis)".to_string()
+            "rt_thread_sleep expects 1 argument (millis)".to_string(),
         ));
     }
 
     let millis = match &args[0] {
         Value::Int(n) => *n as u64,
-        _ => return Err(CompileError::Runtime(
-            "rt_thread_sleep expects integer milliseconds".to_string()
-        )),
+        _ => {
+            return Err(CompileError::Runtime(
+                "rt_thread_sleep expects integer milliseconds".to_string(),
+            ))
+        }
     };
 
     thread::sleep(Duration::from_millis(millis));
@@ -80,18 +80,18 @@ pub fn rt_thread_spawn_isolated(args: &[Value]) -> Result<Value, CompileError> {
 pub fn rt_thread_spawn_isolated2(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() != 3 {
         return Err(CompileError::Runtime(
-            "rt_thread_spawn_isolated2 expects 3 arguments (closure, data1, data2)".to_string()
+            "rt_thread_spawn_isolated2 expects 3 arguments (closure, data1, data2)".to_string(),
         ));
     }
 
     // Extract the closure
     let (params, body, mut captured_env) = match &args[0] {
-        Value::Lambda { params, body, env } => {
-            (params.clone(), body.clone(), env.clone())
+        Value::Lambda { params, body, env } => (params.clone(), body.clone(), env.clone()),
+        _ => {
+            return Err(CompileError::Runtime(
+                "rt_thread_spawn_isolated2 expects first argument to be a closure".to_string(),
+            ))
         }
-        _ => return Err(CompileError::Runtime(
-            "rt_thread_spawn_isolated2 expects first argument to be a closure".to_string()
-        )),
     };
 
     // Clone data for thread isolation
@@ -117,21 +117,21 @@ pub fn rt_thread_spawn_isolated2(args: &[Value]) -> Result<Value, CompileError> 
 pub fn rt_thread_join(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() != 1 {
         return Err(CompileError::Runtime(
-            "rt_thread_join expects 1 argument (handle)".to_string()
+            "rt_thread_join expects 1 argument (handle)".to_string(),
         ));
     }
 
     let handle_id = match &args[0] {
         Value::Int(id) => *id,
-        _ => return Err(CompileError::Runtime(
-            "rt_thread_join expects integer handle".to_string()
-        )),
+        _ => {
+            return Err(CompileError::Runtime(
+                "rt_thread_join expects integer handle".to_string(),
+            ))
+        }
     };
 
     // Retrieve stored result
-    let result = THREAD_RESULTS.lock().unwrap()
-        .remove(&handle_id)
-        .unwrap_or(Value::Nil);
+    let result = THREAD_RESULTS.lock().unwrap().remove(&handle_id).unwrap_or(Value::Nil);
 
     Ok(result)
 }
@@ -146,15 +146,13 @@ pub fn rt_thread_is_done(args: &[Value]) -> Result<Value, CompileError> {
 pub fn rt_thread_id(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() != 1 {
         return Err(CompileError::Runtime(
-            "rt_thread_id expects 1 argument (handle)".to_string()
+            "rt_thread_id expects 1 argument (handle)".to_string(),
         ));
     }
 
     match &args[0] {
         Value::Int(handle) => Ok(Value::Int(*handle)),
-        _ => Err(CompileError::Runtime(
-            "rt_thread_id expects integer handle".to_string()
-        )),
+        _ => Err(CompileError::Runtime("rt_thread_id expects integer handle".to_string())),
     }
 }
 
@@ -185,28 +183,27 @@ pub fn rt_channel_new(_args: &[Value]) -> Result<Value, CompileError> {
 pub fn rt_channel_send(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() != 2 {
         return Err(CompileError::Runtime(
-            "rt_channel_send expects 2 arguments (channel_id, value)".to_string()
+            "rt_channel_send expects 2 arguments (channel_id, value)".to_string(),
         ));
     }
 
     let channel_id = match &args[0] {
         Value::Int(id) => *id,
-        _ => return Err(CompileError::Runtime(
-            "rt_channel_send expects integer channel_id".to_string()
-        )),
+        _ => {
+            return Err(CompileError::Runtime(
+                "rt_channel_send expects integer channel_id".to_string(),
+            ))
+        }
     };
 
     let channels = CHANNELS.lock().unwrap();
     if let Some((tx, _)) = channels.get(&channel_id) {
         let value = args[1].clone();
-        tx.send(value).map_err(|_| CompileError::Runtime(
-            "Failed to send to channel".to_string()
-        ))?;
+        tx.send(value)
+            .map_err(|_| CompileError::Runtime("Failed to send to channel".to_string()))?;
         Ok(Value::Nil)
     } else {
-        Err(CompileError::Runtime(
-            format!("Channel {} not found", channel_id)
-        ))
+        Err(CompileError::Runtime(format!("Channel {} not found", channel_id)))
     }
 }
 
@@ -214,15 +211,17 @@ pub fn rt_channel_send(args: &[Value]) -> Result<Value, CompileError> {
 pub fn rt_channel_try_recv(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() != 1 {
         return Err(CompileError::Runtime(
-            "rt_channel_try_recv expects 1 argument (channel_id)".to_string()
+            "rt_channel_try_recv expects 1 argument (channel_id)".to_string(),
         ));
     }
 
     let channel_id = match &args[0] {
         Value::Int(id) => *id,
-        _ => return Err(CompileError::Runtime(
-            "rt_channel_try_recv expects integer channel_id".to_string()
-        )),
+        _ => {
+            return Err(CompileError::Runtime(
+                "rt_channel_try_recv expects integer channel_id".to_string(),
+            ))
+        }
     };
 
     let channels = CHANNELS.lock().unwrap();
@@ -233,9 +232,7 @@ pub fn rt_channel_try_recv(args: &[Value]) -> Result<Value, CompileError> {
             Err(_) => Ok(Value::Nil), // Return nil if no value available
         }
     } else {
-        Err(CompileError::Runtime(
-            format!("Channel {} not found", channel_id)
-        ))
+        Err(CompileError::Runtime(format!("Channel {} not found", channel_id)))
     }
 }
 
@@ -243,15 +240,17 @@ pub fn rt_channel_try_recv(args: &[Value]) -> Result<Value, CompileError> {
 pub fn rt_channel_recv(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() != 1 {
         return Err(CompileError::Runtime(
-            "rt_channel_recv expects 1 argument (channel_id)".to_string()
+            "rt_channel_recv expects 1 argument (channel_id)".to_string(),
         ));
     }
 
     let channel_id = match &args[0] {
         Value::Int(id) => *id,
-        _ => return Err(CompileError::Runtime(
-            "rt_channel_recv expects integer channel_id".to_string()
-        )),
+        _ => {
+            return Err(CompileError::Runtime(
+                "rt_channel_recv expects integer channel_id".to_string(),
+            ))
+        }
     };
 
     let channels = CHANNELS.lock().unwrap();
@@ -265,9 +264,7 @@ pub fn rt_channel_recv(args: &[Value]) -> Result<Value, CompileError> {
             Err(_) => Ok(Value::Nil),
         }
     } else {
-        Err(CompileError::Runtime(
-            format!("Channel {} not found", channel_id)
-        ))
+        Err(CompileError::Runtime(format!("Channel {} not found", channel_id)))
     }
 }
 
@@ -275,15 +272,17 @@ pub fn rt_channel_recv(args: &[Value]) -> Result<Value, CompileError> {
 pub fn rt_channel_close(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() != 1 {
         return Err(CompileError::Runtime(
-            "rt_channel_close expects 1 argument (channel_id)".to_string()
+            "rt_channel_close expects 1 argument (channel_id)".to_string(),
         ));
     }
 
     let channel_id = match &args[0] {
         Value::Int(id) => *id,
-        _ => return Err(CompileError::Runtime(
-            "rt_channel_close expects integer channel_id".to_string()
-        )),
+        _ => {
+            return Err(CompileError::Runtime(
+                "rt_channel_close expects integer channel_id".to_string(),
+            ))
+        }
     };
 
     let mut channels = CHANNELS.lock().unwrap();
@@ -296,15 +295,17 @@ pub fn rt_channel_close(args: &[Value]) -> Result<Value, CompileError> {
 pub fn rt_channel_is_closed(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() != 1 {
         return Err(CompileError::Runtime(
-            "rt_channel_is_closed expects 1 argument (channel_id)".to_string()
+            "rt_channel_is_closed expects 1 argument (channel_id)".to_string(),
         ));
     }
 
     let channel_id = match &args[0] {
         Value::Int(id) => *id,
-        _ => return Err(CompileError::Runtime(
-            "rt_channel_is_closed expects integer channel_id".to_string()
-        )),
+        _ => {
+            return Err(CompileError::Runtime(
+                "rt_channel_is_closed expects integer channel_id".to_string(),
+            ))
+        }
     };
 
     let channels = CHANNELS.lock().unwrap();

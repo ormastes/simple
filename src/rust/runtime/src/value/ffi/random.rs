@@ -20,10 +20,7 @@ fn ensure_initialized() -> i64 {
     let mut state = GLOBAL_RNG_STATE.write().unwrap();
     if state.is_none() {
         // Initialize with time-based seed
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_micros();
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_micros();
         *state = Some((now % (LCG_M as u128)) as i64);
     }
     state.unwrap()
@@ -66,10 +63,7 @@ pub extern "C" fn rt_random_next() -> i64 {
     let mut state = GLOBAL_RNG_STATE.write().unwrap();
     if state.is_none() {
         // Initialize with time-based seed
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_micros();
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_micros();
         *state = Some((now % (LCG_M as u128)) as i64);
     }
 

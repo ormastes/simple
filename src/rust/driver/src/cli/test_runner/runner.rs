@@ -170,7 +170,8 @@ pub fn run_tests(options: TestOptions) -> TestRunResult {
         };
 
     // Determine if all tests were run (no filters applied)
-    let all_tests_run = options.path.is_none() && options.tag.is_none() && options.level == TestLevel::All && !list_mode;
+    let all_tests_run =
+        options.path.is_none() && options.tag.is_none() && options.level == TestLevel::All && !list_mode;
 
     // Skip database updates in list mode
     if !list_mode {
@@ -257,7 +258,12 @@ fn determine_test_path(options: &TestOptions) -> PathBuf {
 
 /// Discover and filter test files
 fn discover_and_filter_tests(test_path: &PathBuf, options: &TestOptions) -> Vec<PathBuf> {
-    debug_log!(DebugLevel::Basic, "Discovery", "Finding tests in: {}", test_path.display());
+    debug_log!(
+        DebugLevel::Basic,
+        "Discovery",
+        "Finding tests in: {}",
+        test_path.display()
+    );
 
     let mut test_files = discover_tests(test_path, options.level);
 
@@ -267,8 +273,14 @@ fn discover_and_filter_tests(test_path: &PathBuf, options: &TestOptions) -> Vec<
     if let Some(ref tag) = options.tag {
         let before_count = test_files.len();
         test_files.retain(|path| matches_tag(path, &options.tag));
-        debug_log!(DebugLevel::Detailed, "Discovery", "Tag filter '{}': {} -> {} files",
-            tag, before_count, test_files.len());
+        debug_log!(
+            DebugLevel::Detailed,
+            "Discovery",
+            "Tag filter '{}': {} -> {} files",
+            tag,
+            before_count,
+            test_files.len()
+        );
     }
 
     // Apply seed for shuffling
@@ -309,7 +321,12 @@ fn execute_test_files(
     options: &TestOptions,
     quiet: bool,
 ) -> (Vec<TestFileResult>, usize, usize, usize, usize) {
-    debug_log!(DebugLevel::Basic, "Execution", "Executing {} test files", test_files.len());
+    debug_log!(
+        DebugLevel::Basic,
+        "Execution",
+        "Executing {} test files",
+        test_files.len()
+    );
 
     let mut results = Vec::new();
     let mut total_passed = 0;
@@ -338,8 +355,14 @@ fn execute_test_files(
             println!("[{}/{}] {}", idx + 1, test_files.len(), path.display());
         }
 
-        debug_log!(DebugLevel::Detailed, "Execution", "Test {}/{}: {}",
-            idx + 1, test_files.len(), path.display());
+        debug_log!(
+            DebugLevel::Detailed,
+            "Execution",
+            "Test {}/{}: {}",
+            idx + 1,
+            test_files.len(),
+            path.display()
+        );
 
         let result = if options.safe_mode {
             // Safe mode - run in separate process
@@ -364,8 +387,15 @@ fn execute_test_files(
         total_skipped += result.skipped;
         total_ignored += result.ignored;
 
-        debug_log!(DebugLevel::Trace, "Execution", "  Running totals: passed={}, failed={}, skipped={}, ignored={}",
-            total_passed, total_failed, total_skipped, total_ignored);
+        debug_log!(
+            DebugLevel::Trace,
+            "Execution",
+            "  Running totals: passed={}, failed={}, skipped={}, ignored={}",
+            total_passed,
+            total_failed,
+            total_skipped,
+            total_ignored
+        );
 
         if !options.list && !options.list_ignored {
             print_result(&result, quiet);
@@ -376,13 +406,24 @@ fn execute_test_files(
 
         // Stop on first failure if fail-fast
         if options.fail_fast && failed {
-            debug_log!(DebugLevel::Detailed, "Execution", "Stopping on first failure (fail-fast mode)");
+            debug_log!(
+                DebugLevel::Detailed,
+                "Execution",
+                "Stopping on first failure (fail-fast mode)"
+            );
             break;
         }
     }
 
-    debug_log!(DebugLevel::Basic, "Collection", "Aggregated results: passed={}, failed={}, skipped={}, ignored={}",
-        total_passed, total_failed, total_skipped, total_ignored);
+    debug_log!(
+        DebugLevel::Basic,
+        "Collection",
+        "Aggregated results: passed={}, failed={}, skipped={}, ignored={}",
+        total_passed,
+        total_failed,
+        total_skipped,
+        total_ignored
+    );
 
     (results, total_passed, total_failed, total_skipped, total_ignored)
 }

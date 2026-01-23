@@ -118,54 +118,111 @@ val missing = template.with {"user": x}  # ERROR: Missing key "city"
 
 **Constructors:**
 
-For **struct** (Python-style, zero boilerplate):
+**Core Rule:** Use direct construction `ClassName(field: value)` - that's it!
+
 ```simple
 struct Point:
     x: i64
     y: i64
 
-# ✅ PRIMARY: Direct construction with positional or named parameters
-val p = Point(3, 4)
-val p2 = Point(x: 10, y: 20)
+class StringInterner:
+    strings: Dict<text, i32>
+    reverse: Dict<i32, text>
+    next_id: i32
 
-# Optional: Custom constructor logic in impl
-impl Point:
-    fn new(x: i64, y: i64) -> Point:
-        return Point(x: x, y: y)
+# ✅ PRIMARY: Direct construction (no method needed)
+val p = Point(x: 3, y: 4)
+val interner = StringInterner(strings: {}, reverse: {}, next_id: 0)
 ```
 
-For **class** (factory methods):
-```simple
-pub class CapType:
-    cap: RefCapability
-    type_name: text
+**Optional: Custom factory methods (for special cases)**
 
-    fn new(cap: RefCapability, type_name: text) -> CapType:
-        CapType(cap: cap, type_name: type_name)
+When you need special initialization logic, use `static fn` with a descriptive name:
 
-    static fn imm_type(type_name: text) -> CapType:
-        CapType(cap: RefCapability.Imm, type_name: type_name)
-```
-
-When **constructing classes**:
-```simple
-# ✅ Use static factory methods
-val cap1 = CapType.imm_type("Int")   # From imported module
-
-# ✅ Direct construction (only within class methods)
-val cap2 = CapType(cap: RefCapability.Mut, type_name: "String")
-
-# ❌ AVOID from outside module (static method access not always reliable)
-# val cap = CapType.new(...)  # May fail if static method not properly exported
-```
-
-**Methods (LL(1)-friendly, implicit self):**
 ```simple
 impl Point:
+    # ✅ Named factory for common case
+    static fn origin() -> Point:
+        Point(x: 0, y: 0)
+
+    # ✅ Named factory for special transformation
+    static fn from_polar(r: f64, theta: f64) -> Point:
+        Point(x: r * theta.cos(), y: r * theta.sin())
+
+impl StringInterner:
+    # ✅ Factory with default capacity
+    static fn with_capacity(capacity: i32) -> StringInterner:
+        StringInterner(strings: {}, reverse: {}, next_id: 0)
+        # Could add pre-allocation logic here in future
+
+# Usage - clear intent:
+val center = Point.origin()
+val p = Point.from_polar(5.0, 0.785)
+val interner = StringInterner.with_capacity(100)
+```
+
+**Why this pattern?**
+- Direct construction is simplest: `Point(x: 3, y: 4)`
+- Named factories are clearer than `.new()`: `Point.origin()` explains intent
+- Return type automatically inferred to be the class
+- No ambiguity about what constructor is being used
+
+**Pattern Summary:**
+- ✅ **Primary:** `ClassName(field: value)` - direct construction
+- ✅ **Optional:** `static fn factory_name() -> ClassName` - named factories
+- ❌ **Avoid:** `.new()` - not idiomatic in Simple, use named factories instead
+
+**⚠️ CAUTION: Do NOT call `.new()` methods**
+
+```simple
+# ❌ WRONG - Don't do this:
+val p = Point.new(3, 4)
+val cache = Cache.new()
+val interner = StringInterner.new()
+
+# ✅ CORRECT - Do this instead:
+val p = Point(x: 3, y: 4)                                              # Direct construction
+val cache = Cache(items: {})                                           # Direct construction
+val interner = StringInterner(strings: {}, reverse: {}, next_id: 0)   # Direct construction
+
+# ✅ OR use named factories when helpful:
+val center = Point.origin()
+val cache = Cache.empty()
+val interner = StringInterner.with_capacity(100)
+```
+
+Why `.new()` is wrong in Simple:
+- Direct construction `ClassName(field: value)` is built-in - no method needed
+- `.new()` adds unnecessary indirection
+- It's not the Simple idiom (this is Java/Rust/Python-style, not Simple)
+- Use named factories `ClassName.factory_name()` instead when you need custom initialization
+- Return type is automatically inferred - just use `static fn factory_name()` with no explicit return type
+
+**Methods (can be in class body OR impl block):**
+```simple
+# ✅ OPTION 1: Methods in class body (Simple-style)
+class Point:
+    x: i64
+    y: i64
+
     fn get_x() -> i64:                  # Immutable method (self implicit)
         self.x
-    me set_x(val_: i64):                # Mutable method ('me' keyword, self implicit)
-        self.x = val_
+
+    me move(dx: i64, dy: i64):          # Mutable method ('me' keyword, self implicit)
+        self.x = self.x + dx            # Can modify fields via self.field[key] = value
+        self.y = self.y + dy
+
+# ✅ OPTION 2: Methods in impl block (Rust-style, alternative)
+impl Point:
+    fn distance() -> f64:
+        (self.x * self.x + self.y * self.y).sqrt()
+
+# Key points:
+# - Immutable methods: `fn method()` - can't modify self
+# - Mutable methods: `me method()` - can modify self and fields
+# - Static methods: `static fn factory()` - no self parameter
+# - Both patterns work: in-class or in-impl
+# - `self` is always implicit (don't write `self` in parameter list)
 ```
 
 See `/coding` skill for full details.

@@ -96,12 +96,7 @@ impl ParallelExecutor {
     /// Execute test files in parallel with CPU-aware thread adjustment.
     ///
     /// Returns results in the same order as input files (stable ordering).
-    pub fn execute(
-        &mut self,
-        test_files: &[PathBuf],
-        options: &TestOptions,
-        quiet: bool,
-    ) -> Vec<TestFileResult> {
+    pub fn execute(&mut self, test_files: &[PathBuf], options: &TestOptions, quiet: bool) -> Vec<TestFileResult> {
         let total_tests = test_files.len();
         if total_tests == 0 {
             return Vec::new();
@@ -256,11 +251,7 @@ fn print_progress(done: usize, total: usize, threads: usize, result: &TestFileRe
     };
 
     // Extract just the filename for compact display
-    let filename = result
-        .path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("unknown");
+    let filename = result.path.file_name().and_then(|n| n.to_str()).unwrap_or("unknown");
 
     println!(
         "[{}/{}] {} {} ({}ms, {} threads)",
@@ -342,8 +333,7 @@ mod tests {
     #[test]
     fn test_empty_test_files() {
         let options = TestOptions::default();
-        let (results, passed, failed, skipped, ignored) =
-            run_tests_parallel(&[], &options, true);
+        let (results, passed, failed, skipped, ignored) = run_tests_parallel(&[], &options, true);
         assert!(results.is_empty());
         assert_eq!(passed, 0);
         assert_eq!(failed, 0);

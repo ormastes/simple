@@ -398,9 +398,7 @@ impl<'a> Parser<'a> {
             None
         };
 
-        let body = if self.check(&TokenKind::Arrow)
-            || self.check(&TokenKind::FatArrow)
-            || self.check(&TokenKind::Colon)
+        let body = if self.check(&TokenKind::Arrow) || self.check(&TokenKind::FatArrow) || self.check(&TokenKind::Colon)
         {
             self.advance();
             // Support inline match arm: `case X => return Y` or `case X: expr`

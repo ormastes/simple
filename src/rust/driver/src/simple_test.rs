@@ -421,13 +421,9 @@ fn parse_test_output(
 /// Convert SimpleTestResult to test_db types for database recording.
 fn convert_to_db_result(result: &SimpleTestResult) -> (TestStatus, f64, Option<DbTestFailure>) {
     match result {
-        SimpleTestResult::Pass { duration_ms, .. } => {
-            (TestStatus::Passed, *duration_ms as f64, None)
-        }
+        SimpleTestResult::Pass { duration_ms, .. } => (TestStatus::Passed, *duration_ms as f64, None),
         SimpleTestResult::Fail {
-            duration_ms,
-            failures,
-            ..
+            duration_ms, failures, ..
         } => {
             let failure = if let Some(first_failure) = failures.first() {
                 Some(DbTestFailure {

@@ -158,7 +158,11 @@ pub fn rt_timestamp_get_second(args: &[Value]) -> Result<Value, CompileError> {
 pub fn rt_timestamp_get_microsecond(args: &[Value]) -> Result<Value, CompileError> {
     let micros = match args.first() {
         Some(Value::Int(m)) => *m,
-        _ => return Err(CompileError::semantic("rt_timestamp_get_microsecond requires i64 argument")),
+        _ => {
+            return Err(CompileError::semantic(
+                "rt_timestamp_get_microsecond requires i64 argument",
+            ))
+        }
     };
     let microsecond = simple_runtime::value::ffi::rt_timestamp_get_microsecond(micros);
     Ok(Value::Int(microsecond as i64))
@@ -169,20 +173,42 @@ pub fn rt_timestamp_get_microsecond(args: &[Value]) -> Result<Value, CompileErro
 /// Callable from Simple as: `rt_timestamp_from_components(year, month, day, hour, minute, second, microsecond)`
 pub fn rt_timestamp_from_components(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() != 7 {
-        return Err(CompileError::semantic("rt_timestamp_from_components requires 7 arguments"));
+        return Err(CompileError::semantic(
+            "rt_timestamp_from_components requires 7 arguments",
+        ));
     }
 
-    let year = match &args[0] { Value::Int(v) => *v as i32, _ => return Err(CompileError::semantic("year must be i32")) };
-    let month = match &args[1] { Value::Int(v) => *v as i32, _ => return Err(CompileError::semantic("month must be i32")) };
-    let day = match &args[2] { Value::Int(v) => *v as i32, _ => return Err(CompileError::semantic("day must be i32")) };
-    let hour = match &args[3] { Value::Int(v) => *v as i32, _ => return Err(CompileError::semantic("hour must be i32")) };
-    let minute = match &args[4] { Value::Int(v) => *v as i32, _ => return Err(CompileError::semantic("minute must be i32")) };
-    let second = match &args[5] { Value::Int(v) => *v as i32, _ => return Err(CompileError::semantic("second must be i32")) };
-    let microsecond = match &args[6] { Value::Int(v) => *v as i32, _ => return Err(CompileError::semantic("microsecond must be i32")) };
+    let year = match &args[0] {
+        Value::Int(v) => *v as i32,
+        _ => return Err(CompileError::semantic("year must be i32")),
+    };
+    let month = match &args[1] {
+        Value::Int(v) => *v as i32,
+        _ => return Err(CompileError::semantic("month must be i32")),
+    };
+    let day = match &args[2] {
+        Value::Int(v) => *v as i32,
+        _ => return Err(CompileError::semantic("day must be i32")),
+    };
+    let hour = match &args[3] {
+        Value::Int(v) => *v as i32,
+        _ => return Err(CompileError::semantic("hour must be i32")),
+    };
+    let minute = match &args[4] {
+        Value::Int(v) => *v as i32,
+        _ => return Err(CompileError::semantic("minute must be i32")),
+    };
+    let second = match &args[5] {
+        Value::Int(v) => *v as i32,
+        _ => return Err(CompileError::semantic("second must be i32")),
+    };
+    let microsecond = match &args[6] {
+        Value::Int(v) => *v as i32,
+        _ => return Err(CompileError::semantic("microsecond must be i32")),
+    };
 
-    let timestamp = simple_runtime::value::ffi::rt_timestamp_from_components(
-        year, month, day, hour, minute, second, microsecond
-    );
+    let timestamp =
+        simple_runtime::value::ffi::rt_timestamp_from_components(year, month, day, hour, minute, second, microsecond);
     Ok(Value::Int(timestamp))
 }
 
@@ -194,8 +220,14 @@ pub fn rt_timestamp_add_days(args: &[Value]) -> Result<Value, CompileError> {
         return Err(CompileError::semantic("rt_timestamp_add_days requires 2 arguments"));
     }
 
-    let micros = match &args[0] { Value::Int(v) => *v, _ => return Err(CompileError::semantic("micros must be i64")) };
-    let days = match &args[1] { Value::Int(v) => *v, _ => return Err(CompileError::semantic("days must be i64")) };
+    let micros = match &args[0] {
+        Value::Int(v) => *v,
+        _ => return Err(CompileError::semantic("micros must be i64")),
+    };
+    let days = match &args[1] {
+        Value::Int(v) => *v,
+        _ => return Err(CompileError::semantic("days must be i64")),
+    };
 
     let result = simple_runtime::value::ffi::rt_timestamp_add_days(micros, days);
     Ok(Value::Int(result))
@@ -209,8 +241,14 @@ pub fn rt_timestamp_diff_days(args: &[Value]) -> Result<Value, CompileError> {
         return Err(CompileError::semantic("rt_timestamp_diff_days requires 2 arguments"));
     }
 
-    let micros1 = match &args[0] { Value::Int(v) => *v, _ => return Err(CompileError::semantic("micros1 must be i64")) };
-    let micros2 = match &args[1] { Value::Int(v) => *v, _ => return Err(CompileError::semantic("micros2 must be i64")) };
+    let micros1 = match &args[0] {
+        Value::Int(v) => *v,
+        _ => return Err(CompileError::semantic("micros1 must be i64")),
+    };
+    let micros2 = match &args[1] {
+        Value::Int(v) => *v,
+        _ => return Err(CompileError::semantic("micros2 must be i64")),
+    };
 
     let result = simple_runtime::value::ffi::rt_timestamp_diff_days(micros1, micros2);
     Ok(Value::Int(result))
