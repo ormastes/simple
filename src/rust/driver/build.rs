@@ -114,18 +114,7 @@ fn generate_test_file(test_root: &Path, dest_path: &Path, prefix: &str) {
             // Skip specific unimplemented feature specs
             let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
             let unimplemented_specs = [
-                "strings_spec.spl",            // Uses ellipsis (...) syntax
-                "generators_spec.spl",         // Generator features not implemented
-                "hir_spec.spl",                // HIR features not implemented
-                "parser_spec.spl",             // Parser features not implemented
-                "sets_spec.spl",               // Set operations not implemented
-                "each_method_spec.spl",        // Each method not implemented
-                "integer_iteration_spec.spl",  // Integer iteration not implemented
-                "empty_predicate_spec.spl",    // Empty predicate not implemented
-                "number_trait_spec.spl",       // Number trait not implemented
-                "sorting_algorithms_spec.spl", // Sorting algorithms not implemented
-                "brevity_syntax_spec.spl",     // Brevity syntax not implemented
-                "custom_blocks_spec.spl",      // Custom blocks not implemented
+                "generators_spec.spl", // Generator features not implemented
                 // Tests using sspec module (not yet available)
                 "string_escape_spec.spl",    // Uses sspec module
                 "effects_core_spec.spl",     // Uses sspec module
@@ -140,7 +129,7 @@ fn generate_test_file(test_root: &Path, dest_path: &Path, prefix: &str) {
                 "matchers_spec.spl", // Spec stdlib matchers have variable scoping issues
                 "dsl_spec.spl",      // Spec stdlib DSL has parse error
                 // Tests with file module issues (exists keyword conflict in dependencies)
-                "file_io_spec.spl", // Dependencies use 'exists' function which conflicts with keyword
+                "file_io_spec.spl",     // Dependencies use 'exists' function which conflicts with keyword
                 "file_system_spec.spl", // Dependencies use 'exists' function which conflicts with keyword
                 // Other tests with dependency issues
                 "screenshot_ffi_spec.spl",      // Screenshot FFI not available

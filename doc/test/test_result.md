@@ -1,17 +1,36 @@
 # Test Results
 
-**Generated:** 2026-01-23 10:23:26
+**Generated:** 2026-01-23 10:42:01
 **Total Tests:** 1
-**Status:** ✅ ALL PASSED
+**Status:** ⚠️ 1 FAILED
 
 ## Summary
 
 | Status | Count | Percentage |
 |--------|-------|-----------|
-| ✅ Passed | 1 | 100.0% |
-| ❌ Failed | 0 | 0.0% |
+| ✅ Passed | 0 | 0.0% |
+| ❌ Failed | 1 | 100.0% |
 | ⏭️ Skipped | 0 | 0.0% |
 | 🔕 Ignored | 0 | 0.0% |
+
+---
+
+## ❌ Failed Tests (1)
+
+### 🔴 formatter_spec
+
+**File:** `test/integration/spec/formatter_spec.spl`
+**Category:** Integration
+**Failed:** 2026-01-23T10:42:01.250759329+00:00
+**Flaky:** No (100.0% failure rate)
+
+**Error:**
+```
+compile failed: parse: Unexpected token: expected expression, found Dedent
+Location: test/integration/spec/formatter_spec.spl
+```
+
+---
 
 ---
 
@@ -20,4 +39,8 @@
 ---
 
 ## 🎯 Action Items
+
+### Priority 1: Fix Failing Tests (1)
+
+1. **formatter_spec** - compile failed: parse: Unexpected token: expected expression, found Dedent
 
