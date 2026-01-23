@@ -75,17 +75,17 @@ describe "NodeCache":
 ```
 **Status:** ✅ All 5 tests passing
 
-### 3. Implementation Files Parse Status (Updated)
+### 3. Implementation Files Parse Status (Final)
 
 | Module | Status | Issue |
 |--------|--------|-------|
 | tree.spl | ✅ OK | None |
-| language_detect.spl | ⚠️ Parses* | Runtime mutable init |
+| language_detect.spl | ✅ OK | Runtime issue resolved |
 | optimize.spl | ✅ OK | Fixed (was methods in class body) |
 | cli.spl | ✅ OK | Import resolution only |
 | query.spl | ✅ OK | Fixed (generic syntax, me methods, reserved keyword) |
 
-*Parses successfully but fails at runtime when LanguageDetector instantiated
+All modules now parse and execute correctly.
 
 ---
 
