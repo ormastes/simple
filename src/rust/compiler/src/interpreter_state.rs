@@ -96,6 +96,14 @@ thread_local! {
     /// When a module declares `let mut x = ...` at top level, x is added here.
     /// Functions can read and write these variables.
     pub(crate) static MODULE_GLOBALS: RefCell<HashMap<String, Value>> = RefCell::new(HashMap::new());
+    /// BDD Test Registry - shared across all modules that import spec.registry
+    /// This ensures that describe/context/it blocks register to the same location
+    /// regardless of how the registry module is imported.
+    pub(crate) static BDD_REGISTRY_GROUPS: RefCell<Vec<Value>> = RefCell::new(Vec::new());
+    /// BDD Context definitions registry (for context_def blocks)
+    pub(crate) static BDD_REGISTRY_CONTEXTS: RefCell<HashMap<String, Value>> = RefCell::new(HashMap::new());
+    /// BDD Shared examples registry (for shared_examples blocks)
+    pub(crate) static BDD_REGISTRY_SHARED: RefCell<HashMap<String, Value>> = RefCell::new(HashMap::new());
 }
 
 //==============================================================================

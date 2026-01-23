@@ -3,6 +3,7 @@
 
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::interpreter::evaluate_expr;
+use crate::interpreter::{BDD_REGISTRY_CONTEXTS, BDD_REGISTRY_GROUPS, BDD_REGISTRY_SHARED};
 use crate::value::*;
 use simple_parser::ast::{Argument, BinOp, ClassDef, EnumDef, Expr, FunctionDef, UnaryOp};
 use std::cell::RefCell;
@@ -10,6 +11,11 @@ use std::collections::HashMap;
 
 type Enums = HashMap<String, EnumDef>;
 type ImplMethods = HashMap<String, Vec<FunctionDef>>;
+
+// Type aliases for BDD registry types
+type BddGroupsCell = RefCell<Vec<Value>>;
+type BddContextsCell = RefCell<HashMap<String, Value>>;
+type BddSharedCell = RefCell<HashMap<String, Value>>;
 
 // BDD testing state (thread-local for test isolation)
 // Made pub(crate) so interpreter_control.rs can access for context statement handling
@@ -39,6 +45,127 @@ thread_local! {
 
     // TEST-012: Memoized lazy values (name -> (block, Option<cached_value>))
     pub(crate) static BDD_LAZY_VALUES: RefCell<HashMap<String, (Value, Option<Value>)>> = RefCell::new(HashMap::new());
+
+    // Stack of current ExampleGroup objects for nested describe/context
+    pub(crate) static BDD_GROUP_STACK: RefCell<Vec<Value>> = RefCell::new(Vec::new());
+}
+
+/// Create an ExampleGroup Value object
+fn create_example_group(description: String, parent: Option<Value>) -> Value {
+    let mut fields = HashMap::new();
+    fields.insert("description".to_string(), Value::Str(description));
+    fields.insert(
+        "parent".to_string(),
+        match parent {
+            Some(p) => Value::Enum {
+                enum_name: "Option".to_string(),
+                variant: "Some".to_string(),
+                payload: Some(Box::new(p)),
+            },
+            None => Value::Enum {
+                enum_name: "Option".to_string(),
+                variant: "None".to_string(),
+                payload: None,
+            },
+        },
+    );
+    fields.insert("children".to_string(), Value::Array(Vec::new()));
+    fields.insert("test_examples".to_string(), Value::Array(Vec::new()));
+    fields.insert("hooks".to_string(), Value::Array(Vec::new()));
+
+    Value::Object {
+        class: "ExampleGroup".to_string(),
+        fields,
+    }
+}
+
+/// Create an Example Value object
+fn create_example(description: String, block: Value) -> Value {
+    let mut fields = HashMap::new();
+    fields.insert("description".to_string(), Value::Str(description));
+    fields.insert("block".to_string(), block);
+    fields.insert("is_skipped".to_string(), Value::Bool(false));
+    fields.insert("tags".to_string(), Value::Array(Vec::new()));
+    fields.insert(
+        "timeout_seconds".to_string(),
+        Value::Enum {
+            enum_name: "Option".to_string(),
+            variant: "None".to_string(),
+            payload: None,
+        },
+    );
+    fields.insert(
+        "resource_limits".to_string(),
+        Value::Enum {
+            enum_name: "Option".to_string(),
+            variant: "None".to_string(),
+            payload: None,
+        },
+    );
+
+    Value::Object {
+        class: "Example".to_string(),
+        fields,
+    }
+}
+
+/// Add an example to the current group
+fn add_example_to_current_group(example: Value) {
+    BDD_GROUP_STACK.with(|cell| {
+        let mut stack = cell.borrow_mut();
+        if let Some(group) = stack.last_mut() {
+            if let Value::Object { fields, .. } = group {
+                if let Some(Value::Array(examples)) = fields.get_mut("test_examples") {
+                    examples.push(example);
+                }
+            }
+        }
+    });
+}
+
+/// Add a child group to the current group
+fn add_child_to_current_group(child: &Value) {
+    BDD_GROUP_STACK.with(|cell| {
+        let mut stack = cell.borrow_mut();
+        if let Some(group) = stack.last_mut() {
+            if let Value::Object { fields, .. } = group {
+                if let Some(Value::Array(children)) = fields.get_mut("children") {
+                    children.push(child.clone());
+                }
+            }
+        }
+    });
+}
+
+/// Add a hook to the current group
+fn add_hook_to_current_group(hook: Value) {
+    BDD_GROUP_STACK.with(|cell| {
+        let mut stack = cell.borrow_mut();
+        if let Some(group) = stack.last_mut() {
+            if let Value::Object { fields, .. } = group {
+                if let Some(Value::Array(hooks)) = fields.get_mut("hooks") {
+                    hooks.push(hook);
+                }
+            }
+        }
+    });
+}
+
+/// Update the last child in the current group's children array with a fully-built version
+fn update_last_child_in_current_group(updated_child: &Value) {
+    BDD_GROUP_STACK.with(|cell| {
+        let mut stack = cell.borrow_mut();
+        if let Some(group) = stack.last_mut() {
+            if let Value::Object { fields, .. } = group {
+                if let Some(Value::Array(children)) = fields.get_mut("children") {
+                    if !children.is_empty() {
+                        let last_idx = children.len() - 1;
+                        children[last_idx] = updated_child.clone();
+                    }
+                }
+            }
+        }
+    });
 }
 
 /// Build a helpful failure message for expect by inspecting the expression
@@ -209,7 +336,28 @@ pub(super) fn eval_bdd_builtin(
 
             println!("{}{}", indent_str, name_str);
 
+            // Create ExampleGroup object
+            // - `describe` always creates a top-level group (no parent)
+            // - `context` creates a child of the current group (if there is one)
+            let is_describe = name == "describe";
+            let parent = if is_describe {
+                None // describe always creates top-level group
+            } else {
+                BDD_GROUP_STACK.with(|cell| cell.borrow().last().cloned())
+            };
+            let group = create_example_group(name_str.clone(), parent.clone());
+
+            // If context with a parent, add this as a child
+            if !is_describe && parent.is_some() {
+                add_child_to_current_group(&group);
+            }
+
+            // Push group onto stack
+            BDD_GROUP_STACK.with(|cell| cell.borrow_mut().push(group));
+
             BDD_INDENT.with(|cell| *cell.borrow_mut() += 1);
+            BDD_BEFORE_EACH.with(|cell| cell.borrow_mut().push(vec![]));
+            BDD_AFTER_EACH.with(|cell| cell.borrow_mut().push(vec![]));
 
             if let Some(ctx_blocks) = ctx_def_blocks {
                 for ctx_block in ctx_blocks {
@@ -219,7 +367,29 @@ pub(super) fn eval_bdd_builtin(
 
             let result = exec_block_value(block, env, functions, classes, enums, impl_methods);
 
+            BDD_BEFORE_EACH.with(|cell| cell.borrow_mut().pop());
+            BDD_AFTER_EACH.with(|cell| cell.borrow_mut().pop());
             BDD_INDENT.with(|cell| *cell.borrow_mut() -= 1);
+
+            // Pop finished group from stack
+            let finished_group = BDD_GROUP_STACK.with(|cell| cell.borrow_mut().pop());
+
+            // If this was a context with a parent, update the parent's child reference
+            // with the fully-built child (including its own children)
+            if !is_describe && parent.is_some() {
+                if let Some(child) = &finished_group {
+                    update_last_child_in_current_group(child);
+                }
+            }
+
+            // Register group to the registry if it's a describe block
+            if is_describe {
+                if let Some(group) = finished_group {
+                    BDD_REGISTRY_GROUPS.with(|cell: &BddGroupsCell| {
+                        cell.borrow_mut().push(group);
+                    });
+                }
+            }
 
             if indent == 0 {
                 BDD_LAZY_VALUES.with(|cell| cell.borrow_mut().clear());
@@ -272,6 +442,10 @@ pub(super) fn eval_bdd_builtin(
                 _ => "unnamed".to_string(),
             };
             let block = eval_arg(args, 1, Value::Nil, env, functions, classes, enums, impl_methods)?;
+
+            // Create and register Example object with current group
+            let example = create_example(name_str.clone(), block.clone());
+            add_example_to_current_group(example);
 
             BDD_EXPECT_FAILED.with(|cell| *cell.borrow_mut() = false);
             BDD_FAILURE_MSG.with(|cell| *cell.borrow_mut() = None);
@@ -640,6 +814,116 @@ pub(super) fn eval_bdd_builtin(
         "eq" => {
             let expected = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
             Ok(Some(Value::Matcher(MatcherValue::Exact(Box::new(expected)))))
+        }
+        // BDD Registry FFI functions - shared across all modules
+        "__bdd_register_group" => {
+            let group = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
+            BDD_REGISTRY_GROUPS.with(|cell: &BddGroupsCell| {
+                cell.borrow_mut().push(group);
+            });
+            Ok(Some(Value::Nil))
+        }
+        "__bdd_get_all_groups" => {
+            let groups = BDD_REGISTRY_GROUPS.with(|cell: &BddGroupsCell| cell.borrow().clone());
+            Ok(Some(Value::Array(groups)))
+        }
+        "__bdd_clear_groups" => {
+            BDD_REGISTRY_GROUPS.with(|cell: &BddGroupsCell| {
+                cell.borrow_mut().clear();
+            });
+            Ok(Some(Value::Nil))
+        }
+        "__bdd_register_context" => {
+            let name = eval_arg(args, 0, Value::Str("".to_string()), env, functions, classes, enums, impl_methods)?;
+            let name_str = match name {
+                Value::Str(s) => s,
+                Value::Symbol(s) => s,
+                _ => "".to_string(),
+            };
+            let ctx_def = eval_arg(args, 1, Value::Nil, env, functions, classes, enums, impl_methods)?;
+            BDD_REGISTRY_CONTEXTS.with(|cell: &BddContextsCell| {
+                cell.borrow_mut().insert(name_str, ctx_def);
+            });
+            Ok(Some(Value::Nil))
+        }
+        "__bdd_get_context" => {
+            let name = eval_arg(args, 0, Value::Str("".to_string()), env, functions, classes, enums, impl_methods)?;
+            let name_str = match name {
+                Value::Str(s) => s,
+                Value::Symbol(s) => s,
+                _ => "".to_string(),
+            };
+            let result = BDD_REGISTRY_CONTEXTS.with(|cell: &BddContextsCell| cell.borrow().get(&name_str).cloned());
+            match result {
+                Some(ctx) => Ok(Some(Value::Enum {
+                    enum_name: "Option".to_string(),
+                    variant: "Some".to_string(),
+                    payload: Some(Box::new(ctx)),
+                })),
+                None => Ok(Some(Value::Enum {
+                    enum_name: "Option".to_string(),
+                    variant: "None".to_string(),
+                    payload: None,
+                })),
+            }
+        }
+        "__bdd_clear_contexts" => {
+            BDD_REGISTRY_CONTEXTS.with(|cell: &BddContextsCell| {
+                cell.borrow_mut().clear();
+            });
+            Ok(Some(Value::Nil))
+        }
+        "__bdd_register_shared_examples" => {
+            let name = eval_arg(args, 0, Value::Str("".to_string()), env, functions, classes, enums, impl_methods)?;
+            let name_str = match name {
+                Value::Str(s) => s,
+                Value::Symbol(s) => s,
+                _ => "".to_string(),
+            };
+            let shared_def = eval_arg(args, 1, Value::Nil, env, functions, classes, enums, impl_methods)?;
+            BDD_REGISTRY_SHARED.with(|cell: &BddSharedCell| {
+                cell.borrow_mut().insert(name_str, shared_def);
+            });
+            Ok(Some(Value::Nil))
+        }
+        "__bdd_get_shared_examples" => {
+            let name = eval_arg(args, 0, Value::Str("".to_string()), env, functions, classes, enums, impl_methods)?;
+            let name_str = match name {
+                Value::Str(s) => s,
+                Value::Symbol(s) => s,
+                _ => "".to_string(),
+            };
+            let result = BDD_REGISTRY_SHARED.with(|cell: &BddSharedCell| cell.borrow().get(&name_str).cloned());
+            match result {
+                Some(shared) => Ok(Some(Value::Enum {
+                    enum_name: "Option".to_string(),
+                    variant: "Some".to_string(),
+                    payload: Some(Box::new(shared)),
+                })),
+                None => Ok(Some(Value::Enum {
+                    enum_name: "Option".to_string(),
+                    variant: "None".to_string(),
+                    payload: None,
+                })),
+            }
+        }
+        "__bdd_clear_shared_examples" => {
+            BDD_REGISTRY_SHARED.with(|cell: &BddSharedCell| {
+                cell.borrow_mut().clear();
+            });
+            Ok(Some(Value::Nil))
+        }
+        "__bdd_reset_registry" => {
+            BDD_REGISTRY_GROUPS.with(|cell: &BddGroupsCell| {
+                cell.borrow_mut().clear();
+            });
+            BDD_REGISTRY_CONTEXTS.with(|cell: &BddContextsCell| {
+                cell.borrow_mut().clear();
+            });
+            BDD_REGISTRY_SHARED.with(|cell: &BddSharedCell| {
+                cell.borrow_mut().clear();
+            });
+            Ok(Some(Value::Nil))
         }
         _ => Ok(None),
     }

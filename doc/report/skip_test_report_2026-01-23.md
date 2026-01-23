@@ -5,8 +5,8 @@
 | Category | Count | Status | Hang? | Duration |
 |----------|-------|--------|-------|----------|
 | Parser/Treesitter | 57 | Not Implemented | No | 39ms |
-| ML/Torch | 42 | Not Implemented | No | 25ms |
-| System/Snapshot | 40 | Not Implemented | No | 115ms |
+| ML/Torch | 59 | Not Implemented | No | 3.3s |
+| System/Snapshot | 0 | **Implemented** | No | - |
 | Tooling | 24 | Not Implemented | No | 8ms |
 | LSP | 18 | Not Implemented | No | 24ms |
 | DAP (Debugger) | 20 | Not Implemented | No | 38ms |
@@ -19,7 +19,6 @@
 | Improvements | 31 | Proposed Features | No | 618ms |
 | Bugs | 3 | Known Issues | No | 3.8s |
 | Console | 4 | Not Implemented | No | 3.3s |
-| ML Integration | 17 | Not Implemented | No | 3.3s |
 | DateTime | 3 | Not Implemented | No | 3.6s |
 | Concurrency | 1 | Not Implemented | No | 622ms |
 | Feature Doc | 9 | Not Implemented | No | 3.3s |
@@ -27,7 +26,7 @@
 | Spec Integration | ~6 | Partial | No | - |
 | UI | - | - | No | 494ms |
 | SDN | - | - | No | 329ms |
-| **Total** | **~373** | | **All OK** | |
+| **Total** | **~333** | | **All OK** | |
 
 ---
 
@@ -54,9 +53,9 @@
 | treesitter_incremental_spec.spl | 5 | Incremental parsing |
 | treesitter_highlights_spec.spl | 6 | Syntax highlighting |
 
-### 2. ML/Torch (42 skips)
+### 2. ML/Torch (59 skips)
 
-**Location:** `test/lib/std/unit/ml/torch/*`
+**Location:** `test/lib/std/unit/ml/torch/*` and `test/lib/std/integration/ml/*`
 
 | File | Count | Description |
 |------|-------|-------------|
@@ -70,17 +69,22 @@
 | simple_math_spec.spl | 3 | Basic math ops |
 | transformer_spec.spl | 5 | Transformer architecture |
 | typed_tensor_spec.spl | 1 | Module parse errors |
+| simple_math_integration_spec.spl | 17 | Matrix ops, grid literals, tensor creation |
 
-### 3. System/Snapshot (40 skips)
+### 3. System/Snapshot (0 skips - IMPLEMENTED)
 
 **Location:** `test/lib/std/system/snapshot/*`
 
-| File | Count | Description |
+**Status:** ✅ Fully implemented and converted to working tests.
+
+| File | Tests | Description |
 |------|-------|-------------|
-| basic_spec.spl | 14 | Snapshot creation/storage |
-| comparison_spec.spl | 17 | Diff generation |
-| formats_spec.spl | 20 | JSON/YAML/HTML/Text formats |
-| runner_spec.spl | 16 | Snapshot test runner |
+| basic_spec.spl | 7 | Snapshot creation/storage |
+| comparison_spec.spl | 13 | Diff generation |
+| formats_spec.spl | 17 | JSON/YAML/HTML/Text formats |
+| runner_spec.spl | 13 | Snapshot test runner |
+
+**Total: 50 working tests** (previously 40 skipped)
 
 ### 4. LSP (18 skips)
 
@@ -202,19 +206,13 @@ Feature documentation generation:
 - Class access through module alias
 - Doc comments before imports
 
-### 16. ML Integration (17 skips)
-
-**Location:** `test/lib/std/integration/ml/simple_math_integration_spec.spl`
-
-Matrix operations, grid literals, tensor creation.
-
-### 17. Console (4 skips)
+### 16. Console (4 skips)
 
 **Location:** `test/lib/std/integration/console/console_basic_spec.spl`
 
 PTY operations, keystroke sending.
 
-### 18. Other (9 skips)
+### 17. Other (9 skips)
 
 | Location | Count | Description |
 |----------|-------|-------------|
