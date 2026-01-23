@@ -32,6 +32,7 @@ val p = Point(3, 4)
 
 # ✅ OPTIONAL: Custom logic
 impl Point:
+    # fn new() is implicitly static at module level
     fn new(x: i64, y: i64) -> Point:
         return Point(x: x, y: y)
 
@@ -286,10 +287,10 @@ struct Config:
 
 impl Config:
     static fn new() -> Config:
-        return Config {
+        return Config(
             host: "localhost",
             port: 8080
-        }
+        )
 
     me with_host(host: String) -> Config:
         self.host = host
@@ -403,7 +404,7 @@ struct Box<T>:
 
 impl<T> Box<T>:
     static fn new(value: T) -> Box<T>:
-        return Box { value: value }
+        return Box(value: value)
 
     fn get() -> T:
         return self.value
@@ -491,7 +492,7 @@ const b = new Box(42);
 
 | Feature | Simple | Python |
 |---------|--------|--------|
-| Constructor call | `Type.new()` | `Type()` (calls `__init__`) |
+| Constructor call | `Type(args)` (primary) or `Type.new(args)` | `Type()` (calls `__init__`) |
 | Self reference | Implicit `self` | Explicit `self` in parameters |
 | Mutability | `me` keyword for mutable | All methods can mutate |
 | Static methods | `static fn new()` | `@staticmethod` decorator |
@@ -501,7 +502,7 @@ const b = new Box(42);
 
 | Feature | Simple | Ruby |
 |---------|--------|--------|
-| Constructor call | `Type.new()` | `Type.new` (calls `initialize`) |
+| Constructor call | `Type(args)` (primary) or `Type.new(args)` | `Type.new` (calls `initialize`) |
 | Self reference | Implicit `self` | Implicit `self`, use `@var` |
 | Static methods | `static fn method` | `def self.method` |
 | Type annotations | Required for function params | Not available |
@@ -511,7 +512,7 @@ const b = new Box(42);
 
 | Feature | Simple | Rust |
 |---------|--------|--------|
-| Constructor call | `Type.new()` (dot) | `Type::new()` (double-colon) |
+| Constructor call | `Type(args)` (primary) or `Type.new()` (dot) | `Type::new()` (double-colon) |
 | Method syntax | `fn method()` / `me method()` | `fn method(&self)` / `fn method(&mut self)` |
 | Self reference | Implicit | Explicit (`&self`, `&mut self`, `self`) |
 | Ownership | GC-based | Ownership/borrowing |
@@ -523,7 +524,7 @@ const b = new Box(42);
 
 | Feature | Simple | JavaScript |
 |---------|--------|--------|
-| Constructor call | `Type.new()` | `new Type()` |
+| Constructor call | `Type(args)` (primary) or `Type.new()` | `new Type()` |
 | Constructor method | `static fn new()` | `constructor()` |
 | Static methods | `static fn method` | `static method()` |
 | Type safety | Static typing | Dynamic (TypeScript adds types) |
@@ -585,13 +586,14 @@ struct Point:
 
 impl Point:
     static fn new(x: i64, y: i64) -> Point:
-        return Point { x: x, y: y }
+        return Point(x: x, y: y)
 
     me move(dx: i64, dy: i64):
         self.x = self.x + dx  # or self.x += dx
         self.y = self.y + dy
 
 val p = Point.new(3, 4)
+# Or use direct construction: val p = Point(3, 4)
 p.move(1, 2)
 ```
 
@@ -630,13 +632,14 @@ struct Point:
 
 impl Point:
     static fn new(x: i64, y: i64) -> Point:
-        return Point { x: x, y: y }
+        return Point(x: x, y: y)
 
     me move(dx: i64, dy: i64):
         self.x += dx
         self.y += dy
 
 val p = Point.new(3, 4)
+# Or use direct construction: val p = Point(3, 4)
 ```
 
 **Changes:**
@@ -677,13 +680,14 @@ struct Point:
 
 impl Point:
     static fn new(x: i64, y: i64) -> Point:
-        return Point { x: x, y: y }
+        return Point(x: x, y: y)
 
     me move(dx: i64, dy: i64):
         self.x += dx
         self.y += dy
 
 val p = Point.new(3, 4)
+# Or use direct construction: val p = Point(3, 4)
 ```
 
 **Changes:**
@@ -720,13 +724,14 @@ struct Point:
 
 impl Point:
     static fn new(x: i64, y: i64) -> Point:
-        return Point { x: x, y: y }
+        return Point(x: x, y: y)
 
     me move(dx: i64, dy: i64):
         self.x += dx
         self.y += dy
 
 val p = Point.new(3, 4)
+# Or use direct construction: val p = Point(3, 4)
 ```
 
 **Changes:**

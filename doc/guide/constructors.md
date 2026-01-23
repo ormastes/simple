@@ -12,17 +12,20 @@ struct Point:
     y: i64
 
 impl Point:
-    # Constructor - static method named 'new'
-    static fn new(x: i64, y: i64) -> Point:
-        return Point { x: x, y: y }
+    # Constructor - fn new() is implicitly static at module level
+    fn new(x: i64, y: i64) -> Point:
+        return Point(x: x, y: y)
 
-    # Alternative constructor
-    static fn origin() -> Point:
-        return Point { x: 0, y: 0 }
+    # Alternative constructor (also implicitly static)
+    fn origin() -> Point:
+        return Point(x: 0, y: 0)
 
-# Usage - dot syntax (preferred)
-val p1 = Point.new(3, 4)
-val p2 = Point.origin()
+# ✅ PRIMARY: Direct construction works!
+val p1 = Point(3, 4)
+
+# ✅ OPTIONAL: Or use .new() if you defined it
+val p2 = Point.new(3, 4)
+val p3 = Point.origin()
 ```
 
 ### Class with Constructor
@@ -33,8 +36,9 @@ class Person:
     age: i64
 
 impl Person:
+    # Can use explicit 'static' if you prefer clarity
     static fn new(name: String, age: i64) -> Person:
-        return Person { name: name, age: age }
+        return Person(name: name, age: age)
 
 # Usage
 val alice = Person.new("Alice", 30)
@@ -51,7 +55,7 @@ struct Rectangle:
 
 impl Rectangle:
     static fn new(width: i64, height: i64) -> Rectangle:
-        return Rectangle { width: width, height: height }
+        return Rectangle(width: width, height: height)
 
 val rect = Rectangle.new(10, 20)
 ```
@@ -61,7 +65,7 @@ val rect = Rectangle.new(10, 20)
 ```simple
 impl Rectangle:
     static fn default() -> Rectangle:
-        return Rectangle { width: 0, height: 0 }
+        return Rectangle(width: 0, height: 0)
 
 val empty = Rectangle.default()
 ```
@@ -72,7 +76,7 @@ val empty = Rectangle.default()
 impl Rectangle:
     # Main constructor
     static fn new(width: i64, height: i64) -> Rectangle:
-        return Rectangle { width: width, height: height }
+        return Rectangle(width: width, height: height)
 
     # Square constructor
     static fn square(size: i64) -> Rectangle:
@@ -81,7 +85,7 @@ impl Rectangle:
     # From area
     static fn from_area(area: i64) -> Rectangle:
         val side = sqrt(area) as i64
-        return Rectangle { width: side, height: side }
+        return Rectangle(width: side, height: side)
 
 # Usage
 val rect = Rectangle.new(10, 20)
@@ -98,7 +102,7 @@ struct PositiveNumber:
 impl PositiveNumber:
     static fn new(value: i64) -> Option<PositiveNumber>:
         if value > 0:
-            return Some(PositiveNumber { value: value })
+            return Some(PositiveNumber(value: value))
         else:
             return None
 
@@ -122,12 +126,12 @@ struct Config:
 impl Config:
     # Start with defaults
     static fn builder() -> Config:
-        return Config {
+        return Config(
             host: "localhost",
             port: 8080,
             timeout: 30,
             retries: 3
-        }
+        )
 
     # Fluent setters
     me with_host(host: String) -> Config:
@@ -157,7 +161,7 @@ val config = Config.builder()
 impl Point:
     # No 'self' - operates on type, not instance
     static fn new(x: i64, y: i64) -> Point:
-        return Point { x: x, y: y }
+        return Point(x: x, y: y)
 ```
 
 ### Instance Methods (Immutable)
@@ -213,19 +217,19 @@ struct BankAccount:
 impl BankAccount:
     # Constructor
     static fn new(account_number: String, owner: String) -> BankAccount:
-        return BankAccount {
+        return BankAccount(
             account_number: account_number,
             balance: 0,
             owner: owner
-        }
+        )
 
     # Constructor with initial deposit
     static fn with_deposit(account_number: String, owner: String, initial: i64) -> BankAccount:
-        return BankAccount {
+        return BankAccount(
             account_number: account_number,
             balance: initial,
             owner: owner
-        }
+        )
 
     # Immutable query
     fn get_balance() -> i64:
@@ -263,7 +267,7 @@ struct Container<T>:
 
 impl<T> Container<T>:
     static fn new(value: T) -> Container<T>:
-        return Container { value: value }
+        return Container(value: value)
 
     fn get() -> T:
         return self.value
