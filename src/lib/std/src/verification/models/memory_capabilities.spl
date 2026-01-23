@@ -169,6 +169,22 @@ enum RefCapability:
         val attrs_str = attrs.join(", ")
         return "RefCapability: {name} ({attrs_str})"
 
+    fn to_lean_name() -> text:
+        """Convert capability to Lean name.
+
+        Returns:
+            Lean representation of capability
+
+        Example:
+            RefCapability.Imm.to_lean_name()  # → "Shared"
+            RefCapability.Mut.to_lean_name()  # → "Exclusive"
+            RefCapability.Iso.to_lean_name()  # → "Isolated"
+        """
+        match self:
+            case Imm: "Shared"
+            case Mut: "Exclusive"
+            case Iso: "Isolated"
+
 # Capability type - combines a capability with a type name
 # Matches Lean: structure CapType
 class CapType:
@@ -192,6 +208,19 @@ class CapType:
             self.type_name
         else:
             "{self.cap.to_string()} {self.type_name}"
+
+    fn to_lean() -> text:
+        """Convert capability type to Lean syntax.
+
+        Returns:
+            Lean representation of CapType
+
+        Example:
+            CapType.imm_type("Int").to_lean()
+            # → "CapType.mk \"Int\" RefCapability.Shared"
+        """
+        val cap_lean = self.cap.to_lean_name()
+        "CapType.mk \"{self.type_name}\" RefCapability.{cap_lean}"
 
 # Reference in the environment
 # Matches Lean: structure Reference
@@ -247,7 +276,7 @@ fn can_create_ref(source: RefCapability, target: RefCapability) -> bool:
     match (source, target):
         # mut can create anything (with restrictions)
         case (RefCapability.Mut, RefCapability.Mut): true
-        case (RefCapability.Mut, RefCapability.Iso): true  # consume
+        case (RefCapability.Mut, RefCapability.Iso): false
         case (RefCapability.Mut, RefCapability.Imm): true  # freeze
 
         # iso can create mut or imm
@@ -478,6 +507,66 @@ fn get_conversion_kind(from_cap: RefCapability, to_cap: RefCapability) -> Conver
 
         case (RefCapability.Imm, RefCapability.Imm): ConversionKind.Identity
         case _: ConversionKind.Invalid
+
+# Concurrency mode for capability checking
+enum ConcurrencyMode:
+    Actor      # Imm + Iso only (no shared mutable state)
+    LockBase   # All allowed (locks protect access)
+    Unsafe     # All allowed (no safety)
+
+    fn to_string() -> text:
+        match self:
+            case Actor: "actor"
+            case LockBase: "lock-based"
+            case Unsafe: "unsafe"
+
+# Check if capability is allowed in concurrency mode
+fn capability_allowed_in_mode(cap: RefCapability, mode: ConcurrencyMode) -> bool:
+    """Check if capability allowed in concurrency mode.
+
+    Parameters:
+        cap: Reference capability
+        mode: Concurrency mode
+
+    Returns:
+        true if capability is allowed in mode
+
+    Example:
+        capability_allowed_in_mode(RefCapability.Imm, ConcurrencyMode.Actor)  # → true
+        capability_allowed_in_mode(RefCapability.Mut, ConcurrencyMode.Actor)  # → false
+    """
+    match mode:
+        case ConcurrencyMode.Actor:
+            cap == RefCapability.Imm or cap == RefCapability.Iso
+        case ConcurrencyMode.LockBase:
+            true
+        case ConcurrencyMode.Unsafe:
+            true
+
+# Check if reference allows specific access type
+fn allows_access(ref: Reference, access_type: text) -> bool:
+    """Check if reference allows specific access type.
+
+    Parameters:
+        ref: Reference to check
+        access_type: Type of access ("read" or "write")
+
+    Returns:
+        true if access is allowed
+
+    Example:
+        val ref = Reference.new("x", CapType.imm_type("Int"))
+        allows_access(ref, "read")    # → true
+        allows_access(ref, "write")   # → false
+    """
+    match access_type:
+        case "read":
+            true
+        case "write":
+            ref.cap_type.cap == RefCapability.Mut or
+            ref.cap_type.cap == RefCapability.Iso
+        case _:
+            false
 
 # Capability checking result
 class CapabilityCheckResult:
