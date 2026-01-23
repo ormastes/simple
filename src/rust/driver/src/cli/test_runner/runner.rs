@@ -21,8 +21,8 @@ use super::feature_db::update_feature_database;
 use super::test_db_update::update_test_database;
 use super::static_registry::StaticTestRegistry;
 
-/// Load CPU throttle configuration from simple.test.toml
-fn load_cpu_throttle_config(options: &mut TestOptions) {
+/// Load resource throttle configuration from simple.test.toml
+fn load_resource_throttle_config(options: &mut TestOptions) {
     // Find simple.test.toml in current directory or project root
     let config_paths = [
         PathBuf::from("simple.test.toml"),
@@ -32,7 +32,7 @@ fn load_cpu_throttle_config(options: &mut TestOptions) {
 
     for path in &config_paths {
         if let Ok(content) = fs::read_to_string(path) {
-            parse_cpu_throttle_config(&content, options);
+            parse_resource_throttle_config(&content, options);
             debug_log!(DebugLevel::Detailed, "Config", "Loaded config from: {}", path.display());
             return;
         }
@@ -41,9 +41,9 @@ fn load_cpu_throttle_config(options: &mut TestOptions) {
     debug_log!(DebugLevel::Trace, "Config", "No simple.test.toml found, using defaults");
 }
 
-/// Parse CPU throttle configuration from TOML content
-fn parse_cpu_throttle_config(content: &str, options: &mut TestOptions) {
-    // Simple TOML parsing for cpu_throttle section
+/// Parse resource throttle configuration from TOML content
+fn parse_resource_throttle_config(content: &str, options: &mut TestOptions) {
+    // Simple TOML parsing for cpu_throttle section (handles both CPU and memory thresholds)
     let mut in_cpu_throttle = false;
 
     for line in content.lines() {
@@ -83,6 +83,14 @@ fn parse_cpu_throttle_config(content: &str, options: &mut TestOptions) {
                         }
                     }
                 }
+                "memory_threshold" => {
+                    if let Ok(v) = value.parse::<u8>() {
+                        // Only apply if user didn't override on CLI (still default)
+                        if options.memory_threshold == 70 {
+                            options.memory_threshold = v;
+                        }
+                    }
+                }
                 "throttled_threads" => {
                     if let Ok(v) = value.parse::<usize>() {
                         if options.throttled_threads == 1 {
@@ -110,7 +118,7 @@ pub fn run_tests(options: TestOptions) -> TestRunResult {
 
     // Load configuration from simple.test.toml (applies defaults if not overridden by CLI)
     if options.parallel {
-        load_cpu_throttle_config(&mut options);
+        load_resource_throttle_config(&mut options);
     }
 
     let quiet = matches!(options.format, OutputFormat::Json);

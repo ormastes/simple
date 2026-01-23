@@ -1,7 +1,7 @@
 //! Parallel test execution with dynamic thread adjustment.
 //!
-//! Provides CPU-aware parallel test execution that reduces thread count
-//! when system CPU usage exceeds a configurable threshold.
+//! Provides resource-aware parallel test execution that reduces thread count
+//! when system CPU or memory usage exceeds configurable thresholds.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -11,7 +11,7 @@ use std::time::Instant;
 use rayon::prelude::*;
 use rayon::ThreadPoolBuilder;
 
-use super::cpu_monitor::{CpuMonitor, available_cores};
+use super::resource_monitor::{ResourceMonitor, available_cores};
 use super::execution::run_test_file_safe_mode;
 use super::types::{TestFileResult, TestOptions, DebugLevel, debug_log};
 
@@ -22,11 +22,13 @@ pub struct ParallelConfig {
     pub max_threads: usize,
     /// CPU usage percentage threshold to trigger throttling
     pub cpu_threshold: u8,
+    /// Memory usage percentage threshold to trigger throttling
+    pub memory_threshold: u8,
     /// Number of threads when throttled
     pub throttled_threads: usize,
-    /// Seconds between CPU checks
+    /// Seconds between resource checks
     pub check_interval: u64,
-    /// Ignore CPU limits (full parallel mode)
+    /// Ignore CPU/memory limits (full parallel mode)
     pub full_parallel: bool,
 }
 
@@ -35,6 +37,7 @@ impl Default for ParallelConfig {
         Self {
             max_threads: 0, // Auto-detect
             cpu_threshold: 70,
+            memory_threshold: 70,
             throttled_threads: 1,
             check_interval: 5,
             full_parallel: false,
@@ -48,6 +51,7 @@ impl ParallelConfig {
         Self {
             max_threads: options.max_threads,
             cpu_threshold: options.cpu_threshold,
+            memory_threshold: options.memory_threshold,
             throttled_threads: options.throttled_threads,
             check_interval: options.cpu_check_interval,
             full_parallel: options.full_parallel,
@@ -64,10 +68,10 @@ impl ParallelConfig {
     }
 }
 
-/// Parallel test executor with CPU-aware thread management.
+/// Parallel test executor with resource-aware thread management.
 pub struct ParallelExecutor {
     config: ParallelConfig,
-    cpu_monitor: Option<CpuMonitor>,
+    resource_monitor: Option<ResourceMonitor>,
     current_threads: Arc<AtomicUsize>,
 }
 
@@ -75,15 +79,15 @@ impl ParallelExecutor {
     /// Create a new parallel executor with the given configuration.
     pub fn new(config: ParallelConfig) -> Self {
         let initial_threads = config.effective_max_threads();
-        let cpu_monitor = if config.full_parallel {
+        let resource_monitor = if config.full_parallel {
             None // No monitoring needed in full parallel mode
         } else {
-            Some(CpuMonitor::new(config.check_interval))
+            Some(ResourceMonitor::new(config.check_interval))
         };
 
         Self {
             config,
-            cpu_monitor,
+            resource_monitor,
             current_threads: Arc::new(AtomicUsize::new(initial_threads)),
         }
     }
@@ -93,7 +97,7 @@ impl ParallelExecutor {
         Self::new(ParallelConfig::from_options(options))
     }
 
-    /// Execute test files in parallel with CPU-aware thread adjustment.
+    /// Execute test files in parallel with resource-aware thread adjustment.
     ///
     /// Returns results in the same order as input files (stable ordering).
     pub fn execute(&mut self, test_files: &[PathBuf], options: &TestOptions, quiet: bool) -> Vec<TestFileResult> {
@@ -102,16 +106,16 @@ impl ParallelExecutor {
             return Vec::new();
         }
 
-        // Start CPU monitoring
-        if let Some(ref mut monitor) = self.cpu_monitor {
+        // Start resource monitoring
+        if let Some(ref mut monitor) = self.resource_monitor {
             monitor.start();
         }
 
         let initial_threads = self.current_threads.load(Ordering::SeqCst);
         if !quiet {
             println!(
-                "Starting parallel execution with {} threads (CPU threshold: {}%)",
-                initial_threads, self.config.cpu_threshold
+                "Starting parallel execution with {} threads (CPU threshold: {}%, memory threshold: {}%)",
+                initial_threads, self.config.cpu_threshold, self.config.memory_threshold
             );
         }
 
@@ -166,14 +170,14 @@ impl ParallelExecutor {
                 .collect()
         });
 
-        // Stop CPU monitoring
-        if let Some(ref mut monitor) = self.cpu_monitor {
+        // Stop resource monitoring
+        if let Some(ref mut monitor) = self.resource_monitor {
             monitor.stop();
         }
 
         let throttle_events = throttled_count.load(Ordering::SeqCst);
         if !quiet && throttle_events > 0 {
-            println!("Throttled {} times due to high CPU usage", throttle_events);
+            println!("Throttled {} times due to high resource usage", throttle_events);
         }
 
         debug_log!(
@@ -187,51 +191,79 @@ impl ParallelExecutor {
         results
     }
 
-    /// Check CPU usage and adjust thread count if needed.
+    /// Check CPU and memory usage and adjust thread count if needed.
     fn maybe_adjust_threads(&self, quiet: bool) {
         if self.config.full_parallel {
             return; // No adjustment in full parallel mode
         }
 
-        if let Some(ref monitor) = self.cpu_monitor {
-            let cpu_usage = monitor.get_usage();
+        if let Some(ref monitor) = self.resource_monitor {
+            let cpu_usage = monitor.get_cpu_usage();
+            let memory_usage = monitor.get_memory_usage();
             let current = self.current_threads.load(Ordering::SeqCst);
 
-            if monitor.is_above_threshold(self.config.cpu_threshold) {
-                // CPU is high - reduce threads
+            let cpu_high = monitor.is_cpu_above_threshold(self.config.cpu_threshold);
+            let memory_high = monitor.is_memory_above_threshold(self.config.memory_threshold);
+
+            if cpu_high || memory_high {
+                // Either resource is high - reduce threads
                 let new_threads = self.config.throttled_threads.max(1);
                 if current > new_threads {
                     self.current_threads.store(new_threads, Ordering::SeqCst);
                     if !quiet {
-                        eprintln!(
-                            "CPU at {:.0}% (>{:.0}%) - reduced to {} thread(s)",
-                            cpu_usage, self.config.cpu_threshold, new_threads
-                        );
+                        let reason = match (cpu_high, memory_high) {
+                            (true, true) => format!(
+                                "CPU at {:.0}% (>{:.0}%) and memory at {:.0}% (>{:.0}%)",
+                                cpu_usage, self.config.cpu_threshold,
+                                memory_usage, self.config.memory_threshold
+                            ),
+                            (true, false) => format!(
+                                "CPU at {:.0}% (>{:.0}%)",
+                                cpu_usage, self.config.cpu_threshold
+                            ),
+                            (false, true) => format!(
+                                "Memory at {:.0}% (>{:.0}%)",
+                                memory_usage, self.config.memory_threshold
+                            ),
+                            _ => unreachable!(),
+                        };
+                        eprintln!("{} - reduced to {} thread(s)", reason, new_threads);
                     }
                     debug_log!(
                         DebugLevel::Detailed,
                         "Parallel",
-                        "Throttled: CPU={:.0}%, threads {} -> {}",
+                        "Throttled: CPU={:.0}%, memory={:.0}%, threads {} -> {}",
                         cpu_usage,
+                        memory_usage,
                         current,
                         new_threads
                     );
                 }
-            } else if cpu_usage < (self.config.cpu_threshold as f32 - 10.0) {
-                // CPU is low - consider increasing threads
-                let max_threads = self.config.effective_max_threads();
-                if current < max_threads {
-                    let new_threads = (current + 1).min(max_threads);
-                    self.current_threads.store(new_threads, Ordering::SeqCst);
-                    debug_log!(
-                        DebugLevel::Trace,
-                        "Parallel",
-                        "Unthrottled: CPU={:.0}%, threads {} -> {}",
-                        cpu_usage,
-                        current,
-                        new_threads
-                    );
+            } else {
+                // Check if BOTH resources are below hysteresis threshold to scale up
+                let cpu_hysteresis = self.config.cpu_threshold.saturating_sub(10) as f32;
+                let memory_hysteresis = self.config.memory_threshold.saturating_sub(10) as f32;
+                let cpu_low = cpu_usage < cpu_hysteresis;
+                let memory_low = memory_usage < memory_hysteresis;
+
+                if cpu_low && memory_low {
+                    // Both resources are low - consider increasing threads
+                    let max_threads = self.config.effective_max_threads();
+                    if current < max_threads {
+                        let new_threads = (current + 1).min(max_threads);
+                        self.current_threads.store(new_threads, Ordering::SeqCst);
+                        debug_log!(
+                            DebugLevel::Trace,
+                            "Parallel",
+                            "Unthrottled: CPU={:.0}%, memory={:.0}%, threads {} -> {}",
+                            cpu_usage,
+                            memory_usage,
+                            current,
+                            new_threads
+                        );
+                    }
                 }
+                // If only one is below hysteresis, stay at current thread count
             }
         }
     }
@@ -327,7 +359,13 @@ mod tests {
             ..Default::default()
         };
         let executor = ParallelExecutor::new(config);
-        assert!(executor.cpu_monitor.is_none());
+        assert!(executor.resource_monitor.is_none());
+    }
+
+    #[test]
+    fn test_parallel_config_memory_threshold() {
+        let config = ParallelConfig::default();
+        assert_eq!(config.memory_threshold, 70);
     }
 
     #[test]
