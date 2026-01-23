@@ -116,42 +116,56 @@ val bad = template.with {"usr": x}   # ERROR: "usr" not in ["user", "city"]
 val missing = template.with {"user": x}  # ERROR: Missing key "city"
 ```
 
-**Constructors (Python-style, zero boilerplate):**
+**Constructors:**
+
+For **struct** (Python-style, zero boilerplate):
 ```simple
 struct Point:
     x: i64
     y: i64
 
-# ✅ PRIMARY: Direct construction (works immediately, no impl needed!)
+# ✅ PRIMARY: Direct construction with positional or named parameters
 val p = Point(3, 4)
-val p2 = Point(x: 10, y: 20)  # Named parameters
+val p2 = Point(x: 10, y: 20)
 
-# Optional: Custom constructor logic
+# Optional: Custom constructor logic in impl
 impl Point:
-    fn new(x: i64, y: i64) -> Point:   # 'static' keyword optional (implicitly static)
-        return Point(x, y)
+    fn new(x: i64, y: i64) -> Point:
+        return Point(x: x, y: y)
+```
+
+For **class** (factory methods):
+```simple
+pub class CapType:
+    cap: RefCapability
+    type_name: text
+
+    fn new(cap: RefCapability, type_name: text) -> CapType:
+        CapType(cap: cap, type_name: type_name)
+
+    static fn imm_type(type_name: text) -> CapType:
+        CapType(cap: RefCapability.Imm, type_name: type_name)
+```
+
+When **constructing classes**:
+```simple
+# ✅ Use static factory methods
+val cap1 = CapType.imm_type("Int")   # From imported module
+
+# ✅ Direct construction (only within class methods)
+val cap2 = CapType(cap: RefCapability.Mut, type_name: "String")
+
+# ❌ AVOID from outside module (static method access not always reliable)
+# val cap = CapType.new(...)  # May fail if static method not properly exported
 ```
 
 **Methods (LL(1)-friendly, implicit self):**
 ```simple
-impl MyStruct:
-    fn new() -> MyStruct:               # Implicitly static (constructor name)
-    fn get_value() -> i32:              # Immutable method (self implicit)
-    me set_value(v: i32):               # Mutable method ('me' keyword, self implicit)
-```
-
-**Calling Constructors and Static Methods:**
-```simple
-# ✅ RECOMMENDED: Direct construction (Python-style)
-val p = Point(3, 4)
-
-# ✅ Alternative: Static constructor method with dot syntax
-val obj = MyStruct.new()
-val date = Date.today()
-val result = Result.ok(42)
-
-# ❌ DEPRECATED: double-colon syntax (shows warning)
-val obj = MyStruct::new()   # Warning: Use dot syntax instead
+impl Point:
+    fn get_x() -> i64:                  # Immutable method (self implicit)
+        self.x
+    me set_x(val_: i64):                # Mutable method ('me' keyword, self implicit)
+        self.x = val_
 ```
 
 See `/coding` skill for full details.
