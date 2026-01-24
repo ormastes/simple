@@ -71,6 +71,9 @@ pub enum OutputFormat {
 }
 
 /// Options for the test runner
+///
+/// Default behavior: Sequential (single-threaded) test execution.
+/// Parallel execution requires explicit `--parallel` or `-p` flag.
 #[derive(Debug, Clone)]
 pub struct TestOptions {
     /// Test path (file or directory)
@@ -151,6 +154,10 @@ pub struct TestOptions {
     pub full_parallel: bool,
     /// Seconds between resource usage checks
     pub cpu_check_interval: u64,
+    /// Include Rust test results in database
+    pub rust_tests: bool,
+    /// Only track ignored Rust tests (skip running all)
+    pub rust_ignored_only: bool,
 }
 
 impl Default for TestOptions {
@@ -188,13 +195,17 @@ impl Default for TestOptions {
             show_tags: false,
             safe_mode: false,
             safe_mode_timeout: 30,
+            // Default: sequential (single-threaded) execution
+            // Parallel requires explicit --parallel or -p flag
             parallel: false,
-            max_threads: 0, // Auto-detect
+            max_threads: 0, // Auto-detect (only used when parallel=true)
             cpu_threshold: 70,
             memory_threshold: 70,
             throttled_threads: 1,
             full_parallel: false,
             cpu_check_interval: 5,
+            rust_tests: false,
+            rust_ignored_only: false,
         }
     }
 }

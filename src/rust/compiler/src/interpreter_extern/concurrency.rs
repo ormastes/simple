@@ -153,15 +153,20 @@ pub fn rt_thread_spawn_isolated2_with_context(
     }
 
     // First evaluate the body expression to get a potentially BlockClosure value
-    let body_value = evaluate_expr(&body, &mut local_env, functions, classes, enums, impl_methods)
-        .unwrap_or(Value::Nil);
+    let body_value =
+        evaluate_expr(&body, &mut local_env, functions, classes, enums, impl_methods).unwrap_or(Value::Nil);
 
     // If it's a BlockClosure, execute it; otherwise use the value directly
     let result = match &body_value {
-        Value::BlockClosure { .. } => {
-            exec_block_value(body_value.clone(), &mut local_env, functions, classes, enums, impl_methods)
-                .unwrap_or(Value::Nil)
-        }
+        Value::BlockClosure { .. } => exec_block_value(
+            body_value.clone(),
+            &mut local_env,
+            functions,
+            classes,
+            enums,
+            impl_methods,
+        )
+        .unwrap_or(Value::Nil),
         _ => body_value,
     };
 

@@ -117,42 +117,60 @@ impl<'a> Parser<'a> {
         } else {
             self.expect(&TokenKind::Colon)?;
 
-            // After the colon, expect NEWLINE + INDENT to start the function body
-            self.expect(&TokenKind::Newline)?;
-            self.expect(&TokenKind::Indent)?;
+            // Check for single-line vs block function syntax
+            if self.check(&TokenKind::Newline) {
+                // Block form: fn name(): \n INDENT body
+                self.expect(&TokenKind::Newline)?;
+                self.expect(&TokenKind::Indent)?;
 
-            // Parse optional contract block at the start of the function body
-            // (new: in/out/out_err/invariant/decreases, legacy: requires/ensures)
-            let contract = if self.check(&TokenKind::In)
-                || self.check(&TokenKind::Invariant)
-                || self.check(&TokenKind::Out)
-                || self.check(&TokenKind::OutErr)
-                || self.check(&TokenKind::Requires)
-                || self.check(&TokenKind::Ensures)
-                || self.check(&TokenKind::Decreases)
-            {
-                self.parse_contract_block()?
+                // Parse optional contract block at the start of the function body
+                // (new: in/out/out_err/invariant/decreases, legacy: requires/ensures)
+                let contract = if self.check(&TokenKind::In)
+                    || self.check(&TokenKind::Invariant)
+                    || self.check(&TokenKind::Out)
+                    || self.check(&TokenKind::OutErr)
+                    || self.check(&TokenKind::Requires)
+                    || self.check(&TokenKind::Ensures)
+                    || self.check(&TokenKind::Decreases)
+                {
+                    self.parse_contract_block()?
+                } else {
+                    None
+                };
+
+                // Parse the rest of the function body statements
+                let body = self.parse_block_body()?;
+
+                // Check for trailing bounds: block (only valid for @simd decorated functions)
+                let has_simd = decorators
+                    .iter()
+                    .any(|d| matches!(&d.name, Expr::Identifier(name) if name == "simd"));
+
+                let bounds_block = if has_simd {
+                    // Skip newlines after body to check for bounds:
+                    self.skip_newlines();
+                    self.parse_bounds_block()?
+                } else {
+                    None
+                };
+
+                (body, contract, bounds_block)
             } else {
-                None
-            };
+                // Single-line form: fn name(): expr
+                // Parse the expression as the function body
+                let expr_start = self.current.span;
+                let expr = self.parse_expression()?;
+                let expr_end = self.previous.span;
 
-            // Parse the rest of the function body statements
-            let body = self.parse_block_body()?;
+                // Wrap the expression in a Block with a single Expression statement
+                let body = Block {
+                    span: Span::new(expr_start.start, expr_end.end, expr_start.line, expr_start.column),
+                    statements: vec![Node::Expression(expr)],
+                };
 
-            // Check for trailing bounds: block (only valid for @simd decorated functions)
-            let has_simd = decorators
-                .iter()
-                .any(|d| matches!(&d.name, Expr::Identifier(name) if name == "simd"));
-
-            let bounds_block = if has_simd {
-                // Skip newlines after body to check for bounds:
-                self.skip_newlines();
-                self.parse_bounds_block()?
-            } else {
-                None
-            };
-
-            (body, contract, bounds_block)
+                // Single-line functions don't support contracts or bounds blocks
+                (body, None, None)
+            }
         };
 
         // Effect inference: if body contains suspension operators, infer async effect
@@ -335,6 +353,102 @@ impl<'a> Parser<'a> {
             f.doc_comment = doc_comment;
         }
         Ok(node)
+    }
+
+    /// Parse a literal function definition: `literal fn _suffix(s: text) -> Type: body`
+    ///
+    /// Literal functions provide explicit control over suffix → type mapping.
+    /// When a string literal like "value"_suffix is encountered, the literal function
+    /// is called with the string value.
+    ///
+    /// # Syntax
+    /// ```simple
+    /// literal fn _re(s: text) -> Regex:
+    ///     Regex.compile(s)
+    /// ```
+    pub(crate) fn parse_literal_function(&mut self) -> Result<Node, ParseError> {
+        let start_span = self.current.span;
+
+        self.expect(&TokenKind::Literal)?;
+        self.expect(&TokenKind::Fn)?;
+
+        // Expect an identifier starting with underscore (the suffix name)
+        let suffix_token = self.expect_identifier()?;
+        if !suffix_token.starts_with('_') {
+            return Err(ParseError::syntax_error_with_span(
+                format!(
+                    "Literal function name must start with underscore (e.g., _re, _ip), got '{}'",
+                    suffix_token
+                ),
+                self.previous.span,
+            ));
+        }
+
+        // Extract suffix without leading underscore
+        let suffix = suffix_token[1..].to_string();
+
+        // Parse parameters - expect exactly one parameter of type text
+        self.expect(&TokenKind::LParen)?;
+        let param_name = self.expect_identifier()?;
+        self.expect(&TokenKind::Colon)?;
+        let param_type = self.parse_type()?;
+        self.expect(&TokenKind::RParen)?;
+
+        // Validate parameter type is text
+        if let Type::Simple(type_name) = &param_type {
+            if type_name != "text" && type_name != "str" && type_name != "String" {
+                return Err(ParseError::syntax_error_with_span(
+                    format!(
+                        "Literal function parameter must be of type 'text', got '{}'",
+                        type_name
+                    ),
+                    self.previous.span,
+                ));
+            }
+        }
+
+        // Parse optional return type
+        let return_type = if self.check(&TokenKind::Arrow) {
+            self.advance();
+            Some(self.parse_type()?)
+        } else {
+            None
+        };
+
+        // Expect colon and body
+        self.expect(&TokenKind::Colon)?;
+
+        // Check for single-line vs block function syntax
+        let body = if self.check(&TokenKind::Newline) {
+            // Block form: literal fn _suffix(): \n INDENT body
+            self.expect(&TokenKind::Newline)?;
+            self.expect(&TokenKind::Indent)?;
+            self.parse_block_body()?
+        } else {
+            // Single-line form: literal fn _suffix(): expr
+            let expr_start = self.current.span;
+            let expr = self.parse_expression()?;
+            let expr_end = self.previous.span;
+
+            Block {
+                span: Span::new(expr_start.start, expr_end.end, expr_start.line, expr_start.column),
+                statements: vec![Node::Expression(expr)],
+            }
+        };
+
+        Ok(Node::LiteralFunction(LiteralFunctionDef {
+            span: Span::new(
+                start_span.start,
+                self.previous.span.end,
+                start_span.line,
+                start_span.column,
+            ),
+            suffix,
+            param_name,
+            return_type,
+            body,
+            doc_comment: None,
+        }))
     }
 
     /// Parse a decorated function: @decorator fn foo(): ...

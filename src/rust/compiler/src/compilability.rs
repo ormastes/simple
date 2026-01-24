@@ -606,6 +606,58 @@ fn analyze_expr(expr: &Expr, reasons: &mut Vec<FallbackReason>) {
             analyze_expr(count, reasons);
             add_reason(reasons, FallbackReason::CollectionLiteral);
         }
+
+        // Safe unwrap operators - require Option/Result runtime handling
+        Expr::UnwrapOr { expr: inner, default } => {
+            analyze_expr(inner, reasons);
+            analyze_expr(default, reasons);
+            add_reason(reasons, FallbackReason::TryOperator);
+        }
+        Expr::UnwrapElse { expr: inner, fallback_fn } => {
+            analyze_expr(inner, reasons);
+            analyze_expr(fallback_fn, reasons);
+            add_reason(reasons, FallbackReason::TryOperator);
+        }
+        Expr::UnwrapOrReturn(inner) => {
+            analyze_expr(inner, reasons);
+            add_reason(reasons, FallbackReason::TryOperator);
+        }
+
+        // Safe cast operators - require type checking at runtime
+        Expr::CastOr { expr: inner, default, .. } => {
+            analyze_expr(inner, reasons);
+            analyze_expr(default, reasons);
+            add_reason(reasons, FallbackReason::TryOperator);
+        }
+        Expr::CastElse { expr: inner, fallback_fn, .. } => {
+            analyze_expr(inner, reasons);
+            analyze_expr(fallback_fn, reasons);
+            add_reason(reasons, FallbackReason::TryOperator);
+        }
+        Expr::CastOrReturn { expr: inner, .. } => {
+            analyze_expr(inner, reasons);
+            add_reason(reasons, FallbackReason::TryOperator);
+        }
+
+        // Null coalescing: expr ?? default
+        Expr::Coalesce { expr: inner, default } => {
+            analyze_expr(inner, reasons);
+            analyze_expr(default, reasons);
+            add_reason(reasons, FallbackReason::TryOperator);
+        }
+
+        // Optional chaining: expr?.field or expr?.method(args)
+        Expr::OptionalChain { expr: inner, .. } => {
+            analyze_expr(inner, reasons);
+            add_reason(reasons, FallbackReason::FieldAccess);
+        }
+        Expr::OptionalMethodCall { receiver, args, .. } => {
+            analyze_expr(receiver, reasons);
+            for arg in args {
+                analyze_expr(&arg.value, reasons);
+            }
+            add_reason(reasons, FallbackReason::MethodCall);
+        }
     }
 }
 

@@ -333,6 +333,7 @@ impl<'a> Parser<'a> {
             TokenKind::HandlePool => self.parse_handle_pool(),
             TokenKind::Extern => self.parse_extern(),
             TokenKind::Macro => self.parse_macro_def(),
+            TokenKind::Literal => self.parse_literal_function(),
             // Module system (Features #104-111)
             TokenKind::Use => self.parse_use(),
             TokenKind::Import => self.parse_import(),    // alias for use

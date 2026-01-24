@@ -39,7 +39,10 @@ impl Default for ParallelConfig {
             cpu_threshold: 70,
             memory_threshold: 70,
             throttled_threads: 1,
-            check_interval: 5,
+            // Reduced from 5s to 1s for faster response to resource changes.
+            // With condvar-based interruptible sleep, shorter intervals don't
+            // cause stop() to hang.
+            check_interval: 1,
             full_parallel: false,
         }
     }
@@ -96,7 +99,9 @@ impl ParallelExecutor {
             if memory_usage >= config.memory_threshold as f32 {
                 eprintln!(
                     "Memory already at {:.0}% (>={:.0}%) - starting with {} thread(s)",
-                    memory_usage, config.memory_threshold, config.throttled_threads.max(1)
+                    memory_usage,
+                    config.memory_threshold,
+                    config.throttled_threads.max(1)
                 );
                 config.throttled_threads.max(1)
             } else {
@@ -233,17 +238,12 @@ impl ParallelExecutor {
                         let reason = match (cpu_high, memory_high) {
                             (true, true) => format!(
                                 "CPU at {:.0}% (>{:.0}%) and memory at {:.0}% (>{:.0}%)",
-                                cpu_usage, self.config.cpu_threshold,
-                                memory_usage, self.config.memory_threshold
+                                cpu_usage, self.config.cpu_threshold, memory_usage, self.config.memory_threshold
                             ),
-                            (true, false) => format!(
-                                "CPU at {:.0}% (>{:.0}%)",
-                                cpu_usage, self.config.cpu_threshold
-                            ),
-                            (false, true) => format!(
-                                "Memory at {:.0}% (>{:.0}%)",
-                                memory_usage, self.config.memory_threshold
-                            ),
+                            (true, false) => format!("CPU at {:.0}% (>{:.0}%)", cpu_usage, self.config.cpu_threshold),
+                            (false, true) => {
+                                format!("Memory at {:.0}% (>{:.0}%)", memory_usage, self.config.memory_threshold)
+                            }
                             _ => unreachable!(),
                         };
                         eprintln!("{} - reduced to {} thread(s)", reason, new_threads);
@@ -347,7 +347,7 @@ mod tests {
         assert_eq!(config.max_threads, 0);
         assert_eq!(config.cpu_threshold, 70);
         assert_eq!(config.throttled_threads, 1);
-        assert_eq!(config.check_interval, 5);
+        assert_eq!(config.check_interval, 1); // Reduced from 5 to 1 for faster response
         assert!(!config.full_parallel);
     }
 

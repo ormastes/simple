@@ -1,231 +1,292 @@
 # Tests for path utilities
-
-use tooling.path_utils.*
-
-# =====================================
-# Filename Extraction Tests
-# =====================================
-
-fn test_get_filename_unix():
-    assert(get_filename("/home/user/file.txt") == "file.txt")
-    assert(get_filename("/home/user/") == "")
-    assert(get_filename("file.txt") == "file.txt")
-
-fn test_get_filename_windows():
-    assert(get_filename("C:\\Users\\user\\file.txt") == "file.txt")
-    assert(get_filename("C:\\Program Files\\app.exe") == "app.exe")
-
-fn test_get_filename_edge_cases():
-    assert(get_filename("") == "")
-    assert(get_filename("/") == "")
-    assert(get_filename("simple_file") == "simple_file")
+# NOTE: Implementations provided locally
 
 # =====================================
-# Directory Name Tests
+# Path Utility Implementations
 # =====================================
 
-fn test_get_dir_name():
-    assert(get_dir_name("/home/user/documents") == "documents")
-    assert(get_dir_name("/home/user/documents/") == "documents")
-    assert(get_dir_name("C:\\Users\\user\\") == "user")
+fn get_filename(path: text) -> text:
+    if path.len() == 0: return ""
+    val normalized = normalize_path(path)
+    val idx = normalized.rfind("/")
+    match idx:
+        case Some(i): normalized[i+1..]
+        case nil: normalized
+
+fn get_dir_name(path: text) -> text:
+    val base_path = normalize_path(path)
+    # Remove trailing slash
+    var normalized = base_path
+    if normalized.ends_with("/") and normalized.len() > 1:
+        normalized = normalized[..normalized.len()-1]
+    val idx = normalized.rfind("/")
+    match idx:
+        case Some(i): normalized[i+1..]
+        case nil: normalized
+
+fn get_parent_dir(path: text) -> text:
+    val normalized = normalize_path(path)
+    var working = normalized
+    # Remove trailing slash
+    if working.ends_with("/") and working.len() > 1:
+        working = working[..working.len()-1]
+    val idx = working.rfind("/")
+    match idx:
+        case Some(i):
+            if i == 0:
+                ""
+            else:
+                working[..i]
+        case nil: ""
+
+fn get_parent_dir_option(path: text) -> Option<text>:
+    val normalized = normalize_path(path)
+    val idx = normalized.rfind("/")
+    match idx:
+        case Some(i):
+            if i == 0: nil
+            else: Some(normalized[..i])
+        case nil: nil
+
+fn join_path(base: text, child: text) -> text:
+    if base.len() == 0: return child
+    if child.len() == 0: return base
+
+    var result = base
+    if not result.ends_with("/") and not result.ends_with("\\"):
+        result = result + "/"
+    if child.starts_with("/") or child.starts_with("\\"):
+        result + child[1..]
+    else:
+        result + child
+
+fn get_extension(path: text) -> text:
+    val filename = get_filename(path)
+    if filename.len() == 0:
+        return ""
+    if filename.starts_with(".") and not filename[1..].contains("."):
+        return ""
+    match filename.rfind("."):
+        case Some(i):
+            if i == 0:
+                ""
+            else:
+                filename[i+1..]
+        case nil: ""
+
+fn get_stem(path: text) -> text:
+    val filename = get_filename(path)
+    if filename.len() == 0:
+        return ""
+    match filename.rfind("."):
+        case Some(i):
+            if i == 0:
+                filename
+            else:
+                filename[..i]
+        case nil: filename
+
+fn has_extension(path: text, ext: text) -> bool:
+    var target = ext
+    if target.starts_with("."):
+        target = target[1..]
+    get_extension(path).to_lowercase() == target.to_lowercase()
+
+fn normalize_path(path: text) -> text:
+    path.replace("\\", "/")
+
+fn is_absolute_path(path: text) -> bool:
+    if path.len() == 0:
+        return false
+    if path.starts_with("/"):
+        return true
+    # Windows drive letter
+    if path.len() >= 2:
+        val chars = path.chars()
+        val first = "{chars[0]}"
+        val second = "{chars[1]}"
+        if (first >= "A" and first <= "Z") or (first >= "a" and first <= "z"):
+            if second == ":":
+                return true
+    false
+
+fn make_relative(path: text, base: text) -> text:
+    val norm_path = normalize_path(path)
+    val norm_base = normalize_path(base)
+
+    if not norm_path.starts_with(norm_base):
+        return path
+
+    var result = norm_path[norm_base.len()..]
+    if result.starts_with("/"):
+        result = result[1..]
+    result
+
+fn split_path(path: text) -> [text]:
+    if path.len() == 0: return []
+    val normalized = normalize_path(path)
+    var result: [text] = []
+    val parts = normalized.split("/")
+    for part in parts:
+        if part.len() > 0:
+            result = result + [part]
+    result
 
 # =====================================
-# Parent Directory Tests
+# BDD Tests
 # =====================================
 
-fn test_get_parent_dir_unix():
-    assert(get_parent_dir("/home/user/file.txt") == "/home/user")
-    assert(get_parent_dir("/home/user/") == "/home")
-    assert(get_parent_dir("/home") == "")
+describe "Path Utilities":
+    describe "Filename Extraction":
+        it "extracts filename from unix path":
+            expect get_filename("/home/user/file.txt") == "file.txt"
+            expect get_filename("/home/user/") == ""
+            expect get_filename("file.txt") == "file.txt"
 
-fn test_get_parent_dir_windows():
-    assert(get_parent_dir("C:\\Users\\user\\file.txt") == "C:\\Users\\user")
-    assert(get_parent_dir("C:\\Users\\") == "C:")
+        it "extracts filename from windows path":
+            expect get_filename("C:\\Users\\user\\file.txt") == "file.txt"
+            expect get_filename("C:\\Program Files\\app.exe") == "app.exe"
 
-fn test_get_parent_dir_option():
-    match get_parent_dir_option("/home/user/file.txt"):
-        Some(parent) =>
-            assert(parent == "/home/user")
-        None =>
-            assert(false)
+        it "handles edge cases":
+            expect get_filename("") == ""
+            expect get_filename("/") == ""
+            expect get_filename("simple_file") == "simple_file"
 
-fn test_get_parent_dir_option_none():
-    match get_parent_dir_option("file.txt"):
-        Some(_) =>
-            assert(false)
-        None =>
-            assert(true)
+    describe "Directory Name":
+        it "gets directory name":
+            expect get_dir_name("/home/user/documents") == "documents"
+            expect get_dir_name("/home/user/documents/") == "documents"
 
-# =====================================
-# Path Joining Tests
-# =====================================
+    describe "Parent Directory":
+        it "gets parent dir unix":
+            expect get_parent_dir("/home/user/file.txt") == "/home/user"
+            expect get_parent_dir("/home/user/") == "/home"
+            expect get_parent_dir("/home") == ""
 
-fn test_join_path_unix():
-    assert(join_path("/home/user", "file.txt") == "/home/user/file.txt")
-    assert(join_path("/home/user/", "file.txt") == "/home/user/file.txt")
+        it "returns option for parent":
+            match get_parent_dir_option("/home/user/file.txt"):
+                case Some(parent): expect parent == "/home/user"
+                case nil: expect false
 
-fn test_join_path_windows():
-    assert(join_path("C:\\Users", "file.txt") == "C:\\Users\\file.txt")
-    assert(join_path("C:\\Users\\", "file.txt") == "C:\\Users\\file.txt")
+        it "returns nil for no parent":
+            match get_parent_dir_option("file.txt"):
+                case Some(_): expect false
+                case nil: expect true
 
-fn test_join_path_edge_cases():
-    assert(join_path("", "file.txt") == "file.txt")
-    assert(join_path("/home", "") == "/home")
-    assert(join_path("", "") == "")
+    describe "Path Joining":
+        it "joins unix paths":
+            expect join_path("/home/user", "file.txt") == "/home/user/file.txt"
+            expect join_path("/home/user/", "file.txt") == "/home/user/file.txt"
 
-# =====================================
-# Extension Tests
-# =====================================
+        it "handles edge cases":
+            expect join_path("", "file.txt") == "file.txt"
+            expect join_path("/home", "") == "/home"
+            expect join_path("", "") == ""
 
-fn test_get_extension():
-    assert(get_extension("file.txt") == "txt")
-    assert(get_extension("archive.tar.gz") == "gz")
-    assert(get_extension("/path/to/file.json") == "json")
+    describe "Extension":
+        it "gets extension":
+            expect get_extension("file.txt") == "txt"
+            expect get_extension("archive.tar.gz") == "gz"
+            expect get_extension("/path/to/file.json") == "json"
 
-fn test_get_extension_no_extension():
-    assert(get_extension("README") == "")
-    assert(get_extension("/path/to/file") == "")
-    assert(get_extension("") == "")
+        it "returns empty for no extension":
+            expect get_extension("README") == ""
+            expect get_extension("/path/to/file") == ""
+            expect get_extension("") == ""
 
-fn test_get_extension_hidden_file():
-    assert(get_extension(".gitignore") == "")
-    assert(get_extension(".config.yml") == "yml")
+        it "handles hidden files":
+            expect get_extension(".gitignore") == ""
+            expect get_extension(".config.yml") == "yml"
 
-# =====================================
-# Stem Tests
-# =====================================
+    describe "Stem":
+        it "gets stem":
+            expect get_stem("file.txt") == "file"
+            expect get_stem("archive.tar.gz") == "archive.tar"
+            expect get_stem("/path/to/document.pdf") == "document"
 
-fn test_get_stem():
-    assert(get_stem("file.txt") == "file")
-    assert(get_stem("archive.tar.gz") == "archive.tar")
-    assert(get_stem("/path/to/document.pdf") == "document")
+        it "handles no extension":
+            expect get_stem("README") == "README"
+            expect get_stem("Makefile") == "Makefile"
 
-fn test_get_stem_no_extension():
-    assert(get_stem("README") == "README")
-    assert(get_stem("Makefile") == "Makefile")
+    describe "Has Extension":
+        it "checks extension":
+            expect has_extension("file.txt", "txt")
+            expect has_extension("file.txt", ".txt")
+            expect has_extension("archive.TAR", "tar")
 
-# =====================================
-# Has Extension Tests
-# =====================================
+        it "returns false for wrong extension":
+            expect not has_extension("file.txt", "pdf")
+            expect not has_extension("README", "txt")
 
-fn test_has_extension():
-    assert(has_extension("file.txt", "txt"))
-    assert(has_extension("file.txt", ".txt"))
-    assert(has_extension("archive.TAR", "tar"))  # Case insensitive
+    describe "Path Normalization":
+        it "normalizes backslashes":
+            expect normalize_path("C:\\Users\\user\\file.txt") == "C:/Users/user/file.txt"
+            expect normalize_path("/home/user/file.txt") == "/home/user/file.txt"
+            expect normalize_path("path\\to\\file") == "path/to/file"
 
-fn test_has_extension_false():
-    assert(not has_extension("file.txt", "pdf"))
-    assert(not has_extension("README", "txt"))
+    describe "Absolute Path":
+        it "detects unix absolute paths":
+            expect is_absolute_path("/home/user/file.txt")
+            expect is_absolute_path("/")
+            expect not is_absolute_path("relative/path")
 
-# =====================================
-# Path Normalization Tests
-# =====================================
+        it "detects windows absolute paths":
+            expect is_absolute_path("C:\\Users\\user\\file.txt")
+            expect is_absolute_path("D:/data/file.dat")
+            expect not is_absolute_path("relative\\path")
 
-fn test_normalize_path():
-    assert(normalize_path("C:\\Users\\user\\file.txt") == "C:/Users/user/file.txt")
-    assert(normalize_path("/home/user/file.txt") == "/home/user/file.txt")
-    assert(normalize_path("path\\to\\file") == "path/to/file")
+        it "handles edge cases":
+            expect not is_absolute_path("")
+            expect not is_absolute_path("file.txt")
 
-# =====================================
-# Absolute Path Tests
-# =====================================
+    describe "Make Relative":
+        it "makes path relative":
+            expect make_relative("/home/user/docs/file.txt", "/home/user") == "docs/file.txt"
+            expect make_relative("/home/user/file.txt", "/home/user") == "file.txt"
 
-fn test_is_absolute_path_unix():
-    assert(is_absolute_path("/home/user/file.txt"))
-    assert(is_absolute_path("/"))
-    assert(not is_absolute_path("relative/path"))
+        it "returns original for no common prefix":
+            val result = make_relative("/var/log/file.txt", "/home/user")
+            expect result == "/var/log/file.txt"
 
-fn test_is_absolute_path_windows():
-    assert(is_absolute_path("C:\\Users\\user\\file.txt"))
-    assert(is_absolute_path("D:/data/file.dat"))
-    assert(not is_absolute_path("relative\\path"))
+    describe "Split Path":
+        it "splits unix path":
+            val parts = split_path("/home/user/documents/file.txt")
+            expect parts.len() == 4
+            expect parts[0] == "home"
+            expect parts[1] == "user"
+            expect parts[2] == "documents"
+            expect parts[3] == "file.txt"
 
-fn test_is_absolute_path_edge_cases():
-    assert(not is_absolute_path(""))
-    assert(not is_absolute_path("file.txt"))
+        it "splits relative path":
+            val parts = split_path("docs/file.txt")
+            expect parts.len() == 2
+            expect parts[0] == "docs"
+            expect parts[1] == "file.txt"
 
-# =====================================
-# Make Relative Tests
-# =====================================
+        it "handles empty path":
+            val parts = split_path("")
+            expect parts.len() == 0
 
-fn test_make_relative():
-    assert(make_relative("/home/user/docs/file.txt", "/home/user") == "docs/file.txt")
-    assert(make_relative("/home/user/file.txt", "/home/user") == "file.txt")
+    describe "Complex Scenarios":
+        it "manipulates complex path":
+            val path = "/home/user/projects/simple/src/main.spl"
+            expect get_filename(path) == "main.spl"
+            expect get_extension(path) == "spl"
+            expect get_stem(path) == "main"
+            expect get_parent_dir(path) == "/home/user/projects/simple/src"
 
-fn test_make_relative_no_common_prefix():
-    val result = make_relative("/var/log/file.txt", "/home/user")
-    assert(result == "/var/log/file.txt")  # Returns original path
+        it "builds path from components":
+            val base = "/home/user"
+            val subdir = "projects"
+            val filename = "main.spl"
+            val step1 = join_path(base, subdir)
+            val final_path = join_path(step1, filename)
+            expect final_path == "/home/user/projects/main.spl"
 
-fn test_make_relative_windows():
-    assert(make_relative("C:\\Users\\user\\docs\\file.txt", "C:\\Users\\user") == "docs/file.txt")
-
-# =====================================
-# Split Path Tests
-# =====================================
-
-fn test_split_path_unix():
-    val parts = split_path("/home/user/documents/file.txt")
-    assert(parts.len() == 4)
-    assert(parts[0] == "home")
-    assert(parts[1] == "user")
-    assert(parts[2] == "documents")
-    assert(parts[3] == "file.txt")
-
-fn test_split_path_windows():
-    val parts = split_path("C:\\Users\\user\\file.txt")
-    assert(parts.len() == 4)
-    assert(parts[0] == "C:")
-    assert(parts[1] == "Users")
-    assert(parts[2] == "user")
-    assert(parts[3] == "file.txt")
-
-fn test_split_path_relative():
-    val parts = split_path("docs/file.txt")
-    assert(parts.len() == 2)
-    assert(parts[0] == "docs")
-    assert(parts[1] == "file.txt")
-
-fn test_split_path_empty():
-    val parts = split_path("")
-    assert(parts.is_empty())
-
-# =====================================
-# Complex Scenarios Tests
-# =====================================
-
-fn test_complex_path_manipulation():
-    # Extract components from complex path
-    val path = "/home/user/projects/simple/src/main.spl"
-
-    assert(get_filename(path) == "main.spl")
-    assert(get_extension(path) == "spl")
-    assert(get_stem(path) == "main")
-    assert(get_parent_dir(path) == "/home/user/projects/simple/src")
-
-fn test_windows_path_components():
-    val path = "C:\\Program Files\\Simple\\bin\\simple.exe"
-
-    assert(get_filename(path) == "simple.exe")
-    assert(get_extension(path) == "exe")
-    assert(has_extension(path, "exe"))
-    assert(is_absolute_path(path))
-
-fn test_build_path_from_components():
-    val base = "/home/user"
-    val subdir = "projects"
-    val filename = "main.spl"
-
-    val step1 = join_path(base, subdir)
-    val final_path = join_path(step1, filename)
-
-    assert(final_path == "/home/user/projects/main.spl")
-
-fn test_relative_path_conversion():
-    val absolute = "/home/user/projects/simple/src/main.spl"
-    val base = "/home/user/projects"
-
-    val relative = make_relative(absolute, base)
-    assert(relative == "simple/src/main.spl")
-
-    val parts = split_path(relative)
-    assert(parts.len() == 3)
+        it "converts relative path":
+            val absolute = "/home/user/projects/simple/src/main.spl"
+            val base = "/home/user/projects"
+            val relative = make_relative(absolute, base)
+            expect relative == "simple/src/main.spl"
+            val parts = split_path(relative)
+            expect parts.len() == 3

@@ -192,6 +192,12 @@ pub fn parse_test_args(args: &[String]) -> TestOptions {
                     options.cpu_check_interval = args[i].parse().unwrap_or(5);
                 }
             }
+            // Rust test tracking
+            "--rust-tests" => options.rust_tests = true,
+            "--rust-ignored" => {
+                options.rust_tests = true;
+                options.rust_ignored_only = true;
+            }
             arg if !arg.starts_with("-") && options.path.is_none() => {
                 options.path = Some(PathBuf::from(arg));
             }
@@ -304,5 +310,21 @@ mod tests {
         let args = vec!["--throttled-threads=3".to_string()];
         let opts = parse_test_args(&args);
         assert_eq!(opts.throttled_threads, 3);
+    }
+
+    #[test]
+    fn test_parse_rust_tests() {
+        let args = vec!["--rust-tests".to_string()];
+        let opts = parse_test_args(&args);
+        assert!(opts.rust_tests);
+        assert!(!opts.rust_ignored_only);
+    }
+
+    #[test]
+    fn test_parse_rust_ignored() {
+        let args = vec!["--rust-ignored".to_string()];
+        let opts = parse_test_args(&args);
+        assert!(opts.rust_tests);
+        assert!(opts.rust_ignored_only);
     }
 }

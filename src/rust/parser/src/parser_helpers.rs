@@ -490,6 +490,8 @@ impl<'a> Parser<'a> {
             TokenKind::AndThen => "and_then",
             // Allow set operation keywords as method names
             TokenKind::Union => "union",
+            // Allow safe unwrap keyword as method name (e.g., opt.unwrap())
+            TokenKind::Unwrap => "unwrap",
             // Special error for 'exists' - reserved for verification quantifiers
             TokenKind::Exists => {
                 return Err(ParseError::syntax_error_with_span(

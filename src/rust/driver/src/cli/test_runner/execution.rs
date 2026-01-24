@@ -12,25 +12,57 @@ use super::types::TestFileResult;
 /// Parse test output to extract pass/fail counts
 pub fn parse_test_output(output: &str) -> (usize, usize) {
     // Look for patterns like "N examples, M failures"
-    let mut passed = 0;
-    let mut failed = 0;
+    // Sum all occurrences (each describe block outputs one)
+    let mut total_passed = 0;
+    let mut total_failed = 0;
 
     for line in output.lines() {
         // Pattern: "X examples, Y failures"
         if line.contains("examples") && line.contains("failure") {
-            // Extract numbers
-            let parts: Vec<&str> = line.split(|c: char| !c.is_numeric()).collect();
+            // Strip ANSI escape codes first (they contain numbers like \x1b[32m)
+            let clean_line = strip_ansi_codes(line);
+
+            // Extract numbers from cleaned line
+            let parts: Vec<&str> = clean_line.split(|c: char| !c.is_numeric()).collect();
             let numbers: Vec<usize> = parts.iter().filter_map(|p| p.parse::<usize>().ok()).collect();
 
             if numbers.len() >= 2 {
                 let total = numbers[0];
-                failed = numbers[1];
-                passed = total.saturating_sub(failed);
+                let failed = numbers[1];
+                let passed = total.saturating_sub(failed);
+                total_passed += passed;
+                total_failed += failed;
             }
         }
     }
 
-    (passed, failed)
+    (total_passed, total_failed)
+}
+
+/// Strip ANSI escape codes from a string
+fn strip_ansi_codes(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            // Skip escape sequence: ESC [ ... m
+            if chars.peek() == Some(&'[') {
+                chars.next(); // consume '['
+                              // Skip until 'm' or end
+                while let Some(&ch) = chars.peek() {
+                    chars.next();
+                    if ch == 'm' {
+                        break;
+                    }
+                }
+            }
+        } else {
+            result.push(c);
+        }
+    }
+
+    result
 }
 
 /// Run a single test file with options (wrapper for compatibility)
@@ -211,6 +243,10 @@ fn find_simple_binary() -> PathBuf {
 }
 
 /// Wait for a process with timeout
+///
+/// Spawns a thread to wait for the child process and uses a channel with timeout.
+/// The thread is properly joined on success, and on timeout the process is killed
+/// (which will cause the thread to exit when the child terminates).
 fn wait_with_timeout(mut child: std::process::Child, timeout: Duration) -> Result<(i32, String, String), String> {
     use std::thread;
     use std::sync::mpsc;
@@ -219,7 +255,10 @@ fn wait_with_timeout(mut child: std::process::Child, timeout: Duration) -> Resul
     let child_id = child.id();
 
     // Spawn a thread to wait for the child
-    thread::spawn(move || {
+    // Thread lifecycle:
+    // - On success: joined below after receiving result
+    // - On timeout: child is killed, thread will exit when wait_with_output returns
+    let handle = thread::spawn(move || {
         let output = child.wait_with_output();
         let _ = tx.send(output);
     });
@@ -227,14 +266,21 @@ fn wait_with_timeout(mut child: std::process::Child, timeout: Duration) -> Resul
     // Wait for the result with timeout
     match rx.recv_timeout(timeout) {
         Ok(Ok(output)) => {
+            // Clean up the thread - it should exit quickly since we have the output
+            let _ = handle.join();
             let exit_code = output.status.code().unwrap_or(-1);
             let stdout = String::from_utf8_lossy(&output.stdout).to_string();
             let stderr = String::from_utf8_lossy(&output.stderr).to_string();
             Ok((exit_code, stdout, stderr))
         }
-        Ok(Err(e)) => Err(format!("Process failed: {}", e)),
+        Ok(Err(e)) => {
+            // Process failed - thread should exit, try to join
+            let _ = handle.join();
+            Err(format!("Process failed: {}", e))
+        }
         Err(_) => {
             // Timeout - kill the process
+            // The thread will exit when the killed child's wait_with_output returns
             #[cfg(unix)]
             {
                 use std::process::Command as StdCommand;
@@ -247,6 +293,16 @@ fn wait_with_timeout(mut child: std::process::Child, timeout: Duration) -> Resul
                 let _ = StdCommand::new("taskkill")
                     .args(&["/F", "/PID", &child_id.to_string()])
                     .status();
+            }
+
+            // Wait briefly for thread to notice the killed process and exit
+            // Don't block forever - if the thread doesn't exit quickly, let it go
+            let start = std::time::Instant::now();
+            while !handle.is_finished() && start.elapsed() < Duration::from_millis(500) {
+                thread::sleep(Duration::from_millis(10));
+            }
+            if handle.is_finished() {
+                let _ = handle.join();
             }
 
             Err(format!("Test timed out after {} seconds", timeout.as_secs()))
@@ -280,5 +336,30 @@ mod tests {
         let (passed, failed) = parse_test_output(output);
         assert_eq!(passed, 0);
         assert_eq!(failed, 0);
+    }
+
+    #[test]
+    fn test_parse_test_output_multiple_blocks() {
+        // Multiple describe blocks each output "X examples, Y failures"
+        let output = "3 examples, 0 failures\n4 examples, 1 failures\n3 examples, 0 failures";
+        let (passed, failed) = parse_test_output(output);
+        assert_eq!(passed, 9); // 3 + 3 + 3
+        assert_eq!(failed, 1);
+    }
+
+    #[test]
+    fn test_parse_test_output_with_ansi_codes() {
+        // Output with ANSI color codes (green for success)
+        let output = "\x1b[32m2 examples, 0 failures\x1b[0m";
+        let (passed, failed) = parse_test_output(output);
+        assert_eq!(passed, 2);
+        assert_eq!(failed, 0);
+    }
+
+    #[test]
+    fn test_strip_ansi_codes() {
+        assert_eq!(strip_ansi_codes("\x1b[32mhello\x1b[0m"), "hello");
+        assert_eq!(strip_ansi_codes("no codes"), "no codes");
+        assert_eq!(strip_ansi_codes("\x1b[1;31mred\x1b[0m"), "red");
     }
 }

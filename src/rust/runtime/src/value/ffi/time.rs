@@ -19,21 +19,24 @@
 //!
 //! ## Usage Pattern
 //!
-//! ```ignore
-//! // Get current time
+//! ```
+//! use simple_runtime::value::ffi::time::*;
+//!
+//! // Get current time (returns positive microseconds since epoch)
 //! let now = rt_time_now_unix_micros();
+//! assert!(now > 0);
 //!
-//! // Extract components
-//! let year = rt_timestamp_get_year(now);
-//! let month = rt_timestamp_get_month(now);
-//! let day = rt_timestamp_get_day(now);
-//!
-//! // Create timestamp
+//! // Create a specific timestamp
 //! let timestamp = rt_timestamp_from_components(2024, 1, 15, 12, 30, 45, 0);
 //!
+//! // Extract components
+//! assert_eq!(rt_timestamp_get_year(timestamp), 2024);
+//! assert_eq!(rt_timestamp_get_month(timestamp), 1);
+//! assert_eq!(rt_timestamp_get_day(timestamp), 15);
+//!
 //! // Arithmetic
-//! let tomorrow = rt_timestamp_add_days(now, 1);
-//! let days_diff = rt_timestamp_diff_days(tomorrow, now);
+//! let tomorrow = rt_timestamp_add_days(timestamp, 1);
+//! assert_eq!(rt_timestamp_diff_days(tomorrow, timestamp), 1);
 //! ```
 
 // ============================================================================

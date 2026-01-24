@@ -14,6 +14,35 @@ use crate::parser_impl::core::Parser;
 use crate::token::{Span, TokenKind};
 
 impl<'a> Parser<'a> {
+    /// Check if current token is an inline statement keyword (return, break, continue)
+    fn is_inline_statement_keyword(&self) -> bool {
+        matches!(
+            self.current.kind,
+            TokenKind::Return | TokenKind::Break | TokenKind::Continue
+        )
+    }
+
+    /// Check if the inline body looks like an assignment statement (identifier = expr)
+    /// This allows `if cond: x = value` without requiring an else clause
+    fn is_inline_assignment(&mut self) -> bool {
+        // Check if current token is an identifier followed by =
+        if let TokenKind::Identifier { .. } = &self.current.kind {
+            // Peek ahead to see if next token is =
+            let next = self.pending_tokens.front().cloned().unwrap_or_else(|| {
+                let tok = self.lexer.next_token();
+                self.pending_tokens.push_back(tok.clone());
+                tok
+            });
+            return matches!(next.kind, TokenKind::Assign);
+        }
+        false
+    }
+
+    /// Check if inline body is a statement (keyword or assignment) that doesn't require else
+    fn is_inline_statement(&mut self) -> bool {
+        self.is_inline_statement_keyword() || self.is_inline_assignment()
+    }
+
     pub(crate) fn parse_if(&mut self) -> Result<Node, ParseError> {
         let start_span = self.current.span;
         self.expect(&TokenKind::If)?;
@@ -23,11 +52,96 @@ impl<'a> Parser<'a> {
 
         // Check if this is inline-style (no newline after colon) or block-style
         if !self.check(&TokenKind::Newline) {
-            // Inline-style: parse as expression (e.g., `if x < 0: -x else: x`)
+            // Check if this is an inline statement (return, break, continue, assignment)
+            // These don't require an else clause since they're control flow statements
+            if self.is_inline_statement() {
+                // Parse inline statement like match_arm does
+                let stmt = self.parse_item()?;
+                let then_block = Block {
+                    span: self.previous.span,
+                    statements: vec![stmt],
+                };
+
+                // Parse optional elif/else as blocks
+                let mut elif_branches = Vec::new();
+                while self.check(&TokenKind::Elif) {
+                    self.advance();
+                    let elif_condition = self.parse_expression()?;
+                    self.expect(&TokenKind::Colon)?;
+                    let elif_block = if !self.check(&TokenKind::Newline) {
+                        let stmt = self.parse_item()?;
+                        Block {
+                            span: self.previous.span,
+                            statements: vec![stmt],
+                        }
+                    } else {
+                        self.parse_block()?
+                    };
+                    elif_branches.push((elif_condition, elif_block));
+                }
+
+                let mut else_block = None;
+                if self.check(&TokenKind::Else) {
+                    self.advance();
+                    if self.check(&TokenKind::If) {
+                        // else if -> treat as elif
+                        self.advance();
+                        let elif_condition = self.parse_expression()?;
+                        self.expect(&TokenKind::Colon)?;
+                        let elif_block = if !self.check(&TokenKind::Newline) {
+                            let stmt = self.parse_item()?;
+                            Block {
+                                span: self.previous.span,
+                                statements: vec![stmt],
+                            }
+                        } else {
+                            self.parse_block()?
+                        };
+                        elif_branches.push((elif_condition, elif_block));
+                    } else {
+                        self.expect(&TokenKind::Colon)?;
+                        else_block = if !self.check(&TokenKind::Newline) {
+                            let stmt = self.parse_item()?;
+                            Some(Block {
+                                span: self.previous.span,
+                                statements: vec![stmt],
+                            })
+                        } else {
+                            Some(self.parse_block()?)
+                        };
+                    }
+                }
+
+                return Ok(Node::If(IfStmt {
+                    span: Span::new(
+                        start_span.start,
+                        self.previous.span.end,
+                        start_span.line,
+                        start_span.column,
+                    ),
+                    let_pattern,
+                    condition,
+                    then_block,
+                    elif_branches,
+                    else_block,
+                    is_suspend: false,
+                }));
+            }
+
+            // Inline-style expression: parse as expression (e.g., `if x < 0: -x else: x`)
             // This returns Node::Expression(Expr::If { ... }) for proper implicit return handling
             let then_expr = self.parse_expression()?;
 
-            // For inline if, we must have an else clause
+            // Skip newlines before checking for else/elif
+            // This allows:
+            //   if x < min_val: min_val
+            //   else if x > max_val: max_val
+            //   else: x
+            while self.check(&TokenKind::Newline) {
+                self.advance();
+            }
+
+            // For inline if expression, we must have an else clause
             if !self.check(&TokenKind::Else) && !self.check(&TokenKind::Elif) {
                 return Err(crate::error::ParseError::syntax_error_with_span(
                     "Inline if expression requires an else clause".to_string(),
@@ -129,6 +243,11 @@ impl<'a> Parser<'a> {
         let (let_pattern, condition) = self.parse_optional_let_pattern()?;
         self.expect(&TokenKind::Colon)?;
         let then_expr = self.parse_expression()?;
+
+        // Skip newlines before checking for else/elif (allows multi-line inline if)
+        while self.check(&TokenKind::Newline) {
+            self.advance();
+        }
 
         let else_branch = if self.check(&TokenKind::Elif) {
             self.advance();

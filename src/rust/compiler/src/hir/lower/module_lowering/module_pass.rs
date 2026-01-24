@@ -199,6 +199,7 @@ impl Lowerer {
                 | Node::DiBinding(_)
                 | Node::ArchitectureRule(_)
                 | Node::MockDecl(_)
+                | Node::LiteralFunction(_)
                 | Node::LeanBlock(_) => {}
             }
         }

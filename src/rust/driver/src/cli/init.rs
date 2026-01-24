@@ -104,6 +104,33 @@ pub fn init_signal_handlers(metrics: &mut StartupMetrics) {
     metrics.record(crate::StartupPhase::SignalHandlerInit, signal_start.elapsed());
 }
 
+/// Initialize execution limit from environment variables
+///
+/// Reads SIMPLE_EXECUTION_LIMIT to set the limit (0 = disabled)
+/// Reads SIMPLE_EXECUTION_LIMIT_ENABLED to enable/disable checking
+pub fn init_execution_limit(metrics: &mut StartupMetrics) {
+    let limit_start = std::time::Instant::now();
+
+    // Read limit from env (default: 10 million, 0 = no limit)
+    if let Ok(limit_str) = std::env::var("SIMPLE_EXECUTION_LIMIT") {
+        if let Ok(limit) = limit_str.parse::<u64>() {
+            simple_compiler::set_execution_limit(limit);
+            if limit == 0 {
+                // Setting limit to 0 also disables checking
+                simple_compiler::set_execution_limit_enabled(false);
+            }
+        }
+    }
+
+    // Allow explicit enable/disable
+    if let Ok(enabled_str) = std::env::var("SIMPLE_EXECUTION_LIMIT_ENABLED") {
+        let enabled = matches!(enabled_str.to_lowercase().as_str(), "1" | "true" | "yes");
+        simple_compiler::set_execution_limit_enabled(enabled);
+    }
+
+    metrics.record(crate::StartupPhase::ExecutionLimitInit, limit_start.elapsed());
+}
+
 /// Clean up stale temporary database files from crashed writes
 /// This removes any .sdn.tmp and .cache.tmp files left over from interrupted atomic writes
 pub fn cleanup_stale_db_files(metrics: &mut StartupMetrics) {
@@ -155,4 +182,5 @@ pub fn init_runtime(metrics: &mut StartupMetrics) {
     init_interpreter_handlers(metrics);
     init_panic_hook(metrics);
     init_signal_handlers(metrics);
+    init_execution_limit(metrics);
 }

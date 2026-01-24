@@ -20,7 +20,7 @@ pub(crate) use method_dispatch::{
     build_method_missing_args, call_method_on_value, find_and_exec_method, try_method_missing,
 };
 
-pub(crate) use objects::{create_range_object, spawn_actor_with_expr};
+pub(crate) use objects::{create_range_object, create_range_object_opt, spawn_actor_with_expr};
 
 pub(crate) use args::{eval_arg, eval_arg_int, eval_arg_usize};
 

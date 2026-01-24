@@ -201,6 +201,23 @@ pub(crate) fn exec_node(
             );
             Ok(Control::Next)
         }
+        Node::LiteralFunction(lit_fn) => {
+            // Register literal function for custom string suffix handling
+            // This enables syntax like: "value"_suffix -> LiteralFn.call("value")
+            use super::interpreter_state::{LITERAL_FUNCTIONS, LiteralFunctionInfo};
+            LITERAL_FUNCTIONS.with(|cell: &std::cell::RefCell<std::collections::HashMap<String, LiteralFunctionInfo>>| {
+                cell.borrow_mut().insert(
+                    lit_fn.suffix.clone(),
+                    LiteralFunctionInfo {
+                        suffix: lit_fn.suffix.clone(),
+                        return_type: lit_fn.return_type.clone(),
+                        param_name: lit_fn.param_name.clone(),
+                        body: lit_fn.body.clone(),
+                    },
+                );
+            });
+            Ok(Control::Next)
+        }
         _ => Ok(Control::Next),
     }
 }

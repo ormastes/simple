@@ -14,9 +14,16 @@
 //! ## Usage Pattern
 //!
 //! All functions are simple f64 → f64 transformations:
-//! ```ignore
-//! let result = rt_math_sin(x);
-//! let result = rt_math_pow(base, exponent);
+//! ```
+//! use simple_runtime::value::ffi::math::*;
+//!
+//! // Basic operations
+//! assert_eq!(rt_math_sqrt(4.0), 2.0);
+//! assert_eq!(rt_math_pow(2.0, 3.0), 8.0);
+//!
+//! // Trigonometric (with floating-point tolerance)
+//! assert!((rt_math_sin(0.0) - 0.0).abs() < 1e-10);
+//! assert!((rt_math_cos(0.0) - 1.0).abs() < 1e-10);
 //! ```
 //!
 //! ## Special Values

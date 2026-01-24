@@ -5,6 +5,63 @@ use crate::interpreter::UNIT_SUFFIX_TO_FAMILY;
 use crate::interpreter_unit::decompose_si_prefix;
 use crate::value::Value;
 
+/// Convert a suffix string to potential type names.
+///
+/// Returns a list of type name candidates to try, in priority order:
+/// - "ip" → ["IP", "Ip"]  (all-caps first for common acronyms, then PascalCase)
+/// - "my_type" → ["MyType"]  (snake_case → PascalCase)
+/// - "url" → ["URL", "Url"]  (3 letters or less → try all-caps first)
+/// - "regex" → ["Regex"]  (4+ letters → PascalCase only)
+///
+/// # Examples
+/// ```
+/// assert_eq!(suffix_to_type_names("ip"), vec!["IP", "Ip"]);
+/// assert_eq!(suffix_to_type_names("my_type"), vec!["MyType"]);
+/// assert_eq!(suffix_to_type_names("url"), vec!["URL", "Url"]);
+/// assert_eq!(suffix_to_type_names("regex"), vec!["Regex"]);
+/// ```
+pub(crate) fn suffix_to_type_names(suffix: &str) -> Vec<String> {
+    let mut result = Vec::new();
+
+    // Handle snake_case: convert to PascalCase
+    if suffix.contains('_') {
+        let pascal_case: String = suffix
+            .split('_')
+            .filter(|s| !s.is_empty())
+            .map(|part| {
+                let mut chars = part.chars();
+                match chars.next() {
+                    None => String::new(),
+                    Some(first) => first.to_uppercase().chain(chars).collect(),
+                }
+            })
+            .collect();
+        result.push(pascal_case);
+    } else {
+        // For short suffixes (3 letters or less), try ALL_CAPS first
+        // Common acronyms: IP, URL, URI, XML, JSON, CSV, etc.
+        if suffix.len() <= 3 {
+            result.push(suffix.to_uppercase());
+        }
+
+        // PascalCase version: capitalize first letter
+        let pascal_case = {
+            let mut chars = suffix.chars();
+            match chars.next() {
+                None => String::new(),
+                Some(first) => first.to_uppercase().chain(chars).collect(),
+            }
+        };
+
+        // Only add PascalCase if it's different from uppercase
+        if result.is_empty() || result[0] != pascal_case {
+            result.push(pascal_case);
+        }
+    }
+
+    result
+}
+
 /// Look up the family name for a unit suffix from the thread-local registry
 pub(super) fn lookup_unit_family(suffix: &str) -> Option<String> {
     // First try direct lookup

@@ -709,3 +709,35 @@ pub struct MacroInvocation {
     pub name: String,
     pub args: Vec<MacroArg>,
 }
+
+/// Literal function definition for custom string suffix handling.
+///
+/// Syntax: `literal fn _suffix(param: text) -> ReturnType: body`
+///
+/// Literal functions provide explicit control over suffix → type mapping.
+/// When a string literal like "value"_suffix is encountered:
+/// 1. Check LITERAL_FUNCTIONS registry for explicit override
+/// 2. If found, call the literal function with the string value
+/// 3. If not found, fall back to suffix → type name conversion
+///
+/// # Example
+/// ```simple
+/// literal fn _re(s: text) -> Regex:
+///     Regex.compile(s)
+///
+/// val pattern = "test"_re  # Calls the literal fn, returns Regex
+/// ```
+#[derive(Debug, Clone, PartialEq)]
+pub struct LiteralFunctionDef {
+    pub span: Span,
+    /// The suffix without leading underscore (e.g., "re" for _re)
+    pub suffix: String,
+    /// The parameter name for the string value
+    pub param_name: String,
+    /// The return type
+    pub return_type: Option<Type>,
+    /// The function body
+    pub body: Block,
+    /// Optional documentation comment
+    pub doc_comment: Option<DocComment>,
+}

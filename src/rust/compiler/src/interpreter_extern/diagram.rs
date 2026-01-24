@@ -219,8 +219,7 @@ fn generate_class_mermaid(events: &[diagram_ffi::CallEvent]) -> String {
     let mut output = String::from("classDiagram\n");
 
     // Extract classes and methods
-    let mut classes: std::collections::HashMap<String, Vec<String>> =
-        std::collections::HashMap::new();
+    let mut classes: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
 
     for event in events {
         if let Some(cls) = &event.callee_class {
@@ -266,10 +265,7 @@ fn generate_class_mermaid(events: &[diagram_ffi::CallEvent]) -> String {
     output
 }
 
-fn generate_arch_mermaid(
-    events: &[diagram_ffi::CallEvent],
-    arch_entities: &[String],
-) -> String {
+fn generate_arch_mermaid(events: &[diagram_ffi::CallEvent], arch_entities: &[String]) -> String {
     let mut output = String::from("flowchart TD\n");
 
     // Add architectural nodes
@@ -277,11 +273,7 @@ fn generate_arch_mermaid(
         if entity.contains('.') {
             let parts: Vec<&str> = entity.split('.').collect();
             let short_name = parts.last().copied().unwrap_or(entity.as_str());
-            output.push_str(&format!(
-                "    {}[{}]\n",
-                entity.replace('.', "_"),
-                short_name
-            ));
+            output.push_str(&format!("    {}[{}]\n", entity.replace('.', "_"), short_name));
         } else {
             output.push_str(&format!("    {}\n", entity));
         }
