@@ -1,3 +1,4 @@
+pub mod auth_db;
 pub mod bug_db;
 pub mod cli;
 pub mod compile_options;
@@ -13,10 +14,12 @@ pub mod interpreter;
 pub mod jj;
 pub mod jj_state;
 pub mod lazy_init;
+pub mod oauth_flow;
 pub mod prefetch;
 pub mod repl_runner_ffi;
 pub mod resource_manager;
 pub mod runner;
+pub mod signature;
 pub mod simple_test;
 pub mod startup_metrics;
 pub mod task_db;

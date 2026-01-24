@@ -83,6 +83,7 @@ pub(super) fn register_definitions(
             Node::Struct(s) => {
                 // Treat structs like classes for export purposes
                 // Include struct methods so they're available for method calls
+                eprintln!("DEBUG REGISTER: Adding struct {} with {} methods to classes", s.name, s.methods.len());
                 let class_def = ClassDef {
                     span: s.span.clone(),
                     name: s.name.clone(),

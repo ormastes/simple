@@ -98,6 +98,23 @@ cargo test -p simple-driver --test simple_stdlib_tests unit_verification -- --no
 
 ---
 
+## New Hanging Tests Found
+
+During failed test recheck, 3 additional hanging tests were identified:
+
+| Test | Directory | Timeout |
+|------|-----------|---------|
+| set_spec.spl | simple/std_lib/test/unit | >60s |
+| mock_phase6_spec.spl | simple/std_lib/test/unit/testing | >60s |
+| mock_phase7_spec.spl | simple/std_lib/test/unit/testing | >60s |
+
+These are in the `simple/std_lib` directory and need investigation.
+
+---
+
 ## Conclusion
 
-The hang issue has been resolved. All 13 previously hanging tests now complete within acceptable time limits. Only 1 test (math_spec.spl) has failures, but these are functional failures, not hangs.
+The original 13 hanging tests are resolved. 3 new hanging tests were found in `simple/std_lib/test/unit/testing/`. Total remaining issues:
+- **Hanging**: 3 tests (set_spec, mock_phase6_spec, mock_phase7_spec)
+- **Parse errors**: 5 tests (helpers_spec, mock_verification_spec, mock_phase3-5_spec)
+- **Passing**: 284 files

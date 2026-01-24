@@ -26,6 +26,7 @@ use simple_driver::cli::verify::run_verify;
 #[cfg(feature = "tui")]
 use simple_driver::cli::tui::run_tui_repl;
 use simple_driver::cli::doc_gen::{run_feature_gen, run_spec_gen, run_task_gen, run_todo_gen, run_todo_scan};
+use simple_driver::cli::qualify_ignore::{handle_qualify_ignore, parse_qualify_ignore_args};
 
 // Import our new command modules
 use simple_driver::cli::commands::*;
@@ -173,6 +174,18 @@ fn main() {
 
         // Verification
         "verify" => run_verify(&args, global_flags.gc_log, global_flags.gc_off),
+
+        // Qualified ignore management
+        "qualify-ignore" => {
+            let qi_args = parse_qualify_ignore_args(&args[1..]);
+            match handle_qualify_ignore(qi_args) {
+                Ok(()) => 0,
+                Err(e) => {
+                    eprintln!("error: {}", e);
+                    1
+                }
+            }
+        }
 
         // Diagram generation
         "diagram" => handle_diagram(&args),

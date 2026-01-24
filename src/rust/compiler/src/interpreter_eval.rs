@@ -707,6 +707,7 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
             // Module system nodes
             Node::UseStmt(use_stmt) => {
                 // Handle runtime module loading
+                eprintln!("DEBUG MAIN EVAL: Processing UseStmt: {:?}, target: {:?}", use_stmt.path, use_stmt.target);
                 // Determine the binding name (alias or imported item name)
                 let binding_name = match &use_stmt.target {
                     ImportTarget::Single(name) => name.clone(),

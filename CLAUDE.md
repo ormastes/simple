@@ -21,6 +21,8 @@ For detailed guidance, invoke with `/skill-name`:
 
 Skills located in `.claude/skills/`.
 
+**Full Syntax Reference:** `doc/guide/syntax_quick_reference.md` - Complete syntax guide with all features
+
 **Writing SSpec Tests:**
 - **Template:** `.claude/templates/sspec_template.spl` - Copy this for new specs
 - **Complete Example:** `doc/guide/sspec_complete_example.md` - Full workflow
@@ -94,6 +96,28 @@ list1.merge(list2)            # Combine collections
 0..10                         # Exclusive range: 0 to 9
 0..=10                        # Inclusive range: 0 to 10
 [for x in 0..20 if x % 2 == 0: x]   # List comprehension with filter
+```
+
+**Slicing and indexing:**
+```simple
+arr[0]                        # First element
+arr[-1]                       # Last element (negative indexing)
+arr[-2]                       # Second to last
+arr[1:4]                      # Slice from index 1 to 3
+arr[:3]                       # First 3 elements
+arr[2:]                       # From index 2 to end
+arr[::2]                      # Every other element (step=2)
+arr[::-1]                     # Reversed
+"Hello"[1:4]                  # String slicing: "ell"
+```
+
+**Optional chaining and null coalescing:**
+```simple
+user?.name                    # Returns None if user is None
+user?.profile?.settings       # Chain safe navigation
+obj?.method()                 # Safe method call
+user?.name ?? "Anonymous"     # Default if None
+config["key"] ?? default      # Fallback value
 ```
 
 **Strings:**

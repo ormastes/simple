@@ -169,6 +169,7 @@ pub(crate) fn exec_node(
             Ok(Control::Break(value))
         }
         Node::Continue(_) => Ok(Control::Continue),
+        Node::Pass(_) => Ok(Control::Next), // No-op, just continue to next statement
         Node::Match(match_stmt) => exec_match(match_stmt, env, functions, classes, enums, impl_methods),
         Node::Context(ctx_stmt) => exec_context(ctx_stmt, env, functions, classes, enums, impl_methods),
         Node::With(with_stmt) => exec_with(with_stmt, env, functions, classes, enums, impl_methods),

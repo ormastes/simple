@@ -105,6 +105,7 @@ impl<'a> super::Lexer<'a> {
             "loop" => TokenKind::Loop,
             "break" => TokenKind::Break,
             "continue" => TokenKind::Continue,
+            "pass" => TokenKind::Pass,
             "return" => TokenKind::Return,
             "match" => TokenKind::Match,
             "case" => TokenKind::Case,
