@@ -262,6 +262,89 @@ val city = user?.address?.city ?? "N/A"
 val display = user?.profile?.display_name ?? user?.name ?? "Anonymous"
 ```
 
+### Existence Check (`.?`)
+
+The `.?` operator checks if a value is **present** (not nil AND not empty):
+
+```simple
+# Option types
+opt.?                         # true if Some, false if None
+
+# Collections
+list.?                        # true if non-empty
+dict.?                        # true if non-empty
+set.?                         # true if non-empty
+
+# Strings
+str.?                         # true if non-empty string
+
+# Primitives (always true - they are values)
+num.?                         # true (0 is still a value)
+flag.?                        # true (false is still a value)
+
+# Negation patterns
+not opt.?                     # true if None (replaces is_none())
+not list.?                    # true if empty (replaces is_empty())
+```
+
+### Result with `.?`
+
+```simple
+# Result.ok returns Option, Result.err returns Option
+result.ok.?                   # true if Ok (replaces is_ok())
+result.err.?                  # true if Err (replaces is_err())
+
+# Example
+val r: Result<i32, text> = Ok(42)
+if r.ok.?:
+    print "Success: {r!}"
+```
+
+### No-Paren Method Calls
+
+Methods with no arguments can be called without parentheses:
+
+```simple
+# These are equivalent
+list.first()                  # with parens
+list.first                    # without parens (Ruby-like)
+
+# More examples
+str.len                       # same as str.len()
+str.trim                      # same as str.trim()
+str.upper                     # same as str.upper()
+list.last                     # same as list.last()
+
+# Chaining without parens
+text.trim.upper.split(",")    # split needs parens (has arg)
+```
+
+### Combining `.?` with No-Paren
+
+```simple
+# Check if first element exists
+list.first.?                  # true if list has first element
+
+# Check if trimmed string is non-empty
+str.trim.?                    # true if trimmed result is non-empty
+
+# Full pattern
+if user?.profile?.tags.?:
+    for tag in user!.profile!.tags:
+        print tag.upper.trim
+```
+
+### Refactoring Patterns
+
+| Verbose | Concise | Notes |
+|---------|---------|-------|
+| `opt.is_some()` | `opt.?` | Existence check |
+| `opt.is_none()` | `not opt.?` | Negated existence |
+| `result.is_ok()` | `result.ok.?` | `ok` returns Option |
+| `result.is_err()` | `result.err.?` | `err` returns Option |
+| `list.is_empty()` | `not list.?` | Empty = not present |
+| `list.first().is_some()` | `list.first.?` | No-paren + existence |
+
 ---
 
 ## Functions
@@ -522,6 +605,7 @@ data->filter(min: 0)->sort()    # Chainable
 # Optional operators
 x?.y        # Safe navigation
 x ?? y      # Null coalescing
+x.?         # Existence check (is present/non-empty)
 ```
 
 ---

@@ -1,8 +1,9 @@
 //! Compile Options (#824)
 //!
-//! Configuration for compilation including parallelization, profiling, and coverage.
+//! Configuration for compilation including parallelization, profiling, coverage, and memory limits.
 
 use simple_common::file_reader::ReadStrategy;
+use simple_common::gc::{MemoryLimitConfig, DEFAULT_MEMORY_LIMIT};
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
 
@@ -51,6 +52,12 @@ pub struct CompileOptions {
 
     /// Allow deprecated syntax without warnings (e.g., [] for generics).
     pub allow_deprecated: bool,
+
+    /// Memory limit for runner threads in bytes (default: 1 GB, 0 = unlimited).
+    pub memory_limit: usize,
+
+    /// Whether to fail on memory limit exceeded (true) or just warn (false).
+    pub memory_limit_fail: bool,
 }
 
 impl Default for CompileOptions {
@@ -70,6 +77,8 @@ impl Default for CompileOptions {
             build_timestamp: None,
             log_path: None,
             allow_deprecated: false,
+            memory_limit: DEFAULT_MEMORY_LIMIT,
+            memory_limit_fail: true,
         }
     }
 }
@@ -198,6 +207,48 @@ impl CompileOptions {
         self
     }
 
+    /// Set memory limit in bytes (0 = unlimited).
+    pub fn with_memory_limit(mut self, limit_bytes: usize) -> Self {
+        self.memory_limit = limit_bytes;
+        self
+    }
+
+    /// Set memory limit in megabytes.
+    pub fn with_memory_limit_mb(mut self, limit_mb: usize) -> Self {
+        self.memory_limit = limit_mb * 1024 * 1024;
+        self
+    }
+
+    /// Set memory limit in gigabytes.
+    pub fn with_memory_limit_gb(mut self, limit_gb: usize) -> Self {
+        self.memory_limit = limit_gb * 1024 * 1024 * 1024;
+        self
+    }
+
+    /// Disable memory limit (unlimited memory).
+    pub fn with_unlimited_memory(mut self) -> Self {
+        self.memory_limit = 0;
+        self
+    }
+
+    /// Set whether to fail on memory limit exceeded.
+    pub fn with_memory_limit_fail(mut self, fail: bool) -> Self {
+        self.memory_limit_fail = fail;
+        self
+    }
+
+    /// Get memory limit configuration.
+    pub fn memory_limit_config(&self) -> MemoryLimitConfig {
+        if self.memory_limit == 0 {
+            MemoryLimitConfig::unlimited()
+        } else {
+            MemoryLimitConfig {
+                limit_bytes: self.memory_limit,
+                fail_on_exceeded: self.memory_limit_fail,
+            }
+        }
+    }
+
     /// Get the number of threads to use for parallel compilation.
     /// Returns the configured number or all available cores.
     pub fn thread_count(&self) -> usize {
@@ -266,10 +317,40 @@ impl CompileOptions {
                 }
             } else if arg == "--allow-deprecated" {
                 opts.allow_deprecated = true;
+            } else if arg.starts_with("--memory-limit=") {
+                if let Some(value) = arg.strip_prefix("--memory-limit=") {
+                    opts.memory_limit = parse_memory_size(value).unwrap_or(DEFAULT_MEMORY_LIMIT);
+                }
+            } else if arg == "--unlimited-memory" || arg == "--no-memory-limit" {
+                opts.memory_limit = 0;
+            } else if arg == "--memory-warn-only" {
+                opts.memory_limit_fail = false;
             }
         }
 
         opts
+    }
+}
+
+/// Parse a memory size string (e.g., "100M", "2G", "1024K", "500000000").
+/// Supports suffixes: K/KB (kilobytes), M/MB (megabytes), G/GB (gigabytes).
+fn parse_memory_size(s: &str) -> Option<usize> {
+    let s = s.trim().to_uppercase();
+
+    if let Some(num) = s.strip_suffix("GB") {
+        num.trim().parse::<usize>().ok().map(|n| n * 1024 * 1024 * 1024)
+    } else if let Some(num) = s.strip_suffix("G") {
+        num.trim().parse::<usize>().ok().map(|n| n * 1024 * 1024 * 1024)
+    } else if let Some(num) = s.strip_suffix("MB") {
+        num.trim().parse::<usize>().ok().map(|n| n * 1024 * 1024)
+    } else if let Some(num) = s.strip_suffix("M") {
+        num.trim().parse::<usize>().ok().map(|n| n * 1024 * 1024)
+    } else if let Some(num) = s.strip_suffix("KB") {
+        num.trim().parse::<usize>().ok().map(|n| n * 1024)
+    } else if let Some(num) = s.strip_suffix("K") {
+        num.trim().parse::<usize>().ok().map(|n| n * 1024)
+    } else {
+        s.parse::<usize>().ok()
     }
 }
 

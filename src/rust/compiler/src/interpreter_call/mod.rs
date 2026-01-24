@@ -7,6 +7,8 @@ mod core;
 mod mock;
 
 // Re-export public items
+pub use bdd::clear_bdd_state;
+pub use core::clear_class_instantiation_state;
 pub(crate) use bdd::{
     exec_block_value, BDD_AFTER_EACH, BDD_BEFORE_EACH, BDD_CONTEXT_DEFS, BDD_COUNTS, BDD_EXPECT_FAILED,
     BDD_FAILURE_MSG, BDD_INDENT, BDD_LAZY_VALUES, BDD_SHARED_EXAMPLES,
@@ -309,12 +311,7 @@ pub(crate) fn evaluate_call(
             }
 
             // Check for class associated function (static method)
-            eprintln!("DEBUG PATH CALL: Looking for {} in classes (size={})", type_name, classes.len());
-            for (name, _) in classes.iter() {
-                eprintln!("DEBUG PATH CALL:   - class: {}", name);
-            }
             if let Some(class_def) = classes.get(type_name).cloned() {
-                eprintln!("DEBUG PATH CALL: Found class {}, methods: {:?}", type_name, class_def.methods.iter().map(|m| &m.name).collect::<Vec<_>>());
                 if let Some(func) = class_def.methods.iter().find(|m| m.name == *method_name) {
                     // If calling a `new` method, mark it to prevent double execution via instantiate_class
                     let is_new_method = method_name == "new";

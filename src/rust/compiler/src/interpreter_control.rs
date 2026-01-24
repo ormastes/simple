@@ -325,7 +325,7 @@ pub(super) fn exec_context(
 /// with resource as name:
 ///     body
 /// Calls __enter__ before body, __exit__ after (even on error)
-pub(super) fn exec_with(
+pub fn exec_with(
     with_stmt: &WithStmt,
     env: &mut Env,
     functions: &mut HashMap<String, FunctionDef>,

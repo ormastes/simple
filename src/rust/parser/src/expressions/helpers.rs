@@ -2,6 +2,7 @@
 
 use crate::ast::{Argument, Expr, LambdaParam, MacroArg, MoveMode, Pattern};
 use crate::error::ParseError;
+use crate::expressions::placeholder::transform_placeholder_lambda;
 use crate::parser_impl::core::Parser;
 use crate::token::TokenKind;
 
@@ -264,6 +265,10 @@ impl<'a> Parser<'a> {
                 self.advance(); // consume ...
                 value = Expr::Spread(Box::new(value));
             }
+
+            // Transform placeholder lambda syntax: _ * 2 -> \__p0: __p0 * 2
+            // Count and replace all _ identifiers with unique parameters
+            value = transform_placeholder_lambda(value);
 
             args.push(Argument { name, value });
 

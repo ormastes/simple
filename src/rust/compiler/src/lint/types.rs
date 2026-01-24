@@ -45,6 +45,8 @@ pub enum LintName {
     SSpecMinimalDocstrings,
     /// Manual pass/fail tracking instead of expect()
     SSpecManualAssertions,
+    /// Positional arguments for parameters that share a type with other parameters
+    UnnamedDuplicateTypedArgs,
 }
 
 impl LintName {
@@ -59,6 +61,7 @@ impl LintName {
             LintName::SSpecMissingDocstrings => "sspec_missing_docstrings",
             LintName::SSpecMinimalDocstrings => "sspec_minimal_docstrings",
             LintName::SSpecManualAssertions => "sspec_manual_assertions",
+            LintName::UnnamedDuplicateTypedArgs => "unnamed_duplicate_typed_args",
         }
     }
 
@@ -73,6 +76,7 @@ impl LintName {
             "sspec_missing_docstrings" => Some(LintName::SSpecMissingDocstrings),
             "sspec_minimal_docstrings" => Some(LintName::SSpecMinimalDocstrings),
             "sspec_manual_assertions" => Some(LintName::SSpecManualAssertions),
+            "unnamed_duplicate_typed_args" => Some(LintName::UnnamedDuplicateTypedArgs),
             _ => None,
         }
     }
@@ -89,6 +93,7 @@ impl LintName {
             LintName::SSpecMissingDocstrings => LintLevel::Warn,
             LintName::SSpecMinimalDocstrings => LintLevel::Warn, // Info level not supported, use Warn
             LintName::SSpecManualAssertions => LintLevel::Warn,
+            LintName::UnnamedDuplicateTypedArgs => LintLevel::Warn,
         }
     }
 
@@ -342,6 +347,67 @@ See also: .claude/skills/todo.md for full format specification
             LintName::SSpecMissingDocstrings => "Lint: sspec_missing_docstrings\nLevel: warn\n\nWarns when describe/context/it blocks lack docstrings.".to_string(),
             LintName::SSpecMinimalDocstrings => "Lint: sspec_minimal_docstrings\nLevel: warn\n\nWarns when test files have minimal documentation.".to_string(),
             LintName::SSpecManualAssertions => "Lint: sspec_manual_assertions\nLevel: warn\n\nDetects manual pass/fail tracking instead of expect() assertions.".to_string(),
+            LintName::UnnamedDuplicateTypedArgs => r#"Lint: unnamed_duplicate_typed_args
+Level: warn (default)
+
+=== What it checks ===
+
+This lint warns when a function has multiple parameters with the same type
+and any of those parameters are passed positionally (not named) at the call site.
+
+=== Why it matters ===
+
+When multiple parameters share the same type, it's easy to accidentally swap
+arguments without the compiler catching it:
+
+    fn create_user(name: text, email: text, phone: text):
+        ...
+
+    # Bug: arguments in wrong order, but compiles fine!
+    create_user("john@example.com", "John", "555-1234")
+
+Named arguments make intent explicit and prevent such bugs:
+
+    create_user(name: "John", email: "john@example.com", phone: "555-1234")
+
+=== Examples ===
+
+Triggers the lint:
+    fn point(x: i64, y: i64):
+        ...
+    point(3, 4)              # x, y share type i64
+    point(x: 3, 4)           # y is positional
+
+Does not trigger:
+    point(x: 3, y: 4)        # All same-typed params are named
+    point(y: 4, x: 3)        # Order doesn't matter with names
+
+    fn describe(name: text, age: i64):
+        ...
+    describe("Alice", 30)    # Types are different, no confusion
+
+=== How to fix ===
+
+Use named arguments for parameters that share a type:
+
+    # Instead of:
+    point(3, 4)
+
+    # Use:
+    point(x: 3, y: 4)
+
+=== How to suppress ===
+
+If positional arguments are intentional:
+
+    #[allow(unnamed_duplicate_typed_args)]
+    fn swap(a: i64, b: i64):
+        ...
+
+Or in simple.sdn:
+    [lints]
+    unnamed_duplicate_typed_args = "allow"
+"#.to_string(),
         }
     }
 
@@ -356,6 +422,7 @@ See also: .claude/skills/todo.md for full format specification
             LintName::SSpecMissingDocstrings,
             LintName::SSpecMinimalDocstrings,
             LintName::SSpecManualAssertions,
+            LintName::UnnamedDuplicateTypedArgs,
         ]
     }
 }

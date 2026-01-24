@@ -6,8 +6,55 @@ use super::config::LintConfig;
 use super::diagnostics::LintDiagnostic;
 use super::rules::{is_bare_bool, is_primitive_type};
 use super::types::{LintLevel, LintName};
-use simple_parser::ast::{ClassDef, EnumDef, FunctionDef, Node, StructDef, TraitDef, Type};
+use simple_parser::ast::{Argument, ClassDef, EnumDef, Expr, FunctionDef, Node, StructDef, TraitDef, Type};
 use simple_parser::token::Span;
+use std::collections::HashMap;
+
+/// Parameter info for duplicate typed args checking
+#[derive(Clone, Debug)]
+struct ParamInfo {
+    name: String,
+    ty: Option<Type>,
+}
+
+/// Function signature info for call-site checking
+#[derive(Clone, Debug)]
+struct FunctionInfo {
+    params: Vec<ParamInfo>,
+}
+
+/// Format a type for user-friendly display
+fn format_type(ty: &Type) -> String {
+    match ty {
+        Type::Simple(name) => name.clone(),
+        Type::Generic { name, args } => {
+            if args.is_empty() {
+                name.clone()
+            } else {
+                let args_str: Vec<String> = args.iter().map(format_type).collect();
+                format!("{}<{}>", name, args_str.join(", "))
+            }
+        }
+        Type::Array { element, size } => {
+            let elem_str = format_type(element);
+            match size {
+                Some(s) => format!("[{}; {:?}]", elem_str, s),
+                None => format!("[{}]", elem_str),
+            }
+        }
+        Type::Optional(inner) => format!("{}?", format_type(inner)),
+        Type::Tuple(types) => {
+            let types_str: Vec<String> = types.iter().map(format_type).collect();
+            format!("({})", types_str.join(", "))
+        }
+        Type::Function { params, ret } => {
+            let params_str: Vec<String> = params.iter().map(format_type).collect();
+            let ret_str = ret.as_ref().map(|r| format_type(r)).unwrap_or_else(|| "()".to_string());
+            format!("fn({}) -> {}", params_str.join(", "), ret_str)
+        }
+        _ => format!("{:?}", ty),
+    }
+}
 
 /// Lint checker for a compilation unit
 pub struct LintChecker {
@@ -17,6 +64,8 @@ pub struct LintChecker {
     diagnostics: Vec<LintDiagnostic>,
     /// Source file path (for file-based lints)
     source_file: Option<std::path::PathBuf>,
+    /// Function registry for call-site checks (populated during check_module)
+    functions: HashMap<String, FunctionInfo>,
 }
 
 impl LintChecker {
@@ -25,6 +74,7 @@ impl LintChecker {
             config: LintConfig::new(),
             diagnostics: Vec::new(),
             source_file: None,
+            functions: HashMap::new(),
         }
     }
 
@@ -33,6 +83,7 @@ impl LintChecker {
             config,
             diagnostics: Vec::new(),
             source_file: None,
+            functions: HashMap::new(),
         }
     }
 
@@ -99,6 +150,9 @@ impl LintChecker {
 
     /// Check a module for lint violations
     pub fn check_module(&mut self, items: &[Node]) {
+        // First pass: collect function definitions for call-site checks
+        self.collect_functions(items);
+
         // Run file-based lints first
         if let Some(source_file) = self.source_file.clone() {
             // Check for print in test spec files
@@ -117,6 +171,94 @@ impl LintChecker {
         // Run AST-based lints
         for item in items {
             self.check_node(item);
+        }
+
+        // Check for unnamed duplicate typed args at call sites
+        self.check_unnamed_duplicate_typed_args(items);
+    }
+
+    /// Collect function definitions for call-site checking
+    fn collect_functions(&mut self, items: &[Node]) {
+        fn collect_from_node(functions: &mut HashMap<String, FunctionInfo>, node: &Node) {
+            match node {
+                Node::Function(func) => {
+                    let info = FunctionInfo {
+                        params: func
+                            .params
+                            .iter()
+                            .map(|p| ParamInfo {
+                                name: p.name.clone(),
+                                ty: p.ty.clone(),
+                            })
+                            .collect(),
+                    };
+                    functions.insert(func.name.clone(), info);
+                }
+                Node::Class(c) => {
+                    // Collect methods from class
+                    for method in &c.methods {
+                        let info = FunctionInfo {
+                            params: method
+                                .params
+                                .iter()
+                                .filter(|p| p.name != "self")
+                                .map(|p| ParamInfo {
+                                    name: p.name.clone(),
+                                    ty: p.ty.clone(),
+                                })
+                                .collect(),
+                        };
+                        // Store as ClassName.method_name for method lookup
+                        let key = format!("{}.{}", c.name, method.name);
+                        functions.insert(key, info.clone());
+                        // Also store just by method name for simple lookup
+                        functions.insert(method.name.clone(), info);
+                    }
+                }
+                Node::Struct(s) => {
+                    for method in &s.methods {
+                        let info = FunctionInfo {
+                            params: method
+                                .params
+                                .iter()
+                                .filter(|p| p.name != "self")
+                                .map(|p| ParamInfo {
+                                    name: p.name.clone(),
+                                    ty: p.ty.clone(),
+                                })
+                                .collect(),
+                        };
+                        let key = format!("{}.{}", s.name, method.name);
+                        functions.insert(key, info.clone());
+                        functions.insert(method.name.clone(), info);
+                    }
+                }
+                Node::Impl(impl_block) => {
+                    for method in &impl_block.methods {
+                        let info = FunctionInfo {
+                            params: method
+                                .params
+                                .iter()
+                                .filter(|p| p.name != "self")
+                                .map(|p| ParamInfo {
+                                    name: p.name.clone(),
+                                    ty: p.ty.clone(),
+                                })
+                                .collect(),
+                        };
+                        // Format target_type for key
+                        let type_name = format!("{:?}", impl_block.target_type);
+                        let key = format!("{}.{}", type_name, method.name);
+                        functions.insert(key, info.clone());
+                        functions.insert(method.name.clone(), info);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        for item in items {
+            collect_from_node(&mut self.functions, item);
         }
     }
 
@@ -781,6 +923,247 @@ impl LintChecker {
 
         for item in items {
             check_node(self, item);
+        }
+    }
+
+    /// Check for unnamed arguments when parameters share the same type
+    fn check_unnamed_duplicate_typed_args(&mut self, items: &[Node]) {
+        // Helper to check if a type matches another (structural equality)
+        fn types_match(ty1: &Option<Type>, ty2: &Option<Type>) -> bool {
+            match (ty1, ty2) {
+                (Some(t1), Some(t2)) => t1 == t2,
+                _ => false, // Can't compare if either type is unknown
+            }
+        }
+
+        // Find parameter indices that share a type with at least one other parameter
+        fn find_duplicate_typed_params(params: &[ParamInfo]) -> Vec<usize> {
+            let mut duplicates = Vec::new();
+            for (i, param) in params.iter().enumerate() {
+                if param.ty.is_none() {
+                    continue;
+                }
+                for (j, other) in params.iter().enumerate() {
+                    if i != j && types_match(&param.ty, &other.ty) {
+                        if !duplicates.contains(&i) {
+                            duplicates.push(i);
+                        }
+                        break;
+                    }
+                }
+            }
+            duplicates
+        }
+
+        // Get the function name from a callee expression
+        fn get_callee_name(expr: &Expr) -> Option<String> {
+            match expr {
+                Expr::Identifier(name) => Some(name.clone()),
+                Expr::FieldAccess { field, .. } => Some(field.clone()),
+                _ => None,
+            }
+        }
+
+        // Check a call expression
+        fn check_call(
+            checker: &mut LintChecker,
+            callee_name: &str,
+            args: &[Argument],
+            _span: Span,
+        ) {
+            // Look up the function in the registry
+            let func_info = match checker.functions.get(callee_name) {
+                Some(info) => info.clone(),
+                None => return, // Function not found, skip
+            };
+
+            let duplicate_indices = find_duplicate_typed_params(&func_info.params);
+            if duplicate_indices.is_empty() {
+                return; // No duplicate types
+            }
+
+            // Check if any duplicate-typed parameter is passed positionally
+            for (arg_idx, arg) in args.iter().enumerate() {
+                if arg.name.is_some() {
+                    continue; // Named argument, OK
+                }
+
+                // This is a positional argument
+                if arg_idx >= func_info.params.len() {
+                    continue; // Extra args (variadic or error)
+                }
+
+                if duplicate_indices.contains(&arg_idx) {
+                    let param = &func_info.params[arg_idx];
+
+                    // Find other params with same type
+                    let same_type_params: Vec<&str> = func_info
+                        .params
+                        .iter()
+                        .enumerate()
+                        .filter(|(i, p)| *i != arg_idx && types_match(&p.ty, &param.ty))
+                        .map(|(_, p)| p.name.as_str())
+                        .collect();
+
+                    let type_str = param
+                        .ty
+                        .as_ref()
+                        .map(|t| format_type(t))
+                        .unwrap_or_else(|| "unknown".to_string());
+
+                    checker.emit(
+                        LintName::UnnamedDuplicateTypedArgs,
+                        Span::new(0, 0, 0, 0), // TODO: get proper span from arg
+                        format!(
+                            "positional argument for parameter `{}` which shares type `{}` with `{}`",
+                            param.name,
+                            type_str,
+                            same_type_params.join("`, `")
+                        ),
+                        Some(format!(
+                            "consider using named argument: `{}: <value>`",
+                            param.name
+                        )),
+                    );
+                }
+            }
+        }
+
+        // Recursively check expressions
+        fn check_expr(checker: &mut LintChecker, expr: &Expr) {
+            match expr {
+                Expr::Call { callee, args } => {
+                    if let Some(name) = get_callee_name(callee) {
+                        check_call(checker, &name, args, Span::new(0, 0, 0, 0));
+                    }
+                    check_expr(checker, callee);
+                    for arg in args {
+                        check_expr(checker, &arg.value);
+                    }
+                }
+                Expr::MethodCall { receiver, method, args } => {
+                    // Try to look up method
+                    check_call(checker, method, args, Span::new(0, 0, 0, 0));
+                    check_expr(checker, receiver);
+                    for arg in args {
+                        check_expr(checker, &arg.value);
+                    }
+                }
+                Expr::Binary { left, right, .. } => {
+                    check_expr(checker, left);
+                    check_expr(checker, right);
+                }
+                Expr::Unary { operand, .. } => {
+                    check_expr(checker, operand);
+                }
+                Expr::FieldAccess { receiver, .. } => {
+                    check_expr(checker, receiver);
+                }
+                Expr::Index { receiver, index } => {
+                    check_expr(checker, receiver);
+                    check_expr(checker, index);
+                }
+                Expr::Lambda { body, .. } => {
+                    check_expr(checker, body);
+                }
+                Expr::Array(elements) => {
+                    for elem in elements {
+                        check_expr(checker, elem);
+                    }
+                }
+                Expr::Tuple(elements) => {
+                    for elem in elements {
+                        check_expr(checker, elem);
+                    }
+                }
+                Expr::DoBlock(stmts) => {
+                    for stmt in stmts {
+                        check_stmt(checker, stmt);
+                    }
+                }
+                Expr::If { condition, then_branch, else_branch, .. } => {
+                    check_expr(checker, condition);
+                    check_expr(checker, then_branch);
+                    if let Some(eb) = else_branch {
+                        check_expr(checker, eb);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // Recursively check statements
+        fn check_stmt(checker: &mut LintChecker, node: &Node) {
+            use simple_parser::ast::LetStmt;
+
+            match node {
+                Node::Expression(expr) => check_expr(checker, expr),
+                Node::Let(LetStmt { value, .. }) => {
+                    if let Some(v) = value {
+                        check_expr(checker, v);
+                    }
+                }
+                Node::Assignment(assign) => {
+                    check_expr(checker, &assign.value);
+                }
+                Node::Return(ret) => {
+                    if let Some(v) = &ret.value {
+                        check_expr(checker, v);
+                    }
+                }
+                Node::If(if_stmt) => {
+                    check_expr(checker, &if_stmt.condition);
+                    for stmt in &if_stmt.then_block.statements {
+                        check_stmt(checker, stmt);
+                    }
+                    for (elif_cond, elif_block) in &if_stmt.elif_branches {
+                        check_expr(checker, elif_cond);
+                        for stmt in &elif_block.statements {
+                            check_stmt(checker, stmt);
+                        }
+                    }
+                    if let Some(else_block) = &if_stmt.else_block {
+                        for stmt in &else_block.statements {
+                            check_stmt(checker, stmt);
+                        }
+                    }
+                }
+                Node::Match(match_stmt) => {
+                    check_expr(checker, &match_stmt.subject);
+                    for arm in &match_stmt.arms {
+                        for stmt in &arm.body.statements {
+                            check_stmt(checker, stmt);
+                        }
+                    }
+                }
+                Node::For(for_stmt) => {
+                    check_expr(checker, &for_stmt.iterable);
+                    for stmt in &for_stmt.body.statements {
+                        check_stmt(checker, stmt);
+                    }
+                }
+                Node::While(while_stmt) => {
+                    check_expr(checker, &while_stmt.condition);
+                    for stmt in &while_stmt.body.statements {
+                        check_stmt(checker, stmt);
+                    }
+                }
+                Node::Loop(loop_stmt) => {
+                    for stmt in &loop_stmt.body.statements {
+                        check_stmt(checker, stmt);
+                    }
+                }
+                Node::Function(func) => {
+                    for stmt in &func.body.statements {
+                        check_stmt(checker, stmt);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        for item in items {
+            check_stmt(self, item);
         }
     }
 }

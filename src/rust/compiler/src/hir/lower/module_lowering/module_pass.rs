@@ -50,6 +50,52 @@ impl Lowerer {
             Node::TypeAlias(ta) => {
                 self.register_type_alias(ta)?;
             }
+            Node::ClassAlias(ca) => {
+                // Register class/struct/enum alias mapping
+                self.register_type_alias_mapping(ca.name.clone(), ca.target.clone());
+
+                // Check for @deprecated decorator
+                for decorator in &ca.decorators {
+                    if let ast::Expr::Identifier(name) = &decorator.name {
+                        if name == "deprecated" {
+                            // Extract message from decorator args if present
+                            let msg = decorator.args.as_ref().and_then(|args| {
+                                args.first().and_then(|arg| {
+                                    if let ast::Expr::String(s) = &arg.value {
+                                        Some(s.clone())
+                                    } else {
+                                        None
+                                    }
+                                })
+                            });
+                            self.mark_deprecated(ca.name.clone(), msg);
+                        }
+                    }
+                }
+            }
+            Node::FunctionAlias(fa) => {
+                // Register function alias mapping
+                self.register_function_alias(fa.name.clone(), fa.target.clone());
+
+                // Check for @deprecated decorator
+                for decorator in &fa.decorators {
+                    if let ast::Expr::Identifier(name) = &decorator.name {
+                        if name == "deprecated" {
+                            // Extract message from decorator args if present
+                            let msg = decorator.args.as_ref().and_then(|args| {
+                                args.first().and_then(|arg| {
+                                    if let ast::Expr::String(s) = &arg.value {
+                                        Some(s.clone())
+                                    } else {
+                                        None
+                                    }
+                                })
+                            });
+                            self.mark_deprecated(fa.name.clone(), msg);
+                        }
+                    }
+                }
+            }
             Node::Trait(t) => {
                 // Register trait with vtable slot information for static polymorphism
                 self.register_trait(t)?;
@@ -200,7 +246,11 @@ impl Lowerer {
                 | Node::ArchitectureRule(_)
                 | Node::MockDecl(_)
                 | Node::LiteralFunction(_)
-                | Node::LeanBlock(_) => {}
+                | Node::LeanBlock(_)
+                | Node::ClassAlias(_)
+                | Node::FunctionAlias(_)
+                | Node::Pass(_)
+                | Node::Guard(_) => {}
             }
         }
 

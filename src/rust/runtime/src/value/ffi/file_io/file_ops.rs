@@ -3,12 +3,17 @@
 //! This module provides high-level file operations including:
 //! - Canonicalize: Resolve absolute paths with symbolic links
 //! - Read/Write: High-level text file I/O
+//! - ReadLines: Read file as array of lines
+//! - Append: Append text to files
+//! - Binary I/O: Read/write raw bytes
 //! - Copy: Copy files from source to destination
 //! - Remove: Delete files
-//! - Rename: Move or rename files
+//! - Rename/Move: Move or rename files
 
-use crate::value::collections::rt_string_new;
+use crate::value::collections::{rt_array_new, rt_array_push, rt_string_new};
 use crate::value::RuntimeValue;
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::Path;
 
 /// Normalize/canonicalize a file path
@@ -155,6 +160,163 @@ pub unsafe extern "C" fn rt_file_rename(from_ptr: *const u8, from_len: u64, to_p
     std::fs::rename(from_str, to_str).is_ok()
 }
 
+/// Read file as array of lines
+/// Returns an array of strings, one per line
+#[no_mangle]
+pub unsafe extern "C" fn rt_file_read_lines(path_ptr: *const u8, path_len: u64) -> RuntimeValue {
+    if path_ptr.is_null() {
+        return RuntimeValue::NIL;
+    }
+
+    let path_bytes = std::slice::from_raw_parts(path_ptr, path_len as usize);
+    let path_str = match std::str::from_utf8(path_bytes) {
+        Ok(s) => s,
+        Err(_) => return RuntimeValue::NIL,
+    };
+
+    match std::fs::read_to_string(path_str) {
+        Ok(content) => {
+            let lines: Vec<&str> = content.lines().collect();
+            let array_handle = rt_array_new(lines.len() as u64);
+
+            for line in lines {
+                let bytes = line.as_bytes();
+                let str_value = rt_string_new(bytes.as_ptr(), bytes.len() as u64);
+                rt_array_push(array_handle, str_value);
+            }
+
+            array_handle
+        }
+        Err(_) => RuntimeValue::NIL,
+    }
+}
+
+/// Append text to file (creates file if it doesn't exist)
+#[no_mangle]
+pub unsafe extern "C" fn rt_file_append_text(
+    path_ptr: *const u8,
+    path_len: u64,
+    content_ptr: *const u8,
+    content_len: u64,
+) -> bool {
+    if path_ptr.is_null() || content_ptr.is_null() {
+        return false;
+    }
+
+    let path_bytes = std::slice::from_raw_parts(path_ptr, path_len as usize);
+    let path_str = match std::str::from_utf8(path_bytes) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+
+    let content_bytes = std::slice::from_raw_parts(content_ptr, content_len as usize);
+    let content_str = match std::str::from_utf8(content_bytes) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+
+    match OpenOptions::new().create(true).append(true).open(path_str) {
+        Ok(mut file) => file.write_all(content_str.as_bytes()).is_ok(),
+        Err(_) => false,
+    }
+}
+
+/// Read file as raw bytes
+/// Returns an array of integers (0-255)
+#[no_mangle]
+pub unsafe extern "C" fn rt_file_read_bytes(path_ptr: *const u8, path_len: u64) -> RuntimeValue {
+    if path_ptr.is_null() {
+        return RuntimeValue::NIL;
+    }
+
+    let path_bytes = std::slice::from_raw_parts(path_ptr, path_len as usize);
+    let path_str = match std::str::from_utf8(path_bytes) {
+        Ok(s) => s,
+        Err(_) => return RuntimeValue::NIL,
+    };
+
+    match std::fs::read(path_str) {
+        Ok(bytes) => {
+            let array_handle = rt_array_new(bytes.len() as u64);
+
+            for byte in bytes {
+                let byte_value = RuntimeValue::from_int(byte as i64);
+                rt_array_push(array_handle, byte_value);
+            }
+
+            array_handle
+        }
+        Err(_) => RuntimeValue::NIL,
+    }
+}
+
+/// Write raw bytes to file
+/// Takes an array of integers (0-255)
+#[no_mangle]
+pub unsafe extern "C" fn rt_file_write_bytes(
+    path_ptr: *const u8,
+    path_len: u64,
+    data_ptr: *const u8,
+    data_len: u64,
+) -> bool {
+    if path_ptr.is_null() {
+        return false;
+    }
+
+    let path_bytes = std::slice::from_raw_parts(path_ptr, path_len as usize);
+    let path_str = match std::str::from_utf8(path_bytes) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+
+    // If data_ptr is null but len is 0, write empty file
+    if data_ptr.is_null() {
+        return std::fs::write(path_str, &[]).is_ok();
+    }
+
+    let data = std::slice::from_raw_parts(data_ptr, data_len as usize);
+    std::fs::write(path_str, data).is_ok()
+}
+
+/// Move file from source to destination
+/// Unlike rename, this works across filesystems by copying then deleting
+#[no_mangle]
+pub unsafe extern "C" fn rt_file_move(
+    src_ptr: *const u8,
+    src_len: u64,
+    dest_ptr: *const u8,
+    dest_len: u64,
+) -> bool {
+    if src_ptr.is_null() || dest_ptr.is_null() {
+        return false;
+    }
+
+    let src_bytes = std::slice::from_raw_parts(src_ptr, src_len as usize);
+    let src_str = match std::str::from_utf8(src_bytes) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+
+    let dest_bytes = std::slice::from_raw_parts(dest_ptr, dest_len as usize);
+    let dest_str = match std::str::from_utf8(dest_bytes) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+
+    // Try rename first (fast path, same filesystem)
+    if std::fs::rename(src_str, dest_str).is_ok() {
+        return true;
+    }
+
+    // Fallback: copy then delete (works across filesystems)
+    if std::fs::copy(src_str, dest_str).is_ok() {
+        // Only delete source if copy succeeded
+        return std::fs::remove_file(src_str).is_ok();
+    }
+
+    false
+}
+
 // ============================================================================
 // Tests
 // ============================================================================
@@ -258,6 +420,152 @@ mod tests {
             assert!(rt_file_rename(from_ptr, from_len, to_ptr, to_len));
             assert!(!from_path.exists());
             assert!(to_path.exists());
+        }
+    }
+
+    #[test]
+    fn test_file_read_lines() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("lines.txt");
+        fs::write(&file_path, "line1\nline2\nline3").unwrap();
+
+        let path_str = file_path.to_str().unwrap();
+        let (ptr, len) = str_to_ptr(path_str);
+
+        unsafe {
+            let result = rt_file_read_lines(ptr, len);
+            assert!(!result.is_nil());
+
+            let count = crate::value::collections::rt_array_len(result);
+            assert_eq!(count, 3);
+        }
+    }
+
+    #[test]
+    fn test_file_read_lines_empty_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("empty.txt");
+        fs::write(&file_path, "").unwrap();
+
+        let path_str = file_path.to_str().unwrap();
+        let (ptr, len) = str_to_ptr(path_str);
+
+        unsafe {
+            let result = rt_file_read_lines(ptr, len);
+            assert!(!result.is_nil());
+
+            let count = crate::value::collections::rt_array_len(result);
+            assert_eq!(count, 0);
+        }
+    }
+
+    #[test]
+    fn test_file_append_text() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("append.txt");
+        fs::write(&file_path, "Hello").unwrap();
+
+        let path_str = file_path.to_str().unwrap();
+        let (path_ptr, path_len) = str_to_ptr(path_str);
+        let (content_ptr, content_len) = str_to_ptr(", World!");
+
+        unsafe {
+            assert!(rt_file_append_text(path_ptr, path_len, content_ptr, content_len));
+
+            let content = fs::read_to_string(&file_path).unwrap();
+            assert_eq!(content, "Hello, World!");
+        }
+    }
+
+    #[test]
+    fn test_file_append_text_creates_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("new_append.txt");
+
+        let path_str = file_path.to_str().unwrap();
+        let (path_ptr, path_len) = str_to_ptr(path_str);
+        let (content_ptr, content_len) = str_to_ptr("New content");
+
+        unsafe {
+            assert!(rt_file_append_text(path_ptr, path_len, content_ptr, content_len));
+            assert!(file_path.exists());
+
+            let content = fs::read_to_string(&file_path).unwrap();
+            assert_eq!(content, "New content");
+        }
+    }
+
+    #[test]
+    fn test_file_read_write_bytes() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("binary.bin");
+
+        let path_str = file_path.to_str().unwrap();
+        let (path_ptr, path_len) = str_to_ptr(path_str);
+
+        let binary_data: [u8; 5] = [0, 127, 255, 1, 128];
+
+        unsafe {
+            // Write bytes
+            assert!(rt_file_write_bytes(
+                path_ptr,
+                path_len,
+                binary_data.as_ptr(),
+                binary_data.len() as u64
+            ));
+
+            // Read bytes back
+            let result = rt_file_read_bytes(path_ptr, path_len);
+            assert!(!result.is_nil());
+
+            let count = crate::value::collections::rt_array_len(result);
+            assert_eq!(count, 5);
+        }
+    }
+
+    #[test]
+    fn test_file_move() {
+        let temp_dir = TempDir::new().unwrap();
+        let src_path = temp_dir.path().join("src.txt");
+        let dest_path = temp_dir.path().join("dest.txt");
+        fs::write(&src_path, "move me").unwrap();
+
+        let src_str = src_path.to_str().unwrap();
+        let dest_str = dest_path.to_str().unwrap();
+
+        unsafe {
+            let (src_ptr, src_len) = str_to_ptr(src_str);
+            let (dest_ptr, dest_len) = str_to_ptr(dest_str);
+
+            assert!(rt_file_move(src_ptr, src_len, dest_ptr, dest_len));
+            assert!(!src_path.exists());
+            assert!(dest_path.exists());
+
+            let content = fs::read_to_string(&dest_path).unwrap();
+            assert_eq!(content, "move me");
+        }
+    }
+
+    #[test]
+    fn test_file_move_across_dirs() {
+        let temp_dir = TempDir::new().unwrap();
+        let subdir = temp_dir.path().join("subdir");
+        fs::create_dir(&subdir).unwrap();
+
+        let src_path = temp_dir.path().join("file.txt");
+        let dest_path = subdir.join("file.txt");
+        fs::write(&src_path, "content").unwrap();
+
+        let src_str = src_path.to_str().unwrap();
+        let dest_str = dest_path.to_str().unwrap();
+
+        unsafe {
+            let (src_ptr, src_len) = str_to_ptr(src_str);
+            let (dest_ptr, dest_len) = str_to_ptr(dest_str);
+
+            assert!(rt_file_move(src_ptr, src_len, dest_ptr, dest_len));
+            assert!(!src_path.exists());
+            assert!(dest_path.exists());
         }
     }
 }

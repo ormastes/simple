@@ -7,7 +7,7 @@ use std::path::Path;
 use std::sync::Arc;
 use tempfile::TempDir;
 
-use simple_common::gc::GcAllocator;
+use simple_common::gc::{GcAllocator, MemoryLimitConfig};
 use simple_common::target::Target;
 use simple_compiler::CompilerPipeline;
 use simple_loader::loader::ModuleLoader as SmfLoader;
@@ -68,6 +68,65 @@ impl ExecCore {
     /// Create with verbose GC logging
     pub fn new_with_gc_logging() -> Self {
         Self::with_gc(GcRuntime::verbose_stdout())
+    }
+
+    /// Create with specific memory limit in bytes
+    pub fn with_memory_limit(limit_bytes: usize) -> Self {
+        Self::with_gc(GcRuntime::with_memory_limit(limit_bytes))
+    }
+
+    /// Create with specific memory limit in megabytes
+    pub fn with_memory_limit_mb(limit_mb: usize) -> Self {
+        Self::with_gc(GcRuntime::with_memory_limit_mb(limit_mb))
+    }
+
+    /// Create with specific memory limit in gigabytes
+    pub fn with_memory_limit_gb(limit_gb: usize) -> Self {
+        Self::with_gc(GcRuntime::with_memory_limit_gb(limit_gb))
+    }
+
+    /// Create with custom memory limit configuration
+    pub fn with_memory_config(config: MemoryLimitConfig) -> Self {
+        Self::with_gc(GcRuntime::with_options(
+            simple_runtime::gc::GcOptions::new(),
+            None,
+            config,
+        ))
+    }
+
+    /// Create with unlimited memory
+    pub fn unlimited_memory() -> Self {
+        Self::with_gc(GcRuntime::unlimited())
+    }
+
+    /// Create without GC but with memory limit
+    pub fn new_no_gc_with_memory_limit(limit_bytes: usize) -> Self {
+        Self {
+            loader: SmfLoader::new(),
+            gc_alloc: Arc::new(NoGcAllocator::with_memory_limit(limit_bytes)),
+            gc_runtime: None,
+            symbol_provider: default_runtime_provider(),
+        }
+    }
+
+    /// Create without GC and with memory limit configuration
+    pub fn new_no_gc_with_memory_config(config: MemoryLimitConfig) -> Self {
+        Self {
+            loader: SmfLoader::new(),
+            gc_alloc: Arc::new(NoGcAllocator::with_memory_config(config)),
+            gc_runtime: None,
+            symbol_provider: default_runtime_provider(),
+        }
+    }
+
+    /// Get current memory usage in bytes
+    pub fn memory_usage(&self) -> usize {
+        self.gc_alloc.memory_usage()
+    }
+
+    /// Get memory limit in bytes (0 if unlimited)
+    pub fn memory_limit(&self) -> usize {
+        self.gc_alloc.memory_limit()
     }
 
     /// Get the runtime symbol provider

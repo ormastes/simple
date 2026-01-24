@@ -529,6 +529,68 @@ pub struct TypeAliasDef {
     pub where_clause: Option<Expr>,
 }
 
+/// Class/struct/enum alias definition
+///
+/// Syntax: `alias NewName = OldName`
+///
+/// Creates an alias for an existing class, struct, or enum type.
+/// Useful for renaming types or creating shorter names.
+///
+/// # Example
+/// ```simple
+/// alias Point2D = Point
+/// alias Optional = Option   # Generic type alias
+///
+/// @deprecated("Use Point2D instead")
+/// alias OldPoint = Point
+/// ```
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClassAliasDef {
+    pub span: Span,
+    /// The new alias name
+    pub name: String,
+    /// The original type name being aliased
+    pub target: String,
+    pub visibility: Visibility,
+    /// Decorators applied to the alias: @deprecated("Use X instead")
+    pub decorators: Vec<Decorator>,
+    /// Documentation comment
+    pub doc_comment: Option<DocComment>,
+}
+
+/// Function alias definition
+///
+/// Syntax: `fn new_name = old_name` (top-level)
+/// Syntax: `fn new_name = old_name` (in impl block)
+///
+/// Creates an alias for an existing function.
+/// The alias can be deprecated to guide users to a new name.
+///
+/// # Example
+/// ```simple
+/// fn println = print        # Top-level alias
+///
+/// @deprecated("Use println instead")
+/// fn old_print = print
+///
+/// impl List:
+///     fn each = iter        # Method alias
+///     fn forEach = each     # Chain aliases
+/// ```
+#[derive(Debug, Clone, PartialEq)]
+pub struct FunctionAliasDef {
+    pub span: Span,
+    /// The new alias name
+    pub name: String,
+    /// The original function name being aliased
+    pub target: String,
+    pub visibility: Visibility,
+    /// Decorators applied to the alias: @deprecated("Use X instead")
+    pub decorators: Vec<Decorator>,
+    /// Documentation comment
+    pub doc_comment: Option<DocComment>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExternDef {
     pub span: Span,

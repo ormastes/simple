@@ -103,6 +103,14 @@ pub const PRELUDE_EXTERN_FUNCTIONS: &[&str] = &[
     // Process control
     "exit",
     "panic",
+    // Memory functions
+    "memory_usage",
+    "memory_limit",
+    "memory_usage_percent",
+    "is_memory_limited",
+    "default_memory_limit",
+    "format_bytes",
+    "parse_memory_size",
 ];
 
 /// Main module evaluation implementation.
@@ -707,7 +715,6 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
             // Module system nodes
             Node::UseStmt(use_stmt) => {
                 // Handle runtime module loading
-                eprintln!("DEBUG MAIN EVAL: Processing UseStmt: {:?}, target: {:?}", use_stmt.path, use_stmt.target);
                 // Determine the binding name (alias or imported item name)
                 let binding_name = match &use_stmt.target {
                     ImportTarget::Single(name) => name.clone(),
@@ -811,7 +818,11 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
             | Node::Assume(_)
             | Node::Admit(_)
             | Node::ProofHint(_)
-            | Node::Calc(_) => {
+            | Node::Calc(_)
+            | Node::ClassAlias(_)
+            | Node::FunctionAlias(_)
+            | Node::Pass(_)
+            | Node::Guard(_) => {
                 // Module system is handled by the module resolver
                 // HandlePool is processed at compile time for allocation
                 // Bitfield is processed at compile time for bit-level field access
@@ -821,6 +832,8 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                 // Assume/Admit are verification statements (similar to assert)
                 // ProofHint is a tactic hint for Lean (not runtime)
                 // Calc is a calculational proof block for Lean (not runtime)
+                // ClassAlias/FunctionAlias are compile-time declarations
+                // Pass is a no-op statement
                 // These are no-ops in the interpreter
             }
         }

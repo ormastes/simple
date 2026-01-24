@@ -4,7 +4,7 @@ use super::arg_binding::{bind_args, bind_args_with_values};
 use super::async_support::{is_async_function, wrap_in_promise};
 use super::macros::*;
 use crate::error::CompileError;
-use crate::interpreter::{exec_block_fn, Control};
+use crate::interpreter::{exec_block_fn, Control, CONST_NAMES, IN_IMMUTABLE_FN_METHOD};
 use crate::interpreter_unit::{is_unit_type, validate_unit_type};
 use crate::value::*;
 use simple_parser::ast::{Argument, ClassDef, EnumDef, FunctionDef, SelfMode, Type};
@@ -31,6 +31,20 @@ fn execute_function_body(
     impl_methods: &ImplMethods,
     wrap_async: bool,
 ) -> Result<Value, CompileError> {
+    // Save current CONST_NAMES and clear for function scope
+    // This prevents const names from caller leaking into callee
+    let saved_const_names = CONST_NAMES.with(|cell| cell.borrow().clone());
+    CONST_NAMES.with(|cell| cell.borrow_mut().clear());
+
+    // Check if this is an immutable fn method (has self but not is_me_method)
+    // Save and set IN_IMMUTABLE_FN_METHOD flag to detect self mutation errors
+    let saved_in_immutable_fn = IN_IMMUTABLE_FN_METHOD.with(|cell| *cell.borrow());
+    let is_method_with_self = local_env.contains_key("self") || bound_args.contains_key("self");
+    let is_immutable_fn_method = is_method_with_self && !func.is_me_method;
+    if is_immutable_fn_method {
+        IN_IMMUTABLE_FN_METHOD.with(|cell| *cell.borrow_mut() = true);
+    }
+
     // Insert bound arguments into environment
     for (name, val) in bound_args {
         local_env.insert(name, val);
@@ -45,6 +59,12 @@ fn execute_function_body(
         enums,
         impl_methods
     ));
+
+    // Restore IN_IMMUTABLE_FN_METHOD flag
+    IN_IMMUTABLE_FN_METHOD.with(|cell| *cell.borrow_mut() = saved_in_immutable_fn);
+
+    // Restore CONST_NAMES
+    CONST_NAMES.with(|cell| *cell.borrow_mut() = saved_const_names);
 
     // Validate return type
     validate_unit!(

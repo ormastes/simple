@@ -212,3 +212,19 @@ pub(crate) fn exit_class_scope() {
 pub(crate) fn get_current_class_context() -> Option<String> {
     CURRENT_CLASS_CONTEXT.with(|cell| cell.borrow().clone())
 }
+
+/// Clear all macro-related thread-local state.
+///
+/// This should be called between test runs to prevent memory leaks from:
+/// - Cached macro contracts
+/// - Pending tail injections
+/// - Class context state
+pub fn clear_macro_state() {
+    MACRO_INTRODUCED_SYMBOLS.with(|cell| *cell.borrow_mut() = None);
+    MACRO_TRACE_ENABLED.with(|cell| *cell.borrow_mut() = false);
+    MACRO_EXPANSION_DEPTH.with(|cell| *cell.borrow_mut() = 0);
+    PENDING_TAIL_INJECTIONS.with(|cell| cell.borrow_mut().clear());
+    BLOCK_DEPTH.with(|cell| *cell.borrow_mut() = 0);
+    MACRO_CONTRACT_CACHE.with(|cell| cell.borrow_mut().clear());
+    CURRENT_CLASS_CONTEXT.with(|cell| *cell.borrow_mut() = None);
+}

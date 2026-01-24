@@ -14,7 +14,7 @@ use simple_parser::ast::{ClassDef, FunctionDef};
 
 use crate::aop_config::AopConfig;
 use crate::di::DiConfig;
-pub use crate::effects::check_effect_violations;
+pub use crate::effects::{check_effect_violations, clear_effects_state};
 use crate::error::CompileError;
 pub use crate::value::BUILTIN_CHANNEL;
 use crate::value::{Env, Value};
@@ -29,16 +29,18 @@ pub(crate) use interpreter_state::{
     clear_moved_vars, get_aop_config, get_di_config, mark_as_moved, set_aop_config, set_di_config, ExecutionMode,
 };
 pub use interpreter_state::{
-    check_execution_limit, get_current_file, get_execution_count, get_interpreter_args, init_signal_handlers,
-    is_debug_mode, is_execution_limit_enabled, is_interrupted, reset_execution_count, reset_interrupt,
-    set_current_file, set_debug_mode, set_execution_limit, set_execution_limit_enabled, set_interpreter_args,
+    check_execution_limit, clear_interpreter_state, get_current_file, get_execution_count, get_interpreter_args,
+    init_signal_handlers, is_debug_mode, is_execution_limit_enabled, is_interrupted, reset_execution_count,
+    reset_interrupt, set_current_file, set_debug_mode, set_execution_limit, set_execution_limit_enabled,
+    set_interpreter_args,
 };
 pub(crate) use interpreter_state::{
     ACTOR_INBOX, ACTOR_OUTBOX, ACTOR_SPAWNER, AOP_CONFIG, BASE_UNIT_DIMENSIONS, BDD_REGISTRY_CONTEXTS,
     BDD_REGISTRY_GROUPS, BDD_REGISTRY_SHARED, COMPOUND_UNIT_DIMENSIONS, CONST_NAMES, CONTEXT_OBJECT, CONTEXT_VAR_NAME,
     CURRENT_FILE, DI_CONFIG, DI_SINGLETONS, EXECUTION_MODE, EXTERN_FUNCTIONS, GENERATOR_YIELDS, IMMUTABLE_VARS,
-    INTERFACE_BINDINGS, INTERPRETER_ARGS, INTERRUPT_REQUESTED, MACRO_DEFINITION_ORDER, MODULE_GLOBALS, MOVED_VARS,
-    SI_BASE_UNITS, UNIT_FAMILY_ARITHMETIC, UNIT_FAMILY_CONVERSIONS, UNIT_SUFFIX_TO_FAMILY, USER_MACROS,
+    IN_IMMUTABLE_FN_METHOD, INTERFACE_BINDINGS, INTERPRETER_ARGS, INTERRUPT_REQUESTED, MACRO_DEFINITION_ORDER,
+    MODULE_GLOBALS, MOVED_VARS, SI_BASE_UNITS, UNIT_FAMILY_ARITHMETIC, UNIT_FAMILY_CONVERSIONS, UNIT_SUFFIX_TO_FAMILY,
+    USER_MACROS,
 };
 
 // Core types and utilities
@@ -86,7 +88,9 @@ pub(crate) use interpreter_patterns::{
 // Control flow functions (if, while, loop, for, match)
 #[path = "../interpreter_control.rs"]
 mod interpreter_control;
-use interpreter_control::{exec_context, exec_for, exec_if, exec_if_expr, exec_loop, exec_match, exec_match_expr, exec_while, exec_with};
+use interpreter_control::{exec_context, exec_for, exec_if, exec_if_expr, exec_loop, exec_match, exec_match_expr, exec_while};
+// Re-export exec_with for use in interpreter_call module
+pub(crate) use interpreter_control::exec_with;
 
 mod expr;
 pub(crate) use expr::evaluate_expr;
@@ -111,6 +115,7 @@ pub(crate) use interpreter_helpers::{
 mod interpreter_call;
 pub(crate) use interpreter_call::IN_NEW_METHOD;
 pub(crate) use interpreter_call::exec_block_value;
+pub use interpreter_call::{clear_bdd_state, clear_class_instantiation_state};
 use interpreter_call::{
     bind_args, bind_args_with_injected, evaluate_call, exec_function, exec_function_with_captured_env,
     exec_function_with_values, exec_lambda, instantiate_class, BDD_AFTER_EACH, BDD_BEFORE_EACH, BDD_CONTEXT_DEFS,
@@ -141,8 +146,9 @@ mod interpreter_eval;
 #[path = "../interpreter_method/mod.rs"]
 mod interpreter_method;
 use interpreter_method::{evaluate_method_call, evaluate_method_call_with_self_update};
+pub use interpreter_method::find_and_exec_method_with_self;
 mod macros;
-pub use macros::set_macro_trace;
+pub use macros::{clear_macro_state, set_macro_trace};
 pub(crate) use macros::{
     enter_block_scope, enter_class_scope, evaluate_macro_invocation, exit_block_scope, exit_class_scope,
     preprocess_macro_contract_at_definition, queue_tail_injection, take_macro_introduced_symbols,

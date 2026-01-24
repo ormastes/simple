@@ -231,7 +231,11 @@ impl TypeChecker {
                 | Node::Calc(_)
                 | Node::Context(_)
                 | Node::With(_)
-                | Node::Expression(_) => {
+                | Node::Expression(_)
+                | Node::Pass(_)
+                | Node::Guard(_)
+                | Node::ClassAlias(_)
+                | Node::FunctionAlias(_) => {
                     // Statement nodes at module level are checked in second pass
                 }
                 // Module system nodes (parsed but not type-checked at this level)

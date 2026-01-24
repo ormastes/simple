@@ -2,7 +2,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use abfall::{GcContext, Heap};
-use simple_common::gc::GcAllocator;
+use simple_common::gc::{AllocResult, GcAllocator, MemoryLimitConfig, MemoryLimitExceeded, MemoryTracker};
 use tracing::instrument;
 
 /// Event emitted by the GC runtime when logging is enabled.
@@ -11,6 +11,7 @@ pub enum GcLogEventKind {
     Allocation,
     CollectionStart,
     CollectionEnd,
+    MemoryLimitExceeded,
 }
 
 /// Structured GC log entry.
@@ -37,16 +38,24 @@ impl fmt::Display for GcLogEvent {
                 self.reason.as_deref().unwrap_or("unknown"),
                 self.bytes_in_use
             ),
+            GcLogEventKind::MemoryLimitExceeded => write!(
+                f,
+                "gc:limit_exceeded reason={} bytes={}",
+                self.reason.as_deref().unwrap_or("unknown"),
+                self.bytes_in_use
+            ),
         }
     }
 }
 
 type LogSink = Arc<dyn Fn(GcLogEvent) + Send + Sync>;
 
-/// Thin wrapper around the Abfall GC with optional structured logging.
+/// Thin wrapper around the Abfall GC with optional structured logging and memory limits.
 pub struct GcRuntime {
     ctx: GcContext,
     log: Option<LogSink>,
+    /// Memory tracker for enforcing limits
+    memory_tracker: MemoryTracker,
 }
 
 impl Default for GcRuntime {
@@ -56,20 +65,52 @@ impl Default for GcRuntime {
 }
 
 impl GcRuntime {
-    /// Create a GC runtime with default options and no logging.
+    /// Create a GC runtime with default options, no logging, and default memory limit (1 GB).
     pub fn new() -> Self {
-        Self::with_options(GcOptions::new(), None)
+        Self::with_options(GcOptions::new(), None, MemoryLimitConfig::default())
     }
 
-    /// Create a GC runtime with custom options.
-    pub fn with_options(options: GcOptions, log: Option<LogSink>) -> Self {
+    /// Create a GC runtime with unlimited memory.
+    pub fn unlimited() -> Self {
+        Self::with_options(GcOptions::new(), None, MemoryLimitConfig::unlimited())
+    }
+
+    /// Create a GC runtime with custom options and memory limit.
+    pub fn with_options(options: GcOptions, log: Option<LogSink>, memory_config: MemoryLimitConfig) -> Self {
         let ctx = GcContext::with_options(options);
-        Self { ctx, log }
+        Self {
+            ctx,
+            log,
+            memory_tracker: MemoryTracker::with_config(memory_config),
+        }
+    }
+
+    /// Create a GC runtime with specific memory limit in bytes.
+    pub fn with_memory_limit(limit_bytes: usize) -> Self {
+        Self::with_options(GcOptions::new(), None, MemoryLimitConfig::with_limit(limit_bytes))
+    }
+
+    /// Create a GC runtime with memory limit in megabytes.
+    pub fn with_memory_limit_mb(limit_mb: usize) -> Self {
+        Self::with_options(GcOptions::new(), None, MemoryLimitConfig::with_limit_mb(limit_mb))
+    }
+
+    /// Create a GC runtime with memory limit in gigabytes.
+    pub fn with_memory_limit_gb(limit_gb: usize) -> Self {
+        Self::with_options(GcOptions::new(), None, MemoryLimitConfig::with_limit_gb(limit_gb))
     }
 
     /// Create a GC runtime that emits structured logs to the provided sink.
     pub fn with_logger(logger: impl Fn(GcLogEvent) + Send + Sync + 'static) -> Self {
-        Self::with_options(GcOptions::new(), Some(Arc::new(logger)))
+        Self::with_options(GcOptions::new(), Some(Arc::new(logger)), MemoryLimitConfig::default())
+    }
+
+    /// Create a GC runtime with both logger and memory limit.
+    pub fn with_logger_and_limit(
+        logger: impl Fn(GcLogEvent) + Send + Sync + 'static,
+        memory_config: MemoryLimitConfig,
+    ) -> Self {
+        Self::with_options(GcOptions::new(), Some(Arc::new(logger)), memory_config)
     }
 
     /// Create a GC runtime that prints verbose logs to stdout.
@@ -89,6 +130,26 @@ impl GcRuntime {
         self.ctx.heap().bytes_allocated()
     }
 
+    /// Get tracked memory usage (may differ from heap_bytes due to tracking granularity)
+    pub fn tracked_memory(&self) -> usize {
+        self.memory_tracker.current_bytes()
+    }
+
+    /// Get memory limit in bytes (0 if unlimited)
+    pub fn memory_limit(&self) -> usize {
+        self.memory_tracker.limit_bytes()
+    }
+
+    /// Check if memory is limited
+    pub fn is_memory_limited(&self) -> bool {
+        self.memory_tracker.is_limited()
+    }
+
+    /// Get memory usage as percentage of limit
+    pub fn memory_usage_percent(&self) -> f64 {
+        self.memory_tracker.usage_percent()
+    }
+
     /// Allocate data on the GC heap, emitting a log entry if enabled.
     pub fn allocate<T: Trace>(&self, data: T) -> GcRoot<T> {
         let root = self.ctx.allocate(data);
@@ -98,6 +159,20 @@ impl GcRuntime {
             bytes_in_use: self.heap_bytes(),
         });
         root
+    }
+
+    /// Try to allocate data, returning error if memory limit exceeded.
+    pub fn try_allocate<T: Trace>(&self, data: T, size_hint: usize) -> AllocResult<GcRoot<T>> {
+        // Check memory limit
+        self.memory_tracker.try_allocate(size_hint)?;
+
+        let root = self.ctx.allocate(data);
+        self.log_event(GcLogEvent {
+            kind: GcLogEventKind::Allocation,
+            reason: None,
+            bytes_in_use: self.heap_bytes(),
+        });
+        Ok(root)
     }
 
     /// Force a collection and log start/end markers.
@@ -115,6 +190,14 @@ impl GcRuntime {
             reason: Some(reason.to_string()),
             bytes_in_use: after,
         });
+
+        // Update memory tracker to reflect post-collection state
+        // This resets the tracker to match actual heap usage
+        let freed = before.saturating_sub(after);
+        if freed > 0 {
+            self.memory_tracker.deallocate(freed);
+        }
+
         after
     }
 
@@ -130,13 +213,39 @@ pub use abfall::{GcOptions, GcRoot, Trace};
 
 impl GcAllocator for GcRuntime {
     fn alloc_bytes(&self, bytes: &[u8]) -> usize {
+        // Try to allocate with limit checking, panic on failure
+        match self.try_alloc_bytes(bytes) {
+            Ok(ptr) => ptr,
+            Err(e) => panic!("{}", e),
+        }
+    }
+
+    fn try_alloc_bytes(&self, bytes: &[u8]) -> AllocResult<usize> {
+        // Check memory limit before allocating
+        self.memory_tracker.try_allocate(bytes.len())?;
+
         let root = self.ctx.allocate(bytes.to_vec());
         let ptr: *const Vec<u8> = root.as_ptr().as_ptr();
-        ptr as usize
+
+        self.log_event(GcLogEvent {
+            kind: GcLogEventKind::Allocation,
+            reason: None,
+            bytes_in_use: self.heap_bytes(),
+        });
+
+        Ok(ptr as usize)
     }
 
     fn collect(&self) {
         self.collect("ffi");
+    }
+
+    fn memory_usage(&self) -> usize {
+        self.tracked_memory()
+    }
+
+    fn memory_limit(&self) -> usize {
+        self.memory_tracker.limit_bytes()
     }
 }
 

@@ -50,9 +50,11 @@ impl RuntimeSymbolProvider for StaticSymbolProvider {
         // File I/O operations
         use simple_runtime::value::{
             rt_file_exists, rt_file_stat, rt_file_canonicalize, rt_file_read_text, rt_file_write_text, rt_file_copy,
-            rt_file_remove, rt_file_rename, rt_dir_create, rt_dir_list, rt_dir_remove, rt_file_find, rt_dir_glob,
+            rt_file_remove, rt_file_rename, rt_file_read_lines, rt_file_append_text, rt_file_read_bytes,
+            rt_file_write_bytes, rt_file_move, rt_dir_create, rt_dir_list, rt_dir_remove, rt_file_find, rt_dir_glob,
+            rt_dir_create_all, rt_dir_walk, rt_current_dir, rt_set_current_dir, rt_dir_remove_all,
             rt_file_open, rt_file_get_size, rt_file_close, rt_path_basename, rt_path_dirname, rt_path_ext,
-            rt_path_absolute, rt_path_separator,
+            rt_path_absolute, rt_path_separator, rt_path_stem, rt_path_relative, rt_path_join,
         };
         // Regex operations
         use simple_runtime::value::{
@@ -284,12 +286,22 @@ impl RuntimeSymbolProvider for StaticSymbolProvider {
             rt_file_copy,
             rt_file_remove,
             rt_file_rename,
+            rt_file_read_lines,
+            rt_file_append_text,
+            rt_file_read_bytes,
+            rt_file_write_bytes,
+            rt_file_move,
             // File I/O operations - directory
             rt_dir_create,
             rt_dir_list,
             rt_dir_remove,
             rt_file_find,
             rt_dir_glob,
+            rt_dir_create_all,
+            rt_dir_walk,
+            rt_current_dir,
+            rt_set_current_dir,
+            rt_dir_remove_all,
             // File I/O operations - descriptor
             rt_file_open,
             rt_file_get_size,
@@ -300,6 +312,9 @@ impl RuntimeSymbolProvider for StaticSymbolProvider {
             rt_path_ext,
             rt_path_absolute,
             rt_path_separator,
+            rt_path_stem,
+            rt_path_relative,
+            rt_path_join,
             // High-performance collections - HashMap
             rt_hashmap_new,
             rt_hashmap_insert,

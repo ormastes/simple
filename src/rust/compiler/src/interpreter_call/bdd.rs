@@ -470,19 +470,25 @@ pub(super) fn eval_bdd_builtin(
                 return Ok(Some(Value::Nil));
             }
 
+            // Create a fresh environment for this test to prevent memory accumulation.
+            // Each test gets its own copy of the environment that is discarded after the test.
+            // This prevents values created during one test from persisting into subsequent tests.
+            let mut test_env = env.clone();
+
             let before_hooks: Vec<Value> =
                 BDD_BEFORE_EACH.with(|cell| cell.borrow().iter().flat_map(|level| level.clone()).collect());
             for hook in before_hooks {
-                exec_block_value(hook, env, functions, classes, enums, impl_methods)?;
+                exec_block_value(hook, &mut test_env, functions, classes, enums, impl_methods)?;
             }
 
-            let result = exec_block_value(block, env, functions, classes, enums, impl_methods);
+            let result = exec_block_value(block, &mut test_env, functions, classes, enums, impl_methods);
 
             let after_hooks: Vec<Value> =
                 BDD_AFTER_EACH.with(|cell| cell.borrow().iter().rev().flat_map(|level| level.clone()).collect());
             for hook in after_hooks {
-                let _ = exec_block_value(hook, env, functions, classes, enums, impl_methods);
+                let _ = exec_block_value(hook, &mut test_env, functions, classes, enums, impl_methods);
             }
+            // test_env is dropped here, freeing memory used by this test
 
             BDD_INSIDE_IT.with(|cell| *cell.borrow_mut() = false);
 
@@ -514,6 +520,11 @@ pub(super) fn eval_bdd_builtin(
                         println!("{}\x1b[32m✓ {}\x1b[0m", indent_str, name_str);
                         BDD_COUNTS.with(|cell| cell.borrow_mut().0 += 1);
                     }
+
+                    // Clear lazy values after each test to reduce memory accumulation.
+                    // This forces lazy values to be re-evaluated for each test, which is
+                    // the expected behavior (fresh values per test).
+                    BDD_LAZY_VALUES.with(|cell| cell.borrow_mut().clear());
 
                     Ok(Some(result?))
                 }
@@ -963,4 +974,37 @@ pub(super) fn eval_bdd_builtin(
         }
         _ => Ok(None),
     }
+}
+
+/// Clear all BDD testing state.
+///
+/// This function clears all thread-local BDD state to prevent memory leaks
+/// and state pollution between test files. It clears:
+/// - Indentation level
+/// - Pass/fail counts
+/// - Expectation state
+/// - Shared examples
+/// - Context definitions
+/// - Before/after hooks
+/// - Lazy values
+/// - Group stack
+/// - Global registries
+pub fn clear_bdd_state() {
+    // Clear local BDD state
+    BDD_INDENT.with(|cell| *cell.borrow_mut() = 0);
+    BDD_COUNTS.with(|cell| *cell.borrow_mut() = (0, 0));
+    BDD_EXPECT_FAILED.with(|cell| *cell.borrow_mut() = false);
+    BDD_INSIDE_IT.with(|cell| *cell.borrow_mut() = false);
+    BDD_FAILURE_MSG.with(|cell| *cell.borrow_mut() = None);
+    BDD_SHARED_EXAMPLES.with(|cell| cell.borrow_mut().clear());
+    BDD_CONTEXT_DEFS.with(|cell| cell.borrow_mut().clear());
+    BDD_BEFORE_EACH.with(|cell| *cell.borrow_mut() = vec![vec![]]);
+    BDD_AFTER_EACH.with(|cell| *cell.borrow_mut() = vec![vec![]]);
+    BDD_LAZY_VALUES.with(|cell| cell.borrow_mut().clear());
+    BDD_GROUP_STACK.with(|cell| cell.borrow_mut().clear());
+
+    // Clear global registries
+    BDD_REGISTRY_GROUPS.with(|cell: &BddGroupsCell| cell.borrow_mut().clear());
+    BDD_REGISTRY_CONTEXTS.with(|cell: &BddContextsCell| cell.borrow_mut().clear());
+    BDD_REGISTRY_SHARED.with(|cell: &BddSharedCell| cell.borrow_mut().clear());
 }

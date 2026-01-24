@@ -381,6 +381,9 @@ impl<'a> Lexer<'a> {
                     } else {
                         TokenKind::DoubleDot
                     }
+                } else if self.check('?') {
+                    self.advance();
+                    TokenKind::DotQuestion
                 } else {
                     TokenKind::Dot
                 }

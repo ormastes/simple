@@ -7,5 +7,8 @@ mod binary;
 mod core;
 mod helpers;
 mod no_paren;
+pub mod placeholder;
 mod postfix;
 mod primary;
+
+pub use placeholder::transform_placeholder_lambda;

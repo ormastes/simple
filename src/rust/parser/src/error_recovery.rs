@@ -304,8 +304,13 @@ pub fn detect_common_mistake(current: &Token, previous: &Token, next: Option<&To
         }
     }
 
-    // Check for 'void' (Java/C++)
-    if current.lexeme == "void" && matches!(current.kind, TokenKind::Identifier { .. }) {
+    // Check for 'void' (Java/C++) - but NOT when used as a type annotation after ->
+    // In Simple, -> void is a valid (but verbose) way to say "no return value"
+    // Only flag Java-style "void foo()" pattern, not "fn foo() -> void"
+    if current.lexeme == "void"
+        && matches!(current.kind, TokenKind::Identifier { .. })
+        && !matches!(previous.kind, TokenKind::Arrow)
+    {
         return Some(CommonMistake::JavaVoid);
     }
 
@@ -314,9 +319,29 @@ pub fn detect_common_mistake(current: &Token, previous: &Token, next: Option<&To
     // - Method names after dot (e.g., Type.new())
     // - Function names after fn keyword (e.g., fn new() or static fn new())
     // - Static method calls after :: (e.g., List::new())
+    // - Variable names in patterns (e.g., val (saved_path, new, diff) = ...)
+    // - After comma in destructuring (e.g., val (x, new, y) = ...)
+    // - After opening paren in patterns (e.g., val (new, ...) = ...)
+    // - After operators (e.g., is_new or new)
     // Only flag standalone 'new Type()' pattern as a mistake
     if matches!(current.kind, TokenKind::New)
-        && !matches!(previous.kind, TokenKind::Dot | TokenKind::Fn | TokenKind::DoubleColon)
+        && !matches!(
+            previous.kind,
+            TokenKind::Dot
+                | TokenKind::Fn
+                | TokenKind::DoubleColon
+                | TokenKind::Comma
+                | TokenKind::LParen
+                | TokenKind::Val
+                | TokenKind::Var
+                | TokenKind::Or
+                | TokenKind::And
+                | TokenKind::Assign
+                | TokenKind::Plus
+                | TokenKind::Minus
+                | TokenKind::Star
+                | TokenKind::Slash
+        )
     {
         return Some(CommonMistake::JavaNew);
     }

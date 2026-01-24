@@ -49,6 +49,7 @@ pub mod system;
 pub mod io;
 pub mod network;
 pub mod filesystem;
+pub mod file_io;
 pub mod terminal;
 pub mod atomic;
 pub mod concurrency;
@@ -56,6 +57,7 @@ pub mod tui;
 pub mod repl;
 pub mod gpu;
 pub mod diagram;
+pub mod memory;
 
 // Import parent interpreter types
 type Enums = HashMap<String, EnumDef>;
@@ -381,6 +383,17 @@ pub(crate) fn call_extern_function(
         "rt_env_cwd" => system::rt_env_cwd(&evaluated),
 
         // ====================================================================
+        // Memory Operations (7 functions)
+        // ====================================================================
+        "memory_usage" => memory::memory_usage(&evaluated),
+        "memory_limit" => memory::memory_limit(&evaluated),
+        "memory_usage_percent" => memory::memory_usage_percent(&evaluated),
+        "is_memory_limited" => memory::is_memory_limited(&evaluated),
+        "default_memory_limit" => memory::default_memory_limit(&evaluated),
+        "format_bytes" => memory::format_bytes(&evaluated),
+        "parse_memory_size" => memory::parse_memory_size(&evaluated),
+
+        // ====================================================================
         // Concurrency Operations (15 functions: Thread + Channel)
         // ====================================================================
         "rt_thread_available_parallelism" => concurrency::rt_thread_available_parallelism(&evaluated),
@@ -477,6 +490,49 @@ pub(crate) fn call_extern_function(
         "rt_diagram_generate_class" => diagram::rt_diagram_generate_class(&evaluated),
         "rt_diagram_generate_arch" => diagram::rt_diagram_generate_arch(&evaluated),
         "rt_diagram_free_string" => diagram::rt_diagram_free_string(&evaluated),
+
+        // ====================================================================
+        // File I/O FFI Operations (rt_* functions)
+        // ====================================================================
+        // File metadata
+        "rt_file_exists" => file_io::rt_file_exists(&evaluated),
+        "rt_file_stat" => file_io::rt_file_stat(&evaluated),
+        // File operations
+        "rt_file_canonicalize" => file_io::rt_file_canonicalize(&evaluated),
+        "rt_file_read_text" => file_io::rt_file_read_text(&evaluated),
+        "rt_file_write_text" => file_io::rt_file_write_text(&evaluated),
+        "rt_file_copy" => file_io::rt_file_copy(&evaluated),
+        "rt_file_remove" => file_io::rt_file_remove(&evaluated),
+        "rt_file_rename" => file_io::rt_file_rename(&evaluated),
+        "rt_file_read_lines" => file_io::rt_file_read_lines(&evaluated),
+        "rt_file_append_text" => file_io::rt_file_append_text(&evaluated),
+        "rt_file_read_bytes" => file_io::rt_file_read_bytes(&evaluated),
+        "rt_file_write_bytes" => file_io::rt_file_write_bytes(&evaluated),
+        "rt_file_move" => file_io::rt_file_move(&evaluated),
+        // Directory operations
+        "rt_dir_create" => file_io::rt_dir_create(&evaluated),
+        "rt_dir_list" => file_io::rt_dir_list(&evaluated),
+        "rt_dir_remove" => file_io::rt_dir_remove(&evaluated),
+        "rt_file_find" => file_io::rt_file_find(&evaluated),
+        "rt_dir_glob" => file_io::rt_dir_glob(&evaluated),
+        "rt_dir_create_all" => file_io::rt_dir_create_all(&evaluated),
+        "rt_dir_walk" => file_io::rt_dir_walk(&evaluated),
+        "rt_current_dir" => file_io::rt_current_dir(&evaluated),
+        "rt_set_current_dir" => file_io::rt_set_current_dir(&evaluated),
+        "rt_dir_remove_all" => file_io::rt_dir_remove_all(&evaluated),
+        // File descriptor operations
+        "rt_file_open" => file_io::rt_file_open(&evaluated),
+        "rt_file_get_size" => file_io::rt_file_get_size(&evaluated),
+        "rt_file_close" => file_io::rt_file_close(&evaluated),
+        // Path operations
+        "rt_path_basename" => file_io::rt_path_basename(&evaluated),
+        "rt_path_dirname" => file_io::rt_path_dirname(&evaluated),
+        "rt_path_ext" => file_io::rt_path_ext(&evaluated),
+        "rt_path_absolute" => file_io::rt_path_absolute(&evaluated),
+        "rt_path_separator" => file_io::rt_path_separator(&evaluated),
+        "rt_path_stem" => file_io::rt_path_stem(&evaluated),
+        "rt_path_relative" => file_io::rt_path_relative(&evaluated),
+        "rt_path_join" => file_io::rt_path_join(&evaluated),
 
         // Unknown extern function
         _ => Err(common::unknown_function(name)),

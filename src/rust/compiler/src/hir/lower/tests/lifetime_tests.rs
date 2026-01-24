@@ -145,7 +145,7 @@ class Counter:
     fn new() -> Counter:
         Counter { count: 0 }
 
-    fn increment():
+    me increment():
         self.count = self.count + 1
 
     fn get_count() -> i32:
@@ -291,8 +291,8 @@ struct Node:
 
 fn test_unique():
     val node: &Node = Node { data: 42 }
-    val alias = node
-    alias.data
+    val node_ref = node
+    node_ref.data
 "#;
 
     let result = lower_with_warnings(source);

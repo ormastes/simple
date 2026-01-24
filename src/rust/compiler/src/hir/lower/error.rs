@@ -65,6 +65,10 @@ pub enum LowerError {
     #[error("Static method `{class_name}.{method_name}()` not yet supported in native compilation. Use interpreter mode or define as a free function")]
     StaticMethodNotSupported { class_name: String, method_name: String },
 
+    /// E1052: Attempted to mutate self in an immutable fn method
+    #[error("cannot modify self in immutable fn method. Use `me` instead of `fn` to allow self mutation")]
+    SelfMutationInImmutableMethod,
+
     /// CTR-032: Impure function call in contract expression
     #[error(
         "Impure function call '{func_name}' in contract expression. Only #[pure] functions can be called in contracts"

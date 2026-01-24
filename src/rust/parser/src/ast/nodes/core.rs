@@ -25,6 +25,10 @@ pub enum Node {
     Mixin(MixinDef),
     Actor(ActorDef),
     TypeAlias(TypeAliasDef),
+    /// Class/struct/enum alias: `alias NewName = OldName`
+    ClassAlias(ClassAliasDef),
+    /// Function alias: `fn new_name = old_name`
+    FunctionAlias(FunctionAliasDef),
     Extern(ExternDef),
     Macro(MacroDef),
     Unit(UnitDef),
@@ -70,6 +74,9 @@ pub enum Node {
     Break(BreakStmt),
     Continue(ContinueStmt),
     Pass(PassStmt),
+    /// Guard clause: `? condition -> result` or `? else -> result`
+    /// Desugars to early return if condition is true
+    Guard(GuardStmt),
     Assert(AssertStmt),
     Assume(AssumeStmt),
     Admit(AdmitStmt),
@@ -581,6 +588,19 @@ pub enum Expr {
     },
     /// Try operator: expr? - unwrap Ok or early return Err
     Try(Box<Expr>),
+
+    /// Existence check operator: expr.? - returns bool indicating if value is present
+    /// Returns true if:
+    /// - Option/Result: is Some/Ok
+    /// - Collections (List, Set, Dict): is non-empty
+    /// - String: is non-empty
+    /// - Numbers, Bool: always true (they are values)
+    /// Returns false if:
+    /// - Option: is None
+    /// - Result: is Err
+    /// - Collections: is empty
+    /// - String: is empty
+    ExistsCheck(Box<Expr>),
 
     /// Safe unwrap with default: expr unwrap or: default
     /// Returns the inner value if Some/Ok, otherwise evaluates default

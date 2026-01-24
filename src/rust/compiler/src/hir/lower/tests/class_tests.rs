@@ -23,3 +23,72 @@ fn test_unknown_variable_error() {
 
     assert!(matches!(result, Err(LowerError::UnknownVariable(_))));
 }
+
+/// E1052: Self mutation in immutable fn method should error
+#[test]
+fn test_self_mutation_in_fn_method_error() {
+    // fn methods cannot mutate self fields
+    let source = r#"
+class Counter:
+    count: i32
+
+    fn increment():
+        self.count = self.count + 1
+"#;
+    let result = parse_and_lower(source);
+    assert!(
+        matches!(result, Err(LowerError::SelfMutationInImmutableMethod)),
+        "Self mutation in fn method should produce E1052 error"
+    );
+}
+
+/// E1052: Nested self field mutation in fn method should error
+#[test]
+fn test_nested_self_mutation_in_fn_method_error() {
+    // fn methods cannot mutate nested self fields either
+    let source = r#"
+struct Inner:
+    value: i32
+
+class Outer:
+    inner: Inner
+
+    fn update():
+        self.inner.value = 10
+"#;
+    let result = parse_and_lower(source);
+    assert!(
+        matches!(result, Err(LowerError::SelfMutationInImmutableMethod)),
+        "Nested self mutation in fn method should produce E1052 error"
+    );
+}
+
+/// Self mutation in me method should work
+#[test]
+fn test_self_mutation_in_me_method_ok() {
+    // me methods can mutate self fields
+    let source = r#"
+class Counter:
+    count: i32
+
+    me increment():
+        self.count = self.count + 1
+"#;
+    let result = parse_and_lower(source);
+    assert!(result.is_ok(), "Self mutation in me method should work");
+}
+
+/// Reading self in fn method should work
+#[test]
+fn test_self_read_in_fn_method_ok() {
+    // fn methods can read self fields
+    let source = r#"
+class Counter:
+    count: i32
+
+    fn get_count() -> i32:
+        self.count
+"#;
+    let result = parse_and_lower(source);
+    assert!(result.is_ok(), "Reading self in fn method should work");
+}

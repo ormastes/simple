@@ -37,7 +37,10 @@ class MockFunction:
             timestamp: 0,
             call_number: self.calls.len() as i32
         )
-        self.calls.append(record)
+        # Workaround: nested field mutation requires copy-modify-assign
+        var calls = self.calls
+        calls.append(record)
+        self.calls = calls
 
     me set_return_values(values: List<text>):
         self.return_values = values
@@ -226,7 +229,8 @@ class Matcher:
         Matcher(matches_fn: fn_pred)
 
     fn matches(arg: text) -> bool:
-        self.matches_fn(arg)
+        val fn_ref = self.matches_fn
+        fn_ref(arg)
 
 # ============================================================================
 # Phase 3: Advanced Features
@@ -260,7 +264,7 @@ class CallAnalyzer:
 
     fn get_first_call() -> Option<CallRecord>:
         if self.mockfn.calls.len() == 0:
-            return nil
+            return None
         Some(self.mockfn.calls[0])
 
     fn get_calls_between(start_idx: i32, end_idx: i32) -> List<CallRecord>:
@@ -277,9 +281,10 @@ struct ReturnValue:
 class SequentialReturns:
     returns: List<ReturnValue>
     current_idx: i32
+    times_used: i32
 
     static fn new() -> SequentialReturns:
-        SequentialReturns(returns: [], current_idx: 0)
+        SequentialReturns(returns: [], current_idx: 0, times_used: 0)
 
     me add_return(value: text, times: i32):
         self.returns.append(ReturnValue(value: value, times: times))
@@ -287,17 +292,19 @@ class SequentialReturns:
     me add_return_once(value: text):
         self.add_return(value, 1)
 
-    fn next_value() -> Option<text>:
+    me next_value() -> Option<text>:
         if self.current_idx >= self.returns.len() as i32:
-            return nil
+            return None
         val current = self.returns[self.current_idx as usize]
-        current.times = current.times - 1
-        if current.times == 0:
+        self.times_used = self.times_used + 1
+        if self.times_used >= current.times:
             self.current_idx = self.current_idx + 1
+            self.times_used = 0
         Some(current.value)
 
     me reset():
         self.current_idx = 0
+        self.times_used = 0
 
 class Spy:
     name: text
@@ -1285,11 +1292,20 @@ class TaskScheduler:
 
         match best_idx:
             Some(i):
-                self.tasks[i as usize].executed = true
-                self.tasks[i as usize].execution_time = self.current_time
-                self.current_time = self.current_time + self.tasks[i as usize].delay_ms
-                self.executed_order.append(self.tasks[i as usize].id)
-                Some(self.tasks[i as usize])
+                val task = self.tasks[i as usize]
+                val updated_task = ScheduledTask(
+                    id: task.id,
+                    name: task.name,
+                    priority: task.priority,
+                    delay_ms: task.delay_ms,
+                    executed: true,
+                    execution_time: self.current_time,
+                    result: task.result
+                )
+                self.tasks[i as usize] = updated_task
+                self.current_time = self.current_time + task.delay_ms
+                self.executed_order.append(task.id)
+                Some(updated_task)
             nil: nil
 
     me execute_all():

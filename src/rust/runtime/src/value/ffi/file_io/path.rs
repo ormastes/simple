@@ -4,7 +4,9 @@
 //! - Basename: Get filename from path
 //! - Dirname: Get directory from path
 //! - Extension: Get file extension
+//! - Stem: Get filename without extension
 //! - Absolute: Convert to absolute path
+//! - Relative: Compute relative path
 //! - Separator: Get platform-specific path separator
 
 use crate::value::collections::rt_string_new;
@@ -108,6 +110,91 @@ pub extern "C" fn rt_path_separator() -> RuntimeValue {
     const SEPARATOR: &[u8] = b"/";
 
     unsafe { rt_string_new(SEPARATOR.as_ptr(), SEPARATOR.len() as u64) }
+}
+
+/// Get file stem (filename without extension)
+/// For "file.txt" returns "file", for "archive.tar.gz" returns "archive.tar"
+#[no_mangle]
+pub unsafe extern "C" fn rt_path_stem(path_ptr: *const u8, path_len: u64) -> RuntimeValue {
+    path_string_helper(path_ptr, path_len, |path| {
+        path.file_stem().and_then(|s| s.to_str()).unwrap_or("")
+    })
+}
+
+/// Compute relative path from base to target
+/// For target="/a/b/c" and base="/a", returns "b/c"
+#[no_mangle]
+pub unsafe extern "C" fn rt_path_relative(
+    path_ptr: *const u8,
+    path_len: u64,
+    base_ptr: *const u8,
+    base_len: u64,
+) -> RuntimeValue {
+    if path_ptr.is_null() || base_ptr.is_null() {
+        return rt_string_new(b"".as_ptr(), 0);
+    }
+
+    let path_bytes = std::slice::from_raw_parts(path_ptr, path_len as usize);
+    let path_str = match std::str::from_utf8(path_bytes) {
+        Ok(s) => s,
+        Err(_) => return rt_string_new(b"".as_ptr(), 0),
+    };
+
+    let base_bytes = std::slice::from_raw_parts(base_ptr, base_len as usize);
+    let base_str = match std::str::from_utf8(base_bytes) {
+        Ok(s) => s,
+        Err(_) => return rt_string_new(b"".as_ptr(), 0),
+    };
+
+    let path = Path::new(path_str);
+    let base = Path::new(base_str);
+
+    // Try to strip the base prefix
+    match path.strip_prefix(base) {
+        Ok(relative) => {
+            let rel_str = relative.to_string_lossy();
+            let bytes = rel_str.as_bytes();
+            rt_string_new(bytes.as_ptr(), bytes.len() as u64)
+        }
+        Err(_) => {
+            // Paths don't share a common prefix - return original path
+            rt_string_new(path_str.as_ptr(), path_str.len() as u64)
+        }
+    }
+}
+
+/// Join two paths together
+#[no_mangle]
+pub unsafe extern "C" fn rt_path_join(
+    path1_ptr: *const u8,
+    path1_len: u64,
+    path2_ptr: *const u8,
+    path2_len: u64,
+) -> RuntimeValue {
+    if path1_ptr.is_null() {
+        return rt_string_new(b"".as_ptr(), 0);
+    }
+
+    let path1_bytes = std::slice::from_raw_parts(path1_ptr, path1_len as usize);
+    let path1_str = match std::str::from_utf8(path1_bytes) {
+        Ok(s) => s,
+        Err(_) => return rt_string_new(b"".as_ptr(), 0),
+    };
+
+    if path2_ptr.is_null() || path2_len == 0 {
+        return rt_string_new(path1_str.as_ptr(), path1_str.len() as u64);
+    }
+
+    let path2_bytes = std::slice::from_raw_parts(path2_ptr, path2_len as usize);
+    let path2_str = match std::str::from_utf8(path2_bytes) {
+        Ok(s) => s,
+        Err(_) => return rt_string_new(path1_str.as_ptr(), path1_str.len() as u64),
+    };
+
+    let joined = Path::new(path1_str).join(path2_str);
+    let joined_str = joined.to_string_lossy();
+    let bytes = joined_str.as_bytes();
+    rt_string_new(bytes.as_ptr(), bytes.len() as u64)
 }
 
 // ============================================================================
@@ -226,6 +313,93 @@ mod tests {
             let result2 = rt_path_dirname(ptr2, len2);
             let dirname2 = extract_string(result2);
             assert_eq!(dirname2, "");
+        }
+    }
+
+    #[test]
+    fn test_path_stem() {
+        unsafe {
+            // Simple file
+            let (ptr, len) = str_to_ptr("file.txt");
+            let result = rt_path_stem(ptr, len);
+            let stem = extract_string(result);
+            assert_eq!(stem, "file");
+
+            // File with multiple dots
+            let (ptr2, len2) = str_to_ptr("archive.tar.gz");
+            let result2 = rt_path_stem(ptr2, len2);
+            let stem2 = extract_string(result2);
+            assert_eq!(stem2, "archive.tar");
+
+            // No extension
+            let (ptr3, len3) = str_to_ptr("README");
+            let result3 = rt_path_stem(ptr3, len3);
+            let stem3 = extract_string(result3);
+            assert_eq!(stem3, "README");
+
+            // Hidden file
+            let (ptr4, len4) = str_to_ptr(".gitignore");
+            let result4 = rt_path_stem(ptr4, len4);
+            let stem4 = extract_string(result4);
+            assert_eq!(stem4, ".gitignore");
+
+            // Full path
+            let (ptr5, len5) = str_to_ptr("/path/to/file.txt");
+            let result5 = rt_path_stem(ptr5, len5);
+            let stem5 = extract_string(result5);
+            assert_eq!(stem5, "file");
+        }
+    }
+
+    #[test]
+    fn test_path_relative() {
+        unsafe {
+            // Simple relative path
+            let (path_ptr, path_len) = str_to_ptr("/a/b/c/file.txt");
+            let (base_ptr, base_len) = str_to_ptr("/a/b");
+            let result = rt_path_relative(path_ptr, path_len, base_ptr, base_len);
+            let relative = extract_string(result);
+            assert_eq!(relative, "c/file.txt");
+
+            // Same path
+            let (path_ptr2, path_len2) = str_to_ptr("/a/b");
+            let (base_ptr2, base_len2) = str_to_ptr("/a/b");
+            let result2 = rt_path_relative(path_ptr2, path_len2, base_ptr2, base_len2);
+            let relative2 = extract_string(result2);
+            assert_eq!(relative2, "");
+
+            // No common prefix - returns original
+            let (path_ptr3, path_len3) = str_to_ptr("/x/y/z");
+            let (base_ptr3, base_len3) = str_to_ptr("/a/b");
+            let result3 = rt_path_relative(path_ptr3, path_len3, base_ptr3, base_len3);
+            let relative3 = extract_string(result3);
+            assert_eq!(relative3, "/x/y/z");
+        }
+    }
+
+    #[test]
+    fn test_path_join() {
+        unsafe {
+            // Simple join
+            let (p1_ptr, p1_len) = str_to_ptr("/home/user");
+            let (p2_ptr, p2_len) = str_to_ptr("file.txt");
+            let result = rt_path_join(p1_ptr, p1_len, p2_ptr, p2_len);
+            let joined = extract_string(result);
+            assert_eq!(joined, "/home/user/file.txt");
+
+            // Join with nested path
+            let (p3_ptr, p3_len) = str_to_ptr("/home");
+            let (p4_ptr, p4_len) = str_to_ptr("user/docs");
+            let result2 = rt_path_join(p3_ptr, p3_len, p4_ptr, p4_len);
+            let joined2 = extract_string(result2);
+            assert_eq!(joined2, "/home/user/docs");
+
+            // Second path is absolute (replaces first)
+            let (p5_ptr, p5_len) = str_to_ptr("/home/user");
+            let (p6_ptr, p6_len) = str_to_ptr("/etc/config");
+            let result3 = rt_path_join(p5_ptr, p5_len, p6_ptr, p6_len);
+            let joined3 = extract_string(result3);
+            assert_eq!(joined3, "/etc/config");
         }
     }
 }

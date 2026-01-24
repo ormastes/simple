@@ -34,7 +34,7 @@ mod substitution;
 pub(crate) use expansion::{macro_has_const_params, preprocess_macro_contract_at_definition};
 pub(crate) use helpers::{build_macro_const_bindings, const_value_to_string};
 pub(crate) use invocation::evaluate_macro_invocation;
-pub use state::set_macro_trace;
+pub use state::{clear_macro_state, set_macro_trace};
 pub(crate) use state::{
     enter_block_scope, enter_class_scope, exit_block_scope, exit_class_scope, get_cached_macro_contract,
     get_current_class_context, has_cached_macro_contract, queue_tail_injection, take_macro_introduced_symbols,

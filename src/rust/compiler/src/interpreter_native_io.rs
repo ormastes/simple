@@ -613,3 +613,18 @@ pub fn native_term_poll(_args: &[Value]) -> Result<Value, CompileError> {
     // On non-Unix, assume input is always available
     Ok(Value::Int(1))
 }
+
+/// Clear all file handles and I/O state.
+///
+/// This should be called between test runs to prevent memory leaks
+/// from unclosed file handles.
+pub fn clear_io_state() {
+    FILE_HANDLES.with(|handles| {
+        // Drop all file handles (this closes them)
+        handles.borrow_mut().clear();
+    });
+    #[cfg(unix)]
+    ORIGINAL_TERMIOS.with(|termios| {
+        *termios.borrow_mut() = None;
+    });
+}

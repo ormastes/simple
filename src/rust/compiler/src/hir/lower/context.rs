@@ -21,6 +21,11 @@ pub(super) struct FunctionContext {
     pub contract_ctx: Option<ContractLoweringContext>,
     /// Capability tracking for each local variable (local_id -> capability)
     pub local_capabilities: HashMap<usize, ReferenceCapability>,
+    /// Whether this function has an implicit self parameter (is a method)
+    pub has_self: bool,
+    /// Whether this is a mutable method (uses `me` keyword instead of `fn`)
+    /// Mutable methods can modify self and the changes persist
+    pub is_me_method: bool,
 }
 
 impl FunctionContext {
@@ -31,6 +36,21 @@ impl FunctionContext {
             return_type,
             contract_ctx: None,
             local_capabilities: HashMap::new(),
+            has_self: false,
+            is_me_method: false,
+        }
+    }
+
+    /// Create a new function context for a method
+    pub fn new_method(return_type: TypeId, is_me_method: bool) -> Self {
+        Self {
+            locals: Vec::new(),
+            local_map: HashMap::new(),
+            return_type,
+            contract_ctx: None,
+            local_capabilities: HashMap::new(),
+            has_self: true,
+            is_me_method,
         }
     }
 

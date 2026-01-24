@@ -1,4 +1,5 @@
 mod context;
+pub mod deprecation_warning;
 mod error;
 mod expr;
 mod import_loader;
@@ -11,6 +12,7 @@ mod stmt_lowering;
 mod type_registration;
 mod type_resolver;
 
+pub use deprecation_warning::{DeprecationWarning, DeprecationWarningCollector};
 pub use error::{LowerError, LowerResult};
 pub use memory_warning::{MemoryWarning, MemoryWarningCode, MemoryWarningCollector, WarningSummary};
 pub use lowerer::Lowerer;

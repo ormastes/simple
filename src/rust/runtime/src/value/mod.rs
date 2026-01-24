@@ -276,12 +276,22 @@ pub use ffi::{
     rt_file_copy,
     rt_file_remove,
     rt_file_rename,
+    rt_file_read_lines,
+    rt_file_append_text,
+    rt_file_read_bytes,
+    rt_file_write_bytes,
+    rt_file_move,
     // Directory ops
     rt_dir_create,
     rt_dir_list,
     rt_dir_remove,
     rt_file_find,
     rt_dir_glob,
+    rt_dir_create_all,
+    rt_dir_walk,
+    rt_current_dir,
+    rt_set_current_dir,
+    rt_dir_remove_all,
     // Descriptor ops
     rt_file_open,
     rt_file_get_size,
@@ -292,6 +302,9 @@ pub use ffi::{
     rt_path_ext,
     rt_path_absolute,
     rt_path_separator,
+    rt_path_stem,
+    rt_path_relative,
+    rt_path_join,
 };
 
 // Re-export atomic operations FFI functions

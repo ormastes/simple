@@ -157,6 +157,28 @@ pub struct PassStmt {
     pub span: Span,
 }
 
+/// Guard clause statement: `? condition -> result` or `? else -> result`
+/// Desugars to early return if condition is true.
+///
+/// # Example
+/// ```simple
+/// fn divide(x: i64, y: i64) -> Option<i64>:
+///     ? y == 0 -> None       # Early return if y is 0
+///     Some(x / y)
+///
+/// fn process(data: Option<Data>):
+///     ? data.is_none() -> return   # Early return if no data
+///     val d = data.unwrap()
+/// ```
+#[derive(Debug, Clone, PartialEq)]
+pub struct GuardStmt {
+    pub span: Span,
+    /// The condition to check (None if this is `? else -> result`)
+    pub condition: Option<Expr>,
+    /// The result expression if condition is true
+    pub result: Expr,
+}
+
 /// Assert statement for inline contract checks
 /// assert condition
 /// assert condition, "message"

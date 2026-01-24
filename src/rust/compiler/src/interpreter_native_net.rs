@@ -736,3 +736,14 @@ pub fn native_http_send_interp(args: &[Value]) -> Result<Value, CompileError> {
         }
     }
 }
+
+/// Clear all socket handles and network state.
+///
+/// This should be called between test runs to prevent memory leaks
+/// from unclosed sockets.
+pub fn clear_net_state() {
+    SOCKET_HANDLES.with(|handles| {
+        // Drop all socket handles (this closes them)
+        handles.borrow_mut().clear();
+    });
+}

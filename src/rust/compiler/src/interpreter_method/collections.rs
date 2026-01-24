@@ -30,7 +30,7 @@ pub fn handle_array_methods(
             let idx = eval_arg_usize(args, 0, 0, env, functions, classes, enums, impl_methods)?;
             arr.get(idx).cloned().unwrap_or(Value::Nil)
         }
-        "contains" => {
+        "has" | "contains" => {
             let needle = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
             Value::Bool(arr.contains(&needle))
         }
@@ -87,7 +87,7 @@ pub fn handle_array_methods(
             }
             Value::Array(new_arr)
         }
-        "reverse" => {
+        "rev" | "reverse" => {
             let mut new_arr = arr.to_vec();
             new_arr.reverse();
             Value::Array(new_arr)
@@ -354,7 +354,7 @@ pub fn handle_array_methods(
             let result: Vec<Value> = arr.chunks(size).map(|chunk| Value::Array(chunk.to_vec())).collect();
             Value::Array(result)
         }
-        "unique" | "distinct" => {
+        "uniq" | "unique" | "distinct" => {
             let mut seen = Vec::new();
             let mut result = Vec::new();
             for item in arr {
@@ -584,7 +584,7 @@ pub fn handle_tuple_methods(
         "first" => tup.first().cloned().unwrap_or(Value::Nil),
         "last" => tup.last().cloned().unwrap_or(Value::Nil),
         "to_array" => Value::Array(tup.to_vec()),
-        "contains" => {
+        "has" | "contains" => {
             let needle = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
             Value::Bool(tup.contains(&needle))
         }
@@ -597,7 +597,7 @@ pub fn handle_tuple_methods(
             }
             Value::Int(-1)
         }
-        "reverse" => {
+        "rev" | "reverse" => {
             let mut new_tup = tup.to_vec();
             new_tup.reverse();
             Value::Tuple(new_tup)
@@ -676,7 +676,7 @@ pub fn handle_dict_methods(
     let result = match method {
         "len" => Value::Int(map.len() as i64),
         "is_empty" => Value::Bool(map.is_empty()),
-        "contains_key" | "contains" => {
+        "has" | "contains_key" | "contains" => {
             let key = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?.to_key_string();
             Value::Bool(map.contains_key(&key))
         }

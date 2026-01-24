@@ -168,7 +168,16 @@ impl Lowerer {
         let concurrency_mode = Self::parse_concurrency_mode(&f.attributes);
 
         let return_type = self.resolve_type_opt(&f.return_type)?;
-        let mut ctx = FunctionContext::new(return_type);
+
+        // Determine if this is a method (has self parameter)
+        let has_self = f.params.first().map(|p| p.name == "self").unwrap_or(false);
+
+        // Create appropriate function context based on whether this is a method
+        let mut ctx = if has_self {
+            FunctionContext::new_method(return_type, f.is_me_method)
+        } else {
+            FunctionContext::new(return_type)
+        };
 
         // Add parameters as locals and check capability compatibility with mode
         for (param_idx, param) in f.params.iter().enumerate() {

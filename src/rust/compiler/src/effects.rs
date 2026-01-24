@@ -221,3 +221,10 @@ fn format_effects(effects: &[Effect]) -> String {
         .collect::<Vec<_>>()
         .join(", ")
 }
+
+/// Clear effect tracking thread-local state.
+///
+/// This should be called between test runs to prevent memory leaks.
+pub fn clear_effects_state() {
+    CURRENT_EFFECTS.with(|cell| cell.borrow_mut().clear());
+}
