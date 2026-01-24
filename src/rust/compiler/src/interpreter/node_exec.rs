@@ -9,7 +9,7 @@ use super::async_support::await_value;
 use super::expr::evaluate_expr;
 use super::interpreter_helpers::{bind_pattern_value, handle_method_call_with_self_update, handle_functional_update};
 use super::interpreter_control::{exec_if, exec_while, exec_loop, exec_for, exec_match, exec_context, exec_with};
-use super::interpreter_state::{mark_as_moved, CONST_NAMES, IMMUTABLE_VARS, MODULE_GLOBALS};
+use super::interpreter_state::{mark_as_moved, CONST_NAMES, IMMUTABLE_VARS, IN_IMMUTABLE_FN_METHOD, MODULE_GLOBALS};
 use super::coverage_helpers::record_node_coverage;
 use crate::interpreter_unit::{is_unit_type, validate_unit_type, validate_unit_constraints};
 
@@ -170,6 +170,23 @@ pub(crate) fn exec_node(
         }
         Node::Continue(_) => Ok(Control::Continue),
         Node::Pass(_) => Ok(Control::Next), // No-op, just continue to next statement
+        Node::Guard(guard_stmt) => {
+            // Guard clause: ? condition -> result
+            // If condition is Some and true, or if condition is None (else), return the result
+            let should_return = match &guard_stmt.condition {
+                Some(cond_expr) => {
+                    let cond = evaluate_expr(cond_expr, env, functions, classes, enums, impl_methods)?;
+                    cond.truthy()
+                }
+                None => true, // `? else -> result` always matches
+            };
+            if should_return {
+                let result = evaluate_expr(&guard_stmt.result, env, functions, classes, enums, impl_methods)?;
+                Ok(Control::Return(result))
+            } else {
+                Ok(Control::Next)
+            }
+        }
         Node::Match(match_stmt) => exec_match(match_stmt, env, functions, classes, enums, impl_methods),
         Node::Context(ctx_stmt) => exec_context(ctx_stmt, env, functions, classes, enums, impl_methods),
         Node::With(with_stmt) => exec_with(with_stmt, env, functions, classes, enums, impl_methods),
@@ -260,15 +277,16 @@ fn exec_assignment(
         // Handle method calls on objects - need to persist mutations to self
         let (value, update) =
             handle_method_call_with_self_update(&assign.value, env, functions, classes, enums, impl_methods)?;
-        // If the mutating method returned an updated object with the same name as target,
-        // the update already set the variable, so skip the normal assignment
-        let skip_assignment = if let Some((ref obj_name, ref new_self)) = update {
-            env.insert(obj_name.clone(), new_self.clone());
-            obj_name == name
-        } else {
-            false
-        };
-        if !skip_assignment {
+        // Apply side effects from 'me' methods to the receiver object
+        // But always do the explicit assignment - the user's assignment takes precedence
+        if let Some((ref obj_name, ref new_self)) = update {
+            // Only apply side effect if the receiver is different from the target
+            // If they're the same, the assignment below will set the correct value
+            if obj_name != name {
+                env.insert(obj_name.clone(), new_self.clone());
+            }
+        }
+        {
             // Check if this is a module-level global variable (for function access)
             let is_global = MODULE_GLOBALS.with(|cell| cell.borrow().contains_key(name));
             if is_global && !env.contains_key(name) {
@@ -309,6 +327,21 @@ fn exec_assignment(
         }
         Ok(Control::Next)
     } else if let Expr::FieldAccess { receiver, field } = &assign.target {
+        // E1052: Check for self mutation in immutable fn method
+        if let Expr::Identifier(obj_name) = receiver.as_ref() {
+            if obj_name == "self" {
+                let in_immutable_fn = IN_IMMUTABLE_FN_METHOD.with(|cell| *cell.borrow());
+                if in_immutable_fn {
+                    let ctx = ErrorContext::new()
+                        .with_code(codes::INVALID_ASSIGNMENT)
+                        .with_help("use `me` instead of `fn` to allow self mutation in methods");
+                    return Err(CompileError::semantic_with_context(
+                        format!("cannot modify self.{} in immutable fn method", field),
+                        ctx,
+                    ));
+                }
+            }
+        }
         // Handle field assignment: obj.field = value
         let value = evaluate_expr(&assign.value, env, functions, classes, enums, impl_methods)?;
         // Get the object name (must be an identifier for now)
@@ -363,6 +396,27 @@ fn exec_assignment(
             ))
         }
     } else if let Expr::Index { receiver, index } = &assign.target {
+        // E1052: Check for self mutation in immutable fn method
+        // Handle self[key] = value and self.field[key] = value
+        let is_self_mutation = match receiver.as_ref() {
+            Expr::Identifier(name) if name == "self" => true,
+            Expr::FieldAccess { receiver: inner, .. } => {
+                matches!(inner.as_ref(), Expr::Identifier(name) if name == "self")
+            }
+            _ => false,
+        };
+        if is_self_mutation {
+            let in_immutable_fn = IN_IMMUTABLE_FN_METHOD.with(|cell| *cell.borrow());
+            if in_immutable_fn {
+                let ctx = ErrorContext::new()
+                    .with_code(codes::INVALID_ASSIGNMENT)
+                    .with_help("use `me` instead of `fn` to allow self mutation in methods");
+                return Err(CompileError::semantic_with_context(
+                    "cannot modify self in immutable fn method",
+                    ctx,
+                ));
+            }
+        }
         // Handle index assignment: arr[i] = value or dict["key"] = value or self.dict[key] = value
         let value = evaluate_expr(&assign.value, env, functions, classes, enums, impl_methods)?;
         let index_val = evaluate_expr(index, env, functions, classes, enums, impl_methods)?;

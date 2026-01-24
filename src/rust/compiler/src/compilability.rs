@@ -435,6 +435,13 @@ fn analyze_expr(expr: &Expr, reasons: &mut Vec<FallbackReason>) {
             add_reason(reasons, FallbackReason::TryOperator);
         }
 
+        // Existence check operator
+        Expr::ExistsCheck(inner) => {
+            analyze_expr(inner, reasons);
+            // ExistsCheck requires runtime type inspection
+            add_reason(reasons, FallbackReason::TryOperator);
+        }
+
         // Macro invocations
         Expr::MacroInvocation { .. } => {
             add_reason(reasons, FallbackReason::UserMacros);

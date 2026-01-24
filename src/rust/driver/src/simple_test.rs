@@ -25,7 +25,11 @@ use walkdir::WalkDir;
 
 use crate::{Interpreter, RunConfig};
 use crate::test_db::{self, TestStatus, TestFailure as DbTestFailure};
-use simple_compiler::interpreter::clear_module_cache;
+use simple_compiler::i18n::clear_registry as clear_i18n_state;
+use simple_compiler::interpreter::{
+    clear_bdd_state, clear_class_instantiation_state, clear_effects_state, clear_interpreter_state,
+    clear_io_state, clear_macro_state, clear_module_cache, clear_net_state,
+};
 
 /// Category of test based on location in test directory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -250,9 +254,24 @@ pub fn run_test_file(path: &Path) -> SimpleTestResult {
     // let the test runner handle that)
     // Coverage will be collected via interpreter hooks
 
-    // Clear module cache to ensure tests don't share stale cached modules
-    // DISABLED: Investigating if this causes test failures
-    // clear_module_cache();
+    // Clear all interpreter state to prevent memory leaks and state pollution between tests.
+    // This clears BDD registries, module globals, DI singletons, unit system registries, etc.
+    clear_interpreter_state();
+
+    // Clear BDD testing state (indentation, counts, hooks, lazy values, etc.)
+    clear_bdd_state();
+
+    // Clear module cache to ensure tests don't share stale cached modules.
+    // This prevents memory accumulation from cached module exports.
+    clear_module_cache();
+
+    // Clear additional module-specific state to prevent memory leaks
+    clear_class_instantiation_state(); // Clear IN_NEW_METHOD tracking
+    clear_macro_state();               // Clear macro contract cache and expansion state
+    clear_effects_state();             // Clear effect tracking state
+    clear_io_state();                  // Close and clear file handles
+    clear_net_state();                 // Close and clear socket handles
+    clear_i18n_state();                // Clear locale strings cache
 
     // Run the test with output capture, using file path for proper import resolution
     let interpreter = Interpreter::new();

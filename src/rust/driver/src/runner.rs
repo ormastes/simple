@@ -1,6 +1,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use simple_common::gc::MemoryLimitConfig;
 use simple_common::target::Target;
 use simple_runtime::gc::GcRuntime;
 use tracing::instrument;
@@ -11,11 +12,15 @@ use crate::exec_core::ExecCore;
 ///
 /// The compiler uses the interpreter to evaluate the program, then emits an SMF
 /// binary containing native code that returns the computed result.
+///
+/// By default, each runner has a memory limit of 1 GB per thread.
+/// Use `with_memory_limit()` or `unlimited_memory()` to customize.
 pub struct Runner {
     core: ExecCore,
 }
 
 impl Runner {
+    /// Create a new runner with default memory limit (1 GB)
     pub fn new() -> Self {
         Self { core: ExecCore::new() }
     }
@@ -37,6 +42,51 @@ impl Runner {
         Self {
             core: ExecCore::new_with_gc_logging(),
         }
+    }
+
+    /// Create a runner with specific memory limit in bytes
+    pub fn with_memory_limit(limit_bytes: usize) -> Self {
+        Self {
+            core: ExecCore::with_memory_limit(limit_bytes),
+        }
+    }
+
+    /// Create a runner with specific memory limit in megabytes
+    pub fn with_memory_limit_mb(limit_mb: usize) -> Self {
+        Self {
+            core: ExecCore::with_memory_limit_mb(limit_mb),
+        }
+    }
+
+    /// Create a runner with specific memory limit in gigabytes
+    pub fn with_memory_limit_gb(limit_gb: usize) -> Self {
+        Self {
+            core: ExecCore::with_memory_limit_gb(limit_gb),
+        }
+    }
+
+    /// Create a runner with custom memory limit configuration
+    pub fn with_memory_config(config: MemoryLimitConfig) -> Self {
+        Self {
+            core: ExecCore::with_memory_config(config),
+        }
+    }
+
+    /// Create a runner with unlimited memory
+    pub fn unlimited_memory() -> Self {
+        Self {
+            core: ExecCore::unlimited_memory(),
+        }
+    }
+
+    /// Get current memory usage in bytes
+    pub fn memory_usage(&self) -> usize {
+        self.core.memory_usage()
+    }
+
+    /// Get memory limit in bytes (0 if unlimited)
+    pub fn memory_limit(&self) -> usize {
+        self.core.memory_limit()
     }
 
     /// Access the underlying GC runtime (for tests and diagnostics).

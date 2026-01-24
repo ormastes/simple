@@ -27,7 +27,6 @@ impl<'a> Parser<'a> {
                 let level = match mistake {
                     // Errors for wrong keywords/syntax
                     CommonMistake::PythonDef
-                    | CommonMistake::PythonNone
                     | CommonMistake::PythonTrue
                     | CommonMistake::PythonFalse
                     | CommonMistake::RustLetMut
@@ -44,7 +43,9 @@ impl<'a> Parser<'a> {
                     | CommonMistake::MissingColon => ErrorHintLevel::Error,
 
                     // Warnings for verbose but valid syntax
-                    CommonMistake::VerboseReturnType
+                    // Note: PythonNone is now warning since None is also Option::None variant
+                    CommonMistake::PythonNone
+                    | CommonMistake::VerboseReturnType
                     | CommonMistake::ExplicitSelf
                     | CommonMistake::WrongBrackets
                     | CommonMistake::CSemicolon
@@ -305,6 +306,15 @@ impl<'a> Parser<'a> {
             TokenKind::Tensor => "Tensor".to_string(),
             TokenKind::Grid => "Grid".to_string(),
             TokenKind::Flat => "Flat".to_string(),
+            // Allow 'alias' to be used as identifier (e.g., `with resource as alias:`)
+            // The 'alias' keyword is only used in type aliasing context: `alias NewType = OldType`
+            TokenKind::Alias => "alias".to_string(),
+            // Allow 'new' to be used as identifier (variable name, struct field name)
+            // The 'new' keyword is only used in allocation contexts: `new Type(...)`
+            TokenKind::New => "new".to_string(),
+            // Allow 'old' to be used as identifier (variable name)
+            // The 'old' keyword is only used in contracts: `old(x)`
+            TokenKind::Old => "old".to_string(),
             _ => {
                 return Err(ParseError::unexpected_token(
                     "identifier",

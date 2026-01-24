@@ -418,4 +418,78 @@ fn test():
         assert_eq!(todo_warnings.len(), 1);
         assert!(todo_warnings[0].message.contains("invalid priority"));
     }
+
+    #[test]
+    fn test_unnamed_duplicate_typed_args_warns() {
+        let code = r#"
+fn point(x: i64, y: i64) -> i64:
+    x + y
+
+fn test():
+    val result = point(3, 4)
+"#;
+        let diagnostics = check_code(code);
+        let dup_warnings: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.lint == LintName::UnnamedDuplicateTypedArgs)
+            .collect();
+        // Should warn about positional args with same type
+        assert!(!dup_warnings.is_empty());
+        assert!(dup_warnings[0].message.contains("positional argument"));
+    }
+
+    #[test]
+    fn test_unnamed_duplicate_typed_args_no_warn_named() {
+        let code = r#"
+fn point(x: i64, y: i64) -> i64:
+    x + y
+
+fn test():
+    val result = point(x: 3, y: 4)
+"#;
+        let diagnostics = check_code(code);
+        let dup_warnings: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.lint == LintName::UnnamedDuplicateTypedArgs)
+            .collect();
+        // Should NOT warn when all same-typed params are named
+        assert!(dup_warnings.is_empty());
+    }
+
+    #[test]
+    fn test_unnamed_duplicate_typed_args_no_warn_different_types() {
+        let code = r#"
+fn describe(name: text, age: i64) -> text:
+    name
+
+fn test():
+    val result = describe("Alice", 30)
+"#;
+        let diagnostics = check_code(code);
+        let dup_warnings: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.lint == LintName::UnnamedDuplicateTypedArgs)
+            .collect();
+        // Should NOT warn when types are different
+        assert!(dup_warnings.is_empty());
+    }
+
+    #[test]
+    fn test_unnamed_duplicate_typed_args_partial_named() {
+        let code = r#"
+fn point(x: i64, y: i64) -> i64:
+    x + y
+
+fn test():
+    val result = point(x: 3, 4)
+"#;
+        let diagnostics = check_code(code);
+        let dup_warnings: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.lint == LintName::UnnamedDuplicateTypedArgs)
+            .collect();
+        // Should warn about the positional arg (y)
+        assert!(!dup_warnings.is_empty());
+        assert!(dup_warnings[0].message.contains("y"));
+    }
 }

@@ -114,6 +114,9 @@ impl Lowerer {
                 let target = self.lower_expr(&assign.target, ctx)?;
                 let value = self.lower_expr(&assign.value, ctx)?;
 
+                // E1052: Check for self mutation in immutable fn method
+                self.check_self_mutation_in_fn_method(&target, ctx)?;
+
                 // W1001: Check for shared pointer mutation
                 self.check_shared_mutation(&target, assign.span);
 

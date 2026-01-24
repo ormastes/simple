@@ -14,6 +14,12 @@ mod math;
 impl<'a> Parser<'a> {
     pub(crate) fn parse_primary(&mut self) -> Result<Expr, ParseError> {
         match &self.current.kind.clone() {
+            // Placeholder syntax: _ in expressions (for placeholder lambdas like nums.map(_ * 2))
+            // The _ is parsed as an identifier and later transformed in argument parsing
+            TokenKind::Underscore => {
+                self.advance();
+                Ok(Expr::Identifier("_".to_string()))
+            }
             TokenKind::Integer(_)
             | TokenKind::TypedInteger(_, _)
             | TokenKind::Float(_)
@@ -47,7 +53,8 @@ impl<'a> Parser<'a> {
             | TokenKind::Vec
             | TokenKind::Gpu
             | TokenKind::Slice
-            | TokenKind::Flat => self.parse_primary_identifier(),
+            | TokenKind::Flat
+            | TokenKind::Alias => self.parse_primary_identifier(),
             TokenKind::Backslash | TokenKind::Pipe | TokenKind::Move => self.parse_primary_lambda(),
             // fn(): lambda syntax (alias for \:) - only in expression context
             // Check if fn is IMMEDIATELY followed by ( (no identifier) to distinguish from function definitions
@@ -76,10 +83,51 @@ impl<'a> Parser<'a> {
                 }
             }
             TokenKind::LParen | TokenKind::LBracket | TokenKind::LBrace => self.parse_primary_collection(),
-            TokenKind::Old
-            | TokenKind::Spawn
+            // Handle 'new' specially: if followed by a type (identifier, &, *, etc.), it's allocation
+            // Otherwise, it's used as a variable name identifier
+            TokenKind::New => {
+                // Peek at next token
+                let next = self.pending_tokens.front().cloned().unwrap_or_else(|| {
+                    let tok = self.lexer.next_token();
+                    self.pending_tokens.push_back(tok.clone());
+                    tok
+                });
+
+                // Check if next token indicates allocation context: new Type, new &Type, new *Type
+                match next.kind {
+                    TokenKind::Identifier { .. }
+                    | TokenKind::Ampersand
+                    | TokenKind::Star
+                    | TokenKind::Plus
+                    | TokenKind::Minus => {
+                        // Allocation: new Type(...) or new &Type(...)
+                        self.parse_primary_control()
+                    }
+                    _ => {
+                        // Identifier: used as variable name like 'is_new or new'
+                        self.parse_primary_identifier()
+                    }
+                }
+            }
+            // Handle 'old' specially: if followed by (, it's contract old(x)
+            // Otherwise, it's used as a variable name identifier
+            TokenKind::Old => {
+                let next = self.pending_tokens.front().cloned().unwrap_or_else(|| {
+                    let tok = self.lexer.next_token();
+                    self.pending_tokens.push_back(tok.clone());
+                    tok
+                });
+
+                if matches!(next.kind, TokenKind::LParen) {
+                    // Contract: old(x)
+                    self.parse_primary_control()
+                } else {
+                    // Identifier: used as variable name
+                    self.parse_primary_identifier()
+                }
+            }
+            TokenKind::Spawn
             | TokenKind::Go
-            | TokenKind::New
             | TokenKind::If
             | TokenKind::Elif
             | TokenKind::Match

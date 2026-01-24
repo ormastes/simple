@@ -145,6 +145,10 @@ thread_local! {
     /// Maps suffix (without leading underscore) to LiteralFunctionInfo.
     /// Example: "re" → LiteralFunctionInfo for `literal fn _re(s: text) -> Regex: ...`
     pub(crate) static LITERAL_FUNCTIONS: RefCell<HashMap<String, LiteralFunctionInfo>> = RefCell::new(HashMap::new());
+    /// Tracks whether we're currently executing inside an immutable fn method.
+    /// When true, self.field = value assignments should error.
+    /// This is set when entering a fn method (not me method) and cleared when leaving.
+    pub(crate) static IN_IMMUTABLE_FN_METHOD: RefCell<bool> = RefCell::new(false);
 }
 
 //==============================================================================
@@ -404,4 +408,73 @@ pub(crate) fn clear_moved_vars() {
     MOVED_VARS.with(|cell| {
         cell.borrow_mut().clear();
     });
+}
+
+//==============================================================================
+// Full State Reset (for test isolation)
+//==============================================================================
+
+/// Clear all thread-local interpreter state.
+///
+/// This function should be called before each test file to prevent memory leaks
+/// and state pollution between tests. It clears:
+/// - BDD registries (test groups, contexts, shared examples)
+/// - Module globals
+/// - DI singletons
+/// - Moved variables tracking
+/// - Const names
+/// - Immutable variables
+/// - Extern functions
+/// - User macros
+/// - Unit system registries
+/// - Literal functions
+/// - Interface bindings
+///
+/// Note: Module cache is cleared separately via `clear_module_cache()`.
+pub fn clear_interpreter_state() {
+    // Clear BDD registries (accumulate test definitions)
+    BDD_REGISTRY_GROUPS.with(|cell| cell.borrow_mut().clear());
+    BDD_REGISTRY_CONTEXTS.with(|cell| cell.borrow_mut().clear());
+    BDD_REGISTRY_SHARED.with(|cell| cell.borrow_mut().clear());
+
+    // Clear module globals (mutable module-level variables)
+    MODULE_GLOBALS.with(|cell| cell.borrow_mut().clear());
+
+    // Clear DI singletons
+    DI_SINGLETONS.with(|cell| cell.borrow_mut().clear());
+
+    // Clear variable tracking
+    MOVED_VARS.with(|cell| cell.borrow_mut().clear());
+    CONST_NAMES.with(|cell| cell.borrow_mut().clear());
+    IMMUTABLE_VARS.with(|cell| cell.borrow_mut().clear());
+    EXTERN_FUNCTIONS.with(|cell| cell.borrow_mut().clear());
+
+    // Clear user macros
+    USER_MACROS.with(|cell| cell.borrow_mut().clear());
+    MACRO_DEFINITION_ORDER.with(|cell| cell.borrow_mut().clear());
+
+    // Clear unit system registries
+    UNIT_SUFFIX_TO_FAMILY.with(|cell| cell.borrow_mut().clear());
+    UNIT_FAMILY_CONVERSIONS.with(|cell| cell.borrow_mut().clear());
+    UNIT_FAMILY_ARITHMETIC.with(|cell| cell.borrow_mut().clear());
+    COMPOUND_UNIT_DIMENSIONS.with(|cell| cell.borrow_mut().clear());
+    BASE_UNIT_DIMENSIONS.with(|cell| cell.borrow_mut().clear());
+    SI_BASE_UNITS.with(|cell| cell.borrow_mut().clear());
+
+    // Clear literal functions
+    LITERAL_FUNCTIONS.with(|cell| cell.borrow_mut().clear());
+
+    // Clear interface bindings
+    INTERFACE_BINDINGS.with(|cell| cell.borrow_mut().clear());
+
+    // Reset execution mode to Normal
+    EXECUTION_MODE.with(|cell| *cell.borrow_mut() = ExecutionMode::Normal);
+
+    // Clear context-related state
+    CONTEXT_OBJECT.with(|cell| *cell.borrow_mut() = None);
+    CONTEXT_VAR_NAME.with(|cell| *cell.borrow_mut() = None);
+    GENERATOR_YIELDS.with(|cell| *cell.borrow_mut() = None);
+
+    // Reset immutable fn method tracking
+    IN_IMMUTABLE_FN_METHOD.with(|cell| *cell.borrow_mut() = false);
 }

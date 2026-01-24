@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use simple_parser::ast::Expr;
+use simple_parser::ast::{Argument, Expr};
 
 use super::evaluate_expr;
 use crate::error::{codes, typo, CompileError, ErrorContext};
@@ -264,50 +264,74 @@ pub(super) fn eval_call_expr(
                     }
                 }
                 // String property access (e.g., str.len, str.is_empty)
+                // Also supports no-paren method calls (e.g., str.upper, str.trim)
                 Value::Str(ref s) => match field.as_str() {
                     "len" => Ok(Value::Int(s.len() as i64)),
                     "byte_len" => Ok(Value::Int(s.len() as i64)),
                     "char_count" => Ok(Value::Int(s.chars().count() as i64)),
                     "is_empty" => Ok(Value::Bool(s.is_empty())),
                     _ => {
-                        let ctx = ErrorContext::new()
-                            .with_code(codes::UNDEFINED_FIELD)
-                            .with_help("available properties on String: len, byte_len, char_count, is_empty");
-                        Err(CompileError::semantic_with_context(
-                            format!("undefined field: unknown property '{field}' on String"),
-                            ctx,
-                        ))
+                        // Try calling as a no-arg method (e.g., str.upper, str.trim)
+                        let empty_args: Vec<Argument> = vec![];
+                        match evaluate_method_call(receiver, field, &empty_args, env, functions, classes, enums, impl_methods) {
+                            Ok(result) => Ok(result),
+                            Err(_) => {
+                                let ctx = ErrorContext::new()
+                                    .with_code(codes::UNDEFINED_FIELD)
+                                    .with_help("available properties: len, byte_len, char_count, is_empty; or use method() syntax");
+                                Err(CompileError::semantic_with_context(
+                                    format!("undefined field: unknown property or method '{field}' on String"),
+                                    ctx,
+                                ))
+                            }
+                        }
                     }
                 },
                 // Array property access (e.g., arr.len, arr.is_empty)
+                // Also supports no-paren method calls (e.g., arr.first, arr.last, arr.reverse)
                 Value::Array(ref arr) => match field.as_str() {
                     "len" => Ok(Value::Int(arr.len() as i64)),
                     "is_empty" => Ok(Value::Bool(arr.is_empty())),
                     _ => {
-                        let ctx = ErrorContext::new()
-                            .with_code(codes::UNDEFINED_FIELD)
-                            .with_help("available properties on Array: len, is_empty");
-                        Err(CompileError::semantic_with_context(
-                            format!("undefined field: unknown property '{field}' on Array"),
-                            ctx,
-                        ))
+                        // Try calling as a no-arg method (e.g., arr.first, arr.last, arr.reverse)
+                        let empty_args: Vec<Argument> = vec![];
+                        match evaluate_method_call(receiver, field, &empty_args, env, functions, classes, enums, impl_methods) {
+                            Ok(result) => Ok(result),
+                            Err(_) => {
+                                let ctx = ErrorContext::new()
+                                    .with_code(codes::UNDEFINED_FIELD)
+                                    .with_help("available properties: len, is_empty; or use method() syntax");
+                                Err(CompileError::semantic_with_context(
+                                    format!("undefined field: unknown property or method '{field}' on Array"),
+                                    ctx,
+                                ))
+                            }
+                        }
                     }
                 },
                 // Tuple property access (e.g., tup.len)
-                Value::Tuple(ref tup) => match field.as_str() {
-                    "len" => Ok(Value::Int(tup.len() as i64)),
+                // Also supports no-paren method calls
+                Value::Tuple(ref _tup) => match field.as_str() {
+                    "len" => Ok(Value::Int(_tup.len() as i64)),
                     _ => {
-                        let ctx = ErrorContext::new()
-                            .with_code(codes::UNDEFINED_FIELD)
-                            .with_help("available properties on Tuple: len");
-                        Err(CompileError::semantic_with_context(
-                            format!("undefined field: unknown property '{field}' on Tuple"),
-                            ctx,
-                        ))
+                        // Try calling as a no-arg method
+                        let empty_args: Vec<Argument> = vec![];
+                        match evaluate_method_call(receiver, field, &empty_args, env, functions, classes, enums, impl_methods) {
+                            Ok(result) => Ok(result),
+                            Err(_) => {
+                                let ctx = ErrorContext::new()
+                                    .with_code(codes::UNDEFINED_FIELD)
+                                    .with_help("available properties: len; or use method() syntax");
+                                Err(CompileError::semantic_with_context(
+                                    format!("undefined field: unknown property or method '{field}' on Tuple"),
+                                    ctx,
+                                ))
+                            }
+                        }
                     }
                 },
                 // Dict property access (e.g., dict.len, dict.is_empty)
-                // Also supports module namespace access (e.g., physics.World)
+                // Also supports module namespace access and no-paren method calls
                 Value::Dict(ref map) => match field.as_str() {
                     "len" => Ok(Value::Int(map.len() as i64)),
                     "is_empty" => Ok(Value::Bool(map.is_empty())),
@@ -316,17 +340,25 @@ pub(super) fn eval_call_expr(
                         if let Some(value) = map.get(field) {
                             Ok(value.clone())
                         } else {
-                            let ctx = ErrorContext::new()
-                                .with_code(codes::UNDEFINED_FIELD)
-                                .with_help("available properties on Dict: len, is_empty");
-                            Err(CompileError::semantic_with_context(
-                                format!("undefined field: unknown property or key '{field}' on Dict"),
-                                ctx,
-                            ))
+                            // Try calling as a no-arg method (e.g., dict.keys, dict.values)
+                            let empty_args: Vec<Argument> = vec![];
+                            match evaluate_method_call(receiver, field, &empty_args, env, functions, classes, enums, impl_methods) {
+                                Ok(result) => Ok(result),
+                                Err(_) => {
+                                    let ctx = ErrorContext::new()
+                                        .with_code(codes::UNDEFINED_FIELD)
+                                        .with_help("available properties: len, is_empty; or use method() syntax");
+                                    Err(CompileError::semantic_with_context(
+                                        format!("undefined field: unknown property, key, or method '{field}' on Dict"),
+                                        ctx,
+                                    ))
+                                }
+                            }
                         }
                     }
                 },
                 // Enum property access (Option/Result properties)
+                // Also supports no-paren method calls
                 Value::Enum {
                     ref enum_name,
                     ref variant,
@@ -337,13 +369,20 @@ pub(super) fn eval_call_expr(
                             "is_some" => Ok(Value::Bool(variant == "Some")),
                             "is_none" => Ok(Value::Bool(variant == "None")),
                             _ => {
-                                let ctx = ErrorContext::new()
-                                    .with_code(codes::UNDEFINED_FIELD)
-                                    .with_help("available properties on Option: is_some, is_none");
-                                Err(CompileError::semantic_with_context(
-                                    format!("undefined field: unknown property '{field}' on Option"),
-                                    ctx,
-                                ))
+                                // Try calling as a no-arg method
+                                let empty_args: Vec<Argument> = vec![];
+                                match evaluate_method_call(receiver, field, &empty_args, env, functions, classes, enums, impl_methods) {
+                                    Ok(result) => Ok(result),
+                                    Err(_) => {
+                                        let ctx = ErrorContext::new()
+                                            .with_code(codes::UNDEFINED_FIELD)
+                                            .with_help("available properties: is_some, is_none; or use method() syntax");
+                                        Err(CompileError::semantic_with_context(
+                                            format!("undefined field: unknown property or method '{field}' on Option"),
+                                            ctx,
+                                        ))
+                                    }
+                                }
                             }
                         }
                     } else if enum_name == "Result" {
@@ -351,23 +390,37 @@ pub(super) fn eval_call_expr(
                             "is_ok" => Ok(Value::Bool(variant == "Ok")),
                             "is_err" => Ok(Value::Bool(variant == "Err")),
                             _ => {
+                                // Try calling as a no-arg method
+                                let empty_args: Vec<Argument> = vec![];
+                                match evaluate_method_call(receiver, field, &empty_args, env, functions, classes, enums, impl_methods) {
+                                    Ok(result) => Ok(result),
+                                    Err(_) => {
+                                        let ctx = ErrorContext::new()
+                                            .with_code(codes::UNDEFINED_FIELD)
+                                            .with_help("available properties: is_ok, is_err; or use method() syntax");
+                                        Err(CompileError::semantic_with_context(
+                                            format!("undefined field: unknown property or method '{field}' on Result"),
+                                            ctx,
+                                        ))
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        // Try calling as a no-arg method for other enums
+                        let empty_args: Vec<Argument> = vec![];
+                        match evaluate_method_call(receiver, field, &empty_args, env, functions, classes, enums, impl_methods) {
+                            Ok(result) => Ok(result),
+                            Err(_) => {
                                 let ctx = ErrorContext::new()
                                     .with_code(codes::UNDEFINED_FIELD)
-                                    .with_help("available properties on Result: is_ok, is_err");
+                                    .with_help(format!("check that the property or method '{field}' exists on enum {enum_name}"));
                                 Err(CompileError::semantic_with_context(
-                                    format!("undefined field: unknown property '{field}' on Result"),
+                                    format!("undefined field: unknown property or method '{field}' on enum {enum_name}"),
                                     ctx,
                                 ))
                             }
                         }
-                    } else {
-                        let ctx = ErrorContext::new()
-                            .with_code(codes::UNDEFINED_FIELD)
-                            .with_help(format!("check that the property '{field}' exists on enum {enum_name}"));
-                        Err(CompileError::semantic_with_context(
-                            format!("undefined field: unknown property '{field}' on enum {enum_name}"),
-                            ctx,
-                        ))
                     }
                 }
                 _ => {

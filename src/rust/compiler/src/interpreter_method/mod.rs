@@ -336,7 +336,6 @@ pub(crate) fn evaluate_method_call(
             }
         }
         Value::Object { class, fields } => {
-            eprintln!("DEBUG method_call: class={}, method={}", class, method);
             // Try to find and execute the method
             if let Some(result) = find_and_exec_method(
                 method,
@@ -350,6 +349,43 @@ pub(crate) fn evaluate_method_call(
                 impl_methods,
             )? {
                 return Ok(result);
+            }
+            // Check if the method name corresponds to a callable field (Lambda/Function)
+            // This allows patterns like: self.callback(arg) where callback is a lambda field
+            if let Some(field_value) = fields.get(method) {
+                match field_value {
+                    Value::Lambda { params, body, env: captured_env } => {
+                        // Call the lambda stored in the field
+                        let mut arg_vals = Vec::new();
+                        for arg in args {
+                            arg_vals.push(evaluate_expr(&arg.value, env, functions, classes, enums, impl_methods)?);
+                        }
+                        // Create local env from captured env and bind params
+                        let mut local_env = captured_env.clone();
+                        for (i, param) in params.iter().enumerate() {
+                            if let Some(val) = arg_vals.get(i) {
+                                local_env.insert(param.clone(), val.clone());
+                            }
+                        }
+                        // Evaluate the body expression
+                        let result = evaluate_expr(body.as_ref(), &mut local_env, functions, classes, enums, impl_methods)?;
+                        return Ok(result);
+                    }
+                    Value::Function { def, captured_env, .. } => {
+                        // Call the function stored in the field
+                        return exec_function_with_captured_env(
+                            def,
+                            args,
+                            env,
+                            &mut captured_env.clone(),
+                            functions,
+                            classes,
+                            enums,
+                            impl_methods,
+                        );
+                    }
+                    _ => {}
+                }
             }
             // Try method_missing hook
             if let Some(result) = try_method_missing(

@@ -48,6 +48,13 @@ impl<'a> Parser<'a> {
                 self.advance();
                 Ok(Expr::Identifier("gpu".to_string()))
             }
+            // Allow 'alias' to be used as identifier (e.g., `with resource as alias: captured = alias`)
+            // The 'alias' keyword is only used in type aliasing context: `alias NewType = OldType`
+            TokenKind::Alias => self.parse_keyword_identifier("alias"),
+            // Allow 'new' and 'old' to be used as identifiers (variable names)
+            // These are keywords only in specific contexts: new Type(...) and old(x)
+            TokenKind::New => self.parse_keyword_identifier("new"),
+            TokenKind::Old => self.parse_keyword_identifier("old"),
             _ => Err(ParseError::unexpected_token(
                 "identifier",
                 format!("{:?}", self.current.kind),

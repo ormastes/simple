@@ -222,14 +222,14 @@ describe "Retry Utilities":
             expect config.timeout_ms == 30000
 
         it "fixed_delay creates correct strategy":
-            val config = RetryConfig.fixed_delay(5, 1000)
+            val config = RetryConfig.fixed_delay(attempts=5, delay=1000)
             expect config.max_attempts == 5
             match config.strategy:
                 case RetryStrategy.FixedDelay(delay): expect delay == 1000
                 case _: expect false
 
         it "linear_backoff creates correct strategy":
-            val config = RetryConfig.linear_backoff(4, 100, 50)
+            val config = RetryConfig.linear_backoff(attempts=4, start=100, increment=50)
             expect config.max_attempts == 4
             match config.strategy:
                 case RetryStrategy.LinearBackoff(start, increment):
@@ -238,7 +238,7 @@ describe "Retry Utilities":
                 case _: expect false
 
         it "exponential_backoff creates correct strategy":
-            val config = RetryConfig.exponential_backoff(5, 100, 5000)
+            val config = RetryConfig.exponential_backoff(attempts=5, base=100, max_delay=5000)
             expect config.max_attempts == 5
             match config.strategy:
                 case RetryStrategy.ExponentialBackoff(base, max_delay):
@@ -281,14 +281,14 @@ describe "Retry Utilities":
 
     describe "Retry Schedule":
         it "calculates fixed schedule":
-            val config = RetryConfig.fixed_delay(3, 1000)
+            val config = RetryConfig.fixed_delay(attempts=3, delay=1000)
             val schedule = calculate_retry_schedule(config)
             expect schedule.len() == 2
             expect schedule[0] == 1000
             expect schedule[1] == 1000
 
         it "calculates exponential schedule":
-            val config = RetryConfig.exponential_backoff(4, 100, 5000)
+            val config = RetryConfig.exponential_backoff(attempts=4, base=100, max_delay=5000)
             val schedule = calculate_retry_schedule(config)
             expect schedule.len() == 3
             expect schedule[0] == 100
@@ -296,7 +296,7 @@ describe "Retry Utilities":
             expect schedule[2] == 400
 
         it "calculates total retry time":
-            val config = RetryConfig.fixed_delay(3, 1000)
+            val config = RetryConfig.fixed_delay(attempts=3, delay=1000)
             val total = calculate_total_retry_time(config)
             expect total == 2000
 
@@ -318,7 +318,7 @@ describe "Retry Utilities":
 
     describe "Circuit Breaker":
         it "creates with closed state":
-            val cb = CircuitBreaker.create(5, 2)
+            val cb = CircuitBreaker.create(failure_threshold=5, success_threshold=2)
             expect cb.failure_threshold == 5
             expect cb.success_threshold == 2
             match cb.state:
@@ -326,7 +326,7 @@ describe "Retry Utilities":
                 case _: expect false
 
         it "opens after failure threshold":
-            var cb = CircuitBreaker.create(3, 2)
+            var cb = CircuitBreaker.create(failure_threshold=3, success_threshold=2)
             match cb.state:
                 case CircuitState.Closed: expect true
                 case _: expect false
@@ -338,42 +338,42 @@ describe "Retry Utilities":
                 case _: expect false
 
         it "allows attempt when closed":
-            var cb = CircuitBreaker.create(2, 1)
-            expect cb.can_attempt(0, 1000)
+            var cb = CircuitBreaker.create(failure_threshold=2, success_threshold=1)
+            expect cb.can_attempt(current_time=0, timeout=1000)
 
         it "blocks attempt when open":
-            var cb = CircuitBreaker.create(2, 1)
+            var cb = CircuitBreaker.create(failure_threshold=2, success_threshold=1)
             cb.on_failure(100)
             cb.on_failure(200)
-            expect not cb.can_attempt(250, 1000)
+            expect not cb.can_attempt(current_time=250, timeout=1000)
 
         it "allows attempt after timeout":
-            var cb = CircuitBreaker.create(2, 1)
+            var cb = CircuitBreaker.create(failure_threshold=2, success_threshold=1)
             cb.on_failure(100)
             cb.on_failure(200)
-            expect cb.can_attempt(1300, 1000)
+            expect cb.can_attempt(current_time=1300, timeout=1000)
 
     describe "Rate Limiter":
         it "creates with correct settings":
-            val limiter = RateLimiter.create(10, 1000)
+            val limiter = RateLimiter.create(max_requests=10, window_ms=1000)
             expect limiter.max_requests == 10
             expect limiter.window_ms == 1000
 
         it "allows requests under limit":
-            var limiter = RateLimiter.create(5, 1000)
+            var limiter = RateLimiter.create(max_requests=5, window_ms=1000)
             expect limiter.is_allowed(100)
             limiter.record_request(100)
             expect limiter.is_allowed(100)
             limiter.record_request(100)
 
         it "rejects requests over limit":
-            var limiter = RateLimiter.create(2, 1000)
+            var limiter = RateLimiter.create(max_requests=2, window_ms=1000)
             limiter.record_request(100)
             limiter.record_request(100)
             expect not limiter.is_allowed(100)
 
         it "resets after window":
-            var limiter = RateLimiter.create(2, 1000)
+            var limiter = RateLimiter.create(max_requests=2, window_ms=1000)
             limiter.record_request(100)
             limiter.record_request(100)
             expect not limiter.is_allowed(500)
@@ -381,7 +381,7 @@ describe "Retry Utilities":
             expect limiter.is_allowed(1200)
 
         it "calculates delay until allowed":
-            var limiter = RateLimiter.create(1, 1000)
+            var limiter = RateLimiter.create(max_requests=1, window_ms=1000)
             limiter.record_request(100)
             val delay = limiter.delay_until_allowed(500)
             expect delay > 0
@@ -389,12 +389,12 @@ describe "Retry Utilities":
 
     describe "Timeout":
         it "detects timed out":
-            expect not is_timed_out(100, 500, 1000)
-            expect is_timed_out(100, 1200, 1000)
+            expect not is_timed_out(start_time=100, current_time=500, timeout=1000)
+            expect is_timed_out(start_time=100, current_time=1200, timeout=1000)
 
         it "calculates remaining time":
-            expect remaining_time(100, 500, 1000) == 600
-            expect remaining_time(100, 1200, 1000) == 0
+            expect remaining_time(start_time=100, current_time=500, timeout=1000) == 600
+            expect remaining_time(start_time=100, current_time=1200, timeout=1000) == 0
 
     describe "Retry Stats":
         it "creates empty stats":

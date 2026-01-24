@@ -9,6 +9,7 @@ use super::node_exec::exec_node;
 use super::expr::evaluate_expr;
 use super::macros::{enter_block_scope, exit_block_scope};
 use super::interpreter_control::{exec_match_expr, exec_if_expr};
+use super::interpreter_helpers::handle_method_call_with_self_update;
 
 pub(crate) fn exec_block(
     block: &Block,
@@ -66,7 +67,11 @@ pub(crate) fn exec_block_fn(
         if is_last {
             if let simple_parser::ast::Node::Expression(expr) = stmt {
                 // Evaluate and capture the value for implicit return
-                let val = evaluate_expr(expr, env, functions, classes, enums, impl_methods)?;
+                // Use handle_method_call_with_self_update to properly track mutations
+                let (val, update) = handle_method_call_with_self_update(expr, env, functions, classes, enums, impl_methods)?;
+                if let Some((name, new_self)) = update {
+                    env.insert(name, new_self);
+                }
                 last_expr_value = Some(val);
                 continue;
             }

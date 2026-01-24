@@ -97,11 +97,13 @@ impl<'a> super::Lexer<'a> {
                             let content = self.parse_nested_comment();
                             // Clean up the content
                             let cleaned = clean_doc_comment(&content);
-                            return Some(Token::new(
+                            // Use pending_token to allow Dedent handling first
+                            pending_token = Some(Token::new(
                                 TokenKind::DocComment(cleaned),
                                 Span::new(slash_start, self.current_pos, slash_start_line, slash_start_col),
                                 self.source[slash_start..self.current_pos].to_string(),
                             ));
+                            break;
                         }
                         // Regular block comment /* ... */
                         let mut depth = 1;
@@ -145,7 +147,9 @@ impl<'a> super::Lexer<'a> {
                             // Check if this is a multi-line doc block (/// on its own line)
                             if self.peek() == Some('\n') || self.peek().is_none() {
                                 // Multi-line doc block: ///\n...\n///
-                                return Some(self.read_doc_block_triple_slash(start_pos, start_line, start_col));
+                                // Use pending_token to allow Dedent handling first
+                                pending_token = Some(self.read_doc_block_triple_slash(start_pos, start_line, start_col));
+                                break;
                             }
 
                             // Read to end of line (single-line doc comment)
@@ -157,11 +161,13 @@ impl<'a> super::Lexer<'a> {
                                 self.advance();
                             }
                             let content = self.source[content_start..self.current_pos].trim().to_string();
-                            return Some(Token::new(
+                            // Use pending_token to allow Dedent handling first
+                            pending_token = Some(Token::new(
                                 TokenKind::DocComment(content),
                                 Span::new(start_pos, self.current_pos, start_line, start_col),
                                 self.source[start_pos..self.current_pos].to_string(),
                             ));
+                            break;
                         } else {
                             // Double slash // - return DoubleSlash token
                             return Some(Token::new(

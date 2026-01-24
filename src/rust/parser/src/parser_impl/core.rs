@@ -95,7 +95,6 @@ impl<'a> Parser<'a> {
             use crate::error_recovery::{CommonMistake, ErrorHint, ErrorHintLevel};
             let level = match mistake {
                 CommonMistake::PythonDef
-                | CommonMistake::PythonNone
                 | CommonMistake::PythonTrue
                 | CommonMistake::PythonFalse
                 | CommonMistake::RustLetMut
@@ -110,6 +109,8 @@ impl<'a> Parser<'a> {
                 | CommonMistake::CppTemplate
                 | CommonMistake::CTypeFirst
                 | CommonMistake::MissingColon => ErrorHintLevel::Error,
+                // PythonNone is now a warning because None is also a valid Option variant
+                CommonMistake::PythonNone => ErrorHintLevel::Warning,
                 CommonMistake::VerboseReturnType
                 | CommonMistake::ExplicitSelf
                 | CommonMistake::WrongBrackets
@@ -305,6 +306,7 @@ impl<'a> Parser<'a> {
             TokenKind::Static => self.parse_static(),
             TokenKind::Shared => self.parse_shared_let(),
             TokenKind::Ghost => self.parse_ghost_let(),
+            TokenKind::Alias => self.parse_class_alias(),
             TokenKind::Type => {
                 // Check if this is a type alias (type Name = ...) or expression (expect type to eq)
                 // Simple heuristic: type alias names are PascalCase (start with uppercase)

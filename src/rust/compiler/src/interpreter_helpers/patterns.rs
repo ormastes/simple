@@ -5,7 +5,7 @@ use crate::value::{Env, Value};
 use simple_parser::ast::{ClassDef, EnumDef, Expr, FunctionDef, Pattern};
 use std::collections::HashMap;
 
-use super::super::{evaluate_expr, evaluate_method_call_with_self_update, Enums, ImplMethods, CONST_NAMES};
+use super::super::{evaluate_expr, evaluate_method_call_with_self_update, find_and_exec_method_with_self, Enums, ImplMethods, CONST_NAMES};
 
 use super::collections::bind_sequence_pattern;
 use super::method_dispatch::call_method_on_value;
@@ -185,6 +185,55 @@ pub(crate) fn handle_method_call_with_self_update(
             }
             // Fall back to propagating the inner update for non-object results
             return Ok((outer_result, inner_update));
+        }
+
+        // Handle FieldAccess receivers: self.data.method()
+        // When calling a mutating method on a nested object field, we need to:
+        // 1. Get the parent object
+        // 2. Get the field value
+        // 3. Call the method on the field (with self-update tracking)
+        // 4. Update the parent's field with the mutated value
+        // 5. Update the parent in env
+        if let Expr::FieldAccess { receiver: parent_receiver, field } = receiver.as_ref() {
+            if let Expr::Identifier(parent_name) = parent_receiver.as_ref() {
+                // Get parent object
+                if let Some(parent_val) = env.get(parent_name).cloned() {
+                    if let Value::Object { class: parent_class, mut fields } = parent_val {
+                        // Get the field value
+                        if let Some(field_val) = fields.get(field).cloned() {
+                            // For Object field values, use find_and_exec_method_with_self
+                            // to properly execute the method and get the updated self
+                            if let Value::Object { class: field_class, fields: field_fields } = &field_val {
+                                if let Some((result, updated_field)) = find_and_exec_method_with_self(
+                                    method,
+                                    args,
+                                    field_class,
+                                    field_fields,
+                                    env,
+                                    functions,
+                                    classes,
+                                    enums,
+                                    impl_methods,
+                                )? {
+                                    // Update the field in parent with the mutated nested object
+                                    fields.insert(field.clone(), updated_field);
+
+                                    // Create updated parent
+                                    let updated_parent = Value::Object {
+                                        class: parent_class.clone(),
+                                        fields,
+                                    };
+
+                                    // Return result and update instruction for parent
+                                    return Ok((result, Some((parent_name.clone(), updated_parent))));
+                                }
+                            }
+
+                            // For non-Object field values, fall through to regular evaluation
+                        }
+                    }
+                }
+            }
         }
 
         if let Expr::Identifier(obj_name) = receiver.as_ref() {

@@ -185,6 +185,7 @@ impl<'a> super::Lexer<'a> {
             "dyn" => TokenKind::Dyn,
             "repr" => TokenKind::Repr,
             "literal" => TokenKind::Literal,
+            "alias" => TokenKind::Alias,
             // Note: "lean" is NOT a keyword - it's parsed contextually to avoid breaking
             // existing module paths like "verification.lean.codegen"
             // Note: "allow" is NOT a keyword - it's parsed contextually in unit definitions

@@ -125,15 +125,10 @@ pub fn load_and_merge_module(
 
     // Try to resolve the module path
     let base_dir = current_file.and_then(|p| p.parent()).unwrap_or(Path::new("."));
-    eprintln!("DEBUG LOAD MODULE: Resolving {:?} from base {:?}", parts, base_dir);
 
     let module_path = match resolve_module_path(&parts, base_dir) {
-        Ok(p) => {
-            eprintln!("DEBUG LOAD MODULE: Resolved to {:?}", p);
-            p
-        },
+        Ok(p) => p,
         Err(e) => {
-            eprintln!("DEBUG LOAD MODULE: Failed to resolve {:?}: {}", parts, e);
             decrement_load_depth();
             debug!(module = %parts.join("."), error = %e, "Failed to resolve module");
             return Err(e);
@@ -143,7 +138,6 @@ pub fn load_and_merge_module(
 
     // Check cache first - if we've already loaded this module, return cached exports
     if let Some(cached_exports) = get_cached_module_exports(&module_path) {
-        eprintln!("DEBUG LOAD MODULE: Using cached exports for {:?}", module_path);
         decrement_load_depth();
         // If importing a specific item, extract it from cached exports
         if let Some(item_name) = import_item_name {
@@ -173,11 +167,9 @@ pub fn load_and_merge_module(
     mark_module_loading(&module_path);
 
     // Read and parse the module
-    eprintln!("DEBUG LOAD MODULE: Reading module from {:?}", module_path);
     let source = match fs::read_to_string(&module_path) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("DEBUG LOAD MODULE: Failed to read {:?}: {}", module_path, e);
             unmark_module_loading(&module_path);
             decrement_load_depth();
             return Err(CompileError::Io(format!("Cannot read module {:?}: {}", module_path, e)));

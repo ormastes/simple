@@ -447,6 +447,7 @@ fn substitute_expr_templates(expr: &Expr, const_bindings: &HashMap<String, Strin
                 .collect(),
         },
         Expr::Try(expr) => Expr::Try(Box::new(substitute_expr_templates(expr, const_bindings))),
+        Expr::ExistsCheck(expr) => Expr::ExistsCheck(Box::new(substitute_expr_templates(expr, const_bindings))),
         // Handle bare identifiers that match const parameters
         Expr::Identifier(name) => {
             if let Some(value) = const_bindings.get(name) {

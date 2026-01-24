@@ -155,6 +155,13 @@ pub fn print_help() {
     eprintln!("  --build-timestamp=<ISO8601>  Override build timestamp (e.g., 2025-01-15T10:00:00Z)");
     eprintln!("  --log=<file.json>            Save build log for replay and debugging");
     eprintln!();
+    eprintln!("Runner Memory Limits:");
+    eprintln!("  --memory-limit=<size>        Set memory limit per runner thread (default: 1G)");
+    eprintln!("                               Accepts: bytes, K/KB, M/MB, G/GB (e.g., 512M, 2G)");
+    eprintln!("  --unlimited-memory           Disable memory limit (no limit)");
+    eprintln!("  --no-memory-limit            Same as --unlimited-memory");
+    eprintln!("  --memory-warn-only           Warn instead of fail on limit exceeded");
+    eprintln!();
     eprintln!("Target Architectures:");
     eprintln!("  x86_64   64-bit x86 (default on most systems)");
     eprintln!("  aarch64  64-bit ARM (Apple Silicon, ARM servers)");

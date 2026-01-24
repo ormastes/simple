@@ -121,13 +121,22 @@ impl<'a> Parser<'a> {
                                 end: None,
                                 step,
                             };
-                        } else if self.check(&TokenKind::Colon) {
+                        } else if self.check(&TokenKind::Colon)
+                            || matches!(&self.current.kind, TokenKind::Symbol(_))
+                        {
                             // It's a slice
-                            self.advance();
-                            let end = if self.check(&TokenKind::Colon) || self.check(&TokenKind::RBracket) {
-                                None
+                            // Handle Symbol tokens as :identifier (e.g., arr[start:end] where :end is Symbol("end"))
+                            let end = if let TokenKind::Symbol(name) = &self.current.kind.clone() {
+                                let name = name.clone();
+                                self.advance();
+                                Some(Box::new(Expr::Identifier(name)))
                             } else {
-                                Some(Box::new(self.parse_expression()?))
+                                self.advance(); // consume the colon
+                                if self.check(&TokenKind::Colon) || self.check(&TokenKind::RBracket) {
+                                    None
+                                } else {
+                                    Some(Box::new(self.parse_expression()?))
+                                }
                             };
                             let step = self.parse_optional_step()?;
                             self.expect(&TokenKind::RBracket)?;
@@ -343,6 +352,11 @@ impl<'a> Parser<'a> {
                             field,
                         };
                     }
+                }
+                TokenKind::DotQuestion => {
+                    // Existence check: expr.? - returns bool (is present/non-empty)
+                    self.advance();
+                    expr = Expr::ExistsCheck(Box::new(expr));
                 }
                 TokenKind::Unwrap => {
                     // Safe unwrap: expr unwrap or: default / expr unwrap else: fn / expr unwrap or_return:

@@ -381,6 +381,43 @@ pub(crate) fn evaluate_expr(
                 }
             }
         }
+        // Existence check: expr.? - returns bool indicating if value is present
+        Expr::ExistsCheck(inner) => {
+            let val = evaluate_expr(inner, env, functions, classes, enums, impl_methods)?;
+            let exists = match &val {
+                // Option: Some is present, None is not
+                Value::Enum { enum_name, variant, .. }
+                    if SpecialEnumType::from_name(enum_name) == Some(SpecialEnumType::Option) =>
+                {
+                    OptionVariant::from_name(variant) == Some(OptionVariant::Some)
+                }
+                // Result: Ok is present, Err is not
+                Value::Enum { enum_name, variant, .. }
+                    if SpecialEnumType::from_name(enum_name) == Some(SpecialEnumType::Result) =>
+                {
+                    ResultVariant::from_name(variant) == Some(ResultVariant::Ok)
+                }
+                // Nil is not present
+                Value::Nil => false,
+                // Empty collections are not present
+                Value::Array(arr) => !arr.is_empty(),
+                Value::Dict(dict) => !dict.is_empty(),
+                // Empty strings are not present
+                Value::Str(s) => !s.is_empty(),
+                // Objects with class "Set" - check if inner items are empty
+                Value::Object { class, fields } if class == "Set" => {
+                    // Set is typically stored with an "items" field containing a Dict
+                    if let Some(Value::Dict(items)) = fields.get("items") {
+                        !items.is_empty()
+                    } else {
+                        true // If no items field, treat as present
+                    }
+                }
+                // All other values (numbers, bools, structs, etc.) are present
+                _ => true,
+            };
+            Ok(Value::Bool(exists))
+        }
         // Safe unwrap: expr unwrap or: default
         Expr::UnwrapOr { expr: inner, default } => {
             let val = evaluate_expr(inner, env, functions, classes, enums, impl_methods)?;

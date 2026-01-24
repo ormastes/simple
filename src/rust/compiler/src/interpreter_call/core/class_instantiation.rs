@@ -270,3 +270,10 @@ fn has_inject_attr(method: &FunctionDef) -> bool {
         .iter()
         .any(|attr| attr.name == "inject" || attr.name == "sys_inject")
 }
+
+/// Clear class instantiation thread-local state.
+///
+/// This should be called between test runs to prevent memory leaks.
+pub fn clear_class_instantiation_state() {
+    IN_NEW_METHOD.with(|cell| cell.borrow_mut().clear());
+}

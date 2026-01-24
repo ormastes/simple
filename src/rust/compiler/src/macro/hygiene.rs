@@ -492,6 +492,7 @@ pub(super) fn apply_macro_hygiene_expr(expr: &Expr, ctx: &mut MacroHygieneContex
                 .collect(),
         },
         Expr::Try(expr) => Expr::Try(Box::new(apply_macro_hygiene_expr(expr, ctx))),
+        Expr::ExistsCheck(expr) => Expr::ExistsCheck(Box::new(apply_macro_hygiene_expr(expr, ctx))),
         Expr::ContractOld(expr) => Expr::ContractOld(Box::new(apply_macro_hygiene_expr(expr, ctx))),
         Expr::DoBlock(nodes) => {
             ctx.push_scope();

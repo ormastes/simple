@@ -120,6 +120,44 @@ user?.name ?? "Anonymous"     # Default if None
 config["key"] ?? default      # Fallback value
 ```
 
+**Existence check (`.?`) and no-paren methods:**
+```simple
+# .? checks if value is "present" (not nil AND not empty)
+opt.?                         # true if Some, false if None
+list.?                        # true if non-empty, false if empty
+dict.?                        # true if non-empty, false if empty
+str.?                         # true if non-empty string
+num.?                         # always true (primitives exist)
+
+# No-paren method calls (Ruby-like)
+list.first                    # same as list.first()
+list.last                     # same as list.last()
+str.trim                      # same as str.trim()
+str.upper                     # same as str.upper()
+
+# Combine .? with no-paren for concise checks
+list.first.?                  # true if list has first element
+str.trim.?                    # true if trimmed string is non-empty
+
+# Result type patterns (replaces is_ok/is_err)
+result.ok.?                   # true if Ok (same as is_ok())
+result.err.?                  # true if Err (same as is_err())
+
+# Negation patterns
+not opt.?                     # true if None (same as is_none())
+not list.?                    # true if empty (same as is_empty())
+```
+
+**Refactoring patterns (prefer `.?` style):**
+| Verbose | Concise | Notes |
+|---------|---------|-------|
+| `opt.is_some()` | `opt.?` | Direct existence check |
+| `opt.is_none()` | `not opt.?` | Negated existence |
+| `result.is_ok()` | `result.ok.?` | `ok` returns Option |
+| `result.is_err()` | `result.err.?` | `err` returns Option |
+| `list.is_empty()` | `not list.?` | Empty = not present |
+| `list.first().is_some()` | `list.first.?` | No-paren + existence |
+
 **Strings:**
 ```simple
 print "Hello, {name}!"        # Interpolation is default (no f"" needed)
@@ -279,9 +317,15 @@ See `/coding` skill for full details.
 
 ### Question Mark (`?`) Usage
 - ❌ **NEVER use `?` in method/function/variable names** - unlike Ruby
-- ✅ **`?` is an operator only**: try operator (`result?`), optional type (`T?`)
-- ✅ **Use `is_*` prefix for predicates**: `is_empty()`, `is_valid()`, `is_some()`
+- ✅ **`?` is an operator only**:
+  - `result?` - Try operator (unwrap or propagate error)
+  - `T?` - Optional type
+  - `expr?.field` - Optional chaining
+  - `expr ?? default` - Null coalescing
+  - `expr.?` - Existence check (is present/non-empty)
+- ✅ **Prefer `.?` over `is_*` predicates**: `opt.?` instead of `opt.is_some()`
 - 📖 **Design Decision**: See `doc/design/question_mark_design_decision.md`
+- 📖 **Refactoring Guide**: See `doc/research/exists_check_refactoring.md`
 
 ### TODO Comments
 - ❌ **NEVER remove TODO markers** unless the feature is fully implemented and working

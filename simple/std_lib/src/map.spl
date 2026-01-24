@@ -98,15 +98,15 @@ struct Map<K, V>:
         Returns:
             Hash value
         """
-        # TODO: Implement proper hash function
+        # TODO[stdlib][P2]: Implement proper hash function
         # For now, use a simple approach
         # This is a placeholder - real implementation needs type-specific hashing
-        var hash: i64 = 0
+        var h: i64 = 0
         # For text keys, hash the string
         # For numeric keys, use the value directly
         # This is simplified and would need proper trait-based hashing
-        hash = 0  # Placeholder
-        hash
+        h = 0  # Placeholder
+        h
 
     me insert(key: K, value: V):
         """Insert or update a key-value pair.
@@ -121,16 +121,22 @@ struct Map<K, V>:
         val hash = self.hash_key(key)
         val bucket_idx = (hash % self.capacity as i64) as i32
 
+        # Get the bucket - make a mutable copy
+        var bucket_ = self.buckets[bucket_idx]
+
         # Check if key already exists in bucket
-        var bucket = self.buckets[bucket_idx]
-        for i in 0..bucket.len():
-            if bucket[i].key == key:
+        for i in 0..bucket_.len():
+            if bucket_[i].key == key:
                 # Update existing entry
-                bucket[i] = MapEntry(key: key, value: value, hash: hash)
+                bucket_[i] = MapEntry(key: key, value: value, hash: hash)
+                # Write back the modified bucket
+                self.buckets[bucket_idx] = bucket_
                 return
 
         # Add new entry
-        bucket.append(MapEntry(key: key, value: value, hash: hash))
+        bucket_.append(MapEntry(key: key, value: value, hash: hash))
+        # Write back the modified bucket
+        self.buckets[bucket_idx] = bucket_
         self.size = self.size + 1
 
         # Check if we need to rehash
@@ -161,6 +167,24 @@ struct Map<K, V>:
 
         nil
 
+    fn has(key: K) -> bool:
+        """Check if map contains key.
+
+        Args:
+            key: Key to check
+
+        Returns:
+            true if key exists
+
+        Example:
+            if map.has("name"):
+                print "Found!"
+        """
+        match self.get(key):
+            Some(_): true
+            nil: false
+
+    @deprecated("Use 'has' instead of 'contains_key'")
     fn contains_key(key: K) -> bool:
         """Check if map contains key.
 
@@ -174,9 +198,7 @@ struct Map<K, V>:
             if map.contains_key("name"):
                 print "Found!"
         """
-        match self.get(key):
-            Some(_): true
-            nil: false
+        self.has(key)
 
     me remove(key: K) -> Option<V>:
         """Remove key-value pair.
@@ -313,7 +335,7 @@ struct Map<K, V>:
             if map.insert_if_absent("key", "value"):
                 print "Inserted"
         """
-        if self.contains_key(key):
+        if self.has(key):
             return false
 
         self.insert(key, value)
@@ -406,10 +428,19 @@ struct Map<K, V>:
         Example:
             val copy = map.clone()
         """
-        val result = Map.with_capacity(self.size)
-        for (key, value) in self.entries():
-            result.insert(key, value)
-        result
+        # Direct bucket copy to avoid nested mutation bug with me methods
+        var new_buckets_ = []
+        for bucket in self.buckets:
+            var new_bucket_ = []
+            for entry in bucket:
+                new_bucket_.append(MapEntry(key: entry.key, value: entry.value, hash: entry.hash))
+            new_buckets_.append(new_bucket_)
+
+        Map(
+            buckets: new_buckets_,
+            size: self.size,
+            capacity: self.capacity
+        )
 
 # ============================================================================
 # Map Literal Support

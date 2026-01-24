@@ -83,7 +83,6 @@ pub(super) fn register_definitions(
             Node::Struct(s) => {
                 // Treat structs like classes for export purposes
                 // Include struct methods so they're available for method calls
-                eprintln!("DEBUG REGISTER: Adding struct {} with {} methods to classes", s.name, s.methods.len());
                 let class_def = ClassDef {
                     span: s.span.clone(),
                     name: s.name.clone(),
@@ -242,11 +241,9 @@ fn process_use_stmt(
     global_classes: &mut HashMap<String, ClassDef>,
     global_enums: &mut Enums,
 ) -> Result<(), CompileError> {
-    eprintln!("DEBUG: Processing import: {:?}", use_stmt.path);
     // Skip type-only imports at runtime - they're only for compile-time type checking
     if use_stmt.is_type_only {
         trace!("Skipping type-only import: {:?}", use_stmt.path);
-        eprintln!("DEBUG: Skipping type-only import");
         return Ok(());
     }
 
@@ -272,9 +269,7 @@ fn process_use_stmt(
         Ok(value) => {
             // Unpack module exports into current namespace
             if let Value::Dict(exports) = &value {
-                eprintln!("DEBUG: Unpacking {} exports from {}", exports.len(), binding_name);
                 for (name, export_value) in exports {
-                    eprintln!("DEBUG:   - {}", name);
                     env.insert(name.clone(), export_value.clone());
                 }
             }

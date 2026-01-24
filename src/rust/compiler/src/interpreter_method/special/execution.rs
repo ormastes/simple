@@ -3,7 +3,7 @@
 // Special type methods: Unit, Option, Result, Mock, Future, Channel, ThreadPool, TraitObject, Object, Constructor
 
 use crate::error::CompileError;
-use crate::interpreter::{bind_args, exec_block_fn, Control, Enums, ImplMethods};
+use crate::interpreter::{bind_args, exec_block_fn, Control, Enums, ImplMethods, CONST_NAMES};
 use crate::value::{Env, OptionVariant, ResultVariant, SpecialEnumType, Value};
 use simple_parser::ast::{Argument, ClassDef, FunctionDef};
 use std::collections::HashMap;
@@ -108,6 +108,10 @@ pub fn exec_function_with_self_return(
         local_env.insert(name, val);
     }
 
+    // Save current CONST_NAMES and clear for function scope
+    let saved_const_names = CONST_NAMES.with(|cell| cell.borrow().clone());
+    CONST_NAMES.with(|cell| cell.borrow_mut().clear());
+
     // Execute the function body with implicit return support
     let result = extract_block_result!(exec_block_fn(
         &func.body,
@@ -117,6 +121,9 @@ pub fn exec_function_with_self_return(
         enums,
         impl_methods
     ));
+
+    // Restore CONST_NAMES
+    CONST_NAMES.with(|cell| *cell.borrow_mut() = saved_const_names);
 
     // Get the potentially modified self
     let updated_self = local_env.get("self").cloned().unwrap_or_else(|| Value::Object {

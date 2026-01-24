@@ -8,6 +8,7 @@ use simple_parser::Span;
 
 use super::super::types::{HirExpr, HirExprKind, HirType, PointerKind, TypeId};
 use super::context::FunctionContext;
+use super::error::{LowerError, LowerResult};
 use super::lowerer::Lowerer;
 use super::memory_warning::{MemoryWarning, MemoryWarningCode};
 
@@ -233,10 +234,15 @@ impl Lowerer {
     /// - Local variable mutability (var vs val)
     /// - Pointer capability (Exclusive, Isolated allow mutation)
     /// - Receiver capability for field access
+    /// - Self parameter in me methods (self is mutable in me methods)
     pub(super) fn expr_has_mut_capability(&self, expr: &HirExpr, ctx: &FunctionContext) -> bool {
         match &expr.kind {
             // Local variable: check mutability and capability
             HirExprKind::Local(idx) => {
+                // Special case: self (local index 0) is mutable in me methods
+                if *idx == 0 && ctx.has_self && ctx.is_me_method {
+                    return true;
+                }
                 // First check if the local is declared as mutable (var)
                 if let Some(local) = ctx.get_local(*idx) {
                     if local.mutability == Mutability::Mutable {
@@ -276,6 +282,62 @@ impl Lowerer {
                     false
                 }
             }
+        }
+    }
+
+    /// E1052: Check if attempting to mutate self in an immutable fn method
+    ///
+    /// In Simple, `fn` methods are immutable (cannot modify self fields)
+    /// while `me` methods are mutable (can modify self fields).
+    /// This check prevents silent failures where self mutation doesn't persist.
+    pub(super) fn check_self_mutation_in_fn_method(
+        &self,
+        target: &HirExpr,
+        ctx: &FunctionContext,
+    ) -> LowerResult<()> {
+        // Only check in methods (has self), and only if NOT a me method
+        if !ctx.has_self || ctx.is_me_method {
+            return Ok(());
+        }
+
+        // Check if target is self.field or self[idx] = ...
+        if self.is_self_mutation(target) {
+            return Err(LowerError::SelfMutationInImmutableMethod);
+        }
+
+        Ok(())
+    }
+
+    /// Check if an expression represents mutation of self (local index 0 in methods)
+    ///
+    /// Returns true for:
+    /// - `self.field = ...` (field access on self)
+    /// - `self[idx] = ...` (index access on self)
+    /// - `self.field.subfield = ...` (nested field access starting from self)
+    fn is_self_mutation(&self, expr: &HirExpr) -> bool {
+        match &expr.kind {
+            HirExprKind::FieldAccess { receiver, .. } => {
+                // Check if receiver is self (local index 0 in methods)
+                // or if it's a nested access that starts from self
+                match &receiver.kind {
+                    HirExprKind::Local(0) => true,
+                    HirExprKind::FieldAccess { .. } | HirExprKind::Index { .. } => {
+                        self.is_self_mutation(receiver)
+                    }
+                    _ => false,
+                }
+            }
+            HirExprKind::Index { receiver, .. } => {
+                // self.arr[i] = value or self[i] = value
+                match &receiver.kind {
+                    HirExprKind::Local(0) => true,
+                    HirExprKind::FieldAccess { .. } | HirExprKind::Index { .. } => {
+                        self.is_self_mutation(receiver)
+                    }
+                    _ => false,
+                }
+            }
+            _ => false,
         }
     }
 

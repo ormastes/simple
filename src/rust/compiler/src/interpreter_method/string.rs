@@ -28,7 +28,7 @@ if let Value::Str(ref s) = recv_val {
             let bytes: Vec<Value> = s.bytes().map(|b| Value::Int(b as i64)).collect();
             return Ok(Value::Array(bytes));
         }
-        "contains" => {
+        "has" | "contains" => {
             let needle = eval_arg(args, 0, Value::Str(String::new()), env, functions, classes, enums, impl_methods)?.to_key_string();
             return Ok(Value::Bool(s.contains(&needle)));
         }
@@ -47,8 +47,8 @@ if let Value::Str(ref s) = recv_val {
                 None => Value::none(),
             });
         }
-        "upper" | "to_upper" | "to_uppercase" => return Ok(Value::Str(s.to_uppercase())),
-        "lower" | "to_lower" | "to_lowercase" => return Ok(Value::Str(s.to_lowercase())),
+        "up" | "upper" | "to_upper" | "to_uppercase" => return Ok(Value::Str(s.to_uppercase())),
+        "down" | "lower" | "to_lower" | "to_lowercase" => return Ok(Value::Str(s.to_lowercase())),
         "capitalize" => {
             // Uppercase first character, lowercase the rest
             let mut chars = s.chars();
@@ -141,7 +141,7 @@ if let Value::Str(ref s) = recv_val {
             }
             return Ok(Value::Str(result));
         }
-        "reversed" => return Ok(Value::Str(s.chars().rev().collect())),
+        "rev" | "reversed" => return Ok(Value::Str(s.chars().rev().collect())),
         "sorted" => {
             let mut chars: Vec<char> = s.chars().collect();
             chars.sort();
@@ -280,7 +280,7 @@ if let Value::Str(ref s) = recv_val {
             let n = eval_arg_usize(args, 0, 1, env, functions, classes, enums, impl_methods)?;
             return Ok(Value::Str(s.repeat(n)));
         }
-        "reverse" => {
+        "rev" | "reverse" => {
             return Ok(Value::Str(s.chars().rev().collect()));
         }
         "last_index_of" | "rfind" => {

@@ -3,7 +3,7 @@
 use super::super::interpreter_helpers::{bind_pattern_value, handle_method_call_with_self_update};
 use super::bdd::{BDD_AFTER_EACH, BDD_BEFORE_EACH, BDD_CONTEXT_DEFS, BDD_INDENT};
 use crate::error::{codes, CompileError, ErrorContext};
-use crate::interpreter::{evaluate_expr, pattern_matches, EXTERN_FUNCTIONS, MODULE_GLOBALS};
+use crate::interpreter::{evaluate_expr, exec_with, pattern_matches, EXTERN_FUNCTIONS, MODULE_GLOBALS};
 use crate::value::*;
 use simple_parser::ast::{ClassDef, EnumDef, Expr, FunctionDef, Node};
 use simple_runtime::value::diagram_ffi;
@@ -394,6 +394,15 @@ pub(super) fn exec_block_closure(
                 EXTERN_FUNCTIONS.with(|cell| cell.borrow_mut().insert(ext.name.clone()));
                 last_value = Value::Nil;
             }
+            Node::With(with_stmt) => {
+                // Handle context manager (with statement) inside block closures
+                // Delegates to the main interpreter's exec_with function
+                use crate::interpreter::Control;
+                match exec_with(with_stmt, &mut local_env, functions, classes, enums, impl_methods)? {
+                    Control::Return(val) => return Ok(val),
+                    _ => last_value = Value::Nil,
+                }
+            }
             _ => {
                 last_value = Value::Nil;
             }
@@ -597,6 +606,15 @@ fn exec_block_closure_mut(
                         enums,
                         impl_methods,
                     )?;
+                }
+            }
+            Node::With(with_stmt) => {
+                // Handle context manager (with statement) inside block closures
+                // Delegates to the main interpreter's exec_with function
+                use crate::interpreter::Control;
+                match exec_with(with_stmt, local_env, functions, classes, enums, impl_methods)? {
+                    Control::Return(val) => return Ok(val),
+                    _ => last_value = Value::Nil,
                 }
             }
             _ => {

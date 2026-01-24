@@ -69,7 +69,7 @@ fn set_ffi_output_dir(dir: text) -> void:
     rt_screenshot_set_output_dir(dir)
 
 fn set_ffi_test_context(test_file: text, test_name: text) -> void:
-    rt_screenshot_set_context(test_file, test_name)
+    rt_screenshot_set_context(test_file=test_file, test_name=test_name)
 
 fn clear_ffi_test_context() -> void:
     rt_screenshot_clear_context()
@@ -471,18 +471,18 @@ fn save_screenshots() -> ScreenshotResult:
 # Context manager for screenshot capture
 fn with_screenshot(name: text, block: fn() -> void) -> ScreenshotResult:
     val config = ScreenshotConfig.default()
-    return with_screenshot_config(name, config, block)
+    return with_screenshot_config(name=name, config=config, block=block)
 
 fn with_screenshot_config(name: text, config: ScreenshotConfig, block: fn() -> void) -> ScreenshotResult:
     # Get test context from registry
     val test_file = runtime.get_current_test_file().unwrap_or("unknown")
 
-    init_screenshot_context(name, test_file, config)
+    init_screenshot_context(test_name=name, test_file=test_file, config=config)
 
     # Set FFI context if FFI screenshots are enabled
     if is_ffi_screenshots_enabled():
         set_ffi_output_dir(config.output_dir)
-        set_ffi_test_context(test_file, name)
+        set_ffi_test_context(test_file=test_file, test_name=name)
 
     # Capture before state if needed
     match config.capture_mode:
@@ -558,7 +558,7 @@ fn _capture_pty_buffer() -> text:
 
 # Internal: Save screenshots from context
 fn _save_context_screenshots(ctx: ScreenshotContext) -> ScreenshotResult:
-    val output_dir = _compute_output_path(ctx.config.output_dir, ctx.test_file)
+    val output_dir = _compute_output_path(base_dir=ctx.config.output_dir, test_file=ctx.test_file)
 
     # Ensure output directory exists
     fs.create_dir_all(output_dir)
@@ -571,8 +571,8 @@ fn _save_context_screenshots(ctx: ScreenshotContext) -> ScreenshotResult:
     # Save before screenshot
     match ctx.before_buffer:
         case Some(buffer):
-            val path = _get_screenshot_path(output_dir, ctx.test_name, "before", ctx.config.format)
-            val (saved_path, new, diff) = _save_screenshot(path, buffer, ctx.config)
+            val path = _get_screenshot_path(dir=output_dir, name=ctx.test_name, suffix="before", format=ctx.config.format)
+            val (saved_path, new, diff) = _save_screenshot(path=path, buffer=buffer, config=ctx.config)
             before_path = Some(saved_path)
             is_new = is_new or new
             changed = changed or diff
@@ -582,8 +582,8 @@ fn _save_context_screenshots(ctx: ScreenshotContext) -> ScreenshotResult:
     # Save after screenshot
     match ctx.after_buffer:
         case Some(buffer):
-            val path = _get_screenshot_path(output_dir, ctx.test_name, "after", ctx.config.format)
-            val (saved_path, new, diff) = _save_screenshot(path, buffer, ctx.config)
+            val path = _get_screenshot_path(dir=output_dir, name=ctx.test_name, suffix="after", format=ctx.config.format)
+            val (saved_path, new, diff) = _save_screenshot(path=path, buffer=buffer, config=ctx.config)
             after_path = Some(saved_path)
             is_new = is_new or new
             changed = changed or diff
@@ -645,9 +645,9 @@ fn _save_screenshot(path: text, buffer: text, config: ScreenshotConfig) -> (text
     # Convert buffer to appropriate format and save
     match config.format:
         case ImageFormat.PNG:
-            _save_as_png(path, buffer)
+            _save_as_png(path=path, buffer=buffer)
         case ImageFormat.JPEG:
-            _save_as_jpeg(path, buffer)
+            _save_as_jpeg(path=path, buffer=buffer)
         case ImageFormat.ANSI:
             fs.write_string(path, buffer)
 
@@ -671,30 +671,30 @@ fn _compute_hash(content: text) -> text:
 fn _save_as_png(path: text, buffer: text) -> void:
     # Convert ANSI text to PNG image
     # This calls into the runtime FFI
-    runtime.ansi_to_png(buffer, path)
+    runtime.ansi_to_png(buffer=buffer, path=path)
 
 # Internal: Save buffer as JPEG image
 fn _save_as_jpeg(path: text, buffer: text) -> void:
-    runtime.ansi_to_jpeg(buffer, path)
+    runtime.ansi_to_jpeg(buffer=buffer, path=path)
 
 # Internal: Save metadata alongside screenshot
 fn _save_metadata(screenshot_path: text, metadata: ScreenshotMetadata) -> void:
     val meta_path = screenshot_path + ".meta.json"
-    val json = json.encode(metadata)
-    fs.write_string(meta_path, json)
+    val json_str = json.encode(metadata)
+    fs.write_string(path=meta_path, content=json_str)
 
 # Check if screenshot exists for a test
 fn screenshot_exists(test_name: text, test_file: text, suffix: text = "after") -> bool:
     val config = ScreenshotConfig.default()
-    val output_dir = _compute_output_path(config.output_dir, test_file)
-    val path = _get_screenshot_path(output_dir, test_name, suffix, config.format)
+    val output_dir = _compute_output_path(base_dir=config.output_dir, test_file=test_file)
+    val path = _get_screenshot_path(dir=output_dir, name=test_name, suffix=suffix, format=config.format)
     return fs.exist(path)
 
 # Get screenshot path for a test
 fn get_screenshot_path(test_name: text, test_file: text, suffix: text = "after") -> Option<text>:
     val config = ScreenshotConfig.default()
-    val output_dir = _compute_output_path(config.output_dir, test_file)
-    val path = _get_screenshot_path(output_dir, test_name, suffix, config.format)
+    val output_dir = _compute_output_path(base_dir=config.output_dir, test_file=test_file)
+    val path = _get_screenshot_path(dir=output_dir, name=test_name, suffix=suffix, format=config.format)
     if fs.exist(path):
         return Some(path)
     else:
@@ -702,7 +702,7 @@ fn get_screenshot_path(test_name: text, test_file: text, suffix: text = "after")
 
 # Generate markdown for screenshot with placeholder
 fn screenshot_markdown(test_name: text, test_file: text, suffix: text = "after") -> text:
-    match get_screenshot_path(test_name, test_file, suffix):
+    match get_screenshot_path(test_name=test_name, test_file=test_file, suffix=suffix):
         case Some(path):
             # Convert absolute path to relative for markdown
             val rel_path = path.replace("doc/spec/", "../")

@@ -40,3 +40,6 @@ pub(crate) use lambda::exec_lambda;
 // Re-export types that are part of the public interface
 pub(crate) use aop_advice::ProceedContext;
 pub(crate) use class_instantiation::IN_NEW_METHOD;
+
+// Clear functions for memory leak prevention
+pub use class_instantiation::clear_class_instantiation_state;

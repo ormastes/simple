@@ -3,9 +3,10 @@
 //! This module contains expression lowering logic for function calls,
 //! including special builtins (async, I/O, math/conversion) and spawn.
 
-use simple_parser::{self as ast, Expr};
+use simple_parser::{self as ast, Expr, Span};
 
 use crate::hir::lower::context::FunctionContext;
+use crate::hir::lower::deprecation_warning::DeprecationWarning;
 use crate::hir::lower::error::{LowerError, LowerResult};
 use crate::hir::lower::lowerer::Lowerer;
 use crate::hir::types::*;
@@ -100,6 +101,24 @@ impl Lowerer {
             // CTR-030-032: Check for impure function calls in contract expressions
             if ctx.contract_ctx.is_some() {
                 self.check_contract_purity(name)?;
+            }
+
+            // Check for deprecated function usage
+            if self.is_deprecated(name) {
+                let message = self.deprecation_message(name).map(|s| s.to_string());
+                let suggestion = self.find_non_deprecated_function_alternative(name);
+                let span = if let Expr::Identifier(_) = callee {
+                    // Use a dummy span for now - in a real implementation we'd get the actual span
+                    Span::new(0, 0, 1, 1)
+                } else {
+                    Span::new(0, 0, 1, 1)
+                };
+                self.deprecation_warnings.add(DeprecationWarning::function(
+                    span,
+                    name.clone(),
+                    message,
+                    suggestion,
+                ));
             }
         }
 
