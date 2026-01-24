@@ -139,6 +139,7 @@ pub enum TokenKind {
     Loop,
     Break,
     Continue,
+    Pass, // pass (no-op statement, like Python's pass)
     Return,
     Match,
     Case,

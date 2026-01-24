@@ -11,6 +11,7 @@
 
 use crate::db_lock::FileLock;
 use crate::test_stats::{compute_statistics, detect_outliers, has_significant_change, OutlierMethod};
+use crate::unified_db::Record;
 use serde::{Deserialize, Serialize};
 use simple_sdn::{parse_document, SdnValue};
 use std::collections::HashMap;
@@ -93,6 +94,156 @@ pub struct TestRecord {
 
     // Record validity
     pub valid: bool,
+
+    // Qualified ignore fields (requires authentication to modify)
+    /// Who qualified this ignore (email or "password:<hash-prefix>")
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub qualified_by: Option<String>,
+    /// When the qualification was made (ISO timestamp)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub qualified_at: Option<String>,
+    /// User-provided reason for the qualified ignore
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub qualified_reason: Option<String>,
+}
+
+/// Implement Record trait for unified database access
+impl Record for TestRecord {
+    fn id(&self) -> String {
+        self.test_id.clone()
+    }
+
+    fn table_name() -> &'static str {
+        "tests"
+    }
+
+    fn from_sdn_row(row: &[String]) -> Result<Self, String> {
+        let get_field = |idx: usize| row.get(idx).cloned().unwrap_or_default();
+
+        let status = match get_field(4).as_str() {
+            "passed" => TestStatus::Passed,
+            "failed" => TestStatus::Failed,
+            "skipped" => TestStatus::Skipped,
+            "ignored" => TestStatus::Ignored,
+            "qualifiedignore" | "qualified_ignore" => TestStatus::QualifiedIgnore,
+            _ => TestStatus::Skipped,
+        };
+
+        let failure: Option<TestFailure> = {
+            let json = get_field(6);
+            if json.is_empty() {
+                None
+            } else {
+                serde_json::from_str(&json).ok()
+            }
+        };
+
+        let execution_history: ExecutionHistory =
+            serde_json::from_str(&get_field(7)).unwrap_or_else(|_| ExecutionHistory::default());
+
+        let timing: TimingData =
+            serde_json::from_str(&get_field(8)).unwrap_or_else(|_| TimingData::default());
+
+        let timing_config: Option<TimingConfig> = {
+            let json = get_field(9);
+            if json.is_empty() {
+                None
+            } else {
+                serde_json::from_str(&json).ok()
+            }
+        };
+
+        // Parse qualified ignore fields
+        let qualified_by = {
+            let s = get_field(15);
+            if s.is_empty() { None } else { Some(s) }
+        };
+        let qualified_at = {
+            let s = get_field(16);
+            if s.is_empty() { None } else { Some(s) }
+        };
+        let qualified_reason = {
+            let s = get_field(17);
+            if s.is_empty() { None } else { Some(s) }
+        };
+
+        Ok(TestRecord {
+            test_id: get_field(0),
+            test_name: get_field(1),
+            test_file: get_field(2),
+            category: get_field(3),
+            status,
+            last_run: get_field(5),
+            failure,
+            execution_history,
+            timing,
+            timing_config,
+            related_bugs: get_field(10)
+                .split(',')
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+                .collect(),
+            related_features: get_field(11)
+                .split(',')
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+                .collect(),
+            tags: get_field(12)
+                .split(',')
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+                .collect(),
+            description: get_field(13),
+            valid: get_field(14) == "true",
+            qualified_by,
+            qualified_at,
+            qualified_reason,
+        })
+    }
+
+    fn to_sdn_row(&self) -> Vec<String> {
+        let status_str = match self.status {
+            TestStatus::Passed => "passed",
+            TestStatus::Failed => "failed",
+            TestStatus::Skipped => "skipped",
+            TestStatus::Ignored => "ignored",
+            TestStatus::QualifiedIgnore => "qualifiedignore",
+        };
+
+        let failure_json = self
+            .failure
+            .as_ref()
+            .map(|f| serde_json::to_string(f).unwrap_or_default())
+            .unwrap_or_default();
+        let history_json = serde_json::to_string(&self.execution_history).unwrap_or_default();
+        let timing_json = serde_json::to_string(&self.timing).unwrap_or_default();
+        let timing_config_json = self
+            .timing_config
+            .as_ref()
+            .map(|c| serde_json::to_string(c).unwrap_or_default())
+            .unwrap_or_default();
+
+        vec![
+            self.test_id.clone(),
+            self.test_name.clone(),
+            self.test_file.clone(),
+            self.category.clone(),
+            status_str.to_string(),
+            self.last_run.clone(),
+            failure_json,
+            history_json,
+            timing_json,
+            timing_config_json,
+            self.related_bugs.join(","),
+            self.related_features.join(","),
+            self.tags.join(","),
+            self.description.clone(),
+            self.valid.to_string(),
+            self.qualified_by.clone().unwrap_or_default(),
+            self.qualified_at.clone().unwrap_or_default(),
+            self.qualified_reason.clone().unwrap_or_default(),
+        ]
+    }
 }
 
 /// Test execution status
@@ -103,6 +254,8 @@ pub enum TestStatus {
     Failed,
     Skipped,
     Ignored,
+    /// Ignored with qualified authorization - requires authentication to set/modify
+    QualifiedIgnore,
 }
 
 /// Test failure information
@@ -356,6 +509,7 @@ fn parse_test_db_sdn(doc: &simple_sdn::SdnDocument) -> Result<TestDb, String> {
                 "failed" => TestStatus::Failed,
                 "skipped" => TestStatus::Skipped,
                 "ignored" => TestStatus::Ignored,
+                "qualifiedignore" | "qualified_ignore" => TestStatus::QualifiedIgnore,
                 _ => TestStatus::Passed,
             };
 
@@ -412,6 +566,20 @@ fn parse_test_db_sdn(doc: &simple_sdn::SdnDocument) -> Result<TestDb, String> {
                 .filter(|s| !s.is_empty())
                 .collect();
 
+            // Parse qualified ignore fields
+            let qualified_by = {
+                let s = get_field("qualified_by");
+                if s.is_empty() { None } else { Some(s) }
+            };
+            let qualified_at = {
+                let s = get_field("qualified_at");
+                if s.is_empty() { None } else { Some(s) }
+            };
+            let qualified_reason = {
+                let s = get_field("qualified_reason");
+                if s.is_empty() { None } else { Some(s) }
+            };
+
             let record = TestRecord {
                 test_id: test_id.clone(),
                 test_name: get_field("test_name"),
@@ -428,6 +596,9 @@ fn parse_test_db_sdn(doc: &simple_sdn::SdnDocument) -> Result<TestDb, String> {
                 tags,
                 description: get_field("description"),
                 valid: get_field("valid") == "true",
+                qualified_by,
+                qualified_at,
+                qualified_reason,
             };
 
             db.records.insert(test_id, record);
@@ -438,7 +609,10 @@ fn parse_test_db_sdn(doc: &simple_sdn::SdnDocument) -> Result<TestDb, String> {
 }
 
 /// Save test database to SDN file (with file locking)
+/// Uses simple_sdn library for proper serialization (matches Simple's sdn.serializer)
 pub fn save_test_db(path: &Path, db: &TestDb) -> Result<(), String> {
+    use simple_sdn::SdnValue;
+
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
@@ -462,70 +636,61 @@ pub fn save_test_db(path: &Path, db: &TestDb) -> Result<(), String> {
         }
     }
 
-    let mut content = String::new();
-    content.push_str("tests |test_id, test_name, test_file, category, status, last_run, failure, execution_history, timing, timing_config, related_bugs, related_features, tags, description, valid|\n");
+    // Build table fields
+    let fields = vec![
+        "test_id".to_string(),
+        "test_name".to_string(),
+        "test_file".to_string(),
+        "category".to_string(),
+        "status".to_string(),
+        "last_run".to_string(),
+        "failure".to_string(),
+        "execution_history".to_string(),
+        "timing".to_string(),
+        "timing_config".to_string(),
+        "related_bugs".to_string(),
+        "related_features".to_string(),
+        "tags".to_string(),
+        "description".to_string(),
+        "valid".to_string(),
+        "qualified_by".to_string(),
+        "qualified_at".to_string(),
+        "qualified_reason".to_string(),
+    ];
 
+    // Build table rows using Record trait (no duplication, proper serialization)
     let mut sorted_records: Vec<_> = db.records.values().collect();
     sorted_records.sort_by(|a, b| a.test_id.cmp(&b.test_id));
 
-    for record in sorted_records {
-        let status_str = match record.status {
-            TestStatus::Passed => "passed",
-            TestStatus::Failed => "failed",
-            TestStatus::Skipped => "skipped",
-            TestStatus::Ignored => "ignored",
-        };
+    let rows: Vec<Vec<SdnValue>> = sorted_records
+        .iter()
+        .map(|record| {
+            // Use Record::to_sdn_row() for consistent serialization
+            record
+                .to_sdn_row()
+                .into_iter()
+                .map(SdnValue::String)
+                .collect()
+        })
+        .collect();
 
-        let failure_json = record
-            .failure
-            .as_ref()
-            .map(|f| serde_json::to_string(f).unwrap_or_default())
-            .unwrap_or_default();
-        let history_json = serde_json::to_string(&record.execution_history).unwrap_or_default();
-        let timing_json = serde_json::to_string(&record.timing).unwrap_or_default();
-        let timing_config_json = record
-            .timing_config
-            .as_ref()
-            .map(|c| serde_json::to_string(c).unwrap_or_default())
-            .unwrap_or_default();
+    // Create SDN table and serialize using library (proper quoting built-in)
+    let table = SdnValue::Table {
+        fields: Some(fields),
+        types: None,
+        rows,
+    };
 
-        let quote = |s: &str| {
-            // Quote strings that contain special characters:
-            // - `,` is column separator in SDN tables
-            // - `"` needs escaping
-            // - `\n` needs escaping
-            // - `:` is key-value separator in SDN (important for timestamps like 2026-01-24T08:05:00)
-            // - `+` is not a valid identifier char in SDN (important for timezone offsets like +00:00)
-            if s.is_empty() || s.contains(',') || s.contains('"') || s.contains('\n') || s.contains(':') || s.contains('+') {
-                format!("\"{}\"", s.replace("\"", "\\\"").replace("\n", "\\n"))
-            } else {
-                s.to_string()
-            }
-        };
+    // Build document with table as root under "tests" key
+    let mut dict = indexmap::IndexMap::new();
+    dict.insert("tests".to_string(), table);
 
-        let row = vec![
-            quote(&record.test_id),
-            quote(&record.test_name),
-            quote(&record.test_file),
-            quote(&record.category),
-            quote(status_str),
-            quote(&record.last_run),
-            quote(&failure_json),
-            quote(&history_json),
-            quote(&timing_json),
-            quote(&timing_config_json),
-            quote(&record.related_bugs.join(",")),
-            quote(&record.related_features.join(",")),
-            quote(&record.tags.join(",")),
-            quote(&record.description),
-            record.valid.to_string(),
-        ];
+    let mut doc = simple_sdn::SdnDocument::parse("tests |id|").map_err(|e| e.to_string())?;
+    *doc.root_mut() = SdnValue::Dict(dict);
 
-        content.push_str("    ");
-        content.push_str(&row.join(", "));
-        content.push('\n');
-    }
+    let content = doc.to_sdn();
 
+    // Atomic write: temp file then rename
     let temp_path = path.with_extension("sdn.tmp");
     fs::write(&temp_path, &content).map_err(|e| e.to_string())?;
     fs::rename(&temp_path, path).map_err(|e| e.to_string())?;
@@ -571,6 +736,9 @@ pub fn update_test_result(
         tags: Vec::new(),
         description: String::new(),
         valid: true,
+        qualified_by: None,
+        qualified_at: None,
+        qualified_reason: None,
     });
 
     let old_status = test.status;
@@ -603,6 +771,7 @@ pub fn update_test_result(
         TestStatus::Failed => "fail",
         TestStatus::Skipped => "skip",
         TestStatus::Ignored => "ignore",
+        TestStatus::QualifiedIgnore => "qualified_ignore",
     };
     test.execution_history.last_10_runs.insert(0, run_result.to_string());
     if test.execution_history.last_10_runs.len() > 10 {
@@ -793,6 +962,7 @@ pub fn generate_test_result_docs(db: &TestDb, output_dir: &Path) -> Result<(), S
     let mut failed = 0;
     let mut skipped = 0;
     let mut ignored = 0;
+    let mut qualified_ignored = 0;
 
     for test in db.valid_records() {
         match test.status {
@@ -800,10 +970,11 @@ pub fn generate_test_result_docs(db: &TestDb, output_dir: &Path) -> Result<(), S
             TestStatus::Failed => failed += 1,
             TestStatus::Skipped => skipped += 1,
             TestStatus::Ignored => ignored += 1,
+            TestStatus::QualifiedIgnore => qualified_ignored += 1,
         }
     }
 
-    let total = passed + failed + skipped + ignored;
+    let total = passed + failed + skipped + ignored + qualified_ignored;
     md.push_str(&format!("**Total Tests:** {}\n", total));
 
     let status_emoji = if failed > 0 {
@@ -836,7 +1007,8 @@ pub fn generate_test_result_docs(db: &TestDb, output_dir: &Path) -> Result<(), S
     md.push_str(&format!("| ✅ Passed | {} | {:.1}% |\n", passed, pct(passed)));
     md.push_str(&format!("| ❌ Failed | {} | {:.1}% |\n", failed, pct(failed)));
     md.push_str(&format!("| ⏭️ Skipped | {} | {:.1}% |\n", skipped, pct(skipped)));
-    md.push_str(&format!("| 🔕 Ignored | {} | {:.1}% |\n\n", ignored, pct(ignored)));
+    md.push_str(&format!("| 🔕 Ignored | {} | {:.1}% |\n", ignored, pct(ignored)));
+    md.push_str(&format!("| 🔐 Qualified Ignore | {} | {:.1}% |\n\n", qualified_ignored, pct(qualified_ignored)));
 
     // Failed tests section
     if failed > 0 {
@@ -1085,6 +1257,34 @@ pub fn generate_test_result_docs(db: &TestDb, output_dir: &Path) -> Result<(), S
             md.push_str(&format!(
                 "- {} ({:.1}% failure rate)\n",
                 test.test_name, test.execution_history.failure_rate_pct
+            ));
+        }
+        md.push_str("\n");
+    }
+
+    // Qualified Ignored tests section
+    let qualified_ignored_tests: Vec<&TestRecord> = db
+        .valid_records()
+        .into_iter()
+        .filter(|t| t.status == TestStatus::QualifiedIgnore)
+        .collect();
+
+    if !qualified_ignored_tests.is_empty() {
+        md.push_str("---\n\n");
+        md.push_str(&format!("## 🔐 Qualified Ignored Tests ({})\n\n", qualified_ignored_tests.len()));
+        md.push_str("Tests ignored with authorized qualification:\n\n");
+        md.push_str("| Test | Qualified By | Reason | Date |\n");
+        md.push_str("|------|-------------|--------|------|\n");
+
+        for test in qualified_ignored_tests.iter().take(20) {
+            let qualified_by = test.qualified_by.as_deref().unwrap_or("-");
+            let reason = test.qualified_reason.as_deref().unwrap_or("-");
+            let date = test.qualified_at.as_deref()
+                .and_then(|s| s.split('T').next())
+                .unwrap_or("-");
+            md.push_str(&format!(
+                "| {} | {} | {} | {} |\n",
+                test.test_name, qualified_by, reason, date
             ));
         }
         md.push_str("\n");

@@ -150,6 +150,13 @@ pub struct ContinueStmt {
     pub span: Span,
 }
 
+/// Pass statement (no-op, like Python's pass)
+/// Used to have an empty block body
+#[derive(Debug, Clone, PartialEq)]
+pub struct PassStmt {
+    pub span: Span,
+}
+
 /// Assert statement for inline contract checks
 /// assert condition
 /// assert condition, "message"

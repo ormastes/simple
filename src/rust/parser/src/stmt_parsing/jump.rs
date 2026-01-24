@@ -4,6 +4,7 @@
 //! - return
 //! - break
 //! - continue
+//! - pass
 
 use crate::ast::*;
 use crate::error::ParseError;
@@ -58,6 +59,20 @@ impl<'a> Parser<'a> {
         self.expect(&TokenKind::Continue)?;
 
         Ok(Node::Continue(ContinueStmt {
+            span: Span::new(
+                start_span.start,
+                self.previous.span.end,
+                start_span.line,
+                start_span.column,
+            ),
+        }))
+    }
+
+    pub(crate) fn parse_pass(&mut self) -> Result<Node, ParseError> {
+        let start_span = self.current.span;
+        self.expect(&TokenKind::Pass)?;
+
+        Ok(Node::Pass(PassStmt {
             span: Span::new(
                 start_span.start,
                 self.previous.span.end,

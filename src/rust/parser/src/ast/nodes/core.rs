@@ -69,6 +69,7 @@ pub enum Node {
     Loop(LoopStmt),
     Break(BreakStmt),
     Continue(ContinueStmt),
+    Pass(PassStmt),
     Assert(AssertStmt),
     Assume(AssumeStmt),
     Admit(AdmitStmt),

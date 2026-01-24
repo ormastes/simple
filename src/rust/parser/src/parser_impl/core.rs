@@ -373,6 +373,7 @@ impl<'a> Parser<'a> {
             TokenKind::Return => self.parse_return(),
             TokenKind::Break => self.parse_break(),
             TokenKind::Continue => self.parse_continue(),
+            TokenKind::Pass => self.parse_pass(),
             TokenKind::Assert => self.parse_assert(),
             TokenKind::Assume => self.parse_assume(),
             TokenKind::Admit => self.parse_admit(),

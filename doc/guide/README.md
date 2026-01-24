@@ -22,6 +22,15 @@ This directory contains practical guides for:
 
 ---
 
+## Language Reference
+
+| Guide | Description |
+|-------|-------------|
+| [syntax_quick_reference.md](syntax_quick_reference.md) | **Syntax cheatsheet** - Slicing `[1:5]`, comprehensions, `?.`, `??`, destructuring, ranges, all implemented syntax |
+| [fn_lambda_syntax.md](fn_lambda_syntax.md) | Function and lambda syntax details |
+
+---
+
 ## Coding Standards
 
 | Guide | Description |
@@ -119,10 +128,11 @@ Covers:
 ### By Purpose
 
 **Getting Started:**
-1. [coding_style.md](coding_style.md) - Coding conventions
-2. [sspec_writing.md](sspec_writing.md) - Writing tests with SSpec
-3. [module_system.md](module_system.md) - Project organization
-4. [basic_sample_check.md](basic_sample_check.md) - Verifying your setup
+1. [syntax_quick_reference.md](syntax_quick_reference.md) - **Language syntax cheatsheet** (slicing, comprehensions, `?.`, `??`, etc.)
+2. [coding_style.md](coding_style.md) - Coding conventions
+3. [sspec_writing.md](sspec_writing.md) - Writing tests with SSpec
+4. [module_system.md](module_system.md) - Project organization
+5. [basic_sample_check.md](basic_sample_check.md) - Verifying your setup
 
 **Building Applications:**
 1. [application_writing.md](application_writing.md) - Application patterns with spec links

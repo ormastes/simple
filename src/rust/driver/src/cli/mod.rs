@@ -18,6 +18,7 @@ pub mod init;
 pub mod llm_tools;
 pub mod lock;
 pub mod migrate;
+pub mod qualify_ignore;
 pub mod repl;
 pub mod sandbox;
 pub mod sspec_docgen;
