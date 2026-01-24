@@ -8,7 +8,7 @@ use super::core_types::{Control, Enums, ImplMethods};
 use super::node_exec::exec_node;
 use super::expr::evaluate_expr;
 use super::macros::{enter_block_scope, exit_block_scope};
-use super::interpreter_control::{exec_match_expr};
+use super::interpreter_control::{exec_match_expr, exec_if_expr};
 
 pub(crate) fn exec_block(
     block: &Block,
@@ -73,6 +73,12 @@ pub(crate) fn exec_block_fn(
             // Handle match as last statement - capture implicit return from match arm
             if let simple_parser::ast::Node::Match(match_stmt) = stmt {
                 let val = exec_match_expr(match_stmt, env, functions, classes, enums, impl_methods)?;
+                last_expr_value = Some(val);
+                continue;
+            }
+            // Handle if as last statement - capture implicit return from if/else branches
+            if let simple_parser::ast::Node::If(if_stmt) = stmt {
+                let val = exec_if_expr(if_stmt, env, functions, classes, enums, impl_methods)?;
                 last_expr_value = Some(val);
                 continue;
             }

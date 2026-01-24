@@ -47,6 +47,8 @@ fn cast_to_simple_type(val: Value, type_name: &str) -> Result<Value, CompileErro
         "bool" => cast_to_bool(val),
         // String (Simple uses "text", Rust uses "str"/"String")
         "str" | "String" | "text" => cast_to_string(val),
+        // Char (i64 code point to single-char string)
+        "char" => cast_to_char(val),
         // For other types, check if it's already that type
         other => {
             // Type assertion - check if value is already that type
@@ -82,10 +84,18 @@ fn cast_to_numeric(val: Value, target: NumericType) -> Result<Value, CompileErro
             CastNumericResult::Int(v) => Ok(Value::Int(v)),
             CastNumericResult::Float(v) => Ok(Value::Float(v)),
         },
+        // Single-character string to numeric (char code point)
+        Value::Str(ref s) if s.chars().count() == 1 => {
+            let code_point = s.chars().next().unwrap() as i64;
+            match cast_int_to_numeric(code_point, target) {
+                CastNumericResult::Int(v) => Ok(Value::Int(v)),
+                CastNumericResult::Float(v) => Ok(Value::Float(v)),
+            }
+        }
         _ => {
             let ctx = ErrorContext::new()
                 .with_code(codes::TYPE_MISMATCH)
-                .with_help(format!("only int, float, and bool can be cast to numeric types"));
+                .with_help(format!("only int, float, bool, and single-char strings can be cast to numeric types"));
             Err(CompileError::semantic_with_context(
                 format!("type mismatch: cannot cast {} to {}", val.type_name(), target.name()),
                 ctx,
@@ -127,6 +137,37 @@ fn cast_to_string(val: Value) -> Result<Value, CompileError> {
                 .with_help("only int, float, bool, string, symbol, and nil can be cast to String");
             Err(CompileError::semantic_with_context(
                 format!("type mismatch: cannot cast {} to String", val.type_name()),
+                ctx,
+            ))
+        }
+    }
+}
+
+/// Cast an integer to a single-character string (char from code point)
+fn cast_to_char(val: Value) -> Result<Value, CompileError> {
+    match val {
+        Value::Int(i) => {
+            if i >= 0 && i <= 0x10FFFF {
+                if let Some(c) = char::from_u32(i as u32) {
+                    return Ok(Value::Str(c.to_string()));
+                }
+            }
+            let ctx = ErrorContext::new()
+                .with_code(codes::TYPE_MISMATCH)
+                .with_help("integer must be a valid Unicode code point (0-0x10FFFF)");
+            Err(CompileError::semantic_with_context(
+                format!("type mismatch: {} is not a valid Unicode code point", i),
+                ctx,
+            ))
+        }
+        // Single-char string is already a char
+        Value::Str(s) if s.chars().count() == 1 => Ok(Value::Str(s)),
+        _ => {
+            let ctx = ErrorContext::new()
+                .with_code(codes::TYPE_MISMATCH)
+                .with_help("only integers (code points) can be cast to char");
+            Err(CompileError::semantic_with_context(
+                format!("type mismatch: cannot cast {} to char", val.type_name()),
                 ctx,
             ))
         }

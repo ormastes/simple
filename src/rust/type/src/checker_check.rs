@@ -257,6 +257,10 @@ impl TypeChecker {
                     let impl_type = self.ast_type_to_type(&binding.impl_type);
                     self.interface_bindings.insert(binding.interface_name.clone(), impl_type);
                 }
+                Node::LiteralFunction(_) => {
+                    // Literal functions don't introduce new type bindings
+                    // They register suffix → type mappings at runtime
+                }
             }
         }
         // Second pass: check all nodes in order, enforcing macro definition order

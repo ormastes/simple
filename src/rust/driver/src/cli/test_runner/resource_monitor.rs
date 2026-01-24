@@ -7,12 +7,17 @@
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+use parking_lot::{Condvar, Mutex};
 
 /// Resource usage monitor that runs in a background thread.
 ///
 /// Monitors system CPU and memory usage and provides real-time readings for
 /// the parallel test executor to adjust thread counts dynamically.
+///
+/// Uses a Condvar-based interruptible sleep so that `stop()` returns quickly
+/// instead of waiting for the full check interval to elapse.
 pub struct ResourceMonitor {
     /// Current CPU usage percentage (0-100), stored as integer
     cpu_usage: Arc<AtomicU32>,
@@ -20,6 +25,8 @@ pub struct ResourceMonitor {
     memory_usage: Arc<AtomicU32>,
     /// Flag to signal the monitoring thread to stop
     running: Arc<AtomicBool>,
+    /// Condvar for interruptible sleep - allows stop() to wake thread immediately
+    stop_signal: Arc<(Mutex<bool>, Condvar)>,
     /// Handle to the background monitoring thread
     thread_handle: Option<JoinHandle<()>>,
     /// Interval between resource measurements
@@ -36,6 +43,7 @@ impl ResourceMonitor {
             cpu_usage: Arc::new(AtomicU32::new(0)),
             memory_usage: Arc::new(AtomicU32::new(0)),
             running: Arc::new(AtomicBool::new(false)),
+            stop_signal: Arc::new((Mutex::new(false), Condvar::new())),
             thread_handle: None,
             check_interval: Duration::from_secs(check_interval_secs),
         }
@@ -50,22 +58,48 @@ impl ResourceMonitor {
             return; // Already running
         }
 
+        // Reset stop signal
+        *self.stop_signal.0.lock() = false;
+
         self.running.store(true, Ordering::SeqCst);
         let cpu_usage = Arc::clone(&self.cpu_usage);
         let memory_usage = Arc::clone(&self.memory_usage);
         let running = Arc::clone(&self.running);
+        let stop_signal = Arc::clone(&self.stop_signal);
         let interval = self.check_interval;
 
         self.thread_handle = Some(thread::spawn(move || {
-            monitor_loop(cpu_usage, memory_usage, running, interval);
+            monitor_loop(cpu_usage, memory_usage, running, stop_signal, interval);
         }));
     }
 
     /// Stop the background monitoring thread.
+    ///
+    /// Uses a Condvar to wake the thread immediately instead of waiting for
+    /// the sleep interval to complete. Includes a 2-second timeout as a safety net.
     pub fn stop(&mut self) {
         self.running.store(false, Ordering::SeqCst);
+
+        // Signal the condvar to wake the thread immediately
+        {
+            let (lock, cvar) = &*self.stop_signal;
+            *lock.lock() = true;
+            cvar.notify_all();
+        }
+
         if let Some(handle) = self.thread_handle.take() {
-            let _ = handle.join();
+            // Try to join with a timeout as safety net
+            let start = Instant::now();
+            let timeout = Duration::from_secs(2);
+
+            while !handle.is_finished() && start.elapsed() < timeout {
+                thread::sleep(Duration::from_millis(10));
+            }
+
+            if handle.is_finished() {
+                let _ = handle.join();
+            }
+            // If still running after 2s, abandon the thread (it will terminate on process exit)
         }
     }
 
@@ -117,19 +151,52 @@ impl Drop for ResourceMonitor {
 }
 
 /// Background monitoring loop
+///
+/// Uses a Condvar-based interruptible sleep so that stop() can wake
+/// the thread immediately instead of waiting for the full interval.
+/// All sleeps (including CPU measurement delay) are interruptible.
 fn monitor_loop(
     cpu_usage: Arc<AtomicU32>,
     memory_usage: Arc<AtomicU32>,
     running: Arc<AtomicBool>,
+    stop_signal: Arc<(Mutex<bool>, Condvar)>,
     interval: Duration,
 ) {
     while running.load(Ordering::SeqCst) {
-        let cpu = measure_cpu_usage();
+        // Check stop signal before CPU measurement (which has internal delay)
+        if check_stop_signal(&stop_signal) {
+            break;
+        }
+
+        let cpu = measure_cpu_usage_interruptible(&stop_signal);
+
+        // Check stop signal after CPU measurement
+        if check_stop_signal(&stop_signal) {
+            break;
+        }
+
         let memory = measure_memory_usage();
         cpu_usage.store(cpu as u32, Ordering::SeqCst);
         memory_usage.store(memory as u32, Ordering::SeqCst);
-        thread::sleep(interval);
+
+        // Use condvar for interruptible sleep
+        let (lock, cvar) = &*stop_signal;
+        let mut stopped = lock.lock();
+        if *stopped {
+            break; // Stop signal received
+        }
+        // Wait for interval or until signaled to stop
+        let _result = cvar.wait_for(&mut stopped, interval);
+        if *stopped {
+            break; // Stop signal received during wait
+        }
     }
+}
+
+/// Check if the stop signal has been set
+fn check_stop_signal(stop_signal: &Arc<(Mutex<bool>, Condvar)>) -> bool {
+    let (lock, _) = &**stop_signal;
+    *lock.lock()
 }
 
 /// Measure current CPU usage.
@@ -146,6 +213,20 @@ fn measure_cpu_usage() -> f32 {
 
     // Fallback to sysinfo crate
     measure_cpu_from_sysinfo()
+}
+
+/// Measure CPU usage with interruptible sleep using condvar.
+/// Returns 0.0 if interrupted before measurement completes.
+fn measure_cpu_usage_interruptible(stop_signal: &Arc<(Mutex<bool>, Condvar)>) -> f32 {
+    #[cfg(target_os = "linux")]
+    {
+        if let Some(usage) = measure_cpu_from_proc_stat_interruptible(stop_signal) {
+            return usage;
+        }
+    }
+
+    // Fallback to sysinfo crate (interruptible version)
+    measure_cpu_from_sysinfo_interruptible(stop_signal)
 }
 
 /// Measure current memory usage.
@@ -178,6 +259,41 @@ fn measure_cpu_from_proc_stat() -> Option<f32> {
 
     // Wait for measurement interval
     thread::sleep(Duration::from_millis(500));
+
+    // Second sample
+    let (total2, idle2) = read_proc_stat()?;
+
+    // Calculate usage
+    let total_diff = total2.saturating_sub(total1);
+    let idle_diff = idle2.saturating_sub(idle1);
+
+    if total_diff == 0 {
+        return Some(0.0);
+    }
+
+    let usage = ((total_diff - idle_diff) as f32 / total_diff as f32) * 100.0;
+    Some(usage)
+}
+
+/// Measure CPU usage from /proc/stat with interruptible sleep.
+/// Returns None if interrupted or if reading /proc/stat fails.
+#[cfg(target_os = "linux")]
+fn measure_cpu_from_proc_stat_interruptible(stop_signal: &Arc<(Mutex<bool>, Condvar)>) -> Option<f32> {
+    // First sample
+    let (total1, idle1) = read_proc_stat()?;
+
+    // Use condvar for interruptible wait
+    let (lock, cvar) = &**stop_signal;
+    let mut stopped = lock.lock();
+    if *stopped {
+        return Some(0.0); // Interrupted before measurement
+    }
+    // Wait for 500ms or until signaled to stop
+    let _result = cvar.wait_for(&mut stopped, Duration::from_millis(500));
+    if *stopped {
+        return Some(0.0); // Interrupted during wait
+    }
+    drop(stopped);
 
     // Second sample
     let (total2, idle2) = read_proc_stat()?;
@@ -299,6 +415,42 @@ fn measure_cpu_from_sysinfo() -> f32 {
     total_usage / cpus.len() as f32
 }
 
+/// Measure CPU usage using sysinfo with interruptible sleep.
+/// Returns 0.0 if interrupted before measurement completes.
+fn measure_cpu_from_sysinfo_interruptible(stop_signal: &Arc<(Mutex<bool>, Condvar)>) -> f32 {
+    use sysinfo::System;
+
+    let mut sys = System::new();
+
+    // First refresh to initialize
+    sys.refresh_cpu_usage();
+
+    // Use condvar for interruptible wait
+    let (lock, cvar) = &**stop_signal;
+    let mut stopped = lock.lock();
+    if *stopped {
+        return 0.0; // Interrupted before measurement
+    }
+    // Wait for 500ms or until signaled to stop
+    let _result = cvar.wait_for(&mut stopped, Duration::from_millis(500));
+    if *stopped {
+        return 0.0; // Interrupted during wait
+    }
+    drop(stopped);
+
+    // Second refresh to get accurate reading
+    sys.refresh_cpu_usage();
+
+    // Calculate average across all CPUs
+    let cpus = sys.cpus();
+    if cpus.is_empty() {
+        return 0.0;
+    }
+
+    let total_usage: f32 = cpus.iter().map(|cpu| cpu.cpu_usage()).sum();
+    total_usage / cpus.len() as f32
+}
+
 /// Measure memory usage using the sysinfo crate (cross-platform fallback).
 fn measure_memory_from_sysinfo() -> f32 {
     use sysinfo::System;
@@ -318,9 +470,7 @@ fn measure_memory_from_sysinfo() -> f32 {
 
 /// Get the number of available CPU cores.
 pub fn available_cores() -> usize {
-    std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(1)
+    std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1)
 }
 
 #[cfg(test)]
@@ -349,10 +499,7 @@ mod tests {
     #[test]
     fn test_measure_memory_once() {
         let usage = ResourceMonitor::measure_memory_once();
-        assert!(
-            usage >= 0.0 && usage <= 100.0,
-            "Memory usage should be 0-100%"
-        );
+        assert!(usage >= 0.0 && usage <= 100.0, "Memory usage should be 0-100%");
     }
 
     #[test]
@@ -369,5 +516,83 @@ mod tests {
         // Initially 0, so should not be above any positive threshold
         assert!(!monitor.is_memory_above_threshold(50));
         assert!(monitor.is_memory_above_threshold(0)); // 0% threshold always triggered
+    }
+
+    #[test]
+    fn test_stop_completes_quickly() {
+        // Start a monitor with a long interval (10 seconds)
+        // Stop should return within 200ms due to condvar signaling
+        let mut monitor = ResourceMonitor::new(10);
+        monitor.start();
+
+        // Wait a bit for the thread to start and potentially enter sleep
+        thread::sleep(Duration::from_millis(50));
+
+        let start = Instant::now();
+        monitor.stop();
+        let elapsed = start.elapsed();
+
+        // Stop should complete within 200ms, not the full 10 seconds
+        assert!(
+            elapsed < Duration::from_millis(200),
+            "stop() took {:?}, expected < 200ms (condvar should wake thread immediately)",
+            elapsed
+        );
+    }
+
+    #[test]
+    fn test_start_stop_cycle() {
+        // Verify rapid start/stop cycles don't hang
+        let mut monitor = ResourceMonitor::new(5);
+
+        for _ in 0..3 {
+            let start = Instant::now();
+            monitor.start();
+            thread::sleep(Duration::from_millis(20));
+            monitor.stop();
+            let elapsed = start.elapsed();
+
+            assert!(
+                elapsed < Duration::from_millis(300),
+                "start/stop cycle took {:?}, expected < 300ms",
+                elapsed
+            );
+        }
+    }
+
+    #[test]
+    fn test_stop_from_sleeping() {
+        // Start monitor, wait for it to enter sleep, then stop
+        let mut monitor = ResourceMonitor::new(5);
+        monitor.start();
+
+        // Wait 100ms - thread should be sleeping by now
+        thread::sleep(Duration::from_millis(100));
+
+        let start = Instant::now();
+        monitor.stop();
+        let elapsed = start.elapsed();
+
+        // Even though thread is sleeping, stop should complete quickly
+        assert!(
+            elapsed < Duration::from_millis(200),
+            "stop() from sleeping state took {:?}, expected < 200ms",
+            elapsed
+        );
+    }
+
+    #[test]
+    fn test_stop_without_start() {
+        // Calling stop on an unstarted monitor should not hang
+        let mut monitor = ResourceMonitor::new(5);
+        let start = Instant::now();
+        monitor.stop();
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed < Duration::from_millis(50),
+            "stop() on unstarted monitor took {:?}, expected < 50ms",
+            elapsed
+        );
     }
 }

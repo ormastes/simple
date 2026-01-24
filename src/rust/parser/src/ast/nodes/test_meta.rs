@@ -117,26 +117,17 @@ impl TestMeta {
 
     /// Check if test is marked as slow
     pub fn is_slow(&self) -> bool {
-        self.meta
-            .get("is_slow")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false)
+        self.meta.get("is_slow").and_then(|v| v.as_bool()).unwrap_or(false)
     }
 
     /// Check if test is marked as skipped
     pub fn is_skipped(&self) -> bool {
-        self.meta
-            .get("is_skipped")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false)
+        self.meta.get("is_skipped").and_then(|v| v.as_bool()).unwrap_or(false)
     }
 
     /// Check if test is marked as ignored
     pub fn is_ignored(&self) -> bool {
-        self.meta
-            .get("is_ignored")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false)
+        self.meta.get("is_ignored").and_then(|v| v.as_bool()).unwrap_or(false)
     }
 
     /// Get tags for this test
@@ -189,7 +180,8 @@ impl TestMeta {
 
     /// Set timeout in seconds
     pub fn set_timeout(&mut self, seconds: i64) {
-        self.meta.set("timeout_seconds".to_string(), MetaValue::Integer(seconds));
+        self.meta
+            .set("timeout_seconds".to_string(), MetaValue::Integer(seconds));
     }
 
     /// Get full test name (path joined with " > ")
@@ -360,8 +352,7 @@ impl FileTestMeta {
 
     /// Recalculate cached counts
     pub fn recalculate_counts(&mut self) {
-        self.total_tests = self.top_level_tests.len()
-            + self.groups.iter().map(|g| g.total_tests()).sum::<usize>();
+        self.total_tests = self.top_level_tests.len() + self.groups.iter().map(|g| g.total_tests()).sum::<usize>();
 
         self.skipped_count = self.top_level_tests.iter().filter(|t| t.is_skipped()).count()
             + self.groups.iter().map(|g| g.skipped_count()).sum::<usize>();

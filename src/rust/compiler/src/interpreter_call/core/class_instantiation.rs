@@ -74,9 +74,13 @@ pub(crate) fn instantiate_class(
     if let Some(new_method) = class_def.methods.iter().find(|m| m.name == METHOD_NEW) {
         // Auto-call new() for Python-style construction: ClassName() calls ClassName.new()
         // Skip if we're already inside new() to prevent infinite recursion
-        // Also skip if argument count doesn't match new()'s parameters (field-based construction intended)
+        //
+        // Call new() if:
+        // 1. Exact arg count match, OR
+        // 2. Has #[inject] attribute (missing args will be injected via DI)
         let new_param_count = new_method.params.len();
-        let should_call_new = args.len() == new_param_count;
+        let has_inject = has_inject_attr(new_method);
+        let should_call_new = args.len() == new_param_count || has_inject;
 
         if should_call_new && !already_in_new {
             let self_val = Value::Object {

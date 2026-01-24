@@ -547,7 +547,8 @@ impl<'a> MirLowerer<'a> {
                         // constructions like `return Self {}` inside the constructor body itself.
                         //
                         // Check if we're inside the constructor for this class. If so, skip DI.
-                        let current_func = self.try_contract_ctx()
+                        let current_func = self
+                            .try_contract_ctx()
                             .map(|ctx| ctx.func_name.clone())
                             .unwrap_or_default();
                         let is_inside_constructor = current_func == constructor_name;

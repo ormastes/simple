@@ -1,6 +1,6 @@
 // Block closure execution helpers for interpreter_call module
 
-use super::super::interpreter_helpers::handle_method_call_with_self_update;
+use super::super::interpreter_helpers::{bind_pattern_value, handle_method_call_with_self_update};
 use super::bdd::{BDD_AFTER_EACH, BDD_BEFORE_EACH, BDD_CONTEXT_DEFS, BDD_INDENT};
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::interpreter::{evaluate_expr, pattern_matches, EXTERN_FUNCTIONS, MODULE_GLOBALS};
@@ -19,7 +19,7 @@ fn get_iterator_values(iterable: &Value) -> Result<Vec<Value>, CompileError> {
         Value::Str(s) => Ok(s.chars().map(|c| Value::Str(c.to_string())).collect()),
         Value::Generator(gen) => Ok(gen.collect_remaining()),
         Value::Object { class, fields } => {
-            if class == "Range" {
+            if class == "Range" || class == BUILTIN_RANGE {
                 let start = fields.get("start").and_then(|v| v.as_int().ok()).unwrap_or(0);
                 let end = fields.get("end").and_then(|v| v.as_int().ok()).unwrap_or(0);
                 let inclusive = fields.get("inclusive").map(|v| v.truthy()).unwrap_or(false);
@@ -117,13 +117,9 @@ pub(super) fn exec_block_closure(
                     if let Some((obj_name, new_self)) = update {
                         local_env.insert(obj_name, new_self);
                     }
-                    if let simple_parser::ast::Pattern::Identifier(name) = &let_stmt.pattern {
-                        local_env.insert(name.clone(), val);
-                    } else if let simple_parser::ast::Pattern::MutIdentifier(name) = &let_stmt.pattern {
-                        local_env.insert(name.clone(), val);
-                    } else if let simple_parser::ast::Pattern::MoveIdentifier(name) = &let_stmt.pattern {
-                        local_env.insert(name.clone(), val);
-                    }
+                    // Use bind_pattern_value to handle all pattern types including tuples
+                    let is_mutable = let_stmt.mutability.is_mutable();
+                    bind_pattern_value(&let_stmt.pattern, val, is_mutable, &mut local_env);
                 }
                 last_value = Value::Nil;
             }
@@ -159,6 +155,41 @@ pub(super) fn exec_block_closure(
                                 }
                                 _ => {}
                             }
+                        }
+                    }
+                } else if let simple_parser::ast::Expr::Index { receiver, index } = &assign_stmt.target {
+                    // Handle index assignment: arr[i] = value or dict["key"] = value
+                    let index_val = evaluate_expr(index, &mut local_env, functions, classes, enums, impl_methods)?;
+                    if let simple_parser::ast::Expr::Identifier(container_name) = receiver.as_ref() {
+                        if let Some(container) = local_env.get(container_name).cloned() {
+                            let new_container = match container {
+                                Value::Array(mut arr) => {
+                                    let idx = index_val.as_int()? as usize;
+                                    if idx < arr.len() {
+                                        arr[idx] = val;
+                                    } else {
+                                        while arr.len() < idx {
+                                            arr.push(Value::Nil);
+                                        }
+                                        arr.push(val);
+                                    }
+                                    Value::Array(arr)
+                                }
+                                Value::Dict(mut dict) => {
+                                    let key = index_val.to_key_string();
+                                    dict.insert(key, val);
+                                    Value::Dict(dict)
+                                }
+                                Value::Tuple(mut tup) => {
+                                    let idx = index_val.as_int()? as usize;
+                                    if idx < tup.len() {
+                                        tup[idx] = val;
+                                    }
+                                    Value::Tuple(tup)
+                                }
+                                _ => container,
+                            };
+                            local_env.insert(container_name.clone(), new_container);
                         }
                     }
                 }
@@ -455,6 +486,41 @@ fn exec_block_closure_mut(
                                 }
                                 _ => {}
                             }
+                        }
+                    }
+                } else if let simple_parser::ast::Expr::Index { receiver, index } = &assign_stmt.target {
+                    // Handle index assignment: arr[i] = value or dict["key"] = value
+                    let index_val = evaluate_expr(index, local_env, functions, classes, enums, impl_methods)?;
+                    if let simple_parser::ast::Expr::Identifier(container_name) = receiver.as_ref() {
+                        if let Some(container) = local_env.get(container_name).cloned() {
+                            let new_container = match container {
+                                Value::Array(mut arr) => {
+                                    let idx = index_val.as_int()? as usize;
+                                    if idx < arr.len() {
+                                        arr[idx] = val;
+                                    } else {
+                                        while arr.len() < idx {
+                                            arr.push(Value::Nil);
+                                        }
+                                        arr.push(val);
+                                    }
+                                    Value::Array(arr)
+                                }
+                                Value::Dict(mut dict) => {
+                                    let key = index_val.to_key_string();
+                                    dict.insert(key, val);
+                                    Value::Dict(dict)
+                                }
+                                Value::Tuple(mut tup) => {
+                                    let idx = index_val.as_int()? as usize;
+                                    if idx < tup.len() {
+                                        tup[idx] = val;
+                                    }
+                                    Value::Tuple(tup)
+                                }
+                                _ => container,
+                            };
+                            local_env.insert(container_name.clone(), new_container);
                         }
                     }
                 }

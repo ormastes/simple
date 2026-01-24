@@ -94,7 +94,9 @@ pub use formatter::{FormatConfig, Formatter};
 pub use i18n::{ExtractionResult, I18nExtractor, I18nString, LocaleFile, LocaleGenerator};
 pub use i18n_diagnostics::convert_compiler_error;
 pub use interpreter::{
-    evaluate_module, get_interpreter_args, is_debug_mode, set_debug_mode, set_interpreter_args, set_macro_trace,
+    check_execution_limit, evaluate_module, get_execution_count, get_interpreter_args, is_debug_mode,
+    is_execution_limit_enabled, reset_execution_count, set_debug_mode, set_execution_limit,
+    set_execution_limit_enabled, set_interpreter_args, set_macro_trace,
 };
 pub use ir_export::{export_ast, export_hir, export_mir, ExportResult};
 pub use layout_recorder::{

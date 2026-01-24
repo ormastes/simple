@@ -198,8 +198,9 @@ pub enum TokenKind {
     Shared, // shared (for GPU shared memory)
     Gpu,    // gpu (for GPU intrinsics namespace)
     Bounds, // bounds (for @simd kernel bounds: clause)
-    Dyn,    // dyn (for dynamic trait objects)
-    Repr,   // repr (for unit representation constraints)
+    Dyn,     // dyn (for dynamic trait objects)
+    Repr,    // repr (for unit representation constraints)
+    Literal, // literal (for literal fn definitions)
     // Note: "lean" is NOT a keyword - it's parsed contextually as lean{...} custom block
     // or "lean import" statement to avoid breaking existing module paths
     // Note: 'allow' is parsed as identifier (not a keyword) to avoid conflict with #[allow(...)]
@@ -212,6 +213,12 @@ pub enum TokenKind {
     Forbid,           // forbid (for architecture rules: `forbid pc{...}`)
     Allow,            // allow (keyword for architecture rules: `allow pc{...}`)
     Mock,             // mock (for mock declarations: `mock Name implements Trait:`)
+
+    // Safe Unwrap/Cast Operators (#2300-2310)
+    Unwrap,    // unwrap (unwrap Option/Result with fallback)
+    OrColon,   // or: (fallback value suffix)
+    ElseColon, // else: (lazy fallback suffix)
+    OrReturn,  // or_return: (unwrap or early return)
 
     // Custom Blocks (#1090-1098)
     // DSL embedding blocks: kind{payload} where payload is captured raw
@@ -316,16 +323,18 @@ pub enum TokenKind {
     LBrace,   // {
     RBrace,   // }
 
-    Comma,       // ,
-    Colon,       // :
-    DoubleColon, // ::
-    Semicolon,   // ;
-    Dot,         // .
-    DoubleDot,   // ..
-    DoubleDotEq, // ..=
-    Ellipsis,    // ...
-    Question,    // ?
-    At,          // @
+    Comma,          // ,
+    Colon,          // :
+    DoubleColon,    // ::
+    Semicolon,      // ;
+    Dot,            // .
+    DoubleDot,      // ..
+    DoubleDotEq,    // ..=
+    Ellipsis,       // ...
+    Question,       // ?
+    DoubleQuestion, // ?? (null coalescing / Option fallback)
+    QuestionDot,    // ?. (optional chaining)
+    At,             // @
     Hash,        // #
     Dollar,      // $
     Backslash,   // \

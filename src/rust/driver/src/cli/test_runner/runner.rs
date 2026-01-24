@@ -18,8 +18,9 @@ use super::diagrams::generate_test_diagrams;
 use super::discovery::print_discovery_summary;
 use super::coverage::save_coverage_data;
 use super::feature_db::update_feature_database;
-use super::test_db_update::update_test_database;
+use super::test_db_update::{update_test_database, update_rust_test_database};
 use super::static_registry::StaticTestRegistry;
+use super::rust_tests;
 
 /// Load resource throttle configuration from simple.test.toml
 fn load_resource_throttle_config(options: &mut TestOptions) {
@@ -69,11 +70,11 @@ fn parse_resource_throttle_config(content: &str, options: &mut TestOptions) {
             let value = value.trim().trim_matches(|c| c == '"' || c == '\'');
 
             match key {
+                // Note: "enabled" in config does NOT auto-enable parallel mode.
+                // Parallel execution always requires explicit --parallel or -p CLI flag.
+                // Config file only overrides thresholds and other settings.
                 "enabled" => {
-                    if value == "true" && !options.parallel {
-                        // Enable parallel if config says so and not explicitly disabled
-                        // Only applies if user didn't specify --parallel on CLI
-                    }
+                    // Intentionally ignored - parallel must be enabled via CLI
                 }
                 "threshold" => {
                     if let Ok(v) = value.parse::<u8>() {
@@ -166,13 +167,15 @@ pub fn run_tests(options: TestOptions) -> TestRunResult {
     print_discovery_summary(&test_files, &options, quiet);
 
     // Execute tests
+    // Default: Sequential (single-threaded) execution
+    // Parallel: Only when --parallel or -p flag is explicitly passed
     let (mut results, mut total_passed, mut total_failed, mut total_skipped, mut total_ignored) =
         if options.parallel && options.safe_mode {
-            // Parallel execution with CPU-aware thread management
+            // Parallel execution (optional, requires --parallel flag)
             debug_log!(DebugLevel::Basic, "Runner", "Using parallel execution mode");
             run_tests_parallel(&test_files, &options, quiet)
         } else {
-            // Sequential execution (default)
+            // Sequential execution (default - single-threaded)
             execute_test_files(runner.as_ref(), &test_files, &options, quiet)
         };
 
@@ -189,6 +192,40 @@ pub fn run_tests(options: TestOptions) -> TestRunResult {
         if let Err(e) = update_test_database(&test_files, &results, all_tests_run) {
             if !quiet {
                 eprintln!("Warning: Failed to update test database: {}", e);
+            }
+        }
+
+        // Run Rust tests if enabled
+        if options.rust_tests {
+            let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            if !quiet {
+                if options.rust_ignored_only {
+                    println!("\nTracking ignored Rust tests...");
+                } else {
+                    println!("\nRunning Rust tests...");
+                }
+            }
+
+            let rust_results = if options.rust_ignored_only {
+                // Just list ignored tests for database tracking
+                let ignored = rust_tests::list_ignored_rust_tests(&cwd);
+                if !quiet {
+                    println!("Found {} ignored Rust tests", ignored.len());
+                }
+                rust_tests::rust_tests_to_file_results(&ignored)
+            } else {
+                // Run all Rust tests
+                let mut test_results = rust_tests::run_rust_tests(&cwd, false);
+                let doc_results = rust_tests::run_rust_doctests(&cwd);
+                test_results.extend(doc_results);
+                test_results
+            };
+
+            // Update Rust test database
+            if let Err(e) = update_rust_test_database(&rust_results) {
+                if !quiet {
+                    eprintln!("Warning: Failed to update Rust test database: {}", e);
+                }
             }
         }
 
@@ -502,11 +539,7 @@ fn generate_diagrams_if_enabled(options: &TestOptions, result: &TestRunResult, q
 ///
 /// This uses the static test registry to list tests without executing
 /// any DSL code. Target performance: ~1 second for 1000+ tests.
-fn run_list_mode_static(
-    test_files: &[PathBuf],
-    options: &TestOptions,
-    quiet: bool,
-) -> TestRunResult {
+fn run_list_mode_static(test_files: &[PathBuf], options: &TestOptions, quiet: bool) -> TestRunResult {
     let start = Instant::now();
 
     debug_log!(

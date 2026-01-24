@@ -10,8 +10,159 @@ use crate::value::{OptionVariant, ResultVariant, SpecialEnumType};
 
 use super::{
     evaluate_macro_invocation, spawn_actor_with_expr, take_macro_introduced_symbols, ClassDef, CompileError, Enums,
-    Env, FunctionDef, ImplMethods, Value, GENERATOR_YIELDS,
+    Env, FunctionDef, ImplMethods, Value, GENERATOR_YIELDS, evaluate_method_call, exec_lambda,
+    exec_function_with_captured_env,
 };
+
+/// Helper to unwrap Option or Result values, returning Some(inner_value) or None
+fn try_unwrap_option_or_result(val: &Value) -> Option<Value> {
+    match val {
+        Value::Enum {
+            ref enum_name,
+            ref variant,
+            ref payload,
+        } => {
+            if SpecialEnumType::from_name(enum_name) == Some(SpecialEnumType::Option) {
+                if OptionVariant::from_name(variant) == Some(OptionVariant::Some) {
+                    payload.as_ref().map(|p| p.as_ref().clone())
+                } else {
+                    None
+                }
+            } else if SpecialEnumType::from_name(enum_name) == Some(SpecialEnumType::Result) {
+                if ResultVariant::from_name(variant) == Some(ResultVariant::Ok) {
+                    payload.as_ref().map(|p| p.as_ref().clone())
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Helper to call a closure/lambda value with no arguments
+fn call_closure_no_args(
+    closure: Value,
+    env: &mut Env,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Result<Value, CompileError> {
+    match closure {
+        Value::Lambda {
+            params,
+            body,
+            env: captured,
+        } => {
+            let mut captured_clone = captured.clone();
+            exec_lambda(
+                &params,  // params is already Vec<String>
+                &body,
+                &[],
+                env,
+                &mut captured_clone,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )
+        }
+        Value::Function {
+            def, captured_env, ..
+        } => {
+            let mut captured_env_clone = captured_env.clone();
+            exec_function_with_captured_env(
+                &def,
+                &[],
+                env,
+                &mut captured_env_clone,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )
+        }
+        _ => {
+            let ctx = ErrorContext::new()
+                .with_code(codes::INVALID_OPERATION)
+                .with_help("expected a closure or function");
+            Err(CompileError::semantic_with_context(
+                format!("expected callable, got {}", closure.type_name()),
+                ctx,
+            ))
+        }
+    }
+}
+
+/// Helper to get a field value from an object-like value
+fn get_field_value(val: &Value, field: &str) -> Result<Value, CompileError> {
+    match val {
+        Value::Object { fields, class, .. } => {
+            if let Some(v) = fields.get(field) {
+                Ok(v.clone())
+            } else {
+                let ctx = ErrorContext::new()
+                    .with_code(codes::UNDEFINED_FIELD)
+                    .with_help("check the field name");
+                Err(CompileError::semantic_with_context(
+                    format!("class `{}` has no field named `{}`", class, field),
+                    ctx,
+                ))
+            }
+        }
+        Value::Dict(map) => {
+            if let Some(v) = map.get(field) {
+                Ok(v.clone())
+            } else {
+                let ctx = ErrorContext::new()
+                    .with_code(codes::UNDEFINED_FIELD)
+                    .with_help("key not found in dict");
+                Err(CompileError::semantic_with_context(
+                    format!("key `{}` not found in dict", field),
+                    ctx,
+                ))
+            }
+        }
+        Value::Str(s) => match field {
+            "len" => Ok(Value::Int(s.len() as i64)),
+            "is_empty" => Ok(Value::Bool(s.is_empty())),
+            _ => {
+                let ctx = ErrorContext::new()
+                    .with_code(codes::UNDEFINED_FIELD)
+                    .with_help("available properties on String: len, is_empty");
+                Err(CompileError::semantic_with_context(
+                    format!("unknown property '{field}' on String"),
+                    ctx,
+                ))
+            }
+        },
+        Value::Array(arr) => match field {
+            "len" => Ok(Value::Int(arr.len() as i64)),
+            "is_empty" => Ok(Value::Bool(arr.is_empty())),
+            _ => {
+                let ctx = ErrorContext::new()
+                    .with_code(codes::UNDEFINED_FIELD)
+                    .with_help("available properties on Array: len, is_empty");
+                Err(CompileError::semantic_with_context(
+                    format!("unknown property '{field}' on Array"),
+                    ctx,
+                ))
+            }
+        },
+        _ => {
+            let ctx = ErrorContext::new()
+                .with_code(codes::UNDEFINED_FIELD)
+                .with_help("field access requires an object, dict, or value with properties");
+            Err(CompileError::semantic_with_context(
+                format!("cannot access field '{}' on this value type", field),
+                ctx,
+            ))
+        }
+    }
+}
 
 mod calls;
 mod collections;
@@ -227,6 +378,127 @@ pub(crate) fn evaluate_expr(
                         ),
                         ctx,
                     ))
+                }
+            }
+        }
+        // Safe unwrap: expr unwrap or: default
+        Expr::UnwrapOr { expr: inner, default } => {
+            let val = evaluate_expr(inner, env, functions, classes, enums, impl_methods)?;
+            if let Some(unwrapped) = try_unwrap_option_or_result(&val) {
+                Ok(unwrapped)
+            } else {
+                evaluate_expr(default, env, functions, classes, enums, impl_methods)
+            }
+        }
+        // Safe unwrap with lazy default: expr unwrap else: closure
+        Expr::UnwrapElse { expr: inner, fallback_fn } => {
+            let val = evaluate_expr(inner, env, functions, classes, enums, impl_methods)?;
+            if let Some(unwrapped) = try_unwrap_option_or_result(&val) {
+                Ok(unwrapped)
+            } else {
+                // Evaluate the fallback closure and call it
+                let closure = evaluate_expr(fallback_fn, env, functions, classes, enums, impl_methods)?;
+                call_closure_no_args(closure, env, functions, classes, enums, impl_methods)
+            }
+        }
+        // Safe unwrap or early return: expr unwrap or_return:
+        Expr::UnwrapOrReturn(inner) => {
+            let val = evaluate_expr(inner, env, functions, classes, enums, impl_methods)?;
+            if let Some(unwrapped) = try_unwrap_option_or_result(&val) {
+                Ok(unwrapped)
+            } else {
+                // Return the None/Err as a TryError to propagate
+                Err(CompileError::TryError(val))
+            }
+        }
+        // Null coalescing: expr ?? default
+        Expr::Coalesce { expr: inner, default } => {
+            let val = evaluate_expr(inner, env, functions, classes, enums, impl_methods)?;
+            if let Some(unwrapped) = try_unwrap_option_or_result(&val) {
+                Ok(unwrapped)
+            } else {
+                evaluate_expr(default, env, functions, classes, enums, impl_methods)
+            }
+        }
+        // Optional chaining: expr?.field
+        Expr::OptionalChain { expr: inner, field } => {
+            let val = evaluate_expr(inner, env, functions, classes, enums, impl_methods)?;
+            if let Some(unwrapped) = try_unwrap_option_or_result(&val) {
+                // Access the field on the unwrapped value
+                let field_val = get_field_value(&unwrapped, field)?;
+                // Wrap result in Some
+                Ok(Value::Enum {
+                    enum_name: "Option".to_string(),
+                    variant: "Some".to_string(),
+                    payload: Some(Box::new(field_val)),
+                })
+            } else {
+                // Return None
+                Ok(Value::Enum {
+                    enum_name: "Option".to_string(),
+                    variant: "None".to_string(),
+                    payload: None,
+                })
+            }
+        }
+        // Optional method call: expr?.method(args)
+        Expr::OptionalMethodCall { receiver, method, args } => {
+            let val = evaluate_expr(receiver, env, functions, classes, enums, impl_methods)?;
+            if let Some(unwrapped) = try_unwrap_option_or_result(&val) {
+                // Create a synthetic method call expression on the unwrapped value
+                // We'll temporarily store the unwrapped value in env and call the method
+                let temp_var_name = "__optional_chain_temp__".to_string();
+                env.insert(temp_var_name.clone(), unwrapped);
+                let temp_receiver = Box::new(Expr::Identifier(temp_var_name.clone()));
+                let result = evaluate_method_call(&temp_receiver, method, args, env, functions, classes, enums, impl_methods)?;
+                env.remove(&temp_var_name);
+                // Wrap result in Some
+                Ok(Value::Enum {
+                    enum_name: "Option".to_string(),
+                    variant: "Some".to_string(),
+                    payload: Some(Box::new(result)),
+                })
+            } else {
+                // Return None
+                Ok(Value::Enum {
+                    enum_name: "Option".to_string(),
+                    variant: "None".to_string(),
+                    payload: None,
+                })
+            }
+        }
+        // Safe cast with default: expr as Type or: default
+        Expr::CastOr { expr: inner, target_type, default } => {
+            let val = evaluate_expr(inner, env, functions, classes, enums, impl_methods)?;
+            match casting::cast_value(val, target_type) {
+                Ok(cast_val) => Ok(cast_val),
+                Err(_) => evaluate_expr(default, env, functions, classes, enums, impl_methods),
+            }
+        }
+        // Safe cast with lazy default: expr as Type else: closure
+        Expr::CastElse { expr: inner, target_type, fallback_fn } => {
+            let val = evaluate_expr(inner, env, functions, classes, enums, impl_methods)?;
+            match casting::cast_value(val, target_type) {
+                Ok(cast_val) => Ok(cast_val),
+                Err(_) => {
+                    let closure = evaluate_expr(fallback_fn, env, functions, classes, enums, impl_methods)?;
+                    call_closure_no_args(closure, env, functions, classes, enums, impl_methods)
+                }
+            }
+        }
+        // Safe cast or early return: expr as Type or_return:
+        Expr::CastOrReturn { expr: inner, target_type } => {
+            let val = evaluate_expr(inner, env, functions, classes, enums, impl_methods)?;
+            match casting::cast_value(val, target_type) {
+                Ok(cast_val) => Ok(cast_val),
+                Err(_) => {
+                    // Return None to signal early return
+                    let none_val = Value::Enum {
+                        enum_name: "Option".to_string(),
+                        variant: "None".to_string(),
+                        payload: None,
+                    };
+                    Err(CompileError::TryError(none_val))
                 }
             }
         }

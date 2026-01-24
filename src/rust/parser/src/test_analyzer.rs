@@ -224,7 +224,10 @@ impl TestMetaAnalyzer {
     /// Add a test from DSL call arguments
     fn add_test(&mut self, args: &[Argument], kind: TestKind) {
         // First argument should be the description (string)
-        let description = args.first().and_then(|arg| extract_string(&arg.value)).unwrap_or_default();
+        let description = args
+            .first()
+            .and_then(|arg| extract_string(&arg.value))
+            .unwrap_or_default();
 
         // Try to get span from the expression (approximation)
         let span = Span::new(0, 0, 1, 0);
@@ -243,7 +246,10 @@ impl TestMetaAnalyzer {
     /// Enter a new test group (describe/context)
     fn enter_group(&mut self, args: &[Argument]) {
         // First argument should be the description
-        let description = args.first().and_then(|arg| extract_string(&arg.value)).unwrap_or_default();
+        let description = args
+            .first()
+            .and_then(|arg| extract_string(&arg.value))
+            .unwrap_or_default();
 
         let span = Span::new(0, 0, 1, 0);
         let group = TestGroupMeta::new(description.clone(), span);
@@ -323,10 +329,7 @@ pub fn extract_tags_from_content(content: &str) -> Vec<String> {
         // Match @tag name (in comments like # @tag slow)
         if let Some(idx) = trimmed.find("@tag ") {
             let after = &trimmed[idx + 5..];
-            let tag: String = after
-                .chars()
-                .take_while(|c| c.is_alphanumeric() || *c == '_')
-                .collect();
+            let tag: String = after.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
             if !tag.is_empty() {
                 tags.push(tag.to_lowercase());
             }
@@ -447,10 +450,7 @@ mod tests {
 
     #[test]
     fn test_extract_test_group() {
-        let inner_tests = vec![
-            make_test_call("it", "test 1"),
-            make_test_call("slow_it", "test 2"),
-        ];
+        let inner_tests = vec![make_test_call("it", "test 1"), make_test_call("slow_it", "test 2")];
         let statements = vec![make_group_call("describe", "Math", inner_tests)];
 
         let meta = extract_file_test_meta(&statements, None);

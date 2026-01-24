@@ -63,10 +63,7 @@ pub enum LowerError {
 
     /// E1051: Static method not supported in native compilation
     #[error("Static method `{class_name}.{method_name}()` not yet supported in native compilation. Use interpreter mode or define as a free function")]
-    StaticMethodNotSupported {
-        class_name: String,
-        method_name: String,
-    },
+    StaticMethodNotSupported { class_name: String, method_name: String },
 
     /// CTR-032: Impure function call in contract expression
     #[error(

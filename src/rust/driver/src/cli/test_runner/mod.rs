@@ -31,6 +31,7 @@ mod feature_db;
 mod test_db_update;
 mod resource_monitor;
 mod parallel;
+mod rust_tests;
 pub mod static_registry;
 
 // Re-export public API for backward compatibility

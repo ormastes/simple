@@ -29,8 +29,9 @@ pub(crate) use interpreter_state::{
     clear_moved_vars, get_aop_config, get_di_config, mark_as_moved, set_aop_config, set_di_config, ExecutionMode,
 };
 pub use interpreter_state::{
-    get_current_file, get_interpreter_args, init_signal_handlers, is_debug_mode, is_interrupted, reset_interrupt,
-    set_current_file, set_debug_mode, set_interpreter_args,
+    check_execution_limit, get_current_file, get_execution_count, get_interpreter_args, init_signal_handlers,
+    is_debug_mode, is_execution_limit_enabled, is_interrupted, reset_execution_count, reset_interrupt,
+    set_current_file, set_debug_mode, set_execution_limit, set_execution_limit_enabled, set_interpreter_args,
 };
 pub(crate) use interpreter_state::{
     ACTOR_INBOX, ACTOR_OUTBOX, ACTOR_SPAWNER, AOP_CONFIG, BASE_UNIT_DIMENSIONS, BDD_REGISTRY_CONTEXTS,
@@ -85,7 +86,7 @@ pub(crate) use interpreter_patterns::{
 // Control flow functions (if, while, loop, for, match)
 #[path = "../interpreter_control.rs"]
 mod interpreter_control;
-use interpreter_control::{exec_context, exec_for, exec_if, exec_loop, exec_match, exec_match_expr, exec_while, exec_with};
+use interpreter_control::{exec_context, exec_for, exec_if, exec_if_expr, exec_loop, exec_match, exec_match_expr, exec_while, exec_with};
 
 mod expr;
 pub(crate) use expr::evaluate_expr;
@@ -94,7 +95,8 @@ pub(crate) use expr::evaluate_expr;
 #[path = "../interpreter_helpers/mod.rs"]
 mod interpreter_helpers;
 pub(crate) use interpreter_helpers::{
-    bind_pattern, bind_pattern_value, comprehension_iterate, control_to_value, create_range_object, eval_arg,
+    bind_pattern, bind_pattern_value, comprehension_iterate, control_to_value, create_range_object,
+    create_range_object_opt, eval_arg,
     eval_arg_int, eval_arg_usize, eval_array_all, eval_array_any, eval_array_filter, eval_array_find, eval_array_map,
     eval_array_reduce, eval_dict_filter, eval_dict_map_values, eval_option_and_then, eval_option_filter,
     eval_option_map, eval_option_or_else, eval_result_and_then, eval_result_map, eval_result_map_err,
@@ -110,9 +112,9 @@ mod interpreter_call;
 pub(crate) use interpreter_call::IN_NEW_METHOD;
 pub(crate) use interpreter_call::exec_block_value;
 use interpreter_call::{
-    bind_args, bind_args_with_injected, evaluate_call, exec_function,
-    exec_function_with_captured_env, exec_function_with_values, exec_lambda, instantiate_class, BDD_AFTER_EACH,
-    BDD_BEFORE_EACH, BDD_CONTEXT_DEFS, BDD_COUNTS, BDD_INDENT, BDD_LAZY_VALUES, BDD_SHARED_EXAMPLES,
+    bind_args, bind_args_with_injected, evaluate_call, exec_function, exec_function_with_captured_env,
+    exec_function_with_values, exec_lambda, instantiate_class, BDD_AFTER_EACH, BDD_BEFORE_EACH, BDD_CONTEXT_DEFS,
+    BDD_COUNTS, BDD_INDENT, BDD_LAZY_VALUES, BDD_SHARED_EXAMPLES,
 };
 
 // Module caching and loading state

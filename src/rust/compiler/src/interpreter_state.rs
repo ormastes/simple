@@ -10,16 +10,35 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{mpsc, Arc, Mutex};
 
 use simple_common::actor::{Message, ThreadSpawner};
-use simple_parser::ast::MacroDef;
+use simple_parser::ast::{Block, MacroDef, Type};
 
 use crate::aop_config::AopConfig;
 use crate::di::DiConfig;
 use crate::interpreter_unit::*;
 use crate::value::Value;
+
+/// Information about a literal function for custom string suffix handling.
+///
+/// Literal functions allow explicit override of suffix → type mapping:
+/// ```simple
+/// literal fn _re(s: text) -> Regex:
+///     Regex.compile(s)
+/// ```
+#[derive(Debug, Clone)]
+pub struct LiteralFunctionInfo {
+    /// The suffix without leading underscore (e.g., "re" for _re)
+    pub suffix: String,
+    /// The return type of the literal function
+    pub return_type: Option<Type>,
+    /// The parameter name for the string value
+    pub param_name: String,
+    /// The function body
+    pub body: Block,
+}
 
 //==============================================================================
 // Thread-local state declarations
@@ -53,7 +72,25 @@ pub(crate) static INTERRUPT_REQUESTED: AtomicBool = AtomicBool::new(false);
 /// When set to true, debug print statements (dprint) will output.
 /// When false, dprint calls are silently ignored.
 /// Thread-safe via atomic operations.
+/// Default: true in debug builds, false in release builds.
+#[cfg(debug_assertions)]
+pub(crate) static DEBUG_MODE: AtomicBool = AtomicBool::new(true);
+
+#[cfg(not(debug_assertions))]
 pub(crate) static DEBUG_MODE: AtomicBool = AtomicBool::new(false);
+
+/// Execution limit to prevent infinite loops (default: 10 million operations)
+pub(crate) static EXECUTION_LIMIT: AtomicU64 = AtomicU64::new(10_000_000);
+
+/// Current instruction count (reset per execution)
+pub(crate) static INSTRUCTION_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// Whether execution limit checking is enabled (default: true in debug builds)
+#[cfg(debug_assertions)]
+pub(crate) static EXECUTION_LIMIT_ENABLED: AtomicBool = AtomicBool::new(true);
+
+#[cfg(not(debug_assertions))]
+pub(crate) static EXECUTION_LIMIT_ENABLED: AtomicBool = AtomicBool::new(false);
 
 thread_local! {
     pub(crate) static ACTOR_SPAWNER: ThreadSpawner = ThreadSpawner::new();
@@ -104,6 +141,10 @@ thread_local! {
     pub(crate) static BDD_REGISTRY_CONTEXTS: RefCell<HashMap<String, Value>> = RefCell::new(HashMap::new());
     /// BDD Shared examples registry (for shared_examples blocks)
     pub(crate) static BDD_REGISTRY_SHARED: RefCell<HashMap<String, Value>> = RefCell::new(HashMap::new());
+    /// Literal function registry for custom string suffix → type mapping.
+    /// Maps suffix (without leading underscore) to LiteralFunctionInfo.
+    /// Example: "re" → LiteralFunctionInfo for `literal fn _re(s: text) -> Regex: ...`
+    pub(crate) static LITERAL_FUNCTIONS: RefCell<HashMap<String, LiteralFunctionInfo>> = RefCell::new(HashMap::new());
 }
 
 //==============================================================================
@@ -243,6 +284,54 @@ pub fn set_debug_mode(enabled: bool) {
 #[inline]
 pub fn is_debug_mode() -> bool {
     DEBUG_MODE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+//==============================================================================
+// Execution Limit Management
+//==============================================================================
+
+/// Check execution limit and increment counter.
+/// Returns error if limit exceeded.
+#[inline]
+pub fn check_execution_limit() -> Result<(), crate::error::CompileError> {
+    if !is_execution_limit_enabled() {
+        return Ok(());
+    }
+    let count = INSTRUCTION_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let limit = EXECUTION_LIMIT.load(std::sync::atomic::Ordering::Relaxed);
+    if limit > 0 && count >= limit {
+        return Err(crate::error::CompileError::ExecutionLimitExceeded {
+            limit,
+            message: format!("Execution limit of {} operations exceeded", limit),
+        });
+    }
+    Ok(())
+}
+
+/// Reset execution count (call at start of each file/test)
+pub fn reset_execution_count() {
+    INSTRUCTION_COUNT.store(0, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Set execution limit (0 = no limit)
+pub fn set_execution_limit(limit: u64) {
+    EXECUTION_LIMIT.store(limit, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Get current execution count
+pub fn get_execution_count() -> u64 {
+    INSTRUCTION_COUNT.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Enable or disable execution limit checking
+pub fn set_execution_limit_enabled(enabled: bool) {
+    EXECUTION_LIMIT_ENABLED.store(enabled, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Check if execution limit is enabled
+#[inline]
+pub fn is_execution_limit_enabled() -> bool {
+    EXECUTION_LIMIT_ENABLED.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 //==============================================================================

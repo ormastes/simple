@@ -7,8 +7,8 @@ use crate::error::{codes, CompileError, ErrorContext};
 use crate::value::Value;
 
 use super::super::{
-    comprehension_iterate, create_range_object, normalize_index, slice_collection, ClassDef, Enums, Env, FunctionDef,
-    ImplMethods,
+    comprehension_iterate, create_range_object_opt, normalize_index, slice_collection, ClassDef, Enums, Env,
+    FunctionDef, ImplMethods,
 };
 
 /// Compute slice indices from start, end, length, and inclusive flag.
@@ -138,27 +138,21 @@ pub(super) fn eval_collection_expr(
             Ok(Some(Value::Dict(map)))
         }
         Expr::Range { start, end, bound } => {
-            let start = match start
+            let start_val = start
                 .as_ref()
                 .map(|s| evaluate_expr(s, env, functions, classes, enums, impl_methods))
-                .transpose()
-            {
-                Ok(val) => val,
-                Err(err) => return Err(err),
-            }
-            .unwrap_or(Value::Int(0))
-            .as_int()?;
-            let end = match end
+                .transpose()?
+                .map(|v| v.as_int())
+                .transpose()?;
+
+            let end_val = end
                 .as_ref()
                 .map(|e| evaluate_expr(e, env, functions, classes, enums, impl_methods))
-                .transpose()
-            {
-                Ok(val) => val,
-                Err(err) => return Err(err),
-            }
-            .unwrap_or(Value::Int(0))
-            .as_int()?;
-            Ok(Some(create_range_object(start, end, *bound)))
+                .transpose()?
+                .map(|v| v.as_int())
+                .transpose()?;
+
+            Ok(Some(create_range_object_opt(start_val, end_val, *bound)))
         }
         Expr::Array(items) => {
             let mut arr = Vec::new();

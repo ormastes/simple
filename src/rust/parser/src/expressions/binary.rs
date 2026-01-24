@@ -133,9 +133,40 @@ impl<'a> Parser<'a> {
         Ok(result)
     }
 
-    /// Parse range expressions: a..b (exclusive), a..=b (inclusive), or a.. (half-open, no end)
+    /// Parse range expressions: a..b (exclusive), a..=b (inclusive), a.. (suffix), ..b (prefix), or .. (full)
     pub(crate) fn parse_range(&mut self) -> Result<Expr, ParseError> {
         use crate::ast::RangeBound;
+
+        // Check for prefix range (..end or ..=end) first - no start expression
+        if self.check(&TokenKind::DoubleDotEq) {
+            self.advance();
+            let end = if self.is_range_terminator() {
+                None
+            } else {
+                Some(Box::new(self.parse_bitwise_or()?))
+            };
+            return Ok(Expr::Range {
+                start: None,
+                end,
+                bound: RangeBound::Inclusive,
+            });
+        }
+
+        if self.check(&TokenKind::DoubleDot) {
+            self.advance();
+            let end = if self.is_range_terminator() {
+                None
+            } else {
+                Some(Box::new(self.parse_bitwise_or()?))
+            };
+            return Ok(Expr::Range {
+                start: None,
+                end,
+                bound: RangeBound::Exclusive,
+            });
+        }
+
+        // Regular range with start expression
         let start = self.parse_bitwise_or()?;
 
         // Check for range operators

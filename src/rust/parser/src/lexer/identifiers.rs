@@ -132,7 +132,29 @@ impl<'a> super::Lexer<'a> {
             "is" => TokenKind::Is,
             "not" => TokenKind::Not,
             "and" => TokenKind::And,
-            "or" => TokenKind::Or,
+            "or" => {
+                // Check for "or:" combined token (used in unwrap fallback)
+                if self.check(':') {
+                    self.advance(); // consume ':'
+                    TokenKind::OrColon
+                } else {
+                    TokenKind::Or
+                }
+            }
+            "or_return" => {
+                // Check for "or_return:" combined token (unwrap or early return)
+                if self.check(':') {
+                    self.advance(); // consume ':'
+                    TokenKind::OrReturn
+                } else {
+                    // Not followed by colon - treat as identifier
+                    let pattern = NamePattern::detect("or_return");
+                    TokenKind::Identifier {
+                        name: "or_return".to_string(),
+                        pattern,
+                    }
+                }
+            }
             "true" => TokenKind::Bool(true),
             "false" => TokenKind::Bool(false),
             "nil" => TokenKind::Nil,
@@ -161,6 +183,7 @@ impl<'a> super::Lexer<'a> {
             "bounds" => TokenKind::Bounds,
             "dyn" => TokenKind::Dyn,
             "repr" => TokenKind::Repr,
+            "literal" => TokenKind::Literal,
             // Note: "lean" is NOT a keyword - it's parsed contextually to avoid breaking
             // existing module paths like "verification.lean.codegen"
             // Note: "allow" is NOT a keyword - it's parsed contextually in unit definitions
@@ -215,6 +238,8 @@ impl<'a> super::Lexer<'a> {
             "forbid" => TokenKind::Forbid,
             "allow" => TokenKind::Allow,
             "mock" => TokenKind::Mock,
+            // Safe unwrap operator keyword
+            "unwrap" => TokenKind::Unwrap,
             _ => {
                 let pattern = NamePattern::detect(&name);
                 TokenKind::Identifier { name, pattern }

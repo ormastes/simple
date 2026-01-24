@@ -4,10 +4,13 @@ use simple_parser::ast::{Expr, FStringPart};
 use simple_parser::token::NumericSuffix;
 
 use super::evaluate_expr;
-use super::units::{lookup_unit_family, lookup_unit_family_with_si};
+use super::units::{lookup_unit_family, lookup_unit_family_with_si, suffix_to_type_names};
 use crate::blocks;
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::value::{OptionVariant, Value};
+use super::super::interpreter_state::{LITERAL_FUNCTIONS, LiteralFunctionInfo};
+use crate::interpreter::block_exec::exec_block_fn;
+use crate::interpreter::core_types::Control;
 
 use super::super::{ClassDef, Enums, Env, FunctionDef, ImplMethods, MODULE_GLOBALS, MOVED_VARS};
 
@@ -64,7 +67,71 @@ pub(super) fn eval_literal_expr(
         Expr::Nil => Ok(Some(Value::Nil)),
         Expr::String(s) => Ok(Some(Value::Str(s.clone()))),
         Expr::TypedString(s, suffix) => {
-            // Create a Unit value for unit-suffixed strings (e.g., "127.0.0.1"_ip)
+            // Custom string literal suffix handling:
+            // 1. Check LITERAL_FUNCTIONS registry for explicit override
+            // 2. Convert suffix to type names and look up in classes
+            // 3. Call Type.from(value) if found
+            // 4. Fall back to Value::Unit if nothing found
+
+            // Step 1: Check for explicit literal fn override
+            let literal_fn_result: Option<LiteralFunctionInfo> = LITERAL_FUNCTIONS.with(|cell| {
+                cell.borrow().get(suffix).cloned()
+            });
+
+            if let Some(lit_fn_info) = literal_fn_result {
+                // Execute the literal function body with the string value
+                let mut local_env: HashMap<String, Value> = HashMap::new();
+                local_env.insert(lit_fn_info.param_name.clone(), Value::Str(s.clone()));
+
+                match exec_block_fn(
+                    &lit_fn_info.body,
+                    &mut local_env,
+                    functions,
+                    classes,
+                    enums,
+                    impl_methods,
+                ) {
+                    Ok((Control::Return(v), _)) => return Ok(Some(v)),
+                    Ok((_, Some(implicit_val))) => return Ok(Some(implicit_val)),
+                    Ok((_, None)) => return Ok(Some(Value::Nil)),
+                    Err(e) => return Err(e),
+                }
+            }
+
+            // Step 2: Convert suffix to type names and look for matching class
+            let type_names = suffix_to_type_names(suffix);
+            for type_name in &type_names {
+                if let Some(class_def) = classes.get(type_name).cloned() {
+                    // Step 3: Look for static `from` method (or `from_raw` for raw strings)
+                    // TypedString comes from double-quoted strings, so use `from`
+                    if let Some(from_method) = class_def.methods.iter().find(|m| m.name == "from") {
+                        // Execute the from method with the string value
+                        let mut local_env: HashMap<String, Value> = HashMap::new();
+
+                        // Bind the string value to the first parameter
+                        if !from_method.params.is_empty() {
+                            let param_name = &from_method.params[0].name;
+                            local_env.insert(param_name.clone(), Value::Str(s.clone()));
+                        }
+
+                        match exec_block_fn(
+                            &from_method.body,
+                            &mut local_env,
+                            functions,
+                            classes,
+                            enums,
+                            impl_methods,
+                        ) {
+                            Ok((Control::Return(v), _)) => return Ok(Some(v)),
+                            Ok((_, Some(implicit_val))) => return Ok(Some(implicit_val)),
+                            Ok((_, None)) => return Ok(Some(Value::Nil)),
+                            Err(e) => return Err(e),
+                        }
+                    }
+                }
+            }
+
+            // Step 4: Fall back to Value::Unit (backward compatibility)
             let family = lookup_unit_family(suffix);
             Ok(Some(Value::Unit {
                 value: Box::new(Value::Str(s.clone())),

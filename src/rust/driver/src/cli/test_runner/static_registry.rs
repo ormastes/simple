@@ -83,13 +83,11 @@ impl StaticTestRegistry {
     /// Add a single file to the registry
     fn add_file(&mut self, file_path: &Path) -> Result<(), String> {
         // Read file content
-        let content = fs::read_to_string(file_path)
-            .map_err(|e| format!("Failed to read file: {}", e))?;
+        let content = fs::read_to_string(file_path).map_err(|e| format!("Failed to read file: {}", e))?;
 
         // Parse the file
         let mut parser = Parser::new(&content);
-        let module = parser.parse()
-            .map_err(|e| format!("Parse error: {:?}", e))?;
+        let module = parser.parse().map_err(|e| format!("Parse error: {:?}", e))?;
 
         // Extract test metadata from AST
         let path_buf = file_path.to_path_buf();
@@ -123,10 +121,7 @@ impl StaticTestRegistry {
                 // Index by tags
                 if let Some(tags) = test.tags() {
                     for tag in tags {
-                        self.tag_index
-                            .entry(tag.clone())
-                            .or_default()
-                            .push(test_ref.clone());
+                        self.tag_index.entry(tag.clone()).or_default().push(test_ref.clone());
                     }
                 }
 

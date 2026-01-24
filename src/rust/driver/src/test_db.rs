@@ -275,14 +275,35 @@ pub fn load_test_db(path: &Path) -> Result<TestDb, String> {
     }
 
     let _lock = FileLock::acquire(path, 10).map_err(|e| format!("Failed to acquire lock: {:?}", e))?;
-    let content = fs::read_to_string(path).map_err(|e| e.to_string())?;
+    let content = fs::read_to_string(path).map_err(|e| format!("Failed to read file: {}", e))?;
+
+    if content.trim().is_empty() {
+        return Ok(TestDb::new());
+    }
 
     // Try SDN format first, fall back to JSON for backward compatibility
-    if let Ok(doc) = parse_document(&content) {
-        parse_test_db_sdn(&doc)
-    } else {
-        // Fallback to JSON format for existing databases
-        serde_json::from_str(&content).map_err(|e| e.to_string())
+    match parse_document(&content) {
+        Ok(doc) => {
+            let db = parse_test_db_sdn(&doc)?;
+            // Validate that we actually loaded some records if file has content
+            if db.records.is_empty() && content.lines().count() > 2 {
+                debug_log!(
+                    DebugLevel::Basic,
+                    "TestDB",
+                    "Warning: Database file has content but no records were parsed"
+                );
+            }
+            Ok(db)
+        }
+        Err(sdn_err) => {
+            // Fallback to JSON format for existing databases
+            serde_json::from_str(&content).map_err(|json_err| {
+                format!(
+                    "Failed to parse database - SDN error: {}, JSON error: {}",
+                    sdn_err, json_err
+                )
+            })
+        }
     }
 }
 
@@ -424,6 +445,23 @@ pub fn save_test_db(path: &Path, db: &TestDb) -> Result<(), String> {
 
     let _lock = FileLock::acquire(path, 10).map_err(|e| format!("Failed to acquire lock: {:?}", e))?;
 
+    // Create backup before overwriting if file exists and has content
+    if path.exists() {
+        if let Ok(existing_content) = fs::read_to_string(path) {
+            if !existing_content.trim().is_empty() {
+                let backup_path = path.with_extension("sdn.prev");
+                if let Err(e) = fs::write(&backup_path, &existing_content) {
+                    debug_log!(
+                        DebugLevel::Basic,
+                        "TestDB",
+                        "Warning: Failed to create backup: {}",
+                        e
+                    );
+                }
+            }
+        }
+    }
+
     let mut content = String::new();
     content.push_str("tests |test_id, test_name, test_file, category, status, last_run, failure, execution_history, timing, timing_config, related_bugs, related_features, tags, description, valid|\n");
 
@@ -452,7 +490,13 @@ pub fn save_test_db(path: &Path, db: &TestDb) -> Result<(), String> {
             .unwrap_or_default();
 
         let quote = |s: &str| {
-            if s.is_empty() || s.contains(',') || s.contains('"') || s.contains('\n') {
+            // Quote strings that contain special characters:
+            // - `,` is column separator in SDN tables
+            // - `"` needs escaping
+            // - `\n` needs escaping
+            // - `:` is key-value separator in SDN (important for timestamps like 2026-01-24T08:05:00)
+            // - `+` is not a valid identifier char in SDN (important for timezone offsets like +00:00)
+            if s.is_empty() || s.contains(',') || s.contains('"') || s.contains('\n') || s.contains(':') || s.contains('+') {
                 format!("\"{}\"", s.replace("\"", "\\\"").replace("\n", "\\n"))
             } else {
                 s.to_string()

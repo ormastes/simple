@@ -25,6 +25,24 @@ pub(crate) fn create_range_object(start: i64, end: i64, bound: RangeBound) -> Va
     }
 }
 
+/// Create a range object with optional start/end values.
+/// Missing start defaults to 0 at indexing time.
+/// Missing end defaults to collection length at indexing time.
+pub(crate) fn create_range_object_opt(start: Option<i64>, end: Option<i64>, bound: RangeBound) -> Value {
+    let mut fields = HashMap::new();
+    if let Some(s) = start {
+        fields.insert("start".into(), Value::Int(s));
+    }
+    if let Some(e) = end {
+        fields.insert("end".into(), Value::Int(e));
+    }
+    fields.insert("inclusive".into(), Value::Bool(bound.is_inclusive()));
+    Value::Object {
+        class: BUILTIN_RANGE.into(),
+        fields,
+    }
+}
+
 /// Spawn an actor with the given expression and environment
 pub(crate) fn spawn_actor_with_expr(
     expr: &Expr,

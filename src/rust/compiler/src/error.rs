@@ -1469,6 +1469,10 @@ pub enum CompileError {
     #[error("ghost: {0}")]
     GhostError(String),
 
+    /// Execution limit exceeded (infinite loop protection)
+    #[error("execution limit exceeded: {message}")]
+    ExecutionLimitExceeded { limit: u64, message: String },
+
     // Rich variants with context (new API)
     #[error("io: {message}")]
     IoWithContext { message: String, context: ErrorContext },
@@ -1586,6 +1590,7 @@ impl CompileError {
             Self::TryError(_) => "try: early return",
             Self::InterruptedByUser => "interrupted: execution stopped by user request",
             Self::GhostError(msg) => msg,
+            Self::ExecutionLimitExceeded { message, .. } => message,
         }
     }
 

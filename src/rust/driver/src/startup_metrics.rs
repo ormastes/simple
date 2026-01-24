@@ -42,6 +42,8 @@ pub enum StartupPhase {
     PanicHookInit,
     /// Signal handler setup (Ctrl-C)
     SignalHandlerInit,
+    /// Execution limit initialization
+    ExecutionLimitInit,
     /// Database cleanup (stale temp files)
     DbCleanup,
     /// Main argument parsing
@@ -68,6 +70,7 @@ impl StartupPhase {
             Self::HandlerInit => "Handler Setup",
             Self::PanicHookInit => "Panic Hook Init",
             Self::SignalHandlerInit => "Signal Handler Init",
+            Self::ExecutionLimitInit => "Execution Limit Init",
             Self::DbCleanup => "Database Cleanup",
             Self::MainArgParse => "Main Argument Parsing",
             Self::SandboxSetup => "Sandbox Setup",

@@ -473,21 +473,11 @@ cargo test --doc -p simple-driver 2>&1 | grep ignored   # Check ignored doc-test
 ./target/debug/simple test --tag=integration  # Run integration tests only
 ```
 
-### Current Test Statistics
+### Test Statistics
 
-- **Total Tests**: 7,909 (Simple language tests)
-- **Ignored Rust Tests**: 2 (regeneration_spec.spl - 3 slow_it tests)
-- **Skipped Tests**: 1,241 (unimplemented features)
-- **Doc-Tests Ignored**: 31 (down from 43, across all crates)
-  - simple-driver: 0 ignored (✅ all fixed)
-  - arch_test: 0 ignored (✅ all fixed)
-  - simple-compiler: 4 ignored
-  - simple-runtime: 10 ignored
-  - Other crates: 17 ignored
-
-**Status Reports:**
-- Test results: `doc/test/test_result.md` (updated every test run)
-- Doc-test fixes: `doc/report/doctest_fixes_final_2026-01-21.md`
+See auto-generated reports for current statistics:
+- `doc/test/test_result.md` - Test results (updated every test run)
+- `doc/test/grouped_test_db.sdn` - Grouped test status
 
 ---
 

@@ -30,6 +30,14 @@ macro_rules! check_interrupt {
         // No-op in release mode for maximum performance
     };
 }
+
+/// Check execution limit and return error if exceeded.
+/// Only active in debug builds by default (controlled by EXECUTION_LIMIT_ENABLED).
+macro_rules! check_execution_limit {
+    () => {
+        crate::interpreter::check_execution_limit()?;
+    };
+}
 use crate::value::{Env, Value, ATTR_STRONG, BUILTIN_ARRAY, BUILTIN_RANGE};
 use simple_parser::ast::{
     ClassDef, ContextStmt, Expr, ForStmt, FunctionDef, IfStmt, LoopStmt, MatchStmt, WhileStmt, WithStmt,
@@ -146,6 +154,7 @@ pub(super) fn exec_while(
     if let Some(pattern) = &while_stmt.let_pattern {
         loop {
             check_interrupt!();
+            check_execution_limit!();
             let value = evaluate_expr(&while_stmt.condition, env, functions, classes, enums, impl_methods)?;
             let mut bindings = HashMap::new();
             if !pattern_matches(pattern, &value, &mut bindings, enums)? {
@@ -170,6 +179,7 @@ pub(super) fn exec_while(
     // For while~ (is_suspend), await the condition value before checking truthiness
     loop {
         check_interrupt!();
+        check_execution_limit!();
         let cond_val = evaluate_expr(&while_stmt.condition, env, functions, classes, enums, impl_methods)?;
         let cond_val = if while_stmt.is_suspend {
             await_value(cond_val)?
@@ -211,6 +221,7 @@ pub(super) fn exec_loop(
 ) -> Result<Control, CompileError> {
     loop {
         check_interrupt!();
+        check_execution_limit!();
         let ctrl = exec_block(&loop_stmt.body, env, functions, classes, enums, impl_methods)?;
         if matches!(ctrl, Control::Continue) {
             continue;
@@ -448,6 +459,7 @@ pub(super) fn exec_for(
     // If auto_enumerate, wrap items with indices as tuples
     for (index, item) in items.into_iter().enumerate() {
         check_interrupt!();
+        check_execution_limit!();
 
         // For for~ (is_suspend), await each item if it's a Promise
         let item = if for_stmt.is_suspend { await_value(item)? } else { item };
@@ -554,6 +566,83 @@ pub(super) fn exec_match(
             Ok(Control::Next)
         }
     }
+}
+
+/// Execute an if statement as an expression, returning the branch's implicit value.
+/// Used for implicit return when if is the last statement in a function.
+pub(super) fn exec_if_expr(
+    if_stmt: &IfStmt,
+    env: &mut Env,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Result<Value, CompileError> {
+    // Handle if-let: if let PATTERN = EXPR:
+    if let Some(pattern) = &if_stmt.let_pattern {
+        let value = evaluate_expr(&if_stmt.condition, env, functions, classes, enums, impl_methods)?;
+        let mut bindings = HashMap::new();
+        if pattern_matches(pattern, &value, &mut bindings, enums)? {
+            // Pattern matched - add bindings and execute then block
+            for (name, val) in bindings {
+                env.insert(name, val);
+            }
+            let (flow, last_val) = exec_block_fn(&if_stmt.then_block, env, functions, classes, enums, impl_methods)?;
+            return match flow {
+                Control::Return(v) => Ok(v),
+                _ => Ok(last_val.unwrap_or(Value::Nil)),
+            };
+        } else if let Some(block) = &if_stmt.else_block {
+            let (flow, last_val) = exec_block_fn(block, env, functions, classes, enums, impl_methods)?;
+            return match flow {
+                Control::Return(v) => Ok(v),
+                _ => Ok(last_val.unwrap_or(Value::Nil)),
+            };
+        }
+        return Ok(Value::Nil);
+    }
+
+    // Normal if condition
+    let cond_val = evaluate_expr(&if_stmt.condition, env, functions, classes, enums, impl_methods)?;
+    let cond_val = if if_stmt.is_suspend {
+        await_value(cond_val)?
+    } else {
+        cond_val
+    };
+
+    if cond_val.truthy() {
+        let (flow, last_val) = exec_block_fn(&if_stmt.then_block, env, functions, classes, enums, impl_methods)?;
+        return match flow {
+            Control::Return(v) => Ok(v),
+            _ => Ok(last_val.unwrap_or(Value::Nil)),
+        };
+    }
+
+    for (cond, block) in if_stmt.elif_branches.iter() {
+        let elif_val = evaluate_expr(cond, env, functions, classes, enums, impl_methods)?;
+        let elif_val = if if_stmt.is_suspend {
+            await_value(elif_val)?
+        } else {
+            elif_val
+        };
+        if elif_val.truthy() {
+            let (flow, last_val) = exec_block_fn(block, env, functions, classes, enums, impl_methods)?;
+            return match flow {
+                Control::Return(v) => Ok(v),
+                _ => Ok(last_val.unwrap_or(Value::Nil)),
+            };
+        }
+    }
+
+    if let Some(block) = &if_stmt.else_block {
+        let (flow, last_val) = exec_block_fn(block, env, functions, classes, enums, impl_methods)?;
+        return match flow {
+            Control::Return(v) => Ok(v),
+            _ => Ok(last_val.unwrap_or(Value::Nil)),
+        };
+    }
+
+    Ok(Value::Nil)
 }
 
 /// Execute a match statement as an expression, returning the match arm's value.

@@ -7,9 +7,13 @@ use simple_parser::Parser;
 /// This tests whether AOP aspects can intercept constructor calls at runtime
 /// and replace the object being initialized.
 ///
-/// Status: Requires enhanced AOP/DI integration - deferred for future implementation
+/// Test flow:
+/// 1. Service() constructor triggers DI resolution for repo: Repo
+/// 2. AOP around advice intercepts Repo init via pc{ init(Repo) }
+/// 3. The proceed() callback creates the original Repo
+/// 4. The advice returns a WrappedRepo instead
+/// 5. Service.get_value() returns 1 (from WrappedRepo) instead of 0 (from Repo)
 #[test]
-#[ignore]
 fn interpreter_applies_runtime_around_init() {
     let source = r#"
 fn repo_around(proceed):
@@ -17,25 +21,25 @@ fn repo_around(proceed):
     return WrappedRepo()
 
 class Repo:
-    fn new(self):
-        return self
-
     fn value(self) -> i64:
         return 0
 
 class WrappedRepo:
-    fn new(self):
-        return self
-
     fn value(self) -> i64:
         return 1
 
 class Service:
-    #[inject]
-    fn new(self, repo: Repo) -> i64:
-        return repo.value()
+    repo: Repo
 
-main = Service()
+    #[inject]
+    fn new(self, repo: Repo):
+        self.repo = repo
+
+    fn get_value(self) -> i64:
+        return self.repo.value()
+
+val service = Service()
+main = service.get_value()
 "#;
 
     let mut parser = Parser::new(source);

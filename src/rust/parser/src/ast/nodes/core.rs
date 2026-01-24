@@ -31,6 +31,8 @@ pub enum Node {
     UnitFamily(UnitFamilyDef),
     CompoundUnit(CompoundUnitDef),
     HandlePool(HandlePoolDef),
+    /// Literal function definition: `literal fn _suffix(s: text) -> Type: body`
+    LiteralFunction(LiteralFunctionDef),
 
     // Module system (Features #104-111)
     ModDecl(ModDecl),
@@ -578,6 +580,69 @@ pub enum Expr {
     },
     /// Try operator: expr? - unwrap Ok or early return Err
     Try(Box<Expr>),
+
+    /// Safe unwrap with default: expr unwrap or: default
+    /// Returns the inner value if Some/Ok, otherwise evaluates default
+    UnwrapOr {
+        expr: Box<Expr>,
+        default: Box<Expr>,
+    },
+
+    /// Safe unwrap with lazy default: expr unwrap else: \: fallback()
+    /// Returns the inner value if Some/Ok, otherwise calls the fallback closure
+    UnwrapElse {
+        expr: Box<Expr>,
+        fallback_fn: Box<Expr>,
+    },
+
+    /// Unwrap or early return: expr unwrap or_return:
+    /// Returns the inner value if Some/Ok, otherwise returns None/Err from the function
+    UnwrapOrReturn(Box<Expr>),
+
+    /// Safe cast with default: expr as Type or: default
+    /// Returns the cast value if successful, otherwise evaluates default
+    CastOr {
+        expr: Box<Expr>,
+        target_type: Type,
+        default: Box<Expr>,
+    },
+
+    /// Safe cast with lazy default: expr as Type else: \: fallback()
+    /// Returns the cast value if successful, otherwise calls the fallback closure
+    CastElse {
+        expr: Box<Expr>,
+        target_type: Type,
+        fallback_fn: Box<Expr>,
+    },
+
+    /// Safe cast or early return: expr as Type or_return:
+    /// Returns the cast value if successful, otherwise returns from the function
+    CastOrReturn {
+        expr: Box<Expr>,
+        target_type: Type,
+    },
+
+    /// Null coalescing / Option fallback: expr ?? default
+    /// Returns the inner value if Some, otherwise evaluates default
+    Coalesce {
+        expr: Box<Expr>,
+        default: Box<Expr>,
+    },
+
+    /// Optional chaining field access: expr?.field
+    /// Returns Some(field_value) if expr is Some, otherwise None
+    OptionalChain {
+        expr: Box<Expr>,
+        field: String,
+    },
+
+    /// Optional chaining method call: expr?.method(args)
+    /// Returns Some(result) if expr is Some, otherwise None
+    OptionalMethodCall {
+        receiver: Box<Expr>,
+        method: String,
+        args: Vec<Argument>,
+    },
 
     // Contract-specific expressions (LLM-friendly feature #400)
     /// Result identifier in ensures block - refers to return value

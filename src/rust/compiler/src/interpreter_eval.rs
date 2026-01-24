@@ -779,6 +779,21 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                         .insert(binding.interface_name.clone(), impl_type_name);
                 });
             }
+            Node::LiteralFunction(lit_fn) => {
+                // Register literal function for custom string suffix handling
+                use super::interpreter_state::{LITERAL_FUNCTIONS, LiteralFunctionInfo};
+                LITERAL_FUNCTIONS.with(|cell: &std::cell::RefCell<std::collections::HashMap<String, LiteralFunctionInfo>>| {
+                    cell.borrow_mut().insert(
+                        lit_fn.suffix.clone(),
+                        LiteralFunctionInfo {
+                            suffix: lit_fn.suffix.clone(),
+                            return_type: lit_fn.return_type.clone(),
+                            param_name: lit_fn.param_name.clone(),
+                            body: lit_fn.body.clone(),
+                        },
+                    );
+                });
+            }
             Node::ModDecl(_)
             | Node::CommonUseStmt(_)
             | Node::ExportUseStmt(_)

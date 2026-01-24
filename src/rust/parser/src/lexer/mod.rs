@@ -230,7 +230,18 @@ impl<'a> Lexer<'a> {
                     TokenKind::Tilde
                 }
             }
-            '?' => TokenKind::Question,
+            '?' => {
+                // Check for ?? (null coalescing) or ?. (optional chaining)
+                if self.check('?') {
+                    self.advance();
+                    TokenKind::DoubleQuestion
+                } else if self.check('.') {
+                    self.advance();
+                    TokenKind::QuestionDot
+                } else {
+                    TokenKind::Question
+                }
+            }
 
             // Multi-character operators
             '+' => self.match_char('=', TokenKind::PlusAssign, TokenKind::Plus),

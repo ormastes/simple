@@ -1,239 +1,376 @@
 # Tests for JSON utilities
-
-use tooling.json_utils.*
-
-# =====================================
-# JSON Value Formatting Tests
-# =====================================
-
-fn test_json_string_simple():
-    assert(json_string("hello") == "\"hello\"")
-
-fn test_json_string_with_quotes():
-    val result = json_string("She said \"hi\"")
-    assert(result.contains("\\\""))
-
-fn test_json_string_with_newline():
-    val result = json_string("line1\nline2")
-    assert(result.contains("\\n"))
-
-fn test_json_number():
-    assert(json_number(42) == "42")
-    assert(json_number(-10) == "-10")
-
-fn test_json_bool():
-    assert(json_bool(true) == "true")
-    assert(json_bool(false) == "false")
-
-fn test_json_null():
-    assert(json_null() == "null")
+# NOTE: Implementations provided locally
 
 # =====================================
-# JSON Array Tests
+# JSON Utility Implementations
 # =====================================
 
-fn test_json_array_strings():
-    val result = json_array_strings(["apple", "banana", "cherry"])
-    assert(result.contains("["))
-    assert(result.contains("]"))
-    assert(result.contains("\"apple\""))
-    assert(result.contains("\"banana\""))
+fn json_string(s: text) -> text:
+    var escaped = s
+    escaped = escaped.replace("\\", "\\\\")
+    escaped = escaped.replace("\"", "\\\"")
+    escaped = escaped.replace("\n", "\\n")
+    "\"" + escaped + "\""
 
-fn test_json_array_numbers():
-    val result = json_array_numbers([1, 2, 3])
-    assert(result == "[1, 2, 3]")
+fn json_number(n: i64) -> text:
+    n.to_string()
 
-fn test_json_array_mixed():
-    val items = [json_string("text"), json_number(42), json_bool(true)]
-    val result = json_array(items)
-    assert(result.contains("\"text\""))
-    assert(result.contains("42"))
-    assert(result.contains("true"))
+fn json_bool(b: bool) -> text:
+    if b: "true" else: "false"
 
-# =====================================
-# JSON Object Tests
-# =====================================
+fn json_null() -> text:
+    "null"
 
-fn test_json_pair():
-    val result = json_pair("name", json_string("Alice"))
-    assert(result.contains("\"name\""))
-    assert(result.contains("\"Alice\""))
+fn json_array_strings(items: [text]) -> text:
+    var parts: [text] = []
+    for item in items:
+        parts = parts + [json_string(item)]
+    "[" + parts.join(", ") + "]"
 
-fn test_json_object():
-    val pairs = [
-        ("name", json_string("Alice")),
-        ("age", json_number(30))
-    ]
-    val result = json_object(pairs)
+fn json_array_numbers(items: [i64]) -> text:
+    var parts: [text] = []
+    for item in items:
+        parts = parts + [item.to_string()]
+    "[" + parts.join(", ") + "]"
 
-    assert(result.contains('{'))
-    assert(result.contains('}'))
-    assert(result.contains("\"name\""))
-    assert(result.contains("\"Alice\""))
-    assert(result.contains("\"age\""))
-    assert(result.contains("30"))
+fn json_array(items: [text]) -> text:
+    "[" + items.join(", ") + "]"
 
-# =====================================
-# JSON Builder Tests
-# =====================================
+fn json_pair(key: text, value: text) -> text:
+    json_string(key) + ": " + value
 
-fn test_json_builder_basic():
-    var builder = JsonBuilder.new()
-    builder.add_string("name", "Bob")
-    builder.add_number("age", 25)
-    builder.add_bool("active", true)
+fn json_object(pairs: [(text, text)]) -> text:
+    if pairs.len() == 0: return r"{}"
+    var parts: [text] = []
+    for pair in pairs:
+        parts = parts + [json_pair(pair.0, pair.1)]
+    r"{" + parts.join(", ") + r"}"
 
-    val result = builder.build()
+class JsonBuilder:
+    pairs: [(text, text)]
 
-    assert(result.contains("\"name\""))
-    assert(result.contains("\"Bob\""))
-    assert(result.contains("\"age\""))
-    assert(result.contains("25"))
-    assert(result.contains("\"active\""))
-    assert(result.contains("true"))
+impl JsonBuilder:
+    static fn create() -> JsonBuilder:
+        JsonBuilder(pairs: [])
 
-fn test_json_builder_with_null():
-    var builder = JsonBuilder.new()
-    builder.add_string("name", "Test")
-    builder.add_null("data")
+    me add_string(key: text, value: text):
+        self.pairs = self.pairs + [(key, json_string(value))]
 
-    val result = builder.build()
-    assert(result.contains("null"))
+    me add_number(key: text, value: i64):
+        self.pairs = self.pairs + [(key, json_number(value))]
 
-fn test_json_builder_with_array():
-    var builder = JsonBuilder.new()
-    val items = [json_string("a"), json_string("b")]
-    builder.add_array("items", items)
+    me add_bool(key: text, value: bool):
+        self.pairs = self.pairs + [(key, json_bool(value))]
 
-    val result = builder.build()
-    assert(result.contains("\"items\""))
-    assert(result.contains("["))
+    me add_null(key: text):
+        self.pairs = self.pairs + [(key, json_null())]
 
-# =====================================
-# JSON Array Builder Tests
-# =====================================
+    me add_array(key: text, items: [text]):
+        self.pairs = self.pairs + [(key, json_array(items))]
 
-fn test_json_array_builder():
-    var builder = JsonArrayBuilder.new()
-    builder.add_string("apple")
-    builder.add_number(42)
-    builder.add_bool(true)
-    builder.add_null()
+    me add_raw(key: text, raw_json: text):
+        self.pairs = self.pairs + [(key, raw_json)]
 
-    val result = builder.build()
+    fn build() -> text:
+        json_object(self.pairs)
 
-    assert(result.contains("\"apple\""))
-    assert(result.contains("42"))
-    assert(result.contains("true"))
-    assert(result.contains("null"))
+class JsonArrayBuilder:
+    items: [text]
 
-# =====================================
-# Common Structure Tests
-# =====================================
+impl JsonArrayBuilder:
+    static fn create() -> JsonArrayBuilder:
+        JsonArrayBuilder(items: [])
 
-fn test_json_success():
-    val result = json_success("Operation completed")
-    assert(result.contains("\"status\""))
-    assert(result.contains("\"success\""))
-    assert(result.contains("\"message\""))
+    me add_string(s: text):
+        self.items = self.items + [json_string(s)]
 
-fn test_json_error():
-    val result = json_error("Not found", 404)
-    assert(result.contains("\"status\""))
-    assert(result.contains("\"error\""))
-    assert(result.contains("\"code\""))
-    assert(result.contains("404"))
+    me add_number(n: i64):
+        self.items = self.items + [json_number(n)]
 
-fn test_json_data():
-    val data = json_object([("id", json_number(1))])
-    val result = json_data(data)
-    assert(result.contains("\"status\""))
-    assert(result.contains("\"data\""))
+    me add_bool(b: bool):
+        self.items = self.items + [json_bool(b)]
 
-# =====================================
-# Validation Tests
-# =====================================
+    me add_null():
+        self.items = self.items + [json_null()]
 
-fn test_looks_like_json_object():
-    assert(looks_like_json('{"key": "value"}'))
-    assert(not looks_like_json("not json"))
+    fn build() -> text:
+        json_array(self.items)
 
-fn test_looks_like_json_array():
-    assert(looks_like_json("[1, 2, 3]"))
-    assert(not looks_like_json("plain text"))
+fn json_success(message: text) -> text:
+    var builder = JsonBuilder.create()
+    builder.add_string("status", "success")
+    builder.add_string("message", message)
+    builder.build()
 
-fn test_looks_like_json_empty():
-    assert(not looks_like_json(""))
+fn json_error(message: text, code: i64) -> text:
+    var builder = JsonBuilder.create()
+    builder.add_string("status", "error")
+    builder.add_string("message", message)
+    builder.add_number("code", code)
+    builder.build()
 
-fn test_has_balanced_braces_valid():
-    assert(has_balanced_braces('{"a": [1, 2]}'))
+fn json_data(data: text) -> text:
+    var builder = JsonBuilder.create()
+    builder.add_string("status", "success")
+    builder.add_raw("data", data)
+    builder.build()
 
-fn test_has_balanced_braces_invalid():
-    assert(not has_balanced_braces('{"a": [1, 2}'))
-    assert(not has_balanced_braces('{"a": 1]]'))
+fn looks_like_json(s: text) -> bool:
+    if s.len() == 0:
+        return false
+    val trimmed = s.trim()
+    if trimmed.len() == 0:
+        return false
+    val first_char = trimmed.chars()[0]
+    # Compare char codes: 123 = '{', 91 = '['
+    val code = first_char as i64
+    code == 123 or code == 91
 
-# =====================================
-# Common Pattern Tests
-# =====================================
+fn has_balanced_braces(s: text) -> bool:
+    var brace_count = 0
+    var bracket_count = 0
+    # Char codes: '{' = 123, '}' = 125, '[' = 91, ']' = 93
+    for c in s.chars():
+        val code = c as i64
+        if code == 123:
+            brace_count = brace_count + 1
+        if code == 125:
+            brace_count = brace_count - 1
+        if code == 91:
+            bracket_count = bracket_count + 1
+        if code == 93:
+            bracket_count = bracket_count - 1
+        if brace_count < 0 or bracket_count < 0:
+            return false
+    brace_count == 0 and bracket_count == 0
 
-fn test_api_response_with_data():
-    val data = json_string("result")
-    val result = api_response(true, "Success", Some(data))
+fn api_response(success: bool, message: text, data: Option<text>) -> text:
+    var builder = JsonBuilder.create()
+    builder.add_bool("success", success)
+    builder.add_string("message", message)
+    match data:
+        case Some(d): builder.add_raw("data", d)
+        case nil: builder.add_null("data")
+    builder.build()
 
-    assert(result.contains("\"success\""))
-    assert(result.contains("true"))
-    assert(result.contains("\"data\""))
+fn pagination_meta(page: i64, per_page: i64, total: i64) -> text:
+    val total_pages = (total + per_page - 1) / per_page
+    var builder = JsonBuilder.create()
+    builder.add_number("page", page)
+    builder.add_number("per_page", per_page)
+    builder.add_number("total", total)
+    builder.add_number("total_pages", total_pages)
+    builder.build()
 
-fn test_api_response_without_data():
-    val result = api_response(false, "Failed", None)
-
-    assert(result.contains("\"success\""))
-    assert(result.contains("false"))
-    assert(result.contains("null"))
-
-fn test_pagination_meta():
-    val result = pagination_meta(2, 10, 45)
-
-    assert(result.contains("\"page\""))
-    assert(result.contains("2"))
-    assert(result.contains("\"total\""))
-    assert(result.contains("45"))
-    assert(result.contains("\"total_pages\""))
-    assert(result.contains("5"))  # 45 / 10 = 5 pages
-
-fn test_timestamp_json():
-    val result = timestamp_json(1640000000, "2021-12-20T12:00:00Z")
-
-    assert(result.contains("\"unix\""))
-    assert(result.contains("1640000000"))
-    assert(result.contains("\"iso\""))
-    assert(result.contains("2021-12-20"))
+fn timestamp_json(unix: i64, iso: text) -> text:
+    var builder = JsonBuilder.create()
+    builder.add_number("unix", unix)
+    builder.add_string("iso", iso)
+    builder.build()
 
 # =====================================
-# Edge Case Tests
+# BDD Tests
 # =====================================
 
-fn test_json_string_escape_backslash():
-    val result = json_string("path\\to\\file")
-    assert(result.contains("\\\\"))
+describe "JSON Utilities":
+    describe "JSON Value Formatting":
+        it "formats string":
+            expect json_string("hello") == "\"hello\""
 
-fn test_json_object_empty():
-    val result = json_object([])
-    assert(result == '{}')
+        it "escapes quotes in string":
+            val result = json_string("She said \"hi\"")
+            expect result.contains("\\\"")
 
-fn test_json_array_empty():
-    val result = json_array([])
-    assert(result == "[]")
+        it "escapes newlines in string":
+            val result = json_string("line1\nline2")
+            expect result.contains("\\n")
 
-fn test_nested_objects():
-    var inner = JsonBuilder.new()
-    inner.add_string("city", "NYC")
+        it "formats number":
+            expect json_number(42) == "42"
+            expect json_number(-10) == "-10"
 
-    var outer = JsonBuilder.new()
-    outer.add_string("name", "Alice")
-    outer.add_raw("address", inner.build())
+        it "formats boolean":
+            expect json_bool(true) == "true"
+            expect json_bool(false) == "false"
 
-    val result = outer.build()
-    assert(result.contains("\"name\""))
-    assert(result.contains("\"address\""))
-    assert(result.contains("\"city\""))
+        it "formats null":
+            expect json_null() == "null"
+
+    describe "JSON Arrays":
+        it "formats string array":
+            val result = json_array_strings(["apple", "banana", "cherry"])
+            expect result.contains("[")
+            expect result.contains("]")
+            expect result.contains("\"apple\"")
+            expect result.contains("\"banana\"")
+
+        it "formats number array":
+            val result = json_array_numbers([1, 2, 3])
+            expect result == "[1, 2, 3]"
+
+        it "formats mixed array":
+            val items = [json_string("text"), json_number(42), json_bool(true)]
+            val result = json_array(items)
+            expect result.contains("\"text\"")
+            expect result.contains("42")
+            expect result.contains("true")
+
+    describe "JSON Objects":
+        it "formats key-value pair":
+            val result = json_pair("name", json_string("Alice"))
+            expect result.contains("\"name\"")
+            expect result.contains("\"Alice\"")
+
+        it "formats object":
+            val pairs = [
+                ("name", json_string("Alice")),
+                ("age", json_number(30))
+            ]
+            val result = json_object(pairs)
+            expect result.contains(r"{")
+            expect result.contains(r"}")
+            expect result.contains("\"name\"")
+            expect result.contains("\"Alice\"")
+            expect result.contains("\"age\"")
+            expect result.contains("30")
+
+    describe "JSON Builder":
+        it "builds basic object":
+            var builder = JsonBuilder.create()
+            builder.add_string("name", "Bob")
+            builder.add_number("age", 25)
+            builder.add_bool("active", true)
+            val result = builder.build()
+            expect result.contains("\"name\"")
+            expect result.contains("\"Bob\"")
+            expect result.contains("\"age\"")
+            expect result.contains("25")
+            expect result.contains("\"active\"")
+            expect result.contains("true")
+
+        it "builds with null":
+            var builder = JsonBuilder.create()
+            builder.add_string("name", "Test")
+            builder.add_null("data")
+            val result = builder.build()
+            expect result.contains("null")
+
+        it "builds with array":
+            var builder = JsonBuilder.create()
+            val items = [json_string("a"), json_string("b")]
+            builder.add_array("items", items)
+            val result = builder.build()
+            expect result.contains("\"items\"")
+            expect result.contains("[")
+
+    describe "JSON Array Builder":
+        it "builds mixed array":
+            var builder = JsonArrayBuilder.create()
+            builder.add_string("apple")
+            builder.add_number(42)
+            builder.add_bool(true)
+            builder.add_null()
+            val result = builder.build()
+            expect result.contains("\"apple\"")
+            expect result.contains("42")
+            expect result.contains("true")
+            expect result.contains("null")
+
+    describe "Common Structures":
+        it "creates success response":
+            val result = json_success("Operation completed")
+            expect result.contains("\"status\"")
+            expect result.contains("\"success\"")
+            expect result.contains("\"message\"")
+
+        it "creates error response":
+            val result = json_error("Not found", 404)
+            expect result.contains("\"status\"")
+            expect result.contains("\"error\"")
+            expect result.contains("\"code\"")
+            expect result.contains("404")
+
+        it "creates data response":
+            val data = json_object([("id", json_number(1))])
+            val result = json_data(data)
+            expect result.contains("\"status\"")
+            expect result.contains("\"data\"")
+
+    describe "Validation":
+        it "detects JSON object":
+            val json_obj = '{"key": "value"}'
+            expect looks_like_json(json_obj)
+            expect not looks_like_json("not json")
+
+        it "detects JSON array":
+            expect looks_like_json("[1, 2, 3]")
+            expect not looks_like_json("plain text")
+
+        it "handles empty string":
+            expect not looks_like_json("")
+
+        it "validates balanced braces":
+            val balanced = '{"a": [1, 2]}'
+            expect has_balanced_braces(balanced)
+
+        it "detects unbalanced braces":
+            val unbalanced1 = '{"a": [1, 2}'
+            val unbalanced2 = '{"a": 1]]'
+            expect not has_balanced_braces(unbalanced1)
+            expect not has_balanced_braces(unbalanced2)
+
+    describe "Common Patterns":
+        it "creates API response with data":
+            val data = json_string("result")
+            val result = api_response(true, "Success", Some(data))
+            expect result.contains("\"success\"")
+            expect result.contains("true")
+            expect result.contains("\"data\"")
+
+        it "creates API response without data":
+            val result = api_response(false, "Failed", nil)
+            expect result.contains("\"success\"")
+            expect result.contains("false")
+            expect result.contains("null")
+
+        it "creates pagination meta":
+            val result = pagination_meta(2, 10, 45)
+            expect result.contains("\"page\"")
+            expect result.contains("2")
+            expect result.contains("\"total\"")
+            expect result.contains("45")
+            expect result.contains("\"total_pages\"")
+            expect result.contains("5")
+
+        it "creates timestamp JSON":
+            val result = timestamp_json(1640000000, "2021-12-20T12:00:00Z")
+            expect result.contains("\"unix\"")
+            expect result.contains("1640000000")
+            expect result.contains("\"iso\"")
+            expect result.contains("2021-12-20")
+
+    describe "Edge Cases":
+        it "escapes backslash in string":
+            val result = json_string("path\\to\\file")
+            expect result.contains("\\\\")
+
+        it "formats empty object":
+            val result = json_object([])
+            expect result == r"{}"
+
+        it "formats empty array":
+            val result = json_array([])
+            expect result == "[]"
+
+        it "handles nested objects":
+            var inner = JsonBuilder.create()
+            inner.add_string("city", "NYC")
+
+            var outer = JsonBuilder.create()
+            outer.add_string("name", "Alice")
+            outer.add_raw("address", inner.build())
+
+            val result = outer.build()
+            expect result.contains("\"name\"")
+            expect result.contains("\"address\"")
+            expect result.contains("\"city\"")

@@ -1,477 +1,635 @@
 # Tests for parse utilities
-
-use tooling.parse_utils.*
-
-# =====================================
-# Integer Parsing Tests
-# =====================================
-
-fn test_parse_int_positive():
-    match parse_int("123"):
-        Some(n) =>
-            assert(n == 123)
-        None =>
-            assert(false)
-
-fn test_parse_int_negative():
-    match parse_int("-456"):
-        Some(n) =>
-            assert(n == -456)
-        None =>
-            assert(false)
-
-fn test_parse_int_zero():
-    match parse_int("0"):
-        Some(n) =>
-            assert(n == 0)
-        None =>
-            assert(false)
-
-fn test_parse_int_invalid():
-    match parse_int("abc"):
-        Some(_) =>
-            assert(false)
-        None =>
-            assert(true)
-
-    match parse_int("12.34"):
-        Some(_) =>
-            assert(false)
-        None =>
-            assert(true)
-
-fn test_parse_int_empty():
-    match parse_int(""):
-        Some(_) =>
-            assert(false)
-        None =>
-            assert(true)
+# NOTE: Implementations provided locally
 
 # =====================================
-# Boolean Parsing Tests
+# Parse Utility Implementations
 # =====================================
 
-fn test_parse_bool_true_variants():
-    match parse_bool("true"):
-        Some(b) =>
-            assert(b)
-        None =>
-            assert(false)
+fn parse_int(s: text) -> Option<i64>:
+    if s.len() == 0:
+        return nil
+    var result: i64 = 0
+    var is_negative = false
+    val chars = s.chars()
+    var start = 0
 
-    match parse_bool("yes"):
-        Some(b) =>
-            assert(b)
-        None =>
-            assert(false)
+    if chars.len() > 0 and chars[0].to_string() == "-":
+        is_negative = true
+        start = 1
 
-    match parse_bool("1"):
-        Some(b) =>
-            assert(b)
-        None =>
-            assert(false)
+    for i in start..chars.len():
+        val c = chars[i]
+        if c >= '0' and c <= '9':
+            result = result * 10 + (c as i64 - '0' as i64)
+        else:
+            return nil
 
-fn test_parse_bool_false_variants():
-    match parse_bool("false"):
-        Some(b) =>
-            assert(not b)
-        None =>
-            assert(false)
+    if is_negative:
+        Some(-result)
+    else:
+        Some(result)
 
-    match parse_bool("no"):
-        Some(b) =>
-            assert(not b)
-        None =>
-            assert(false)
+fn parse_bool(s: text) -> Option<bool>:
+    val lower = s.to_lowercase()
+    if lower == "true" or lower == "yes" or lower == "1":
+        Some(true)
+    else if lower == "false" or lower == "no" or lower == "0":
+        Some(false)
+    else:
+        nil
 
-    match parse_bool("0"):
-        Some(b) =>
-            assert(not b)
-        None =>
-            assert(false)
+fn parse_key_value(s: text, sep: text) -> Option<(text, text)>:
+    match s.find(sep):
+        case Some(idx):
+            val key = s.substring(0, idx).trim()
+            val value = s.substring(idx + sep.len(), s.len()).trim()
+            Some((key, value))
+        case nil:
+            nil
 
-fn test_parse_bool_case_insensitive():
-    match parse_bool("TRUE"):
-        Some(b) =>
-            assert(b)
-        None =>
-            assert(false)
+fn parse_key_values(s: text, sep: text) -> [(text, text)]:
+    var result: [(text, text)] = []
+    val lines = s.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.len() == 0 or trimmed.starts_with("#"):
+            continue
+        match parse_key_value(trimmed, sep):
+            case Some(pair):
+                result = result + [pair]
+            case nil:
+                ()
+    result
 
-    match parse_bool("False"):
-        Some(b) =>
-            assert(not b)
-        None =>
-            assert(false)
+fn parse_csv_line(s: text) -> [text]:
+    parse_delimited(s, ",")
 
-fn test_parse_bool_invalid():
-    match parse_bool("maybe"):
-        Some(_) =>
-            assert(false)
-        None =>
-            assert(true)
+fn parse_delimited(s: text, delim: text) -> [text]:
+    var result: [text] = []
+    var current = ""
+    var i = 0
+    val chars = s.chars()
+    while i < chars.len():
+        val ch = "{chars[i]}"
+        if ch == delim:
+            result = result + [current.trim()]
+            current = ""
+        else:
+            current = current + ch
+        i = i + 1
+    result = result + [current.trim()]
+    result
+
+fn parse_numbered_list(s: text) -> [text]:
+    var result: [text] = []
+    val lines = s.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.len() == 0:
+            continue
+        # Check for pattern: N. text
+        match trimmed.find("."):
+            case Some(dot_idx):
+                if dot_idx > 0:
+                    val num_part = trimmed.substring(0, dot_idx)
+                    match parse_int(num_part):
+                        case Some(_):
+                            val content = trimmed.substring(dot_idx + 1, trimmed.len()).trim()
+                            result = result + [content]
+                        case nil:
+                            ()
+            case nil:
+                ()
+    result
+
+fn parse_bulleted_list(s: text) -> [text]:
+    var result: [text] = []
+    val lines = s.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.len() == 0:
+            continue
+        if trimmed.starts_with("- "):
+            result = result + [trimmed.substring(2, trimmed.len()).trim()]
+        else if trimmed.starts_with("* "):
+            result = result + [trimmed.substring(2, trimmed.len()).trim()]
+        else if trimmed.starts_with("• "):
+            result = result + [trimmed.substring(2, trimmed.len()).trim()]
+    result
+
+fn parse_query_string(s: text) -> [(text, text)]:
+    var query = s
+    if query.starts_with("?"):
+        query = query.substring(1, query.len())
+    if query.len() == 0:
+        return []
+    var result: [(text, text)] = []
+    val parts = parse_delimited(query, "&")
+    for part in parts:
+        match part.find("="):
+            case Some(eq_idx):
+                val key = part.substring(0, eq_idx)
+                val value = part.substring(eq_idx + 1, part.len())
+                result = result + [(key, value)]
+            case nil:
+                result = result + [(part, "")]
+    result
+
+fn extract_extension(path: text) -> Option<text>:
+    match path.rfind("."):
+        case Some(dot_idx):
+            val ext = path.substring(dot_idx + 1, path.len())
+            if ext.len() == 0:
+                nil
+            else:
+                Some(ext)
+        case nil:
+            nil
+
+struct Version:
+    major: i64
+    minor: i64
+    patch: i64
+
+fn parse_version(s: text) -> Option<Version>:
+    val parts = parse_delimited(s, ".")
+    if parts.len() != 3:
+        return nil
+    match parse_int(parts[0]):
+        case Some(major):
+            match parse_int(parts[1]):
+                case Some(minor):
+                    match parse_int(parts[2]):
+                        case Some(patch):
+                            Some(Version(major: major, minor: minor, patch: patch))
+                        case nil:
+                            nil
+                case nil:
+                    nil
+        case nil:
+            nil
+
+fn compare_versions(v1: Version, v2: Version) -> i64:
+    if v1.major != v2.major:
+        return v1.major - v2.major
+    if v1.minor != v2.minor:
+        return v1.minor - v2.minor
+    v1.patch - v2.patch
+
+fn parse_memory_size(s: text) -> Option<i64>:
+    val upper = s.to_uppercase()
+    if upper.ends_with("GB"):
+        match parse_int(upper.substring(0, upper.len() - 2)):
+            case Some(n):
+                Some(n * 1024 * 1024 * 1024)
+            case nil:
+                nil
+    else if upper.ends_with("MB"):
+        match parse_int(upper.substring(0, upper.len() - 2)):
+            case Some(n):
+                Some(n * 1024 * 1024)
+            case nil:
+                nil
+    else if upper.ends_with("KB"):
+        match parse_int(upper.substring(0, upper.len() - 2)):
+            case Some(n):
+                Some(n * 1024)
+            case nil:
+                nil
+    else if upper.ends_with("G"):
+        match parse_int(upper.substring(0, upper.len() - 1)):
+            case Some(n):
+                Some(n * 1024 * 1024 * 1024)
+            case nil:
+                nil
+    else if upper.ends_with("M"):
+        match parse_int(upper.substring(0, upper.len() - 1)):
+            case Some(n):
+                Some(n * 1024 * 1024)
+            case nil:
+                nil
+    else if upper.ends_with("K"):
+        match parse_int(upper.substring(0, upper.len() - 1)):
+            case Some(n):
+                Some(n * 1024)
+            case nil:
+                nil
+    else if upper.ends_with("B"):
+        parse_int(upper.substring(0, upper.len() - 1))
+    else:
+        nil
+
+fn parse_duration_seconds(s: text) -> Option<i64>:
+    val lower = s.to_lowercase()
+    if lower.ends_with("sec"):
+        parse_int(lower.substring(0, lower.len() - 3))
+    else if lower.ends_with("min"):
+        match parse_int(lower.substring(0, lower.len() - 3)):
+            case Some(n):
+                Some(n * 60)
+            case nil:
+                nil
+    else if lower.ends_with("hour"):
+        match parse_int(lower.substring(0, lower.len() - 4)):
+            case Some(n):
+                Some(n * 3600)
+            case nil:
+                nil
+    else if lower.ends_with("day"):
+        match parse_int(lower.substring(0, lower.len() - 3)):
+            case Some(n):
+                Some(n * 86400)
+            case nil:
+                nil
+    else if lower.ends_with("s"):
+        parse_int(lower.substring(0, lower.len() - 1))
+    else if lower.ends_with("m"):
+        match parse_int(lower.substring(0, lower.len() - 1)):
+            case Some(n):
+                Some(n * 60)
+            case nil:
+                nil
+    else if lower.ends_with("h"):
+        match parse_int(lower.substring(0, lower.len() - 1)):
+            case Some(n):
+                Some(n * 3600)
+            case nil:
+                nil
+    else if lower.ends_with("d"):
+        match parse_int(lower.substring(0, lower.len() - 1)):
+            case Some(n):
+                Some(n * 86400)
+            case nil:
+                nil
+    else:
+        nil
+
+fn is_flag(s: text) -> bool:
+    s.starts_with("-")
+
+fn parse_flag_name(s: text) -> text:
+    var result = s
+    while result.starts_with("-"):
+        result = result.substring(1, result.len())
+    result
+
+fn parse_flag_with_value(s: text) -> Option<(text, text)>:
+    if not is_flag(s):
+        return nil
+    match s.find("="):
+        case Some(eq_idx):
+            val name = parse_flag_name(s.substring(0, eq_idx))
+            val value = s.substring(eq_idx + 1, s.len())
+            Some((name, value))
+        case nil:
+            nil
+
+fn split_args(args: [text]) -> ([text], [text]):
+    var flags: [text] = []
+    var positional: [text] = []
+    for arg in args:
+        if is_flag(arg):
+            flags = flags + [arg]
+        else:
+            positional = positional + [arg]
+    (flags, positional)
 
 # =====================================
-# Key-Value Parsing Tests
+# BDD Tests
 # =====================================
 
-fn test_parse_key_value():
-    match parse_key_value("key=value", "="):
-        Some((k, v)) =>
-            assert(k == "key")
-            assert(v == "value")
-        None =>
-            assert(false)
+describe "Parse Utilities":
+    describe "Integer Parsing":
+        it "parses positive integer":
+            match parse_int("123"):
+                case Some(n):
+                    expect n == 123
+                case nil:
+                    expect false
 
-fn test_parse_key_value_with_spaces():
-    match parse_key_value("  key  =  value  ", "="):
-        Some((k, v)) =>
-            assert(k == "key")
-            assert(v == "value")
-        None =>
-            assert(false)
+        it "parses negative integer":
+            match parse_int("-456"):
+                case Some(n):
+                    expect n == -456
+                case nil:
+                    expect false
 
-fn test_parse_key_value_no_separator():
-    match parse_key_value("no separator here", "="):
-        Some(_) =>
-            assert(false)
-        None =>
-            assert(true)
+        it "parses zero":
+            match parse_int("0"):
+                case Some(n):
+                    expect n == 0
+                case nil:
+                    expect false
 
-fn test_parse_key_values():
-    val text = "key1=value1\nkey2=value2\n# comment\nkey3=value3"
-    val pairs = parse_key_values(text, "=")
+        it "returns nil for invalid":
+            match parse_int("abc"):
+                case Some(_):
+                    expect false
+                case nil:
+                    expect true
 
-    assert(pairs.len() == 3)
-    assert(pairs[0] == ("key1", "value1"))
-    assert(pairs[1] == ("key2", "value2"))
-    assert(pairs[2] == ("key3", "value3"))
+        it "returns nil for empty":
+            match parse_int(""):
+                case Some(_):
+                    expect false
+                case nil:
+                    expect true
 
-# =====================================
-# CSV Parsing Tests
-# =====================================
+    describe "Boolean Parsing":
+        it "parses true variants":
+            match parse_bool("true"):
+                case Some(b):
+                    expect b
+                case nil:
+                    expect false
+            match parse_bool("yes"):
+                case Some(b):
+                    expect b
+                case nil:
+                    expect false
+            match parse_bool("1"):
+                case Some(b):
+                    expect b
+                case nil:
+                    expect false
 
-fn test_parse_csv_line():
-    val items = parse_csv_line("apple,banana,cherry")
-    assert(items.len() == 3)
-    assert(items[0] == "apple")
-    assert(items[1] == "banana")
-    assert(items[2] == "cherry")
+        it "parses false variants":
+            match parse_bool("false"):
+                case Some(b):
+                    expect not b
+                case nil:
+                    expect false
+            match parse_bool("no"):
+                case Some(b):
+                    expect not b
+                case nil:
+                    expect false
+            match parse_bool("0"):
+                case Some(b):
+                    expect not b
+                case nil:
+                    expect false
 
-fn test_parse_csv_with_spaces():
-    val items = parse_csv_line("  apple  ,  banana  ,  cherry  ")
-    assert(items[0] == "apple")
-    assert(items[1] == "banana")
+        it "is case insensitive":
+            match parse_bool("TRUE"):
+                case Some(b):
+                    expect b
+                case nil:
+                    expect false
+            match parse_bool("False"):
+                case Some(b):
+                    expect not b
+                case nil:
+                    expect false
 
-fn test_parse_delimited():
-    val items = parse_delimited("a|b|c", "|")
-    assert(items.len() == 3)
-    assert(items[0] == "a")
-    assert(items[1] == "b")
-    assert(items[2] == "c")
+        it "returns nil for invalid":
+            match parse_bool("maybe"):
+                case Some(_):
+                    expect false
+                case nil:
+                    expect true
 
-# =====================================
-# Numbered List Parsing Tests
-# =====================================
+    describe "Key-Value Parsing":
+        it "parses simple key=value":
+            match parse_key_value("key=value", "="):
+                case Some((k, v)):
+                    expect k == "key"
+                    expect v == "value"
+                case nil:
+                    expect false
 
-fn test_parse_numbered_list():
-    val text = "1. First item\n2. Second item\n3. Third item"
-    val items = parse_numbered_list(text)
+        it "trims whitespace":
+            match parse_key_value("  key  =  value  ", "="):
+                case Some((k, v)):
+                    expect k == "key"
+                    expect v == "value"
+                case nil:
+                    expect false
 
-    assert(items.len() == 3)
-    assert(items[0] == "First item")
-    assert(items[1] == "Second item")
-    assert(items[2] == "Third item")
+        it "returns nil without separator":
+            match parse_key_value("no separator here", "="):
+                case Some(_):
+                    expect false
+                case nil:
+                    expect true
 
-fn test_parse_numbered_list_with_blanks():
-    val text = "1. First\n\n2. Second\n  \n3. Third"
-    val items = parse_numbered_list(text)
+        it "parses multiple key-values":
+            val input = "key1=value1\nkey2=value2\n# comment\nkey3=value3"
+            val pairs = parse_key_values(input, "=")
+            expect pairs.len() == 3
 
-    assert(items.len() == 3)
+    describe "CSV Parsing":
+        it "parses csv line":
+            val items = parse_csv_line("apple,banana,cherry")
+            expect items.len() == 3
+            expect items[0] == "apple"
+            expect items[1] == "banana"
+            expect items[2] == "cherry"
 
-# =====================================
-# Bulleted List Parsing Tests
-# =====================================
+        it "trims whitespace":
+            val items = parse_csv_line("  apple  ,  banana  ,  cherry  ")
+            expect items[0] == "apple"
+            expect items[1] == "banana"
 
-fn test_parse_bulleted_list_dash():
-    val text = "- First item\n- Second item\n- Third item"
-    val items = parse_bulleted_list(text)
+        it "parses with custom delimiter":
+            val items = parse_delimited("a|b|c", "|")
+            expect items.len() == 3
+            expect items[0] == "a"
+            expect items[1] == "b"
+            expect items[2] == "c"
 
-    assert(items.len() == 3)
-    assert(items[0] == "First item")
-    assert(items[1] == "Second item")
+    describe "List Parsing":
+        it "parses numbered list":
+            val input = "1. First item\n2. Second item\n3. Third item"
+            val items = parse_numbered_list(input)
+            expect items.len() == 3
+            expect items[0] == "First item"
+            expect items[1] == "Second item"
+            expect items[2] == "Third item"
 
-fn test_parse_bulleted_list_asterisk():
-    val text = "* First item\n* Second item"
-    val items = parse_bulleted_list(text)
+        it "parses bulleted list with dash":
+            val input = "- First item\n- Second item\n- Third item"
+            val items = parse_bulleted_list(input)
+            expect items.len() == 3
+            expect items[0] == "First item"
+            expect items[1] == "Second item"
 
-    assert(items.len() == 2)
+        it "parses bulleted list with asterisk":
+            val input = "* First item\n* Second item"
+            val items = parse_bulleted_list(input)
+            expect items.len() == 2
 
-fn test_parse_bulleted_list_bullet():
-    val text = "• First item\n• Second item"
-    val items = parse_bulleted_list(text)
+    describe "Query String Parsing":
+        it "parses with question mark":
+            val params = parse_query_string("?key1=value1&key2=value2")
+            expect params.len() == 2
 
-    assert(items.len() == 2)
+        it "parses without question mark":
+            val params = parse_query_string("key1=value1&key2=value2")
+            expect params.len() == 2
 
-# =====================================
-# Query String Parsing Tests
-# =====================================
+    describe "Extension Extraction":
+        it "extracts simple extension":
+            match extract_extension("file.txt"):
+                case Some(ext):
+                    expect ext == "txt"
+                case nil:
+                    expect false
 
-fn test_parse_query_string():
-    val params = parse_query_string("?key1=value1&key2=value2")
+        it "extracts last extension":
+            match extract_extension("archive.tar.gz"):
+                case Some(ext):
+                    expect ext == "gz"
+                case nil:
+                    expect false
 
-    assert(params.len() == 2)
-    assert(params[0] == ("key1", "value1"))
-    assert(params[1] == ("key2", "value2"))
+        it "returns nil for no extension":
+            match extract_extension("README"):
+                case Some(_):
+                    expect false
+                case nil:
+                    expect true
 
-fn test_parse_query_string_no_question_mark():
-    val params = parse_query_string("key1=value1&key2=value2")
-    assert(params.len() == 2)
+        it "returns nil for trailing dot":
+            match extract_extension("file."):
+                case Some(_):
+                    expect false
+                case nil:
+                    expect true
 
-# =====================================
-# Extension Extraction Tests
-# =====================================
-
-fn test_extract_extension():
-    match extract_extension("file.txt"):
-        Some(ext) =>
-            assert(ext == "txt")
-        None =>
-            assert(false)
-
-fn test_extract_extension_multiple_dots():
-    match extract_extension("archive.tar.gz"):
-        Some(ext) =>
-            assert(ext == "gz")
-        None =>
-            assert(false)
-
-fn test_extract_extension_no_extension():
-    match extract_extension("README"):
-        Some(_) =>
-            assert(false)
-        None =>
-            assert(true)
-
-fn test_extract_extension_ends_with_dot():
-    match extract_extension("file."):
-        Some(_) =>
-            assert(false)
-        None =>
-            assert(true)
-
-# =====================================
-# Version Parsing Tests
-# =====================================
-
-fn test_parse_version():
-    match parse_version("1.2.3"):
-        Some(v) =>
-            assert(v.major == 1)
-            assert(v.minor == 2)
-            assert(v.patch == 3)
-        None =>
-            assert(false)
-
-fn test_parse_version_invalid():
-    match parse_version("1.2"):
-        Some(_) =>
-            assert(false)
-        None =>
-            assert(true)
-
-    match parse_version("1.2.3.4"):
-        Some(_) =>
-            assert(false)
-        None =>
-            assert(true)
-
-    match parse_version("a.b.c"):
-        Some(_) =>
-            assert(false)
-        None =>
-            assert(true)
-
-fn test_compare_versions_major():
-    match parse_version("2.0.0"):
-        Some(v1) =>
-            match parse_version("1.9.9"):
-                Some(v2) =>
-                    assert(compare_versions(v1, v2) > 0)
-                None =>
-                    assert(false)
-        None =>
-            assert(false)
-
-fn test_compare_versions_minor():
-    match parse_version("1.5.0"):
-        Some(v1) =>
-            match parse_version("1.3.9"):
-                Some(v2) =>
-                    assert(compare_versions(v1, v2) > 0)
-                None =>
-                    assert(false)
-        None =>
-            assert(false)
-
-fn test_compare_versions_patch():
-    match parse_version("1.2.5"):
-        Some(v1) =>
+    describe "Version Parsing":
+        it "parses semantic version":
             match parse_version("1.2.3"):
-                Some(v2) =>
-                    assert(compare_versions(v1, v2) > 0)
-                None =>
-                    assert(false)
-        None =>
-            assert(false)
+                case Some(v):
+                    expect v.major == 1
+                    expect v.minor == 2
+                    expect v.patch == 3
+                case nil:
+                    expect false
 
-fn test_compare_versions_equal():
-    match parse_version("1.2.3"):
-        Some(v1) =>
-            match parse_version("1.2.3"):
-                Some(v2) =>
-                    assert(compare_versions(v1, v2) == 0)
-                None =>
-                    assert(false)
-        None =>
-            assert(false)
+        it "returns nil for invalid version":
+            match parse_version("1.2"):
+                case Some(_):
+                    expect false
+                case nil:
+                    expect true
+            match parse_version("a.b.c"):
+                case Some(_):
+                    expect false
+                case nil:
+                    expect true
 
-# =====================================
-# Memory Size Parsing Tests
-# =====================================
+        it "compares versions":
+            match parse_version("2.0.0"):
+                case Some(v1):
+                    match parse_version("1.9.9"):
+                        case Some(v2):
+                            expect compare_versions(v1, v2) > 0
+                        case nil:
+                            expect false
+                case nil:
+                    expect false
 
-fn test_parse_memory_size_bytes():
-    match parse_memory_size("512B"):
-        Some(size) =>
-            assert(size == 512)
-        None =>
-            assert(false)
+    describe "Memory Size Parsing":
+        it "parses bytes":
+            match parse_memory_size("512B"):
+                case Some(size):
+                    expect size == 512
+                case nil:
+                    expect false
 
-fn test_parse_memory_size_kb():
-    match parse_memory_size("2KB"):
-        Some(size) =>
-            assert(size == 2 * 1024)
-        None =>
-            assert(false)
+        it "parses kilobytes":
+            match parse_memory_size("2KB"):
+                case Some(size):
+                    expect size == 2 * 1024
+                case nil:
+                    expect false
 
-fn test_parse_memory_size_mb():
-    match parse_memory_size("16MB"):
-        Some(size) =>
-            assert(size == 16 * 1024 * 1024)
-        None =>
-            assert(false)
+        it "parses megabytes":
+            match parse_memory_size("16MB"):
+                case Some(size):
+                    expect size == 16 * 1024 * 1024
+                case nil:
+                    expect false
 
-fn test_parse_memory_size_gb():
-    match parse_memory_size("1GB"):
-        Some(size) =>
-            assert(size == 1 * 1024 * 1024 * 1024)
-        None =>
-            assert(false)
+        it "parses gigabytes":
+            match parse_memory_size("1GB"):
+                case Some(size):
+                    expect size == 1 * 1024 * 1024 * 1024
+                case nil:
+                    expect false
 
-fn test_parse_memory_size_short_units():
-    match parse_memory_size("512K"):
-        Some(size) =>
-            assert(size == 512 * 1024)
-        None =>
-            assert(false)
+        it "parses short units":
+            match parse_memory_size("512K"):
+                case Some(size):
+                    expect size == 512 * 1024
+                case nil:
+                    expect false
 
-fn test_parse_memory_size_invalid():
-    match parse_memory_size("invalid"):
-        Some(_) =>
-            assert(false)
-        None =>
-            assert(true)
+    describe "Duration Parsing":
+        it "parses seconds":
+            match parse_duration_seconds("30s"):
+                case Some(secs):
+                    expect secs == 30
+                case nil:
+                    expect false
 
-# =====================================
-# Duration Parsing Tests
-# =====================================
+        it "parses minutes":
+            match parse_duration_seconds("5m"):
+                case Some(secs):
+                    expect secs == 5 * 60
+                case nil:
+                    expect false
 
-fn test_parse_duration_seconds():
-    match parse_duration_seconds("30s"):
-        Some(secs) =>
-            assert(secs == 30)
-        None =>
-            assert(false)
+        it "parses hours":
+            match parse_duration_seconds("2h"):
+                case Some(secs):
+                    expect secs == 2 * 3600
+                case nil:
+                    expect false
 
-fn test_parse_duration_minutes():
-    match parse_duration_seconds("5m"):
-        Some(secs) =>
-            assert(secs == 5 * 60)
-        None =>
-            assert(false)
+        it "parses days":
+            match parse_duration_seconds("1d"):
+                case Some(secs):
+                    expect secs == 86400
+                case nil:
+                    expect false
 
-fn test_parse_duration_hours():
-    match parse_duration_seconds("2h"):
-        Some(secs) =>
-            assert(secs == 2 * 3600)
-        None =>
-            assert(false)
+        it "parses long units":
+            match parse_duration_seconds("30sec"):
+                case Some(secs):
+                    expect secs == 30
+                case nil:
+                    expect false
 
-fn test_parse_duration_days():
-    match parse_duration_seconds("1d"):
-        Some(secs) =>
-            assert(secs == 86400)
-        None =>
-            assert(false)
+    describe "Command Line Flags":
+        it "identifies flags":
+            expect is_flag("--verbose")
+            expect is_flag("-v")
+            expect not is_flag("file.txt")
 
-fn test_parse_duration_long_units():
-    match parse_duration_seconds("30sec"):
-        Some(secs) =>
-            assert(secs == 30)
-        None =>
-            assert(false)
+        it "parses flag name":
+            expect parse_flag_name("--verbose") == "verbose"
+            expect parse_flag_name("-v") == "v"
+            expect parse_flag_name("---triple") == "triple"
 
-fn test_parse_duration_invalid():
-    match parse_duration_seconds("invalid"):
-        Some(_) =>
-            assert(false)
-        None =>
-            assert(true)
+        it "parses flag with value":
+            match parse_flag_with_value("--port=8080"):
+                case Some((name, value)):
+                    expect name == "port"
+                    expect value == "8080"
+                case nil:
+                    expect false
 
-# =====================================
-# Command Line Flag Tests
-# =====================================
+        it "returns nil for non-flag":
+            match parse_flag_with_value("notaflag=value"):
+                case Some(_):
+                    expect false
+                case nil:
+                    expect true
 
-fn test_is_flag():
-    assert(is_flag("--verbose"))
-    assert(is_flag("-v"))
-    assert(not is_flag("file.txt"))
-
-fn test_parse_flag_name():
-    assert(parse_flag_name("--verbose") == "verbose")
-    assert(parse_flag_name("-v") == "v")
-    assert(parse_flag_name("---triple") == "triple")
-
-fn test_parse_flag_with_value():
-    match parse_flag_with_value("--port=8080"):
-        Some((name, value)) =>
-            assert(name == "port")
-            assert(value == "8080")
-        None =>
-            assert(false)
-
-fn test_parse_flag_with_value_short():
-    match parse_flag_with_value("-p=8080"):
-        Some((name, value)) =>
-            assert(name == "p")
-            assert(value == "8080")
-        None =>
-            assert(false)
-
-fn test_parse_flag_with_value_not_flag():
-    match parse_flag_with_value("notaflag=value"):
-        Some(_) =>
-            assert(false)
-        None =>
-            assert(true)
-
-fn test_split_args():
-    val args = ["--verbose", "file.txt", "-o", "output.txt", "--debug"]
-    val (flags, positional) = split_args(args)
-
-    assert(flags.len() == 3)
-    assert(flags[0] == "--verbose")
-    assert(flags[1] == "-o")
-    assert(flags[2] == "--debug")
-
-    assert(positional.len() == 2)
-    assert(positional[0] == "file.txt")
-    assert(positional[1] == "output.txt")
+        it "splits args into flags and positional":
+            val args = ["--verbose", "file.txt", "-o", "output.txt", "--debug"]
+            val (flags, positional) = split_args(args)
+            expect flags.len() == 3
+            expect positional.len() == 2

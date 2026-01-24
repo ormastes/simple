@@ -59,6 +59,7 @@ pub(crate) fn eval_array_filter(
     with_lambda_predicate(func, "filter", |params, body, captured| {
         let mut results = Vec::new();
         for item in arr {
+            crate::interpreter::check_execution_limit()?;
             let mut local_env = bind_lambda_param(captured, params, item);
             if evaluate_expr(body, &mut local_env, functions, classes, enums, impl_methods)?.truthy() {
                 results.push(item.clone());
@@ -86,6 +87,7 @@ pub(crate) fn eval_array_reduce(
     {
         let mut acc = init;
         for item in arr {
+            crate::interpreter::check_execution_limit()?;
             let mut local_env = captured.clone();
             if params.len() >= 2 {
                 local_env.insert(params[0].clone(), acc);
@@ -118,6 +120,7 @@ pub(crate) fn eval_array_find(
 ) -> Result<Value, CompileError> {
     with_lambda_predicate(func, "find", |params, body, captured| {
         for item in arr {
+            crate::interpreter::check_execution_limit()?;
             let mut local_env = bind_lambda_param(captured, params, item);
             if evaluate_expr(body, &mut local_env, functions, classes, enums, impl_methods)?.truthy() {
                 return Ok(item.clone());
@@ -138,6 +141,7 @@ pub(crate) fn eval_array_any(
 ) -> Result<Value, CompileError> {
     with_lambda_predicate(func, "any", |params, body, captured| {
         for item in arr {
+            crate::interpreter::check_execution_limit()?;
             let mut local_env = bind_lambda_param(captured, params, item);
             if evaluate_expr(body, &mut local_env, functions, classes, enums, impl_methods)?.truthy() {
                 return Ok(Value::Bool(true));
@@ -158,6 +162,7 @@ pub(crate) fn eval_array_all(
 ) -> Result<Value, CompileError> {
     with_lambda_predicate(func, "all", |params, body, captured| {
         for item in arr {
+            crate::interpreter::check_execution_limit()?;
             let mut local_env = bind_lambda_param(captured, params, item);
             if !evaluate_expr(body, &mut local_env, functions, classes, enums, impl_methods)?.truthy() {
                 return Ok(Value::Bool(false));
@@ -196,6 +201,7 @@ pub(crate) fn eval_dict_map_values(
     with_dict_lambda(func, "map_values", |params, body, captured| {
         let mut new_map = HashMap::new();
         for (k, v) in map {
+            crate::interpreter::check_execution_limit()?;
             let mut local_env = bind_lambda_param(captured, params, v);
             let new_val = evaluate_expr(body, &mut local_env, functions, classes, enums, impl_methods)?;
             new_map.insert(k.clone(), new_val);
@@ -216,6 +222,7 @@ pub(crate) fn eval_dict_filter(
     with_dict_lambda(func, "filter", |params, body, captured| {
         let mut new_map = HashMap::new();
         for (k, v) in map {
+            crate::interpreter::check_execution_limit()?;
             let mut local_env = captured.clone();
             if params.len() >= 2 {
                 local_env.insert(params[0].clone(), Value::Str(k.clone()));

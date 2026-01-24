@@ -317,14 +317,109 @@ impl<'a> Parser<'a> {
                     self.advance();
                     expr = Expr::Try(Box::new(expr));
                 }
+                TokenKind::DoubleQuestion => {
+                    // Null coalescing / Option fallback: expr ?? default
+                    self.advance();
+                    let default = self.parse_unary()?; // Higher precedence than ??
+                    expr = Expr::Coalesce {
+                        expr: Box::new(expr),
+                        default: Box::new(default),
+                    };
+                }
+                TokenKind::QuestionDot => {
+                    // Optional chaining: expr?.field or expr?.method(args)
+                    self.advance();
+                    let field = self.expect_method_name()?;
+                    if self.check(&TokenKind::LParen) {
+                        let args = self.parse_arguments()?;
+                        expr = Expr::OptionalMethodCall {
+                            receiver: Box::new(expr),
+                            method: field,
+                            args,
+                        };
+                    } else {
+                        expr = Expr::OptionalChain {
+                            expr: Box::new(expr),
+                            field,
+                        };
+                    }
+                }
+                TokenKind::Unwrap => {
+                    // Safe unwrap: expr unwrap or: default / expr unwrap else: fn / expr unwrap or_return:
+                    self.advance();
+                    match &self.current.kind {
+                        TokenKind::OrColon => {
+                            self.advance();
+                            let default = self.parse_expression()?;
+                            expr = Expr::UnwrapOr {
+                                expr: Box::new(expr),
+                                default: Box::new(default),
+                            };
+                        }
+                        TokenKind::Else => {
+                            // Check for else: (Else followed by Colon)
+                            self.advance();
+                            self.expect(&TokenKind::Colon)?;
+                            let fallback_fn = self.parse_expression()?;
+                            expr = Expr::UnwrapElse {
+                                expr: Box::new(expr),
+                                fallback_fn: Box::new(fallback_fn),
+                            };
+                        }
+                        TokenKind::OrReturn => {
+                            self.advance();
+                            expr = Expr::UnwrapOrReturn(Box::new(expr));
+                        }
+                        _ => {
+                            return Err(ParseError::syntax_error_with_span(
+                                "unwrap requires 'or:', 'else:', or 'or_return:' suffix".to_string(),
+                                self.current.span,
+                            ));
+                        }
+                    }
+                }
                 TokenKind::As => {
-                    // Type cast: expr as Type
+                    // Type cast: expr as Type [or: default | else: fn | or_return:]
                     self.advance();
                     let target_type = self.parse_type()?;
-                    expr = Expr::Cast {
-                        expr: Box::new(expr),
-                        target_type,
-                    };
+
+                    // Check for fallback suffix
+                    match &self.current.kind {
+                        TokenKind::OrColon => {
+                            self.advance();
+                            let default = self.parse_expression()?;
+                            expr = Expr::CastOr {
+                                expr: Box::new(expr),
+                                target_type,
+                                default: Box::new(default),
+                            };
+                        }
+                        TokenKind::Else => {
+                            // Check for else: (Else followed by Colon)
+                            self.advance();
+                            self.expect(&TokenKind::Colon)?;
+                            let fallback_fn = self.parse_expression()?;
+                            expr = Expr::CastElse {
+                                expr: Box::new(expr),
+                                target_type,
+                                fallback_fn: Box::new(fallback_fn),
+                            };
+                        }
+                        TokenKind::OrReturn => {
+                            self.advance();
+                            expr = Expr::CastOrReturn {
+                                expr: Box::new(expr),
+                                target_type,
+                            };
+                        }
+                        _ => {
+                            // Plain cast - no fallback
+                            expr = Expr::Cast {
+                                expr: Box::new(expr),
+                                target_type,
+                            };
+                        }
+                    }
                 }
                 TokenKind::Newline => {
                     // Multi-line method chaining: obj.method()\n    .another()

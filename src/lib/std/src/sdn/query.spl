@@ -1,0 +1,389 @@
+///
+Module: sdn.query
+
+Query API for SDN named tables.
+
+Provides a fluent, SQL-like interface for querying SDN table data.
+Useful for querying test databases, feature databases, and other
+structured SDN data.
+
+Usage:
+    import sdn.query.*
+
+    val results = TableQuery.from(table)
+        .filter(\row: row.get_str("status") == "failed")
+        .order_by("name", Order.Asc)
+        .limit(10)
+        .execute()
+///
+
+use sdn.value.SdnValue
+
+# ============================================================================
+# Order Enum
+# ============================================================================
+
+/// Sort order for order_by
+enum Order:
+    Asc
+    Desc
+
+# ============================================================================
+# Row - Query Result Row
+# ============================================================================
+
+# Represents a single row from a query result.
+# Provides convenient typed accessors for column values.
+struct Row:
+    fields: Dict<text, SdnValue>
+
+impl Row:
+    # Create a Row from field names and values
+    fn from_table_row(field_names: List<text>, values: List<SdnValue>) -> Row:
+        var fields = {}
+        val len = field_names.len().min(values.len())
+        for i in 0..len:
+            fields[field_names[i]] = values[i]
+        Row(fields: fields)
+
+    # Check if row has a key
+    fn has_key(key: text) -> bool:
+        self.fields.contains_key(key)
+
+    # Get raw SdnValue for a key
+    fn get(key: text) -> Option<SdnValue>:
+        self.fields.get(key)
+
+    # Get string value, returns empty string if not found or wrong type
+    fn get_str(key: text) -> text:
+        match self.fields.get(key):
+            case Some(v):
+                match v.as_str():
+                    case Some(s): s
+                    case None: ""
+            case None: ""
+
+    # Get string value with default
+    fn get_str_or(key: text, def_val: text) -> text:
+        match self.fields.get(key):
+            case Some(v):
+                match v.as_str():
+                    case Some(s): s
+                    case None: def_val
+            case None: def_val
+
+    # Get i32 value, returns 0 if not found or wrong type
+    fn get_i32(key: text) -> i32:
+        match self.fields.get(key):
+            case Some(v):
+                match v.as_i64():
+                    case Some(i): i
+                    case None: 0
+            case None: 0
+
+    # Get i32 value with default
+    fn get_i32_or(key: text, def_val: i32) -> i32:
+        match self.fields.get(key):
+            case Some(v):
+                match v.as_i64():
+                    case Some(i): i
+                    case None: def_val
+            case None: def_val
+
+    # Get bool value, returns false if not found or wrong type
+    fn get_bool(key: text) -> bool:
+        match self.fields.get(key):
+            case Some(v):
+                match v.as_bool():
+                    case Some(b): b
+                    case None: false
+            case None: False
+
+    # Get bool value with default
+    fn get_bool_or(key: text, def_val: bool) -> bool:
+        match self.fields.get(key):
+            case Some(v):
+                match v.as_bool():
+                    case Some(b): b
+                    case None: def_val
+            case None: def_val
+
+# ============================================================================
+# TableQuery - Fluent Query Builder
+# ============================================================================
+
+# Fluent query builder for SDN named tables.
+struct TableQuery:
+    table: Option<SdnValue>
+    field_names: List<text>
+    selected_columns: Option<List<text>>
+    predicates: List<fn(Row) -> bool>
+    order_column: Option<text>
+    order_dir: Order
+    limit_count: Option<i32>
+    offset_count: i32
+
+impl TableQuery:
+    # Create a query from an SDN Table value
+    fn from(value: SdnValue) -> TableQuery:
+        match value:
+            case Table(fields, _, _):
+                val field_names = match fields:
+                    case Some(f): f
+                    case None: []
+                TableQuery(
+                    table: Some(value),
+                    field_names: field_names,
+                    selected_columns: None,
+                    predicates: [],
+                    order_column: None,
+                    order_dir: Order.Asc,
+                    limit_count: None,
+                    offset_count: 0
+                )
+            case _:
+                # Not a table - create invalid query
+                TableQuery(
+                    table: None,
+                    field_names: [],
+                    selected_columns: None,
+                    predicates: [],
+                    order_column: None,
+                    order_dir: Order.Asc,
+                    limit_count: None,
+                    offset_count: 0
+                )
+
+    # Check if this query is valid (was created from a table)
+    fn is_valid() -> bool:
+        self.table.is_some()
+
+    # Select specific columns
+    fn select(columns: List<text>) -> TableQuery:
+        TableQuery(
+            table: self.table,
+            field_names: self.field_names,
+            selected_columns: Some(columns),
+            predicates: self.predicates,
+            order_column: self.order_column,
+            order_dir: self.order_dir,
+            limit_count: self.limit_count,
+            offset_count: self.offset_count
+        )
+
+    # Filter rows by predicate
+    fn filter(predicate: fn(Row) -> bool) -> TableQuery:
+        var preds = self.predicates.clone()
+        preds.push(predicate)
+        TableQuery(
+            table: self.table,
+            field_names: self.field_names,
+            selected_columns: self.selected_columns,
+            predicates: preds,
+            order_column: self.order_column,
+            order_dir: self.order_dir,
+            limit_count: self.limit_count,
+            offset_count: self.offset_count
+        )
+
+    # Order results by column
+    fn order_by(column: text, order: Order) -> TableQuery:
+        TableQuery(
+            table: self.table,
+            field_names: self.field_names,
+            selected_columns: self.selected_columns,
+            predicates: self.predicates,
+            order_column: Some(column),
+            order_dir: order,
+            limit_count: self.limit_count,
+            offset_count: self.offset_count
+        )
+
+    # Limit number of results
+    fn limit(n: i32) -> TableQuery:
+        TableQuery(
+            table: self.table,
+            field_names: self.field_names,
+            selected_columns: self.selected_columns,
+            predicates: self.predicates,
+            order_column: self.order_column,
+            order_dir: self.order_dir,
+            limit_count: Some(n),
+            offset_count: self.offset_count
+        )
+
+    # Skip first n results
+    fn offset(n: i32) -> TableQuery:
+        TableQuery(
+            table: self.table,
+            field_names: self.field_names,
+            selected_columns: self.selected_columns,
+            predicates: self.predicates,
+            order_column: self.order_column,
+            order_dir: self.order_dir,
+            limit_count: self.limit_count,
+            offset_count: n
+        )
+
+    # Execute query and return results
+    fn execute() -> List<Row>:
+        match self.table:
+            case None:
+                return []
+            case Some(table_val):
+                match table_val:
+                    case Table(_, _, rows):
+                        # Convert rows to Row objects
+                        var result = []
+                        for row_values in rows:
+                            val row = Row.from_table_row(self.field_names, row_values)
+
+                            # Apply all predicates
+                            var matches = true
+                            for pred in self.predicates:
+                                if not pred(row):
+                                    matches = false
+                                    break
+                            if matches:
+                                result.push(row)
+
+                        # Apply ordering
+                        match self.order_column:
+                            case Some(col):
+                                result = self.sort_rows(result, col, self.order_dir)
+                            case None:
+                                pass
+
+                        # Apply offset
+                        if self.offset_count > 0:
+                            if self.offset_count >= result.len():
+                                result = []
+                            else:
+                                result = result.slice(self.offset_count, result.len())
+
+                        # Apply limit
+                        match self.limit_count:
+                            case Some(n):
+                                if n < result.len():
+                                    result = result.slice(0, n)
+                            case None:
+                                pass
+
+                        # Apply column selection
+                        match self.selected_columns:
+                            case Some(cols):
+                                result = self.filter_columns(result, cols)
+                            case None:
+                                pass
+
+                        return result
+                    case _:
+                        return []
+
+    # Count matching rows
+    fn count() -> i32:
+        self.execute().len()
+
+    # Check if any matching rows exist
+    fn any() -> bool:
+        self.limit(1).execute().len() > 0
+
+    # Check if no matching rows exist
+    fn is_empty() -> bool:
+        self.limit(1).execute().len() == 0
+
+    # Get first matching row
+    fn first() -> Option<Row>:
+        val results = self.limit(1).execute()
+        if results.len() > 0:
+            Some(results[0])
+        else:
+            None
+
+    # Get last matching row
+    fn last() -> Option<Row>:
+        val results = self.execute()
+        if results.len() > 0:
+            Some(results[results.len() - 1])
+        else:
+            None
+
+    # Extract a single column as a list of strings
+    fn pluck(column: text) -> List<text>:
+        var result = []
+        for row in self.execute():
+            result.push(row.get_str(column))
+        result
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    fn sort_rows(rows: List<Row>, column: text, order: Order) -> List<Row>:
+        """Sort rows by column value."""
+        # Simple bubble sort for now
+        var result = rows.clone()
+        val n = result.len()
+
+        for i in 0..n:
+            for j in 0..(n - i - 1):
+                val a = result[j]
+                val b = result[j + 1]
+                val should_swap = match order:
+                    case Order.Asc:
+                        self.compare_rows(a, b, column) > 0
+                    case Order.Desc:
+                        self.compare_rows(a, b, column) < 0
+
+                if should_swap:
+                    val temp = result[j]
+                    result[j] = result[j + 1]
+                    result[j + 1] = temp
+
+        result
+
+    fn compare_rows(a: Row, b: Row, column: text) -> i32:
+        """Compare two rows by column value. Returns -1, 0, or 1."""
+        match a.get(column):
+            case Some(val_a):
+                match b.get(column):
+                    case Some(val_b):
+                        # Compare based on type
+                        match val_a:
+                            case i32(i_a):
+                                match val_b:
+                                    case i32(i_b):
+                                        if i_a < i_b: -1
+                                        else if i_a > i_b: 1
+                                        else: 0
+                                    case _: 0
+                            case text(s_a):
+                                match val_b:
+                                    case text(s_b):
+                                        if s_a < s_b: -1
+                                        else if s_a > s_b: 1
+                                        else: 0
+                                    case _: 0
+                            case _: 0
+                    case None: 1
+            case None:
+                match b.get(column):
+                    case Some(_): -1
+                    case None: 0
+
+    fn filter_columns(rows: List<Row>, columns: List<text>) -> List<Row>:
+        """Filter each row to only include specified columns."""
+        var result = []
+        for row in rows:
+            var new_fields = {}
+            for col in columns:
+                match row.get(col):
+                    case Some(v):
+                        new_fields[col] = v
+                    case None:
+                        pass
+            result.push(Row(fields: new_fields))
+        result
+
+# Public exports
+export Order, Row, TableQuery
