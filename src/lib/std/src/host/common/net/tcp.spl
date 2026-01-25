@@ -26,9 +26,10 @@ use units.time.*
 use host.common.io.error.IoError
 use host.common.net.types.Shutdown
 use core.resource.AsyncResource
+use core.leak_tracked.LeakTracked
 
 # TCP Listener - accepts incoming connections
-pub struct TcpListener:
+pub struct TcpListener with LeakTracked:
     handle: i64
     local_addr: SocketAddr
 
@@ -36,10 +37,13 @@ impl TcpListener:
     # Bind to address and start listening (semantic types)
     pub async fn bind(addr: SocketAddr) -> Result<TcpListener, IoError>:
         val handle = native_tcp_bind(addr)?
-        return Ok(TcpListener {
+        var listener = TcpListener {
             handle: handle,
             local_addr: addr
-        })
+        }
+        # Start leak tracking
+        listener._start_tracking("TcpListener.bind(\"{addr}\")")
+        return Ok(listener)
 
     # Bind using string address (convenience)
     # Example: TcpListener::bind_str("127.0.0.1:8080")
@@ -55,11 +59,13 @@ impl TcpListener:
     # Accept incoming connection
     pub async fn accept(self) -> Result<(TcpStream, SocketAddr), IoError>:
         val (stream_handle, peer_addr) = native_tcp_accept(self.handle)?
-        val stream = TcpStream {
+        var stream = TcpStream {
             handle: stream_handle,
             peer_addr: peer_addr,
             local_addr: self.local_addr
         }
+        # Start leak tracking for accepted connection
+        stream._start_tracking("TcpListener.accept() -> {peer_addr}")
         return Ok((stream, peer_addr))
 
     # Get local address
@@ -72,10 +78,12 @@ impl TcpListener:
 
     # Close listener
     pub async fn close(self) -> Result<(), IoError>:
+        # Stop leak tracking
+        self._stop_tracking()
         return native_tcp_close(self.handle)
 
 # TCP Stream - bidirectional connection
-pub struct TcpStream:
+pub struct TcpStream with LeakTracked:
     handle: i64
     peer_addr: SocketAddr
     local_addr: SocketAddr
@@ -84,11 +92,14 @@ impl TcpStream:
     # Connect to remote address (semantic types)
     pub async fn connect(addr: SocketAddr) -> Result<TcpStream, IoError>:
         val (handle, local) = native_tcp_connect(addr)?
-        return Ok(TcpStream {
+        var stream = TcpStream {
             handle: handle,
             peer_addr: addr,
             local_addr: local
-        })
+        }
+        # Start leak tracking
+        stream._start_tracking("TcpStream.connect(\"{addr}\")")
+        return Ok(stream)
 
     # Connect using string address (convenience)
     # Example: TcpStream::connect_str("127.0.0.1:8080")
@@ -103,11 +114,14 @@ impl TcpStream:
     # Connect with timeout
     pub async fn connect_timeout(addr: SocketAddr, timeout: Duration) -> Result<TcpStream, IoError>:
         val (handle, local) = native_tcp_connect_timeout(addr, timeout)?
-        return Ok(TcpStream {
+        var stream = TcpStream {
             handle: handle,
             peer_addr: addr,
             local_addr: local
-        })
+        }
+        # Start leak tracking
+        stream._start_tracking("TcpStream.connect_timeout(\"{addr}\")")
+        return Ok(stream)
 
     # Read data
     pub async fn read(self, buf: &mut Bytes) -> Result<ByteCount, IoError>:
@@ -147,6 +161,8 @@ impl TcpStream:
 
     # Close connection
     pub async fn close(self) -> Result<(), IoError>:
+        # Stop leak tracking
+        self._stop_tracking()
         return native_tcp_close(self.handle)
 
     # Get peer address
@@ -288,6 +304,8 @@ fn parse_socket_addr(addr: text) -> Result<SocketAddr, IoError>:
 
 impl AsyncResource for TcpStream:
     async fn close():
+        # Stop leak tracking
+        self._stop_tracking()
         val _ = native_tcp_close(self.handle)
 
     fn is_open() -> bool:
@@ -298,6 +316,8 @@ impl AsyncResource for TcpStream:
 
 impl AsyncResource for TcpListener:
     async fn close():
+        # Stop leak tracking
+        self._stop_tracking()
         val _ = native_tcp_close(self.handle)
 
     fn is_open() -> bool:

@@ -268,10 +268,11 @@ pub(crate) fn call_extern_function(
         "to_int" => conversion::to_int(&evaluated),
 
         // ====================================================================
-        // Process Control (2 functions)
+        // Process Control (3 functions)
         // ====================================================================
         "exit" => process::exit(&evaluated),
         "panic" => process::panic(&evaluated),
+        "rt_process_run" => system::rt_process_run(&evaluated),
 
         // ====================================================================
         // Filesystem Operations (18 fs_* + 6 file_* = 24 functions)

@@ -1,93 +1,34 @@
 # Test Results
 
-**Generated:** 2026-01-24 08:16:29
-**Total Tests:** 35
-**Status:** ⚠️ 5 FAILED
+**Generated:** 2026-01-25 03:16:10
+**Total Tests:** 58
+**Status:** ⚠️ 1 FAILED
 
 ## Summary
 
 | Status | Count | Percentage |
 |--------|-------|-----------|
-| ✅ Passed | 30 | 85.7% |
-| ❌ Failed | 5 | 14.3% |
+| ✅ Passed | 57 | 98.3% |
+| ❌ Failed | 1 | 1.7% |
 | ⏭️ Skipped | 0 | 0.0% |
 | 🔕 Ignored | 0 | 0.0% |
+| 🔐 Qualified Ignore | 0 | 0.0% |
 
 ---
 
-## ❌ Failed Tests (5)
+## ❌ Failed Tests (1)
 
-### 🔴 mock_phase3_spec
+### 🔴 hello_spec
 
-**File:** `simple/std_lib/test/unit/testing/mock_phase3_spec.spl`
-**Category:** Unit
-**Failed:** 2026-01-24T08:16:17.934789827+00:00
+**File:** `test/basic/hello_spec.spl`
+**Category:** Unknown
+**Failed:** 2026-01-25T03:15:47.955872775+00:00
 **Flaky:** No (100.0% failure rate)
 
 **Error:**
 ```
-parse error: Unexpected token: expected RParen, found Colon
-Location: simple/std_lib/test/unit/testing/mock_phase3_spec.spl
-```
-
----
-
-### 🔴 mock_verification_spec
-
-**File:** `simple/std_lib/test/unit/testing/mock_verification_spec.spl`
-**Category:** Unit
-**Failed:** 2026-01-24T08:16:15.803127902+00:00
-**Flaky:** No (100.0% failure rate)
-
-**Error:**
-```
-parse error: Unexpected token: expected pattern, found Fn
-Location: simple/std_lib/test/unit/testing/mock_verification_spec.spl
-```
-
----
-
-### 🔴 mock_phase4_spec
-
-**File:** `simple/std_lib/test/unit/testing/mock_phase4_spec.spl`
-**Category:** Unit
-**Failed:** 2026-01-24T08:16:27.810002308+00:00
-**Flaky:** No (100.0% failure rate)
-
-**Error:**
-```
-parse error: Unexpected token: expected RParen, found Colon
-Location: simple/std_lib/test/unit/testing/mock_phase4_spec.spl
-```
-
----
-
-### 🔴 mock_phase5_spec
-
-**File:** `simple/std_lib/test/unit/testing/mock_phase5_spec.spl`
-**Category:** Unit
-**Failed:** 2026-01-24T08:16:29.779052808+00:00
-**Flaky:** No (100.0% failure rate)
-
-**Error:**
-```
-parse error: Unexpected token: expected RParen, found Colon
-Location: simple/std_lib/test/unit/testing/mock_phase5_spec.spl
-```
-
----
-
-### 🔴 helpers_spec
-
-**File:** `simple/std_lib/test/unit/testing/helpers_spec.spl`
-**Category:** Unit
-**Failed:** 2026-01-24T08:16:02.976562941+00:00
-**Flaky:** No (100.0% failure rate)
-
-**Error:**
-```
-parse error: Unexpected token: expected expression, found RParen
-Location: simple/std_lib/test/unit/testing/helpers_spec.spl
+failed to read test/basic/hello_spec.spl: No such file or directory (os error 2)
+Location: test/basic/hello_spec.spl
 ```
 
 ---
@@ -100,11 +41,12 @@ Location: simple/std_lib/test/unit/testing/helpers_spec.spl
 
 ## 🎯 Action Items
 
-### Priority 1: Fix Failing Tests (5)
+### Priority 1: Fix Failing Tests (1)
 
-1. **mock_phase3_spec** - parse error: Unexpected token: expected RParen, found Colon
-2. **mock_verification_spec** - parse error: Unexpected token: expected pattern, found Fn
-3. **mock_phase4_spec** - parse error: Unexpected token: expected RParen, found Colon
-4. **mock_phase5_spec** - parse error: Unexpected token: expected RParen, found Colon
-5. **helpers_spec** - parse error: Unexpected token: expected expression, found RParen
+1. **hello_spec** - failed to read test/basic/hello_spec.spl: No such file or directory (os error 2)
+
+### Priority 3: Stabilize Flaky Tests (1)
+
+Tests with intermittent failures:
+- helpers_spec (20.0% failure rate)
 

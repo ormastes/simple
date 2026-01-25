@@ -6,6 +6,7 @@ use units.file.*
 use units.size.*
 use host.common.io.*
 use core.resource.AsyncResource
+use core.leak_tracked.LeakTracked
 
 export File
 
@@ -16,7 +17,7 @@ import ops.exist
 # ===============================
 
 # File handle for streaming operations with staging support
-struct File:
+struct File with LeakTracked:
     handle: i64
     path: FilePath
     mode: OpenMode
@@ -47,6 +48,9 @@ impl File:
         # This is async but we await completion before returning
         if mode == OpenMode::Read:
             await file.stage_auto()?
+
+        # Start leak tracking
+        file._start_tracking("File.open(\"{resolved_path}\")")
 
         return Ok(file)
 
@@ -158,6 +162,9 @@ impl File:
 
     # Close file
     pub async fn close(self) -> Result<(), IoError>:
+        # Stop leak tracking
+        self._stop_tracking()
+
         if val Some(state) = self.stage_state:
             if state.mode == StageMode::Mmap and state.mmap_ptr != 0:
                 native_mmap_unmap(state.mmap_ptr, state.mmap_size)
@@ -378,12 +385,15 @@ impl File:
 
         # Open file handle
         val handle = native_fs_open(resolved_path, mode)?
-        val file = File {
+        var file = File {
             handle: handle,
             path: resolved_path,
             mode: mode,
             stage_state: nil
         }
+
+        # Start leak tracking
+        file._start_tracking("File.open_sync(\"{resolved_path}\")")
 
         return Ok(file)
 
@@ -446,6 +456,8 @@ impl File:
 
     # Close file (sync)
     pub fn close_sync(self) -> Result<(), IoError>:
+        # Stop leak tracking
+        self._stop_tracking()
         return close_sync_with_staging(self.handle, self.stage_state)
 
     # ===============================
@@ -500,6 +512,8 @@ impl File:
 
 impl AsyncResource for File:
     async fn close():
+        # Stop leak tracking
+        self._stop_tracking()
         val _ = native_file_close(self.handle)
 
     fn is_open() -> bool:

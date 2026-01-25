@@ -1,6 +1,6 @@
 # Simple Language Syntax Quick Reference
 
-**Last Updated:** 2026-01-24
+**Last Updated:** 2026-01-25
 
 A comprehensive reference for Simple's syntax features. All features listed here are **implemented and working**.
 
@@ -20,6 +20,7 @@ A comprehensive reference for Simple's syntax features. All features listed here
 - [Control Flow](#control-flow)
 - [Operators](#operators)
 - [Ranges](#ranges)
+- [Resource Cleanup](#resource-cleanup)
 
 ---
 
@@ -643,6 +644,106 @@ if (1..100).contains(x):
 
 ---
 
+## Resource Cleanup
+
+### The Resource Trait
+
+Resources like files, sockets, and threads implement the `Resource` trait:
+
+```simple
+trait Resource:
+    fn close()              # Close and release the resource
+    fn is_open() -> bool    # Check if still open
+    fn resource_name() -> text  # Name for error reports
+```
+
+### defer Statement
+
+Schedule cleanup to run at scope exit:
+
+```simple
+val file = File.open("data.txt")?
+defer file.close()           # Runs when scope exits
+# ... use file ...
+# close() called automatically here
+```
+
+Multiple defers run in LIFO order:
+
+```simple
+val a = open_a()
+defer close_a()  # Third
+
+val b = open_b()
+defer close_b()  # Second
+
+val c = open_c()
+defer close_c()  # First
+
+# Order: close_c, close_b, close_a
+```
+
+### with Statement for Resources
+
+Automatic cleanup with context managers:
+
+```simple
+# File automatically closed when block exits
+with File.open("data.txt") as file:
+    val content = file.read()
+# file.close() called automatically
+
+# Multiple resources
+with File.open("in.txt") as input, File.create("out.txt") as output:
+    output.write(input.read())
+```
+
+### Async with Statement
+
+For async resources (network sockets, etc.):
+
+```simple
+async with await TcpStream.connect_str("127.0.0.1:8080") as stream:
+    await stream.write_all(data)?
+    val response = await stream.read()?
+# stream.close() called automatically
+```
+
+### Leak Detection
+
+Check for unclosed resources:
+
+```simple
+use core.resource_registry.ResourceRegistry
+
+val leaks = ResourceRegistry.check_leaks()
+if leaks.len() > 0:
+    print ResourceRegistry.leak_report()
+```
+
+### LeakTracked Mixin
+
+Add automatic tracking to custom resources:
+
+```simple
+use core.leak_tracked.LeakTracked
+
+struct MyResource with LeakTracked:
+    handle: i64
+
+impl MyResource:
+    static fn open() -> MyResource:
+        var r = MyResource(handle: native_open())
+        r._start_tracking("MyResource.open()")
+        return r
+
+    fn close():
+        self._stop_tracking()
+        native_close(self.handle)
+```
+
+---
+
 ## Not Yet Implemented
 
 These features are **not available**:
@@ -660,5 +761,6 @@ These features are **not available**:
 
 - [doc/spec/generated/syntax.md](../spec/generated/syntax.md) - Auto-generated syntax spec
 - [doc/guide/fn_lambda_syntax.md](fn_lambda_syntax.md) - Detailed function/lambda guide
+- [doc/guide/resource_cleanup.md](resource_cleanup.md) - Resource management guide
 - [doc/guide/coding_style.md](coding_style.md) - Coding conventions
 - [CLAUDE.md](../../CLAUDE.md) - Quick syntax reference in project instructions

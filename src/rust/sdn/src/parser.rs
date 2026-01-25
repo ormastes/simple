@@ -376,6 +376,8 @@ impl<'a> Parser<'a> {
                     Vec::new()
                 }
             }
+            // Handle EOF - empty table with no rows
+            Some(TokenKind::Eof) | None => Vec::new(),
             _ => {
                 // Inline single row
                 let row = self.parse_table_row(fields.len())?;
@@ -422,17 +424,24 @@ impl<'a> Parser<'a> {
     /// Parse a single table row.
     fn parse_table_row(&mut self, expected_cols: usize) -> Result<Vec<SdnValue>> {
         let mut row = Vec::new();
+        // Track whether we just consumed a comma (for trailing empty value detection)
+        let mut after_comma = false;
 
         loop {
             if self.is_at_end() || matches!(self.peek_kind(), Some(TokenKind::Newline) | Some(TokenKind::Dedent)) {
+                // If we just consumed a comma, there's a trailing empty value
+                if after_comma {
+                    row.push(SdnValue::String(String::new()));
+                }
                 break;
             }
 
-            // Handle empty values (consecutive commas or trailing comma)
+            // Handle empty values (consecutive commas)
             if matches!(self.peek_kind(), Some(TokenKind::Comma)) {
                 // Empty value - treat as empty string
                 row.push(SdnValue::String(String::new()));
                 self.advance();
+                after_comma = true;
                 continue;
             }
 
@@ -441,7 +450,10 @@ impl<'a> Parser<'a> {
 
             if matches!(self.peek_kind(), Some(TokenKind::Comma)) {
                 self.advance();
+                after_comma = true;
             } else {
+                // No trailing comma, so we're not "after a comma"
+                // No need to set after_comma = false since we're breaking
                 break;
             }
         }
@@ -828,6 +840,96 @@ mod tests {
             assert_eq!(rows.len(), 1);
             assert_eq!(rows[0].len(), 3);
             assert_eq!(rows[0][2].as_str(), Some("Hello, World"));
+        } else {
+            panic!("Expected table");
+        }
+    }
+
+    #[test]
+    fn test_empty_table_no_trailing_newline() {
+        // This is used as a placeholder in save_test_db - must parse correctly
+        let src = "tests |id|";
+        let result = parse(src).unwrap();
+        if let SdnValue::Table { fields, rows, .. } = result.get("tests").unwrap() {
+            assert_eq!(fields.as_ref().unwrap().len(), 1);
+            assert_eq!(fields.as_ref().unwrap()[0], "id");
+            assert_eq!(rows.len(), 0); // No rows
+        } else {
+            panic!("Expected table");
+        }
+    }
+
+    #[test]
+    fn test_empty_table_with_trailing_newline() {
+        let src = "tests |id|\n";
+        let result = parse(src).unwrap();
+        if let SdnValue::Table { fields, rows, .. } = result.get("tests").unwrap() {
+            assert_eq!(fields.as_ref().unwrap().len(), 1);
+            assert_eq!(rows.len(), 0);
+        } else {
+            panic!("Expected table");
+        }
+    }
+
+    #[test]
+    fn test_empty_table_multiple_columns() {
+        let src = "data |a, b, c|";
+        let result = parse(src).unwrap();
+        if let SdnValue::Table { fields, rows, .. } = result.get("data").unwrap() {
+            assert_eq!(fields.as_ref().unwrap().len(), 3);
+            assert_eq!(rows.len(), 0);
+        } else {
+            panic!("Expected table");
+        }
+    }
+
+    #[test]
+    fn test_table_row_trailing_empty_value() {
+        // Row like "a, b, " should have 3 values: "a", "b", and empty
+        let src = "data |x, y, z|\n    a, b, ";
+        let result = parse(src).unwrap();
+        if let SdnValue::Table { fields, rows, .. } = result.get("data").unwrap() {
+            assert_eq!(fields.as_ref().unwrap().len(), 3);
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].len(), 3);
+            assert_eq!(rows[0][0], SdnValue::String("a".to_string()));
+            assert_eq!(rows[0][1], SdnValue::String("b".to_string()));
+            assert_eq!(rows[0][2], SdnValue::String(String::new())); // Empty trailing value
+        } else {
+            panic!("Expected table");
+        }
+    }
+
+    #[test]
+    fn test_table_row_multiple_trailing_empty_values() {
+        // Row like "true, , , " should have 4 values: true (bool), empty, empty, empty
+        let src = "data |a, b, c, d|\n    true, , , ";
+        let result = parse(src).unwrap();
+        if let SdnValue::Table { fields, rows, .. } = result.get("data").unwrap() {
+            assert_eq!(fields.as_ref().unwrap().len(), 4);
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].len(), 4);
+            assert_eq!(rows[0][0], SdnValue::Bool(true));
+            assert_eq!(rows[0][1], SdnValue::String(String::new()));
+            assert_eq!(rows[0][2], SdnValue::String(String::new()));
+            assert_eq!(rows[0][3], SdnValue::String(String::new()));
+        } else {
+            panic!("Expected table");
+        }
+    }
+
+    #[test]
+    fn test_table_row_leading_and_trailing_empty() {
+        // Row like ", a, " should have 3 values: empty, "a", empty
+        let src = "data |x, y, z|\n    , a, ";
+        let result = parse(src).unwrap();
+        if let SdnValue::Table { fields, rows, .. } = result.get("data").unwrap() {
+            assert_eq!(fields.as_ref().unwrap().len(), 3);
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].len(), 3);
+            assert_eq!(rows[0][0], SdnValue::String(String::new())); // Leading empty
+            assert_eq!(rows[0][1], SdnValue::String("a".to_string()));
+            assert_eq!(rows[0][2], SdnValue::String(String::new())); // Trailing empty
         } else {
             panic!("Expected table");
         }

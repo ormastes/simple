@@ -5,9 +5,10 @@ use units.size.*
 use units.time.*
 use host.common.io.error.IoError
 use core.resource.AsyncResource
+use core.leak_tracked.LeakTracked
 
 # UDP Socket
-pub struct UdpSocket:
+pub struct UdpSocket with LeakTracked:
     handle: i64
     local_addr: SocketAddr
 
@@ -15,10 +16,13 @@ impl UdpSocket:
     # Bind to address
     pub async fn bind(addr: SocketAddr) -> Result<UdpSocket, IoError>:
         val handle = native_udp_bind(addr)?
-        return Ok(UdpSocket {
+        var socket = UdpSocket {
             handle: handle,
             local_addr: addr
-        })
+        }
+        # Start leak tracking
+        socket._start_tracking("UdpSocket.bind(\"{addr}\")")
+        return Ok(socket)
 
     # Bind to IP and port
     pub async fn bind_to(ip: IpAddr, port: Port) -> Result<UdpSocket, IoError>:
@@ -103,6 +107,8 @@ impl UdpSocket:
 
     # Close socket
     pub async fn close(self) -> Result<(), IoError>:
+        # Stop leak tracking
+        self._stop_tracking()
         return native_udp_close(self.handle)
 
 # Native function declarations
@@ -148,6 +154,8 @@ impl Drop for UdpSocket:
 
 impl AsyncResource for UdpSocket:
     async fn close():
+        # Stop leak tracking
+        self._stop_tracking()
         val _ = native_udp_close(self.handle)
 
     fn is_open() -> bool:
