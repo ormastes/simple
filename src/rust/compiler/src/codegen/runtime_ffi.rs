@@ -636,6 +636,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_cli_run_feature_gen", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_cli_run_task_gen", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_cli_run_spec_gen", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_cli_run_sspec_docgen", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_cli_run_todo_scan", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_cli_run_todo_gen", &[I64], &[I64]),
     // i18n

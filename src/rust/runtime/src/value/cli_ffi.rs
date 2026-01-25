@@ -210,6 +210,11 @@ pub extern "C" fn rt_cli_run_spec_gen(_args: RuntimeValue) -> i64 {
 }
 
 #[no_mangle]
+pub extern "C" fn rt_cli_run_sspec_docgen(_args: RuntimeValue) -> i64 {
+    not_implemented("rt_cli_run_sspec_docgen")
+}
+
+#[no_mangle]
 pub extern "C" fn rt_cli_run_todo_scan(_args: RuntimeValue) -> i64 {
     not_implemented("rt_cli_run_todo_scan")
 }

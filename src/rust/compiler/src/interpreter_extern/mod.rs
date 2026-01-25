@@ -585,6 +585,7 @@ pub(crate) fn call_extern_function(
         "rt_cli_run_feature_gen" => cli::rt_cli_run_feature_gen(&evaluated),
         "rt_cli_run_task_gen" => cli::rt_cli_run_task_gen(&evaluated),
         "rt_cli_run_spec_gen" => cli::rt_cli_run_spec_gen(&evaluated),
+        "rt_cli_run_sspec_docgen" => cli::rt_cli_run_sspec_docgen(&evaluated),
         "rt_cli_run_todo_scan" => cli::rt_cli_run_todo_scan(&evaluated),
         "rt_cli_run_todo_gen" => cli::rt_cli_run_todo_gen(&evaluated),
 
