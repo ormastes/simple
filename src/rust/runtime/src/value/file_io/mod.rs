@@ -75,3 +75,10 @@ use std::sync::Mutex;
 lazy_static::lazy_static! {
     pub static ref MMAP_REGISTRY: Mutex<Vec<MmapRegion>> = Mutex::new(Vec::new());
 }
+
+/// Clear all memory-mapped regions (for test cleanup)
+/// Note: This does NOT unmap the regions - only clears the registry.
+/// For proper cleanup, use native_mmap_unmap on each region first.
+pub fn clear_mmap_registry() {
+    MMAP_REGISTRY.lock().unwrap().clear();
+}

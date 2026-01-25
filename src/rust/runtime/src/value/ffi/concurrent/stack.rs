@@ -84,6 +84,11 @@ pub extern "C" fn rt_concurrent_stack_free(handle: i64) {
     CONCURRENT_STACK_MAP.lock().unwrap().remove(&handle);
 }
 
+/// Clear all concurrent stack handles (for test cleanup)
+pub fn clear_concurrent_stack_registry() {
+    CONCURRENT_STACK_MAP.lock().unwrap().clear();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

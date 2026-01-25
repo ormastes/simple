@@ -926,8 +926,29 @@ impl LintChecker {
         }
     }
 
+    /// Check for file-level lint allow attribute
+    fn has_file_level_allow(&self, lint_name: &str) -> bool {
+        if let Some(ref path) = self.source_file {
+            if let Ok(source) = std::fs::read_to_string(path) {
+                let pattern = format!("#![allow({})]", lint_name);
+                // Check first 50 lines for file-level allow
+                for line in source.lines().take(50) {
+                    if line.contains(&pattern) {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
     /// Check for unnamed arguments when parameters share the same type
     fn check_unnamed_duplicate_typed_args(&mut self, items: &[Node]) {
+        // Check for file-level allow via #![allow(unnamed_duplicate_typed_args)]
+        if self.has_file_level_allow("unnamed_duplicate_typed_args") {
+            return; // File-level allow, skip this lint
+        }
+
         // Helper to check if a type matches another (structural equality)
         fn types_match(ty1: &Option<Type>, ty2: &Option<Type>) -> bool {
             match (ty1, ty2) {
@@ -1013,7 +1034,7 @@ impl LintChecker {
 
                     checker.emit(
                         LintName::UnnamedDuplicateTypedArgs,
-                        Span::new(0, 0, 0, 0), // TODO: get proper span from arg
+                        arg.span, // Use the argument's span for proper location reporting
                         format!(
                             "positional argument for parameter `{}` which shares type `{}` with `{}`",
                             param.name,

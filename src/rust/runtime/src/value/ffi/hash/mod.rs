@@ -27,3 +27,10 @@ pub mod xxhash;
 pub use sha1::*;
 pub use sha256::*;
 pub use xxhash::*;
+
+/// Clear all hash registries (for test cleanup)
+pub fn clear_hash_registries() {
+    sha1::clear_sha1_registry();
+    sha256::clear_sha256_registry();
+    xxhash::clear_xxhash_registry();
+}

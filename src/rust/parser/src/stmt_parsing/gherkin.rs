@@ -35,14 +35,8 @@ impl<'a> Parser<'a> {
         let call_expr = Expr::Call {
             callee: Box::new(Expr::Identifier("examples".to_string())),
             args: vec![
-                Argument {
-                    name: None,
-                    value: Expr::String(name),
-                },
-                Argument {
-                    name: None,
-                    value: rows_expr,
-                },
+                Argument::new(None, Expr::String(name)),
+                Argument::new(None, rows_expr),
             ],
         };
 
@@ -65,14 +59,8 @@ impl<'a> Parser<'a> {
         let call_expr = Expr::Call {
             callee: Box::new(Expr::Identifier("feature".to_string())),
             args: vec![
-                Argument {
-                    name: None,
-                    value: Expr::String(name),
-                },
-                Argument {
-                    name: None,
-                    value: Expr::DoBlock(block.statements),
-                },
+                Argument::new(None, Expr::String(name)),
+                Argument::new(None, Expr::DoBlock(block.statements)),
             ],
         };
 
@@ -103,14 +91,8 @@ impl<'a> Parser<'a> {
         let call_expr = Expr::Call {
             callee: Box::new(Expr::Identifier(fn_name.to_string())),
             args: vec![
-                Argument {
-                    name: None,
-                    value: Expr::String(name),
-                },
-                Argument {
-                    name: None,
-                    value: Expr::DoBlock(block.statements),
-                },
+                Argument::new(None, Expr::String(name)),
+                Argument::new(None, Expr::DoBlock(block.statements)),
             ],
         };
 
@@ -165,14 +147,8 @@ impl<'a> Parser<'a> {
         let call_expr = Expr::Call {
             callee: Box::new(Expr::Identifier(fn_name.to_string())),
             args: vec![
-                Argument {
-                    name: None,
-                    value: Expr::String(pattern),
-                },
-                Argument {
-                    name: None,
-                    value: body_expr,
-                },
+                Argument::new(None, Expr::String(pattern)),
+                Argument::new(None, body_expr),
             ],
         };
 

@@ -1,6 +1,7 @@
 // Helper functions for expression parsing - lambdas, colon blocks, if expressions, and arguments
 
 use crate::ast::{Argument, Expr, LambdaParam, MacroArg, MoveMode, Pattern};
+use crate::Span;
 use crate::error::ParseError;
 use crate::expressions::placeholder::transform_placeholder_lambda;
 use crate::parser_impl::core::Parser;
@@ -218,6 +219,9 @@ impl<'a> Parser<'a> {
                 break;
             }
 
+            // Record start position for span
+            let arg_start = self.current.span;
+
             // Check for named argument with '=' or ':' syntax
             // Also support keywords as named argument names (e.g., type="model", default=true)
             let mut name = None;
@@ -270,7 +274,11 @@ impl<'a> Parser<'a> {
             // Count and replace all _ identifiers with unique parameters
             value = transform_placeholder_lambda(value);
 
-            args.push(Argument { name, value });
+            // Create span from start to current position
+            let arg_end = self.previous.span;
+            let arg_span = Span::new(arg_start.start, arg_end.end, arg_start.line, arg_start.column);
+
+            args.push(Argument::with_span(name, value, arg_span));
 
             // Skip newlines, indent, dedent after argument (for multi-line argument lists)
             while self.check(&TokenKind::Newline) || self.check(&TokenKind::Indent) || self.check(&TokenKind::Dedent) {

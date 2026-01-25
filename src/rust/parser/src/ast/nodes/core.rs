@@ -750,6 +750,23 @@ pub enum TensorSliceContent {
 pub struct Argument {
     pub name: Option<String>, // for named arguments
     pub value: Expr,
+    pub span: Span,
+}
+
+impl Argument {
+    /// Create an argument with a default (zero) span
+    pub fn new(name: Option<String>, value: Expr) -> Self {
+        Argument {
+            name,
+            value,
+            span: Span::new(0, 0, 0, 0),
+        }
+    }
+
+    /// Create an argument with an explicit span
+    pub fn with_span(name: Option<String>, value: Expr, span: Span) -> Self {
+        Argument { name, value, span }
+    }
 }
 
 /// Part of an f-string (interpolated string)

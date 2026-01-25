@@ -158,10 +158,7 @@ impl<'a> CallSiteRewriter<'a> {
                                             callee: Box::new(Expr::Identifier(mangled.clone())),
                                             args: args
                                                 .iter()
-                                                .map(|a| simple_parser::ast::Argument {
-                                                    name: a.name.clone(),
-                                                    value: self.rewrite_expr(&a.value),
-                                                })
+                                                .map(|a| simple_parser::ast::Argument::with_span(a.name.clone(), self.rewrite_expr(&a.value), a.span))
                                                 .collect(),
                                         };
                                     }
@@ -175,10 +172,7 @@ impl<'a> CallSiteRewriter<'a> {
                     callee: Box::new(self.rewrite_expr(callee)),
                     args: args
                         .iter()
-                        .map(|a| simple_parser::ast::Argument {
-                            name: a.name.clone(),
-                            value: self.rewrite_expr(&a.value),
-                        })
+                        .map(|a| simple_parser::ast::Argument::with_span(a.name.clone(), self.rewrite_expr(&a.value), a.span))
                         .collect(),
                 }
             }
@@ -197,10 +191,7 @@ impl<'a> CallSiteRewriter<'a> {
                 method: method.clone(),
                 args: args
                     .iter()
-                    .map(|a| simple_parser::ast::Argument {
-                        name: a.name.clone(),
-                        value: self.rewrite_expr(&a.value),
-                    })
+                    .map(|a| simple_parser::ast::Argument::with_span(a.name.clone(), self.rewrite_expr(&a.value), a.span))
                     .collect(),
             },
             Expr::FieldAccess { receiver, field } => Expr::FieldAccess {

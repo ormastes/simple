@@ -25,6 +25,13 @@ lazy_static::lazy_static! {
     static ref REGEX_CACHE: Mutex<HashMap<String, Arc<Regex>>> = Mutex::new(HashMap::new());
 }
 
+/// Clear the regex cache (useful between test runs to prevent memory leaks)
+pub fn clear_regex_cache() {
+    if let Ok(mut cache) = REGEX_CACHE.lock() {
+        cache.clear();
+    }
+}
+
 // ============================================================================
 // Helper Functions
 // ============================================================================

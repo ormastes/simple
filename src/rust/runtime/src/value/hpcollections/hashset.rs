@@ -274,3 +274,10 @@ pub extern "C" fn rt_hashset_drop(handle: RuntimeValue) -> bool {
         true
     }
 }
+
+/// Clear all HashSets from registry (for test cleanup)
+pub fn clear_hashset_registry() {
+    HASHSET_REGISTRY.with(|registry| {
+        registry.borrow_mut().clear();
+    });
+}

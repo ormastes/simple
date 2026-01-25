@@ -266,6 +266,13 @@ pub extern "C" fn rt_btreeset_is_superset(handle1: RuntimeValue, handle2: Runtim
     .unwrap_or(false)
 }
 
+/// Clear all BTreeSets from registry (for test cleanup)
+pub fn clear_btreeset_registry() {
+    BTREESET_REGISTRY.with(|registry| {
+        registry.borrow_mut().clear();
+    });
+}
+
 /// Drop a BTreeSet (cleanup registry entry)
 #[no_mangle]
 pub extern "C" fn rt_btreeset_drop(handle: RuntimeValue) -> bool {

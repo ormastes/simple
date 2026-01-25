@@ -81,6 +81,11 @@ pub extern "C" fn rt_xxhash_free(handle: i64) {
     XXHASH_MAP.lock().unwrap().remove(&handle);
 }
 
+/// Clear all XXHash hasher handles (for test cleanup)
+pub fn clear_xxhash_registry() {
+    XXHASH_MAP.lock().unwrap().clear();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

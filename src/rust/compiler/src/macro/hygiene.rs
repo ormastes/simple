@@ -291,10 +291,7 @@ pub(super) fn apply_macro_hygiene_expr(expr: &Expr, ctx: &mut MacroHygieneContex
             callee: Box::new(apply_macro_hygiene_expr(callee, ctx)),
             args: args
                 .iter()
-                .map(|arg| Argument {
-                    name: arg.name.clone(),
-                    value: apply_macro_hygiene_expr(&arg.value, ctx),
-                })
+                .map(|arg| Argument::with_span(arg.name.clone(), apply_macro_hygiene_expr(&arg.value, ctx), arg.span))
                 .collect(),
         },
         Expr::MethodCall { receiver, method, args } => Expr::MethodCall {
@@ -302,10 +299,7 @@ pub(super) fn apply_macro_hygiene_expr(expr: &Expr, ctx: &mut MacroHygieneContex
             method: method.clone(),
             args: args
                 .iter()
-                .map(|arg| Argument {
-                    name: arg.name.clone(),
-                    value: apply_macro_hygiene_expr(&arg.value, ctx),
-                })
+                .map(|arg| Argument::with_span(arg.name.clone(), apply_macro_hygiene_expr(&arg.value, ctx), arg.span))
                 .collect(),
         },
         Expr::FieldAccess { receiver, field } => Expr::FieldAccess {
@@ -476,10 +470,7 @@ pub(super) fn apply_macro_hygiene_expr(expr: &Expr, ctx: &mut MacroHygieneContex
             method: method.clone(),
             args: args
                 .iter()
-                .map(|arg| Argument {
-                    name: arg.name.clone(),
-                    value: apply_macro_hygiene_expr(&arg.value, ctx),
-                })
+                .map(|arg| Argument::with_span(arg.name.clone(), apply_macro_hygiene_expr(&arg.value, ctx), arg.span))
                 .collect(),
         },
         Expr::MacroInvocation { name, args } => Expr::MacroInvocation {

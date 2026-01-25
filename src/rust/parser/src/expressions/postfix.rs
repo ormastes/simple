@@ -180,10 +180,7 @@ impl<'a> Parser<'a> {
                             // Check for trailing block: obj.method(args) \x: body
                             if self.check(&TokenKind::Backslash) {
                                 let trailing_lambda = self.parse_trailing_lambda()?;
-                                args.push(Argument {
-                                    name: None,
-                                    value: trailing_lambda,
-                                });
+                                args.push(Argument::new(None, trailing_lambda));
                             }
                             // Check if this is a static method call: Type.method()
                             // Indicated by receiver being a type name (uppercase first letter)
@@ -208,10 +205,7 @@ impl<'a> Parser<'a> {
                             expr = Expr::MethodCall {
                                 receiver: Box::new(expr),
                                 method: field,
-                                args: vec![Argument {
-                                    name: None,
-                                    value: trailing_lambda,
-                                }],
+                                args: vec![Argument::new(None, trailing_lambda)],
                             };
                         } else if self.check(&TokenKind::LBrace)
                             && field.chars().next().map_or(false, |c| c.is_uppercase())
@@ -268,10 +262,7 @@ impl<'a> Parser<'a> {
                             expr = Expr::MethodCall {
                                 receiver: Box::new(expr),
                                 method: field,
-                                args: vec![Argument {
-                                    name: None,
-                                    value: dict_expr,
-                                }],
+                                args: vec![Argument::new(None, dict_expr)],
                             };
                         } else {
                             expr = Expr::FieldAccess {
@@ -486,10 +477,7 @@ impl<'a> Parser<'a> {
         // Check for trailing block: func(args) \x: body
         if self.check(&TokenKind::Backslash) {
             let trailing_lambda = self.parse_trailing_lambda()?;
-            args.push(Argument {
-                name: None,
-                value: trailing_lambda,
-            });
+            args.push(Argument::new(None, trailing_lambda));
         }
         // Note: Colon-block syntax like func(args): body is only supported in the
         // no-paren call context (parse_expression_or_assignment), not here.

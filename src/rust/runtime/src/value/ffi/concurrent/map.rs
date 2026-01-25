@@ -103,6 +103,11 @@ pub extern "C" fn rt_concurrent_map_free(handle: i64) {
     CONCURRENT_MAP_MAP.lock().unwrap().remove(&handle);
 }
 
+/// Clear all concurrent map handles (for test cleanup)
+pub fn clear_concurrent_map_registry() {
+    CONCURRENT_MAP_MAP.lock().unwrap().clear();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

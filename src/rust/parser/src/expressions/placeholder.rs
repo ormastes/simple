@@ -124,10 +124,7 @@ fn replace_placeholders(expr: Expr, counter: &mut usize) -> Expr {
             callee: Box::new(replace_placeholders(*callee, counter)),
             args: args
                 .into_iter()
-                .map(|a| Argument {
-                    name: a.name,
-                    value: replace_placeholders(a.value, counter),
-                })
+                .map(|a| Argument::with_span(a.name, replace_placeholders(a.value, counter), a.span))
                 .collect(),
         },
         Expr::MethodCall {
@@ -139,10 +136,7 @@ fn replace_placeholders(expr: Expr, counter: &mut usize) -> Expr {
             method,
             args: args
                 .into_iter()
-                .map(|a| Argument {
-                    name: a.name,
-                    value: replace_placeholders(a.value, counter),
-                })
+                .map(|a| Argument::with_span(a.name, replace_placeholders(a.value, counter), a.span))
                 .collect(),
         },
         Expr::FieldAccess { receiver, field } => Expr::FieldAccess {

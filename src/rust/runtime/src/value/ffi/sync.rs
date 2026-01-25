@@ -170,6 +170,29 @@ pub extern "C" fn rt_thread_local_free(handle: i64) {
 }
 
 // ============================================================================
+// Registry Cleanup (for test isolation)
+// ============================================================================
+
+/// Clear all condvar handles (for test cleanup)
+pub fn clear_condvar_registry() {
+    CONDVAR_MAP.lock().clear();
+}
+
+/// Clear thread-local storage handles (for test cleanup)
+pub fn clear_thread_local_registry() {
+    THREAD_LOCAL_HANDLES.lock().clear();
+    THREAD_LOCAL_STORAGE.with(|storage| {
+        storage.borrow_mut().clear();
+    });
+}
+
+/// Clear all sync registries (condvar, thread-local)
+pub fn clear_sync_registries() {
+    clear_condvar_registry();
+    clear_thread_local_registry();
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 

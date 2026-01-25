@@ -788,6 +788,66 @@ pub use monoio_future::{
 };
 
 // ============================================================================
+// Registry Cleanup Functions (for test isolation)
+// ============================================================================
+
+// Re-export individual registry clear functions
+pub use hpcollections::hashmap::clear_hashmap_registry;
+pub use hpcollections::hashset::clear_hashset_registry;
+pub use hpcollections::btreemap::clear_btreemap_registry;
+pub use hpcollections::btreeset::clear_btreeset_registry;
+pub use ffi::regex::clear_regex_cache;
+pub use ffi::sync::clear_sync_registries;
+pub use ffi::atomic::clear_atomic_registries;
+pub use ffi::hash::clear_hash_registries;
+pub use ffi::concurrent::clear_concurrent_registries;
+pub use net::clear_socket_registry;
+
+/// Clear all runtime registries to prevent memory leaks between test runs.
+/// This should be called before each test to ensure clean state.
+pub fn clear_all_runtime_registries() {
+    // Clear HP collections registries
+    clear_hashmap_registry();
+    clear_hashset_registry();
+    clear_btreemap_registry();
+    clear_btreeset_registry();
+
+    // Clear regex cache
+    clear_regex_cache();
+
+    // Clear sync registries (condvar, thread-local)
+    clear_sync_registries();
+
+    // Clear atomic registries
+    clear_atomic_registries();
+
+    // Clear hash registries (sha1, sha256, xxhash)
+    clear_hash_registries();
+
+    // Clear concurrent data structure registries (arena, map, pool, queue, stack, tls)
+    clear_concurrent_registries();
+
+    // Clear socket registry (TCP, UDP)
+    clear_socket_registry();
+
+    // Clear actor registry
+    actors::clear_actor_registry();
+
+    // Clear memory-mapped file registry
+    file_io::clear_mmap_registry();
+
+    // Clear ratatui registry (if enabled)
+    #[cfg(feature = "ratatui-tui")]
+    ratatui_tui::clear_ratatui_registry();
+
+    // Clear diagram state
+    diagram_ffi::clear_diagram_data();
+
+    // Clear screenshot captures
+    screenshot_ffi::rt_screenshot_clear_captures();
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 

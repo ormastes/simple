@@ -462,10 +462,7 @@ impl<'a> Monomorphizer<'a> {
                     callee: Box::new(self.substitute_in_expr(callee, bindings)),
                     args: args
                         .iter()
-                        .map(|a| simple_parser::ast::Argument {
-                            name: a.name.clone(),
-                            value: self.substitute_in_expr(&a.value, bindings),
-                        })
+                        .map(|a| simple_parser::ast::Argument::with_span(a.name.clone(), self.substitute_in_expr(&a.value, bindings), a.span))
                         .collect(),
                 }
             }
@@ -486,10 +483,7 @@ impl<'a> Monomorphizer<'a> {
                 method: method.clone(),
                 args: args
                     .iter()
-                    .map(|a| simple_parser::ast::Argument {
-                        name: a.name.clone(),
-                        value: self.substitute_in_expr(&a.value, bindings),
-                    })
+                    .map(|a| simple_parser::ast::Argument::with_span(a.name.clone(), self.substitute_in_expr(&a.value, bindings), a.span))
                     .collect(),
             },
             // Field access

@@ -51,10 +51,7 @@ impl<'a> Parser<'a> {
         // This must come before can_start_argument() check because colon is in that list
         if self.is_callable_expr(&expr) && self.is_at_colon_block() {
             if let Some(block_lambda) = self.try_parse_colon_block()? {
-                let args = vec![Argument {
-                    name: None,
-                    value: block_lambda,
-                }];
+                let args = vec![Argument::new(None, block_lambda)];
                 return Ok(self.make_call_expr(expr, args));
             }
         }
@@ -75,20 +72,14 @@ impl<'a> Parser<'a> {
             // Check for trailing lambda: func arg \x: body
             if self.check(&TokenKind::Backslash) {
                 let trailing_lambda = self.parse_trailing_lambda()?;
-                args.push(Argument {
-                    name: None,
-                    value: trailing_lambda,
-                });
+                args.push(Argument::new(None, trailing_lambda));
             }
             // Check for trailing colon-block: func arg:
             //     body
             // This becomes: func(arg, fn(): body)
             else if self.check(&TokenKind::Colon) {
                 if let Some(block_lambda) = self.try_parse_colon_block()? {
-                    args.push(Argument {
-                        name: None,
-                        value: block_lambda,
-                    });
+                    args.push(Argument::new(None, block_lambda));
                 }
             }
 
@@ -119,10 +110,7 @@ impl<'a> Parser<'a> {
             expr = Expr::MethodCall {
                 receiver: Box::new(expr),
                 method: method_name.to_string(),
-                args: vec![Argument {
-                    name: None,
-                    value: arg_expr,
-                }],
+                args: vec![Argument::new(None, arg_expr)],
             };
         }
         Ok(expr)
@@ -250,10 +238,7 @@ impl<'a> Parser<'a> {
                 }
                 let value = self.parse_expression()?;
                 self.no_paren_depth = prev_depth;
-                return Ok(Argument {
-                    name: Some(name_clone),
-                    value,
-                });
+                return Ok(Argument::new(Some(name_clone), value));
             }
         }
         // Positional argument
@@ -264,6 +249,6 @@ impl<'a> Parser<'a> {
         }
         let value = self.parse_expression()?;
         self.no_paren_depth = prev_depth;
-        Ok(Argument { name: None, value })
+        Ok(Argument::new(None, value))
     }
 }

@@ -91,6 +91,11 @@ pub extern "C" fn rt_pool_free(handle: i64) {
     POOL_MAP.lock().unwrap().remove(&handle);
 }
 
+/// Clear all pool handles (for test cleanup)
+pub fn clear_pool_registry() {
+    POOL_MAP.lock().unwrap().clear();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

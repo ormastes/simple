@@ -113,6 +113,11 @@ pub extern "C" fn rt_arena_free(handle: i64) {
     ARENA_MAP.lock().unwrap().remove(&handle);
 }
 
+/// Clear all arena handles (for test cleanup)
+pub fn clear_arena_registry() {
+    ARENA_MAP.lock().unwrap().clear();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
