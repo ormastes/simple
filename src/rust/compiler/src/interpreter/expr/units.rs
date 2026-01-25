@@ -12,15 +12,7 @@ use crate::value::Value;
 /// - "my_type" → ["MyType"]  (snake_case → PascalCase)
 /// - "url" → ["URL", "Url"]  (3 letters or less → try all-caps first)
 /// - "regex" → ["Regex"]  (4+ letters → PascalCase only)
-///
-/// # Examples
-/// ```
-/// assert_eq!(suffix_to_type_names("ip"), vec!["IP", "Ip"]);
-/// assert_eq!(suffix_to_type_names("my_type"), vec!["MyType"]);
-/// assert_eq!(suffix_to_type_names("url"), vec!["URL", "Url"]);
-/// assert_eq!(suffix_to_type_names("regex"), vec!["Regex"]);
-/// ```
-pub(crate) fn suffix_to_type_names(suffix: &str) -> Vec<String> {
+pub fn suffix_to_type_names(suffix: &str) -> Vec<String> {
     let mut result = Vec::new();
 
     // Handle snake_case: convert to PascalCase

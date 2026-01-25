@@ -9,6 +9,7 @@ use simple_runtime::value::{
     rt_env_all as ffi_env_all, rt_env_cwd as ffi_env_cwd, rt_env_exists as ffi_env_exists, rt_env_get as ffi_env_get,
     rt_env_home as ffi_env_home, rt_env_remove as ffi_env_remove, rt_env_set as ffi_env_set,
     rt_env_temp as ffi_env_temp, rt_set_debug_mode as ffi_set_debug_mode, rt_set_macro_trace as ffi_set_macro_trace,
+    rt_process_run as ffi_process_run,
 };
 
 /// Get command-line arguments
@@ -238,6 +239,49 @@ pub fn rt_set_debug_mode(args: &[Value]) -> Result<Value, CompileError> {
     };
     ffi_set_debug_mode(enabled);
     Ok(Value::Nil)
+}
+
+/// Run a command and capture output
+///
+/// Callable from Simple as: `rt_process_run(cmd, args)`
+///
+/// # Arguments
+/// * `args` - Evaluated arguments [cmd: String, args: List<String>]
+///
+/// # Returns
+/// * Tuple of (stdout: String, stderr: String, exit_code: Int)
+pub fn rt_process_run(args: &[Value]) -> Result<Value, CompileError> {
+    use simple_runtime::value::{rt_array_new, rt_array_push, rt_string_new};
+
+    if args.len() < 2 {
+        return Err(CompileError::runtime("rt_process_run requires 2 arguments (cmd, args)"));
+    }
+
+    let cmd = match &args[0] {
+        Value::Str(s) => s.clone(),
+        _ => return Err(CompileError::runtime("rt_process_run: cmd must be a string")),
+    };
+
+    // Convert args list to RuntimeValue array
+    let args_array = match &args[1] {
+        Value::Array(arr) => {
+            // Create a new RuntimeValue array
+            let runtime_arr = rt_array_new(arr.len() as u64);
+            for item in arr.iter() {
+                if let Value::Str(s) = item {
+                    let runtime_str = rt_string_new(s.as_ptr(), s.len() as u64);
+                    rt_array_push(runtime_arr, runtime_str);
+                }
+            }
+            runtime_arr
+        }
+        _ => return Err(CompileError::runtime("rt_process_run: args must be an array of strings")),
+    };
+
+    unsafe {
+        let result = ffi_process_run(cmd.as_ptr(), cmd.len() as u64, args_array);
+        Ok(runtime_to_value(result))
+    }
 }
 
 #[cfg(test)]

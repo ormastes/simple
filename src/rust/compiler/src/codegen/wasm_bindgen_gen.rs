@@ -346,10 +346,12 @@ mod tests {
                     Argument {
                         name: None,
                         value: Expr::String(module.to_string()),
+                        span,
                     },
                     Argument {
                         name: None,
                         value: Expr::String(js_name.to_string()),
+                        span,
                     },
                 ]),
             }],

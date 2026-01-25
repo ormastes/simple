@@ -1,24 +1,86 @@
 # LeakTracked Mixin - Automatic resource leak tracking
 #
-# This mixin provides automatic resource tracking for classes that implement
-# the Resource trait. When mixed in, resources are automatically registered
-# when created and unregistered when closed.
+# This mixin provides automatic resource tracking for structs/classes that
+# implement the Resource trait. It simplifies leak detection by handling
+# the ResourceRegistry calls automatically.
 #
-# Usage:
+# ## Why Use LeakTracked?
+#
+# Manual resource tracking is error-prone:
+# - Easy to forget to register/unregister
+# - Multiple close paths may miss unregistration
+# - Code duplication across resource types
+#
+# LeakTracked provides:
+# - Consistent tracking pattern
+# - Single point of registration/unregistration
+# - Works with ResourceRegistry for leak reports
+#
+# ## Basic Usage
+#
 # ```simple
-# class MyResource with LeakTracked, Resource:
-#     handle: i64
+# use core.leak_tracked.LeakTracked
 #
+# struct MyResource with LeakTracked:
+#     handle: i64
+#     path: text
+#
+# impl MyResource:
 #     static fn open(path: text) -> MyResource:
-#         val r = MyResource(handle: native_open(path))
+#         val handle = native_open(path)
+#         var r = MyResource(handle: handle, path: path)
+#         # Start tracking after resource is successfully created
 #         r._start_tracking("MyResource.open(\"{path}\")")
 #         return r
 #
 #     fn close():
 #         if self.is_open():
-#             native_close(self.handle)
+#             # Stop tracking before releasing resources
 #             self._stop_tracking()
+#             native_close(self.handle)
+#             self.handle = -1
+#
+# impl Resource for MyResource:
+#     fn close():
+#         self.close()
+#
+#     fn is_open() -> bool:
+#         self.handle != -1
+#
+#     fn resource_name() -> text:
+#         "MyResource({self.path})"
 # ```
+#
+# ## Important Notes
+#
+# 1. **Call _start_tracking after success**: Only track after the resource
+#    is successfully created, not before native calls that might fail.
+#
+# 2. **Call _stop_tracking in ALL close paths**: If you have multiple ways
+#    to close the resource, ensure all paths call _stop_tracking.
+#
+# 3. **resource_name() is required**: LeakTracked calls resource_name() to
+#    get the name for the registry, so implement it on your type.
+#
+# 4. **Idempotent tracking**: _stop_tracking is safe to call multiple times.
+#
+# ## Checking Leaks
+#
+# ```simple
+# use core.resource_registry.ResourceRegistry
+#
+# # After test or at program exit
+# val leaks = ResourceRegistry.check_leaks()
+# if leaks.len() > 0:
+#     print "Leaks detected:"
+#     print ResourceRegistry.leak_report()
+# ```
+#
+# ## See Also
+#
+# - `core.resource` - Resource trait definition
+# - `core.resource_registry` - The underlying registry
+# - `doc/guide/resource_cleanup.md` - User guide
 
 use core.option.Option
 use core.resource_registry.ResourceRegistry

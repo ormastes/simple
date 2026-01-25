@@ -90,7 +90,7 @@ pub fn runtime_to_value(rv: RuntimeValue) -> Value {
         }
         rt_tags::TAG_HEAP => {
             // Decode heap objects
-            use simple_runtime::value::{rt_array_get, rt_array_len, rt_string_data, rt_string_len, HeapObjectType};
+            use simple_runtime::value::{rt_array_get, rt_array_len, rt_string_data, rt_string_len, rt_tuple_get, rt_tuple_len, HeapObjectType};
 
             let ptr = rv.as_heap_ptr();
             if ptr.is_null() {
@@ -130,6 +130,19 @@ pub fn runtime_to_value(rv: RuntimeValue) -> Value {
                                 Err(_) => Value::Nil,
                             }
                         }
+                    }
+                    HeapObjectType::Tuple => {
+                        // Decode tuple
+                        let len = rt_tuple_len(rv) as usize;
+                        let mut elements = Vec::with_capacity(len);
+
+                        for i in 0..len {
+                            let elem_rv = rt_tuple_get(rv, i as u64);
+                            let elem_val = runtime_to_value(elem_rv);
+                            elements.push(elem_val);
+                        }
+
+                        Value::Tuple(elements)
                     }
                     _ => {
                         // Other heap types not yet supported

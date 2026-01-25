@@ -547,6 +547,42 @@ See auto-generated reports for current statistics:
 - `doc/test/test_result.md` - Test results (updated every test run)
 - `doc/test/grouped_test_db.sdn` - Grouped test status
 
+### Test Run Tracking
+
+Test runs are automatically tracked in `doc/test/test_db.sdn` (in the `test_runs` table).
+
+**Run Management Commands:**
+
+| Flag | Effect | Use Case |
+|------|--------|----------|
+| `--list-runs` | List all test runs | See run history |
+| `--cleanup-runs` | Mark stale runs as crashed | Clean up dead processes |
+| `--prune-runs=N` | Delete old runs, keep N most recent | Limit run history size |
+| `--runs-status=STATUS` | Filter runs by status | Filter by running/completed/crashed |
+
+**Examples:**
+
+```bash
+# List all test runs
+./target/debug/simple test --list-runs
+
+# Cleanup stale runs (marks as crashed if running > 2 hours or process dead)
+./target/debug/simple test --cleanup-runs
+
+# Keep only 50 most recent runs
+./target/debug/simple test --prune-runs=50
+
+# List only running tests
+./target/debug/simple test --list-runs --runs-status=running
+```
+
+**Run Record Fields:**
+- `run_id` - Unique ID (timestamp-based)
+- `start_time`, `end_time` - ISO 8601 timestamps
+- `pid`, `hostname` - Process ID and machine name
+- `status` - `running`, `completed`, `crashed`, `timed_out`, `interrupted`
+- `test_count`, `passed`, `failed`, `crashed`, `timed_out` - Test counts
+
 ---
 
 ## Lean 4 Verification

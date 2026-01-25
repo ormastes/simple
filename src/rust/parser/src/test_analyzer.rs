@@ -388,6 +388,7 @@ pub fn merge_content_tags(file_meta: &mut FileTestMeta, content: &str) {
 mod tests {
     use super::*;
     use crate::ast::{Argument, Expr, Node};
+    use crate::token::Span;
 
     fn make_test_call(func_name: &str, description: &str) -> Node {
         Node::Expression(Expr::Call {
@@ -395,6 +396,7 @@ mod tests {
             args: vec![Argument {
                 name: None,
                 value: Expr::String(description.to_string()),
+                span: Span::new(0, 0, 0, 0),
             }],
         })
     }
@@ -406,10 +408,12 @@ mod tests {
                 Argument {
                     name: None,
                     value: Expr::String(description.to_string()),
+                    span: Span::new(0, 0, 0, 0),
                 },
                 Argument {
                     name: None,
                     value: Expr::DoBlock(body),
+                    span: Span::new(0, 0, 0, 0),
                 },
             ],
         })

@@ -1,45 +1,140 @@
 # Resource Trait - Unified cleanup interface for system resources
 #
-# This trait provides a common interface for resources that require explicit
+# This module provides a common interface for resources that require explicit
 # cleanup, such as file handles, network sockets, database connections, etc.
 #
-# Resources implementing this trait can be used with:
+# Resources implementing these traits can be used with:
 # - `defer` statements for scope-based cleanup
-# - `using`/`with` statements for automatic cleanup
-# - `ResourceRegistry` for leak tracking
+# - `with`/`async with` statements for automatic cleanup
+# - `ResourceRegistry` for runtime leak tracking
+# - `LeakTracked` mixin for automatic registration
 #
-# Example:
-#   val file = await File::open("test.txt", OpenMode::Read)?
-#   defer file.close()
-#   # ... use file ...
-#   # close() called automatically when scope exits
+# ## Quick Start
+#
+# ```simple
+# # Using defer for cleanup
+# val file = await File.open("test.txt", OpenMode::Read)?
+# defer file.close()
+# val content = await file.read_all()?
+# # close() called automatically when scope exits
+#
+# # Using with statement
+# with File.open("test.txt") as file:
+#     val content = file.read()
+# # file.close() called automatically
+# ```
+#
+# ## Implementing Resource
+#
+# ```simple
+# use core.resource.Resource
+#
+# struct MyResource:
+#     handle: i64
+#
+# impl Resource for MyResource:
+#     fn close():
+#         native_close(self.handle)
+#         self.handle = -1
+#
+#     fn is_open() -> bool:
+#         self.handle != -1
+#
+#     fn resource_name() -> text:
+#         "MyResource"
+# ```
+#
+# ## See Also
+#
+# - `core.resource_registry` - For leak tracking
+# - `core.leak_tracked` - For automatic tracking mixin
+# - `doc/guide/resource_cleanup.md` - User guide
 
-# Resource trait - unified interface for closeable resources
+"""
+Resource trait - unified interface for closeable resources.
+
+This trait provides a standard interface for any resource that requires
+explicit cleanup. All resources that hold system handles (files, sockets,
+threads, etc.) should implement this trait.
+
+Methods:
+    close() - Release the resource. Should be idempotent.
+    is_open() -> bool - Check if resource is still usable.
+    resource_name() -> text - Human-readable name for error messages.
+"""
 trait Resource:
-    # Close the resource and release any associated system handles.
-    # This method should be idempotent - calling it multiple times should be safe.
+    """
+    Close the resource and release any associated system handles.
+
+    This method should be idempotent - calling it multiple times should
+    be safe and have no additional effect after the first call.
+
+    Implementations should:
+    - Release all system resources (file handles, memory, connections)
+    - Mark the resource as closed (e.g., set handle to -1)
+    - Be safe to call from Drop/destructor contexts
+    """
     fn close()
 
-    # Check if the resource is still open and usable.
-    # Default implementation assumes the resource is always open.
+    """
+    Check if the resource is still open and usable.
+
+    Returns:
+        true if the resource can still be used
+        false if the resource has been closed
+
+    Default implementation returns true. Override for proper state tracking.
+    """
     fn is_open() -> bool:
         true
 
-    # Get a human-readable name for this resource type.
-    # Used in error messages and leak reports.
+    """
+    Get a human-readable name for this resource type.
+
+    Used in error messages and leak reports to help identify
+    which resources have not been properly closed.
+
+    Returns:
+        A descriptive string like "File(/path/to/file)" or "TcpStream(127.0.0.1:8080)"
+    """
     fn resource_name() -> text:
         "Resource"
 
 
-# AsyncResource trait - for resources that require async cleanup
+"""
+AsyncResource trait - for resources that require async cleanup.
+
+Use this trait instead of Resource when the close operation may need
+to perform async I/O, such as:
+- Network sockets that need to flush data
+- Database connections with pending transactions
+- File handles that need to sync to disk
+
+Example:
+    impl AsyncResource for TcpStream:
+        async fn close():
+            await self.flush()?
+            native_tcp_close(self.handle)
+"""
 trait AsyncResource:
-    # Async close for resources that need async cleanup (e.g., network sockets)
+    """
+    Async close for resources that need async cleanup.
+
+    Unlike Resource.close(), this can await on I/O operations
+    like flushing buffers or completing pending transactions.
+    """
     async fn close()
 
-    # Check if the resource is still open
+    """
+    Check if the resource is still open.
+    Same semantics as Resource.is_open().
+    """
     fn is_open() -> bool:
         true
 
-    # Get a human-readable name for this resource type
+    """
+    Get a human-readable name for this resource type.
+    Same semantics as Resource.resource_name().
+    """
     fn resource_name() -> text:
         "AsyncResource"
