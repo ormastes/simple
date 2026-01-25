@@ -418,6 +418,73 @@ pub extern "C" fn rt_string_concat(a: RuntimeValue, b: RuntimeValue) -> RuntimeV
     }
 }
 
+/// Check if string starts with prefix
+/// Returns 1 if true, 0 if false
+#[no_mangle]
+pub extern "C" fn rt_string_starts_with(string: RuntimeValue, prefix: RuntimeValue) -> i64 {
+    let str_len = rt_string_len(string);
+    let prefix_len = rt_string_len(prefix);
+
+    if str_len < 0 || prefix_len < 0 {
+        return 0;
+    }
+
+    if prefix_len > str_len {
+        return 0;
+    }
+
+    if prefix_len == 0 {
+        return 1; // Empty prefix always matches
+    }
+
+    let str_data = rt_string_data(string);
+    let prefix_data = rt_string_data(prefix);
+
+    if str_data.is_null() || prefix_data.is_null() {
+        return 0;
+    }
+
+    unsafe {
+        let str_slice = std::slice::from_raw_parts(str_data, prefix_len as usize);
+        let prefix_slice = std::slice::from_raw_parts(prefix_data, prefix_len as usize);
+        if str_slice == prefix_slice { 1 } else { 0 }
+    }
+}
+
+/// Check if string ends with suffix
+/// Returns 1 if true, 0 if false
+#[no_mangle]
+pub extern "C" fn rt_string_ends_with(string: RuntimeValue, suffix: RuntimeValue) -> i64 {
+    let str_len = rt_string_len(string);
+    let suffix_len = rt_string_len(suffix);
+
+    if str_len < 0 || suffix_len < 0 {
+        return 0;
+    }
+
+    if suffix_len > str_len {
+        return 0;
+    }
+
+    if suffix_len == 0 {
+        return 1; // Empty suffix always matches
+    }
+
+    let str_data = rt_string_data(string);
+    let suffix_data = rt_string_data(suffix);
+
+    if str_data.is_null() || suffix_data.is_null() {
+        return 0;
+    }
+
+    unsafe {
+        let start_offset = (str_len - suffix_len) as usize;
+        let str_slice = std::slice::from_raw_parts(str_data.add(start_offset), suffix_len as usize);
+        let suffix_slice = std::slice::from_raw_parts(suffix_data, suffix_len as usize);
+        if str_slice == suffix_slice { 1 } else { 0 }
+    }
+}
+
 /// Create a string from a null-terminated C string
 ///
 /// # Safety

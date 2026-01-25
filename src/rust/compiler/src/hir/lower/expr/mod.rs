@@ -75,6 +75,8 @@ impl Lowerer {
             Expr::Go { args, params, body } => self.lower_go(args, params, body, ctx),
             // Path expression: Type.method - provide helpful error for .new()
             Expr::Path(segments) => self.lower_path(segments, ctx),
+            // Match expression: match subject: case pattern: body
+            Expr::Match { subject, arms } => self.lower_match(subject, arms, ctx),
             _ => Err(LowerError::Unsupported(format!("{:?}", expr))),
         }
     }
@@ -171,6 +173,11 @@ impl Lowerer {
             }
         }
 
+        // Check for builtin collection/string methods
+        if let Some(result) = self.lower_builtin_method_call(&receiver_hir, method, args, ctx)? {
+            return Ok(result);
+        }
+
         // For now, regular method calls are unsupported in native compilation
         Err(LowerError::Unsupported(format!(
             "Method call {:?}.{}() not supported in native compilation",
@@ -222,6 +229,75 @@ impl Lowerer {
             },
             ty: TypeId::VOID,
         }))
+    }
+
+    /// Handle builtin method calls on strings, arrays
+    fn lower_builtin_method_call(
+        &mut self,
+        receiver: &HirExpr,
+        method: &str,
+        args: &[ast::Argument],
+        ctx: &mut FunctionContext,
+    ) -> LowerResult<Option<HirExpr>> {
+        // Get receiver type to determine which builtin methods are available
+        let is_string = matches!(self.module.types.get(receiver.ty), Some(HirType::String));
+        let is_array = matches!(self.module.types.get(receiver.ty), Some(HirType::Array { .. }));
+
+        // Lower arguments
+        let mut hir_args = Vec::new();
+        for arg in args {
+            let expr = self.lower_expr(&arg.value, ctx)?;
+            hir_args.push(expr);
+        }
+
+        // String methods
+        if is_string {
+            let result_ty = match method {
+                "len" => Some(TypeId::I64),
+                "starts_with" | "ends_with" | "contains" => Some(TypeId::BOOL),
+                "concat" => Some(TypeId::STRING),
+                "slice" => Some(TypeId::STRING),
+                _ => None,
+            };
+
+            if let Some(ty) = result_ty {
+                return Ok(Some(HirExpr {
+                    kind: HirExprKind::MethodCall {
+                        receiver: Box::new(receiver.clone()),
+                        method: method.to_string(),
+                        args: hir_args,
+                        dispatch: DispatchMode::Static,
+                    },
+                    ty,
+                }));
+            }
+        }
+
+        // Array methods
+        if is_array {
+            let result_ty = match method {
+                "len" => Some(TypeId::I64),
+                "push" | "clear" => Some(TypeId::VOID),
+                "pop" => Some(TypeId::I64), // Returns element (simplified)
+                "contains" => Some(TypeId::BOOL),
+                "slice" => Some(receiver.ty), // Returns same array type
+                _ => None,
+            };
+
+            if let Some(ty) = result_ty {
+                return Ok(Some(HirExpr {
+                    kind: HirExprKind::MethodCall {
+                        receiver: Box::new(receiver.clone()),
+                        method: method.to_string(),
+                        args: hir_args,
+                        dispatch: DispatchMode::Static,
+                    },
+                    ty,
+                }));
+            }
+        }
+
+        Ok(None)
     }
 
     // ============================================================================

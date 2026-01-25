@@ -1,9 +1,9 @@
 //! Control flow expression lowering
 //!
 //! This module contains expression lowering logic for control flow:
-//! if expressions, lambda expressions, and yield expressions.
+//! if expressions, lambda expressions, yield expressions, and match expressions.
 
-use simple_parser::{self as ast, Expr};
+use simple_parser::{self as ast, ast::Pattern, Expr, MatchArm};
 use std::collections::HashSet;
 
 use crate::hir::lower::context::FunctionContext;
@@ -189,6 +189,251 @@ impl Lowerer {
                 ty: TypeId::I64, // Returns thread handle
             })
         }
+    }
+
+    /// Lower a match expression to HIR
+    ///
+    /// Match expressions are lowered to a chain of If-Else expressions.
+    /// Each arm becomes an If with:
+    /// - Condition: pattern match check (equality for literals, Or for alternations)
+    /// - Then: the arm body
+    /// - Else: the next arm (or Nil if no more arms)
+    pub(super) fn lower_match(
+        &mut self,
+        subject: &Expr,
+        arms: &[MatchArm],
+        ctx: &mut FunctionContext,
+    ) -> LowerResult<HirExpr> {
+        // Lower the subject once and store in a local variable to avoid re-evaluation
+        let subject_hir = self.lower_expr(subject, ctx)?;
+        let subject_ty = subject_hir.ty;
+
+        // Create a temporary local to hold the subject value
+        let subject_idx = ctx.locals.len();
+        ctx.add_local("$match_subject", subject_ty, false);
+
+        // Build the chain of If-Else expressions from the arms
+        let result = self.lower_match_arms(subject_idx, subject_ty, arms, ctx)?;
+
+        Ok(result)
+    }
+
+    /// Lower match arms to a chain of If-Else expressions
+    fn lower_match_arms(
+        &mut self,
+        subject_idx: usize,
+        subject_ty: TypeId,
+        arms: &[MatchArm],
+        ctx: &mut FunctionContext,
+    ) -> LowerResult<HirExpr> {
+        if arms.is_empty() {
+            // No more arms - return Nil
+            return Ok(HirExpr {
+                kind: HirExprKind::Nil,
+                ty: TypeId::NIL,
+            });
+        }
+
+        let arm = &arms[0];
+        let remaining_arms = &arms[1..];
+
+        // Check if this is a wildcard pattern (always matches)
+        if matches!(&arm.pattern, Pattern::Wildcard | Pattern::Identifier(_)) {
+            // Wildcard or binding pattern - just execute the body
+            return self.lower_match_arm_body(&arm.body, ctx);
+        }
+
+        // Generate the condition for this pattern
+        let condition = self.lower_pattern_condition(subject_idx, subject_ty, &arm.pattern, ctx)?;
+
+        // Handle guard expression if present
+        let final_condition = if let Some(guard) = &arm.guard {
+            let guard_hir = self.lower_expr(guard, ctx)?;
+            HirExpr {
+                kind: HirExprKind::Binary {
+                    op: BinOp::And,
+                    left: Box::new(condition),
+                    right: Box::new(guard_hir),
+                },
+                ty: TypeId::BOOL,
+            }
+        } else {
+            condition
+        };
+
+        // Lower the arm body
+        let then_branch = self.lower_match_arm_body(&arm.body, ctx)?;
+        let then_ty = then_branch.ty;
+
+        // Recursively build the else branch from remaining arms
+        let else_branch = self.lower_match_arms(subject_idx, subject_ty, remaining_arms, ctx)?;
+
+        Ok(HirExpr {
+            kind: HirExprKind::If {
+                condition: Box::new(final_condition),
+                then_branch: Box::new(then_branch),
+                else_branch: Some(Box::new(else_branch)),
+            },
+            ty: then_ty,
+        })
+    }
+
+    /// Generate a condition expression for pattern matching
+    fn lower_pattern_condition(
+        &mut self,
+        subject_idx: usize,
+        subject_ty: TypeId,
+        pattern: &Pattern,
+        ctx: &mut FunctionContext,
+    ) -> LowerResult<HirExpr> {
+        let subject_ref = HirExpr {
+            kind: HirExprKind::Local(subject_idx),
+            ty: subject_ty,
+        };
+
+        match pattern {
+            Pattern::Wildcard | Pattern::Identifier(_) => {
+                // Always matches
+                Ok(HirExpr {
+                    kind: HirExprKind::Bool(true),
+                    ty: TypeId::BOOL,
+                })
+            }
+            Pattern::Literal(lit_expr) => {
+                // Compare subject == literal
+                let lit_hir = self.lower_expr(lit_expr, ctx)?;
+                Ok(HirExpr {
+                    kind: HirExprKind::Binary {
+                        op: BinOp::Eq,
+                        left: Box::new(subject_ref),
+                        right: Box::new(lit_hir),
+                    },
+                    ty: TypeId::BOOL,
+                })
+            }
+            Pattern::Or(patterns) => {
+                // Any of the patterns match: p1 || p2 || p3 ...
+                if patterns.is_empty() {
+                    return Ok(HirExpr {
+                        kind: HirExprKind::Bool(false),
+                        ty: TypeId::BOOL,
+                    });
+                }
+
+                let mut result = self.lower_pattern_condition(subject_idx, subject_ty, &patterns[0], ctx)?;
+                for p in &patterns[1..] {
+                    let p_cond = self.lower_pattern_condition(subject_idx, subject_ty, p, ctx)?;
+                    result = HirExpr {
+                        kind: HirExprKind::Binary {
+                            op: BinOp::Or,
+                            left: Box::new(result),
+                            right: Box::new(p_cond),
+                        },
+                        ty: TypeId::BOOL,
+                    };
+                }
+                Ok(result)
+            }
+            Pattern::Range { start, end, inclusive } => {
+                // subject >= start && subject <= end (or < end if not inclusive)
+                let start_hir = self.lower_expr(start, ctx)?;
+                let end_hir = self.lower_expr(end, ctx)?;
+
+                let gte_start = HirExpr {
+                    kind: HirExprKind::Binary {
+                        op: BinOp::GtEq,
+                        left: Box::new(subject_ref.clone()),
+                        right: Box::new(start_hir),
+                    },
+                    ty: TypeId::BOOL,
+                };
+
+                let end_op = if *inclusive { BinOp::LtEq } else { BinOp::Lt };
+                let lte_end = HirExpr {
+                    kind: HirExprKind::Binary {
+                        op: end_op,
+                        left: Box::new(subject_ref),
+                        right: Box::new(end_hir),
+                    },
+                    ty: TypeId::BOOL,
+                };
+
+                Ok(HirExpr {
+                    kind: HirExprKind::Binary {
+                        op: BinOp::And,
+                        left: Box::new(gte_start),
+                        right: Box::new(lte_end),
+                    },
+                    ty: TypeId::BOOL,
+                })
+            }
+            // For more complex patterns (struct, enum, tuple, array), return unsupported for now
+            _ => Ok(HirExpr {
+                kind: HirExprKind::Bool(false),
+                ty: TypeId::BOOL,
+            }),
+        }
+    }
+
+    /// Lower a match arm body (block of statements) to a single HIR expression
+    fn lower_match_arm_body(
+        &mut self,
+        body: &ast::Block,
+        ctx: &mut FunctionContext,
+    ) -> LowerResult<HirExpr> {
+        // If body is empty, return Nil
+        if body.statements.is_empty() {
+            return Ok(HirExpr {
+                kind: HirExprKind::Nil,
+                ty: TypeId::NIL,
+            });
+        }
+
+        // For a single expression statement, just lower that expression
+        if body.statements.len() == 1 {
+            if let simple_parser::ast::Node::Expression(expr) = &body.statements[0] {
+                return self.lower_expr(expr, ctx);
+            }
+            if let simple_parser::ast::Node::Return(ret_stmt) = &body.statements[0] {
+                if let Some(expr) = &ret_stmt.value {
+                    return self.lower_expr(expr, ctx);
+                } else {
+                    return Ok(HirExpr {
+                        kind: HirExprKind::Nil,
+                        ty: TypeId::NIL,
+                    });
+                }
+            }
+        }
+
+        // For multiple statements, we need to lower them all and return the last value
+        // For now, just look for the last expression or return
+        let mut last_expr = HirExpr {
+            kind: HirExprKind::Nil,
+            ty: TypeId::NIL,
+        };
+
+        for stmt in &body.statements {
+            match stmt {
+                simple_parser::ast::Node::Expression(expr) => {
+                    last_expr = self.lower_expr(expr, ctx)?;
+                }
+                simple_parser::ast::Node::Return(ret_stmt) => {
+                    if let Some(expr) = &ret_stmt.value {
+                        last_expr = self.lower_expr(expr, ctx)?;
+                    } else {
+                        last_expr = HirExpr {
+                            kind: HirExprKind::Nil,
+                            ty: TypeId::NIL,
+                        };
+                    }
+                }
+                // Skip other statement types for now
+                _ => {}
+            }
+        }
+
+        Ok(last_expr)
     }
 }
 

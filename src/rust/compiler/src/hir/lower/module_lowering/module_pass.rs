@@ -100,6 +100,23 @@ impl Lowerer {
                 // Register trait with vtable slot information for static polymorphism
                 self.register_trait(t)?;
             }
+            Node::Extern(e) => {
+                // Register extern function in globals so it can be called
+                let ret_ty = self.resolve_type_opt(&e.return_type)?;
+                self.globals.insert(e.name.clone(), ret_ty);
+            }
+            Node::ExternClass(ec) => {
+                // Register extern class type
+                // For now, just register the class name as a named type
+                let type_id = self.module.types.register_named(
+                    ec.name.clone(),
+                    crate::hir::types::HirType::ExternClass {
+                        name: ec.name.clone(),
+                    },
+                );
+                // Also register it as a global so it can be used in type expressions
+                self.globals.insert(ec.name.clone(), type_id);
+            }
             _ => {}
         }
         Ok(())
@@ -208,6 +225,7 @@ impl Lowerer {
                 Node::Actor(_)
                 | Node::Impl(_)
                 | Node::Extern(_)
+                | Node::ExternClass(_)
                 | Node::Macro(_)
                 | Node::Unit(_)
                 | Node::UnitFamily(_)

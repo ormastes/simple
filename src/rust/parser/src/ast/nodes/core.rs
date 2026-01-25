@@ -30,6 +30,8 @@ pub enum Node {
     /// Function alias: `fn new_name = old_name`
     FunctionAlias(FunctionAliasDef),
     Extern(ExternDef),
+    /// External class for FFI object-based bindings
+    ExternClass(ExternClassDef),
     Macro(MacroDef),
     Unit(UnitDef),
     UnitFamily(UnitFamilyDef),

@@ -112,6 +112,15 @@ pub(super) fn compile_method_call_static<M: Module>(
     func_name: &str,
     args: &[VReg],
 ) -> InstrResult<()> {
+    // First check if this is a builtin method (String, Array methods)
+    // Try to compile as builtin - these have runtime function implementations
+    if let Some(result) = try_compile_builtin_method_call(ctx, builder, receiver, func_name, args)? {
+        if let Some(d) = dest {
+            ctx.vreg_values.insert(*d, result);
+        }
+        return Ok(());
+    }
+
     if let Some(&func_id) = ctx.func_ids.get(func_name) {
         let func_ref = ctx.module.declare_func_in_func(func_id, builder.func);
         let mut call_args = vec![ctx.vreg_values[&receiver]];
@@ -141,6 +150,55 @@ pub(super) fn compile_method_call_static<M: Module>(
         }
     }
     Ok(())
+}
+
+/// Try to compile a builtin method call (String, Array methods)
+/// Returns Some(result_value) if the method was handled, None otherwise
+fn try_compile_builtin_method_call<M: Module>(
+    ctx: &mut InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    receiver: VReg,
+    method: &str,
+    args: &[VReg],
+) -> InstrResult<Option<cranelift_codegen::ir::Value>> {
+    let receiver_val = ctx.vreg_values[&receiver];
+
+    // Map method names to runtime functions
+    let runtime_func = match method {
+        // String methods
+        "starts_with" => "rt_string_starts_with",
+        "ends_with" => "rt_string_ends_with",
+        "len" => "rt_string_len", // Will also handle array len
+        "concat" => "rt_string_concat",
+        "contains" => "rt_contains",
+        // Array methods
+        "push" => "rt_array_push",
+        "pop" => "rt_array_pop",
+        "clear" => "rt_array_clear",
+        _ => return Ok(None),
+    };
+
+    // Check if runtime function exists
+    let Some(&func_id) = ctx.runtime_funcs.get(runtime_func) else {
+        return Ok(None);
+    };
+
+    let func_ref = ctx.module.declare_func_in_func(func_id, builder.func);
+
+    // Build call arguments: receiver first, then other args
+    let mut call_args = vec![receiver_val];
+    for arg in args {
+        call_args.push(ctx.vreg_values[arg]);
+    }
+
+    let call = builder.ins().call(func_ref, &call_args);
+    let results = builder.inst_results(call);
+
+    if results.is_empty() {
+        Ok(Some(builder.ins().iconst(types::I64, 0)))
+    } else {
+        Ok(Some(results[0]))
+    }
 }
 
 pub(super) fn compile_method_call_virtual<M: Module>(

@@ -58,6 +58,8 @@ pub mod repl;
 pub mod gpu;
 pub mod diagram;
 pub mod memory;
+pub mod cli;
+pub mod sdn;
 
 // Import parent interpreter types
 type Enums = HashMap<String, EnumDef>;
@@ -534,6 +536,99 @@ pub(crate) fn call_extern_function(
         "rt_path_stem" => file_io::rt_path_stem(&evaluated),
         "rt_path_relative" => file_io::rt_path_relative(&evaluated),
         "rt_path_join" => file_io::rt_path_join(&evaluated),
+
+        // ====================================================================
+        // CLI FFI Functions (46 functions - for Simple-based CLI)
+        // ====================================================================
+        // Basic CLI operations
+        "rt_cli_version" => cli::rt_cli_version(&evaluated),
+        "rt_cli_print_help" => cli::rt_cli_print_help(&evaluated),
+        "rt_cli_print_version" => cli::rt_cli_print_version(&evaluated),
+        "rt_cli_get_args" => cli::rt_cli_get_args(&evaluated),
+        "rt_cli_file_exists" => cli::rt_cli_file_exists(&evaluated),
+        "rt_cli_exit" => cli::rt_cli_exit(&evaluated),
+
+        // Code execution
+        "rt_cli_run_code" => cli::rt_cli_run_code(&evaluated),
+        "rt_cli_run_file" => cli::rt_cli_run_file(&evaluated),
+        "rt_cli_watch_file" => cli::rt_cli_watch_file(&evaluated),
+        "rt_cli_run_repl" => cli::rt_cli_run_repl(&evaluated),
+
+        // Testing
+        "rt_cli_run_tests" => cli::rt_cli_run_tests(&evaluated),
+
+        // Code quality
+        "rt_cli_run_lint" => cli::rt_cli_run_lint(&evaluated),
+        "rt_cli_run_fmt" => cli::rt_cli_run_fmt(&evaluated),
+        "rt_cli_run_check" => cli::rt_cli_run_check(&evaluated),
+
+        // Verification
+        "rt_cli_run_verify" => cli::rt_cli_run_verify(&evaluated),
+
+        // Migration and tooling
+        "rt_cli_run_migrate" => cli::rt_cli_run_migrate(&evaluated),
+        "rt_cli_run_mcp" => cli::rt_cli_run_mcp(&evaluated),
+        "rt_cli_run_diff" => cli::rt_cli_run_diff(&evaluated),
+        "rt_cli_run_context" => cli::rt_cli_run_context(&evaluated),
+        "rt_cli_run_constr" => cli::rt_cli_run_constr(&evaluated),
+
+        // Analysis
+        "rt_cli_run_query" => cli::rt_cli_run_query(&evaluated),
+        "rt_cli_run_info" => cli::rt_cli_run_info(&evaluated),
+
+        // Auditing
+        "rt_cli_run_spec_coverage" => cli::rt_cli_run_spec_coverage(&evaluated),
+        "rt_cli_run_replay" => cli::rt_cli_run_replay(&evaluated),
+
+        // Code generation
+        "rt_cli_run_gen_lean" => cli::rt_cli_run_gen_lean(&evaluated),
+        "rt_cli_run_feature_gen" => cli::rt_cli_run_feature_gen(&evaluated),
+        "rt_cli_run_task_gen" => cli::rt_cli_run_task_gen(&evaluated),
+        "rt_cli_run_spec_gen" => cli::rt_cli_run_spec_gen(&evaluated),
+        "rt_cli_run_todo_scan" => cli::rt_cli_run_todo_scan(&evaluated),
+        "rt_cli_run_todo_gen" => cli::rt_cli_run_todo_gen(&evaluated),
+
+        // i18n
+        "rt_cli_run_i18n" => cli::rt_cli_run_i18n(&evaluated),
+
+        // Compilation
+        "rt_cli_handle_compile" => cli::rt_cli_handle_compile(&evaluated),
+        "rt_cli_handle_targets" => cli::rt_cli_handle_targets(&evaluated),
+        "rt_cli_handle_linkers" => cli::rt_cli_handle_linkers(&evaluated),
+
+        // Web framework
+        "rt_cli_handle_web" => cli::rt_cli_handle_web(&evaluated),
+
+        // Diagram generation
+        "rt_cli_handle_diagram" => cli::rt_cli_handle_diagram(&evaluated),
+
+        // Package management
+        "rt_cli_handle_init" => cli::rt_cli_handle_init(&evaluated),
+        "rt_cli_handle_add" => cli::rt_cli_handle_add(&evaluated),
+        "rt_cli_handle_remove" => cli::rt_cli_handle_remove(&evaluated),
+        "rt_cli_handle_install" => cli::rt_cli_handle_install(&evaluated),
+        "rt_cli_handle_update" => cli::rt_cli_handle_update(&evaluated),
+        "rt_cli_handle_list" => cli::rt_cli_handle_list(&evaluated),
+        "rt_cli_handle_tree" => cli::rt_cli_handle_tree(&evaluated),
+        "rt_cli_handle_cache" => cli::rt_cli_handle_cache(&evaluated),
+
+        // Environment management
+        "rt_cli_handle_env" => cli::rt_cli_handle_env(&evaluated),
+
+        // Lock file management
+        "rt_cli_handle_lock" => cli::rt_cli_handle_lock(&evaluated),
+
+        // Explicit run command
+        "rt_cli_handle_run" => cli::rt_cli_handle_run(&evaluated),
+
+        // SDN operations
+        "rt_sdn_version" => sdn::rt_sdn_version(&evaluated),
+        "rt_sdn_check" => sdn::rt_sdn_check(&evaluated),
+        "rt_sdn_to_json" => sdn::rt_sdn_to_json(&evaluated),
+        "rt_sdn_from_json" => sdn::rt_sdn_from_json(&evaluated),
+        "rt_sdn_get" => sdn::rt_sdn_get(&evaluated),
+        "rt_sdn_set" => sdn::rt_sdn_set(&evaluated),
+        "rt_sdn_fmt" => sdn::rt_sdn_fmt(&evaluated),
 
         // Unknown extern function
         _ => Err(common::unknown_function(name)),

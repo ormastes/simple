@@ -1,4 +1,4 @@
-use simple_parser::{self as ast, ast::ContractClause, Node};
+use simple_parser::{self as ast, ast::ContractClause, ast::Mutability, Node};
 
 use super::super::lifetime::{ReferenceOrigin, ScopeKind};
 use super::super::types::*;
@@ -225,6 +225,20 @@ impl Lowerer {
                 // Extract pattern name (simple case: single identifier)
                 let pattern = Self::extract_pattern_name(&for_stmt.pattern).unwrap_or_else(|| "item".to_string());
                 let iterable = self.lower_expr(&for_stmt.iterable, ctx)?;
+
+                // Infer the element type from the iterable type
+                // For arrays [T], the element type is T
+                let element_ty = if let Some(elem_ty) = self.module.types.get_array_element(iterable.ty) {
+                    elem_ty
+                } else {
+                    // Fallback to i64 for now (common case)
+                    // TODO: Better type inference for iterables
+                    crate::hir::TypeId::I64
+                };
+
+                // Add the loop variable to the context BEFORE lowering the body
+                ctx.add_local(pattern.clone(), element_ty, Mutability::Immutable);
+
                 let body = self.lower_block(&for_stmt.body, ctx)?;
                 let invariants = self.lower_contract_clauses(&for_stmt.invariants, ctx)?;
                 Ok(vec![HirStmt::For {

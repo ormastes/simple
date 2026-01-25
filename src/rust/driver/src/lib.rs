@@ -1,6 +1,8 @@
 pub mod auth_db;
 pub mod bug_db;
 pub mod cli;
+// CLI FFI functions are in simple_runtime::value::cli_ffi
+pub use simple_runtime::value::cli_ffi;
 pub mod compile_options;
 pub mod db_lock;
 pub mod dependency_cache;

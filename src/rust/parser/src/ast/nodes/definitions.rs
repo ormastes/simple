@@ -601,6 +601,67 @@ pub struct ExternDef {
     pub attributes: Vec<Attribute>,
 }
 
+/// External class definition for FFI object-based bindings.
+///
+/// Syntax:
+/// ```simple
+/// extern class Database:
+///     static fn open(url: text) -> Result<Database, DbError>
+///     fn query(sql: text) -> Result<Rows, DbError>
+///     me execute(sql: text) -> Result<Int, DbError>
+///     fn close()
+/// ```
+///
+/// External classes wrap Rust objects through the FFI system.
+/// - `static fn` - static factory methods (no self parameter)
+/// - `fn` - immutable methods (takes &self)
+/// - `me` - mutable methods (takes &mut self)
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExternClassDef {
+    pub span: Span,
+    /// Class name (e.g., "Database")
+    pub name: String,
+    /// Generic type parameters (e.g., `<T, U>`)
+    pub generic_params: Vec<String>,
+    /// Methods exposed by this external class
+    pub methods: Vec<ExternMethodDef>,
+    /// Visibility (pub/private)
+    pub visibility: Visibility,
+    /// Attributes (e.g., `#[ffi_type = "Database"]`)
+    pub attributes: Vec<Attribute>,
+    /// Documentation comment
+    pub doc_comment: Option<DocComment>,
+}
+
+/// Method kind for extern class methods.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExternMethodKind {
+    /// Static method (no self parameter): `static fn open(...)`
+    Static,
+    /// Immutable method (takes &self): `fn query(...)`
+    Immutable,
+    /// Mutable method (takes &mut self): `me execute(...)`
+    Mutable,
+}
+
+/// Method definition for extern class.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExternMethodDef {
+    pub span: Span,
+    /// Method name
+    pub name: String,
+    /// Method kind (static/immutable/mutable)
+    pub kind: ExternMethodKind,
+    /// Parameters (excluding self)
+    pub params: Vec<Parameter>,
+    /// Return type (None for void methods)
+    pub return_type: Option<Type>,
+    /// Attributes on this method
+    pub attributes: Vec<Attribute>,
+    /// Documentation comment
+    pub doc_comment: Option<DocComment>,
+}
+
 /// Macro definition: macro name(params) -> (contract): body
 #[derive(Debug, Clone, PartialEq)]
 pub struct MacroDef {

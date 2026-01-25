@@ -469,6 +469,22 @@ pub enum MirInst {
         args: Vec<VReg>,
     },
 
+    /// Extern class method call (FFI object method dispatch)
+    /// Used for `extern class` method calls (static, immutable, mutable).
+    ExternMethodCall {
+        dest: Option<VReg>,
+        /// Receiver (None for static methods)
+        receiver: Option<VReg>,
+        /// Extern class name
+        class_name: String,
+        /// Method name
+        method_name: String,
+        /// Method kind (static, immutable, mutable)
+        is_static: bool,
+        /// Arguments (not including receiver for instance methods)
+        args: Vec<VReg>,
+    },
+
     // =========================================================================
     // Pattern matching instructions (Phase 5)
     // =========================================================================

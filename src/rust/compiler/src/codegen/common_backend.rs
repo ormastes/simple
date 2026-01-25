@@ -78,7 +78,8 @@ impl BackendSettings {
     pub fn aot() -> Self {
         Self {
             opt_level: "speed",
-            is_pic: false,
+            // Enable PIC for compatibility with PIE executables and shared libraries
+            is_pic: true,
             target: Target::host(),
         }
     }
@@ -87,7 +88,8 @@ impl BackendSettings {
     pub fn aot_for_target(target: Target) -> Self {
         Self {
             opt_level: "speed",
-            is_pic: false,
+            // Enable PIC for compatibility with PIE executables and shared libraries
+            is_pic: true,
             target,
         }
     }

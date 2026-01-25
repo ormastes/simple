@@ -722,6 +722,13 @@ impl Parser<'_> {
     pub(crate) fn parse_extern_with_attrs(&mut self, attributes: Vec<Attribute>) -> Result<Node, ParseError> {
         let start_span = self.current.span;
         self.expect(&TokenKind::Extern)?;
+
+        // Check if this is `extern class` or `extern fn`
+        if self.check(&TokenKind::Class) {
+            return self.parse_extern_class_impl(start_span, attributes);
+        }
+
+        // Otherwise, parse extern function
         self.expect(&TokenKind::Fn)?;
 
         let name = self.expect_identifier()?;
@@ -746,6 +753,147 @@ impl Parser<'_> {
             return_type,
             visibility: Visibility::Private,
             attributes,
+        }))
+    }
+
+    /// Parse extern class definition.
+    ///
+    /// Syntax:
+    /// ```simple
+    /// extern class Database:
+    ///     static fn open(url: text) -> Result<Database, DbError>
+    ///     fn query(sql: text) -> Result<Rows, DbError>
+    ///     me execute(sql: text) -> Result<Int, DbError>
+    ///     fn close()
+    /// ```
+    fn parse_extern_class_impl(
+        &mut self,
+        start_span: Span,
+        attributes: Vec<Attribute>,
+    ) -> Result<Node, ParseError> {
+        use crate::ast::{DocComment, ExternClassDef, ExternMethodDef, ExternMethodKind};
+
+        self.expect(&TokenKind::Class)?;
+
+        // Parse class name
+        let name = self.expect_identifier()?;
+
+        // Parse optional generic parameters: extern class Container<T>
+        let generic_params = self.parse_generic_params_as_strings()?;
+
+        // Expect colon and newline for block
+        self.expect(&TokenKind::Colon)?;
+
+        // Parse the class body (methods)
+        let mut methods = Vec::new();
+
+        // Skip newline
+        if self.check(&TokenKind::Newline) {
+            self.advance();
+        }
+
+        // Expect indent
+        if !self.check(&TokenKind::Indent) {
+            return Err(ParseError::syntax_error_with_span(
+                "Expected indented block after extern class declaration",
+                self.current.span,
+            ));
+        }
+        self.advance(); // consume Indent
+
+        // Parse methods until dedent
+        while !self.check(&TokenKind::Dedent) && !self.is_at_end() {
+            // Skip empty lines
+            while self.check(&TokenKind::Newline) {
+                self.advance();
+            }
+            if self.check(&TokenKind::Dedent) {
+                break;
+            }
+
+            // Parse optional doc comment for method
+            let doc_comment = self.try_parse_doc_comment();
+
+            // Parse optional attributes for method (#[...])
+            let method_attrs = if self.check(&TokenKind::Hash) {
+                let attr = self.parse_attribute()?;
+                vec![attr]
+            } else {
+                vec![]
+            };
+
+            // Determine method kind
+            let method_span = self.current.span;
+            let kind = if self.check(&TokenKind::Static) {
+                self.advance(); // consume 'static'
+                self.expect(&TokenKind::Fn)?;
+                ExternMethodKind::Static
+            } else if self.check(&TokenKind::Me) {
+                self.advance(); // consume 'me'
+                ExternMethodKind::Mutable
+            } else if self.check(&TokenKind::Fn) {
+                self.advance(); // consume 'fn'
+                ExternMethodKind::Immutable
+            } else {
+                return Err(ParseError::syntax_error_with_span(
+                    "Expected 'static fn', 'fn', or 'me' in extern class method",
+                    self.current.span,
+                ));
+            };
+
+            // Parse method name
+            let method_name = self.expect_identifier()?;
+
+            // Parse parameters
+            let params = self.parse_parameters()?;
+
+            // Parse optional return type
+            let return_type = if self.check(&TokenKind::Arrow) {
+                self.advance();
+                Some(self.parse_type()?)
+            } else {
+                None
+            };
+
+            methods.push(ExternMethodDef {
+                span: Span::new(
+                    method_span.start,
+                    self.previous.span.end,
+                    method_span.line,
+                    method_span.column,
+                ),
+                name: method_name,
+                kind,
+                params,
+                return_type,
+                attributes: method_attrs,
+                doc_comment,
+            });
+
+            // Skip newline after method
+            if self.check(&TokenKind::Newline) {
+                self.advance();
+            }
+        }
+
+        // Consume dedent
+        if self.check(&TokenKind::Dedent) {
+            self.advance();
+        }
+
+        Ok(Node::ExternClass(ExternClassDef {
+            span: Span::new(
+                start_span.start,
+                self.previous.span.end,
+                start_span.line,
+                start_span.column,
+            ),
+            name,
+            generic_params,
+            methods,
+            visibility: Visibility::Private,
+            attributes,
+            doc_comment: None,
         }))
     }
 
@@ -832,5 +980,90 @@ impl Parser<'_> {
             capacity,
             visibility: Visibility::Private,
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::Parser;
+
+    #[test]
+    fn test_parse_extern_class() {
+        let source = r#"extern class Database:
+    static fn open(url: text) -> Database
+    fn query(sql: text) -> Array
+    me execute(sql: text) -> Int
+    fn close()
+"#;
+        let mut parser = Parser::new(source);
+        let module = parser.parse().expect("Should parse extern class");
+
+        // Find the extern class
+        let extern_class = module
+            .items
+            .iter()
+            .find(|n| matches!(n, crate::ast::Node::ExternClass(_)));
+        assert!(extern_class.is_some(), "Should parse extern class");
+
+        if let Some(crate::ast::Node::ExternClass(class)) = extern_class {
+            assert_eq!(class.name, "Database");
+            assert_eq!(class.methods.len(), 4);
+
+            // Check method kinds
+            use crate::ast::ExternMethodKind;
+            assert_eq!(class.methods[0].name, "open");
+            assert_eq!(class.methods[0].kind, ExternMethodKind::Static);
+
+            assert_eq!(class.methods[1].name, "query");
+            assert_eq!(class.methods[1].kind, ExternMethodKind::Immutable);
+
+            assert_eq!(class.methods[2].name, "execute");
+            assert_eq!(class.methods[2].kind, ExternMethodKind::Mutable);
+
+            assert_eq!(class.methods[3].name, "close");
+            assert_eq!(class.methods[3].kind, ExternMethodKind::Immutable);
+        }
+    }
+
+    #[test]
+    fn test_parse_extern_class_with_generics() {
+        let source = r#"extern class Container<T>:
+    static fn new() -> Container<T>
+    fn get() -> T
+    me set(value: T)
+"#;
+        let mut parser = Parser::new(source);
+        let module = parser.parse().expect("Should parse extern class with generics");
+
+        let extern_class = module
+            .items
+            .iter()
+            .find(|n| matches!(n, crate::ast::Node::ExternClass(_)));
+        assert!(extern_class.is_some(), "Should parse extern class with generics");
+
+        if let Some(crate::ast::Node::ExternClass(class)) = extern_class {
+            assert_eq!(class.name, "Container");
+            assert_eq!(class.generic_params, vec!["T".to_string()]);
+            assert_eq!(class.methods.len(), 3);
+        }
+    }
+
+    #[test]
+    fn test_parse_extern_fn() {
+        // Ensure extern fn still works
+        let source = "extern fn rt_print(msg: text)";
+        let mut parser = Parser::new(source);
+        let module = parser.parse().expect("Should parse extern fn");
+
+        let extern_fn = module
+            .items
+            .iter()
+            .find(|n| matches!(n, crate::ast::Node::Extern(_)));
+        assert!(extern_fn.is_some(), "Should parse extern fn");
+
+        if let Some(crate::ast::Node::Extern(func)) = extern_fn {
+            assert_eq!(func.name, "rt_print");
+            assert_eq!(func.params.len(), 1);
+        }
     }
 }

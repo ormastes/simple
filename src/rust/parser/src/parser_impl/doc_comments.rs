@@ -11,7 +11,7 @@ impl<'a> Parser<'a> {
     /// Try to parse a doc comment if one is present.
     /// Returns None if no doc comment, Some(DocComment) if found.
     /// Merges consecutive doc comments into a single DocComment.
-    pub(super) fn try_parse_doc_comment(&mut self) -> Option<DocComment> {
+    pub(crate) fn try_parse_doc_comment(&mut self) -> Option<DocComment> {
         // Skip newlines before doc comment
         while self.check(&TokenKind::Newline) {
             self.advance();
