@@ -125,6 +125,8 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // =========================================================================
     RuntimeFuncSpec::new("rt_string_new", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_concat", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_string_starts_with", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_string_ends_with", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_cstring_to_text", &[I64], &[I64]),
     // =========================================================================
     // Value creation/conversion
@@ -560,6 +562,118 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_coverage_clear", &[], &[]),
     // rt_coverage_enabled() -> bool
     RuntimeFuncSpec::new("rt_coverage_enabled", &[], &[I8]),
+    // =========================================================================
+    // FFI Object System (object-based FFI for extern class)
+    // =========================================================================
+    // Type registration: rt_ffi_type_register(name_ptr, name_len, vtable_ptr) -> type_id
+    RuntimeFuncSpec::new("rt_ffi_type_register", &[I64, I64, I64], &[I64]),
+    // Object creation: rt_ffi_new(type_id) -> RuntimeValue (FfiObject)
+    RuntimeFuncSpec::new("rt_ffi_new", &[I64], &[I64]),
+    // Object destruction: rt_ffi_drop(obj) -> bool (success)
+    RuntimeFuncSpec::new("rt_ffi_drop", &[I64], &[I8]),
+    // Type introspection: rt_ffi_type_id(obj) -> type_id
+    RuntimeFuncSpec::new("rt_ffi_type_id", &[I64], &[I64]),
+    // Type name: rt_ffi_type_name(obj) -> RuntimeValue (string)
+    RuntimeFuncSpec::new("rt_ffi_type_name", &[I64], &[I64]),
+    // Method call: rt_ffi_call_method(obj, name_ptr, name_len, argc, argv_ptr) -> RuntimeValue
+    RuntimeFuncSpec::new("rt_ffi_call_method", &[I64, I64, I64, I64, I64], &[I64]),
+    // Method check: rt_ffi_has_method(obj, name_ptr, name_len) -> bool
+    RuntimeFuncSpec::new("rt_ffi_has_method", &[I64, I64, I64], &[I8]),
+    // Object clone: rt_ffi_clone(obj) -> RuntimeValue (cloned FfiObject)
+    RuntimeFuncSpec::new("rt_ffi_clone", &[I64], &[I64]),
+    // Object-based FFI - new object creation
+    // rt_ffi_object_new(type_id, handle, vtable_ptr) -> RuntimeValue
+    RuntimeFuncSpec::new("rt_ffi_object_new", &[I64, I64, I64], &[I64]),
+    // rt_ffi_object_free(obj) -> bool
+    RuntimeFuncSpec::new("rt_ffi_object_free", &[I64], &[I8]),
+    // rt_ffi_object_call_method(obj, method_name_ptr, method_name_len, argc, argv) -> RuntimeValue
+    RuntimeFuncSpec::new("rt_ffi_object_call_method", &[I64, I64, I64, I64, I64], &[I64]),
+    // rt_ffi_object_has_method(obj, method_name_ptr, method_name_len) -> bool
+    RuntimeFuncSpec::new("rt_ffi_object_has_method", &[I64, I64, I64], &[I8]),
+    // rt_ffi_object_type_id(obj) -> type_id
+    RuntimeFuncSpec::new("rt_ffi_object_type_id", &[I64], &[I64]),
+    // rt_ffi_object_type_name(obj) -> RuntimeValue (string)
+    RuntimeFuncSpec::new("rt_ffi_object_type_name", &[I64], &[I64]),
+    // =========================================================================
+    // CLI FFI functions (for Simple-based CLI)
+    // =========================================================================
+    // Version and help
+    RuntimeFuncSpec::new("rt_cli_version", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_cli_print_help", &[], &[]),
+    RuntimeFuncSpec::new("rt_cli_print_version", &[], &[]),
+    RuntimeFuncSpec::new("rt_cli_get_args", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_cli_file_exists", &[I64], &[I8]),
+    RuntimeFuncSpec::new("rt_cli_exit", &[I64], &[]),
+    // Code execution
+    RuntimeFuncSpec::new("rt_cli_run_code", &[I64, I8, I8], &[I64]),
+    RuntimeFuncSpec::new("rt_cli_run_file", &[I64, I64, I8, I8], &[I64]),
+    RuntimeFuncSpec::new("rt_cli_watch_file", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_cli_run_repl", &[I8, I8], &[I64]),
+    // Testing
+    RuntimeFuncSpec::new("rt_cli_run_tests", &[I64, I8, I8], &[I64]),
+    // Code quality
+    RuntimeFuncSpec::new("rt_cli_run_lint", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_cli_run_fmt", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_cli_run_check", &[I64], &[I64]),
+    // Verification
+    RuntimeFuncSpec::new("rt_cli_run_verify", &[I64, I8, I8], &[I64]),
+    // Migration and tooling
+    RuntimeFuncSpec::new("rt_cli_run_migrate", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_cli_run_mcp", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_cli_run_diff", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_cli_run_context", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_cli_run_constr", &[I64], &[I64]),
+    // Analysis
+    RuntimeFuncSpec::new("rt_cli_run_query", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_cli_run_info", &[I64], &[I64]),
+    // Auditing
+    RuntimeFuncSpec::new("rt_cli_run_spec_coverage", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_cli_run_replay", &[I64], &[I64]),
+    // Code generation
+    RuntimeFuncSpec::new("rt_cli_run_gen_lean", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_cli_run_feature_gen", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_cli_run_task_gen", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_cli_run_spec_gen", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_cli_run_todo_scan", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_cli_run_todo_gen", &[I64], &[I64]),
+    // i18n
+    RuntimeFuncSpec::new("rt_cli_run_i18n", &[I64], &[I64]),
+    // Compilation
+    RuntimeFuncSpec::new("rt_cli_handle_compile", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_cli_handle_targets", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_cli_handle_linkers", &[], &[I64]),
+    // Web framework
+    RuntimeFuncSpec::new("rt_cli_handle_web", &[I64], &[I64]),
+    // Diagram generation
+    RuntimeFuncSpec::new("rt_cli_handle_diagram", &[I64], &[I64]),
+    // Package management
+    RuntimeFuncSpec::new("rt_cli_handle_init", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_cli_handle_add", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_cli_handle_remove", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_cli_handle_install", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_cli_handle_update", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_cli_handle_list", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_cli_handle_tree", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_cli_handle_cache", &[I64], &[I64]),
+    // Environment management
+    RuntimeFuncSpec::new("rt_cli_handle_env", &[I64], &[I64]),
+    // Lock file management
+    RuntimeFuncSpec::new("rt_cli_handle_lock", &[I64], &[I64]),
+    // Explicit run command
+    RuntimeFuncSpec::new("rt_cli_handle_run", &[I64, I8, I8], &[I64]),
+    // Print utilities
+    RuntimeFuncSpec::new("rt_cli_print", &[I64], &[]),
+    RuntimeFuncSpec::new("rt_cli_println", &[I64], &[]),
+    RuntimeFuncSpec::new("rt_cli_eprint", &[I64], &[]),
+    RuntimeFuncSpec::new("rt_cli_eprintln", &[I64], &[]),
+    // SDN operations
+    RuntimeFuncSpec::new("rt_sdn_version", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_sdn_check", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_sdn_to_json", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_sdn_from_json", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_sdn_get", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_sdn_set", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_sdn_fmt", &[I64], &[I64]),
 ];
 
 #[cfg(test)]

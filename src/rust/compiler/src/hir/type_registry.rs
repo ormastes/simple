@@ -221,6 +221,9 @@ impl TypeRegistry {
             // (snapshotting a promise captures its eventual value)
             Some(HirType::Promise { inner }) => self.is_snapshot_safe(*inner),
 
+            // Extern classes are opaque - conservatively not snapshot-safe
+            Some(HirType::ExternClass { .. }) => false,
+
             // Functions and unknown types are not snapshot-safe
             Some(HirType::Function { .. }) => false,
             Some(HirType::Unknown) => false,

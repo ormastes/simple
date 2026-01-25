@@ -69,7 +69,12 @@ pub struct NativeBinaryOptions {
 impl Default for NativeBinaryOptions {
     fn default() -> Self {
         // Detect standard library paths for the current system
-        let library_paths = Self::detect_system_library_paths();
+        let mut library_paths = Self::detect_system_library_paths();
+
+        // Add Simple runtime library path from cargo target directory
+        if let Some(runtime_path) = Self::find_runtime_library_path() {
+            library_paths.insert(0, runtime_path);
+        }
 
         Self {
             output: PathBuf::from("a.out"),
@@ -77,9 +82,21 @@ impl Default for NativeBinaryOptions {
             layout_optimize: false,
             layout_profile: None,
             strip: false,
-            pie: true, // Default to PIE for security
+            pie: true, // Default to PIE for security (codegen generates PIC)
             shared: false,
-            libraries: vec!["c".to_string()], // Link libc by default
+            // Link system libraries (runtime is linked as static archive directly)
+            // pthread, dl, m, gcc_s are commonly needed by Rust code on Linux
+            // gcc_s provides _Unwind_Resume for exception handling
+            #[cfg(target_os = "linux")]
+            libraries: vec![
+                "c".to_string(),
+                "pthread".to_string(),
+                "dl".to_string(),
+                "m".to_string(),
+                "gcc_s".to_string(),  // Unwinding support
+            ],
+            #[cfg(not(target_os = "linux"))]
+            libraries: vec!["c".to_string()],
             library_paths,
             linker: None,
             generate_map: false,
@@ -108,6 +125,10 @@ impl NativeBinaryOptions {
                     "/usr/lib/x86_64-linux-gnu",
                     "/lib64",
                     "/usr/lib64",
+                    // GCC runtime library paths
+                    "/usr/lib/gcc/x86_64-linux-gnu/13",
+                    "/usr/lib/gcc/x86_64-linux-gnu/12",
+                    "/usr/lib/gcc/x86_64-linux-gnu/11",
                 ],
                 TargetArch::Aarch64 => &[
                     "/lib/aarch64-linux-gnu",
@@ -152,6 +173,77 @@ impl NativeBinaryOptions {
         }
 
         paths
+    }
+
+    /// Find the Simple runtime library path.
+    ///
+    /// Looks for libsimple_runtime.a in:
+    /// 1. SIMPLE_RUNTIME_PATH environment variable
+    /// 2. Adjacent to the current executable (for installed binaries)
+    /// 3. Cargo target directory (for development)
+    pub fn find_runtime_library_path() -> Option<PathBuf> {
+        // Check environment variable first
+        if let Ok(path) = std::env::var("SIMPLE_RUNTIME_PATH") {
+            let p = PathBuf::from(&path);
+            if p.exists() {
+                return Some(p);
+            }
+        }
+
+        // Check adjacent to current executable (e.g., /usr/lib/simple/)
+        if let Ok(exe_path) = std::env::current_exe() {
+            if let Some(exe_dir) = exe_path.parent() {
+                // Check ../lib relative to executable
+                let lib_dir = exe_dir.join("../lib");
+                if lib_dir.join("libsimple_runtime.a").exists() {
+                    return Some(lib_dir.canonicalize().ok()?);
+                }
+
+                // Check same directory as executable
+                if exe_dir.join("libsimple_runtime.a").exists() {
+                    return Some(exe_dir.to_path_buf());
+                }
+            }
+        }
+
+        // Check cargo target directory (for development)
+        // Try both release and debug directories
+        let cargo_target_paths = [
+            // Standard cargo target directory
+            "target/release",
+            "target/debug",
+            // Workspace root (when running from subdirectory)
+            "../target/release",
+            "../target/debug",
+            "../../target/release",
+            "../../target/debug",
+        ];
+
+        for path in cargo_target_paths {
+            let p = PathBuf::from(path);
+            if p.join("libsimple_runtime.a").exists() {
+                return p.canonicalize().ok();
+            }
+        }
+
+        // Try to find from CARGO_MANIFEST_DIR (set during cargo build)
+        if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
+            let workspace_root = PathBuf::from(&manifest_dir)
+                .ancestors()
+                .nth(3) // Go up from src/rust/compiler to project root
+                .map(|p| p.to_path_buf());
+
+            if let Some(root) = workspace_root {
+                for profile in ["release", "debug"] {
+                    let lib_path = root.join("target").join(profile);
+                    if lib_path.join("libsimple_runtime.a").exists() {
+                        return Some(lib_path);
+                    }
+                }
+            }
+        }
+
+        None
     }
 
     /// Create new options with default values.
@@ -265,6 +357,15 @@ impl NativeBinaryBuilder {
 
         // Add user object file
         builder = builder.object(&obj_path);
+
+        // Add Simple runtime static library directly (not via -l)
+        // This ensures static linking even when shared library exists
+        if let Some(runtime_dir) = NativeBinaryOptions::find_runtime_library_path() {
+            let runtime_lib = runtime_dir.join("libsimple_runtime.a");
+            if runtime_lib.exists() {
+                builder = builder.object(&runtime_lib);
+            }
+        }
 
         // Set output
         builder = builder.output(&self.options.output);

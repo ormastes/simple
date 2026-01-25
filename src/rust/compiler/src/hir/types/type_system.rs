@@ -223,6 +223,10 @@ pub enum HirType {
         /// Required methods that the target must implement
         required_methods: Vec<String>,
     },
+    /// External class for FFI object-based bindings
+    ExternClass {
+        name: String,
+    },
     Unknown,
 }
 

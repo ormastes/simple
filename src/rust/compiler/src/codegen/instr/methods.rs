@@ -115,6 +115,14 @@ pub(super) fn compile_builtin_method<M: Module>(
             let arg_val = ctx.vreg_values[&args[0]];
             Some(call_runtime_2(ctx, builder, "rt_string_concat", receiver_val, arg_val))
         }
+        ("String", "starts_with") | ("string", "starts_with") => {
+            let arg_val = ctx.vreg_values[&args[0]];
+            Some(call_runtime_2(ctx, builder, "rt_string_starts_with", receiver_val, arg_val))
+        }
+        ("String", "ends_with") | ("string", "ends_with") => {
+            let arg_val = ctx.vreg_values[&args[0]];
+            Some(call_runtime_2(ctx, builder, "rt_string_ends_with", receiver_val, arg_val))
+        }
         ("Dict", "get") | ("dict", "get") => {
             let key_val = ctx.vreg_values[&args[0]];
             let wrapped_key = wrap_value(ctx, builder, key_val);

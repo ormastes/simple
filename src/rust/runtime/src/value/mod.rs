@@ -21,11 +21,18 @@ mod actors;
 mod args;
 mod async_gen;
 mod channels;
+pub mod cli_ffi;
 mod collections;
 mod contracts;
 mod core;
 pub mod diagram_ffi;
 mod dict;
+// FFI object-based system
+pub mod ffi_example;
+pub mod ffi_macros;
+pub mod ffi_object;
+pub mod ffi_registry;
+pub mod sdn_ffi;
 // High-performance collections module (using Rust std::collections)
 pub mod hpcollections;
 mod doctest_io;
@@ -62,14 +69,44 @@ pub use dict::RuntimeDict;
 // Re-export object types
 pub use objects::{RuntimeClosure, RuntimeEnum, RuntimeObject, RuntimeShared, RuntimeUnique, RuntimeWeak};
 
+// Re-export FFI object types
+pub use ffi_object::{
+    FfiMethodEntry, FfiVtable, RuntimeFfiObject,
+    fnv1a_hash, fnv1a_hash_str, method_flags,
+    rt_ffi_object_call_method, rt_ffi_object_free, rt_ffi_object_handle,
+    rt_ffi_object_has_method, rt_ffi_object_is_ffi, rt_ffi_object_new,
+    rt_ffi_object_type_id, rt_ffi_object_type_name, rt_ffi_object_vtable,
+};
+
+// Re-export FFI registry types and functions
+pub use ffi_registry::{
+    FfiObjectStorage, FfiTypeMetadata, FfiTypeRegistry,
+    get_registry,
+    rt_ffi_call_method, rt_ffi_clear_registry, rt_ffi_clone, rt_ffi_drop,
+    rt_ffi_has_method, rt_ffi_is_type, rt_ffi_new, rt_ffi_type_id,
+    rt_ffi_type_name, rt_ffi_type_register,
+};
+
+// Re-export FFI macro helpers and traits
+pub use ffi_macros::{
+    FfiError, FfiResult, FromRuntimeValue, IntoRuntimeValue,
+    get_arg, get_arg_as, get_bool_arg, get_float_arg, get_int_arg, get_string_arg,
+    sort_method_entries,
+};
+
+// Re-export FFI example (Counter) for demonstration and testing
+pub use ffi_example::{
+    Counter, counter_new_ffi, counter_register_type, counter_vtable,
+};
+
 // Re-export channel types
 pub use channels::RuntimeChannel;
 
 // Re-export collection FFI functions
 pub use collections::{
     rt_array_clear, rt_array_get, rt_array_len, rt_array_new, rt_array_pop, rt_array_push, rt_array_set, rt_contains,
-    rt_cstring_to_text, rt_index_get, rt_index_set, rt_slice, rt_string_concat, rt_string_data, rt_string_len,
-    rt_string_new, rt_tuple_get, rt_tuple_len, rt_tuple_new, rt_tuple_set,
+    rt_cstring_to_text, rt_index_get, rt_index_set, rt_slice, rt_string_concat, rt_string_data, rt_string_ends_with,
+    rt_string_len, rt_string_new, rt_string_starts_with, rt_tuple_get, rt_tuple_len, rt_tuple_new, rt_tuple_set,
 };
 
 // Re-export dict FFI functions
@@ -835,6 +872,9 @@ pub fn clear_all_runtime_registries() {
 
     // Clear memory-mapped file registry
     file_io::clear_mmap_registry();
+
+    // Clear FFI type registry
+    rt_ffi_clear_registry();
 
     // Clear ratatui registry (if enabled)
     #[cfg(feature = "ratatui-tui")]

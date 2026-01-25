@@ -163,6 +163,9 @@ impl HasEffects for MirInst {
             MirInst::Drop { .. } => Effect::Io,
             // EndScope is a no-op marker for lifetime analysis
             MirInst::EndScope { .. } => Effect::Compute,
+
+            // Extern class FFI method calls - treated as IO since they call native code
+            MirInst::ExternMethodCall { .. } => Effect::Io,
         }
     }
 }

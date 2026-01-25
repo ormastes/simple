@@ -271,3 +271,61 @@ pub fn run_mcp(args: &[String]) -> i32 {
         }
     }
 }
+
+/// Run constraint analysis on a source file
+pub fn run_constr(args: &[String]) -> i32 {
+    if args.len() < 2 {
+        eprintln!("error: constr requires a source file");
+        eprintln!("Usage: simple constr <file.spl> [--json] [--verbose]");
+        eprintln!();
+        eprintln!("Constraint Analysis:");
+        eprintln!("  Analyzes type constraints and inference in the source file.");
+        eprintln!();
+        eprintln!("Options:");
+        eprintln!("  --json      Output as JSON");
+        eprintln!("  --verbose   Show detailed constraint solving steps");
+        return 1;
+    }
+
+    let path = PathBuf::from(&args[1]);
+    let json_output = args.iter().any(|a| a == "--json");
+    let verbose = args.iter().any(|a| a == "--verbose");
+
+    // Read source file
+    let source = match fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("error: cannot read {}: {}", path.display(), e);
+            return 1;
+        }
+    };
+
+    // Parse source
+    let mut parser = Parser::new(&source);
+    let ast = match parser.parse() {
+        Ok(ast) => ast,
+        Err(e) => {
+            eprintln!("error: parse error: {:?}", e);
+            return 1;
+        }
+    };
+
+    // TODO: Implement full constraint analysis
+    // For now, output basic structure info
+    if json_output {
+        println!("{{");
+        println!("  \"file\": \"{}\",", path.display());
+        println!("  \"status\": \"pending\",");
+        println!("  \"message\": \"Constraint analysis not yet implemented\"");
+        println!("}}");
+    } else {
+        println!("Constraint Analysis: {}", path.display());
+        println!("  Items: {}", ast.items.len());
+        if verbose {
+            println!("  Note: Full constraint analysis is pending implementation");
+        }
+        println!("  Status: pending implementation");
+    }
+
+    0
+}

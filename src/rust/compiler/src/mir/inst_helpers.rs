@@ -119,7 +119,8 @@ impl MirInst {
             | MirInst::InterpCall { dest, .. }
             | MirInst::MethodCallStatic { dest, .. }
             | MirInst::MethodCallVirtual { dest, .. }
-            | MirInst::BuiltinMethod { dest, .. } => *dest,
+            | MirInst::BuiltinMethod { dest, .. }
+            | MirInst::ExternMethodCall { dest, .. } => *dest,
             _ => None,
         }
     }
@@ -295,6 +296,16 @@ impl MirInst {
             MirInst::BuiltinMethod { receiver, args, .. } => {
                 let mut v = Vec::with_capacity(1 + args.len());
                 v.push(*receiver);
+                v.extend(args.iter().copied());
+                v
+            }
+            MirInst::ExternMethodCall {
+                receiver, args, ..
+            } => {
+                let mut v = Vec::with_capacity(1 + args.len());
+                if let Some(r) = receiver {
+                    v.push(*r);
+                }
                 v.extend(args.iter().copied());
                 v
             }

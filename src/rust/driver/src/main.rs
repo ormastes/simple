@@ -17,7 +17,7 @@ use simple_driver::cli::check::{CheckOptions, run_check};
 use simple_driver::cli::code_quality::{run_fmt, run_lint};
 use simple_driver::cli::gen_lean::run_gen_lean;
 use simple_driver::cli::help::{print_help, print_version, version};
-use simple_driver::cli::llm_tools::{run_context, run_diff, run_mcp};
+use simple_driver::cli::llm_tools::{run_constr, run_context, run_diff, run_mcp};
 use simple_driver::cli::migrate::run_migrate;
 use simple_driver::cli::repl::run_repl;
 use simple_driver::cli::sandbox::{apply_sandbox, parse_sandbox_config};
@@ -146,6 +146,7 @@ fn main() {
         "mcp" => run_mcp(&args),
         "diff" => run_diff(&args),
         "context" => run_context(&args),
+        "constr" => run_constr(&args),
 
         // Analysis
         "query" => run_query(&args),

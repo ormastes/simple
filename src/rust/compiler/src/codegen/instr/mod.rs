@@ -33,6 +33,7 @@ pub mod contracts;
 pub mod core;
 pub mod coverage;
 pub mod enum_union;
+pub mod extern_classes;
 pub mod fields;
 pub mod helpers;
 pub mod interpreter;
@@ -74,6 +75,7 @@ use enum_union::{
     compile_enum_discriminant, compile_enum_payload, compile_union_discriminant, compile_union_payload,
     compile_union_wrap,
 };
+use extern_classes::compile_extern_method_call;
 use fields::{compile_field_get, compile_field_set};
 use interpreter::{compile_contract_old_capture, compile_interp_eval};
 use memory::{compile_gc_alloc, compile_get_element_ptr, compile_load, compile_local_addr, compile_store, compile_wait};
@@ -440,6 +442,26 @@ pub fn compile_instruction<M: Module>(
             args,
         } => {
             compile_builtin_method(ctx, builder, dest, *receiver, receiver_type, method, args)?;
+        }
+
+        MirInst::ExternMethodCall {
+            dest,
+            receiver,
+            class_name,
+            method_name,
+            is_static,
+            args,
+        } => {
+            compile_extern_method_call(
+                ctx,
+                builder,
+                dest,
+                receiver.as_ref().copied(),
+                class_name,
+                method_name,
+                *is_static,
+                args,
+            )?;
         }
 
         MirInst::PatternTest { dest, subject, pattern } => {

@@ -33,6 +33,8 @@ pub enum HeapObjectType {
     BTreeMap = 0x18,
     HashSet = 0x19,
     BTreeSet = 0x1A,
+    // FFI-wrapped Rust objects (object-based FFI system)
+    FfiObject = 0x1B,
 }
 
 /// Header for all heap-allocated objects

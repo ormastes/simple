@@ -337,6 +337,10 @@ impl<'a> TypeTranslator<'a> {
                 let inner_type = self.translate(*inner)?;
                 Ok(LeanType::Named(format!("IO ({})", inner_type.to_lean())))
             }
+            HirType::ExternClass { name } => {
+                // Extern classes are opaque types in Lean
+                Ok(LeanType::Primitive(name.clone()))
+            }
             HirType::Unknown => Ok(LeanType::Primitive("Unit".to_string())),
         }
     }

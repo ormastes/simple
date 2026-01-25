@@ -378,6 +378,11 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                 extern_functions.insert(ext.name.clone(), ext.clone());
                 EXTERN_FUNCTIONS.with(|cell| cell.borrow_mut().insert(ext.name.clone()));
             }
+            Node::ExternClass(ec) => {
+                // Register extern class as a type for FFI object creation
+                // In the interpreter, extern classes are handled via runtime FFI calls
+                env.insert(ec.name.clone(), Value::Nil);
+            }
             Node::Macro(m) => {
                 macros.insert(m.name.clone(), m.clone());
                 USER_MACROS.with(|cell| cell.borrow_mut().insert(m.name.clone(), m.clone()));

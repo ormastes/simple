@@ -1,0 +1,319 @@
+# Simple Language - Unified CLI (Written in Simple)
+#
+# This is the main entry point for the Simple CLI, written in Simple itself.
+# It delegates to Rust FFI functions for the actual implementation.
+#
+# Usage like Python:
+#   simple              - Start interactive REPL
+#   simple file.spl     - Run source file
+#   simple file.smf     - Run compiled binary
+#   simple -c "code"    - Run code string
+#   simple compile src.spl [-o out.smf]  - Compile to SMF
+#   simple watch file.spl  - Watch and auto-recompile
+
+# FFI function declarations for CLI operations
+extern fn rt_cli_version() -> str
+extern fn rt_cli_print_help()
+extern fn rt_cli_print_version()
+extern fn rt_cli_get_args() -> [str]
+extern fn rt_cli_file_exists(path: str) -> bool
+extern fn rt_cli_exit(code: i64)
+
+# Code execution
+extern fn rt_cli_run_code(code: str, gc_log: bool, gc_off: bool) -> i64
+extern fn rt_cli_run_file(path: str, args: [str], gc_log: bool, gc_off: bool) -> i64
+extern fn rt_cli_watch_file(path: str) -> i64
+extern fn rt_cli_run_repl(gc_log: bool, gc_off: bool) -> i64
+
+# Testing
+extern fn rt_cli_run_tests(args: [str], gc_log: bool, gc_off: bool) -> i64
+
+# Code quality
+extern fn rt_cli_run_lint(args: [str]) -> i64
+extern fn rt_cli_run_fmt(args: [str]) -> i64
+extern fn rt_cli_run_check(args: [str]) -> i64
+
+# Verification
+extern fn rt_cli_run_verify(args: [str], gc_log: bool, gc_off: bool) -> i64
+
+# Migration and tooling
+extern fn rt_cli_run_migrate(args: [str]) -> i64
+extern fn rt_cli_run_mcp(args: [str]) -> i64
+extern fn rt_cli_run_diff(args: [str]) -> i64
+extern fn rt_cli_run_constr(args: [str]) -> i64
+
+# Analysis
+extern fn rt_cli_run_query(args: [str]) -> i64
+extern fn rt_cli_run_info(args: [str]) -> i64
+
+# Auditing
+extern fn rt_cli_run_spec_coverage(args: [str]) -> i64
+extern fn rt_cli_run_replay(args: [str]) -> i64
+
+# Code generation
+extern fn rt_cli_run_gen_lean(args: [str]) -> i64
+extern fn rt_cli_run_feature_gen(args: [str]) -> i64
+extern fn rt_cli_run_task_gen(args: [str]) -> i64
+extern fn rt_cli_run_spec_gen(args: [str]) -> i64
+extern fn rt_cli_run_todo_scan(args: [str]) -> i64
+extern fn rt_cli_run_todo_gen(args: [str]) -> i64
+
+# i18n
+extern fn rt_cli_run_i18n(args: [str]) -> i64
+
+# Compilation
+extern fn rt_cli_handle_compile(args: [str]) -> i64
+extern fn rt_cli_handle_targets() -> i64
+extern fn rt_cli_handle_linkers() -> i64
+
+# Web framework
+extern fn rt_cli_handle_web(args: [str]) -> i64
+
+# Diagram generation
+extern fn rt_cli_handle_diagram(args: [str]) -> i64
+
+# Package management
+extern fn rt_cli_handle_init(args: [str]) -> i64
+extern fn rt_cli_handle_add(args: [str]) -> i64
+extern fn rt_cli_handle_remove(args: [str]) -> i64
+extern fn rt_cli_handle_install() -> i64
+extern fn rt_cli_handle_update(args: [str]) -> i64
+extern fn rt_cli_handle_list() -> i64
+extern fn rt_cli_handle_tree() -> i64
+extern fn rt_cli_handle_cache(args: [str]) -> i64
+
+# Environment management
+extern fn rt_cli_handle_env(args: [str]) -> i64
+
+# Lock file management
+extern fn rt_cli_handle_lock(args: [str]) -> i64
+
+# Explicit run command
+extern fn rt_cli_handle_run(args: [str], gc_log: bool, gc_off: bool) -> i64
+
+# Global flags struct
+struct GlobalFlags:
+    gc_log: bool
+    gc_off: bool
+    use_notui: bool
+
+fn parse_global_flags(args: [str]) -> GlobalFlags:
+    var gc_log = false
+    var gc_off = false
+    var use_notui = false
+
+    for arg in args:
+        if arg == "--gc-log":
+            gc_log = true
+        elif arg == "--gc-off":
+            gc_off = true
+        elif arg == "--notui":
+            use_notui = true
+
+    GlobalFlags(gc_log: gc_log, gc_off: gc_off, use_notui: use_notui)
+
+fn filter_internal_flags(args: [str]) -> [str]:
+    var result = []
+    for arg in args:
+        if not arg.starts_with("--gc") and arg != "--notui" and arg != "--lang":
+            # Also filter --lang=xx pattern
+            if not arg.starts_with("--lang="):
+                result.push(arg)
+    result
+
+fn main() -> i64:
+    # Get command line arguments
+    val all_args = rt_cli_get_args()
+
+    # Skip the program name (argv[0])
+    var args = []
+    var i = 1
+    while i < all_args.len():
+        args.push(all_args[i])
+        i = i + 1
+
+    # Parse global flags
+    val flags = parse_global_flags(args)
+
+    # Filter out internal flags
+    val filtered_args = filter_internal_flags(args)
+
+    # No arguments -> REPL
+    if filtered_args.len() == 0:
+        return rt_cli_run_repl(flags.gc_log, flags.gc_off)
+
+    val first = filtered_args[0]
+
+    # Route commands to handlers
+    match first:
+        # Help and version
+        case "-h" | "--help":
+            rt_cli_print_help()
+            return 0
+
+        case "-v" | "--version":
+            rt_cli_print_version()
+            return 0
+
+        # Code execution
+        case "-c":
+            if filtered_args.len() < 2:
+                print "error: -c requires a code argument"
+                return 1
+            return rt_cli_run_code(filtered_args[1], flags.gc_log, flags.gc_off)
+
+        # Compilation commands
+        case "compile":
+            return rt_cli_handle_compile(filtered_args)
+
+        case "targets":
+            return rt_cli_handle_targets()
+
+        case "linkers":
+            return rt_cli_handle_linkers()
+
+        # Web framework
+        case "web":
+            return rt_cli_handle_web(filtered_args)
+
+        # File watching
+        case "watch":
+            if filtered_args.len() < 2:
+                print "error: watch requires a source file"
+                print "Usage: simple watch <file.spl>"
+                return 1
+            return rt_cli_watch_file(filtered_args[1])
+
+        # Testing
+        case "test":
+            val test_args = filtered_args[1:]
+            return rt_cli_run_tests(test_args, flags.gc_log, flags.gc_off)
+
+        # Code quality
+        case "lint":
+            return rt_cli_run_lint(filtered_args)
+
+        case "fmt":
+            return rt_cli_run_fmt(filtered_args)
+
+        case "check":
+            val check_args = filtered_args[1:]
+            return rt_cli_run_check(check_args)
+
+        # Localization
+        case "i18n":
+            return rt_cli_run_i18n(filtered_args)
+
+        # Migration and tooling
+        case "migrate":
+            return rt_cli_run_migrate(filtered_args)
+
+        case "mcp":
+            return rt_cli_run_mcp(filtered_args)
+
+        case "diff":
+            return rt_cli_run_diff(filtered_args)
+
+        case "constr":
+            return rt_cli_run_constr(filtered_args)
+
+        # Analysis
+        case "query":
+            return rt_cli_run_query(filtered_args)
+
+        case "info":
+            return rt_cli_run_info(filtered_args)
+
+        # Auditing
+        case "spec-coverage":
+            return rt_cli_run_spec_coverage(filtered_args)
+
+        case "replay":
+            return rt_cli_run_replay(filtered_args)
+
+        # Code generation
+        case "gen-lean":
+            return rt_cli_run_gen_lean(filtered_args)
+
+        case "feature-gen":
+            return rt_cli_run_feature_gen(filtered_args)
+
+        case "task-gen":
+            return rt_cli_run_task_gen(filtered_args)
+
+        case "spec-gen":
+            return rt_cli_run_spec_gen(filtered_args)
+
+        case "todo-scan":
+            return rt_cli_run_todo_scan(filtered_args)
+
+        case "todo-gen":
+            return rt_cli_run_todo_gen(filtered_args)
+
+        # Dashboard
+        case "dashboard":
+            print "Dashboard command - implementation in progress"
+            print "Usage: simple dashboard [status|collect|help]"
+            return 0
+
+        # Verification
+        case "verify":
+            return rt_cli_run_verify(filtered_args, flags.gc_log, flags.gc_off)
+
+        # Diagram generation
+        case "diagram":
+            return rt_cli_handle_diagram(filtered_args)
+
+        # Package management
+        case "init":
+            return rt_cli_handle_init(filtered_args)
+
+        case "add":
+            return rt_cli_handle_add(filtered_args)
+
+        case "remove":
+            return rt_cli_handle_remove(filtered_args)
+
+        case "install":
+            return rt_cli_handle_install()
+
+        case "update":
+            return rt_cli_handle_update(filtered_args)
+
+        case "list":
+            return rt_cli_handle_list()
+
+        case "tree":
+            return rt_cli_handle_tree()
+
+        case "cache":
+            return rt_cli_handle_cache(filtered_args)
+
+        # Environment management
+        case "env":
+            return rt_cli_handle_env(filtered_args)
+
+        # Lock file management
+        case "lock":
+            return rt_cli_handle_lock(filtered_args)
+
+        # Explicit run command
+        case "run":
+            return rt_cli_handle_run(filtered_args, flags.gc_log, flags.gc_off)
+
+        # Default: assume it's a file to run
+        case _:
+            if rt_cli_file_exists(first):
+                # Collect remaining arguments to pass to the Simple program
+                var program_args = [first]
+                var j = 1
+                while j < filtered_args.len():
+                    program_args.push(filtered_args[j])
+                    j = j + 1
+
+                return rt_cli_run_file(first, program_args, flags.gc_log, flags.gc_off)
+            else:
+                print "error: file not found: {first}"
+                print ""
+                rt_cli_print_help()
+                return 1
