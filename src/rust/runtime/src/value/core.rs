@@ -1,5 +1,7 @@
 //! Core RuntimeValue type and operations.
 
+use simple_hir_core::ValueKind;
+
 use super::heap::{HeapHeader, HeapObjectType};
 use super::tags;
 
@@ -423,6 +425,55 @@ impl RuntimeValue {
                 None => "null",
             },
             _ => "unknown",
+        }
+    }
+
+    /// Get the abstract value kind from hir-core.
+    ///
+    /// This provides a unified type abstraction shared with the interpreter.
+    pub fn value_kind(self) -> ValueKind {
+        match self.tag() {
+            tags::TAG_INT => ValueKind::Int,
+            tags::TAG_FLOAT => ValueKind::Float,
+            tags::TAG_SPECIAL => {
+                let payload = self.payload();
+                match payload {
+                    tags::SPECIAL_NIL => ValueKind::Nil,
+                    tags::SPECIAL_TRUE | tags::SPECIAL_FALSE => ValueKind::Bool,
+                    _ => ValueKind::Symbol,
+                }
+            }
+            tags::TAG_HEAP => match self.heap_type() {
+                Some(HeapObjectType::String) => ValueKind::String,
+                Some(HeapObjectType::Array) => ValueKind::Array,
+                Some(HeapObjectType::Dict) => ValueKind::Dict,
+                Some(HeapObjectType::Tuple) => ValueKind::Tuple,
+                Some(HeapObjectType::Object) => ValueKind::Object,
+                Some(HeapObjectType::Closure) => ValueKind::Closure,
+                Some(HeapObjectType::Enum) => ValueKind::Enum,
+                Some(HeapObjectType::Future) => ValueKind::Future,
+                Some(HeapObjectType::Generator) => ValueKind::Generator,
+                Some(HeapObjectType::Actor) => ValueKind::Actor,
+                Some(HeapObjectType::Unique) => ValueKind::Unique,
+                Some(HeapObjectType::Shared) => ValueKind::Shared,
+                Some(HeapObjectType::Borrow) => ValueKind::Borrow,
+                Some(HeapObjectType::Channel) => ValueKind::Channel,
+                Some(HeapObjectType::Weak) => ValueKind::Weak,
+                Some(HeapObjectType::ContractViolation) => ValueKind::ContractViolation,
+                Some(HeapObjectType::Mutex) => ValueKind::Mutex,
+                Some(HeapObjectType::RwLock) => ValueKind::RwLock,
+                Some(HeapObjectType::Semaphore) => ValueKind::Semaphore,
+                Some(HeapObjectType::Barrier) => ValueKind::Barrier,
+                Some(HeapObjectType::Atomic) => ValueKind::Atomic,
+                Some(HeapObjectType::MonoioFuture) => ValueKind::MonoioFuture,
+                Some(HeapObjectType::HashMap) => ValueKind::HashMap,
+                Some(HeapObjectType::BTreeMap) => ValueKind::BTreeMap,
+                Some(HeapObjectType::HashSet) => ValueKind::HashSet,
+                Some(HeapObjectType::BTreeSet) => ValueKind::BTreeSet,
+                Some(HeapObjectType::FfiObject) => ValueKind::FfiObject,
+                None => ValueKind::Nil,
+            },
+            _ => ValueKind::Nil,
         }
     }
 }

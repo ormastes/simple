@@ -9,6 +9,31 @@ use super::{
     rt_array_pop,
     rt_array_push,
     rt_array_set,
+    // New array functions
+    rt_array_reverse,
+    rt_array_reversed,
+    rt_array_sort,
+    rt_array_sorted,
+    rt_array_first,
+    rt_array_last,
+    rt_array_index_of,
+    rt_array_concat,
+    rt_array_copy,
+    rt_array_sum,
+    rt_array_min,
+    rt_array_max,
+    rt_array_count,
+    rt_array_zip,
+    rt_array_enumerate,
+    rt_array_flatten,
+    rt_array_unique,
+    rt_array_take,
+    rt_array_drop,
+    rt_array_range,
+    rt_array_repeat,
+    rt_array_fill,
+    rt_array_all_truthy,
+    rt_array_any_truthy,
     rt_string_concat,
     rt_string_data,
     rt_string_len,
@@ -455,3 +480,373 @@ fn test_dict_invalid_value() {
 //     }
 //     assert_eq!(rt_dict_len(dict), 20);
 // }
+
+// ============================================================================
+// New Array Utility Function Tests
+// ============================================================================
+
+#[test]
+fn test_array_reverse() {
+    let array = rt_array_new(5);
+    rt_array_push(array, RuntimeValue::from_int(1));
+    rt_array_push(array, RuntimeValue::from_int(2));
+    rt_array_push(array, RuntimeValue::from_int(3));
+
+    assert!(rt_array_reverse(array));
+
+    assert_eq!(rt_array_get(array, 0).as_int(), 3);
+    assert_eq!(rt_array_get(array, 1).as_int(), 2);
+    assert_eq!(rt_array_get(array, 2).as_int(), 1);
+}
+
+#[test]
+fn test_array_reversed() {
+    let array = rt_array_new(5);
+    rt_array_push(array, RuntimeValue::from_int(1));
+    rt_array_push(array, RuntimeValue::from_int(2));
+    rt_array_push(array, RuntimeValue::from_int(3));
+
+    let result = rt_array_reversed(array);
+
+    // Original unchanged
+    assert_eq!(rt_array_get(array, 0).as_int(), 1);
+
+    // New array is reversed
+    assert_eq!(rt_array_get(result, 0).as_int(), 3);
+    assert_eq!(rt_array_get(result, 1).as_int(), 2);
+    assert_eq!(rt_array_get(result, 2).as_int(), 1);
+}
+
+#[test]
+fn test_array_sort() {
+    let array = rt_array_new(5);
+    rt_array_push(array, RuntimeValue::from_int(3));
+    rt_array_push(array, RuntimeValue::from_int(1));
+    rt_array_push(array, RuntimeValue::from_int(4));
+    rt_array_push(array, RuntimeValue::from_int(1));
+    rt_array_push(array, RuntimeValue::from_int(5));
+
+    assert!(rt_array_sort(array));
+
+    assert_eq!(rt_array_get(array, 0).as_int(), 1);
+    assert_eq!(rt_array_get(array, 1).as_int(), 1);
+    assert_eq!(rt_array_get(array, 2).as_int(), 3);
+    assert_eq!(rt_array_get(array, 3).as_int(), 4);
+    assert_eq!(rt_array_get(array, 4).as_int(), 5);
+}
+
+#[test]
+fn test_array_sorted() {
+    let array = rt_array_new(3);
+    rt_array_push(array, RuntimeValue::from_int(3));
+    rt_array_push(array, RuntimeValue::from_int(1));
+    rt_array_push(array, RuntimeValue::from_int(2));
+
+    let result = rt_array_sorted(array);
+
+    // Original unchanged
+    assert_eq!(rt_array_get(array, 0).as_int(), 3);
+
+    // New array is sorted
+    assert_eq!(rt_array_get(result, 0).as_int(), 1);
+    assert_eq!(rt_array_get(result, 1).as_int(), 2);
+    assert_eq!(rt_array_get(result, 2).as_int(), 3);
+}
+
+#[test]
+fn test_array_first_last() {
+    let array = rt_array_new(3);
+    rt_array_push(array, RuntimeValue::from_int(10));
+    rt_array_push(array, RuntimeValue::from_int(20));
+    rt_array_push(array, RuntimeValue::from_int(30));
+
+    assert_eq!(rt_array_first(array).as_int(), 10);
+    assert_eq!(rt_array_last(array).as_int(), 30);
+
+    // Empty array
+    let empty = rt_array_new(0);
+    assert!(rt_array_first(empty).is_nil());
+    assert!(rt_array_last(empty).is_nil());
+}
+
+#[test]
+fn test_array_index_of() {
+    let array = rt_array_new(5);
+    rt_array_push(array, RuntimeValue::from_int(10));
+    rt_array_push(array, RuntimeValue::from_int(20));
+    rt_array_push(array, RuntimeValue::from_int(30));
+    rt_array_push(array, RuntimeValue::from_int(20));
+
+    assert_eq!(rt_array_index_of(array, RuntimeValue::from_int(20)), 1);
+    assert_eq!(rt_array_index_of(array, RuntimeValue::from_int(30)), 2);
+    assert_eq!(rt_array_index_of(array, RuntimeValue::from_int(99)), -1);
+}
+
+#[test]
+fn test_array_concat() {
+    let a = rt_array_new(2);
+    rt_array_push(a, RuntimeValue::from_int(1));
+    rt_array_push(a, RuntimeValue::from_int(2));
+
+    let b = rt_array_new(2);
+    rt_array_push(b, RuntimeValue::from_int(3));
+    rt_array_push(b, RuntimeValue::from_int(4));
+
+    let result = rt_array_concat(a, b);
+
+    assert_eq!(rt_array_len(result), 4);
+    assert_eq!(rt_array_get(result, 0).as_int(), 1);
+    assert_eq!(rt_array_get(result, 1).as_int(), 2);
+    assert_eq!(rt_array_get(result, 2).as_int(), 3);
+    assert_eq!(rt_array_get(result, 3).as_int(), 4);
+}
+
+#[test]
+fn test_array_copy() {
+    let array = rt_array_new(3);
+    rt_array_push(array, RuntimeValue::from_int(1));
+    rt_array_push(array, RuntimeValue::from_int(2));
+    rt_array_push(array, RuntimeValue::from_int(3));
+
+    let copy = rt_array_copy(array);
+
+    assert_eq!(rt_array_len(copy), 3);
+    assert_eq!(rt_array_get(copy, 0).as_int(), 1);
+    assert_eq!(rt_array_get(copy, 1).as_int(), 2);
+    assert_eq!(rt_array_get(copy, 2).as_int(), 3);
+
+    // Modify original, copy should be unchanged
+    rt_array_set(array, 0, RuntimeValue::from_int(99));
+    assert_eq!(rt_array_get(copy, 0).as_int(), 1);
+}
+
+#[test]
+fn test_array_sum() {
+    let array = rt_array_new(4);
+    rt_array_push(array, RuntimeValue::from_int(1));
+    rt_array_push(array, RuntimeValue::from_int(2));
+    rt_array_push(array, RuntimeValue::from_int(3));
+    rt_array_push(array, RuntimeValue::from_int(4));
+
+    let sum = rt_array_sum(array);
+    assert_eq!(sum.as_int(), 10);
+
+    // Empty array
+    let empty = rt_array_new(0);
+    assert_eq!(rt_array_sum(empty).as_int(), 0);
+}
+
+#[test]
+fn test_array_min_max() {
+    let array = rt_array_new(5);
+    rt_array_push(array, RuntimeValue::from_int(3));
+    rt_array_push(array, RuntimeValue::from_int(1));
+    rt_array_push(array, RuntimeValue::from_int(4));
+    rt_array_push(array, RuntimeValue::from_int(1));
+    rt_array_push(array, RuntimeValue::from_int(5));
+
+    assert_eq!(rt_array_min(array).as_int(), 1);
+    assert_eq!(rt_array_max(array).as_int(), 5);
+
+    // Empty array
+    let empty = rt_array_new(0);
+    assert!(rt_array_min(empty).is_nil());
+    assert!(rt_array_max(empty).is_nil());
+}
+
+#[test]
+fn test_array_count() {
+    let array = rt_array_new(5);
+    rt_array_push(array, RuntimeValue::from_int(1));
+    rt_array_push(array, RuntimeValue::from_int(2));
+    rt_array_push(array, RuntimeValue::from_int(1));
+    rt_array_push(array, RuntimeValue::from_int(3));
+    rt_array_push(array, RuntimeValue::from_int(1));
+
+    assert_eq!(rt_array_count(array, RuntimeValue::from_int(1)), 3);
+    assert_eq!(rt_array_count(array, RuntimeValue::from_int(2)), 1);
+    assert_eq!(rt_array_count(array, RuntimeValue::from_int(99)), 0);
+}
+
+#[test]
+fn test_array_zip() {
+    let a = rt_array_new(3);
+    rt_array_push(a, RuntimeValue::from_int(1));
+    rt_array_push(a, RuntimeValue::from_int(2));
+    rt_array_push(a, RuntimeValue::from_int(3));
+
+    let b = rt_array_new(3);
+    rt_array_push(b, RuntimeValue::from_int(10));
+    rt_array_push(b, RuntimeValue::from_int(20));
+    rt_array_push(b, RuntimeValue::from_int(30));
+
+    let result = rt_array_zip(a, b);
+
+    assert_eq!(rt_array_len(result), 3);
+
+    // First tuple: (1, 10)
+    let t0 = rt_array_get(result, 0);
+    assert_eq!(rt_tuple_get(t0, 0).as_int(), 1);
+    assert_eq!(rt_tuple_get(t0, 1).as_int(), 10);
+
+    // Second tuple: (2, 20)
+    let t1 = rt_array_get(result, 1);
+    assert_eq!(rt_tuple_get(t1, 0).as_int(), 2);
+    assert_eq!(rt_tuple_get(t1, 1).as_int(), 20);
+}
+
+#[test]
+fn test_array_enumerate() {
+    let array = rt_array_new(3);
+    rt_array_push(array, RuntimeValue::from_int(10));
+    rt_array_push(array, RuntimeValue::from_int(20));
+    rt_array_push(array, RuntimeValue::from_int(30));
+
+    let result = rt_array_enumerate(array);
+
+    assert_eq!(rt_array_len(result), 3);
+
+    // First tuple: (0, 10)
+    let t0 = rt_array_get(result, 0);
+    assert_eq!(rt_tuple_get(t0, 0).as_int(), 0);
+    assert_eq!(rt_tuple_get(t0, 1).as_int(), 10);
+
+    // Third tuple: (2, 30)
+    let t2 = rt_array_get(result, 2);
+    assert_eq!(rt_tuple_get(t2, 0).as_int(), 2);
+    assert_eq!(rt_tuple_get(t2, 1).as_int(), 30);
+}
+
+#[test]
+fn test_array_flatten() {
+    let inner1 = rt_array_new(2);
+    rt_array_push(inner1, RuntimeValue::from_int(1));
+    rt_array_push(inner1, RuntimeValue::from_int(2));
+
+    let inner2 = rt_array_new(2);
+    rt_array_push(inner2, RuntimeValue::from_int(3));
+    rt_array_push(inner2, RuntimeValue::from_int(4));
+
+    let outer = rt_array_new(3);
+    rt_array_push(outer, inner1);
+    rt_array_push(outer, inner2);
+    rt_array_push(outer, RuntimeValue::from_int(5)); // Non-array element
+
+    let result = rt_array_flatten(outer);
+
+    assert_eq!(rt_array_len(result), 5);
+    assert_eq!(rt_array_get(result, 0).as_int(), 1);
+    assert_eq!(rt_array_get(result, 1).as_int(), 2);
+    assert_eq!(rt_array_get(result, 2).as_int(), 3);
+    assert_eq!(rt_array_get(result, 3).as_int(), 4);
+    assert_eq!(rt_array_get(result, 4).as_int(), 5);
+}
+
+#[test]
+fn test_array_unique() {
+    let array = rt_array_new(6);
+    rt_array_push(array, RuntimeValue::from_int(1));
+    rt_array_push(array, RuntimeValue::from_int(2));
+    rt_array_push(array, RuntimeValue::from_int(1));
+    rt_array_push(array, RuntimeValue::from_int(3));
+    rt_array_push(array, RuntimeValue::from_int(2));
+    rt_array_push(array, RuntimeValue::from_int(1));
+
+    let result = rt_array_unique(array);
+
+    assert_eq!(rt_array_len(result), 3);
+    assert_eq!(rt_array_get(result, 0).as_int(), 1);
+    assert_eq!(rt_array_get(result, 1).as_int(), 2);
+    assert_eq!(rt_array_get(result, 2).as_int(), 3);
+}
+
+#[test]
+fn test_array_take_drop() {
+    let array = rt_array_new(5);
+    for i in 1..=5 {
+        rt_array_push(array, RuntimeValue::from_int(i));
+    }
+
+    // Take first 3
+    let taken = rt_array_take(array, 3);
+    assert_eq!(rt_array_len(taken), 3);
+    assert_eq!(rt_array_get(taken, 0).as_int(), 1);
+    assert_eq!(rt_array_get(taken, 2).as_int(), 3);
+
+    // Drop first 2
+    let dropped = rt_array_drop(array, 2);
+    assert_eq!(rt_array_len(dropped), 3);
+    assert_eq!(rt_array_get(dropped, 0).as_int(), 3);
+    assert_eq!(rt_array_get(dropped, 2).as_int(), 5);
+}
+
+#[test]
+fn test_array_range() {
+    // Basic range
+    let r1 = rt_array_range(0, 5, 1);
+    assert_eq!(rt_array_len(r1), 5);
+    assert_eq!(rt_array_get(r1, 0).as_int(), 0);
+    assert_eq!(rt_array_get(r1, 4).as_int(), 4);
+
+    // With step
+    let r2 = rt_array_range(0, 10, 2);
+    assert_eq!(rt_array_len(r2), 5);
+    assert_eq!(rt_array_get(r2, 0).as_int(), 0);
+    assert_eq!(rt_array_get(r2, 2).as_int(), 4);
+
+    // Negative step
+    let r3 = rt_array_range(5, 0, -1);
+    assert_eq!(rt_array_len(r3), 5);
+    assert_eq!(rt_array_get(r3, 0).as_int(), 5);
+    assert_eq!(rt_array_get(r3, 4).as_int(), 1);
+}
+
+#[test]
+fn test_array_repeat() {
+    let result = rt_array_repeat(RuntimeValue::from_int(42), 5);
+
+    assert_eq!(rt_array_len(result), 5);
+    for i in 0..5 {
+        assert_eq!(rt_array_get(result, i).as_int(), 42);
+    }
+}
+
+#[test]
+fn test_array_fill() {
+    let array = rt_array_new(3);
+    rt_array_push(array, RuntimeValue::from_int(1));
+    rt_array_push(array, RuntimeValue::from_int(2));
+    rt_array_push(array, RuntimeValue::from_int(3));
+
+    assert!(rt_array_fill(array, RuntimeValue::from_int(0)));
+
+    assert_eq!(rt_array_get(array, 0).as_int(), 0);
+    assert_eq!(rt_array_get(array, 1).as_int(), 0);
+    assert_eq!(rt_array_get(array, 2).as_int(), 0);
+}
+
+#[test]
+fn test_array_all_any_truthy() {
+    let all_true = rt_array_new(3);
+    rt_array_push(all_true, RuntimeValue::from_int(1));
+    rt_array_push(all_true, RuntimeValue::from_int(2));
+    rt_array_push(all_true, RuntimeValue::from_int(3));
+
+    assert_eq!(rt_array_all_truthy(all_true), 1);
+    assert_eq!(rt_array_any_truthy(all_true), 1);
+
+    let has_zero = rt_array_new(3);
+    rt_array_push(has_zero, RuntimeValue::from_int(1));
+    rt_array_push(has_zero, RuntimeValue::from_int(0));
+    rt_array_push(has_zero, RuntimeValue::from_int(3));
+
+    assert_eq!(rt_array_all_truthy(has_zero), 0);
+    assert_eq!(rt_array_any_truthy(has_zero), 1);
+
+    let all_zero = rt_array_new(2);
+    rt_array_push(all_zero, RuntimeValue::from_int(0));
+    rt_array_push(all_zero, RuntimeValue::from_int(0));
+
+    assert_eq!(rt_array_all_truthy(all_zero), 0);
+    assert_eq!(rt_array_any_truthy(all_zero), 0);
+}

@@ -96,6 +96,7 @@ impl Container:
 
     me register_defaults():
         """Register default bindings based on profile."""
+        # Register instruction modules
         match self.profile:
             case "test":
                 self.register_test_bindings()
@@ -107,6 +108,9 @@ impl Container:
                 self.register_sdn_bindings()
             case _:
                 self.register_dev_bindings()
+
+        # Register backends
+        self.register_backends_for_profile()
 
     me register_test_bindings():
         """Register test profile bindings."""
@@ -195,6 +199,207 @@ impl Container:
     fn profile_name() -> text:
         """Get current profile name."""
         self.profile
+
+# ============================================================================
+# Backend Trait (Core DI Component for HIR Processing)
+# ============================================================================
+
+trait Backend:
+    """Interface for HIR processing backends.
+
+    Different backends connect shared HIR to different execution strategies:
+    - InterpreterBackend: Tree-walking, Value enum, direct execution
+    - CompilerBackend: HIR -> MIR -> Cranelift/LLVM codegen
+    - SdnBackend: No-op, blocks all code execution for data-only parsing
+    """
+    fn process(hir: HirModule, ctx: BackendContext) -> Result<BackendOutput, text>
+    fn is_instruction_allowed(inst: HirInstruction) -> bool
+    fn name() -> text
+    fn kind() -> BackendKind
+
+enum BackendKind:
+    """Type of backend."""
+    Interpreter   # Tree-walking execution
+    Compiler      # Compiled execution
+    Sdn           # No-op (data only)
+    Custom(text)  # Custom backend
+
+struct BackendContext:
+    """Context passed to backends during processing."""
+    config: BackendConfig
+    env: Dict<text, Any>
+
+struct BackendConfig:
+    """Backend-specific configuration."""
+    mode: text              # "interpret", "jit", "aot", "sdn"
+    optimize: i64           # Optimization level
+    debug: bool             # Debug mode
+    features: [text]        # Enabled features
+
+enum BackendOutput:
+    """Result of backend processing."""
+    Interpreted(value: Value)                    # Interpreter result
+    Compiled(binary: [u8], symbols: SymbolTable) # Compiled binary
+    SdnData(data: SdnValue)                      # SDN data result
+    Custom(Any)                                  # Custom result
+
+struct SymbolTable:
+    """Symbol table from compilation."""
+    entries: Dict<text, SymbolEntry>
+
+struct SymbolEntry:
+    address: i64
+    size: i64
+    kind: text
+
+struct HirModule:
+    """HIR module representation."""
+    name: text
+    items: [HirItem]
+
+enum HirItem:
+    Function(FunctionDef)
+    Struct(StructDef)
+    Enum(EnumDef)
+    Import(ImportDef)
+    Export(ExportDef)
+
+struct FunctionDef:
+    name: text
+    params: [ParamDef]
+    body: [HirInstruction]
+    return_type: text?
+
+struct StructDef:
+    name: text
+    fields: [FieldDef]
+
+struct EnumDef:
+    name: text
+    variants: [VariantDef]
+
+struct ParamDef:
+    name: text
+    typ: text
+
+struct FieldDef:
+    name: text
+    typ: text
+
+struct VariantDef:
+    name: text
+    payload: text?
+
+struct ImportDef:
+    module: text
+    items: [text]
+
+struct ExportDef:
+    items: [text]
+
+# ============================================================================
+# Backend Implementations
+# ============================================================================
+
+struct InterpreterBackend:
+    """Tree-walking interpreter backend."""
+
+impl InterpreterBackend: Backend:
+    fn process(hir: HirModule, ctx: BackendContext) -> Result<BackendOutput, text>:
+        # Delegate to interpreter instruction module
+        val instruction_module = get_container().resolve<InstructionModule>("InstructionModule")
+        if instruction_module.is_err():
+            return Err("Failed to resolve instruction module")
+
+        # TODO: Execute HIR via instruction module
+        Ok(BackendOutput.Interpreted(Value.none()))
+
+    fn is_instruction_allowed(inst: HirInstruction) -> bool:
+        # Interpreter allows all instructions
+        true
+
+    fn name() -> text:
+        "InterpreterBackend"
+
+    fn kind() -> BackendKind:
+        BackendKind.Interpreter
+
+struct CompilerBackend:
+    """Compiling backend (HIR -> MIR -> codegen)."""
+
+impl CompilerBackend: Backend:
+    fn process(hir: HirModule, ctx: BackendContext) -> Result<BackendOutput, text>:
+        # Lower HIR to MIR, then to native code
+        # TODO: Implement via FFI to Rust codegen
+        Ok(BackendOutput.Compiled([], SymbolTable(entries: {})))
+
+    fn is_instruction_allowed(inst: HirInstruction) -> bool:
+        # Compiler allows all instructions
+        true
+
+    fn name() -> text:
+        "CompilerBackend"
+
+    fn kind() -> BackendKind:
+        BackendKind.Compiler
+
+struct SdnBackend:
+    """No-op backend for SDN parsing (data only).
+
+    Blocks ALL code execution. Only allows:
+    - Data construction (arrays, dicts, literals)
+    - No function calls, no control flow, no side effects
+    """
+
+impl SdnBackend: Backend:
+    fn process(hir: HirModule, ctx: BackendContext) -> Result<BackendOutput, text>:
+        # Only process data construction, block everything else
+        val instruction_module = NoOpInstructionModule()
+
+        for item in hir.items:
+            match item:
+                case Function(_):
+                    return Err("Functions not allowed in SDN mode")
+                case _:
+                    pass  # Structs, enums, imports/exports OK
+
+        Ok(BackendOutput.SdnData(SdnValue.empty()))
+
+    fn is_instruction_allowed(inst: HirInstruction) -> bool:
+        match inst:
+            case LoadConst(_) | ArrayNew(_) | DictNew(_):
+                true
+            case _:
+                false
+
+    fn name() -> text:
+        "SdnBackend"
+
+    fn kind() -> BackendKind:
+        BackendKind.Sdn
+
+# ============================================================================
+# Backend Registration
+# ============================================================================
+
+impl Container:
+    me register_backend(backend: Backend):
+        """Register a backend with the container."""
+        self.bind("Backend", \: backend, true)
+
+    me register_backends_for_profile():
+        """Register backends based on current profile."""
+        match self.profile:
+            case "test":
+                self.register_backend(InterpreterBackend())
+            case "dev":
+                self.register_backend(InterpreterBackend())
+            case "prod":
+                self.register_backend(CompilerBackend())
+            case "sdn":
+                self.register_backend(SdnBackend())
+            case _:
+                self.register_backend(InterpreterBackend())
 
 # ============================================================================
 # Instruction Modules (DI Components)
@@ -419,5 +624,9 @@ pub fn resolve<T>(name: text) -> Result<T, text>:
 export Container, Profile, Binding, Injectable
 export InstructionModule, MockInstructionModule, FullInstructionModule
 export OptInstructionModule, NoOpInstructionModule
-export HirInstruction, BinOpKind, ExecutionContext, Value
+export Backend, BackendKind, BackendContext, BackendConfig, BackendOutput
+export InterpreterBackend, CompilerBackend, SdnBackend
+export HirModule, HirItem, HirInstruction, BinOpKind, ExecutionContext, Value
+export FunctionDef, StructDef, EnumDef, ParamDef, FieldDef, VariantDef
+export ImportDef, ExportDef, SymbolTable, SymbolEntry
 export init_container, get_container, resolve

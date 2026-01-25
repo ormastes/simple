@@ -223,6 +223,12 @@ pub fn rt_context_stats(_args: &[Value]) -> Result<Value, CompileError> {
     interpreter_not_supported("rt_context_stats")
 }
 
+/// Settlement main entry point
+pub fn rt_settlement_main(_args: &[Value]) -> Result<Value, CompileError> {
+    // Settlement loading only works in compiled mode (reads from self)
+    interpreter_not_supported("rt_settlement_main")
+}
+
 /// Handle compile command
 pub fn rt_cli_handle_compile(_args: &[Value]) -> Result<Value, CompileError> {
     interpreter_not_supported("rt_cli_handle_compile")

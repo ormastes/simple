@@ -348,6 +348,202 @@ fn parse_execution_config(data: SdnValue?) -> ExecutionConfig:
     )
 
 # ============================================================================
+# Configuration Merging (env, args, files)
+# ============================================================================
+
+extern fn rt_env_get(key_ptr: i64, key_len: i64) -> text?
+extern fn rt_args_get() -> [text]
+
+struct EnvOverrides:
+    """Environment variable overrides for configuration."""
+    log_level: text?          # SIMPLE_LOG_LEVEL
+    profile: text?            # SIMPLE_PROFILE
+    parser_mode: text?        # SIMPLE_PARSER_MODE
+    execution_mode: text?     # SIMPLE_EXECUTION_MODE
+    debug: text?              # SIMPLE_DEBUG
+    optimize: text?           # SIMPLE_OPTIMIZE
+
+struct ArgsOverrides:
+    """Command-line argument overrides for configuration."""
+    log_level: i64?
+    profile: text?
+    parser_mode: text?
+    execution_mode: text?
+    debug: bool?
+    optimize: i64?
+    config_file: text?
+
+impl EnvOverrides:
+    static fn from_env() -> EnvOverrides:
+        """Load overrides from environment variables."""
+        EnvOverrides(
+            log_level: env_get("SIMPLE_LOG_LEVEL"),
+            profile: env_get("SIMPLE_PROFILE"),
+            parser_mode: env_get("SIMPLE_PARSER_MODE"),
+            execution_mode: env_get("SIMPLE_EXECUTION_MODE"),
+            debug: env_get("SIMPLE_DEBUG"),
+            optimize: env_get("SIMPLE_OPTIMIZE")
+        )
+
+impl ArgsOverrides:
+    static fn from_args(args: [text]) -> ArgsOverrides:
+        """Parse command-line arguments into overrides."""
+        var result = ArgsOverrides(
+            log_level: None,
+            profile: None,
+            parser_mode: None,
+            execution_mode: None,
+            debug: None,
+            optimize: None,
+            config_file: None
+        )
+
+        var i = 0
+        while i < args.len():
+            val arg = args[i]
+            match arg:
+                case "--log-level":
+                    if i + 1 < args.len():
+                        result.log_level = Some(parse_int(args[i + 1]))
+                        i = i + 1
+                case "--profile":
+                    if i + 1 < args.len():
+                        result.profile = Some(args[i + 1])
+                        i = i + 1
+                case "--parser-mode":
+                    if i + 1 < args.len():
+                        result.parser_mode = Some(args[i + 1])
+                        i = i + 1
+                case "--mode":
+                    if i + 1 < args.len():
+                        result.execution_mode = Some(args[i + 1])
+                        i = i + 1
+                case "--debug":
+                    result.debug = Some(true)
+                case "--no-debug":
+                    result.debug = Some(false)
+                case "--optimize":
+                    if i + 1 < args.len():
+                        result.optimize = Some(parse_int(args[i + 1]))
+                        i = i + 1
+                case "--config":
+                    if i + 1 < args.len():
+                        result.config_file = Some(args[i + 1])
+                        i = i + 1
+                case _:
+                    pass  # Ignore unknown args
+            i = i + 1
+
+        result
+
+impl AppConfig:
+    fn merge_env(env: EnvOverrides) -> AppConfig:
+        """Merge environment variable overrides into config."""
+        var config = self
+
+        if env.log_level.?:
+            config.log.global_level = parse_log_level(env.log_level.unwrap())
+
+        if env.profile.?:
+            config.di.profile = env.profile.unwrap()
+
+        if env.parser_mode.?:
+            config.parser.mode = env.parser_mode.unwrap()
+
+        if env.execution_mode.?:
+            config.execution.mode = env.execution_mode.unwrap()
+
+        if env.debug.?:
+            config.execution.debug = env.debug.unwrap() == "true" or env.debug.unwrap() == "1"
+
+        if env.optimize.?:
+            config.execution.optimize = parse_int(env.optimize.unwrap())
+
+        config
+
+    fn merge_args(args: ArgsOverrides) -> AppConfig:
+        """Merge command-line argument overrides into config."""
+        var config = self
+
+        if args.log_level.?:
+            config.log.global_level = args.log_level.unwrap()
+
+        if args.profile.?:
+            config.di.profile = args.profile.unwrap()
+
+        if args.parser_mode.?:
+            config.parser.mode = args.parser_mode.unwrap()
+
+        if args.execution_mode.?:
+            config.execution.mode = args.execution_mode.unwrap()
+
+        if args.debug.?:
+            config.execution.debug = args.debug.unwrap()
+
+        if args.optimize.?:
+            config.execution.optimize = args.optimize.unwrap()
+
+        config
+
+fn parse_log_level(level: text) -> i64:
+    """Parse log level from string."""
+    match level.lower():
+        case "off": 0
+        case "fatal": 1
+        case "error": 2
+        case "warn" | "warning": 3
+        case "info": 4
+        case "debug": 5
+        case "trace": 6
+        case "verbose": 7
+        case "all": 10
+        case _: parse_int(level) ?? 4
+
+fn parse_int(s: text) -> i64:
+    """Parse integer from string."""
+    # TODO: Use FFI when available
+    0
+
+# ============================================================================
+# Full Configuration Loading Pipeline
+# ============================================================================
+
+pub fn load_full_config(default_path: text) -> Result<AppConfig, text>:
+    """Load configuration with full priority chain:
+    1. Defaults (based on profile)
+    2. Config file (if exists)
+    3. Environment variables
+    4. Command-line arguments (highest priority)
+    """
+    # Get args and env
+    val args = ArgsOverrides.from_args(get_args())
+    val env = EnvOverrides.from_env()
+
+    # Determine config file path
+    val config_path = args.config_file ?? env_get("SIMPLE_CONFIG") ?? default_path
+
+    # Start with defaults
+    var config = AppConfig.default()
+
+    # Load from file if exists
+    if file_exists(config_path):
+        val file_config = load_config(config_path)
+        if file_config.is_ok():
+            config = file_config.unwrap()
+
+    # Apply env overrides
+    config = config.merge_env(env)
+
+    # Apply args overrides (highest priority)
+    config = config.merge_args(args)
+
+    Ok(config)
+
+pub fn quick_config() -> AppConfig:
+    """Load configuration with sensible defaults and overrides."""
+    load_full_config("simple.sdn").unwrap_or(AppConfig.default())
+
+# ============================================================================
 # Helper Functions
 # ============================================================================
 
@@ -366,9 +562,20 @@ fn parse_sdn(content: text) -> Result<SdnValue, text>:
     # TODO: Use FFI when available
     Ok(SdnValue.empty())
 
+fn env_get(key: text) -> text?:
+    """Get environment variable."""
+    # TODO: Use FFI when available
+    None
+
+fn get_args() -> [text]:
+    """Get command-line arguments."""
+    # TODO: Use FFI when available
+    []
+
 # ============================================================================
 # Exports
 # ============================================================================
 
 export LogConfig, DiConfig, ParserConfig, AopConfig, ExecutionConfig, AppConfig
-export load_config
+export EnvOverrides, ArgsOverrides
+export load_config, load_full_config, quick_config

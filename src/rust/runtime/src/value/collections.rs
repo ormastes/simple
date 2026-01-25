@@ -695,6 +695,636 @@ pub extern "C" fn rt_slice(collection: RuntimeValue, start: i64, end: i64, step:
     }
 }
 
+// ============================================================================
+// Array Higher-Order and Utility Functions
+// ============================================================================
+
+/// Reverse an array in place
+///
+/// # Examples
+/// - [1, 2, 3] → [3, 2, 1]
+#[no_mangle]
+pub extern "C" fn rt_array_reverse(array: RuntimeValue) -> bool {
+    let arr = as_typed_ptr!(mut array, HeapObjectType::Array, RuntimeArray, false);
+    unsafe {
+        let slice = (*arr).as_mut_slice();
+        slice.reverse();
+        true
+    }
+}
+
+/// Create a new reversed copy of an array
+///
+/// # Examples
+/// - reversed([1, 2, 3]) → [3, 2, 1]
+#[no_mangle]
+pub extern "C" fn rt_array_reversed(array: RuntimeValue) -> RuntimeValue {
+    let arr = as_typed_ptr!(array, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);
+    unsafe {
+        let len = (*arr).len;
+        let result = rt_array_new(len);
+        if result.is_nil() {
+            return result;
+        }
+        let src_slice = (*arr).as_slice();
+        for i in (0..len as usize).rev() {
+            rt_array_push(result, src_slice[i]);
+        }
+        result
+    }
+}
+
+/// Sort an array in place (ascending order)
+/// Works with integers and floats. Mixed types are sorted with ints first.
+#[no_mangle]
+pub extern "C" fn rt_array_sort(array: RuntimeValue) -> bool {
+    let arr = as_typed_ptr!(mut array, HeapObjectType::Array, RuntimeArray, false);
+    unsafe {
+        let slice = (*arr).as_mut_slice();
+        slice.sort_by(|a, b| {
+            // Compare by type first, then by value
+            match (a.is_int(), b.is_int(), a.is_float(), b.is_float()) {
+                (true, true, _, _) => a.as_int().cmp(&b.as_int()),
+                (_, _, true, true) => a.as_float().partial_cmp(&b.as_float()).unwrap_or(std::cmp::Ordering::Equal),
+                (true, false, _, true) => std::cmp::Ordering::Less, // int < float
+                (false, true, true, _) => std::cmp::Ordering::Greater, // float > int
+                _ => std::cmp::Ordering::Equal, // Other types: keep order
+            }
+        });
+        true
+    }
+}
+
+/// Create a new sorted copy of an array (ascending order)
+#[no_mangle]
+pub extern "C" fn rt_array_sorted(array: RuntimeValue) -> RuntimeValue {
+    let arr = as_typed_ptr!(array, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);
+    unsafe {
+        let len = (*arr).len;
+        let result = rt_array_new(len);
+        if result.is_nil() {
+            return result;
+        }
+        // Copy elements
+        let src_slice = (*arr).as_slice();
+        for item in src_slice {
+            rt_array_push(result, *item);
+        }
+        // Sort in place
+        rt_array_sort(result);
+        result
+    }
+}
+
+/// Sort array in descending order
+#[no_mangle]
+pub extern "C" fn rt_array_sort_desc(array: RuntimeValue) -> bool {
+    if !rt_array_sort(array) {
+        return false;
+    }
+    rt_array_reverse(array)
+}
+
+/// Get the first element of an array
+/// Returns NIL if array is empty
+#[no_mangle]
+pub extern "C" fn rt_array_first(array: RuntimeValue) -> RuntimeValue {
+    rt_array_get(array, 0)
+}
+
+/// Get the last element of an array
+/// Returns NIL if array is empty
+#[no_mangle]
+pub extern "C" fn rt_array_last(array: RuntimeValue) -> RuntimeValue {
+    rt_array_get(array, -1)
+}
+
+/// Find the index of a value in an array
+/// Returns -1 if not found
+#[no_mangle]
+pub extern "C" fn rt_array_index_of(array: RuntimeValue, value: RuntimeValue) -> i64 {
+    use super::ffi::rt_value_eq;
+
+    let arr = as_typed_ptr!(array, HeapObjectType::Array, RuntimeArray, -1);
+    unsafe {
+        let slice = (*arr).as_slice();
+        for (i, item) in slice.iter().enumerate() {
+            if rt_value_eq(*item, value) != 0 {
+                return i as i64;
+            }
+        }
+        -1
+    }
+}
+
+/// Find the last index of a value in an array
+/// Returns -1 if not found
+#[no_mangle]
+pub extern "C" fn rt_array_last_index_of(array: RuntimeValue, value: RuntimeValue) -> i64 {
+    use super::ffi::rt_value_eq;
+
+    let arr = as_typed_ptr!(array, HeapObjectType::Array, RuntimeArray, -1);
+    unsafe {
+        let slice = (*arr).as_slice();
+        for (i, item) in slice.iter().enumerate().rev() {
+            if rt_value_eq(*item, value) != 0 {
+                return i as i64;
+            }
+        }
+        -1
+    }
+}
+
+/// Concatenate two arrays into a new array
+#[no_mangle]
+pub extern "C" fn rt_array_concat(a: RuntimeValue, b: RuntimeValue) -> RuntimeValue {
+    let arr_a = as_typed_ptr!(a, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);
+    let arr_b = as_typed_ptr!(b, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);
+
+    unsafe {
+        let len_a = (*arr_a).len;
+        let len_b = (*arr_b).len;
+        let result = rt_array_new(len_a + len_b);
+        if result.is_nil() {
+            return result;
+        }
+
+        // Copy from first array
+        for item in (*arr_a).as_slice() {
+            rt_array_push(result, *item);
+        }
+        // Copy from second array
+        for item in (*arr_b).as_slice() {
+            rt_array_push(result, *item);
+        }
+        result
+    }
+}
+
+/// Create a shallow copy of an array
+#[no_mangle]
+pub extern "C" fn rt_array_copy(array: RuntimeValue) -> RuntimeValue {
+    let arr = as_typed_ptr!(array, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);
+    unsafe {
+        let len = (*arr).len;
+        let result = rt_array_new(len);
+        if result.is_nil() {
+            return result;
+        }
+        for item in (*arr).as_slice() {
+            rt_array_push(result, *item);
+        }
+        result
+    }
+}
+
+/// Sum all numeric elements in an array
+/// Returns 0 for empty arrays, NIL for non-numeric elements
+#[no_mangle]
+pub extern "C" fn rt_array_sum(array: RuntimeValue) -> RuntimeValue {
+    let arr = as_typed_ptr!(array, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);
+    unsafe {
+        let slice = (*arr).as_slice();
+        if slice.is_empty() {
+            return RuntimeValue::from_int(0);
+        }
+
+        let mut int_sum: i64 = 0;
+        let mut float_sum: f64 = 0.0;
+        let mut has_float = false;
+
+        for item in slice {
+            if item.is_int() {
+                int_sum += item.as_int();
+            } else if item.is_float() {
+                has_float = true;
+                float_sum += item.as_float();
+            }
+        }
+
+        if has_float {
+            RuntimeValue::from_float(int_sum as f64 + float_sum)
+        } else {
+            RuntimeValue::from_int(int_sum)
+        }
+    }
+}
+
+/// Find the minimum element in an array
+/// Returns NIL for empty arrays
+#[no_mangle]
+pub extern "C" fn rt_array_min(array: RuntimeValue) -> RuntimeValue {
+    let arr = as_typed_ptr!(array, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);
+    unsafe {
+        let slice = (*arr).as_slice();
+        if slice.is_empty() {
+            return RuntimeValue::NIL;
+        }
+
+        let mut min_val = slice[0];
+        for item in &slice[1..] {
+            let cmp = if min_val.is_int() && item.is_int() {
+                item.as_int() < min_val.as_int()
+            } else if min_val.is_float() && item.is_float() {
+                item.as_float() < min_val.as_float()
+            } else if min_val.is_int() && item.is_float() {
+                item.as_float() < min_val.as_int() as f64
+            } else if min_val.is_float() && item.is_int() {
+                (item.as_int() as f64) < min_val.as_float()
+            } else {
+                false
+            };
+            if cmp {
+                min_val = *item;
+            }
+        }
+        min_val
+    }
+}
+
+/// Find the maximum element in an array
+/// Returns NIL for empty arrays
+#[no_mangle]
+pub extern "C" fn rt_array_max(array: RuntimeValue) -> RuntimeValue {
+    let arr = as_typed_ptr!(array, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);
+    unsafe {
+        let slice = (*arr).as_slice();
+        if slice.is_empty() {
+            return RuntimeValue::NIL;
+        }
+
+        let mut max_val = slice[0];
+        for item in &slice[1..] {
+            let cmp = if max_val.is_int() && item.is_int() {
+                item.as_int() > max_val.as_int()
+            } else if max_val.is_float() && item.is_float() {
+                item.as_float() > max_val.as_float()
+            } else if max_val.is_int() && item.is_float() {
+                item.as_float() > max_val.as_int() as f64
+            } else if max_val.is_float() && item.is_int() {
+                (item.as_int() as f64) > max_val.as_float()
+            } else {
+                false
+            };
+            if cmp {
+                max_val = *item;
+            }
+        }
+        max_val
+    }
+}
+
+/// Count occurrences of a value in an array
+#[no_mangle]
+pub extern "C" fn rt_array_count(array: RuntimeValue, value: RuntimeValue) -> i64 {
+    use super::ffi::rt_value_eq;
+
+    let arr = as_typed_ptr!(array, HeapObjectType::Array, RuntimeArray, -1);
+    unsafe {
+        let slice = (*arr).as_slice();
+        let mut count = 0i64;
+        for item in slice {
+            if rt_value_eq(*item, value) != 0 {
+                count += 1;
+            }
+        }
+        count
+    }
+}
+
+/// Zip two arrays together into an array of tuples
+/// The result length is the minimum of the two input lengths
+#[no_mangle]
+pub extern "C" fn rt_array_zip(a: RuntimeValue, b: RuntimeValue) -> RuntimeValue {
+    let arr_a = as_typed_ptr!(a, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);
+    let arr_b = as_typed_ptr!(b, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);
+
+    unsafe {
+        let len_a = (*arr_a).len;
+        let len_b = (*arr_b).len;
+        let result_len = len_a.min(len_b);
+
+        let result = rt_array_new(result_len);
+        if result.is_nil() {
+            return result;
+        }
+
+        let slice_a = (*arr_a).as_slice();
+        let slice_b = (*arr_b).as_slice();
+
+        for i in 0..result_len as usize {
+            // Create a tuple for each pair
+            let tuple = rt_tuple_new(2);
+            if tuple.is_nil() {
+                return RuntimeValue::NIL;
+            }
+            rt_tuple_set(tuple, 0, slice_a[i]);
+            rt_tuple_set(tuple, 1, slice_b[i]);
+            rt_array_push(result, tuple);
+        }
+        result
+    }
+}
+
+/// Enumerate an array, returning array of (index, value) tuples
+#[no_mangle]
+pub extern "C" fn rt_array_enumerate(array: RuntimeValue) -> RuntimeValue {
+    let arr = as_typed_ptr!(array, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);
+
+    unsafe {
+        let len = (*arr).len;
+        let result = rt_array_new(len);
+        if result.is_nil() {
+            return result;
+        }
+
+        let slice = (*arr).as_slice();
+        for (i, item) in slice.iter().enumerate() {
+            let tuple = rt_tuple_new(2);
+            if tuple.is_nil() {
+                return RuntimeValue::NIL;
+            }
+            rt_tuple_set(tuple, 0, RuntimeValue::from_int(i as i64));
+            rt_tuple_set(tuple, 1, *item);
+            rt_array_push(result, tuple);
+        }
+        result
+    }
+}
+
+/// Flatten a nested array one level deep
+/// [[1, 2], [3, 4]] → [1, 2, 3, 4]
+#[no_mangle]
+pub extern "C" fn rt_array_flatten(array: RuntimeValue) -> RuntimeValue {
+    let arr = as_typed_ptr!(array, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);
+
+    unsafe {
+        let slice = (*arr).as_slice();
+
+        // First pass: count total elements
+        let mut total_len = 0u64;
+        for item in slice {
+            if item.is_heap() {
+                let ptr = item.as_heap_ptr();
+                if (*ptr).object_type == HeapObjectType::Array {
+                    let inner = ptr as *const RuntimeArray;
+                    total_len += (*inner).len;
+                    continue;
+                }
+            }
+            total_len += 1;
+        }
+
+        let result = rt_array_new(total_len);
+        if result.is_nil() {
+            return result;
+        }
+
+        // Second pass: copy elements
+        for item in slice {
+            if item.is_heap() {
+                let ptr = item.as_heap_ptr();
+                if (*ptr).object_type == HeapObjectType::Array {
+                    let inner = ptr as *const RuntimeArray;
+                    for inner_item in (*inner).as_slice() {
+                        rt_array_push(result, *inner_item);
+                    }
+                    continue;
+                }
+            }
+            rt_array_push(result, *item);
+        }
+        result
+    }
+}
+
+/// Remove duplicate values from array (keeps first occurrence)
+/// Returns a new array
+#[no_mangle]
+pub extern "C" fn rt_array_unique(array: RuntimeValue) -> RuntimeValue {
+    use super::ffi::rt_value_eq;
+
+    let arr = as_typed_ptr!(array, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);
+
+    unsafe {
+        let slice = (*arr).as_slice();
+        let result = rt_array_new((*arr).len);
+        if result.is_nil() {
+            return result;
+        }
+
+        let result_arr = get_typed_ptr::<RuntimeArray>(result, HeapObjectType::Array).unwrap();
+
+        for item in slice {
+            // Check if item already exists in result
+            let mut found = false;
+            for existing in (*result_arr).as_slice() {
+                if rt_value_eq(*existing, *item) != 0 {
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
+                rt_array_push(result, *item);
+            }
+        }
+        result
+    }
+}
+
+/// Take first n elements from array
+#[no_mangle]
+pub extern "C" fn rt_array_take(array: RuntimeValue, n: i64) -> RuntimeValue {
+    let arr = as_typed_ptr!(array, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);
+
+    unsafe {
+        let len = (*arr).len as i64;
+        let take_count = n.max(0).min(len) as u64;
+
+        let result = rt_array_new(take_count);
+        if result.is_nil() {
+            return result;
+        }
+
+        let slice = (*arr).as_slice();
+        for i in 0..take_count as usize {
+            rt_array_push(result, slice[i]);
+        }
+        result
+    }
+}
+
+/// Drop first n elements from array
+#[no_mangle]
+pub extern "C" fn rt_array_drop(array: RuntimeValue, n: i64) -> RuntimeValue {
+    let arr = as_typed_ptr!(array, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);
+
+    unsafe {
+        let len = (*arr).len as i64;
+        let skip_count = n.max(0).min(len) as usize;
+        let result_len = (len - skip_count as i64) as u64;
+
+        let result = rt_array_new(result_len);
+        if result.is_nil() {
+            return result;
+        }
+
+        let slice = (*arr).as_slice();
+        for i in skip_count..len as usize {
+            rt_array_push(result, slice[i]);
+        }
+        result
+    }
+}
+
+/// Join array elements into a string with separator
+#[no_mangle]
+pub extern "C" fn rt_array_join(array: RuntimeValue, separator: RuntimeValue) -> RuntimeValue {
+    use super::ffi::rt_value_to_string;
+
+    let arr = as_typed_ptr!(array, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);
+
+    unsafe {
+        let slice = (*arr).as_slice();
+        if slice.is_empty() {
+            return rt_string_new(std::ptr::null(), 0);
+        }
+
+        // Get separator string
+        let sep_len = rt_string_len(separator);
+        let sep_data = if sep_len > 0 { rt_string_data(separator) } else { std::ptr::null() };
+
+        // Build result by concatenating
+        let mut result = rt_value_to_string(slice[0]);
+
+        for item in &slice[1..] {
+            if sep_len > 0 {
+                result = rt_string_concat(result, separator);
+            }
+            let item_str = rt_value_to_string(*item);
+            result = rt_string_concat(result, item_str);
+        }
+
+        result
+    }
+}
+
+/// Check if all elements satisfy a condition (all non-falsy)
+/// Returns 1 if all elements are truthy, 0 otherwise
+#[no_mangle]
+pub extern "C" fn rt_array_all_truthy(array: RuntimeValue) -> i64 {
+    let arr = as_typed_ptr!(array, HeapObjectType::Array, RuntimeArray, 0);
+
+    unsafe {
+        let slice = (*arr).as_slice();
+        for item in slice {
+            // Check if falsy: nil, false, 0, 0.0
+            if item.is_nil() {
+                return 0;
+            }
+            if item.is_bool() && !item.as_bool() {
+                return 0;
+            }
+            if item.is_int() && item.as_int() == 0 {
+                return 0;
+            }
+            if item.is_float() && item.as_float() == 0.0 {
+                return 0;
+            }
+        }
+        1
+    }
+}
+
+/// Check if any element is truthy
+/// Returns 1 if any element is truthy, 0 otherwise
+#[no_mangle]
+pub extern "C" fn rt_array_any_truthy(array: RuntimeValue) -> i64 {
+    let arr = as_typed_ptr!(array, HeapObjectType::Array, RuntimeArray, 0);
+
+    unsafe {
+        let slice = (*arr).as_slice();
+        for item in slice {
+            // Check if truthy: not (nil, false, 0, 0.0)
+            if item.is_nil() {
+                continue;
+            }
+            if item.is_bool() && !item.as_bool() {
+                continue;
+            }
+            if item.is_int() && item.as_int() == 0 {
+                continue;
+            }
+            if item.is_float() && item.as_float() == 0.0 {
+                continue;
+            }
+            return 1;
+        }
+        0
+    }
+}
+
+/// Fill array with a value (in place)
+#[no_mangle]
+pub extern "C" fn rt_array_fill(array: RuntimeValue, value: RuntimeValue) -> bool {
+    let arr = as_typed_ptr!(mut array, HeapObjectType::Array, RuntimeArray, false);
+    unsafe {
+        let slice = (*arr).as_mut_slice();
+        for item in slice {
+            *item = value;
+        }
+        true
+    }
+}
+
+/// Create a new array filled with a value
+#[no_mangle]
+pub extern "C" fn rt_array_repeat(value: RuntimeValue, count: i64) -> RuntimeValue {
+    if count <= 0 {
+        return rt_array_new(0);
+    }
+
+    let result = rt_array_new(count as u64);
+    if result.is_nil() {
+        return result;
+    }
+
+    for _ in 0..count {
+        rt_array_push(result, value);
+    }
+    result
+}
+
+/// Create an array with a range of integers [start, end)
+#[no_mangle]
+pub extern "C" fn rt_array_range(start: i64, end: i64, step: i64) -> RuntimeValue {
+    if step == 0 {
+        return RuntimeValue::NIL;
+    }
+
+    let count = if step > 0 {
+        if end <= start { 0 } else { ((end - start + step - 1) / step) as u64 }
+    } else {
+        if start <= end { 0 } else { ((start - end - step - 1) / (-step)) as u64 }
+    };
+
+    let result = rt_array_new(count);
+    if result.is_nil() {
+        return result;
+    }
+
+    let mut i = start;
+    while (step > 0 && i < end) || (step < 0 && i > end) {
+        rt_array_push(result, RuntimeValue::from_int(i));
+        i += step;
+    }
+    result
+}
+
+// ============================================================================
+// Membership Testing
+// ============================================================================
+
 /// Check if a value is contained in a collection (array, dict, string)
 /// Returns true (1) if found, false (0) if not
 #[no_mangle]

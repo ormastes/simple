@@ -242,6 +242,11 @@ pub extern "C" fn rt_context_stats(_path: RuntimeValue, _target: RuntimeValue) -
 }
 
 #[no_mangle]
+pub extern "C" fn rt_settlement_main() -> i64 {
+    simple_loader::settlement_main() as i64
+}
+
+#[no_mangle]
 pub extern "C" fn rt_cli_handle_compile(_args: RuntimeValue) -> i64 {
     not_implemented("rt_cli_handle_compile")
 }

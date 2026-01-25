@@ -1,0 +1,474 @@
+# Compiler Driver
+#
+# Orchestrates the compilation pipeline from source to executable.
+# Supports multiple modes: interpret, jit, aot, check, sdn.
+
+import compiler.config.*
+import compiler.di.*
+import compiler.aop.*
+import compiler.lexer.*
+import compiler.treesitter.*
+import compiler.parser.*
+import compiler.hir.*
+import compiler.backend.*
+import compiler.mir.*
+import compiler.codegen.*
+
+# ------------------------------------------------------------------------------
+# Compilation Mode
+# ------------------------------------------------------------------------------
+
+enum CompileMode:
+    Interpret       # Tree-walking interpreter
+    Jit             # JIT compile and run
+    Aot             # Ahead-of-time compile to executable
+    Check           # Type check only, no execution
+    Sdn             # SDN data parsing mode (no code execution)
+
+    fn to_text() -> text:
+        match self:
+            CompileMode.Interpret => "interpret"
+            CompileMode.Jit => "jit"
+            CompileMode.Aot => "aot"
+            CompileMode.Check => "check"
+            CompileMode.Sdn => "sdn"
+
+    static fn from_text(s: text) -> CompileMode?:
+        match s:
+            "interpret" | "i" => Some(CompileMode.Interpret)
+            "jit" | "j" => Some(CompileMode.Jit)
+            "aot" | "a" | "compile" | "c" => Some(CompileMode.Aot)
+            "check" | "k" => Some(CompileMode.Check)
+            "sdn" | "s" | "data" => Some(CompileMode.Sdn)
+            _ => None
+
+# ------------------------------------------------------------------------------
+# Compilation Options
+# ------------------------------------------------------------------------------
+
+struct CompileOptions:
+    mode: CompileMode
+    input_files: [text]
+    output_file: text?
+    optimize: bool
+    debug_info: bool
+    verbose: bool
+    log_level: i64
+    profile: text           # dev, test, prod
+
+    static fn default() -> CompileOptions:
+        CompileOptions(
+            mode: CompileMode.Interpret,
+            input_files: [],
+            output_file: None,
+            optimize: false,
+            debug_info: true,
+            verbose: false,
+            log_level: 4,       # Info
+            profile: "dev"
+        )
+
+# ------------------------------------------------------------------------------
+# Compilation Result
+# ------------------------------------------------------------------------------
+
+enum CompileResult:
+    Success(value: Any?)
+    TypeError(errors: [text])
+    ParseError(errors: [text])
+    CodegenError(message: text)
+    RuntimeError(message: text)
+
+    fn is_success() -> bool:
+        match self:
+            CompileResult.Success(_) => true
+            _ => false
+
+    fn get_value() -> Any?:
+        match self:
+            CompileResult.Success(v) => v
+            _ => None
+
+    fn get_errors() -> [text]:
+        match self:
+            CompileResult.Success(_) => []
+            CompileResult.TypeError(e) => e
+            CompileResult.ParseError(e) => e
+            CompileResult.CodegenError(m) => [m]
+            CompileResult.RuntimeError(m) => [m]
+
+# ------------------------------------------------------------------------------
+# Source File
+# ------------------------------------------------------------------------------
+
+struct SourceFile:
+    path: text
+    content: text
+    module_name: text
+
+    static fn load(path: text) -> Result<SourceFile, text>:
+        val content = rt_read_file(path)
+        if content.is_none():
+            return Err("Failed to read file: {path}")
+
+        # Extract module name from path
+        val name = path.split("/").last() ?? "main"
+        val module_name = name.replace(".spl", "").replace(".sdn", "")
+
+        Ok(SourceFile(
+            path: path,
+            content: content.unwrap(),
+            module_name: module_name
+        ))
+
+# ------------------------------------------------------------------------------
+# Compilation Context
+# ------------------------------------------------------------------------------
+
+class CompileContext:
+    options: CompileOptions
+    config: Config
+    di: DiContainer
+    aop: AopWeaver
+    sources: [SourceFile]
+    modules: Dict<text, Module>
+    hir_modules: Dict<text, HirModule>
+    mir_modules: Dict<text, MirModule>
+    errors: [text]
+    warnings: [text]
+
+    static fn create(options: CompileOptions) -> CompileContext:
+        # Load config
+        val config = Config.default()
+        config.set("log_level", options.log_level.to_text())
+        config.set("profile", options.profile)
+
+        # Setup DI container
+        val di = DiContainer(bindings: {}, singletons: {}, profile: options.profile)
+
+        # Register backend based on mode
+        match options.mode:
+            CompileMode.Interpret =>
+                di.bind("Backend", \: InterpreterBackendImpl(env: Environment.create()))
+            CompileMode.Jit | CompileMode.Aot =>
+                di.bind("Backend", \: CompilerBackendImpl(
+                    mir_lowering: MirLowering(),
+                    codegen: Codegen()
+                ))
+            CompileMode.Sdn =>
+                di.bind("Backend", \: SdnBackendImpl())
+            CompileMode.Check =>
+                # Check mode uses a no-op backend
+                di.bind("Backend", \: CheckBackendImpl())
+
+        # Setup AOP
+        val aop = AopWeaver(aspects: [], logger: Logger(level: options.log_level))
+        if options.verbose:
+            aop.add_aspect(LogAspect(level: 6, logger: aop.logger))
+
+        CompileContext(
+            options: options,
+            config: config,
+            di: di,
+            aop: aop,
+            sources: [],
+            modules: {},
+            hir_modules: {},
+            mir_modules: {},
+            errors: [],
+            warnings: []
+        )
+
+    me add_error(message: text):
+        self.errors.push(message)
+
+    me add_warning(message: text):
+        self.warnings.push(message)
+
+    fn has_errors() -> bool:
+        self.errors.len() > 0
+
+# ------------------------------------------------------------------------------
+# Check Backend (Type Check Only)
+# ------------------------------------------------------------------------------
+
+class CheckBackendImpl(Backend):
+    fn name() -> text:
+        "check"
+
+    fn is_allowed(op: text) -> bool:
+        # Allow everything for type checking
+        true
+
+    fn process_module(module: HirModule) -> Result<Any, text>:
+        # Just validate, don't execute
+        Ok(None)
+
+    fn eval_expr(expr: HirExpr, env: Environment) -> Result<Value, text>:
+        # Don't evaluate, just return unit
+        Ok(Value.Unit)
+
+    fn exec_stmt(stmt: HirStmt, env: Environment) -> Result<Value, text>:
+        Ok(Value.Unit)
+
+# ------------------------------------------------------------------------------
+# Compiler Driver
+# ------------------------------------------------------------------------------
+
+class CompilerDriver:
+    ctx: CompileContext
+
+    static fn create(options: CompileOptions) -> CompilerDriver:
+        CompilerDriver(ctx: CompileContext.create(options))
+
+    # --------------------------------------------------------------------------
+    # Main compilation entry point
+    # --------------------------------------------------------------------------
+
+    me compile() -> CompileResult:
+        # Phase 1: Load source files
+        if not self.load_sources():
+            return CompileResult.ParseError(self.ctx.errors)
+
+        # Phase 2: Parse all sources
+        if not self.parse_all():
+            return CompileResult.ParseError(self.ctx.errors)
+
+        # Phase 3: Lower to HIR and type check
+        if not self.lower_to_hir():
+            return CompileResult.TypeError(self.ctx.errors)
+
+        # Phase 4: Mode-specific processing
+        match self.ctx.options.mode:
+            CompileMode.Check =>
+                return CompileResult.Success(None)
+
+            CompileMode.Sdn =>
+                return self.process_sdn()
+
+            CompileMode.Interpret =>
+                return self.interpret()
+
+            CompileMode.Jit =>
+                return self.jit_compile_and_run()
+
+            CompileMode.Aot =>
+                return self.aot_compile()
+
+    # --------------------------------------------------------------------------
+    # Phase 1: Load sources
+    # --------------------------------------------------------------------------
+
+    me load_sources() -> bool:
+        for path in self.ctx.options.input_files:
+            match SourceFile.load(path):
+                Ok(source) =>
+                    self.ctx.sources.push(source)
+                Err(e) =>
+                    self.ctx.add_error(e)
+
+        not self.ctx.has_errors()
+
+    # --------------------------------------------------------------------------
+    # Phase 2: Parse
+    # --------------------------------------------------------------------------
+
+    me parse_all() -> bool:
+        for source in self.ctx.sources:
+            match self.parse_source(source):
+                Ok(module) =>
+                    self.ctx.modules[source.module_name] = module
+                Err(e) =>
+                    self.ctx.add_error("Parse error in {source.path}: {e}")
+
+        not self.ctx.has_errors()
+
+    fn parse_source(source: SourceFile) -> Result<Module, text>:
+        val lexer = Lexer.create(source.content)
+        val treesitter = TreeSitter(lexer: Lexer.create(source.content))
+
+        # First pass: outline
+        val outline = treesitter.parse_outline()
+
+        # Second pass: full parse
+        val parser = Parser(
+            lexer: lexer,
+            treesitter: treesitter,
+            current: lexer.next_token(),
+            outline: Some(outline)
+        )
+
+        parser.parse()
+
+    # --------------------------------------------------------------------------
+    # Phase 3: Lower to HIR
+    # --------------------------------------------------------------------------
+
+    me lower_to_hir() -> bool:
+        val lowering = HirLowering()
+
+        for (name, module) in self.ctx.modules:
+            match lowering.lower_module(module):
+                Ok(hir_module) =>
+                    self.ctx.hir_modules[name] = hir_module
+                Err(e) =>
+                    self.ctx.add_error("HIR lowering error in {name}: {e}")
+
+        not self.ctx.has_errors()
+
+    # --------------------------------------------------------------------------
+    # Mode: SDN (Data only)
+    # --------------------------------------------------------------------------
+
+    fn process_sdn() -> CompileResult:
+        val backend = self.ctx.di.resolve<Backend>("Backend")
+        val results: Dict<text, Any> = {}
+
+        for (name, hir_module) in self.ctx.hir_modules:
+            match backend.process_module(hir_module):
+                Ok(value) =>
+                    results[name] = value
+                Err(e) =>
+                    return CompileResult.RuntimeError("SDN error in {name}: {e}")
+
+        CompileResult.Success(results)
+
+    # --------------------------------------------------------------------------
+    # Mode: Interpret
+    # --------------------------------------------------------------------------
+
+    fn interpret() -> CompileResult:
+        val backend = self.ctx.di.resolve<Backend>("Backend")
+
+        # Find main module and main function
+        val main_module = self.ctx.hir_modules.get("main")
+        if main_module.is_none():
+            # Try first module
+            if self.ctx.hir_modules.is_empty():
+                return CompileResult.RuntimeError("No modules to execute")
+            val first_name = self.ctx.hir_modules.keys().first().unwrap()
+            val first_module = self.ctx.hir_modules[first_name]
+            return self.run_module(backend, first_module)
+
+        self.run_module(backend, main_module.unwrap())
+
+    fn run_module(backend: Backend, module: HirModule) -> CompileResult:
+        match backend.process_module(module):
+            Ok(value) => CompileResult.Success(value)
+            Err(e) => CompileResult.RuntimeError(e)
+
+    # --------------------------------------------------------------------------
+    # Mode: JIT Compile and Run
+    # --------------------------------------------------------------------------
+
+    me jit_compile_and_run() -> CompileResult:
+        # Lower to MIR
+        if not self.lower_to_mir():
+            return CompileResult.CodegenError(self.ctx.errors.first() ?? "MIR lowering failed")
+
+        # JIT compile
+        val pipeline = CodegenPipeline()
+
+        for (name, mir_module) in self.ctx.mir_modules:
+            match pipeline.jit_compile(mir_module):
+                Ok(_) => ()
+                Err(e) =>
+                    return CompileResult.CodegenError("JIT compile error in {name}: {e}")
+
+        # Find and call main
+        val main_fn = pipeline.get_function("main")
+        if main_fn.is_none():
+            return CompileResult.RuntimeError("No main function found")
+
+        match pipeline.call_function("main", []):
+            Ok(result) => CompileResult.Success(result)
+            Err(e) => CompileResult.RuntimeError(e)
+
+    # --------------------------------------------------------------------------
+    # Mode: AOT Compile
+    # --------------------------------------------------------------------------
+
+    me aot_compile() -> CompileResult:
+        # Lower to MIR
+        if not self.lower_to_mir():
+            return CompileResult.CodegenError(self.ctx.errors.first() ?? "MIR lowering failed")
+
+        # Determine output file
+        val output = self.ctx.options.output_file ?? "a.out"
+
+        # AOT compile all modules
+        val pipeline = CodegenPipeline()
+
+        for (name, mir_module) in self.ctx.mir_modules:
+            match pipeline.aot_compile(mir_module, output):
+                Ok(_) => ()
+                Err(e) =>
+                    return CompileResult.CodegenError("AOT compile error in {name}: {e}")
+
+        # Link
+        match pipeline.link(output):
+            Ok(_) => CompileResult.Success(output)
+            Err(e) => CompileResult.CodegenError("Link error: {e}")
+
+    # --------------------------------------------------------------------------
+    # MIR Lowering
+    # --------------------------------------------------------------------------
+
+    me lower_to_mir() -> bool:
+        val lowering = MirLowering()
+
+        for (name, hir_module) in self.ctx.hir_modules:
+            match lowering.lower_module(hir_module):
+                Ok(mir_module) =>
+                    self.ctx.mir_modules[name] = mir_module
+                Err(e) =>
+                    self.ctx.add_error("MIR lowering error in {name}: {e}")
+
+        not self.ctx.has_errors()
+
+# ------------------------------------------------------------------------------
+# Convenience Functions
+# ------------------------------------------------------------------------------
+
+fn compile_file(path: text) -> CompileResult:
+    val options = CompileOptions.default()
+    options.input_files = [path]
+    val driver = CompilerDriver.create(options)
+    driver.compile()
+
+fn compile_files(paths: [text], mode: CompileMode) -> CompileResult:
+    val options = CompileOptions.default()
+    options.input_files = paths
+    options.mode = mode
+    val driver = CompilerDriver.create(options)
+    driver.compile()
+
+fn interpret_file(path: text) -> CompileResult:
+    compile_files([path], CompileMode.Interpret)
+
+fn jit_file(path: text) -> CompileResult:
+    compile_files([path], CompileMode.Jit)
+
+fn aot_file(path: text, output: text) -> CompileResult:
+    val options = CompileOptions.default()
+    options.input_files = [path]
+    options.mode = CompileMode.Aot
+    options.output_file = Some(output)
+    val driver = CompilerDriver.create(options)
+    driver.compile()
+
+fn check_file(path: text) -> CompileResult:
+    compile_files([path], CompileMode.Check)
+
+fn parse_sdn_file(path: text) -> CompileResult:
+    compile_files([path], CompileMode.Sdn)
+
+# ------------------------------------------------------------------------------
+# FFI Declarations
+# ------------------------------------------------------------------------------
+
+extern fn rt_read_file(path: text) -> text?
+extern fn rt_write_file(path: text, content: text) -> bool
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_get_env(name: text) -> text?
+extern fn rt_get_args() -> [text]

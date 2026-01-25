@@ -1,0 +1,1804 @@
+# Parser - Full AST Parser for Simple Language
+#
+# Two-pass parsing:
+# 1. TreeSitter: Quick outline pass (top-level structure, skip bodies)
+# 2. Parser: Fill in function bodies from outline spans
+#
+# This allows incremental parsing - only reparse changed functions.
+
+import compiler.lexer.*
+import compiler.treesitter.*
+
+# ============================================================================
+# Full AST Types
+# ============================================================================
+
+struct Module:
+    """Complete parsed module."""
+    name: text
+    imports: [Import]
+    exports: [Export]
+    functions: Dict<text, Function>
+    classes: Dict<text, Class>
+    structs: Dict<text, Struct>
+    enums: Dict<text, Enum>
+    traits: Dict<text, Trait>
+    impls: [Impl]
+    type_aliases: Dict<text, TypeAlias>
+    constants: Dict<text, Const>
+
+struct Import:
+    """Import declaration."""
+    module: text
+    items: [ImportItem]
+    span: Span
+
+struct ImportItem:
+    """Single imported item."""
+    name: text
+    alias: text?
+
+struct Export:
+    """Export declaration."""
+    items: [text]
+    span: Span
+
+struct Function:
+    """Function definition."""
+    name: text
+    type_params: [TypeParam]
+    params: [Param]
+    return_type: Type?
+    body: Block
+    is_async: bool
+    is_static: bool
+    is_public: bool
+    is_method: bool
+    is_mutable: bool    # 'me' vs 'fn'
+    doc_comment: text?
+    span: Span
+
+struct Param:
+    """Function parameter."""
+    name: text
+    type_: Type?
+    default: Expr?
+    span: Span
+
+struct TypeParam:
+    """Generic type parameter."""
+    name: text
+    bounds: [Type]
+    default: Type?
+    span: Span
+
+struct Class:
+    """Class definition."""
+    name: text
+    type_params: [TypeParam]
+    fields: [Field]
+    methods: Dict<text, Function>
+    is_public: bool
+    doc_comment: text?
+    span: Span
+
+struct Struct:
+    """Struct definition."""
+    name: text
+    type_params: [TypeParam]
+    fields: [Field]
+    is_public: bool
+    doc_comment: text?
+    span: Span
+
+struct Field:
+    """Struct/class field."""
+    name: text
+    type_: Type
+    default: Expr?
+    is_public: bool
+    span: Span
+
+struct Enum:
+    """Enum definition."""
+    name: text
+    type_params: [TypeParam]
+    variants: [Variant]
+    is_public: bool
+    doc_comment: text?
+    span: Span
+
+struct Variant:
+    """Enum variant."""
+    name: text
+    kind: VariantKind
+    span: Span
+
+enum VariantKind:
+    """Enum variant kind."""
+    Unit
+    Tuple(types: [Type])
+    Struct(fields: [Field])
+
+struct Trait:
+    """Trait definition."""
+    name: text
+    type_params: [TypeParam]
+    methods: [Function]
+    is_public: bool
+    doc_comment: text?
+    span: Span
+
+struct Impl:
+    """Impl block."""
+    type_: Type
+    trait_: Type?
+    methods: Dict<text, Function>
+    span: Span
+
+struct TypeAlias:
+    """Type alias."""
+    name: text
+    type_params: [TypeParam]
+    type_: Type
+    is_public: bool
+    span: Span
+
+struct Const:
+    """Module-level constant."""
+    name: text
+    type_: Type?
+    value: Expr
+    is_mutable: bool
+    is_public: bool
+    span: Span
+
+# ============================================================================
+# Type AST
+# ============================================================================
+
+struct Type:
+    """Type expression."""
+    kind: TypeKind
+    span: Span
+
+enum TypeKind:
+    """Type expression kind."""
+    Named(name: text, args: [Type])
+    Tuple(elements: [Type])
+    Array(element: Type, size: Expr?)
+    Function(params: [Type], ret: Type)
+    Optional(inner: Type)
+    Reference(inner: Type, mutable: bool)
+    Infer
+    Error
+
+# ============================================================================
+# Expression AST
+# ============================================================================
+
+struct Expr:
+    """Expression."""
+    kind: ExprKind
+    span: Span
+
+enum ExprKind:
+    """Expression kind."""
+    # Literals
+    IntLit(value: i64)
+    FloatLit(value: f64)
+    StringLit(value: text, interpolations: [Interpolation]?)
+    BoolLit(value: bool)
+    NilLit
+    ArrayLit(elements: [Expr])
+    TupleLit(elements: [Expr])
+    DictLit(entries: [(Expr, Expr)])
+
+    # Identifiers and access
+    Ident(name: text)
+    Field(base: Expr, field: text)
+    Index(base: Expr, index: Expr)
+    OptionalChain(base: Expr, field: text)  # ?.
+    NullCoalesce(left: Expr, right: Expr)    # ??
+    ExistsCheck(base: Expr)                   # .?
+
+    # Operators
+    Binary(op: BinOp, left: Expr, right: Expr)
+    Unary(op: UnaryOp, operand: Expr)
+    Range(start: Expr?, end: Expr?, inclusive: bool, step: Expr?)
+
+    # Function calls
+    Call(callee: Expr, args: [CallArg])
+    MethodCall(receiver: Expr, method: text, args: [CallArg])
+
+    # Control flow expressions
+    If(cond: Expr, then_: Block, else_: Block?)
+    Match(scrutinee: Expr, arms: [MatchArm])
+    Try(expr: Expr)                           # expr?
+    TryCatch(body: Block, catches: [CatchClause], finally_: Block?)
+
+    # Closures
+    Lambda(params: [LambdaParam], body: Expr)
+    Block(block: Block)
+
+    # Comprehensions
+    ListComprehension(expr: Expr, clauses: [ComprehensionClause])
+    DictComprehension(key: Expr, value: Expr, clauses: [ComprehensionClause])
+
+    # Special
+    Await(expr: Expr)
+    Yield(expr: Expr?)
+    Return(expr: Expr?)
+    Break(label: text?)
+    Continue(label: text?)
+    Throw(expr: Expr)
+
+    # Object construction
+    StructLit(type_: text, fields: [(text, Expr)])
+    EnumLit(enum_: text, variant: text, payload: EnumPayload?)
+
+    # Error recovery
+    Error
+
+struct Interpolation:
+    """String interpolation."""
+    expr: Expr
+    format: text?
+    span: Span
+
+struct CallArg:
+    """Function call argument."""
+    name: text?     # Named argument
+    value: Expr
+    span: Span
+
+struct MatchArm:
+    """Match arm."""
+    pattern: Pattern
+    guard: Expr?
+    body: Block
+    span: Span
+
+struct CatchClause:
+    """Catch clause in try-catch."""
+    pattern: Pattern?
+    type_: Type?
+    body: Block
+    span: Span
+
+struct LambdaParam:
+    """Lambda parameter."""
+    name: text
+    type_: Type?
+    span: Span
+
+struct ComprehensionClause:
+    """Comprehension clause."""
+    kind: ComprehensionKind
+    span: Span
+
+enum ComprehensionKind:
+    For(var_: text, iter: Expr)
+    If(cond: Expr)
+
+enum EnumPayload:
+    Tuple(values: [Expr])
+    Struct(fields: [(text, Expr)])
+
+# ============================================================================
+# Pattern AST
+# ============================================================================
+
+struct Pattern:
+    """Pattern for matching."""
+    kind: PatternKind
+    span: Span
+
+enum PatternKind:
+    """Pattern kind."""
+    Wildcard                                  # _
+    Literal(value: Expr)                      # 42, "hello", true
+    Binding(name: text, mutable: bool)        # x, var x
+    Tuple(elements: [Pattern])                # (a, b, c)
+    Array(elements: [Pattern], rest: text?)   # [a, b, ..rest]
+    Struct(type_: text, fields: [(text, Pattern)]) # Point { x, y }
+    Enum(enum_: text, variant: text, payload: EnumPatternPayload?)
+    Or(patterns: [Pattern])                   # a | b | c
+    Guard(pattern: Pattern, guard: Expr)      # p if cond
+    As(pattern: Pattern, name: text)          # p as name
+    Range(start: Expr?, end: Expr?, inclusive: bool) # 1..10, 1..=10
+    Error
+
+enum EnumPatternPayload:
+    Tuple(patterns: [Pattern])
+    Struct(fields: [(text, Pattern)])
+
+# ============================================================================
+# Statement AST
+# ============================================================================
+
+struct Stmt:
+    """Statement."""
+    kind: StmtKind
+    span: Span
+
+enum StmtKind:
+    """Statement kind."""
+    Expr(expr: Expr)
+    Val(name: text, type_: Type?, init: Expr)
+    Var(name: text, type_: Type?, init: Expr?)
+    Assign(target: Expr, op: AssignOp?, value: Expr)
+    For(var_: text, iter: Expr, body: Block)
+    While(cond: Expr, body: Block)
+    Loop(body: Block)
+    Break(label: text?)
+    Continue(label: text?)
+    Return(value: Expr?)
+    Yield(value: Expr?)
+    Throw(value: Expr)
+
+enum AssignOp:
+    """Assignment operator."""
+    Add     # +=
+    Sub     # -=
+    Mul     # *=
+    Div     # /=
+    Mod     # %=
+
+struct Block:
+    """Block of statements."""
+    stmts: [Stmt]
+    span: Span
+
+# ============================================================================
+# Operators
+# ============================================================================
+
+enum BinOp:
+    """Binary operator."""
+    # Arithmetic
+    Add, Sub, Mul, Div, Mod, Pow
+
+    # Comparison
+    Eq, NotEq, Lt, LtEq, Gt, GtEq
+
+    # Logical
+    And, Or
+
+    # Bitwise
+    BitAnd, BitOr, BitXor, Shl, Shr
+
+    # Other
+    In, NotIn, Is, IsNot
+
+enum UnaryOp:
+    """Unary operator."""
+    Neg     # -
+    Not     # not, !
+    BitNot  # ~
+    Ref     # &
+    Deref   # *
+
+# ============================================================================
+# Parser
+# ============================================================================
+
+struct Parser:
+    """Full AST parser using TreeSitter outline."""
+    source: text
+    lexer: Lexer
+    current: Token
+    previous: Token
+    errors: [ParseError]
+    outline: OutlineModule?
+
+impl Parser:
+    static fn new(source: text) -> Parser:
+        var p = Parser(
+            source: source,
+            lexer: Lexer.new(source),
+            current: Token.eof(0, 1),
+            previous: Token.eof(0, 1),
+            errors: [],
+            outline: None
+        )
+        p.advance()
+        p
+
+    # ========================================================================
+    # Main Entry Point
+    # ========================================================================
+
+    me parse() -> Module:
+        """Parse source into a full Module."""
+
+        # Pass 1: Get outline
+        val ts = TreeSitter.new(self.source)
+        self.outline = Some(ts.parse_outline())
+
+        # Pass 2: Fill in bodies
+        self.parse_full()
+
+    me parse_full() -> Module:
+        """Parse full module using outline."""
+        val outline = self.outline.unwrap()
+
+        var module = Module(
+            name: outline.name,
+            imports: [],
+            exports: [],
+            functions: {},
+            classes: {},
+            structs: {},
+            enums: {},
+            traits: {},
+            impls: [],
+            type_aliases: {},
+            constants: {}
+        )
+
+        # Convert imports
+        for imp in outline.imports:
+            module.imports = module.imports.push(self.convert_import(imp))
+
+        # Convert exports
+        for exp in outline.exports:
+            module.exports = module.exports.push(Export(
+                items: exp.items,
+                span: exp.span
+            ))
+
+        # Parse function bodies
+        for fn_outline in outline.functions:
+            val fn_ = self.parse_function_body(fn_outline)
+            module.functions[fn_.name] = fn_
+
+        # Parse class bodies
+        for class_outline in outline.classes:
+            val class_ = self.parse_class_body(class_outline)
+            module.classes[class_.name] = class_
+
+        # Parse struct bodies (no code to parse, just convert)
+        for struct_outline in outline.structs:
+            val struct_ = self.convert_struct(struct_outline)
+            module.structs[struct_.name] = struct_
+
+        # Parse enum bodies (no code to parse, just convert)
+        for enum_outline in outline.enums:
+            val enum_ = self.convert_enum(enum_outline)
+            module.enums[enum_.name] = enum_
+
+        # Parse trait bodies
+        for trait_outline in outline.traits:
+            val trait_ = self.parse_trait_body(trait_outline)
+            module.traits[trait_.name] = trait_
+
+        # Parse impl bodies
+        for impl_outline in outline.impls:
+            val impl_ = self.parse_impl_body(impl_outline)
+            module.impls = module.impls.push(impl_)
+
+        # Convert type aliases
+        for alias_outline in outline.type_aliases:
+            val alias = self.convert_type_alias(alias_outline)
+            module.type_aliases[alias.name] = alias
+
+        # Parse constant values
+        for const_outline in outline.constants:
+            val const_ = self.parse_const_body(const_outline)
+            module.constants[const_.name] = const_
+
+        module
+
+    # ========================================================================
+    # Token Handling (for body parsing)
+    # ========================================================================
+
+    me advance() -> Token:
+        self.previous = self.current
+        self.current = self.lexer.next_token()
+        self.previous
+
+    me peek() -> TokenKind:
+        self.current.kind
+
+    me check(kind: TokenKind) -> bool:
+        self.current.kind == kind
+
+    me match_token(kind: TokenKind) -> bool:
+        if self.check(kind):
+            self.advance()
+            true
+        else:
+            false
+
+    me expect(kind: TokenKind, message: text) -> bool:
+        if self.check(kind):
+            self.advance()
+            true
+        else:
+            self.error(message)
+            false
+
+    me is_at_end() -> bool:
+        self.current.kind == TokenKind.Eof
+
+    me skip_newlines():
+        while self.check(TokenKind.Newline):
+            self.advance()
+
+    me error(message: text):
+        self.errors = self.errors.push(ParseError(
+            message: message,
+            span: self.current.span,
+            severity: ErrorSeverity.Error
+        ))
+
+    me reset_to_span(span: Span):
+        """Reset lexer to parse from a specific span."""
+        self.lexer = Lexer.new(self.source)
+        self.lexer.pos = span.start
+
+        # Skip to the right position
+        while self.lexer.pos < span.start and not self.lexer.is_at_end():
+            self.lexer.advance()
+
+        self.current = self.lexer.next_token()
+        self.previous = Token.eof(0, 1)
+
+    # ========================================================================
+    # Outline Conversion
+    # ========================================================================
+
+    me convert_import(outline: ImportOutline) -> Import:
+        var items: [ImportItem] = []
+        for item in outline.items:
+            items = items.push(ImportItem(name: item, alias: None))
+
+        Import(
+            module: outline.module,
+            items: items,
+            span: outline.span
+        )
+
+    me convert_type(outline: TypeOutline) -> Type:
+        val kind = match outline.kind:
+            case Named(name, args):
+                var converted_args: [Type] = []
+                for arg in args:
+                    converted_args = converted_args.push(self.convert_type(arg))
+                TypeKind.Named(name, converted_args)
+            case Tuple(elements):
+                var converted: [Type] = []
+                for elem in elements:
+                    converted = converted.push(self.convert_type(elem))
+                TypeKind.Tuple(converted)
+            case Array(element):
+                TypeKind.Array(self.convert_type(element), None)
+            case Function(params, ret):
+                var converted_params: [Type] = []
+                for p in params:
+                    converted_params = converted_params.push(self.convert_type(p))
+                TypeKind.Function(converted_params, self.convert_type(ret))
+            case Optional(inner):
+                TypeKind.Optional(self.convert_type(inner))
+            case Reference(inner, mutable):
+                TypeKind.Reference(self.convert_type(inner), mutable)
+            case Infer:
+                TypeKind.Infer
+
+        Type(kind: kind, span: outline.span)
+
+    me convert_type_param(outline: TypeParamOutline) -> TypeParam:
+        var bounds: [Type] = []
+        for b in outline.bounds:
+            bounds = bounds.push(self.convert_type(b))
+
+        TypeParam(
+            name: outline.name,
+            bounds: bounds,
+            default: outline.default.map(\t: self.convert_type(t)),
+            span: outline.span
+        )
+
+    me convert_param(outline: ParamOutline) -> Param:
+        var default_expr: Expr? = None
+        if outline.default_span.?:
+            default_expr = Some(self.parse_expr_at_span(outline.default_span.unwrap()))
+
+        Param(
+            name: outline.name,
+            type_: outline.type_.map(\t: self.convert_type(t)),
+            default: default_expr,
+            span: outline.span
+        )
+
+    me convert_field(outline: FieldOutline) -> Field:
+        var default_expr: Expr? = None
+        if outline.default_span.?:
+            default_expr = Some(self.parse_expr_at_span(outline.default_span.unwrap()))
+
+        Field(
+            name: outline.name,
+            type_: self.convert_type(outline.type_),
+            default: default_expr,
+            is_public: outline.is_public,
+            span: outline.span
+        )
+
+    me convert_struct(outline: StructOutline) -> Struct:
+        var type_params: [TypeParam] = []
+        for tp in outline.type_params:
+            type_params = type_params.push(self.convert_type_param(tp))
+
+        var fields: [Field] = []
+        for f in outline.fields:
+            fields = fields.push(self.convert_field(f))
+
+        Struct(
+            name: outline.name,
+            type_params: type_params,
+            fields: fields,
+            is_public: outline.is_public,
+            doc_comment: outline.doc_comment,
+            span: outline.span
+        )
+
+    me convert_enum(outline: EnumOutline) -> Enum:
+        var type_params: [TypeParam] = []
+        for tp in outline.type_params:
+            type_params = type_params.push(self.convert_type_param(tp))
+
+        var variants: [Variant] = []
+        for v in outline.variants:
+            val kind = match v.payload:
+                case None:
+                    VariantKind.Unit
+                case Some(Tuple(types)):
+                    var converted: [Type] = []
+                    for t in types:
+                        converted = converted.push(self.convert_type(t))
+                    VariantKind.Tuple(converted)
+                case Some(Struct(fields)):
+                    var converted: [Field] = []
+                    for f in fields:
+                        converted = converted.push(self.convert_field(f))
+                    VariantKind.Struct(converted)
+
+            variants = variants.push(Variant(
+                name: v.name,
+                kind: kind,
+                span: v.span
+            ))
+
+        Enum(
+            name: outline.name,
+            type_params: type_params,
+            variants: variants,
+            is_public: outline.is_public,
+            doc_comment: outline.doc_comment,
+            span: outline.span
+        )
+
+    me convert_type_alias(outline: TypeAliasOutline) -> TypeAlias:
+        var type_params: [TypeParam] = []
+        for tp in outline.type_params:
+            type_params = type_params.push(self.convert_type_param(tp))
+
+        TypeAlias(
+            name: outline.name,
+            type_params: type_params,
+            type_: self.convert_type(outline.type_),
+            is_public: outline.is_public,
+            span: outline.span
+        )
+
+    # ========================================================================
+    # Body Parsing
+    # ========================================================================
+
+    me parse_function_body(outline: FunctionOutline) -> Function:
+        """Parse function body from outline."""
+        var type_params: [TypeParam] = []
+        # Note: outline doesn't have type_params directly, would need to add
+
+        var params: [Param] = []
+        for p in outline.params:
+            params = params.push(self.convert_param(p))
+
+        val body = if outline.body_span.len() > 0:
+            self.parse_block_at_span(outline.body_span)
+        else:
+            Block(stmts: [], span: outline.body_span)
+
+        Function(
+            name: outline.name,
+            type_params: type_params,
+            params: params,
+            return_type: outline.return_type.map(\t: self.convert_type(t)),
+            body: body,
+            is_async: outline.is_async,
+            is_static: outline.is_static,
+            is_public: outline.is_public,
+            is_method: outline.is_method,
+            is_mutable: outline.is_mutable,
+            doc_comment: outline.doc_comment,
+            span: outline.span
+        )
+
+    me parse_class_body(outline: ClassOutline) -> Class:
+        var type_params: [TypeParam] = []
+        for tp in outline.type_params:
+            type_params = type_params.push(self.convert_type_param(tp))
+
+        var fields: [Field] = []
+        for f in outline.fields:
+            fields = fields.push(self.convert_field(f))
+
+        var methods: Dict<text, Function> = {}
+        for m in outline.methods:
+            val fn_ = self.parse_function_body(m)
+            methods[fn_.name] = fn_
+
+        Class(
+            name: outline.name,
+            type_params: type_params,
+            fields: fields,
+            methods: methods,
+            is_public: outline.is_public,
+            doc_comment: outline.doc_comment,
+            span: outline.span
+        )
+
+    me parse_trait_body(outline: TraitOutline) -> Trait:
+        var type_params: [TypeParam] = []
+        for tp in outline.type_params:
+            type_params = type_params.push(self.convert_type_param(tp))
+
+        var methods: [Function] = []
+        for m in outline.methods:
+            val fn_ = self.parse_function_body(m)
+            methods = methods.push(fn_)
+
+        Trait(
+            name: outline.name,
+            type_params: type_params,
+            methods: methods,
+            is_public: outline.is_public,
+            doc_comment: outline.doc_comment,
+            span: outline.span
+        )
+
+    me parse_impl_body(outline: ImplOutline) -> Impl:
+        var methods: Dict<text, Function> = {}
+        for m in outline.methods:
+            val fn_ = self.parse_function_body(m)
+            methods[fn_.name] = fn_
+
+        Impl(
+            type_: self.convert_type(outline.type_),
+            trait_: outline.trait_.map(\t: self.convert_type(t)),
+            methods: methods,
+            span: outline.span
+        )
+
+    me parse_const_body(outline: ConstOutline) -> Const:
+        val value = self.parse_expr_at_span(outline.value_span)
+
+        Const(
+            name: outline.name,
+            type_: outline.type_.map(\t: self.convert_type(t)),
+            value: value,
+            is_mutable: outline.is_mutable,
+            is_public: outline.is_public,
+            span: outline.span
+        )
+
+    # ========================================================================
+    # Expression Parsing
+    # ========================================================================
+
+    me parse_expr_at_span(span: Span) -> Expr:
+        """Parse an expression at a specific span."""
+        self.reset_to_span(span)
+        self.parse_expr()
+
+    me parse_block_at_span(span: Span) -> Block:
+        """Parse a block at a specific span."""
+        self.reset_to_span(span)
+        self.parse_block()
+
+    me parse_expr() -> Expr:
+        """Parse an expression."""
+        self.parse_or_expr()
+
+    me parse_or_expr() -> Expr:
+        """Parse logical or expression."""
+        var left = self.parse_and_expr()
+
+        while self.match_token(TokenKind.KwOr) or self.match_token(TokenKind.PipePipe):
+            val right = self.parse_and_expr()
+            left = Expr(
+                kind: ExprKind.Binary(BinOp.Or, left, right),
+                span: left.span.merge(right.span)
+            )
+
+        left
+
+    me parse_and_expr() -> Expr:
+        """Parse logical and expression."""
+        var left = self.parse_equality_expr()
+
+        while self.match_token(TokenKind.KwAnd) or self.match_token(TokenKind.AmpAmp):
+            val right = self.parse_equality_expr()
+            left = Expr(
+                kind: ExprKind.Binary(BinOp.And, left, right),
+                span: left.span.merge(right.span)
+            )
+
+        left
+
+    me parse_equality_expr() -> Expr:
+        """Parse equality expression."""
+        var left = self.parse_comparison_expr()
+
+        loop:
+            if self.match_token(TokenKind.Eq):
+                val right = self.parse_comparison_expr()
+                left = Expr(
+                    kind: ExprKind.Binary(BinOp.Eq, left, right),
+                    span: left.span.merge(right.span)
+                )
+            elif self.match_token(TokenKind.NotEq):
+                val right = self.parse_comparison_expr()
+                left = Expr(
+                    kind: ExprKind.Binary(BinOp.NotEq, left, right),
+                    span: left.span.merge(right.span)
+                )
+            else:
+                break
+
+        left
+
+    me parse_comparison_expr() -> Expr:
+        """Parse comparison expression."""
+        var left = self.parse_range_expr()
+
+        loop:
+            if self.match_token(TokenKind.Lt):
+                val right = self.parse_range_expr()
+                left = Expr(
+                    kind: ExprKind.Binary(BinOp.Lt, left, right),
+                    span: left.span.merge(right.span)
+                )
+            elif self.match_token(TokenKind.LtEq):
+                val right = self.parse_range_expr()
+                left = Expr(
+                    kind: ExprKind.Binary(BinOp.LtEq, left, right),
+                    span: left.span.merge(right.span)
+                )
+            elif self.match_token(TokenKind.Gt):
+                val right = self.parse_range_expr()
+                left = Expr(
+                    kind: ExprKind.Binary(BinOp.Gt, left, right),
+                    span: left.span.merge(right.span)
+                )
+            elif self.match_token(TokenKind.GtEq):
+                val right = self.parse_range_expr()
+                left = Expr(
+                    kind: ExprKind.Binary(BinOp.GtEq, left, right),
+                    span: left.span.merge(right.span)
+                )
+            elif self.match_token(TokenKind.KwIn):
+                val right = self.parse_range_expr()
+                left = Expr(
+                    kind: ExprKind.Binary(BinOp.In, left, right),
+                    span: left.span.merge(right.span)
+                )
+            elif self.match_token(TokenKind.KwIs):
+                val right = self.parse_range_expr()
+                left = Expr(
+                    kind: ExprKind.Binary(BinOp.Is, left, right),
+                    span: left.span.merge(right.span)
+                )
+            else:
+                break
+
+        left
+
+    me parse_range_expr() -> Expr:
+        """Parse range expression."""
+        val left = self.parse_additive_expr()
+
+        if self.match_token(TokenKind.DotDot):
+            var inclusive = false
+            if self.match_token(TokenKind.Assign):  # ..=
+                inclusive = true
+            val right = self.parse_additive_expr()
+            return Expr(
+                kind: ExprKind.Range(Some(left), Some(right), inclusive, None),
+                span: left.span.merge(right.span)
+            )
+
+        left
+
+    me parse_additive_expr() -> Expr:
+        """Parse additive expression."""
+        var left = self.parse_multiplicative_expr()
+
+        loop:
+            if self.match_token(TokenKind.Plus):
+                val right = self.parse_multiplicative_expr()
+                left = Expr(
+                    kind: ExprKind.Binary(BinOp.Add, left, right),
+                    span: left.span.merge(right.span)
+                )
+            elif self.match_token(TokenKind.Minus):
+                val right = self.parse_multiplicative_expr()
+                left = Expr(
+                    kind: ExprKind.Binary(BinOp.Sub, left, right),
+                    span: left.span.merge(right.span)
+                )
+            else:
+                break
+
+        left
+
+    me parse_multiplicative_expr() -> Expr:
+        """Parse multiplicative expression."""
+        var left = self.parse_power_expr()
+
+        loop:
+            if self.match_token(TokenKind.Star):
+                val right = self.parse_power_expr()
+                left = Expr(
+                    kind: ExprKind.Binary(BinOp.Mul, left, right),
+                    span: left.span.merge(right.span)
+                )
+            elif self.match_token(TokenKind.Slash):
+                val right = self.parse_power_expr()
+                left = Expr(
+                    kind: ExprKind.Binary(BinOp.Div, left, right),
+                    span: left.span.merge(right.span)
+                )
+            elif self.match_token(TokenKind.Percent):
+                val right = self.parse_power_expr()
+                left = Expr(
+                    kind: ExprKind.Binary(BinOp.Mod, left, right),
+                    span: left.span.merge(right.span)
+                )
+            else:
+                break
+
+        left
+
+    me parse_power_expr() -> Expr:
+        """Parse power expression (right-associative)."""
+        val left = self.parse_unary_expr()
+
+        if self.match_token(TokenKind.StarStar):
+            val right = self.parse_power_expr()  # Right-associative
+            return Expr(
+                kind: ExprKind.Binary(BinOp.Pow, left, right),
+                span: left.span.merge(right.span)
+            )
+
+        left
+
+    me parse_unary_expr() -> Expr:
+        """Parse unary expression."""
+        val start = self.current.span
+
+        if self.match_token(TokenKind.Minus):
+            val operand = self.parse_unary_expr()
+            return Expr(
+                kind: ExprKind.Unary(UnaryOp.Neg, operand),
+                span: start.merge(operand.span)
+            )
+
+        if self.match_token(TokenKind.KwNot) or self.match_token(TokenKind.Bang):
+            val operand = self.parse_unary_expr()
+            return Expr(
+                kind: ExprKind.Unary(UnaryOp.Not, operand),
+                span: start.merge(operand.span)
+            )
+
+        if self.match_token(TokenKind.Tilde):
+            val operand = self.parse_unary_expr()
+            return Expr(
+                kind: ExprKind.Unary(UnaryOp.BitNot, operand),
+                span: start.merge(operand.span)
+            )
+
+        if self.match_token(TokenKind.Ampersand):
+            val operand = self.parse_unary_expr()
+            return Expr(
+                kind: ExprKind.Unary(UnaryOp.Ref, operand),
+                span: start.merge(operand.span)
+            )
+
+        if self.match_token(TokenKind.KwAwait):
+            val operand = self.parse_unary_expr()
+            return Expr(
+                kind: ExprKind.Await(operand),
+                span: start.merge(operand.span)
+            )
+
+        self.parse_postfix_expr()
+
+    me parse_postfix_expr() -> Expr:
+        """Parse postfix expression (calls, indexing, field access)."""
+        var expr = self.parse_primary_expr()
+
+        loop:
+            if self.match_token(TokenKind.LParen):
+                # Function call
+                val args = self.parse_call_args()
+                self.expect(TokenKind.RParen, "expected ')' after arguments")
+                expr = Expr(
+                    kind: ExprKind.Call(expr, args),
+                    span: expr.span.merge(self.previous.span)
+                )
+            elif self.match_token(TokenKind.LBracket):
+                # Index
+                val index = self.parse_expr()
+                self.expect(TokenKind.RBracket, "expected ']' after index")
+                expr = Expr(
+                    kind: ExprKind.Index(expr, index),
+                    span: expr.span.merge(self.previous.span)
+                )
+            elif self.match_token(TokenKind.Dot):
+                # Field access or method call
+                val field = self.parse_identifier()
+                if self.match_token(TokenKind.LParen):
+                    val args = self.parse_call_args()
+                    self.expect(TokenKind.RParen, "expected ')' after arguments")
+                    expr = Expr(
+                        kind: ExprKind.MethodCall(expr, field, args),
+                        span: expr.span.merge(self.previous.span)
+                    )
+                else:
+                    expr = Expr(
+                        kind: ExprKind.Field(expr, field),
+                        span: expr.span.merge(self.previous.span)
+                    )
+            elif self.match_token(TokenKind.QuestionDot):
+                # Optional chaining
+                val field = self.parse_identifier()
+                expr = Expr(
+                    kind: ExprKind.OptionalChain(expr, field),
+                    span: expr.span.merge(self.previous.span)
+                )
+            elif self.match_token(TokenKind.DotQuestion):
+                # Exists check
+                expr = Expr(
+                    kind: ExprKind.ExistsCheck(expr),
+                    span: expr.span.merge(self.previous.span)
+                )
+            elif self.match_token(TokenKind.Question):
+                # Try operator
+                expr = Expr(
+                    kind: ExprKind.Try(expr),
+                    span: expr.span.merge(self.previous.span)
+                )
+            elif self.match_token(TokenKind.QuestionQuestion):
+                # Null coalesce
+                val right = self.parse_unary_expr()
+                expr = Expr(
+                    kind: ExprKind.NullCoalesce(expr, right),
+                    span: expr.span.merge(right.span)
+                )
+            else:
+                break
+
+        expr
+
+    me parse_primary_expr() -> Expr:
+        """Parse primary expression."""
+        val start = self.current.span
+
+        match self.peek():
+            case IntLit:
+                val text = self.current.text
+                self.advance()
+                val value = parse_int_literal(text)
+                Expr(kind: ExprKind.IntLit(value), span: start)
+
+            case FloatLit:
+                val text = self.current.text
+                self.advance()
+                val value = parse_float_literal(text)
+                Expr(kind: ExprKind.FloatLit(value), span: start)
+
+            case StringLit:
+                self.parse_string_literal()
+
+            case BoolLit:
+                val value = self.current.text == "true"
+                self.advance()
+                Expr(kind: ExprKind.BoolLit(value), span: start)
+
+            case NilLit:
+                self.advance()
+                Expr(kind: ExprKind.NilLit, span: start)
+
+            case Ident:
+                val name = self.current.text
+                self.advance()
+                Expr(kind: ExprKind.Ident(name), span: start)
+
+            case LParen:
+                self.advance()
+                if self.check(TokenKind.RParen):
+                    # Unit tuple ()
+                    self.advance()
+                    Expr(kind: ExprKind.TupleLit([]), span: start.merge(self.previous.span))
+                else:
+                    val expr = self.parse_expr()
+                    if self.match_token(TokenKind.Comma):
+                        # Tuple literal
+                        var elements = [expr]
+                        if not self.check(TokenKind.RParen):
+                            elements = elements.push(self.parse_expr())
+                            while self.match_token(TokenKind.Comma):
+                                if self.check(TokenKind.RParen):
+                                    break
+                                elements = elements.push(self.parse_expr())
+                        self.expect(TokenKind.RParen, "expected ')' after tuple")
+                        Expr(kind: ExprKind.TupleLit(elements), span: start.merge(self.previous.span))
+                    else:
+                        # Grouped expression
+                        self.expect(TokenKind.RParen, "expected ')'")
+                        expr
+
+            case LBracket:
+                self.parse_array_or_comprehension()
+
+            case LBrace:
+                self.parse_dict_literal()
+
+            case Backslash:
+                self.parse_lambda()
+
+            case KwIf:
+                self.parse_if_expr()
+
+            case KwMatch:
+                self.parse_match_expr()
+
+            case KwReturn:
+                self.advance()
+                var value: Expr? = None
+                if not self.check(TokenKind.Newline) and not self.check(TokenKind.Dedent):
+                    value = Some(self.parse_expr())
+                Expr(kind: ExprKind.Return(value), span: start.merge(self.previous.span))
+
+            case KwBreak:
+                self.advance()
+                Expr(kind: ExprKind.Break(None), span: start)
+
+            case KwContinue:
+                self.advance()
+                Expr(kind: ExprKind.Continue(None), span: start)
+
+            case KwYield:
+                self.advance()
+                var value: Expr? = None
+                if not self.check(TokenKind.Newline) and not self.check(TokenKind.Dedent):
+                    value = Some(self.parse_expr())
+                Expr(kind: ExprKind.Yield(value), span: start.merge(self.previous.span))
+
+            case KwThrow:
+                self.advance()
+                val value = self.parse_expr()
+                Expr(kind: ExprKind.Throw(value), span: start.merge(value.span))
+
+            case _:
+                self.error("expected expression")
+                self.advance()
+                Expr(kind: ExprKind.Error, span: start)
+
+    me parse_string_literal() -> Expr:
+        """Parse string literal with interpolation."""
+        val start = self.current.span
+        val text = self.current.text
+        self.advance()
+
+        # TODO: Parse interpolations
+        Expr(kind: ExprKind.StringLit(text, None), span: start)
+
+    me parse_array_or_comprehension() -> Expr:
+        """Parse array literal or list comprehension."""
+        val start = self.current.span
+        self.advance()  # Consume '['
+
+        if self.check(TokenKind.RBracket):
+            self.advance()
+            return Expr(kind: ExprKind.ArrayLit([]), span: start.merge(self.previous.span))
+
+        # Check for comprehension
+        if self.check(TokenKind.KwFor):
+            return self.parse_list_comprehension(start)
+
+        # Array literal
+        var elements: [Expr] = []
+        elements = elements.push(self.parse_expr())
+
+        while self.match_token(TokenKind.Comma):
+            if self.check(TokenKind.RBracket):
+                break
+            elements = elements.push(self.parse_expr())
+
+        self.expect(TokenKind.RBracket, "expected ']' after array elements")
+        Expr(kind: ExprKind.ArrayLit(elements), span: start.merge(self.previous.span))
+
+    me parse_list_comprehension(start: Span) -> Expr:
+        """Parse list comprehension [for x in y if cond: expr]."""
+        var clauses: [ComprehensionClause] = []
+
+        while self.match_token(TokenKind.KwFor):
+            val var_start = self.current.span
+            val var_ = self.parse_identifier()
+            self.expect(TokenKind.KwIn, "expected 'in' in comprehension")
+            val iter = self.parse_expr()
+            clauses = clauses.push(ComprehensionClause(
+                kind: ComprehensionKind.For(var_, iter),
+                span: var_start.merge(iter.span)
+            ))
+
+            while self.match_token(TokenKind.KwIf):
+                val cond_start = self.previous.span
+                val cond = self.parse_expr()
+                clauses = clauses.push(ComprehensionClause(
+                    kind: ComprehensionKind.If(cond),
+                    span: cond_start.merge(cond.span)
+                ))
+
+        self.expect(TokenKind.Colon, "expected ':' in comprehension")
+        val expr = self.parse_expr()
+        self.expect(TokenKind.RBracket, "expected ']' after comprehension")
+
+        Expr(kind: ExprKind.ListComprehension(expr, clauses), span: start.merge(self.previous.span))
+
+    me parse_dict_literal() -> Expr:
+        """Parse dict literal {key: value, ...}."""
+        val start = self.current.span
+        self.advance()  # Consume '{'
+
+        if self.check(TokenKind.RBrace):
+            self.advance()
+            return Expr(kind: ExprKind.DictLit([]), span: start.merge(self.previous.span))
+
+        var entries: [(Expr, Expr)] = []
+        val key = self.parse_expr()
+        self.expect(TokenKind.Colon, "expected ':' after dict key")
+        val value = self.parse_expr()
+        entries = entries.push((key, value))
+
+        while self.match_token(TokenKind.Comma):
+            if self.check(TokenKind.RBrace):
+                break
+            val k = self.parse_expr()
+            self.expect(TokenKind.Colon, "expected ':' after dict key")
+            val v = self.parse_expr()
+            entries = entries.push((k, v))
+
+        self.expect(TokenKind.RBrace, "expected '}' after dict entries")
+        Expr(kind: ExprKind.DictLit(entries), span: start.merge(self.previous.span))
+
+    me parse_lambda() -> Expr:
+        """Parse lambda expression \x, y: expr."""
+        val start = self.current.span
+        self.advance()  # Consume '\'
+
+        var params: [LambdaParam] = []
+
+        if not self.check(TokenKind.Colon):
+            params = params.push(self.parse_lambda_param())
+            while self.match_token(TokenKind.Comma):
+                params = params.push(self.parse_lambda_param())
+
+        self.expect(TokenKind.Colon, "expected ':' after lambda parameters")
+        val body = self.parse_expr()
+
+        Expr(kind: ExprKind.Lambda(params, body), span: start.merge(body.span))
+
+    me parse_lambda_param() -> LambdaParam:
+        """Parse lambda parameter."""
+        val start = self.current.span
+        val name = self.parse_identifier()
+
+        var type_: Type? = None
+        if self.match_token(TokenKind.Colon):
+            type_ = Some(self.parse_type())
+
+        LambdaParam(name: name, type_: type_, span: start.merge(self.previous.span))
+
+    me parse_if_expr() -> Expr:
+        """Parse if expression."""
+        val start = self.current.span
+        self.advance()  # Consume 'if'
+
+        val cond = self.parse_expr()
+        self.expect(TokenKind.Colon, "expected ':' after if condition")
+        val then_ = self.parse_block()
+
+        var else_: Block? = None
+        if self.match_token(TokenKind.KwElse):
+            self.expect(TokenKind.Colon, "expected ':' after else")
+            else_ = Some(self.parse_block())
+        elif self.match_token(TokenKind.KwElif):
+            # elif is sugar for else if
+            val elif_expr = self.parse_if_expr()
+            else_ = Some(Block(stmts: [Stmt(kind: StmtKind.Expr(elif_expr), span: elif_expr.span)], span: elif_expr.span))
+
+        Expr(kind: ExprKind.If(cond, then_, else_), span: start.merge(self.previous.span))
+
+    me parse_match_expr() -> Expr:
+        """Parse match expression."""
+        val start = self.current.span
+        self.advance()  # Consume 'match'
+
+        val scrutinee = self.parse_expr()
+        self.expect(TokenKind.Colon, "expected ':' after match scrutinee")
+        self.skip_newlines()
+        self.expect(TokenKind.Indent, "expected indented match arms")
+
+        var arms: [MatchArm] = []
+
+        while not self.check(TokenKind.Dedent) and not self.is_at_end():
+            self.skip_newlines()
+            if self.check(TokenKind.Dedent):
+                break
+
+            self.expect(TokenKind.KwCase, "expected 'case' in match arm")
+            val pattern = self.parse_pattern()
+
+            var guard: Expr? = None
+            if self.match_token(TokenKind.KwIf):
+                guard = Some(self.parse_expr())
+
+            self.expect(TokenKind.Colon, "expected ':' after pattern")
+            val body = self.parse_block()
+
+            arms = arms.push(MatchArm(
+                pattern: pattern,
+                guard: guard,
+                body: body,
+                span: pattern.span.merge(body.span)
+            ))
+
+        self.match_token(TokenKind.Dedent)
+
+        Expr(kind: ExprKind.Match(scrutinee, arms), span: start.merge(self.previous.span))
+
+    me parse_call_args() -> [CallArg]:
+        """Parse function call arguments."""
+        var args: [CallArg] = []
+
+        if not self.check(TokenKind.RParen):
+            args = args.push(self.parse_call_arg())
+            while self.match_token(TokenKind.Comma):
+                if self.check(TokenKind.RParen):
+                    break
+                args = args.push(self.parse_call_arg())
+
+        args
+
+    me parse_call_arg() -> CallArg:
+        """Parse single call argument."""
+        val start = self.current.span
+
+        # Check for named argument
+        if self.check(TokenKind.Ident):
+            val name = self.current.text
+            self.advance()
+            if self.match_token(TokenKind.Colon):
+                val value = self.parse_expr()
+                return CallArg(name: Some(name), value: value, span: start.merge(value.span))
+            else:
+                # Not a named argument, parse as expression
+                val expr = Expr(kind: ExprKind.Ident(name), span: start)
+                return CallArg(name: None, value: expr, span: start)
+
+        val value = self.parse_expr()
+        CallArg(name: None, value: value, span: start.merge(value.span))
+
+    me parse_identifier() -> text:
+        if self.check(TokenKind.Ident):
+            val name = self.current.text
+            self.advance()
+            name
+        else:
+            self.error("expected identifier")
+            "<error>"
+
+    me parse_type() -> Type:
+        """Parse a type expression (reuses outline type parsing logic)."""
+        # Create temporary TreeSitter to parse type
+        val ts = TreeSitter.new(self.source)
+        ts.lexer.pos = self.lexer.pos
+        ts.current = self.current
+        ts.previous = self.previous
+
+        val outline = ts.parse_type_outline()
+        self.current = ts.current
+        self.previous = ts.previous
+        self.lexer.pos = ts.lexer.pos
+
+        self.convert_type(outline)
+
+    # ========================================================================
+    # Pattern Parsing
+    # ========================================================================
+
+    me parse_pattern() -> Pattern:
+        """Parse a pattern."""
+        val start = self.current.span
+
+        match self.peek():
+            case Underscore:
+                self.advance()
+                Pattern(kind: PatternKind.Wildcard, span: start)
+
+            case IntLit | FloatLit | StringLit | BoolLit | NilLit:
+                val expr = self.parse_primary_expr()
+                Pattern(kind: PatternKind.Literal(expr), span: start.merge(expr.span))
+
+            case Ident:
+                val name = self.current.text
+                self.advance()
+
+                if self.match_token(TokenKind.LParen):
+                    # Enum pattern
+                    self.parse_enum_pattern(name, start)
+                elif self.match_token(TokenKind.LBrace):
+                    # Struct pattern
+                    self.parse_struct_pattern(name, start)
+                else:
+                    # Binding pattern
+                    Pattern(kind: PatternKind.Binding(name, false), span: start)
+
+            case KwVar:
+                self.advance()
+                val name = self.parse_identifier()
+                Pattern(kind: PatternKind.Binding(name, true), span: start.merge(self.previous.span))
+
+            case LParen:
+                self.advance()
+                if self.check(TokenKind.RParen):
+                    self.advance()
+                    Pattern(kind: PatternKind.Tuple([]), span: start.merge(self.previous.span))
+                else:
+                    var elements: [Pattern] = []
+                    elements = elements.push(self.parse_pattern())
+                    while self.match_token(TokenKind.Comma):
+                        if self.check(TokenKind.RParen):
+                            break
+                        elements = elements.push(self.parse_pattern())
+                    self.expect(TokenKind.RParen, "expected ')' after tuple pattern")
+                    Pattern(kind: PatternKind.Tuple(elements), span: start.merge(self.previous.span))
+
+            case LBracket:
+                self.parse_array_pattern(start)
+
+            case _:
+                self.error("expected pattern")
+                self.advance()
+                Pattern(kind: PatternKind.Error, span: start)
+
+    me parse_enum_pattern(enum_name: text, start: Span) -> Pattern:
+        """Parse enum pattern Enum.Variant(...)."""
+        var variant = enum_name
+        var enum_ = ""
+
+        # Check for Enum.Variant form
+        if self.previous.kind == TokenKind.Dot:
+            enum_ = enum_name
+            variant = self.parse_identifier()
+
+        var payload: EnumPatternPayload? = None
+
+        if not self.check(TokenKind.RParen):
+            var patterns: [Pattern] = []
+            patterns = patterns.push(self.parse_pattern())
+            while self.match_token(TokenKind.Comma):
+                if self.check(TokenKind.RParen):
+                    break
+                patterns = patterns.push(self.parse_pattern())
+            payload = Some(EnumPatternPayload.Tuple(patterns))
+
+        self.expect(TokenKind.RParen, "expected ')' after enum pattern")
+
+        Pattern(
+            kind: PatternKind.Enum(enum_, variant, payload),
+            span: start.merge(self.previous.span)
+        )
+
+    me parse_struct_pattern(type_name: text, start: Span) -> Pattern:
+        """Parse struct pattern Type { field, field: pattern }."""
+        var fields: [(text, Pattern)] = []
+
+        if not self.check(TokenKind.RBrace):
+            val field = self.parse_identifier()
+            var pattern: Pattern
+            if self.match_token(TokenKind.Colon):
+                pattern = self.parse_pattern()
+            else:
+                pattern = Pattern(kind: PatternKind.Binding(field, false), span: self.previous.span)
+            fields = fields.push((field, pattern))
+
+            while self.match_token(TokenKind.Comma):
+                if self.check(TokenKind.RBrace):
+                    break
+                val f = self.parse_identifier()
+                var p: Pattern
+                if self.match_token(TokenKind.Colon):
+                    p = self.parse_pattern()
+                else:
+                    p = Pattern(kind: PatternKind.Binding(f, false), span: self.previous.span)
+                fields = fields.push((f, p))
+
+        self.expect(TokenKind.RBrace, "expected '}' after struct pattern")
+
+        Pattern(
+            kind: PatternKind.Struct(type_name, fields),
+            span: start.merge(self.previous.span)
+        )
+
+    me parse_array_pattern(start: Span) -> Pattern:
+        """Parse array pattern [a, b, ..rest]."""
+        self.advance()  # Consume '['
+
+        var elements: [Pattern] = []
+        var rest: text? = None
+
+        if not self.check(TokenKind.RBracket):
+            if self.match_token(TokenKind.DotDot):
+                rest = Some(self.parse_identifier())
+            else:
+                elements = elements.push(self.parse_pattern())
+
+            while self.match_token(TokenKind.Comma):
+                if self.check(TokenKind.RBracket):
+                    break
+                if self.match_token(TokenKind.DotDot):
+                    rest = Some(self.parse_identifier())
+                    break
+                elements = elements.push(self.parse_pattern())
+
+        self.expect(TokenKind.RBracket, "expected ']' after array pattern")
+
+        Pattern(
+            kind: PatternKind.Array(elements, rest),
+            span: start.merge(self.previous.span)
+        )
+
+    # ========================================================================
+    # Statement and Block Parsing
+    # ========================================================================
+
+    me parse_block() -> Block:
+        """Parse a block of statements."""
+        val start = self.current.span
+        var stmts: [Stmt] = []
+
+        self.skip_newlines()
+
+        if self.match_token(TokenKind.Indent):
+            while not self.check(TokenKind.Dedent) and not self.is_at_end():
+                self.skip_newlines()
+                if self.check(TokenKind.Dedent):
+                    break
+                stmts = stmts.push(self.parse_stmt())
+            self.match_token(TokenKind.Dedent)
+        else:
+            # Single-line block
+            stmts = stmts.push(self.parse_stmt())
+
+        Block(stmts: stmts, span: start.merge(self.previous.span))
+
+    me parse_stmt() -> Stmt:
+        """Parse a statement."""
+        val start = self.current.span
+
+        match self.peek():
+            case KwVal:
+                self.parse_val_stmt()
+            case KwVar:
+                self.parse_var_stmt()
+            case KwFor:
+                self.parse_for_stmt()
+            case KwWhile:
+                self.parse_while_stmt()
+            case KwLoop:
+                self.parse_loop_stmt()
+            case KwReturn:
+                self.advance()
+                var value: Expr? = None
+                if not self.check(TokenKind.Newline) and not self.check(TokenKind.Dedent):
+                    value = Some(self.parse_expr())
+                self.skip_newlines()
+                Stmt(kind: StmtKind.Return(value), span: start.merge(self.previous.span))
+            case KwBreak:
+                self.advance()
+                self.skip_newlines()
+                Stmt(kind: StmtKind.Break(None), span: start)
+            case KwContinue:
+                self.advance()
+                self.skip_newlines()
+                Stmt(kind: StmtKind.Continue(None), span: start)
+            case KwYield:
+                self.advance()
+                var value: Expr? = None
+                if not self.check(TokenKind.Newline) and not self.check(TokenKind.Dedent):
+                    value = Some(self.parse_expr())
+                self.skip_newlines()
+                Stmt(kind: StmtKind.Yield(value), span: start.merge(self.previous.span))
+            case KwThrow:
+                self.advance()
+                val value = self.parse_expr()
+                self.skip_newlines()
+                Stmt(kind: StmtKind.Throw(value), span: start.merge(value.span))
+            case _:
+                self.parse_expr_or_assign_stmt()
+
+    me parse_val_stmt() -> Stmt:
+        """Parse val statement."""
+        val start = self.current.span
+        self.advance()  # Consume 'val'
+
+        val name = self.parse_identifier()
+
+        var type_: Type? = None
+        if self.match_token(TokenKind.Colon):
+            type_ = Some(self.parse_type())
+
+        self.expect(TokenKind.Assign, "expected '=' in val declaration")
+        val init = self.parse_expr()
+        self.skip_newlines()
+
+        Stmt(kind: StmtKind.Val(name, type_, init), span: start.merge(init.span))
+
+    me parse_var_stmt() -> Stmt:
+        """Parse var statement."""
+        val start = self.current.span
+        self.advance()  # Consume 'var'
+
+        val name = self.parse_identifier()
+
+        var type_: Type? = None
+        if self.match_token(TokenKind.Colon):
+            type_ = Some(self.parse_type())
+
+        var init: Expr? = None
+        if self.match_token(TokenKind.Assign):
+            init = Some(self.parse_expr())
+
+        self.skip_newlines()
+
+        Stmt(kind: StmtKind.Var(name, type_, init), span: start.merge(self.previous.span))
+
+    me parse_for_stmt() -> Stmt:
+        """Parse for statement."""
+        val start = self.current.span
+        self.advance()  # Consume 'for'
+
+        val var_ = self.parse_identifier()
+        self.expect(TokenKind.KwIn, "expected 'in' in for loop")
+        val iter = self.parse_expr()
+        self.expect(TokenKind.Colon, "expected ':' after for header")
+        val body = self.parse_block()
+
+        Stmt(kind: StmtKind.For(var_, iter, body), span: start.merge(body.span))
+
+    me parse_while_stmt() -> Stmt:
+        """Parse while statement."""
+        val start = self.current.span
+        self.advance()  # Consume 'while'
+
+        val cond = self.parse_expr()
+        self.expect(TokenKind.Colon, "expected ':' after while condition")
+        val body = self.parse_block()
+
+        Stmt(kind: StmtKind.While(cond, body), span: start.merge(body.span))
+
+    me parse_loop_stmt() -> Stmt:
+        """Parse loop statement."""
+        val start = self.current.span
+        self.advance()  # Consume 'loop'
+
+        self.expect(TokenKind.Colon, "expected ':' after loop")
+        val body = self.parse_block()
+
+        Stmt(kind: StmtKind.Loop(body), span: start.merge(body.span))
+
+    me parse_expr_or_assign_stmt() -> Stmt:
+        """Parse expression or assignment statement."""
+        val start = self.current.span
+        val expr = self.parse_expr()
+
+        # Check for assignment
+        if self.check(TokenKind.Assign):
+            self.advance()
+            val value = self.parse_expr()
+            self.skip_newlines()
+            return Stmt(kind: StmtKind.Assign(expr, None, value), span: start.merge(value.span))
+
+        if self.check(TokenKind.PlusEq):
+            self.advance()
+            val value = self.parse_expr()
+            self.skip_newlines()
+            return Stmt(kind: StmtKind.Assign(expr, Some(AssignOp.Add), value), span: start.merge(value.span))
+
+        if self.check(TokenKind.MinusEq):
+            self.advance()
+            val value = self.parse_expr()
+            self.skip_newlines()
+            return Stmt(kind: StmtKind.Assign(expr, Some(AssignOp.Sub), value), span: start.merge(value.span))
+
+        if self.check(TokenKind.StarEq):
+            self.advance()
+            val value = self.parse_expr()
+            self.skip_newlines()
+            return Stmt(kind: StmtKind.Assign(expr, Some(AssignOp.Mul), value), span: start.merge(value.span))
+
+        if self.check(TokenKind.SlashEq):
+            self.advance()
+            val value = self.parse_expr()
+            self.skip_newlines()
+            return Stmt(kind: StmtKind.Assign(expr, Some(AssignOp.Div), value), span: start.merge(value.span))
+
+        if self.check(TokenKind.PercentEq):
+            self.advance()
+            val value = self.parse_expr()
+            self.skip_newlines()
+            return Stmt(kind: StmtKind.Assign(expr, Some(AssignOp.Mod), value), span: start.merge(value.span))
+
+        self.skip_newlines()
+        Stmt(kind: StmtKind.Expr(expr), span: expr.span)
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+fn parse_int_literal(text: text) -> i64:
+    """Parse integer literal."""
+    # Handle different bases
+    if text.starts_with("0x") or text.starts_with("0X"):
+        # Hex
+        parse_int_base(text[2:], 16)
+    elif text.starts_with("0b") or text.starts_with("0B"):
+        # Binary
+        parse_int_base(text[2:], 2)
+    elif text.starts_with("0o") or text.starts_with("0O"):
+        # Octal
+        parse_int_base(text[2:], 8)
+    else:
+        # Decimal
+        parse_int_base(text, 10)
+
+fn parse_int_base(text: text, base: i64) -> i64:
+    """Parse integer in given base."""
+    # TODO: Implement proper parsing
+    0
+
+fn parse_float_literal(text: text) -> f64:
+    """Parse float literal."""
+    # TODO: Implement proper parsing
+    0.0
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export Module, Import, ImportItem, Export
+export Function, Param, TypeParam, Class, Struct, Field
+export Enum, Variant, VariantKind, Trait, Impl, TypeAlias, Const
+export Type, TypeKind
+export Expr, ExprKind, Interpolation, CallArg, MatchArm, CatchClause
+export LambdaParam, ComprehensionClause, ComprehensionKind, EnumPayload
+export Pattern, PatternKind, EnumPatternPayload
+export Stmt, StmtKind, AssignOp, Block
+export BinOp, UnaryOp
+export Parser

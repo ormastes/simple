@@ -233,6 +233,50 @@ impl Value {
         }
     }
 
+    /// Get the abstract value kind from hir-core.
+    ///
+    /// This provides a unified type abstraction shared with the runtime.
+    pub fn value_kind(&self) -> simple_hir_core::ValueKind {
+        use simple_hir_core::ValueKind;
+        match self {
+            Value::Int(_) => ValueKind::Int,
+            Value::Float(_) => ValueKind::Float,
+            Value::Bool(_) => ValueKind::Bool,
+            Value::Str(_) => ValueKind::String,
+            Value::Symbol(_) => ValueKind::Symbol,
+            Value::Array(_) => ValueKind::Array,
+            Value::Tuple(_) => ValueKind::Tuple,
+            Value::Dict(_) => ValueKind::Dict,
+            Value::Lambda { .. } => ValueKind::Closure,
+            Value::BlockClosure { .. } => ValueKind::BlockClosure,
+            Value::Function { .. } => ValueKind::Closure,
+            Value::NativeFunction(_) => ValueKind::NativeFunction,
+            Value::Object { .. } => ValueKind::Object,
+            Value::Enum { .. } => ValueKind::Enum,
+            Value::Union { inner, .. } => inner.value_kind(),
+            Value::Constructor { .. } => ValueKind::Constructor,
+            Value::TraitObject { .. } => ValueKind::TraitObject,
+            Value::Unit { .. } => ValueKind::Unit,
+            Value::Actor(_) => ValueKind::Actor,
+            Value::Future(_) => ValueKind::Future,
+            Value::Generator(_) => ValueKind::Generator,
+            Value::Channel(_) => ValueKind::Channel,
+            Value::ThreadPool(_) => ValueKind::ThreadPool,
+            Value::Unique(_) => ValueKind::Unique,
+            Value::Shared(_) => ValueKind::Shared,
+            Value::Weak(_) => ValueKind::Weak,
+            Value::Handle(_) => ValueKind::Handle,
+            Value::Borrow(_) => ValueKind::Borrow,
+            Value::BorrowMut(_) => ValueKind::BorrowMut,
+            Value::Mock(_) => ValueKind::Mock,
+            Value::Matcher(_) => ValueKind::Matcher,
+            Value::EnumType { .. } => ValueKind::EnumType,
+            Value::EnumVariantConstructor { .. } => ValueKind::EnumVariantConstructor,
+            Value::Block { .. } => ValueKind::Block,
+            Value::Nil => ValueKind::Nil,
+        }
+    }
+
     /// Check if this value matches a given type name (for union type discrimination)
     pub fn matches_type(&self, type_name: &str) -> bool {
         match type_name {
