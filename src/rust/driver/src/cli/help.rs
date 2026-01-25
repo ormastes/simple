@@ -62,6 +62,10 @@ pub fn print_help() {
     eprintln!("  simple context <file.spl> --json        Output as JSON");
     eprintln!("  simple context <file.spl> --markdown    Output as Markdown");
     eprintln!();
+    eprintln!("Documentation Generation:");
+    eprintln!("  simple sspec-docgen <files...>           Generate docs from SSpec test files");
+    eprintln!("  simple sspec-docgen <files...> -o <dir>  Output to specific directory");
+    eprintln!();
     eprintln!("Build & Audit (#911-915):");
     eprintln!("  simple query --generated           Find all LLM-generated code");
     eprintln!("  simple query --generated --unverified    Find unverified generated code");
