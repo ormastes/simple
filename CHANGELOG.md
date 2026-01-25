@@ -5,7 +5,92 @@ All notable changes to the Simple compiler will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.3.0] - Planned
+
+### Goals
+
+#### Performance Improvements
+- JIT compilation optimization for hot paths
+- Reduced interpreter overhead
+- Memory allocation optimization
+- Faster startup time
+
+#### All Simple Executables
+- Rewrite all internal tools in Simple language
+- `simple fmt` - formatter written in Simple
+- `simple lint` - linter written in Simple
+- `simple test` - test runner written in Simple
+- Self-hosting milestone
+
+#### Migrate Rust to Simple
+- Gradual migration of compiler components
+- Parser rewrite in Simple (bootstrap phase)
+- Type checker in Simple
+- Reduce Rust dependency
+
+#### LLM Interface Enhancement
+- Improved context pack generation
+- Better IR export for LLM analysis
+- Enhanced lint suggestions for AI-assisted coding
+- Structured output for IDE integration
+
+---
+
+## [0.2.0] - 2026-01-25
+
+### Summary
+
+**Standard Library Draft Complete** - First complete draft of the standard library with all core modules implemented and tested.
+
+### Completed
+
+#### Standard Library (Draft Complete)
+- **Core modules**: `Option`, `Result`, `String`, `List`, `Dict`, `Set`
+- **Collections**: iterators, comprehensions, slicing
+- **Concurrency**: channels, threads, async primitives
+- **File I/O**: file operations, memory-mapped files
+- **Networking**: TCP/UDP sockets
+- **Resource management**: leak tracking, resource registry, cleanup protocols
+
+#### Error/Warning Fixes
+- All compiler errors resolved
+- All compiler warnings fixed
+- Doc-test failures corrected
+- Clean build with zero warnings
+
+#### Testing Infrastructure
+- 631+ tests passing
+- SSpec BDD framework complete
+- Slow test separation (`slow_it`)
+- Test run tracking and cleanup
+- Auto-generated test reports
+
+#### Documentation
+- Auto-generated feature docs (`doc/feature/`)
+- Test result reports (`doc/test/`)
+- Build error tracking (`doc/build/`)
+- Syntax quick reference guide
+
+#### Language Features
+- Pattern matching with exhaustiveness checking
+- Optional chaining (`?.`) and null coalescing (`??`)
+- Existence check (`.?`) operator
+- Negative indexing and slicing
+- String interpolation by default
+
+#### Tooling
+- Lint framework (75% complete)
+- Memory leak finder app
+- Resource cleanup validation
+
+### Technical Stats
+- **Test count**: 631+ tests
+- **Build status**: Clean (0 errors, 0 warnings)
+- **Compiler**: Hybrid (Cranelift + Interpreter)
+
+---
+
+## [0.1.0] - Previous
 
 ### Added
 
