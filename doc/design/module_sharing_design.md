@@ -307,12 +307,16 @@ get_tokens(source)       →    rt_tokenize(source)
 
 ## Implementation Phases
 
-### Phase 1: Connect hir-core (Current)
+### Phase 1: Connect hir-core (COMPLETE)
 - [x] Create `simple-hir-core` crate
 - [x] Add LogLevel, StructLayout, EnumLayout
-- [ ] Link to `simple-compiler`
-- [ ] Link to `simple-runtime`
-- [ ] Link to `simple-parser`
+- [x] Link to `simple-compiler`
+- [x] Link to `simple-runtime`
+- [x] Link to `simple-parser`
+- [x] Link to `simple-sdn`
+- [x] Link to `simple-diagnostics`
+- [x] Create `config.spl` (374 lines)
+- [x] Create `di.spl` (423 lines)
 
 ### Phase 2: Add log FFI
 - [ ] Implement `log_ffi.rs` in runtime
@@ -339,15 +343,23 @@ get_tokens(source)       →    rt_tokenize(source)
 
 ## Size Targets
 
-| Module | Current (Rust) | Target (Simple) | Reduction |
-|--------|----------------|-----------------|-----------|
-| log | (none) | 143 lines | n/a |
-| db | 2930 lines | 251 lines | 91% |
-| config | (none) | ~100 lines | n/a |
-| parse utils | (in parser) | ~200 lines | n/a |
+| Module | Current (Rust) | Actual (Simple) | Target | Reduction |
+|--------|----------------|-----------------|--------|-----------|
+| log | (none) | 143 lines | 143 | n/a |
+| db | 2930 lines | 251 lines | 251 | 91% |
+| config | ~500 lines | 374 lines | 150 | 25% |
+| di | ~400 lines | 423 lines | 80 | -6% |
+| time | (in runtime) | 129 lines | 130 | n/a |
+| map | (in runtime) | 475 lines | - | n/a |
+| set | (in runtime) | 479 lines | - | n/a |
+| parse utils | (in parser) | ~200 (TODO) | 200 | n/a |
 
-**Total Simple stdlib target**: ~700 lines
+**Current Simple stdlib**: 2,274 lines (7 modules)
 **Shared Rust core (hir-core)**: ~500 lines
+
+**Note**: config.spl and di.spl are larger than target because they include
+full type definitions that will be shared. When types are extracted to a
+common module, the size will be reduced.
 
 ---
 

@@ -26,6 +26,7 @@ use simple_driver::cli::verify::run_verify;
 #[cfg(feature = "tui")]
 use simple_driver::cli::tui::run_tui_repl;
 use simple_driver::cli::doc_gen::{run_feature_gen, run_spec_gen, run_task_gen, run_todo_gen, run_todo_scan};
+use simple_driver::cli::sspec_docgen;
 use simple_driver::cli::qualify_ignore::{handle_qualify_ignore, parse_qualify_ignore_args};
 
 // Import our new command modules
@@ -163,6 +164,7 @@ fn main() {
         "spec-gen" => run_spec_gen(&args),
         "todo-scan" => run_todo_scan(&args),
         "todo-gen" => run_todo_gen(&args),
+        "sspec-docgen" => run_sspec_docgen(&args),
 
         // Dashboard
         "dashboard" => {
@@ -343,5 +345,62 @@ fn handle_file_execution(
         eprintln!();
         print_help();
         1
+    }
+}
+
+/// Run sspec-docgen command
+fn run_sspec_docgen(args: &[String]) -> i32 {
+    // Parse arguments
+    let mut output_dir = PathBuf::from("doc/spec");
+    let mut spec_files: Vec<PathBuf> = Vec::new();
+
+    let mut i = 1; // Skip command name
+    while i < args.len() {
+        let arg = &args[i];
+        if arg == "--output" || arg == "-o" {
+            if i + 1 < args.len() {
+                output_dir = PathBuf::from(&args[i + 1]);
+                i += 2;
+                continue;
+            }
+        } else if arg == "--help" || arg == "-h" {
+            println!("SSpec Documentation Generator");
+            println!();
+            println!("Usage: simple sspec-docgen <spec_file>... [--output <dir>]");
+            println!();
+            println!("Arguments:");
+            println!("  <spec_file>...    One or more sspec files (*_spec.spl)");
+            println!();
+            println!("Options:");
+            println!("  --output <dir>    Output directory (default: doc/spec)");
+            println!("  -o <dir>          Short form of --output");
+            println!("  --help, -h        Show this help message");
+            return 0;
+        } else if !arg.starts_with("-") {
+            spec_files.push(PathBuf::from(arg));
+        }
+        i += 1;
+    }
+
+    if spec_files.is_empty() {
+        eprintln!("error: No spec files provided");
+        eprintln!();
+        eprintln!("Usage: simple sspec-docgen <spec_file>... [--output <dir>]");
+        return 1;
+    }
+
+    // Call the sspec_docgen module
+    match sspec_docgen::generate_sspec_docs(&spec_files, &output_dir) {
+        Ok(stats) => {
+            println!(
+                "\n✓ Generated {} docs ({} complete, {} stubs)",
+                stats.total_specs, stats.specs_with_docs, stats.specs_without_docs
+            );
+            0
+        }
+        Err(e) => {
+            eprintln!("✗ Failed to generate documentation: {}", e);
+            1
+        }
     }
 }

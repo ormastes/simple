@@ -1,0 +1,423 @@
+# DI Module - Dependency Injection Container
+#
+# Provides dependency injection with profiles for different execution modes:
+# - test: Mock implementations for testing
+# - dev: Full implementations with debug logging
+# - prod: Optimized implementations
+# - sdn: No-op instruction module (data-only parsing)
+
+# ============================================================================
+# Core Types
+# ============================================================================
+
+trait Injectable:
+    """Marker trait for injectable types."""
+    fn type_name() -> text
+
+struct Binding:
+    """A binding from interface to implementation."""
+    interface_name: text
+    factory: fn() -> Any
+    singleton: bool
+    instance: Any?
+
+struct Container:
+    """Dependency injection container."""
+    profile: text
+    bindings: Dict<text, Binding>
+    instances: Dict<text, Any>
+
+# ============================================================================
+# Profile Presets
+# ============================================================================
+
+enum Profile:
+    Test        # Mock implementations
+    Dev         # Development with debug
+    Prod        # Production optimized
+    Sdn         # SDN parsing (no code execution)
+    Custom(text) # Custom profile name
+
+impl Profile:
+    fn name() -> text:
+        match self:
+            case Test: "test"
+            case Dev: "dev"
+            case Prod: "prod"
+            case Sdn: "sdn"
+            case Custom(n): n
+
+    static fn from_text(name: text) -> Profile:
+        match name:
+            case "test": Profile.Test
+            case "dev": Profile.Dev
+            case "prod": Profile.Prod
+            case "sdn": Profile.Sdn
+            case _: Profile.Custom(name)
+
+# ============================================================================
+# Container Implementation
+# ============================================================================
+
+impl Container:
+    static fn empty() -> Container:
+        """Create empty container."""
+        Container(
+            profile: "dev",
+            bindings: {},
+            instances: {}
+        )
+
+    static fn with_profile(profile: text) -> Container:
+        """Create container with profile and default bindings."""
+        var container = Container(
+            profile: profile,
+            bindings: {},
+            instances: {}
+        )
+        container.register_defaults()
+        container
+
+    static fn for_test() -> Container:
+        """Create container for testing."""
+        Container.with_profile("test")
+
+    static fn for_dev() -> Container:
+        """Create container for development."""
+        Container.with_profile("dev")
+
+    static fn for_prod() -> Container:
+        """Create container for production."""
+        Container.with_profile("prod")
+
+    static fn for_sdn() -> Container:
+        """Create container for SDN parsing."""
+        Container.with_profile("sdn")
+
+    me register_defaults():
+        """Register default bindings based on profile."""
+        match self.profile:
+            case "test":
+                self.register_test_bindings()
+            case "dev":
+                self.register_dev_bindings()
+            case "prod":
+                self.register_prod_bindings()
+            case "sdn":
+                self.register_sdn_bindings()
+            case _:
+                self.register_dev_bindings()
+
+    me register_test_bindings():
+        """Register test profile bindings."""
+        # InstructionModule -> Mock (allows all, returns defaults)
+        self.bind("InstructionModule", \: MockInstructionModule(), true)
+        # LogConfig -> Testing (debug, no timestamps)
+        self.bind("LogConfig", \: LogConfig.testing(), true)
+        # ExecutionConfig -> Interpret with debug
+        self.bind("ExecutionConfig", \: ExecutionConfig.interpret(), true)
+
+    me register_dev_bindings():
+        """Register development profile bindings."""
+        # InstructionModule -> Full implementation
+        self.bind("InstructionModule", \: FullInstructionModule(), true)
+        # LogConfig -> Development
+        self.bind("LogConfig", \: LogConfig.development(), true)
+        # ExecutionConfig -> JIT with optimization
+        self.bind("ExecutionConfig", \: ExecutionConfig.jit(), true)
+
+    me register_prod_bindings():
+        """Register production profile bindings."""
+        # InstructionModule -> Optimized implementation
+        self.bind("InstructionModule", \: OptInstructionModule(), true)
+        # LogConfig -> Production (warn only)
+        self.bind("LogConfig", \: LogConfig.production(), true)
+        # ExecutionConfig -> AOT with full optimization
+        self.bind("ExecutionConfig", \: ExecutionConfig.aot(), true)
+
+    me register_sdn_bindings():
+        """Register SDN profile bindings (no code execution)."""
+        # InstructionModule -> NoOp (blocks code execution)
+        self.bind("InstructionModule", \: NoOpInstructionModule(), true)
+        # LogConfig -> SDN (errors only)
+        self.bind("LogConfig", \: LogConfig.sdn(), true)
+        # ExecutionConfig -> None (no execution)
+        self.bind("ExecutionConfig", \: ExecutionConfig(
+            mode: "none",
+            debug: false,
+            optimize: 0,
+            gc_threshold: 0
+        ), true)
+
+    me bind(name: text, factory: fn() -> Any, singleton: bool):
+        """Register a binding."""
+        self.bindings[name] = Binding(
+            interface_name: name,
+            factory: factory,
+            singleton: singleton,
+            instance: None
+        )
+
+    me bind_instance(name: text, instance: Any):
+        """Register a pre-created instance."""
+        self.bindings[name] = Binding(
+            interface_name: name,
+            factory: \: instance,
+            singleton: true,
+            instance: Some(instance)
+        )
+
+    fn resolve<T>(name: text) -> Result<T, text>:
+        """Resolve a dependency by name."""
+        val binding = self.bindings[name]
+        if binding.is_none():
+            return Err("No binding for: {name}")
+
+        val b = binding.unwrap()
+
+        # Return cached instance for singletons
+        if b.singleton and b.instance.is_some():
+            return Ok(b.instance.unwrap() as T)
+
+        # Create new instance
+        val instance = b.factory()
+
+        # Cache singleton instances
+        if b.singleton:
+            self.instances[name] = instance
+
+        Ok(instance as T)
+
+    fn has(name: text) -> bool:
+        """Check if a binding exists."""
+        self.bindings[name].is_some()
+
+    fn profile_name() -> text:
+        """Get current profile name."""
+        self.profile
+
+# ============================================================================
+# Instruction Modules (DI Components)
+# ============================================================================
+
+trait InstructionModule:
+    """Interface for instruction execution modules."""
+    fn execute(inst: HirInstruction, ctx: ExecutionContext) -> Result<Value, text>
+    fn is_allowed(inst: HirInstruction) -> bool
+    fn name() -> text
+
+struct MockInstructionModule:
+    """Mock instruction module for testing."""
+
+impl MockInstructionModule: InstructionModule:
+    fn execute(inst: HirInstruction, ctx: ExecutionContext) -> Result<Value, text>:
+        # Mock execution - return default values
+        Ok(Value.none())
+
+    fn is_allowed(inst: HirInstruction) -> bool:
+        # Allow everything in mock
+        true
+
+    fn name() -> text:
+        "MockInstructionModule"
+
+struct FullInstructionModule:
+    """Full instruction module with all features."""
+
+impl FullInstructionModule: InstructionModule:
+    fn execute(inst: HirInstruction, ctx: ExecutionContext) -> Result<Value, text>:
+        # Full execution - delegate to Rust FFI
+        # TODO: Implement via FFI
+        Ok(Value.none())
+
+    fn is_allowed(inst: HirInstruction) -> bool:
+        # Allow all instructions
+        true
+
+    fn name() -> text:
+        "FullInstructionModule"
+
+struct OptInstructionModule:
+    """Optimized instruction module for production."""
+
+impl OptInstructionModule: InstructionModule:
+    fn execute(inst: HirInstruction, ctx: ExecutionContext) -> Result<Value, text>:
+        # Optimized execution - minimal checks
+        # TODO: Implement via FFI
+        Ok(Value.none())
+
+    fn is_allowed(inst: HirInstruction) -> bool:
+        true
+
+    fn name() -> text:
+        "OptInstructionModule"
+
+struct NoOpInstructionModule:
+    """No-operation instruction module for SDN parsing.
+
+    Only allows data construction:
+    - LoadConst: Load literal values
+    - ArrayNew: Create arrays
+    - DictNew: Create dictionaries
+
+    All other instructions are blocked to prevent code execution in SDN.
+    """
+
+impl NoOpInstructionModule: InstructionModule:
+    fn execute(inst: HirInstruction, ctx: ExecutionContext) -> Result<Value, text>:
+        match inst:
+            case LoadConst(value):
+                Ok(value)
+            case ArrayNew(elements):
+                val results = elements.map(\e: self.execute(e, ctx))
+                if results.any(\r: r.is_err()):
+                    return Err("Failed to construct array")
+                Ok(Value.array(results.map(\r: r.unwrap())))
+            case DictNew(pairs):
+                var dict: Dict<Value, Value> = {}
+                for pair in pairs:
+                    val key = self.execute(pair.0, ctx)
+                    val value = self.execute(pair.1, ctx)
+                    if key.is_err() or value.is_err():
+                        return Err("Failed to construct dict")
+                    dict[key.unwrap()] = value.unwrap()
+                Ok(Value.dict(dict))
+            case _:
+                Err("Code execution not allowed in SDN mode: {inst.kind()}")
+
+    fn is_allowed(inst: HirInstruction) -> bool:
+        match inst:
+            case LoadConst(_) | ArrayNew(_) | DictNew(_):
+                true
+            case _:
+                false
+
+    fn name() -> text:
+        "NoOpInstructionModule"
+
+# ============================================================================
+# Placeholder Types (to be replaced with real implementations)
+# ============================================================================
+
+# These are placeholder types - actual definitions in instruction.spl
+enum HirInstruction:
+    LoadConst(value: Value)
+    LoadLocal(slot: i64)
+    StoreLocal(slot: i64)
+    BinOp(op: BinOpKind, left: HirInstruction, right: HirInstruction)
+    Call(func: text, args: [HirInstruction])
+    ArrayNew(elements: [HirInstruction])
+    DictNew(pairs: [(HirInstruction, HirInstruction)])
+    Return(value: HirInstruction?)
+    Other
+
+impl HirInstruction:
+    fn kind() -> text:
+        match self:
+            case LoadConst(_): "LoadConst"
+            case LoadLocal(_): "LoadLocal"
+            case StoreLocal(_): "StoreLocal"
+            case BinOp(_, _, _): "BinOp"
+            case Call(_, _): "Call"
+            case ArrayNew(_): "ArrayNew"
+            case DictNew(_): "DictNew"
+            case Return(_): "Return"
+            case Other: "Other"
+
+enum BinOpKind:
+    Add, Sub, Mul, Div, Mod
+    Eq, Ne, Lt, Le, Gt, Ge
+    And, Or
+
+struct ExecutionContext:
+    locals: Dict<i64, Value>
+    globals: Dict<text, Value>
+
+enum Value:
+    None
+    Int(i64)
+    Float(f64)
+    Bool(bool)
+    String(text)
+    Array([Value])
+    Dict(Dict<Value, Value>)
+
+impl Value:
+    static fn none() -> Value:
+        Value.None
+
+    static fn int(n: i64) -> Value:
+        Value.Int(n)
+
+    static fn array(elements: [Value]) -> Value:
+        Value.Array(elements)
+
+    static fn dict(pairs: Dict<Value, Value>) -> Value:
+        Value.Dict(pairs)
+
+# Import config types (forward declaration)
+# These will be properly imported when modules are linked
+struct LogConfig:
+    global_level: i64
+    scopes: Dict<text, i64>
+    timestamps: bool
+    format: text
+
+impl LogConfig:
+    static fn testing() -> LogConfig:
+        LogConfig(global_level: 5, scopes: {}, timestamps: false, format: "text")
+
+    static fn development() -> LogConfig:
+        LogConfig(global_level: 5, scopes: {}, timestamps: true, format: "text")
+
+    static fn production() -> LogConfig:
+        LogConfig(global_level: 3, scopes: {}, timestamps: true, format: "json")
+
+    static fn sdn() -> LogConfig:
+        LogConfig(global_level: 2, scopes: {}, timestamps: false, format: "text")
+
+struct ExecutionConfig:
+    mode: text
+    debug: bool
+    optimize: i64
+    gc_threshold: i64
+
+impl ExecutionConfig:
+    static fn interpret() -> ExecutionConfig:
+        ExecutionConfig(mode: "interpret", debug: true, optimize: 0, gc_threshold: 100000)
+
+    static fn jit() -> ExecutionConfig:
+        ExecutionConfig(mode: "jit", debug: false, optimize: 2, gc_threshold: 1000000)
+
+    static fn aot() -> ExecutionConfig:
+        ExecutionConfig(mode: "aot", debug: false, optimize: 3, gc_threshold: 10000000)
+
+# ============================================================================
+# Global Container (singleton pattern)
+# ============================================================================
+
+var global_container: Container? = None
+
+pub fn init_container(profile: text):
+    """Initialize global container with profile."""
+    global_container = Some(Container.with_profile(profile))
+
+pub fn get_container() -> Container:
+    """Get the global container (creates dev container if not initialized)."""
+    if global_container.is_none():
+        global_container = Some(Container.for_dev())
+    global_container.unwrap()
+
+pub fn resolve<T>(name: text) -> Result<T, text>:
+    """Resolve dependency from global container."""
+    get_container().resolve(name)
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export Container, Profile, Binding, Injectable
+export InstructionModule, MockInstructionModule, FullInstructionModule
+export OptInstructionModule, NoOpInstructionModule
+export HirInstruction, BinOpKind, ExecutionContext, Value
+export init_container, get_container, resolve
