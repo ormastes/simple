@@ -1,0 +1,58 @@
+# LeakTracked Mixin - Automatic resource leak tracking
+#
+# This mixin provides automatic resource tracking for classes that implement
+# the Resource trait. When mixed in, resources are automatically registered
+# when created and unregistered when closed.
+#
+# Usage:
+# ```simple
+# class MyResource with LeakTracked, Resource:
+#     handle: i64
+#
+#     static fn open(path: text) -> MyResource:
+#         val r = MyResource(handle: native_open(path))
+#         r._start_tracking("MyResource.open(\"{path}\")")
+#         return r
+#
+#     fn close():
+#         if self.is_open():
+#             native_close(self.handle)
+#             self._stop_tracking()
+# ```
+
+use core.option.Option
+use core.resource_registry.ResourceRegistry
+
+# Mixin that adds leak tracking capabilities to a class
+mixin LeakTracked:
+    # Internal tracking ID (None if not being tracked)
+    var _tracking_id: Option<i64> = None
+
+    # Start tracking this resource
+    # Call this after the resource is successfully opened/created
+    #
+    # Arguments:
+    #   location - Description of where/how the resource was created
+    #              e.g., "File.open(\"config.txt\")" or "TcpStream.connect(\"localhost:8080\")"
+    me _start_tracking(location: text):
+        val resource_name = self.resource_name()
+        val id = ResourceRegistry.register(resource_name, location)
+        self._tracking_id = Some(id)
+
+    # Stop tracking this resource
+    # Call this when the resource is closed
+    me _stop_tracking():
+        match self._tracking_id:
+            case Some(id):
+                ResourceRegistry.unregister(id)
+                self._tracking_id = None
+            case None:
+                pass  # Not being tracked
+
+    # Check if this resource is currently being tracked
+    fn is_tracked() -> bool:
+        self._tracking_id.is_some()
+
+    # Get the tracking ID if being tracked
+    fn tracking_id() -> Option<i64>:
+        self._tracking_id

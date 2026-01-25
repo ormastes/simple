@@ -157,6 +157,42 @@ pub struct PassStmt {
     pub span: Span,
 }
 
+/// Defer statement - execute at scope exit (LIFO order)
+///
+/// Deferred statements run when the enclosing scope exits, whether by:
+/// - Normal flow (end of function/block)
+/// - Early return
+/// - Break/continue in loops
+/// - Exception propagation
+///
+/// # Syntax
+/// ```simple
+/// defer file.close()              # Single expression
+/// defer:                          # Block form
+///     cleanup_resource()
+///     log("done")
+/// ```
+///
+/// # Semantics
+/// - LIFO: later defers run first
+/// - Variables captured at defer time (closure semantics)
+/// - Runs even on error propagation
+#[derive(Debug, Clone, PartialEq)]
+pub struct DeferStmt {
+    pub span: Span,
+    /// The deferred action - either a single expression or a block
+    pub body: DeferBody,
+}
+
+/// Body of a defer statement
+#[derive(Debug, Clone, PartialEq)]
+pub enum DeferBody {
+    /// Single expression: `defer file.close()`
+    Expr(Expr),
+    /// Block of statements: `defer: statements`
+    Block(Block),
+}
+
 /// Guard clause statement: `? condition -> result` or `? else -> result`
 /// Desugars to early return if condition is true.
 ///

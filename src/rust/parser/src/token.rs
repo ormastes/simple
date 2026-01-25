@@ -139,7 +139,8 @@ pub enum TokenKind {
     Loop,
     Break,
     Continue,
-    Pass, // pass (no-op statement, like Python's pass)
+    Pass,  // pass (no-op statement, like Python's pass)
+    Defer, // defer (deferred execution at scope exit)
     Return,
     Match,
     Case,

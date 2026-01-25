@@ -46,6 +46,10 @@ thread_local! {
     // TEST-012: Memoized lazy values (name -> (block, Option<cached_value>))
     pub(crate) static BDD_LAZY_VALUES: RefCell<HashMap<String, (Value, Option<Value>)>> = RefCell::new(HashMap::new());
 
+    // Resource fixtures: name -> (factory_block, Option<created_resource>)
+    // Resources are lazily created and automatically cleaned up after each test
+    pub(crate) static BDD_RESOURCE_VALUES: RefCell<HashMap<String, (Value, Option<Value>)>> = RefCell::new(HashMap::new());
+
     // Stack of current ExampleGroup objects for nested describe/context
     pub(crate) static BDD_GROUP_STACK: RefCell<Vec<Value>> = RefCell::new(Vec::new());
 }
@@ -819,6 +823,176 @@ pub(super) fn eval_bdd_builtin(
 
             Ok(Some(Value::Bool(exists)))
         }
+        // Resource fixtures with automatic cleanup
+        "resource" => {
+            let name = eval_arg(
+                args,
+                0,
+                Value::Symbol("unnamed".to_string()),
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )?;
+            let name_str = match &name {
+                Value::Symbol(s) => s.clone(),
+                Value::Str(s) => s.clone(),
+                _ => "unnamed".to_string(),
+            };
+            let factory = eval_arg(args, 1, Value::Nil, env, functions, classes, enums, impl_methods)?;
+
+            // Register the factory block (resource not created yet)
+            BDD_RESOURCE_VALUES.with(|cell| {
+                cell.borrow_mut().insert(name_str, (factory, None));
+            });
+
+            Ok(Some(Value::Nil))
+        }
+        "get_resource" => {
+            let name = eval_arg(
+                args,
+                0,
+                Value::Symbol("unnamed".to_string()),
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )?;
+            let name_str = match &name {
+                Value::Symbol(s) => s.clone(),
+                Value::Str(s) => s.clone(),
+                _ => "unnamed".to_string(),
+            };
+
+            let cached = BDD_RESOURCE_VALUES.with(|cell| cell.borrow().get(&name_str).cloned());
+
+            match cached {
+                Some((_factory, Some(value))) => Ok(Some(value)),
+                Some((factory, None)) => {
+                    // Create the resource by calling the factory
+                    let value = exec_block_value(factory.clone(), env, functions, classes, enums, impl_methods)?;
+                    BDD_RESOURCE_VALUES.with(|cell| {
+                        if let Some(entry) = cell.borrow_mut().get_mut(&name_str) {
+                            entry.1 = Some(value.clone());
+                        }
+                    });
+                    Ok(Some(value))
+                }
+                None => {
+                    let ctx = ErrorContext::new()
+                        .with_code(codes::UNDEFINED_VARIABLE)
+                        .with_help("define the resource with resource() before using get_resource()");
+                    return Err(CompileError::semantic_with_context(
+                        format!("no resource found for '{}'", name_str),
+                        ctx,
+                    ));
+                }
+            }
+        }
+        "has_resource" => {
+            let name = eval_arg(
+                args,
+                0,
+                Value::Symbol("unnamed".to_string()),
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )?;
+            let name_str = match &name {
+                Value::Symbol(s) => s.clone(),
+                Value::Str(s) => s.clone(),
+                _ => "unnamed".to_string(),
+            };
+
+            let exists = BDD_RESOURCE_VALUES.with(|cell| {
+                cell.borrow().get(&name_str).map(|(_, cached)| cached.is_some()).unwrap_or(false)
+            });
+
+            Ok(Some(Value::Bool(exists)))
+        }
+        "cleanup_resource" => {
+            // Cleanup a specific resource by name (calls close() if available)
+            let name = eval_arg(
+                args,
+                0,
+                Value::Symbol("unnamed".to_string()),
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )?;
+            let name_str = match &name {
+                Value::Symbol(s) => s.clone(),
+                Value::Str(s) => s.clone(),
+                _ => "unnamed".to_string(),
+            };
+
+            // Get and remove the resource
+            let resource = BDD_RESOURCE_VALUES.with(|cell| {
+                let mut resources = cell.borrow_mut();
+                if let Some((factory, cached)) = resources.get_mut(&name_str) {
+                    let value = cached.take();
+                    value
+                } else {
+                    None
+                }
+            });
+
+            // Try to call close() on the resource if it was created
+            if let Some(resource_value) = resource {
+                // Try to call close() method using the interpreter's method dispatch
+                // This is a best-effort cleanup - if close() doesn't exist, we just drop the value
+                if let Value::Object { class, fields } = &resource_value {
+                    if let Some(class_def) = classes.get(class).cloned() {
+                        if let Some(method) = class_def.methods.iter().find(|m| m.name == "close") {
+                            // Call close() method
+                            let mut local_env = env.clone();
+                            local_env.insert("self".to_string(), resource_value.clone());
+                            for (k, v) in fields {
+                                local_env.insert(k.clone(), v.clone());
+                            }
+                            let _ = crate::interpreter::exec_block(&method.body, &mut local_env, functions, classes, enums, impl_methods);
+                        }
+                    }
+                }
+            }
+
+            Ok(Some(Value::Nil))
+        }
+        "cleanup_all_resources" => {
+            // Cleanup all resources (called at end of test)
+            let resources: Vec<(String, Option<Value>)> = BDD_RESOURCE_VALUES.with(|cell| {
+                cell.borrow().iter().map(|(k, (_, v))| (k.clone(), v.clone())).collect()
+            });
+
+            // Clean up in reverse order (LIFO)
+            for (name, cached) in resources.into_iter().rev() {
+                if let Some(resource_value) = cached {
+                    if let Value::Object { class, fields } = &resource_value {
+                        if let Some(class_def) = classes.get(class).cloned() {
+                            if let Some(method) = class_def.methods.iter().find(|m| m.name == "close") {
+                                let mut local_env = env.clone();
+                                local_env.insert("self".to_string(), resource_value.clone());
+                                for (k, v) in fields {
+                                    local_env.insert(k.clone(), v.clone());
+                                }
+                                let _ = crate::interpreter::exec_block(&method.body, &mut local_env, functions, classes, enums, impl_methods);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Clear all resource entries
+            BDD_RESOURCE_VALUES.with(|cell| cell.borrow_mut().clear());
+
+            Ok(Some(Value::Nil))
+        }
         // BDD Matchers
         "be_true" => Ok(Some(Value::Matcher(MatcherValue::BeTrue))),
         "be_false" => Ok(Some(Value::Matcher(MatcherValue::BeFalse))),
@@ -1001,6 +1175,7 @@ pub fn clear_bdd_state() {
     BDD_BEFORE_EACH.with(|cell| *cell.borrow_mut() = vec![vec![]]);
     BDD_AFTER_EACH.with(|cell| *cell.borrow_mut() = vec![vec![]]);
     BDD_LAZY_VALUES.with(|cell| cell.borrow_mut().clear());
+    BDD_RESOURCE_VALUES.with(|cell| cell.borrow_mut().clear());
     BDD_GROUP_STACK.with(|cell| cell.borrow_mut().clear());
 
     // Clear global registries

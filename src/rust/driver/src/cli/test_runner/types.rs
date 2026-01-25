@@ -158,6 +158,16 @@ pub struct TestOptions {
     pub rust_tests: bool,
     /// Only track ignored Rust tests (skip running all)
     pub rust_ignored_only: bool,
+
+    // Run management options
+    /// List test runs
+    pub list_runs: bool,
+    /// Cleanup stale runs (mark as crashed)
+    pub cleanup_runs: bool,
+    /// Prune old runs (delete, keeping only N most recent)
+    pub prune_runs: Option<usize>,
+    /// Filter runs by status for listing
+    pub runs_status_filter: Option<String>,
 }
 
 impl Default for TestOptions {
@@ -206,6 +216,12 @@ impl Default for TestOptions {
             cpu_check_interval: 5,
             rust_tests: false,
             rust_ignored_only: false,
+
+            // Run management
+            list_runs: false,
+            cleanup_runs: false,
+            prune_runs: None,
+            runs_status_filter: None,
         }
     }
 }

@@ -58,6 +58,10 @@ impl Record for TodoRecord {
         "todos"
     }
 
+    fn field_names() -> &'static [&'static str] {
+        &["id", "keyword", "area", "priority", "description", "file", "line", "issue", "blocked", "status", "valid"]
+    }
+
     fn from_sdn_row(row: &[String]) -> Result<Self, String> {
         Ok(TodoRecord {
             id: row.get(0).cloned().unwrap_or_default(),

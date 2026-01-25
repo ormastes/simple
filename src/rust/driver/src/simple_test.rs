@@ -32,6 +32,45 @@ use simple_compiler::interpreter::{
 };
 use simple_runtime::value::clear_all_runtime_registries;
 
+/// Default memory limit for test execution (3GB)
+pub const DEFAULT_TEST_MEMORY_LIMIT_BYTES: u64 = 3 * 1024 * 1024 * 1024;
+
+/// Set memory limit for current process (Unix only)
+/// Returns true if limit was set successfully, false otherwise
+#[cfg(unix)]
+pub fn set_memory_limit(limit_bytes: u64) -> bool {
+    use std::mem::MaybeUninit;
+
+    unsafe {
+        let mut rlim = MaybeUninit::<libc::rlimit>::uninit();
+
+        // Get current limits
+        if libc::getrlimit(libc::RLIMIT_AS, rlim.as_mut_ptr()) != 0 {
+            return false;
+        }
+
+        let mut rlim = rlim.assume_init();
+
+        // Set soft limit (hard limit remains unchanged)
+        rlim.rlim_cur = limit_bytes as libc::rlim_t;
+
+        // Apply the limit
+        libc::setrlimit(libc::RLIMIT_AS, &rlim) == 0
+    }
+}
+
+/// Set memory limit (no-op on non-Unix platforms)
+#[cfg(not(unix))]
+pub fn set_memory_limit(_limit_bytes: u64) -> bool {
+    // Memory limits not supported on this platform
+    true
+}
+
+/// Apply default test memory limit
+pub fn apply_test_memory_limit() -> bool {
+    set_memory_limit(DEFAULT_TEST_MEMORY_LIMIT_BYTES)
+}
+
 /// Category of test based on location in test directory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TestCategory {
@@ -254,6 +293,9 @@ pub fn run_test_file(path: &Path) -> SimpleTestResult {
     // Initialize coverage if enabled (but don't initialize global singleton here,
     // let the test runner handle that)
     // Coverage will be collected via interpreter hooks
+
+    // Apply memory limit to prevent runaway memory usage (3GB default)
+    apply_test_memory_limit();
 
     // Clear all interpreter state to prevent memory leaks and state pollution between tests.
     // This clears BDD registries, module globals, DI singletons, unit system registries, etc.

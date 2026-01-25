@@ -37,6 +37,10 @@ impl Record for TaskRecord {
         "tasks"
     }
 
+    fn field_names() -> &'static [&'static str] {
+        &["id", "category", "name", "description", "priority", "status", "valid"]
+    }
+
     fn from_sdn_row(row: &[String]) -> Result<Self, String> {
         Ok(TaskRecord {
             id: row.get(0).cloned().unwrap_or_default(),

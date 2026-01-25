@@ -170,6 +170,26 @@ pub(crate) fn exec_node(
         }
         Node::Continue(_) => Ok(Control::Continue),
         Node::Pass(_) => Ok(Control::Next), // No-op, just continue to next statement
+        Node::Defer(defer_stmt) => {
+            // Defer statement: queue the body for execution when the current scope exits
+            // The body is converted to a Block and queued via the tail injection mechanism
+            use simple_parser::ast::{Block, DeferBody};
+            use crate::r#macro::queue_tail_injection;
+
+            let block = match &defer_stmt.body {
+                DeferBody::Expr(expr) => {
+                    // Convert single expression to a block with one statement
+                    Block {
+                        span: defer_stmt.span,
+                        statements: vec![Node::Expression(expr.clone())],
+                    }
+                }
+                DeferBody::Block(block) => block.clone(),
+            };
+
+            queue_tail_injection(block);
+            Ok(Control::Next)
+        }
         Node::Guard(guard_stmt) => {
             // Guard clause: ? condition -> result
             // If condition is Some and true, or if condition is None (else), return the result

@@ -117,6 +117,15 @@ impl Record for TestRecord {
         "tests"
     }
 
+    fn field_names() -> &'static [&'static str] {
+        &[
+            "test_id", "test_name", "test_file", "category", "status", "last_run",
+            "failure", "execution_history", "timing", "timing_config",
+            "related_bugs", "related_features", "tags", "description", "valid",
+            "qualified_by", "qualified_at", "qualified_reason"
+        ]
+    }
+
     fn from_sdn_row(row: &[String]) -> Result<Self, String> {
         let get_field = |idx: usize| row.get(idx).cloned().unwrap_or_default();
 
@@ -350,6 +359,323 @@ pub struct UpdateRules {
     pub update_on_all_tests_run: bool,
     pub track_top_variance_pct: f64,
     pub rewrite_top_variance: bool,
+}
+
+// ============================================================================
+// Test Run Tracking
+// ============================================================================
+
+/// Status of a test run session
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TestRunStatus {
+    Running,
+    Completed,
+    Crashed,
+    TimedOut,
+    Interrupted,
+}
+
+impl std::fmt::Display for TestRunStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TestRunStatus::Running => write!(f, "running"),
+            TestRunStatus::Completed => write!(f, "completed"),
+            TestRunStatus::Crashed => write!(f, "crashed"),
+            TestRunStatus::TimedOut => write!(f, "timed_out"),
+            TestRunStatus::Interrupted => write!(f, "interrupted"),
+        }
+    }
+}
+
+impl TestRunStatus {
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "running" => TestRunStatus::Running,
+            "completed" => TestRunStatus::Completed,
+            "crashed" => TestRunStatus::Crashed,
+            "timed_out" => TestRunStatus::TimedOut,
+            "interrupted" => TestRunStatus::Interrupted,
+            _ => TestRunStatus::Running,
+        }
+    }
+}
+
+/// A test run record - tracks a single test execution session
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TestRunRecord {
+    /// Unique run identifier (timestamp-based)
+    pub run_id: String,
+    /// When the run started (ISO 8601)
+    pub start_time: String,
+    /// When the run ended (empty if still running)
+    pub end_time: String,
+    /// Process ID of the test runner
+    pub pid: u32,
+    /// Hostname where the test ran
+    pub hostname: String,
+    /// Current status
+    pub status: TestRunStatus,
+    /// Total number of tests in this run
+    pub test_count: usize,
+    /// Number of passed tests
+    pub passed: usize,
+    /// Number of failed tests
+    pub failed: usize,
+    /// Number of tests that crashed
+    pub crashed: usize,
+    /// Number of tests that timed out
+    pub timed_out: usize,
+}
+
+impl TestRunRecord {
+    /// Create a new running test run record
+    pub fn new_running() -> Self {
+        let now = chrono::Utc::now();
+        TestRunRecord {
+            run_id: format!("run_{}", now.format("%Y%m%d_%H%M%S_%3f")),
+            start_time: now.to_rfc3339(),
+            end_time: String::new(),
+            pid: std::process::id(),
+            hostname: hostname::get()
+                .map(|h| h.to_string_lossy().to_string())
+                .unwrap_or_else(|_| "unknown".to_string()),
+            status: TestRunStatus::Running,
+            test_count: 0,
+            passed: 0,
+            failed: 0,
+            crashed: 0,
+            timed_out: 0,
+        }
+    }
+
+    /// Mark the run as completed
+    pub fn mark_completed(&mut self) {
+        self.end_time = chrono::Utc::now().to_rfc3339();
+        self.status = TestRunStatus::Completed;
+    }
+
+    /// Mark the run as crashed
+    pub fn mark_crashed(&mut self) {
+        self.end_time = chrono::Utc::now().to_rfc3339();
+        self.status = TestRunStatus::Crashed;
+    }
+
+    /// Check if this run is stale (running but started too long ago)
+    pub fn is_stale(&self, max_hours: i64) -> bool {
+        if self.status != TestRunStatus::Running {
+            return false;
+        }
+        if let Ok(start) = chrono::DateTime::parse_from_rfc3339(&self.start_time) {
+            let elapsed = chrono::Utc::now().signed_duration_since(start);
+            return elapsed.num_hours() >= max_hours;
+        }
+        false
+    }
+
+    /// Check if the process is still alive
+    pub fn is_process_alive(&self) -> bool {
+        #[cfg(unix)]
+        {
+            // Check if process exists by sending signal 0
+            unsafe {
+                libc::kill(self.pid as i32, 0) == 0
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            // On non-unix, assume process is alive if we can't check
+            true
+        }
+    }
+}
+
+/// Implement Record trait for TestRunRecord
+impl Record for TestRunRecord {
+    fn id(&self) -> String {
+        self.run_id.clone()
+    }
+
+    fn table_name() -> &'static str {
+        "test_runs"
+    }
+
+    fn field_names() -> &'static [&'static str] {
+        &[
+            "run_id", "start_time", "end_time", "pid", "hostname", "status",
+            "test_count", "passed", "failed", "crashed", "timed_out"
+        ]
+    }
+
+    fn from_sdn_row(row: &[String]) -> Result<Self, String> {
+        Ok(TestRunRecord {
+            run_id: row.get(0).cloned().unwrap_or_default(),
+            start_time: row.get(1).cloned().unwrap_or_default(),
+            end_time: row.get(2).cloned().unwrap_or_default(),
+            pid: row.get(3).and_then(|s| s.parse().ok()).unwrap_or(0),
+            hostname: row.get(4).cloned().unwrap_or_default(),
+            status: TestRunStatus::from_str(row.get(5).map(|s| s.as_str()).unwrap_or("running")),
+            test_count: row.get(6).and_then(|s| s.parse().ok()).unwrap_or(0),
+            passed: row.get(7).and_then(|s| s.parse().ok()).unwrap_or(0),
+            failed: row.get(8).and_then(|s| s.parse().ok()).unwrap_or(0),
+            crashed: row.get(9).and_then(|s| s.parse().ok()).unwrap_or(0),
+            timed_out: row.get(10).and_then(|s| s.parse().ok()).unwrap_or(0),
+        })
+    }
+
+    fn to_sdn_row(&self) -> Vec<String> {
+        vec![
+            self.run_id.clone(),
+            self.start_time.clone(),
+            self.end_time.clone(),
+            self.pid.to_string(),
+            self.hostname.clone(),
+            self.status.to_string(),
+            self.test_count.to_string(),
+            self.passed.to_string(),
+            self.failed.to_string(),
+            self.crashed.to_string(),
+            self.timed_out.to_string(),
+        ]
+    }
+}
+
+// ============================================================================
+// Test Run Management Functions
+// ============================================================================
+
+use crate::unified_db::Database;
+
+/// Load test runs from the test database file
+pub fn load_test_runs(db_path: &Path) -> Result<Database<TestRunRecord>, String> {
+    Database::<TestRunRecord>::load(db_path)
+}
+
+/// Save test runs to the test database file (preserves other tables)
+pub fn save_test_runs(db: &Database<TestRunRecord>) -> Result<(), String> {
+    db.save().map_err(|e| e.to_string())
+}
+
+/// Start a new test run and save it to the database
+pub fn start_test_run(db_path: &Path) -> Result<TestRunRecord, String> {
+    let mut db = load_test_runs(db_path)?;
+    let run = TestRunRecord::new_running();
+    db.insert(run.clone());
+    save_test_runs(&db)?;
+    Ok(run)
+}
+
+/// Update an existing test run
+pub fn update_test_run(db_path: &Path, run: &TestRunRecord) -> Result<(), String> {
+    let mut db = load_test_runs(db_path)?;
+    db.insert(run.clone());
+    save_test_runs(&db)
+}
+
+/// Complete a test run with final counts
+pub fn complete_test_run(
+    db_path: &Path,
+    run_id: &str,
+    test_count: usize,
+    passed: usize,
+    failed: usize,
+    crashed: usize,
+    timed_out: usize,
+) -> Result<(), String> {
+    let mut db = load_test_runs(db_path)?;
+    if let Some(run) = db.get_mut(run_id) {
+        run.mark_completed();
+        run.test_count = test_count;
+        run.passed = passed;
+        run.failed = failed;
+        run.crashed = crashed;
+        run.timed_out = timed_out;
+    }
+    save_test_runs(&db)
+}
+
+/// Mark a test run as crashed
+pub fn mark_run_crashed(db_path: &Path, run_id: &str) -> Result<(), String> {
+    let mut db = load_test_runs(db_path)?;
+    if let Some(run) = db.get_mut(run_id) {
+        run.mark_crashed();
+    }
+    save_test_runs(&db)
+}
+
+/// Cleanup stale test runs (mark as crashed if running too long or process dead)
+pub fn cleanup_stale_runs(db_path: &Path, max_hours: i64) -> Result<Vec<String>, String> {
+    let mut db = load_test_runs(db_path)?;
+    let mut cleaned = Vec::new();
+
+    // Collect IDs to update (can't mutate while iterating)
+    let stale_ids: Vec<String> = db
+        .records
+        .values()
+        .filter(|r| r.status == TestRunStatus::Running)
+        .filter(|r| r.is_stale(max_hours) || !r.is_process_alive())
+        .map(|r| r.run_id.clone())
+        .collect();
+
+    for run_id in stale_ids {
+        if let Some(run) = db.get_mut(&run_id) {
+            run.mark_crashed();
+            cleaned.push(run_id);
+        }
+    }
+
+    if !cleaned.is_empty() {
+        save_test_runs(&db)?;
+    }
+
+    Ok(cleaned)
+}
+
+/// Delete old completed runs (keep only N most recent)
+pub fn prune_old_runs(db_path: &Path, keep_count: usize) -> Result<usize, String> {
+    let mut db = load_test_runs(db_path)?;
+
+    // Sort by start_time descending
+    let mut runs: Vec<_> = db.records.values().cloned().collect();
+    runs.sort_by(|a, b| b.start_time.cmp(&a.start_time));
+
+    // Keep only the most recent N
+    let to_delete: Vec<String> = runs
+        .iter()
+        .skip(keep_count)
+        .map(|r| r.run_id.clone())
+        .collect();
+
+    let deleted_count = to_delete.len();
+    for run_id in to_delete {
+        db.delete(&run_id);
+    }
+
+    if deleted_count > 0 {
+        save_test_runs(&db)?;
+    }
+
+    Ok(deleted_count)
+}
+
+/// List all test runs, optionally filtered by status
+pub fn list_runs(db_path: &Path, status_filter: Option<TestRunStatus>) -> Result<Vec<TestRunRecord>, String> {
+    let db = load_test_runs(db_path)?;
+    let mut runs: Vec<_> = db
+        .records
+        .values()
+        .filter(|r| status_filter.is_none() || Some(r.status) == status_filter)
+        .cloned()
+        .collect();
+
+    // Sort by start_time descending (most recent first)
+    runs.sort_by(|a, b| b.start_time.cmp(&a.start_time));
+    Ok(runs)
+}
+
+/// Get currently running test runs
+pub fn get_running_runs(db_path: &Path) -> Result<Vec<TestRunRecord>, String> {
+    list_runs(db_path, Some(TestRunStatus::Running))
 }
 
 impl TestDb {

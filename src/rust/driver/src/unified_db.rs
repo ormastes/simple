@@ -23,6 +23,9 @@ pub trait Record: Clone {
     /// Get the table name in the SDN database (e.g., "todos", "features", "tasks")
     fn table_name() -> &'static str;
 
+    /// Get the field names for the table columns
+    fn field_names() -> &'static [&'static str];
+
     /// Deserialize a record from an SDN table row
     fn from_sdn_row(row: &[String]) -> Result<Self, String>;
 
@@ -52,6 +55,10 @@ pub trait Record: Clone {
 ///
 ///     fn table_name() -> &'static str {
 ///         "records"
+///     }
+///
+///     fn field_names() -> &'static [&'static str] {
+///         &["id", "value"]
 ///     }
 ///
 ///     fn from_sdn_row(row: &[String]) -> Result<Self, String> {
@@ -170,23 +177,27 @@ impl<T: Record> Database<T> {
         Ok(db)
     }
 
-    /// Save database to disk with atomic write and locking
+    /// Save database to disk with atomic write and locking.
+    /// Preserves other tables in the same file (multi-table support).
     pub fn save(&self) -> Result<(), io::Error> {
         // Acquire lock
         let _lock =
             FileLock::acquire(&self.path, 10).map_err(|e| io::Error::new(io::ErrorKind::Other, format!("{:?}", e)))?;
 
-        // Build field list (first record's fields or empty)
-        let fields: Vec<String> = if let Some(first) = self.records.values().next() {
-            first
-                .to_sdn_row()
-                .iter()
-                .enumerate()
-                .map(|(i, _)| format!("field_{}", i))
-                .collect()
-        } else {
-            Vec::new()
-        };
+        // Load existing file to preserve other tables
+        let mut existing_dict = indexmap::IndexMap::new();
+        if self.path.exists() {
+            if let Ok(content) = fs::read_to_string(&self.path) {
+                if let Ok(doc) = simple_sdn::parse_document(&content) {
+                    if let simple_sdn::SdnValue::Dict(dict) = doc.root() {
+                        existing_dict = dict.clone();
+                    }
+                }
+            }
+        }
+
+        // Build field list from Record trait
+        let fields: Vec<String> = T::field_names().iter().map(|s| s.to_string()).collect();
 
         // Convert records to SDN rows
         let mut rows = Vec::new();
@@ -206,13 +217,13 @@ impl<T: Record> Database<T> {
             rows,
         };
 
-        // Build SDN document as a dictionary
-        let mut dict = indexmap::IndexMap::new();
-        dict.insert(T::table_name().to_string(), table);
+        // Update only this table in the existing dict (preserves other tables)
+        existing_dict.insert(T::table_name().to_string(), table);
 
-        let mut doc = simple_sdn::SdnDocument::parse(&format!("{} |id|", T::table_name()))
+        // Create empty document for serialization
+        let mut doc = simple_sdn::SdnDocument::parse("_placeholder: 1")
             .map_err(|e| io::Error::other(e.to_string()))?;
-        *doc.root_mut() = simple_sdn::SdnValue::Dict(dict);
+        *doc.root_mut() = simple_sdn::SdnValue::Dict(existing_dict);
 
         let content = doc.to_sdn();
 
@@ -299,6 +310,10 @@ mod tests {
 
         fn table_name() -> &'static str {
             "test_records"
+        }
+
+        fn field_names() -> &'static [&'static str] {
+            &["id", "name"]
         }
 
         fn from_sdn_row(row: &[String]) -> Result<Self, String> {

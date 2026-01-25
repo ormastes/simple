@@ -106,6 +106,9 @@ pub mod sandbox;
 // Phase 14: Random number generation
 pub mod random;
 
+// Phase 15: Resource registry for leak detection
+pub mod resource_registry;
+
 // Re-export all public FFI functions for backward compatibility
 // Phase 1
 pub use equality::*;
@@ -158,3 +161,6 @@ pub use sandbox::*;
 
 // Phase 14
 pub use random::*;
+
+// Phase 15
+pub use resource_registry::*;

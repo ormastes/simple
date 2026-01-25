@@ -822,7 +822,8 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
             | Node::ClassAlias(_)
             | Node::FunctionAlias(_)
             | Node::Pass(_)
-            | Node::Guard(_) => {
+            | Node::Guard(_)
+            | Node::Defer(_) => {
                 // Module system is handled by the module resolver
                 // HandlePool is processed at compile time for allocation
                 // Bitfield is processed at compile time for bit-level field access
@@ -834,6 +835,7 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                 // Calc is a calculational proof block for Lean (not runtime)
                 // ClassAlias/FunctionAlias are compile-time declarations
                 // Pass is a no-op statement
+                // Defer at module level is a no-op (only meaningful inside function bodies)
                 // These are no-ops in the interpreter
             }
         }

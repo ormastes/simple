@@ -355,8 +355,13 @@ pub fn exec_with(
     // Execute the body
     let result = exec_block(&with_stmt.body, env, functions, classes, enums, impl_methods);
 
-    // Always call __exit__ (even if body failed)
-    let _ = call_method_if_exists(&resource, "__exit__", &[], env, functions, classes, enums, impl_methods);
+    // Always call cleanup (even if body failed)
+    // First try __exit__, then fall back to close() for Resource types
+    let exit_result = call_method_if_exists(&resource, "__exit__", &[], env, functions, classes, enums, impl_methods)?;
+    if exit_result.is_none() {
+        // No __exit__ method found - try close() for Resource trait compatibility
+        let _ = call_method_if_exists(&resource, "close", &[], env, functions, classes, enums, impl_methods);
+    }
 
     // Remove the binding if it was created
     if let Some(name) = &with_stmt.name {

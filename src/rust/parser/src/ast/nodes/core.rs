@@ -74,6 +74,7 @@ pub enum Node {
     Break(BreakStmt),
     Continue(ContinueStmt),
     Pass(PassStmt),
+    Defer(DeferStmt),
     /// Guard clause: `? condition -> result` or `? else -> result`
     /// Desugars to early return if condition is true
     Guard(GuardStmt),
