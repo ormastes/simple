@@ -485,6 +485,39 @@ pub extern "C" fn rt_string_ends_with(string: RuntimeValue, suffix: RuntimeValue
     }
 }
 
+/// Check if two strings are equal
+/// Returns 1 if true, 0 if false
+#[no_mangle]
+pub extern "C" fn rt_string_eq(string1: RuntimeValue, string2: RuntimeValue) -> i64 {
+    let len1 = rt_string_len(string1);
+    let len2 = rt_string_len(string2);
+
+    if len1 < 0 || len2 < 0 {
+        return 0;
+    }
+
+    if len1 != len2 {
+        return 0;
+    }
+
+    if len1 == 0 {
+        return 1; // Both empty strings are equal
+    }
+
+    let data1 = rt_string_data(string1);
+    let data2 = rt_string_data(string2);
+
+    if data1.is_null() || data2.is_null() {
+        return 0;
+    }
+
+    unsafe {
+        let slice1 = std::slice::from_raw_parts(data1, len1 as usize);
+        let slice2 = std::slice::from_raw_parts(data2, len2 as usize);
+        if slice1 == slice2 { 1 } else { 0 }
+    }
+}
+
 /// Create a string from a null-terminated C string
 ///
 /// # Safety
