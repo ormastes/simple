@@ -250,7 +250,8 @@ impl Lowerer {
                 | Node::ClassAlias(_)
                 | Node::FunctionAlias(_)
                 | Node::Pass(_)
-                | Node::Guard(_) => {}
+                | Node::Guard(_)
+                | Node::Defer(_) => {}
             }
         }
 

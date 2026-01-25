@@ -677,4 +677,38 @@ impl<'a> Parser<'a> {
             invariants,
         }))
     }
+
+    /// Parse a defer statement for scope-based cleanup
+    ///
+    /// # Syntax
+    /// ```simple
+    /// defer expr             # Single expression
+    /// defer:                 # Block form
+    ///     statements
+    /// ```
+    pub(crate) fn parse_defer(&mut self) -> Result<Node, ParseError> {
+        let start_span = self.current.span;
+        self.expect(&TokenKind::Defer)?;
+
+        // Check if this is block form (defer:) or expression form (defer expr)
+        let body = if self.check(&TokenKind::Colon) {
+            self.advance(); // consume ':'
+            let block = self.parse_block()?;
+            DeferBody::Block(block)
+        } else {
+            // Parse single expression
+            let expr = self.parse_expression()?;
+            DeferBody::Expr(expr)
+        };
+
+        Ok(Node::Defer(DeferStmt {
+            span: Span::new(
+                start_span.start,
+                self.previous.span.end,
+                start_span.line,
+                start_span.column,
+            ),
+            body,
+        }))
+    }
 }

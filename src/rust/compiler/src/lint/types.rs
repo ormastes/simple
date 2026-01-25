@@ -47,6 +47,8 @@ pub enum LintName {
     SSpecManualAssertions,
     /// Positional arguments for parameters that share a type with other parameters
     UnnamedDuplicateTypedArgs,
+    /// Resource types not properly closed within scope
+    ResourceLeak,
 }
 
 impl LintName {
@@ -62,6 +64,7 @@ impl LintName {
             LintName::SSpecMinimalDocstrings => "sspec_minimal_docstrings",
             LintName::SSpecManualAssertions => "sspec_manual_assertions",
             LintName::UnnamedDuplicateTypedArgs => "unnamed_duplicate_typed_args",
+            LintName::ResourceLeak => "resource_leak",
         }
     }
 
@@ -77,6 +80,7 @@ impl LintName {
             "sspec_minimal_docstrings" => Some(LintName::SSpecMinimalDocstrings),
             "sspec_manual_assertions" => Some(LintName::SSpecManualAssertions),
             "unnamed_duplicate_typed_args" => Some(LintName::UnnamedDuplicateTypedArgs),
+            "resource_leak" => Some(LintName::ResourceLeak),
             _ => None,
         }
     }
@@ -94,6 +98,7 @@ impl LintName {
             LintName::SSpecMinimalDocstrings => LintLevel::Warn, // Info level not supported, use Warn
             LintName::SSpecManualAssertions => LintLevel::Warn,
             LintName::UnnamedDuplicateTypedArgs => LintLevel::Warn,
+            LintName::ResourceLeak => LintLevel::Warn,
         }
     }
 
@@ -408,6 +413,85 @@ Or in simple.sdn:
     [lints]
     unnamed_duplicate_typed_args = "allow"
 "#.to_string(),
+            LintName::ResourceLeak => r#"Lint: resource_leak
+Level: warn (default)
+
+=== What it checks ===
+
+This lint warns when a Resource-typed variable is created but not properly
+closed within its scope. Resources include File, TcpStream, TcpListener,
+UdpSocket, and other types implementing the Resource trait.
+
+=== Why it matters ===
+
+Unclosed resources can lead to:
+- File handle exhaustion
+- Socket/port leaks
+- Memory leaks
+- System resource exhaustion
+- Test failures due to lingering resources
+
+Proper resource cleanup is essential for reliable software.
+
+=== Examples ===
+
+Triggers the lint:
+    fn process_file():
+        val file = File.open("data.txt")  # Warning: file not closed
+        val content = file.read()
+        # Missing: file.close()
+
+    fn connect():
+        val conn = TcpStream.connect("localhost:8080")  # Warning
+        conn.write("hello")
+        # Missing: conn.close()
+
+Does not trigger:
+    fn process_file():
+        val file = File.open("data.txt")
+        val content = file.read()
+        file.close()  # Properly closed
+
+    fn connect():
+        with TcpStream.connect("localhost:8080") as conn:
+            conn.write("hello")
+        # Automatically closed by with statement
+
+    fn with_defer():
+        val file = File.open("data.txt")
+        defer file.close()  # Will be closed at scope exit
+        val content = file.read()
+
+=== How to fix ===
+
+1. Explicitly close resources:
+    val file = File.open("path")
+    defer file.close()  # Best practice
+    # ... use file ...
+
+2. Use with/using statement for automatic cleanup:
+    with File.open("path") as file:
+        val content = file.read()
+    # file.close() called automatically
+
+3. Use the resource BDD fixture in tests:
+    resource :db, \: Database.connect("test.db")
+    it "queries data":
+        db.execute("SELECT 1")
+    # db.close() called automatically after each test
+
+=== How to suppress ===
+
+If the resource is intentionally left open (e.g., returned to caller):
+
+    #[allow(resource_leak)]
+    fn create_connection() -> TcpStream:
+        TcpStream.connect("localhost:8080")  # Caller is responsible
+
+Or in simple.sdn:
+    [lints]
+    resource_leak = "allow"
+"#.to_string(),
         }
     }
 
@@ -423,6 +507,7 @@ Or in simple.sdn:
             LintName::SSpecMinimalDocstrings,
             LintName::SSpecManualAssertions,
             LintName::UnnamedDuplicateTypedArgs,
+            LintName::ResourceLeak,
         ]
     }
 }

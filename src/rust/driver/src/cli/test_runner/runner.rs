@@ -117,6 +117,11 @@ pub fn run_tests(options: TestOptions) -> TestRunResult {
     // Make options mutable to apply config file settings
     let mut options = options;
 
+    // Handle run management commands (--list-runs, --cleanup-runs, --prune-runs)
+    if options.list_runs || options.cleanup_runs || options.prune_runs.is_some() {
+        return handle_run_management(&options);
+    }
+
     // Load configuration from simple.test.toml (applies defaults if not overridden by CLI)
     if options.parallel {
         load_resource_throttle_config(&mut options);
@@ -165,6 +170,23 @@ pub fn run_tests(options: TestOptions) -> TestRunResult {
 
     // Print discovery summary
     print_discovery_summary(&test_files, &options, quiet);
+
+    // Start test run tracking
+    let db_path = PathBuf::from("doc/test/test_db.sdn");
+    let test_run = match crate::test_db::start_test_run(&db_path) {
+        Ok(run) => {
+            if !quiet {
+                debug_log!(DebugLevel::Basic, "Runner", "Started test run: {}", run.run_id);
+            }
+            Some(run)
+        }
+        Err(e) => {
+            if !quiet {
+                eprintln!("Note: Test run tracking disabled ({})", e);
+            }
+            None
+        }
+    };
 
     // Execute tests
     // Default: Sequential (single-threaded) execution
@@ -247,6 +269,31 @@ pub fn run_tests(options: TestOptions) -> TestRunResult {
     if !list_mode {
         generate_diagrams_if_enabled(&options, &result, quiet);
         save_coverage_data(quiet);
+    }
+
+    // Complete test run tracking
+    if let Some(run) = test_run {
+        // Count crashed/timed out tests from results
+        let crashed_count = result.files.iter()
+            .filter(|f| f.error.as_ref().map(|e| e.contains("crash") || e.contains("signal")).unwrap_or(false))
+            .count();
+        let timed_out_count = result.files.iter()
+            .filter(|f| f.error.as_ref().map(|e| e.contains("timed out")).unwrap_or(false))
+            .count();
+
+        if let Err(e) = crate::test_db::complete_test_run(
+            &db_path,
+            &run.run_id,
+            result.files.len(),
+            result.total_passed,
+            result.total_failed,
+            crashed_count,
+            timed_out_count,
+        ) {
+            debug_log!(DebugLevel::Detailed, "Runner", "Failed to complete test run: {}", e);
+        } else {
+            debug_log!(DebugLevel::Basic, "Runner", "Completed test run: {}", run.run_id);
+        }
     }
 
     result
@@ -598,5 +645,127 @@ fn run_list_mode_static(test_files: &[PathBuf], options: &TestOptions, quiet: bo
         total_skipped: registry.skipped_count(),
         total_ignored: registry.ignored_count(),
         total_duration_ms: start.elapsed().as_millis() as u64,
+    }
+}
+
+// ============================================================================
+// Run Management
+// ============================================================================
+
+use crate::test_db::{
+    TestRunRecord, TestRunStatus,
+    cleanup_stale_runs, list_runs, prune_old_runs,
+};
+
+/// Handle run management commands (--list-runs, --cleanup-runs, --prune-runs)
+fn handle_run_management(options: &TestOptions) -> TestRunResult {
+    let db_path = PathBuf::from("doc/test/test_db.sdn");
+    let quiet = matches!(options.format, OutputFormat::Json);
+
+    // Cleanup stale runs first (if requested or before listing)
+    if options.cleanup_runs {
+        match cleanup_stale_runs(&db_path, 2) {  // 2 hours = stale
+            Ok(cleaned) => {
+                if !quiet {
+                    if cleaned.is_empty() {
+                        println!("No stale runs found.");
+                    } else {
+                        println!("Cleaned {} stale run(s):", cleaned.len());
+                        for run_id in &cleaned {
+                            println!("  - {}", run_id);
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                if !quiet {
+                    eprintln!("Error cleaning up runs: {}", e);
+                }
+            }
+        }
+    }
+
+    // Prune old runs (if requested)
+    if let Some(keep_count) = options.prune_runs {
+        match prune_old_runs(&db_path, keep_count) {
+            Ok(deleted) => {
+                if !quiet {
+                    if deleted == 0 {
+                        println!("No runs to prune (keeping {})", keep_count);
+                    } else {
+                        println!("Pruned {} old run(s) (keeping {})", deleted, keep_count);
+                    }
+                }
+            }
+            Err(e) => {
+                if !quiet {
+                    eprintln!("Error pruning runs: {}", e);
+                }
+            }
+        }
+    }
+
+    // List runs (if requested)
+    if options.list_runs {
+        let status_filter = options.runs_status_filter.as_ref().map(|s| {
+            TestRunStatus::from_str(s)
+        });
+
+        match list_runs(&db_path, status_filter) {
+            Ok(runs) => {
+                if !quiet {
+                    if runs.is_empty() {
+                        println!("No test runs found.");
+                    } else {
+                        println!("Test Runs ({} total):\n", runs.len());
+                        println!("{:<30} {:<10} {:<20} {:<8} {:>6} {:>6} {:>6}",
+                            "Run ID", "Status", "Start Time", "PID", "Tests", "Pass", "Fail");
+                        println!("{}", "-".repeat(100));
+
+                        for run in &runs {
+                            // Parse and format start time
+                            let start_time = if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(&run.start_time) {
+                                dt.format("%Y-%m-%d %H:%M:%S").to_string()
+                            } else {
+                                run.start_time.clone()
+                            };
+
+                            println!("{:<30} {:<10} {:<20} {:<8} {:>6} {:>6} {:>6}",
+                                run.run_id,
+                                run.status.to_string(),
+                                start_time,
+                                run.pid,
+                                run.test_count,
+                                run.passed,
+                                run.failed
+                            );
+                        }
+
+                        // Summary
+                        let running = runs.iter().filter(|r| r.status == TestRunStatus::Running).count();
+                        let completed = runs.iter().filter(|r| r.status == TestRunStatus::Completed).count();
+                        let crashed = runs.iter().filter(|r| r.status == TestRunStatus::Crashed).count();
+
+                        println!("\nSummary: {} running, {} completed, {} crashed",
+                            running, completed, crashed);
+                    }
+                }
+            }
+            Err(e) => {
+                if !quiet {
+                    eprintln!("Error listing runs: {}", e);
+                }
+            }
+        }
+    }
+
+    // Return empty result for run management commands
+    TestRunResult {
+        files: Vec::new(),
+        total_passed: 0,
+        total_failed: 0,
+        total_skipped: 0,
+        total_ignored: 0,
+        total_duration_ms: 0,
     }
 }

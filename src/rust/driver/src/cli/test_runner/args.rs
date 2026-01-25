@@ -198,6 +198,30 @@ pub fn parse_test_args(args: &[String]) -> TestOptions {
                 options.rust_tests = true;
                 options.rust_ignored_only = true;
             }
+            // Run management options
+            "--list-runs" => options.list_runs = true,
+            "--cleanup-runs" => options.cleanup_runs = true,
+            "--prune-runs" => {
+                i += 1;
+                if i < args.len() {
+                    options.prune_runs = args[i].parse().ok();
+                } else {
+                    // Default to keeping 100 runs
+                    options.prune_runs = Some(100);
+                }
+            }
+            arg if arg.starts_with("--prune-runs=") => {
+                options.prune_runs = arg.trim_start_matches("--prune-runs=").parse().ok();
+            }
+            "--runs-status" => {
+                i += 1;
+                if i < args.len() {
+                    options.runs_status_filter = Some(args[i].clone());
+                }
+            }
+            arg if arg.starts_with("--runs-status=") => {
+                options.runs_status_filter = Some(arg.trim_start_matches("--runs-status=").to_string());
+            }
             arg if !arg.starts_with("-") && options.path.is_none() => {
                 options.path = Some(PathBuf::from(arg));
             }

@@ -448,3 +448,65 @@ fn it_behaves_like(name: text):
 fn include_examples(name: text):
     it_behaves_like(name)
 
+# ============================================================================
+# Resource Fixtures - Automatic cleanup for Resource-typed test fixtures
+# ============================================================================
+#
+# The `resource` function provides lazy resource initialization with automatic
+# cleanup. Resources are only created when first accessed within an example,
+# and are automatically closed after each example completes.
+#
+# This is similar to let_lazy but with automatic cleanup for Resource types.
+#
+# Usage:
+#   describe "Database tests":
+#       resource :db, \: Database.connect("test.db")
+#
+#       it "queries data":
+#           db.execute("SELECT 1")
+#       # db.close() automatically called after example
+#
+#       it "inserts data":
+#           db.execute("INSERT INTO t VALUES (1)")
+#       # db.close() automatically called after example
+#
+# Resources are cleaned up in LIFO order (last resource created is first closed).
+
+# resource: Define a lazy resource fixture with automatic cleanup
+# Usage: resource :db, \: Database.connect("test.db")
+fn resource(name: Symbol, factory: fn() -> Any):
+    match current_group:
+        case Some(group):
+            val name_str = name.to_string()
+
+            # Create a before_each hook that sets up the memoized factory
+            # The resource is NOT created here - only when accessed
+            group.add_hook(Hook.BeforeEach(\: runtime.set_resource_memoized(name_str, factory)))
+
+            # Create an after_each hook that cleans up the resource if it was created
+            group.add_hook(Hook.AfterEach(\: runtime.cleanup_resource_memoized(name_str)))
+        case None:
+            panic("resource() must be called within a describe or context block")
+
+# get_resource: Explicitly get a resource fixture (triggers creation if needed)
+# Usage: val conn = get_resource(:db)
+fn get_resource(name: Symbol) -> Any:
+    val name_str = name.to_string()
+    return runtime.get_resource_memoized(name_str)
+
+# Check if a resource fixture exists (and has been created)
+fn has_resource(name: Symbol) -> bool:
+    val name_str = name.to_string()
+    return runtime.has_resource_memoized(name_str)
+
+# with_resource: Execute a block with a resource, ensuring cleanup
+# Usage: with_resource :db, \: Database.connect("test.db"), \db: db.query("SELECT 1")
+fn with_resource(name: Symbol, factory: fn() -> Any, block: fn(Any) -> Any) -> Any:
+    val res = factory()
+    try:
+        return block(res)
+    finally:
+        # Try to call close() if available
+        if res.responds_to?(:close):
+            res.close()
+

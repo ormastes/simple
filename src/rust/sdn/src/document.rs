@@ -216,7 +216,11 @@ fn render_value(value: &SdnValue, indent: usize) -> String {
                 // Block format for complex dicts
                 let mut result = String::new();
                 for (k, v) in dict {
-                    if is_block_value(v) {
+                    if matches!(v, SdnValue::Table { .. }) {
+                        // Tables use space, not colon: `table_name |field1, field2|`
+                        result.push_str(&format!("\n{}{} ", prefix, k));
+                        result.push_str(&render_value(v, indent + 1));
+                    } else if is_block_value(v) {
                         result.push_str(&format!("\n{}{}:", prefix, k));
                         result.push_str(&render_value(v, indent + 1));
                     } else {

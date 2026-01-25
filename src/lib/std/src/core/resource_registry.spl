@@ -1,0 +1,91 @@
+# ResourceRegistry - Global tracking of open resources for leak detection
+#
+# This module provides a registry for tracking resources that implement the Resource trait.
+# It enables detection of resource leaks at runtime, particularly useful in tests.
+#
+# Usage:
+# ```simple
+# # In resource implementations:
+# val id = ResourceRegistry.register(self, "File.open(\"test.txt\")")
+# # ... when closing:
+# ResourceRegistry.unregister(id)
+#
+# # In tests (via BDD `resource` fixture):
+# val leaks = ResourceRegistry.check_leaks()
+# if leaks.len() > 0:
+#     print("WARNING: Resource leaks detected!")
+# ```
+
+use core.option.Option
+use core.result.Result
+use core.list.List
+
+# Entry in the resource registry
+struct ResourceEntry:
+    id: i64
+    resource_name: text
+    location: text         # Source location where resource was created
+    created_at: i64        # Timestamp when registered (for debugging)
+
+impl ResourceEntry:
+    fn new(id: i64, resource_name: text, location: text) -> ResourceEntry:
+        ResourceEntry(
+            id: id,
+            resource_name: resource_name,
+            location: location,
+            created_at: __native_time_now()
+        )
+
+    fn to_string() -> text:
+        "{self.resource_name} created at {self.location}"
+
+# Global registry for tracking resources
+# Uses FFI for thread-safe, efficient implementation
+struct ResourceRegistry:
+    pass
+
+impl ResourceRegistry:
+    # Register a resource for tracking
+    # Returns a unique ID for later unregistration
+    static fn register(resource_name: text, location: text) -> i64:
+        __native_resource_registry_register(resource_name, location)
+
+    # Unregister a resource (call when closed)
+    static fn unregister(id: i64):
+        __native_resource_registry_unregister(id)
+
+    # Get all currently open resources
+    static fn get_open_resources() -> List<ResourceEntry>:
+        __native_resource_registry_get_all()
+
+    # Check for leaks - returns list of unclosed resources
+    static fn check_leaks() -> List<ResourceEntry>:
+        ResourceRegistry.get_open_resources()
+
+    # Close all tracked resources (emergency cleanup)
+    static fn close_all():
+        __native_resource_registry_close_all()
+
+    # Clear the registry (for testing)
+    static fn clear():
+        __native_resource_registry_clear()
+
+    # Get a human-readable leak report
+    static fn leak_report() -> text:
+        val leaks = ResourceRegistry.check_leaks()
+        if leaks.len() == 0:
+            return "No resource leaks detected."
+
+        var report = "Resource Leaks Detected ({leaks.len()}):\n"
+        for entry in leaks:
+            report = report + "  - {entry.to_string()}\n"
+        return report
+
+
+# Native FFI declarations
+extern fn __native_resource_registry_register(resource_name: text, location: text) -> i64
+extern fn __native_resource_registry_unregister(id: i64)
+extern fn __native_resource_registry_get_all() -> List<ResourceEntry>
+extern fn __native_resource_registry_close_all()
+extern fn __native_resource_registry_clear()
+extern fn __native_time_now() -> i64
