@@ -716,6 +716,10 @@ impl Parser<'_> {
     }
 
     pub(crate) fn parse_extern(&mut self) -> Result<Node, ParseError> {
+        self.parse_extern_with_attrs(vec![])
+    }
+
+    pub(crate) fn parse_extern_with_attrs(&mut self, attributes: Vec<Attribute>) -> Result<Node, ParseError> {
         let start_span = self.current.span;
         self.expect(&TokenKind::Extern)?;
         self.expect(&TokenKind::Fn)?;
@@ -741,6 +745,7 @@ impl Parser<'_> {
             params,
             return_type,
             visibility: Visibility::Private,
+            attributes,
         }))
     }
 

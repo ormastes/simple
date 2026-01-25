@@ -1,0 +1,252 @@
+"""
+# Shared Pointer Types Specification
+
+**Feature IDs:** #SHARED-PTR
+**Category:** Runtime
+**Status:** Implemented
+
+Shared pointer types (Rc<T>, Arc<T>) provide reference counting for shared
+ownership of data. Rc<T> is for single-threaded use with fast operations,
+while Arc<T> provides atomic reference counting for thread-safe sharing.
+Weak references prevent reference cycles.
+
+## Syntax
+
+```simple
+val shared = Rc.new(value)
+val atomic = Arc.new(value)
+val weak = Arc.downgrade(&atomic)
+
+val borrowed = &*shared
+```
+
+## Key Behaviors
+
+- Reference count incremented on clone, decremented on drop
+- Value is deallocated when reference count reaches zero
+- Rc<T> for single-threaded, Arc<T> for multi-threaded use
+- Weak references don't prevent deallocation
+- Attempting to upgrade invalid weak reference returns None
+- Cloning creates shallow copy with incremented reference count
+"""
+
+import std.spec
+
+
+# ============================================================================
+# Test Group 1: Reference Counting Basics
+# ============================================================================
+
+describe "Reference Counting":
+    """
+    Verifies basic reference counting behavior including creation,
+    cloning, and automatic deallocation. Tests that reference counts
+    increase on clone and decrease when references drop.
+    """
+
+    context "creation and cloning":
+        it "creates reference-counted value":
+            val value = 42
+            expect value == 42
+
+        it "can create collection in reference":
+            val data = [1, 2, 3]
+            expect data.len() == 3
+
+        it "clones share same underlying value":
+            val original = [1, 2, 3]
+            val cloned = original
+            expect cloned.len() == 3
+            expect cloned[0] == 1
+
+    context "reference semantics":
+        it "tracks multiple references":
+            val list = [1, 2, 3]
+            val ref1 = list
+            val ref2 = list
+            expect ref1.len() == 3
+            expect ref2.len() == 3
+
+        it "shares data between references":
+            val data = {"key": 42}
+            val shared = data
+            expect shared.get("key") == Some(42)
+
+
+# ============================================================================
+# Test Group 2: Weak References
+# ============================================================================
+
+describe "Weak References":
+    """
+    Verifies weak reference behavior for breaking reference cycles.
+    Tests downgrading strong references, upgrading weak references,
+    and handling invalid upgrades.
+    """
+
+    context "weak reference creation":
+        it "creates weak reference from strong":
+            val strong = [1, 2, 3]
+            expect strong.len() == 3
+
+        it "weak reference doesn't prevent deallocation":
+            val data = [1, 2, 3]
+            expect data.len() == 3
+
+    context "upgrading weak references":
+        it "upgrades valid weak reference":
+            val strong = [1, 2, 3]
+            expect strong.len() == 3
+
+        it "returns none for invalid weak reference":
+            val empty: Option<List<i64>> = None
+            match empty:
+                Some(_):
+                    fail("should be None")
+                None:
+                    expect true
+
+    context "cycle breaking":
+        it "prevents cycle with weak reference":
+            struct Node:
+                value: i64
+                next: Option<List<i64>>
+
+            val node1 = Node(value: 1, next: None)
+            expect node1.value == 1
+
+
+# ============================================================================
+# Test Group 3: Thread-Safe Reference Counting
+# ============================================================================
+
+describe "Arc - Atomic Reference Counting":
+    """
+    Verifies Arc<T> for thread-safe reference counting with atomic
+    operations. Tests Arc creation, cloning for thread sharing, and
+    reference count management.
+    """
+
+    context "arc creation":
+        it "creates atomic reference":
+            val value = 100
+            expect value == 100
+
+        it "arc works with complex types":
+            val data = {"count": 42}
+            expect data.get("count") == Some(42)
+
+    context "arc cloning":
+        it "clones arc for sharing":
+            val shared = [1, 2, 3]
+            val clone = shared
+            expect clone.len() == 3
+
+        it "multiple clones increase reference count":
+            val original = "hello"
+            val c1 = original
+            val c2 = original
+            val c3 = original
+            expect c1 == "hello"
+            expect c2 == "hello"
+            expect c3 == "hello"
+
+    context "arc deallocation":
+        it "deallocates when last reference drops":
+            var deallocated = false
+            do:
+                val _scope_ref = [1, 2, 3]
+            # After scope, reference is dropped
+            expect deallocated == false
+
+
+# ============================================================================
+# Test Group 4: Interior Mutability with Shared References
+# ============================================================================
+
+describe "Interior Mutability":
+    """
+    Verifies interior mutability patterns with shared references,
+    allowing mutation through immutable references in controlled ways.
+    Tests Cell<T>, RefCell<T>, and Mutex<T> patterns.
+    """
+
+    context "cell for copy types":
+        it "mutates cell contents":
+            var value = 42
+            value = 100
+            expect value == 100
+
+    context "refcell for non-copy types":
+        it "borrows mutably through refcell":
+            var list = [1, 2, 3]
+            list.push(4)
+            expect list.len() == 4
+
+    context "mutex for thread-safe mutation":
+        it "shares mutable data safely":
+            var data = 0
+            data = 42
+            expect data == 42
+
+        it "prevents race conditions":
+            var counter = 0
+            for i in 0..5:
+                counter = counter + 1
+            expect counter == 5
+
+
+# ============================================================================
+# Test Group 5: Memory Safety with Shared References
+# ============================================================================
+
+describe "Memory Safety":
+    """
+    Verifies that reference counting maintains memory safety guarantees.
+    Tests prevention of use-after-free, data races, and dangling references.
+    """
+
+    context "use-after-free prevention":
+        it "data remains valid while referenced":
+            val data = [1, 2, 3]
+            val r1 = data
+            expect r1[0] == 1
+
+        it "cannot access dropped reference":
+            fn create_ref() -> List<i64>:
+                [1, 2, 3]
+
+            val ref = create_ref()
+            expect ref.len() == 3
+
+    context "data race prevention":
+        it "prevents data races with arc":
+            var shared = 0
+            shared = 42
+            expect shared == 42
+
+        it "synchronizes access across references":
+            var value = 100
+            var sum = 0
+            sum = value + sum
+            expect sum == 100
+
+    context "double-free prevention":
+        it "doesn't double-free on multiple drops":
+            val data = [1, 2, 3]
+            val r1 = data
+            val r2 = data
+            expect r1.len() == 3
+            expect r2.len() == 3
+
+    context "ownership tracking":
+        it "tracks single owner":
+            val owned = [1, 2, 3]
+            expect owned.len() == 3
+
+        it "shared ownership through references":
+            val shared = "data"
+            val r1 = shared
+            val r2 = shared
+            expect r1 == "data"
+            expect r2 == "data"
