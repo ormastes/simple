@@ -273,8 +273,22 @@ fn process_use_stmt(
                     env.insert(name.clone(), export_value.clone());
                 }
             }
-            // Also keep the module dict under its name for qualified access
-            env.insert(binding_name.clone(), value);
+            // For glob imports, don't overwrite the unpacked exports with the module dict
+            // This prevents a class named "shell" from being overwritten by the "shell" module dict
+            match &use_stmt.target {
+                ImportTarget::Glob => {
+                    // For glob imports, only insert the module dict if there's no export with the same name
+                    if let Value::Dict(exports) = &value {
+                        if !exports.contains_key(&binding_name) {
+                            env.insert(binding_name.clone(), value);
+                        }
+                    }
+                }
+                _ => {
+                    // For non-glob imports, keep the module dict under its name for qualified access
+                    env.insert(binding_name.clone(), value);
+                }
+            }
         }
         Err(_e) => {
             // Module loading failed - use empty dict
