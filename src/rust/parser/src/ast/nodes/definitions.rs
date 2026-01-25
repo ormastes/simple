@@ -598,6 +598,7 @@ pub struct ExternDef {
     pub params: Vec<Parameter>,
     pub return_type: Option<Type>,
     pub visibility: Visibility,
+    pub attributes: Vec<Attribute>,
 }
 
 /// Macro definition: macro name(params) -> (contract): body

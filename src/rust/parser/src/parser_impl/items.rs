@@ -294,8 +294,9 @@ impl<'a> Parser<'a> {
                 self.parse_pub_item_with_attrs(attributes)
             }
             TokenKind::Mod => self.parse_mod(Visibility::Private, attributes),
+            TokenKind::Extern => self.parse_extern_with_attrs(attributes),
             _ => Err(ParseError::unexpected_token(
-                "fn, struct, class, enum, union, impl, mod, or pub after attributes",
+                "fn, struct, class, enum, union, impl, mod, extern, or pub after attributes",
                 format!("{:?}", self.current.kind),
                 self.current.span,
             )),

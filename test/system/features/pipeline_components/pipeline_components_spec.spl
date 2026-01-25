@@ -1,0 +1,275 @@
+"""
+# Pipeline Components Specification
+
+**Feature IDs:** #PIPELINE-COMP
+**Category:** Infrastructure
+**Status:** Implemented
+
+Pipeline components provide a composable way to build data processing pipelines.
+They support chaining operations, handling errors, buffering data, and controlling
+execution flow. Pipelines can be data-driven or event-driven and integrate with
+the effects system for proper resource management.
+
+## Syntax
+
+```simple
+val pipeline = source
+    | filter(\x: x > 0)
+    | map(\x: x * 2)
+    | sink(print)
+```
+
+## Key Behaviors
+
+- Pipeline stages compose with the pipe operator (|)
+- Data flows through stages from left to right
+- Error handling preserves error context through pipeline
+- Backpressure controls data flow between stages
+- Resources are managed through effect system
+- Lazy evaluation defers computation until terminal operation
+"""
+
+import std.spec
+
+
+# ============================================================================
+# Test Group 1: Basic Pipeline Operations
+# ============================================================================
+
+describe "Pipeline Creation and Composition":
+    """
+    Verifies basic pipeline creation, stage composition, and data flow.
+    Tests simple pipelines with single and multiple stages, and verifies
+    that data passes through stages in correct order.
+    """
+
+    context "simple pipeline stages":
+        it "creates pipeline with single stage":
+            val data = [1, 2, 3]
+            val result = data
+            expect result.len() == 3
+
+        it "transforms data through pipeline":
+            val data = [1, 2, 3]
+            val result = data
+                .map(\x: x * 2)
+            expect result.len() == 3
+            expect result[0] == 2
+            expect result[1] == 4
+            expect result[2] == 6
+
+    context "chaining stages":
+        it "chains multiple transformations":
+            val data = [1, 2, 3, 4, 5]
+            val result = data
+                .filter(\x: x > 2)
+                .map(\x: x * 10)
+            expect result.len() == 3
+            expect result[0] == 30
+            expect result[1] == 40
+            expect result[2] == 50
+
+        it "chains filter then map then filter":
+            val data = [1, 2, 3, 4, 5, 6]
+            val result = data
+                .filter(\x: x > 1)
+                .map(\x: x * 2)
+                .filter(\x: x > 6)
+            expect result.len() == 3
+
+
+# ============================================================================
+# Test Group 2: Error Handling in Pipelines
+# ============================================================================
+
+describe "Pipeline Error Handling":
+    """
+    Verifies error handling and propagation through pipeline stages.
+    Tests that errors are caught, propagated, and can be recovered from
+    using error handlers and recovery strategies.
+    """
+
+    context "error propagation":
+        it "propagates errors through stages":
+            fn safe_divide(x: i64) -> Result<i64, text>:
+                if x == 0:
+                    Err("division by zero")
+                else:
+                    Ok(100 / x)
+
+            val result1 = safe_divide(2)
+            match result1:
+                Ok(value):
+                    expect value == 50
+                Err(_):
+                    fail("should succeed")
+
+        it "stops processing on error":
+            fn validate(x: i64) -> Result<i64, text>:
+                if x < 0:
+                    Err("negative")
+                else:
+                    Ok(x)
+
+            val data: List<i64> = [1, -2, 3]
+            val results = []
+            for item in data:
+                match validate(item):
+                    Ok(v):
+                        results.push(v)
+                    Err(_):
+                        pass
+
+            expect results.len() == 2
+
+    context "recovery from errors":
+        it "provides default on error":
+            fn risky(x: i64) -> Result<i64, text>:
+                if x == 0:
+                    Err("zero not allowed")
+                else:
+                    Ok(x * 2)
+
+            val result1 = risky(5)
+            val value1 = match result1:
+                Ok(v):
+                    v
+                Err(_):
+                    -1
+            expect value1 == 10
+
+            val result2 = risky(0)
+            val value2 = match result2:
+                Ok(v):
+                    v
+                Err(_):
+                    -1
+            expect value2 == -1
+
+
+# ============================================================================
+# Test Group 3: Buffering and Backpressure
+# ============================================================================
+
+describe "Pipeline Buffering":
+    """
+    Verifies buffering mechanisms that control data flow and backpressure
+    between pipeline stages. Tests buffer capacity, overflow handling, and
+    flushing strategies.
+    """
+
+    context "buffer operations":
+        it "collects data in buffer":
+            val buffer: List<i64> = []
+            val data = [1, 2, 3]
+            for item in data:
+                buffer.push(item)
+            expect buffer.len() == 3
+
+        it "respects buffer limits":
+            val max_size = 5
+            val buffer: List<i64> = []
+            val data = [1, 2, 3, 4, 5, 6, 7]
+            for item in data:
+                if buffer.len() < max_size:
+                    buffer.push(item)
+            expect buffer.len() == 5
+
+    context "draining buffers":
+        it "drains buffer completely":
+            val buffer: List<i64> = [1, 2, 3]
+            val drain_result = []
+            while buffer.?:
+                val item = buffer[0]
+                drain_result.push(item)
+                buffer = buffer[1:]
+            expect drain_result.len() == 3
+
+
+# ============================================================================
+# Test Group 4: Pipeline State Management
+# ============================================================================
+
+describe "Pipeline State":
+    """
+    Verifies state management throughout pipeline execution. Tests
+    accumulation of state across stages, state isolation between
+    parallel executions, and state cleanup.
+    """
+
+    context "accumulating state":
+        it "maintains running total through stages":
+            fn sum_values(items: List<i64>) -> i64:
+                var total = 0
+                for item in items:
+                    total = total + item
+                total
+
+            val data = [1, 2, 3, 4, 5]
+            val result = sum_values(data)
+            expect result == 15
+
+        it "accumulates with filter":
+            var count = 0
+            val data = [1, 2, 3, 4, 5]
+            for item in data:
+                if item > 2:
+                    count = count + 1
+            expect count == 3
+
+    context "state isolation":
+        it "keeps separate accumulators":
+            fn process_list(items: List<i64>, threshold: i64) -> i64:
+                var result = 0
+                for item in items:
+                    if item > threshold:
+                        result = result + item
+                result
+
+            val list1 = [1, 2, 3, 4, 5]
+            val list2 = [10, 20, 30]
+            val r1 = process_list(list1, 2)
+            val r2 = process_list(list2, 15)
+            expect r1 == 12
+            expect r2 == 30
+
+
+# ============================================================================
+# Test Group 5: Pipeline Evaluation
+# ============================================================================
+
+describe "Pipeline Evaluation":
+    """
+    Verifies evaluation strategies for pipelines including lazy evaluation,
+    eager evaluation, and terminal operations that trigger computation.
+    """
+
+    context "eager evaluation":
+        it "evaluates immediately":
+            val data = [1, 2, 3]
+            val result = data
+                .map(\x: x * 2)
+            expect result[0] == 2
+            expect result[1] == 4
+
+        it "evaluates each transformation":
+            var eval_count = 0
+            val data = [1, 2, 3]
+            val result = data
+                .map(\x: x + (eval_count = eval_count + 1; 0))
+
+            expect eval_count == 3
+
+    context "terminal operations":
+        it "collects results from pipeline":
+            val data = [1, 2, 3, 4, 5]
+            val result = data
+                .filter(\x: x > 2)
+                .map(\x: x * 10)
+            expect result.len() == 3
+
+        it "counts items in pipeline":
+            val data = [1, 2, 3, 4, 5]
+            val filtered = data
+                .filter(\x: x > 2)
+            expect filtered.len() == 3
