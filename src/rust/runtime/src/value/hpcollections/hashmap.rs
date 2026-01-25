@@ -220,3 +220,10 @@ pub extern "C" fn rt_hashmap_drop(handle: RuntimeValue) -> bool {
         true
     }
 }
+
+/// Clear all HashMaps from registry (for test cleanup)
+pub fn clear_hashmap_registry() {
+    HASHMAP_REGISTRY.with(|registry| {
+        registry.borrow_mut().clear();
+    });
+}

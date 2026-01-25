@@ -85,6 +85,11 @@ pub extern "C" fn rt_concurrent_queue_free(handle: i64) {
     CONCURRENT_QUEUE_MAP.lock().unwrap().remove(&handle);
 }
 
+/// Clear all concurrent queue handles (for test cleanup)
+pub fn clear_concurrent_queue_registry() {
+    CONCURRENT_QUEUE_MAP.lock().unwrap().clear();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

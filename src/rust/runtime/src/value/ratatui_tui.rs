@@ -606,6 +606,14 @@ pub extern "C" fn ratatui_object_destroy(handle: u64) {
     }
 }
 
+/// Clear all ratatui handles (for test cleanup)
+pub fn clear_ratatui_registry() {
+    let mut registry = HANDLE_REGISTRY.lock().unwrap();
+    if let Some(ref mut map) = *registry {
+        map.clear();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -41,3 +41,13 @@ pub use pool::*;
 pub use queue::*;
 pub use stack::*;
 pub use tls::*;
+
+/// Clear all concurrent data structure registries (for test cleanup)
+pub fn clear_concurrent_registries() {
+    arena::clear_arena_registry();
+    map::clear_concurrent_map_registry();
+    pool::clear_pool_registry();
+    queue::clear_concurrent_queue_registry();
+    stack::clear_concurrent_stack_registry();
+    tls::clear_tls_registry();
+}

@@ -263,10 +263,7 @@ fn substitute_expr_templates(expr: &Expr, const_bindings: &HashMap<String, Strin
             callee: Box::new(substitute_expr_templates(callee, const_bindings)),
             args: args
                 .iter()
-                .map(|arg| Argument {
-                    name: arg.name.clone(),
-                    value: substitute_expr_templates(&arg.value, const_bindings),
-                })
+                .map(|arg| Argument::with_span(arg.name.clone(), substitute_expr_templates(&arg.value, const_bindings), arg.span))
                 .collect(),
         },
         Expr::MethodCall { receiver, method, args } => Expr::MethodCall {
@@ -274,10 +271,7 @@ fn substitute_expr_templates(expr: &Expr, const_bindings: &HashMap<String, Strin
             method: method.clone(),
             args: args
                 .iter()
-                .map(|arg| Argument {
-                    name: arg.name.clone(),
-                    value: substitute_expr_templates(&arg.value, const_bindings),
-                })
+                .map(|arg| Argument::with_span(arg.name.clone(), substitute_expr_templates(&arg.value, const_bindings), arg.span))
                 .collect(),
         },
         Expr::FieldAccess { receiver, field } => Expr::FieldAccess {
@@ -431,10 +425,7 @@ fn substitute_expr_templates(expr: &Expr, const_bindings: &HashMap<String, Strin
             method: method.clone(),
             args: args
                 .iter()
-                .map(|arg| Argument {
-                    name: arg.name.clone(),
-                    value: substitute_expr_templates(&arg.value, const_bindings),
-                })
+                .map(|arg| Argument::with_span(arg.name.clone(), substitute_expr_templates(&arg.value, const_bindings), arg.span))
                 .collect(),
         },
         Expr::MacroInvocation { name, args } => Expr::MacroInvocation {

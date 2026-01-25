@@ -87,6 +87,11 @@ pub extern "C" fn rt_sha1_free(handle: i64) {
     SHA1_MAP.lock().unwrap().remove(&handle);
 }
 
+/// Clear all SHA1 hasher handles (for test cleanup)
+pub fn clear_sha1_registry() {
+    SHA1_MAP.lock().unwrap().clear();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

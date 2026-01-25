@@ -211,6 +211,13 @@ pub extern "C" fn rt_btreemap_last_key(handle: RuntimeValue) -> RuntimeValue {
     .unwrap_or(RuntimeValue::NIL)
 }
 
+/// Clear all BTreeMaps from registry (for test cleanup)
+pub fn clear_btreemap_registry() {
+    BTREEMAP_REGISTRY.with(|registry| {
+        registry.borrow_mut().clear();
+    });
+}
+
 /// Drop a BTreeMap (cleanup registry entry)
 #[no_mangle]
 pub extern "C" fn rt_btreemap_drop(handle: RuntimeValue) -> bool {

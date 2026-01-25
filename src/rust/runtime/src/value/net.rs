@@ -323,6 +323,16 @@ include!("net_udp.rs");
 include!("net_http.rs");
 
 // ============================================================================
+// Registry Cleanup (for test isolation)
+// ============================================================================
+
+/// Clear all socket handles (for test cleanup)
+/// Note: This closes all open sockets
+pub fn clear_socket_registry() {
+    SOCKET_REGISTRY.lock().unwrap().clear();
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 

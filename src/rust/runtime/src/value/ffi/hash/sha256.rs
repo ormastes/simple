@@ -84,6 +84,11 @@ pub extern "C" fn rt_sha256_free(handle: i64) {
     SHA256_MAP.lock().unwrap().remove(&handle);
 }
 
+/// Clear all SHA256 hasher handles (for test cleanup)
+pub fn clear_sha256_registry() {
+    SHA256_MAP.lock().unwrap().clear();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -81,6 +81,11 @@ pub extern "C" fn rt_tls_free(handle: i64) {
     TLS_MAP.lock().unwrap().remove(&handle);
 }
 
+/// Clear all TLS handles (for test cleanup)
+pub fn clear_tls_registry() {
+    TLS_MAP.lock().unwrap().clear();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

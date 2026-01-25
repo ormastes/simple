@@ -215,18 +215,9 @@ pub(crate) fn build_method_missing_args(
     args: &[simple_parser::ast::Argument],
 ) -> Vec<simple_parser::ast::Argument> {
     vec![
-        simple_parser::ast::Argument {
-            name: None,
-            value: Expr::Symbol(method.to_string()),
-        },
-        simple_parser::ast::Argument {
-            name: None,
-            value: Expr::Array(args.iter().map(|a| a.value.clone()).collect()),
-        },
-        simple_parser::ast::Argument {
-            name: None,
-            value: Expr::Nil,
-        },
+        simple_parser::ast::Argument::new(None, Expr::Symbol(method.to_string())),
+        simple_parser::ast::Argument::new(None, Expr::Array(args.iter().map(|a| a.value.clone()).collect())),
+        simple_parser::ast::Argument::new(None, Expr::Nil),
     ]
 }
 

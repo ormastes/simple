@@ -276,6 +276,18 @@ pub extern "C" fn rt_once_free(handle: i64) {
 }
 
 // ============================================================================
+// Registry Cleanup (for test isolation)
+// ============================================================================
+
+/// Clear all atomic registries (for test cleanup)
+pub fn clear_atomic_registries() {
+    ATOMIC_BOOL_MAP.lock().clear();
+    ATOMIC_INT_MAP.lock().clear();
+    ATOMIC_FLAG_MAP.lock().clear();
+    ONCE_MAP.lock().clear();
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 

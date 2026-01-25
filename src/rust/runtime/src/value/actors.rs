@@ -215,6 +215,11 @@ pub extern "C" fn rt_actor_is_alive(actor: RuntimeValue) -> i64 {
     0
 }
 
+/// Clear all actor handles (for test cleanup)
+pub fn clear_actor_registry() {
+    ACTOR_REGISTRY.write().unwrap().clear();
+}
+
 #[cfg(test)]
 #[path = "actor_tests.rs"]
 mod tests;
