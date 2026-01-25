@@ -318,10 +318,12 @@ get_tokens(source)       →    rt_tokenize(source)
 - [x] Create `config.spl` (374 lines)
 - [x] Create `di.spl` (423 lines)
 
-### Phase 2: Add log FFI
-- [ ] Implement `log_ffi.rs` in runtime
-- [ ] Connect `log.spl` to FFI
-- [ ] Use LogLevel from hir-core
+### Phase 2: Add log FFI (COMPLETE)
+- [x] Implement `log_ffi.rs` in runtime (317 lines)
+- [x] Use LogLevel from hir-core
+- [x] Connect `log.spl` to FFI (175 lines)
+- [x] Add level_name(), parse_level(), is_enabled(), clear_scopes()
+- [x] Update log_spec.spl with comprehensive tests (180 lines)
 
 ### Phase 3: Add TokenKind sharing
 - [ ] Add TokenKind to hir-core

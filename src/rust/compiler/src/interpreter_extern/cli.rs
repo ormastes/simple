@@ -193,6 +193,11 @@ pub fn rt_cli_run_spec_gen(_args: &[Value]) -> Result<Value, CompileError> {
     interpreter_not_supported("rt_cli_run_spec_gen")
 }
 
+/// Run sspec-docgen command
+pub fn rt_cli_run_sspec_docgen(_args: &[Value]) -> Result<Value, CompileError> {
+    interpreter_not_supported("rt_cli_run_sspec_docgen")
+}
+
 /// Run todo-scan command
 pub fn rt_cli_run_todo_scan(_args: &[Value]) -> Result<Value, CompileError> {
     interpreter_not_supported("rt_cli_run_todo_scan")

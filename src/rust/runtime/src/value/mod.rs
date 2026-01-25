@@ -23,6 +23,7 @@ mod async_gen;
 mod channels;
 pub mod cli_ffi;
 mod collections;
+pub mod log_ffi;
 mod contracts;
 mod core;
 pub mod diagram_ffi;
@@ -286,6 +287,13 @@ pub use ffi::{rt_clear_stdin, rt_has_mock_stdin, rt_read_stdin_char, rt_read_std
 pub use ffi::{
     rt_eprint_str, rt_eprint_value, rt_eprintln_str, rt_eprintln_value, rt_print_str, rt_print_value, rt_println_str,
     rt_println_value, rt_value_to_string,
+};
+
+// Re-export log FFI functions
+pub use log_ffi::{
+    rt_log_clear_scope_levels, rt_log_debug, rt_log_emit, rt_log_emit_rv, rt_log_error, rt_log_fatal,
+    rt_log_get_global_level, rt_log_get_scope_level, rt_log_info, rt_log_is_enabled, rt_log_level_name,
+    rt_log_set_global_level, rt_log_set_scope_level, rt_log_trace, rt_log_verbose, rt_log_warn,
 };
 
 // Re-export time FFI functions
@@ -885,6 +893,9 @@ pub fn clear_all_runtime_registries() {
 
     // Clear screenshot captures
     screenshot_ffi::rt_screenshot_clear_captures();
+
+    // Clear log state
+    log_ffi::clear_log_state();
 }
 
 // ============================================================================
