@@ -37,6 +37,7 @@ impl Lowerer {
             Expr::Call { callee, args } => self.lower_call(callee, args, ctx),
             Expr::FieldAccess { receiver, field } => self.lower_field_access(receiver, field, ctx),
             Expr::Index { receiver, index } => self.lower_index(receiver, index, ctx),
+            Expr::Slice { receiver, start, end, step } => self.lower_slice(receiver, start.as_deref(), end.as_deref(), step.as_deref(), ctx),
             Expr::Tuple(exprs) => self.lower_tuple(exprs, ctx),
             Expr::Array(exprs) => self.lower_array(exprs, ctx),
             Expr::ArrayRepeat { value, count } => self.lower_array_repeat(value, count, ctx),

@@ -1,7 +1,7 @@
 //! Collection literal expression lowering
 //!
 //! This module contains expression lowering logic for collection literals:
-//! tuples, arrays, vector literals, and struct initialization.
+//! tuples, arrays, vector literals, struct initialization, and slice expressions.
 
 use simple_parser::Expr;
 
@@ -173,6 +173,69 @@ impl Lowerer {
                 fields: fields_hir,
             },
             ty: struct_ty,
+        })
+    }
+
+    /// Lower a slice expression to HIR: receiver[start:end:step]
+    ///
+    /// Converts to a call to rt_slice(collection, start, end, step).
+    /// Handles defaults:
+    /// - start: 0 if None
+    /// - end: collection.len() if None (uses a large value as sentinel)
+    /// - step: 1 if None
+    pub(super) fn lower_slice(
+        &mut self,
+        receiver: &Expr,
+        start: Option<&Expr>,
+        end: Option<&Expr>,
+        step: Option<&Expr>,
+        ctx: &mut FunctionContext,
+    ) -> LowerResult<HirExpr> {
+        // Lower the receiver (the collection being sliced)
+        let receiver_hir = self.lower_expr(receiver, ctx)?;
+        let receiver_ty = receiver_hir.ty;
+
+        // Determine result type (same as input for arrays/strings)
+        let result_ty = receiver_ty;
+
+        // Lower start (default: 0)
+        let start_hir = if let Some(s) = start {
+            self.lower_expr(s, ctx)?
+        } else {
+            HirExpr {
+                kind: HirExprKind::Integer(0),
+                ty: TypeId::I64,
+            }
+        };
+
+        // Lower end (default: large sentinel value, runtime will clamp to len)
+        // We use i64::MAX as a sentinel for "to the end"
+        let end_hir = if let Some(e) = end {
+            self.lower_expr(e, ctx)?
+        } else {
+            HirExpr {
+                kind: HirExprKind::Integer(i64::MAX),
+                ty: TypeId::I64,
+            }
+        };
+
+        // Lower step (default: 1)
+        let step_hir = if let Some(s) = step {
+            self.lower_expr(s, ctx)?
+        } else {
+            HirExpr {
+                kind: HirExprKind::Integer(1),
+                ty: TypeId::I64,
+            }
+        };
+
+        // Generate a builtin call to rt_slice
+        Ok(HirExpr {
+            kind: HirExprKind::BuiltinCall {
+                name: "rt_slice".to_string(),
+                args: vec![receiver_hir, start_hir, end_hir, step_hir],
+            },
+            ty: result_ty,
         })
     }
 }

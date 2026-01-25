@@ -3,7 +3,7 @@
 //! This module contains expression lowering logic for control flow:
 //! if expressions, lambda expressions, yield expressions, and match expressions.
 
-use simple_parser::{self as ast, ast::Pattern, Expr, MatchArm};
+use simple_parser::{self as ast, ast::Mutability, ast::Pattern, Expr, MatchArm};
 use std::collections::HashSet;
 
 use crate::hir::lower::context::FunctionContext;
@@ -210,7 +210,7 @@ impl Lowerer {
 
         // Create a temporary local to hold the subject value
         let subject_idx = ctx.locals.len();
-        ctx.add_local("$match_subject", subject_ty, false);
+        ctx.add_local("$match_subject".to_string(), subject_ty, Mutability::Immutable);
 
         // Build the chain of If-Else expressions from the arms
         let result = self.lower_match_arms(subject_idx, subject_ty, arms, ctx)?;
@@ -302,14 +302,31 @@ impl Lowerer {
             Pattern::Literal(lit_expr) => {
                 // Compare subject == literal
                 let lit_hir = self.lower_expr(lit_expr, ctx)?;
-                Ok(HirExpr {
-                    kind: HirExprKind::Binary {
-                        op: BinOp::Eq,
-                        left: Box::new(subject_ref),
-                        right: Box::new(lit_hir),
-                    },
-                    ty: TypeId::BOOL,
-                })
+
+                // Check if subject is a string type - use rt_string_eq for string comparison
+                let is_string = subject_ty == TypeId::STRING
+                    || matches!(self.module.types.get(subject_ty), Some(HirType::String));
+
+                if is_string {
+                    // Use builtin string equality for string comparison
+                    Ok(HirExpr {
+                        kind: HirExprKind::BuiltinCall {
+                            name: "rt_string_eq".to_string(),
+                            args: vec![subject_ref, lit_hir],
+                        },
+                        ty: TypeId::BOOL,
+                    })
+                } else {
+                    // Use standard comparison for other types
+                    Ok(HirExpr {
+                        kind: HirExprKind::Binary {
+                            op: BinOp::Eq,
+                            left: Box::new(subject_ref),
+                            right: Box::new(lit_hir),
+                        },
+                        ty: TypeId::BOOL,
+                    })
+                }
             }
             Pattern::Or(patterns) => {
                 // Any of the patterns match: p1 || p2 || p3 ...

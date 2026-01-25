@@ -127,6 +127,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_string_concat", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_starts_with", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_ends_with", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_string_eq", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_cstring_to_text", &[I64], &[I64]),
     // =========================================================================
     // Value creation/conversion
