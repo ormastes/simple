@@ -1,5 +1,7 @@
 //! Heap object types and header structure.
 
+use simple_hir_core::ValueKind;
+
 /// Heap object type tags
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -187,4 +189,42 @@ macro_rules! as_typed_ptr {
             None => return $ret,
         }
     }};
+}
+
+// ============================================================================
+// ValueKind conversion
+// ============================================================================
+
+impl From<HeapObjectType> for ValueKind {
+    fn from(heap_type: HeapObjectType) -> Self {
+        match heap_type {
+            HeapObjectType::String => ValueKind::String,
+            HeapObjectType::Array => ValueKind::Array,
+            HeapObjectType::Dict => ValueKind::Dict,
+            HeapObjectType::Tuple => ValueKind::Tuple,
+            HeapObjectType::Object => ValueKind::Object,
+            HeapObjectType::Closure => ValueKind::Closure,
+            HeapObjectType::Enum => ValueKind::Enum,
+            HeapObjectType::Future => ValueKind::Future,
+            HeapObjectType::Generator => ValueKind::Generator,
+            HeapObjectType::Actor => ValueKind::Actor,
+            HeapObjectType::Unique => ValueKind::Unique,
+            HeapObjectType::Shared => ValueKind::Shared,
+            HeapObjectType::Borrow => ValueKind::Borrow,
+            HeapObjectType::Channel => ValueKind::Channel,
+            HeapObjectType::Weak => ValueKind::Weak,
+            HeapObjectType::ContractViolation => ValueKind::ContractViolation,
+            HeapObjectType::Mutex => ValueKind::Mutex,
+            HeapObjectType::RwLock => ValueKind::RwLock,
+            HeapObjectType::Semaphore => ValueKind::Semaphore,
+            HeapObjectType::Barrier => ValueKind::Barrier,
+            HeapObjectType::Atomic => ValueKind::Atomic,
+            HeapObjectType::MonoioFuture => ValueKind::MonoioFuture,
+            HeapObjectType::HashMap => ValueKind::HashMap,
+            HeapObjectType::BTreeMap => ValueKind::BTreeMap,
+            HeapObjectType::HashSet => ValueKind::HashSet,
+            HeapObjectType::BTreeSet => ValueKind::BTreeSet,
+            HeapObjectType::FfiObject => ValueKind::FfiObject,
+        }
+    }
 }

@@ -1,0 +1,938 @@
+# Lexer - Tokenizer for Simple Language
+#
+# Converts source text into a stream of tokens.
+# Handles indentation-based syntax (Python-style).
+
+# ============================================================================
+# Token Types
+# ============================================================================
+
+enum TokenKind:
+    # Literals
+    IntLit          # 42, 0x2A, 0b101010, 0o52
+    FloatLit        # 3.14, 1e10, 2.5e-3
+    StringLit       # "hello", 'hello', """multiline"""
+    RawStringLit    # r"raw\nstring"
+    BoolLit         # true, false
+    NilLit          # nil
+
+    # Identifiers and Keywords
+    Ident           # foo, bar, _private
+
+    # Keywords - Declarations
+    KwFn            # fn
+    KwVal           # val
+    KwVar           # var
+    KwStruct        # struct
+    KwClass         # class
+    KwEnum          # enum
+    KwTrait         # trait
+    KwImpl          # impl
+    KwType          # type
+    KwMod           # mod
+    KwPub           # pub
+    KwStatic        # static
+    KwMe            # me (mutable self method)
+    KwExtern        # extern
+
+    # Keywords - Control Flow
+    KwIf            # if
+    KwElse          # else
+    KwElif          # elif
+    KwMatch         # match
+    KwCase          # case
+    KwFor           # for
+    KwWhile         # while
+    KwLoop          # loop
+    KwBreak         # break
+    KwContinue      # continue
+    KwReturn        # return
+    KwYield         # yield
+    KwAwait         # await
+    KwAsync         # async
+
+    # Keywords - Expressions
+    KwIn            # in
+    KwIs            # is
+    KwAs            # as
+    KwNot           # not
+    KwAnd           # and
+    KwOr            # or
+    KwTry           # try
+    KwCatch         # catch
+    KwThrow         # throw
+    KwWith          # with
+
+    # Keywords - Imports
+    KwImport        # import
+    KwExport        # export
+    KwFrom          # from
+
+    # Keywords - Special
+    KwSelf          # self
+    KwSuper         # super
+    KwNone          # None
+    KwSome          # Some
+    KwOk            # Ok
+    KwErr           # Err
+
+    # Operators - Arithmetic
+    Plus            # +
+    Minus           # -
+    Star            # *
+    Slash           # /
+    Percent         # %
+    StarStar        # **
+
+    # Operators - Comparison
+    Eq              # ==
+    NotEq           # !=
+    Lt              # <
+    Gt              # >
+    LtEq            # <=
+    GtEq            # >=
+
+    # Operators - Assignment
+    Assign          # =
+    PlusEq          # +=
+    MinusEq         # -=
+    StarEq          # *=
+    SlashEq         # /=
+    PercentEq       # %=
+
+    # Operators - Logical (symbols)
+    Ampersand       # &
+    Pipe            # |
+    Caret           # ^
+    Tilde           # ~
+    AmpAmp          # &&
+    PipePipe        # ||
+
+    # Operators - Special
+    Question        # ?
+    QuestionDot     # ?.
+    QuestionQuestion # ??
+    DotQuestion     # .?
+    Bang            # !
+    At              # @
+    Hash            # #
+    Dollar          # $
+    Backslash       # \
+
+    # Delimiters
+    LParen          # (
+    RParen          # )
+    LBrace          # {
+    RBrace          # }
+    LBracket        # [
+    RBracket        # ]
+
+    # Punctuation
+    Comma           # ,
+    Colon           # :
+    ColonColon      # ::
+    Semicolon       # ;
+    Dot             # .
+    DotDot          # ..
+    DotDotEq        # ..=
+    Arrow           # ->
+    FatArrow        # =>
+    Underscore      # _
+
+    # Indentation
+    Newline         # End of line
+    Indent          # Increase in indentation
+    Dedent          # Decrease in indentation
+
+    # Special
+    Eof             # End of file
+    Error           # Lexer error
+
+struct Span:
+    """Source location span."""
+    start: i64      # Start offset
+    end: i64        # End offset (exclusive)
+    line: i64       # Line number (1-based)
+    col: i64        # Column number (1-based)
+
+impl Span:
+    static fn new(start: i64, end: i64, line: i64, col: i64) -> Span:
+        Span(start: start, end: end, line: line, col: col)
+
+    static fn empty() -> Span:
+        Span(start: 0, end: 0, line: 0, col: 0)
+
+    fn len() -> i64:
+        self.end - self.start
+
+    fn merge(other: Span) -> Span:
+        Span(
+            start: min(self.start, other.start),
+            end: max(self.end, other.end),
+            line: min(self.line, other.line),
+            col: if self.line <= other.line: self.col else: other.col
+        )
+
+struct Token:
+    """A token with its kind, span, and text."""
+    kind: TokenKind
+    span: Span
+    text: text
+
+impl Token:
+    static fn new(kind: TokenKind, span: Span, text: text) -> Token:
+        Token(kind: kind, span: span, text: text)
+
+    static fn eof(pos: i64, line: i64) -> Token:
+        Token(
+            kind: TokenKind.Eof,
+            span: Span.new(pos, pos, line, 0),
+            text: ""
+        )
+
+    fn is_keyword() -> bool:
+        match self.kind:
+            case KwFn | KwVal | KwVar | KwStruct | KwClass | KwEnum | KwTrait
+               | KwImpl | KwType | KwMod | KwPub | KwStatic | KwMe | KwExtern
+               | KwIf | KwElse | KwElif | KwMatch | KwCase | KwFor | KwWhile
+               | KwLoop | KwBreak | KwContinue | KwReturn | KwYield | KwAwait
+               | KwAsync | KwIn | KwIs | KwAs | KwNot | KwAnd | KwOr | KwTry
+               | KwCatch | KwThrow | KwWith | KwImport | KwExport | KwFrom
+               | KwSelf | KwSuper | KwNone | KwSome | KwOk | KwErr:
+                true
+            case _:
+                false
+
+    fn is_operator() -> bool:
+        match self.kind:
+            case Plus | Minus | Star | Slash | Percent | StarStar
+               | Eq | NotEq | Lt | Gt | LtEq | GtEq
+               | Assign | PlusEq | MinusEq | StarEq | SlashEq | PercentEq
+               | Ampersand | Pipe | Caret | Tilde | AmpAmp | PipePipe
+               | Question | QuestionDot | QuestionQuestion | DotQuestion
+               | Bang | At | Hash | Dollar | Backslash:
+                true
+            case _:
+                false
+
+    fn is_literal() -> bool:
+        match self.kind:
+            case IntLit | FloatLit | StringLit | RawStringLit | BoolLit | NilLit:
+                true
+            case _:
+                false
+
+# ============================================================================
+# Lexer
+# ============================================================================
+
+struct Lexer:
+    """Tokenizer for Simple source code."""
+    source: text
+    pos: i64            # Current byte position
+    line: i64           # Current line (1-based)
+    col: i64            # Current column (1-based)
+    indent_stack: [i64] # Stack of indentation levels
+    pending_dedents: i64 # Number of dedents to emit
+    at_line_start: bool # Are we at the start of a line?
+    paren_depth: i64    # Nested parentheses depth (suppress newlines inside)
+
+impl Lexer:
+    static fn new(source: text) -> Lexer:
+        Lexer(
+            source: source,
+            pos: 0,
+            line: 1,
+            col: 1,
+            indent_stack: [0],  # Start with zero indentation
+            pending_dedents: 0,
+            at_line_start: true,
+            paren_depth: 0
+        )
+
+    # ========================================================================
+    # Main Tokenization
+    # ========================================================================
+
+    me next_token() -> Token:
+        """Get the next token from the source."""
+
+        # Emit pending dedents first
+        if self.pending_dedents > 0:
+            self.pending_dedents = self.pending_dedents - 1
+            return Token.new(
+                TokenKind.Dedent,
+                Span.new(self.pos, self.pos, self.line, self.col),
+                ""
+            )
+
+        # Handle indentation at line start
+        if self.at_line_start:
+            val indent_token = self.handle_indentation()
+            if indent_token.?:
+                return indent_token.unwrap()
+
+        # Skip whitespace (but not newlines)
+        self.skip_horizontal_whitespace()
+
+        # Check for EOF
+        if self.is_at_end():
+            return Token.eof(self.pos, self.line)
+
+        # Get current character
+        val c = self.peek()
+
+        # Handle different token types
+        match c:
+            # Newline
+            case '\n':
+                return self.scan_newline()
+
+            # Comments
+            case '#':
+                return self.scan_comment()
+
+            # String literals
+            case '"' | '\'':
+                return self.scan_string()
+
+            # Numbers
+            case '0' | '1' | '2' | '3' | '4' | '5' | '6' | '7' | '8' | '9':
+                return self.scan_number()
+
+            # Identifiers and keywords
+            case 'a' | 'b' | 'c' | 'd' | 'e' | 'f' | 'g' | 'h' | 'i' | 'j'
+               | 'k' | 'l' | 'm' | 'n' | 'o' | 'p' | 'q' | 'r' | 's' | 't'
+               | 'u' | 'v' | 'w' | 'x' | 'y' | 'z'
+               | 'A' | 'B' | 'C' | 'D' | 'E' | 'F' | 'G' | 'H' | 'I' | 'J'
+               | 'K' | 'L' | 'M' | 'N' | 'O' | 'P' | 'Q' | 'R' | 'S' | 'T'
+               | 'U' | 'V' | 'W' | 'X' | 'Y' | 'Z'
+               | '_':
+                return self.scan_identifier()
+
+            # Operators and delimiters
+            case _:
+                return self.scan_operator_or_delimiter()
+
+    me peek() -> char:
+        """Peek at current character without consuming."""
+        if self.is_at_end():
+            return '\0'
+        self.source[self.pos]
+
+    me peek_next() -> char:
+        """Peek at next character without consuming."""
+        if self.pos + 1 >= self.source.len():
+            return '\0'
+        self.source[self.pos + 1]
+
+    me advance() -> char:
+        """Consume and return current character."""
+        val c = self.peek()
+        self.pos = self.pos + 1
+        if c == '\n':
+            self.line = self.line + 1
+            self.col = 1
+            self.at_line_start = true
+        else:
+            self.col = self.col + 1
+        c
+
+    me is_at_end() -> bool:
+        """Check if we've reached end of source."""
+        self.pos >= self.source.len()
+
+    # ========================================================================
+    # Indentation Handling
+    # ========================================================================
+
+    me handle_indentation() -> Token?:
+        """Handle indentation at the start of a line."""
+        self.at_line_start = false
+
+        # Skip blank lines and comments
+        while not self.is_at_end():
+            val c = self.peek()
+            if c == '\n':
+                self.advance()
+                continue
+            if c == '#':
+                self.skip_to_eol()
+                continue
+            break
+
+        if self.is_at_end():
+            return None
+
+        # Count leading whitespace
+        val start_pos = self.pos
+        var indent = 0
+        while not self.is_at_end():
+            val c = self.peek()
+            if c == ' ':
+                indent = indent + 1
+                self.advance()
+            elif c == '\t':
+                # Tab = 4 spaces
+                indent = indent + 4
+                self.advance()
+            else:
+                break
+
+        val current_indent = self.indent_stack[self.indent_stack.len() - 1]
+
+        if indent > current_indent:
+            # Increase indentation
+            self.indent_stack = self.indent_stack.push(indent)
+            return Some(Token.new(
+                TokenKind.Indent,
+                Span.new(start_pos, self.pos, self.line, 1),
+                ""
+            ))
+        elif indent < current_indent:
+            # Decrease indentation - may need multiple dedents
+            while self.indent_stack.len() > 1:
+                val top = self.indent_stack[self.indent_stack.len() - 1]
+                if indent >= top:
+                    break
+                self.indent_stack = self.indent_stack.pop()
+                self.pending_dedents = self.pending_dedents + 1
+
+            if self.pending_dedents > 0:
+                self.pending_dedents = self.pending_dedents - 1
+                return Some(Token.new(
+                    TokenKind.Dedent,
+                    Span.new(start_pos, self.pos, self.line, 1),
+                    ""
+                ))
+
+        None
+
+    # ========================================================================
+    # Whitespace and Comments
+    # ========================================================================
+
+    me skip_horizontal_whitespace():
+        """Skip spaces and tabs (not newlines)."""
+        while not self.is_at_end():
+            val c = self.peek()
+            if c == ' ' or c == '\t':
+                self.advance()
+            else:
+                break
+
+    me skip_to_eol():
+        """Skip to end of line."""
+        while not self.is_at_end() and self.peek() != '\n':
+            self.advance()
+
+    me scan_newline() -> Token:
+        """Scan a newline token."""
+        val start = self.pos
+        val line = self.line
+        val col = self.col
+        self.advance()  # Consume '\n'
+
+        # Suppress newlines inside parentheses
+        if self.paren_depth > 0:
+            return self.next_token()
+
+        Token.new(
+            TokenKind.Newline,
+            Span.new(start, self.pos, line, col),
+            "\n"
+        )
+
+    me scan_comment() -> Token:
+        """Scan a comment (skip it and get next token)."""
+        val start = self.pos
+        self.advance()  # Consume '#'
+
+        # Check for doc comment (##)
+        if self.peek() == '#':
+            self.advance()
+            # Doc comment - could preserve for documentation
+
+        self.skip_to_eol()
+
+        # Comments are skipped, get next token
+        self.next_token()
+
+    # ========================================================================
+    # Literals
+    # ========================================================================
+
+    me scan_string() -> Token:
+        """Scan a string literal."""
+        val start = self.pos
+        val line = self.line
+        val col = self.col
+        val quote = self.advance()
+
+        # Check for raw string (r"...")
+        var is_raw = false
+        if start > 0 and self.source[start - 1] == 'r':
+            is_raw = true
+
+        # Check for triple-quoted string
+        var triple = false
+        if self.peek() == quote and self.peek_next() == quote:
+            self.advance()
+            self.advance()
+            triple = true
+
+        var content = ""
+        while not self.is_at_end():
+            val c = self.peek()
+
+            if triple:
+                # Triple-quoted: look for closing """
+                if c == quote and self.peek_next() == quote:
+                    val next2 = if self.pos + 2 < self.source.len(): self.source[self.pos + 2] else: '\0'
+                    if next2 == quote:
+                        self.advance()
+                        self.advance()
+                        self.advance()
+                        break
+                content = content + c.to_string()
+                self.advance()
+            else:
+                # Single-quoted
+                if c == quote:
+                    self.advance()
+                    break
+                if c == '\n':
+                    # Unterminated string
+                    return Token.new(
+                        TokenKind.Error,
+                        Span.new(start, self.pos, line, col),
+                        "unterminated string"
+                    )
+                if c == '\\' and not is_raw:
+                    self.advance()
+                    val escaped = self.scan_escape_sequence()
+                    content = content + escaped
+                else:
+                    content = content + c.to_string()
+                    self.advance()
+
+        Token.new(
+            if is_raw: TokenKind.RawStringLit else: TokenKind.StringLit,
+            Span.new(start, self.pos, line, col),
+            content
+        )
+
+    me scan_escape_sequence() -> text:
+        """Scan an escape sequence after backslash."""
+        if self.is_at_end():
+            return "\\"
+
+        val c = self.advance()
+        match c:
+            case 'n': "\n"
+            case 'r': "\r"
+            case 't': "\t"
+            case '\\': "\\"
+            case '"': "\""
+            case '\'': "'"
+            case '0': "\0"
+            case 'x':
+                # Hex escape: \xNN
+                self.scan_hex_escape(2)
+            case 'u':
+                # Unicode escape: \uNNNN
+                self.scan_hex_escape(4)
+            case _:
+                # Unknown escape, keep as-is
+                "\\" + c.to_string()
+
+    me scan_hex_escape(digits: i64) -> text:
+        """Scan a hex escape sequence."""
+        var hex = ""
+        for _ in 0..digits:
+            if self.is_at_end():
+                break
+            val c = self.peek()
+            if is_hex_digit(c):
+                hex = hex + c.to_string()
+                self.advance()
+            else:
+                break
+
+        # Convert hex to character
+        # TODO: Implement hex to char conversion
+        hex
+
+    me scan_number() -> Token:
+        """Scan a number literal (int or float)."""
+        val start = self.pos
+        val line = self.line
+        val col = self.col
+
+        # Check for hex, binary, or octal
+        if self.peek() == '0' and not self.is_at_end():
+            val next = self.peek_next()
+            if next == 'x' or next == 'X':
+                return self.scan_hex_number(start, line, col)
+            if next == 'b' or next == 'B':
+                return self.scan_binary_number(start, line, col)
+            if next == 'o' or next == 'O':
+                return self.scan_octal_number(start, line, col)
+
+        # Decimal number
+        self.scan_decimal_number(start, line, col)
+
+    me scan_decimal_number(start: i64, line: i64, col: i64) -> Token:
+        """Scan a decimal number."""
+        # Integer part
+        while not self.is_at_end() and is_digit(self.peek()):
+            self.advance()
+
+        # Check for float
+        var is_float = false
+        if self.peek() == '.' and is_digit(self.peek_next()):
+            is_float = true
+            self.advance()  # Consume '.'
+            while not self.is_at_end() and is_digit(self.peek()):
+                self.advance()
+
+        # Check for exponent
+        val c = self.peek()
+        if c == 'e' or c == 'E':
+            is_float = true
+            self.advance()
+            if self.peek() == '+' or self.peek() == '-':
+                self.advance()
+            while not self.is_at_end() and is_digit(self.peek()):
+                self.advance()
+
+        val text = self.source[start:self.pos]
+        Token.new(
+            if is_float: TokenKind.FloatLit else: TokenKind.IntLit,
+            Span.new(start, self.pos, line, col),
+            text
+        )
+
+    me scan_hex_number(start: i64, line: i64, col: i64) -> Token:
+        """Scan a hexadecimal number (0x...)."""
+        self.advance()  # Consume '0'
+        self.advance()  # Consume 'x'
+
+        while not self.is_at_end() and is_hex_digit(self.peek()):
+            self.advance()
+
+        val text = self.source[start:self.pos]
+        Token.new(TokenKind.IntLit, Span.new(start, self.pos, line, col), text)
+
+    me scan_binary_number(start: i64, line: i64, col: i64) -> Token:
+        """Scan a binary number (0b...)."""
+        self.advance()  # Consume '0'
+        self.advance()  # Consume 'b'
+
+        while not self.is_at_end():
+            val c = self.peek()
+            if c == '0' or c == '1':
+                self.advance()
+            else:
+                break
+
+        val text = self.source[start:self.pos]
+        Token.new(TokenKind.IntLit, Span.new(start, self.pos, line, col), text)
+
+    me scan_octal_number(start: i64, line: i64, col: i64) -> Token:
+        """Scan an octal number (0o...)."""
+        self.advance()  # Consume '0'
+        self.advance()  # Consume 'o'
+
+        while not self.is_at_end():
+            val c = self.peek()
+            if c >= '0' and c <= '7':
+                self.advance()
+            else:
+                break
+
+        val text = self.source[start:self.pos]
+        Token.new(TokenKind.IntLit, Span.new(start, self.pos, line, col), text)
+
+    # ========================================================================
+    # Identifiers and Keywords
+    # ========================================================================
+
+    me scan_identifier() -> Token:
+        """Scan an identifier or keyword."""
+        val start = self.pos
+        val line = self.line
+        val col = self.col
+
+        # Check for raw string prefix
+        if self.peek() == 'r' and (self.peek_next() == '"' or self.peek_next() == '\''):
+            self.advance()  # Consume 'r'
+            return self.scan_string()
+
+        # Consume identifier characters
+        while not self.is_at_end():
+            val c = self.peek()
+            if is_ident_char(c):
+                self.advance()
+            else:
+                break
+
+        val text = self.source[start:self.pos]
+        val kind = keyword_kind(text)
+
+        Token.new(kind, Span.new(start, self.pos, line, col), text)
+
+    # ========================================================================
+    # Operators and Delimiters
+    # ========================================================================
+
+    me scan_operator_or_delimiter() -> Token:
+        """Scan an operator or delimiter."""
+        val start = self.pos
+        val line = self.line
+        val col = self.col
+        val c = self.advance()
+
+        val kind = match c:
+            # Single character
+            case '+':
+                if self.peek() == '=':
+                    self.advance()
+                    TokenKind.PlusEq
+                else:
+                    TokenKind.Plus
+            case '-':
+                if self.peek() == '>':
+                    self.advance()
+                    TokenKind.Arrow
+                elif self.peek() == '=':
+                    self.advance()
+                    TokenKind.MinusEq
+                else:
+                    TokenKind.Minus
+            case '*':
+                if self.peek() == '*':
+                    self.advance()
+                    TokenKind.StarStar
+                elif self.peek() == '=':
+                    self.advance()
+                    TokenKind.StarEq
+                else:
+                    TokenKind.Star
+            case '/':
+                if self.peek() == '=':
+                    self.advance()
+                    TokenKind.SlashEq
+                else:
+                    TokenKind.Slash
+            case '%':
+                if self.peek() == '=':
+                    self.advance()
+                    TokenKind.PercentEq
+                else:
+                    TokenKind.Percent
+            case '=':
+                if self.peek() == '=':
+                    self.advance()
+                    TokenKind.Eq
+                elif self.peek() == '>':
+                    self.advance()
+                    TokenKind.FatArrow
+                else:
+                    TokenKind.Assign
+            case '!':
+                if self.peek() == '=':
+                    self.advance()
+                    TokenKind.NotEq
+                else:
+                    TokenKind.Bang
+            case '<':
+                if self.peek() == '=':
+                    self.advance()
+                    TokenKind.LtEq
+                else:
+                    TokenKind.Lt
+            case '>':
+                if self.peek() == '=':
+                    self.advance()
+                    TokenKind.GtEq
+                else:
+                    TokenKind.Gt
+            case '&':
+                if self.peek() == '&':
+                    self.advance()
+                    TokenKind.AmpAmp
+                else:
+                    TokenKind.Ampersand
+            case '|':
+                if self.peek() == '|':
+                    self.advance()
+                    TokenKind.PipePipe
+                else:
+                    TokenKind.Pipe
+            case '^':
+                TokenKind.Caret
+            case '~':
+                TokenKind.Tilde
+            case '?':
+                if self.peek() == '.':
+                    self.advance()
+                    TokenKind.QuestionDot
+                elif self.peek() == '?':
+                    self.advance()
+                    TokenKind.QuestionQuestion
+                else:
+                    TokenKind.Question
+            case '.':
+                if self.peek() == '.':
+                    self.advance()
+                    if self.peek() == '=':
+                        self.advance()
+                        TokenKind.DotDotEq
+                    else:
+                        TokenKind.DotDot
+                elif self.peek() == '?':
+                    self.advance()
+                    TokenKind.DotQuestion
+                else:
+                    TokenKind.Dot
+            case ',':
+                TokenKind.Comma
+            case ':':
+                if self.peek() == ':':
+                    self.advance()
+                    TokenKind.ColonColon
+                else:
+                    TokenKind.Colon
+            case ';':
+                TokenKind.Semicolon
+            case '(':
+                self.paren_depth = self.paren_depth + 1
+                TokenKind.LParen
+            case ')':
+                self.paren_depth = max(0, self.paren_depth - 1)
+                TokenKind.RParen
+            case '{':
+                self.paren_depth = self.paren_depth + 1
+                TokenKind.LBrace
+            case '}':
+                self.paren_depth = max(0, self.paren_depth - 1)
+                TokenKind.RBrace
+            case '[':
+                self.paren_depth = self.paren_depth + 1
+                TokenKind.LBracket
+            case ']':
+                self.paren_depth = max(0, self.paren_depth - 1)
+                TokenKind.RBracket
+            case '@':
+                TokenKind.At
+            case '$':
+                TokenKind.Dollar
+            case '\\':
+                TokenKind.Backslash
+            case '_':
+                TokenKind.Underscore
+            case _:
+                TokenKind.Error
+
+        val text = self.source[start:self.pos]
+        Token.new(kind, Span.new(start, self.pos, line, col), text)
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+fn is_digit(c: char) -> bool:
+    c >= '0' and c <= '9'
+
+fn is_hex_digit(c: char) -> bool:
+    (c >= '0' and c <= '9') or (c >= 'a' and c <= 'f') or (c >= 'A' and c <= 'F')
+
+fn is_alpha(c: char) -> bool:
+    (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z')
+
+fn is_ident_start(c: char) -> bool:
+    is_alpha(c) or c == '_'
+
+fn is_ident_char(c: char) -> bool:
+    is_alpha(c) or is_digit(c) or c == '_'
+
+fn keyword_kind(text: text) -> TokenKind:
+    """Look up keyword from text, or return Ident."""
+    match text:
+        # Declarations
+        case "fn": TokenKind.KwFn
+        case "val": TokenKind.KwVal
+        case "var": TokenKind.KwVar
+        case "struct": TokenKind.KwStruct
+        case "class": TokenKind.KwClass
+        case "enum": TokenKind.KwEnum
+        case "trait": TokenKind.KwTrait
+        case "impl": TokenKind.KwImpl
+        case "type": TokenKind.KwType
+        case "mod": TokenKind.KwMod
+        case "pub": TokenKind.KwPub
+        case "static": TokenKind.KwStatic
+        case "me": TokenKind.KwMe
+        case "extern": TokenKind.KwExtern
+
+        # Control flow
+        case "if": TokenKind.KwIf
+        case "else": TokenKind.KwElse
+        case "elif": TokenKind.KwElif
+        case "match": TokenKind.KwMatch
+        case "case": TokenKind.KwCase
+        case "for": TokenKind.KwFor
+        case "while": TokenKind.KwWhile
+        case "loop": TokenKind.KwLoop
+        case "break": TokenKind.KwBreak
+        case "continue": TokenKind.KwContinue
+        case "return": TokenKind.KwReturn
+        case "yield": TokenKind.KwYield
+        case "await": TokenKind.KwAwait
+        case "async": TokenKind.KwAsync
+
+        # Expressions
+        case "in": TokenKind.KwIn
+        case "is": TokenKind.KwIs
+        case "as": TokenKind.KwAs
+        case "not": TokenKind.KwNot
+        case "and": TokenKind.KwAnd
+        case "or": TokenKind.KwOr
+        case "try": TokenKind.KwTry
+        case "catch": TokenKind.KwCatch
+        case "throw": TokenKind.KwThrow
+        case "with": TokenKind.KwWith
+
+        # Imports
+        case "import": TokenKind.KwImport
+        case "export": TokenKind.KwExport
+        case "from": TokenKind.KwFrom
+
+        # Special
+        case "self": TokenKind.KwSelf
+        case "super": TokenKind.KwSuper
+        case "None": TokenKind.KwNone
+        case "Some": TokenKind.KwSome
+        case "Ok": TokenKind.KwOk
+        case "Err": TokenKind.KwErr
+
+        # Literals
+        case "true": TokenKind.BoolLit
+        case "false": TokenKind.BoolLit
+        case "nil": TokenKind.NilLit
+
+        case _: TokenKind.Ident
+
+fn min(a: i64, b: i64) -> i64:
+    if a < b: a else: b
+
+fn max(a: i64, b: i64) -> i64:
+    if a > b: a else: b
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export TokenKind, Token, Span, Lexer
+export is_digit, is_hex_digit, is_alpha, is_ident_start, is_ident_char, keyword_kind

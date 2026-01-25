@@ -1,0 +1,700 @@
+# Codegen - Native Code Generation
+#
+# Generates native machine code from MIR using Cranelift backend (via FFI).
+# Supports:
+# - x86_64, aarch64, riscv64 targets
+# - JIT compilation (immediate execution)
+# - AOT compilation (object file generation)
+#
+# Architecture:
+#   MIR -> Codegen -> Cranelift IR -> Native Code
+
+import compiler.mir.*
+import compiler.hir.SymbolId
+import compiler.lexer.Span
+
+# ============================================================================
+# FFI Declarations (Cranelift Backend)
+# ============================================================================
+
+# Module management
+extern fn rt_cranelift_new_module(name_ptr: i64, name_len: i64, target: i64) -> i64
+extern fn rt_cranelift_finalize_module(module: i64) -> i64
+extern fn rt_cranelift_free_module(module: i64)
+
+# Function building
+extern fn rt_cranelift_begin_function(module: i64, name_ptr: i64, name_len: i64, sig: i64) -> i64
+extern fn rt_cranelift_end_function(ctx: i64) -> i64
+extern fn rt_cranelift_define_function(module: i64, func_id: i64, ctx: i64) -> bool
+
+# Signature building
+extern fn rt_cranelift_new_signature(call_conv: i64) -> i64
+extern fn rt_cranelift_sig_add_param(sig: i64, type_: i64)
+extern fn rt_cranelift_sig_set_return(sig: i64, type_: i64)
+
+# Block management
+extern fn rt_cranelift_create_block(ctx: i64) -> i64
+extern fn rt_cranelift_switch_to_block(ctx: i64, block: i64)
+extern fn rt_cranelift_seal_block(ctx: i64, block: i64)
+extern fn rt_cranelift_seal_all_blocks(ctx: i64)
+
+# Values
+extern fn rt_cranelift_iconst(ctx: i64, type_: i64, value: i64) -> i64
+extern fn rt_cranelift_fconst(ctx: i64, type_: i64, value: f64) -> i64
+extern fn rt_cranelift_bconst(ctx: i64, value: bool) -> i64
+extern fn rt_cranelift_null(ctx: i64, type_: i64) -> i64
+
+# Arithmetic
+extern fn rt_cranelift_iadd(ctx: i64, a: i64, b: i64) -> i64
+extern fn rt_cranelift_isub(ctx: i64, a: i64, b: i64) -> i64
+extern fn rt_cranelift_imul(ctx: i64, a: i64, b: i64) -> i64
+extern fn rt_cranelift_sdiv(ctx: i64, a: i64, b: i64) -> i64
+extern fn rt_cranelift_udiv(ctx: i64, a: i64, b: i64) -> i64
+extern fn rt_cranelift_srem(ctx: i64, a: i64, b: i64) -> i64
+extern fn rt_cranelift_urem(ctx: i64, a: i64, b: i64) -> i64
+
+extern fn rt_cranelift_fadd(ctx: i64, a: i64, b: i64) -> i64
+extern fn rt_cranelift_fsub(ctx: i64, a: i64, b: i64) -> i64
+extern fn rt_cranelift_fmul(ctx: i64, a: i64, b: i64) -> i64
+extern fn rt_cranelift_fdiv(ctx: i64, a: i64, b: i64) -> i64
+
+# Bitwise
+extern fn rt_cranelift_band(ctx: i64, a: i64, b: i64) -> i64
+extern fn rt_cranelift_bor(ctx: i64, a: i64, b: i64) -> i64
+extern fn rt_cranelift_bxor(ctx: i64, a: i64, b: i64) -> i64
+extern fn rt_cranelift_bnot(ctx: i64, a: i64) -> i64
+extern fn rt_cranelift_ishl(ctx: i64, a: i64, b: i64) -> i64
+extern fn rt_cranelift_sshr(ctx: i64, a: i64, b: i64) -> i64
+extern fn rt_cranelift_ushr(ctx: i64, a: i64, b: i64) -> i64
+
+# Comparison
+extern fn rt_cranelift_icmp(ctx: i64, cond: i64, a: i64, b: i64) -> i64
+extern fn rt_cranelift_fcmp(ctx: i64, cond: i64, a: i64, b: i64) -> i64
+
+# Memory
+extern fn rt_cranelift_load(ctx: i64, type_: i64, addr: i64, offset: i64) -> i64
+extern fn rt_cranelift_store(ctx: i64, value: i64, addr: i64, offset: i64)
+extern fn rt_cranelift_stack_slot(ctx: i64, size: i64, align: i64) -> i64
+extern fn rt_cranelift_stack_addr(ctx: i64, slot: i64, offset: i64) -> i64
+
+# Control flow
+extern fn rt_cranelift_jump(ctx: i64, block: i64)
+extern fn rt_cranelift_brif(ctx: i64, cond: i64, then_block: i64, else_block: i64)
+extern fn rt_cranelift_return(ctx: i64, value: i64)
+extern fn rt_cranelift_return_void(ctx: i64)
+extern fn rt_cranelift_trap(ctx: i64, code: i64)
+
+# Function calls
+extern fn rt_cranelift_call(ctx: i64, func: i64, args_ptr: i64, args_len: i64) -> i64
+extern fn rt_cranelift_call_indirect(ctx: i64, sig: i64, addr: i64, args_ptr: i64, args_len: i64) -> i64
+
+# Type conversion
+extern fn rt_cranelift_sextend(ctx: i64, to_type: i64, value: i64) -> i64
+extern fn rt_cranelift_uextend(ctx: i64, to_type: i64, value: i64) -> i64
+extern fn rt_cranelift_ireduce(ctx: i64, to_type: i64, value: i64) -> i64
+extern fn rt_cranelift_fcvt_to_sint(ctx: i64, to_type: i64, value: i64) -> i64
+extern fn rt_cranelift_fcvt_to_uint(ctx: i64, to_type: i64, value: i64) -> i64
+extern fn rt_cranelift_fcvt_from_sint(ctx: i64, to_type: i64, value: i64) -> i64
+extern fn rt_cranelift_fcvt_from_uint(ctx: i64, to_type: i64, value: i64) -> i64
+extern fn rt_cranelift_bitcast(ctx: i64, to_type: i64, value: i64) -> i64
+
+# Block parameters (for phi nodes)
+extern fn rt_cranelift_append_block_param(ctx: i64, block: i64, type_: i64) -> i64
+extern fn rt_cranelift_block_param(ctx: i64, block: i64, index: i64) -> i64
+
+# JIT execution
+extern fn rt_cranelift_get_function_ptr(module: i64, name_ptr: i64, name_len: i64) -> i64
+extern fn rt_cranelift_call_function_ptr(ptr: i64, args_ptr: i64, args_len: i64) -> i64
+
+# Object file generation
+extern fn rt_cranelift_emit_object(module: i64, path_ptr: i64, path_len: i64) -> bool
+
+# ============================================================================
+# Cranelift Type Constants
+# ============================================================================
+
+val CL_TYPE_I8: i64 = 1
+val CL_TYPE_I16: i64 = 2
+val CL_TYPE_I32: i64 = 3
+val CL_TYPE_I64: i64 = 4
+val CL_TYPE_F32: i64 = 5
+val CL_TYPE_F64: i64 = 6
+val CL_TYPE_B1: i64 = 7    # Boolean
+val CL_TYPE_PTR: i64 = 8
+
+val CL_CC_SYSTEM_V: i64 = 0
+val CL_CC_WINDOWS_FASTCALL: i64 = 1
+val CL_CC_FAST: i64 = 2
+
+val CL_CMP_EQ: i64 = 0
+val CL_CMP_NE: i64 = 1
+val CL_CMP_SLT: i64 = 2
+val CL_CMP_SLE: i64 = 3
+val CL_CMP_SGT: i64 = 4
+val CL_CMP_SGE: i64 = 5
+val CL_CMP_ULT: i64 = 6
+val CL_CMP_ULE: i64 = 7
+val CL_CMP_UGT: i64 = 8
+val CL_CMP_UGE: i64 = 9
+
+val CL_FCMP_EQ: i64 = 0
+val CL_FCMP_NE: i64 = 1
+val CL_FCMP_LT: i64 = 2
+val CL_FCMP_LE: i64 = 3
+val CL_FCMP_GT: i64 = 4
+val CL_FCMP_GE: i64 = 5
+
+val CL_TARGET_X86_64: i64 = 0
+val CL_TARGET_AARCH64: i64 = 1
+val CL_TARGET_RISCV64: i64 = 2
+
+# ============================================================================
+# Codegen State
+# ============================================================================
+
+struct Codegen:
+    """Code generator state."""
+    module_handle: i64
+    current_ctx: i64
+    target: CodegenTarget
+    mode: CodegenMode
+    local_values: Dict<i64, i64>    # LocalId -> Cranelift value
+    block_map: Dict<i64, i64>       # BlockId -> Cranelift block
+    function_map: Dict<text, i64>   # name -> function id
+    errors: [CodegenError]
+
+enum CodegenTarget:
+    """Target architecture."""
+    X86_64
+    Aarch64
+    Riscv64
+    Native      # Detect at runtime
+
+enum CodegenMode:
+    """Compilation mode."""
+    Jit         # Immediate execution
+    Aot         # Object file generation
+
+struct CodegenError:
+    """Codegen error."""
+    message: text
+    span: Span?
+
+impl Codegen:
+    static fn new(target: CodegenTarget, mode: CodegenMode) -> Codegen:
+        Codegen(
+            module_handle: 0,
+            current_ctx: 0,
+            target: target,
+            mode: mode,
+            local_values: {},
+            block_map: {},
+            function_map: {},
+            errors: []
+        )
+
+    # ========================================================================
+    # Module Management
+    # ========================================================================
+
+    me init_module(name: text) -> bool:
+        """Initialize a new module."""
+        val target_code = match self.target:
+            case X86_64: CL_TARGET_X86_64
+            case Aarch64: CL_TARGET_AARCH64
+            case Riscv64: CL_TARGET_RISCV64
+            case Native: CL_TARGET_X86_64  # Default to x86_64
+
+        self.module_handle = rt_cranelift_new_module(name.ptr(), name.len(), target_code)
+        self.module_handle != 0
+
+    me finalize_module() -> bool:
+        """Finalize the module after all functions are defined."""
+        if self.module_handle == 0:
+            return false
+        rt_cranelift_finalize_module(self.module_handle) != 0
+
+    me free_module():
+        """Free module resources."""
+        if self.module_handle != 0:
+            rt_cranelift_free_module(self.module_handle)
+            self.module_handle = 0
+
+    # ========================================================================
+    # Function Compilation
+    # ========================================================================
+
+    me compile_function(fn_: MirFunction) -> bool:
+        """Compile a MIR function to native code."""
+        self.local_values = {}
+        self.block_map = {}
+
+        # Build signature
+        val sig = self.build_signature(fn_.signature)
+        if sig == 0:
+            self.error("failed to build signature", Some(fn_.span))
+            return false
+
+        # Begin function
+        self.current_ctx = rt_cranelift_begin_function(
+            self.module_handle,
+            fn_.name.ptr(),
+            fn_.name.len(),
+            sig
+        )
+        if self.current_ctx == 0:
+            self.error("failed to begin function", Some(fn_.span))
+            return false
+
+        # Create blocks
+        for block in fn_.blocks:
+            val cl_block = rt_cranelift_create_block(self.current_ctx)
+            self.block_map[block.id.id] = cl_block
+
+        # Switch to entry block
+        val entry_block = self.block_map[fn_.entry_block.id]
+        rt_cranelift_switch_to_block(self.current_ctx, entry_block)
+
+        # Create locals for parameters
+        for i in 0..fn_.signature.params.len():
+            val param_value = rt_cranelift_block_param(self.current_ctx, entry_block, i)
+            # Parameter locals start at 1 (0 is return slot if non-void)
+            val local_id = if fn_.signature.return_type.kind != MirTypeKind.Unit:
+                i + 1
+            else:
+                i
+            self.local_values[local_id] = param_value
+
+        # Compile blocks
+        for block in fn_.blocks:
+            self.compile_block(block)
+
+        # Seal all blocks
+        rt_cranelift_seal_all_blocks(self.current_ctx)
+
+        # End function
+        val func_id = rt_cranelift_end_function(self.current_ctx)
+        if func_id == 0:
+            self.error("failed to end function", Some(fn_.span))
+            return false
+
+        # Define function in module
+        if not rt_cranelift_define_function(self.module_handle, func_id, self.current_ctx):
+            self.error("failed to define function", Some(fn_.span))
+            return false
+
+        self.function_map[fn_.name] = func_id
+        true
+
+    me build_signature(sig: MirSignature) -> i64:
+        """Build Cranelift signature."""
+        val cl_sig = rt_cranelift_new_signature(CL_CC_SYSTEM_V)
+        if cl_sig == 0:
+            return 0
+
+        # Add parameters
+        for param in sig.params:
+            val cl_type = self.mir_type_to_cl(param)
+            rt_cranelift_sig_add_param(cl_sig, cl_type)
+
+        # Set return type
+        if sig.return_type.kind != MirTypeKind.Unit:
+            val cl_ret = self.mir_type_to_cl(sig.return_type)
+            rt_cranelift_sig_set_return(cl_sig, cl_ret)
+
+        cl_sig
+
+    me mir_type_to_cl(type_: MirType) -> i64:
+        """Convert MIR type to Cranelift type."""
+        match type_.kind:
+            case I8: CL_TYPE_I8
+            case I16: CL_TYPE_I16
+            case I32: CL_TYPE_I32
+            case I64: CL_TYPE_I64
+            case U8: CL_TYPE_I8
+            case U16: CL_TYPE_I16
+            case U32: CL_TYPE_I32
+            case U64: CL_TYPE_I64
+            case F32: CL_TYPE_F32
+            case F64: CL_TYPE_F64
+            case Bool: CL_TYPE_B1
+            case Ptr(_, _) | Ref(_, _) | FuncPtr(_): CL_TYPE_PTR
+            case _: CL_TYPE_I64  # Default to i64
+
+    # ========================================================================
+    # Block Compilation
+    # ========================================================================
+
+    me compile_block(block: MirBlock):
+        """Compile a basic block."""
+        val cl_block = self.block_map[block.id.id]
+        rt_cranelift_switch_to_block(self.current_ctx, cl_block)
+
+        # Compile instructions
+        for inst in block.instructions:
+            self.compile_inst(inst)
+
+        # Compile terminator
+        self.compile_terminator(block.terminator)
+
+        rt_cranelift_seal_block(self.current_ctx, cl_block)
+
+    # ========================================================================
+    # Instruction Compilation
+    # ========================================================================
+
+    me compile_inst(inst: MirInst):
+        """Compile a MIR instruction."""
+        match inst.kind:
+            case Const(dest, value, type_):
+                val cl_value = self.compile_const(value, type_)
+                self.local_values[dest.id] = cl_value
+
+            case Copy(dest, src):
+                val src_value = self.get_local(src)
+                self.local_values[dest.id] = src_value
+
+            case Move(dest, src):
+                val src_value = self.get_local(src)
+                self.local_values[dest.id] = src_value
+
+            case BinOp(dest, op, left, right):
+                val lv = self.compile_operand(left)
+                val rv = self.compile_operand(right)
+                val result = self.compile_binop(op, lv, rv)
+                self.local_values[dest.id] = result
+
+            case UnaryOp(dest, op, operand):
+                val v = self.compile_operand(operand)
+                val result = self.compile_unaryop(op, v)
+                self.local_values[dest.id] = result
+
+            case Load(dest, ptr):
+                val addr = self.compile_operand(ptr)
+                val result = rt_cranelift_load(self.current_ctx, CL_TYPE_I64, addr, 0)
+                self.local_values[dest.id] = result
+
+            case Store(ptr, value):
+                val addr = self.compile_operand(ptr)
+                val v = self.compile_operand(value)
+                rt_cranelift_store(self.current_ctx, v, addr, 0)
+
+            case Alloc(dest, type_):
+                val size = type_.size_bytes()
+                val align = type_.alignment()
+                val slot = rt_cranelift_stack_slot(self.current_ctx, size, align)
+                val addr = rt_cranelift_stack_addr(self.current_ctx, slot, 0)
+                self.local_values[dest.id] = addr
+
+            case Call(dest, func, args):
+                val func_value = self.compile_operand(func)
+                var arg_values: [i64] = []
+                for arg in args:
+                    arg_values = arg_values.push(self.compile_operand(arg))
+                val result = rt_cranelift_call(
+                    self.current_ctx,
+                    func_value,
+                    arg_values.ptr(),
+                    arg_values.len()
+                )
+                if dest.?:
+                    self.local_values[dest.unwrap().id] = result
+
+            case Cast(dest, operand, target):
+                val v = self.compile_operand(operand)
+                val cl_target = self.mir_type_to_cl(target)
+                val result = rt_cranelift_bitcast(self.current_ctx, cl_target, v)
+                self.local_values[dest.id] = result
+
+            case Aggregate(dest, kind, operands):
+                # For now, allocate on stack and store each field
+                val type_ = self.aggregate_type(kind)
+                val size = type_.size_bytes()
+                val slot = rt_cranelift_stack_slot(self.current_ctx, size, 8)
+                val base = rt_cranelift_stack_addr(self.current_ctx, slot, 0)
+
+                var offset = 0
+                for operand in operands:
+                    val v = self.compile_operand(operand)
+                    val addr = rt_cranelift_iadd(
+                        self.current_ctx,
+                        base,
+                        rt_cranelift_iconst(self.current_ctx, CL_TYPE_I64, offset)
+                    )
+                    rt_cranelift_store(self.current_ctx, v, addr, 0)
+                    offset = offset + 8  # Assume 8 bytes per element
+
+                self.local_values[dest.id] = base
+
+            case GetField(dest, base, field):
+                val base_addr = self.compile_operand(base)
+                val offset = field * 8  # Assume 8 bytes per field
+                val field_addr = rt_cranelift_iadd(
+                    self.current_ctx,
+                    base_addr,
+                    rt_cranelift_iconst(self.current_ctx, CL_TYPE_I64, offset)
+                )
+                val result = rt_cranelift_load(self.current_ctx, CL_TYPE_I64, field_addr, 0)
+                self.local_values[dest.id] = result
+
+            case Nop:
+                pass
+
+            case _:
+                self.error("unsupported instruction", inst.span)
+
+    me compile_const(value: MirConstValue, type_: MirType) -> i64:
+        """Compile a constant value."""
+        match value:
+            case Int(v):
+                val cl_type = self.mir_type_to_cl(type_)
+                rt_cranelift_iconst(self.current_ctx, cl_type, v)
+
+            case Float(v):
+                val cl_type = self.mir_type_to_cl(type_)
+                rt_cranelift_fconst(self.current_ctx, cl_type, v)
+
+            case Bool(v):
+                rt_cranelift_bconst(self.current_ctx, v)
+
+            case Zero:
+                val cl_type = self.mir_type_to_cl(type_)
+                rt_cranelift_iconst(self.current_ctx, cl_type, 0)
+
+            case _:
+                rt_cranelift_iconst(self.current_ctx, CL_TYPE_I64, 0)
+
+    me compile_operand(operand: MirOperand) -> i64:
+        """Compile an operand to a Cranelift value."""
+        match operand.kind:
+            case Copy(local) | Move(local):
+                self.get_local(local)
+            case Const(value, type_):
+                self.compile_const(value, type_)
+
+    me get_local(local: LocalId) -> i64:
+        """Get Cranelift value for a local."""
+        self.local_values[local.id] ?? 0
+
+    me compile_binop(op: MirBinOp, left: i64, right: i64) -> i64:
+        """Compile binary operation."""
+        match op:
+            case Add:
+                rt_cranelift_iadd(self.current_ctx, left, right)
+            case Sub:
+                rt_cranelift_isub(self.current_ctx, left, right)
+            case Mul:
+                rt_cranelift_imul(self.current_ctx, left, right)
+            case Div:
+                rt_cranelift_sdiv(self.current_ctx, left, right)
+            case Rem:
+                rt_cranelift_srem(self.current_ctx, left, right)
+            case BitAnd:
+                rt_cranelift_band(self.current_ctx, left, right)
+            case BitOr:
+                rt_cranelift_bor(self.current_ctx, left, right)
+            case BitXor:
+                rt_cranelift_bxor(self.current_ctx, left, right)
+            case Shl:
+                rt_cranelift_ishl(self.current_ctx, left, right)
+            case Shr:
+                rt_cranelift_sshr(self.current_ctx, left, right)
+            case Eq:
+                rt_cranelift_icmp(self.current_ctx, CL_CMP_EQ, left, right)
+            case Ne:
+                rt_cranelift_icmp(self.current_ctx, CL_CMP_NE, left, right)
+            case Lt:
+                rt_cranelift_icmp(self.current_ctx, CL_CMP_SLT, left, right)
+            case Le:
+                rt_cranelift_icmp(self.current_ctx, CL_CMP_SLE, left, right)
+            case Gt:
+                rt_cranelift_icmp(self.current_ctx, CL_CMP_SGT, left, right)
+            case Ge:
+                rt_cranelift_icmp(self.current_ctx, CL_CMP_SGE, left, right)
+            case _:
+                rt_cranelift_iadd(self.current_ctx, left, right)
+
+    me compile_unaryop(op: MirUnaryOp, operand: i64) -> i64:
+        """Compile unary operation."""
+        match op:
+            case Neg:
+                val zero = rt_cranelift_iconst(self.current_ctx, CL_TYPE_I64, 0)
+                rt_cranelift_isub(self.current_ctx, zero, operand)
+            case Not:
+                val one = rt_cranelift_iconst(self.current_ctx, CL_TYPE_I64, 1)
+                rt_cranelift_bxor(self.current_ctx, operand, one)
+            case BitNot:
+                rt_cranelift_bnot(self.current_ctx, operand)
+
+    me aggregate_type(kind: AggregateKind) -> MirType:
+        """Get type for aggregate kind."""
+        match kind:
+            case Array(type_): type_
+            case Tuple: MirType(kind: MirTypeKind.I64)
+            case Struct(_): MirType(kind: MirTypeKind.I64)
+            case Enum(_, _): MirType(kind: MirTypeKind.I64)
+
+    # ========================================================================
+    # Terminator Compilation
+    # ========================================================================
+
+    me compile_terminator(term: MirTerminator):
+        """Compile a block terminator."""
+        match term:
+            case Goto(target):
+                val cl_target = self.block_map[target.id]
+                rt_cranelift_jump(self.current_ctx, cl_target)
+
+            case Return(value):
+                if value.?:
+                    val v = self.compile_operand(value.unwrap())
+                    rt_cranelift_return(self.current_ctx, v)
+                else:
+                    rt_cranelift_return_void(self.current_ctx)
+
+            case If(cond, then_, else_):
+                val cv = self.compile_operand(cond)
+                val cl_then = self.block_map[then_.id]
+                val cl_else = self.block_map[else_.id]
+                rt_cranelift_brif(self.current_ctx, cv, cl_then, cl_else)
+
+            case Switch(value, targets, default):
+                # TODO: Implement switch
+                val cl_default = self.block_map[default.id]
+                rt_cranelift_jump(self.current_ctx, cl_default)
+
+            case Unreachable:
+                rt_cranelift_trap(self.current_ctx, 0)
+
+            case Abort(message):
+                rt_cranelift_trap(self.current_ctx, 1)
+
+            case _:
+                self.error("unsupported terminator", None)
+
+    # ========================================================================
+    # Execution and Output
+    # ========================================================================
+
+    me get_function_ptr(name: text) -> i64:
+        """Get pointer to compiled function."""
+        rt_cranelift_get_function_ptr(self.module_handle, name.ptr(), name.len())
+
+    me call_function(name: text, args: [i64]) -> i64:
+        """Call a compiled function."""
+        val ptr = self.get_function_ptr(name)
+        if ptr == 0:
+            return 0
+        rt_cranelift_call_function_ptr(ptr, args.ptr(), args.len())
+
+    me emit_object(path: text) -> bool:
+        """Emit object file for AOT compilation."""
+        rt_cranelift_emit_object(self.module_handle, path.ptr(), path.len())
+
+    me error(message: text, span: Span?):
+        """Record an error."""
+        self.errors = self.errors.push(CodegenError(message: message, span: span))
+
+# ============================================================================
+# High-Level API
+# ============================================================================
+
+struct CodegenPipeline:
+    """High-level code generation pipeline."""
+    target: CodegenTarget
+    mode: CodegenMode
+    optimize: bool
+
+impl CodegenPipeline:
+    static fn jit() -> CodegenPipeline:
+        """Create JIT compilation pipeline."""
+        CodegenPipeline(
+            target: CodegenTarget.Native,
+            mode: CodegenMode.Jit,
+            optimize: true
+        )
+
+    static fn aot(target: CodegenTarget) -> CodegenPipeline:
+        """Create AOT compilation pipeline."""
+        CodegenPipeline(
+            target: target,
+            mode: CodegenMode.Aot,
+            optimize: true
+        )
+
+    me compile_module(mir: MirModule) -> Result<CompiledModule, CodegenError>:
+        """Compile MIR module to native code."""
+        var codegen = Codegen.new(self.target, self.mode)
+
+        if not codegen.init_module(mir.name):
+            return Err(CodegenError(message: "failed to initialize module", span: None))
+
+        # Compile all functions
+        for symbol, fn_ in mir.functions:
+            if not codegen.compile_function(fn_):
+                if codegen.errors.len() > 0:
+                    return Err(codegen.errors[0])
+                return Err(CodegenError(message: "failed to compile function", span: None))
+
+        if not codegen.finalize_module():
+            return Err(CodegenError(message: "failed to finalize module", span: None))
+
+        Ok(CompiledModule(
+            name: mir.name,
+            codegen: codegen,
+            mode: self.mode
+        ))
+
+struct CompiledModule:
+    """Compiled module ready for execution or output."""
+    name: text
+    codegen: Codegen
+    mode: CodegenMode
+
+impl CompiledModule:
+    fn call(name: text, args: [i64]) -> Result<i64, CodegenError>:
+        """Call a function in the compiled module (JIT mode only)."""
+        if self.mode != CodegenMode.Jit:
+            return Err(CodegenError(message: "can only call functions in JIT mode", span: None))
+
+        val result = self.codegen.call_function(name, args)
+        Ok(result)
+
+    fn emit_object(path: text) -> Result<(), CodegenError>:
+        """Emit object file (AOT mode)."""
+        if not self.codegen.emit_object(path):
+            return Err(CodegenError(message: "failed to emit object file", span: None))
+        Ok(())
+
+    fn cleanup():
+        """Free resources."""
+        self.codegen.free_module()
+
+# ============================================================================
+# Convenience Functions
+# ============================================================================
+
+pub fn jit_compile(mir: MirModule) -> Result<CompiledModule, CodegenError>:
+    """JIT compile a MIR module."""
+    val pipeline = CodegenPipeline.jit()
+    pipeline.compile_module(mir)
+
+pub fn aot_compile(mir: MirModule, target: CodegenTarget) -> Result<CompiledModule, CodegenError>:
+    """AOT compile a MIR module."""
+    val pipeline = CodegenPipeline.aot(target)
+    pipeline.compile_module(mir)
+
+pub fn compile_and_run(mir: MirModule, entry: text, args: [i64]) -> Result<i64, CodegenError>:
+    """Compile and immediately run a function."""
+    val module = jit_compile(mir)?
+    val result = module.call(entry, args)?
+    module.cleanup()
+    Ok(result)
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export Codegen, CodegenTarget, CodegenMode, CodegenError
+export CodegenPipeline, CompiledModule
+export jit_compile, aot_compile, compile_and_run

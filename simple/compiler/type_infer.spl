@@ -1,0 +1,1072 @@
+# Hindley-Milner Type Inference
+#
+# Full Algorithm W type inference with level-based generalization.
+# Enables zero-annotation code like ML/OCaml:
+#
+#   fn identity(x):     # Infers: forall a. a -> a
+#       x
+#
+#   fn compose(f, g, x): # Infers: forall a b c. (b -> c) -> (a -> b) -> a -> c
+#       f(g(x))
+#
+# Key features:
+# - Level-based type variables for efficient generalization
+# - Let-polymorphism at all let-bindings
+# - Unification with occurs check
+# - Type scheme instantiation
+#
+# References:
+# - Damas-Milner Algorithm W
+# - verification/type_inference_compile/src/Generics.lean
+
+use compiler.hir.*
+use compiler.lexer.*
+
+# ============================================================================
+# Type Scheme (Polymorphic Types)
+# ============================================================================
+
+struct TypeScheme:
+    """Polymorphic type: forall vars. ty
+
+    A type scheme represents a polymorphic type with quantified variables.
+    For example, the identity function has scheme: forall a. a -> a
+    """
+    # Bound type variable IDs (quantified)
+    vars: [i64]
+    # The type body (may reference vars)
+    ty: HirType
+
+impl TypeScheme:
+    static fn mono(ty: HirType) -> TypeScheme:
+        """Create a monomorphic scheme (no quantified variables)."""
+        TypeScheme(vars: [], ty: ty)
+
+    static fn poly(vars: [i64], ty: HirType) -> TypeScheme:
+        """Create a polymorphic scheme with the given bound variables."""
+        TypeScheme(vars: vars, ty: ty)
+
+    fn is_mono() -> bool:
+        """Check if this is a monomorphic type (no quantified vars)."""
+        self.vars.is_empty()
+
+# ============================================================================
+# Substitution
+# ============================================================================
+
+struct Substitution:
+    """Mapping from type variable IDs to types."""
+    map: Dict<i64, HirType>
+
+impl Substitution:
+    static fn new() -> Substitution:
+        Substitution(map: {})
+
+    fn get(id: i64) -> HirType?:
+        """Look up a type variable."""
+        self.map[id]
+
+    me insert(id: i64, ty: HirType):
+        """Insert a substitution."""
+        self.map[id] = ty
+
+    fn apply(ty: HirType) -> HirType:
+        """Apply substitution to a type."""
+        match ty.kind:
+            case Infer(id, level):
+                if self.map[id].?:
+                    self.apply(self.map[id])
+                else:
+                    ty
+            case Function(params, ret, effects):
+                var new_params: [HirType] = []
+                for p in params:
+                    new_params = new_params.push(self.apply(p))
+                HirType(
+                    kind: HirTypeKind.Function(new_params, self.apply(ret), effects),
+                    span: ty.span
+                )
+            case Tuple(elements):
+                var new_elements: [HirType] = []
+                for e in elements:
+                    new_elements = new_elements.push(self.apply(e))
+                HirType(kind: HirTypeKind.Tuple(new_elements), span: ty.span)
+            case Array(element, size):
+                HirType(kind: HirTypeKind.Array(self.apply(element), size), span: ty.span)
+            case Slice(element):
+                HirType(kind: HirTypeKind.Slice(self.apply(element)), span: ty.span)
+            case Dict(key, value):
+                HirType(kind: HirTypeKind.Dict(self.apply(key), self.apply(value)), span: ty.span)
+            case Optional(inner):
+                HirType(kind: HirTypeKind.Optional(self.apply(inner)), span: ty.span)
+            case Result(ok, err):
+                HirType(kind: HirTypeKind.Result(self.apply(ok), self.apply(err)), span: ty.span)
+            case Ref(inner, mutable):
+                HirType(kind: HirTypeKind.Ref(self.apply(inner), mutable), span: ty.span)
+            case Ptr(inner, mutable):
+                HirType(kind: HirTypeKind.Ptr(self.apply(inner), mutable), span: ty.span)
+            case Named(symbol, args):
+                var new_args: [HirType] = []
+                for a in args:
+                    new_args = new_args.push(self.apply(a))
+                HirType(kind: HirTypeKind.Named(symbol, new_args), span: ty.span)
+            case _:
+                ty
+
+# ============================================================================
+# Type Inference Errors
+# ============================================================================
+
+enum TypeInferError:
+    """Type inference error."""
+    Mismatch(expected: HirType, found: HirType, span: Span)
+    OccursCheck(var_id: i64, ty: HirType, span: Span)
+    Undefined(name: text, span: Span)
+    Other(message: text, span: Span)
+
+impl TypeInferError:
+    fn message() -> text:
+        """Get error message."""
+        match self:
+            case Mismatch(expected, found, _):
+                "type mismatch: expected {expected.kind}, found {found.kind}"
+            case OccursCheck(var_id, ty, _):
+                "infinite type: T{var_id} occurs in {ty.kind}"
+            case Undefined(name, _):
+                "undefined: {name}"
+            case Other(msg, _):
+                msg
+
+    fn span() -> Span:
+        """Get error span."""
+        match self:
+            case Mismatch(_, _, s): s
+            case OccursCheck(_, _, s): s
+            case Undefined(_, s): s
+            case Other(_, s): s
+
+# ============================================================================
+# HM Inference Context
+# ============================================================================
+
+struct HmInferContext:
+    """Hindley-Milner inference context with level-based generalization.
+
+    Levels enable efficient generalization control:
+    - Each scope (let-binding, lambda) increments the level
+    - Type variables are created at the current level
+    - Only variables at level > environment level are generalizable
+    """
+    # Type environment: maps names to polymorphic type schemes
+    env: Dict<text, TypeScheme>
+    # Current generalization level (incremented on enter_level)
+    level: i64
+    # Counter for generating fresh type variable IDs
+    next_var: i64
+    # Substitution map from type variable IDs to types
+    subst: Substitution
+    # Accumulated errors
+    errors: [TypeInferError]
+
+impl HmInferContext:
+    static fn new() -> HmInferContext:
+        """Create a new inference context at level 0."""
+        HmInferContext(
+            env: {},
+            level: 0,
+            next_var: 0,
+            subst: Substitution.new(),
+            errors: []
+        )
+
+    static fn with_builtins() -> HmInferContext:
+        """Create a context with pre-defined builtins."""
+        var ctx = HmInferContext.new()
+        ctx.add_builtins()
+        ctx
+
+    me add_builtins():
+        """Add built-in polymorphic functions."""
+        val dummy_span = Span(start: 0, end: 0, line: 0, col: 0)
+
+        # identity: forall a. a -> a
+        val a = self.fresh_var(dummy_span)
+        val identity_ty = HirType(
+            kind: HirTypeKind.Function([a], a, []),
+            span: dummy_span
+        )
+        val identity_scheme = self.generalize_all(identity_ty)
+        self.env["identity"] = identity_scheme
+
+        # print: forall a. a -> ()
+        val b = self.fresh_var(dummy_span)
+        val print_ty = HirType(
+            kind: HirTypeKind.Function([b], HirType(kind: HirTypeKind.Unit, span: dummy_span), []),
+            span: dummy_span
+        )
+        val print_scheme = self.generalize_all(print_ty)
+        self.env["print"] = print_scheme
+
+        # len: forall a. [a] -> i64
+        val c = self.fresh_var(dummy_span)
+        val len_ty = HirType(
+            kind: HirTypeKind.Function(
+                [HirType(kind: HirTypeKind.Array(c, None), span: dummy_span)],
+                HirType(kind: HirTypeKind.Int(64, true), span: dummy_span),
+                []
+            ),
+            span: dummy_span
+        )
+        val len_scheme = self.generalize_all(len_ty)
+        self.env["len"] = len_scheme
+
+    # =========================================================================
+    # Level Management
+    # =========================================================================
+
+    me enter_level():
+        """Enter a new scope level (for let-binding RHS, lambda body).
+        Variables created at higher levels can be generalized when exiting."""
+        self.level = self.level + 1
+
+    me exit_level():
+        """Exit the current scope level."""
+        if self.level > 0:
+            self.level = self.level - 1
+
+    fn current_level() -> i64:
+        """Get the current level."""
+        self.level
+
+    # =========================================================================
+    # Fresh Variables
+    # =========================================================================
+
+    me fresh_var(span: Span) -> HirType:
+        """Create a fresh type variable at the current level."""
+        val id = self.next_var
+        self.next_var = self.next_var + 1
+        HirType(kind: HirTypeKind.Infer(id, self.level), span: span)
+
+    me fresh_var_at_level(level: i64, span: Span) -> HirType:
+        """Create a fresh type variable at a specific level."""
+        val id = self.next_var
+        self.next_var = self.next_var + 1
+        HirType(kind: HirTypeKind.Infer(id, level), span: span)
+
+    # =========================================================================
+    # Substitution
+    # =========================================================================
+
+    fn apply_subst(ty: HirType) -> HirType:
+        """Apply current substitution to a type (resolve all known variables)."""
+        self.subst.apply(ty)
+
+    fn resolve(ty: HirType) -> HirType:
+        """Get the fully resolved type (chase all substitutions)."""
+        self.apply_subst(ty)
+
+    # =========================================================================
+    # Occurs Check
+    # =========================================================================
+
+    fn occurs(var_id: i64, ty: HirType) -> bool:
+        """Check if type variable occurs in type (for occurs check)."""
+        val resolved = self.resolve(ty)
+        match resolved.kind:
+            case Infer(id, _):
+                id == var_id
+            case Function(params, ret, _):
+                for p in params:
+                    if self.occurs(var_id, p):
+                        return true
+                self.occurs(var_id, ret)
+            case Tuple(elements):
+                for e in elements:
+                    if self.occurs(var_id, e):
+                        return true
+                false
+            case Array(element, _) | Slice(element):
+                self.occurs(var_id, element)
+            case Dict(key, value):
+                self.occurs(var_id, key) or self.occurs(var_id, value)
+            case Optional(inner) | Ref(inner, _) | Ptr(inner, _):
+                self.occurs(var_id, inner)
+            case Result(ok, err):
+                self.occurs(var_id, ok) or self.occurs(var_id, err)
+            case Named(_, args):
+                for a in args:
+                    if self.occurs(var_id, a):
+                        return true
+                false
+            case _:
+                false
+
+    # =========================================================================
+    # Unification
+    # =========================================================================
+
+    me unify(t1: HirType, t2: HirType) -> Result<(), TypeInferError>:
+        """Unify two types, updating the substitution."""
+        val ty1 = self.resolve(t1)
+        val ty2 = self.resolve(t2)
+
+        match (ty1.kind, ty2.kind):
+            # Same primitive types unify trivially
+            case (Int(b1, s1), Int(b2, s2)) if b1 == b2 and s1 == s2:
+                Ok(())
+            case (Float(b1), Float(b2)) if b1 == b2:
+                Ok(())
+            case (Bool, Bool):
+                Ok(())
+            case (Char, Char):
+                Ok(())
+            case (Str, Str):
+                Ok(())
+            case (Unit, Unit):
+                Ok(())
+            case (Never, Never):
+                Ok(())
+
+            # Type variable unification
+            case (Infer(id1, _), Infer(id2, _)) if id1 == id2:
+                Ok(())
+            case (Infer(id, level), _):
+                if self.occurs(id, ty2):
+                    Err(TypeInferError.OccursCheck(id, ty2, ty1.span))
+                else:
+                    self.subst.insert(id, ty2)
+                    Ok(())
+            case (_, Infer(id, level)):
+                if self.occurs(id, ty1):
+                    Err(TypeInferError.OccursCheck(id, ty1, ty2.span))
+                else:
+                    self.subst.insert(id, ty1)
+                    Ok(())
+
+            # Function types
+            case (Function(p1, r1, _), Function(p2, r2, _)) if p1.len() == p2.len():
+                var i = 0
+                while i < p1.len():
+                    match self.unify(p1[i], p2[i]):
+                        case Err(e): return Err(e)
+                        case _: pass
+                    i = i + 1
+                self.unify(r1, r2)
+
+            # Tuple types
+            case (Tuple(e1), Tuple(e2)) if e1.len() == e2.len():
+                var i = 0
+                while i < e1.len():
+                    match self.unify(e1[i], e2[i]):
+                        case Err(e): return Err(e)
+                        case _: pass
+                    i = i + 1
+                Ok(())
+
+            # Array types
+            case (Array(el1, _), Array(el2, _)):
+                self.unify(el1, el2)
+
+            # Slice types
+            case (Slice(el1), Slice(el2)):
+                self.unify(el1, el2)
+
+            # Dict types
+            case (Dict(k1, v1), Dict(k2, v2)):
+                match self.unify(k1, k2):
+                    case Err(e): Err(e)
+                    case _: self.unify(v1, v2)
+
+            # Optional types
+            case (Optional(i1), Optional(i2)):
+                self.unify(i1, i2)
+
+            # Result types
+            case (Result(o1, e1), Result(o2, e2)):
+                match self.unify(o1, o2):
+                    case Err(e): Err(e)
+                    case _: self.unify(e1, e2)
+
+            # Reference types
+            case (Ref(i1, m1), Ref(i2, m2)) if m1 == m2:
+                self.unify(i1, i2)
+            case (Ptr(i1, m1), Ptr(i2, m2)) if m1 == m2:
+                self.unify(i1, i2)
+
+            # Named types
+            case (Named(s1, a1), Named(s2, a2)) if s1.id == s2.id and a1.len() == a2.len():
+                var i = 0
+                while i < a1.len():
+                    match self.unify(a1[i], a2[i]):
+                        case Err(e): return Err(e)
+                        case _: pass
+                    i = i + 1
+                Ok(())
+
+            # Type parameters
+            case (TypeParam(n1, _), TypeParam(n2, _)) if n1 == n2:
+                Ok(())
+
+            # Mismatch
+            case _:
+                Err(TypeInferError.Mismatch(ty1, ty2, ty1.span))
+
+    # =========================================================================
+    # Free Variables
+    # =========================================================================
+
+    fn free_vars_with_levels(ty: HirType) -> [(i64, i64)]:
+        """Collect free type variables in a type with their levels."""
+        val resolved = self.resolve(ty)
+        var vars: [(i64, i64)] = []
+        self.collect_free_vars(resolved, vars)
+        vars
+
+    me collect_free_vars(ty: HirType, vars: [(i64, i64)]):
+        """Collect free variables from a type."""
+        match ty.kind:
+            case Infer(id, level):
+                vars = vars.push((id, level))
+            case Function(params, ret, _):
+                for p in params:
+                    self.collect_free_vars(p, vars)
+                self.collect_free_vars(ret, vars)
+            case Tuple(elements):
+                for e in elements:
+                    self.collect_free_vars(e, vars)
+            case Array(element, _) | Slice(element):
+                self.collect_free_vars(element, vars)
+            case Dict(key, value):
+                self.collect_free_vars(key, vars)
+                self.collect_free_vars(value, vars)
+            case Optional(inner) | Ref(inner, _) | Ptr(inner, _):
+                self.collect_free_vars(inner, vars)
+            case Result(ok, err):
+                self.collect_free_vars(ok, vars)
+                self.collect_free_vars(err, vars)
+            case Named(_, args):
+                for a in args:
+                    self.collect_free_vars(a, vars)
+            case _:
+                pass
+
+    fn env_free_var_ids() -> [i64]:
+        """Collect free type variable IDs in the environment."""
+        var vars: [i64] = []
+        for name, scheme in self.env:
+            val ty_vars = self.free_vars_with_levels(scheme.ty)
+            for (id, _) in ty_vars:
+                if not scheme.vars.contains(id):
+                    vars = vars.push(id)
+        vars
+
+    # =========================================================================
+    # Generalization and Instantiation
+    # =========================================================================
+
+    fn generalize(ty: HirType) -> TypeScheme:
+        """Generalize a type to a type scheme.
+        Only variables at level > current env level are generalized."""
+        val resolved = self.resolve(ty)
+        val free_vars = self.free_vars_with_levels(resolved)
+        val env_vars = self.env_free_var_ids()
+
+        # Variables to quantify: free in ty, not in env, at level > current
+        var to_generalize: [i64] = []
+        for (id, var_level) in free_vars:
+            if not env_vars.contains(id) and var_level > self.level:
+                if not to_generalize.contains(id):
+                    to_generalize = to_generalize.push(id)
+
+        TypeScheme(vars: to_generalize, ty: resolved)
+
+    fn generalize_all(ty: HirType) -> TypeScheme:
+        """Generalize all variables (ignore levels) - for top-level definitions."""
+        val resolved = self.resolve(ty)
+        val free_vars = self.free_vars_with_levels(resolved)
+        val env_vars = self.env_free_var_ids()
+
+        var to_generalize: [i64] = []
+        for (id, _) in free_vars:
+            if not env_vars.contains(id):
+                if not to_generalize.contains(id):
+                    to_generalize = to_generalize.push(id)
+
+        TypeScheme(vars: to_generalize, ty: resolved)
+
+    me instantiate(scheme: TypeScheme) -> HirType:
+        """Instantiate a type scheme with fresh type variables."""
+        if scheme.vars.is_empty():
+            return scheme.ty
+
+        # Create mapping from bound vars to fresh vars
+        var var_map: Dict<i64, HirType> = {}
+        for bound_var in scheme.vars:
+            var_map[bound_var] = self.fresh_var(scheme.ty.span)
+
+        # Apply the mapping
+        self.instantiate_type(scheme.ty, var_map)
+
+    fn instantiate_type(ty: HirType, var_map: Dict<i64, HirType>) -> HirType:
+        """Apply instantiation mapping to a type."""
+        match ty.kind:
+            case Infer(id, _):
+                if var_map[id].?:
+                    var_map[id]
+                else:
+                    ty
+            case Function(params, ret, effects):
+                var new_params: [HirType] = []
+                for p in params:
+                    new_params = new_params.push(self.instantiate_type(p, var_map))
+                HirType(
+                    kind: HirTypeKind.Function(new_params, self.instantiate_type(ret, var_map), effects),
+                    span: ty.span
+                )
+            case Tuple(elements):
+                var new_elements: [HirType] = []
+                for e in elements:
+                    new_elements = new_elements.push(self.instantiate_type(e, var_map))
+                HirType(kind: HirTypeKind.Tuple(new_elements), span: ty.span)
+            case Array(element, size):
+                HirType(kind: HirTypeKind.Array(self.instantiate_type(element, var_map), size), span: ty.span)
+            case Slice(element):
+                HirType(kind: HirTypeKind.Slice(self.instantiate_type(element, var_map)), span: ty.span)
+            case Dict(key, value):
+                HirType(
+                    kind: HirTypeKind.Dict(
+                        self.instantiate_type(key, var_map),
+                        self.instantiate_type(value, var_map)
+                    ),
+                    span: ty.span
+                )
+            case Optional(inner):
+                HirType(kind: HirTypeKind.Optional(self.instantiate_type(inner, var_map)), span: ty.span)
+            case Result(ok, err):
+                HirType(
+                    kind: HirTypeKind.Result(
+                        self.instantiate_type(ok, var_map),
+                        self.instantiate_type(err, var_map)
+                    ),
+                    span: ty.span
+                )
+            case Ref(inner, mutable):
+                HirType(kind: HirTypeKind.Ref(self.instantiate_type(inner, var_map), mutable), span: ty.span)
+            case Ptr(inner, mutable):
+                HirType(kind: HirTypeKind.Ptr(self.instantiate_type(inner, var_map), mutable), span: ty.span)
+            case Named(symbol, args):
+                var new_args: [HirType] = []
+                for a in args:
+                    new_args = new_args.push(self.instantiate_type(a, var_map))
+                HirType(kind: HirTypeKind.Named(symbol, new_args), span: ty.span)
+            case _:
+                ty
+
+    # =========================================================================
+    # Environment Operations
+    # =========================================================================
+
+    me lookup(name: text, span: Span) -> Result<HirType, TypeInferError>:
+        """Look up a name in the environment and instantiate its scheme."""
+        if self.env[name].?:
+            val scheme = self.env[name]
+            Ok(self.instantiate(scheme))
+        else:
+            Err(TypeInferError.Undefined(name, span))
+
+    me bind_mono(name: text, ty: HirType):
+        """Bind a name to a monomorphic type (no generalization)."""
+        self.env[name] = TypeScheme.mono(ty)
+
+    me bind_poly(name: text, scheme: TypeScheme):
+        """Bind a name to a polymorphic type scheme."""
+        self.env[name] = scheme
+
+    me error(err: TypeInferError):
+        """Record an error."""
+        self.errors = self.errors.push(err)
+
+    # =========================================================================
+    # Type Inference (Algorithm W)
+    # =========================================================================
+
+    me infer_expr(expr: HirExpr) -> Result<HirType, TypeInferError>:
+        """Infer the type of an expression using Algorithm W."""
+        val span = expr.span
+
+        match expr.kind:
+            # Literals
+            case IntLit(_, suffix):
+                val bits = if suffix.?:
+                    match suffix.unwrap():
+                        case "i8": 8
+                        case "i16": 16
+                        case "i32": 32
+                        case "u8": 8
+                        case "u16": 16
+                        case "u32": 32
+                        case "u64": 64
+                        case _: 64
+                else: 64
+                val signed = if suffix.? and suffix.unwrap().starts_with("u"): false else: true
+                Ok(HirType(kind: HirTypeKind.Int(bits, signed), span: span))
+
+            case FloatLit(_, suffix):
+                val bits = if suffix.? and suffix.unwrap() == "f32": 32 else: 64
+                Ok(HirType(kind: HirTypeKind.Float(bits), span: span))
+
+            case StringLit(_, _):
+                Ok(HirType(kind: HirTypeKind.Str, span: span))
+
+            case BoolLit(_):
+                Ok(HirType(kind: HirTypeKind.Bool, span: span))
+
+            case CharLit(_):
+                Ok(HirType(kind: HirTypeKind.Char, span: span))
+
+            case Unit:
+                Ok(HirType(kind: HirTypeKind.Unit, span: span))
+
+            # Variables - lookup and instantiate
+            case Var(symbol):
+                val name = symbol.id.to_text()  # Get symbol name from ID
+                self.lookup(name, span)
+
+            # Array literals
+            case ArrayLit(elements, _):
+                if elements.is_empty():
+                    val elem_ty = self.fresh_var(span)
+                    Ok(HirType(kind: HirTypeKind.Array(elem_ty, None), span: span))
+                else:
+                    match self.infer_expr(elements[0]):
+                        case Ok(elem_ty):
+                            var i = 1
+                            while i < elements.len():
+                                match self.infer_expr(elements[i]):
+                                    case Ok(item_ty):
+                                        match self.unify(elem_ty, item_ty):
+                                            case Err(e): return Err(e)
+                                            case _: pass
+                                    case Err(e): return Err(e)
+                                i = i + 1
+                            Ok(HirType(kind: HirTypeKind.Array(self.resolve(elem_ty), None), span: span))
+                        case Err(e): Err(e)
+
+            # Tuple literals
+            case TupleLit(elements):
+                var types: [HirType] = []
+                for e in elements:
+                    match self.infer_expr(e):
+                        case Ok(ty): types = types.push(ty)
+                        case Err(e): return Err(e)
+                Ok(HirType(kind: HirTypeKind.Tuple(types), span: span))
+
+            # Dict literals
+            case DictLit(entries, _, _):
+                if entries.is_empty():
+                    val key_ty = self.fresh_var(span)
+                    val val_ty = self.fresh_var(span)
+                    Ok(HirType(kind: HirTypeKind.Dict(key_ty, val_ty), span: span))
+                else:
+                    val (k, v) = entries[0]
+                    match self.infer_expr(k):
+                        case Ok(key_ty):
+                            match self.infer_expr(v):
+                                case Ok(val_ty):
+                                    var i = 1
+                                    while i < entries.len():
+                                        val (ki, vi) = entries[i]
+                                        match self.infer_expr(ki):
+                                            case Ok(kt):
+                                                match self.unify(key_ty, kt):
+                                                    case Err(e): return Err(e)
+                                                    case _: pass
+                                            case Err(e): return Err(e)
+                                        match self.infer_expr(vi):
+                                            case Ok(vt):
+                                                match self.unify(val_ty, vt):
+                                                    case Err(e): return Err(e)
+                                                    case _: pass
+                                            case Err(e): return Err(e)
+                                        i = i + 1
+                                    Ok(HirType(
+                                        kind: HirTypeKind.Dict(self.resolve(key_ty), self.resolve(val_ty)),
+                                        span: span
+                                    ))
+                                case Err(e): Err(e)
+                        case Err(e): Err(e)
+
+            # Binary operations
+            case Binary(op, left, right):
+                match self.infer_expr(left):
+                    case Ok(left_ty):
+                        match self.infer_expr(right):
+                            case Ok(right_ty):
+                                self.infer_binary_op(op, left_ty, right_ty, span)
+                            case Err(e): Err(e)
+                    case Err(e): Err(e)
+
+            # Unary operations
+            case Unary(op, operand):
+                match self.infer_expr(operand):
+                    case Ok(operand_ty):
+                        self.infer_unary_op(op, operand_ty, span)
+                    case Err(e): Err(e)
+
+            # Function calls
+            case Call(callee, args, type_args):
+                match self.infer_expr(callee):
+                    case Ok(callee_ty):
+                        var arg_types: [HirType] = []
+                        for arg in args:
+                            match self.infer_expr(arg.value):
+                                case Ok(ty): arg_types = arg_types.push(ty)
+                                case Err(e): return Err(e)
+
+                        val ret_ty = self.fresh_var(span)
+                        val expected_fn_ty = HirType(
+                            kind: HirTypeKind.Function(arg_types, ret_ty, []),
+                            span: span
+                        )
+
+                        match self.unify(callee_ty, expected_fn_ty):
+                            case Err(e): Err(e)
+                            case _: Ok(self.resolve(ret_ty))
+                    case Err(e): Err(e)
+
+            # Method calls
+            case MethodCall(receiver, method, args, _):
+                match self.infer_expr(receiver):
+                    case Ok(_):
+                        for arg in args:
+                            match self.infer_expr(arg.value):
+                                case Err(e): return Err(e)
+                                case _: pass
+                        # Method resolution requires more type information
+                        # For now, return fresh var
+                        Ok(self.fresh_var(span))
+                    case Err(e): Err(e)
+
+            # Field access
+            case Field(base, _, _):
+                match self.infer_expr(base):
+                    case Ok(_):
+                        # Field resolution requires struct/class type info
+                        Ok(self.fresh_var(span))
+                    case Err(e): Err(e)
+
+            # Index
+            case Index(base, index):
+                match self.infer_expr(base):
+                    case Ok(base_ty):
+                        match self.infer_expr(index):
+                            case Ok(idx_ty):
+                                val resolved_base = self.resolve(base_ty)
+                                match resolved_base.kind:
+                                    case Array(elem, _):
+                                        Ok(elem)
+                                    case Slice(elem):
+                                        Ok(elem)
+                                    case Dict(_, value):
+                                        Ok(value)
+                                    case Str:
+                                        Ok(HirType(kind: HirTypeKind.Char, span: span))
+                                    case _:
+                                        Ok(self.fresh_var(span))
+                            case Err(e): Err(e)
+                    case Err(e): Err(e)
+
+            # If expression
+            case If(cond, then_, else_):
+                match self.infer_expr(cond):
+                    case Ok(cond_ty):
+                        val bool_ty = HirType(kind: HirTypeKind.Bool, span: span)
+                        match self.unify(cond_ty, bool_ty):
+                            case Err(e): return Err(e)
+                            case _: pass
+                        match self.infer_block(then_):
+                            case Ok(then_ty):
+                                if else_.?:
+                                    match self.infer_block(else_.unwrap()):
+                                        case Ok(else_ty):
+                                            match self.unify(then_ty, else_ty):
+                                                case Err(e): Err(e)
+                                                case _: Ok(self.resolve(then_ty))
+                                        case Err(e): Err(e)
+                                else:
+                                    Ok(self.resolve(then_ty))
+                            case Err(e): Err(e)
+                    case Err(e): Err(e)
+
+            # Lambda (closure)
+            case Closure(params, body, _):
+                self.enter_level()
+
+                var param_types: [HirType] = []
+                for p in params:
+                    val param_ty = if p.type_.kind != HirTypeKind.Infer(0, 0):
+                        p.type_
+                    else:
+                        self.fresh_var(p.span)
+                    param_types = param_types.push(param_ty)
+                    self.bind_mono(p.name, param_ty)
+
+                match self.infer_expr(body):
+                    case Ok(body_ty):
+                        self.exit_level()
+                        var resolved_params: [HirType] = []
+                        for pt in param_types:
+                            resolved_params = resolved_params.push(self.resolve(pt))
+                        Ok(HirType(
+                            kind: HirTypeKind.Function(resolved_params, self.resolve(body_ty), []),
+                            span: span
+                        ))
+                    case Err(e):
+                        self.exit_level()
+                        Err(e)
+
+            # Match expression
+            case Match(scrutinee, arms):
+                match self.infer_expr(scrutinee):
+                    case Ok(scrut_ty):
+                        val result_ty = self.fresh_var(span)
+                        for arm in arms:
+                            match self.infer_pattern(arm.pattern, scrut_ty):
+                                case Err(e): return Err(e)
+                                case _: pass
+                            if arm.guard.?:
+                                match self.infer_expr(arm.guard.unwrap()):
+                                    case Ok(guard_ty):
+                                        val bool_ty = HirType(kind: HirTypeKind.Bool, span: span)
+                                        match self.unify(guard_ty, bool_ty):
+                                            case Err(e): return Err(e)
+                                            case _: pass
+                                    case Err(e): return Err(e)
+                            match self.infer_expr(arm.body):
+                                case Ok(arm_ty):
+                                    match self.unify(result_ty, arm_ty):
+                                        case Err(e): return Err(e)
+                                        case _: pass
+                                case Err(e): return Err(e)
+                        Ok(self.resolve(result_ty))
+                    case Err(e): Err(e)
+
+            # Range expressions
+            case Range(start, end, _, _):
+                if start.?:
+                    match self.infer_expr(start.unwrap()):
+                        case Err(e): return Err(e)
+                        case _: pass
+                if end.?:
+                    match self.infer_expr(end.unwrap()):
+                        case Err(e): return Err(e)
+                        case _: pass
+                val int_ty = HirType(kind: HirTypeKind.Int(64, true), span: span)
+                Ok(HirType(kind: HirTypeKind.Slice(int_ty), span: span))
+
+            # Default: fresh type variable
+            case _:
+                Ok(self.fresh_var(span))
+
+    me infer_binary_op(op: HirBinOp, left: HirType, right: HirType, span: Span) -> Result<HirType, TypeInferError>:
+        """Infer type of binary operation."""
+        match op:
+            # Arithmetic: operands same type, return same type
+            case Add | Sub | Mul | Div | Mod | Pow:
+                match self.unify(left, right):
+                    case Err(e): Err(e)
+                    case _: Ok(self.resolve(left))
+
+            # Comparison: operands same type, return bool
+            case Eq | NotEq | Lt | LtEq | Gt | GtEq:
+                match self.unify(left, right):
+                    case Err(e): Err(e)
+                    case _: Ok(HirType(kind: HirTypeKind.Bool, span: span))
+
+            # Logical: operands bool, return bool
+            case And | Or:
+                val bool_ty = HirType(kind: HirTypeKind.Bool, span: span)
+                match self.unify(left, bool_ty):
+                    case Err(e): return Err(e)
+                    case _: pass
+                match self.unify(right, bool_ty):
+                    case Err(e): Err(e)
+                    case _: Ok(bool_ty)
+
+            # Bitwise: operands int, return int
+            case BitAnd | BitOr | BitXor | Shl | Shr:
+                val int_ty = HirType(kind: HirTypeKind.Int(64, true), span: span)
+                match self.unify(left, int_ty):
+                    case Err(e): return Err(e)
+                    case _: pass
+                match self.unify(right, int_ty):
+                    case Err(e): Err(e)
+                    case _: Ok(int_ty)
+
+            case _:
+                Ok(self.fresh_var(span))
+
+    me infer_unary_op(op: HirUnaryOp, operand: HirType, span: Span) -> Result<HirType, TypeInferError>:
+        """Infer type of unary operation."""
+        match op:
+            case Neg:
+                Ok(operand)
+            case Not:
+                Ok(HirType(kind: HirTypeKind.Bool, span: span))
+            case BitNot:
+                Ok(operand)
+            case Ref:
+                Ok(HirType(kind: HirTypeKind.Ref(operand, false), span: span))
+            case RefMut:
+                Ok(HirType(kind: HirTypeKind.Ref(operand, true), span: span))
+            case Deref:
+                val resolved = self.resolve(operand)
+                match resolved.kind:
+                    case Ref(inner, _) | Ptr(inner, _):
+                        Ok(inner)
+                    case _:
+                        Ok(self.fresh_var(span))
+            case _:
+                Ok(operand)
+
+    me infer_block(block: HirBlock) -> Result<HirType, TypeInferError>:
+        """Infer type of a block."""
+        var result_ty = HirType(kind: HirTypeKind.Unit, span: block.span)
+
+        for stmt in block.statements:
+            match self.infer_stmt(stmt):
+                case Ok(ty):
+                    result_ty = ty
+                case Err(e):
+                    return Err(e)
+
+        Ok(result_ty)
+
+    me infer_stmt(stmt: HirStmt) -> Result<HirType, TypeInferError>:
+        """Infer type of a statement."""
+        match stmt.kind:
+            case Expr(expr):
+                self.infer_expr(expr)
+
+            case Let(symbol, type_, init):
+                self.enter_level()
+                match self.infer_expr(init):
+                    case Ok(init_ty):
+                        self.exit_level()
+
+                        # If there's a type annotation, unify with it
+                        if type_.? and type_.unwrap().kind != HirTypeKind.Infer(0, 0):
+                            match self.unify(init_ty, type_.unwrap()):
+                                case Err(e): return Err(e)
+                                case _: pass
+
+                        # Generalize the type for let-polymorphism
+                        val scheme = self.generalize(init_ty)
+                        val name = symbol.id.to_text()
+                        self.bind_poly(name, scheme)
+                        Ok(HirType(kind: HirTypeKind.Unit, span: stmt.span))
+                    case Err(e):
+                        self.exit_level()
+                        Err(e)
+
+            case Assign(target, _, value):
+                match self.infer_expr(target):
+                    case Ok(target_ty):
+                        match self.infer_expr(value):
+                            case Ok(value_ty):
+                                match self.unify(target_ty, value_ty):
+                                    case Err(e): Err(e)
+                                    case _: Ok(HirType(kind: HirTypeKind.Unit, span: stmt.span))
+                            case Err(e): Err(e)
+                    case Err(e): Err(e)
+
+            case Block(block):
+                self.infer_block(block)
+
+            case _:
+                Ok(HirType(kind: HirTypeKind.Unit, span: stmt.span))
+
+    me infer_pattern(pattern: HirPattern, expected: HirType) -> Result<(), TypeInferError>:
+        """Infer types from pattern matching."""
+        match pattern.kind:
+            case Wildcard:
+                Ok(())
+            case Binding(symbol, _):
+                val name = symbol.id.to_text()
+                self.bind_mono(name, expected)
+                Ok(())
+            case Literal(expr):
+                match self.infer_expr(expr):
+                    case Ok(lit_ty):
+                        match self.unify(expected, lit_ty):
+                            case Err(e): Err(e)
+                            case _: Ok(())
+                    case Err(e): Err(e)
+            case Tuple(elements):
+                val resolved = self.resolve(expected)
+                match resolved.kind:
+                    case Tuple(elem_types) if elem_types.len() == elements.len():
+                        var i = 0
+                        while i < elements.len():
+                            match self.infer_pattern(elements[i], elem_types[i]):
+                                case Err(e): return Err(e)
+                                case _: pass
+                            i = i + 1
+                        Ok(())
+                    case _:
+                        Ok(())
+            case _:
+                Ok(())
+
+    # =========================================================================
+    # Module/Function Inference
+    # =========================================================================
+
+    me infer_function(fn_: HirFunction):
+        """Infer types for a function."""
+        self.enter_level()
+
+        # Bind parameters
+        for p in fn_.params:
+            self.bind_mono(p.name, p.type_)
+
+        # Infer body
+        match self.infer_block(fn_.body):
+            case Ok(body_ty):
+                # Check return type
+                if fn_.return_type.kind != HirTypeKind.Infer(0, 0):
+                    match self.unify(body_ty, fn_.return_type):
+                        case Err(e): self.error(e)
+                        case _: pass
+            case Err(e):
+                self.error(e)
+
+        self.exit_level()
+
+        # Generalize function type
+        var param_types: [HirType] = []
+        for p in fn_.params:
+            param_types = param_types.push(self.resolve(p.type_))
+        val fn_ty = HirType(
+            kind: HirTypeKind.Function(param_types, self.resolve(fn_.return_type), fn_.effects),
+            span: fn_.span
+        )
+        val scheme = self.generalize_all(fn_ty)
+        self.bind_poly(fn_.name, scheme)
+
+    me infer_module(module: HirModule):
+        """Infer types for all functions in a module."""
+        for name, fn_ in module.functions:
+            val symbol = module.symbols.get(fn_.symbol)
+            if symbol.?:
+                self.infer_function(fn_)
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export TypeScheme
+export Substitution
+export TypeInferError
+export HmInferContext

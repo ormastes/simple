@@ -644,6 +644,8 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // Context pack generation
     RuntimeFuncSpec::new("rt_context_generate", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_context_stats", &[I64, I64], &[I64]),
+    // Settlement stub
+    RuntimeFuncSpec::new("rt_settlement_main", &[], &[I64]),
     // Compilation
     RuntimeFuncSpec::new("rt_cli_handle_compile", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_cli_handle_targets", &[], &[I64]),

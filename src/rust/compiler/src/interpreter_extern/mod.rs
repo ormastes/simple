@@ -596,6 +596,9 @@ pub(crate) fn call_extern_function(
         "rt_context_generate" => cli::rt_context_generate(&evaluated),
         "rt_context_stats" => cli::rt_context_stats(&evaluated),
 
+        // Settlement stub
+        "rt_settlement_main" => cli::rt_settlement_main(&evaluated),
+
         // Compilation
         "rt_cli_handle_compile" => cli::rt_cli_handle_compile(&evaluated),
         "rt_cli_handle_targets" => cli::rt_cli_handle_targets(&evaluated),

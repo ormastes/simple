@@ -898,6 +898,283 @@ impl BaseTokenKind {
 }
 
 //==============================================================================
+// Value Kind (shared value type abstraction)
+//==============================================================================
+
+/// Abstract value kinds shared by interpreter and compiler.
+///
+/// This enum represents the abstract type of a value without payload data.
+/// The interpreter's `Value` and runtime's `RuntimeValue` can both map
+/// to and from these kinds for type checking and dispatch.
+///
+/// # Mapping
+///
+/// | ValueKind | Interpreter (Value) | Runtime (RuntimeValue/HeapObjectType) |
+/// |-----------|---------------------|---------------------------------------|
+/// | Int       | Value::Int          | TAG_INT                               |
+/// | Float     | Value::Float        | TAG_FLOAT                             |
+/// | Bool      | Value::Bool         | TAG_SPECIAL (TRUE/FALSE)              |
+/// | Nil       | Value::Nil          | TAG_SPECIAL (NIL)                     |
+/// | String    | Value::Str          | HeapObjectType::String                |
+/// | Symbol    | Value::Symbol       | TAG_SPECIAL (symbol payload)          |
+/// | Array     | Value::Array        | HeapObjectType::Array                 |
+/// | Tuple     | Value::Tuple        | HeapObjectType::Tuple                 |
+/// | Dict      | Value::Dict         | HeapObjectType::Dict                  |
+/// | Object    | Value::Object       | HeapObjectType::Object                |
+/// | Enum      | Value::Enum         | HeapObjectType::Enum                  |
+/// | Closure   | Value::Lambda       | HeapObjectType::Closure               |
+/// | Function  | Value::Function     | HeapObjectType::Closure               |
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ValueKind {
+    // Primitives
+    /// 64-bit signed integer
+    Int,
+    /// 64-bit floating point
+    Float,
+    /// Boolean (true/false)
+    Bool,
+    /// Nil/None/null value
+    Nil,
+
+    // Strings
+    /// String value
+    String,
+    /// Symbol (interned string, used for keys)
+    Symbol,
+
+    // Collections
+    /// Array/list
+    Array,
+    /// Tuple (fixed-size heterogeneous)
+    Tuple,
+    /// Dictionary (string -> value map)
+    Dict,
+    /// HashMap (generic key -> value)
+    HashMap,
+    /// BTreeMap (ordered key -> value)
+    BTreeMap,
+    /// HashSet (unordered unique values)
+    HashSet,
+    /// BTreeSet (ordered unique values)
+    BTreeSet,
+
+    // Objects
+    /// Object instance (has class name and fields)
+    Object,
+    /// Closure (captures environment)
+    Closure,
+    /// Enum variant (has enum name, variant name, optional payload)
+    Enum,
+
+    // Special types
+    /// Union type (wraps one of multiple possible types)
+    Union,
+    /// Trait object (dynamic dispatch wrapper)
+    TraitObject,
+    /// Unit value (numeric value with unit suffix)
+    Unit,
+    /// Constructor reference (class as first-class value)
+    Constructor,
+    /// Enum type reference (allows EnumName.Variant syntax)
+    EnumType,
+    /// Enum variant constructor (callable to create enum)
+    EnumVariantConstructor,
+
+    // Async
+    /// Future (async computation)
+    Future,
+    /// Generator (yield-based iterator)
+    Generator,
+    /// Actor (message-passing concurrency)
+    Actor,
+    /// Channel (async communication)
+    Channel,
+    /// Thread pool
+    ThreadPool,
+
+    // Memory management
+    /// Unique ownership (move semantics)
+    Unique,
+    /// Shared reference (reference counted)
+    Shared,
+    /// Weak reference (non-owning)
+    Weak,
+    /// Handle (index into pool)
+    Handle,
+    /// Immutable borrow
+    Borrow,
+    /// Mutable borrow
+    BorrowMut,
+
+    // Synchronization
+    /// Mutex (exclusive lock)
+    Mutex,
+    /// RwLock (reader-writer lock)
+    RwLock,
+    /// Semaphore (counting lock)
+    Semaphore,
+    /// Barrier (synchronization point)
+    Barrier,
+    /// Atomic value
+    Atomic,
+
+    // Testing
+    /// Mock object
+    Mock,
+    /// Argument matcher
+    Matcher,
+
+    // Special
+    /// Custom block (m{}, sh{}, sql{}, etc.)
+    Block,
+    /// Native function (Rust callback)
+    NativeFunction,
+    /// FFI-wrapped Rust object
+    FfiObject,
+    /// Contract violation (error value)
+    ContractViolation,
+    /// Monoio async I/O future
+    MonoioFuture,
+    /// Block closure (DSL colon-blocks)
+    BlockClosure,
+}
+
+impl ValueKind {
+    /// Get the display name for this value kind
+    pub fn name(&self) -> &'static str {
+        match self {
+            ValueKind::Int => "int",
+            ValueKind::Float => "float",
+            ValueKind::Bool => "bool",
+            ValueKind::Nil => "nil",
+            ValueKind::String => "string",
+            ValueKind::Symbol => "symbol",
+            ValueKind::Array => "array",
+            ValueKind::Tuple => "tuple",
+            ValueKind::Dict => "dict",
+            ValueKind::HashMap => "hashmap",
+            ValueKind::BTreeMap => "btreemap",
+            ValueKind::HashSet => "hashset",
+            ValueKind::BTreeSet => "btreeset",
+            ValueKind::Object => "object",
+            ValueKind::Closure => "closure",
+            ValueKind::Enum => "enum",
+            ValueKind::Union => "union",
+            ValueKind::TraitObject => "trait_object",
+            ValueKind::Unit => "unit",
+            ValueKind::Constructor => "constructor",
+            ValueKind::EnumType => "enum_type",
+            ValueKind::EnumVariantConstructor => "enum_variant_constructor",
+            ValueKind::Future => "future",
+            ValueKind::Generator => "generator",
+            ValueKind::Actor => "actor",
+            ValueKind::Channel => "channel",
+            ValueKind::ThreadPool => "thread_pool",
+            ValueKind::Unique => "unique",
+            ValueKind::Shared => "shared",
+            ValueKind::Weak => "weak",
+            ValueKind::Handle => "handle",
+            ValueKind::Borrow => "borrow",
+            ValueKind::BorrowMut => "borrow_mut",
+            ValueKind::Mutex => "mutex",
+            ValueKind::RwLock => "rwlock",
+            ValueKind::Semaphore => "semaphore",
+            ValueKind::Barrier => "barrier",
+            ValueKind::Atomic => "atomic",
+            ValueKind::Mock => "mock",
+            ValueKind::Matcher => "matcher",
+            ValueKind::Block => "block",
+            ValueKind::NativeFunction => "native_function",
+            ValueKind::FfiObject => "ffi_object",
+            ValueKind::ContractViolation => "contract_violation",
+            ValueKind::MonoioFuture => "monoio_future",
+            ValueKind::BlockClosure => "block_closure",
+        }
+    }
+
+    /// Check if this is a primitive type
+    pub fn is_primitive(&self) -> bool {
+        matches!(
+            self,
+            ValueKind::Int | ValueKind::Float | ValueKind::Bool | ValueKind::Nil
+        )
+    }
+
+    /// Check if this is a collection type
+    pub fn is_collection(&self) -> bool {
+        matches!(
+            self,
+            ValueKind::Array
+                | ValueKind::Tuple
+                | ValueKind::Dict
+                | ValueKind::HashMap
+                | ValueKind::BTreeMap
+                | ValueKind::HashSet
+                | ValueKind::BTreeSet
+        )
+    }
+
+    /// Check if this is a callable type (can be invoked)
+    pub fn is_callable(&self) -> bool {
+        matches!(
+            self,
+            ValueKind::Closure
+                | ValueKind::NativeFunction
+                | ValueKind::Constructor
+                | ValueKind::EnumVariantConstructor
+        )
+    }
+
+    /// Check if this is an async type
+    pub fn is_async(&self) -> bool {
+        matches!(
+            self,
+            ValueKind::Future
+                | ValueKind::Generator
+                | ValueKind::Actor
+                | ValueKind::Channel
+                | ValueKind::MonoioFuture
+        )
+    }
+
+    /// Check if this is a synchronization primitive
+    pub fn is_sync_primitive(&self) -> bool {
+        matches!(
+            self,
+            ValueKind::Mutex
+                | ValueKind::RwLock
+                | ValueKind::Semaphore
+                | ValueKind::Barrier
+                | ValueKind::Atomic
+        )
+    }
+
+    /// Check if this is a memory management type
+    pub fn is_memory_managed(&self) -> bool {
+        matches!(
+            self,
+            ValueKind::Unique
+                | ValueKind::Shared
+                | ValueKind::Weak
+                | ValueKind::Handle
+                | ValueKind::Borrow
+                | ValueKind::BorrowMut
+        )
+    }
+
+    /// Check if this is a heap-allocated type (for GC consideration)
+    pub fn is_heap_allocated(&self) -> bool {
+        !self.is_primitive() && *self != ValueKind::Symbol
+    }
+}
+
+impl std::fmt::Display for ValueKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.name())
+    }
+}
+
+//==============================================================================
 // High-Level Constraint Operations
 //==============================================================================
 
@@ -1045,5 +1322,104 @@ mod tests {
         assert!(BaseTokenKind::String.is_literal());
         assert!(BaseTokenKind::Bool.is_literal());
         assert!(!BaseTokenKind::KwFn.is_literal());
+    }
+
+    #[test]
+    fn test_value_kind_name() {
+        assert_eq!(ValueKind::Int.name(), "int");
+        assert_eq!(ValueKind::Float.name(), "float");
+        assert_eq!(ValueKind::Bool.name(), "bool");
+        assert_eq!(ValueKind::Nil.name(), "nil");
+        assert_eq!(ValueKind::String.name(), "string");
+        assert_eq!(ValueKind::Array.name(), "array");
+        assert_eq!(ValueKind::Object.name(), "object");
+        assert_eq!(ValueKind::Closure.name(), "closure");
+    }
+
+    #[test]
+    fn test_value_kind_is_primitive() {
+        assert!(ValueKind::Int.is_primitive());
+        assert!(ValueKind::Float.is_primitive());
+        assert!(ValueKind::Bool.is_primitive());
+        assert!(ValueKind::Nil.is_primitive());
+        assert!(!ValueKind::String.is_primitive());
+        assert!(!ValueKind::Array.is_primitive());
+    }
+
+    #[test]
+    fn test_value_kind_is_collection() {
+        assert!(ValueKind::Array.is_collection());
+        assert!(ValueKind::Tuple.is_collection());
+        assert!(ValueKind::Dict.is_collection());
+        assert!(ValueKind::HashMap.is_collection());
+        assert!(ValueKind::BTreeMap.is_collection());
+        assert!(ValueKind::HashSet.is_collection());
+        assert!(ValueKind::BTreeSet.is_collection());
+        assert!(!ValueKind::Int.is_collection());
+        assert!(!ValueKind::Object.is_collection());
+    }
+
+    #[test]
+    fn test_value_kind_is_callable() {
+        assert!(ValueKind::Closure.is_callable());
+        assert!(ValueKind::NativeFunction.is_callable());
+        assert!(ValueKind::Constructor.is_callable());
+        assert!(ValueKind::EnumVariantConstructor.is_callable());
+        assert!(!ValueKind::Int.is_callable());
+        assert!(!ValueKind::Object.is_callable());
+    }
+
+    #[test]
+    fn test_value_kind_is_async() {
+        assert!(ValueKind::Future.is_async());
+        assert!(ValueKind::Generator.is_async());
+        assert!(ValueKind::Actor.is_async());
+        assert!(ValueKind::Channel.is_async());
+        assert!(ValueKind::MonoioFuture.is_async());
+        assert!(!ValueKind::Int.is_async());
+    }
+
+    #[test]
+    fn test_value_kind_is_sync_primitive() {
+        assert!(ValueKind::Mutex.is_sync_primitive());
+        assert!(ValueKind::RwLock.is_sync_primitive());
+        assert!(ValueKind::Semaphore.is_sync_primitive());
+        assert!(ValueKind::Barrier.is_sync_primitive());
+        assert!(ValueKind::Atomic.is_sync_primitive());
+        assert!(!ValueKind::Int.is_sync_primitive());
+    }
+
+    #[test]
+    fn test_value_kind_is_memory_managed() {
+        assert!(ValueKind::Unique.is_memory_managed());
+        assert!(ValueKind::Shared.is_memory_managed());
+        assert!(ValueKind::Weak.is_memory_managed());
+        assert!(ValueKind::Handle.is_memory_managed());
+        assert!(ValueKind::Borrow.is_memory_managed());
+        assert!(ValueKind::BorrowMut.is_memory_managed());
+        assert!(!ValueKind::Int.is_memory_managed());
+    }
+
+    #[test]
+    fn test_value_kind_is_heap_allocated() {
+        // Primitives are not heap allocated
+        assert!(!ValueKind::Int.is_heap_allocated());
+        assert!(!ValueKind::Float.is_heap_allocated());
+        assert!(!ValueKind::Bool.is_heap_allocated());
+        assert!(!ValueKind::Nil.is_heap_allocated());
+        // Symbol is also not heap allocated (interned)
+        assert!(!ValueKind::Symbol.is_heap_allocated());
+        // Everything else is heap allocated
+        assert!(ValueKind::String.is_heap_allocated());
+        assert!(ValueKind::Array.is_heap_allocated());
+        assert!(ValueKind::Object.is_heap_allocated());
+        assert!(ValueKind::Closure.is_heap_allocated());
+    }
+
+    #[test]
+    fn test_value_kind_display() {
+        assert_eq!(format!("{}", ValueKind::Int), "int");
+        assert_eq!(format!("{}", ValueKind::String), "string");
+        assert_eq!(format!("{}", ValueKind::Object), "object");
     }
 }

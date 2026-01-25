@@ -9,7 +9,8 @@
 //! - **Roots**: sqrt, cbrt
 //! - **Trigonometric**: sin, cos, tan, asin, acos, atan, atan2
 //! - **Hyperbolic**: sinh, cosh, tanh
-//! - **Rounding**: floor, ceil
+//! - **Rounding**: floor, ceil, round, trunc
+//! - **Basic**: abs, hypot, gcd, min, max, clamp
 //!
 //! ## Usage Pattern
 //!
@@ -289,6 +290,193 @@ pub extern "C" fn rt_math_ceil(x: f64) -> f64 {
     x.ceil()
 }
 
+/// Round to nearest integer (half away from zero)
+///
+/// # Examples
+/// - round(3.5) = 4.0
+/// - round(3.4) = 3.0
+/// - round(-3.5) = -4.0
+/// - round(-3.4) = -3.0
+#[no_mangle]
+pub extern "C" fn rt_math_round(x: f64) -> f64 {
+    x.round()
+}
+
+/// Truncate toward zero (remove fractional part)
+///
+/// # Examples
+/// - trunc(3.7) = 3.0
+/// - trunc(-3.7) = -3.0
+/// - trunc(5.0) = 5.0
+#[no_mangle]
+pub extern "C" fn rt_math_trunc(x: f64) -> f64 {
+    x.trunc()
+}
+
+// ============================================================================
+// Basic Functions
+// ============================================================================
+
+/// Absolute value
+///
+/// Returns the magnitude of x (always non-negative).
+///
+/// # Examples
+/// - abs(5.0) = 5.0
+/// - abs(-5.0) = 5.0
+/// - abs(0.0) = 0.0
+#[no_mangle]
+pub extern "C" fn rt_math_abs(x: f64) -> f64 {
+    x.abs()
+}
+
+/// Hypotenuse: sqrt(x² + y²)
+///
+/// Computes the length of the hypotenuse of a right triangle
+/// with sides x and y. Handles overflow/underflow better than
+/// computing sqrt(x*x + y*y) directly.
+///
+/// # Examples
+/// - hypot(3.0, 4.0) = 5.0
+/// - hypot(5.0, 12.0) = 13.0
+/// - hypot(1.0, 1.0) ≈ 1.414
+#[no_mangle]
+pub extern "C" fn rt_math_hypot(x: f64, y: f64) -> f64 {
+    x.hypot(y)
+}
+
+/// Greatest common divisor (GCD) using Euclidean algorithm
+///
+/// Returns the largest positive integer that divides both a and b.
+/// Works with negative numbers (returns positive GCD).
+/// Returns 0 if both inputs are 0.
+///
+/// # Examples
+/// - gcd(12, 8) = 4
+/// - gcd(54, 24) = 6
+/// - gcd(17, 13) = 1 (coprime)
+/// - gcd(-12, 8) = 4
+#[no_mangle]
+pub extern "C" fn rt_math_gcd(a: i64, b: i64) -> i64 {
+    let mut a = a.abs();
+    let mut b = b.abs();
+    while b != 0 {
+        let t = b;
+        b = a % b;
+        a = t;
+    }
+    a
+}
+
+/// Least common multiple (LCM)
+///
+/// Returns the smallest positive integer that is divisible by both a and b.
+/// Returns 0 if either input is 0.
+///
+/// # Examples
+/// - lcm(4, 6) = 12
+/// - lcm(3, 5) = 15
+/// - lcm(12, 8) = 24
+#[no_mangle]
+pub extern "C" fn rt_math_lcm(a: i64, b: i64) -> i64 {
+    if a == 0 || b == 0 {
+        return 0;
+    }
+    let gcd = rt_math_gcd(a, b);
+    (a.abs() / gcd) * b.abs()
+}
+
+/// Minimum of two values
+///
+/// Returns the smaller of x and y.
+/// If either value is NaN, returns NaN.
+///
+/// # Examples
+/// - min(3.0, 5.0) = 3.0
+/// - min(-2.0, 1.0) = -2.0
+/// - min(4.0, 4.0) = 4.0
+#[no_mangle]
+pub extern "C" fn rt_math_min(x: f64, y: f64) -> f64 {
+    x.min(y)
+}
+
+/// Maximum of two values
+///
+/// Returns the larger of x and y.
+/// If either value is NaN, returns NaN.
+///
+/// # Examples
+/// - max(3.0, 5.0) = 5.0
+/// - max(-2.0, 1.0) = 1.0
+/// - max(4.0, 4.0) = 4.0
+#[no_mangle]
+pub extern "C" fn rt_math_max(x: f64, y: f64) -> f64 {
+    x.max(y)
+}
+
+/// Clamp value to range [min, max]
+///
+/// Returns min if x < min, max if x > max, otherwise x.
+///
+/// # Examples
+/// - clamp(5.0, 0.0, 10.0) = 5.0
+/// - clamp(-5.0, 0.0, 10.0) = 0.0
+/// - clamp(15.0, 0.0, 10.0) = 10.0
+#[no_mangle]
+pub extern "C" fn rt_math_clamp(x: f64, min: f64, max: f64) -> f64 {
+    x.clamp(min, max)
+}
+
+/// Sign function
+///
+/// Returns 1.0 if x > 0, -1.0 if x < 0, 0.0 if x == 0.
+/// Returns NaN if x is NaN.
+///
+/// # Examples
+/// - sign(5.0) = 1.0
+/// - sign(-5.0) = -1.0
+/// - sign(0.0) = 0.0
+#[no_mangle]
+pub extern "C" fn rt_math_sign(x: f64) -> f64 {
+    if x.is_nan() {
+        f64::NAN
+    } else if x > 0.0 {
+        1.0
+    } else if x < 0.0 {
+        -1.0
+    } else {
+        0.0
+    }
+}
+
+/// Fractional part of x
+///
+/// Returns the fractional (decimal) part of x.
+/// fract(x) = x - trunc(x)
+///
+/// # Examples
+/// - fract(3.7) = 0.7
+/// - fract(-3.7) = -0.7
+/// - fract(5.0) = 0.0
+#[no_mangle]
+pub extern "C" fn rt_math_fract(x: f64) -> f64 {
+    x.fract()
+}
+
+/// Modulo (remainder) operation
+///
+/// Returns the remainder of x / y.
+/// The result has the same sign as x.
+///
+/// # Examples
+/// - rem(7.0, 3.0) = 1.0
+/// - rem(-7.0, 3.0) = -1.0
+/// - rem(7.0, -3.0) = 1.0
+#[no_mangle]
+pub extern "C" fn rt_math_rem(x: f64, y: f64) -> f64 {
+    x % y
+}
+
 // ============================================================================
 // Special Values
 // ============================================================================
@@ -548,6 +736,130 @@ mod tests {
         assert_eq!(rt_math_ceil(-3.2), -3.0);
         assert_eq!(rt_math_ceil(5.0), 5.0);
         assert_eq!(rt_math_ceil(0.1), 1.0);
+    }
+
+    #[test]
+    fn test_round() {
+        assert_eq!(rt_math_round(3.5), 4.0);
+        assert_eq!(rt_math_round(3.4), 3.0);
+        assert_eq!(rt_math_round(-3.5), -4.0);
+        assert_eq!(rt_math_round(-3.4), -3.0);
+        assert_eq!(rt_math_round(5.0), 5.0);
+        assert_eq!(rt_math_round(2.5), 3.0); // Round half away from zero
+    }
+
+    #[test]
+    fn test_trunc() {
+        assert_eq!(rt_math_trunc(3.7), 3.0);
+        assert_eq!(rt_math_trunc(-3.7), -3.0);
+        assert_eq!(rt_math_trunc(5.0), 5.0);
+        assert_eq!(rt_math_trunc(0.9), 0.0);
+        assert_eq!(rt_math_trunc(-0.9), 0.0);
+    }
+
+    // ========================================================================
+    // Basic Function Tests
+    // ========================================================================
+
+    #[test]
+    fn test_abs() {
+        assert_eq!(rt_math_abs(5.0), 5.0);
+        assert_eq!(rt_math_abs(-5.0), 5.0);
+        assert_eq!(rt_math_abs(0.0), 0.0);
+        assert_eq!(rt_math_abs(-0.0), 0.0);
+        assert_eq!(rt_math_abs(f64::INFINITY), f64::INFINITY);
+        assert_eq!(rt_math_abs(f64::NEG_INFINITY), f64::INFINITY);
+    }
+
+    #[test]
+    fn test_hypot() {
+        assert_eq!(rt_math_hypot(3.0, 4.0), 5.0);
+        assert_eq!(rt_math_hypot(5.0, 12.0), 13.0);
+        assert_close(rt_math_hypot(1.0, 1.0), std::f64::consts::SQRT_2, EPSILON);
+        assert_eq!(rt_math_hypot(0.0, 5.0), 5.0);
+        assert_eq!(rt_math_hypot(5.0, 0.0), 5.0);
+    }
+
+    #[test]
+    fn test_gcd() {
+        assert_eq!(rt_math_gcd(12, 8), 4);
+        assert_eq!(rt_math_gcd(54, 24), 6);
+        assert_eq!(rt_math_gcd(17, 13), 1); // Coprime
+        assert_eq!(rt_math_gcd(100, 10), 10);
+        assert_eq!(rt_math_gcd(0, 5), 5);
+        assert_eq!(rt_math_gcd(5, 0), 5);
+        assert_eq!(rt_math_gcd(0, 0), 0);
+        // Negative numbers
+        assert_eq!(rt_math_gcd(-12, 8), 4);
+        assert_eq!(rt_math_gcd(12, -8), 4);
+        assert_eq!(rt_math_gcd(-12, -8), 4);
+    }
+
+    #[test]
+    fn test_lcm() {
+        assert_eq!(rt_math_lcm(4, 6), 12);
+        assert_eq!(rt_math_lcm(3, 5), 15);
+        assert_eq!(rt_math_lcm(12, 8), 24);
+        assert_eq!(rt_math_lcm(7, 1), 7);
+        assert_eq!(rt_math_lcm(0, 5), 0);
+        assert_eq!(rt_math_lcm(5, 0), 0);
+        // Negative numbers
+        assert_eq!(rt_math_lcm(-4, 6), 12);
+        assert_eq!(rt_math_lcm(4, -6), 12);
+    }
+
+    #[test]
+    fn test_min() {
+        assert_eq!(rt_math_min(3.0, 5.0), 3.0);
+        assert_eq!(rt_math_min(5.0, 3.0), 3.0);
+        assert_eq!(rt_math_min(-2.0, 1.0), -2.0);
+        assert_eq!(rt_math_min(4.0, 4.0), 4.0);
+        assert_eq!(rt_math_min(f64::NEG_INFINITY, 0.0), f64::NEG_INFINITY);
+    }
+
+    #[test]
+    fn test_max() {
+        assert_eq!(rt_math_max(3.0, 5.0), 5.0);
+        assert_eq!(rt_math_max(5.0, 3.0), 5.0);
+        assert_eq!(rt_math_max(-2.0, 1.0), 1.0);
+        assert_eq!(rt_math_max(4.0, 4.0), 4.0);
+        assert_eq!(rt_math_max(f64::INFINITY, 0.0), f64::INFINITY);
+    }
+
+    #[test]
+    fn test_clamp() {
+        assert_eq!(rt_math_clamp(5.0, 0.0, 10.0), 5.0);
+        assert_eq!(rt_math_clamp(-5.0, 0.0, 10.0), 0.0);
+        assert_eq!(rt_math_clamp(15.0, 0.0, 10.0), 10.0);
+        assert_eq!(rt_math_clamp(0.0, 0.0, 10.0), 0.0);
+        assert_eq!(rt_math_clamp(10.0, 0.0, 10.0), 10.0);
+    }
+
+    #[test]
+    fn test_sign() {
+        assert_eq!(rt_math_sign(5.0), 1.0);
+        assert_eq!(rt_math_sign(-5.0), -1.0);
+        assert_eq!(rt_math_sign(0.0), 0.0);
+        assert_eq!(rt_math_sign(f64::INFINITY), 1.0);
+        assert_eq!(rt_math_sign(f64::NEG_INFINITY), -1.0);
+        assert!(rt_math_sign(f64::NAN).is_nan());
+    }
+
+    #[test]
+    fn test_fract() {
+        assert_close(rt_math_fract(3.7), 0.7, EPSILON);
+        assert_close(rt_math_fract(-3.7), -0.7, EPSILON);
+        assert_eq!(rt_math_fract(5.0), 0.0);
+        assert_close(rt_math_fract(0.25), 0.25, EPSILON);
+    }
+
+    #[test]
+    fn test_rem() {
+        assert_eq!(rt_math_rem(7.0, 3.0), 1.0);
+        assert_eq!(rt_math_rem(-7.0, 3.0), -1.0);
+        assert_eq!(rt_math_rem(7.0, -3.0), 1.0);
+        assert_eq!(rt_math_rem(-7.0, -3.0), -1.0);
+        assert_close(rt_math_rem(5.5, 2.0), 1.5, EPSILON);
     }
 
     // ========================================================================

@@ -1,0 +1,429 @@
+# Simple Compiler - Main Entry Point
+#
+# Self-hosting compiler for the Simple programming language.
+# This is the entry point when running the compiler as a standalone tool.
+#
+# Usage:
+#   simple-compiler [options] <files...>
+#   simple-compiler --mode=jit script.spl
+#   simple-compiler --mode=aot -o output src/*.spl
+#   simple-compiler --check src/
+#   simple-compiler --sdn config.sdn
+
+import compiler.driver.*
+import compiler.config.*
+
+# ------------------------------------------------------------------------------
+# Command Line Interface
+# ------------------------------------------------------------------------------
+
+struct CliArgs:
+    mode: CompileMode
+    input_files: [text]
+    output_file: text?
+    optimize: bool
+    debug_info: bool
+    verbose: bool
+    log_level: i64
+    profile: text
+    help: bool
+    version: bool
+
+    static fn default() -> CliArgs:
+        CliArgs(
+            mode: CompileMode.Interpret,
+            input_files: [],
+            output_file: None,
+            optimize: false,
+            debug_info: true,
+            verbose: false,
+            log_level: 4,
+            profile: "dev",
+            help: false,
+            version: false
+        )
+
+    fn to_options() -> CompileOptions:
+        CompileOptions(
+            mode: self.mode,
+            input_files: self.input_files,
+            output_file: self.output_file,
+            optimize: self.optimize,
+            debug_info: self.debug_info,
+            verbose: self.verbose,
+            log_level: self.log_level,
+            profile: self.profile
+        )
+
+# ------------------------------------------------------------------------------
+# Argument Parser
+# ------------------------------------------------------------------------------
+
+class ArgParser:
+    args: [text]
+    pos: i64
+
+    static fn create(args: [text]) -> ArgParser:
+        ArgParser(args: args, pos: 0)
+
+    fn has_next() -> bool:
+        self.pos < self.args.len()
+
+    me next() -> text?:
+        if self.pos >= self.args.len():
+            return None
+        val arg = self.args[self.pos]
+        self.pos = self.pos + 1
+        Some(arg)
+
+    me peek() -> text?:
+        if self.pos >= self.args.len():
+            return None
+        Some(self.args[self.pos])
+
+    me parse() -> Result<CliArgs, text>:
+        val result = CliArgs.default()
+
+        while self.has_next():
+            val arg = self.next().unwrap()
+
+            if arg.starts_with("--"):
+                # Long option
+                match self.parse_long_option(arg, result):
+                    Ok(r) => result = r
+                    Err(e) => return Err(e)
+            else if arg.starts_with("-"):
+                # Short option
+                match self.parse_short_option(arg, result):
+                    Ok(r) => result = r
+                    Err(e) => return Err(e)
+            else:
+                # Input file
+                result.input_files.push(arg)
+
+        Ok(result)
+
+    me parse_long_option(arg: text, result: CliArgs) -> Result<CliArgs, text>:
+        val opt = arg.slice(2, arg.len())
+
+        # Options with values (--option=value or --option value)
+        if opt.contains("="):
+            val parts = opt.split("=")
+            val name = parts[0]
+            val value = parts[1]
+            return self.apply_option(name, value, result)
+
+        # Boolean flags
+        match opt:
+            "help" | "h" =>
+                result.help = true
+                return Ok(result)
+            "version" | "V" =>
+                result.version = true
+                return Ok(result)
+            "optimize" | "O" =>
+                result.optimize = true
+                return Ok(result)
+            "debug" | "g" =>
+                result.debug_info = true
+                return Ok(result)
+            "no-debug" =>
+                result.debug_info = false
+                return Ok(result)
+            "verbose" | "v" =>
+                result.verbose = true
+                return Ok(result)
+            "check" =>
+                result.mode = CompileMode.Check
+                return Ok(result)
+            "sdn" =>
+                result.mode = CompileMode.Sdn
+                return Ok(result)
+            "interpret" =>
+                result.mode = CompileMode.Interpret
+                return Ok(result)
+            "jit" =>
+                result.mode = CompileMode.Jit
+                return Ok(result)
+            "aot" | "compile" =>
+                result.mode = CompileMode.Aot
+                return Ok(result)
+            _ =>
+                ()
+
+        # Options requiring a value
+        val value = self.next()
+        if value.is_none():
+            return Err("Option --{opt} requires a value")
+
+        self.apply_option(opt, value.unwrap(), result)
+
+    fn apply_option(name: text, value: text, result: CliArgs) -> Result<CliArgs, text>:
+        match name:
+            "mode" | "m" =>
+                val mode = CompileMode.from_text(value)
+                if mode.is_none():
+                    return Err("Unknown mode: {value}")
+                result.mode = mode.unwrap()
+
+            "output" | "o" =>
+                result.output_file = Some(value)
+
+            "log-level" | "l" =>
+                val level = value.parse_int()
+                if level.is_none():
+                    return Err("Invalid log level: {value}")
+                result.log_level = level.unwrap()
+
+            "profile" | "p" =>
+                result.profile = value
+
+            _ =>
+                return Err("Unknown option: --{name}")
+
+        Ok(result)
+
+    me parse_short_option(arg: text, result: CliArgs) -> Result<CliArgs, text>:
+        val opts = arg.slice(1, arg.len())
+
+        for i in 0..opts.len():
+            val c = opts.char_at(i)
+            match c:
+                'h' =>
+                    result.help = true
+                'V' =>
+                    result.version = true
+                'O' =>
+                    result.optimize = true
+                'g' =>
+                    result.debug_info = true
+                'v' =>
+                    result.verbose = true
+                'c' =>
+                    result.mode = CompileMode.Aot
+                'i' =>
+                    result.mode = CompileMode.Interpret
+                'j' =>
+                    result.mode = CompileMode.Jit
+                'k' =>
+                    result.mode = CompileMode.Check
+                's' =>
+                    result.mode = CompileMode.Sdn
+                'o' =>
+                    # -o requires a value (rest of arg or next arg)
+                    if i + 1 < opts.len():
+                        result.output_file = Some(opts.slice(i + 1, opts.len()))
+                        return Ok(result)
+                    else:
+                        val value = self.next()
+                        if value.is_none():
+                            return Err("Option -o requires a value")
+                        result.output_file = Some(value.unwrap())
+                        return Ok(result)
+                'm' =>
+                    # -m requires a value
+                    val value = self.next()
+                    if value.is_none():
+                        return Err("Option -m requires a value")
+                    val mode = CompileMode.from_text(value.unwrap())
+                    if mode.is_none():
+                        return Err("Unknown mode: {value.unwrap()}")
+                    result.mode = mode.unwrap()
+                    return Ok(result)
+                'l' =>
+                    # -l requires a value
+                    val value = self.next()
+                    if value.is_none():
+                        return Err("Option -l requires a value")
+                    val level = value.unwrap().parse_int()
+                    if level.is_none():
+                        return Err("Invalid log level")
+                    result.log_level = level.unwrap()
+                    return Ok(result)
+                _ =>
+                    return Err("Unknown option: -{c}")
+
+        Ok(result)
+
+# ------------------------------------------------------------------------------
+# Help and Version
+# ------------------------------------------------------------------------------
+
+val VERSION = "0.3.0"
+val VERSION_DATE = "2026-01"
+
+fn print_help():
+    print "Simple Compiler v{VERSION}"
+    print ""
+    print "Usage: simple-compiler [options] <files...>"
+    print ""
+    print "Modes:"
+    print "  -i, --interpret     Interpret (default)"
+    print "  -j, --jit           JIT compile and run"
+    print "  -c, --aot           Compile to executable"
+    print "  -k, --check         Type check only"
+    print "  -s, --sdn           Parse as SDN data"
+    print "  -m, --mode=MODE     Set mode explicitly"
+    print ""
+    print "Options:"
+    print "  -o, --output=FILE   Output file (for --aot)"
+    print "  -O, --optimize      Enable optimizations"
+    print "  -g, --debug         Include debug info (default)"
+    print "  --no-debug          Exclude debug info"
+    print "  -v, --verbose       Verbose output"
+    print "  -l, --log-level=N   Log level 0-10 (default: 4)"
+    print "  -p, --profile=NAME  Profile: dev, test, prod"
+    print ""
+    print "  -h, --help          Show this help"
+    print "  -V, --version       Show version"
+    print ""
+    print "Examples:"
+    print "  simple-compiler script.spl           # Interpret"
+    print "  simple-compiler -j script.spl        # JIT compile"
+    print "  simple-compiler -c -o out src/*.spl  # AOT compile"
+    print "  simple-compiler -k src/              # Type check"
+    print "  simple-compiler -s config.sdn        # Parse SDN"
+
+fn print_version():
+    print "simple-compiler {VERSION} ({VERSION_DATE})"
+    print "Self-hosting compiler for the Simple programming language"
+    print ""
+    print "Backends:"
+    print "  - Interpreter (tree-walking)"
+    print "  - JIT (Cranelift)"
+    print "  - AOT (Cranelift)"
+    print ""
+    print "Features:"
+    print "  - Indentation-based syntax"
+    print "  - Pattern matching"
+    print "  - Effect system"
+    print "  - Reference capabilities"
+    print "  - Algebraic data types"
+
+# ------------------------------------------------------------------------------
+# Main Entry Point
+# ------------------------------------------------------------------------------
+
+fn main() -> i32:
+    val args = rt_get_args()
+
+    # Skip program name
+    val program_args = if args.len() > 0:
+        args.slice(1, args.len())
+    else:
+        []
+
+    # Parse arguments
+    val parser = ArgParser.create(program_args)
+    val parsed = parser.parse()
+
+    match parsed:
+        Err(e) =>
+            print "Error: {e}"
+            print "Try 'simple-compiler --help' for usage"
+            return 1
+
+        Ok(cli_args) =>
+            # Handle help/version
+            if cli_args.help:
+                print_help()
+                return 0
+
+            if cli_args.version:
+                print_version()
+                return 0
+
+            # Check for input files
+            if cli_args.input_files.is_empty():
+                print "Error: No input files"
+                print "Try 'simple-compiler --help' for usage"
+                return 1
+
+            # Run compilation
+            val options = cli_args.to_options()
+            val driver = CompilerDriver.create(options)
+            val result = driver.compile()
+
+            match result:
+                CompileResult.Success(value) =>
+                    if cli_args.verbose:
+                        if value.is_some():
+                            print "Result: {value.unwrap()}"
+                        else:
+                            print "Compilation successful"
+                    return 0
+
+                CompileResult.ParseError(errors) =>
+                    print "Parse errors:"
+                    for e in errors:
+                        print "  {e}"
+                    return 1
+
+                CompileResult.TypeError(errors) =>
+                    print "Type errors:"
+                    for e in errors:
+                        print "  {e}"
+                    return 1
+
+                CompileResult.CodegenError(msg) =>
+                    print "Codegen error: {msg}"
+                    return 1
+
+                CompileResult.RuntimeError(msg) =>
+                    print "Runtime error: {msg}"
+                    return 1
+
+# ------------------------------------------------------------------------------
+# Bootstrap Self-Compile Test
+# ------------------------------------------------------------------------------
+
+## Bootstrap test function
+## Verifies the compiler can compile itself
+fn bootstrap_test() -> bool:
+    print "=== Bootstrap Self-Compile Test ==="
+    print ""
+
+    # Step 1: Compile the compiler itself
+    print "Step 1: Compiling simple/compiler/ to simple-compiler-v1..."
+    val step1 = aot_file("simple/compiler/main.spl", "simple-compiler-v1")
+    if not step1.is_success():
+        print "  FAILED: {step1.get_errors()}"
+        return false
+    print "  OK"
+
+    # Step 2: Use v1 to compile itself
+    print "Step 2: Using v1 to compile to simple-compiler-v2..."
+    val step2_result = rt_exec("./simple-compiler-v1 -c -o simple-compiler-v2 simple/compiler/main.spl")
+    if step2_result != 0:
+        print "  FAILED: v1 could not compile itself"
+        return false
+    print "  OK"
+
+    # Step 3: Use v2 to compile itself
+    print "Step 3: Using v2 to compile to simple-compiler-v3..."
+    val step3_result = rt_exec("./simple-compiler-v2 -c -o simple-compiler-v3 simple/compiler/main.spl")
+    if step3_result != 0:
+        print "  FAILED: v2 could not compile itself"
+        return false
+    print "  OK"
+
+    # Step 4: Verify v2 == v3
+    print "Step 4: Verifying v2 and v3 are identical..."
+    val v2_hash = rt_file_hash("simple-compiler-v2")
+    val v3_hash = rt_file_hash("simple-compiler-v3")
+
+    if v2_hash != v3_hash:
+        print "  FAILED: v2 and v3 differ"
+        print "    v2 hash: {v2_hash}"
+        print "    v3 hash: {v3_hash}"
+        return false
+
+    print "  OK (hash: {v2_hash})"
+    print ""
+    print "=== Bootstrap Test PASSED ==="
+    print "The Simple compiler can compile itself!"
+    true
+
+# FFI for bootstrap test
+extern fn rt_exec(cmd: text) -> i32
+extern fn rt_file_hash(path: text) -> text
