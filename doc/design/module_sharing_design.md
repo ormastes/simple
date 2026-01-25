@@ -325,11 +325,14 @@ get_tokens(source)       →    rt_tokenize(source)
 - [x] Add level_name(), parse_level(), is_enabled(), clear_scopes()
 - [x] Update log_spec.spl with comprehensive tests (180 lines)
 
-### Phase 3: Add TokenKind sharing
-- [ ] Add TokenKind to hir-core
-- [ ] Refactor parser to use shared TokenKind
-- [ ] Refactor SDN lexer to use shared TokenKind
-- [ ] Prepare for TreeSitter integration
+### Phase 3: Add TokenKind sharing (COMPLETE)
+- [x] Add TokenCategory enum for syntax highlighting (20 categories)
+- [x] Add BaseTokenKind enum with ~100 shared token types
+- [x] Add css_class() and treesitter_scope() for highlighting
+- [x] Add is_keyword(), is_operator(), is_literal() predicates
+- [x] hir-core now 1,049 lines (was 469)
+- [ ] Refactor parser to use shared TokenKind (future)
+- [ ] Refactor SDN lexer to use shared TokenKind (future)
 
 ### Phase 4: Add ValueKind sharing
 - [ ] Add ValueKind to hir-core

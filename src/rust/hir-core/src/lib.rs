@@ -366,6 +366,538 @@ impl EnumLayout {
 }
 
 //==============================================================================
+// Token Categories (for syntax highlighting)
+//==============================================================================
+
+/// Token category for syntax highlighting.
+/// Used by TreeSitter, LSP, and other tools.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum TokenCategory {
+    /// Keywords: fn, val, var, if, else, for, while, etc.
+    Keyword,
+    /// Control flow: if, else, match, for, while, break, continue, return
+    ControlFlow,
+    /// Type keywords: struct, class, enum, trait, impl
+    TypeKeyword,
+    /// Operators: +, -, *, /, ==, !=, etc.
+    Operator,
+    /// Delimiters: (, ), {, }, [, ]
+    Delimiter,
+    /// Punctuation: ,, :, ;, ., ->
+    Punctuation,
+    /// Integer literals: 42, 0xFF, 0b1010
+    IntegerLiteral,
+    /// Float literals: 3.14, 1e-5
+    FloatLiteral,
+    /// String literals: "hello", 'raw'
+    StringLiteral,
+    /// Boolean literals: true, false
+    BoolLiteral,
+    /// Null/nil literals
+    NullLiteral,
+    /// Identifiers (variables, functions)
+    Identifier,
+    /// Type names (PascalCase)
+    TypeName,
+    /// Constants (ALL_CAPS)
+    Constant,
+    /// Comments: # line, /** block */
+    Comment,
+    /// Doc comments: ## or /** */
+    DocComment,
+    /// Whitespace and indentation
+    Whitespace,
+    /// Newline
+    Newline,
+    /// Error token
+    Error,
+    /// End of file
+    Eof,
+}
+
+impl TokenCategory {
+    /// Get the CSS class name for syntax highlighting
+    pub fn css_class(&self) -> &'static str {
+        match self {
+            TokenCategory::Keyword => "keyword",
+            TokenCategory::ControlFlow => "control",
+            TokenCategory::TypeKeyword => "type-keyword",
+            TokenCategory::Operator => "operator",
+            TokenCategory::Delimiter => "delimiter",
+            TokenCategory::Punctuation => "punctuation",
+            TokenCategory::IntegerLiteral => "number",
+            TokenCategory::FloatLiteral => "number",
+            TokenCategory::StringLiteral => "string",
+            TokenCategory::BoolLiteral => "boolean",
+            TokenCategory::NullLiteral => "null",
+            TokenCategory::Identifier => "identifier",
+            TokenCategory::TypeName => "type",
+            TokenCategory::Constant => "constant",
+            TokenCategory::Comment => "comment",
+            TokenCategory::DocComment => "doc-comment",
+            TokenCategory::Whitespace => "whitespace",
+            TokenCategory::Newline => "newline",
+            TokenCategory::Error => "error",
+            TokenCategory::Eof => "eof",
+        }
+    }
+
+    /// Get the TreeSitter scope name
+    pub fn treesitter_scope(&self) -> &'static str {
+        match self {
+            TokenCategory::Keyword => "keyword",
+            TokenCategory::ControlFlow => "keyword.control",
+            TokenCategory::TypeKeyword => "keyword.type",
+            TokenCategory::Operator => "operator",
+            TokenCategory::Delimiter => "punctuation.bracket",
+            TokenCategory::Punctuation => "punctuation",
+            TokenCategory::IntegerLiteral => "constant.numeric.integer",
+            TokenCategory::FloatLiteral => "constant.numeric.float",
+            TokenCategory::StringLiteral => "string",
+            TokenCategory::BoolLiteral => "constant.language.boolean",
+            TokenCategory::NullLiteral => "constant.language.null",
+            TokenCategory::Identifier => "variable",
+            TokenCategory::TypeName => "type",
+            TokenCategory::Constant => "constant",
+            TokenCategory::Comment => "comment",
+            TokenCategory::DocComment => "comment.documentation",
+            TokenCategory::Whitespace => "text.whitespace",
+            TokenCategory::Newline => "text.whitespace",
+            TokenCategory::Error => "invalid",
+            TokenCategory::Eof => "text",
+        }
+    }
+}
+
+//==============================================================================
+// Base Token Kind (shared by parser and SDN)
+//==============================================================================
+
+/// Base token kinds shared by parser, SDN, and TreeSitter.
+/// This enum contains the common tokens without payload data.
+/// Parser and SDN have their own extended enums with full payloads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum BaseTokenKind {
+    // Literals (without payload - use category for highlighting)
+    Integer,
+    Float,
+    String,
+    Bool,
+    Null,
+
+    // Identifiers
+    Identifier,
+
+    // Common keywords (shared by parser and SDN)
+    KwTrue,
+    KwFalse,
+    KwNull,
+
+    // Variable declarations
+    KwVal,
+    KwVar,
+    KwLet,
+    KwMut,
+    KwConst,
+
+    // Function declarations
+    KwFn,
+    KwReturn,
+
+    // Control flow
+    KwIf,
+    KwElse,
+    KwElif,
+    KwFor,
+    KwWhile,
+    KwLoop,
+    KwBreak,
+    KwContinue,
+    KwMatch,
+    KwCase,
+
+    // Type declarations
+    KwStruct,
+    KwClass,
+    KwEnum,
+    KwTrait,
+    KwImpl,
+    KwType,
+
+    // Visibility
+    KwPub,
+    KwPriv,
+
+    // Modules
+    KwImport,
+    KwExport,
+    KwFrom,
+    KwAs,
+    KwMod,
+    KwUse,
+
+    // Logic
+    KwAnd,
+    KwOr,
+    KwNot,
+    KwIn,
+    KwIs,
+
+    // Async
+    KwAsync,
+    KwAwait,
+    KwYield,
+
+    // Other common keywords
+    KwSelf,
+    KwSuper,
+    KwNew,
+
+    // Arithmetic operators
+    Plus,       // +
+    Minus,      // -
+    Star,       // *
+    Slash,      // /
+    Percent,    // %
+    DoubleStar, // **
+
+    // Comparison operators
+    Eq,    // ==
+    NotEq, // !=
+    Lt,    // <
+    Gt,    // >
+    LtEq,  // <=
+    GtEq,  // >=
+
+    // Assignment
+    Assign,      // =
+    PlusAssign,  // +=
+    MinusAssign, // -=
+    StarAssign,  // *=
+    SlashAssign, // /=
+
+    // Logical operators
+    Ampersand,  // &
+    Pipe,       // |
+    DoubleAmp,  // &&
+    DoublePipe, // ||
+    Caret,      // ^
+    Tilde,      // ~
+
+    // Arrows
+    Arrow,    // ->
+    FatArrow, // =>
+
+    // Delimiters
+    LParen,   // (
+    RParen,   // )
+    LBracket, // [
+    RBracket, // ]
+    LBrace,   // {
+    RBrace,   // }
+
+    // Punctuation
+    Comma,          // ,
+    Colon,          // :
+    DoubleColon,    // ::
+    Semicolon,      // ;
+    Dot,            // .
+    DoubleDot,      // ..
+    DoubleDotEq,    // ..=
+    Ellipsis,       // ...
+    Question,       // ?
+    DoubleQuestion, // ??
+    QuestionDot,    // ?.
+    At,             // @
+    Hash,           // #
+    Dollar,         // $
+    Backslash,      // \
+    Underscore,     // _
+
+    // Whitespace
+    Newline,
+    Indent,
+    Dedent,
+
+    // Comments
+    Comment,
+    DocComment,
+
+    // Special
+    Eof,
+    Error,
+}
+
+impl BaseTokenKind {
+    /// Get the token category for syntax highlighting
+    pub fn category(&self) -> TokenCategory {
+        match self {
+            // Literals
+            BaseTokenKind::Integer => TokenCategory::IntegerLiteral,
+            BaseTokenKind::Float => TokenCategory::FloatLiteral,
+            BaseTokenKind::String => TokenCategory::StringLiteral,
+            BaseTokenKind::Bool | BaseTokenKind::KwTrue | BaseTokenKind::KwFalse => {
+                TokenCategory::BoolLiteral
+            }
+            BaseTokenKind::Null | BaseTokenKind::KwNull => TokenCategory::NullLiteral,
+
+            // Identifiers
+            BaseTokenKind::Identifier => TokenCategory::Identifier,
+
+            // Control flow keywords
+            BaseTokenKind::KwIf
+            | BaseTokenKind::KwElse
+            | BaseTokenKind::KwElif
+            | BaseTokenKind::KwFor
+            | BaseTokenKind::KwWhile
+            | BaseTokenKind::KwLoop
+            | BaseTokenKind::KwBreak
+            | BaseTokenKind::KwContinue
+            | BaseTokenKind::KwMatch
+            | BaseTokenKind::KwCase
+            | BaseTokenKind::KwReturn => TokenCategory::ControlFlow,
+
+            // Type keywords
+            BaseTokenKind::KwStruct
+            | BaseTokenKind::KwClass
+            | BaseTokenKind::KwEnum
+            | BaseTokenKind::KwTrait
+            | BaseTokenKind::KwImpl
+            | BaseTokenKind::KwType => TokenCategory::TypeKeyword,
+
+            // Other keywords
+            BaseTokenKind::KwVal
+            | BaseTokenKind::KwVar
+            | BaseTokenKind::KwLet
+            | BaseTokenKind::KwMut
+            | BaseTokenKind::KwConst
+            | BaseTokenKind::KwFn
+            | BaseTokenKind::KwPub
+            | BaseTokenKind::KwPriv
+            | BaseTokenKind::KwImport
+            | BaseTokenKind::KwExport
+            | BaseTokenKind::KwFrom
+            | BaseTokenKind::KwAs
+            | BaseTokenKind::KwMod
+            | BaseTokenKind::KwUse
+            | BaseTokenKind::KwAnd
+            | BaseTokenKind::KwOr
+            | BaseTokenKind::KwNot
+            | BaseTokenKind::KwIn
+            | BaseTokenKind::KwIs
+            | BaseTokenKind::KwAsync
+            | BaseTokenKind::KwAwait
+            | BaseTokenKind::KwYield
+            | BaseTokenKind::KwSelf
+            | BaseTokenKind::KwSuper
+            | BaseTokenKind::KwNew => TokenCategory::Keyword,
+
+            // Operators
+            BaseTokenKind::Plus
+            | BaseTokenKind::Minus
+            | BaseTokenKind::Star
+            | BaseTokenKind::Slash
+            | BaseTokenKind::Percent
+            | BaseTokenKind::DoubleStar
+            | BaseTokenKind::Eq
+            | BaseTokenKind::NotEq
+            | BaseTokenKind::Lt
+            | BaseTokenKind::Gt
+            | BaseTokenKind::LtEq
+            | BaseTokenKind::GtEq
+            | BaseTokenKind::Assign
+            | BaseTokenKind::PlusAssign
+            | BaseTokenKind::MinusAssign
+            | BaseTokenKind::StarAssign
+            | BaseTokenKind::SlashAssign
+            | BaseTokenKind::Ampersand
+            | BaseTokenKind::Pipe
+            | BaseTokenKind::DoubleAmp
+            | BaseTokenKind::DoublePipe
+            | BaseTokenKind::Caret
+            | BaseTokenKind::Tilde
+            | BaseTokenKind::Arrow
+            | BaseTokenKind::FatArrow => TokenCategory::Operator,
+
+            // Delimiters
+            BaseTokenKind::LParen
+            | BaseTokenKind::RParen
+            | BaseTokenKind::LBracket
+            | BaseTokenKind::RBracket
+            | BaseTokenKind::LBrace
+            | BaseTokenKind::RBrace => TokenCategory::Delimiter,
+
+            // Punctuation
+            BaseTokenKind::Comma
+            | BaseTokenKind::Colon
+            | BaseTokenKind::DoubleColon
+            | BaseTokenKind::Semicolon
+            | BaseTokenKind::Dot
+            | BaseTokenKind::DoubleDot
+            | BaseTokenKind::DoubleDotEq
+            | BaseTokenKind::Ellipsis
+            | BaseTokenKind::Question
+            | BaseTokenKind::DoubleQuestion
+            | BaseTokenKind::QuestionDot
+            | BaseTokenKind::At
+            | BaseTokenKind::Hash
+            | BaseTokenKind::Dollar
+            | BaseTokenKind::Backslash
+            | BaseTokenKind::Underscore => TokenCategory::Punctuation,
+
+            // Whitespace
+            BaseTokenKind::Newline | BaseTokenKind::Indent | BaseTokenKind::Dedent => {
+                TokenCategory::Whitespace
+            }
+
+            // Comments
+            BaseTokenKind::Comment => TokenCategory::Comment,
+            BaseTokenKind::DocComment => TokenCategory::DocComment,
+
+            // Special
+            BaseTokenKind::Eof => TokenCategory::Eof,
+            BaseTokenKind::Error => TokenCategory::Error,
+        }
+    }
+
+    /// Get the display name for this token kind
+    pub fn name(&self) -> &'static str {
+        match self {
+            BaseTokenKind::Integer => "integer",
+            BaseTokenKind::Float => "float",
+            BaseTokenKind::String => "string",
+            BaseTokenKind::Bool => "bool",
+            BaseTokenKind::Null => "null",
+            BaseTokenKind::Identifier => "identifier",
+            BaseTokenKind::KwTrue => "true",
+            BaseTokenKind::KwFalse => "false",
+            BaseTokenKind::KwNull => "null",
+            BaseTokenKind::KwVal => "val",
+            BaseTokenKind::KwVar => "var",
+            BaseTokenKind::KwLet => "let",
+            BaseTokenKind::KwMut => "mut",
+            BaseTokenKind::KwConst => "const",
+            BaseTokenKind::KwFn => "fn",
+            BaseTokenKind::KwReturn => "return",
+            BaseTokenKind::KwIf => "if",
+            BaseTokenKind::KwElse => "else",
+            BaseTokenKind::KwElif => "elif",
+            BaseTokenKind::KwFor => "for",
+            BaseTokenKind::KwWhile => "while",
+            BaseTokenKind::KwLoop => "loop",
+            BaseTokenKind::KwBreak => "break",
+            BaseTokenKind::KwContinue => "continue",
+            BaseTokenKind::KwMatch => "match",
+            BaseTokenKind::KwCase => "case",
+            BaseTokenKind::KwStruct => "struct",
+            BaseTokenKind::KwClass => "class",
+            BaseTokenKind::KwEnum => "enum",
+            BaseTokenKind::KwTrait => "trait",
+            BaseTokenKind::KwImpl => "impl",
+            BaseTokenKind::KwType => "type",
+            BaseTokenKind::KwPub => "pub",
+            BaseTokenKind::KwPriv => "priv",
+            BaseTokenKind::KwImport => "import",
+            BaseTokenKind::KwExport => "export",
+            BaseTokenKind::KwFrom => "from",
+            BaseTokenKind::KwAs => "as",
+            BaseTokenKind::KwMod => "mod",
+            BaseTokenKind::KwUse => "use",
+            BaseTokenKind::KwAnd => "and",
+            BaseTokenKind::KwOr => "or",
+            BaseTokenKind::KwNot => "not",
+            BaseTokenKind::KwIn => "in",
+            BaseTokenKind::KwIs => "is",
+            BaseTokenKind::KwAsync => "async",
+            BaseTokenKind::KwAwait => "await",
+            BaseTokenKind::KwYield => "yield",
+            BaseTokenKind::KwSelf => "self",
+            BaseTokenKind::KwSuper => "super",
+            BaseTokenKind::KwNew => "new",
+            BaseTokenKind::Plus => "+",
+            BaseTokenKind::Minus => "-",
+            BaseTokenKind::Star => "*",
+            BaseTokenKind::Slash => "/",
+            BaseTokenKind::Percent => "%",
+            BaseTokenKind::DoubleStar => "**",
+            BaseTokenKind::Eq => "==",
+            BaseTokenKind::NotEq => "!=",
+            BaseTokenKind::Lt => "<",
+            BaseTokenKind::Gt => ">",
+            BaseTokenKind::LtEq => "<=",
+            BaseTokenKind::GtEq => ">=",
+            BaseTokenKind::Assign => "=",
+            BaseTokenKind::PlusAssign => "+=",
+            BaseTokenKind::MinusAssign => "-=",
+            BaseTokenKind::StarAssign => "*=",
+            BaseTokenKind::SlashAssign => "/=",
+            BaseTokenKind::Ampersand => "&",
+            BaseTokenKind::Pipe => "|",
+            BaseTokenKind::DoubleAmp => "&&",
+            BaseTokenKind::DoublePipe => "||",
+            BaseTokenKind::Caret => "^",
+            BaseTokenKind::Tilde => "~",
+            BaseTokenKind::Arrow => "->",
+            BaseTokenKind::FatArrow => "=>",
+            BaseTokenKind::LParen => "(",
+            BaseTokenKind::RParen => ")",
+            BaseTokenKind::LBracket => "[",
+            BaseTokenKind::RBracket => "]",
+            BaseTokenKind::LBrace => "{",
+            BaseTokenKind::RBrace => "}",
+            BaseTokenKind::Comma => ",",
+            BaseTokenKind::Colon => ":",
+            BaseTokenKind::DoubleColon => "::",
+            BaseTokenKind::Semicolon => ";",
+            BaseTokenKind::Dot => ".",
+            BaseTokenKind::DoubleDot => "..",
+            BaseTokenKind::DoubleDotEq => "..=",
+            BaseTokenKind::Ellipsis => "...",
+            BaseTokenKind::Question => "?",
+            BaseTokenKind::DoubleQuestion => "??",
+            BaseTokenKind::QuestionDot => "?.",
+            BaseTokenKind::At => "@",
+            BaseTokenKind::Hash => "#",
+            BaseTokenKind::Dollar => "$",
+            BaseTokenKind::Backslash => "\\",
+            BaseTokenKind::Underscore => "_",
+            BaseTokenKind::Newline => "newline",
+            BaseTokenKind::Indent => "INDENT",
+            BaseTokenKind::Dedent => "DEDENT",
+            BaseTokenKind::Comment => "comment",
+            BaseTokenKind::DocComment => "doc_comment",
+            BaseTokenKind::Eof => "EOF",
+            BaseTokenKind::Error => "error",
+        }
+    }
+
+    /// Check if this is a keyword token
+    pub fn is_keyword(&self) -> bool {
+        matches!(
+            self.category(),
+            TokenCategory::Keyword | TokenCategory::ControlFlow | TokenCategory::TypeKeyword
+        )
+    }
+
+    /// Check if this is an operator token
+    pub fn is_operator(&self) -> bool {
+        self.category() == TokenCategory::Operator
+    }
+
+    /// Check if this is a literal token
+    pub fn is_literal(&self) -> bool {
+        matches!(
+            self.category(),
+            TokenCategory::IntegerLiteral
+                | TokenCategory::FloatLiteral
+                | TokenCategory::StringLiteral
+                | TokenCategory::BoolLiteral
+                | TokenCategory::NullLiteral
+        )
+    }
+}
+
+//==============================================================================
 // High-Level Constraint Operations
 //==============================================================================
 
@@ -465,5 +997,53 @@ mod tests {
         assert_eq!(layout.discriminant("None"), Some(0));
         assert_eq!(layout.discriminant("Some"), Some(1));
         assert!(layout.size >= 9); // 1 byte tag + 8 byte payload
+    }
+
+    #[test]
+    fn test_token_category() {
+        assert_eq!(TokenCategory::Keyword.css_class(), "keyword");
+        assert_eq!(TokenCategory::StringLiteral.css_class(), "string");
+        assert_eq!(TokenCategory::Operator.treesitter_scope(), "operator");
+        assert_eq!(
+            TokenCategory::IntegerLiteral.treesitter_scope(),
+            "constant.numeric.integer"
+        );
+    }
+
+    #[test]
+    fn test_base_token_kind_category() {
+        assert_eq!(BaseTokenKind::Integer.category(), TokenCategory::IntegerLiteral);
+        assert_eq!(BaseTokenKind::KwFn.category(), TokenCategory::Keyword);
+        assert_eq!(BaseTokenKind::KwIf.category(), TokenCategory::ControlFlow);
+        assert_eq!(BaseTokenKind::KwStruct.category(), TokenCategory::TypeKeyword);
+        assert_eq!(BaseTokenKind::Plus.category(), TokenCategory::Operator);
+        assert_eq!(BaseTokenKind::LParen.category(), TokenCategory::Delimiter);
+        assert_eq!(BaseTokenKind::Comma.category(), TokenCategory::Punctuation);
+    }
+
+    #[test]
+    fn test_base_token_kind_name() {
+        assert_eq!(BaseTokenKind::KwFn.name(), "fn");
+        assert_eq!(BaseTokenKind::Plus.name(), "+");
+        assert_eq!(BaseTokenKind::LParen.name(), "(");
+        assert_eq!(BaseTokenKind::Arrow.name(), "->");
+        assert_eq!(BaseTokenKind::DoubleQuestion.name(), "??");
+    }
+
+    #[test]
+    fn test_base_token_kind_predicates() {
+        assert!(BaseTokenKind::KwFn.is_keyword());
+        assert!(BaseTokenKind::KwIf.is_keyword());
+        assert!(BaseTokenKind::KwStruct.is_keyword());
+        assert!(!BaseTokenKind::Plus.is_keyword());
+
+        assert!(BaseTokenKind::Plus.is_operator());
+        assert!(BaseTokenKind::Eq.is_operator());
+        assert!(!BaseTokenKind::KwFn.is_operator());
+
+        assert!(BaseTokenKind::Integer.is_literal());
+        assert!(BaseTokenKind::String.is_literal());
+        assert!(BaseTokenKind::Bool.is_literal());
+        assert!(!BaseTokenKind::KwFn.is_literal());
     }
 }

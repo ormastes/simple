@@ -641,6 +641,9 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_cli_run_todo_gen", &[I64], &[I64]),
     // i18n
     RuntimeFuncSpec::new("rt_cli_run_i18n", &[I64], &[I64]),
+    // Context pack generation
+    RuntimeFuncSpec::new("rt_context_generate", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_context_stats", &[I64, I64], &[I64]),
     // Compilation
     RuntimeFuncSpec::new("rt_cli_handle_compile", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_cli_handle_targets", &[], &[I64]),
