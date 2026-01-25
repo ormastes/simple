@@ -27,7 +27,7 @@ impl Lowerer {
     pub(in crate::hir::lower) fn lower_expr(&mut self, expr: &Expr, ctx: &mut FunctionContext) -> LowerResult<HirExpr> {
         match expr {
             Expr::Integer(_) | Expr::Float(_) | Expr::String(_) | Expr::Bool(_) | Expr::Nil => self.lower_literal(expr),
-            Expr::FString { parts, type_meta } => self.lower_fstring(parts, type_meta),
+            Expr::FString { parts, type_meta } => self.lower_fstring(parts, type_meta, ctx),
             Expr::I18nString { name, default_text } => self.lower_i18n_string(name, default_text),
             Expr::I18nTemplate { name, parts, args } => self.lower_i18n_template(name, parts, args),
             Expr::I18nRef(name) => self.lower_i18n_ref(name),

@@ -662,6 +662,46 @@ impl<'a> MirLowerer<'a> {
                 })
             }
 
+            // Field access expression: obj.field
+            HirExprKind::FieldAccess { receiver, field_index } => {
+                let receiver_reg = self.lower_expr(receiver)?;
+                let field_index = *field_index;
+
+                // Compute byte offset - assume 8 bytes per field for now
+                let byte_offset = (field_index as u32) * 8;
+
+                self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::FieldGet {
+                        dest,
+                        object: receiver_reg,
+                        byte_offset,
+                        field_type: expr_ty,
+                    });
+                    dest
+                })
+            }
+
+            // Index expression: array[index] or string[index]
+            HirExprKind::Index { receiver, index } => {
+                let receiver_reg = self.lower_expr(receiver)?;
+                let index_reg = self.lower_expr(index)?;
+
+                // Use rt_array_get which works for both arrays and strings
+                let target = CallTarget::from_name("rt_array_get");
+                self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::Call {
+                        dest: Some(dest),
+                        target,
+                        args: vec![receiver_reg, index_reg],
+                    });
+                    dest
+                })
+            }
+
             // Method call with dispatch mode (static vs dynamic)
             HirExprKind::MethodCall {
                 receiver,

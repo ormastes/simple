@@ -146,6 +146,15 @@ pub extern "C" fn rt_eprintln_value(v: RuntimeValue) {
     }
 }
 
+/// Convert a RuntimeValue to a string RuntimeValue.
+/// This is used for f-string interpolation in native compiled code.
+#[no_mangle]
+pub extern "C" fn rt_value_to_string(v: RuntimeValue) -> RuntimeValue {
+    let s = value_to_display_string(v);
+    let bytes = s.as_bytes();
+    unsafe { crate::value::collections::rt_string_new(bytes.as_ptr(), bytes.len() as u64) }
+}
+
 /// Convert RuntimeValue to display string.
 fn value_to_display_string(v: RuntimeValue) -> String {
     if v.is_nil() {

@@ -5,6 +5,7 @@
 
 use simple_parser::{self as ast, Expr};
 
+use crate::hir::lower::context::FunctionContext;
 use crate::hir::lower::error::{LowerError, LowerResult};
 use crate::hir::lower::lowerer::Lowerer;
 use crate::hir::types::*;
@@ -115,36 +116,104 @@ impl Lowerer {
 
     /// Lower an FString (formatted string) to HIR
     ///
-    /// Currently only supports FStrings without interpolation (plain literals).
-    /// FStrings with interpolation expressions are not yet supported in native compilation.
+    /// Handles both plain string literals and strings with interpolation.
+    /// For interpolation, generates calls to rt_value_to_string and rt_string_concat.
     ///
     /// The `type_meta` contains compile-time metadata including const_keys extracted
     /// from placeholders. This will be used for compile-time key validation in future.
-    pub(super) fn lower_fstring(&self, parts: &[ast::FStringPart], _type_meta: &ast::TypeMeta) -> LowerResult<HirExpr> {
+    pub(super) fn lower_fstring(
+        &mut self,
+        parts: &[ast::FStringPart],
+        _type_meta: &ast::TypeMeta,
+        ctx: &mut FunctionContext,
+    ) -> LowerResult<HirExpr> {
         // Check if the FString is a simple literal (no interpolation)
         // If so, convert it to a plain string
-        let mut result = String::new();
         let mut all_literal = true;
+        for part in parts {
+            if let ast::FStringPart::Expr(_) = part {
+                all_literal = false;
+                break;
+            }
+        }
+
+        if all_literal {
+            // Simple case: just concatenate all literal parts
+            let mut result = String::new();
+            for part in parts {
+                if let ast::FStringPart::Literal(s) = part {
+                    result.push_str(s);
+                }
+            }
+            return Ok(HirExpr {
+                kind: HirExprKind::String(result),
+                ty: TypeId::STRING,
+            });
+        }
+
+        // Complex case: interpolation needed
+        // Build up the string by concatenating parts
+        let mut string_parts: Vec<HirExpr> = Vec::new();
+
         for part in parts {
             match part {
                 ast::FStringPart::Literal(s) => {
-                    result.push_str(s);
+                    if !s.is_empty() {
+                        string_parts.push(HirExpr {
+                            kind: HirExprKind::String(s.clone()),
+                            ty: TypeId::STRING,
+                        });
+                    }
                 }
-                ast::FStringPart::Expr(_) => {
-                    all_literal = false;
-                    break;
+                ast::FStringPart::Expr(e) => {
+                    // Lower the expression
+                    let expr_hir = self.lower_expr(e, ctx)?;
+
+                    // If it's already a string, use it directly; otherwise convert
+                    let string_expr = if expr_hir.ty == TypeId::STRING
+                        || matches!(self.module.types.get(expr_hir.ty), Some(HirType::String))
+                    {
+                        expr_hir
+                    } else {
+                        // Convert to string using rt_value_to_string
+                        HirExpr {
+                            kind: HirExprKind::BuiltinCall {
+                                name: "rt_value_to_string".to_string(),
+                                args: vec![expr_hir],
+                            },
+                            ty: TypeId::STRING,
+                        }
+                    };
+                    string_parts.push(string_expr);
                 }
             }
         }
-        if all_literal {
-            Ok(HirExpr {
-                kind: HirExprKind::String(result),
-                ty: TypeId::STRING,
-            })
-        } else {
-            Err(LowerError::Unsupported(
-                "FString with interpolation not yet supported in native compilation".to_string(),
-            ))
+
+        // If only one part, return it directly
+        if string_parts.len() == 1 {
+            return Ok(string_parts.into_iter().next().unwrap());
         }
+
+        // If no parts, return empty string
+        if string_parts.is_empty() {
+            return Ok(HirExpr {
+                kind: HirExprKind::String(String::new()),
+                ty: TypeId::STRING,
+            });
+        }
+
+        // Concatenate all parts using rt_string_concat
+        // Build a chain: concat(concat(concat(a, b), c), d)
+        let mut result = string_parts.into_iter();
+        let first = result.next().unwrap();
+        let concatenated = result.fold(first, |acc, part| HirExpr {
+            kind: HirExprKind::BuiltinCall {
+                name: "rt_string_concat".to_string(),
+                args: vec![acc, part],
+            },
+            ty: TypeId::STRING,
+        });
+
+        Ok(concatenated)
     }
 }
