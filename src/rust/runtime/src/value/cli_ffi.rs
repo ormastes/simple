@@ -230,6 +230,18 @@ pub extern "C" fn rt_cli_run_i18n(_args: RuntimeValue) -> i64 {
 }
 
 #[no_mangle]
+pub extern "C" fn rt_context_generate(_path: RuntimeValue, _target: RuntimeValue, _format: RuntimeValue) -> RuntimeValue {
+    eprintln!("error: rt_context_generate is not available in standalone mode");
+    rt_string_new("".as_ptr(), 0)
+}
+
+#[no_mangle]
+pub extern "C" fn rt_context_stats(_path: RuntimeValue, _target: RuntimeValue) -> RuntimeValue {
+    eprintln!("error: rt_context_stats is not available in standalone mode");
+    rt_string_new("".as_ptr(), 0)
+}
+
+#[no_mangle]
 pub extern "C" fn rt_cli_handle_compile(_args: RuntimeValue) -> i64 {
     not_implemented("rt_cli_handle_compile")
 }

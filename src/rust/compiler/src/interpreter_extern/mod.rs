@@ -592,6 +592,10 @@ pub(crate) fn call_extern_function(
         // i18n
         "rt_cli_run_i18n" => cli::rt_cli_run_i18n(&evaluated),
 
+        // Context pack generation
+        "rt_context_generate" => cli::rt_context_generate(&evaluated),
+        "rt_context_stats" => cli::rt_context_stats(&evaluated),
+
         // Compilation
         "rt_cli_handle_compile" => cli::rt_cli_handle_compile(&evaluated),
         "rt_cli_handle_targets" => cli::rt_cli_handle_targets(&evaluated),

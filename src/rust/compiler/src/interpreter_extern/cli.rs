@@ -213,6 +213,16 @@ pub fn rt_cli_run_i18n(_args: &[Value]) -> Result<Value, CompileError> {
     interpreter_not_supported("rt_cli_run_i18n")
 }
 
+/// Generate context pack
+pub fn rt_context_generate(_args: &[Value]) -> Result<Value, CompileError> {
+    interpreter_not_supported("rt_context_generate")
+}
+
+/// Get context statistics
+pub fn rt_context_stats(_args: &[Value]) -> Result<Value, CompileError> {
+    interpreter_not_supported("rt_context_stats")
+}
+
 /// Handle compile command
 pub fn rt_cli_handle_compile(_args: &[Value]) -> Result<Value, CompileError> {
     interpreter_not_supported("rt_cli_handle_compile")
