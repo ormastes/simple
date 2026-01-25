@@ -3,8 +3,9 @@
 # Discovers test files for Simple, SDoctest, and Rust tests.
 
 use types
-use shell.{shell, file}
 
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_process_run(cmd: text, args: List<text>) -> (text, text, i32)
 extern fn rt_dir_walk(path: text) -> List<text>
 
 # Discovered test info
@@ -30,14 +31,14 @@ fn discover_simple_tests(pattern: Option<text>) -> List<DiscoveredTest>:
     var tests: List<DiscoveredTest> = []
 
     # Walk test directory and find *_spec.spl and *_test.spl files
-    if file.exist("test"):
+    if rt_file_exists("test"):
         val all_files = rt_dir_walk("test")
         for path in all_files:
             if (path.ends_with("_spec.spl") or path.ends_with("_test.spl")) and matches_pattern(path, pattern):
                 tests.push(make_simple_test(path))
 
     # Also check src/lib/std/test
-    if file.exist("src/lib/std/test"):
+    if rt_file_exists("src/lib/std/test"):
         val std_files = rt_dir_walk("src/lib/std/test")
         for path in std_files:
             if (path.ends_with("_spec.spl") or path.ends_with("_test.spl")) and matches_pattern(path, pattern):
@@ -50,14 +51,14 @@ fn discover_sdoctest_tests(pattern: Option<text>) -> List<DiscoveredTest>:
     var tests: List<DiscoveredTest> = []
 
     # Walk test directory and find *.sdt files
-    if file.exist("test"):
+    if rt_file_exists("test"):
         val all_files = rt_dir_walk("test")
         for path in all_files:
             if path.ends_with(".sdt") and matches_pattern(path, pattern):
                 tests.push(make_sdoctest_test(path))
 
     # Also check doc directory
-    if file.exist("doc"):
+    if rt_file_exists("doc"):
         val doc_files = rt_dir_walk("doc")
         for path in doc_files:
             if path.ends_with(".sdt") and matches_pattern(path, pattern):
@@ -70,15 +71,15 @@ fn discover_rust_tests(pattern: Option<text>) -> List<DiscoveredTest>:
     var tests: List<DiscoveredTest> = []
 
     # Use cargo test --list to get test names
-    val result = shell.run("cargo", ["test", "--workspace", "--", "--list"])
+    val (stdout, stderr, exit_code) = rt_process_run("cargo", ["test", "--workspace", "--", "--list"])
 
-    if result.exit_code != 0:
-        print("Warning: Failed to list Rust tests: {result.stderr}")
+    if exit_code != 0:
+        print("Warning: Failed to list Rust tests: {stderr}")
         return tests
 
     # Parse test names from output
     # Format: "test_name: test"
-    for line in result.stdout.split("\n"):
+    for line in stdout.split("\n"):
         val line_trimmed = line.trim()
         if line_trimmed.ends_with(": test"):
             val test_name = line_trimmed.slice(0, line_trimmed.len() - 6)

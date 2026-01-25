@@ -4,7 +4,9 @@
 
 use types
 use discovery
-use shell.{shell, file}
+
+extern fn rt_process_run(cmd: text, args: List<text>) -> (text, text, i32)
+extern fn rt_file_exists(path: text) -> bool
 
 # Timer for measuring elapsed time
 extern fn _current_time_unix() -> i64
@@ -59,37 +61,31 @@ fn run_test(test: discovery.DiscoveredTest, timeout_seconds: i32) -> types.TestR
 # Run Simple test file
 fn run_simple_test(path: text, timeout_seconds: i32) -> (text, text, i32):
     # Check if the simple binary exists
-    val simple_binary = if file.exist("./target/debug/simple"):
-        "./target/debug/simple"
-    elif file.exist("./target/release/simple"):
-        "./target/release/simple"
-    else:
-        # Try system simple
-        "simple"
+    var simple_binary = "simple"
+    if rt_file_exists("./target/debug/simple"):
+        simple_binary = "./target/debug/simple"
+    elif rt_file_exists("./target/release/simple"):
+        simple_binary = "./target/release/simple"
 
     # Run with timeout
     val args = [timeout_seconds.to_string() + "s", simple_binary, "test", path, "--sequential"]
-    val result = shell.run("timeout", args)
-    (result.stdout, result.stderr, result.exit_code as i32)
+    rt_process_run("timeout", args)
 
 # Run SDoctest file
 fn run_sdoctest_test(path: text, timeout_seconds: i32) -> (text, text, i32):
-    val simple_binary = if file.exist("./target/debug/simple"):
-        "./target/debug/simple"
-    elif file.exist("./target/release/simple"):
-        "./target/release/simple"
-    else:
-        "simple"
+    var simple_binary = "simple"
+    if rt_file_exists("./target/debug/simple"):
+        simple_binary = "./target/debug/simple"
+    elif rt_file_exists("./target/release/simple"):
+        simple_binary = "./target/release/simple"
 
     val args = [timeout_seconds.to_string() + "s", simple_binary, "doctest", path]
-    val result = shell.run("timeout", args)
-    (result.stdout, result.stderr, result.exit_code as i32)
+    rt_process_run("timeout", args)
 
 # Run Rust test
 fn run_rust_test(test_name: text, timeout_seconds: i32) -> (text, text, i32):
     val args = [timeout_seconds.to_string() + "s", "cargo", "test", "--", test_name, "--exact", "--nocapture"]
-    val result = shell.run("timeout", args)
-    (result.stdout, result.stderr, result.exit_code as i32)
+    rt_process_run("timeout", args)
 
 # Format test result for display
 fn format_test_result(result: types.TestRunResult, verbose: bool) -> text:
@@ -100,10 +96,9 @@ fn format_test_result(result: types.TestRunResult, verbose: bool) -> text:
         case _: "?"
 
     if verbose:
-        val memory_change = if result.diff_kb >= 0:
-            "+{result.diff_kb}"
-        else:
-            "{result.diff_kb}"
+        var memory_change = "{result.diff_kb}"
+        if result.diff_kb >= 0:
+            memory_change = "+{result.diff_kb}"
         "[{status_icon}] {result.test_file} ({result.duration_ms}ms, mem: {memory_change} KB)"
     else:
         "[{status_icon}] {result.test_file}"
