@@ -18,6 +18,7 @@ For detailed guidance, invoke with `/skill-name`:
 | `stdlib` | Writing stdlib modules, variants, capabilities |
 | `todo` | TODO/FIXME comment format |
 | `doc` | Documentation writing: specs (SSpec), research, design, guides |
+| `deeplearning` | **Deep learning**: Pipeline operators, dimension checking, NN layers |
 
 Skills located in `.claude/skills/`.
 
@@ -326,6 +327,52 @@ See `/coding` skill for full details.
 - ✅ **Prefer `.?` over `is_*` predicates**: `opt.?` instead of `opt.is_some()`
 - 📖 **Design Decision**: See `doc/design/question_mark_design_decision.md`
 - 📖 **Refactoring Guide**: See `doc/research/exists_check_refactoring.md`
+
+### Caret Operator (`^`) and Math Blocks
+- ✅ **Inside `m{}` blocks**: `^` is power operator (e.g., `m{ x^2 + y^2 }`)
+- ❌ **Outside `m{}` blocks**: `^` produces lexer error
+- ✅ **For exponentiation outside m{}**: Use `**` (e.g., `2 ** 3` for 2³)
+- ✅ **For XOR**: Use `xor` keyword (e.g., `5 xor 3` for bitwise XOR)
+
+### Math Language Features
+- ✅ **`xor` keyword**: Bitwise XOR operator (e.g., `5 xor 3` → 6)
+- ✅ **`@` operator**: Matrix multiplication (e.g., `A @ B`)
+- ✅ **Dotted operators**: Element-wise broadcasting
+  - `.+` broadcast add, `.-` broadcast sub
+  - `.*` broadcast mul, `./` broadcast div
+  - `.^` broadcast power
+- ✅ **`m{}` math blocks**: Enable `^` as power operator
+  ```simple
+  # Normal code uses **
+  val result = x ** 2
+
+  # Math blocks use ^ for power
+  val formula = m{ x^2 + 2*x*y + y^2 }
+  ```
+
+### Pipeline Operators
+- ✅ **`|>` pipe forward**: Pass value to function (`x |> f` = `f(x)`)
+- ✅ **`>>` compose**: Forward composition (`f >> g` = `λx. g(f(x))`)
+- ✅ **`<<` compose back**: Backward composition (`f << g` = `λx. f(g(x))`)
+- ✅ **`//` parallel**: Run operations in parallel
+- ✅ **`~>` layer connect**: NN layer pipeline with **dimension checking**
+  ```simple
+  # Data processing pipeline
+  val result = data |> normalize |> transform |> predict
+
+  # Function composition
+  val preprocess = normalize >> augment >> to_tensor
+
+  # Neural network with compile-time dimension checking
+  val model = Linear(784, 256) ~> ReLU() ~> Linear(256, 10)
+  # Type: Layer<[batch, 784], [batch, 10]>
+
+  # Compile-time error on dimension mismatch:
+  val bad = Linear(784, 256) ~> Linear(128, 64)
+  # ERROR[E0502]: output [batch, 256] != input [batch, 128]
+  ```
+- 📖 **Design**: See `doc/design/pipeline_operators_design.md`
+- 📖 **Error Guide**: See `doc/guide/dimension_errors_guide.md`
 
 ### TODO Comments
 - ❌ **NEVER remove TODO markers** unless the feature is fully implemented and working

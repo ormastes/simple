@@ -27,7 +27,20 @@ struct OutlineModule:
     impls: [ImplOutline]
     type_aliases: [TypeAliasOutline]
     constants: [ConstOutline]
+    inline_blocks: [BlockOutline]  # Blocks found in expressions (m{}, loss{}, sh{}, etc.)
     errors: [ParseError]
+
+struct BlockOutline:
+    """Outline for a block expression (m{}, loss{}, sh{}, sql{}, etc.)
+
+    Captures the block without parsing its payload.
+    Used for custom block resolution phase.
+    """
+    kind: text              # Block keyword (e.g., "m", "loss", "sh", "sql")
+    payload: text           # Raw payload text between braces
+    payload_span: Span      # Span of payload for error mapping
+    span: Span              # Full span including keyword and braces
+    parent_context: text?   # Optional: function/method where block appears
 
 struct ImportOutline:
     """Import declaration outline."""
@@ -186,6 +199,8 @@ struct TreeSitter:
     previous: Token
     errors: [ParseError]
     doc_comment: text?      # Accumulated doc comment
+    inline_blocks: [BlockOutline]  # Blocks found while skipping expressions
+    current_context: text?  # Current function/method name for block context
 
 impl TreeSitter:
     static fn new(source: text) -> TreeSitter:
@@ -194,7 +209,9 @@ impl TreeSitter:
             current: Token.eof(0, 1),
             previous: Token.eof(0, 1),
             errors: [],
-            doc_comment: None
+            doc_comment: None,
+            inline_blocks: [],
+            current_context: None
         )
         ts.advance()  # Prime the parser
         ts
@@ -217,6 +234,7 @@ impl TreeSitter:
             impls: [],
             type_aliases: [],
             constants: [],
+            inline_blocks: [],
             errors: []
         )
 
@@ -250,6 +268,7 @@ impl TreeSitter:
                 case TopLevelItem.Error(e):
                     module.errors = module.errors.push(e)
 
+        module.inline_blocks = self.inline_blocks
         module.errors = self.errors
         module
 
@@ -547,9 +566,16 @@ impl TreeSitter:
         self.expect(TokenKind.Colon, "expected ':' before function body")
         self.skip_newlines()
 
+        # Set context for block tracking
+        val prev_context = self.current_context
+        self.current_context = Some(name)
+
         val body_start = self.current.span.start
         self.skip_block()
         val body_end = self.previous.span.end
+
+        # Restore previous context
+        self.current_context = prev_context
 
         FunctionOutline(
             name: name,
@@ -1163,6 +1189,10 @@ impl TreeSitter:
                 case Dedent:
                     depth = depth - 1
                     self.advance()
+                case BlockStart:
+                    # Custom block found - capture it
+                    val block = self.parse_block_outline()
+                    self.inline_blocks = self.inline_blocks.push(block)
                 case _:
                     self.advance()
 
@@ -1198,6 +1228,19 @@ impl TreeSitter:
                         return
                     brace_depth = brace_depth - 1
                     self.advance()
+                case BlockStart:
+                    # Custom block found - capture it
+                    val block = self.parse_block_outline()
+                    self.inline_blocks = self.inline_blocks.push(block)
+                case BlockPayload:
+                    # Raw block payload (should be inside parse_block_outline)
+                    self.advance()
+                case BlockEnd:
+                    # Block end (should be handled by parse_block_outline)
+                    if brace_depth == 0:
+                        return
+                    brace_depth = brace_depth - 1
+                    self.advance()
                 case Comma:
                     if paren_depth == 0 and bracket_depth == 0 and brace_depth == 0:
                         return
@@ -1219,6 +1262,118 @@ impl TreeSitter:
             self.advance()
         if self.check(TokenKind.Newline):
             self.advance()
+
+    # ========================================================================
+    # Block Outline Capture
+    # ========================================================================
+
+    me parse_block_outline() -> BlockOutline:
+        """Capture block outline without parsing payload.
+
+        Called when a BlockStart token is encountered.
+        Captures the raw payload text for later resolution.
+        """
+        val start = self.current.span
+        val kind = self.current.text
+        self.advance()  # Consume BlockStart
+
+        # Expect opening brace
+        if not self.match_token(TokenKind.LBrace):
+            self.error("expected '{' after block keyword '{kind}'")
+            return BlockOutline(
+                kind: kind,
+                payload: "",
+                payload_span: start,
+                span: start,
+                parent_context: self.current_context
+            )
+
+        # Record payload start
+        val payload_start = self.current.span.start
+        val payload_line = self.current.span.line
+        val payload_col = self.current.span.col
+
+        # Check for BlockPayload token (raw mode blocks)
+        if self.check(TokenKind.BlockPayload):
+            val payload = self.current.text
+            val payload_span = self.current.span
+            self.advance()  # Consume BlockPayload
+
+            # Expect BlockEnd or RBrace
+            if self.check(TokenKind.BlockEnd):
+                self.advance()
+            elif self.check(TokenKind.RBrace):
+                self.advance()
+            else:
+                self.error("expected '}' after block payload")
+
+            return BlockOutline(
+                kind: kind,
+                payload: payload,
+                payload_span: payload_span,
+                span: start.merge(self.previous.span),
+                parent_context: self.current_context
+            )
+
+        # For normal blocks, capture content by skipping
+        val payload = self.skip_block_content()
+        val payload_end = self.previous.span.end
+        val payload_span = Span.new(payload_start, payload_end, payload_line, payload_col)
+
+        # Expect closing brace
+        if self.check(TokenKind.BlockEnd):
+            self.advance()
+        elif self.check(TokenKind.RBrace):
+            self.advance()
+        else:
+            self.error("expected '}' after block content")
+
+        BlockOutline(
+            kind: kind,
+            payload: payload,
+            payload_span: payload_span,
+            span: start.merge(self.previous.span),
+            parent_context: self.current_context
+        )
+
+    me skip_block_content() -> text:
+        """Skip block content and return the raw payload text.
+
+        Tracks brace depth to handle nested blocks/braces.
+        Returns the captured text.
+        """
+        val start_pos = self.current.span.start
+        var brace_depth = 1
+
+        while brace_depth > 0 and not self.is_at_end():
+            match self.peek():
+                case LBrace:
+                    brace_depth = brace_depth + 1
+                    self.advance()
+                case RBrace:
+                    brace_depth = brace_depth - 1
+                    if brace_depth > 0:
+                        self.advance()
+                    # Don't consume final }
+                case BlockEnd:
+                    brace_depth = brace_depth - 1
+                    if brace_depth > 0:
+                        self.advance()
+                    # Don't consume final BlockEnd
+                case BlockStart:
+                    # Nested block - capture it
+                    val nested = self.parse_block_outline()
+                    self.inline_blocks = self.inline_blocks.push(nested)
+                case _:
+                    self.advance()
+
+        val end_pos = self.previous.span.end
+        # Return the raw source text for the payload
+        self.lexer.source[start_pos:end_pos]
+
+    me set_context(name: text?):
+        """Set the current context for block parent tracking."""
+        self.current_context = name
 
 # ============================================================================
 # Helper Types
@@ -1242,7 +1397,7 @@ enum TopLevelItem:
 # Exports
 # ============================================================================
 
-export OutlineModule, ImportOutline, ExportOutline
+export OutlineModule, ImportOutline, ExportOutline, BlockOutline
 export FunctionOutline, ParamOutline, ClassOutline, StructOutline, FieldOutline
 export EnumOutline, VariantOutline, VariantPayload
 export TraitOutline, ImplOutline, TypeAliasOutline, ConstOutline

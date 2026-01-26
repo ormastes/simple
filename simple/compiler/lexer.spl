@@ -3,6 +3,8 @@
 # Converts source text into a stream of tokens.
 # Handles indentation-based syntax (Python-style).
 
+import .blocks.{BlockRegistry, block_registry, LexerMode, LexerConfig}
+
 # ============================================================================
 # Token Types
 # ============================================================================
@@ -58,6 +60,7 @@ enum TokenKind:
     KwNot           # not
     KwAnd           # and
     KwOr            # or
+    KwXor           # xor (bitwise XOR)
     KwTry           # try
     KwCatch         # catch
     KwThrow         # throw
@@ -75,6 +78,8 @@ enum TokenKind:
     KwSome          # Some
     KwOk            # Ok
     KwErr           # Err
+    KwLoss          # loss (enters math mode)
+    KwNograd        # nograd (enters math mode)
 
     # Operators - Arithmetic
     Plus            # +
@@ -118,6 +123,14 @@ enum TokenKind:
     Hash            # #
     Dollar          # $
     Backslash       # \
+    Transpose       # ' (postfix transpose in m{} only)
+
+    # Pipeline/Composition Operators
+    PipeForward     # |>
+    Compose         # >>
+    ComposeBack     # <<
+    Parallel        # //
+    LayerConnect    # ~>
 
     # Delimiters
     LParen          # (
@@ -135,6 +148,12 @@ enum TokenKind:
     Dot             # .
     DotDot          # ..
     DotDotEq        # ..=
+    DotPlus         # .+ (broadcast add)
+    DotMinus        # .- (broadcast sub)
+    DotStar         # .* (broadcast mul)
+    DotSlash        # ./ (broadcast div)
+    DotCaret        # .^ (broadcast pow)
+    Ellipsis        # ... (axis slicing)
     Arrow           # ->
     FatArrow        # =>
     Underscore      # _
@@ -147,6 +166,13 @@ enum TokenKind:
     # Special
     Eof             # End of file
     Error           # Lexer error
+    ImplicitMul     # Implicit multiplication (m{} only, e.g., 2x, Ax)
+    ArraySuffix     # Suffix after ]: ]f32, ]_f32_gpu, ]f32_tr_gpu
+
+    # Block Tokens (for user-definable blocks)
+    BlockStart      # Block keyword detected (e.g., "m", "loss", "sh", "sql")
+    BlockPayload    # Raw payload text (for Raw mode blocks)
+    BlockEnd        # Closing brace of block
 
 struct Span:
     """Source location span."""
@@ -196,9 +222,10 @@ impl Token:
                | KwImpl | KwType | KwMod | KwPub | KwStatic | KwMe | KwExtern
                | KwIf | KwElse | KwElif | KwMatch | KwCase | KwFor | KwWhile
                | KwLoop | KwBreak | KwContinue | KwReturn | KwYield | KwAwait
-               | KwAsync | KwIn | KwIs | KwAs | KwNot | KwAnd | KwOr | KwTry
-               | KwCatch | KwThrow | KwWith | KwImport | KwExport | KwFrom
-               | KwSelf | KwSuper | KwNone | KwSome | KwOk | KwErr:
+               | KwAsync | KwIn | KwIs | KwAs | KwNot | KwAnd | KwOr | KwXor
+               | KwTry | KwCatch | KwThrow | KwWith | KwImport | KwExport | KwFrom
+               | KwSelf | KwSuper | KwNone | KwSome | KwOk | KwErr
+               | KwLoss | KwNograd:
                 true
             case _:
                 false
@@ -236,6 +263,19 @@ struct Lexer:
     pending_dedents: i64 # Number of dedents to emit
     at_line_start: bool # Are we at the start of a line?
     paren_depth: i64    # Nested parentheses depth (suppress newlines inside)
+    in_math_block: bool # Inside m{} math block (enables ^ as power)
+    math_brace_depth: i64 # Brace depth within math block
+    prev_token_kind: TokenKind  # Previous token kind (for implicit mul)
+    pending_token: Token?       # Token to emit after ImplicitMul
+    generic_depth: i64  # Track <> nesting for >> disambiguation
+
+    # Block system fields
+    block_registry: BlockRegistry  # Registry of block definitions
+    current_block_kind: text?      # Kind of current block (e.g., "m", "loss", "sh")
+    current_lexer_mode: LexerMode  # Current lexer mode (Normal, Math, Raw, Custom)
+    in_raw_block: bool             # Inside a raw-mode block (sh{}, sql{})
+    raw_block_start: i64           # Start position of raw block payload
+    block_brace_depth: i64         # Brace depth tracking for blocks
 
 impl Lexer:
     static fn new(source: text) -> Lexer:
@@ -247,15 +287,110 @@ impl Lexer:
             indent_stack: [0],  # Start with zero indentation
             pending_dedents: 0,
             at_line_start: true,
-            paren_depth: 0
+            paren_depth: 0,
+            in_math_block: false,
+            math_brace_depth: 0,
+            prev_token_kind: TokenKind.Eof,
+            pending_token: None,
+            generic_depth: 0,
+            # Block system initialization
+            block_registry: block_registry(),  # Use global registry
+            current_block_kind: None,
+            current_lexer_mode: LexerMode.Normal,
+            in_raw_block: false,
+            raw_block_start: 0,
+            block_brace_depth: 0
         )
+
+    static fn with_registry(source: text, registry: BlockRegistry) -> Lexer:
+        """Create lexer with a custom block registry."""
+        Lexer(
+            source: source,
+            pos: 0,
+            line: 1,
+            col: 1,
+            indent_stack: [0],
+            pending_dedents: 0,
+            at_line_start: true,
+            paren_depth: 0,
+            in_math_block: false,
+            math_brace_depth: 0,
+            prev_token_kind: TokenKind.Eof,
+            pending_token: None,
+            generic_depth: 0,
+            block_registry: registry,
+            current_block_kind: None,
+            current_lexer_mode: LexerMode.Normal,
+            in_raw_block: false,
+            raw_block_start: 0,
+            block_brace_depth: 0
+        )
+
+    # ========================================================================
+    # Implicit Multiplication (m{} only)
+    # ========================================================================
+
+    me maybe_insert_implicit_mul(token: Token) -> Token:
+        """Check if implicit multiplication is needed before this token.
+
+        In math mode only, insert implicit mul for patterns like:
+        - 2x     (number followed by identifier)
+        - 2(x)   (number followed by lparen)
+        - (a)(b) (rparen followed by lparen)
+        - (a)x   (rparen followed by identifier)
+        """
+        if not self.in_math_block:
+            self.prev_token_kind = token.kind
+            return token
+
+        val needs_implicit_mul = match (self.prev_token_kind, token.kind):
+            # number followed by identifier: 2x
+            case (IntLit, Ident) | (FloatLit, Ident): true
+            # number followed by lparen: 2(x+1)
+            case (IntLit, LParen) | (FloatLit, LParen): true
+            # rparen followed by identifier: (x+1)y
+            case (RParen, Ident): true
+            # rparen followed by lparen: (a)(b)
+            case (RParen, LParen): true
+            # identifier followed by lparen could be function call, skip
+            case _: false
+
+        if needs_implicit_mul:
+            # Store current token, return ImplicitMul
+            self.pending_token = Some(token)
+            val mul_token = Token.new(
+                TokenKind.ImplicitMul,
+                Span.new(token.span.start, token.span.start, token.span.line, token.span.col),
+                ""
+            )
+            self.prev_token_kind = TokenKind.ImplicitMul
+            return mul_token
+        else:
+            self.prev_token_kind = token.kind
+            return token
 
     # ========================================================================
     # Main Tokenization
     # ========================================================================
 
     me next_token() -> Token:
-        """Get the next token from the source."""
+        """Get the next token from the source, with implicit multiplication."""
+
+        # Return pending token if we inserted ImplicitMul
+        if self.pending_token.?:
+            val token = self.pending_token.unwrap()
+            self.pending_token = None
+            self.prev_token_kind = token.kind
+            return token
+
+        # Get the actual token
+        val token = self.scan_token()
+
+        # Check for implicit multiplication
+        return self.maybe_insert_implicit_mul(token)
+
+    me scan_token() -> Token:
+        """Scan the next token (internal, without implicit mul check)."""
 
         # Emit pending dedents first
         if self.pending_dedents > 0:
@@ -265,6 +400,13 @@ impl Lexer:
                 Span.new(self.pos, self.pos, self.line, self.col),
                 ""
             )
+
+        # Handle raw mode block payload
+        # After entering a raw block and seeing {, scan the entire payload
+        if self.in_raw_block and self.block_brace_depth == 1 and self.raw_block_start == -1:
+            # We're inside a raw block after {, scan payload
+            self.raw_block_start = 0  # Reset to prevent re-scanning
+            return self.scan_raw_block_payload()
 
         # Handle indentation at line start
         if self.at_line_start:
@@ -292,9 +434,20 @@ impl Lexer:
             case '#':
                 return self.scan_comment()
 
-            # String literals
-            case '"' | '\'':
+            # String literals (and transpose in math mode)
+            case '"':
                 return self.scan_string()
+            case '\'':
+                if self.in_math_block:
+                    # In math mode, single quote is transpose operator
+                    self.advance()
+                    return Token.new(
+                        TokenKind.Transpose,
+                        Span.new(start, self.pos, line, col),
+                        "'"
+                    )
+                else:
+                    return self.scan_string()
 
             # Numbers
             case '0' | '1' | '2' | '3' | '4' | '5' | '6' | '7' | '8' | '9':
@@ -669,7 +822,12 @@ impl Lexer:
             self.advance()  # Consume 'r'
             return self.scan_string()
 
-        # Consume identifier characters
+        # Try to detect a registered block: kind{
+        val block_result = self.try_scan_block_start(start, line, col)
+        if block_result.?:
+            return block_result.unwrap()
+
+        # Regular identifier scanning
         while not self.is_at_end():
             val c = self.peek()
             if is_ident_char(c):
@@ -681,6 +839,141 @@ impl Lexer:
         val kind = keyword_kind(text)
 
         Token.new(kind, Span.new(start, self.pos, line, col), text)
+
+    me try_scan_block_start(start: i64, line: i64, col: i64) -> Token?:
+        """Try to detect and handle a registered block keyword followed by {.
+
+        Returns Some(Token) if a block was detected, None otherwise.
+        Uses the block registry to determine lexer mode.
+        """
+        # Peek ahead to find the identifier
+        var peek_pos = self.pos
+        while peek_pos < self.source.len():
+            val c = self.source[peek_pos]
+            if is_ident_char(c):
+                peek_pos = peek_pos + 1
+            else:
+                break
+
+        if peek_pos == self.pos:
+            return None  # No identifier found
+
+        val ident = self.source[self.pos:peek_pos]
+
+        # Check if followed by {
+        if peek_pos >= self.source.len() or self.source[peek_pos] != '{':
+            return None  # Not a block
+
+        # Check if this identifier is a registered block
+        val block_def = self.block_registry.lookup(ident)
+        if not block_def.?:
+            return None  # Not a registered block
+
+        # It's a registered block! Consume the identifier
+        while self.pos < peek_pos:
+            self.advance()
+
+        val def = block_def.unwrap()
+        val mode = def.lexer_mode()
+
+        # Enter block mode
+        self.current_block_kind = Some(ident)
+        self.current_lexer_mode = mode
+        self.block_brace_depth = 0
+
+        # Apply lexer mode
+        match mode:
+            case LexerMode.Math:
+                self.in_math_block = true
+                self.math_brace_depth = 0
+            case LexerMode.Raw:
+                self.in_raw_block = true
+                self.raw_block_start = 0  # Will be set when { is consumed
+            case LexerMode.Normal:
+                pass  # Normal mode, no special handling
+            case LexerMode.Custom(config):
+                # Apply custom config
+                if config.enable_power_caret or config.enable_transpose:
+                    self.in_math_block = true
+                    self.math_brace_depth = 0
+
+        # Return BlockStart token with the block kind
+        Some(Token.new(TokenKind.BlockStart, Span.new(start, self.pos, line, col), ident))
+
+    # ========================================================================
+    # Block Mode Methods
+    # ========================================================================
+
+    me scan_raw_block_payload() -> Token:
+        """Scan a raw block payload (everything between { and matching }).
+
+        Used for Raw mode blocks like sh{}, sql{} where the content
+        should not be tokenized.
+        """
+        val start = self.pos
+        val line = self.line
+        val col = self.col
+        var brace_depth = 1
+
+        while not self.is_at_end() and brace_depth > 0:
+            val c = self.peek()
+            if c == '{':
+                brace_depth = brace_depth + 1
+            elif c == '}':
+                brace_depth = brace_depth - 1
+                if brace_depth == 0:
+                    break  # Don't consume the closing brace
+            self.advance()
+
+        val payload = self.source[start:self.pos]
+        Token.new(TokenKind.BlockPayload, Span.new(start, self.pos, line, col), payload)
+
+    fn is_in_block() -> bool:
+        """Check if currently inside a block."""
+        self.current_block_kind.?
+
+    fn current_block() -> text?:
+        """Get the current block kind, if any."""
+        self.current_block_kind
+
+    fn is_math_mode() -> bool:
+        """Check if in math mode (^, ' operators enabled)."""
+        self.in_math_block
+
+    fn is_raw_mode() -> bool:
+        """Check if in raw mode (no tokenization)."""
+        self.in_raw_block
+
+    me enter_block(kind: text, mode: LexerMode):
+        """Enter a block with the specified mode.
+
+        Used by the parser to manually enter block mode.
+        """
+        self.current_block_kind = Some(kind)
+        self.current_lexer_mode = mode
+        self.block_brace_depth = 0
+
+        match mode:
+            case LexerMode.Math:
+                self.in_math_block = true
+                self.math_brace_depth = 0
+            case LexerMode.Raw:
+                self.in_raw_block = true
+            case LexerMode.Normal:
+                pass
+            case LexerMode.Custom(config):
+                if config.enable_power_caret or config.enable_transpose:
+                    self.in_math_block = true
+                    self.math_brace_depth = 0
+
+    me exit_block():
+        """Exit the current block and reset to normal mode."""
+        self.current_block_kind = None
+        self.current_lexer_mode = LexerMode.Normal
+        self.in_math_block = false
+        self.math_brace_depth = 0
+        self.in_raw_block = false
+        self.block_brace_depth = 0
 
     # ========================================================================
     # Operators and Delimiters
@@ -720,7 +1013,10 @@ impl Lexer:
                 else:
                     TokenKind.Star
             case '/':
-                if self.peek() == '=':
+                if self.peek() == '/':
+                    self.advance()
+                    TokenKind.Parallel
+                elif self.peek() == '=':
                     self.advance()
                     TokenKind.SlashEq
                 else:
@@ -747,16 +1043,28 @@ impl Lexer:
                 else:
                     TokenKind.Bang
             case '<':
-                if self.peek() == '=':
+                if self.peek() == '<':
+                    self.advance()
+                    TokenKind.ComposeBack
+                elif self.peek() == '=':
                     self.advance()
                     TokenKind.LtEq
                 else:
+                    # Track generic depth: < after Ident likely opens a generic
+                    if self.prev_token_kind == TokenKind.Ident:
+                        self.generic_depth = self.generic_depth + 1
                     TokenKind.Lt
             case '>':
-                if self.peek() == '=':
+                if self.peek() == '>' and self.generic_depth == 0:
+                    self.advance()
+                    TokenKind.Compose
+                elif self.peek() == '=':
                     self.advance()
                     TokenKind.GtEq
                 else:
+                    # Track generic depth: > closes a generic
+                    if self.generic_depth > 0:
+                        self.generic_depth = self.generic_depth - 1
                     TokenKind.Gt
             case '&':
                 if self.peek() == '&':
@@ -765,15 +1073,31 @@ impl Lexer:
                 else:
                     TokenKind.Ampersand
             case '|':
-                if self.peek() == '|':
+                if self.peek() == '>':
+                    self.advance()
+                    TokenKind.PipeForward
+                elif self.peek() == '|':
                     self.advance()
                     TokenKind.PipePipe
                 else:
                     TokenKind.Pipe
             case '^':
-                TokenKind.Caret
+                if self.in_math_block:
+                    # Inside m{} block, ^ is power operator
+                    TokenKind.Caret
+                else:
+                    # Outside m{} block, ^ returns error
+                    return Token.new(
+                        TokenKind.Error,
+                        Span.new(start, self.pos, line, col),
+                        "'^' only valid inside m{} math blocks (use '**' for power, 'xor' for bitwise XOR)"
+                    )
             case '~':
-                TokenKind.Tilde
+                if self.peek() == '>':
+                    self.advance()
+                    TokenKind.LayerConnect
+                else:
+                    TokenKind.Tilde
             case '?':
                 if self.peek() == '.':
                     self.advance()
@@ -786,7 +1110,10 @@ impl Lexer:
             case '.':
                 if self.peek() == '.':
                     self.advance()
-                    if self.peek() == '=':
+                    if self.peek() == '.':
+                        self.advance()
+                        TokenKind.Ellipsis
+                    elif self.peek() == '=':
                         self.advance()
                         TokenKind.DotDotEq
                     else:
@@ -794,6 +1121,21 @@ impl Lexer:
                 elif self.peek() == '?':
                     self.advance()
                     TokenKind.DotQuestion
+                elif self.peek() == '+':
+                    self.advance()
+                    TokenKind.DotPlus
+                elif self.peek() == '-':
+                    self.advance()
+                    TokenKind.DotMinus
+                elif self.peek() == '*':
+                    self.advance()
+                    TokenKind.DotStar
+                elif self.peek() == '/':
+                    self.advance()
+                    TokenKind.DotSlash
+                elif self.peek() == '^':
+                    self.advance()
+                    TokenKind.DotCaret
                 else:
                     TokenKind.Dot
             case ',':
@@ -814,15 +1156,46 @@ impl Lexer:
                 TokenKind.RParen
             case '{':
                 self.paren_depth = self.paren_depth + 1
+                if self.in_math_block:
+                    self.math_brace_depth = self.math_brace_depth + 1
+                # Track block depth
+                if self.current_block_kind.?:
+                    self.block_brace_depth = self.block_brace_depth + 1
+                    # For raw mode blocks, mark that we need to capture payload
+                    # Use -1 as marker (next scan_token will start capturing)
+                    if self.in_raw_block and self.block_brace_depth == 1:
+                        self.raw_block_start = -1  # Signal to scan payload on next token
                 TokenKind.LBrace
             case '}':
                 self.paren_depth = max(0, self.paren_depth - 1)
+                if self.in_math_block:
+                    self.math_brace_depth = self.math_brace_depth - 1
+                    if self.math_brace_depth < 0:
+                        # Exiting math block
+                        self.in_math_block = false
+                        self.math_brace_depth = 0
+                # Handle block exit
+                if self.current_block_kind.?:
+                    self.block_brace_depth = self.block_brace_depth - 1
+                    if self.block_brace_depth < 0:
+                        # Exiting the block
+                        val block_kind = self.current_block_kind.unwrap()
+                        self.current_block_kind = None
+                        self.current_lexer_mode = LexerMode.Normal
+                        self.in_raw_block = false
+                        self.block_brace_depth = 0
+                        # Return BlockEnd token
+                        return Token.new(TokenKind.BlockEnd, Span.new(start, self.pos, line, col), block_kind)
                 TokenKind.RBrace
             case '[':
                 self.paren_depth = self.paren_depth + 1
                 TokenKind.LBracket
             case ']':
                 self.paren_depth = max(0, self.paren_depth - 1)
+                # Check for array suffix after ]
+                val suffix = self.try_scan_array_suffix()
+                if suffix.?:
+                    return Token.new(TokenKind.ArraySuffix, Span.new(start, self.pos, line, col), suffix.unwrap())
                 TokenKind.RBracket
             case '@':
                 TokenKind.At
@@ -837,6 +1210,173 @@ impl Lexer:
 
         val text = self.source[start:self.pos]
         Token.new(kind, Span.new(start, self.pos, line, col), text)
+
+    # ========================================================================
+    # Array Suffix Scanning
+    # ========================================================================
+
+    me try_scan_array_suffix() -> text?:
+        """Scan optional suffix after ]: f32, _f32_gpu, f32_tr_gpu.
+
+        Returns the suffix string if found, None otherwise.
+        Valid suffixes:
+        - DType: f16, f32, f64, bf16, i8, i16, i32, i64, u8, u16, u32, u64
+        - Device: cpu, gpu, cuda, cuda0, cuda1, etc.
+        - Modifier: tr (trainable), pin (pinned)
+        - Backend: native, torch
+
+        Format: [_]dtype[_device][_modifier][_backend] or any combination
+        Examples: f32, _f32, f32_gpu, _f32_tr_gpu, _tr_cuda
+        """
+        val start = self.pos
+        var suffix = ""
+
+        # Skip optional leading underscore
+        if self.peek() == '_':
+            suffix = suffix + "_"
+            self.advance()
+
+        # Check for dtype first: f16, f32, f64, bf16, i8, i16, i32, i64, u8, u16, u32, u64
+        val dtype = self.try_scan_dtype()
+        if dtype.?:
+            suffix = suffix + dtype.unwrap()
+        elif suffix == "":
+            # No underscore and no dtype means no suffix
+            self.pos = start
+            return None
+
+        # Scan remaining suffix parts: _tr, _gpu, _cpu, _cuda, _pin, _native, _torch
+        while self.peek() == '_':
+            val underscore_pos = self.pos
+            self.advance()  # Consume '_'
+
+            val part = self.try_scan_suffix_part()
+            if part.?:
+                suffix = suffix + "_" + part.unwrap()
+            else:
+                # Invalid suffix part, rollback the underscore
+                self.pos = underscore_pos
+                break
+
+        if suffix.len() > 0 and suffix != "_":
+            Some(suffix)
+        else:
+            self.pos = start
+            None
+
+    me try_scan_dtype() -> text?:
+        """Try to scan a dtype: f16, f32, f64, bf16, i8, i16, i32, i64, u8, u16, u32, u64."""
+        val start = self.pos
+        val c = self.peek()
+
+        match c:
+            case 'f':
+                # f16, f32, f64
+                self.advance()
+                if self.peek() == '1' and self.peek_next() == '6':
+                    self.advance()
+                    self.advance()
+                    return Some("f16")
+                elif self.peek() == '3' and self.peek_next() == '2':
+                    self.advance()
+                    self.advance()
+                    return Some("f32")
+                elif self.peek() == '6' and self.peek_next() == '4':
+                    self.advance()
+                    self.advance()
+                    return Some("f64")
+                else:
+                    self.pos = start
+                    return None
+
+            case 'b':
+                # bf16
+                self.advance()
+                if self.peek() == 'f' and self.peek_next() == '1':
+                    self.advance()  # f
+                    self.advance()  # 1
+                    if self.peek() == '6':
+                        self.advance()
+                        return Some("bf16")
+                self.pos = start
+                return None
+
+            case 'i':
+                # i8, i16, i32, i64
+                self.advance()
+                if self.peek() == '8' and not is_digit(self.peek_next()):
+                    self.advance()
+                    return Some("i8")
+                elif self.peek() == '1' and self.peek_next() == '6':
+                    self.advance()
+                    self.advance()
+                    return Some("i16")
+                elif self.peek() == '3' and self.peek_next() == '2':
+                    self.advance()
+                    self.advance()
+                    return Some("i32")
+                elif self.peek() == '6' and self.peek_next() == '4':
+                    self.advance()
+                    self.advance()
+                    return Some("i64")
+                else:
+                    self.pos = start
+                    return None
+
+            case 'u':
+                # u8, u16, u32, u64
+                self.advance()
+                if self.peek() == '8' and not is_digit(self.peek_next()):
+                    self.advance()
+                    return Some("u8")
+                elif self.peek() == '1' and self.peek_next() == '6':
+                    self.advance()
+                    self.advance()
+                    return Some("u16")
+                elif self.peek() == '3' and self.peek_next() == '2':
+                    self.advance()
+                    self.advance()
+                    return Some("u32")
+                elif self.peek() == '6' and self.peek_next() == '4':
+                    self.advance()
+                    self.advance()
+                    return Some("u64")
+                else:
+                    self.pos = start
+                    return None
+
+            case _:
+                None
+
+    me try_scan_suffix_part() -> text?:
+        """Try to scan a suffix part after underscore: tr, gpu, cpu, cuda, cuda0, pin, native, torch."""
+        val start = self.pos
+
+        # Scan alphanumeric identifier
+        var part = ""
+        while not self.is_at_end() and (is_alpha(self.peek()) or is_digit(self.peek())):
+            part = part + self.peek().to_string()
+            self.advance()
+
+        # Check if it's a valid suffix part
+        match part:
+            case "tr" | "pin":
+                # Modifiers
+                Some(part)
+            case "cpu" | "gpu":
+                # Devices
+                Some(part)
+            case "native" | "torch":
+                # Backends
+                Some(part)
+            case _:
+                # Check for cuda with optional digit(s)
+                if part.starts_with("cuda"):
+                    Some(part)
+                else:
+                    # Not a valid suffix part, rollback
+                    self.pos = start
+                    None
 
 # ============================================================================
 # Helper Functions
@@ -899,6 +1439,7 @@ fn keyword_kind(text: text) -> TokenKind:
         case "not": TokenKind.KwNot
         case "and": TokenKind.KwAnd
         case "or": TokenKind.KwOr
+        case "xor": TokenKind.KwXor
         case "try": TokenKind.KwTry
         case "catch": TokenKind.KwCatch
         case "throw": TokenKind.KwThrow
@@ -916,6 +1457,8 @@ fn keyword_kind(text: text) -> TokenKind:
         case "Some": TokenKind.KwSome
         case "Ok": TokenKind.KwOk
         case "Err": TokenKind.KwErr
+        case "loss": TokenKind.KwLoss
+        case "nograd": TokenKind.KwNograd
 
         # Literals
         case "true": TokenKind.BoolLit

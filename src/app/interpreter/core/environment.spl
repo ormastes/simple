@@ -1,108 +1,243 @@
 # Environment - Variable Bindings
 #
-# Manages variable scopes and bindings.
+# Manages variable scopes and bindings using interned symbols.
+#
+# Performance optimization: Uses SymbolId (i64) instead of String keys.
+# - Comparison: O(1) integer compare vs O(n) string compare
+# - Hashing: Direct use of id vs computing string hash
+# - Memory: One interned string vs many duplicate strings
 
 from value import {Value}
+from symbol import {SymbolId, intern, resolve, GLOBAL_INTERNER}
 
-export Environment, Scope, Binding
+export Environment, Scope, Binding, EnvironmentWithInterner
 
-# A single variable binding
+# ============================================================================
+# Binding - A single variable binding
+# ============================================================================
+
 struct Binding:
-    name: String
+    """A variable binding in a scope."""
+    name: SymbolId      # Interned name (was: String)
     value: Value
     mutable: bool
 
-# A single scope (lexical block)
+impl Binding:
+    fn name_str() -> text:
+        """Get the string representation of the binding name."""
+        resolve(self.name) ?? "<unknown>"
+
+# ============================================================================
+# Scope - A lexical scope (block)
+# ============================================================================
+
 struct Scope:
-    bindings: Dict<String, Binding>
+    """A single scope (lexical block)."""
+    bindings: Dict<i64, Binding>    # SymbolId.id -> Binding (was: Dict<String, Binding>)
     parent: Option<&Scope>
 
 impl Scope:
     static fn new() -> Scope:
-        return Scope {
-            bindings: Dict::new(),
+        """Create a new empty scope."""
+        Scope(
+            bindings: {},
             parent: None
-        }
+        )
 
-    fn with_parent(parent: &Scope) -> Scope:
-        return Scope {
-            bindings: Dict::new(),
+    static fn with_parent(parent: &Scope) -> Scope:
+        """Create a new scope with a parent."""
+        Scope(
+            bindings: {},
             parent: Some(parent)
-        }
+        )
 
-    fn define(name: String, value: Value, mutable: bool):
-        self.bindings.set(name.clone(), Binding {
+    me define(name: SymbolId, value: Value, mutable: bool):
+        """Define a variable in this scope."""
+        self.bindings[name.id] = Binding(
             name: name,
             value: value,
             mutable: mutable
-        })
+        )
 
-    fn get(name: &str) -> Option<&Binding>:
-        if val Some(binding) = self.bindings.get(name):
-            return Some(binding)
-        if val Some(parent) = self.parent:
-            return parent.get(name)
-        return None
+    me define_str(name: text, value: Value, mutable: bool):
+        """Define a variable by string name (auto-interns)."""
+        val sym = intern(name)
+        self.define(sym, value, mutable)
 
-    fn set(name: &str, value: Value) -> Result<(), String>:
-        if val Some(binding) = self.bindings.get_mut(name):
+    fn get(name: SymbolId) -> Binding?:
+        """Look up a binding by SymbolId."""
+        if self.bindings[name.id].?:
+            return Some(self.bindings[name.id])
+        if self.parent.?:
+            return self.parent.unwrap().get(name)
+        None
+
+    fn get_str(name: text) -> Binding?:
+        """Look up a binding by string name.
+
+        First checks if the string is interned. If not, the binding
+        cannot exist (all bindings use interned symbols).
+        """
+        val sym = GLOBAL_INTERNER.get_or_none(name)
+        if sym.?:
+            self.get(sym.unwrap())
+        else:
+            None
+
+    me set(name: SymbolId, value: Value) -> Result<(), text>:
+        """Set a variable's value."""
+        if self.bindings[name.id].?:
+            val binding = self.bindings[name.id]
             if not binding.mutable:
-                return Err("Cannot assign to immutable variable: {name}".to_string())
-            binding.value = value
+                val name_str = resolve(name) ?? "<unknown>"
+                return Err("Cannot assign to immutable variable: {name_str}")
+            self.bindings[name.id] = Binding(
+                name: binding.name,
+                value: value,
+                mutable: binding.mutable
+            )
             return Ok(())
-        if val Some(parent) = self.parent:
-            return parent.set(name, value)
-        return Err("Undefined variable: {name}".to_string())
+        if self.parent.?:
+            return self.parent.unwrap().set(name, value)
+        val name_str = resolve(name) ?? "<unknown>"
+        Err("Undefined variable: {name_str}")
 
-# The environment (stack of scopes)
+    me set_str(name: text, value: Value) -> Result<(), text>:
+        """Set a variable's value by string name."""
+        val sym = GLOBAL_INTERNER.get_or_none(name)
+        if sym.?:
+            self.set(sym.unwrap(), value)
+        else:
+            Err("Undefined variable: {name}")
+
+# ============================================================================
+# Environment - Stack of scopes
+# ============================================================================
+
 struct Environment:
-    scopes: Array<Scope>
+    """The environment (stack of scopes)."""
+    scopes: [Scope]
     globals: Scope
 
 impl Environment:
     static fn new() -> Environment:
-        return Environment {
-            scopes: [Scope::new()],
-            globals: Scope::new()
-        }
+        """Create a new environment with an empty scope."""
+        Environment(
+            scopes: [Scope.new()],
+            globals: Scope.new()
+        )
 
-    # Enter a new scope
-    fn push_scope():
+    # ------------------------------------------------------------------------
+    # Scope management
+    # ------------------------------------------------------------------------
+
+    me push_scope():
+        """Enter a new scope."""
         val parent = self.current_scope()
-        self.scopes.push(Scope::with_parent(parent))
+        self.scopes = self.scopes.push(Scope.with_parent(parent))
 
-    # Exit current scope
-    fn pop_scope():
+    me pop_scope():
+        """Exit current scope."""
         if self.scopes.len() > 1:
-            self.scopes.pop()
+            self.scopes = self.scopes[0:self.scopes.len() - 1]
 
-    # Get current scope
     fn current_scope() -> &Scope:
-        return &self.scopes[self.scopes.len() - 1]
+        """Get current scope (immutable)."""
+        &self.scopes[self.scopes.len() - 1]
 
-    fn current_scope_mut() -> &mut Scope:
+    me current_scope_mut() -> &Scope:
+        """Get current scope (mutable)."""
         val idx = self.scopes.len() - 1
-        return &mut self.scopes[idx]
+        &self.scopes[idx]
 
-    # Define a variable in current scope
-    fn define(name: String, value: Value):
+    # ------------------------------------------------------------------------
+    # Variable operations (SymbolId)
+    # ------------------------------------------------------------------------
+
+    me define(name: SymbolId, value: Value):
+        """Define a mutable variable in current scope."""
         self.current_scope_mut().define(name, value, true)
 
-    fn define_const(name: String, value: Value):
+    me define_const(name: SymbolId, value: Value):
+        """Define an immutable variable in current scope."""
         self.current_scope_mut().define(name, value, false)
 
-    # Get a variable
-    fn get(name: &str) -> Option<Value>:
-        if val Some(binding) = self.current_scope().get(name):
+    fn get(name: SymbolId) -> Value?:
+        """Get a variable's value by SymbolId."""
+        if val binding = self.current_scope().get(name):
             return Some(binding.value.clone())
-        if val Some(binding) = self.globals.get(name):
+        if val binding = self.globals.get(name):
             return Some(binding.value.clone())
-        return None
+        None
 
-    # Set a variable
-    fn set(name: &str, value: Value) -> Result<(), String>:
-        return self.current_scope_mut().set(name, value)
+    me set(name: SymbolId, value: Value) -> Result<(), text>:
+        """Set a variable's value."""
+        self.current_scope_mut().set(name, value)
 
-    # Define a global
-    fn define_global(name: String, value: Value):
+    me define_global(name: SymbolId, value: Value):
+        """Define a global variable."""
         self.globals.define(name, value, true)
+
+    # ------------------------------------------------------------------------
+    # Variable operations (String - convenience wrappers)
+    # ------------------------------------------------------------------------
+
+    me define_str(name: text, value: Value):
+        """Define a mutable variable by string name (auto-interns)."""
+        self.define(intern(name), value)
+
+    me define_const_str(name: text, value: Value):
+        """Define an immutable variable by string name (auto-interns)."""
+        self.define_const(intern(name), value)
+
+    fn get_str(name: text) -> Value?:
+        """Get a variable's value by string name."""
+        val sym = GLOBAL_INTERNER.get_or_none(name)
+        if sym.?:
+            self.get(sym.unwrap())
+        else:
+            None
+
+    me set_str(name: text, value: Value) -> Result<(), text>:
+        """Set a variable's value by string name."""
+        val sym = GLOBAL_INTERNER.get_or_none(name)
+        if sym.?:
+            self.set(sym.unwrap(), value)
+        else:
+            Err("Undefined variable: {name}")
+
+    me define_global_str(name: text, value: Value):
+        """Define a global variable by string name (auto-interns)."""
+        self.define_global(intern(name), value)
+
+# ============================================================================
+# EnvironmentWithInterner - Environment bundled with interner reference
+# ============================================================================
+
+struct EnvironmentWithInterner:
+    """Environment with explicit interner reference.
+
+    Useful when passing environment between modules or actors
+    where the global interner might not be appropriate.
+    """
+    env: Environment
+    interner: &SymbolInterner
+
+impl EnvironmentWithInterner:
+    static fn new() -> EnvironmentWithInterner:
+        EnvironmentWithInterner(
+            env: Environment.new(),
+            interner: &GLOBAL_INTERNER
+        )
+
+    static fn with_interner(interner: &SymbolInterner) -> EnvironmentWithInterner:
+        EnvironmentWithInterner(
+            env: Environment.new(),
+            interner: interner
+        )
+
+    fn intern(s: text) -> SymbolId:
+        self.interner.intern(s)
+
+    fn resolve(id: SymbolId) -> text?:
+        self.interner.resolve(id)

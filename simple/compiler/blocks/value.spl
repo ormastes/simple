@@ -1,0 +1,250 @@
+# Block Value Types
+#
+# Typed values produced by block parsing.
+
+import ..parser.{Expr, Block, Stmt}
+import ..lexer.{Span}
+
+# ============================================================================
+# Block Value
+# ============================================================================
+
+enum BlockValue:
+    """Typed value from block parsing.
+
+    Each block type produces a specific variant:
+    - m{} -> Expr (math expression)
+    - loss{} -> LossBlock (block with auto-backward)
+    - nograd{} -> NogradBlock (block without gradients)
+    - sh{} -> Shell (shell commands)
+    - sql{} -> Sql (SQL query)
+    - re{} -> Regex (compiled regex)
+    - json{} -> Json (parsed JSON)
+    - Custom blocks -> Custom (user-defined)
+    """
+
+    # Expression result
+    Expr(expr: Expr)
+
+    # Block results (for loss/nograd)
+    LossBlock(block: Block)
+    NogradBlock(block: Block)
+
+    # Raw text (for DSL blocks)
+    Raw(text: text)
+
+    # Shell commands
+    Shell(commands: ShellCommands)
+
+    # SQL query
+    Sql(query: SqlQuery)
+
+    # Regular expression
+    Regex(pattern: RegexPattern)
+
+    # JSON value
+    Json(value: JsonValue)
+
+    # Markdown document
+    Markdown(doc: MarkdownDoc)
+
+    # Graph/diagram
+    Graph(diagram: GraphDiagram)
+
+    # User-defined custom value
+    Custom(type_name: text, data: Any)
+
+    # Error placeholder
+    Error(message: text)
+
+impl BlockValue:
+    fn is_expr() -> bool:
+        match self:
+            case Expr(_): true
+            case _: false
+
+    fn is_block() -> bool:
+        match self:
+            case LossBlock(_) | NogradBlock(_): true
+            case _: false
+
+    fn is_raw() -> bool:
+        match self:
+            case Raw(_): true
+            case _: false
+
+    fn as_expr() -> Expr?:
+        match self:
+            case Expr(e): Some(e)
+            case _: None
+
+    fn as_block() -> Block?:
+        match self:
+            case LossBlock(b) | NogradBlock(b): Some(b)
+            case _: None
+
+    fn as_raw() -> text?:
+        match self:
+            case Raw(t): Some(t)
+            case _: None
+
+    fn type_name() -> text:
+        """Return the type name of this value."""
+        match self:
+            case Expr(_): "Expr"
+            case LossBlock(_): "LossBlock"
+            case NogradBlock(_): "NogradBlock"
+            case Raw(_): "Raw"
+            case Shell(_): "Shell"
+            case Sql(_): "Sql"
+            case Regex(_): "Regex"
+            case Json(_): "Json"
+            case Markdown(_): "Markdown"
+            case Graph(_): "Graph"
+            case Custom(name, _): name
+            case Error(_): "Error"
+
+# ============================================================================
+# Placeholder Types (to be implemented in std library)
+# ============================================================================
+
+struct ShellCommands:
+    """Parsed shell commands."""
+    raw: text
+    commands: [ShellCommand]
+
+struct ShellCommand:
+    """Single shell command."""
+    program: text
+    args: [text]
+    redirects: [Redirect]
+    pipe_to: ShellCommand?
+
+struct Redirect:
+    """Shell redirect."""
+    kind: RedirectKind
+    target: text
+
+enum RedirectKind:
+    StdoutToFile    # >
+    StdoutAppend    # >>
+    StderrToFile    # 2>
+    StdinFromFile   # <
+    StderrToStdout  # 2>&1
+
+struct SqlQuery:
+    """Parsed SQL query."""
+    raw: text
+    kind: SqlKind
+    tables: [text]
+    columns: [text]
+    params: [SqlParam]
+
+enum SqlKind:
+    Select
+    Insert
+    Update
+    Delete
+    Create
+    Alter
+    Drop
+    Other
+
+struct SqlParam:
+    """SQL parameter placeholder."""
+    name: text
+    position: i64
+
+struct RegexPattern:
+    """Compiled regular expression."""
+    raw: text
+    # Compiled pattern handle
+    _handle: i64
+
+struct JsonValue:
+    """Parsed JSON value."""
+    kind: JsonKind
+
+enum JsonKind:
+    Null
+    Bool(value: bool)
+    Number(value: f64)
+    String(value: text)
+    Array(elements: [JsonValue])
+    Object(fields: [(text, JsonValue)])
+
+struct MarkdownDoc:
+    """Parsed markdown document."""
+    raw: text
+    blocks: [MarkdownBlock]
+
+enum MarkdownBlock:
+    Heading(level: i64, text: text)
+    Paragraph(text: text)
+    CodeBlock(language: text?, code: text)
+    List(ordered: bool, items: [text])
+    Quote(text: text)
+    HorizontalRule
+    Table(headers: [text], rows: [[text]])
+
+struct GraphDiagram:
+    """Parsed graph/diagram."""
+    raw: text
+    kind: GraphKind
+    nodes: [GraphNode]
+    edges: [GraphEdge]
+
+enum GraphKind:
+    Flowchart
+    Sequence
+    Class
+    State
+    ER
+    Gantt
+    Dot
+
+struct GraphNode:
+    id: text
+    label: text?
+    shape: text?
+
+struct GraphEdge:
+    from: text
+    to: text
+    label: text?
+    style: text?
+
+# ============================================================================
+# Resolved Block (for compiler pipeline)
+# ============================================================================
+
+struct ResolvedBlock:
+    """A block that has been resolved to a typed value.
+
+    Used in the compiler pipeline between TreeSitter and Parser.
+    """
+    kind: text              # Block keyword
+    value: BlockValue       # Parsed value
+    span: Span              # Full block span
+    payload_span: Span      # Payload span (for error mapping)
+
+impl ResolvedBlock:
+    static fn new(kind: text, value: BlockValue, span: Span, payload_span: Span) -> ResolvedBlock:
+        ResolvedBlock(
+            kind: kind,
+            value: value,
+            span: span,
+            payload_span: payload_span
+        )
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export BlockValue, ResolvedBlock
+export ShellCommands, ShellCommand, Redirect, RedirectKind
+export SqlQuery, SqlKind, SqlParam
+export RegexPattern
+export JsonValue, JsonKind
+export MarkdownDoc, MarkdownBlock
+export GraphDiagram, GraphKind, GraphNode, GraphEdge

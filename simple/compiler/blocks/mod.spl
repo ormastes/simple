@@ -1,0 +1,178 @@
+# Block System Module
+#
+# User-definable custom block interface for Simple language.
+#
+# This module provides:
+# - BlockDefinition trait for defining custom blocks
+# - BlockRegistry for registering and looking up blocks
+# - LexerMode and SyntaxFeatures for configuring block behavior
+# - BlockContext and BlockError for block parsing context
+# - BlockValue for typed block results
+# - Built-in blocks (m, loss, nograd)
+#
+# Example usage:
+# ```simple
+# import compiler.blocks.{BlockDefinition, BlockRegistry, BlockValue}
+#
+# struct MyBlockDef: BlockDefinition:
+#     fn kind() -> text: "myblock"
+#     fn parse_payload(payload: text, ctx: BlockContext) -> Result<BlockValue, BlockError>:
+#         Ok(BlockValue.Raw(payload))
+#
+# # Register the block
+# block_registry().register(MyBlockDef())
+#
+# # Now myblock{ ... } is recognized
+# ```
+
+# Re-export all public types
+export * from .definition
+export * from .registry
+export * from .modes
+export * from .context
+export * from .value
+export * from .builtin
+export * from .resolver
+
+# Convenience imports
+import .definition.{BlockDefinition}
+import .registry.{BlockRegistry, block_registry, register_block, is_block}
+import .modes.{LexerMode, LexerConfig, SyntaxFeatures}
+import .context.{BlockContext, BlockError, BlockErrorKind, Diagnostic}
+import .value.{BlockValue, ResolvedBlock}
+import .resolver.{BlockResolver, ResolvedModule, resolve_blocks}
+import .builtin.{register_builtin_blocks, MathBlockDef, LossBlockDef, NogradBlockDef, ShellBlockDef, SqlBlockDef, RegexBlockDef, JsonBlockDef, MarkdownBlockDef}
+
+# ============================================================================
+# Module Documentation
+# ============================================================================
+
+# ## Overview
+#
+# The block system allows users to define custom block types that integrate
+# with the Simple compiler. Blocks are expressions of the form:
+#
+#     blockname{ payload }
+#
+# Where `blockname` is a registered block keyword and `payload` is the
+# content between the braces.
+#
+# ## Built-in Blocks
+#
+# Math/ML blocks:
+# - `m{}` - Math block with power (^), transpose ('), implicit multiplication
+# - `loss{}` - Math block with auto-backward for gradients
+# - `nograd{}` - Math block with gradient tracking disabled
+#
+# DSL blocks:
+# - `sh{}` - Shell command execution
+# - `sql{}` - SQL query with parameter support
+# - `re{}` - Compiled regular expression
+# - `json{}` - JSON literal
+# - `md{}` - Markdown text
+#
+# ## Creating Custom Blocks
+#
+# 1. Implement the BlockDefinition trait
+# 2. Register with the BlockRegistry
+# 3. Your block is now available!
+#
+# ## Lexer Modes
+#
+# - `Normal` - Standard Simple tokenization
+# - `Math` - Enables ^, ', implicit mul
+# - `Raw` - Capture as raw text (no tokenization)
+# - `Custom` - Fine-grained control via LexerConfig
+#
+# ## Integration Points
+#
+# The block system integrates with the compiler pipeline:
+#
+# 1. Lexer: Detects block keywords, applies lexer mode
+# 2. TreeSitter: Captures block outlines (skips payload parsing)
+# 3. BlockResolver: Parses payloads using registered handlers
+# 4. Parser: Incorporates resolved blocks into AST
+# 5. HIR/MIR: Lowers blocks using handler-defined rules
+
+# ============================================================================
+# Quick Start Functions
+# ============================================================================
+
+fn enable_block(kind: text, def: BlockDefinition):
+    """Enable a custom block in the global registry.
+
+    Convenience function for:
+        block_registry().register(def)
+    """
+    register_block(def)
+
+fn disable_block(kind: text):
+    """Disable a block in the global registry.
+
+    Convenience function for:
+        block_registry().unregister(kind)
+    """
+    block_registry().unregister(kind)
+
+fn list_blocks() -> [text]:
+    """List all registered block keywords."""
+    block_registry().all_keywords()
+
+fn block_info(kind: text) -> BlockInfo?:
+    """Get information about a registered block."""
+    val def = block_registry().lookup(kind)
+    if not def.?:
+        return None
+
+    val d = def.unwrap()
+    Some(BlockInfo(
+        kind: kind,
+        lexer_mode: d.lexer_mode().to_string(),
+        description: d.description(),
+        features: d.syntax_features()
+    ))
+
+struct BlockInfo:
+    """Information about a registered block."""
+    kind: text
+    lexer_mode: text
+    description: text
+    features: SyntaxFeatures
+
+# ============================================================================
+# Initialization
+# ============================================================================
+
+var _blocks_initialized = false
+
+fn init_blocks():
+    """Initialize the block system with all builtin blocks.
+
+    This should be called once at compiler startup. It registers
+    all builtin blocks (m, loss, nograd, sh, sql, re, json, md)
+    with the global BlockRegistry.
+
+    Safe to call multiple times - only initializes once.
+    """
+    if _blocks_initialized:
+        return
+
+    register_builtin_blocks(block_registry())
+    _blocks_initialized = true
+
+fn reset_blocks():
+    """Reset the block system to initial state.
+
+    Clears all registered blocks and re-initializes with builtins.
+    Useful for testing.
+    """
+    block_registry().clear()
+    _blocks_initialized = false
+    init_blocks()
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export enable_block, disable_block, list_blocks, block_info, BlockInfo
+export init_blocks, reset_blocks

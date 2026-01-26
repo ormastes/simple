@@ -546,6 +546,448 @@ validate_no_forgetting(phase, model, tokenizer, device)
 
 ---
 
+---
+
+## Pipeline Operators and Dimension Checking
+
+Simple provides pipeline operators for functional composition and neural network layer chaining, with **compile-time dimension checking** to catch shape mismatches early.
+
+### Pipeline Operators
+
+| Operator | Name | Description |
+|----------|------|-------------|
+| `\|>` | Pipe Forward | Pass value to function: `x \|> f` = `f(x)` |
+| `>>` | Compose | Forward composition: `f >> g` = `λx. g(f(x))` |
+| `<<` | Compose Back | Backward composition: `f << g` = `λx. f(g(x))` |
+| `//` | Parallel | Parallel branches: `f // g` runs both |
+| `~>` | Layer Connect | NN layer pipeline with dimension checking |
+
+### Precedence (Low to High)
+
+```
+15. Pipeline (|>, ~>)     ← Lowest
+14. Parallel (//)
+13. Compose (>>, <<)
+12. Logical OR (or, ||)
+11. Logical AND (and, &&)
+... (standard operators)
+1.  Primary               ← Highest
+```
+
+---
+
+### Pipe Forward (`|>`)
+
+Pass the left operand as the first argument to the right operand.
+
+```simple
+# Basic usage
+val result = 5 |> double |> square |> to_string
+# Equivalent to: to_string(square(double(5)))
+
+# Data processing pipeline
+val output = raw_input
+    |> parse_json
+    |> validate
+    |> transform
+    |> serialize
+
+# With lambdas
+val processed = data
+    |> \x: x.filter(\item: item > 0)
+    |> \x: x.map(\item: item * 2)
+    |> \x: x.sum()
+```
+
+---
+
+### Function Composition (`>>`, `<<`)
+
+Create reusable pipelines by composing functions.
+
+```simple
+# Create reusable pipeline
+val preprocess = normalize >> augment >> to_tensor
+val result = preprocess(raw_data)
+
+# Backward composition (Haskell-style)
+val pipeline = serialize << transform << validate
+# Same as: validate >> transform >> serialize
+
+# Point-free style
+val double = \x: x * 2
+val square = \x: x * x
+val double_then_square = double >> square
+
+assert double_then_square(3) == 36  # (3 * 2)^2
+```
+
+---
+
+### Layer Connect (`~>`) - **Dimension Checked**
+
+Compose neural network layers with **compile-time dimension checking**.
+
+```simple
+# MLP with dimension checking
+val mlp = Linear(784, 256) ~> ReLU() ~> Linear(256, 128) ~> ReLU() ~> Linear(128, 10)
+# Type: Layer<[batch, 784], [batch, 10]>
+
+# CNN encoder
+val encoder = Conv2d(1, 32, 3) ~> ReLU() ~> MaxPool2d(2)
+              ~> Conv2d(32, 64, 3) ~> ReLU() ~> MaxPool2d(2)
+              ~> Flatten() ~> Linear(1600, 256)
+
+# Autoencoder
+val encoder = Linear(784, 256) ~> ReLU() ~> Linear(256, 64)
+val decoder = Linear(64, 256) ~> ReLU() ~> Linear(256, 784)
+val autoencoder = encoder ~> decoder
+# Type: Layer<[batch, 784], [batch, 784]>
+```
+
+**Compile-Time Error Example:**
+```simple
+# ERROR: dimension mismatch
+val bad = Linear(784, 256) ~> Linear(128, 64)
+```
+
+```
+error[E0502]: layer dimension mismatch in ~> pipeline
+  --> model.spl:1:35
+   |
+   = found: previous layer outputs shape: [batch, 256]
+   = expected: next layer expects input shape: [batch, 128]
+   = note: dimension 1 differs: 256 vs 128
+   = help: insert Linear(256, 128) between these layers
+```
+
+---
+
+### Parallel Branches (`//`)
+
+Run two operations in parallel, combining their results.
+
+```simple
+# Parallel function application
+val both = inc // dec
+val (a, b) = both(5, 5)  # (6, 4)
+
+# Parallel data processing
+val process_both = encode_audio // encode_video
+val (audio, video) = process_both(raw_audio, raw_video)
+
+# Neural network parallel branches
+val features = conv_branch // pool_branch
+```
+
+---
+
+## Tensor and Matrix Operators
+
+### Matrix Operations
+
+```simple
+val A: Tensor<f32, [M, K]> = ...
+val B: Tensor<f32, [K, N]> = ...
+
+# Matrix multiplication (dimension checked)
+val C = A @ B    # Result: Tensor<f32, [M, N]>
+
+# Transpose
+val At = A.T     # Tensor<f32, [K, M]>
+
+# Element-wise with broadcasting
+val D = A .+ 1.0  # Add scalar to all elements
+val E = A .* B    # Element-wise multiply (must broadcast)
+```
+
+### Dotted Operators (Element-wise Broadcasting)
+
+| Operator | Description |
+|----------|-------------|
+| `.+` | Broadcast add |
+| `.-` | Broadcast subtract |
+| `.*` | Broadcast multiply |
+| `./` | Broadcast divide |
+| `.^` | Broadcast power |
+
+```simple
+# Broadcasting example
+val a: Tensor<f32, [32, 1]> = ...
+val b: Tensor<f32, [1, 64]> = ...
+val c = a .+ b   # Result: Tensor<f32, [32, 64]>
+```
+
+---
+
+## Dimension Types
+
+### DimExpr (Dimension Expression)
+
+```simple
+# Literal dimension
+784
+
+# Named dimension with range
+batch: 1..128
+
+# Dynamic (runtime only)
+?
+
+# Const parameter
+N  # from generic: fn process<N>(...)
+
+# Arithmetic
+M * K
+H / num_heads
+```
+
+### Tensor Type Syntax
+
+```simple
+# Fixed dimensions
+Tensor<f32, [32, 784]>
+
+# Named/symbolic dimensions
+Tensor<f32, [batch, seq_len, hidden]>
+
+# With constraints
+Tensor<f32, [B: 1..128, T: 1..512, D]>
+```
+
+### Layer Type Syntax
+
+```simple
+# Input → Output shape
+Layer<[batch, 784], [batch, 256]>
+
+# With explicit annotation
+val encoder: Layer<[batch, 784], [batch, 64]> =
+    Linear(784, 256) ~> ReLU() ~> Linear(256, 64)
+```
+
+---
+
+## Dimension Error Codes
+
+| Code | Name | Description | Quick Fix |
+|------|------|-------------|-----------|
+| E0501 | Mismatch | Basic dimension mismatch | Reshape/match dims |
+| E0502 | LayerIncompatible | Layer output/input mismatch | Add intermediate layer |
+| E0503 | RankMismatch | Tensor rank (ndim) mismatch | Flatten/reshape |
+| E0504 | MatMulIncompat | Matrix multiplication K mismatch | Transpose or reshape |
+| E0505 | BroadcastIncompat | Cannot broadcast shapes | Add dims with unsqueeze |
+| E0506 | BatchMismatch | Batch dimension mismatch | Use same batch size |
+| E0507 | ChannelMismatch | CNN channel mismatch | Fix Conv2d params |
+| E0508 | SequenceMismatch | Sequence length mismatch | Pad/truncate |
+| E0509 | OutOfRange | Value out of range | Use valid value |
+| E0510 | UnresolvedVariable | Can't infer dimension | Add annotation |
+
+### Common Error Fixes
+
+**E0502: Layer Incompatible**
+```simple
+# Error
+val model = Linear(784, 256) ~> Linear(128, 64)
+# output [batch, 256] != input [batch, 128]
+
+# Fix: Add intermediate layer
+val model = Linear(784, 256) ~> Linear(256, 128) ~> Linear(128, 64)
+```
+
+**E0503: Rank Mismatch**
+```simple
+# Error: 4D tensor to 2D layer
+val conv_out: Tensor<f32, [batch, 64, 7, 7]> = ...
+val fc = Linear(64, 10)
+val out = conv_out ~> fc  # E0503: 4D vs 2D
+
+# Fix: Flatten before Linear
+val model = Flatten() ~> Linear(3136, 10)  # 64*7*7 = 3136
+val out = conv_out |> model
+```
+
+**E0504: MatMul Incompatible**
+```simple
+# Error
+val A: Tensor<f32, [32, 64]> = ...
+val B: Tensor<f32, [128, 256]> = ...
+val C = A @ B  # E0504: 64 != 128
+
+# Rule: For A @ B, A's last dim must equal B's second-to-last
+# [M, K] @ [K, N] → [M, N]
+
+# Fix: Use correct dimensions
+val B: Tensor<f32, [64, 256]> = ...
+val C = A @ B  # [32, 64] @ [64, 256] = [32, 256] ✓
+```
+
+**E0507: Channel Mismatch**
+```simple
+# Error
+val x: Tensor<f32, [batch, 3, 224, 224]> = ...  # RGB (3 channels)
+val conv = Conv2d(1, 32, 3)  # Expects 1 channel!
+# E0507: Conv2d expects 1 input channels, got 3
+
+# Fix: Match in_channels
+val conv = Conv2d(3, 32, 3)  # 3 input channels ✓
+```
+
+---
+
+## Dimension Check Modes
+
+Configure checking behavior for development vs production.
+
+```simple
+enum DimCheckMode:
+    None_   # No checks (production)
+    Assert  # Debug assertions (default)
+    Log     # Warn but continue
+    Strict  # Return error
+
+# Usage
+val ctx = HmInferContext.with_dim_check_mode(DimCheckMode.Assert)
+```
+
+---
+
+## Real-World Architecture Examples
+
+### MLP Classifier
+
+```simple
+val mlp = Linear(784, 512) ~> ReLU() ~> Dropout(0.2)
+      ~> Linear(512, 256) ~> ReLU() ~> Dropout(0.2)
+      ~> Linear(256, 10) ~> Softmax()
+# Type: Layer<[batch, 784], [batch, 10]>
+```
+
+### CNN (ResNet-style)
+
+```simple
+val stem = Conv2d(3, 64, 7, stride=2, padding=3) ~> BatchNorm2d(64) ~> ReLU() ~> MaxPool2d(3, stride=2)
+
+val block = Conv2d(64, 64, 3, padding=1) ~> BatchNorm2d(64) ~> ReLU()
+        ~> Conv2d(64, 64, 3, padding=1) ~> BatchNorm2d(64)
+
+val classifier = AdaptiveAvgPool2d(1) ~> Flatten() ~> Linear(64, 1000)
+
+val resnet = stem ~> block ~> classifier
+```
+
+### Transformer Encoder
+
+```simple
+val self_attn = MultiHeadAttention(d_model=512, num_heads=8)
+val ffn = Linear(512, 2048) ~> ReLU() ~> Linear(2048, 512)
+
+# Encoder layer with residual connections handled internally
+val encoder_layer = LayerNorm(512) ~> self_attn ~> LayerNorm(512) ~> ffn
+# Type: Layer<[batch, seq, 512], [batch, seq, 512]>
+
+# Stack 6 layers
+val encoder = encoder_layer ~> encoder_layer ~> encoder_layer
+          ~> encoder_layer ~> encoder_layer ~> encoder_layer
+```
+
+### Autoencoder
+
+```simple
+val encoder = Linear(784, 256) ~> ReLU() ~> Linear(256, 64) ~> ReLU() ~> Linear(64, 16)
+val decoder = Linear(16, 64) ~> ReLU() ~> Linear(64, 256) ~> ReLU() ~> Linear(256, 784)
+val autoencoder = encoder ~> decoder
+# Type: Layer<[batch, 784], [batch, 784]>
+```
+
+---
+
+## Debugging Dimension Errors
+
+### 1. Print Shapes
+
+```simple
+print "Input shape: {x.shape}"
+print "After conv: {conv_out.shape}"
+print "After flatten: {flat.shape}"
+```
+
+### 2. Use Explicit Types
+
+```simple
+# Add type annotations to catch errors early
+val encoder: Layer<[batch, 784], [batch, 64]> = ...
+val decoder: Layer<[batch, 64], [batch, 784]> = ...
+```
+
+### 3. Check Common Pitfalls
+
+| Mistake | Fix |
+|---------|-----|
+| Forgot `Flatten()` before Linear | Add `Flatten()` layer |
+| Wrong `in_channels` in Conv | Match to previous layer's `out_channels` |
+| Batch dim in wrong position | Use `NCHW` or `NHWC` consistently |
+| Kernel too large | Add padding or use smaller kernel |
+
+---
+
+## Best Practices for Dimension Checking
+
+### 1. Use `~>` for Neural Networks
+
+✅ **DO**: Dimension-checked pipeline
+```simple
+val model = Linear(784, 256) ~> ReLU() ~> Linear(256, 10)
+```
+
+❌ **DON'T**: Manual forward calls
+```simple
+fn forward(x):
+    var h = self.linear1(x)
+    h = self.relu(h)
+    self.linear2(h)
+```
+
+### 2. Use `|>` for Data Transformations
+
+✅ **DO**: Clear data flow
+```simple
+val result = raw_data |> preprocess |> validate |> transform
+```
+
+❌ **DON'T**: Nested calls
+```simple
+val result = transform(validate(preprocess(raw_data)))
+```
+
+### 3. Use `>>` for Reusable Pipelines
+
+✅ **DO**: Composable, reusable
+```simple
+val preprocess = normalize >> augment >> to_tensor
+val train_data = load_data() |> preprocess
+val test_data = load_test() |> preprocess
+```
+
+### 4. Add Type Annotations for Clarity
+
+```simple
+# Explicit layer types help catch errors early
+val encoder: Layer<[batch, 784], [batch, 64]> =
+    Linear(784, 256) ~> ReLU() ~> Linear(256, 64)
+```
+
+---
+
+## Related Documentation
+
+- **Design Document**: `doc/design/pipeline_operators_design.md`
+- **Error Guide**: `doc/guide/dimension_errors_guide.md`
+- **Syntax Reference**: `doc/guide/syntax_quick_reference.md`
+- **Test Specs**: `simple/compiler/test/dim_constraints_spec.spl`
+
+---
+
 ## See Also
 
 - `/coding` - Simple language coding standards

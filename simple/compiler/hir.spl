@@ -13,6 +13,7 @@
 
 import compiler.parser.*
 import compiler.lexer.Span
+import compiler.blocks.{BlockValue, BlockRegistry, block_registry}
 
 # ============================================================================
 # HIR Module Structure
@@ -88,6 +89,57 @@ enum SymbolKind:
     Const
     Module
     Import
+
+# ============================================================================
+# Method Resolution (UFCS Support)
+# ============================================================================
+
+enum MethodResolution:
+    """How a method call was resolved.
+
+    Supports UFCS (Uniform Function Call Syntax) where `x.method()` can resolve to:
+    1. Instance method on x's type (highest priority)
+    2. Trait method implemented by x's type
+    3. Free function `method(x)` where first param matches x's type (UFCS)
+
+    Examples:
+        x.map()  ->  InstanceMethod if x's class has map()
+        x.map()  ->  TraitMethod if x implements trait with map()
+        x.map()  ->  FreeFunction(map) if map(x) exists and first param matches
+    """
+    # Direct method on the receiver's type
+    InstanceMethod(type_id: SymbolId, method_id: SymbolId)
+
+    # Method from an implemented trait
+    TraitMethod(trait_id: SymbolId, method_id: SymbolId)
+
+    # UFCS: Free function where receiver becomes first argument
+    # x.method(a, b) -> method(x, a, b)
+    FreeFunction(func_id: SymbolId)
+
+    # Not yet resolved (before resolution pass)
+    Unresolved
+
+impl MethodResolution:
+    fn is_resolved() -> bool:
+        """Check if method has been resolved."""
+        match self:
+            case Unresolved: false
+            case _: true
+
+    fn is_ufcs() -> bool:
+        """Check if this is a UFCS resolution (free function)."""
+        match self:
+            case FreeFunction(_): true
+            case _: false
+
+    fn get_symbol_id() -> SymbolId?:
+        """Get the resolved symbol ID if available."""
+        match self:
+            case InstanceMethod(_, method_id): Some(method_id)
+            case TraitMethod(_, method_id): Some(method_id)
+            case FreeFunction(func_id): Some(func_id)
+            case Unresolved: None
 
 struct ScopeId:
     """Unique identifier for a scope."""
@@ -200,6 +252,132 @@ impl SymbolTable:
         if scope.parent.?:
             self.current_scope = scope.parent.unwrap()
 
+    # ========================================================================
+    # Method Resolution Helpers (for UFCS support)
+    # ========================================================================
+
+    fn lookup_function(name: text) -> SymbolId?:
+        """Look up a free function by name."""
+        val sym_id = self.lookup(name)
+        if sym_id.?:
+            val sym = self.get(sym_id.unwrap())
+            if sym.?:
+                match sym.unwrap().kind:
+                    case Function: return sym_id
+                    case _: pass
+        None
+
+    fn lookup_method_in_type(type_id: SymbolId, method_name: text) -> SymbolId?:
+        """Look up a method in a class/struct type.
+
+        Searches for a method named `method_name` defined in the type
+        identified by `type_id`.
+        """
+        # Get the type's scope (class or struct body)
+        val type_sym = self.get(type_id)
+        if not type_sym.?:
+            return None
+
+        # Look for a Method symbol with matching name in the type's members
+        # This requires traversing impl blocks associated with the type
+        # For now, use a naming convention: Type::method
+        val qualified_name = "{type_sym.unwrap().name}::{method_name}"
+        for entry in self.symbols:
+            val sym = entry.1
+            if sym.name == qualified_name:
+                match sym.kind:
+                    case Method: return Some(sym.id)
+                    case Function: return Some(sym.id)  # Static methods
+                    case _: pass
+
+        None
+
+    fn lookup_trait_method(trait_id: SymbolId, method_name: text) -> SymbolId?:
+        """Look up a method in a trait.
+
+        Searches for a method named `method_name` defined in the trait
+        identified by `trait_id`.
+        """
+        val trait_sym = self.get(trait_id)
+        if not trait_sym.?:
+            return None
+
+        # Look for trait method using qualified name
+        val qualified_name = "{trait_sym.unwrap().name}::{method_name}"
+        for entry in self.symbols:
+            val sym = entry.1
+            if sym.name == qualified_name:
+                match sym.kind:
+                    case Method: return Some(sym.id)
+                    case _: pass
+
+        None
+
+    fn get_symbol_type(id: SymbolId) -> HirType?:
+        """Get the type of a symbol."""
+        val sym = self.get(id)
+        if sym.?:
+            sym.unwrap().type_
+        else:
+            None
+
+    fn is_function(id: SymbolId) -> bool:
+        """Check if symbol is a function."""
+        val sym = self.get(id)
+        if sym.?:
+            match sym.unwrap().kind:
+                case Function: true
+                case _: false
+        else:
+            false
+
+    fn is_method(id: SymbolId) -> bool:
+        """Check if symbol is a method."""
+        val sym = self.get(id)
+        if sym.?:
+            match sym.unwrap().kind:
+                case Method: true
+                case _: false
+        else:
+            false
+
+    fn get_methods_for_type(type_id: SymbolId) -> [text]:
+        """Get all method names for a type (for error suggestions)."""
+        var methods: [text] = []
+        val type_sym = self.get(type_id)
+        if not type_sym.?:
+            return methods
+
+        val type_name = type_sym.unwrap().name
+        val prefix = "{type_name}::"
+
+        for entry in self.symbols:
+            val sym = entry.1
+            if sym.name.starts_with(prefix):
+                match sym.kind:
+                    case Method:
+                        # Extract method name from qualified name
+                        val method_name = sym.name[prefix.len():]
+                        methods = methods.push(method_name)
+                    case _: pass
+
+        methods
+
+    fn get_all_functions() -> [text]:
+        """Get all function names (for error suggestions)."""
+        var functions: [text] = []
+
+        for entry in self.symbols:
+            val sym = entry.1
+            match sym.kind:
+                case Function:
+                    # Only include non-qualified names (free functions)
+                    if not sym.name.contains("::"):
+                        functions = functions.push(sym.name)
+                case _: pass
+
+        functions
+
 # ============================================================================
 # HIR Types
 # ============================================================================
@@ -246,6 +424,94 @@ enum HirTypeKind:
     Infer(id: i64, level: i64)
     Error
     Never                            # ! type (never returns)
+
+    # Tensor and Layer types (for dimension checking)
+    Tensor(element: HirType, dims: [DimExpr], device: DeviceType?)
+    Layer(input: [DimExpr], output: [DimExpr])
+
+# ============================================================================
+# Dimension Types (for compile-time dimension checking)
+# ============================================================================
+
+struct DimExpr:
+    """Dimension expression for tensor shape checking."""
+    kind: DimExprKind
+    span: Span
+
+enum DimExprKind:
+    """Dimension expression kind."""
+    Literal(value: i64)                     # 784
+    Named(name: text, lo: i64?, hi: i64?)   # batch: 1..128
+    Var(id: i64)                            # Inference variable
+    Dynamic                                  # Runtime only
+    Broadcast                                # Broadcasting dimension
+    ConstParam(name: text)                  # Reference to const generic
+    # Arithmetic operations
+    Add(left: DimExpr, right: DimExpr)
+    Mul(left: DimExpr, right: DimExpr)
+    Div(left: DimExpr, right: DimExpr)
+
+impl DimExpr:
+    static fn literal(value: i64, span: Span) -> DimExpr:
+        DimExpr(kind: DimExprKind.Literal(value), span: span)
+
+    static fn named(name: text, span: Span) -> DimExpr:
+        DimExpr(kind: DimExprKind.Named(name, None, None), span: span)
+
+    static fn named_range(name: text, lo: i64, hi: i64, span: Span) -> DimExpr:
+        DimExpr(kind: DimExprKind.Named(name, Some(lo), Some(hi)), span: span)
+
+    static fn var(id: i64, span: Span) -> DimExpr:
+        DimExpr(kind: DimExprKind.Var(id), span: span)
+
+    static fn dynamic(span: Span) -> DimExpr:
+        DimExpr(kind: DimExprKind.Dynamic, span: span)
+
+    fn is_literal() -> bool:
+        match self.kind:
+            case Literal(_): true
+            case _: false
+
+    fn get_literal() -> i64?:
+        match self.kind:
+            case Literal(v): Some(v)
+            case _: None
+
+enum DeviceType:
+    """Device type for tensors."""
+    CPU
+    GPU
+    CUDA(id: i64)
+
+struct LayerType:
+    """Type for neural network layers with input/output shapes."""
+    input_shape: [DimExpr]
+    output_shape: [DimExpr]
+    params: [ParamShape]
+    device: DeviceType?
+
+struct ParamShape:
+    """Shape of a trainable parameter in a layer."""
+    name: text
+    shape: [DimExpr]
+    trainable: bool
+
+impl LayerType:
+    static fn new(input: [DimExpr], output: [DimExpr]) -> LayerType:
+        LayerType(
+            input_shape: input,
+            output_shape: output,
+            params: [],
+            device: None
+        )
+
+    fn with_device(device: DeviceType) -> LayerType:
+        LayerType(
+            input_shape: self.input_shape,
+            output_shape: self.output_shape,
+            params: self.params,
+            device: Some(device)
+        )
 
 struct Effect:
     """Effect annotation."""
@@ -423,7 +689,7 @@ enum HirExprKind:
 
     # Calls
     Call(callee: HirExpr, args: [HirCallArg], type_args: [HirType])
-    MethodCall(receiver: HirExpr, method: text, args: [HirCallArg], resolved: SymbolId?)
+    MethodCall(receiver: HirExpr, method: text, args: [HirCallArg], resolution: MethodResolution)
 
     # Control flow
     If(cond: HirExpr, then_: HirBlock, else_: HirBlock?)
@@ -458,6 +724,13 @@ enum HirExprKind:
     # Special
     Range(start: HirExpr?, end: HirExpr?, inclusive: bool, step: HirExpr?)
     Comprehension(kind: HirComprehensionKind, expr: HirExpr, clauses: [HirCompClause])
+
+    # Custom blocks (user-defined: sh{}, sql{}, re{}, etc.)
+    CustomBlock(kind: text, value: BlockValue)
+
+    # Math/DL blocks (built-in with special semantics)
+    LossBlock(body: HirBlock)           # loss{ ... } - autograd + auto-backward
+    NogradBlock(body: HirBlock)         # nograd{ ... } - disable gradients
 
     # Error recovery
     Error
@@ -512,6 +785,9 @@ enum HirBinOp:
     # Arithmetic
     Add, Sub, Mul, Div, Mod, Pow
 
+    # Matrix operations
+    MatMul              # @
+
     # Comparison
     Eq, NotEq, Lt, LtEq, Gt, GtEq
 
@@ -520,6 +796,20 @@ enum HirBinOp:
 
     # Bitwise
     BitAnd, BitOr, BitXor, Shl, Shr
+
+    # Broadcast operations (dotted operators)
+    BroadcastAdd        # .+
+    BroadcastSub        # .-
+    BroadcastMul        # .*
+    BroadcastDiv        # ./
+    BroadcastPow        # .^
+
+    # Pipeline/Composition operators
+    PipeForward         # |>
+    Compose             # >>
+    ComposeBack         # <<
+    Parallel            # //
+    LayerConnect        # ~>
 
     # Other
     In, NotIn
@@ -534,6 +824,7 @@ enum HirUnaryOp:
     Ref            # &
     RefMut         # &mut
     Deref          # *
+    Transpose      # ' (postfix, m{} only)
 
 # ============================================================================
 # HIR Patterns
@@ -1147,7 +1438,7 @@ impl HirLowering:
                         value: self.lower_expr(arg.value),
                         span: arg.span
                     ))
-                HirExprKind.MethodCall(self.lower_expr(receiver), method, hir_args, None)
+                HirExprKind.MethodCall(self.lower_expr(receiver), method, hir_args, MethodResolution.Unresolved)
 
             case If(cond, then_, else_):
                 HirExprKind.If(
@@ -1259,6 +1550,17 @@ impl HirLowering:
                 )
                 HirExprKind.EnumLit(hir_type, variant, hir_payload)
 
+            # Custom blocks (user-defined: sh{}, sql{}, re{}, etc.)
+            case CustomBlock(kind, value):
+                HirExprKind.CustomBlock(kind, value)
+
+            # Math/DL blocks with special semantics
+            case LossBlock(body):
+                HirExprKind.LossBlock(self.lower_block(body))
+
+            case NogradBlock(body):
+                HirExprKind.NogradBlock(self.lower_block(body))
+
             case Error:
                 HirExprKind.Error
 
@@ -1277,6 +1579,7 @@ impl HirLowering:
             case Div: HirBinOp.Div
             case Mod: HirBinOp.Mod
             case Pow: HirBinOp.Pow
+            case MatMul: HirBinOp.MatMul
             case Eq: HirBinOp.Eq
             case NotEq: HirBinOp.NotEq
             case Lt: HirBinOp.Lt
@@ -1290,6 +1593,16 @@ impl HirLowering:
             case BitXor: HirBinOp.BitXor
             case Shl: HirBinOp.Shl
             case Shr: HirBinOp.Shr
+            case BroadcastAdd: HirBinOp.BroadcastAdd
+            case BroadcastSub: HirBinOp.BroadcastSub
+            case BroadcastMul: HirBinOp.BroadcastMul
+            case BroadcastDiv: HirBinOp.BroadcastDiv
+            case BroadcastPow: HirBinOp.BroadcastPow
+            case PipeForward: HirBinOp.PipeForward
+            case Compose: HirBinOp.Compose
+            case ComposeBack: HirBinOp.ComposeBack
+            case Parallel: HirBinOp.Parallel
+            case LayerConnect: HirBinOp.LayerConnect
             case In: HirBinOp.In
             case NotIn: HirBinOp.NotIn
             case Is: HirBinOp.Is
@@ -1303,6 +1616,7 @@ impl HirLowering:
             case BitNot: HirUnaryOp.BitNot
             case Ref: HirUnaryOp.Ref
             case Deref: HirUnaryOp.Deref
+            case Transpose: HirUnaryOp.Transpose
 
     me lower_pattern(p: Pattern) -> HirPattern:
         """Lower pattern to HIR."""
@@ -1524,6 +1838,7 @@ impl HirLowering:
 export HirModule, HirImport, HirImportItem
 export SymbolId, Symbol, SymbolKind, ScopeId, Scope, ScopeKind, SymbolTable
 export HirType, HirTypeKind, Effect, EffectKind
+export DimExpr, DimExprKind, DeviceType, LayerType, ParamShape
 export HirFunction, HirTypeParam, HirParam
 export HirClass, HirStruct, HirField, HirEnum, HirVariant, HirVariantKind
 export HirTrait, HirImpl, HirConst

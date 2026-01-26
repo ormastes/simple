@@ -10,9 +10,11 @@ import compiler.lexer.*
 import compiler.treesitter.*
 import compiler.parser.*
 import compiler.hir.*
+import compiler.resolve.*
 import compiler.backend.*
 import compiler.mir.*
 import compiler.codegen.*
+import compiler.blocks.{BlockResolver, ResolvedModule, resolve_blocks}
 
 # ------------------------------------------------------------------------------
 # Compilation Mode
@@ -76,6 +78,8 @@ enum CompileResult:
     Success(value: Any?)
     TypeError(errors: [text])
     ParseError(errors: [text])
+    BlockError(errors: [text])     # Block resolution errors
+    ResolveError(errors: [text])
     CodegenError(message: text)
     RuntimeError(message: text)
 
@@ -94,6 +98,8 @@ enum CompileResult:
             CompileResult.Success(_) => []
             CompileResult.TypeError(e) => e
             CompileResult.ParseError(e) => e
+            CompileResult.BlockError(e) => e
+            CompileResult.ResolveError(e) => e
             CompileResult.CodegenError(m) => [m]
             CompileResult.RuntimeError(m) => [m]
 
@@ -238,6 +244,10 @@ class CompilerDriver:
         if not self.lower_to_hir():
             return CompileResult.TypeError(self.ctx.errors)
 
+        # Phase 3.5: Method resolution (UFCS)
+        if not self.resolve_methods():
+            return CompileResult.ResolveError(self.ctx.errors)
+
         # Phase 4: Mode-specific processing
         match self.ctx.options.mode:
             CompileMode.Check =>
@@ -284,20 +294,24 @@ class CompilerDriver:
         not self.ctx.has_errors()
 
     fn parse_source(source: SourceFile) -> Result<Module, text>:
-        val lexer = Lexer.create(source.content)
-        val treesitter = TreeSitter(lexer: Lexer.create(source.content))
+        # Phase 2a: Outline parsing (TreeSitter)
+        val ts = TreeSitter.new(source.content)
+        val outline = ts.parse_outline()
 
-        # First pass: outline
-        val outline = treesitter.parse_outline()
+        # Phase 2b: Block resolution (NEW)
+        # Resolve all blocks found in the outline before full parsing
+        var resolver = BlockResolver.new()
+            .with_file(source.path)
+            .with_module(source.module_name)
+        val (resolved, block_diagnostics) = resolver.resolve(outline)
 
-        # Second pass: full parse
-        val parser = Parser(
-            lexer: lexer,
-            treesitter: treesitter,
-            current: lexer.next_token(),
-            outline: Some(outline)
-        )
+        # Check for block resolution errors
+        for diag in block_diagnostics:
+            if diag.is_error():
+                return Err("Block error at {source.path}:{diag.span.line}:{diag.span.col}: {diag.message}")
 
+        # Phase 2c: Full parse with resolved blocks
+        val parser = Parser.with_resolved_blocks(source.content, resolved)
         parser.parse()
 
     # --------------------------------------------------------------------------
@@ -313,6 +327,23 @@ class CompilerDriver:
                     self.ctx.hir_modules[name] = hir_module
                 Err(e) =>
                     self.ctx.add_error("HIR lowering error in {name}: {e}")
+
+        not self.ctx.has_errors()
+
+    # --------------------------------------------------------------------------
+    # Phase 3.5: Method Resolution (UFCS)
+    # --------------------------------------------------------------------------
+
+    me resolve_methods() -> bool:
+        for (name, hir_module) in self.ctx.hir_modules:
+            val (resolved_module, errors) = resolve_methods(hir_module)
+
+            # Update the module with resolved method calls
+            self.ctx.hir_modules[name] = resolved_module
+
+            # Collect errors
+            for err in errors:
+                self.ctx.add_error("Method resolution error in {name}: {err.message}")
 
         not self.ctx.has_errors()
 

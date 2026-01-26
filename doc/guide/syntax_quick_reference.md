@@ -1,6 +1,6 @@
 # Simple Language Syntax Quick Reference
 
-**Last Updated:** 2026-01-25
+**Last Updated:** 2026-01-26
 
 A comprehensive reference for Simple's syntax features. All features listed here are **implemented and working**.
 
@@ -19,6 +19,8 @@ A comprehensive reference for Simple's syntax features. All features listed here
 - [Pattern Matching](#pattern-matching)
 - [Control Flow](#control-flow)
 - [Operators](#operators)
+- [Pipeline Operators](#pipeline-operators)
+- [Tensor & Matrix Operators](#tensor--matrix-operators)
 - [Ranges](#ranges)
 - [Resource Cleanup](#resource-cleanup)
 
@@ -611,6 +613,120 @@ x.?         # Existence check (is present/non-empty)
 
 ---
 
+## Pipeline Operators
+
+Pipeline operators enable functional programming patterns and neural network composition.
+
+### Pipe Forward (`|>`)
+
+Pass value to function:
+
+```simple
+# x |> f is equivalent to f(x)
+val result = 5 |> double |> square |> to_string
+# Same as: to_string(square(double(5)))
+
+# Data processing pipeline
+val output = data
+    |> preprocess
+    |> validate
+    |> transform
+```
+
+### Function Composition (`>>`, `<<`)
+
+Create new functions by composition:
+
+```simple
+# f >> g means: λx. g(f(x))
+val pipeline = normalize >> augment >> to_tensor
+val result = pipeline(data)
+
+# << is backward composition (like Haskell's .)
+val same = to_tensor << augment << normalize
+```
+
+### Parallel (`//`)
+
+Run operations in parallel:
+
+```simple
+# f // g runs both and returns tuple
+val both = encode_audio // encode_video
+val (audio, video) = both(raw_audio, raw_video)
+```
+
+### Layer Connect (`~>`)
+
+Compose neural network layers with **dimension checking**:
+
+```simple
+# Dimension-checked pipeline
+val model = Linear(784, 256) ~> ReLU() ~> Linear(256, 10)
+# Type: Layer<[batch, 784], [batch, 10]>
+
+# Compile-time error on mismatch:
+val bad = Linear(784, 256) ~> Linear(128, 64)
+# ERROR: output [batch, 256] != input [batch, 128]
+```
+
+### Pipeline Precedence (Low to High)
+
+```
+|>, ~>    (lowest - pipeline)
+//        (parallel)
+>>        (composition)
+or, ||    (logical or)
+and, &&   (logical and)
+...       (other operators)
+```
+
+---
+
+## Tensor & Matrix Operators
+
+### Matrix Multiplication (`@`)
+
+```simple
+val C = A @ B           # Matrix multiply
+# [M, K] @ [K, N] -> [M, N]
+
+val batched = X @ W     # Batched matmul
+# [batch, M, K] @ [K, N] -> [batch, M, N]
+```
+
+### Broadcast Operators (`.+`, `.-`, `.*`, `./`, `.^`)
+
+Element-wise operations with broadcasting:
+
+```simple
+val result = A .+ B     # Broadcast add
+val scaled = X .* 2.0   # Scalar broadcast
+val powered = M .^ 2    # Element-wise power
+
+# Broadcasting rules (NumPy-style):
+# [3, 4] .+ [1, 4] -> [3, 4]  (1 broadcasts to 3)
+# [3, 4] .+ [4]    -> [3, 4]  (missing dim = 1)
+```
+
+### Power Operators
+
+```simple
+# Outside math blocks: use **
+val x = 2 ** 10         # 1024
+
+# Inside m{} blocks: use ^
+val formula = m{ x^2 + 2*x*y + y^2 }
+```
+
+### XOR Operator
+
+```simple
+val result = 5 xor 3    # Bitwise XOR: 6
+```
+
+---
+
 ## Ranges
 
 ### Exclusive Range (`..`)
@@ -752,7 +868,6 @@ These features are **not available**:
 |---------|------------|
 | Byte strings `b"..."` | Use array of bytes |
 | For-else | Use flag variable |
-| Pipeline `\|>` | Use method chaining or `->` |
 | Elvis `?:` | Use `??` instead |
 
 ---
@@ -763,4 +878,6 @@ These features are **not available**:
 - [doc/guide/fn_lambda_syntax.md](fn_lambda_syntax.md) - Detailed function/lambda guide
 - [doc/guide/resource_cleanup.md](resource_cleanup.md) - Resource management guide
 - [doc/guide/coding_style.md](coding_style.md) - Coding conventions
+- [doc/guide/dimension_errors_guide.md](dimension_errors_guide.md) - Dimension error reference
+- [doc/design/pipeline_operators_design.md](../design/pipeline_operators_design.md) - Pipeline operator design
 - [CLAUDE.md](../../CLAUDE.md) - Quick syntax reference in project instructions
