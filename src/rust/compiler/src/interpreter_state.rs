@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{mpsc, Arc, Mutex};
 
 use simple_common::actor::{Message, ThreadSpawner};
-use simple_parser::ast::{Block, MacroDef, Type};
+use simple_parser::ast::{Block, EnumDef, MacroDef, Type};
 
 use crate::aop_config::AopConfig;
 use crate::di::DiConfig;
@@ -111,6 +111,8 @@ thread_local! {
     pub(crate) static USER_MACROS: RefCell<HashMap<String, MacroDef>> = RefCell::new(HashMap::new());
     /// Order in which macros are defined (for validating defined-before-use)
     pub(crate) static MACRO_DEFINITION_ORDER: RefCell<Vec<String>> = RefCell::new(Vec::new());
+    /// Block-scoped enums (for enums defined inside closures like `it` blocks)
+    pub(crate) static BLOCK_SCOPED_ENUMS: RefCell<HashMap<String, EnumDef>> = RefCell::new(HashMap::new());
     /// Type-safe execution mode (new, replaces Option fields above)
     pub(crate) static EXECUTION_MODE: RefCell<ExecutionMode> = RefCell::new(ExecutionMode::Normal);
     /// Maps unit suffix -> family name (for looking up which family a unit belongs to)
@@ -452,6 +454,9 @@ pub fn clear_interpreter_state() {
     // Clear user macros
     USER_MACROS.with(|cell| cell.borrow_mut().clear());
     MACRO_DEFINITION_ORDER.with(|cell| cell.borrow_mut().clear());
+
+    // Clear block-scoped enums
+    BLOCK_SCOPED_ENUMS.with(|cell| cell.borrow_mut().clear());
 
     // Clear unit system registries
     UNIT_SUFFIX_TO_FAMILY.with(|cell| cell.borrow_mut().clear());

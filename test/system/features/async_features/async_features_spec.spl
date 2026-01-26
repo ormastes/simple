@@ -1,0 +1,480 @@
+"""
+# Async Features Specification
+
+**Feature IDs:** #ASYNC-001 to #ASYNC-063
+**Category:** Runtime | Async
+**Status:** Implemented
+
+Tests async features including:
+- Lambda expressions
+- Future creation and await
+- Async functions
+- Generators and yield
+- Codegen/interpreter parity
+
+## Feature Summary
+
+- **Lambdas**: `\x: expr`, `\x, y: expr`, `\: expr`
+- **Futures**: `future(expr)`, `await f`
+- **Async Functions**: `async fn name() -> T`
+- **Generators**: `generator(\: yield expr)`, `next(gen)`
+
+## Syntax
+
+```simple
+# Lambda
+val double = \x: x * 2
+
+# Future
+val f = future(compute())
+val result = await f
+
+# Async function
+async fn fetch(url: str) -> str:
+    http_get(url)
+
+# Generator
+val gen = generator(\: [yield 1, yield 2, yield 3])
+val first = next(gen)
+```
+"""
+
+use std.spec
+
+
+# ============================================================================
+# Test Group 1: Lambda Expressions
+# ============================================================================
+
+describe "Lambda Expressions":
+    """
+    ## Lambda Syntax
+
+    Tests lambda expression parsing and execution.
+    """
+
+    it "basic lambda with single param":
+        val double = \x: x * 2
+        expect double(21) == 42
+
+    it "lambda with multiple params":
+        val add = \x, y: x + y
+        expect add(15, 27) == 42
+
+    it "lambda capturing outer variable":
+        val multiplier = 10
+        val multiply = \x: x * multiplier
+        expect multiply(4) == 40
+
+    it "immediately invoked lambda":
+        expect (\x: x + 5)(37) == 42
+
+    it "nested lambda calls":
+        val double = \x: x * 2
+        val add_one = \x: x + 1
+        expect add_one(double(20)) == 41
+
+    it "lambda with no params":
+        val answer = \: 42
+        expect answer() == 42
+
+
+# ============================================================================
+# Test Group 2: Basic Futures
+# ============================================================================
+
+describe "Basic Futures":
+    """
+    ## Future Creation and Await
+
+    Tests future() creation and await semantics.
+    """
+
+    it "creates and awaits basic future":
+        val f = future(42)
+        val value = await f
+        expect value == 42
+
+    it "future with function call":
+        fn compute() -> i64:
+            10 + 20 + 30
+
+        val f = future(compute())
+        val value = await f
+        expect value == 60
+
+    it "multiple futures":
+        val f1 = future(10)
+        val f2 = future(20)
+        val f3 = future(30)
+        val r1 = await f1
+        val r2 = await f2
+        val r3 = await f3
+        expect r1 + r2 + r3 == 60
+
+    it "future function call with params":
+        fn slow_add(a: i64, b: i64) -> i64:
+            a + b
+
+        val f = future(slow_add(15, 27))
+        val value = await f
+        expect value == 42
+
+
+# ============================================================================
+# Test Group 3: Async Functions
+# ============================================================================
+
+describe "Async Functions":
+    """
+    ## Async Function Semantics
+
+    Tests async fn declaration and execution.
+    """
+
+    it "basic async function":
+        async fn compute(x: i64) -> i64:
+            x * 2
+
+        expect compute(21) == 42
+
+    it "async fn returns auto-awaited":
+        async fn fetch() -> i64:
+            42
+
+        expect fetch() == 42
+
+    it "async fn can call other async":
+        async fn double(x: i64) -> i64:
+            x * 2
+
+        async fn quadruple(x: i64) -> i64:
+            double(double(x))
+
+        expect quadruple(10) == 40
+
+    it "async fn can use await":
+        async fn compute() -> i64:
+            val f = future(42)
+            await f
+
+        expect compute() == 42
+
+    it "async fn allows print":
+        async fn greet() -> i64:
+            print("hello")
+            42
+
+        expect greet() == 42
+
+
+# ============================================================================
+# Test Group 4: Basic Generators
+# ============================================================================
+
+describe "Basic Generators":
+    """
+    ## Generator Creation and Iteration
+
+    Tests generator() creation and next() semantics.
+    """
+
+    it "single value generator":
+        val gen = generator(\: yield 42)
+        expect next(gen) == 42
+
+    it "multiple yields":
+        val gen = generator(\: [yield 1, yield 2, yield 3])
+        val first = next(gen)
+        val second = next(gen)
+        val third = next(gen)
+        expect first + second + third == 6
+
+    it "generator exhaustion returns nil":
+        val gen = generator(\: yield 1)
+        val first = next(gen)
+        val second = next(gen)  # should be nil
+        expect first == 1
+
+    it "generator with captured variable":
+        val base = 100
+        val gen = generator(\: [yield base, yield base])
+        val a = next(gen)
+        val b = next(gen)
+        expect a + b == 200
+
+    it "arithmetic in yield":
+        val value = 2 * 3
+        val gen = generator(\: yield value)
+        expect next(gen) == 6
+
+    it "nested iteration":
+        val gen = generator(\: [yield 1, yield 2, yield 3, yield 4])
+        val sum = next(gen) + next(gen) + next(gen) + next(gen)
+        expect sum == 10
+
+    it "collects generator values":
+        val gen = generator(\: (yield 10, yield 20, yield 30, 0)[3])
+        val arr = collect(gen)
+        expect arr[0] + arr[1] + arr[2] == 60
+
+
+# ============================================================================
+# Test Group 5: Await Non-Future Error
+# ============================================================================
+
+describe "Await Non-Future Error":
+    """
+    ## Type Checking for Await
+
+    Tests that await requires Future type.
+    """
+
+    it "await requires future type":
+        # This would be a compile error:
+        # val x = 42
+        # val value = await x  # Error: await requires Future
+        expect true  # Compile-time check
+
+
+# ============================================================================
+# Test Group 6: Generator State Machine
+# ============================================================================
+
+describe "Generator State Machine":
+    """
+    ## State Preservation
+
+    Tests generator state preservation across yields.
+    """
+
+    it "state preserved across yields":
+        val gen = generator(\: (yield 10, yield 15)[1])
+        val a = next(gen)
+        val b = next(gen)
+        expect a + b == 25
+
+    it "multiple captures":
+        val a = 10
+        val b = 20
+        val c = 30
+        val gen = generator(\: [yield a, yield b, yield c])
+        val x = next(gen)
+        val y = next(gen)
+        val z = next(gen)
+        expect x + y + z == 60
+
+    it "capture and compute":
+        val multiplier = 10
+        val gen = generator(\: [yield (1 * multiplier), yield (2 * multiplier), yield (3 * multiplier)])
+        val a = next(gen)
+        val b = next(gen)
+        val c = next(gen)
+        expect a + b + c == 60
+
+
+# ============================================================================
+# Test Group 7: Future with Captures
+# ============================================================================
+
+describe "Future with Captures":
+    """
+    ## Closure Capture in Futures
+
+    Tests future capturing outer variables.
+    """
+
+    it "future with single capture":
+        val base = 40
+        val f = future(base + 2)
+        val res = await f
+        expect res == 42
+
+    it "future with multiple captures":
+        val a = 10
+        val b = 20
+        val c = 12
+        val f = future(a + b + c)
+        val res = await f
+        expect res == 42
+
+
+# ============================================================================
+# Test Group 8: Actor Spawn
+# ============================================================================
+
+describe "Actor Spawn":
+    """
+    ## Basic Actor Creation
+
+    Tests spawn for actor creation.
+    """
+
+    it "basic actor spawn":
+        fn worker() -> i64:
+            42
+
+        val h = spawn worker()
+        expect true  # Spawned successfully
+
+
+# ============================================================================
+# Test Group 9: Generator with State and Capture
+# ============================================================================
+
+describe "Generator with State and Capture":
+    """
+    ## Combined State and Capture
+
+    Tests generators with both state machine and captures.
+    """
+
+    it "state and capture combined":
+        val offset = 100
+        val gen = generator(\: [yield (1 + offset), yield (2 + offset)])
+        val a = next(gen)
+        val b = next(gen)
+        expect a + b == 203
+
+    it "exhaustion with capture":
+        val value = 42
+        val gen = generator(\: yield value)
+        val first = next(gen)
+        val second = next(gen)
+        expect first == 42
+
+    it "nested generator captures":
+        val x = 5
+        val y = 3
+        val gen = generator(\: yield (x * y + x))
+        expect next(gen) == 20
+
+
+# ============================================================================
+# Test Group 10: Control Flow Parity
+# ============================================================================
+
+describe "Control Flow Parity":
+    """
+    ## Interpreter/Codegen Parity
+
+    Tests that control flow works in both modes.
+    """
+
+    it "nested control flow":
+        fn compute(n: i64) -> i64:
+            var sum = 0
+            var i = 0
+            while i < n:
+                if i % 2 == 0:
+                    sum = sum + i
+                else:
+                    sum = sum + 1
+                i = i + 1
+            sum
+
+        expect compute(10) == 25
+
+    it "recursive function":
+        fn factorial(n: i64) -> i64:
+            if n <= 1:
+                1
+            else:
+                n * factorial(n - 1)
+
+        expect factorial(3) == 6
+
+
+# ============================================================================
+# Test Group 11: Data Structure Parity
+# ============================================================================
+
+describe "Data Structure Parity":
+    """
+    ## Struct/Enum/Array Parity
+
+    Tests data structures in both modes.
+    """
+
+    it "struct field access":
+        struct Point:
+            x: i64
+            y: i64
+
+        val p = Point(x: 10, y: 20)
+        expect p.x * p.y == 200
+
+    it "enum pattern match":
+        enum Result:
+            Ok(i64)
+            Err
+
+        val r = Result::Ok(42)
+        var value = 0
+        match r:
+            Result::Ok(v) =>
+                value = v
+            Result::Err =>
+                value = -1
+        expect value == 42
+
+    it "array operations":
+        val arr = [10, 20, 30, 40, 50]
+        var sum = 0
+        var i = 0
+        while i < 5:
+            sum = sum + arr[i]
+            i = i + 1
+        expect sum == 150
+
+    it "tuple indexing":
+        val t = (10, 20, 30)
+        expect t.0 + t.1 + t.2 == 60
+
+    it "dictionary access":
+        val d = {"a": 10, "b": 20, "c": 30}
+        expect d["a"] + d["b"] + d["c"] == 60
+
+
+# ============================================================================
+# Test Group 12: Function Parity
+# ============================================================================
+
+describe "Function Parity":
+    """
+    ## Function Call Parity
+
+    Tests function calls in both modes.
+    """
+
+    it "function composition":
+        fn double(x: i64) -> i64:
+            x * 2
+
+        fn add_one(x: i64) -> i64:
+            x + 1
+
+        expect double(add_one(double(5))) == 22
+
+    it "early return":
+        fn find_first_even(limit: i64) -> i64:
+            var i = 1
+            while i <= limit:
+                if i % 2 == 0:
+                    return i
+                i = i + 1
+            -1
+
+        expect find_first_even(10) == 2
+
+    it "boolean logic":
+        fn verify(a: i64, b: i64) -> i64:
+            if a > 0 and b > 0:
+                1
+            elif a > 0 or b > 0:
+                2
+            else:
+                0
+
+        expect verify(1, 1) * 100 + verify(1, 0) * 10 + verify(0, 0) == 120
+

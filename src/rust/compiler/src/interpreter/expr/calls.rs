@@ -8,6 +8,7 @@ use crate::value::Value;
 
 use super::super::{
     evaluate_call, evaluate_method_call, exec_method_function, ClassDef, Enums, Env, FunctionDef, ImplMethods,
+    BLOCK_SCOPED_ENUMS,
 };
 
 pub(super) fn eval_call_expr(
@@ -202,7 +203,10 @@ pub(super) fn eval_call_expr(
                 // Enum type field access - construct enum variants
                 // EnumName.VariantName syntax
                 Value::EnumType { ref enum_name } => {
-                    if let Some(enum_def) = enums.get(enum_name).cloned() {
+                    // Check both module-level enums and block-scoped enums
+                    let enum_def = enums.get(enum_name).cloned()
+                        .or_else(|| BLOCK_SCOPED_ENUMS.with(|cell| cell.borrow().get(enum_name).cloned()));
+                    if let Some(enum_def) = enum_def {
                         // Check if the field is a valid variant name
                         let variant_opt = enum_def.variants.iter().find(|v| v.name == *field);
                         if let Some(variant) = variant_opt {

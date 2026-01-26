@@ -597,6 +597,15 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // rt_ffi_object_type_name(obj) -> RuntimeValue (string)
     RuntimeFuncSpec::new("rt_ffi_object_type_name", &[I64], &[I64]),
     // =========================================================================
+    // Process execution
+    // =========================================================================
+    // rt_process_run(cmd_ptr, cmd_len, args) -> RuntimeValue (tuple of stdout, stderr, exit_code)
+    RuntimeFuncSpec::new("rt_process_run", &[I64, I64, I64], &[I64]),
+    // rt_process_spawn(cmd_ptr, cmd_len, args) -> pid (i64)
+    RuntimeFuncSpec::new("rt_process_spawn", &[I64, I64, I64], &[I64]),
+    // rt_process_execute(cmd_ptr, cmd_len, args) -> exit_code (i32)
+    RuntimeFuncSpec::new("rt_process_execute", &[I64, I64, I64], &[I32]),
+    // =========================================================================
     // CLI FFI functions (for Simple-based CLI)
     // =========================================================================
     // Version and help

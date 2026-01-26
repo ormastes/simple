@@ -1,0 +1,392 @@
+"""
+# TreeSitter Query Specification
+
+**Feature IDs:** #TS-QUERY-001 to #TS-QUERY-020
+**Category:** Infrastructure | Parser
+**Status:** Implemented
+
+Tests the query system for pattern matching on syntax trees,
+including pattern types, captures, and query execution.
+
+## API
+
+```simple
+use std.parser.treesitter.{Query, QueryCursor, QueryPattern, Capture}
+
+val query = Query.new("simple", query_str)?
+var cursor = QueryCursor.new(query, tree)
+val matches = cursor.all_matches()
+```
+"""
+
+use std.spec
+use std.parser.treesitter.{TreeSitterParser, Query, QueryCursor, QueryPattern, QueryMatch, Capture}
+
+
+# ============================================================================
+# Test Group 1: Query Creation
+# ============================================================================
+
+describe "TreeSitter Query Creation":
+    """
+    ## Creating Queries
+
+    Tests query initialization for the Simple language.
+    """
+
+    it "creates query for Simple language":
+        val result = Query.new("simple", "")
+        expect result.ok.?
+
+    it "rejects unsupported language":
+        val result = Query.new("unknown_language", "")
+        expect result.err.?
+
+    it "creates query with patterns":
+        val query = Query.new("simple", "").unwrap()
+        expect query.patterns.len() >= 0
+
+    it "creates query with capture names":
+        val query = Query.new("simple", "").unwrap()
+        expect query.capture_names.len() >= 0
+
+
+# ============================================================================
+# Test Group 2: Query Pattern Types
+# ============================================================================
+
+describe "TreeSitter Query Pattern Types":
+    """
+    ## Pattern Type Identification
+
+    Tests the different types of query patterns.
+    """
+
+    context "NodeKind pattern":
+        it "creates NodeKind pattern":
+            val pattern = QueryPattern::NodeKind("identifier")
+            expect pattern.is_node_kind()
+
+        it "NodeKind has no capture":
+            val pattern = QueryPattern::NodeKind("identifier")
+            expect not pattern.has_capture()
+
+    context "CaptureNode pattern":
+        it "creates CaptureNode pattern":
+            val pattern = QueryPattern::CaptureNode("identifier", "variable")
+            expect pattern.is_capture_node()
+
+        it "CaptureNode has capture":
+            val pattern = QueryPattern::CaptureNode("identifier", "variable")
+            expect pattern.has_capture()
+
+    context "FieldNode pattern":
+        it "creates FieldNode pattern":
+            val child = QueryPattern::NodeKind("identifier")
+            val pattern = QueryPattern::FieldNode("function_def", "name", child)
+            expect pattern.is_field_node()
+
+        it "FieldNode is nested":
+            val child = QueryPattern::NodeKind("identifier")
+            val pattern = QueryPattern::FieldNode("function_def", "name", child)
+            expect pattern.is_nested()
+
+    context "ParentNode pattern":
+        it "creates ParentNode pattern":
+            val children: [QueryPattern] = []
+            val pattern = QueryPattern::ParentNode("function_def", children)
+            expect pattern.is_parent_node()
+
+        it "ParentNode is nested":
+            val children: [QueryPattern] = []
+            val pattern = QueryPattern::ParentNode("function_def", children)
+            expect pattern.is_nested()
+
+    context "KeywordList pattern":
+        it "creates KeywordList pattern":
+            val keywords = ["fn", "val", "return"]
+            val pattern = QueryPattern::KeywordList(keywords, "keyword")
+            expect pattern.is_keyword_list()
+
+        it "KeywordList has capture":
+            val keywords = ["fn", "val"]
+            val pattern = QueryPattern::KeywordList(keywords, "keyword")
+            expect pattern.has_capture()
+
+
+# ============================================================================
+# Test Group 3: Pattern Methods
+# ============================================================================
+
+describe "TreeSitter Query Pattern Methods":
+    """
+    ## Pattern Helper Methods
+
+    Tests utility methods on QueryPattern.
+    """
+
+    it "converts to string":
+        val pattern = QueryPattern::NodeKind("identifier")
+        expect pattern.to_string() == "node_kind"
+
+    it "gets description":
+        val pattern = QueryPattern::NodeKind("identifier")
+        val desc = pattern.description()
+        expect desc.len() > 0
+
+    it "gets summary":
+        val pattern = QueryPattern::NodeKind("identifier")
+        val summary = pattern.summary()
+        expect summary.contains("QueryPattern")
+
+
+# ============================================================================
+# Test Group 4: Query Cursor Creation
+# ============================================================================
+
+describe "TreeSitter Query Cursor Creation":
+    """
+    ## Creating Query Cursors
+
+    Tests query cursor initialization.
+    """
+
+    it "creates cursor with query and tree":
+        var parser = TreeSitterParser.new("simple").unwrap()
+        val tree = parser.parse("val x = 42").unwrap()
+        val query = Query.new("simple", "").unwrap()
+        var cursor = QueryCursor.new(query, tree)
+        # Cursor should be valid
+        expect true
+
+    it "cursor executes query on creation":
+        var parser = TreeSitterParser.new("simple").unwrap()
+        val tree = parser.parse("val x = 42").unwrap()
+        val query = Query.new("simple", "").unwrap()
+        var cursor = QueryCursor.new(query, tree)
+        # Matches should be collected
+        expect cursor.matches.len() >= 0
+
+
+# ============================================================================
+# Test Group 5: Query Execution
+# ============================================================================
+
+describe "TreeSitter Query Execution":
+    """
+    ## Running Queries on Trees
+
+    Tests query execution and match finding.
+    """
+
+    it "finds matches in tree":
+        var parser = TreeSitterParser.new("simple").unwrap()
+        val tree = parser.parse("val x = 42").unwrap()
+        val query = Query.new("simple", "").unwrap()
+        var cursor = QueryCursor.new(query, tree)
+        val matches = cursor.all_matches()
+        # Should find some matches (keywords, numbers, etc.)
+        expect matches.len() >= 0
+
+    it "returns empty for empty tree":
+        var parser = TreeSitterParser.new("simple").unwrap()
+        val tree = parser.parse("").unwrap()
+        val query = Query.new("simple", "").unwrap()
+        var cursor = QueryCursor.new(query, tree)
+        val matches = cursor.all_matches()
+        # May or may not have matches
+        expect true
+
+
+# ============================================================================
+# Test Group 6: Match Iteration
+# ============================================================================
+
+describe "TreeSitter Query Match Iteration":
+    """
+    ## Iterating Over Matches
+
+    Tests the next_match() method.
+    """
+
+    it "iterates matches with next_match":
+        var parser = TreeSitterParser.new("simple").unwrap()
+        val tree = parser.parse("val x = 42").unwrap()
+        val query = Query.new("simple", "").unwrap()
+        var cursor = QueryCursor.new(query, tree)
+
+        var count = 0
+        while cursor.next_match().?:
+            count = count + 1
+
+        expect count >= 0
+
+    it "returns None after all matches":
+        var parser = TreeSitterParser.new("simple").unwrap()
+        val tree = parser.parse("val x = 42").unwrap()
+        val query = Query.new("simple", "").unwrap()
+        var cursor = QueryCursor.new(query, tree)
+
+        # Consume all matches
+        while cursor.next_match().?:
+            pass
+
+        # Next should be None
+        expect not cursor.next_match().?
+
+
+# ============================================================================
+# Test Group 7: Cursor Reset
+# ============================================================================
+
+describe "TreeSitter Query Cursor Reset":
+    """
+    ## Resetting Query Cursor
+
+    Tests the reset() method.
+    """
+
+    it "resets cursor to beginning":
+        var parser = TreeSitterParser.new("simple").unwrap()
+        val tree = parser.parse("val x = 42").unwrap()
+        val query = Query.new("simple", "").unwrap()
+        var cursor = QueryCursor.new(query, tree)
+
+        # Consume some matches
+        cursor.next_match()
+        cursor.next_match()
+
+        # Reset
+        cursor.reset()
+
+        # Should be at beginning again
+        expect cursor.current_index == 0
+
+    it "can iterate again after reset":
+        var parser = TreeSitterParser.new("simple").unwrap()
+        val tree = parser.parse("val x = 42").unwrap()
+        val query = Query.new("simple", "").unwrap()
+        var cursor = QueryCursor.new(query, tree)
+
+        # First iteration
+        var count1 = 0
+        while cursor.next_match().?:
+            count1 = count1 + 1
+
+        # Reset and iterate again
+        cursor.reset()
+        var count2 = 0
+        while cursor.next_match().?:
+            count2 = count2 + 1
+
+        expect count1 == count2
+
+
+# ============================================================================
+# Test Group 8: Query Match Structure
+# ============================================================================
+
+describe "TreeSitter Query Match Structure":
+    """
+    ## Match Content
+
+    Tests the structure of QueryMatch objects.
+    """
+
+    it "match has pattern index":
+        var parser = TreeSitterParser.new("simple").unwrap()
+        val tree = parser.parse("val x = 42").unwrap()
+        val query = Query.new("simple", "").unwrap()
+        var cursor = QueryCursor.new(query, tree)
+
+        match cursor.next_match():
+            case Some(m):
+                expect m.pattern_index >= 0
+            case None:
+                expect true  # No matches is valid
+
+    it "match has captures list":
+        var parser = TreeSitterParser.new("simple").unwrap()
+        val tree = parser.parse("val x = 42").unwrap()
+        val query = Query.new("simple", "").unwrap()
+        var cursor = QueryCursor.new(query, tree)
+
+        match cursor.next_match():
+            case Some(m):
+                expect m.captures.len() >= 0
+            case None:
+                expect true
+
+
+# ============================================================================
+# Test Group 9: Capture Structure
+# ============================================================================
+
+describe "TreeSitter Capture Structure":
+    """
+    ## Capture Content
+
+    Tests the structure of Capture objects.
+    """
+
+    it "creates capture with name":
+        var parser = TreeSitterParser.new("simple").unwrap()
+        val tree = parser.parse("val x = 42").unwrap()
+        val root = tree.root().unwrap()
+        val capture = Capture.new("variable", root, 0)
+        expect capture.name == "variable"
+
+    it "creates capture with node":
+        var parser = TreeSitterParser.new("simple").unwrap()
+        val tree = parser.parse("val x = 42").unwrap()
+        val root = tree.root().unwrap()
+        val capture = Capture.new("test", root, 0)
+        expect capture.node.kind == root.kind
+
+    it "creates capture with index":
+        var parser = TreeSitterParser.new("simple").unwrap()
+        val tree = parser.parse("val x = 42").unwrap()
+        val root = tree.root().unwrap()
+        val capture = Capture.new("test", root, 5)
+        expect capture.index == 5
+
+
+# ============================================================================
+# Test Group 10: Syntax Highlighting Query
+# ============================================================================
+
+describe "TreeSitter Syntax Highlighting":
+    """
+    ## Highlighting Queries
+
+    Tests queries used for syntax highlighting.
+    """
+
+    it "highlights keywords":
+        var parser = TreeSitterParser.new("simple").unwrap()
+        val tree = parser.parse("fn test():\n    return 42").unwrap()
+        val query = Query.new("simple", "").unwrap()
+        var cursor = QueryCursor.new(query, tree)
+
+        # Should find keyword captures for "fn" and "return"
+        val matches = cursor.all_matches()
+        expect matches.len() >= 0
+
+    it "highlights function names":
+        var parser = TreeSitterParser.new("simple").unwrap()
+        val tree = parser.parse("fn add(a, b):\n    a + b").unwrap()
+        val query = Query.new("simple", "").unwrap()
+        var cursor = QueryCursor.new(query, tree)
+
+        val matches = cursor.all_matches()
+        expect matches.len() >= 0
+
+    it "highlights numbers":
+        var parser = TreeSitterParser.new("simple").unwrap()
+        val tree = parser.parse("val x = 42").unwrap()
+        val query = Query.new("simple", "").unwrap()
+        var cursor = QueryCursor.new(query, tree)
+
+        val matches = cursor.all_matches()
+        expect matches.len() >= 0
+

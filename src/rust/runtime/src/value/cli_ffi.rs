@@ -57,25 +57,53 @@ pub extern "C" fn rt_cli_get_args() -> RuntimeValue {
     arr
 }
 
-/// Check if a file exists
+/// Check if a file exists (cli version)
 #[no_mangle]
 pub extern "C" fn rt_cli_file_exists(path: RuntimeValue) -> u8 {
+    if file_exists_impl(path) { 1 } else { 0 }
+}
+
+/// Helper: check if a file exists
+fn file_exists_impl(path: RuntimeValue) -> bool {
     let len = super::rt_string_len(path);
     if len <= 0 {
-        return 0;
+        return false;
     }
     let data = super::rt_string_data(path);
     if data.is_null() {
-        return 0;
+        return false;
     }
     let path_str = unsafe {
         let slice = std::slice::from_raw_parts(data, len as usize);
         String::from_utf8_lossy(slice).to_string()
     };
-    if std::path::Path::new(&path_str).exists() {
-        1
-    } else {
-        0
+    std::path::Path::new(&path_str).exists()
+}
+
+/// Check if a file exists (for Simple code - takes RuntimeValue string)
+#[no_mangle]
+pub extern "C" fn rt_file_exists_str(path: RuntimeValue) -> bool {
+    file_exists_impl(path)
+}
+
+/// Read file contents as text (for Simple code - takes RuntimeValue string)
+#[no_mangle]
+pub extern "C" fn rt_read_file_str(path: RuntimeValue) -> RuntimeValue {
+    let len = super::rt_string_len(path);
+    if len <= 0 {
+        return rt_string_new("".as_ptr(), 0);
+    }
+    let data = super::rt_string_data(path);
+    if data.is_null() {
+        return rt_string_new("".as_ptr(), 0);
+    }
+    let path_str = unsafe {
+        let slice = std::slice::from_raw_parts(data, len as usize);
+        String::from_utf8_lossy(slice).to_string()
+    };
+    match std::fs::read_to_string(&path_str) {
+        Ok(content) => rt_string_new(content.as_ptr(), content.len() as u64),
+        Err(_) => rt_string_new("".as_ptr(), 0),
     }
 }
 

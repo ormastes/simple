@@ -1,6 +1,7 @@
 pub mod api_scanner;
 pub mod coverage;
 pub mod coverage_extended;
+pub mod ffi;
 pub mod fluent;
 pub mod mock_policy;
 pub mod test_check;
