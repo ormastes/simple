@@ -534,6 +534,9 @@ impl CompilerPipeline {
     }
 
     /// Compile a source file to a standalone native binary.
+    ///
+    /// This method properly resolves imports using `load_module_with_imports`,
+    /// which is necessary for compiling multi-module projects.
     #[instrument(skip(self, source_path, output))]
     pub fn compile_file_to_native_binary(
         &mut self,
@@ -541,8 +544,109 @@ impl CompilerPipeline {
         output: &Path,
         options: Option<crate::linker::NativeBinaryOptions>,
     ) -> Result<crate::linker::NativeBinaryResult, CompileError> {
-        let source = fs::read_to_string(source_path)
-            .map_err(|e| CompileError::Io(format!("failed to read {}: {}", source_path.display(), e)))?;
-        self.compile_to_native_binary(&source, output, options)
+        // Load module with imports resolved (flattened into the module)
+        let ast_module = load_module_with_imports(source_path, &mut HashSet::new())?;
+        self.compile_module_to_native_binary(ast_module, output, options)
+    }
+
+    /// Compile an already-parsed module to a standalone native binary.
+    ///
+    /// This is the internal implementation shared by both source string and file path methods.
+    #[instrument(skip(self, ast_module, output))]
+    pub fn compile_module_to_native_binary(
+        &mut self,
+        ast_module: simple_parser::ast::Module,
+        output: &Path,
+        options: Option<crate::linker::NativeBinaryOptions>,
+    ) -> Result<crate::linker::NativeBinaryResult, CompileError> {
+        use crate::linker::{LayoutOptimizer, NativeBinaryBuilder, NativeBinaryOptions};
+
+        // Clear previous diagnostics
+        self.lint_diagnostics.clear();
+
+        // Validate release mode configuration
+        self.validate_release_config()?;
+
+        // Emit AST if requested
+        if let Some(path) = &self.emit_ast {
+            crate::ir_export::export_ast(&ast_module, path.as_deref()).map_err(|e| {
+                let ctx = ErrorContext::new()
+                    .with_code(codes::UNSUPPORTED_FEATURE)
+                    .with_help("Failed to export AST to file");
+                CompileError::semantic_with_context(e, ctx)
+            })?;
+        }
+
+        // Monomorphization
+        let ast_module = monomorphize_module(&ast_module);
+
+        // Run lint checks
+        self.run_lint_checks(&ast_module.items, None)?;
+
+        // Validate capabilities
+        self.validate_capabilities(&ast_module.items)?;
+
+        // Check trait coherence
+        self.check_trait_coherence(&ast_module.items)?;
+
+        // Validate sync constraints (async-by-default #44)
+        self.validate_sync_constraints(&ast_module.items)?;
+
+        // Type check and lower to MIR
+        let mir_module = self.type_check_and_lower(&ast_module)?;
+
+        // Get options
+        let options = options.unwrap_or_else(|| NativeBinaryOptions::default().output(output));
+
+        // Check for main function (not required for shared libraries)
+        if !options.shared {
+            let has_main_function = mir_module.functions.iter().any(|f| f.name == FUNC_MAIN);
+            if !has_main_function {
+                let ctx = ErrorContext::new()
+                    .with_code(codes::INVALID_OPERATION)
+                    .with_help("Define a 'main() -> i32' function in your source code");
+                return Err(CompileError::semantic_with_context(
+                    "native binary requires a main function".to_string(),
+                    ctx,
+                ));
+            }
+        }
+
+        // Generate object code
+        let object_code = self.compile_mir_to_object(&mir_module, options.target.clone())?;
+
+        // Build native binary
+        let mut builder = NativeBinaryBuilder::new(object_code)
+            .output(output)
+            .target(options.target.clone())
+            .strip(options.strip)
+            .pie(options.pie)
+            .shared(options.shared)
+            .map(options.generate_map)
+            .verbose(options.verbose);
+
+        // Add libraries
+        for lib in &options.libraries {
+            builder = builder.library(lib);
+        }
+
+        // Add library paths
+        for path in &options.library_paths {
+            builder = builder.library_path(path);
+        }
+
+        // Set linker
+        if let Some(linker) = options.linker {
+            builder = builder.linker(linker);
+        }
+
+        // Set up layout optimizer if requested
+        if options.layout_optimize {
+            let optimizer = LayoutOptimizer::new();
+            builder = builder.with_layout_optimizer(optimizer);
+        }
+
+        // Build
+        builder.build().map_err(|e| CompileError::Codegen(format!("{e}")))
     }
 }

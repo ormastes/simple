@@ -416,6 +416,14 @@ impl From<&Value> for BridgeValue {
                 // Native functions are interpreter-only - use nil
                 BridgeValue::nil()
             }
+            Value::TraitType { trait_name } => {
+                // Store trait type name
+                BridgeValue {
+                    tag: bridge_tags::STRING, // Use STRING tag for trait type name
+                    payload: 0,
+                    extended: CString::new(trait_name.as_str()).unwrap().into_raw() as *mut u8,
+                }
+            }
             Value::TraitObject { inner, .. } => {
                 // Bridge the inner value - trait info is lost in FFI
                 BridgeValue::from(inner.as_ref())

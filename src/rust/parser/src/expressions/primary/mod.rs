@@ -54,7 +54,13 @@ impl<'a> Parser<'a> {
             | TokenKind::Gpu
             | TokenKind::Slice
             | TokenKind::Flat
-            | TokenKind::Alias => self.parse_primary_identifier(),
+            | TokenKind::Alias
+            | TokenKind::Bounds
+            | TokenKind::Default
+            | TokenKind::New
+            | TokenKind::Old
+            | TokenKind::From
+            | TokenKind::To => self.parse_primary_identifier(),
             TokenKind::Backslash | TokenKind::Pipe | TokenKind::Move => self.parse_primary_lambda(),
             // fn(): lambda syntax (alias for \:) - only in expression context
             // Check if fn is IMMEDIATELY followed by ( (no identifier) to distinguish from function definitions

@@ -505,10 +505,25 @@ impl<'a> Parser<'a> {
 
     pub(crate) fn parse_match_arm(&mut self) -> Result<MatchArm, ParseError> {
         let start_span = self.current.span;
-        if self.check(&TokenKind::Case) {
+
+        // Support both syntaxes:
+        // - `case pattern:` or `case pattern ->`  (traditional)
+        // - `| pattern ->`  (Erlang-style, preferred)
+        let is_pipe_syntax = self.check(&TokenKind::Pipe);
+        if is_pipe_syntax {
+            self.advance(); // consume `|`
+        } else if self.check(&TokenKind::Case) {
             self.advance();
         }
+
+        // Reset pattern indent count before parsing pattern
+        self.pattern_indent_count = 0;
         let pattern = self.parse_pattern()?;
+
+        // Save the count of INDENTs consumed during pattern parsing
+        // (for multi-line or-patterns like `case 1 | 2\n   | 3:`)
+        let pattern_indents = self.pattern_indent_count;
+        self.pattern_indent_count = 0;
 
         let guard = if self.check(&TokenKind::If) {
             self.advance();
@@ -517,10 +532,17 @@ impl<'a> Parser<'a> {
             None
         };
 
-        let body = if self.check(&TokenKind::Arrow) || self.check(&TokenKind::FatArrow) || self.check(&TokenKind::Colon)
-        {
+        // For `| pattern ->` syntax, only accept `->`
+        // For `case pattern:` syntax, accept `->`, `=>`, or `:`
+        let valid_separator = if is_pipe_syntax {
+            self.check(&TokenKind::Arrow)
+        } else {
+            self.check(&TokenKind::Arrow) || self.check(&TokenKind::FatArrow) || self.check(&TokenKind::Colon)
+        };
+
+        let body = if valid_separator {
             self.advance();
-            // Support inline match arm: `case X => return Y` or `case X: expr`
+            // Support inline match arm: `case X => return Y` or `| X -> expr`
             if self.check(&TokenKind::Newline) {
                 self.parse_block()?
             } else {
@@ -532,12 +554,25 @@ impl<'a> Parser<'a> {
                 }
             }
         } else {
+            let expected = if is_pipe_syntax { "->" } else { "-> or => or :" };
             return Err(ParseError::unexpected_token(
-                "match arm",
+                expected,
                 format!("{:?}", self.current.kind),
                 self.current.span,
             ));
         };
+
+        // Consume DEDENTs that balance the INDENTs consumed during multi-line pattern parsing
+        // These DEDENTs appear AFTER the arm body in the token stream
+        for _ in 0..pattern_indents {
+            // Skip any newlines before the DEDENT
+            while self.check(&TokenKind::Newline) {
+                self.advance();
+            }
+            if self.check(&TokenKind::Dedent) {
+                self.advance();
+            }
+        }
 
         Ok(MatchArm {
             span: Span::new(

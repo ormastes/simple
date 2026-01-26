@@ -153,6 +153,15 @@ pub(super) fn register_definitions(
                 // Register extern function declarations in the global EXTERN_FUNCTIONS
                 crate::interpreter::EXTERN_FUNCTIONS.with(|cell| cell.borrow_mut().insert(ext.name.clone()));
             }
+            Node::Trait(t) => {
+                // Export trait as TraitType so trait exports work
+                let trait_type = Value::TraitType {
+                    trait_name: t.name.clone(),
+                };
+                exports.insert(t.name.clone(), trait_type.clone());
+                // Also add to env so it's available in the module
+                env.insert(t.name.clone(), trait_type);
+            }
             _ => {}
         }
     }
@@ -438,8 +447,13 @@ pub(super) fn process_bare_exports(bare_exports: &[Vec<String>], env: &Env, expo
                     exports.insert(name.clone(), value.clone());
                 }
             } else {
-                // Warn if exported name doesn't exist
-                warn!(name = %name, "Export statement references undefined symbol");
+                // Check if it's already in exports (e.g., enums are auto-exported)
+                if exports.contains_key(name) {
+                    trace!(name = %name, "Bare export already in exports, skipping");
+                } else {
+                    // Warn if exported name doesn't exist
+                    warn!(name = %name, "Export statement references undefined symbol");
+                }
             }
         }
     }

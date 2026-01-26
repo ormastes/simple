@@ -211,6 +211,12 @@ pub mod codes {
 
     // FFI errors (E40xx)
     pub const TYPE_NOT_FFI_SAFE: &str = "E4005";
+
+    // Contract errors (E50xx)
+    pub const CONTRACT_PRECONDITION_FAILED: &str = "E5001";
+    pub const CONTRACT_POSTCONDITION_FAILED: &str = "E5002";
+    pub const CONTRACT_INVARIANT_FAILED: &str = "E5003";
+    pub const CONTRACT_OLD_EXPR_FAILED: &str = "E5004";
 }
 
 /// Typo detection and suggestion utilities.
@@ -1517,6 +1523,18 @@ impl CompileError {
     /// Create a runtime error with just a message.
     pub fn runtime(message: impl Into<String>) -> Self {
         Self::Runtime(message.into())
+    }
+
+    /// Create a contract violation error with a message.
+    /// Used when preconditions, postconditions, or invariants fail at runtime.
+    pub fn contract_violation(message: impl Into<String>) -> Self {
+        let ctx = ErrorContext::new()
+            .with_code(codes::CONTRACT_PRECONDITION_FAILED)
+            .with_help("ensure the contract condition is satisfied before function call");
+        Self::RuntimeWithContext {
+            message: message.into(),
+            context: ctx,
+        }
     }
 
     /// Create a semantic error with context.

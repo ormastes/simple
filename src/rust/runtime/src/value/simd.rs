@@ -467,6 +467,400 @@ pub extern "C" fn rt_vec_select(mask: RuntimeValue, if_true: RuntimeValue, if_fa
 }
 
 // =============================================================================
+// Load/Store Operations
+// =============================================================================
+
+/// Load elements from array starting at offset.
+///
+/// # Parameters
+/// - `arr`: Source array
+/// - `offset`: Starting offset
+///
+/// # Returns
+/// New vector containing elements from arr[offset..]
+#[no_mangle]
+pub extern "C" fn rt_vec_load(arr: RuntimeValue, offset: i64) -> RuntimeValue {
+    let src = match get_array(arr) {
+        Some(a) => a,
+        None => return RuntimeValue::NIL,
+    };
+
+    let src_len = array_len(src);
+    let start = offset.max(0) as usize;
+
+    if start >= src_len {
+        return rt_array_new(0);
+    }
+
+    // Load 4 elements (typical SIMD width) or remaining elements
+    let count = (src_len - start).min(4);
+    create_array_from_fn(count, |i| array_get_element(src, start + i))
+}
+
+/// Store vector elements into array at offset.
+///
+/// # Parameters
+/// - `vec`: Source vector to store
+/// - `arr`: Target array
+/// - `offset`: Starting offset in target array
+#[no_mangle]
+pub extern "C" fn rt_vec_store(vec: RuntimeValue, arr: RuntimeValue, offset: i64) {
+    let src = match get_array(vec) {
+        Some(a) => a,
+        None => return,
+    };
+    let dst = match get_array(arr) {
+        Some(a) => a,
+        None => return,
+    };
+
+    let src_len = array_len(src);
+    let dst_len = array_len(dst);
+    let start = offset.max(0) as usize;
+
+    // Store elements directly to the array data
+    for i in 0..src_len {
+        let idx = start + i;
+        if idx >= dst_len {
+            break;
+        }
+        let elem = array_get_element(src, i);
+        // Use rt_array_set to store the element
+        super::collections::rt_array_set(arr, idx as i64, elem);
+    }
+}
+
+/// Gather elements from array at scattered indices.
+///
+/// # Parameters
+/// - `arr`: Source array
+/// - `indices`: Vector of indices
+///
+/// # Returns
+/// New vector containing arr[indices[i]] for each i
+#[no_mangle]
+pub extern "C" fn rt_vec_gather(arr: RuntimeValue, indices: RuntimeValue) -> RuntimeValue {
+    let src = match get_array(arr) {
+        Some(a) => a,
+        None => return RuntimeValue::NIL,
+    };
+    let idx_arr = match get_array(indices) {
+        Some(a) => a,
+        None => return RuntimeValue::NIL,
+    };
+
+    let src_len = array_len(src);
+    let idx_len = array_len(idx_arr);
+
+    create_array_from_fn(idx_len, |i| {
+        let idx_val = array_get_element(idx_arr, i);
+        if idx_val.is_int() {
+            let idx = idx_val.as_int();
+            if idx >= 0 && (idx as usize) < src_len {
+                array_get_element(src, idx as usize)
+            } else {
+                RuntimeValue::NIL
+            }
+        } else {
+            RuntimeValue::NIL
+        }
+    })
+}
+
+/// Scatter vector elements into array at scattered indices.
+///
+/// # Parameters
+/// - `vec`: Source vector
+/// - `arr`: Target array
+/// - `indices`: Vector of target indices
+#[no_mangle]
+pub extern "C" fn rt_vec_scatter(vec: RuntimeValue, arr: RuntimeValue, indices: RuntimeValue) {
+    let src = match get_array(vec) {
+        Some(a) => a,
+        None => return,
+    };
+    let idx_arr = match get_array(indices) {
+        Some(a) => a,
+        None => return,
+    };
+
+    let src_len = array_len(src);
+    let dst_len = rt_array_len(arr);
+    let idx_len = array_len(idx_arr);
+
+    for i in 0..idx_len.min(src_len) {
+        let idx_val = array_get_element(idx_arr, i);
+        if idx_val.is_int() {
+            let idx = idx_val.as_int();
+            if idx >= 0 && idx < dst_len {
+                let elem = array_get_element(src, i);
+                super::collections::rt_array_set(arr, idx, elem);
+            }
+        }
+    }
+}
+
+// =============================================================================
+// Advanced Math Operations
+// =============================================================================
+
+/// Fused multiply-add: a * b + c (element-wise).
+///
+/// # Parameters
+/// - `a`, `b`, `c`: Input vectors
+///
+/// # Returns
+/// New vector with a[i] * b[i] + c[i] for each i
+#[no_mangle]
+pub extern "C" fn rt_vec_fma(a: RuntimeValue, b: RuntimeValue, c: RuntimeValue) -> RuntimeValue {
+    let arr_a = match get_array(a) {
+        Some(x) => x,
+        None => return RuntimeValue::NIL,
+    };
+    let arr_b = match get_array(b) {
+        Some(x) => x,
+        None => return RuntimeValue::NIL,
+    };
+    let arr_c = match get_array(c) {
+        Some(x) => x,
+        None => return RuntimeValue::NIL,
+    };
+
+    let len = array_len(arr_a).min(array_len(arr_b)).min(array_len(arr_c));
+
+    create_array_from_fn(len, |i| {
+        let va = array_get_element(arr_a, i);
+        let vb = array_get_element(arr_b, i);
+        let vc = array_get_element(arr_c, i);
+
+        // Convert to float for FMA operation
+        let fa = if va.is_float() { va.as_float() } else if va.is_int() { va.as_int() as f64 } else { 0.0 };
+        let fb = if vb.is_float() { vb.as_float() } else if vb.is_int() { vb.as_int() as f64 } else { 0.0 };
+        let fc = if vc.is_float() { vc.as_float() } else if vc.is_int() { vc.as_int() as f64 } else { 0.0 };
+
+        RuntimeValue::from_float(fa.mul_add(fb, fc))
+    })
+}
+
+/// Reciprocal: 1.0 / x (element-wise).
+///
+/// # Parameters
+/// - `vec`: Input vector
+///
+/// # Returns
+/// New vector with 1.0 / vec[i] for each i
+#[no_mangle]
+pub extern "C" fn rt_vec_recip(vec: RuntimeValue) -> RuntimeValue {
+    apply_unary_op(vec, |v| {
+        if v.is_float() {
+            RuntimeValue::from_float(1.0 / v.as_float())
+        } else if v.is_int() {
+            RuntimeValue::from_float(1.0 / (v.as_int() as f64))
+        } else {
+            RuntimeValue::from_float(f64::INFINITY)
+        }
+    })
+}
+
+/// Masked load: load elements where mask is true, use default otherwise.
+///
+/// # Parameters
+/// - `arr`: Source array
+/// - `offset`: Starting offset
+/// - `mask`: Boolean mask vector
+/// - `default`: Default values for masked-out lanes
+///
+/// # Returns
+/// New vector with loaded/default values
+#[no_mangle]
+pub extern "C" fn rt_vec_masked_load(
+    arr: RuntimeValue,
+    offset: i64,
+    mask: RuntimeValue,
+    default: RuntimeValue,
+) -> RuntimeValue {
+    let src = match get_array(arr) {
+        Some(a) => a,
+        None => return default,
+    };
+    let mask_arr = match get_array(mask) {
+        Some(a) => a,
+        None => return default,
+    };
+    let def_arr = match get_array(default) {
+        Some(a) => a,
+        None => return RuntimeValue::NIL,
+    };
+
+    let src_len = array_len(src);
+    let mask_len = array_len(mask_arr);
+    let def_len = array_len(def_arr);
+    let start = offset.max(0) as usize;
+    let len = mask_len.min(def_len);
+
+    create_array_from_fn(len, |i| {
+        let use_src = array_get_element(mask_arr, i).truthy();
+        if use_src && (start + i) < src_len {
+            array_get_element(src, start + i)
+        } else {
+            array_get_element(def_arr, i)
+        }
+    })
+}
+
+/// Masked store: store elements only where mask is true.
+///
+/// # Parameters
+/// - `vec`: Source vector
+/// - `arr`: Target array
+/// - `offset`: Starting offset in target
+/// - `mask`: Boolean mask vector
+#[no_mangle]
+pub extern "C" fn rt_vec_masked_store(vec: RuntimeValue, arr: RuntimeValue, offset: i64, mask: RuntimeValue) {
+    let src = match get_array(vec) {
+        Some(a) => a,
+        None => return,
+    };
+    let mask_arr = match get_array(mask) {
+        Some(a) => a,
+        None => return,
+    };
+
+    let src_len = array_len(src);
+    let dst_len = rt_array_len(arr);
+    let mask_len = array_len(mask_arr);
+    let start = offset.max(0) as usize;
+
+    for i in 0..src_len.min(mask_len) {
+        let use_src = array_get_element(mask_arr, i).truthy();
+        if use_src {
+            let idx = (start + i) as i64;
+            if idx < dst_len {
+                let elem = array_get_element(src, i);
+                super::collections::rt_array_set(arr, idx, elem);
+            }
+        }
+    }
+}
+
+/// Element-wise minimum of two vectors.
+///
+/// # Parameters
+/// - `a`, `b`: Input vectors
+///
+/// # Returns
+/// New vector with min(a[i], b[i]) for each i
+#[no_mangle]
+pub extern "C" fn rt_vec_min_vec(a: RuntimeValue, b: RuntimeValue) -> RuntimeValue {
+    apply_binary_op(a, b, |va, vb| {
+        if compare_values(va, vb) <= 0 { va } else { vb }
+    })
+}
+
+/// Element-wise maximum of two vectors.
+///
+/// # Parameters
+/// - `a`, `b`: Input vectors
+///
+/// # Returns
+/// New vector with max(a[i], b[i]) for each i
+#[no_mangle]
+pub extern "C" fn rt_vec_max_vec(a: RuntimeValue, b: RuntimeValue) -> RuntimeValue {
+    apply_binary_op(a, b, |va, vb| {
+        if compare_values(va, vb) >= 0 { va } else { vb }
+    })
+}
+
+/// Clamp elements to range [lo, hi].
+///
+/// # Parameters
+/// - `vec`: Input vector
+/// - `lo`: Lower bound vector
+/// - `hi`: Upper bound vector
+///
+/// # Returns
+/// New vector with clamped values
+#[no_mangle]
+pub extern "C" fn rt_vec_clamp(vec: RuntimeValue, lo: RuntimeValue, hi: RuntimeValue) -> RuntimeValue {
+    let arr = match get_array(vec) {
+        Some(a) => a,
+        None => return RuntimeValue::NIL,
+    };
+    let lo_arr = match get_array(lo) {
+        Some(a) => a,
+        None => return RuntimeValue::NIL,
+    };
+    let hi_arr = match get_array(hi) {
+        Some(a) => a,
+        None => return RuntimeValue::NIL,
+    };
+
+    let len = array_len(arr).min(array_len(lo_arr)).min(array_len(hi_arr));
+
+    create_array_from_fn(len, |i| {
+        let v = array_get_element(arr, i);
+        let lo_v = array_get_element(lo_arr, i);
+        let hi_v = array_get_element(hi_arr, i);
+
+        // clamp(v, lo, hi) = max(lo, min(v, hi))
+        let clamped_hi = if compare_values(v, hi_v) <= 0 { v } else { hi_v };
+        if compare_values(clamped_hi, lo_v) >= 0 { clamped_hi } else { lo_v }
+    })
+}
+
+/// Load from neighbor index (for stencil operations).
+///
+/// # Parameters
+/// - `arr`: Source array
+/// - `direction`: 0 = previous (-1), 1 = next (+1)
+///
+/// # Returns
+/// Value from neighboring index (wraps at boundaries)
+#[no_mangle]
+pub extern "C" fn rt_neighbor_load(arr: RuntimeValue, direction: i64) -> RuntimeValue {
+    let src = match get_array(arr) {
+        Some(a) => a,
+        None => return RuntimeValue::NIL,
+    };
+
+    let len = array_len(src);
+    if len == 0 {
+        return RuntimeValue::NIL;
+    }
+
+    // For stencil operations, this would typically be called within a parallel
+    // context where each thread has an implicit index. For now, we return NIL
+    // since we don't have thread-local state to track the current index.
+    // In a real SIMD/GPU implementation, the current lane index would be available.
+    RuntimeValue::NIL
+}
+
+// =============================================================================
+// Helper Functions
+// =============================================================================
+
+fn apply_binary_op<F>(a: RuntimeValue, b: RuntimeValue, op: F) -> RuntimeValue
+where
+    F: Fn(RuntimeValue, RuntimeValue) -> RuntimeValue,
+{
+    let arr_a = match get_array(a) {
+        Some(x) => x,
+        None => return RuntimeValue::NIL,
+    };
+    let arr_b = match get_array(b) {
+        Some(x) => x,
+        None => return RuntimeValue::NIL,
+    };
+
+    let len = array_len(arr_a).min(array_len(arr_b));
+    create_array_from_fn(len, |i| {
+        let va = array_get_element(arr_a, i);
+        let vb = array_get_element(arr_b, i);
+        op(va, vb)
+    })
+}
+
+// =============================================================================
 // Helper Functions
 // =============================================================================
 

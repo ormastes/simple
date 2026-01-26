@@ -41,30 +41,39 @@ fn execute_function_body(
     let saved_in_immutable_fn = IN_IMMUTABLE_FN_METHOD.with(|cell| *cell.borrow());
     let is_method_with_self = local_env.contains_key("self") || bound_args.contains_key("self");
     let is_immutable_fn_method = is_method_with_self && !func.is_me_method;
-    if is_immutable_fn_method {
-        IN_IMMUTABLE_FN_METHOD.with(|cell| *cell.borrow_mut() = true);
-    }
+    // Set the flag based on the current function's mutability:
+    // - true if this is an immutable fn method with self
+    // - false if this is a me method or not a method at all
+    // Always set the flag to avoid leaking state from caller to callee
+    IN_IMMUTABLE_FN_METHOD.with(|cell| *cell.borrow_mut() = is_immutable_fn_method);
 
     // Insert bound arguments into environment
     for (name, val) in bound_args {
         local_env.insert(name, val);
     }
 
-    // Execute function body
-    let result = extract_block_result!(exec_block_fn(
+    // Execute function body - handle result manually to ensure flag restoration
+    let exec_result = exec_block_fn(
         &func.body,
         local_env,
         functions,
         classes,
         enums,
         impl_methods
-    ));
+    );
 
-    // Restore IN_IMMUTABLE_FN_METHOD flag
+    // ALWAYS restore flags before handling the result to avoid flag leaking on error
     IN_IMMUTABLE_FN_METHOD.with(|cell| *cell.borrow_mut() = saved_in_immutable_fn);
-
-    // Restore CONST_NAMES
     CONST_NAMES.with(|cell| *cell.borrow_mut() = saved_const_names);
+
+    // Now extract result, potentially returning error
+    let result = match exec_result {
+        Ok((Control::Return(v), _)) => v,
+        Ok((_, Some(v))) => v,
+        Ok((_, None)) => Value::Nil,
+        Err(CompileError::TryError(val)) => val,
+        Err(e) => return Err(e),
+    };
 
     // Validate return type
     validate_unit!(

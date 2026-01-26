@@ -116,6 +116,7 @@ impl Value {
             | Value::Constructor { .. }
             | Value::EnumType { .. }
             | Value::EnumVariantConstructor { .. }
+            | Value::TraitType { .. }
             | Value::TraitObject { .. }
             | Value::Actor(_)
             | Value::Future(_)
@@ -228,6 +229,7 @@ impl Value {
             Value::Matcher(_) => "matcher",
             Value::EnumType { .. } => "enum_type",
             Value::EnumVariantConstructor { .. } => "enum_variant_constructor",
+            Value::TraitType { .. } => "trait_type",
             Value::Block { .. } => "block",
             Value::Nil => "nil",
         }
@@ -272,6 +274,7 @@ impl Value {
             Value::Matcher(_) => ValueKind::Matcher,
             Value::EnumType { .. } => ValueKind::EnumType,
             Value::EnumVariantConstructor { .. } => ValueKind::EnumVariantConstructor,
+            Value::TraitType { .. } => ValueKind::TraitType,
             Value::Block { .. } => ValueKind::Block,
             Value::Nil => ValueKind::Nil,
         }

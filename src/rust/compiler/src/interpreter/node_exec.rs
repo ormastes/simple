@@ -9,7 +9,7 @@ use super::async_support::await_value;
 use super::expr::evaluate_expr;
 use super::interpreter_helpers::{bind_pattern_value, handle_method_call_with_self_update, handle_functional_update};
 use super::interpreter_control::{exec_if, exec_while, exec_loop, exec_for, exec_match, exec_context, exec_with};
-use super::interpreter_state::{mark_as_moved, CONST_NAMES, IMMUTABLE_VARS, IN_IMMUTABLE_FN_METHOD, MODULE_GLOBALS};
+use super::interpreter_state::{mark_as_moved, get_current_file, CONST_NAMES, IMMUTABLE_VARS, IN_IMMUTABLE_FN_METHOD, MODULE_GLOBALS};
 use super::coverage_helpers::record_node_coverage;
 use crate::interpreter_unit::{is_unit_type, validate_unit_type, validate_unit_constraints};
 
@@ -352,6 +352,7 @@ fn exec_assignment(
             if obj_name == "self" {
                 let in_immutable_fn = IN_IMMUTABLE_FN_METHOD.with(|cell| *cell.borrow());
                 if in_immutable_fn {
+                    eprintln!("DEBUG FieldAccess: self.{} assignment with IN_IMMUTABLE=true", field);
                     let ctx = ErrorContext::new()
                         .with_code(codes::INVALID_ASSIGNMENT)
                         .with_help("use `me` instead of `fn` to allow self mutation in methods");
@@ -406,12 +407,95 @@ fn exec_assignment(
                     ctx,
                 ))
             }
+        }
+        // Case 2: Nested field access: obj.inner.field = value
+        else if let Expr::FieldAccess {
+            receiver: inner_receiver,
+            field: inner_field,
+        } = receiver.as_ref()
+        {
+            if let Expr::Identifier(obj_name) = inner_receiver.as_ref() {
+                if let Some(obj_val) = env.get(obj_name).cloned() {
+                    match obj_val {
+                        Value::Object { class, mut fields } => {
+                            // Get the inner object
+                            if let Some(inner_val) = fields.get(inner_field).cloned() {
+                                match inner_val {
+                                    Value::Object {
+                                        class: inner_class,
+                                        fields: mut inner_fields,
+                                    } => {
+                                        // Set the field on the inner object
+                                        inner_fields.insert(field.clone(), value);
+                                        // Update the inner object in the outer object
+                                        fields.insert(
+                                            inner_field.clone(),
+                                            Value::Object {
+                                                class: inner_class,
+                                                fields: inner_fields,
+                                            },
+                                        );
+                                        // Update the outer object in env
+                                        env.insert(obj_name.clone(), Value::Object { class, fields });
+                                        Ok(Control::Next)
+                                    }
+                                    _ => {
+                                        let ctx = ErrorContext::new()
+                                            .with_code(codes::INVALID_ASSIGNMENT)
+                                            .with_help("nested field assignment requires inner value to be an object");
+                                        Err(CompileError::semantic_with_context(
+                                            format!(
+                                                "invalid assignment: cannot assign field '{}' on non-object field '{}'",
+                                                field, inner_field
+                                            ),
+                                            ctx,
+                                        ))
+                                    }
+                                }
+                            } else {
+                                let ctx = ErrorContext::new()
+                                    .with_code(codes::UNDEFINED_FIELD)
+                                    .with_help("check the field name");
+                                Err(CompileError::semantic_with_context(
+                                    format!("field '{}' not found on object", inner_field),
+                                    ctx,
+                                ))
+                            }
+                        }
+                        _ => {
+                            let ctx = ErrorContext::new()
+                                .with_code(codes::INVALID_ASSIGNMENT)
+                                .with_help("nested field assignment requires an object");
+                            Err(CompileError::semantic_with_context(
+                                "invalid assignment: cannot assign field on non-object value",
+                                ctx,
+                            ))
+                        }
+                    }
+                } else {
+                    let ctx = ErrorContext::new()
+                        .with_code(codes::UNDEFINED_VARIABLE)
+                        .with_help("check that the variable is defined and in scope");
+                    Err(CompileError::semantic_with_context(
+                        format!("variable '{}' not found", obj_name),
+                        ctx,
+                    ))
+                }
+            } else {
+                let ctx = ErrorContext::new()
+                    .with_code(codes::INVALID_ASSIGNMENT)
+                    .with_help("deeply nested field assignment (more than 2 levels) is not supported; use intermediate variables");
+                Err(CompileError::semantic_with_context(
+                    "invalid assignment: deeply nested field access requires intermediate variables",
+                    ctx,
+                ))
+            }
         } else {
             let ctx = ErrorContext::new()
                 .with_code(codes::INVALID_ASSIGNMENT)
-                .with_help("field assignment requires an identifier as the object");
+                .with_help("field assignment requires an identifier or simple nested field access as the object");
             Err(CompileError::semantic_with_context(
-                "invalid assignment: field assignment requires identifier as object",
+                "invalid assignment: field assignment requires identifier or simple nested field access as object",
                 ctx,
             ))
         }
@@ -428,9 +512,27 @@ fn exec_assignment(
         if is_self_mutation {
             let in_immutable_fn = IN_IMMUTABLE_FN_METHOD.with(|cell| *cell.borrow());
             if in_immutable_fn {
+                // Get current file for debugging
+                let current_file = get_current_file()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| "unknown".to_string());
+                let receiver_info = match receiver.as_ref() {
+                    Expr::Identifier(name) => format!("{}[...]", name),
+                    Expr::FieldAccess { receiver: inner, field } => {
+                        if let Expr::Identifier(name) = inner.as_ref() {
+                            format!("{}.{}[...]", name, field)
+                        } else {
+                            "self.field[...]".to_string()
+                        }
+                    }
+                    _ => "unknown[...]".to_string(),
+                };
+                // Debug output
+                eprintln!("DEBUG: cannot modify self in file: {}, assignment: {}", current_file, receiver_info);
                 let ctx = ErrorContext::new()
                     .with_code(codes::INVALID_ASSIGNMENT)
-                    .with_help("use `me` instead of `fn` to allow self mutation in methods");
+                    .with_help("use `me` instead of `fn` to allow self mutation in methods")
+                    .with_note(format!("in file: {}, assignment: {}", current_file, receiver_info));
                 return Err(CompileError::semantic_with_context(
                     "cannot modify self in immutable fn method",
                     ctx,
@@ -604,6 +706,76 @@ fn exec_assignment(
                         ctx,
                     ))
                 }
+            } else if let Expr::FieldAccess {
+                receiver: inner_obj_expr,
+                field: inner_field_name,
+            } = obj_expr.as_ref()
+            {
+                // Handle nested field access: self.ctx.dict[key] = value
+                // This is obj.field1.field2[index] = value
+                if let Expr::Identifier(root_name) = inner_obj_expr.as_ref() {
+                    if let Some(root_val) = env.get(root_name).cloned() {
+                        if let Value::Object { class: r_class, fields: r_fields } = root_val {
+                            let mut root_fields = r_fields;
+                            let root_class = r_class;
+                            if let Some(inner_obj) = root_fields.get(inner_field_name).cloned() {
+                                if let Value::Object { class: i_class, fields: i_fields } = inner_obj {
+                                    let mut inner_fields = i_fields;
+                                    let inner_class = i_class;
+                                    if let Some(container) = inner_fields.get(field_name).cloned() {
+                                        let new_container = match container {
+                                            Value::Array(mut arr) => {
+                                                let idx = index_val.as_int()? as usize;
+                                                if idx < arr.len() {
+                                                    arr[idx] = value;
+                                                } else {
+                                                    while arr.len() < idx {
+                                                        arr.push(Value::Nil);
+                                                    }
+                                                    arr.push(value);
+                                                }
+                                                Value::Array(arr)
+                                            }
+                                            Value::Dict(mut dict) => {
+                                                let key = index_val.to_key_string();
+                                                dict.insert(key, value);
+                                                Value::Dict(dict)
+                                            }
+                                            _ => {
+                                                let ctx = ErrorContext::new()
+                                                    .with_code(codes::INVALID_ASSIGNMENT)
+                                                    .with_help("nested index assignment requires an array or dict");
+                                                return Err(CompileError::semantic_with_context(
+                                                    format!(
+                                                        "invalid assignment: cannot index assign to field `{}` of type {}",
+                                                        field_name,
+                                                        container.type_name()
+                                                    ),
+                                                    ctx,
+                                                ));
+                                            }
+                                        };
+                                        inner_fields.insert(field_name.clone(), new_container);
+                                        let new_inner_obj = Value::Object {
+                                            class: inner_class,
+                                            fields: inner_fields,
+                                        };
+                                        root_fields.insert(inner_field_name.clone(), new_inner_obj);
+                                        env.insert(root_name.clone(), Value::Object { class: root_class, fields: root_fields });
+                                        return Ok(Control::Next);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                let ctx = ErrorContext::new()
+                    .with_code(codes::INVALID_ASSIGNMENT)
+                    .with_help("nested field access index assignment requires a simple identifier chain");
+                Err(CompileError::semantic_with_context(
+                    "invalid assignment: nested field access not fully supported",
+                    ctx,
+                ))
             } else {
                 let ctx = ErrorContext::new()
                     .with_code(codes::INVALID_ASSIGNMENT)
@@ -704,6 +876,7 @@ fn exec_augmented_assignment(
         AssignOp::SubAssign | AssignOp::SuspendSubAssign => Some(BinOp::Sub),
         AssignOp::MulAssign | AssignOp::SuspendMulAssign => Some(BinOp::Mul),
         AssignOp::DivAssign | AssignOp::SuspendDivAssign => Some(BinOp::Div),
+        AssignOp::ModAssign => Some(BinOp::Mod),
         AssignOp::SuspendAssign => None, // ~= is simple await assignment
         AssignOp::Assign => {
             let ctx = ErrorContext::new()
@@ -823,12 +996,126 @@ fn exec_augmented_assignment(
                     ctx,
                 ))
             }
+        }
+        // Case 2: Nested field access: obj.inner.field += value
+        else if let Expr::FieldAccess {
+            receiver: inner_receiver,
+            field: inner_field,
+        } = receiver.as_ref()
+        {
+            if let Expr::Identifier(obj_name) = inner_receiver.as_ref() {
+                if let Some(obj_val) = env.get(obj_name).cloned() {
+                    match obj_val {
+                        Value::Object { class, mut fields } => {
+                            // Get the inner object
+                            if let Some(inner_val) = fields.get(inner_field).cloned() {
+                                match inner_val {
+                                    Value::Object {
+                                        class: inner_class,
+                                        fields: mut inner_fields,
+                                    } => {
+                                        // Evaluate the RHS
+                                        let mut rhs_value = evaluate_expr(&assign.value, env, functions, classes, enums, impl_methods)?;
+
+                                        // If suspension, await the value
+                                        if is_suspend {
+                                            rhs_value = await_value(rhs_value)?;
+                                        }
+
+                                        // If compound assignment, combine with current value
+                                        let new_value = if let Some(op) = bin_op {
+                                            let current = inner_fields
+                                                .get(field)
+                                                .cloned()
+                                                .ok_or_else(|| crate::error::factory::undefined_field(field))?;
+                                            let temp_lhs = "__lhs_temp__".to_string();
+                                            let temp_rhs = "__rhs_temp__".to_string();
+                                            env.insert(temp_lhs.clone(), current);
+                                            env.insert(temp_rhs.clone(), rhs_value);
+                                            let binary_expr = Expr::Binary {
+                                                op,
+                                                left: Box::new(Expr::Identifier(temp_lhs.clone())),
+                                                right: Box::new(Expr::Identifier(temp_rhs.clone())),
+                                            };
+                                            let result = evaluate_expr(&binary_expr, env, functions, classes, enums, impl_methods)?;
+                                            env.remove(&temp_lhs);
+                                            env.remove(&temp_rhs);
+                                            result
+                                        } else {
+                                            rhs_value
+                                        };
+
+                                        // Set the field on the inner object
+                                        inner_fields.insert(field.clone(), new_value);
+                                        // Update the inner object in the outer object
+                                        fields.insert(
+                                            inner_field.clone(),
+                                            Value::Object {
+                                                class: inner_class,
+                                                fields: inner_fields,
+                                            },
+                                        );
+                                        // Update the outer object in env
+                                        env.insert(obj_name.clone(), Value::Object { class, fields });
+                                        Ok(Control::Next)
+                                    }
+                                    _ => {
+                                        let ctx = ErrorContext::new()
+                                            .with_code(codes::INVALID_ASSIGNMENT)
+                                            .with_help("nested augmented field assignment requires inner value to be an object");
+                                        Err(CompileError::semantic_with_context(
+                                            format!(
+                                                "invalid assignment: cannot use augmented assignment on field '{}' of non-object field '{}'",
+                                                field, inner_field
+                                            ),
+                                            ctx,
+                                        ))
+                                    }
+                                }
+                            } else {
+                                let ctx = ErrorContext::new()
+                                    .with_code(codes::UNDEFINED_FIELD)
+                                    .with_help("check the field name");
+                                Err(CompileError::semantic_with_context(
+                                    format!("field '{}' not found on object", inner_field),
+                                    ctx,
+                                ))
+                            }
+                        }
+                        _ => {
+                            let ctx = ErrorContext::new()
+                                .with_code(codes::INVALID_ASSIGNMENT)
+                                .with_help("nested augmented field assignment requires an object");
+                            Err(CompileError::semantic_with_context(
+                                "invalid assignment: cannot use augmented assignment on non-object value",
+                                ctx,
+                            ))
+                        }
+                    }
+                } else {
+                    let ctx = ErrorContext::new()
+                        .with_code(codes::UNDEFINED_VARIABLE)
+                        .with_help("check that the variable is defined and in scope");
+                    Err(CompileError::semantic_with_context(
+                        format!("variable '{}' not found", obj_name),
+                        ctx,
+                    ))
+                }
+            } else {
+                let ctx = ErrorContext::new()
+                    .with_code(codes::INVALID_ASSIGNMENT)
+                    .with_help("deeply nested augmented field assignment (more than 2 levels) is not supported");
+                Err(CompileError::semantic_with_context(
+                    "invalid assignment: deeply nested augmented field access requires intermediate variables",
+                    ctx,
+                ))
+            }
         } else {
             let ctx = ErrorContext::new()
                 .with_code(codes::INVALID_ASSIGNMENT)
-                .with_help("augmented field assignment requires an identifier as the object");
+                .with_help("augmented field assignment requires an identifier or simple nested field access as the object");
             Err(CompileError::semantic_with_context(
-                "invalid assignment: augmented field assignment requires identifier as object",
+                "invalid assignment: augmented field assignment requires identifier or simple nested field access as object",
                 ctx,
             ))
         }

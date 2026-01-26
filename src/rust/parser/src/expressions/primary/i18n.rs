@@ -104,11 +104,23 @@ impl<'a> Parser<'a> {
                     result_parts.push(FStringPart::Literal(s.clone()));
                 }
                 FStringToken::Expr(expr_str) => {
-                    // Parse the expression string
-                    let mut sub_parser = Parser::new(expr_str);
+                    // Parse the expression string using expression parser
+                    // (does not treat leading whitespace as indentation)
+                    let mut sub_parser = Parser::new_expression(expr_str);
                     match sub_parser.parse_expression() {
-                        Ok(expr) => result_parts.push(FStringPart::Expr(expr)),
-                        Err(e) => return Err(e),
+                        Ok(expr) => {
+                            // Verify the entire expression was consumed
+                            if sub_parser.is_at_end() || matches!(sub_parser.current.kind, TokenKind::Eof) {
+                                result_parts.push(FStringPart::Expr(expr));
+                            } else {
+                                // Expression didn't consume all input, treat as literal
+                                result_parts.push(FStringPart::Literal(format!("{{{}}}", expr_str)));
+                            }
+                        }
+                        Err(_) => {
+                            // If parsing fails, treat as literal
+                            result_parts.push(FStringPart::Literal(format!("{{{}}}", expr_str)));
+                        }
                     }
                 }
             }

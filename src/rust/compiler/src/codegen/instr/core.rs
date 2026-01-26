@@ -10,6 +10,17 @@ use crate::mir::VReg;
 use super::helpers::create_string_constant;
 use super::{InstrContext, InstrResult};
 
+/// Ensure a value is i64, extending smaller integer types if needed.
+/// This is necessary because some values (e.g., from FFI functions returning i32)
+/// may not be i64 even though the rest of the codegen assumes i64.
+fn ensure_i64(builder: &mut FunctionBuilder, val: cranelift_codegen::ir::Value) -> cranelift_codegen::ir::Value {
+    let val_type = builder.func.dfg.value_type(val);
+    match val_type {
+        types::I8 | types::I16 | types::I32 => builder.ins().sextend(types::I64, val),
+        _ => val,
+    }
+}
+
 pub(super) fn compile_binop<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
@@ -42,19 +53,40 @@ pub(super) fn compile_binop<M: Module>(
             lhs,
             rhs,
         ),
-        BinOp::Eq => builder
-            .ins()
-            .icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, lhs, rhs),
-        BinOp::NotEq => builder
-            .ins()
-            .icmp(cranelift_codegen::ir::condcodes::IntCC::NotEqual, lhs, rhs),
+        BinOp::Eq => {
+            // Use rt_value_eq for deep equality comparison (handles strings, etc.)
+            // Ensure both operands are i64 (FFI functions may return smaller types)
+            let lhs_i64 = ensure_i64(builder, lhs);
+            let rhs_i64 = ensure_i64(builder, rhs);
+            let eq_id = ctx.runtime_funcs["rt_value_eq"];
+            let eq_ref = ctx.module.declare_func_in_func(eq_id, builder.func);
+            let call = builder.ins().call(eq_ref, &[lhs_i64, rhs_i64]);
+            builder.inst_results(call)[0]
+        }
+        BinOp::NotEq => {
+            // Use rt_value_eq and negate the result
+            // Ensure both operands are i64 (FFI functions may return smaller types)
+            let lhs_i64 = ensure_i64(builder, lhs);
+            let rhs_i64 = ensure_i64(builder, rhs);
+            let eq_id = ctx.runtime_funcs["rt_value_eq"];
+            let eq_ref = ctx.module.declare_func_in_func(eq_id, builder.func);
+            let call = builder.ins().call(eq_ref, &[lhs_i64, rhs_i64]);
+            let eq_result = builder.inst_results(call)[0];
+            // Negate: eq_result == 0 ? 1 : 0
+            builder
+                .ins()
+                .icmp_imm(cranelift_codegen::ir::condcodes::IntCC::Equal, eq_result, 0)
+        }
         BinOp::Is => builder
             .ins()
             .icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, lhs, rhs),
         BinOp::In => {
+            // Ensure both operands are i64 for runtime function call
+            let lhs_i64 = ensure_i64(builder, lhs);
+            let rhs_i64 = ensure_i64(builder, rhs);
             let contains_id = ctx.runtime_funcs["rt_contains"];
             let contains_ref = ctx.module.declare_func_in_func(contains_id, builder.func);
-            let call = builder.ins().call(contains_ref, &[rhs, lhs]);
+            let call = builder.ins().call(contains_ref, &[rhs_i64, lhs_i64]);
             builder.inst_results(call)[0]
         }
         BinOp::And | BinOp::AndSuspend => {
@@ -110,6 +142,10 @@ pub(super) fn compile_binop<M: Module>(
         BinOp::MatMul => {
             // Simple Math #1930-#1939: Matrix multiplication requires PyTorch runtime
             return Err("Matrix multiplication (@) requires PyTorch runtime, use interpreter mode".to_string());
+        }
+        BinOp::PipeForward => {
+            // Pipe forward requires function call at runtime
+            return Err("Pipe forward (|>) requires interpreter mode for function dispatch".to_string());
         }
     };
     Ok(val)

@@ -9,7 +9,7 @@ use std::time::Instant;
 use simple_compiler::{init_coverage, is_coverage_enabled};
 
 use crate::runner::Runner;
-use super::test_discovery::{discover_tests, matches_tag};
+use super::test_discovery::{discover_tests_with_skip, is_skip_test_file, matches_tag};
 use super::types::{TestFileResult, TestLevel, TestOptions, TestRunResult, OutputFormat, DebugLevel, debug_log};
 use super::execution::run_test_file;
 use super::doctest::{run_doctests, run_md_doctests};
@@ -133,6 +133,11 @@ pub fn run_tests(options: TestOptions) -> TestRunResult {
     // Discover test files first (needed for both static and runtime modes)
     let test_path = determine_test_path(&options);
     let test_files = discover_and_filter_tests(&test_path, &options);
+
+    // Handle --list-skip-features: show features from .skip files
+    if options.list_skip_features {
+        return run_list_skip_features(&test_files, options.skip_features_planned_only, quiet);
+    }
 
     // FAST PATH: Use static analysis for list mode (no DSL execution)
     if list_mode {
@@ -356,7 +361,13 @@ fn discover_and_filter_tests(test_path: &PathBuf, options: &TestOptions) -> Vec<
         test_path.display()
     );
 
-    let mut test_files = discover_tests(test_path, options.level);
+    // Include .skip files when --only-skipped is set
+    let mut test_files = discover_tests_with_skip(test_path, options.level, options.only_skipped);
+
+    // When --only-skipped, filter to only .skip files
+    if options.only_skipped {
+        test_files.retain(|path| is_skip_test_file(path));
+    }
 
     debug_log!(DebugLevel::Basic, "Discovery", "Found {} test files", test_files.len());
 
@@ -645,6 +656,189 @@ fn run_list_mode_static(test_files: &[PathBuf], options: &TestOptions, quiet: bo
         total_skipped: registry.skipped_count(),
         total_ignored: registry.ignored_count(),
         total_duration_ms: start.elapsed().as_millis() as u64,
+    }
+}
+
+// ============================================================================
+// Skip Features Listing
+// ============================================================================
+
+/// Feature metadata extracted from a .skip file
+#[derive(Debug, Clone)]
+struct SkipFeatureInfo {
+    file_path: PathBuf,
+    title: String,
+    feature_ids: String,
+    category: String,
+    status: String,
+}
+
+/// Extract feature metadata from a .skip file's docstring
+fn extract_skip_feature_info(path: &PathBuf) -> Option<SkipFeatureInfo> {
+    let content = fs::read_to_string(path).ok()?;
+
+    // Find the docstring (starts with """)
+    let doc_start = content.find("\"\"\"")?;
+    let doc_end = content[doc_start + 3..].find("\"\"\"")? + doc_start + 3;
+    let docstring = &content[doc_start + 3..doc_end];
+
+    let mut title = String::new();
+    let mut feature_ids = String::new();
+    let mut category = String::new();
+    let mut status = String::new();
+
+    for line in docstring.lines() {
+        let trimmed = line.trim();
+
+        // Title is the first # heading
+        if title.is_empty() && trimmed.starts_with("# ") {
+            title = trimmed[2..].trim().to_string();
+        }
+
+        // Extract metadata fields
+        if trimmed.starts_with("**Feature ID") {
+            if let Some(val) = trimmed.split(":**").nth(1) {
+                feature_ids = val.trim().to_string();
+            }
+        } else if trimmed.starts_with("**Category:**") {
+            if let Some(val) = trimmed.split(":**").nth(1) {
+                category = val.trim().to_string();
+            }
+        } else if trimmed.starts_with("**Status:**") {
+            if let Some(val) = trimmed.split(":**").nth(1) {
+                status = val.trim().to_string();
+            }
+        }
+    }
+
+    // Use filename as fallback title
+    if title.is_empty() {
+        title = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .map(|s| s.replace("_spec.spl", "").replace('_', " "))
+            .unwrap_or_else(|| "Unknown".to_string());
+    }
+
+    Some(SkipFeatureInfo {
+        file_path: path.clone(),
+        title,
+        feature_ids,
+        category,
+        status,
+    })
+}
+
+/// List features from .skip test files
+fn run_list_skip_features(test_files: &[PathBuf], planned_only: bool, quiet: bool) -> TestRunResult {
+    let start = Instant::now();
+
+    // Extract feature info from each file
+    let mut features: Vec<SkipFeatureInfo> = test_files
+        .iter()
+        .filter_map(|path| extract_skip_feature_info(path))
+        .collect();
+
+    // Filter to planned-only if requested
+    if planned_only {
+        features.retain(|f| {
+            let status_lower = f.status.to_lowercase();
+            status_lower.contains("planned") || status_lower.contains("tbd") || status_lower == "unknown"
+        });
+    }
+
+    let title = if planned_only {
+        format!("Planned Features ({} of {} files)", features.len(), test_files.len())
+    } else {
+        format!("Skipped Features ({} files)", test_files.len())
+    };
+
+    if !quiet {
+        println!();
+        println!("{}", title);
+        println!("═══════════════════════════════════════════════════════════════");
+        println!();
+    }
+
+    // Group by category
+    features.sort_by(|a, b| {
+        a.category.cmp(&b.category)
+            .then_with(|| a.title.cmp(&b.title))
+    });
+
+    if !quiet {
+        let mut current_category: Option<String> = None;
+        let mut category_count = 0;
+
+        for feature in &features {
+            // Print category header when it changes
+            let should_print_header = match &current_category {
+                None => true,
+                Some(cat) => cat != &feature.category,
+            };
+
+            if should_print_header {
+                if current_category.is_some() {
+                    println!();
+                }
+                let cat_name = if feature.category.is_empty() {
+                    "Uncategorized"
+                } else {
+                    &feature.category
+                };
+                println!("Category: {}", cat_name);
+                current_category = Some(feature.category.clone());
+                category_count += 1;
+            }
+
+            // Print feature info
+            let status_display = if feature.status.is_empty() {
+                "Unknown".to_string()
+            } else {
+                feature.status.clone()
+            };
+
+            let ids_display = if feature.feature_ids.is_empty() {
+                "-".to_string()
+            } else {
+                feature.feature_ids.clone()
+            };
+
+            println!(
+                "  {:24} {:40} [{}]",
+                ids_display,
+                truncate_str(&feature.title, 40),
+                status_display
+            );
+        }
+
+        // Summary
+        println!();
+        println!("───────────────────────────────────────────────────────────────");
+        println!(
+            "Summary: {} files across {} categories",
+            features.len(),
+            category_count.max(1)
+        );
+        println!();
+    }
+
+    TestRunResult {
+        files: Vec::new(),
+        total_passed: 0,
+        total_failed: 0,
+        total_skipped: test_files.len(),
+        total_ignored: 0,
+        total_duration_ms: start.elapsed().as_millis() as u64,
+    }
+}
+
+/// Truncate string to max length with ellipsis
+fn truncate_str(s: &str, max_len: usize) -> String {
+    if s.len() <= max_len {
+        s.to_string()
+    } else {
+        format!("{}...", &s[..max_len - 3])
     }
 }
 

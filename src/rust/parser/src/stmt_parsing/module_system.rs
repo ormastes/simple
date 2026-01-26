@@ -20,9 +20,38 @@ impl<'a> Parser<'a> {
         let mut segments = Vec::new();
 
         // Handle relative imports (Python-style):
-        // import .. as parent         -> [".."]
+        // import . as current          -> ["."] (current package)
+        // import .sibling              -> [".", "sibling"]
+        // import .. as parent          -> [".."]
         // import ..sibling             -> ["..", "sibling"]
         // import ...grandparent        -> ["...", "grandparent"] (not yet supported, but future-proof)
+
+        // Handle single dot for same-directory imports: .definition
+        if self.check(&TokenKind::Dot) {
+            self.advance();
+            segments.push(".".to_string());
+            // The next segment should be the module name
+            if !self.check(&TokenKind::Newline) && !self.is_at_end() && !self.check(&TokenKind::As) {
+                segments.push(self.expect_path_segment()?);
+                // Continue with remaining path segments
+                while self.check(&TokenKind::Dot) || self.check(&TokenKind::DoubleColon) {
+                    if self.check(&TokenKind::DoubleColon) {
+                        let warning = ErrorHint {
+                            level: ErrorHintLevel::Warning,
+                            message: "Deprecated: '::' in module paths".to_string(),
+                            span: self.current.span,
+                            suggestion: Some("Use '.' instead of '::'".to_string()),
+                            help: Some("Example: use std.spec.* instead of use std::spec::*".to_string()),
+                        };
+                        self.error_hints.push(warning);
+                    }
+                    self.advance();
+                    segments.push(self.expect_path_segment()?);
+                }
+            }
+            return Ok(ModulePath::new(segments));
+        }
+
         while self.check(&TokenKind::DoubleDot) {
             self.advance();
             segments.push("..".to_string());
@@ -265,24 +294,76 @@ impl<'a> Parser<'a> {
         is_type_only: bool,
     ) -> Result<Node, ParseError> {
         let (path, target) = self.parse_use_path_and_target()?;
-        Ok(Node::UseStmt(UseStmt {
-            span: Span::new(
-                start_span.start,
-                self.previous.span.end,
-                start_span.line,
-                start_span.column,
-            ),
-            path,
-            target,
-            is_type_only,
-        }))
+
+        // Check for comma-separated imports: use a.B, c.D
+        if self.check(&TokenKind::Comma) {
+            // Multiple imports - collect into a MultiUse node
+            let mut imports = vec![(path, target)];
+            while self.check(&TokenKind::Comma) {
+                self.advance(); // consume comma
+                let (p, t) = self.parse_use_path_and_target()?;
+                imports.push((p, t));
+            }
+            Ok(Node::MultiUse(MultiUse {
+                span: Span::new(
+                    start_span.start,
+                    self.previous.span.end,
+                    start_span.line,
+                    start_span.column,
+                ),
+                imports,
+                is_type_only,
+            }))
+        } else {
+            Ok(Node::UseStmt(UseStmt {
+                span: Span::new(
+                    start_span.start,
+                    self.previous.span.end,
+                    start_span.line,
+                    start_span.column,
+                ),
+                path,
+                target,
+                is_type_only,
+            }))
+        }
     }
 
-    /// Parse mod declaration: mod name or pub mod name
+    /// Parse mod declaration: mod name (external) or mod name: body (inline)
+    /// External module: mod router
+    /// Inline module: mod math:
+    ///     fn add(a: i64, b: i64) -> i64:
+    ///         a + b
     pub(crate) fn parse_mod(&mut self, visibility: Visibility, attributes: Vec<Attribute>) -> Result<Node, ParseError> {
         let start_span = self.current.span;
         self.expect(&TokenKind::Mod)?;
         let name = self.expect_identifier()?;
+
+        // Check for inline module body
+        let body = if self.check(&TokenKind::Colon) {
+            self.advance(); // consume ':'
+            self.expect(&TokenKind::Newline)?;
+            self.expect(&TokenKind::Indent)?;
+
+            let mut items = Vec::new();
+            while !self.check(&TokenKind::Dedent) && !self.is_at_end() {
+                // Skip newlines
+                while self.check(&TokenKind::Newline) {
+                    self.advance();
+                }
+                if self.check(&TokenKind::Dedent) {
+                    break;
+                }
+                items.push(self.parse_item()?);
+            }
+            if self.check(&TokenKind::Dedent) {
+                self.advance();
+            }
+            Some(items)
+        } else {
+            None
+        };
+
         Ok(Node::ModDecl(ModDecl {
             span: Span::new(
                 start_span.start,
@@ -293,6 +374,7 @@ impl<'a> Parser<'a> {
             name,
             visibility,
             attributes,
+            body,
         }))
     }
 
@@ -348,6 +430,24 @@ impl<'a> Parser<'a> {
                 ),
                 path,
                 target,
+            }))
+        } else if self.check(&TokenKind::Star) {
+            // export * from module (glob re-export)
+            self.advance(); // consume '*'
+            self.expect(&TokenKind::From)?;
+
+            // Parse module path
+            let module_path = self.parse_module_path()?;
+
+            Ok(Node::ExportUseStmt(ExportUseStmt {
+                span: Span::new(
+                    start_span.start,
+                    self.previous.span.end,
+                    start_span.line,
+                    start_span.column,
+                ),
+                path: module_path,
+                target: ImportTarget::Glob,
             }))
         } else if self.check(&TokenKind::LBrace) {
             // Style 3: export { X, Y, Z } from module (JS-style with braces)

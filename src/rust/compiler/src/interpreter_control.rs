@@ -458,10 +458,15 @@ pub(super) fn exec_for(
         iterable
     };
 
+    // Check if iterating over a Dict - auto_enumerate doesn't apply since
+    // dict iteration already returns (key, value) tuples
+    let is_dict_iteration = matches!(&iterable, Value::Dict(_));
+
     // Use iter_to_vec to handle all iterable types uniformly
     let items = iter_to_vec(&iterable)?;
 
     // If auto_enumerate, wrap items with indices as tuples
+    // But NOT for dict iteration - dict items are already (key, value) tuples
     for (index, item) in items.into_iter().enumerate() {
         check_interrupt!();
         check_execution_limit!();
@@ -470,7 +475,8 @@ pub(super) fn exec_for(
         let item = if for_stmt.is_suspend { await_value(item)? } else { item };
 
         // Create the value to bind - either (index, item) tuple or just item
-        let bind_value = if for_stmt.auto_enumerate {
+        // For dict iteration, items are already (key, value) tuples, so don't wrap
+        let bind_value = if for_stmt.auto_enumerate && !is_dict_iteration {
             Value::Tuple(vec![Value::Int(index as i64), item])
         } else {
             item
@@ -575,7 +581,7 @@ pub(super) fn exec_match(
 
 /// Execute an if statement as an expression, returning the branch's implicit value.
 /// Used for implicit return when if is the last statement in a function.
-pub(super) fn exec_if_expr(
+pub(crate) fn exec_if_expr(
     if_stmt: &IfStmt,
     env: &mut Env,
     functions: &mut HashMap<String, FunctionDef>,
@@ -652,7 +658,7 @@ pub(super) fn exec_if_expr(
 
 /// Execute a match statement as an expression, returning the match arm's value.
 /// Used for implicit return when match is the last statement in a function.
-pub(super) fn exec_match_expr(
+pub(crate) fn exec_match_expr(
     match_stmt: &MatchStmt,
     env: &mut Env,
     functions: &mut HashMap<String, FunctionDef>,

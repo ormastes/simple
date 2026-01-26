@@ -24,7 +24,15 @@ struct PtySession {
 
 impl PtySession {
     fn new() -> Result<Self, Box<dyn std::error::Error>> {
-        let binary = PathBuf::from(env!("CARGO_BIN_EXE_simple"));
+        // Find the binary in target directory
+        let binary = std::env::var("CARGO_BIN_EXE_simple_old")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| {
+                let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
+                    .unwrap_or_else(|_| ".".to_string());
+                PathBuf::from(manifest_dir)
+                    .join("../../../target/debug/simple_old")
+            });
         if !binary.exists() {
             return Err(format!("Binary not found at {:?}", binary).into());
         }

@@ -184,10 +184,21 @@ pub fn check_enum_exhaustiveness(enum_name: &str, variants: &[String], arms: &[M
     // Collect covered variants
     let mut covered: HashSet<String> = HashSet::new();
     for arm in arms {
-        if let Pattern::Enum { name, variant, .. } = &arm.pattern {
-            if name == enum_name {
-                covered.insert(variant.clone());
+        match &arm.pattern {
+            Pattern::Enum { name, variant, .. } => {
+                // Handle "_" placeholder for unqualified enum patterns (e.g., `case Named(...)` without enum name prefix)
+                if name == enum_name || name == "_" {
+                    covered.insert(variant.clone());
+                }
             }
+            Pattern::Identifier(ident) => {
+                // Handle unit variant patterns written as identifiers (e.g., `case Infer:`)
+                // The runtime treats these as matching unit variants with the same name
+                if variants.contains(ident) {
+                    covered.insert(ident.clone());
+                }
+            }
+            _ => {}
         }
     }
 

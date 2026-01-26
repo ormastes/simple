@@ -417,26 +417,36 @@ items.each \item:
 
 ### Basic Match
 
+Two syntaxes are supported. **Erlang-style `| ->` is preferred** (shorter):
+
 ```simple
+# Preferred: Erlang-style (shorter, cleaner)
 match value:
-    case 0:
-        print "zero"
-    case 1:
-        print "one"
-    case n:
-        print "other: {n}"
+    | 0 -> "zero"
+    | 1 -> "one"
+    | _ -> "other"
+
+# Traditional: case syntax (also valid)
+match value:
+    case 0: "zero"
+    case 1: "one"
+    case _: "other"
 ```
 
 ### Pattern Guards
 
 ```simple
+# Preferred: | -> with guards
 match value:
-    case n if n < 0:
-        print "negative"
-    case n if n == 0:
-        print "zero"
-    case n if n > 0:
-        print "positive"
+    | n if n < 0 -> "negative"
+    | 0 -> "zero"
+    | n if n > 0 -> "positive"
+
+# Traditional: case with guards
+match value:
+    case n if n < 0: "negative"
+    case 0: "zero"
+    case n if n > 0: "positive"
 ```
 
 ### Destructuring Patterns

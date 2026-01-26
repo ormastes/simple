@@ -11,7 +11,15 @@ use std::thread;
 use std::time::Duration;
 
 fn spawn_repl(use_tui: bool) -> Result<(Box<dyn Read + Send>, Box<dyn Write + Send>), Box<dyn std::error::Error>> {
-    let binary = PathBuf::from(env!("CARGO_BIN_EXE_simple"));
+    // Find the binary in target directory
+    let binary = std::env::var("CARGO_BIN_EXE_simple_old")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
+                .unwrap_or_else(|_| ".".to_string());
+            PathBuf::from(manifest_dir)
+                .join("../../../target/debug/simple_old")
+        });
     let pty_system = native_pty_system();
     let pair = pty_system.openpty(PtySize {
         rows: 24,

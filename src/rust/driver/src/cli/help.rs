@@ -32,6 +32,8 @@ pub fn print_help() {
     eprintln!("  simple test --class-diagram Generate class diagrams from tests");
     eprintln!("  simple test --arch-diagram  Generate architecture diagrams from tests");
     eprintln!("  simple test --diagram-all   Generate all diagram types");
+    eprintln!("  simple test --list-skip-features   List features from .skip files");
+    eprintln!("  simple test --planned-only  Filter to planned features only");
     eprintln!();
     eprintln!("Diagram Generation:");
     eprintln!("  simple diagram -A -n my_test      Generate all diagrams");

@@ -40,12 +40,23 @@ impl Parser<'_> {
         let start_span = self.current.span;
         self.expect(&TokenKind::Var)?;
 
-        // Check for common mistake: `var fn` instead of `me` for mutable methods
+        // Deprecated `var fn` syntax - emit warning and parse as mutable function
         if self.check(&TokenKind::Fn) {
-            return Err(ParseError::syntax_error_with_span(
-                "Use `me` keyword instead of `var fn` for mutable methods. Example: `me update(x: i32):` instead of `var fn update(x: i32):`",
-                self.current.span,
-            ));
+            use crate::error_recovery::{ErrorHint, ErrorHintLevel};
+            let warning = ErrorHint {
+                level: ErrorHintLevel::Warning,
+                message: "Deprecated: `var fn` syntax".to_string(),
+                span: start_span,
+                suggestion: Some("Replace `var fn method()` with `me method()`".to_string()),
+                help: None,
+            };
+            self.error_hints.push(warning);
+            // Parse as mutable function
+            let mut node = self.parse_function()?;
+            if let Node::Function(ref mut f) = node {
+                f.is_me_method = true;
+            }
+            return Ok(node);
         }
 
         self.parse_let_impl(start_span, Mutability::Mutable, StorageClass::Auto, false)
@@ -150,34 +161,124 @@ impl Parser<'_> {
 
     /// Parse optional assignment `= expr` or `~= expr` (suspension assignment)
     /// Returns (Option<Expr>, bool) where bool indicates if this is a suspension assignment
+    /// Supports continuation on next line: `val x = \n    expr`
     fn parse_optional_assignment_with_suspend(&mut self) -> Result<(Option<Expr>, bool), ParseError> {
         if self.check(&TokenKind::Assign) {
             self.advance();
-            Ok((Some(self.parse_expression()?), false))
+            // Skip newlines after = to allow continuation on next line
+            while self.check(&TokenKind::Newline) {
+                self.advance();
+            }
+            // Track if we consumed an indent (need to consume matching dedent)
+            let consumed_indent = if self.check(&TokenKind::Indent) {
+                self.advance();
+                true
+            } else {
+                false
+            };
+            let expr = self.parse_expression()?;
+            // Consume matching dedent if we consumed an indent
+            if consumed_indent {
+                // Skip newlines before dedent
+                while self.check(&TokenKind::Newline) {
+                    self.advance();
+                }
+                if self.check(&TokenKind::Dedent) {
+                    self.advance();
+                }
+            }
+            Ok((Some(expr), false))
         } else if self.check(&TokenKind::TildeAssign) {
             self.advance();
-            Ok((Some(self.parse_expression()?), true))
+            // Skip newlines after ~= to allow continuation on next line
+            while self.check(&TokenKind::Newline) {
+                self.advance();
+            }
+            // Track if we consumed an indent (need to consume matching dedent)
+            let consumed_indent = if self.check(&TokenKind::Indent) {
+                self.advance();
+                true
+            } else {
+                false
+            };
+            let expr = self.parse_expression()?;
+            // Consume matching dedent if we consumed an indent
+            if consumed_indent {
+                // Skip newlines before dedent
+                while self.check(&TokenKind::Newline) {
+                    self.advance();
+                }
+                if self.check(&TokenKind::Dedent) {
+                    self.advance();
+                }
+            }
+            Ok((Some(expr), true))
         } else {
             Ok((None, false))
         }
     }
 
     /// Parse optional assignment `= expr`
+    /// Supports continuation on next line: `val x = \n    expr`
     fn parse_optional_assignment(&mut self) -> Result<Option<Expr>, ParseError> {
         if self.check(&TokenKind::Assign) {
             self.advance();
-            Ok(Some(self.parse_expression()?))
+            // Skip newlines after = to allow continuation on next line
+            while self.check(&TokenKind::Newline) {
+                self.advance();
+            }
+            // Track if we consumed an indent (need to consume matching dedent)
+            let consumed_indent = if self.check(&TokenKind::Indent) {
+                self.advance();
+                true
+            } else {
+                false
+            };
+            let expr = self.parse_expression()?;
+            // Consume matching dedent if we consumed an indent
+            if consumed_indent {
+                // Skip newlines before dedent
+                while self.check(&TokenKind::Newline) {
+                    self.advance();
+                }
+                if self.check(&TokenKind::Dedent) {
+                    self.advance();
+                }
+            }
+            Ok(Some(expr))
         } else {
             Ok(None)
         }
     }
 
     /// Helper to parse name, type annotation, and assigned value for const/static
+    /// Supports continuation on next line: `const X = \n    expr`
     fn parse_named_value(&mut self) -> Result<(String, Option<Type>, Expr), ParseError> {
         let name = self.expect_identifier()?;
         let ty = self.parse_optional_type_annotation()?;
         self.expect(&TokenKind::Assign)?;
+        // Skip newlines after = to allow continuation on next line
+        while self.check(&TokenKind::Newline) {
+            self.advance();
+        }
+        // Track if we consumed an indent (need to consume matching dedent)
+        let consumed_indent = if self.check(&TokenKind::Indent) {
+            self.advance();
+            true
+        } else {
+            false
+        };
         let value = self.parse_expression()?;
+        // Consume matching dedent if we consumed an indent
+        if consumed_indent {
+            // Skip newlines before dedent
+            while self.check(&TokenKind::Newline) {
+                self.advance();
+            }
+            if self.check(&TokenKind::Dedent) {
+                self.advance();
+            }
+        }
         Ok((name, ty, value))
     }
 

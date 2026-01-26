@@ -166,6 +166,12 @@ impl HasEffects for MirInst {
 
             // Extern class FFI method calls - treated as IO since they call native code
             MirInst::ExternMethodCall { .. } => Effect::Io,
+
+            // Value boxing instructions - pure compute operations
+            MirInst::BoxInt { .. } => Effect::Compute,
+            MirInst::BoxFloat { .. } => Effect::Compute,
+            MirInst::UnboxInt { .. } => Effect::Compute,
+            MirInst::UnboxFloat { .. } => Effect::Compute,
         }
     }
 }

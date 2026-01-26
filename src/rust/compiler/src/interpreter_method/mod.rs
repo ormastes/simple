@@ -5,8 +5,9 @@ mod primitives;
 mod special;
 
 use super::{
-    eval_arg, eval_arg_usize, evaluate_expr, exec_function, exec_function_with_captured_env, find_and_exec_method,
-    instantiate_class, try_method_missing, Enums, ImplMethods, BLOCK_SCOPED_ENUMS,
+    eval_arg, eval_arg_usize, evaluate_expr, exec_function, exec_function_with_captured_env,
+    exec_function_with_values, find_and_exec_method, instantiate_class, try_method_missing, Enums,
+    ImplMethods, BLOCK_SCOPED_ENUMS,
 };
 use crate::error::{codes, typo, CompileError, ErrorContext};
 use crate::value::{Env, Value};
@@ -466,11 +467,109 @@ pub(crate) fn evaluate_method_call(
             // Mock methods handler handles all cases including fallback
             unreachable!("Mock methods handler should have handled all cases");
         }
+        Value::Nil => {
+            // Treat nil as Option::None for Option-like methods
+            match method {
+                "map" | "and_then" | "flat_map" => {
+                    // map/and_then on None returns None
+                    return Ok(Value::Nil);
+                }
+                "or_else" => {
+                    // or_else on None calls the closure
+                    let func = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
+                    if let Value::Lambda { params, body, env: captured } = func {
+                        let mut local_env = captured.clone();
+                        // No args to bind for or_else
+                        return evaluate_expr(&body, &mut local_env, functions, classes, enums, impl_methods);
+                    }
+                    return Ok(Value::Nil);
+                }
+                "unwrap" => {
+                    let ctx = ErrorContext::new()
+                        .with_code(codes::INVALID_OPERATION)
+                        .with_help("use unwrap_or(default) or check with is_some() first");
+                    return Err(CompileError::semantic_with_context(
+                        "called unwrap() on None/nil value".to_string(),
+                        ctx,
+                    ));
+                }
+                "unwrap_or" => {
+                    // Return the default value
+                    return eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods);
+                }
+                "unwrap_or_else" => {
+                    // Call the closure and return its result
+                    let func = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
+                    if let Value::Lambda { params, body, env: captured } = func {
+                        let mut local_env = captured.clone();
+                        return evaluate_expr(&body, &mut local_env, functions, classes, enums, impl_methods);
+                    }
+                    return Ok(Value::Nil);
+                }
+                "is_some" | "is_present" => return Ok(Value::Bool(false)),
+                "is_none" | "is_nil" | "is_null" => return Ok(Value::Bool(true)),
+                "ok_or" => {
+                    // Convert None to Err(default)
+                    let err_val = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
+                    return Ok(Value::err(err_val));
+                }
+                "expect" => {
+                    let msg = eval_arg(args, 0, Value::Str("expected Some value".to_string()), env, functions, classes, enums, impl_methods)?;
+                    let ctx = ErrorContext::new()
+                        .with_code(codes::INVALID_OPERATION);
+                    return Err(CompileError::semantic_with_context(
+                        format!("expect() failed: {}", msg.to_display_string()),
+                        ctx,
+                    ));
+                }
+                _ => {} // Fall through to default error handling
+            }
+        }
         _ => {}
+    }
+
+    // UFCS Fallback: Try to find a free function with the method name
+    // This allows both len(x) and x.len() syntax to work
+    if let Some(func) = functions.get(method).cloned() {
+        // Evaluate all arguments to values
+        let mut arg_values = vec![recv_val.clone()]; // Receiver becomes first argument
+        for arg in args {
+            let val = evaluate_expr(&arg.value, env, functions, classes, enums, impl_methods)?;
+            arg_values.push(val);
+        }
+        // Call the function with receiver as first argument
+        return exec_function_with_values(
+            &func,
+            &arg_values,
+            env,
+            functions,
+            classes,
+            enums,
+            impl_methods,
+        );
     }
 
     // E1013 - Unknown Method (with helpful hints for common conversions)
     let mut ctx = ErrorContext::new().with_code(codes::UNKNOWN_METHOD);
+
+    // Handle special case: method on function value (user probably forgot to call the function)
+    if recv_val.type_name() == "function" {
+        let func_name = match &recv_val {
+            Value::Function { name, .. } => name.clone(),
+            Value::Lambda { .. } => "<lambda>".to_string(),
+            Value::BlockClosure { .. } => "<block>".to_string(),
+            Value::NativeFunction(nf) => format!("<native:{}>", nf.name),
+            _ => "<unknown>".to_string(),
+        };
+        ctx = ctx.with_help(format!(
+            "you have a function value, not its result. Did you mean to call it? Try: {}().{}()",
+            func_name, method
+        ));
+        return Err(CompileError::semantic_with_context(
+            format!("method `{}` not found on type `function` (function '{}' was not called)", method, func_name),
+            ctx,
+        ));
+    }
 
     let hint = match method {
         "to_f64" | "to_f32" | "to_float" => {
@@ -540,6 +639,26 @@ pub(crate) fn evaluate_method_call_with_self_update(
         )? {
             // method_missing returns just a result, self is not mutated
             return Ok((result, None));
+        }
+        // UFCS Fallback: Try to find a free function with the method name
+        if let Some(func) = functions.get(method).cloned() {
+            // Evaluate all arguments to values
+            let mut arg_values = vec![recv_val.clone()]; // Receiver becomes first argument
+            for arg in args {
+                let val = evaluate_expr(&arg.value, env, functions, classes, enums, impl_methods)?;
+                arg_values.push(val);
+            }
+            // Call the function with receiver as first argument
+            let result = exec_function_with_values(
+                &func,
+                &arg_values,
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )?;
+            return Ok((result, None)); // UFCS calls don't mutate self
         }
         // Collect available methods for typo suggestion
         let mut available_methods: Vec<&str> = Vec::new();

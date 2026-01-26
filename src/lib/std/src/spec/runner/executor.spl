@@ -2,13 +2,18 @@
 # Executes registered tests with hook support and result capture
 # Extended with resource-limited execution support
 
-import spec.registry.{ExampleGroup, Example, Hook, get_all_groups}
+import spec.registry.{ExampleGroup, Example, Hook, MockMode, get_all_groups}
 import spec.runner.filter.{TestFilter}
 import spec.runtime.{Runtime, ExampleState}
 import spec.progress.{init_progress, reset_progress}
 import core.time.{Timer}
 import concurrency.resource_limits.{ResourceLimits, LimitViolation, LimitedResult}
 import concurrency.threads.{spawn_limited, LimitedThreadHandle}
+
+# FFI declarations for mock policy
+extern fn __mock_policy_init_all() -> ()
+extern fn __mock_policy_init_hal_only() -> ()
+extern fn __mock_policy_disable() -> ()
 
 # Test result status
 enum TestStatus:
@@ -257,6 +262,19 @@ impl TestExecutor:
             # Call the hook block
             hook_block()
 
+    fn init_mock_policy_for_mode(mode: MockMode):
+        """Initialize mock policy based on the mode."""
+        match mode:
+            case MockMode.All:
+                __mock_policy_init_all()
+            case MockMode.HalOnly:
+                __mock_policy_init_hal_only()
+            case MockMode.Disabled:
+                __mock_policy_disable()
+            case MockMode.Custom:
+                # Custom mode requires patterns, fall back to all for now
+                __mock_policy_init_all()
+
     fn execute_example(example: Example, group: ExampleGroup) -> TestResult:
         """Execute a single test example."""
         val result = TestResult.new(example, group)
@@ -270,6 +288,12 @@ impl TestExecutor:
         if example.is_pending():
             result.mark_pending()
             return result
+
+        # Determine mock mode: example-specific, group-inherited, or default
+        val mock_mode = example.mock_mode
+
+        # Initialize mock policy for this test
+        self.init_mock_policy_for_mode(mock_mode)
 
         # Collect all before_each hooks from hierarchy
         val before_hooks = self.collect_before_each_hooks(group)

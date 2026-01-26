@@ -10,8 +10,7 @@
 #   simple-compiler --check src/
 #   simple-compiler --sdn config.sdn
 
-import compiler.driver.*
-import compiler.config.*
+use driver.*
 
 # ------------------------------------------------------------------------------
 # Command Line Interface
@@ -33,7 +32,7 @@ struct CliArgs:
         CliArgs(
             mode: CompileMode.Interpret,
             input_files: [],
-            output_file: None,
+            output_file: nil,
             optimize: false,
             debug_info: true,
             verbose: false,
@@ -82,24 +81,33 @@ class ArgParser:
         Some(self.args[self.pos])
 
     me parse() -> Result<CliArgs, text>:
-        val result = CliArgs.default()
+        var result = CliArgs.default()
 
         while self.has_next():
             val arg = self.next().unwrap()
 
-            if arg.starts_with("--"):
+            if arg == "--":
+                # End of options marker - rest are positional args
+                while self.has_next():
+                    val file = self.next().unwrap()
+                    var files = result.input_files
+                    files.push(file)
+                    result.input_files = files
+            elif arg.starts_with("--"):
                 # Long option
                 match self.parse_long_option(arg, result):
-                    Ok(r) => result = r
-                    Err(e) => return Err(e)
-            else if arg.starts_with("-"):
+                    case Ok(r): result = r
+                    case Err(e): return Err(e)
+            elif arg.starts_with("-"):
                 # Short option
                 match self.parse_short_option(arg, result):
-                    Ok(r) => result = r
-                    Err(e) => return Err(e)
+                    case Ok(r): result = r
+                    case Err(e): return Err(e)
             else:
                 # Input file
-                result.input_files.push(arg)
+                var files = result.input_files
+                files.push(arg)
+                result.input_files = files
 
         Ok(result)
 
@@ -115,41 +123,41 @@ class ArgParser:
 
         # Boolean flags
         match opt:
-            "help" | "h" =>
+            case "help" | "h":
                 result.help = true
                 return Ok(result)
-            "version" | "V" =>
+            case "version" | "V":
                 result.version = true
                 return Ok(result)
-            "optimize" | "O" =>
+            case "optimize" | "O":
                 result.optimize = true
                 return Ok(result)
-            "debug" | "g" =>
+            case "debug" | "g":
                 result.debug_info = true
                 return Ok(result)
-            "no-debug" =>
+            case "no-debug":
                 result.debug_info = false
                 return Ok(result)
-            "verbose" | "v" =>
+            case "verbose" | "v":
                 result.verbose = true
                 return Ok(result)
-            "check" =>
+            case "check":
                 result.mode = CompileMode.Check
                 return Ok(result)
-            "sdn" =>
+            case "sdn":
                 result.mode = CompileMode.Sdn
                 return Ok(result)
-            "interpret" =>
+            case "interpret":
                 result.mode = CompileMode.Interpret
                 return Ok(result)
-            "jit" =>
+            case "jit":
                 result.mode = CompileMode.Jit
                 return Ok(result)
-            "aot" | "compile" =>
+            case "aot" | "compile":
                 result.mode = CompileMode.Aot
                 return Ok(result)
-            _ =>
-                ()
+            case _:
+                pass
 
         # Options requiring a value
         val value = self.next()
@@ -160,25 +168,25 @@ class ArgParser:
 
     fn apply_option(name: text, value: text, result: CliArgs) -> Result<CliArgs, text>:
         match name:
-            "mode" | "m" =>
+            case "mode" | "m":
                 val mode = CompileMode.from_text(value)
                 if mode.is_none():
                     return Err("Unknown mode: {value}")
                 result.mode = mode.unwrap()
 
-            "output" | "o" =>
+            case "output" | "o":
                 result.output_file = Some(value)
 
-            "log-level" | "l" =>
+            case "log-level" | "l":
                 val level = value.parse_int()
                 if level.is_none():
                     return Err("Invalid log level: {value}")
                 result.log_level = level.unwrap()
 
-            "profile" | "p" =>
+            case "profile" | "p":
                 result.profile = value
 
-            _ =>
+            case _:
                 return Err("Unknown option: --{name}")
 
         Ok(result)
@@ -189,27 +197,27 @@ class ArgParser:
         for i in 0..opts.len():
             val c = opts.char_at(i)
             match c:
-                'h' =>
+                case 'h':
                     result.help = true
-                'V' =>
+                case 'V':
                     result.version = true
-                'O' =>
+                case 'O':
                     result.optimize = true
-                'g' =>
+                case 'g':
                     result.debug_info = true
-                'v' =>
+                case 'v':
                     result.verbose = true
-                'c' =>
+                case 'c':
                     result.mode = CompileMode.Aot
-                'i' =>
+                case 'i':
                     result.mode = CompileMode.Interpret
-                'j' =>
+                case 'j':
                     result.mode = CompileMode.Jit
-                'k' =>
+                case 'k':
                     result.mode = CompileMode.Check
-                's' =>
+                case 's':
                     result.mode = CompileMode.Sdn
-                'o' =>
+                case 'o':
                     # -o requires a value (rest of arg or next arg)
                     if i + 1 < opts.len():
                         result.output_file = Some(opts.slice(i + 1, opts.len()))
@@ -220,7 +228,7 @@ class ArgParser:
                             return Err("Option -o requires a value")
                         result.output_file = Some(value.unwrap())
                         return Ok(result)
-                'm' =>
+                case 'm':
                     # -m requires a value
                     val value = self.next()
                     if value.is_none():
@@ -230,7 +238,7 @@ class ArgParser:
                         return Err("Unknown mode: {value.unwrap()}")
                     result.mode = mode.unwrap()
                     return Ok(result)
-                'l' =>
+                case 'l':
                     # -l requires a value
                     val value = self.next()
                     if value.is_none():
@@ -240,7 +248,7 @@ class ArgParser:
                         return Err("Invalid log level")
                     result.log_level = level.unwrap()
                     return Ok(result)
-                _ =>
+                case _:
                     return Err("Unknown option: -{c}")
 
         Ok(result)
@@ -249,11 +257,8 @@ class ArgParser:
 # Help and Version
 # ------------------------------------------------------------------------------
 
-val VERSION = "0.3.0"
-val VERSION_DATE = "2026-01"
-
 fn print_help():
-    print "Simple Compiler v{VERSION}"
+    print "Simple Compiler v0.3.0"
     print ""
     print "Usage: simple-compiler [options] <files...>"
     print ""
@@ -285,7 +290,7 @@ fn print_help():
     print "  simple-compiler -s config.sdn        # Parse SDN"
 
 fn print_version():
-    print "simple-compiler {VERSION} ({VERSION_DATE})"
+    print "simple-compiler 0.3.0 (2026-01)"
     print "Self-hosting compiler for the Simple programming language"
     print ""
     print "Backends:"
@@ -305,25 +310,22 @@ fn print_version():
 # ------------------------------------------------------------------------------
 
 fn main() -> i32:
-    val args = rt_get_args()
+    val args = sys_get_args()
 
     # Skip program name
-    val program_args = if args.len() > 0:
-        args.slice(1, args.len())
-    else:
-        []
+    var program_args = args.slice(1, args.len())
 
     # Parse arguments
-    val parser = ArgParser.create(program_args)
+    var parser = ArgParser.create(program_args)
     val parsed = parser.parse()
 
     match parsed:
-        Err(e) =>
+        case Err(e):
             print "Error: {e}"
             print "Try 'simple-compiler --help' for usage"
             return 1
 
-        Ok(cli_args) =>
+        case Ok(cli_args):
             # Handle help/version
             if cli_args.help:
                 print_help()
@@ -341,11 +343,11 @@ fn main() -> i32:
 
             # Run compilation
             val options = cli_args.to_options()
-            val driver = CompilerDriver.create(options)
+            var driver = CompilerDriver.create(options)
             val result = driver.compile()
 
             match result:
-                CompileResult.Success(value) =>
+                case CompileResult.Success(value):
                     if cli_args.verbose:
                         if value.is_some():
                             print "Result: {value.unwrap()}"
@@ -353,23 +355,23 @@ fn main() -> i32:
                             print "Compilation successful"
                     return 0
 
-                CompileResult.ParseError(errors) =>
+                case CompileResult.ParseError(errors):
                     print "Parse errors:"
                     for e in errors:
                         print "  {e}"
                     return 1
 
-                CompileResult.TypeError(errors) =>
+                case CompileResult.TypeError(errors):
                     print "Type errors:"
                     for e in errors:
                         print "  {e}"
                     return 1
 
-                CompileResult.CodegenError(msg) =>
+                case CompileResult.CodegenError(msg):
                     print "Codegen error: {msg}"
                     return 1
 
-                CompileResult.RuntimeError(msg) =>
+                case CompileResult.RuntimeError(msg):
                     print "Runtime error: {msg}"
                     return 1
 
@@ -424,6 +426,7 @@ fn bootstrap_test() -> bool:
     print "The Simple compiler can compile itself!"
     true
 
-# FFI for bootstrap test
+# FFI for main entry and bootstrap test
+extern fn sys_get_args() -> [text]
 extern fn rt_exec(cmd: text) -> i32
 extern fn rt_file_hash(path: text) -> text

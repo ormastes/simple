@@ -43,6 +43,7 @@ pub enum Node {
     // Module system (Features #104-111)
     ModDecl(ModDecl),
     UseStmt(UseStmt),
+    MultiUse(MultiUse),
     CommonUseStmt(CommonUseStmt),
     ExportUseStmt(ExportUseStmt),
     AutoImportStmt(AutoImportStmt),
@@ -817,6 +818,8 @@ pub enum BinOp {
     // Other
     Is,
     In,
+    // Pipeline
+    PipeForward, // |> pipe forward operator
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

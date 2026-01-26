@@ -15,16 +15,49 @@ impl<'a> Parser<'a> {
         let first = self.parse_single_pattern()?;
 
         // Check for or patterns (pattern1 | pattern2 | ...)
-        if self.check(&TokenKind::Pipe) {
-            let mut patterns = vec![first];
-            while self.check(&TokenKind::Pipe) {
-                self.advance();
-                patterns.push(self.parse_single_pattern()?);
+        // Support multi-line patterns where pipe continues on next line:
+        //   case 'a' | 'b'
+        //      | 'c' | 'd':
+        // Use peek to check if there's a pipe ahead (through newlines/indents)
+        // Only consume those tokens if we actually find a pipe
+        if self.check(&TokenKind::Pipe) || self.peek_through_newlines_and_indents_is(&TokenKind::Pipe) {
+            // Skip to the pipe, tracking how many INDENTs we consume
+            // These INDENTs will have matching DEDENTs that appear AFTER the arm body,
+            // so we store the count in pattern_indent_count for parse_match_arm to handle
+            self.pattern_indent_count += self.skip_newlines_and_indents_for_pattern();
+
+            if self.check(&TokenKind::Pipe) {
+                let mut patterns = vec![first];
+                while self.check(&TokenKind::Pipe) {
+                    self.advance();
+                    // Skip whitespace after the pipe operator
+                    self.pattern_indent_count += self.skip_newlines_and_indents_for_pattern();
+                    patterns.push(self.parse_single_pattern()?);
+                    // Check if there's another pipe (possibly on next line)
+                    if self.peek_through_newlines_and_indents_is(&TokenKind::Pipe) {
+                        self.pattern_indent_count += self.skip_newlines_and_indents_for_pattern();
+                    }
+                }
+                // Note: DEDENTs are NOT consumed here - they appear after the arm body
+                // and will be consumed by parse_match_arm
+                return Ok(Pattern::Or(patterns));
             }
-            return Ok(Pattern::Or(patterns));
         }
 
         Ok(first)
+    }
+
+    /// Skip newlines and indents for pattern continuation.
+    /// Returns the number of Indent tokens skipped.
+    fn skip_newlines_and_indents_for_pattern(&mut self) -> usize {
+        let mut indent_count = 0;
+        while matches!(self.current.kind, TokenKind::Newline | TokenKind::Indent) {
+            if matches!(self.current.kind, TokenKind::Indent) {
+                indent_count += 1;
+            }
+            self.advance();
+        }
+        indent_count
     }
 
     fn parse_single_pattern(&mut self) -> Result<Pattern, ParseError> {
@@ -41,24 +74,40 @@ impl<'a> Parser<'a> {
             TokenKind::Move => {
                 self.advance();
                 // Check if followed by an identifier - this is a move pattern (move name)
-                // Otherwise, "move" by itself is just an identifier
                 if let TokenKind::Identifier { name, .. } = &self.current.kind {
                     let name = name.clone();
                     self.advance();
-                    Ok(Pattern::MoveIdentifier(name))
-                } else {
-                    // Just "move" by itself as identifier
-                    Ok(Pattern::Identifier("move".to_string()))
+                    return Ok(Pattern::MoveIdentifier(name));
                 }
+                // Check for enum variant pattern: Move(...)
+                if self.check(&TokenKind::LParen) {
+                    self.advance();
+                    let mut patterns = Vec::new();
+                    while !self.check(&TokenKind::RParen) {
+                        patterns.push(self.parse_pattern()?);
+                        if !self.check(&TokenKind::RParen) {
+                            self.expect(&TokenKind::Comma)?;
+                        }
+                    }
+                    self.expect(&TokenKind::RParen)?;
+                    return Ok(Pattern::Enum {
+                        name: "_".to_string(),
+                        variant: "Move".to_string(),
+                        payload: Some(patterns),
+                    });
+                }
+                // Just "move" by itself as identifier
+                Ok(Pattern::Identifier("move".to_string()))
             }
             // Allow certain keywords as identifier patterns
             // These are keywords that are commonly used as variable names
-            TokenKind::New | TokenKind::Old | TokenKind::Type | TokenKind::Examples => {
+            TokenKind::New | TokenKind::Old | TokenKind::Type | TokenKind::Examples | TokenKind::From => {
                 let name = match &self.current.kind {
                     TokenKind::New => "new".to_string(),
                     TokenKind::Old => "old".to_string(),
                     TokenKind::Type => "type".to_string(),
                     TokenKind::Examples => "examples".to_string(),
+                    TokenKind::From => "from".to_string(),
                     _ => unreachable!(),
                 };
                 self.advance();
@@ -300,6 +349,26 @@ impl<'a> Parser<'a> {
             TokenKind::Common => {
                 self.advance();
                 Ok(Pattern::Identifier("common".to_string()))
+            }
+            // Allow BDD/Gherkin 'outline' as identifier pattern
+            TokenKind::Outline => {
+                self.advance();
+                Ok(Pattern::Identifier("outline".to_string()))
+            }
+            // Allow 'bounds' as identifier pattern
+            TokenKind::Bounds => {
+                self.advance();
+                Ok(Pattern::Identifier("bounds".to_string()))
+            }
+            // Allow 'alias' as identifier pattern
+            TokenKind::Alias => {
+                self.advance();
+                Ok(Pattern::Identifier("alias".to_string()))
+            }
+            // Allow 'default' as identifier pattern
+            TokenKind::Default => {
+                self.advance();
+                Ok(Pattern::Identifier("default".to_string()))
             }
             _ => Err(ParseError::unexpected_token(
                 "pattern",

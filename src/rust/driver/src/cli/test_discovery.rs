@@ -11,10 +11,15 @@ use super::test_runner::TestLevel;
 
 /// Discover test files in a directory
 pub fn discover_tests(dir: &Path, level: TestLevel) -> Vec<PathBuf> {
+    discover_tests_with_skip(dir, level, false)
+}
+
+/// Discover test files in a directory, optionally including .skip files
+pub fn discover_tests_with_skip(dir: &Path, level: TestLevel, include_skip_files: bool) -> Vec<PathBuf> {
     let mut tests = Vec::new();
 
     if !dir.is_dir() {
-        if is_test_file(dir) {
+        if is_test_file(dir) || (include_skip_files && is_skip_test_file(dir)) {
             tests.push(dir.to_path_buf());
         }
         return tests;
@@ -37,9 +42,9 @@ pub fn discover_tests(dir: &Path, level: TestLevel) -> Vec<PathBuf> {
                 };
 
                 if should_include {
-                    tests.extend(discover_tests(&path, level));
+                    tests.extend(discover_tests_with_skip(&path, level, include_skip_files));
                 }
-            } else if is_test_file(&path) {
+            } else if is_test_file(&path) || (include_skip_files && is_skip_test_file(&path)) {
                 tests.push(path);
             }
         }
@@ -55,6 +60,18 @@ pub fn is_test_file(path: &Path) -> bool {
         let is_simple_ext = name.ends_with(".spl") || name.ends_with(".simple") || name.ends_with(".sscript");
         let is_test = name.contains("_spec.") || name.contains("_test.");
         is_simple_ext && is_test
+    } else {
+        false
+    }
+}
+
+/// Check if a file is a skipped test file (*.spl.skip, *_spec.spl.skip, etc.)
+pub fn is_skip_test_file(path: &Path) -> bool {
+    if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+        // Match patterns like *_spec.spl.skip, *_test.spl.skip
+        let is_skip_ext = name.ends_with(".spl.skip") || name.ends_with(".simple.skip") || name.ends_with(".sscript.skip");
+        let is_test = name.contains("_spec.") || name.contains("_test.");
+        is_skip_ext && is_test
     } else {
         false
     }

@@ -13,6 +13,32 @@ impl<'a> super::Lexer<'a> {
                     return TokenKind::TypedRawString(value, suffix);
                 }
                 return TokenKind::RawString(value);
+            } else if ch == '\\' {
+                // Handle escape sequences in single-quoted raw strings
+                // Only \' is treated specially (to allow single quote in string)
+                // All other escapes like \n, \t are kept literally as backslash + char
+                self.advance();
+                if let Some(next_ch) = self.peek() {
+                    if next_ch == '\'' {
+                        // Escaped single quote - consume and add just the quote
+                        self.advance();
+                        value.push('\'');
+                    } else if next_ch == '\n' {
+                        // Backslash at end of line - just keep the backslash
+                        // The newline will be handled in the next iteration and error
+                        value.push('\\');
+                    } else {
+                        // All other cases: keep the backslash literal AND consume the next char
+                        // This includes \\, \n, \t, \r, \0, etc.
+                        // We must advance past the next char to avoid re-processing it
+                        self.advance();
+                        value.push('\\');
+                        value.push(next_ch);
+                    }
+                } else {
+                    // Backslash at end of file
+                    value.push('\\');
+                }
             } else if ch == '\n' {
                 return TokenKind::Error("Unterminated raw string".to_string());
             } else {
@@ -212,23 +238,131 @@ impl<'a> super::Lexer<'a> {
                     current_literal.push('{');
                     continue;
                 }
+                // Check if next char is backslash - this can't be a valid expression start
+                // This handles JSON patterns like {\"key\": \"value\"}
+                // where { is followed by an escape sequence
+                if self.check('\\') {
+                    current_literal.push('{');
+                    continue;
+                }
+                // Check if next char is a quote immediately after {
+                // This handles patterns like '{' in "expected '{' after 'loss'"
+                // where the user wants literal braces in the string
+                if self.check('\'') || self.check('"') {
+                    current_literal.push('{');
+                    continue;
+                }
                 // Save current literal if any
                 if !current_literal.is_empty() {
                     parts.push(FStringToken::Literal(current_literal));
                     current_literal = String::new();
                 }
                 // Read expression until }
+                // Need to handle escapes and track strings inside the expression
+                // Escapes like \" are translated to just " in the expression
                 let mut expr = String::new();
                 let mut brace_depth = 1;
+                let mut in_string: Option<char> = None; // Track if inside string and which quote
                 while let Some(c) = self.peek() {
-                    if c == '}' {
-                        brace_depth -= 1;
-                        if brace_depth == 0 {
-                            self.advance();
-                            break;
+                    // Handle escape sequences - translate them for the expression
+                    if c == '\\' {
+                        self.advance();
+                        if let Some(next) = self.peek() {
+                            match next {
+                                '"' | '\'' => {
+                                    // Escaped quote - becomes a quote in the expression
+                                    self.advance();
+                                    expr.push(next);
+                                    // Track string state
+                                    if let Some(quote) = in_string {
+                                        if quote == next {
+                                            in_string = None; // End string
+                                        }
+                                    } else {
+                                        in_string = Some(next); // Start string
+                                    }
+                                }
+                                '\\' => {
+                                    // Escaped backslash - becomes single backslash
+                                    self.advance();
+                                    expr.push('\\');
+                                }
+                                'n' => {
+                                    // Newline escape - keep as \n in expression
+                                    self.advance();
+                                    expr.push('\\');
+                                    expr.push('n');
+                                }
+                                't' => {
+                                    // Tab escape - keep as \t in expression
+                                    self.advance();
+                                    expr.push('\\');
+                                    expr.push('t');
+                                }
+                                _ => {
+                                    // Unknown escape - keep backslash
+                                    expr.push('\\');
+                                }
+                            }
+                        } else {
+                            expr.push('\\');
                         }
-                    } else if c == '{' {
-                        brace_depth += 1;
+                        continue;
+                    }
+                    // Track unescaped string boundaries
+                    // For double quote: always track as string delimiter
+                    // For single quote: only track as string start if NOT preceded by identifier/number/closing paren
+                    // (otherwise it's the transpose operator, e.g., A' in "m{ A' @ A }")
+                    if c == '"' {
+                        if let Some(quote) = in_string {
+                            if quote == c {
+                                in_string = None; // End of string
+                            }
+                        } else {
+                            in_string = Some(c); // Start of string
+                        }
+                        expr.push(c);
+                        self.advance();
+                        continue;
+                    }
+                    if c == '\'' {
+                        if let Some(quote) = in_string {
+                            if quote == c {
+                                in_string = None; // End of string
+                            }
+                            expr.push(c);
+                            self.advance();
+                            continue;
+                        } else {
+                            // Check if preceded by identifier char, digit, or ')' -> transpose operator
+                            let is_postfix = expr.chars().last().map_or(false, |last| {
+                                last.is_alphanumeric() || last == '_' || last == ')'
+                            });
+                            if is_postfix {
+                                // This is transpose operator, not string start
+                                expr.push(c);
+                                self.advance();
+                                continue;
+                            } else {
+                                // This is starting a single-quoted string
+                                in_string = Some(c);
+                                expr.push(c);
+                                self.advance();
+                                continue;
+                            }
+                        }
+                    }
+                    // Only track braces when not in a string
+                    if in_string.is_none() {
+                        if c == '}' {
+                            brace_depth -= 1;
+                            if brace_depth == 0 {
+                                self.advance();
+                                break;
+                            }
+                        } else if c == '{' {
+                            brace_depth += 1;
+                        }
                     }
                     expr.push(c);
                     self.advance();
@@ -236,17 +370,23 @@ impl<'a> super::Lexer<'a> {
                 if brace_depth != 0 {
                     return TokenKind::Error("Unclosed { in f-string".to_string());
                 }
-                parts.push(FStringToken::Expr(expr));
-                has_interpolation = true; // Mark that we have interpolation
+                // If expression is empty (just "{}"), treat as literal "{}"
+                // This allows strings like "m{} block" without escaping
+                if expr.trim().is_empty() {
+                    current_literal.push_str("{}");
+                } else {
+                    parts.push(FStringToken::Expr(expr));
+                    has_interpolation = true; // Mark that we have interpolation
+                }
             } else if ch == '}' {
                 self.advance();
                 // Check for escaped }} -> literal }
                 if self.check('}') {
                     self.advance();
-                    current_literal.push('}');
-                } else {
-                    return TokenKind::Error("Single } in f-string (use }} to escape)".to_string());
                 }
+                // Treat single } as literal } (lenient mode)
+                // This allows strings like "{value}}" to work where the } is part of JSON syntax
+                current_literal.push('}');
             } else if ch == '\\' {
                 self.advance();
                 match self.process_escape(true) {

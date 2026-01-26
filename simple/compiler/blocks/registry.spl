@@ -2,8 +2,13 @@
 #
 # Central registry for block definitions.
 
-import .definition.{BlockDefinition}
-import .modes.{LexerMode, SyntaxFeatures}
+use blocks.definition.{BlockDefinition}
+use blocks.modes.{LexerMode, SyntaxFeatures}
+use blocks.builtin.{
+    MathBlockDef, LossBlockDef, NogradBlockDef,
+    ShellBlockDef, SqlBlockDef, RegexBlockDef,
+    JsonBlockDef, MarkdownBlockDef
+}
 
 # ============================================================================
 # Block Registry
@@ -21,8 +26,8 @@ struct BlockRegistry:
 
     # Check if a keyword is a block
     if registry.is_block_keyword("sql"):
-        val def = registry.lookup("sql").unwrap()
-        val mode = def.lexer_mode()
+        val blk = registry.lookup("sql").unwrap()
+        val mode = blk.lexer_mode()
     ```
     """
     blocks: Dict<text, BlockDefinition>
@@ -43,13 +48,7 @@ impl BlockRegistry:
         """
         var reg = BlockRegistry.new()
 
-        # Import and register built-in blocks
-        import .builtin.{
-            MathBlockDef, LossBlockDef, NogradBlockDef,
-            ShellBlockDef, SqlBlockDef, RegexBlockDef,
-            JsonBlockDef, MarkdownBlockDef
-        }
-
+        # Register built-in blocks (imported at module level)
         # Math/ML blocks
         reg.register(MathBlockDef())
         reg.register(LossBlockDef())
@@ -64,16 +63,16 @@ impl BlockRegistry:
 
         reg
 
-    me register(def: BlockDefinition):
+    me register(block_def: BlockDefinition):
         """Register a block definition.
 
         Args:
-            def: The block definition to register
+            block_def: The block definition to register
 
         Note: If a block with the same kind is already registered,
         it will be replaced.
         """
-        self.blocks[def.kind()] = def
+        self.blocks[block_def.kind()] = block_def
 
     me unregister(kind: text) -> bool:
         """Unregister a block by keyword.
@@ -112,13 +111,13 @@ impl BlockRegistry:
     fn lexer_mode_for(kind: text) -> LexerMode:
         """Get the lexer mode for a block, or Normal if not found."""
         match self.lookup(kind):
-            case Some(def): def.lexer_mode()
+            case Some(blk): blk.lexer_mode()
             case None: LexerMode.Normal
 
     fn syntax_features_for(kind: text) -> SyntaxFeatures:
         """Get syntax features for a block, or default if not found."""
         match self.lookup(kind):
-            case Some(def): def.syntax_features()
+            case Some(blk): blk.syntax_features()
             case None: SyntaxFeatures.default()
 
 # ============================================================================
@@ -138,13 +137,15 @@ fn block_registry() -> BlockRegistry:
         _global_registry = Some(BlockRegistry.default())
     _global_registry.unwrap()
 
-fn register_block(def: BlockDefinition):
+fn register_block(block_def: BlockDefinition):
     """Register a block in the global registry."""
-    block_registry().register(def)
+    var reg = block_registry()
+    reg.register(block_def)
 
 fn unregister_block(kind: text) -> bool:
     """Unregister a block from the global registry."""
-    block_registry().unregister(kind)
+    var reg = block_registry()
+    reg.unregister(kind)
 
 fn is_block(kind: text) -> bool:
     """Check if a keyword is a registered block."""
@@ -181,9 +182,9 @@ impl RegistryBuilder:
         self.include_builtin = true
         self
 
-    me register(def: BlockDefinition) -> RegistryBuilder:
+    me register(block_def: BlockDefinition) -> RegistryBuilder:
         """Register a block definition."""
-        self.registry.register(def)
+        self.registry.register(block_def)
         self
 
     me without(kind: text) -> RegistryBuilder:
@@ -194,11 +195,7 @@ impl RegistryBuilder:
     fn build() -> BlockRegistry:
         """Build the final registry."""
         if self.include_builtin:
-            import .builtin.{
-                MathBlockDef, LossBlockDef, NogradBlockDef,
-                ShellBlockDef, SqlBlockDef, RegexBlockDef,
-                JsonBlockDef, MarkdownBlockDef
-            }
+            # Register built-in blocks (imported at module level)
             # Math/ML blocks
             self.registry.register(MathBlockDef())
             self.registry.register(LossBlockDef())

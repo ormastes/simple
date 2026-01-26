@@ -546,6 +546,11 @@ pub enum Value {
     EnumType {
         enum_name: String,
     },
+    /// Trait type reference - represents a trait definition
+    /// Used for trait exports and "impl Trait for Type" syntax
+    TraitType {
+        trait_name: String,
+    },
     /// Enum variant constructor - callable to create enum with payload
     /// Used for variants with data: Option.Some(x), Result.Ok(value)
     EnumVariantConstructor {

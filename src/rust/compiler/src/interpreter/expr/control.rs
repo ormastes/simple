@@ -6,7 +6,7 @@ use super::evaluate_expr;
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::value::{Value, ATTR_STRONG};
 
-use super::super::{exec_node, pattern_matches, ClassDef, Control, Enums, Env, FunctionDef, ImplMethods};
+use super::super::{exec_node, exec_if_expr, exec_match_expr, pattern_matches, ClassDef, Control, Enums, Env, FunctionDef, ImplMethods};
 
 pub(super) fn eval_control_expr(
     expr: &Expr,
@@ -40,12 +40,34 @@ pub(super) fn eval_control_expr(
             else_branch,
             ..
         } => {
-            let result = if evaluate_expr(condition, env, functions, classes, enums, impl_methods)?.truthy() {
+            let branch_result = if evaluate_expr(condition, env, functions, classes, enums, impl_methods)?.truthy() {
                 evaluate_expr(then_branch, env, functions, classes, enums, impl_methods)?
             } else if let Some(else_b) = else_branch {
                 evaluate_expr(else_b, env, functions, classes, enums, impl_methods)?
             } else {
                 Value::Nil
+            };
+            // If branch returned a BlockClosure (from DoBlock), execute it immediately
+            // This handles the case where if branches are parsed as DoBlock expressions
+            let result = if let Value::BlockClosure { nodes, env: captured_env } = branch_result {
+                let mut block_env = captured_env.clone();
+                let mut last_val = Value::Nil;
+                for node in &nodes {
+                    match exec_node(node, &mut block_env, functions, classes, enums, impl_methods)? {
+                        Control::Return(v) => return Ok(Some(v)),
+                        Control::Break(_) => break,
+                        Control::Continue => continue,
+                        Control::Next => {
+                            // Get the expression value if it was an expression node
+                            if let Node::Expression(expr) = node {
+                                last_val = evaluate_expr(expr, &mut block_env, functions, classes, enums, impl_methods)?;
+                            }
+                        }
+                    }
+                }
+                last_val
+            } else {
+                branch_result
             };
             Ok(Some(result))
         }
@@ -107,7 +129,31 @@ pub(super) fn eval_control_expr(
                         arm_env.insert(name, value);
                     }
                     let mut result = Value::Nil;
-                    for stmt in &arm.body.statements {
+                    let stmt_count = arm.body.statements.len();
+                    for (idx, stmt) in arm.body.statements.iter().enumerate() {
+                        let is_last = idx == stmt_count - 1;
+
+                        // For the last statement, handle if/match specially to capture implicit return
+                        if is_last {
+                            match stmt {
+                                Node::Expression(expr) => {
+                                    result = evaluate_expr(expr, &mut arm_env, functions, classes, enums, impl_methods)?;
+                                    continue;
+                                }
+                                Node::If(if_stmt) => {
+                                    // Use exec_if_expr to properly capture the implicit return value
+                                    result = exec_if_expr(if_stmt, &mut arm_env, functions, classes, enums, impl_methods)?;
+                                    continue;
+                                }
+                                Node::Match(match_stmt) => {
+                                    // Use exec_match_expr to properly capture the implicit return value
+                                    result = exec_match_expr(match_stmt, &mut arm_env, functions, classes, enums, impl_methods)?;
+                                    continue;
+                                }
+                                _ => {}
+                            }
+                        }
+
                         match exec_node(stmt, &mut arm_env, functions, classes, enums, impl_methods)? {
                             Control::Return(v) => return Ok(Some(v)),
                             Control::Break(_) => return Ok(Some(Value::Nil)),

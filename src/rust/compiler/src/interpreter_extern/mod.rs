@@ -61,6 +61,9 @@ pub mod memory;
 pub mod cli;
 pub mod sdn;
 pub mod coverage;
+pub mod cranelift;
+pub mod sandbox;
+pub mod mock_policy;
 
 // Import parent interpreter types
 type Enums = HashMap<String, EnumDef>;
@@ -649,6 +652,139 @@ pub(crate) fn call_extern_function(
         "coverage_generate" => coverage::coverage_generate(&evaluated),
         "coverage_check" => coverage::coverage_check(&evaluated),
         "coverage_summary" => coverage::coverage_summary(&evaluated),
+
+        // ====================================================================
+        // Cranelift FFI Functions (for self-hosting compiler)
+        // ====================================================================
+        // Module management
+        "rt_cranelift_module_new" => cranelift::rt_cranelift_module_new(&evaluated),
+        "rt_cranelift_new_module" => cranelift::rt_cranelift_new_module(&evaluated),
+        "rt_cranelift_finalize_module" => cranelift::rt_cranelift_finalize_module(&evaluated),
+        "rt_cranelift_free_module" => cranelift::rt_cranelift_free_module(&evaluated),
+        "rt_cranelift_emit_object" => cranelift::rt_cranelift_emit_object(&evaluated),
+
+        // Signature management
+        "rt_cranelift_new_signature" => cranelift::rt_cranelift_new_signature(&evaluated),
+        "rt_cranelift_sig_add_param" => cranelift::rt_cranelift_sig_add_param(&evaluated),
+        "rt_cranelift_sig_set_return" => cranelift::rt_cranelift_sig_set_return(&evaluated),
+
+        // Function building
+        "rt_cranelift_begin_function" => cranelift::rt_cranelift_begin_function(&evaluated),
+        "rt_cranelift_end_function" => cranelift::rt_cranelift_end_function(&evaluated),
+        "rt_cranelift_define_function" => cranelift::rt_cranelift_define_function(&evaluated),
+
+        // Block management
+        "rt_cranelift_create_block" => cranelift::rt_cranelift_create_block(&evaluated),
+        "rt_cranelift_switch_to_block" => cranelift::rt_cranelift_switch_to_block(&evaluated),
+        "rt_cranelift_seal_block" => cranelift::rt_cranelift_seal_block(&evaluated),
+        "rt_cranelift_seal_all_blocks" => cranelift::rt_cranelift_seal_all_blocks(&evaluated),
+        "rt_cranelift_append_block_param" => cranelift::rt_cranelift_append_block_param(&evaluated),
+        "rt_cranelift_block_param" => cranelift::rt_cranelift_block_param(&evaluated),
+
+        // Constants
+        "rt_cranelift_iconst" => cranelift::rt_cranelift_iconst(&evaluated),
+        "rt_cranelift_fconst" => cranelift::rt_cranelift_fconst(&evaluated),
+        "rt_cranelift_bconst" => cranelift::rt_cranelift_bconst(&evaluated),
+        "rt_cranelift_null" => cranelift::rt_cranelift_null(&evaluated),
+
+        // Arithmetic
+        "rt_cranelift_iadd" => cranelift::rt_cranelift_iadd(&evaluated),
+        "rt_cranelift_isub" => cranelift::rt_cranelift_isub(&evaluated),
+        "rt_cranelift_imul" => cranelift::rt_cranelift_imul(&evaluated),
+        "rt_cranelift_sdiv" => cranelift::rt_cranelift_sdiv(&evaluated),
+        "rt_cranelift_udiv" => cranelift::rt_cranelift_udiv(&evaluated),
+        "rt_cranelift_srem" => cranelift::rt_cranelift_srem(&evaluated),
+        "rt_cranelift_urem" => cranelift::rt_cranelift_urem(&evaluated),
+        "rt_cranelift_fadd" => cranelift::rt_cranelift_fadd(&evaluated),
+        "rt_cranelift_fsub" => cranelift::rt_cranelift_fsub(&evaluated),
+        "rt_cranelift_fmul" => cranelift::rt_cranelift_fmul(&evaluated),
+        "rt_cranelift_fdiv" => cranelift::rt_cranelift_fdiv(&evaluated),
+
+        // Bitwise
+        "rt_cranelift_band" => cranelift::rt_cranelift_band(&evaluated),
+        "rt_cranelift_bor" => cranelift::rt_cranelift_bor(&evaluated),
+        "rt_cranelift_bxor" => cranelift::rt_cranelift_bxor(&evaluated),
+        "rt_cranelift_bnot" => cranelift::rt_cranelift_bnot(&evaluated),
+        "rt_cranelift_ishl" => cranelift::rt_cranelift_ishl(&evaluated),
+        "rt_cranelift_ushr" => cranelift::rt_cranelift_ushr(&evaluated),
+        "rt_cranelift_sshr" => cranelift::rt_cranelift_sshr(&evaluated),
+
+        // Comparison
+        "rt_cranelift_icmp" => cranelift::rt_cranelift_icmp(&evaluated),
+        "rt_cranelift_fcmp" => cranelift::rt_cranelift_fcmp(&evaluated),
+
+        // Memory
+        "rt_cranelift_load" => cranelift::rt_cranelift_load(&evaluated),
+        "rt_cranelift_store" => cranelift::rt_cranelift_store(&evaluated),
+        "rt_cranelift_stack_slot" => cranelift::rt_cranelift_stack_slot(&evaluated),
+        "rt_cranelift_stack_addr" => cranelift::rt_cranelift_stack_addr(&evaluated),
+
+        // Control flow
+        "rt_cranelift_jump" => cranelift::rt_cranelift_jump(&evaluated),
+        "rt_cranelift_brif" => cranelift::rt_cranelift_brif(&evaluated),
+        "rt_cranelift_return" => cranelift::rt_cranelift_return(&evaluated),
+        "rt_cranelift_return_void" => cranelift::rt_cranelift_return_void(&evaluated),
+        "rt_cranelift_trap" => cranelift::rt_cranelift_trap(&evaluated),
+
+        // Function calls
+        "rt_cranelift_call" => cranelift::rt_cranelift_call(&evaluated),
+        "rt_cranelift_call_indirect" => cranelift::rt_cranelift_call_indirect(&evaluated),
+
+        // Type conversions
+        "rt_cranelift_sextend" => cranelift::rt_cranelift_sextend(&evaluated),
+        "rt_cranelift_uextend" => cranelift::rt_cranelift_uextend(&evaluated),
+        "rt_cranelift_ireduce" => cranelift::rt_cranelift_ireduce(&evaluated),
+        "rt_cranelift_fcvt_to_sint" => cranelift::rt_cranelift_fcvt_to_sint(&evaluated),
+        "rt_cranelift_fcvt_to_uint" => cranelift::rt_cranelift_fcvt_to_uint(&evaluated),
+        "rt_cranelift_fcvt_from_sint" => cranelift::rt_cranelift_fcvt_from_sint(&evaluated),
+        "rt_cranelift_fcvt_from_uint" => cranelift::rt_cranelift_fcvt_from_uint(&evaluated),
+        "rt_cranelift_bitcast" => cranelift::rt_cranelift_bitcast(&evaluated),
+
+        // JIT execution
+        "rt_cranelift_get_function_ptr" => cranelift::rt_cranelift_get_function_ptr(&evaluated),
+        "rt_cranelift_call_function_ptr" => cranelift::rt_cranelift_call_function_ptr(&evaluated),
+
+        // Bootstrap test FFI
+        "rt_exec" => cranelift::rt_exec(&evaluated),
+        "rt_file_hash" => cranelift::rt_file_hash(&evaluated),
+        "rt_write_file" => cranelift::rt_write_file(&evaluated),
+
+        // ====================================================================
+        // Mock Policy Operations (6 functions)
+        // ====================================================================
+        "__mock_policy_init_all" => mock_policy::mock_policy_init_all(&evaluated),
+        "__mock_policy_init_hal_only" => mock_policy::mock_policy_init_hal_only(&evaluated),
+        "__mock_policy_disable" => mock_policy::mock_policy_disable(&evaluated),
+        "__mock_policy_init_patterns" => mock_policy::mock_policy_init_patterns(&evaluated),
+        "__mock_policy_check" => mock_policy::mock_policy_check(&evaluated),
+        "__mock_policy_try_check" => mock_policy::mock_policy_try_check(&evaluated),
+        "__mock_policy_get_mode" => mock_policy::mock_policy_get_mode(&evaluated),
+
+        // ====================================================================
+        // Sandbox Operations (21 functions)
+        // ====================================================================
+        "rt_sandbox_reset" => sandbox::rt_sandbox_reset_fn(&evaluated),
+        "rt_sandbox_set_cpu_time" => sandbox::rt_sandbox_set_cpu_time_fn(&evaluated),
+        "rt_sandbox_set_memory" => sandbox::rt_sandbox_set_memory_fn(&evaluated),
+        "rt_sandbox_set_fd_limit" => sandbox::rt_sandbox_set_fd_limit_fn(&evaluated),
+        "rt_sandbox_set_thread_limit" => sandbox::rt_sandbox_set_thread_limit_fn(&evaluated),
+        "rt_sandbox_disable_network" => sandbox::rt_sandbox_disable_network_fn(&evaluated),
+        "rt_sandbox_set_network_allowlist" => sandbox::rt_sandbox_set_network_allowlist_fn(&evaluated),
+        "rt_sandbox_set_network_blocklist" => sandbox::rt_sandbox_set_network_blocklist_fn(&evaluated),
+        "rt_sandbox_add_allowed_domain" => sandbox::rt_sandbox_add_allowed_domain_fn(&evaluated),
+        "rt_sandbox_add_blocked_domain" => sandbox::rt_sandbox_add_blocked_domain_fn(&evaluated),
+        "rt_sandbox_set_fs_readonly" => sandbox::rt_sandbox_set_fs_readonly_fn(&evaluated),
+        "rt_sandbox_set_fs_restricted" => sandbox::rt_sandbox_set_fs_restricted_fn(&evaluated),
+        "rt_sandbox_set_fs_overlay" => sandbox::rt_sandbox_set_fs_overlay_fn(&evaluated),
+        "rt_sandbox_add_read_path" => sandbox::rt_sandbox_add_read_path_fn(&evaluated),
+        "rt_sandbox_add_write_path" => sandbox::rt_sandbox_add_write_path_fn(&evaluated),
+        "rt_sandbox_apply" => sandbox::rt_sandbox_apply_fn(&evaluated),
+        "rt_sandbox_cleanup" => sandbox::rt_sandbox_cleanup_fn(&evaluated),
+        "rt_sandbox_is_configured" => sandbox::rt_sandbox_is_configured_fn(&evaluated),
+        "rt_sandbox_get_cpu_time" => sandbox::rt_sandbox_get_cpu_time_fn(&evaluated),
+        "rt_sandbox_get_memory" => sandbox::rt_sandbox_get_memory_fn(&evaluated),
+        "rt_sandbox_get_network_mode" => sandbox::rt_sandbox_get_network_mode_fn(&evaluated),
+        "rt_sandbox_get_fs_mode" => sandbox::rt_sandbox_get_fs_mode_fn(&evaluated),
 
         // Unknown extern function
         _ => Err(common::unknown_function(name)),

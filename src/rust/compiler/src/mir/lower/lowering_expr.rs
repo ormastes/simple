@@ -349,6 +349,47 @@ impl<'a> MirLowerer<'a> {
                     });
                 }
 
+                // Special handling for rt_value_to_string - box integers/floats
+                if name == "rt_value_to_string" && args.len() == 1 {
+                    let arg = &args[0];
+                    let arg_reg = self.lower_expr(arg)?;
+
+                    // Check if argument is a native integer or float type that needs boxing
+                    let needs_boxing = matches!(
+                        arg.ty,
+                        TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::I64 |
+                        TypeId::U8 | TypeId::U16 | TypeId::U32 | TypeId::U64
+                    );
+                    let needs_float_boxing = matches!(arg.ty, TypeId::F32 | TypeId::F64);
+
+                    return self.with_func(|func, current_block| {
+                        // Box the argument if it's a native numeric type
+                        let boxed_arg = if needs_boxing {
+                            let boxed = func.new_vreg();
+                            let block = func.block_mut(current_block).unwrap();
+                            block.instructions.push(MirInst::BoxInt { dest: boxed, value: arg_reg });
+                            boxed
+                        } else if needs_float_boxing {
+                            let boxed = func.new_vreg();
+                            let block = func.block_mut(current_block).unwrap();
+                            block.instructions.push(MirInst::BoxFloat { dest: boxed, value: arg_reg });
+                            boxed
+                        } else {
+                            // Strings, arrays, etc. are already RuntimeValues
+                            arg_reg
+                        };
+
+                        let dest = func.new_vreg();
+                        let block = func.block_mut(current_block).unwrap();
+                        block.instructions.push(MirInst::Call {
+                            dest: Some(dest),
+                            target: CallTarget::from_name(name),
+                            args: vec![boxed_arg],
+                        });
+                        dest
+                    });
+                }
+
                 // Lower all arguments
                 let mut arg_regs = Vec::new();
                 for arg in args {

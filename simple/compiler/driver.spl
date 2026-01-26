@@ -3,18 +3,58 @@
 # Orchestrates the compilation pipeline from source to executable.
 # Supports multiple modes: interpret, jit, aot, check, sdn.
 
-import compiler.config.*
-import compiler.di.*
-import compiler.aop.*
-import compiler.lexer.*
-import compiler.treesitter.*
-import compiler.parser.*
-import compiler.hir.*
-import compiler.resolve.*
-import compiler.backend.*
-import compiler.mir.*
-import compiler.codegen.*
-import compiler.blocks.{BlockResolver, ResolvedModule, resolve_blocks}
+use config.*
+use di.*
+use aop.*
+use lexer.*
+use treesitter.*
+use parser.*
+use hir.*
+use resolve.*
+use backend.*
+use mir.*
+use codegen.*
+use blocks.resolver.{BlockResolver, ResolvedModule}
+use blocks.registry.{block_registry}
+use type_infer.{HmInferContext, TypeInferError}
+
+# Helper function to create a BlockResolver (avoids static method calls)
+fn create_block_resolver() -> BlockResolver:
+    BlockResolver(
+        registry: block_registry(),
+        diagnostics: [],
+        file_path: nil,
+        module_name: nil
+    )
+
+# Helper function to create a SymbolTable (avoids static method calls)
+fn create_symbol_table() -> SymbolTable:
+    var table = SymbolTable(
+        symbols: {},
+        scopes: {},
+        current_scope: ScopeId(id: 0),
+        next_symbol_id: 0,
+        next_scope_id: 1
+    )
+    # Create root scope
+    var scopes = table.scopes
+    scopes[0] = Scope(
+        id: ScopeId(id: 0),
+        parent: nil,
+        kind: ScopeKind.Module,
+        symbols: {}
+    )
+    table.scopes = scopes
+    table
+
+# Helper function to create HirLowering (avoids static method calls)
+fn create_hir_lowering() -> HirLowering:
+    HirLowering(
+        symbols: create_symbol_table(),
+        errors: [],
+        current_function: nil,
+        loop_depth: 0
+    )
 
 # ------------------------------------------------------------------------------
 # Compilation Mode
@@ -27,22 +67,24 @@ enum CompileMode:
     Check           # Type check only, no execution
     Sdn             # SDN data parsing mode (no code execution)
 
+impl CompileMode:
     fn to_text() -> text:
         match self:
-            CompileMode.Interpret => "interpret"
-            CompileMode.Jit => "jit"
-            CompileMode.Aot => "aot"
-            CompileMode.Check => "check"
-            CompileMode.Sdn => "sdn"
+            case CompileMode.Interpret: "interpret"
+            case CompileMode.Jit: "jit"
+            case CompileMode.Aot: "aot"
+            case CompileMode.Check: "check"
+            case CompileMode.Sdn: "sdn"
+            case _: "unknown"
 
     static fn from_text(s: text) -> CompileMode?:
         match s:
-            "interpret" | "i" => Some(CompileMode.Interpret)
-            "jit" | "j" => Some(CompileMode.Jit)
-            "aot" | "a" | "compile" | "c" => Some(CompileMode.Aot)
-            "check" | "k" => Some(CompileMode.Check)
-            "sdn" | "s" | "data" => Some(CompileMode.Sdn)
-            _ => None
+            case "interpret" | "i": Some(CompileMode.Interpret)
+            case "jit" | "j": Some(CompileMode.Jit)
+            case "aot" | "a" | "compile" | "c": Some(CompileMode.Aot)
+            case "check" | "k": Some(CompileMode.Check)
+            case "sdn" | "s" | "data": Some(CompileMode.Sdn)
+            case _: nil
 
 # ------------------------------------------------------------------------------
 # Compilation Options
@@ -62,7 +104,7 @@ struct CompileOptions:
         CompileOptions(
             mode: CompileMode.Interpret,
             input_files: [],
-            output_file: None,
+            output_file: nil,
             optimize: false,
             debug_info: true,
             verbose: false,
@@ -85,23 +127,24 @@ enum CompileResult:
 
     fn is_success() -> bool:
         match self:
-            CompileResult.Success(_) => true
-            _ => false
+            case CompileResult.Success(_): true
+            case _: false
 
     fn get_value() -> Any?:
         match self:
-            CompileResult.Success(v) => v
-            _ => None
+            case CompileResult.Success(v): v
+            case _: nil
 
     fn get_errors() -> [text]:
         match self:
-            CompileResult.Success(_) => []
-            CompileResult.TypeError(e) => e
-            CompileResult.ParseError(e) => e
-            CompileResult.BlockError(e) => e
-            CompileResult.ResolveError(e) => e
-            CompileResult.CodegenError(m) => [m]
-            CompileResult.RuntimeError(m) => [m]
+            case CompileResult.Success(_): []
+            case CompileResult.TypeError(e): e
+            case CompileResult.ParseError(e): e
+            case CompileResult.BlockError(e): e
+            case CompileResult.ResolveError(e): e
+            case CompileResult.CodegenError(m): [m]
+            case CompileResult.RuntimeError(m): [m]
+            case _: []
 
 # ------------------------------------------------------------------------------
 # Source File
@@ -113,17 +156,20 @@ struct SourceFile:
     module_name: text
 
     static fn load(path: text) -> Result<SourceFile, text>:
-        val content = rt_read_file(path)
-        if content.is_none():
+        val content_opt = rt_file_read_text(path)
+        # rt_file_read_text returns Option<text>
+        if content_opt.is_none():
             return Err("Failed to read file: {path}")
+        val content = content_opt.unwrap()
 
         # Extract module name from path
         val name = path.split("/").last() ?? "main"
-        val module_name = name.replace(".spl", "").replace(".sdn", "")
+        val name_no_spl = name.replace(".spl", "")
+        val module_name = name_no_spl.replace(".sdn", "")
 
         Ok(SourceFile(
             path: path,
-            content: content.unwrap(),
+            content: content,
             module_name: module_name
         ))
 
@@ -146,7 +192,7 @@ class CompileContext:
     static fn create(options: CompileOptions) -> CompileContext:
         # Load config
         val config = Config.default()
-        config.set("log_level", options.log_level.to_text())
+        config.set("log_level", "{options.log_level}")
         config.set("profile", options.profile)
 
         # Setup DI container
@@ -154,21 +200,21 @@ class CompileContext:
 
         # Register backend based on mode
         match options.mode:
-            CompileMode.Interpret =>
-                di.bind("Backend", \: InterpreterBackendImpl(env: Environment.create()))
-            CompileMode.Jit | CompileMode.Aot =>
-                di.bind("Backend", \: CompilerBackendImpl(
-                    mir_lowering: MirLowering(),
-                    codegen: Codegen()
-                ))
-            CompileMode.Sdn =>
+            case CompileMode.Interpret:
+                di.bind("Backend", \: InterpreterBackendImpl())
+            case CompileMode.Jit:
+                di.bind("Backend", \: CompilerBackendImpl.jit())
+            case CompileMode.Aot:
+                val output = options.output_file ?? "a.out"
+                di.bind("Backend", \: CompilerBackendImpl.aot(output))
+            case CompileMode.Sdn:
                 di.bind("Backend", \: SdnBackendImpl())
-            CompileMode.Check =>
+            case CompileMode.Check:
                 # Check mode uses a no-op backend
                 di.bind("Backend", \: CheckBackendImpl())
 
         # Setup AOP
-        val aop = AopWeaver(aspects: [], logger: Logger(level: options.log_level))
+        var aop = AopWeaver(aspects: [], logger: Logger(level: options.log_level))
         if options.verbose:
             aop.add_aspect(LogAspect(level: 6, logger: aop.logger))
 
@@ -208,7 +254,7 @@ class CheckBackendImpl(Backend):
 
     fn process_module(module: HirModule) -> Result<Any, text>:
         # Just validate, don't execute
-        Ok(None)
+        Ok(nil)
 
     fn eval_expr(expr: HirExpr, env: Environment) -> Result<Value, text>:
         # Don't evaluate, just return unit
@@ -233,133 +279,218 @@ class CompilerDriver:
 
     me compile() -> CompileResult:
         # Phase 1: Load source files
-        if not self.load_sources():
+        val (new_ctx1, load_ok) = self.load_sources_impl()
+        self.ctx = new_ctx1
+        if not load_ok:
             return CompileResult.ParseError(self.ctx.errors)
 
         # Phase 2: Parse all sources
-        if not self.parse_all():
+        val (new_ctx2, parse_ok) = self.parse_all_impl()
+        self.ctx = new_ctx2
+        if not parse_ok:
             return CompileResult.ParseError(self.ctx.errors)
 
-        # Phase 3: Lower to HIR and type check
-        if not self.lower_to_hir():
+        # Phase 3: Lower to HIR, resolve methods, and type check (combined loop)
+        val (new_ctx3, analyze_ok) = self.lower_and_check_impl()
+        self.ctx = new_ctx3
+        if not analyze_ok:
+            # Determine error type from first error
+            if self.ctx.errors.len() > 0:
+                val first_error = self.ctx.errors[0]
+                if first_error.contains("Method resolution"):
+                    return CompileResult.ResolveError(self.ctx.errors)
             return CompileResult.TypeError(self.ctx.errors)
 
-        # Phase 3.5: Method resolution (UFCS)
-        if not self.resolve_methods():
-            return CompileResult.ResolveError(self.ctx.errors)
-
-        # Phase 4: Mode-specific processing
+        # Phase 5: Mode-specific processing
         match self.ctx.options.mode:
-            CompileMode.Check =>
-                return CompileResult.Success(None)
+            case CompileMode.Check:
+                return CompileResult.Success(nil)
 
-            CompileMode.Sdn =>
+            case CompileMode.Sdn:
                 return self.process_sdn()
 
-            CompileMode.Interpret =>
+            case CompileMode.Interpret:
                 return self.interpret()
 
-            CompileMode.Jit =>
+            case CompileMode.Jit:
                 return self.jit_compile_and_run()
 
-            CompileMode.Aot =>
+            case CompileMode.Aot:
                 return self.aot_compile()
 
     # --------------------------------------------------------------------------
     # Phase 1: Load sources
     # --------------------------------------------------------------------------
 
-    me load_sources() -> bool:
-        for path in self.ctx.options.input_files:
+    fn load_sources_impl() -> (CompileContext, bool):
+        var ctx = self.ctx
+        for path in ctx.options.input_files:
             match SourceFile.load(path):
-                Ok(source) =>
-                    self.ctx.sources.push(source)
-                Err(e) =>
-                    self.ctx.add_error(e)
+                case Ok(source):
+                    var sources = ctx.sources
+                    sources.push(source)
+                    ctx.sources = sources
+                case Err(e):
+                    var errors = ctx.errors
+                    errors.push(e)
+                    ctx.errors = errors
 
-        not self.ctx.has_errors()
+        (ctx, ctx.errors.len() == 0)
 
     # --------------------------------------------------------------------------
     # Phase 2: Parse
     # --------------------------------------------------------------------------
 
-    me parse_all() -> bool:
-        for source in self.ctx.sources:
-            match self.parse_source(source):
-                Ok(module) =>
-                    self.ctx.modules[source.module_name] = module
-                Err(e) =>
-                    self.ctx.add_error("Parse error in {source.path}: {e}")
+    fn parse_all_impl() -> (CompileContext, bool):
+        var ctx = self.ctx
+        for source in ctx.sources:
+            val module = self.parse_source(source)
+            var modules = ctx.modules
+            modules[source.module_name] = module
+            ctx.modules = modules
 
-        not self.ctx.has_errors()
+        (ctx, ctx.errors.len() == 0)
 
-    fn parse_source(source: SourceFile) -> Result<Module, text>:
+    fn parse_source(source: SourceFile) -> Module:
         # Phase 2a: Outline parsing (TreeSitter)
-        val ts = TreeSitter.new(source.content)
+        var ts = TreeSitter.new(source.content)
         val outline = ts.parse_outline()
 
-        # Phase 2b: Block resolution (NEW)
-        # Resolve all blocks found in the outline before full parsing
-        var resolver = BlockResolver.new()
-            .with_file(source.path)
-            .with_module(source.module_name)
+        # Phase 2b: Block resolution
+        var resolver = create_block_resolver()
+        resolver = resolver.with_file(source.path)
+        resolver = resolver.with_module(source.module_name)
         val (resolved, block_diagnostics) = resolver.resolve(outline)
 
-        # Check for block resolution errors
-        for diag in block_diagnostics:
-            if diag.is_error():
-                return Err("Block error at {source.path}:{diag.span.line}:{diag.span.col}: {diag.message}")
-
         # Phase 2c: Full parse with resolved blocks
-        val parser = Parser.with_resolved_blocks(source.content, resolved)
-        parser.parse()
+        var parser = Parser.with_resolved_blocks(source.content, resolved)
+        val module = parser.parse()
+        module
 
     # --------------------------------------------------------------------------
-    # Phase 3: Lower to HIR
+    # Phase 3: Combined HIR Lowering + Method Resolution + Type Checking
+    # --------------------------------------------------------------------------
+    #
+    # This combined implementation processes each module through all three
+    # phases in a single loop, avoiding redundant iterations and improving
+    # performance on large codebases.
+
+    fn lower_and_check_impl() -> (CompileContext, bool):
+        var lowering = create_hir_lowering()
+        var ctx = self.ctx
+
+        val module_names = ctx.modules.keys()
+        for name in module_names:
+            val module = ctx.modules[name]
+
+            # Step 1: Lower to HIR
+            val hir_module = lowering.lower_module(module)
+
+            # Step 2: Method resolution (UFCS)
+            val (resolved_module, resolve_errors) = resolve_methods(hir_module)
+
+            # Collect method resolution errors
+            for err in resolve_errors:
+                var errors = ctx.errors
+                errors.push("Method resolution error in {name}: {err.message}")
+                ctx.errors = errors
+
+            # Step 3: Type checking (HM inference)
+            var infer_ctx = HmInferContext.with_builtins()
+            infer_ctx.infer_module(resolved_module)
+
+            # Collect type errors
+            for err in infer_ctx.errors:
+                var errors = ctx.errors
+                errors.push("Type error in {name}: {err.message()}")
+                ctx.errors = errors
+
+            # Store final module
+            var hir_modules = ctx.hir_modules
+            hir_modules[name] = resolved_module
+            ctx.hir_modules = hir_modules
+
+        (ctx, ctx.errors.len() == 0)
+
+    # --------------------------------------------------------------------------
+    # Phase 3a: Lower to HIR (standalone, kept for compatibility)
     # --------------------------------------------------------------------------
 
-    me lower_to_hir() -> bool:
-        val lowering = HirLowering()
+    fn lower_to_hir_impl() -> (CompileContext, bool):
+        var lowering = create_hir_lowering()
+        var ctx = self.ctx
 
-        for (name, module) in self.ctx.modules:
-            match lowering.lower_module(module):
-                Ok(hir_module) =>
-                    self.ctx.hir_modules[name] = hir_module
-                Err(e) =>
-                    self.ctx.add_error("HIR lowering error in {name}: {e}")
-
-        not self.ctx.has_errors()
+        val module_names = ctx.modules.keys()
+        for name in module_names:
+            val module = ctx.modules[name]
+            val hir_module = lowering.lower_module(module)
+            var hir_modules = ctx.hir_modules
+            hir_modules[name] = hir_module
+            ctx.hir_modules = hir_modules
+        (ctx, ctx.errors.len() == 0)
 
     # --------------------------------------------------------------------------
-    # Phase 3.5: Method Resolution (UFCS)
+    # Phase 3b: Method Resolution (standalone, kept for compatibility)
     # --------------------------------------------------------------------------
 
-    me resolve_methods() -> bool:
-        for (name, hir_module) in self.ctx.hir_modules:
-            val (resolved_module, errors) = resolve_methods(hir_module)
+    fn resolve_methods_impl() -> (CompileContext, bool):
+        var ctx = self.ctx
+
+        for name in ctx.hir_modules.keys():
+            val hir_module = ctx.hir_modules[name]
+            val (resolved_module, resolve_errors) = resolve_methods(hir_module)
 
             # Update the module with resolved method calls
-            self.ctx.hir_modules[name] = resolved_module
+            var hir_modules = ctx.hir_modules
+            hir_modules[name] = resolved_module
+            ctx.hir_modules = hir_modules
 
             # Collect errors
-            for err in errors:
-                self.ctx.add_error("Method resolution error in {name}: {err.message}")
+            for err in resolve_errors:
+                var errors = ctx.errors
+                errors.push("Method resolution error in {name}: {err.message}")
+                ctx.errors = errors
 
-        not self.ctx.has_errors()
+        (ctx, ctx.errors.len() == 0)
+
+    # --------------------------------------------------------------------------
+    # Phase 3c: Type Checking (standalone, kept for compatibility)
+    # --------------------------------------------------------------------------
+
+    fn type_check_impl() -> (CompileContext, bool):
+        var ctx = self.ctx
+
+        for name in ctx.hir_modules.keys():
+            val hir_module = ctx.hir_modules[name]
+
+            # Create type inference context with builtins
+            var infer_ctx = HmInferContext.with_builtins()
+
+            # Run type inference on the module
+            infer_ctx.infer_module(hir_module)
+
+            # Collect type errors
+            for err in infer_ctx.errors:
+                var errors = ctx.errors
+                errors.push("Type error in {name}: {err.message()}")
+                ctx.errors = errors
+
+        (ctx, ctx.errors.len() == 0)
 
     # --------------------------------------------------------------------------
     # Mode: SDN (Data only)
     # --------------------------------------------------------------------------
 
     fn process_sdn() -> CompileResult:
-        val backend = self.ctx.di.resolve<Backend>("Backend")
+        val backend = self.ctx.di.resolve("Backend")
         val results: Dict<text, Any> = {}
 
-        for (name, hir_module) in self.ctx.hir_modules:
+        for name in self.ctx.hir_modules.keys():
+            val hir_module = self.ctx.hir_modules[name]
             match backend.process_module(hir_module):
-                Ok(value) =>
+                case Ok(value):
                     results[name] = value
-                Err(e) =>
+                case Err(e):
                     return CompileResult.RuntimeError("SDN error in {name}: {e}")
 
         CompileResult.Success(results)
@@ -369,24 +500,27 @@ class CompilerDriver:
     # --------------------------------------------------------------------------
 
     fn interpret() -> CompileResult:
-        val backend = self.ctx.di.resolve<Backend>("Backend")
+        val backend = self.ctx.di.resolve("Backend")
 
         # Find main module and main function
         val main_module = self.ctx.hir_modules.get("main")
-        if main_module.is_none():
+        if main_module == nil:
             # Try first module
             if self.ctx.hir_modules.is_empty():
                 return CompileResult.RuntimeError("No modules to execute")
-            val first_name = self.ctx.hir_modules.keys().first().unwrap()
+            val keys = self.ctx.hir_modules.keys()
+            val first_name = keys.first() ?? ""
+            if first_name == "":
+                return CompileResult.RuntimeError("No modules to execute")
             val first_module = self.ctx.hir_modules[first_name]
             return self.run_module(backend, first_module)
 
-        self.run_module(backend, main_module.unwrap())
+        self.run_module(backend, main_module)
 
     fn run_module(backend: Backend, module: HirModule) -> CompileResult:
         match backend.process_module(module):
-            Ok(value) => CompileResult.Success(value)
-            Err(e) => CompileResult.RuntimeError(e)
+            case Ok(value): CompileResult.Success(value)
+            case Err(e): CompileResult.RuntimeError(e)
 
     # --------------------------------------------------------------------------
     # Mode: JIT Compile and Run
@@ -398,22 +532,23 @@ class CompilerDriver:
             return CompileResult.CodegenError(self.ctx.errors.first() ?? "MIR lowering failed")
 
         # JIT compile
-        val pipeline = CodegenPipeline()
+        var pipeline = CodegenPipeline()
 
-        for (name, mir_module) in self.ctx.mir_modules:
+        for name in self.ctx.mir_modules.keys():
+            val mir_module = self.ctx.mir_modules[name]
             match pipeline.jit_compile(mir_module):
-                Ok(_) => ()
-                Err(e) =>
+                case Ok(_): pass
+                case Err(e):
                     return CompileResult.CodegenError("JIT compile error in {name}: {e}")
 
         # Find and call main
         val main_fn = pipeline.get_function("main")
-        if main_fn.is_none():
+        if main_fn == nil:
             return CompileResult.RuntimeError("No main function found")
 
         match pipeline.call_function("main", []):
-            Ok(result) => CompileResult.Success(result)
-            Err(e) => CompileResult.RuntimeError(e)
+            case Ok(result): CompileResult.Success(result)
+            case Err(e): CompileResult.RuntimeError(e)
 
     # --------------------------------------------------------------------------
     # Mode: AOT Compile
@@ -428,31 +563,66 @@ class CompilerDriver:
         val output = self.ctx.options.output_file ?? "a.out"
 
         # AOT compile all modules
-        val pipeline = CodegenPipeline()
+        var pipeline = CodegenPipeline.aot(CodegenTarget.Native)
+        var compiled_modules: [CompiledModule] = []
 
-        for (name, mir_module) in self.ctx.mir_modules:
-            match pipeline.aot_compile(mir_module, output):
-                Ok(_) => ()
-                Err(e) =>
-                    return CompileResult.CodegenError("AOT compile error in {name}: {e}")
+        for name in self.ctx.mir_modules.keys():
+            val mir_module = self.ctx.mir_modules[name]
+            match pipeline.compile_module(mir_module):
+                case Ok(compiled):
+                    compiled_modules = compiled_modules.push(compiled)
+                case Err(e):
+                    return CompileResult.CodegenError("AOT compile error in {name}: {e.message}")
 
-        # Link
-        match pipeline.link(output):
-            Ok(_) => CompileResult.Success(output)
-            Err(e) => CompileResult.CodegenError("Link error: {e}")
+        # Emit object files
+        var object_files: [text] = []
+        for module in compiled_modules:
+            val obj_path = "{output}.{module.name}.o"
+            match module.emit_object(obj_path):
+                case Ok(_):
+                    object_files = object_files.push(obj_path)
+                case Err(e):
+                    return CompileResult.CodegenError("Object emit error: {e.message}")
+
+        # Link object files into final executable
+        match self.link_objects(object_files, output):
+            case Ok(_):
+                CompileResult.Success(output)
+            case Err(e):
+                CompileResult.CodegenError("Linking failed: {e}")
+
+    # --------------------------------------------------------------------------
+    # Linker Helper
+    # --------------------------------------------------------------------------
+
+    fn link_objects(objects: [text], output: text) -> Result<(), text>:
+        """Link object files into an executable using the system linker."""
+        if objects.is_empty():
+            return Err("No object files to link")
+
+        # Build linker command: cc obj1.o obj2.o ... -o output
+        val args = objects.join(" ") + " -o " + output
+
+        # Call system linker
+        val result = rt_shell("cc " + args)
+        if result.exit_code == 0:
+            Ok(())
+        else:
+            Err(result.stderr ?? "Unknown linking error")
 
     # --------------------------------------------------------------------------
     # MIR Lowering
     # --------------------------------------------------------------------------
 
     me lower_to_mir() -> bool:
-        val lowering = MirLowering()
+        val lowering = MirLowering.new(create_symbol_table())
 
-        for (name, hir_module) in self.ctx.hir_modules:
+        for name in self.ctx.hir_modules.keys():
+            val hir_module = self.ctx.hir_modules[name]
             match lowering.lower_module(hir_module):
-                Ok(mir_module) =>
+                case Ok(mir_module):
                     self.ctx.mir_modules[name] = mir_module
-                Err(e) =>
+                case Err(e):
                     self.ctx.add_error("MIR lowering error in {name}: {e}")
 
         not self.ctx.has_errors()
@@ -498,8 +668,16 @@ fn parse_sdn_file(path: text) -> CompileResult:
 # FFI Declarations
 # ------------------------------------------------------------------------------
 
-extern fn rt_read_file(path: text) -> text?
+extern fn rt_file_read_text(path: text) -> text?
 extern fn rt_write_file(path: text, content: text) -> bool
 extern fn rt_file_exists(path: text) -> bool
-extern fn rt_get_env(name: text) -> text?
-extern fn rt_get_args() -> [text]
+extern fn rt_env_get(name: text) -> text?
+extern fn sys_get_args() -> [text]
+
+# Shell execution result
+struct ShellResult:
+    exit_code: i64
+    stdout: text?
+    stderr: text?
+
+extern fn rt_shell(command: text) -> ShellResult

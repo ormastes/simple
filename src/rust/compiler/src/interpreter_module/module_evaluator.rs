@@ -11,6 +11,8 @@ use simple_parser::ast::{ClassDef, EnumDef, Node};
 use crate::error::CompileError;
 use crate::value::{Env, Value};
 
+use super::module_cache::cache_partial_module_exports;
+
 mod evaluation_helpers;
 use evaluation_helpers::{
     add_builtin_types, create_filtered_env, export_functions, process_bare_exports, process_imports_and_assignments,
@@ -53,6 +55,12 @@ pub fn evaluate_module_exports(
         &mut exports,
         &mut env,
     );
+
+    // Cache partial exports (type definitions) for circular import resolution
+    // This allows other modules that import this one to access types even during circular imports
+    if let Some(path) = module_path {
+        cache_partial_module_exports(path, Value::Dict(exports.clone()));
+    }
 
     // Second pass: process imports and assignments to build the environment
     process_imports_and_assignments(

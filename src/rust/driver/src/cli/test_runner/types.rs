@@ -134,6 +134,10 @@ pub struct TestOptions {
     pub only_slow: bool,
     /// Run only skipped tests (skip tag)
     pub only_skipped: bool,
+    /// List features from skipped test files
+    pub list_skip_features: bool,
+    /// Filter skip features to show only planned (not implemented)
+    pub skip_features_planned_only: bool,
     /// Show tags in test output
     pub show_tags: bool,
     /// Run each test file in a separate process (safe mode)
@@ -202,6 +206,8 @@ impl Default for TestOptions {
             list_ignored: false,
             only_slow: false,
             only_skipped: false,
+            list_skip_features: false,
+            skip_features_planned_only: false,
             show_tags: false,
             safe_mode: false,
             safe_mode_timeout: 30,

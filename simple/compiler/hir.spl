@@ -11,9 +11,9 @@
 # - Compiler: Lowers to MIR then codegen
 # - SDN: Blocks code execution, only allows data
 
-import compiler.parser.*
-import compiler.lexer.Span
-import compiler.blocks.{BlockValue, BlockRegistry, block_registry}
+use parser.*
+use lexer.Span
+use blocks.{BlockValue, BlockRegistry, block_registry}
 
 # ============================================================================
 # HIR Module Structure
@@ -72,8 +72,8 @@ struct Symbol:
     is_public: bool
     is_mutable: bool
 
+"""Kind of symbol."""
 enum SymbolKind:
-    """Kind of symbol."""
     Function
     Method
     Variable
@@ -94,19 +94,19 @@ enum SymbolKind:
 # Method Resolution (UFCS Support)
 # ============================================================================
 
+"""How a method call was resolved.
+
+Supports UFCS (Uniform Function Call Syntax) where `x.method()` can resolve to:
+1. Instance method on x's type (highest priority)
+2. Trait method implemented by x's type
+3. Free function `method(x)` where first param matches x's type (UFCS)
+
+Examples:
+    x.map()  ->  InstanceMethod if x's class has map()
+    x.map()  ->  TraitMethod if x implements trait with map()
+    x.map()  ->  FreeFunction(map) if map(x) exists and first param matches
+"""
 enum MethodResolution:
-    """How a method call was resolved.
-
-    Supports UFCS (Uniform Function Call Syntax) where `x.method()` can resolve to:
-    1. Instance method on x's type (highest priority)
-    2. Trait method implemented by x's type
-    3. Free function `method(x)` where first param matches x's type (UFCS)
-
-    Examples:
-        x.map()  ->  InstanceMethod if x's class has map()
-        x.map()  ->  TraitMethod if x implements trait with map()
-        x.map()  ->  FreeFunction(map) if map(x) exists and first param matches
-    """
     # Direct method on the receiver's type
     InstanceMethod(type_id: SymbolId, method_id: SymbolId)
 
@@ -139,7 +139,7 @@ impl MethodResolution:
             case InstanceMethod(_, method_id): Some(method_id)
             case TraitMethod(_, method_id): Some(method_id)
             case FreeFunction(func_id): Some(func_id)
-            case Unresolved: None
+            case Unresolved: nil
 
 struct ScopeId:
     """Unique identifier for a scope."""
@@ -152,8 +152,8 @@ struct Scope:
     kind: ScopeKind
     symbols: Dict<text, SymbolId>
 
+"""Kind of scope."""
 enum ScopeKind:
-    """Kind of scope."""
     Module
     Function
     Block
@@ -162,7 +162,7 @@ enum ScopeKind:
     Class
     Impl
 
-struct SymbolTable:
+class SymbolTable:
     """Symbol table for name resolution."""
     symbols: Dict<i64, Symbol>
     scopes: Dict<i64, Scope>
@@ -182,7 +182,7 @@ impl SymbolTable:
         # Create root scope
         table.scopes[0] = Scope(
             id: ScopeId(id: 0),
-            parent: None,
+            parent: nil,
             kind: ScopeKind.Module,
             symbols: {}
         )
@@ -206,8 +206,12 @@ impl SymbolTable:
 
         self.symbols[id.id] = symbol
 
-        val scope = self.scopes[self.current_scope.id]
-        scope.symbols[name] = id
+        # Get scope, modify, and put back (value semantics)
+        var scope = self.scopes[self.current_scope.id]
+        var scope_symbols = scope.symbols
+        scope_symbols[name] = id
+        scope.symbols = scope_symbols
+        self.scopes[self.current_scope.id] = scope
 
         id
 
@@ -217,7 +221,8 @@ impl SymbolTable:
 
         loop:
             val scope = self.scopes[scope_id.id]
-            if scope.symbols[name].?:
+            # Use contains_key to check if key exists before accessing
+            if scope.symbols.contains_key(name):
                 return Some(scope.symbols[name])
 
             if scope.parent.?:
@@ -225,7 +230,7 @@ impl SymbolTable:
             else:
                 break
 
-        None
+        nil
 
     fn get(id: SymbolId) -> Symbol?:
         """Get symbol by ID."""
@@ -265,7 +270,7 @@ impl SymbolTable:
                 match sym.unwrap().kind:
                     case Function: return sym_id
                     case _: pass
-        None
+        nil
 
     fn lookup_method_in_type(type_id: SymbolId, method_name: text) -> SymbolId?:
         """Look up a method in a class/struct type.
@@ -290,7 +295,7 @@ impl SymbolTable:
                     case Function: return Some(sym.id)  # Static methods
                     case _: pass
 
-        None
+        nil
 
     fn lookup_trait_method(trait_id: SymbolId, method_name: text) -> SymbolId?:
         """Look up a method in a trait.
@@ -311,7 +316,7 @@ impl SymbolTable:
                     case Method: return Some(sym.id)
                     case _: pass
 
-        None
+        nil
 
     fn get_symbol_type(id: SymbolId) -> HirType?:
         """Get the type of a symbol."""
@@ -319,7 +324,7 @@ impl SymbolTable:
         if sym.?:
             sym.unwrap().type_
         else:
-            None
+            nil
 
     fn is_function(id: SymbolId) -> bool:
         """Check if symbol is a function."""
@@ -353,7 +358,11 @@ impl SymbolTable:
 
         for entry in self.symbols:
             val sym = entry.1
-            if sym.name.starts_with(prefix):
+            if not sym.?:
+                pass
+            elif not sym.name.?:
+                pass
+            elif sym.name.starts_with(prefix):
                 match sym.kind:
                     case Method:
                         # Extract method name from qualified name
@@ -387,8 +396,8 @@ struct HirType:
     kind: HirTypeKind
     span: Span
 
+"""Type kind."""
 enum HirTypeKind:
-    """Type kind."""
     # Primitive types
     Int(bits: i64, signed: bool)    # i8, i16, i32, i64, u8, u16, u32, u64
     Float(bits: i64)                 # f32, f64
@@ -438,8 +447,8 @@ struct DimExpr:
     kind: DimExprKind
     span: Span
 
+"""Dimension expression kind."""
 enum DimExprKind:
-    """Dimension expression kind."""
     Literal(value: i64)                     # 784
     Named(name: text, lo: i64?, hi: i64?)   # batch: 1..128
     Var(id: i64)                            # Inference variable
@@ -456,7 +465,7 @@ impl DimExpr:
         DimExpr(kind: DimExprKind.Literal(value), span: span)
 
     static fn named(name: text, span: Span) -> DimExpr:
-        DimExpr(kind: DimExprKind.Named(name, None, None), span: span)
+        DimExpr(kind: DimExprKind.Named(name, nil, nil), span: span)
 
     static fn named_range(name: text, lo: i64, hi: i64, span: Span) -> DimExpr:
         DimExpr(kind: DimExprKind.Named(name, Some(lo), Some(hi)), span: span)
@@ -475,10 +484,10 @@ impl DimExpr:
     fn get_literal() -> i64?:
         match self.kind:
             case Literal(v): Some(v)
-            case _: None
+            case _: nil
 
+"""Device type for tensors."""
 enum DeviceType:
-    """Device type for tensors."""
     CPU
     GPU
     CUDA(id: i64)
@@ -502,7 +511,7 @@ impl LayerType:
             input_shape: input,
             output_shape: output,
             params: [],
-            device: None
+            device: nil
         )
 
     fn with_device(device: DeviceType) -> LayerType:
@@ -518,8 +527,8 @@ struct Effect:
     kind: EffectKind
     span: Span
 
+"""Effect kind."""
 enum EffectKind:
-    """Effect kind."""
     Pure            # No side effects
     IO              # I/O operations
     Async           # Async operations
@@ -612,8 +621,8 @@ struct HirVariant:
     kind: HirVariantKind
     span: Span
 
+"""Enum variant kind."""
 enum HirVariantKind:
-    """Enum variant kind."""
     Unit
     Tuple(types: [HirType])
     Struct(fields: [HirField])
@@ -655,8 +664,8 @@ struct HirExpr:
     type_: HirType?         # Resolved type (filled during type checking)
     span: Span
 
+"""Expression kind."""
 enum HirExprKind:
-    """Expression kind."""
     # Literals
     IntLit(value: i64, suffix: text?)
     FloatLit(value: f64, suffix: text?)
@@ -754,13 +763,13 @@ struct HirMatchArm:
     body: HirBlock
     span: Span
 
+"""Enum construction payload."""
 enum HirEnumPayload:
-    """Enum construction payload."""
     Tuple(values: [HirExpr])
     Struct(fields: [(text, HirExpr)])
 
+"""Comprehension kind."""
 enum HirComprehensionKind:
-    """Comprehension kind."""
     List
     Dict
     Set
@@ -771,8 +780,8 @@ struct HirCompClause:
     kind: HirCompClauseKind
     span: Span
 
+"""Comprehension clause kind."""
 enum HirCompClauseKind:
-    """Comprehension clause kind."""
     For(var_: SymbolId, iter: HirExpr)
     If(cond: HirExpr)
 
@@ -780,8 +789,8 @@ enum HirCompClauseKind:
 # HIR Operators
 # ============================================================================
 
+"""Binary operator."""
 enum HirBinOp:
-    """Binary operator."""
     # Arithmetic
     Add, Sub, Mul, Div, Mod, Pow
 
@@ -816,8 +825,8 @@ enum HirBinOp:
     Is, IsNot
     Concat         # ++
 
+"""Unary operator."""
 enum HirUnaryOp:
-    """Unary operator."""
     Neg            # -
     Not            # not, !
     BitNot         # ~
@@ -836,8 +845,8 @@ struct HirPattern:
     type_: HirType?
     span: Span
 
+"""Pattern kind."""
 enum HirPatternKind:
-    """Pattern kind."""
     Wildcard
     Literal(value: HirExpr)
     Binding(symbol: SymbolId, mutable: bool)
@@ -849,8 +858,8 @@ enum HirPatternKind:
     Range(start: HirExpr?, end: HirExpr?, inclusive: bool)
     Error
 
+"""Enum pattern payload."""
 enum HirPatternPayload:
-    """Enum pattern payload."""
     Tuple(patterns: [HirPattern])
     Struct(fields: [(text, HirPattern)])
 
@@ -863,15 +872,15 @@ struct HirStmt:
     kind: HirStmtKind
     span: Span
 
+"""Statement kind."""
 enum HirStmtKind:
-    """Statement kind."""
     Expr(expr: HirExpr)
     Let(symbol: SymbolId, type_: HirType?, init: HirExpr)
     Assign(target: HirExpr, op: HirAssignOp?, value: HirExpr)
     Block(block: HirBlock)
 
+"""Compound assignment operator."""
 enum HirAssignOp:
-    """Compound assignment operator."""
     Add, Sub, Mul, Div, Mod
     BitAnd, BitOr, BitXor, Shl, Shr
 
@@ -885,7 +894,7 @@ struct HirBlock:
 # AST to HIR Lowering
 # ============================================================================
 
-struct HirLowering:
+class HirLowering:
     """Lowers AST to HIR."""
     symbols: SymbolTable
     errors: [LoweringError]
@@ -898,8 +907,8 @@ struct LoweringError:
     span: Span
     kind: LoweringErrorKind
 
+"""Lowering error kind."""
 enum LoweringErrorKind:
-    """Lowering error kind."""
     UnresolvedName
     DuplicateDefinition
     TypeMismatch
@@ -912,13 +921,12 @@ impl HirLowering:
         HirLowering(
             symbols: SymbolTable.new(),
             errors: [],
-            current_function: None,
+            current_function: nil,
             loop_depth: 0
         )
 
     me lower_module(module: Module) -> HirModule:
         """Lower a parsed module to HIR."""
-
         # First pass: declare all top-level symbols
         self.declare_module_symbols(module)
 
@@ -931,30 +939,36 @@ impl HirLowering:
         var impls: [HirImpl] = []
         var constants: Dict<SymbolId, HirConst> = {}
 
-        for name, fn_ in module.functions:
+        for name in module.functions.keys():
+            val fn_ = module.functions[name]
             val hir_fn = self.lower_function(fn_)
             functions[hir_fn.symbol] = hir_fn
 
-        for name, class_ in module.classes:
+        for name in module.classes.keys():
+            val class_ = module.classes[name]
             val hir_class = self.lower_class(class_)
             classes[hir_class.symbol] = hir_class
 
-        for name, struct_ in module.structs:
+        for name in module.structs.keys():
+            val struct_ = module.structs[name]
             val hir_struct = self.lower_struct(struct_)
             structs[hir_struct.symbol] = hir_struct
 
-        for name, enum_ in module.enums:
+        for name in module.enums.keys():
+            val enum_ = module.enums[name]
             val hir_enum = self.lower_enum(enum_)
             enums[hir_enum.symbol] = hir_enum
 
-        for name, trait_ in module.traits:
+        for name in module.traits.keys():
+            val trait_ = module.traits[name]
             val hir_trait = self.lower_trait(trait_)
             traits[hir_trait.symbol] = hir_trait
 
         for impl_ in module.impls:
             impls = impls.push(self.lower_impl(impl_))
 
-        for name, const_ in module.constants:
+        for name in module.constants.keys():
+            val const_ = module.constants[name]
             val hir_const = self.lower_const(const_)
             constants[hir_const.symbol] = hir_const
 
@@ -986,23 +1000,40 @@ impl HirLowering:
 
     me declare_module_symbols(module: Module):
         """Declare all top-level symbols."""
-        for name, fn_ in module.functions:
-            self.symbols.define(name, SymbolKind.Function, None, fn_.span, fn_.is_public, false)
+        # Workaround: Store symbols table in local var to avoid interpreter bug
+        var symbols_table = self.symbols
 
-        for name, class_ in module.classes:
-            self.symbols.define(name, SymbolKind.Class, None, class_.span, class_.is_public, false)
+        for name in module.functions.keys():
+            val fn_ = module.functions[name]
+            symbols_table.define(name, SymbolKind.Function, nil, fn_.span, fn_.is_public, false)
 
-        for name, struct_ in module.structs:
-            self.symbols.define(name, SymbolKind.Struct, None, struct_.span, struct_.is_public, false)
+        for name in module.classes.keys():
+            val class_ = module.classes[name]
+            symbols_table.define(name, SymbolKind.Class, nil, class_.span, class_.is_public, false)
 
-        for name, enum_ in module.enums:
-            self.symbols.define(name, SymbolKind.Enum, None, enum_.span, enum_.is_public, false)
+        for name in module.structs.keys():
+            val struct_ = module.structs[name]
+            symbols_table.define(name, SymbolKind.Struct, nil, struct_.span, struct_.is_public, false)
 
-        for name, trait_ in module.traits:
-            self.symbols.define(name, SymbolKind.Trait, None, trait_.span, trait_.is_public, false)
+        for name in module.enums.keys():
+            val enum_ = module.enums[name]
+            symbols_table.define(name, SymbolKind.Enum, nil, enum_.span, enum_.is_public, false)
 
-        for name, const_ in module.constants:
-            self.symbols.define(name, SymbolKind.Const, None, const_.span, const_.is_public, const_.is_mutable)
+        for name in module.traits.keys():
+            val trait_ = module.traits[name]
+            symbols_table.define(name, SymbolKind.Trait, nil, trait_.span, trait_.is_public, false)
+
+        for name in module.constants.keys():
+            val const_ = module.constants[name]
+            symbols_table.define(name, SymbolKind.Const, nil, const_.span, const_.is_public, const_.is_mutable)
+
+        # Declare impl methods
+        for impl_ in module.impls:
+            for name in impl_.methods.keys():
+                val fn_ = impl_.methods[name]
+                symbols_table.define(name, SymbolKind.Method, nil, fn_.span, fn_.is_public, false)
+
+        self.symbols = symbols_table
 
     me lower_import(imp: Import) -> HirImport:
         """Lower import declaration."""
@@ -1011,7 +1042,7 @@ impl HirLowering:
             items = items.push(HirImportItem(
                 name: item.name,
                 alias: item.alias,
-                resolved: None
+                resolved: nil
             ))
 
         HirImport(
@@ -1022,11 +1053,19 @@ impl HirLowering:
 
     me lower_function(fn_: Function) -> HirFunction:
         """Lower function to HIR."""
-        val symbol = self.symbols.lookup(fn_.name).unwrap()
-        self.current_function = Some(symbol)
+        # Workaround: Store symbols in local var first to avoid interpreter bug
+        # where chained method calls corrupt 'self'
+        var symbols_table = self.symbols
+        val fn_symbol_id = symbols_table.lookup(fn_.name).unwrap()
 
-        # Push function scope
-        self.symbols.push_scope(ScopeKind.Function)
+        # Workaround: Create the Some value separately to avoid interpreter bug
+        val opt_fn_id: SymbolId? = Some(fn_symbol_id)
+        self.current_function = opt_fn_id
+
+        # Re-get symbols from self after field modification
+        symbols_table = self.symbols
+        symbols_table.push_scope(ScopeKind.Function)
+        self.symbols = symbols_table
 
         # Lower type parameters
         var type_params: [HirTypeParam] = []
@@ -1044,11 +1083,14 @@ impl HirLowering:
         # Lower body
         val body = self.lower_block(fn_.body)
 
-        self.symbols.pop_scope()
+        # Workaround: Store symbols in local var to avoid interpreter bug
+        symbols_table = self.symbols
+        symbols_table.pop_scope()
+        self.symbols = symbols_table
         self.current_function = None
 
         HirFunction(
-            symbol: symbol,
+            symbol: fn_symbol_id,
             name: fn_.name,
             type_params: type_params,
             params: params,
@@ -1066,7 +1108,10 @@ impl HirLowering:
 
     me lower_type_param(tp: TypeParam) -> HirTypeParam:
         """Lower type parameter."""
-        val symbol = self.symbols.define(tp.name, SymbolKind.TypeParam, None, tp.span, false, false)
+        # Workaround: Store symbols in local var to avoid interpreter bug
+        var symbols_table = self.symbols
+        val symbol = symbols_table.define(tp.name, SymbolKind.TypeParam, nil, tp.span, false, false)
+        self.symbols = symbols_table
 
         var bounds: [HirType] = []
         for b in tp.bounds:
@@ -1083,7 +1128,10 @@ impl HirLowering:
     me lower_param(p: Param) -> HirParam:
         """Lower function parameter."""
         val type_ = p.type_.map(\t: self.lower_type(t)) ?? HirType(kind: HirTypeKind.Infer(0, 0), span: p.span)
-        val symbol = self.symbols.define(p.name, SymbolKind.Parameter, Some(type_), p.span, false, false)
+        # Workaround: Store symbols in local var to avoid interpreter bug
+        var symbols_table = self.symbols
+        val symbol = symbols_table.define(p.name, SymbolKind.Parameter, Some(type_), p.span, false, false)
+        self.symbols = symbols_table
 
         HirParam(
             symbol: symbol,
@@ -1135,7 +1183,7 @@ impl HirLowering:
 
             case Array(element, size):
                 val hir_element = self.lower_type(element)
-                HirTypeKind.Array(hir_element, None)
+                HirTypeKind.Array(hir_element, nil)
 
             case Function(params, ret):
                 var hir_params: [HirType] = []
@@ -1160,9 +1208,12 @@ impl HirLowering:
 
     me lower_class(class_: Class) -> HirClass:
         """Lower class to HIR."""
-        val symbol = self.symbols.lookup(class_.name).unwrap()
+        # Workaround: Store symbols in local var to avoid interpreter bug
+        var symbols_table = self.symbols
+        val symbol = symbols_table.lookup(class_.name).unwrap()
 
-        self.symbols.push_scope(ScopeKind.Class)
+        symbols_table.push_scope(ScopeKind.Class)
+        self.symbols = symbols_table
 
         var type_params: [HirTypeParam] = []
         for tp in class_.type_params:
@@ -1173,11 +1224,14 @@ impl HirLowering:
             fields = fields.push(self.lower_field(f))
 
         var methods: Dict<text, SymbolId> = {}
-        for name, fn_ in class_.methods:
+        for name in class_.methods.keys():
+            val fn_ = class_.methods[name]
             val hir_fn = self.lower_function(fn_)
             methods[name] = hir_fn.symbol
 
-        self.symbols.pop_scope()
+        symbols_table = self.symbols
+        symbols_table.pop_scope()
+        self.symbols = symbols_table
 
         HirClass(
             symbol: symbol,
@@ -1192,7 +1246,10 @@ impl HirLowering:
 
     me lower_struct(struct_: Struct) -> HirStruct:
         """Lower struct to HIR."""
-        val symbol = self.symbols.lookup(struct_.name).unwrap()
+        # Workaround: Store symbols in local var to avoid interpreter bug
+        var symbols_table = self.symbols
+        val symbol = symbols_table.lookup(struct_.name).unwrap()
+        self.symbols = symbols_table
 
         var type_params: [HirTypeParam] = []
         for tp in struct_.type_params:
@@ -1215,7 +1272,10 @@ impl HirLowering:
     me lower_field(f: Field) -> HirField:
         """Lower field to HIR."""
         val type_ = self.lower_type(f.type_)
-        val symbol = self.symbols.define(f.name, SymbolKind.Field, Some(type_), f.span, f.is_public, false)
+        # Workaround: Store symbols in local var to avoid interpreter bug
+        var symbols_table = self.symbols
+        val symbol = symbols_table.define(f.name, SymbolKind.Field, Some(type_), f.span, f.is_public, false)
+        self.symbols = symbols_table
 
         HirField(
             symbol: symbol,
@@ -1250,7 +1310,7 @@ impl HirLowering:
 
     me lower_variant(v: Variant) -> HirVariant:
         """Lower enum variant."""
-        val symbol = self.symbols.define(v.name, SymbolKind.EnumVariant, None, v.span, true, false)
+        val symbol = self.symbols.define(v.name, SymbolKind.EnumVariant, nil, v.span, true, false)
 
         val kind = match v.kind:
             case Unit:
@@ -1307,7 +1367,8 @@ impl HirLowering:
         val trait_ = impl_.trait_.map(\t: self.lower_type(t))
 
         var methods: Dict<text, SymbolId> = {}
-        for name, fn_ in impl_.methods:
+        for name in impl_.methods.keys():
+            val fn_ = impl_.methods[name]
             val hir_fn = self.lower_function(fn_)
             methods[name] = hir_fn.symbol
 
@@ -1344,10 +1405,10 @@ impl HirLowering:
         """Lower expression to HIR."""
         val kind = match e.kind:
             case IntLit(value):
-                HirExprKind.IntLit(value, None)
+                HirExprKind.IntLit(value, nil)
 
             case FloatLit(value):
-                HirExprKind.FloatLit(value, None)
+                HirExprKind.FloatLit(value, nil)
 
             case StringLit(value, interps):
                 var hir_interps: [HirInterpolation]? = None
@@ -1372,7 +1433,7 @@ impl HirLowering:
                 var hir_elements: [HirExpr] = []
                 for elem in elements:
                     hir_elements = hir_elements.push(self.lower_expr(elem))
-                HirExprKind.ArrayLit(hir_elements, None)
+                HirExprKind.ArrayLit(hir_elements, nil)
 
             case TupleLit(elements):
                 var hir_elements: [HirExpr] = []
@@ -1387,7 +1448,7 @@ impl HirLowering:
                         self.lower_expr(entry.0),
                         self.lower_expr(entry.1)
                     ))
-                HirExprKind.DictLit(hir_entries, None, None)
+                HirExprKind.DictLit(hir_entries, nil, nil)
 
             case Ident(name):
                 val symbol = self.symbols.lookup(name)
@@ -1398,7 +1459,7 @@ impl HirLowering:
                     HirExprKind.Error
 
             case Field(base, field):
-                HirExprKind.Field(self.lower_expr(base), field, None)
+                HirExprKind.Field(self.lower_expr(base), field, nil)
 
             case Index(base, index):
                 HirExprKind.Index(self.lower_expr(base), self.lower_expr(index))
@@ -1468,7 +1529,7 @@ impl HirLowering:
                         symbol: symbol,
                         name: p.name,
                         type_: type_,
-                        default: None,
+                        default: nil,
                         span: p.span
                     ))
                 val hir_body = self.lower_expr(body)
@@ -1482,7 +1543,7 @@ impl HirLowering:
                 HirExprKind.Return(value.map(\v: self.lower_expr(v)))
 
             case Break(label):
-                HirExprKind.Break(label, None)
+                HirExprKind.Break(label, nil)
 
             case Continue(label):
                 HirExprKind.Continue(label)
@@ -1512,7 +1573,7 @@ impl HirLowering:
                 for clause in clauses:
                     val hir_kind = match clause.kind:
                         case For(var_, iter):
-                            val symbol = self.symbols.define(var_, SymbolKind.Variable, None, clause.span, false, false)
+                            val symbol = self.symbols.define(var_, SymbolKind.Variable, nil, clause.span, false, false)
                             HirCompClauseKind.For(symbol, self.lower_expr(iter))
                         case If(cond):
                             HirCompClauseKind.If(self.lower_expr(cond))
@@ -1568,7 +1629,7 @@ impl HirLowering:
                 self.error("unsupported expression kind", e.span)
                 HirExprKind.Error
 
-        HirExpr(kind: kind, type_: None, span: e.span)
+        HirExpr(kind: kind, type_: nil, span: e.span)
 
     me lower_binop(op: BinOp) -> HirBinOp:
         """Lower binary operator."""
@@ -1628,7 +1689,7 @@ impl HirLowering:
                 HirPatternKind.Literal(self.lower_expr(value))
 
             case Binding(name, mutable):
-                val symbol = self.symbols.define(name, SymbolKind.Variable, None, p.span, false, mutable)
+                val symbol = self.symbols.define(name, SymbolKind.Variable, nil, p.span, false, mutable)
                 HirPatternKind.Binding(symbol, mutable)
 
             case Tuple(elements):
@@ -1643,7 +1704,7 @@ impl HirLowering:
                     hir_elements = hir_elements.push(self.lower_pattern(elem))
                 var rest_symbol: SymbolId? = None
                 if rest.?:
-                    rest_symbol = Some(self.symbols.define(rest.unwrap(), SymbolKind.Variable, None, p.span, false, false))
+                    rest_symbol = Some(self.symbols.define(rest.unwrap(), SymbolKind.Variable, nil, p.span, false, false))
                 HirPatternKind.Array(hir_elements, rest_symbol)
 
             case Struct(type_, fields):
@@ -1697,17 +1758,23 @@ impl HirLowering:
                 self.error("unsupported pattern kind", p.span)
                 HirPatternKind.Error
 
-        HirPattern(kind: kind, type_: None, span: p.span)
+        HirPattern(kind: kind, type_: nil, span: p.span)
 
     me lower_block(b: Block) -> HirBlock:
         """Lower block to HIR."""
-        self.symbols.push_scope(ScopeKind.Block)
+        # Workaround: Store symbols in local var to avoid interpreter bug
+        # where chained method calls corrupt 'self'
+        var symbols_table = self.symbols
+        symbols_table.push_scope(ScopeKind.Block)
+        self.symbols = symbols_table
 
         var stmts: [HirStmt] = []
         for s in b.stmts:
             stmts = stmts.push(self.lower_stmt(s))
 
-        self.symbols.pop_scope()
+        symbols_table = self.symbols
+        symbols_table.pop_scope()
+        self.symbols = symbols_table
 
         # Check if last statement is an expression (for block value)
         var value: HirExpr? = None
@@ -1724,100 +1791,123 @@ impl HirLowering:
 
     me lower_stmt(s: Stmt) -> HirStmt:
         """Lower statement to HIR."""
+        # Workaround: Capture self reference to ensure it's available in match arms
+        val lowerer = self
         val kind = match s.kind:
-            case Expr(expr):
+            case StmtKind.Expr(expr):
                 HirStmtKind.Expr(self.lower_expr(expr))
 
-            case Val(name, type_, init):
+            case StmtKind.Val(name, type_, init):
                 val hir_type = type_.map(\t: self.lower_type(t))
                 val hir_init = self.lower_expr(init)
-                val symbol = self.symbols.define(name, SymbolKind.Variable, hir_type, s.span, false, false)
+                # Workaround: Store symbols in local var to avoid interpreter bug
+                var symbols_table = self.symbols
+                val symbol = symbols_table.define(name, SymbolKind.Variable, hir_type, s.span, false, false)
+                self.symbols = symbols_table
                 HirStmtKind.Let(symbol, hir_type, hir_init)
 
-            case Var(name, type_, init):
+            case StmtKind.Var(name, type_, init):
                 val hir_type = type_.map(\t: self.lower_type(t))
-                val hir_init = init.map(\i: self.lower_expr(i)) ?? HirExpr(kind: HirExprKind.NilLit, type_: None, span: s.span)
-                val symbol = self.symbols.define(name, SymbolKind.Variable, hir_type, s.span, false, true)
+                val hir_init = init.map(\i: self.lower_expr(i)) ?? HirExpr(kind: HirExprKind.NilLit, type_: nil, span: s.span)
+                # Workaround: Store symbols in local var to avoid interpreter bug
+                var symbols_table = self.symbols
+                val symbol = symbols_table.define(name, SymbolKind.Variable, hir_type, s.span, false, true)
+                self.symbols = symbols_table
                 HirStmtKind.Let(symbol, hir_type, hir_init)
 
-            case Assign(target, op, value):
+            case StmtKind.Assign(target, op, value):
                 val hir_op = op.map(\o: match o:
-                    case Add: HirAssignOp.Add
-                    case Sub: HirAssignOp.Sub
-                    case Mul: HirAssignOp.Mul
-                    case Div: HirAssignOp.Div
-                    case Mod: HirAssignOp.Mod
+                    case AssignOp.Add: HirAssignOp.Add
+                    case AssignOp.Sub: HirAssignOp.Sub
+                    case AssignOp.Mul: HirAssignOp.Mul
+                    case AssignOp.Div: HirAssignOp.Div
+                    case AssignOp.Mod: HirAssignOp.Mod
                 )
                 HirStmtKind.Assign(self.lower_expr(target), hir_op, self.lower_expr(value))
 
-            case For(var_, iter, body):
-                self.symbols.push_scope(ScopeKind.Loop)
+            case StmtKind.For(var_, iter, body):
+                # Workaround: Store symbols in local var to avoid interpreter bug
+                var symbols_table = self.symbols
+                symbols_table.push_scope(ScopeKind.Loop)
+                self.symbols = symbols_table
                 self.loop_depth = self.loop_depth + 1
-                val symbol = self.symbols.define(var_, SymbolKind.Variable, None, s.span, false, false)
+                symbols_table = self.symbols
+                val symbol = symbols_table.define(var_, SymbolKind.Variable, nil, s.span, false, false)
+                self.symbols = symbols_table
                 val hir_iter = self.lower_expr(iter)
                 val hir_body = self.lower_block(body)
                 self.loop_depth = self.loop_depth - 1
-                self.symbols.pop_scope()
+                symbols_table = self.symbols
+                symbols_table.pop_scope()
+                self.symbols = symbols_table
                 # Desugar to loop
                 HirStmtKind.Expr(HirExpr(
-                    kind: HirExprKind.For(symbol, hir_iter, hir_body, None),
-                    type_: None,
+                    kind: HirExprKind.For(symbol, hir_iter, hir_body, nil),
+                    type_: nil,
                     span: s.span
                 ))
 
-            case While(cond, body):
+            case StmtKind.While(cond, body):
                 self.loop_depth = self.loop_depth + 1
                 val hir_cond = self.lower_expr(cond)
                 val hir_body = self.lower_block(body)
                 self.loop_depth = self.loop_depth - 1
                 HirStmtKind.Expr(HirExpr(
-                    kind: HirExprKind.While(hir_cond, hir_body, None),
-                    type_: None,
+                    kind: HirExprKind.While(hir_cond, hir_body, nil),
+                    type_: nil,
                     span: s.span
                 ))
 
-            case Loop(body):
+            case StmtKind.Loop(body):
                 self.loop_depth = self.loop_depth + 1
                 val hir_body = self.lower_block(body)
                 self.loop_depth = self.loop_depth - 1
                 HirStmtKind.Expr(HirExpr(
-                    kind: HirExprKind.Loop(hir_body, None),
-                    type_: None,
+                    kind: HirExprKind.Loop(hir_body, nil),
+                    type_: nil,
                     span: s.span
                 ))
 
-            case Return(value):
+            case StmtKind.Return(value):
                 HirStmtKind.Expr(HirExpr(
                     kind: HirExprKind.Return(value.map(\v: self.lower_expr(v))),
-                    type_: None,
+                    type_: nil,
                     span: s.span
                 ))
 
-            case Break(label):
+            case StmtKind.Break(label):
                 HirStmtKind.Expr(HirExpr(
-                    kind: HirExprKind.Break(label, None),
-                    type_: None,
+                    kind: HirExprKind.Break(label, nil),
+                    type_: nil,
                     span: s.span
                 ))
 
-            case Continue(label):
+            case StmtKind.Continue(label):
                 HirStmtKind.Expr(HirExpr(
                     kind: HirExprKind.Continue(label),
-                    type_: None,
+                    type_: nil,
                     span: s.span
                 ))
 
-            case Yield(value):
+            case StmtKind.Yield(value):
                 HirStmtKind.Expr(HirExpr(
                     kind: HirExprKind.Yield(value.map(\v: self.lower_expr(v))),
-                    type_: None,
+                    type_: nil,
                     span: s.span
                 ))
 
-            case Throw(value):
+            case StmtKind.Throw(value):
                 HirStmtKind.Expr(HirExpr(
                     kind: HirExprKind.Throw(self.lower_expr(value)),
-                    type_: None,
+                    type_: nil,
+                    span: s.span
+                ))
+
+            case _:
+                # Fallback for unhandled statement kinds
+                HirStmtKind.Expr(HirExpr(
+                    kind: HirExprKind.NilLit,
+                    type_: nil,
                     span: s.span
                 ))
 

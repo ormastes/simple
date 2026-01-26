@@ -2,6 +2,7 @@ pub mod backend_trait;
 pub mod buffer_pool;
 pub mod common_backend;
 mod cranelift;
+pub mod cranelift_ffi;
 pub mod instr;
 pub mod instr_gpu;
 #[cfg(not(doctest))]

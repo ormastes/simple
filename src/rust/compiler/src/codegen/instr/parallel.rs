@@ -18,6 +18,21 @@ fn backend_to_i32(backend: Option<ParallelBackend>) -> i32 {
     }
 }
 
+/// Get array length via runtime function call
+fn get_array_length<M: Module>(
+    ctx: &mut InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    array_val: cranelift_codegen::ir::Value,
+) -> InstrResult<cranelift_codegen::ir::Value> {
+    let func_id = ctx
+        .runtime_funcs
+        .get("rt_array_len")
+        .ok_or_else(|| "rt_array_len not found".to_string())?;
+    let func_ref = ctx.module.declare_func_in_func(*func_id, builder.func);
+    let call = builder.ins().call(func_ref, &[array_val]);
+    Ok(builder.inst_results(call)[0])
+}
+
 /// Compile a parallel map operation
 pub(super) fn compile_par_map<M: Module>(
     ctx: &mut InstrContext<'_, M>,
@@ -31,9 +46,8 @@ pub(super) fn compile_par_map<M: Module>(
     let closure_val = ctx.vreg_values[&closure];
     let backend_val = builder.ins().iconst(types::I32, backend_to_i32(backend) as i64);
 
-    // For now, assume input is an array with length stored at offset 8
-    // In a real implementation, we'd get the length from the array header
-    let input_len = builder.ins().iconst(types::I64, 0); // Placeholder
+    // Get the array length via runtime function
+    let input_len = get_array_length(ctx, builder, input_val)?;
 
     let func_id = ctx
         .runtime_funcs
@@ -64,7 +78,8 @@ pub(super) fn compile_par_reduce<M: Module>(
     let closure_val = ctx.vreg_values[&closure];
     let backend_val = builder.ins().iconst(types::I32, backend_to_i32(backend) as i64);
 
-    let input_len = builder.ins().iconst(types::I64, 0); // Placeholder
+    // Get the array length via runtime function
+    let input_len = get_array_length(ctx, builder, input_val)?;
 
     let func_id = ctx
         .runtime_funcs
@@ -93,7 +108,8 @@ pub(super) fn compile_par_filter<M: Module>(
     let predicate_val = ctx.vreg_values[&predicate];
     let backend_val = builder.ins().iconst(types::I32, backend_to_i32(backend) as i64);
 
-    let input_len = builder.ins().iconst(types::I64, 0); // Placeholder
+    // Get the array length via runtime function
+    let input_len = get_array_length(ctx, builder, input_val)?;
 
     let func_id = ctx
         .runtime_funcs
@@ -121,7 +137,8 @@ pub(super) fn compile_par_for_each<M: Module>(
     let closure_val = ctx.vreg_values[&closure];
     let backend_val = builder.ins().iconst(types::I32, backend_to_i32(backend) as i64);
 
-    let input_len = builder.ins().iconst(types::I64, 0); // Placeholder
+    // Get the array length via runtime function
+    let input_len = get_array_length(ctx, builder, input_val)?;
 
     let func_id = ctx
         .runtime_funcs

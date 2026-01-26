@@ -168,13 +168,14 @@ fn try_compile_builtin_method_call<M: Module>(
         // String methods
         "starts_with" => "rt_string_starts_with",
         "ends_with" => "rt_string_ends_with",
-        "len" => "rt_string_len", // Will also handle array len
         "concat" => "rt_string_concat",
         "contains" => "rt_contains",
         // Array methods
         "push" => "rt_array_push",
         "pop" => "rt_array_pop",
         "clear" => "rt_array_clear",
+        // Generic collection methods (work on String, Array, Tuple, Dict)
+        "len" => "rt_len",
         _ => return Ok(None),
     };
 

@@ -5,9 +5,28 @@
 
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::value::Value;
+use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::Path;
+
+// Helper to create Option::Some(value)
+fn make_some(value: Value) -> Value {
+    Value::Enum {
+        enum_name: "Option".to_string(),
+        variant: "Some".to_string(),
+        payload: Some(Box::new(value)),
+    }
+}
+
+// Helper to create Option::None
+fn make_none() -> Value {
+    Value::Enum {
+        enum_name: "Option".to_string(),
+        variant: "None".to_string(),
+        payload: None,
+    }
+}
 
 // Helper to extract path from first argument
 fn extract_path(args: &[Value], idx: usize) -> Result<String, CompileError> {
@@ -86,8 +105,8 @@ pub fn rt_file_canonicalize(args: &[Value]) -> Result<Value, CompileError> {
 pub fn rt_file_read_text(args: &[Value]) -> Result<Value, CompileError> {
     let path = extract_path(args, 0)?;
     match fs::read_to_string(&path) {
-        Ok(content) => Ok(Value::Str(content)),
-        Err(_) => Ok(Value::Nil),
+        Ok(content) => Ok(make_some(Value::Str(content))),
+        Err(_) => Ok(make_none()),
     }
 }
 
@@ -136,9 +155,9 @@ pub fn rt_file_read_lines(args: &[Value]) -> Result<Value, CompileError> {
     match fs::read_to_string(&path) {
         Ok(content) => {
             let lines: Vec<Value> = content.lines().map(|l| Value::Str(l.to_string())).collect();
-            Ok(Value::Array(lines))
+            Ok(make_some(Value::Array(lines)))
         }
-        Err(_) => Ok(Value::Nil),
+        Err(_) => Ok(make_none()),
     }
 }
 
@@ -161,9 +180,9 @@ pub fn rt_file_read_bytes(args: &[Value]) -> Result<Value, CompileError> {
     match fs::read(&path) {
         Ok(bytes) => {
             let arr: Vec<Value> = bytes.into_iter().map(|b| Value::Int(b as i64)).collect();
-            Ok(Value::Array(arr))
+            Ok(make_some(Value::Array(arr)))
         }
-        Err(_) => Ok(Value::Nil),
+        Err(_) => Ok(make_none()),
     }
 }
 
@@ -232,9 +251,9 @@ pub fn rt_dir_list(args: &[Value]) -> Result<Value, CompileError> {
                 .filter_map(|e| e.file_name().into_string().ok())
                 .map(Value::Str)
                 .collect();
-            Ok(Value::Array(names))
+            Ok(make_some(Value::Array(names)))
         }
-        Err(_) => Ok(Value::Nil),
+        Err(_) => Ok(make_none()),
     }
 }
 
@@ -325,8 +344,8 @@ pub fn rt_dir_walk(args: &[Value]) -> Result<Value, CompileError> {
 /// Get current directory
 pub fn rt_current_dir(_args: &[Value]) -> Result<Value, CompileError> {
     match std::env::current_dir() {
-        Ok(cwd) => Ok(Value::Str(cwd.to_string_lossy().to_string())),
-        Err(_) => Ok(Value::Nil),
+        Ok(cwd) => Ok(make_some(Value::Str(cwd.to_string_lossy().to_string()))),
+        Err(_) => Ok(make_none()),
     }
 }
 

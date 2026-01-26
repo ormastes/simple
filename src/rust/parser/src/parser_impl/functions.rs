@@ -49,7 +49,7 @@ impl<'a> Parser<'a> {
         self.parse_function_with_decorators(vec![])
     }
 
-    pub(super) fn parse_function_with_decorators(&mut self, decorators: Vec<Decorator>) -> Result<Node, ParseError> {
+    pub(crate) fn parse_function_with_decorators(&mut self, decorators: Vec<Decorator>) -> Result<Node, ParseError> {
         self.parse_function_with_attrs(decorators, vec![])
     }
 
@@ -451,12 +451,14 @@ impl<'a> Parser<'a> {
         }))
     }
 
-    /// Parse a decorated function: @decorator fn foo(): ...
+    /// Parse a decorated function or impl block: @decorator fn foo(): ... or @default impl Trait for T:
     /// Effect decorators (@pure, @io, @net, @fs, @unsafe, @async) are extracted
     /// into the function's effects field; other decorators remain in decorators field.
+    /// For impl blocks, @default is converted to #[default] attribute.
     pub(super) fn parse_decorated_function(&mut self) -> Result<Node, ParseError> {
         let mut decorators = Vec::new();
         let mut effects = Vec::new();
+        let mut impl_attributes = Vec::new();
 
         // Parse all decorators (can be multiple: @pure @io fn foo)
         while self.check(&TokenKind::At) {
@@ -472,6 +474,21 @@ impl<'a> Parser<'a> {
                     }
                     continue;
                 }
+
+                // Check for @default before impl - convert to #[default] attribute
+                if name == "default" {
+                    impl_attributes.push(Attribute {
+                        span: decorator.span,
+                        name: "default".to_string(),
+                        value: None,
+                        args: None,
+                    });
+                    // Skip newlines after @default
+                    while self.check(&TokenKind::Newline) {
+                        self.advance();
+                    }
+                    continue;
+                }
             }
 
             // Not an effect decorator - keep as regular decorator
@@ -481,6 +498,11 @@ impl<'a> Parser<'a> {
             while self.check(&TokenKind::Newline) {
                 self.advance();
             }
+        }
+
+        // Check if this is an impl block with @default decorator
+        if self.check(&TokenKind::Impl) && !impl_attributes.is_empty() {
+            return self.parse_impl_with_attrs(impl_attributes);
         }
 
         // Now parse the function with the collected decorators and effects

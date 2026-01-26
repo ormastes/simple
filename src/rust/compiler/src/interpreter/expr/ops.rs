@@ -446,6 +446,35 @@ pub(super) fn eval_op_expr(
                         Ok(Value::Int(left_val.as_int()? * right_val.as_int()?))
                     }
                 }
+                BinOp::PipeForward => {
+                    // Pipe forward: left |> right means right(left)
+                    // right should be a function, left is the argument
+                    match right_val {
+                        Value::Function { def, captured_env, .. } => {
+                            // Call the function with left_val as argument
+                            let mut captured_env_clone = captured_env.clone();
+                            let args = [left_val];
+                            super::super::exec_function_with_values(
+                                &def,
+                                &args,
+                                &mut captured_env_clone,
+                                functions,
+                                classes,
+                                enums,
+                                impl_methods,
+                            )
+                        }
+                        _ => {
+                            let ctx = ErrorContext::new()
+                                .with_code(codes::TYPE_MISMATCH)
+                                .with_help("pipe forward operator |> requires a function on the right side");
+                            Err(CompileError::semantic_with_context(
+                                format!("cannot pipe to non-function: {}", right_val.type_name()),
+                                ctx,
+                            ))
+                        }
+                    }
+                }
             };
 
             Ok(Some(result?))

@@ -36,9 +36,9 @@ pub use interpreter_state::{
 };
 pub(crate) use interpreter_state::{
     ACTOR_INBOX, ACTOR_OUTBOX, ACTOR_SPAWNER, AOP_CONFIG, BASE_UNIT_DIMENSIONS, BDD_REGISTRY_CONTEXTS,
-    BDD_REGISTRY_GROUPS, BDD_REGISTRY_SHARED, BLOCK_SCOPED_ENUMS, COMPOUND_UNIT_DIMENSIONS, CONST_NAMES,
-    CONTEXT_OBJECT, CONTEXT_VAR_NAME, CURRENT_FILE, DI_CONFIG, DI_SINGLETONS, EXECUTION_MODE, EXTERN_FUNCTIONS,
-    GENERATOR_YIELDS, IMMUTABLE_VARS, IN_IMMUTABLE_FN_METHOD, INTERFACE_BINDINGS, INTERPRETER_ARGS,
+    BDD_REGISTRY_GROUPS, BDD_REGISTRY_SHARED, BLANKET_IMPL_METHODS, BLOCK_SCOPED_ENUMS, COMPOUND_UNIT_DIMENSIONS,
+    CONST_NAMES, CONTEXT_OBJECT, CONTEXT_VAR_NAME, CURRENT_FILE, DI_CONFIG, DI_SINGLETONS, EXECUTION_MODE,
+    EXTERN_FUNCTIONS, GENERATOR_YIELDS, IMMUTABLE_VARS, IN_IMMUTABLE_FN_METHOD, INTERFACE_BINDINGS, INTERPRETER_ARGS,
     INTERRUPT_REQUESTED, MACRO_DEFINITION_ORDER, MODULE_GLOBALS, MOVED_VARS, SI_BASE_UNITS, UNIT_FAMILY_ARITHMETIC,
     UNIT_FAMILY_CONVERSIONS, UNIT_SUFFIX_TO_FAMILY, USER_MACROS,
 };
@@ -88,7 +88,9 @@ pub(crate) use interpreter_patterns::{
 // Control flow functions (if, while, loop, for, match)
 #[path = "../interpreter_control.rs"]
 mod interpreter_control;
-use interpreter_control::{exec_context, exec_for, exec_if, exec_if_expr, exec_loop, exec_match, exec_match_expr, exec_while};
+use interpreter_control::{exec_context, exec_for, exec_if, exec_loop, exec_match, exec_while};
+// Re-export exec_if_expr and exec_match_expr for use in expr/control.rs
+pub(crate) use interpreter_control::{exec_if_expr, exec_match_expr};
 // Re-export exec_with for use in interpreter_call module
 pub(crate) use interpreter_control::exec_with;
 

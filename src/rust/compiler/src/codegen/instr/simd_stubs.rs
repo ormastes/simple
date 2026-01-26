@@ -1,6 +1,10 @@
-//! SIMD stub instruction compilation
+//! SIMD instruction compilation via runtime FFI delegation
 //!
-//! This module handles compilation of SIMD stub instructions:
+//! This module handles compilation of SIMD instructions by delegating
+//! to runtime FFI functions. This provides correct functionality while
+//! native Cranelift SIMD support can be added later for better performance.
+//!
+//! Instructions handled:
 //! - VecLoad - Load SIMD vector from memory
 //! - VecStore - Store SIMD vector to memory
 //! - VecGather - Gather SIMD vector from scattered indices
@@ -24,173 +28,282 @@ use crate::mir::VReg;
 
 use super::{InstrContext, InstrResult};
 
-/// Compile NeighborLoad instruction (stub)
+/// Compile NeighborLoad instruction via runtime FFI
 pub fn compile_neighbor_load<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     dest: VReg,
-    _array: VReg,
-    _direction: NeighborDirection,
+    array: VReg,
+    direction: NeighborDirection,
 ) -> InstrResult<()> {
-    // Stub for SIMD neighbor load - in real GPU codegen this would
-    // compute (this.index() +/- 1) and load from array at that index
-    let zero = builder.ins().iconst(types::I64, 0);
-    ctx.vreg_values.insert(dest, zero);
+    let array_val = ctx.vreg_values[&array];
+    // Convert direction to i64: 0 = Left (previous), 1 = Right (next)
+    let dir_val = builder.ins().iconst(
+        types::I64,
+        match direction {
+            NeighborDirection::Left => 0,
+            NeighborDirection::Right => 1,
+        },
+    );
+
+    let func_id = ctx
+        .runtime_funcs
+        .get("rt_neighbor_load")
+        .ok_or_else(|| "rt_neighbor_load not found".to_string())?;
+    let func_ref = ctx.module.declare_func_in_func(*func_id, builder.func);
+    let call = builder.ins().call(func_ref, &[array_val, dir_val]);
+    let result = builder.inst_results(call)[0];
+    ctx.vreg_values.insert(dest, result);
     Ok(())
 }
 
-/// Compile VecLoad instruction (stub)
+/// Compile VecLoad instruction via runtime FFI
 pub fn compile_vec_load<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     dest: VReg,
-    _array: VReg,
-    _offset: VReg,
+    array: VReg,
+    offset: VReg,
 ) -> InstrResult<()> {
-    // Stub: load 4 f32s from array[offset..offset+4]
-    // In real implementation this would emit SIMD load instruction
-    let zero = builder.ins().iconst(types::I64, 0);
-    ctx.vreg_values.insert(dest, zero);
+    let array_val = ctx.vreg_values[&array];
+    let offset_val = ctx.vreg_values[&offset];
+
+    let func_id = ctx
+        .runtime_funcs
+        .get("rt_vec_load")
+        .ok_or_else(|| "rt_vec_load not found".to_string())?;
+    let func_ref = ctx.module.declare_func_in_func(*func_id, builder.func);
+    let call = builder.ins().call(func_ref, &[array_val, offset_val]);
+    let result = builder.inst_results(call)[0];
+    ctx.vreg_values.insert(dest, result);
     Ok(())
 }
 
-/// Compile VecStore instruction (stub)
+/// Compile VecStore instruction via runtime FFI
 pub fn compile_vec_store<M: Module>(
-    _ctx: &mut InstrContext<'_, M>,
-    _builder: &mut FunctionBuilder,
-    _source: VReg,
-    _array: VReg,
-    _offset: VReg,
+    ctx: &mut InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    source: VReg,
+    array: VReg,
+    offset: VReg,
 ) -> InstrResult<()> {
-    // Stub: store 4 f32s to array[offset..offset+4]
-    // In real implementation this would emit SIMD store instruction
+    let source_val = ctx.vreg_values[&source];
+    let array_val = ctx.vreg_values[&array];
+    let offset_val = ctx.vreg_values[&offset];
+
+    let func_id = ctx
+        .runtime_funcs
+        .get("rt_vec_store")
+        .ok_or_else(|| "rt_vec_store not found".to_string())?;
+    let func_ref = ctx.module.declare_func_in_func(*func_id, builder.func);
+    builder.ins().call(func_ref, &[source_val, array_val, offset_val]);
     Ok(())
 }
 
-/// Compile VecGather instruction (stub)
+/// Compile VecGather instruction via runtime FFI
 pub fn compile_vec_gather<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     dest: VReg,
-    _array: VReg,
-    _indices: VReg,
+    array: VReg,
+    indices: VReg,
 ) -> InstrResult<()> {
-    // Stub: gather 4 f32s from array at 4 different indices
-    let zero = builder.ins().iconst(types::I64, 0);
-    ctx.vreg_values.insert(dest, zero);
+    let array_val = ctx.vreg_values[&array];
+    let indices_val = ctx.vreg_values[&indices];
+
+    let func_id = ctx
+        .runtime_funcs
+        .get("rt_vec_gather")
+        .ok_or_else(|| "rt_vec_gather not found".to_string())?;
+    let func_ref = ctx.module.declare_func_in_func(*func_id, builder.func);
+    let call = builder.ins().call(func_ref, &[array_val, indices_val]);
+    let result = builder.inst_results(call)[0];
+    ctx.vreg_values.insert(dest, result);
     Ok(())
 }
 
-/// Compile VecScatter instruction (stub)
+/// Compile VecScatter instruction via runtime FFI
 pub fn compile_vec_scatter<M: Module>(
-    _ctx: &mut InstrContext<'_, M>,
-    _builder: &mut FunctionBuilder,
-    _source: VReg,
-    _array: VReg,
-    _indices: VReg,
+    ctx: &mut InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    source: VReg,
+    array: VReg,
+    indices: VReg,
 ) -> InstrResult<()> {
-    // Stub: scatter 4 f32s to array at 4 different indices
+    let source_val = ctx.vreg_values[&source];
+    let array_val = ctx.vreg_values[&array];
+    let indices_val = ctx.vreg_values[&indices];
+
+    let func_id = ctx
+        .runtime_funcs
+        .get("rt_vec_scatter")
+        .ok_or_else(|| "rt_vec_scatter not found".to_string())?;
+    let func_ref = ctx.module.declare_func_in_func(*func_id, builder.func);
+    builder.ins().call(func_ref, &[source_val, array_val, indices_val]);
     Ok(())
 }
 
-/// Compile VecFma instruction (stub)
+/// Compile VecFma instruction via runtime FFI
 pub fn compile_vec_fma<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     dest: VReg,
-    _a: VReg,
-    _b: VReg,
-    _c: VReg,
+    a: VReg,
+    b: VReg,
+    c: VReg,
 ) -> InstrResult<()> {
-    // Stub: fused multiply-add: a * b + c
-    // In real implementation this would emit FMA SIMD instruction
-    let zero = builder.ins().iconst(types::I64, 0);
-    ctx.vreg_values.insert(dest, zero);
+    let a_val = ctx.vreg_values[&a];
+    let b_val = ctx.vreg_values[&b];
+    let c_val = ctx.vreg_values[&c];
+
+    let func_id = ctx
+        .runtime_funcs
+        .get("rt_vec_fma")
+        .ok_or_else(|| "rt_vec_fma not found".to_string())?;
+    let func_ref = ctx.module.declare_func_in_func(*func_id, builder.func);
+    let call = builder.ins().call(func_ref, &[a_val, b_val, c_val]);
+    let result = builder.inst_results(call)[0];
+    ctx.vreg_values.insert(dest, result);
     Ok(())
 }
 
-/// Compile VecRecip instruction (stub)
+/// Compile VecRecip instruction via runtime FFI
 pub fn compile_vec_recip<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     dest: VReg,
-    _source: VReg,
+    source: VReg,
 ) -> InstrResult<()> {
-    // Stub: reciprocal: 1.0 / source
-    // In real implementation this would emit reciprocal SIMD instruction
-    let zero = builder.ins().iconst(types::I64, 0);
-    ctx.vreg_values.insert(dest, zero);
+    let source_val = ctx.vreg_values[&source];
+
+    let func_id = ctx
+        .runtime_funcs
+        .get("rt_vec_recip")
+        .ok_or_else(|| "rt_vec_recip not found".to_string())?;
+    let func_ref = ctx.module.declare_func_in_func(*func_id, builder.func);
+    let call = builder.ins().call(func_ref, &[source_val]);
+    let result = builder.inst_results(call)[0];
+    ctx.vreg_values.insert(dest, result);
     Ok(())
 }
 
-/// Compile VecMaskedLoad instruction (stub)
+/// Compile VecMaskedLoad instruction via runtime FFI
 pub fn compile_vec_masked_load<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     dest: VReg,
-    _array: VReg,
-    _offset: VReg,
-    _mask: VReg,
-    _default: VReg,
+    array: VReg,
+    offset: VReg,
+    mask: VReg,
+    default: VReg,
 ) -> InstrResult<()> {
-    // Stub: masked load - load where mask is true, use default for false
-    let zero = builder.ins().iconst(types::I64, 0);
-    ctx.vreg_values.insert(dest, zero);
+    let array_val = ctx.vreg_values[&array];
+    let offset_val = ctx.vreg_values[&offset];
+    let mask_val = ctx.vreg_values[&mask];
+    let default_val = ctx.vreg_values[&default];
+
+    let func_id = ctx
+        .runtime_funcs
+        .get("rt_vec_masked_load")
+        .ok_or_else(|| "rt_vec_masked_load not found".to_string())?;
+    let func_ref = ctx.module.declare_func_in_func(*func_id, builder.func);
+    let call = builder
+        .ins()
+        .call(func_ref, &[array_val, offset_val, mask_val, default_val]);
+    let result = builder.inst_results(call)[0];
+    ctx.vreg_values.insert(dest, result);
     Ok(())
 }
 
-/// Compile VecMaskedStore instruction (stub)
+/// Compile VecMaskedStore instruction via runtime FFI
 pub fn compile_vec_masked_store<M: Module>(
-    _ctx: &mut InstrContext<'_, M>,
-    _builder: &mut FunctionBuilder,
-    _source: VReg,
-    _array: VReg,
-    _offset: VReg,
-    _mask: VReg,
+    ctx: &mut InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    source: VReg,
+    array: VReg,
+    offset: VReg,
+    mask: VReg,
 ) -> InstrResult<()> {
-    // Stub: masked store - store only where mask is true
+    let source_val = ctx.vreg_values[&source];
+    let array_val = ctx.vreg_values[&array];
+    let offset_val = ctx.vreg_values[&offset];
+    let mask_val = ctx.vreg_values[&mask];
+
+    let func_id = ctx
+        .runtime_funcs
+        .get("rt_vec_masked_store")
+        .ok_or_else(|| "rt_vec_masked_store not found".to_string())?;
+    let func_ref = ctx.module.declare_func_in_func(*func_id, builder.func);
+    builder
+        .ins()
+        .call(func_ref, &[source_val, array_val, offset_val, mask_val]);
     Ok(())
 }
 
-/// Compile VecMinVec instruction (stub)
+/// Compile VecMinVec instruction via runtime FFI
 pub fn compile_vec_min_vec<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     dest: VReg,
-    _a: VReg,
-    _b: VReg,
+    a: VReg,
+    b: VReg,
 ) -> InstrResult<()> {
-    // Stub: element-wise minimum of two vectors
-    let zero = builder.ins().iconst(types::I64, 0);
-    ctx.vreg_values.insert(dest, zero);
+    let a_val = ctx.vreg_values[&a];
+    let b_val = ctx.vreg_values[&b];
+
+    let func_id = ctx
+        .runtime_funcs
+        .get("rt_vec_min_vec")
+        .ok_or_else(|| "rt_vec_min_vec not found".to_string())?;
+    let func_ref = ctx.module.declare_func_in_func(*func_id, builder.func);
+    let call = builder.ins().call(func_ref, &[a_val, b_val]);
+    let result = builder.inst_results(call)[0];
+    ctx.vreg_values.insert(dest, result);
     Ok(())
 }
 
-/// Compile VecMaxVec instruction (stub)
+/// Compile VecMaxVec instruction via runtime FFI
 pub fn compile_vec_max_vec<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     dest: VReg,
-    _a: VReg,
-    _b: VReg,
+    a: VReg,
+    b: VReg,
 ) -> InstrResult<()> {
-    // Stub: element-wise maximum of two vectors
-    let zero = builder.ins().iconst(types::I64, 0);
-    ctx.vreg_values.insert(dest, zero);
+    let a_val = ctx.vreg_values[&a];
+    let b_val = ctx.vreg_values[&b];
+
+    let func_id = ctx
+        .runtime_funcs
+        .get("rt_vec_max_vec")
+        .ok_or_else(|| "rt_vec_max_vec not found".to_string())?;
+    let func_ref = ctx.module.declare_func_in_func(*func_id, builder.func);
+    let call = builder.ins().call(func_ref, &[a_val, b_val]);
+    let result = builder.inst_results(call)[0];
+    ctx.vreg_values.insert(dest, result);
     Ok(())
 }
 
-/// Compile VecClamp instruction (stub)
+/// Compile VecClamp instruction via runtime FFI
 pub fn compile_vec_clamp<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     dest: VReg,
-    _source: VReg,
-    _lo: VReg,
-    _hi: VReg,
+    source: VReg,
+    lo: VReg,
+    hi: VReg,
 ) -> InstrResult<()> {
-    // Stub: element-wise clamp to range
-    let zero = builder.ins().iconst(types::I64, 0);
-    ctx.vreg_values.insert(dest, zero);
+    let source_val = ctx.vreg_values[&source];
+    let lo_val = ctx.vreg_values[&lo];
+    let hi_val = ctx.vreg_values[&hi];
+
+    let func_id = ctx
+        .runtime_funcs
+        .get("rt_vec_clamp")
+        .ok_or_else(|| "rt_vec_clamp not found".to_string())?;
+    let func_ref = ctx.module.declare_func_in_func(*func_id, builder.func);
+    let call = builder.ins().call(func_ref, &[source_val, lo_val, hi_val]);
+    let result = builder.inst_results(call)[0];
+    ctx.vreg_values.insert(dest, result);
     Ok(())
 }

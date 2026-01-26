@@ -89,6 +89,9 @@ impl<'a> Parser<'a> {
     fn parse_match_expr(&mut self) -> Result<Expr, ParseError> {
         self.advance();
         let subject = self.parse_expression()?;
+        // Enable forced indentation BEFORE consuming colon, so the newline after colon is preserved
+        // This handles match expressions inside lambdas/parens where newlines would be suppressed
+        self.lexer.enable_forced_indentation();
         self.expect(&TokenKind::Colon)?;
         if self.check(&TokenKind::Newline) {
             self.advance();
@@ -106,11 +109,15 @@ impl<'a> Parser<'a> {
             if self.check(&TokenKind::Dedent) {
                 self.advance();
             }
+            // Disable forced indentation after match body
+            self.lexer.disable_forced_indentation();
             Ok(Expr::Match {
                 subject: Box::new(subject),
                 arms,
             })
         } else {
+            // Disable forced indentation before returning error
+            self.lexer.disable_forced_indentation();
             Err(ParseError::unexpected_token(
                 "newline after match",
                 format!("{:?}", self.current.kind),
@@ -229,10 +236,17 @@ impl<'a> Parser<'a> {
     fn parse_match_arm_expr(&mut self) -> Result<MatchArm, ParseError> {
         use crate::token::Span;
         let start_span = self.current.span;
-        // Optionally consume 'case' keyword (consistent with statement-level match)
-        if self.check(&TokenKind::Case) {
+
+        // Support both syntaxes:
+        // - `case pattern:` or `case pattern ->`  (traditional)
+        // - `| pattern ->`  (Erlang-style, preferred)
+        let is_pipe_syntax = self.check(&TokenKind::Pipe);
+        if is_pipe_syntax {
+            self.advance(); // consume `|`
+        } else if self.check(&TokenKind::Case) {
             self.advance();
         }
+
         let pattern = self.parse_pattern()?;
         let guard = if self.check(&TokenKind::If) {
             self.advance();
@@ -240,10 +254,19 @@ impl<'a> Parser<'a> {
         } else {
             None
         };
-        // Accept ->, =>, or : for match arms (consistent with statement-level match)
-        if !self.check(&TokenKind::Arrow) && !self.check(&TokenKind::FatArrow) && !self.check(&TokenKind::Colon) {
+
+        // For `| pattern ->` syntax, only accept `->`
+        // For `case pattern:` syntax, accept `->`, `=>`, or `:`
+        let valid_separator = if is_pipe_syntax {
+            self.check(&TokenKind::Arrow)
+        } else {
+            self.check(&TokenKind::Arrow) || self.check(&TokenKind::FatArrow) || self.check(&TokenKind::Colon)
+        };
+
+        if !valid_separator {
+            let expected = if is_pipe_syntax { "->" } else { "-> or => or :" };
             return Err(ParseError::unexpected_token(
-                "-> or => or :",
+                expected,
                 format!("{:?}", self.current.kind),
                 self.current.span,
             ));

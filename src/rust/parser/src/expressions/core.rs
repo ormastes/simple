@@ -39,7 +39,7 @@ impl<'a> Parser<'a> {
     // === Expression Parsing (Pratt Parser) ===
 
     pub(crate) fn parse_expression(&mut self) -> Result<Expr, ParseError> {
-        self.parse_or()
+        self.parse_pipe()
     }
 
     /// Parse optional step expression for slice syntax (`:step` at end of slice)

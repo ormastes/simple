@@ -117,10 +117,13 @@ pub fn run_test_file(runner: &Runner, path: &Path) -> TestFileResult {
 }
 
 /// Run a single test file in a separate process with timeout (safe mode)
+// TODO(bootstrap): For system tests, use simple_new (bin/wrappers/simple_new) to test
+//                  the full Simple CLI stack once the self-hosting compiler is ready.
 pub fn run_test_file_safe_mode(path: &Path, options: &super::types::TestOptions) -> TestFileResult {
     let start = Instant::now();
 
     // Find the simple binary path
+    // TODO(bootstrap): Use simple_new for system tests (test/system/*) to verify full CLI
     let simple_binary = find_simple_binary();
 
     // Prepare environment variables
@@ -217,12 +220,14 @@ pub fn run_test_file_safe_mode(path: &Path, options: &super::types::TestOptions)
 }
 
 /// Find the simple binary path
+// TODO(bootstrap): Update to use simple_new (Simple CLI) once self-hosting compiler is ready.
+//                  Currently uses simple_old (Rust runtime) directly.
 fn find_simple_binary() -> PathBuf {
     // Try to find the binary in common locations
     let candidates = vec![
-        PathBuf::from("./target/debug/simple"),
-        PathBuf::from("./target/release/simple"),
-        PathBuf::from("simple"), // In PATH
+        PathBuf::from("./target/debug/simple_old"),
+        PathBuf::from("./target/release/simple_old"),
+        PathBuf::from("simple_old"), // In PATH
     ];
 
     for candidate in candidates {
@@ -233,13 +238,13 @@ fn find_simple_binary() -> PathBuf {
 
     // If we're running as the simple binary, use the current executable
     if let Ok(exe) = std::env::current_exe() {
-        if exe.file_name().and_then(|n| n.to_str()) == Some("simple") {
+        if exe.file_name().and_then(|n| n.to_str()) == Some("simple_old") {
             return exe;
         }
     }
 
     // Default to looking in target/debug
-    PathBuf::from("./target/debug/simple")
+    PathBuf::from("./target/debug/simple_old")
 }
 
 /// Wait for a process with timeout

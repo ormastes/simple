@@ -12,8 +12,8 @@
 #
 # This pass runs after type inference to have full type information.
 
-import compiler.hir.*
-import compiler.lexer.Span
+use hir.*
+use lexer.Span
 
 # ============================================================================
 # Type Compatibility
@@ -87,7 +87,7 @@ struct TypeChecker:
         """Get the symbol ID for a named type."""
         match ty.kind:
             case Named(sym, _): Some(sym)
-            case _: None
+            case _: nil
 
 # ============================================================================
 # Method Resolver
@@ -129,15 +129,15 @@ class MethodResolver:
 
         # Resolve functions
         var resolved_functions: Dict<SymbolId, HirFunction> = {}
-        for entry in module.functions:
-            val func = entry.1
-            resolved_functions[entry.0] = self.resolve_function(func)
+        for key in module.functions.keys():
+            val func = module.functions[key]
+            resolved_functions[key] = self.resolve_function(func)
 
         # Resolve constants
         var resolved_constants: Dict<SymbolId, HirConst> = {}
-        for entry in module.constants:
-            val const_ = entry.1
-            resolved_constants[entry.0] = HirConst(
+        for key in module.constants.keys():
+            val const_ = module.constants[key]
+            resolved_constants[key] = HirConst(
                 symbol: const_.symbol,
                 name: const_.name,
                 type_: const_.type_,
@@ -212,7 +212,7 @@ class MethodResolver:
         val resolved_value = if block.value.?:
             Some(self.resolve_expr(block.value.unwrap()))
         else:
-            None
+            nil
 
         HirBlock(
             stmts: resolved_stmts,
@@ -318,7 +318,9 @@ class MethodResolver:
 
             case DictLit(entries, key_type, value_type):
                 var resolved: [(HirExpr, HirExpr)] = []
-                for (k, v) in entries:
+                for entry in entries:
+                    val k = entry.0
+                    val v = entry.1
                     resolved = resolved.push((self.resolve_expr(k), self.resolve_expr(v)))
                 HirExprKind.DictLit(resolved, key_type, value_type)
 
@@ -347,7 +349,7 @@ class MethodResolver:
                 val resolved_else = if else_.?:
                     Some(self.resolve_block(else_.unwrap()))
                 else:
-                    None
+                    nil
                 HirExprKind.If(self.resolve_expr(cond), self.resolve_block(then_), resolved_else)
 
             case Match(scrutinee, arms):
@@ -356,7 +358,7 @@ class MethodResolver:
                     val resolved_guard = if arm.guard.?:
                         Some(self.resolve_expr(arm.guard.unwrap()))
                     else:
-                        None
+                        nil
                     resolved_arms = resolved_arms.push(HirMatchArm(
                         pattern: arm.pattern,
                         guard: resolved_guard,
@@ -383,11 +385,11 @@ class MethodResolver:
 
             # Control transfer
             case Return(value):
-                val resolved_value = if value.?: Some(self.resolve_expr(value.unwrap())) else: None
+                val resolved_value = if value.?: Some(self.resolve_expr(value.unwrap())) else: nil
                 HirExprKind.Return(resolved_value)
 
             case Break(label, value):
-                val resolved_value = if value.?: Some(self.resolve_expr(value.unwrap())) else: None
+                val resolved_value = if value.?: Some(self.resolve_expr(value.unwrap())) else: nil
                 HirExprKind.Break(label, resolved_value)
 
             case Continue(label):
@@ -404,13 +406,15 @@ class MethodResolver:
                 HirExprKind.Await(self.resolve_expr(e))
 
             case Yield(value):
-                val resolved_value = if value.?: Some(self.resolve_expr(value.unwrap())) else: None
+                val resolved_value = if value.?: Some(self.resolve_expr(value.unwrap())) else: nil
                 HirExprKind.Yield(resolved_value)
 
             # Construction
             case StructLit(type_, fields):
                 var resolved_fields: [(text, HirExpr)] = []
-                for (name, value) in fields:
+                for field in fields:
+                    val name = field.0
+                    val value = field.1
                     resolved_fields = resolved_fields.push((name, self.resolve_expr(value)))
                 HirExprKind.StructLit(type_, resolved_fields)
 
@@ -424,11 +428,13 @@ class MethodResolver:
                             Some(HirEnumPayload.Tuple(resolved))
                         case Struct(fields):
                             var resolved: [(text, HirExpr)] = []
-                            for (name, value) in fields:
+                            for field in fields:
+                                val name = field.0
+                                val value = field.1
                                 resolved = resolved.push((name, self.resolve_expr(value)))
                             Some(HirEnumPayload.Struct(resolved))
                 else:
-                    None
+                    nil
                 HirExprKind.EnumLit(type_, variant, resolved_payload)
 
             # Casts
@@ -440,9 +446,9 @@ class MethodResolver:
 
             # Range
             case Range(start, end, inclusive, step):
-                val resolved_start = if start.?: Some(self.resolve_expr(start.unwrap())) else: None
-                val resolved_end = if end.?: Some(self.resolve_expr(end.unwrap())) else: None
-                val resolved_step = if step.?: Some(self.resolve_expr(step.unwrap())) else: None
+                val resolved_start = if start.?: Some(self.resolve_expr(start.unwrap())) else: nil
+                val resolved_end = if end.?: Some(self.resolve_expr(end.unwrap())) else: nil
+                val resolved_step = if step.?: Some(self.resolve_expr(step.unwrap())) else: nil
                 HirExprKind.Range(resolved_start, resolved_end, inclusive, resolved_step)
 
             # Comprehension
@@ -451,6 +457,17 @@ class MethodResolver:
                 for clause in clauses:
                     resolved_clauses = resolved_clauses.push(self.resolve_comp_clause(clause))
                 HirExprKind.Comprehension(kind, self.resolve_expr(e), resolved_clauses)
+
+            # Custom blocks (pass through - no method resolution needed)
+            case CustomBlock(kind, value):
+                HirExprKind.CustomBlock(kind, value)
+
+            # Math/DL blocks (resolve expressions in body)
+            case LossBlock(body):
+                HirExprKind.LossBlock(self.resolve_block(body))
+
+            case NogradBlock(body):
+                HirExprKind.NogradBlock(self.resolve_block(body))
 
             # Error
             case Error: expr.kind
@@ -586,11 +603,19 @@ class MethodResolver:
     fn is_similar(a: text, b: text) -> bool:
         """Check if two names are similar (for suggestions)."""
         # Simple heuristic: same prefix or suffix, or edit distance <= 2
-        if a.len() < 2 or b.len() < 2:
+        if not a.?:
             false
-        elif a.starts_with(b[0:2]) or b.starts_with(a[0:2]):
+        elif not b.?:
+            false
+        elif a.len() < 2 or b.len() < 2:
+            false
+        elif a.starts_with(b[0:2]):
             true
-        elif a.ends_with(b[b.len()-2:]) or b.ends_with(a[a.len()-2:]):
+        elif b.starts_with(a[0:2]):
+            true
+        elif a.ends_with(b[b.len()-2:]):
+            true
+        elif b.ends_with(a[a.len()-2:]):
             true
         else:
             false
@@ -607,7 +632,7 @@ class MethodResolver:
         if method_sym.?:
             Some(MethodResolution.InstanceMethod(type_id, method_sym.unwrap()))
         else:
-            None
+            nil
 
     me try_trait_method(receiver_type: HirType, method: text) -> MethodResolution?:
         """Try to find a trait method implemented by the receiver's type."""
@@ -627,7 +652,7 @@ class MethodResolver:
             if method_sym.?:
                 return Some(MethodResolution.TraitMethod(trait_id, method_sym.unwrap()))
 
-        None
+        nil
 
     me try_ufcs(receiver_type: HirType, method: text, args: [HirCallArg]) -> MethodResolution?:
         """Try to find a free function for UFCS resolution.
@@ -659,9 +684,9 @@ class MethodResolver:
                 if self.type_checker.is_compatible(receiver_type, first_param_type):
                     Some(MethodResolution.FreeFunction(func_sym_id.unwrap()))
                 else:
-                    None
+                    nil
             case _:
-                None
+                nil
 
     # ========================================================================
     # Error Handling

@@ -24,12 +24,13 @@ impl<'a> Parser<'a> {
                     params
                 };
                 self.expect(&TokenKind::RParen)?;
+                // Enable forced indentation BEFORE consuming colon, so the newline after colon is preserved
+                // This handles lambda expressions inside function call arguments where newlines would be suppressed
+                self.lexer.enable_forced_indentation();
                 self.expect(&TokenKind::Colon)?;
 
                 // Parse body - can be inline expression or indented block
                 let body = if self.check(&TokenKind::Newline) {
-                    // Enable forced indentation for lambda body
-                    self.lexer.enable_forced_indentation();
                     self.advance(); // consume newline
 
                     if self.check(&TokenKind::Indent) {
@@ -73,8 +74,10 @@ impl<'a> Parser<'a> {
                         self.parse_expression()?
                     }
                 } else {
-                    // Inline expression
-                    self.parse_expression()?
+                    // Inline expression - disable forced indentation after parsing
+                    let expr = self.parse_expression()?;
+                    self.lexer.disable_forced_indentation();
+                    expr
                 };
 
                 Ok(Expr::Lambda {

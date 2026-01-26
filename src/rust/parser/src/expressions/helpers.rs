@@ -238,6 +238,9 @@ impl<'a> Parser<'a> {
                 TokenKind::As => Some("as".to_string()),
                 TokenKind::Match => Some("match".to_string()),
                 TokenKind::Use => Some("use".to_string()),
+                TokenKind::Alias => Some("alias".to_string()),
+                TokenKind::Bounds => Some("bounds".to_string()),
+                TokenKind::Outline => Some("outline".to_string()),
                 _ => None,
             };
             if let Some(id_clone) = maybe_name {
@@ -356,13 +359,13 @@ impl<'a> Parser<'a> {
     /// Parse lambda body (params, colon, expression or block) with given move mode
     pub(super) fn parse_lambda_body(&mut self, move_mode: MoveMode) -> Result<Expr, ParseError> {
         let (params, capture_all) = self.parse_lambda_params()?;
+        // Enable forced indentation BEFORE consuming colon, so the newline after colon is preserved
+        // This handles lambda expressions inside function call arguments where newlines would be suppressed
+        self.lexer.enable_forced_indentation();
         self.expect(&TokenKind::Colon)?;
 
         // Check if body is an indented block or inline expression
         let body = if self.check(&TokenKind::Newline) {
-            // Enable forced indentation for lambda body (even inside brackets/parens)
-            self.lexer.enable_forced_indentation();
-
             // Consume the newline
             self.advance();
 
@@ -408,8 +411,10 @@ impl<'a> Parser<'a> {
                 self.parse_expression()?
             }
         } else {
-            // Inline expression
-            self.parse_expression()?
+            // Inline expression - disable forced indentation after parsing
+            let expr = self.parse_expression()?;
+            self.lexer.disable_forced_indentation();
+            expr
         };
 
         Ok(Expr::Lambda {

@@ -1,0 +1,582 @@
+# HIR Interpreter - Direct HIR Evaluation
+#
+# Evaluates HIR directly without lowering to MIR.
+# This provides shared execution semantics for interpreter and compiler.
+#
+# Architecture:
+#   HIR -> HirInterpreter -> RuntimeValue
+#
+# Benefits:
+#   - Single source of truth for execution semantics
+#   - O(1) variable lookup via index
+#   - Type-aware evaluation
+#   - No MIR/bytecode generation overhead for interpreted code
+
+# TODO: Enable when module system supports relative imports
+# use ..types.{TypeId, BinOp, UnaryOp}
+# use ..lower.{HirExpr, HirStmt, HirExprKind, HirStmtKind}
+
+# Duplicated minimal types (see types.spl, lower.spl)
+struct TypeId:
+    id: u32
+
+impl TypeId:
+    static fn void_ty() -> TypeId:
+        TypeId(id: 0)
+    static fn bool_ty() -> TypeId:
+        TypeId(id: 1)
+    static fn i64_ty() -> TypeId:
+        TypeId(id: 5)
+    static fn f64_ty() -> TypeId:
+        TypeId(id: 11)
+    static fn string_ty() -> TypeId:
+        TypeId(id: 12)
+    static fn nil_ty() -> TypeId:
+        TypeId(id: 13)
+
+    fn is_void() -> bool:
+        self.id == 0
+    fn is_integer() -> bool:
+        self.id >= 2 and self.id <= 9
+    fn is_float() -> bool:
+        self.id == 10 or self.id == 11
+    fn is_numeric() -> bool:
+        self.is_integer() or self.is_float()
+
+
+# =============================================================================
+# Runtime Value
+# =============================================================================
+
+# Value kind tag
+enum ValueKind:
+    Nil
+    Bool
+    Int
+    Float
+    String
+    Array
+    Tuple
+    Struct
+    Function
+    Closure
+
+# Runtime value
+struct Value:
+    kind: ValueKind
+    # Payload - one of these is valid depending on kind
+    bool_val: bool
+    int_val: i64
+    float_val: f64
+    str_val: text
+    array_val: [Value]
+
+impl Value:
+    # Nil value
+    static fn nil_val() -> Value:
+        Value(
+            kind: ValueKind.Nil,
+            bool_val: false,
+            int_val: 0,
+            float_val: 0.0,
+            str_val: "",
+            array_val: []
+        )
+
+    # Boolean value
+    static fn bool_val(v: bool) -> Value:
+        Value(
+            kind: ValueKind.Bool,
+            bool_val: v,
+            int_val: 0,
+            float_val: 0.0,
+            str_val: "",
+            array_val: []
+        )
+
+    # Integer value
+    static fn int_val(v: i64) -> Value:
+        Value(
+            kind: ValueKind.Int,
+            bool_val: false,
+            int_val: v,
+            float_val: 0.0,
+            str_val: "",
+            array_val: []
+        )
+
+    # Float value
+    static fn float_val(v: f64) -> Value:
+        Value(
+            kind: ValueKind.Float,
+            bool_val: false,
+            int_val: 0,
+            float_val: v,
+            str_val: "",
+            array_val: []
+        )
+
+    # String value
+    static fn string_val(v: text) -> Value:
+        Value(
+            kind: ValueKind.String,
+            bool_val: false,
+            int_val: 0,
+            float_val: 0.0,
+            str_val: v,
+            array_val: []
+        )
+
+    # Array value
+    static fn array_val(v: [Value]) -> Value:
+        Value(
+            kind: ValueKind.Array,
+            bool_val: false,
+            int_val: 0,
+            float_val: 0.0,
+            str_val: "",
+            array_val: v
+        )
+
+    # Type checks
+    fn is_nil() -> bool:
+        match self.kind:
+            ValueKind.Nil -> true
+            _ -> false
+
+    fn is_bool() -> bool:
+        match self.kind:
+            ValueKind.Bool -> true
+            _ -> false
+
+    fn is_int() -> bool:
+        match self.kind:
+            ValueKind.Int -> true
+            _ -> false
+
+    fn is_float() -> bool:
+        match self.kind:
+            ValueKind.Float -> true
+            _ -> false
+
+    fn is_string() -> bool:
+        match self.kind:
+            ValueKind.String -> true
+            _ -> false
+
+    fn is_array() -> bool:
+        match self.kind:
+            ValueKind.Array -> true
+            _ -> false
+
+    fn is_numeric() -> bool:
+        self.is_int() or self.is_float()
+
+    # Truthiness
+    fn is_truthy() -> bool:
+        match self.kind:
+            ValueKind.Nil -> false
+            ValueKind.Bool -> self.bool_val
+            ValueKind.Int -> self.int_val != 0
+            ValueKind.Float -> self.float_val != 0.0
+            ValueKind.String -> self.str_val.len() > 0
+            ValueKind.Array -> self.array_val.len() > 0
+            _ -> true
+
+    # Convert to string for display
+    fn to_string() -> text:
+        match self.kind:
+            ValueKind.Nil -> "nil"
+            ValueKind.Bool -> if self.bool_val: "true" else: "false"
+            ValueKind.Int -> "{self.int_val}"
+            ValueKind.Float -> "{self.float_val}"
+            ValueKind.String -> self.str_val
+            ValueKind.Array -> "[...]"
+            _ -> "<value>"
+
+
+# =============================================================================
+# Evaluation Result
+# =============================================================================
+
+# Result of evaluation
+enum EvalResult:
+    Ok(Value)
+    Err(text)
+    Return(Value)
+    Break
+    Continue
+
+impl EvalResult:
+    fn is_ok() -> bool:
+        match self:
+            EvalResult.Ok(_) -> true
+            _ -> false
+
+    fn is_err() -> bool:
+        match self:
+            EvalResult.Err(_) -> true
+            _ -> false
+
+    fn is_return() -> bool:
+        match self:
+            EvalResult.Return(_) -> true
+            _ -> false
+
+    fn is_break() -> bool:
+        match self:
+            EvalResult.Break -> true
+            _ -> false
+
+    fn is_continue() -> bool:
+        match self:
+            EvalResult.Continue -> true
+            _ -> false
+
+    fn unwrap() -> Value:
+        match self:
+            EvalResult.Ok(v) -> v
+            EvalResult.Return(v) -> v
+            _ -> Value.nil_val()
+
+    fn unwrap_err() -> text:
+        match self:
+            EvalResult.Err(msg) -> msg
+            _ -> ""
+
+
+# =============================================================================
+# Call Frame - Function execution context
+# =============================================================================
+
+struct CallFrame:
+    name: text
+    locals: [Value]
+    return_type: TypeId
+
+impl CallFrame:
+    static fn new(name: text, local_count: u32, return_type: TypeId) -> CallFrame:
+        # Initialize locals with nil
+        var locals: [Value] = []
+        var i: u32 = 0
+        while i < local_count:
+            locals = locals + [Value.nil_val()]
+            i = i + 1
+        CallFrame(name: name, locals: locals, return_type: return_type)
+
+    # Get local by index
+    fn get_local(index: u32) -> Value:
+        if (index as i32) < self.locals.len():
+            self.locals[index as i32]
+        else:
+            Value.nil_val()
+
+    # Set local by index
+    me set_local(index: u32, value: Value):
+        if (index as i32) < self.locals.len():
+            self.locals[index as i32] = value
+
+
+# =============================================================================
+# Evaluation Context
+# =============================================================================
+
+struct EvalContext:
+    # Call stack
+    frames: [CallFrame]
+    current_frame_index: i32
+
+    # Global variables
+    globals: [Value]
+
+    # Configuration
+    max_stack_depth: u32
+    max_iterations: u64
+
+impl EvalContext:
+    # Create new evaluation context
+    static fn new() -> EvalContext:
+        EvalContext(
+            frames: [],
+            current_frame_index: -1,
+            globals: [],
+            max_stack_depth: 1000,
+            max_iterations: 10000000
+        )
+
+    # Get current frame
+    fn current_frame() -> Option<CallFrame>:
+        if self.current_frame_index >= 0 and self.current_frame_index < (self.frames.len() as i32):
+            Some(self.frames[self.current_frame_index])
+        else:
+            None
+
+    # Push call frame
+    me push_frame(frame: CallFrame) -> bool:
+        if (self.frames.len() as u32) >= self.max_stack_depth:
+            return false
+        self.frames = self.frames + [frame]
+        self.current_frame_index = (self.frames.len() - 1) as i32
+        true
+
+    # Pop call frame
+    me pop_frame() -> Option<CallFrame>:
+        if self.frames.len() > 0:
+            val frame = self.frames[self.frames.len() - 1]
+            # Remove last frame
+            var new_frames: [CallFrame] = []
+            var i = 0
+            while i < self.frames.len() - 1:
+                new_frames = new_frames + [self.frames[i]]
+                i = i + 1
+            self.frames = new_frames
+            self.current_frame_index = (self.frames.len() - 1) as i32
+            Some(frame)
+        else:
+            None
+
+    # Get local from current frame
+    fn get_local(index: u32) -> Value:
+        match self.current_frame():
+            Some(frame) -> frame.get_local(index)
+            None -> Value.nil_val()
+
+    # Set local in current frame
+    me set_local(index: u32, value: Value):
+        if self.current_frame_index >= 0:
+            var frame = self.frames[self.current_frame_index]
+            frame.set_local(index, value)
+            self.frames[self.current_frame_index] = frame
+
+    # Get global
+    fn get_global(index: u32) -> Value:
+        if (index as i32) < self.globals.len():
+            self.globals[index as i32]
+        else:
+            Value.nil_val()
+
+    # Set global
+    me set_global(index: u32, value: Value):
+        # Grow globals array if needed
+        while (index as i32) >= self.globals.len():
+            self.globals = self.globals + [Value.nil_val()]
+        self.globals[index as i32] = value
+
+
+# =============================================================================
+# Binary Operations
+# =============================================================================
+
+# Binary operator enum
+enum BinOp:
+    Add
+    Sub
+    Mul
+    Div
+    Mod
+    Pow
+    Eq
+    NotEq
+    Lt
+    Gt
+    LtEq
+    GtEq
+    And
+    Or
+
+# Evaluate binary operation
+fn eval_binary(op: BinOp, left: Value, right: Value) -> EvalResult:
+    match op:
+        BinOp.Add ->
+            if left.is_int() and right.is_int():
+                EvalResult.Ok(Value.int_val(left.int_val + right.int_val))
+            elif left.is_float() and right.is_float():
+                EvalResult.Ok(Value.float_val(left.float_val + right.float_val))
+            elif left.is_string() and right.is_string():
+                EvalResult.Ok(Value.string_val(left.str_val + right.str_val))
+            else:
+                EvalResult.Err("type error in addition")
+
+        BinOp.Sub ->
+            if left.is_int() and right.is_int():
+                EvalResult.Ok(Value.int_val(left.int_val - right.int_val))
+            elif left.is_float() and right.is_float():
+                EvalResult.Ok(Value.float_val(left.float_val - right.float_val))
+            else:
+                EvalResult.Err("type error in subtraction")
+
+        BinOp.Mul ->
+            if left.is_int() and right.is_int():
+                EvalResult.Ok(Value.int_val(left.int_val * right.int_val))
+            elif left.is_float() and right.is_float():
+                EvalResult.Ok(Value.float_val(left.float_val * right.float_val))
+            else:
+                EvalResult.Err("type error in multiplication")
+
+        BinOp.Div ->
+            if right.is_int() and right.int_val == 0:
+                EvalResult.Err("division by zero")
+            elif right.is_float() and right.float_val == 0.0:
+                EvalResult.Err("division by zero")
+            elif left.is_int() and right.is_int():
+                EvalResult.Ok(Value.int_val(left.int_val / right.int_val))
+            elif left.is_float() and right.is_float():
+                EvalResult.Ok(Value.float_val(left.float_val / right.float_val))
+            else:
+                EvalResult.Err("type error in division")
+
+        BinOp.Mod ->
+            if right.is_int() and right.int_val == 0:
+                EvalResult.Err("modulo by zero")
+            elif left.is_int() and right.is_int():
+                EvalResult.Ok(Value.int_val(left.int_val % right.int_val))
+            else:
+                EvalResult.Err("type error in modulo")
+
+        BinOp.Eq ->
+            if left.is_int() and right.is_int():
+                EvalResult.Ok(Value.bool_val(left.int_val == right.int_val))
+            elif left.is_float() and right.is_float():
+                EvalResult.Ok(Value.bool_val(left.float_val == right.float_val))
+            elif left.is_string() and right.is_string():
+                EvalResult.Ok(Value.bool_val(left.str_val == right.str_val))
+            elif left.is_bool() and right.is_bool():
+                EvalResult.Ok(Value.bool_val(left.bool_val == right.bool_val))
+            elif left.is_nil() and right.is_nil():
+                EvalResult.Ok(Value.bool_val(true))
+            else:
+                EvalResult.Ok(Value.bool_val(false))
+
+        BinOp.NotEq ->
+            match eval_binary(BinOp.Eq, left, right):
+                EvalResult.Ok(v) -> EvalResult.Ok(Value.bool_val(not v.bool_val))
+                other -> other
+
+        BinOp.Lt ->
+            if left.is_int() and right.is_int():
+                EvalResult.Ok(Value.bool_val(left.int_val < right.int_val))
+            elif left.is_float() and right.is_float():
+                EvalResult.Ok(Value.bool_val(left.float_val < right.float_val))
+            else:
+                EvalResult.Err("type error in comparison")
+
+        BinOp.Gt ->
+            if left.is_int() and right.is_int():
+                EvalResult.Ok(Value.bool_val(left.int_val > right.int_val))
+            elif left.is_float() and right.is_float():
+                EvalResult.Ok(Value.bool_val(left.float_val > right.float_val))
+            else:
+                EvalResult.Err("type error in comparison")
+
+        BinOp.LtEq ->
+            if left.is_int() and right.is_int():
+                EvalResult.Ok(Value.bool_val(left.int_val <= right.int_val))
+            elif left.is_float() and right.is_float():
+                EvalResult.Ok(Value.bool_val(left.float_val <= right.float_val))
+            else:
+                EvalResult.Err("type error in comparison")
+
+        BinOp.GtEq ->
+            if left.is_int() and right.is_int():
+                EvalResult.Ok(Value.bool_val(left.int_val >= right.int_val))
+            elif left.is_float() and right.is_float():
+                EvalResult.Ok(Value.bool_val(left.float_val >= right.float_val))
+            else:
+                EvalResult.Err("type error in comparison")
+
+        BinOp.And ->
+            EvalResult.Ok(Value.bool_val(left.is_truthy() and right.is_truthy()))
+
+        BinOp.Or ->
+            EvalResult.Ok(Value.bool_val(left.is_truthy() or right.is_truthy()))
+
+        _ ->
+            EvalResult.Err("unsupported binary operator")
+
+
+# =============================================================================
+# Unary Operations
+# =============================================================================
+
+enum UnaryOp:
+    Neg
+    Not
+
+fn eval_unary(op: UnaryOp, value: Value) -> EvalResult:
+    match op:
+        UnaryOp.Neg ->
+            if value.is_int():
+                EvalResult.Ok(Value.int_val(-value.int_val))
+            elif value.is_float():
+                EvalResult.Ok(Value.float_val(-value.float_val))
+            else:
+                EvalResult.Err("type error in negation")
+
+        UnaryOp.Not ->
+            EvalResult.Ok(Value.bool_val(not value.is_truthy()))
+
+
+# =============================================================================
+# HIR Interpreter
+# =============================================================================
+
+struct HirInterpreter:
+    ctx: EvalContext
+
+impl HirInterpreter:
+    # Create new interpreter
+    static fn new() -> HirInterpreter:
+        HirInterpreter(ctx: EvalContext.new())
+
+    # Evaluate integer literal
+    fn eval_integer(value: i64) -> EvalResult:
+        EvalResult.Ok(Value.int_val(value))
+
+    # Evaluate float literal
+    fn eval_float(value: f64) -> EvalResult:
+        EvalResult.Ok(Value.float_val(value))
+
+    # Evaluate bool literal
+    fn eval_bool(value: bool) -> EvalResult:
+        EvalResult.Ok(Value.bool_val(value))
+
+    # Evaluate string literal
+    fn eval_string(value: text) -> EvalResult:
+        EvalResult.Ok(Value.string_val(value))
+
+    # Evaluate nil literal
+    fn eval_nil() -> EvalResult:
+        EvalResult.Ok(Value.nil_val())
+
+    # Evaluate local variable
+    fn eval_local(index: u32) -> EvalResult:
+        EvalResult.Ok(self.ctx.get_local(index))
+
+    # Evaluate global variable
+    fn eval_global(index: u32) -> EvalResult:
+        EvalResult.Ok(self.ctx.get_global(index))
+
+    # Evaluate binary operation
+    fn eval_binary_op(op: BinOp, left: Value, right: Value) -> EvalResult:
+        eval_binary(op, left, right)
+
+    # Evaluate unary operation
+    fn eval_unary_op(op: UnaryOp, value: Value) -> EvalResult:
+        eval_unary(op, value)
+
+    # Declare local variable
+    me declare_local(index: u32, value: Value):
+        self.ctx.set_local(index, value)
+
+    # Assign to local variable
+    me assign_local(index: u32, value: Value):
+        self.ctx.set_local(index, value)
+
+    # Push call frame
+    me push_frame(name: text, local_count: u32, return_type: TypeId) -> bool:
+        val frame = CallFrame.new(name, local_count, return_type)
+        self.ctx.push_frame(frame)
+
+    # Pop call frame
+    me pop_frame():
+        self.ctx.pop_frame()

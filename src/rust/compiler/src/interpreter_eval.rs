@@ -28,8 +28,8 @@ use super::{
     validate_unit_type, with_effect_context, Dimension, ExternFunctions, ImplMethods, Macros, TraitImplRegistry,
     TraitImpls, Traits, UnitArithmeticRules, UnitFamilies, UnitFamilyInfo, Units, BASE_UNIT_DIMENSIONS, BDD_AFTER_EACH,
     BDD_BEFORE_EACH, BDD_CONTEXT_DEFS, BDD_COUNTS, BDD_INDENT, BDD_LAZY_VALUES, BDD_SHARED_EXAMPLES,
-    COMPOUND_UNIT_DIMENSIONS, CONST_NAMES, EXTERN_FUNCTIONS, MACRO_DEFINITION_ORDER, MODULE_GLOBALS, SI_BASE_UNITS,
-    UNIT_FAMILY_ARITHMETIC, UNIT_FAMILY_CONVERSIONS, UNIT_SUFFIX_TO_FAMILY, USER_MACROS,
+    BLANKET_IMPL_METHODS, COMPOUND_UNIT_DIMENSIONS, CONST_NAMES, EXTERN_FUNCTIONS, MACRO_DEFINITION_ORDER,
+    MODULE_GLOBALS, SI_BASE_UNITS, UNIT_FAMILY_ARITHMETIC, UNIT_FAMILY_CONVERSIONS, UNIT_SUFFIX_TO_FAMILY, USER_MACROS,
 };
 
 type Enums = HashMap<String, EnumDef>;
@@ -325,53 +325,71 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                 );
             }
             Node::Impl(impl_block) => {
-                register_trait_impl(&mut trait_impl_registry, impl_block)?;
-                let type_name = get_type_name(&impl_block.target_type);
-                let methods = impl_methods.entry(type_name.clone()).or_insert_with(Vec::new);
-                for method in &impl_block.methods {
-                    methods.push(method.clone());
-                }
+                // Check if this is a blanket impl: has #[default] attribute AND generic params
+                // Blanket impls apply to any type that doesn't have a concrete impl
+                let is_default_impl = impl_block.attributes.iter().any(|attr| attr.name == "default");
+                let has_generic_params = !impl_block.generic_params.is_empty();
+                let is_blanket_impl = is_default_impl && has_generic_params;
 
-                // Also add impl methods to class/struct definition for Constructor method dispatch
-                if let Some(class_def) = classes.get_mut(&type_name) {
-                    class_def.methods.extend(impl_block.methods.clone());
-                }
-
-                // If this is a trait implementation, verify and register it
-                if let Some(ref trait_name) = impl_block.trait_name {
-                    // Verify trait exists
-                    if let Some(trait_def) = traits.get(trait_name) {
-                        // Check all abstract trait methods are implemented
-                        let impl_method_names: std::collections::HashSet<_> =
-                            impl_block.methods.iter().map(|m| m.name.clone()).collect();
-
-                        for trait_method in &trait_def.methods {
-                            // Only require implementation of abstract methods
-                            if trait_method.is_abstract && !impl_method_names.contains(&trait_method.name) {
-                                return Err(crate::error::factory::missing_trait_method(
-                                    &type_name,
-                                    &trait_method.name,
-                                    trait_name,
-                                ));
-                            }
-                        }
-
-                        // Build combined methods: impl methods + default trait methods
-                        let mut combined_methods = impl_block.methods.clone();
-                        for trait_method in &trait_def.methods {
-                            // Add default implementations that weren't overridden
-                            if !trait_method.is_abstract && !impl_method_names.contains(&trait_method.name) {
-                                combined_methods.push(trait_method.clone());
-                                // Also add to impl_methods so method dispatch can find it
-                                methods.push(trait_method.clone());
-                            }
-                        }
-
-                        // Store the trait implementation with combined methods
-                        trait_impls.insert((trait_name.clone(), type_name.clone()), combined_methods);
+                if is_blanket_impl {
+                    // Register as blanket impl - keyed by trait name
+                    if let Some(ref trait_name) = impl_block.trait_name {
+                        BLANKET_IMPL_METHODS.with(|cell| {
+                            let mut blanket_impls = cell.borrow_mut();
+                            let methods = blanket_impls.entry(trait_name.clone()).or_insert_with(Vec::new);
+                            methods.extend(impl_block.methods.clone());
+                        });
                     }
-                    // Note: If trait not found, it might be defined in another module
-                    // For now, we silently allow this for forward compatibility
+                } else {
+                    // Regular impl - register as before
+                    register_trait_impl(&mut trait_impl_registry, impl_block)?;
+                    let type_name = get_type_name(&impl_block.target_type);
+                    let methods = impl_methods.entry(type_name.clone()).or_insert_with(Vec::new);
+                    for method in &impl_block.methods {
+                        methods.push(method.clone());
+                    }
+
+                    // Also add impl methods to class/struct definition for Constructor method dispatch
+                    if let Some(class_def) = classes.get_mut(&type_name) {
+                        class_def.methods.extend(impl_block.methods.clone());
+                    }
+
+                    // If this is a trait implementation, verify and register it
+                    if let Some(ref trait_name) = impl_block.trait_name {
+                        // Verify trait exists
+                        if let Some(trait_def) = traits.get(trait_name) {
+                            // Check all abstract trait methods are implemented
+                            let impl_method_names: std::collections::HashSet<_> =
+                                impl_block.methods.iter().map(|m| m.name.clone()).collect();
+
+                            for trait_method in &trait_def.methods {
+                                // Only require implementation of abstract methods
+                                if trait_method.is_abstract && !impl_method_names.contains(&trait_method.name) {
+                                    return Err(crate::error::factory::missing_trait_method(
+                                        &type_name,
+                                        &trait_method.name,
+                                        trait_name,
+                                    ));
+                                }
+                            }
+
+                            // Build combined methods: impl methods + default trait methods
+                            let mut combined_methods = impl_block.methods.clone();
+                            for trait_method in &trait_def.methods {
+                                // Add default implementations that weren't overridden
+                                if !trait_method.is_abstract && !impl_method_names.contains(&trait_method.name) {
+                                    combined_methods.push(trait_method.clone());
+                                    // Also add to impl_methods so method dispatch can find it
+                                    methods.push(trait_method.clone());
+                                }
+                            }
+
+                            // Store the trait implementation with combined methods
+                            trait_impls.insert((trait_name.clone(), type_name.clone()), combined_methods);
+                        }
+                        // Note: If trait not found, it might be defined in another module
+                        // For now, we silently allow this for forward compatibility
+                    }
                 }
             }
             Node::Extern(ext) => {
@@ -807,7 +825,95 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                     );
                 });
             }
-            Node::ModDecl(_)
+            Node::ModDecl(mod_decl) => {
+                // Handle inline modules with a body
+                if let Some(body_items) = &mod_decl.body {
+                    // Create a module dict to hold the module's exports
+                    let mut module_dict: HashMap<String, Value> = HashMap::new();
+
+                    // Process items in the inline module body
+                    for item in body_items {
+                        match item {
+                            Node::Function(f) => {
+                                // Register function in parent scope with module prefix for internal use
+                                let prefixed_name = format!("{}.{}", mod_decl.name, f.name);
+                                functions.insert(prefixed_name, f.clone());
+
+                                // Also add to module dict for module.func() calls
+                                let func_value = Value::Function {
+                                    name: f.name.clone(),
+                                    def: Box::new(f.clone()),
+                                    captured_env: Env::new(),
+                                };
+                                module_dict.insert(f.name.clone(), func_value);
+                            }
+                            Node::Class(c) => {
+                                // Register class in parent scope with module prefix
+                                let prefixed_name = format!("{}.{}", mod_decl.name, c.name);
+                                classes.insert(prefixed_name, c.clone());
+                                classes.insert(c.name.clone(), c.clone()); // Also register unqualified for internal use
+
+                                // Add constructor to module dict
+                                module_dict.insert(c.name.clone(), Value::Constructor { class_name: c.name.clone() });
+                            }
+                            Node::Struct(s) => {
+                                // Convert struct to class-like for simple handling
+                                let class_def = ClassDef {
+                                    span: s.span,
+                                    name: s.name.clone(),
+                                    generic_params: s.generic_params.clone(),
+                                    where_clause: s.where_clause.clone(),
+                                    fields: s.fields.clone(),
+                                    methods: s.methods.clone(),
+                                    parent: None,
+                                    visibility: s.visibility.clone(),
+                                    effects: vec![],
+                                    attributes: s.attributes.clone(),
+                                    doc_comment: s.doc_comment.clone(),
+                                    invariant: s.invariant.clone(),
+                                    macro_invocations: vec![],
+                                    mixins: vec![],
+                                };
+                                let prefixed_name = format!("{}.{}", mod_decl.name, s.name);
+                                classes.insert(prefixed_name, class_def.clone());
+                                classes.insert(s.name.clone(), class_def);
+
+                                module_dict.insert(s.name.clone(), Value::Constructor { class_name: s.name.clone() });
+                            }
+                            Node::Enum(e) => {
+                                let prefixed_name = format!("{}.{}", mod_decl.name, e.name);
+                                enums.insert(prefixed_name, e.clone());
+                                enums.insert(e.name.clone(), e.clone());
+
+                                // Add enum variants to module dict as constructors
+                                for variant in &e.variants {
+                                    module_dict.insert(
+                                        variant.name.clone(),
+                                        Value::EnumVariantConstructor {
+                                            enum_name: e.name.clone(),
+                                            variant_name: variant.name.clone(),
+                                        },
+                                    );
+                                }
+                            }
+                            Node::Const(c) => {
+                                // Evaluate const value and add to module dict
+                                if let Ok(val) = evaluate_expr(&c.value, &mut env, &mut functions, &mut classes, &enums, &impl_methods) {
+                                    module_dict.insert(c.name.clone(), val);
+                                }
+                            }
+                            _ => {
+                                // Other items are not yet supported in inline modules
+                            }
+                        }
+                    }
+
+                    // Store module dict in environment
+                    env.insert(mod_decl.name.clone(), Value::Dict(module_dict));
+                }
+                // External module declarations (no body) are handled by the module resolver
+            }
+            Node::MultiUse(_)
             | Node::CommonUseStmt(_)
             | Node::ExportUseStmt(_)
             | Node::AutoImportStmt(_)
