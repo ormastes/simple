@@ -132,6 +132,14 @@ impl RuntimeSymbolProvider for StaticSymbolProvider {
             rt_sandbox_is_configured, rt_sandbox_get_cpu_time, rt_sandbox_get_memory, rt_sandbox_get_network_mode,
             rt_sandbox_get_fs_mode,
         };
+        // SIMD vector operations
+        use simple_runtime::value::{
+            rt_neighbor_load, rt_vec_abs, rt_vec_all, rt_vec_any, rt_vec_blend, rt_vec_ceil, rt_vec_clamp,
+            rt_vec_extract, rt_vec_floor, rt_vec_fma, rt_vec_gather, rt_vec_load, rt_vec_masked_load,
+            rt_vec_masked_store, rt_vec_max, rt_vec_max_vec, rt_vec_min, rt_vec_min_vec, rt_vec_product,
+            rt_vec_recip, rt_vec_round, rt_vec_scatter, rt_vec_select, rt_vec_shuffle, rt_vec_sqrt,
+            rt_vec_store, rt_vec_sum, rt_vec_with,
+        };
         // NOTE: Parser and compiler operations (rt_parse_simple_file, rt_api_surface_extract,
         // rt_symbol_usage_find) are not included to avoid cyclic dependency
         // (compiler -> native-loader -> compiler).
@@ -183,6 +191,35 @@ impl RuntimeSymbolProvider for StaticSymbolProvider {
             ffi_regex_replace_all,
             ffi_regex_split,
             ffi_regex_split_n,
+            // SIMD vector operations
+            rt_neighbor_load,
+            rt_vec_abs,
+            rt_vec_all,
+            rt_vec_any,
+            rt_vec_blend,
+            rt_vec_ceil,
+            rt_vec_clamp,
+            rt_vec_extract,
+            rt_vec_floor,
+            rt_vec_fma,
+            rt_vec_gather,
+            rt_vec_load,
+            rt_vec_masked_load,
+            rt_vec_masked_store,
+            rt_vec_max,
+            rt_vec_max_vec,
+            rt_vec_min,
+            rt_vec_min_vec,
+            rt_vec_product,
+            rt_vec_recip,
+            rt_vec_round,
+            rt_vec_scatter,
+            rt_vec_select,
+            rt_vec_shuffle,
+            rt_vec_sqrt,
+            rt_vec_store,
+            rt_vec_sum,
+            rt_vec_with,
             // Value creation/conversion
             rt_value_int,
             rt_value_float,

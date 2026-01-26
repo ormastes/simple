@@ -14,6 +14,7 @@ impl<'a> Parser<'a> {
             TokenKind::MinusAssign => Some(AssignOp::SubAssign),
             TokenKind::StarAssign => Some(AssignOp::MulAssign),
             TokenKind::SlashAssign => Some(AssignOp::DivAssign),
+            TokenKind::PercentAssign => Some(AssignOp::ModAssign),
             TokenKind::TildeAssign => Some(AssignOp::SuspendAssign),
             TokenKind::TildePlusAssign => Some(AssignOp::SuspendAddAssign),
             TokenKind::TildeMinusAssign => Some(AssignOp::SuspendSubAssign),
@@ -173,6 +174,10 @@ impl<'a> Parser<'a> {
                 | TokenKind::Tilde
                 | TokenKind::Ampersand
                 | TokenKind::Star
+                | TokenKind::New
+                | TokenKind::Old
+                | TokenKind::From
+                | TokenKind::To
         )
     }
 

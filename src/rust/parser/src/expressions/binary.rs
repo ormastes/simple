@@ -48,7 +48,10 @@ macro_rules! parse_binary_multi {
 
 impl<'a> Parser<'a> {
     // Binary expression parsing with precedence (using macros to reduce duplication)
-    // Precedence (lowest to highest): or, and, equality, comparison, bitwise_or, bitwise_xor, bitwise_and, shift, term, factor, power
+    // Precedence (lowest to highest): pipe, or, and, equality, comparison, bitwise_or, bitwise_xor, bitwise_and, shift, term, factor, power
+
+    // Pipeline operator |> (lowest precedence - passes value to function)
+    parse_binary_single!(parse_pipe, parse_or, PipeForward, BinOp::PipeForward);
 
     // Logical operators (support both keyword and symbol forms: or/||, and/&&)
     // Also supports suspension variants: and~, or~ (awaits RHS before evaluation)
@@ -63,7 +66,7 @@ impl<'a> Parser<'a> {
         AndSuspend => BinOp::AndSuspend,
     );
     parse_binary_single!(parse_bitwise_or, parse_bitwise_xor, Pipe, BinOp::BitOr);
-    parse_binary_single!(parse_bitwise_xor, parse_bitwise_and, Caret, BinOp::BitXor);
+    parse_binary_single!(parse_bitwise_xor, parse_bitwise_and, Xor, BinOp::BitXor);
     parse_binary_single!(parse_bitwise_and, parse_shift, Ampersand, BinOp::BitAnd);
 
     // Multi-token operators

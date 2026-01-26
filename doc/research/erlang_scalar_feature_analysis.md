@@ -268,11 +268,17 @@ fn factorial(0) -> Int:
 fn factorial(n: Int) -> Int:
     n * factorial(n - 1)
 
-# Or combined syntax:
+# Combined syntax with case (traditional):
 fn factorial(n: Int) -> Int:
     match n:
         case 0: 1
         case _: n * factorial(n - 1)
+
+# Combined syntax with | -> (Erlang-style, PREFERRED):
+fn factorial(n: Int) -> Int:
+    match n:
+        | 0 -> 1
+        | _ -> n * factorial(n - 1)
 
 # Pattern match on data types
 fn area(shape: Shape) -> Float:

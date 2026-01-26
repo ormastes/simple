@@ -189,6 +189,11 @@ impl<'a> Parser<'a> {
 
     /// Check if the next token after the current could start a type.
     /// Used to distinguish typed patterns (x: Int) from match arm separators (case x:).
+    ///
+    /// For typed patterns in match arms like `case x: Int -> body`, after the type
+    /// we expect a separator (`->`, `=>`), guard (`if`), or newline+block.
+    /// For match arm bodies like `case x: foo(1)` or `case x: None`, we should NOT
+    /// interpret this as a typed pattern.
     pub(crate) fn peek_is_type_start(&mut self) -> bool {
         // Save current state
         let saved_current = self.current.clone();
@@ -196,23 +201,67 @@ impl<'a> Parser<'a> {
 
         // Advance past colon to peek at what follows
         self.advance();
+        let first_token = self.current.clone();
 
         // Check if this token could start a type expression
-        let result = matches!(
-            &self.current.kind,
-            TokenKind::Identifier { .. }
-                | TokenKind::LParen
-                | TokenKind::LBracket
-                | TokenKind::Fn
-                | TokenKind::Mut
-                | TokenKind::Dyn
-                | TokenKind::Ampersand
-        );
+        let result = match &first_token.kind {
+            // If it's an identifier, we need to check what follows
+            // to distinguish types from function calls/expressions
+            TokenKind::Identifier { .. } => {
+                // Peek at the next token
+                self.advance();
+                let second_token = self.current.clone();
 
-        // Restore state - push current to front of pending tokens
-        self.pending_tokens.push_front(self.current.clone());
-        self.current = saved_current;
-        self.previous = saved_previous;
+                let is_type = match &second_token.kind {
+                    // `ident(` - function call expression, not a type
+                    TokenKind::LParen => false,
+                    // `ident<` - generic type like `Option<T>`
+                    TokenKind::Lt => true,
+                    // `ident ->` or `ident =>` - typed pattern separator, so it IS a type
+                    TokenKind::Arrow | TokenKind::FatArrow => true,
+                    // `ident if` - guard clause, so the ident was a type
+                    TokenKind::If => true,
+                    // `ident\n` or `ident,` etc - ambiguous, default to NOT a type
+                    // This covers cases like `case x: None` where None is an expression
+                    _ => false,
+                };
+
+                // Restore: push both consumed tokens back
+                self.pending_tokens.push_front(second_token);
+                self.pending_tokens.push_front(first_token);
+                self.current = saved_current;
+                self.previous = saved_previous;
+                is_type
+            }
+            // These tokens definitively start types
+            TokenKind::LBracket
+            | TokenKind::Fn
+            | TokenKind::Mut
+            | TokenKind::Dyn
+            | TokenKind::Ampersand => {
+                // Restore: push the consumed token back
+                self.pending_tokens.push_front(first_token);
+                self.current = saved_current;
+                self.previous = saved_previous;
+                true
+            }
+            // LParen could be a tuple type or a parenthesized expression
+            // Be conservative and say no - match arm body is more common
+            TokenKind::LParen => {
+                // Restore: push the consumed token back
+                self.pending_tokens.push_front(first_token);
+                self.current = saved_current;
+                self.previous = saved_previous;
+                false
+            }
+            _ => {
+                // Restore: push the consumed token back
+                self.pending_tokens.push_front(first_token);
+                self.current = saved_current;
+                self.previous = saved_previous;
+                false
+            }
+        };
 
         result
     }
@@ -293,13 +342,13 @@ impl<'a> Parser<'a> {
             TokenKind::AndThen => "and_then".to_string(),
             // Allow context keyword to be used as identifier in BDD DSL
             TokenKind::Context => "context".to_string(),
-            // Allow 'default' to be used as trait name (e.g., Default trait)
-            TokenKind::Default => "Default".to_string(),
+            // Allow 'default' to be used as identifier (field name, variable, trait name)
+            TokenKind::Default => "default".to_string(),
             // Allow 'common' to be used as identifier (directory name in stdlib)
             TokenKind::Common => "common".to_string(),
-            // Allow logical/conversion operators as trait names
+            // Allow logical/conversion operators as trait names or identifiers
             TokenKind::Not => "Not".to_string(),
-            TokenKind::From => "From".to_string(),
+            TokenKind::From => "from".to_string(),
             // Allow math keywords to be used as identifiers (e.g., struct Slice<T>)
             // These are only keywords inside m{} math blocks
             TokenKind::Slice => "Slice".to_string(),
@@ -315,6 +364,19 @@ impl<'a> Parser<'a> {
             // Allow 'old' to be used as identifier (variable name)
             // The 'old' keyword is only used in contracts: `old(x)`
             TokenKind::Old => "old".to_string(),
+            // Allow 'bounds' to be used as identifier (variable name, struct field)
+            // The 'bounds' keyword is only used in type constraint contexts
+            TokenKind::Bounds => "bounds".to_string(),
+            // Allow 'to' and 'from' to be used as identifiers (field names like 'from', 'to')
+            // The 'to' keyword is for range syntax (1 to 10)
+            // The 'from' keyword is for type conversion traits
+            TokenKind::To => "to".to_string(),
+            // Note: 'From' is already handled above as "From"
+            // Allow 'mod' to be used as module name (pub mod mod)
+            TokenKind::Mod => "mod".to_string(),
+            // Allow 'unit' to be used as identifier (field names like 'unit: Type')
+            // The 'unit' keyword is only used for unit type context
+            TokenKind::Unit => "unit".to_string(),
             _ => {
                 return Err(ParseError::unexpected_token(
                     "identifier",
@@ -497,11 +559,21 @@ impl<'a> Parser<'a> {
             // Allow Gherkin keywords as method names
             TokenKind::Examples => "examples",
             TokenKind::Outline => "outline",
+            TokenKind::Bounds => "bounds",
+            TokenKind::Alias => "alias",
             TokenKind::AndThen => "and_then",
             // Allow set operation keywords as method names
             TokenKind::Union => "union",
             // Allow safe unwrap keyword as method name (e.g., opt.unwrap())
             TokenKind::Unwrap => "unwrap",
+            // Allow 'literal' as method name (used in DimExpr and similar types)
+            TokenKind::Literal => "literal",
+            // Allow 'var' as method name (used in DimExpr for variable dimensions)
+            TokenKind::Var => "var",
+            // Allow 'val' as method name
+            TokenKind::Val => "val",
+            // Allow 'move' as method name (e.g., MirOperand::move(local))
+            TokenKind::Move => "move",
             // Special error for 'exists' - reserved for verification quantifiers
             TokenKind::Exists => {
                 return Err(ParseError::syntax_error_with_span(

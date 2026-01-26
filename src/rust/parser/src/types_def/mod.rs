@@ -29,22 +29,53 @@ impl<'a> Parser<'a> {
         self.expect(&TokenKind::Struct)?;
         let name = self.expect_identifier()?;
         let generic_params = self.parse_generic_params_as_strings()?;
-        let where_clause = self.parse_where_clause()?;
-        // Parse fields, optional inline methods, optional invariant, and doc comment
-        let (fields, methods, invariant, doc_comment) = self.parse_indented_fields_and_methods()?;
 
-        Ok(Node::Struct(StructDef {
+        // Check for trait implementation syntax: struct Name(Trait):
+        // This means the struct implements the given trait
+        let implements_trait = if self.check(&TokenKind::LParen) {
+            self.advance();
+            let trait_name = self.expect_identifier()?;
+            self.expect(&TokenKind::RParen)?;
+            Some(trait_name)
+        } else {
+            None
+        };
+
+        let where_clause = self.parse_where_clause()?;
+
+        // Check for empty struct (no body)
+        // Empty structs are declared as just "struct Name" without a colon and body
+        let (fields, methods, invariant, doc_comment) = if self.check(&TokenKind::Newline) || self.is_at_end() {
+            // Empty struct - no fields, methods, invariant, or doc comment
+            (Vec::new(), Vec::new(), None, None)
+        } else {
+            // Parse fields, optional inline methods, optional invariant, and doc comment
+            self.parse_indented_fields_and_methods()?
+        };
+
+        let struct_def = StructDef {
             span: self.make_span(start_span),
-            name,
-            generic_params,
+            name: name.clone(),
+            generic_params: generic_params.clone(),
             where_clause,
             fields,
-            methods,
+            methods: methods.clone(),
             visibility: Visibility::Private,
             attributes,
             doc_comment,
             invariant,
-        }))
+        };
+
+        // If struct implements a trait, generate both struct and impl nodes
+        // For now, just store the trait in the struct for later processing
+        // The compiler can generate the impl from methods marked with the trait
+        if let Some(_trait_name) = implements_trait {
+            // For now, treat methods in the struct body as trait implementations
+            // This is simplified - a full implementation would generate an impl block
+            Ok(Node::Struct(struct_def))
+        } else {
+            Ok(Node::Struct(struct_def))
+        }
     }
 
     // === Class ===
@@ -101,7 +132,14 @@ impl<'a> Parser<'a> {
         }
 
         let where_clause = self.parse_where_clause()?;
-        let (fields, methods, invariant, macro_invocations, mut mixins, doc_comment) = self.parse_class_body()?;
+
+        // Check for empty class (no body)
+        let (fields, methods, invariant, macro_invocations, mut mixins, doc_comment) = if self.check(&TokenKind::Newline) || self.is_at_end() {
+            // Empty class - no fields, methods, invariant, etc.
+            (Vec::new(), Vec::new(), None, Vec::new(), Vec::new(), None)
+        } else {
+            self.parse_class_body()?
+        };
 
         // Prepend explicit mixins from `with` clause
         mixins.splice(0..0, explicit_mixins);
@@ -390,6 +428,37 @@ impl<'a> Parser<'a> {
                     ));
                 }
                 invariant = self.parse_invariant_block()?;
+            } else if self.check(&TokenKind::Var) && self.peek_is(&TokenKind::Fn) {
+                // Deprecated `var fn` syntax - emit warning and parse as mutable method
+                use crate::error_recovery::{ErrorHint, ErrorHintLevel};
+                let warning = ErrorHint {
+                    level: ErrorHintLevel::Warning,
+                    message: "Deprecated: `var fn` syntax".to_string(),
+                    span: self.current.span,
+                    suggestion: Some("Replace `var fn method()` with `me method()`".to_string()),
+                    help: None,
+                };
+                self.error_hints.push(warning);
+                self.advance(); // consume 'var'
+                // Now parse as mutable method (fn will be parsed next)
+                let item = self.parse_item()?;
+                if let Node::Function(mut f) = item {
+                    f.is_me_method = true;
+                    // Auto-inject 'self' parameter for instance methods if not present
+                    if f.params.is_empty() || f.params[0].name != "self" {
+                        let self_param = Parameter {
+                            span: f.span,
+                            name: "self".to_string(),
+                            ty: None,
+                            default: None,
+                            mutability: Mutability::Immutable,
+                            inject: false,
+                            variadic: false,
+                        };
+                        f.params.insert(0, self_param);
+                    }
+                    methods.push(f);
+                }
             } else if self.check(&TokenKind::Fn)
                 || self.check(&TokenKind::Me)  // Mutable method keyword
                 || self.check(&TokenKind::Async)
@@ -400,6 +469,18 @@ impl<'a> Parser<'a> {
             {
                 // Method (optionally async/decorated/attributed/pub/static).
                 let start_span = self.current.span;
+
+                // Parse decorators first (@inject, @effect, etc.)
+                let mut decorators = Vec::new();
+                while self.check(&TokenKind::At) {
+                    let decorator = self.parse_decorator()?;
+                    decorators.push(decorator);
+                    // Skip newlines after decorator
+                    while self.check(&TokenKind::Newline) {
+                        self.advance();
+                    }
+                }
+
                 // Handle optional `static` keyword for static methods
                 let is_static = if self.check(&TokenKind::Static) {
                     self.advance();
@@ -407,7 +488,14 @@ impl<'a> Parser<'a> {
                 } else {
                     false
                 };
-                let item = self.parse_item()?;
+
+                // Parse the function (with decorators already parsed)
+                let item = if decorators.is_empty() {
+                    self.parse_item()?
+                } else {
+                    // Parse function directly with decorators
+                    self.parse_function_with_decorators(decorators)?
+                };
                 if let Node::Function(mut f) = item {
                     // Auto-inject 'self' parameter for instance methods (non-static) if not present
                     // Skip auto-injection for constructors (methods named "new")
@@ -542,6 +630,18 @@ impl<'a> Parser<'a> {
                 || (self.check(&TokenKind::Pub) && (self.peek_is(&TokenKind::Fn) || self.peek_is(&TokenKind::Async) || self.peek_is(&TokenKind::Me)))
             {
                 let start_span = self.current.span;
+
+                // Parse decorators first (@inject, @effect, etc.)
+                let mut decorators = Vec::new();
+                while self.check(&TokenKind::At) {
+                    let decorator = self.parse_decorator()?;
+                    decorators.push(decorator);
+                    // Skip newlines after decorator
+                    while self.check(&TokenKind::Newline) {
+                        self.advance();
+                    }
+                }
+
                 // Handle optional `static` keyword for static methods
                 let is_static = if self.check(&TokenKind::Static) {
                     self.advance();
@@ -549,7 +649,14 @@ impl<'a> Parser<'a> {
                 } else {
                     false
                 };
-                let item = self.parse_item()?;
+
+                // Parse the function (with decorators already parsed)
+                let item = if decorators.is_empty() {
+                    self.parse_item()?
+                } else {
+                    // Parse function directly with decorators
+                    self.parse_function_with_decorators(decorators)?
+                };
                 if let Node::Function(mut f) = item {
                     // Auto-inject 'self' parameter for instance methods (non-static) if not present
                     // Skip auto-injection for constructors (methods named "new")
@@ -577,11 +684,34 @@ impl<'a> Parser<'a> {
                 // Macro invocation: macro_name!(args)
                 macro_invocations.push(self.parse_class_body_macro_invocation()?);
             } else if self.check(&TokenKind::Var) && self.peek_is(&TokenKind::Fn) {
-                // Common mistake: `var fn` instead of `me` for mutable methods
-                return Err(ParseError::syntax_error_with_span(
-                    "Use `me` keyword instead of `var fn` for mutable methods. Example: `me update(x: i32):` instead of `var fn update(x: i32):`",
-                    self.current.span,
-                ));
+                // Deprecated `var fn` syntax - emit warning and parse as mutable method
+                use crate::error_recovery::{ErrorHint, ErrorHintLevel};
+                let warning = ErrorHint {
+                    level: ErrorHintLevel::Warning,
+                    message: "Deprecated: `var fn` syntax".to_string(),
+                    span: self.current.span,
+                    suggestion: Some("Replace `var fn method()` with `me method()`".to_string()),
+                    help: None,
+                };
+                self.error_hints.push(warning);
+                self.advance(); // consume 'var'
+                let item = self.parse_item()?;
+                if let Node::Function(mut f) = item {
+                    f.is_me_method = true;
+                    if f.params.is_empty() || f.params[0].name != "self" {
+                        let self_param = Parameter {
+                            span: f.span,
+                            name: "self".to_string(),
+                            ty: None,
+                            default: None,
+                            mutability: Mutability::Immutable,
+                            inject: false,
+                            variadic: false,
+                        };
+                        f.params.insert(0, self_param);
+                    }
+                    methods.push(f);
+                }
             } else {
                 fields.push(self.parse_field()?);
             }

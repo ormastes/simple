@@ -63,9 +63,15 @@ pub(super) fn compile_collection_lit<M: Module>(
     spec: &CollectionSpec,
 ) {
     // Create the collection
+    // Use minimum capacity of 16 for arrays to allow push operations on empty arrays
     let create_id = ctx.runtime_funcs[spec.create_fn];
     let create_ref = ctx.module.declare_func_in_func(create_id, builder.func);
-    let size = builder.ins().iconst(types::I64, elements.len() as i64);
+    let capacity = if elements.is_empty() && spec.create_fn == "rt_array_new" {
+        16 // Default capacity for empty arrays to allow push
+    } else {
+        elements.len()
+    };
+    let size = builder.ins().iconst(types::I64, capacity as i64);
     let call = builder.ins().call(create_ref, &[size]);
     let collection = builder.inst_results(call)[0];
 
@@ -350,7 +356,14 @@ pub(super) fn compile_index_get<M: Module>(
     let wrapped_idx = builder.inst_results(wrap_call)[0];
 
     let call = builder.ins().call(index_get_ref, &[coll_val, wrapped_idx]);
-    let result = builder.inst_results(call)[0];
+    let runtime_value = builder.inst_results(call)[0];
+
+    // Unwrap RuntimeValue to raw i64 using rt_value_as_int
+    let value_as_int_id = ctx.runtime_funcs["rt_value_as_int"];
+    let value_as_int_ref = ctx.module.declare_func_in_func(value_as_int_id, builder.func);
+    let unwrap_call = builder.ins().call(value_as_int_ref, &[runtime_value]);
+    let result = builder.inst_results(unwrap_call)[0];
+
     ctx.vreg_values.insert(dest, result);
 }
 

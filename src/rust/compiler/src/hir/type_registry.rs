@@ -109,6 +109,14 @@ impl TypeRegistry {
         registry
             .name_to_id
             .insert("str".to_string(), TypeId::STRING);
+        // Simple uses "text" as the canonical string type name
+        registry
+            .name_to_id
+            .insert("text".to_string(), TypeId::STRING);
+        // Also support "String" for compatibility
+        registry
+            .name_to_id
+            .insert("String".to_string(), TypeId::STRING);
         registry.name_to_id.insert("nil".to_string(), TypeId::NIL);
 
         registry
@@ -139,6 +147,33 @@ impl TypeRegistry {
     pub fn get_array_element(&self, id: TypeId) -> Option<TypeId> {
         match self.types.get(&id) {
             Some(HirType::Array { element, .. }) => Some(*element),
+            _ => None,
+        }
+    }
+
+    /// Get the element type of an iterable type (for-loop type inference)
+    ///
+    /// Handles multiple iterable types:
+    /// - Arrays [T] → element type T
+    /// - Strings → element type is u8 (byte iteration)
+    /// - Other types (Range, custom iterators) → None (caller should fallback)
+    pub fn get_iterable_element(&self, id: TypeId) -> Option<TypeId> {
+        match self.types.get(&id) {
+            // Arrays: element type is T
+            Some(HirType::Array { element, .. }) => Some(*element),
+            // Strings: iterate as bytes (u8)
+            Some(HirType::String) => Some(TypeId::U8),
+            // Tuples: not typically iterable, but could be
+            Some(HirType::Tuple(elements)) if !elements.is_empty() => {
+                // For tuples, check if all elements have the same type
+                let first = elements[0];
+                if elements.iter().all(|e| *e == first) {
+                    Some(first)
+                } else {
+                    // Heterogeneous tuple - no common element type
+                    None
+                }
+            }
             _ => None,
         }
     }

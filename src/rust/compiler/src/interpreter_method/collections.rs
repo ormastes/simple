@@ -558,6 +558,46 @@ pub fn handle_array_methods(
             // Return empty array (functional style - original is not modified)
             Value::Array(vec![])
         }
+        "sorted" => {
+            // Alias for sort - returns a new sorted array
+            let mut new_arr = arr.to_vec();
+            new_arr.sort_by(|a, b| match (a, b) {
+                (Value::Int(a), Value::Int(b)) => a.cmp(b),
+                (Value::Float(a), Value::Float(b)) => a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal),
+                (Value::Str(a), Value::Str(b)) => a.cmp(b),
+                _ => std::cmp::Ordering::Equal,
+            });
+            Value::Array(new_arr)
+        }
+        "reversed" => {
+            // Alias for reverse - returns a new reversed array
+            let mut new_arr = arr.to_vec();
+            new_arr.reverse();
+            Value::Array(new_arr)
+        }
+        "copy" | "clone" => {
+            // Return a shallow copy of the array
+            Value::Array(arr.to_vec())
+        }
+        "all_truthy" => {
+            // Check if all elements are truthy (without a predicate function)
+            Value::Bool(arr.iter().all(|v| v.truthy()))
+        }
+        "any_truthy" => {
+            // Check if any element is truthy (without a predicate function)
+            Value::Bool(arr.iter().any(|v| v.truthy()))
+        }
+        "count_of" => {
+            // Count occurrences of a specific value
+            let needle = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
+            let count = arr.iter().filter(|v| *v == &needle).count();
+            Value::Int(count as i64)
+        }
+        "fill" => {
+            // Fill array with a value (returns new array of same length)
+            let value = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
+            Value::Array(vec![value; arr.len()])
+        }
         _ => return Ok(None),
     };
     Ok(Some(result))

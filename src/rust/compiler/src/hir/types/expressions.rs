@@ -411,6 +411,7 @@ pub enum BinOp {
     BitXor,
     ShiftLeft,
     ShiftRight,
+    PipeForward,
 }
 
 impl From<simple_parser::BinOp> for BinOp {
@@ -441,6 +442,7 @@ impl From<simple_parser::BinOp> for BinOp {
             simple_parser::BinOp::ShiftRight => BinOp::ShiftRight,
             simple_parser::BinOp::Is => BinOp::Is,
             simple_parser::BinOp::In => BinOp::In,
+            simple_parser::BinOp::PipeForward => BinOp::PipeForward,
         }
     }
 }

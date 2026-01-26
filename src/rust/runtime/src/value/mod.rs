@@ -785,8 +785,10 @@ pub use file_io::{
 
 // Re-export SIMD vector operations
 pub use simd::{
-    rt_vec_abs, rt_vec_all, rt_vec_any, rt_vec_blend, rt_vec_ceil, rt_vec_extract, rt_vec_floor, rt_vec_max,
-    rt_vec_min, rt_vec_product, rt_vec_round, rt_vec_select, rt_vec_shuffle, rt_vec_sqrt, rt_vec_sum, rt_vec_with,
+    rt_neighbor_load, rt_vec_abs, rt_vec_all, rt_vec_any, rt_vec_blend, rt_vec_ceil, rt_vec_clamp, rt_vec_extract,
+    rt_vec_floor, rt_vec_fma, rt_vec_gather, rt_vec_load, rt_vec_masked_load, rt_vec_masked_store, rt_vec_max,
+    rt_vec_max_vec, rt_vec_min, rt_vec_min_vec, rt_vec_product, rt_vec_recip, rt_vec_round, rt_vec_scatter,
+    rt_vec_select, rt_vec_shuffle, rt_vec_sqrt, rt_vec_store, rt_vec_sum, rt_vec_with,
 };
 
 // Re-export regex FFI functions

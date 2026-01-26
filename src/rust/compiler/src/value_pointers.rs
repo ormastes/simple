@@ -280,6 +280,9 @@ impl Clone for Value {
                 enum_name: enum_name.clone(),
                 variant_name: variant_name.clone(),
             },
+            Value::TraitType { trait_name } => Value::TraitType {
+                trait_name: trait_name.clone(),
+            },
             Value::TraitObject { trait_name, inner } => Value::TraitObject {
                 trait_name: trait_name.clone(),
                 inner: inner.clone(),

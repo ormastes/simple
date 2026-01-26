@@ -76,6 +76,14 @@ impl<'a> Parser<'a> {
                     }
                 }
                 TokenKind::LBracket => {
+                    // Only treat [ as indexing if it's adjacent to the previous token
+                    // (no whitespace between). This allows `expect [1, 2, 3]` to work
+                    // where [1, 2, 3] is a separate argument, not indexing.
+                    // Check: if previous token's end != current token's start, there's whitespace
+                    if self.previous.span.end != self.current.span.start {
+                        // Not adjacent - break to let no-paren call handling deal with it
+                        break;
+                    }
                     self.advance();
 
                     // Check for slicing: arr[start:end:step] or arr[:] or arr[::step]
@@ -126,10 +134,32 @@ impl<'a> Parser<'a> {
                         {
                             // It's a slice
                             // Handle Symbol tokens as :identifier (e.g., arr[start:end] where :end is Symbol("end"))
+                            // Note: Symbol tokens like :self may be followed by postfix operators (e.g., :self.pos)
+                            // so we need to parse them as full expressions
                             let end = if let TokenKind::Symbol(name) = &self.current.kind.clone() {
+                                // Symbol like :name means the colon was absorbed into the token
+                                // Convert Symbol(name) back to Identifier so parse_expression can handle it
+                                // This allows binary operators like `arr[0:n - 1]` to work
                                 let name = name.clone();
-                                self.advance();
-                                Some(Box::new(Expr::Identifier(name)))
+                                let span = self.current.span.clone();
+                                self.advance(); // consume the Symbol token
+
+                                // Create an identifier token and set it as current
+                                use crate::token::NamePattern;
+                                let ident_token = crate::token::Token {
+                                    kind: TokenKind::Identifier {
+                                        name: name.clone(),
+                                        pattern: NamePattern::Immutable,
+                                    },
+                                    lexeme: name,
+                                    span,
+                                };
+                                // Put what was going to be current into pending, then set ident as current
+                                self.pending_tokens.push_front(self.current.clone());
+                                self.current = ident_token;
+
+                                // Now let parse_expression handle the full expression including binary ops
+                                Some(Box::new(self.parse_expression()?))
                             } else {
                                 self.advance(); // consume the colon
                                 if self.check(&TokenKind::Colon) || self.check(&TokenKind::RBracket) {

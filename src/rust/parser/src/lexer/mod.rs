@@ -20,8 +20,9 @@ pub struct Lexer<'a> {
     at_line_start: bool,
     /// Track bracket depth to suppress INDENT/DEDENT inside delimiters
     bracket_depth: usize,
-    /// Force indentation tracking even inside brackets (for lambda bodies)
-    force_indentation: bool,
+    /// Force indentation tracking even inside brackets (for lambda bodies, match expressions)
+    /// Uses a counter to support nested contexts that both require forced indentation
+    force_indentation_depth: usize,
 }
 
 impl<'a> Lexer<'a> {
@@ -36,18 +37,37 @@ impl<'a> Lexer<'a> {
             pending_tokens: Vec::new(),
             at_line_start: true,
             bracket_depth: 0,
-            force_indentation: false,
+            force_indentation_depth: 0,
         }
     }
 
-    /// Enable indentation tracking even inside brackets (for lambda bodies)
+    /// Create a lexer for parsing inline expressions (e.g., f-string interpolations).
+    /// Unlike `new()`, this lexer does NOT treat leading whitespace as indentation.
+    pub fn new_expression(source: &'a str) -> Self {
+        Self {
+            source,
+            chars: source.char_indices().peekable(),
+            current_pos: 0,
+            line: 1,
+            column: 1,
+            indent_stack: vec![0],
+            pending_tokens: Vec::new(),
+            at_line_start: false, // Don't treat leading whitespace as indentation
+            bracket_depth: 0,
+            force_indentation_depth: 0,
+        }
+    }
+
+    /// Enable indentation tracking even inside brackets (for lambda bodies, match expressions)
+    /// Uses a counter to support nested contexts (e.g., lambda inside match arm body)
     pub fn enable_forced_indentation(&mut self) {
-        self.force_indentation = true;
+        self.force_indentation_depth += 1;
     }
 
     /// Disable forced indentation tracking
+    /// Only fully disables when all nested contexts have been closed
     pub fn disable_forced_indentation(&mut self) {
-        self.force_indentation = false;
+        self.force_indentation_depth = self.force_indentation_depth.saturating_sub(1);
     }
 
     pub fn tokenize(&mut self) -> Vec<Token> {
@@ -75,7 +95,7 @@ impl<'a> Lexer<'a> {
         if self.at_line_start {
             self.at_line_start = false;
             // Skip indentation handling when inside brackets/parens/braces, unless force_indentation is enabled
-            if self.bracket_depth == 0 || self.force_indentation {
+            if self.bracket_depth == 0 || self.force_indentation_depth > 0 {
                 if let Some(indent_token) = self.handle_indentation() {
                     return indent_token;
                 }
@@ -130,6 +150,12 @@ impl<'a> Lexer<'a> {
                 self.line += 1;
                 self.column = 1;
                 self.at_line_start = true;
+                // Skip newlines inside brackets (parentheses, braces, brackets)
+                // unless force_indentation is enabled (for match bodies inside lambdas)
+                if self.bracket_depth > 0 && self.force_indentation_depth == 0 {
+                    // Continue to next token instead of emitting Newline
+                    return self.next_token();
+                }
                 TokenKind::Newline
             }
 
@@ -295,7 +321,7 @@ impl<'a> Lexer<'a> {
                     TokenKind::Slash
                 }
             }
-            '%' => TokenKind::Percent,
+            '%' => self.match_char('=', TokenKind::PercentAssign, TokenKind::Percent),
             '&' => {
                 if self.check('&') {
                     self.advance();
@@ -308,6 +334,9 @@ impl<'a> Lexer<'a> {
                 if self.check('|') {
                     self.advance();
                     TokenKind::DoublePipe
+                } else if self.check('>') {
+                    self.advance();
+                    TokenKind::PipeForward
                 } else {
                     TokenKind::Pipe
                 }

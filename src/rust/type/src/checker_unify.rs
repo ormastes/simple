@@ -116,14 +116,71 @@ impl TypeChecker {
                 }
             }
 
-            // Dependent keys cannot be unified directly - they need resolution first
-            // For now, treat as compatible (actual validation happens elsewhere)
-            (Type::DependentKeys { .. }, Type::ConstKeySet { .. })
-            | (Type::ConstKeySet { .. }, Type::DependentKeys { .. }) => {
-                // TODO: Resolve dependent keys to const key set and validate
-                Ok(())
+            // Dependent keys resolution - look up the source variable's FString const_keys
+            (Type::DependentKeys { source }, Type::ConstKeySet { keys: expected_keys }) => {
+                // Resolve dependent keys from the FString keys registry
+                if let Some(resolved_keys) = self.fstring_keys.get(source) {
+                    // Compare the resolved keys with the expected keys (order-independent)
+                    let mut k1: Vec<_> = resolved_keys.clone();
+                    let mut k2: Vec<_> = expected_keys.clone();
+                    k1.sort();
+                    k2.sort();
+                    if k1 == k2 {
+                        Ok(())
+                    } else {
+                        Err(TypeError::Mismatch {
+                            expected: Type::ConstKeySet { keys: expected_keys.clone() },
+                            found: Type::ConstKeySet { keys: resolved_keys.clone() },
+                        })
+                    }
+                } else {
+                    // Source variable not found in registry - cannot resolve, treat as compatible
+                    // This allows forward references or untracked FStrings
+                    Ok(())
+                }
             }
+            (Type::ConstKeySet { keys: expected_keys }, Type::DependentKeys { source }) => {
+                // Same logic, reversed order
+                if let Some(resolved_keys) = self.fstring_keys.get(source) {
+                    let mut k1: Vec<_> = expected_keys.clone();
+                    let mut k2: Vec<_> = resolved_keys.clone();
+                    k1.sort();
+                    k2.sort();
+                    if k1 == k2 {
+                        Ok(())
+                    } else {
+                        Err(TypeError::Mismatch {
+                            expected: Type::ConstKeySet { keys: expected_keys.clone() },
+                            found: Type::ConstKeySet { keys: resolved_keys.clone() },
+                        })
+                    }
+                } else {
+                    Ok(())
+                }
+            }
+            // Two DependentKeys unify if they reference the same source
             (Type::DependentKeys { source: s1 }, Type::DependentKeys { source: s2 }) if s1 == s2 => Ok(()),
+            // Different sources - try to resolve both and compare
+            (Type::DependentKeys { source: s1 }, Type::DependentKeys { source: s2 }) => {
+                match (self.fstring_keys.get(s1), self.fstring_keys.get(s2)) {
+                    (Some(k1), Some(k2)) => {
+                        let mut k1_sorted: Vec<_> = k1.clone();
+                        let mut k2_sorted: Vec<_> = k2.clone();
+                        k1_sorted.sort();
+                        k2_sorted.sort();
+                        if k1_sorted == k2_sorted {
+                            Ok(())
+                        } else {
+                            Err(TypeError::Mismatch {
+                                expected: Type::ConstKeySet { keys: k1.clone() },
+                                found: Type::ConstKeySet { keys: k2.clone() },
+                            })
+                        }
+                    }
+                    // If either is unresolvable, treat as compatible
+                    _ => Ok(())
+                }
+            }
 
             // Mismatch
             _ => Err(TypeError::Mismatch {

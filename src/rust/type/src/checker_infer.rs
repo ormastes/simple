@@ -97,6 +97,17 @@ impl TypeChecker {
                     }
                     // Is and In operators
                     BinOp::Is | BinOp::In => Ok(Type::Bool),
+                    // Pipe forward: result type depends on the function being called
+                    // For now, infer from function return type if available, else fresh var
+                    BinOp::PipeForward => {
+                        // If right is a function type, return its result type
+                        if let Type::Function { ret, .. } = &right_ty {
+                            Ok(ret.as_ref().clone())
+                        } else {
+                            // Otherwise return a fresh type variable
+                            Ok(self.fresh_var())
+                        }
+                    }
                 }
             }
             Expr::Unary { op, operand } => {

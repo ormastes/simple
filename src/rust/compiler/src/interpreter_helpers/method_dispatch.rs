@@ -5,8 +5,8 @@ use crate::value::{Env, OptionVariant, ResultVariant, Value, METHOD_MISSING};
 use simple_parser::ast::{ClassDef, EnumDef, Expr, FunctionDef};
 use std::collections::HashMap;
 
-use super::super::{evaluate_expr, evaluate_method_call_with_self_update, exec_function, Control, Enums, ImplMethods};
-use crate::interpreter::interpreter_call::exec_function_with_values_and_self;
+use super::super::{evaluate_expr, evaluate_method_call_with_self_update, exec_function, Control, Enums, ImplMethods, BLANKET_IMPL_METHODS};
+use crate::interpreter::interpreter_call::{exec_function_with_values, exec_function_with_values_and_self};
 
 pub(crate) fn call_method_on_value(
     recv_val: Value,
@@ -196,6 +196,24 @@ pub(crate) fn call_method_on_value(
         _ => {}
     }
 
+    // UFCS Fallback: Try to find a free function with the method name
+    // This allows both len(x) and x.len() syntax to work in chained calls
+    if let Some(func) = _functions.get(method).cloned() {
+        // Prepend receiver to the arguments
+        let mut arg_values = vec![recv_val.clone()];
+        arg_values.extend(_args.iter().cloned());
+        // Call the function with receiver as first argument
+        return exec_function_with_values(
+            &func,
+            &arg_values,
+            _env,
+            _functions,
+            _classes,
+            _enums,
+            _impl_methods,
+        );
+    }
+
     let ctx = ErrorContext::new()
         .with_code(codes::METHOD_NOT_FOUND)
         .with_help("check that the method is defined on this type");
@@ -222,7 +240,7 @@ pub(crate) fn build_method_missing_args(
 }
 
 /// Internal helper: find and execute a method by name on a class/struct object.
-/// Searches in class_def methods first, then impl_methods.
+/// Searches in class_def methods first, then impl_methods, then blanket impls.
 /// Returns Ok(Some(value)) if method found, Ok(None) if not found.
 fn find_method_and_exec(
     method_name: &str,
@@ -265,6 +283,33 @@ fn find_method_and_exec(
             )?));
         }
     }
+
+    // Check blanket impls - search all registered blanket impls for the method
+    // Blanket impls apply to any type that doesn't have a concrete impl
+    let blanket_method: Option<FunctionDef> = BLANKET_IMPL_METHODS.with(|cell| {
+        let blanket_impls = cell.borrow();
+        // Search through all blanket impls (keyed by trait name)
+        for (_trait_name, methods) in blanket_impls.iter() {
+            if let Some(func) = methods.iter().find(|m| m.name == method_name) {
+                return Some(func.clone());
+            }
+        }
+        None
+    });
+
+    if let Some(func) = blanket_method {
+        return Ok(Some(exec_function(
+            &func,
+            args,
+            env,
+            functions,
+            classes,
+            enums,
+            impl_methods,
+            Some((class, fields)),
+        )?));
+    }
+
     Ok(None)
 }
 

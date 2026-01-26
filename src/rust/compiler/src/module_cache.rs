@@ -22,6 +22,9 @@ thread_local! {
     pub static MODULES_LOADING: RefCell<std::collections::HashSet<PathBuf>> = RefCell::new(std::collections::HashSet::new());
     // Track current loading depth to prevent infinite recursion
     pub static MODULE_LOAD_DEPTH: RefCell<usize> = RefCell::new(0);
+    // Cache for partial exports (type definitions only) - used for circular import resolution
+    // This contains exports after register_definitions but before process_imports_and_assignments
+    pub static PARTIAL_MODULE_EXPORTS_CACHE: RefCell<HashMap<PathBuf, Value>> = RefCell::new(HashMap::new());
 }
 
 /// Clear the module exports cache (useful between test runs)
@@ -29,6 +32,7 @@ pub fn clear_module_cache() {
     MODULE_EXPORTS_CACHE.with(|cache| cache.borrow_mut().clear());
     MODULES_LOADING.with(|loading| loading.borrow_mut().clear());
     MODULE_LOAD_DEPTH.with(|depth| *depth.borrow_mut() = 0);
+    PARTIAL_MODULE_EXPORTS_CACHE.with(|cache| cache.borrow_mut().clear());
 }
 
 /// Normalize a path to a consistent key for caching/tracking.
@@ -135,6 +139,37 @@ pub fn cache_module_exports(path: &Path, exports: Value) {
     trace!(path = ?key, "Caching module exports");
     MODULE_EXPORTS_CACHE.with(|cache| {
         cache.borrow_mut().insert(key, exports);
+    });
+}
+
+/// Get partial module exports (type definitions only) for circular import resolution
+pub fn get_partial_module_exports(path: &Path) -> Option<Value> {
+    let key = normalize_path_key(path);
+    PARTIAL_MODULE_EXPORTS_CACHE.with(|cache| {
+        let result = cache.borrow().get(&key).cloned();
+        if result.is_some() {
+            trace!(path = ?key, "Partial module exports cache hit");
+        }
+        result
+    })
+}
+
+/// Cache partial module exports (type definitions only)
+/// Called after register_definitions but before process_imports_and_assignments
+pub fn cache_partial_module_exports(path: &Path, exports: Value) {
+    let key = normalize_path_key(path);
+    trace!(path = ?key, "Caching partial module exports");
+    PARTIAL_MODULE_EXPORTS_CACHE.with(|cache| {
+        cache.borrow_mut().insert(key, exports);
+    });
+}
+
+/// Clear partial module exports for a path (after full loading completes)
+pub fn clear_partial_module_exports(path: &Path) {
+    let key = normalize_path_key(path);
+    trace!(path = ?key, "Clearing partial module exports");
+    PARTIAL_MODULE_EXPORTS_CACHE.with(|cache| {
+        cache.borrow_mut().remove(&key);
     });
 }
 

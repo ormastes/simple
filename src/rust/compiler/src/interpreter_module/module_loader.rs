@@ -2,6 +2,14 @@
 //!
 //! This module handles loading and parsing module files, managing circular imports,
 //! and caching module exports.
+//!
+//! ## Capability-Based Import Validation
+//!
+//! When a module declares `requires [capabilities]`, imports are validated:
+//! - Imported functions' effects must be compatible with importer's capabilities
+//! - If importer has `requires [io]`, it can import functions with @io
+//! - If importer has no `requires`, it can import anything (unrestricted)
+//! - Capability violations are reported at import time
 
 use std::collections::HashMap;
 use std::fs;
@@ -9,19 +17,70 @@ use std::path::Path;
 
 use tracing::{debug, error, trace, warn, instrument};
 
-use simple_parser::ast::{ClassDef, EnumDef, ImportTarget, UseStmt};
+use simple_parser::ast::{Capability, ClassDef, EnumDef, Effect, ImportTarget, Node, UseStmt};
 
 use crate::error::CompileError;
 use crate::value::{Env, Value};
 
 use super::module_cache::{
-    cache_module_exports, decrement_load_depth, get_cached_module_exports, increment_load_depth, is_module_loading,
-    mark_module_loading, unmark_module_loading, MAX_MODULE_DEPTH,
+    cache_module_exports, clear_partial_module_exports, decrement_load_depth, get_cached_module_exports,
+    get_partial_module_exports, increment_load_depth, is_module_loading, mark_module_loading, unmark_module_loading,
+    MAX_MODULE_DEPTH,
 };
 use super::module_evaluator::evaluate_module_exports;
 use super::path_resolution::resolve_module_path;
 
 type Enums = HashMap<String, EnumDef>;
+
+/// Validate that imported function effects are compatible with importer's capabilities.
+///
+/// If the importer has no `requires [capabilities]`, it's unrestricted and can import anything.
+/// Otherwise, each imported function's effects must be covered by the importer's capabilities.
+pub fn validate_import_capabilities(
+    import_name: &str,
+    func_effects: &[Effect],
+    importer_capabilities: &[Capability],
+) -> Result<(), CompileError> {
+    // If importer has no capabilities declared, it's unrestricted
+    if importer_capabilities.is_empty() {
+        return Ok(());
+    }
+
+    // Check each effect of the imported function
+    for effect in func_effects {
+        // Map effect to required capability
+        let required_cap = Capability::from_effect(effect);
+
+        // Async is always allowed (execution model, not capability)
+        if required_cap.is_none() {
+            continue;
+        }
+
+        let required_cap = required_cap.unwrap();
+
+        // Check if importer has the required capability
+        if !importer_capabilities.contains(&required_cap) {
+            return Err(CompileError::semantic(format!(
+                "Cannot import '{}' with @{} effect: module requires [{}] capability",
+                import_name,
+                effect.decorator_name(),
+                required_cap.name()
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+/// Extract capabilities from a module's AST nodes
+pub fn extract_module_capabilities(items: &[Node]) -> Vec<Capability> {
+    for item in items {
+        if let Node::RequiresCapabilities(stmt) = item {
+            return stmt.capabilities.clone();
+        }
+    }
+    Vec::new() // No capabilities = unrestricted
+}
 
 /// Get the import alias from a UseStmt if it exists
 pub fn get_import_alias(use_stmt: &UseStmt) -> Option<String> {
@@ -152,13 +211,19 @@ pub fn load_and_merge_module(
     }
 
     // Check for circular import - if this module is currently being loaded,
-    // return an empty dict to break the cycle. The actual exports will be
-    // available after the module finishes loading.
+    // return partial exports (type definitions) to break the cycle.
+    // This allows Java-style forward references where types are available
+    // even during circular imports.
     if is_module_loading(&module_path) {
-        warn!(path = ?module_path, "Circular import detected, returning empty dict");
+        // Try to get partial exports (type definitions from register_definitions)
+        if let Some(partial_exports) = get_partial_module_exports(&module_path) {
+            debug!(path = ?module_path, "Circular import detected, returning partial exports (type definitions)");
+            decrement_load_depth();
+            return Ok(partial_exports);
+        }
+        // Fallback to empty dict if no partial exports yet (module hasn't completed register_definitions)
+        warn!(path = ?module_path, "Circular import detected, returning empty dict (no partial exports yet)");
         decrement_load_depth();
-        // Circular import detected - return empty dict as placeholder
-        // This allows the current load to complete, and the cache will be populated
         return Ok(Value::Dict(HashMap::new()));
     }
 
@@ -237,6 +302,9 @@ pub fn load_and_merge_module(
     // Cache the full module exports for future use
     let exports_value = Value::Dict(exports.clone());
     cache_module_exports(&module_path, exports_value);
+
+    // Clear partial exports now that full exports are available
+    clear_partial_module_exports(&module_path);
 
     // Mark module as done loading
     unmark_module_loading(&module_path);

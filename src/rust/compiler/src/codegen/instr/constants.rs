@@ -11,6 +11,10 @@ use crate::mir::VReg;
 use super::{InstrContext, InstrResult};
 
 /// Compile ConstInt instruction: creates an i64 constant
+///
+/// Note: Integers are stored as raw values for native arithmetic operations.
+/// When passed to FFI functions that expect RuntimeValue, they need to be
+/// tagged at the call site using MirInst::BoxInt or equivalent.
 pub fn compile_const_int<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,

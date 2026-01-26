@@ -150,7 +150,13 @@ impl<'a> Parser<'a> {
                 });
             }
 
-            return Ok(Type::Tuple(types));
+            let tuple_type = Type::Tuple(types);
+            // Check for optional tuple: (T, U)?
+            if self.check(&TokenKind::Question) {
+                self.advance();
+                return Ok(Type::Optional(Box::new(tuple_type)));
+            }
+            return Ok(tuple_type);
         }
 
         // Handle array type: [T] or [T; N]
@@ -169,10 +175,16 @@ impl<'a> Parser<'a> {
             };
 
             self.expect(&TokenKind::RBracket)?;
-            return Ok(Type::Array {
+            let array_type = Type::Array {
                 element: Box::new(element),
                 size,
-            });
+            };
+            // Check for optional array: [T]?
+            if self.check(&TokenKind::Question) {
+                self.advance();
+                return Ok(Type::Optional(Box::new(array_type)));
+            }
+            return Ok(array_type);
         }
 
         // Handle SIMD vector type: vec[N, T]
@@ -435,7 +447,13 @@ impl<'a> Parser<'a> {
                 });
             }
 
-            return Ok(Type::Generic { name, args });
+            let generic_type = Type::Generic { name, args };
+            // Check for optional generic: Type<T>?
+            if self.check(&TokenKind::Question) {
+                self.advance();
+                return Ok(Type::Optional(Box::new(generic_type)));
+            }
+            return Ok(generic_type);
         }
 
         // Check for optional

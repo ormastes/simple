@@ -205,7 +205,47 @@ impl Lowerer {
     pub fn lower_module(mut self, ast_module: &Module) -> LowerResult<HirModule> {
         self.module.name = ast_module.name.clone();
 
-        // First pass: collect type and function declarations
+        // Pass 0: Pre-register all struct/class/enum names to allow self-referential types
+        // This registers placeholders so types can reference each other
+        for item in &ast_module.items {
+            match item {
+                Node::Struct(s) => {
+                    // Register placeholder struct so it can be referenced by other types
+                    self.module.types.register_named(
+                        s.name.clone(),
+                        HirType::Struct {
+                            name: s.name.clone(),
+                            fields: vec![],
+                            has_snapshot: false,
+                        },
+                    );
+                }
+                Node::Class(c) => {
+                    // Register placeholder for class (uses Struct internally)
+                    self.module.types.register_named(
+                        c.name.clone(),
+                        HirType::Struct {
+                            name: c.name.clone(),
+                            fields: vec![],
+                            has_snapshot: false,
+                        },
+                    );
+                }
+                Node::Enum(e) => {
+                    // Register placeholder enum so it can be referenced by other types
+                    self.module.types.register_named(
+                        e.name.clone(),
+                        HirType::Enum {
+                            name: e.name.clone(),
+                            variants: vec![],
+                        },
+                    );
+                }
+                _ => {}
+            }
+        }
+
+        // First pass: collect type and function declarations (with full field resolution)
         for item in &ast_module.items {
             self.register_declarations_from_node(item)?;
         }
@@ -253,6 +293,7 @@ impl Lowerer {
                 | Node::Expression(_) => {}
                 Node::ModDecl(_)
                 | Node::UseStmt(_)
+                | Node::MultiUse(_)
                 | Node::CommonUseStmt(_)
                 | Node::ExportUseStmt(_)
                 | Node::AutoImportStmt(_)

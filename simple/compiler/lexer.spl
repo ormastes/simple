@@ -3,7 +3,8 @@
 # Converts source text into a stream of tokens.
 # Handles indentation-based syntax (Python-style).
 
-import .blocks.{BlockRegistry, block_registry, LexerMode, LexerConfig}
+use blocks.registry.{BlockRegistry, block_registry}
+use blocks.modes.{LexerMode, LexerConfig}
 
 # ============================================================================
 # Token Types
@@ -192,12 +193,11 @@ impl Span:
         self.end - self.start
 
     fn merge(other: Span) -> Span:
-        Span(
-            start: min(self.start, other.start),
-            end: max(self.end, other.end),
-            line: min(self.line, other.line),
-            col: if self.line <= other.line: self.col else: other.col
-        )
+        val new_start = if self.start < other.start: self.start else: other.start
+        val new_end = if self.end > other.end: self.end else: other.end
+        val new_line = if self.line < other.line: self.line else: other.line
+        val new_col = if self.line <= other.line: self.col else: other.col
+        Span.new(new_start, new_end, new_line, new_col)
 
 struct Token:
     """A token with its kind, span, and text."""
@@ -291,11 +291,11 @@ impl Lexer:
             in_math_block: false,
             math_brace_depth: 0,
             prev_token_kind: TokenKind.Eof,
-            pending_token: None,
+            pending_token: nil,
             generic_depth: 0,
             # Block system initialization
             block_registry: block_registry(),  # Use global registry
-            current_block_kind: None,
+            current_block_kind: nil,
             current_lexer_mode: LexerMode.Normal,
             in_raw_block: false,
             raw_block_start: 0,
@@ -316,10 +316,10 @@ impl Lexer:
             in_math_block: false,
             math_brace_depth: 0,
             prev_token_kind: TokenKind.Eof,
-            pending_token: None,
+            pending_token: nil,
             generic_depth: 0,
             block_registry: registry,
-            current_block_kind: None,
+            current_block_kind: nil,
             current_lexer_mode: LexerMode.Normal,
             in_raw_block: false,
             raw_block_start: 0,
@@ -375,7 +375,6 @@ impl Lexer:
 
     me next_token() -> Token:
         """Get the next token from the source, with implicit multiplication."""
-
         # Return pending token if we inserted ImplicitMul
         if self.pending_token.?:
             val token = self.pending_token.unwrap()
@@ -423,6 +422,9 @@ impl Lexer:
 
         # Get current character
         val c = self.peek()
+        val start = self.pos
+        val line = self.line
+        val col = self.col
 
         # Handle different token types
         match c:
@@ -467,13 +469,13 @@ impl Lexer:
             case _:
                 return self.scan_operator_or_delimiter()
 
-    me peek() -> char:
+    fn peek() -> char:
         """Peek at current character without consuming."""
         if self.is_at_end():
             return '\0'
         self.source[self.pos]
 
-    me peek_next() -> char:
+    fn peek_next() -> char:
         """Peek at next character without consuming."""
         if self.pos + 1 >= self.source.len():
             return '\0'
@@ -491,7 +493,7 @@ impl Lexer:
             self.col = self.col + 1
         c
 
-    me is_at_end() -> bool:
+    fn is_at_end() -> bool:
         """Check if we've reached end of source."""
         self.pos >= self.source.len()
 
@@ -559,7 +561,7 @@ impl Lexer:
                     ""
                 ))
 
-        None
+        nil
 
     # ========================================================================
     # Whitespace and Comments
@@ -846,6 +848,7 @@ impl Lexer:
         Returns Some(Token) if a block was detected, None otherwise.
         Uses the block registry to determine lexer mode.
         """
+        val lbrace = r"{".char_at(0)
         # Peek ahead to find the identifier
         var peek_pos = self.pos
         while peek_pos < self.source.len():
@@ -861,7 +864,7 @@ impl Lexer:
         val ident = self.source[self.pos:peek_pos]
 
         # Check if followed by {
-        if peek_pos >= self.source.len() or self.source[peek_pos] != '{':
+        if peek_pos >= self.source.len() or self.source[peek_pos] != lbrace:
             return None  # Not a block
 
         # Check if this identifier is a registered block
@@ -873,8 +876,8 @@ impl Lexer:
         while self.pos < peek_pos:
             self.advance()
 
-        val def = block_def.unwrap()
-        val mode = def.lexer_mode()
+        val blk = block_def.unwrap()
+        val mode = blk.lexer_mode()
 
         # Enter block mode
         self.current_block_kind = Some(ident)
@@ -910,6 +913,8 @@ impl Lexer:
         Used for Raw mode blocks like sh{}, sql{} where the content
         should not be tokenized.
         """
+        val lbrace = r"{".char_at(0)
+        val rbrace = r"}".char_at(0)
         val start = self.pos
         val line = self.line
         val col = self.col
@@ -917,9 +922,9 @@ impl Lexer:
 
         while not self.is_at_end() and brace_depth > 0:
             val c = self.peek()
-            if c == '{':
+            if c == lbrace:
                 brace_depth = brace_depth + 1
-            elif c == '}':
+            elif c == rbrace:
                 brace_depth = brace_depth - 1
                 if brace_depth == 0:
                     break  # Don't consume the closing brace
@@ -1141,11 +1146,7 @@ impl Lexer:
             case ',':
                 TokenKind.Comma
             case ':':
-                if self.peek() == ':':
-                    self.advance()
-                    TokenKind.ColonColon
-                else:
-                    TokenKind.Colon
+                TokenKind.Colon
             case ';':
                 TokenKind.Semicolon
             case '(':
@@ -1262,7 +1263,7 @@ impl Lexer:
             Some(suffix)
         else:
             self.pos = start
-            None
+            nil
 
     me try_scan_dtype() -> text?:
         """Try to scan a dtype: f16, f32, f64, bf16, i8, i16, i32, i64, u8, u16, u32, u64."""
@@ -1346,7 +1347,7 @@ impl Lexer:
                     return None
 
             case _:
-                None
+                nil
 
     me try_scan_suffix_part() -> text?:
         """Try to scan a suffix part after underscore: tr, gpu, cpu, cuda, cuda0, pin, native, torch."""
@@ -1376,7 +1377,7 @@ impl Lexer:
                 else:
                     # Not a valid suffix part, rollback
                     self.pos = start
-                    None
+                    nil
 
 # ============================================================================
 # Helper Functions
@@ -1473,9 +1474,18 @@ fn min(a: i64, b: i64) -> i64:
 fn max(a: i64, b: i64) -> i64:
     if a > b: a else: b
 
+fn merge_spans(s1: Span, s2: Span) -> Span:
+    """Merge two spans into one covering both."""
+    val start_ = if s1.start < s2.start: s1.start else: s2.start
+    val end_ = if s1.end > s2.end: s1.end else: s2.end
+    val line_ = if s1.line < s2.line: s1.line else: s2.line
+    val col_ = if s1.line <= s2.line: s1.col else: s2.col
+    Span.new(start_, end_, line_, col_)
+
 # ============================================================================
 # Exports
 # ============================================================================
 
 export TokenKind, Token, Span, Lexer
 export is_digit, is_hex_digit, is_alpha, is_ident_start, is_ident_char, keyword_kind
+export min, max, merge_spans

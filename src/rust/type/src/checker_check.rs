@@ -247,6 +247,7 @@ impl TypeChecker {
                 // Module system nodes (parsed but not type-checked at this level)
                 Node::ModDecl(_)
                 | Node::UseStmt(_)
+                | Node::MultiUse(_)
                 | Node::CommonUseStmt(_)
                 | Node::ExportUseStmt(_)
                 | Node::AutoImportStmt(_)
@@ -573,6 +574,21 @@ impl TypeChecker {
             Expr::FString { type_meta, .. } => type_meta.const_keys().cloned(),
             _ => None,
         }
+    }
+
+    /// Register FString const_keys for a variable binding
+    ///
+    /// When a variable is bound to an FString with known keys, store them
+    /// so DependentKeys types (e.g., `var_name.keys`) can be resolved.
+    pub fn register_fstring_keys(&mut self, var_name: &str, expr: &Expr) {
+        if let Some(keys) = self.get_fstring_keys_from_expr(expr) {
+            self.fstring_keys.insert(var_name.to_string(), keys);
+        }
+    }
+
+    /// Resolve DependentKeys to ConstKeySet if possible
+    pub fn resolve_dependent_keys(&self, source: &str) -> Option<Vec<String>> {
+        self.fstring_keys.get(source).cloned()
     }
 
     /// Validate dict literal keys against ConstKeySet type annotation

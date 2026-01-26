@@ -227,14 +227,10 @@ impl Lowerer {
                 let iterable = self.lower_expr(&for_stmt.iterable, ctx)?;
 
                 // Infer the element type from the iterable type
-                // For arrays [T], the element type is T
-                let element_ty = if let Some(elem_ty) = self.module.types.get_array_element(iterable.ty) {
-                    elem_ty
-                } else {
-                    // Fallback to i64 for now (common case)
-                    // TODO: Better type inference for iterables
-                    crate::hir::TypeId::I64
-                };
+                // Handles: Arrays [T] → T, Strings → u8, Tuples → common type
+                // Ranges and custom iterators fallback to i64
+                let element_ty = self.module.types.get_iterable_element(iterable.ty)
+                    .unwrap_or(crate::hir::TypeId::I64);
 
                 // Add the loop variable to the context BEFORE lowering the body
                 ctx.add_local(pattern.clone(), element_ty, Mutability::Immutable);

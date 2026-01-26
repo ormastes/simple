@@ -51,10 +51,18 @@ impl<'a> Parser<'a> {
             // Allow 'alias' to be used as identifier (e.g., `with resource as alias: captured = alias`)
             // The 'alias' keyword is only used in type aliasing context: `alias NewType = OldType`
             TokenKind::Alias => self.parse_keyword_identifier("alias"),
+            // Allow 'bounds' to be used as identifier (variable name)
+            // The 'bounds' keyword is only used in type constraint contexts
+            TokenKind::Bounds => self.parse_keyword_identifier("bounds"),
+            TokenKind::Default => self.parse_keyword_identifier("default"),
             // Allow 'new' and 'old' to be used as identifiers (variable names)
             // These are keywords only in specific contexts: new Type(...) and old(x)
             TokenKind::New => self.parse_keyword_identifier("new"),
             TokenKind::Old => self.parse_keyword_identifier("old"),
+            // Allow 'from' and 'to' to be used as identifiers (variable names)
+            // These are keywords only in specific contexts: from keyword in imports, to in ranges
+            TokenKind::From => self.parse_keyword_identifier("from"),
+            TokenKind::To => self.parse_keyword_identifier("to"),
             _ => Err(ParseError::unexpected_token(
                 "identifier",
                 format!("{:?}", self.current.kind),

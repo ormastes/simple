@@ -1,0 +1,570 @@
+# HIR Lowering - CST to HIR
+#
+# Converts parsed CST (Concrete Syntax Tree) to HIR (High-level IR).
+# This provides a single lowering point shared by interpreter and compiler.
+#
+# Architecture:
+#   Parser -> CST (Tree) -> Lowerer -> HIR (HirModule)
+#
+# Key transformations:
+#   - Variable names resolved to indices (local slots)
+#   - Types attached to expressions
+#   - Method dispatch mode determined
+#   - Field names resolved to indices
+
+# TODO: Enable when module system supports relative imports
+# use ..types.{TypeId, BinOp, UnaryOp, HirExprKind, HirStmtKind, LocalVar, CapturedVar}
+# use ..module.{HirModule, HirFunction, HirFunctionSig, HirBody, HirParam, HirTypeDef}
+
+# Duplicated minimal types (see types.spl and module.spl)
+struct TypeId:
+    id: u32
+
+impl TypeId:
+    static fn void_ty() -> TypeId:
+        TypeId(id: 0)
+    static fn bool_ty() -> TypeId:
+        TypeId(id: 1)
+    static fn i64_ty() -> TypeId:
+        TypeId(id: 5)
+    static fn f64_ty() -> TypeId:
+        TypeId(id: 11)
+    static fn string_ty() -> TypeId:
+        TypeId(id: 12)
+    static fn nil_ty() -> TypeId:
+        TypeId(id: 13)
+    static fn unknown_ty() -> TypeId:
+        TypeId(id: 0xFFFF)
+
+    fn is_void() -> bool:
+        self.id == 0
+    fn is_unknown() -> bool:
+        self.id == 0xFFFF
+
+struct LocalVar:
+    name: text
+    ty: TypeId
+    is_mutable: bool
+    index: u32
+
+impl LocalVar:
+    static fn new(name: text, ty: TypeId, is_mutable: bool, index: u32) -> LocalVar:
+        LocalVar(name: name, ty: ty, is_mutable: is_mutable, index: index)
+
+
+# =============================================================================
+# Scope for Variable Resolution
+# =============================================================================
+
+# Scope level (function, block, etc.)
+struct Scope:
+    locals: [LocalVar]
+    parent_scope_id: i32
+    depth: u32
+
+impl Scope:
+    static fn new(parent_id: i32, depth: u32) -> Scope:
+        Scope(locals: [], parent_scope_id: parent_id, depth: depth)
+
+    fn local_count() -> u32:
+        self.locals.len() as u32
+
+    me add_local(local: LocalVar):
+        self.locals = self.locals + [local]
+
+    fn find_local(name: text) -> Option<LocalVar>:
+        for local in self.locals:
+            if local.name == name:
+                return Some(local)
+        None
+
+
+# =============================================================================
+# Lower Context - Tracks state during lowering
+# =============================================================================
+
+# Lowering context - tracks scopes, locals, types during lowering
+struct LowerContext:
+    # Scope stack
+    scopes: [Scope]
+    current_scope_id: i32
+
+    # Total locals across all scopes (for index allocation)
+    next_local_index: u32
+
+    # Function tracking
+    current_function: Option<text>
+    function_return_type: TypeId
+
+    # Error tracking
+    errors: [text]
+    warnings: [text]
+
+impl LowerContext:
+    # Create new lowering context
+    static fn new() -> LowerContext:
+        val global_scope = Scope.new(-1, 0)
+        LowerContext(
+            scopes: [global_scope],
+            current_scope_id: 0,
+            next_local_index: 0,
+            current_function: None,
+            function_return_type: TypeId.void_ty(),
+            errors: [],
+            warnings: []
+        )
+
+    # Push new scope
+    me push_scope():
+        val parent_id = self.current_scope_id
+        val depth = self.current_scope().depth + 1
+        val new_scope = Scope.new(parent_id, depth)
+        self.scopes = self.scopes + [new_scope]
+        self.current_scope_id = (self.scopes.len() - 1) as i32
+
+    # Pop scope
+    me pop_scope():
+        if self.current_scope_id > 0:
+            val parent_id = self.current_scope().parent_scope_id
+            self.current_scope_id = parent_id
+
+    # Get current scope
+    fn current_scope() -> Scope:
+        self.scopes[self.current_scope_id]
+
+    # Declare a variable in current scope
+    me declare_local(name: text, ty: TypeId, is_mutable: bool) -> LocalVar:
+        val index = self.next_local_index
+        self.next_local_index = index + 1
+        val local = LocalVar.new(name, ty, is_mutable, index)
+        # Update scope in place
+        var scope = self.scopes[self.current_scope_id]
+        scope.add_local(local)
+        self.scopes[self.current_scope_id] = scope
+        local
+
+    # Resolve variable by name (searches up scope chain)
+    fn resolve_local(name: text) -> Option<LocalVar>:
+        var scope_id = self.current_scope_id
+        while scope_id >= 0:
+            val scope = self.scopes[scope_id]
+            match scope.find_local(name):
+                Some(local) -> return Some(local)
+                None -> scope_id = scope.parent_scope_id
+        None
+
+    # Check if variable is mutable
+    fn is_mutable(name: text) -> bool:
+        match self.resolve_local(name):
+            Some(local) -> local.is_mutable
+            None -> false
+
+    # Enter function
+    me enter_function(name: text, return_type: TypeId):
+        self.current_function = Some(name)
+        self.function_return_type = return_type
+        self.push_scope()
+        self.next_local_index = 0
+
+    # Exit function
+    me exit_function():
+        self.pop_scope()
+        self.current_function = None
+        self.function_return_type = TypeId.void_ty()
+
+    # Add error
+    me add_error(msg: text):
+        self.errors = self.errors + [msg]
+
+    # Add warning
+    me add_warning(msg: text):
+        self.warnings = self.warnings + [msg]
+
+    # Check if has errors
+    fn has_errors() -> bool:
+        self.errors.len() > 0
+
+
+# =============================================================================
+# HIR Expression (simplified for lowering output)
+# =============================================================================
+
+enum HirExprKind:
+    Integer
+    Float
+    Bool
+    String
+    Nil
+    Local
+    Global
+    Binary
+    Unary
+    Call
+    MethodCall
+    FieldAccess
+    Index
+    Array
+    Tuple
+    Dict
+    StructInit
+    If
+    Match
+    Lambda
+    Block
+
+struct HirExpr:
+    kind: HirExprKind
+    ty: TypeId
+    # Payload stored based on kind
+    int_value: i64
+    float_value: f64
+    bool_value: bool
+    str_value: text
+    local_index: u32
+    children: [HirExpr]
+
+impl HirExpr:
+    # Integer literal
+    static fn integer(value: i64) -> HirExpr:
+        HirExpr(
+            kind: HirExprKind.Integer,
+            ty: TypeId.i64_ty(),
+            int_value: value,
+            float_value: 0.0,
+            bool_value: false,
+            str_value: "",
+            local_index: 0,
+            children: []
+        )
+
+    # Float literal
+    static fn float(value: f64) -> HirExpr:
+        HirExpr(
+            kind: HirExprKind.Float,
+            ty: TypeId.f64_ty(),
+            int_value: 0,
+            float_value: value,
+            bool_value: false,
+            str_value: "",
+            local_index: 0,
+            children: []
+        )
+
+    # Bool literal
+    static fn bool_lit(value: bool) -> HirExpr:
+        HirExpr(
+            kind: HirExprKind.Bool,
+            ty: TypeId.bool_ty(),
+            int_value: 0,
+            float_value: 0.0,
+            bool_value: value,
+            str_value: "",
+            local_index: 0,
+            children: []
+        )
+
+    # String literal
+    static fn string_lit(value: text) -> HirExpr:
+        HirExpr(
+            kind: HirExprKind.String,
+            ty: TypeId.string_ty(),
+            int_value: 0,
+            float_value: 0.0,
+            bool_value: false,
+            str_value: value,
+            local_index: 0,
+            children: []
+        )
+
+    # Nil literal
+    static fn nil_lit() -> HirExpr:
+        HirExpr(
+            kind: HirExprKind.Nil,
+            ty: TypeId.nil_ty(),
+            int_value: 0,
+            float_value: 0.0,
+            bool_value: false,
+            str_value: "",
+            local_index: 0,
+            children: []
+        )
+
+    # Local variable reference
+    static fn local(index: u32, ty: TypeId) -> HirExpr:
+        HirExpr(
+            kind: HirExprKind.Local,
+            ty: ty,
+            int_value: 0,
+            float_value: 0.0,
+            bool_value: false,
+            str_value: "",
+            local_index: index,
+            children: []
+        )
+
+    # Unknown expression (placeholder)
+    static fn unknown() -> HirExpr:
+        HirExpr(
+            kind: HirExprKind.Nil,
+            ty: TypeId.unknown_ty(),
+            int_value: 0,
+            float_value: 0.0,
+            bool_value: false,
+            str_value: "",
+            local_index: 0,
+            children: []
+        )
+
+
+# =============================================================================
+# HIR Statement
+# =============================================================================
+
+enum HirStmtKind:
+    Let
+    Assign
+    Return
+    Expr
+    If
+    While
+    For
+    Loop
+    Break
+    Continue
+
+struct HirStmt:
+    kind: HirStmtKind
+    # Payload
+    local_index: u32
+    expr: Option<HirExpr>
+    condition: Option<HirExpr>
+    body: [HirStmt]
+    else_body: [HirStmt]
+
+impl HirStmt:
+    # Let statement
+    static fn let_stmt(local_index: u32, init: HirExpr) -> HirStmt:
+        HirStmt(
+            kind: HirStmtKind.Let,
+            local_index: local_index,
+            expr: Some(init),
+            condition: None,
+            body: [],
+            else_body: []
+        )
+
+    # Assign statement
+    static fn assign(local_index: u32, value: HirExpr) -> HirStmt:
+        HirStmt(
+            kind: HirStmtKind.Assign,
+            local_index: local_index,
+            expr: Some(value),
+            condition: None,
+            body: [],
+            else_body: []
+        )
+
+    # Return statement
+    static fn return_stmt(value: Option<HirExpr>) -> HirStmt:
+        HirStmt(
+            kind: HirStmtKind.Return,
+            local_index: 0,
+            expr: value,
+            condition: None,
+            body: [],
+            else_body: []
+        )
+
+    # Expression statement
+    static fn expr_stmt(expr: HirExpr) -> HirStmt:
+        HirStmt(
+            kind: HirStmtKind.Expr,
+            local_index: 0,
+            expr: Some(expr),
+            condition: None,
+            body: [],
+            else_body: []
+        )
+
+    # If statement
+    static fn if_stmt(condition: HirExpr, then_body: [HirStmt], else_body: [HirStmt]) -> HirStmt:
+        HirStmt(
+            kind: HirStmtKind.If,
+            local_index: 0,
+            expr: None,
+            condition: Some(condition),
+            body: then_body,
+            else_body: else_body
+        )
+
+    # While statement
+    static fn while_stmt(condition: HirExpr, loop_body: [HirStmt]) -> HirStmt:
+        HirStmt(
+            kind: HirStmtKind.While,
+            local_index: 0,
+            expr: None,
+            condition: Some(condition),
+            body: loop_body,
+            else_body: []
+        )
+
+    # Break statement
+    static fn break_stmt() -> HirStmt:
+        HirStmt(
+            kind: HirStmtKind.Break,
+            local_index: 0,
+            expr: None,
+            condition: None,
+            body: [],
+            else_body: []
+        )
+
+    # Continue statement
+    static fn continue_stmt() -> HirStmt:
+        HirStmt(
+            kind: HirStmtKind.Continue,
+            local_index: 0,
+            expr: None,
+            condition: None,
+            body: [],
+            else_body: []
+        )
+
+
+# =============================================================================
+# Lower Result
+# =============================================================================
+
+# Lowering result for expressions
+enum LowerExprResult:
+    Ok(HirExpr)
+    Err(text)
+
+impl LowerExprResult:
+    fn is_ok() -> bool:
+        match self:
+            LowerExprResult.Ok(_) -> true
+            _ -> false
+
+    fn unwrap() -> HirExpr:
+        match self:
+            LowerExprResult.Ok(e) -> e
+            LowerExprResult.Err(_) -> HirExpr.unknown()
+
+# Lowering result for statements
+enum LowerStmtResult:
+    Ok(HirStmt)
+    Err(text)
+
+impl LowerStmtResult:
+    fn is_ok() -> bool:
+        match self:
+            LowerStmtResult.Ok(_) -> true
+            _ -> false
+
+
+# =============================================================================
+# Lowerer - Main lowering logic
+# =============================================================================
+
+struct Lowerer:
+    ctx: LowerContext
+    # TODO: Add type registry, function table, etc.
+
+impl Lowerer:
+    # Create new lowerer
+    static fn new() -> Lowerer:
+        Lowerer(ctx: LowerContext.new())
+
+    # Lower an integer literal
+    fn lower_integer(value: i64) -> LowerExprResult:
+        LowerExprResult.Ok(HirExpr.integer(value))
+
+    # Lower a float literal
+    fn lower_float(value: f64) -> LowerExprResult:
+        LowerExprResult.Ok(HirExpr.float(value))
+
+    # Lower a boolean literal
+    fn lower_bool(value: bool) -> LowerExprResult:
+        LowerExprResult.Ok(HirExpr.bool_lit(value))
+
+    # Lower a string literal
+    fn lower_string(value: text) -> LowerExprResult:
+        LowerExprResult.Ok(HirExpr.string_lit(value))
+
+    # Lower nil literal
+    fn lower_nil() -> LowerExprResult:
+        LowerExprResult.Ok(HirExpr.nil_lit())
+
+    # Lower variable reference
+    fn lower_variable(name: text) -> LowerExprResult:
+        match self.ctx.resolve_local(name):
+            Some(local) -> LowerExprResult.Ok(HirExpr.local(local.index, local.ty))
+            None -> LowerExprResult.Err("undefined variable: {name}")
+
+    # Lower let statement
+    me lower_let(name: text, init: HirExpr, is_mutable: bool) -> LowerStmtResult:
+        val local = self.ctx.declare_local(name, init.ty, is_mutable)
+        LowerStmtResult.Ok(HirStmt.let_stmt(local.index, init))
+
+    # Lower assignment statement
+    fn lower_assign(name: text, value: HirExpr) -> LowerStmtResult:
+        match self.ctx.resolve_local(name):
+            Some(local) ->
+                if local.is_mutable:
+                    LowerStmtResult.Ok(HirStmt.assign(local.index, value))
+                else:
+                    LowerStmtResult.Err("cannot assign to immutable variable: {name}")
+            None -> LowerStmtResult.Err("undefined variable: {name}")
+
+    # Lower return statement
+    fn lower_return(value: Option<HirExpr>) -> LowerStmtResult:
+        LowerStmtResult.Ok(HirStmt.return_stmt(value))
+
+    # Lower expression statement
+    fn lower_expr_stmt(expr: HirExpr) -> LowerStmtResult:
+        LowerStmtResult.Ok(HirStmt.expr_stmt(expr))
+
+    # Lower if statement
+    fn lower_if(condition: HirExpr, then_body: [HirStmt], else_body: [HirStmt]) -> LowerStmtResult:
+        LowerStmtResult.Ok(HirStmt.if_stmt(condition, then_body, else_body))
+
+    # Lower while statement
+    fn lower_while(condition: HirExpr, loop_body: [HirStmt]) -> LowerStmtResult:
+        LowerStmtResult.Ok(HirStmt.while_stmt(condition, loop_body))
+
+    # Lower break statement
+    fn lower_break() -> LowerStmtResult:
+        LowerStmtResult.Ok(HirStmt.break_stmt())
+
+    # Lower continue statement
+    fn lower_continue() -> LowerStmtResult:
+        LowerStmtResult.Ok(HirStmt.continue_stmt())
+
+    # Enter function scope
+    me enter_function(name: text, return_type: TypeId):
+        self.ctx.enter_function(name, return_type)
+
+    # Exit function scope
+    me exit_function():
+        self.ctx.exit_function()
+
+    # Push new scope
+    me push_scope():
+        self.ctx.push_scope()
+
+    # Pop scope
+    me pop_scope():
+        self.ctx.pop_scope()
+
+    # Check for errors
+    fn has_errors() -> bool:
+        self.ctx.has_errors()
+
+    # Get errors
+    fn get_errors() -> [text]:
+        self.ctx.errors
+
+    # Get warnings
+    fn get_warnings() -> [text]:
+        self.ctx.warnings

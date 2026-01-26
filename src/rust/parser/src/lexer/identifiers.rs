@@ -134,6 +134,7 @@ impl<'a> super::Lexer<'a> {
             "is" => TokenKind::Is,
             "not" => TokenKind::Not,
             "and" => TokenKind::And,
+            "xor" => TokenKind::Xor,
             "or" => {
                 // Check for "or:" combined token (used in unwrap fallback)
                 if self.check(':') {

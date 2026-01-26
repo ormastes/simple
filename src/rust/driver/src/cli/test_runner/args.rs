@@ -128,6 +128,14 @@ pub fn parse_test_args(args: &[String]) -> TestOptions {
             }
             "--only-slow" => options.only_slow = true,
             "--only-skipped" => options.only_skipped = true,
+            "--list-skip-features" | "--skip-features" => {
+                options.list_skip_features = true;
+                options.only_skipped = true; // Need to discover skip files
+                options.list = true;
+            }
+            "--planned-only" | "--pending" => {
+                options.skip_features_planned_only = true;
+            }
             "--show-tags" => options.show_tags = true,
             "--safe-mode" | "--safe" => options.safe_mode = true,
             "--timeout" => {

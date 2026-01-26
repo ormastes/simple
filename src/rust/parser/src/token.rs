@@ -174,6 +174,7 @@ pub enum TokenKind {
     Not,
     And,
     Or,
+    Xor, // xor (bitwise XOR, replaces ^ outside math blocks)
     True,
     False,
     Spawn,
@@ -297,16 +298,18 @@ pub enum TokenKind {
     MinusAssign,      // -=
     StarAssign,       // *=
     SlashAssign,      // /=
+    PercentAssign,    // %=
     TildeAssign,      // ~= (suspension assignment for async-by-default)
     TildePlusAssign,  // ~+= (suspension compound add)
     TildeMinusAssign, // ~-= (suspension compound subtract)
     TildeStarAssign,  // ~*= (suspension compound multiply)
     TildeSlashAssign, // ~/= (suspension compound divide)
 
-    Ampersand,  // &
-    Pipe,       // |
-    DoublePipe, // ||
-    DoubleAmp,  // &&
+    Ampersand,    // &
+    Pipe,         // |
+    PipeForward,  // |>
+    DoublePipe,   // ||
+    DoubleAmp,    // &&
     AndSuspend, // and~ (suspending boolean AND)
     OrSuspend,  // or~ (suspending boolean OR)
     Caret,      // ^

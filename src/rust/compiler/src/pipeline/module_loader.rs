@@ -447,37 +447,112 @@ fn resolve_use_to_path(use_stmt: &UseStmt, base: &Path) -> Option<PathBuf> {
         return Some(init_resolved);
     }
 
-    // If not found, try stdlib location
-    // Walk up the directory tree to find lib/std/src
-    let mut current = base.to_path_buf();
-    for _ in 0..5 {
-        // Check if current path ends with lib/std/src - if so, use it directly
-        let stdlib_candidate = if current.ends_with("lib/std/src") {
-            current.clone()
+    // Try mod.spl in directory (Rust-style package imports)
+    let mut mod_resolved = base.to_path_buf();
+    for part in &parts {
+        mod_resolved = mod_resolved.join(part);
+    }
+    mod_resolved = mod_resolved.join("mod");
+    mod_resolved.set_extension("spl");
+    if mod_resolved.exists() {
+        return Some(mod_resolved);
+    }
+
+    // Try resolving from parent directories (for project-root-relative imports)
+    // This handles cases like importing "blocks.modes" from within "blocks/builtin.spl"
+    // where we need to go up to find the "blocks/" root
+    let mut parent_dir = base.to_path_buf();
+    for _ in 0..10 {
+        if let Some(parent) = parent_dir.parent() {
+            parent_dir = parent.to_path_buf();
+
+            // Try module.spl
+            let mut parent_resolved = parent_dir.clone();
+            for part in &parts {
+                parent_resolved = parent_resolved.join(part);
+            }
+            parent_resolved.set_extension("spl");
+            if parent_resolved.exists() {
+                return Some(parent_resolved);
+            }
+
+            // Try __init__.spl
+            let mut parent_init_resolved = parent_dir.clone();
+            for part in &parts {
+                parent_init_resolved = parent_init_resolved.join(part);
+            }
+            parent_init_resolved = parent_init_resolved.join("__init__");
+            parent_init_resolved.set_extension("spl");
+            if parent_init_resolved.exists() {
+                return Some(parent_init_resolved);
+            }
+
+            // Try mod.spl
+            let mut parent_mod_resolved = parent_dir.clone();
+            for part in &parts {
+                parent_mod_resolved = parent_mod_resolved.join(part);
+            }
+            parent_mod_resolved = parent_mod_resolved.join("mod");
+            parent_mod_resolved.set_extension("spl");
+            if parent_mod_resolved.exists() {
+                return Some(parent_mod_resolved);
+            }
         } else {
-            current.join("src/lib/std/src")
-        };
+            break;
+        }
+    }
 
-        if stdlib_candidate.exists() {
-            // Try resolving from stdlib
-            let mut stdlib_path = stdlib_candidate.clone();
-            for part in &parts {
-                stdlib_path = stdlib_path.join(part);
-            }
-            stdlib_path.set_extension("spl");
-            if stdlib_path.exists() {
-                return Some(stdlib_path);
-            }
+    // If not found, try stdlib location
+    // Walk up the directory tree to find stdlib
+    let mut current = base.to_path_buf();
+    for _ in 0..10 {
+        // Try various stdlib locations (matching interpreter behavior)
+        for stdlib_subpath in &["src/lib/std/src", "lib/std/src", "simple/std_lib/src", "std_lib/src"] {
+            let stdlib_candidate = current.join(stdlib_subpath);
+            if stdlib_candidate.exists() {
+                // Handle "std" prefix stripping for std.* imports
+                let stdlib_parts: Vec<String> = if !parts.is_empty() && parts[0] == "std" {
+                    parts[1..].to_vec()
+                } else if !parts.is_empty() && parts[0] == "std_lib" {
+                    // Also handle std_lib.* imports -> strip std_lib prefix
+                    parts[1..].to_vec()
+                } else {
+                    parts.clone()
+                };
 
-            // Also try __init__.spl in stdlib
-            let mut stdlib_init_path = stdlib_candidate.clone();
-            for part in &parts {
-                stdlib_init_path = stdlib_init_path.join(part);
-            }
-            stdlib_init_path = stdlib_init_path.join("__init__");
-            stdlib_init_path.set_extension("spl");
-            if stdlib_init_path.exists() {
-                return Some(stdlib_init_path);
+                if !stdlib_parts.is_empty() {
+                    // Try resolving from stdlib
+                    let mut stdlib_path = stdlib_candidate.clone();
+                    for part in &stdlib_parts {
+                        stdlib_path = stdlib_path.join(part);
+                    }
+                    stdlib_path.set_extension("spl");
+                    if stdlib_path.exists() {
+                        return Some(stdlib_path);
+                    }
+
+                    // Also try __init__.spl in stdlib
+                    let mut stdlib_init_path = stdlib_candidate.clone();
+                    for part in &stdlib_parts {
+                        stdlib_init_path = stdlib_init_path.join(part);
+                    }
+                    stdlib_init_path = stdlib_init_path.join("__init__");
+                    stdlib_init_path.set_extension("spl");
+                    if stdlib_init_path.exists() {
+                        return Some(stdlib_init_path);
+                    }
+
+                    // Also try mod.spl in stdlib
+                    let mut stdlib_mod_path = stdlib_candidate.clone();
+                    for part in &stdlib_parts {
+                        stdlib_mod_path = stdlib_mod_path.join(part);
+                    }
+                    stdlib_mod_path = stdlib_mod_path.join("mod");
+                    stdlib_mod_path.set_extension("spl");
+                    if stdlib_mod_path.exists() {
+                        return Some(stdlib_mod_path);
+                    }
+                }
             }
         }
         if let Some(parent) = current.parent() {

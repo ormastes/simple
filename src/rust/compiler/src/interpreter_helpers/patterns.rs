@@ -110,17 +110,14 @@ pub(crate) fn handle_functional_update(
 }
 
 /// Array methods that mutate and should update the binding
+/// Note: sort, sorted, reverse, reversed, concat all return NEW arrays and are NOT mutating
 const ARRAY_MUTATING_METHODS: &[&str] = &[
     "append",
     "push",
     "pop",
     "insert",
     "remove",
-    "reverse",
-    "concat",
     "extend",
-    "sort",
-    "sort_desc",
     "clear",
 ];
 
@@ -173,17 +170,21 @@ pub(crate) fn handle_method_call_with_self_update(
             )?;
 
             // For chained mutable method calls, propagate the final result
-            // If the outer method returned an object of the same type, it's likely
+            // If the outer method returned an object of the SAME CLASS, it's likely
             // the modified self from a `me` method
-            if let Some((ref obj_name, _)) = inner_update {
-                // If outer_result is an Object, use it as the final update
+            if let Some((ref obj_name, ref inner_self)) = inner_update {
+                // Only use the outer result as the update if it's the same class as inner_self
                 // This handles chains like m.when("foo").returns(42) where
-                // both methods modify and return self
-                if matches!(outer_result, Value::Object { .. }) {
-                    return Ok((outer_result.clone(), Some((obj_name.clone(), outer_result))));
+                // both methods modify and return self of the same type
+                if let (Value::Object { class: inner_class, .. }, Value::Object { class: outer_class, .. }) =
+                    (inner_self, &outer_result)
+                {
+                    if inner_class == outer_class {
+                        return Ok((outer_result.clone(), Some((obj_name.clone(), outer_result))));
+                    }
                 }
             }
-            // Fall back to propagating the inner update for non-object results
+            // Fall back to propagating the inner update for non-object results or different types
             return Ok((outer_result, inner_update));
         }
 

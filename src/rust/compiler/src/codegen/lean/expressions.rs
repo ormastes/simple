@@ -719,6 +719,7 @@ impl<'a> ExprTranslator<'a> {
             BinOp::ShiftRight => ">>>".to_string(),
             BinOp::Is => "==".to_string(), // Identity check becomes equality
             BinOp::In => "∈".to_string(),  // Membership
+            BinOp::PipeForward => "|>".to_string(), // Function application
         }
     }
 

@@ -8,7 +8,7 @@
 #
 # The full parser uses TreeSitter's outline to avoid reparsing top-level structure.
 
-import compiler.lexer.*
+use lexer.*
 
 # ============================================================================
 # Outline AST Types
@@ -117,8 +117,8 @@ struct VariantOutline:
     payload: VariantPayload?
     span: Span
 
+"""Enum variant payload type."""
 enum VariantPayload:
-    """Enum variant payload type."""
     Tuple(types: [TypeOutline])
     Struct(fields: [FieldOutline])
 
@@ -167,8 +167,8 @@ struct TypeOutline:
     kind: TypeOutlineKind
     span: Span
 
+"""Type expression kinds."""
 enum TypeOutlineKind:
-    """Type expression kinds."""
     Named(name: text, args: [TypeOutline])      # Foo, Foo<T, U>
     Tuple(elements: [TypeOutline])               # (A, B, C)
     Array(element: TypeOutline)                  # [T]
@@ -204,17 +204,26 @@ struct TreeSitter:
 
 impl TreeSitter:
     static fn new(source: text) -> TreeSitter:
+        val lexer = Lexer.new(source)
         var ts = TreeSitter(
-            lexer: Lexer.new(source),
+            lexer: lexer,
             current: Token.eof(0, 1),
             previous: Token.eof(0, 1),
             errors: [],
-            doc_comment: None,
+            doc_comment: nil,
             inline_blocks: [],
-            current_context: None
+            current_context: nil
         )
         ts.advance()  # Prime the parser
         ts
+
+    fn current_span() -> Span:
+        """Get current token's span (guaranteed non-nil)."""
+        self.current.span
+
+    fn previous_span() -> Span:
+        """Get previous token's span (guaranteed non-nil)."""
+        self.previous.span
 
     # ========================================================================
     # Main Entry Point
@@ -279,10 +288,18 @@ impl TreeSitter:
     me advance() -> Token:
         """Advance to next token."""
         self.previous = self.current
+
+        # Note: We need to use this pattern for mutating method calls on struct fields
+        # because the interpreter properly propagates self-mutations now
         self.current = self.lexer.next_token()
 
         # Accumulate doc comments
-        while self.current.kind == TokenKind.Ident and self.current.text.starts_with("##"):
+        # Guard against EOF and nil tokens before checking text
+        while self.current.kind == TokenKind.Ident:
+            if not self.current.text.?:
+                break
+            if not self.current.text.starts_with("##"):
+                break
             val comment = self.current.text[2:].trim()
             self.doc_comment = match self.doc_comment:
                 case Some(dc): Some(dc + "\n" + comment)
@@ -317,8 +334,11 @@ impl TreeSitter:
             false
 
     me is_at_end() -> bool:
-        """Check if at end of input."""
-        self.current.kind == TokenKind.Eof
+        """Check if at end of input (Eof or nil token)."""
+        val kind = self.current.kind
+        if not kind.?:
+            return true
+        kind == TokenKind.Eof
 
     me skip_newlines():
         """Skip newline tokens."""
@@ -330,6 +350,26 @@ impl TreeSitter:
         val doc = self.doc_comment
         self.doc_comment = None
         doc
+
+    me try_parse_body_docstring() -> text?:
+        """Try to parse a triple-quoted string docstring at current position.
+
+        This handles docstrings that appear immediately after class/enum/union
+        colon but before the indented body, e.g.:
+            class Foo:
+                \"\"\"This is the docstring.\"\"\"
+                field: i32
+
+        Returns the docstring content if found, None otherwise.
+        """
+        self.skip_newlines()
+        if self.check(TokenKind.StringLit):
+            val docstring = self.current.text
+            self.advance()
+            self.skip_newlines()
+            Some(docstring)
+        else:
+            nil
 
     # ========================================================================
     # Error Handling
@@ -480,7 +520,7 @@ impl TreeSitter:
             module: module,
             items: items,
             alias: alias,
-            span: start.merge(self.previous.span)
+            span: merge_spans(start, self.previous.span)
         )
 
     me parse_import_items() -> [text]:
@@ -511,7 +551,7 @@ impl TreeSitter:
 
         ExportOutline(
             items: items,
-            span: start.merge(self.previous.span)
+            span: merge_spans(start, self.previous.span)
         )
 
     me parse_module_path() -> text:
@@ -587,7 +627,7 @@ impl TreeSitter:
             is_method: false,
             is_mutable: is_mutable,
             doc_comment: doc,
-            span: start.merge(self.previous.span),
+            span: merge_spans(start, self.previous.span),
             body_span: Span.new(body_start, body_end, 0, 0)
         )
 
@@ -623,7 +663,7 @@ impl TreeSitter:
             name: name,
             type_: type_,
             default_span: default_span,
-            span: start.merge(self.previous.span)
+            span: merge_spans(start, self.previous.span)
         )
 
     me parse_type_params() -> [TypeParamOutline]:
@@ -658,7 +698,7 @@ impl TreeSitter:
             name: name,
             bounds: bounds,
             default: default,
-            span: start.merge(self.previous.span)
+            span: merge_spans(start, self.previous.span)
         )
 
     # ========================================================================
@@ -674,7 +714,7 @@ impl TreeSitter:
         if self.match_token(TokenKind.Question):
             type_ = TypeOutline(
                 kind: TypeOutlineKind.Optional(type_),
-                span: start.merge(self.previous.span)
+                span: merge_spans(start, self.previous.span)
             )
 
         type_
@@ -718,7 +758,7 @@ impl TreeSitter:
 
         TypeOutline(
             kind: TypeOutlineKind.Named(name, args),
-            span: start.merge(self.previous.span)
+            span: merge_spans(start, self.previous.span)
         )
 
     me parse_tuple_type() -> TypeOutline:
@@ -738,7 +778,7 @@ impl TreeSitter:
 
         TypeOutline(
             kind: TypeOutlineKind.Tuple(elements),
-            span: start.merge(self.previous.span)
+            span: merge_spans(start, self.previous.span)
         )
 
     me parse_array_type() -> TypeOutline:
@@ -751,7 +791,7 @@ impl TreeSitter:
 
         TypeOutline(
             kind: TypeOutlineKind.Array(element),
-            span: start.merge(self.previous.span)
+            span: merge_spans(start, self.previous.span)
         )
 
     me parse_function_type() -> TypeOutline:
@@ -775,7 +815,7 @@ impl TreeSitter:
 
         TypeOutline(
             kind: TypeOutlineKind.Function(params, ret),
-            span: start.merge(self.previous.span)
+            span: merge_spans(start, self.previous.span)
         )
 
     me parse_reference_type() -> TypeOutline:
@@ -792,7 +832,7 @@ impl TreeSitter:
 
         TypeOutline(
             kind: TypeOutlineKind.Reference(inner, mutable),
-            span: start.merge(self.previous.span)
+            span: merge_spans(start, self.previous.span)
         )
 
     # ========================================================================
@@ -814,6 +854,13 @@ impl TreeSitter:
         self.expect(TokenKind.Colon, "expected ':' after class name")
         self.skip_newlines()
         self.expect(TokenKind.Indent, "expected indented class body")
+
+        # Try to parse body docstring (triple-quoted string after indent)
+        val body_doc = self.try_parse_body_docstring()
+        # Use body docstring if no doc was passed, or prefer body doc
+        val final_doc = match body_doc:
+            case Some(bd): Some(bd)
+            case None: doc
 
         var fields: [FieldOutline] = []
         var methods: [FunctionOutline] = []
@@ -838,6 +885,17 @@ impl TreeSitter:
                     val m = self.parse_function_outline(member_public, true, member_doc)
                     m.is_method = true
                     methods = methods.push(m)
+                case KwVar:
+                    # Check for deprecated 'var fn' syntax
+                    if self.peek_next() == TokenKind.KwFn:
+                        self.warning("Deprecated: Replace `var fn method()` with `me method()`")
+                        self.advance()  # consume 'var'
+                        val m = self.parse_function_outline(member_public, true, member_doc)
+                        m.is_method = true
+                        methods = methods.push(m)
+                    else:
+                        self.error("expected field or method in class")
+                        self.synchronize()
                 case KwStatic:
                     self.advance()
                     val m = self.parse_function_outline(member_public, false, member_doc)
@@ -857,8 +915,8 @@ impl TreeSitter:
             fields: fields,
             methods: methods,
             is_public: is_public,
-            doc_comment: doc,
-            span: start.merge(self.previous.span)
+            doc_comment: final_doc,
+            span: merge_spans(start, self.previous.span)
         )
 
     me parse_struct_outline(is_public: bool, doc: text?) -> StructOutline:
@@ -876,6 +934,12 @@ impl TreeSitter:
         self.expect(TokenKind.Colon, "expected ':' after struct name")
         self.skip_newlines()
         self.expect(TokenKind.Indent, "expected indented struct body")
+
+        # Try to parse body docstring (triple-quoted string after indent)
+        val body_doc = self.try_parse_body_docstring()
+        val final_doc = match body_doc:
+            case Some(bd): Some(bd)
+            case None: doc
 
         var fields: [FieldOutline] = []
 
@@ -901,8 +965,8 @@ impl TreeSitter:
             type_params: type_params,
             fields: fields,
             is_public: is_public,
-            doc_comment: doc,
-            span: start.merge(self.previous.span)
+            doc_comment: final_doc,
+            span: merge_spans(start, self.previous.span)
         )
 
     me parse_field_outline(is_public: bool) -> FieldOutline:
@@ -926,7 +990,7 @@ impl TreeSitter:
             type_: type_,
             is_public: is_public,
             default_span: default_span,
-            span: start.merge(self.previous.span)
+            span: merge_spans(start, self.previous.span)
         )
 
     me parse_enum_outline(is_public: bool, doc: text?) -> EnumOutline:
@@ -944,6 +1008,12 @@ impl TreeSitter:
         self.expect(TokenKind.Colon, "expected ':' after enum name")
         self.skip_newlines()
         self.expect(TokenKind.Indent, "expected indented enum body")
+
+        # Try to parse body docstring (triple-quoted string after indent)
+        val body_doc = self.try_parse_body_docstring()
+        val final_doc = match body_doc:
+            case Some(bd): Some(bd)
+            case None: doc
 
         var variants: [VariantOutline] = []
 
@@ -965,8 +1035,8 @@ impl TreeSitter:
             type_params: type_params,
             variants: variants,
             is_public: is_public,
-            doc_comment: doc,
-            span: start.merge(self.previous.span)
+            doc_comment: final_doc,
+            span: merge_spans(start, self.previous.span)
         )
 
     me parse_variant_outline() -> VariantOutline:
@@ -1004,7 +1074,7 @@ impl TreeSitter:
         VariantOutline(
             name: name,
             payload: payload,
-            span: start.merge(self.previous.span)
+            span: merge_spans(start, self.previous.span)
         )
 
     # ========================================================================
@@ -1027,6 +1097,12 @@ impl TreeSitter:
         self.skip_newlines()
         self.expect(TokenKind.Indent, "expected indented trait body")
 
+        # Try to parse body docstring (triple-quoted string after indent)
+        val body_doc = self.try_parse_body_docstring()
+        val final_doc = match body_doc:
+            case Some(bd): Some(bd)
+            case None: doc
+
         var methods: [FunctionOutline] = []
 
         while not self.check(TokenKind.Dedent) and not self.is_at_end():
@@ -1041,6 +1117,15 @@ impl TreeSitter:
                     methods = methods.push(self.parse_function_outline(false, false, method_doc))
                 case KwMe:
                     methods = methods.push(self.parse_function_outline(false, true, method_doc))
+                case KwVar:
+                    # Check for deprecated 'var fn' syntax
+                    if self.peek_next() == TokenKind.KwFn:
+                        self.warning("Deprecated: Replace `var fn method()` with `me method()`")
+                        self.advance()  # consume 'var'
+                        methods = methods.push(self.parse_function_outline(false, true, method_doc))
+                    else:
+                        self.error("expected method in trait")
+                        self.synchronize()
                 case _:
                     self.error("expected method in trait")
                     self.synchronize()
@@ -1052,8 +1137,8 @@ impl TreeSitter:
             type_params: type_params,
             methods: methods,
             is_public: is_public,
-            doc_comment: doc,
-            span: start.merge(self.previous.span)
+            doc_comment: final_doc,
+            span: merge_spans(start, self.previous.span)
         )
 
     me parse_impl_outline() -> ImplOutline:
@@ -1073,6 +1158,10 @@ impl TreeSitter:
             self.expect(TokenKind.Colon, "expected ':' after impl type")
         self.skip_newlines()
         self.expect(TokenKind.Indent, "expected indented impl body")
+
+        # Skip optional body docstring (triple-quoted string after indent)
+        # Note: impl blocks don't store doc comments, so we discard it
+        self.try_parse_body_docstring()
 
         var methods: [FunctionOutline] = []
 
@@ -1096,6 +1185,17 @@ impl TreeSitter:
                     val m = self.parse_function_outline(method_public, true, method_doc)
                     m.is_method = true
                     methods = methods.push(m)
+                case KwVar:
+                    # Check for deprecated 'var fn' syntax
+                    if self.peek_next() == TokenKind.KwFn:
+                        self.warning("Deprecated: Replace `var fn method()` with `me method()`")
+                        self.advance()  # consume 'var'
+                        val m = self.parse_function_outline(method_public, true, method_doc)
+                        m.is_method = true
+                        methods = methods.push(m)
+                    else:
+                        self.error("expected method in impl")
+                        self.synchronize()
                 case KwStatic:
                     self.advance()
                     val m = self.parse_function_outline(method_public, false, method_doc)
@@ -1111,7 +1211,7 @@ impl TreeSitter:
             type_: type_,
             trait_: trait_,
             methods: methods,
-            span: start.merge(self.previous.span)
+            span: merge_spans(start, self.previous.span)
         )
 
     me parse_type_alias_outline(is_public: bool) -> TypeAliasOutline:
@@ -1135,7 +1235,7 @@ impl TreeSitter:
             type_params: type_params,
             type_: type_,
             is_public: is_public,
-            span: start.merge(self.previous.span)
+            span: merge_spans(start, self.previous.span)
         )
 
     me parse_const_outline(is_public: bool) -> ConstOutline:
@@ -1164,7 +1264,7 @@ impl TreeSitter:
             is_mutable: is_mutable,
             is_public: is_public,
             value_span: value_span,
-            span: start.merge(self.previous.span)
+            span: merge_spans(start, self.previous.span)
         )
 
     # ========================================================================
@@ -1311,7 +1411,7 @@ impl TreeSitter:
                 kind: kind,
                 payload: payload,
                 payload_span: payload_span,
-                span: start.merge(self.previous.span),
+                span: merge_spans(start, self.previous.span),
                 parent_context: self.current_context
             )
 
@@ -1332,7 +1432,7 @@ impl TreeSitter:
             kind: kind,
             payload: payload,
             payload_span: payload_span,
-            span: start.merge(self.previous.span),
+            span: merge_spans(start, self.previous.span),
             parent_context: self.current_context
         )
 
@@ -1379,8 +1479,8 @@ impl TreeSitter:
 # Helper Types
 # ============================================================================
 
+"""Parsed top-level item."""
 enum TopLevelItem:
-    """Parsed top-level item."""
     Import(ImportOutline)
     Export(ExportOutline)
     Function(FunctionOutline)

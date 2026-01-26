@@ -831,4 +831,25 @@ pub enum MirInst {
         closure: VReg,
         backend: Option<ParallelBackend>,
     },
+
+    // =========================================================================
+    // Value Boxing Instructions (for FFI boundary)
+    // =========================================================================
+
+    /// Box a native integer as RuntimeValue for FFI calls.
+    /// RuntimeValue layout: (value << 3) | TAG_INT, where TAG_INT = 0.
+    /// Used when passing native integers to FFI functions that expect RuntimeValue.
+    BoxInt { dest: VReg, value: VReg },
+
+    /// Box a native float as RuntimeValue for FFI calls.
+    /// RuntimeValue layout: (bits >> 3) << 3 | TAG_FLOAT, where TAG_FLOAT = 2.
+    BoxFloat { dest: VReg, value: VReg },
+
+    /// Unbox a RuntimeValue to native integer.
+    /// Extracts: value >> 3 (sign-extended)
+    UnboxInt { dest: VReg, value: VReg },
+
+    /// Unbox a RuntimeValue to native float.
+    /// Extracts: (value >> 3) << 3 as f64 bits
+    UnboxFloat { dest: VReg, value: VReg },
 }

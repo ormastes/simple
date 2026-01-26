@@ -361,6 +361,11 @@ impl MirInst {
             // Memory safety instructions
             MirInst::Drop { value, .. } => vec![*value],
             MirInst::EndScope { .. } => vec![], // No register uses
+            // Value boxing instructions
+            MirInst::BoxInt { value, .. } => vec![*value],
+            MirInst::BoxFloat { value, .. } => vec![*value],
+            MirInst::UnboxInt { value, .. } => vec![*value],
+            MirInst::UnboxFloat { value, .. } => vec![*value],
         }
     }
 }

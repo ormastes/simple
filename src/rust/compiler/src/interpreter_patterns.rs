@@ -222,6 +222,10 @@ pub(crate) fn pattern_matches(
             variant,
             payload,
         } => {
+            // Special case: Nil matches Option::None
+            if matches!(value, Value::Nil) && (enum_name == "Option" || enum_name == "_") && variant == "None" && payload.is_none() {
+                return Ok(true);
+            }
             if let Value::Enum {
                 enum_name: ve,
                 variant: vv,

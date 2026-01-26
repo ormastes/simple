@@ -810,15 +810,94 @@ pub fn compile_instruction<M: Module>(
 
         // Memory safety instructions
         MirInst::Drop { value, ty } => {
-            // TODO: Call destructor if applicable
-            // For now, this is a no-op for primitive types
-            // Future: look up Drop trait implementation and call it
-            let _ = (value, ty); // Suppress unused warnings
+            // Drop is a no-op for primitive types
+            // Primitive types: void, bool, integers (i8-i64, u8-u64), floats (f32, f64), string, nil
+            let is_primitive = matches!(
+                *ty,
+                crate::hir::TypeId::VOID
+                    | crate::hir::TypeId::BOOL
+                    | crate::hir::TypeId::I8
+                    | crate::hir::TypeId::I16
+                    | crate::hir::TypeId::I32
+                    | crate::hir::TypeId::I64
+                    | crate::hir::TypeId::U8
+                    | crate::hir::TypeId::U16
+                    | crate::hir::TypeId::U32
+                    | crate::hir::TypeId::U64
+                    | crate::hir::TypeId::F32
+                    | crate::hir::TypeId::F64
+                    | crate::hir::TypeId::STRING
+                    | crate::hir::TypeId::NIL
+            );
+
+            if !is_primitive {
+                // Non-primitive types may need destructor calls
+                // For now, we don't have a Drop trait in Simple, so this is a no-op
+                // Future enhancement: look up Drop trait implementation in trait registry
+                // and generate: call drop_fn(value)
+                //
+                // Implementation steps when Drop trait is added:
+                // 1. Check if type implements Drop trait via ctx.module.trait_impls
+                // 2. If yes, get the drop method function pointer
+                // 3. Generate: builder.ins().call(drop_fn, &[value])
+                //
+                // For reference-counted types (Rc, Arc), the ref-count decrement
+                // is handled by MirInst::RcDecrement / MirInst::WeakDecrement
+                let _ = value; // Suppress unused warning
+            }
         }
 
         MirInst::EndScope { local_index } => {
             // No-op at runtime - this is just a marker for lifetime analysis
             let _ = local_index; // Suppress unused warnings
+        }
+
+        // Value boxing instructions for FFI boundary
+        MirInst::BoxInt { dest, value } => {
+            // Box integer as RuntimeValue: (value << 3) | TAG_INT
+            // TAG_INT is 0, so this is equivalent to value << 3
+            let mut val = ctx.vreg_values[value];
+            // Ensure value is i64 - some paths may produce i32 (e.g., FFI returns)
+            let val_type = builder.func.dfg.value_type(val);
+            if val_type == types::I32 {
+                val = builder.ins().sextend(types::I64, val);
+            } else if val_type == types::I8 || val_type == types::I16 {
+                val = builder.ins().sextend(types::I64, val);
+            }
+            let three = builder.ins().iconst(types::I64, 3);
+            let boxed = builder.ins().ishl(val, three);
+            ctx.vreg_values.insert(*dest, boxed);
+        }
+
+        MirInst::BoxFloat { dest, value } => {
+            // Box float as RuntimeValue: (bits >> 3) << 3 | TAG_FLOAT
+            // TAG_FLOAT is 2 (0b010)
+            let val = ctx.vreg_values[value];
+            let bits = builder.ins().bitcast(types::I64, MemFlags::new(), val);
+            let three = builder.ins().iconst(types::I64, 3);
+            let shifted = builder.ins().ushr(bits, three);
+            let payload = builder.ins().ishl(shifted, three);
+            let tag = builder.ins().iconst(types::I64, 2); // TAG_FLOAT
+            let boxed = builder.ins().bor(payload, tag);
+            ctx.vreg_values.insert(*dest, boxed);
+        }
+
+        MirInst::UnboxInt { dest, value } => {
+            // Unbox RuntimeValue to integer: value >> 3 (arithmetic shift for sign extension)
+            let val = ctx.vreg_values[value];
+            let three = builder.ins().iconst(types::I64, 3);
+            let unboxed = builder.ins().sshr(val, three);
+            ctx.vreg_values.insert(*dest, unboxed);
+        }
+
+        MirInst::UnboxFloat { dest, value } => {
+            // Unbox RuntimeValue to float: extract bits and shift back
+            let val = ctx.vreg_values[value];
+            let three = builder.ins().iconst(types::I64, 3);
+            let shifted = builder.ins().ushr(val, three);
+            let bits = builder.ins().ishl(shifted, three);
+            let unboxed = builder.ins().bitcast(types::F64, MemFlags::new(), bits);
+            ctx.vreg_values.insert(*dest, unboxed);
         }
     }
     Ok(())

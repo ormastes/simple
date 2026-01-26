@@ -195,8 +195,34 @@ impl<'a> Parser<'a> {
                     target,
                 }))
             }
+            TokenKind::Import => {
+                // pub import is equivalent to export use (re-export)
+                // Note: import is deprecated but still supported
+                let start_span = self.current.span;
+                self.advance(); // consume 'import'
+
+                // Check for 'type' keyword after 'import'
+                let _is_type_only = if self.check(&TokenKind::Type) {
+                    self.advance();
+                    true
+                } else {
+                    false
+                };
+
+                let (path, target) = self.parse_use_path_and_target()?;
+                Ok(Node::ExportUseStmt(ExportUseStmt {
+                    span: Span::new(
+                        start_span.start,
+                        self.previous.span.end,
+                        start_span.line,
+                        start_span.column,
+                    ),
+                    path,
+                    target,
+                }))
+            }
             _ => Err(ParseError::unexpected_token(
-                "fn, struct, class, enum, trait, actor, const, static, type, extern, macro, or mod after 'pub'",
+                "fn, struct, class, enum, trait, actor, const, static, type, extern, macro, mod, use, or import after 'pub'",
                 format!("{:?}", self.current.kind),
                 self.current.span,
             )),
@@ -252,12 +278,39 @@ impl<'a> Parser<'a> {
                             }
                             continue;
                         }
+
+                        // Check if this is @default before impl - convert to #[default] attribute
+                        if name == "default" && self.check(&TokenKind::Impl) {
+                            attributes.push(Attribute {
+                                span: decorator.span,
+                                name: "default".to_string(),
+                                value: None,
+                                args: None,
+                            });
+                            return self.parse_impl_with_attrs(attributes);
+                        }
                     }
 
                     decorators.push(decorator);
                     while self.check(&TokenKind::Newline) {
                         self.advance();
                     }
+                }
+
+                // Check if decorators are followed by impl (e.g., @some_decorator impl Trait for T:)
+                if self.check(&TokenKind::Impl) {
+                    // Convert decorators to attributes for impl block
+                    for dec in decorators {
+                        if let Expr::Identifier(name) = dec.name {
+                            attributes.push(Attribute {
+                                span: dec.span,
+                                name,
+                                value: None,
+                                args: None,
+                            });
+                        }
+                    }
+                    return self.parse_impl_with_attrs(attributes);
                 }
 
                 let mut node = self.parse_function_with_attrs(decorators, attributes)?;

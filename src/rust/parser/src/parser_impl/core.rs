@@ -61,6 +61,9 @@ pub struct Parser<'a> {
     pub(crate) current_scope: String,
     /// Collected error hints (helpful messages for common mistakes)
     pub(crate) error_hints: Vec<ErrorHint>,
+    /// Count of INDENT tokens consumed during pattern parsing that need matching DEDENTs
+    /// consumed after the match arm body. Reset to 0 after consuming the dedents.
+    pub(crate) pattern_indent_count: usize,
 }
 
 impl<'a> Parser<'a> {
@@ -82,6 +85,7 @@ impl<'a> Parser<'a> {
             macro_registry: MacroRegistry::new(),
             current_scope: "module".to_string(),
             error_hints: Vec::new(),
+            pattern_indent_count: 0,
         };
 
         // Check for common mistakes in the initial token
@@ -136,6 +140,31 @@ impl<'a> Parser<'a> {
         }
 
         parser
+    }
+
+    /// Create a parser for parsing inline expressions (e.g., f-string interpolations).
+    /// Unlike `new()`, this parser does NOT treat leading whitespace as indentation,
+    /// which allows expressions like ` x + y ` to parse correctly.
+    pub fn new_expression(source: &'a str) -> Self {
+        let mut lexer = Lexer::new_expression(source);
+        let current = lexer.next_token();
+        let previous = Token::new(TokenKind::Eof, Span::new(0, 0, 1, 1), String::new());
+
+        Self {
+            lexer,
+            current,
+            previous,
+            source,
+            pending_tokens: VecDeque::new(),
+            mode: ParserMode::Normal,
+            no_paren_depth: 0,
+            debug_mode: DebugMode::Off,
+            debug_depth: 0,
+            macro_registry: MacroRegistry::new(),
+            current_scope: "module".to_string(),
+            error_hints: Vec::new(),
+            pattern_indent_count: 0,
+        }
     }
 
     /// Create a parser with LL(1) macro integration enabled.
@@ -306,7 +335,29 @@ impl<'a> Parser<'a> {
             TokenKind::Static => self.parse_static(),
             TokenKind::Shared => self.parse_shared_let(),
             TokenKind::Ghost => self.parse_ghost_let(),
-            TokenKind::Alias => self.parse_class_alias(),
+            TokenKind::Alias => {
+                // Check if this is a class alias (alias NewName = OldName) or identifier usage
+                // Class alias names must be PascalCase (start with uppercase)
+                let next = self.pending_tokens.front().cloned().unwrap_or_else(|| {
+                    let tok = self.lexer.next_token();
+                    self.pending_tokens.push_back(tok.clone());
+                    tok
+                });
+
+                // Check if next token is an uppercase identifier (class alias pattern)
+                if let TokenKind::Identifier { name, .. } = &next.kind {
+                    if name.chars().next().map_or(false, |c| c.is_uppercase()) {
+                        // PascalCase identifier after 'alias' - treat as class alias
+                        self.parse_class_alias()
+                    } else {
+                        // lowercase identifier after 'alias' - treat as expression
+                        self.parse_expression_or_assignment()
+                    }
+                } else {
+                    // Not followed by identifier - treat 'alias' as expression
+                    self.parse_expression_or_assignment()
+                }
+            }
             TokenKind::Type => {
                 // Check if this is a type alias (type Name = ...) or expression (expect type to eq)
                 // Simple heuristic: type alias names are PascalCase (start with uppercase)
@@ -339,7 +390,21 @@ impl<'a> Parser<'a> {
             // Module system (Features #104-111)
             TokenKind::Use => self.parse_use(),
             TokenKind::Import => self.parse_import(),    // alias for use
-            TokenKind::From => self.parse_from_import(), // Python-style: from module import {...}
+            TokenKind::From => {
+                // Disambiguate: 'from module import ...' vs 'from' as identifier
+                // Check if followed by an identifier (module name) - if so, it's an import
+                let next = self.pending_tokens.front().cloned().unwrap_or_else(|| {
+                    let tok = self.lexer.next_token();
+                    self.pending_tokens.push_back(tok.clone());
+                    tok
+                });
+                if matches!(next.kind, TokenKind::Identifier { .. }) {
+                    self.parse_from_import() // Python-style: from module import {...}
+                } else {
+                    // Not followed by identifier - treat 'from' as expression
+                    self.parse_expression_or_assignment()
+                }
+            }
             TokenKind::Mod => self.parse_mod(Visibility::Private, vec![]),
             TokenKind::Common => self.parse_common_use(),
             TokenKind::Export => self.parse_export_use(),

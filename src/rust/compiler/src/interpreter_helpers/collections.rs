@@ -251,7 +251,7 @@ pub(crate) fn iter_to_vec(val: &Value) -> Result<Vec<Value>, CompileError> {
         Value::Array(arr) => Ok(arr.clone()),
         Value::Tuple(tup) => Ok(tup.clone()),
         Value::Str(s) => Ok(s.chars().map(|c| Value::Str(c.to_string())).collect()),
-        Value::Dict(map) => Ok(map.keys().map(|k| Value::Str(k.clone())).collect()),
+        Value::Dict(map) => Ok(map.iter().map(|(k, v)| Value::Tuple(vec![Value::Str(k.clone()), v.clone()])).collect()),
         Value::Object { class, fields } if class == BUILTIN_RANGE => {
             // Range object
             let start = fields.get("start").and_then(|v| v.as_int().ok()).unwrap_or(0);

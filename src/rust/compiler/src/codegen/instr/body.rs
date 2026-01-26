@@ -372,28 +372,46 @@ pub fn compile_function_body<M: Module>(
                     }
                 }
                 if let Some(v) = val {
-                    // Handle missing VReg (can happen in complex control flow)
-                    let mut ret_val = if let Some(&rv) = vreg_values.get(v) {
-                        rv
+                    // If function returns void, discard the return value
+                    // (this can happen when return with value is used in a void function)
+                    if func.return_type == TypeId::VOID {
+                        builder.ins().return_(&[]);
                     } else {
-                        // Return a default value of the correct type
                         let ret_ty = type_to_cranelift(func.return_type);
-                        match ret_ty {
-                            types::F32 => builder.ins().f32const(0.0),
-                            types::F64 => builder.ins().f64const(0.0),
-                            types::I8 => builder.ins().iconst(types::I8, 0),
-                            types::I16 => builder.ins().iconst(types::I16, 0),
-                            types::I32 => builder.ins().iconst(types::I32, 0),
-                            _ => builder.ins().iconst(types::I64, 0),
+                        // Handle missing VReg (can happen in complex control flow)
+                        let mut ret_val = if let Some(&rv) = vreg_values.get(v) {
+                            // Coerce value type to match function return type
+                            let val_type = builder.func.dfg.value_type(rv);
+                            if val_type == ret_ty {
+                                rv
+                            } else if val_type == types::I64 && (ret_ty == types::I32 || ret_ty == types::I16 || ret_ty == types::I8) {
+                                // Truncate i64 to smaller integer type
+                                builder.ins().ireduce(ret_ty, rv)
+                            } else if (val_type == types::I8 || val_type == types::I16 || val_type == types::I32) && ret_ty == types::I64 {
+                                // Extend smaller integer to i64
+                                builder.ins().sextend(types::I64, rv)
+                            } else {
+                                rv
+                            }
+                        } else {
+                            // Return a default value of the correct type
+                            match ret_ty {
+                                types::F32 => builder.ins().f32const(0.0),
+                                types::F64 => builder.ins().f64const(0.0),
+                                types::I8 => builder.ins().iconst(types::I8, 0),
+                                types::I16 => builder.ins().iconst(types::I16, 0),
+                                types::I32 => builder.ins().iconst(types::I32, 0),
+                                _ => builder.ins().iconst(types::I64, 0),
+                            }
+                        };
+                        if generator_states.is_some() {
+                            let wrap_id = runtime_funcs["rt_value_int"];
+                            let wrap_ref = module.declare_func_in_func(wrap_id, builder.func);
+                            let wrap_call = builder.ins().call(wrap_ref, &[ret_val]);
+                            ret_val = builder.inst_results(wrap_call)[0];
                         }
-                    };
-                    if generator_states.is_some() {
-                        let wrap_id = runtime_funcs["rt_value_int"];
-                        let wrap_ref = module.declare_func_in_func(wrap_id, builder.func);
-                        let wrap_call = builder.ins().call(wrap_ref, &[ret_val]);
-                        ret_val = builder.inst_results(wrap_call)[0];
+                        builder.ins().return_(&[ret_val]);
                     }
-                    builder.ins().return_(&[ret_val]);
                 } else if generator_states.is_some() {
                     let nil_id = runtime_funcs["rt_value_nil"];
                     let nil_ref = module.declare_func_in_func(nil_id, builder.func);

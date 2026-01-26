@@ -58,13 +58,107 @@ const FS_OPERATIONS: &[&str] = &[
 
 /// Operations that require @net effect (network)
 const NET_OPERATIONS: &[&str] = &[
+    // HTTP operations
     "http_get",
     "http_post",
+    "http_put",
+    "http_delete",
+    "http_patch",
+    "http_head",
+    "http_options",
+    "http_request",
+    "fetch",
+    // TCP operations
     "tcp_connect",
     "tcp_listen",
+    "tcp_accept",
+    "tcp_read",
+    "tcp_write",
+    "tcp_close",
+    // UDP operations
     "udp_bind",
     "udp_send",
+    "udp_recv",
+    "udp_close",
+    // DNS operations
     "dns_lookup",
+    "dns_resolve",
+    // WebSocket operations
+    "ws_connect",
+    "ws_send",
+    "ws_recv",
+    "ws_close",
+    // Native networking
+    "native_http_get",
+    "native_http_post",
+    "native_tcp_connect",
+    "native_tcp_listen",
+    "native_socket_create",
+    "native_socket_bind",
+    "native_socket_listen",
+    "native_socket_accept",
+    "native_socket_connect",
+    "native_socket_send",
+    "native_socket_recv",
+    "native_socket_close",
+];
+
+/// Operations that require @unsafe effect (low-level/dangerous)
+const UNSAFE_OPERATIONS: &[&str] = &[
+    // Memory operations
+    "ptr_read",
+    "ptr_write",
+    "ptr_cast",
+    "mem_alloc",
+    "mem_free",
+    "mem_realloc",
+    "mem_copy",
+    "mem_move",
+    "mem_set",
+    "native_alloc",
+    "native_free",
+    "native_memcpy",
+    "native_memmove",
+    // FFI operations
+    "ffi_call",
+    "ffi_load",
+    "dlopen",
+    "dlsym",
+    "dlclose",
+    // Process operations
+    "exec",
+    "spawn_process",
+    "kill_process",
+    "fork",
+    // Inline assembly
+    "asm",
+    "asm_volatile",
+];
+
+/// Operations that require @compute effect (GPU/parallel computing)
+const COMPUTE_OPERATIONS: &[&str] = &[
+    // GPU operations
+    "gpu_alloc",
+    "gpu_free",
+    "gpu_copy_to_device",
+    "gpu_copy_from_device",
+    "gpu_kernel_launch",
+    "gpu_sync",
+    // SIMD operations
+    "simd_add",
+    "simd_sub",
+    "simd_mul",
+    "simd_div",
+    "simd_fma",
+    "simd_load",
+    "simd_store",
+    // Parallel execution
+    "parallel_for",
+    "parallel_reduce",
+    "parallel_map",
+    "parallel_filter",
+    "thread_spawn",
+    "thread_join",
 ];
 
 thread_local! {
@@ -93,9 +187,23 @@ pub fn is_net_operation(name: &str) -> bool {
     NET_OPERATIONS.contains(&name)
 }
 
+/// Check if an operation requires @unsafe effect
+pub fn is_unsafe_operation(name: &str) -> bool {
+    UNSAFE_OPERATIONS.contains(&name)
+}
+
+/// Check if an operation requires @compute effect (GPU/parallel)
+pub fn is_compute_operation(name: &str) -> bool {
+    COMPUTE_OPERATIONS.contains(&name)
+}
+
 /// Check if an operation has any side effects (for @pure checking)
 pub fn has_side_effects(name: &str) -> bool {
-    is_io_operation(name) || is_fs_operation(name) || is_net_operation(name)
+    is_io_operation(name)
+        || is_fs_operation(name)
+        || is_net_operation(name)
+        || is_unsafe_operation(name)
+        || is_compute_operation(name)
 }
 
 /// Check if we're in an @async context and report error if blocking operation is used

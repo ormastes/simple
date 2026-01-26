@@ -34,15 +34,25 @@ pub enum ImportTarget {
     Glob,
 }
 
-/// Module declaration: mod name or pub mod name
+/// Module declaration: mod name or pub mod name or inline module mod name: body
 /// #[no_gc]
 /// pub mod router
+///
+/// Inline module example:
+/// ```simple
+/// mod math:
+///     fn add(a: i64, b: i64) -> i64:
+///         a + b
+/// ```
 #[derive(Debug, Clone, PartialEq)]
 pub struct ModDecl {
     pub span: Span,
     pub name: String,
     pub visibility: Visibility,
     pub attributes: Vec<Attribute>,
+    /// Optional inline module body. When None, module is loaded from external file.
+    /// When Some, contains the items defined inline.
+    pub body: Option<Vec<super::core::Node>>,
 }
 
 /// Use statement: use module.path.{items}
@@ -86,6 +96,15 @@ pub struct ExportUseStmt {
     pub span: Span,
     pub path: ModulePath,
     pub target: ImportTarget,
+}
+
+/// Multiple comma-separated use statements: use a.B, c.D
+/// Syntax: `use std_lib.di.Container, std_lib.di.get_container`
+#[derive(Debug, Clone, PartialEq)]
+pub struct MultiUse {
+    pub span: Span,
+    pub imports: Vec<(ModulePath, ImportTarget)>,
+    pub is_type_only: bool,
 }
 
 /// Auto import statement: auto import module.macro_name

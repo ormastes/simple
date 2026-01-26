@@ -391,9 +391,86 @@ impl<'a> MirLowerer<'a> {
                 body,
                 ..
             } => {
-                // For loops are lowered similarly to while loops
-                // For now, treat as a simple loop over the iterator
-                // TODO: Full for-loop lowering with iterator protocol
+                // For loops use index-based iteration over collections
+                // 1. Evaluate iterable once
+                // 2. Get length
+                // 3. Loop: check index < len, get element, execute body, increment index
+
+                // Lower the iterable expression
+                let collection_reg = self.lower_expr(iterable)?;
+
+                // Find the local index for the loop variable (pattern)
+                // It should be in params or locals
+                let pattern_local_index = self.with_func(|func, _| {
+                    let num_params = func.params.len();
+                    // First check params
+                    for (i, param) in func.params.iter().enumerate() {
+                        if param.name == *pattern {
+                            return Some(i);
+                        }
+                    }
+                    // Then check locals
+                    for (i, local) in func.locals.iter().enumerate() {
+                        if local.name == *pattern {
+                            return Some(num_params + i);
+                        }
+                    }
+                    None
+                })?;
+
+                let pattern_local_index = pattern_local_index
+                    .ok_or_else(|| super::lowering_core::MirLowerError::Unsupported(
+                        format!("for loop variable '{}' not found in locals", pattern)
+                    ))?;
+
+                // Get collection length via rt_array_len call
+                let len_reg = self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::Call {
+                        dest: Some(dest),
+                        target: crate::mir::CallTarget::from_name("rt_array_len"),
+                        args: vec![collection_reg],
+                    });
+                    dest
+                })?;
+
+                // Create index register, initialize to 0
+                let index_reg = self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::ConstInt { dest, value: 0 });
+                    dest
+                })?;
+
+                // We need a mutable index, so use a local slot for it
+                // Allocate a stack slot for the index
+                let index_addr_reg = self.with_func(|func, current_block| {
+                    // Add a synthetic local for the index counter
+                    let index_local_idx = func.params.len() + func.locals.len();
+                    func.locals.push(crate::mir::function::MirLocal {
+                        name: format!("__for_index_{}", pattern),
+                        ty: crate::hir::TypeId::I64,
+                        kind: crate::mir::effects::LocalKind::Local,
+                        is_ghost: false,
+                    });
+
+                    let addr = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::LocalAddr {
+                        dest: addr,
+                        local_index: index_local_idx,
+                    });
+                    block.instructions.push(MirInst::Store {
+                        addr,
+                        value: index_reg,
+                        ty: crate::hir::TypeId::I64,
+                    });
+                    (addr, index_local_idx)
+                })?;
+                let (index_addr, index_local_idx) = index_addr_reg;
+
+                // Create blocks
                 let (header_id, body_id, exit_id) = self.with_func(|func, current_block| {
                     let header_id = func.new_block();
                     let body_id = func.new_block();
@@ -409,19 +486,135 @@ impl<'a> MirLowerer<'a> {
                     break_target: exit_id,
                 })?;
 
-                // Header: check iterator has more elements
+                // Header: load index, compare with len, branch
                 self.set_current_block(header_id)?;
-                // For now, just emit a placeholder branch
-                self.with_func(|func, current_block| {
+                let cond_reg = self.with_func(|func, current_block| {
+                    // Allocate all vregs first
+                    let addr = func.new_vreg();
+                    let current_idx = func.new_vreg();
+                    let cond = func.new_vreg();
+
+                    // Now get the block and emit instructions
                     let block = func.block_mut(current_block).unwrap();
-                    block.terminator = Terminator::Jump(body_id);
+
+                    // Load current index
+                    block.instructions.push(MirInst::LocalAddr {
+                        dest: addr,
+                        local_index: index_local_idx,
+                    });
+                    block.instructions.push(MirInst::Load {
+                        dest: current_idx,
+                        addr,
+                        ty: crate::hir::TypeId::I64,
+                    });
+
+                    // Compare index < len
+                    block.instructions.push(MirInst::BinOp {
+                        dest: cond,
+                        op: crate::hir::BinOp::Lt,
+                        left: current_idx,
+                        right: len_reg,
+                    });
+                    cond
                 })?;
 
-                // Body
+                self.with_func(|func, current_block| {
+                    let block = func.block_mut(current_block).unwrap();
+                    block.terminator = Terminator::Branch {
+                        cond: cond_reg,
+                        then_block: body_id,
+                        else_block: exit_id,
+                    };
+                })?;
+
+                // Body: get element, store to loop var, execute body, increment index
                 self.set_current_block(body_id)?;
+
+                // Load current index and get element
+                self.with_func(|func, current_block| {
+                    // Allocate all vregs first
+                    let addr = func.new_vreg();
+                    let current_idx = func.new_vreg();
+                    let element = func.new_vreg();
+                    let var_addr = func.new_vreg();
+
+                    // Now get the block and emit instructions
+                    let block = func.block_mut(current_block).unwrap();
+
+                    // Load current index
+                    block.instructions.push(MirInst::LocalAddr {
+                        dest: addr,
+                        local_index: index_local_idx,
+                    });
+                    block.instructions.push(MirInst::Load {
+                        dest: current_idx,
+                        addr,
+                        ty: crate::hir::TypeId::I64,
+                    });
+
+                    // Get element via IndexGet (which calls rt_index_get internally)
+                    block.instructions.push(MirInst::IndexGet {
+                        dest: element,
+                        collection: collection_reg,
+                        index: current_idx,
+                    });
+
+                    // Store element to loop variable's local
+                    block.instructions.push(MirInst::LocalAddr {
+                        dest: var_addr,
+                        local_index: pattern_local_index,
+                    });
+                    block.instructions.push(MirInst::Store {
+                        addr: var_addr,
+                        value: element,
+                        ty: iterable.ty, // Use element type
+                    });
+                })?;
+
+                // Execute body statements
                 for stmt in body {
                     self.lower_stmt(stmt, contract)?;
                 }
+
+                // Increment index
+                self.with_func(|func, current_block| {
+                    // Allocate all vregs first
+                    let addr = func.new_vreg();
+                    let current_idx = func.new_vreg();
+                    let one = func.new_vreg();
+                    let new_idx = func.new_vreg();
+
+                    // Now get the block and emit instructions
+                    let block = func.block_mut(current_block).unwrap();
+
+                    // Load current index
+                    block.instructions.push(MirInst::LocalAddr {
+                        dest: addr,
+                        local_index: index_local_idx,
+                    });
+                    block.instructions.push(MirInst::Load {
+                        dest: current_idx,
+                        addr,
+                        ty: crate::hir::TypeId::I64,
+                    });
+
+                    // Increment
+                    block.instructions.push(MirInst::ConstInt { dest: one, value: 1 });
+                    block.instructions.push(MirInst::BinOp {
+                        dest: new_idx,
+                        op: crate::hir::BinOp::Add,
+                        left: current_idx,
+                        right: one,
+                    });
+
+                    // Store back
+                    block.instructions.push(MirInst::Store {
+                        addr,
+                        value: new_idx,
+                        ty: crate::hir::TypeId::I64,
+                    });
+                })?;
+
                 self.finalize_block_jump(header_id)?;
 
                 self.pop_loop()?;

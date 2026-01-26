@@ -9,9 +9,11 @@
 #
 # The HirVisitor walks the HIR tree and calls the appropriate backend methods.
 
-import compiler.hir.*
-import compiler.lexer.Span
-import std_lib.di.Container, std_lib.di.get_container
+use hir.*
+use lexer.Span
+use std_lib.di.Container, std_lib.di.get_container
+use mir.{MirLowering, MirModule}
+use codegen.{CodegenPipeline, CodegenTarget, CodegenMode, CompiledModule, CodegenError}
 
 # ============================================================================
 # Backend Trait
@@ -50,8 +52,8 @@ trait Backend:
     fn is_allowed(expr: HirExpr) -> bool
     fn is_allowed_stmt(stmt: HirStmt) -> bool
 
+"""Type of backend."""
 enum BackendKind:
-    """Type of backend."""
     Interpreter
     Compiler
     Sdn
@@ -61,8 +63,8 @@ enum BackendKind:
 # Backend Results and Errors
 # ============================================================================
 
+"""Result of backend processing."""
 enum BackendResult:
-    """Result of backend processing."""
     Value(value: Value)
     CompiledUnit(unit: CompiledUnit)
     SdnData(data: SdnValue)
@@ -74,8 +76,8 @@ struct BackendError:
     span: Span?
     kind: BackendErrorKind
 
+"""Backend error kind."""
 enum BackendErrorKind:
-    """Backend error kind."""
     NotAllowed          # Operation not allowed (SDN mode)
     TypeError           # Type mismatch
     RuntimeError        # Runtime error
@@ -97,10 +99,10 @@ impl BackendError:
         BackendError(message: message, span: span, kind: BackendErrorKind.CompileError)
 
     static fn not_implemented(message: text) -> BackendError:
-        BackendError(message: message, span: None, kind: BackendErrorKind.NotImplemented)
+        BackendError(message: message, span: nil, kind: BackendErrorKind.NotImplemented)
 
     static fn internal(message: text) -> BackendError:
-        BackendError(message: message, span: None, kind: BackendErrorKind.Internal)
+        BackendError(message: message, span: nil, kind: BackendErrorKind.Internal)
 
 # ============================================================================
 # Compiled Unit (for Compiler Backend)
@@ -145,8 +147,8 @@ struct SdnValue:
     """Data-only value from SDN parsing."""
     kind: SdnValueKind
 
+"""SDN value kind."""
 enum SdnValueKind:
-    """SDN value kind."""
     Nil
     Bool(value: bool)
     Int(value: i64)
@@ -157,7 +159,7 @@ enum SdnValueKind:
     Table(headers: [text], rows: [[SdnValue]])
 
 impl SdnValue:
-    static fn nil() -> SdnValue:
+    static fn make_nil() -> SdnValue:
         SdnValue(kind: SdnValueKind.Nil)
 
     static fn bool(value: bool) -> SdnValue:
@@ -185,9 +187,10 @@ impl SdnValue:
 # Runtime Value (for Interpreter Backend)
 # ============================================================================
 
+"""Runtime value for interpreter."""
 enum Value:
-    """Runtime value for interpreter."""
     Nil
+    Unit
     Bool(value: bool)
     Int(value: i64)
     Float(value: f64)
@@ -204,6 +207,7 @@ enum Value:
     Ref(target: Value, mutable: bool)
     Option(value: Value?)
     Result(ok: Value?, err: Value?)
+    TraitType(trait_name: text)
 
 enum EnumPayloadValue:
     Tuple(values: [Value])
@@ -226,7 +230,7 @@ struct ObjectValue:
     fields: Dict<text, Value>
 
 impl Value:
-    static fn nil() -> Value:
+    static fn make_nil() -> Value:
         Value.Nil
 
     static fn bool(value: bool) -> Value:
@@ -245,13 +249,13 @@ impl Value:
         Value.Option(Some(value))
 
     static fn none() -> Value:
-        Value.Option(None)
+        Value.Option(nil)
 
     static fn ok(value: Value) -> Value:
-        Value.Result(Some(value), None)
+        Value.Result(Some(value), nil)
 
     static fn err(value: Value) -> Value:
-        Value.Result(None, Some(value))
+        Value.Result(nil, Some(value))
 
     fn is_truthy() -> bool:
         match self:
@@ -267,6 +271,7 @@ impl Value:
     fn type_name() -> text:
         match self:
             case Nil: "nil"
+            case Unit: "unit"
             case Bool(_): "bool"
             case Int(_): "i64"
             case Float(_): "f64"
@@ -283,6 +288,8 @@ impl Value:
             case Ref(_, _): "ref"
             case Option(_): "option"
             case Result(_, _): "result"
+            case TraitType(_): "trait_type"
+            case _: "unknown"
 
 # ============================================================================
 # Evaluation Context
@@ -401,7 +408,7 @@ impl HirVisitor:
         val result = if block.value.?:
             self.visit_expr(block.value.unwrap())?
         else:
-            Value.nil()
+            Value.make_nil()
 
         self.ctx.env.pop_scope()
         Ok(result)
@@ -446,7 +453,7 @@ pub fn get_backend() -> Backend:
 struct InterpreterBackendImpl:
     """Tree-walking interpreter backend."""
 
-impl InterpreterBackendImpl: Backend:
+impl Backend for InterpreterBackendImpl:
     fn name() -> text:
         "interpreter"
 
@@ -490,10 +497,10 @@ impl InterpreterBackendImpl: Backend:
                 Ok(Value.bool(value))
 
             case NilLit:
-                Ok(Value.nil())
+                Ok(Value.make_nil())
 
             case UnitLit:
-                Ok(Value.nil())
+                Ok(Value.make_nil())
 
             case Var(symbol):
                 val value = ctx.env.lookup(symbol)
@@ -544,7 +551,7 @@ impl InterpreterBackendImpl: Backend:
                 elif else_.?:
                     self.eval_block(else_.unwrap(), ctx)
                 else:
-                    Ok(Value.nil())
+                    Ok(Value.make_nil())
 
             case Call(callee, args, _):
                 val fn_value = self.eval_expr(callee, ctx)?
@@ -618,7 +625,7 @@ impl InterpreterBackendImpl:
         val result = if block.value.?:
             self.eval_expr(block.value.unwrap(), ctx)?
         else:
-            Value.nil()
+            Value.make_nil()
 
         ctx.env.pop_scope()
         Ok(result)
@@ -778,7 +785,7 @@ impl InterpreterBackendImpl:
             val value = if i < args.len():
                 args[i]
             else:
-                return Err(BackendError.runtime_error("missing argument for parameter", None))
+                return Err(BackendError.runtime_error("missing argument for parameter", nil))
 
             ctx.env.define(param.symbol, value)
 
@@ -798,13 +805,30 @@ impl InterpreterBackendImpl:
             case _: Err(BackendError.not_implemented("assignment operator not implemented"))
 
 # ============================================================================
-# Compiler Backend Implementation (Stub)
+# Compiler Backend Implementation
 # ============================================================================
 
 struct CompilerBackendImpl:
-    """Compiling backend (HIR -> MIR -> codegen)."""
+    """Compiling backend (HIR -> MIR -> codegen).
 
-impl CompilerBackendImpl: Backend:
+    Compiles HIR modules by:
+    1. Lowering HIR to MIR
+    2. Generating native code via Cranelift
+    3. Either executing (JIT) or emitting object file (AOT)
+    """
+    mode: CodegenMode
+    output_path: text?
+
+impl CompilerBackendImpl:
+    static fn jit() -> CompilerBackendImpl:
+        """Create JIT compilation backend."""
+        CompilerBackendImpl(mode: CodegenMode.Jit, output_path: nil)
+
+    static fn aot(output: text) -> CompilerBackendImpl:
+        """Create AOT compilation backend."""
+        CompilerBackendImpl(mode: CodegenMode.Aot, output_path: Some(output))
+
+impl Backend for CompilerBackendImpl:
     fn name() -> text:
         "compiler"
 
@@ -812,8 +836,48 @@ impl CompilerBackendImpl: Backend:
         BackendKind.Compiler
 
     fn process_module(module: HirModule) -> Result<BackendResult, BackendError>:
-        # TODO: Lower to MIR and generate code
-        Err(BackendError.not_implemented("compiler backend not yet implemented"))
+        # 1. Lower HIR to MIR
+        var lowering = MirLowering.new(module.symbols)
+        val mir_module = lowering.lower_module(module)
+
+        # Check for lowering errors
+        if lowering.errors.len() > 0:
+            val first_error = lowering.errors[0]
+            return Err(BackendError.compile_error(first_error.message, first_error.span))
+
+        # 2. Create codegen pipeline based on mode
+        val pipeline = match self.mode:
+            case Jit: CodegenPipeline.jit()
+            case Aot: CodegenPipeline.aot(CodegenTarget.Native)
+
+        # 3. Compile MIR to native code
+        val compile_result = pipeline.compile_module(mir_module)
+        match compile_result:
+            case Ok(compiled):
+                match self.mode:
+                    case Jit:
+                        # JIT: Execute main function and return result
+                        val call_result = compiled.call("main", [])
+                        match call_result:
+                            case Ok(value):
+                                compiled.cleanup()
+                                Ok(BackendResult.Value(Value.int(value)))
+                            case Err(e):
+                                compiled.cleanup()
+                                Err(BackendError.runtime_error(e.message, e.span))
+                    case Aot:
+                        # AOT: Emit object file
+                        val path = self.output_path ?? "a.o"
+                        val emit_result = compiled.emit_object(path)
+                        match emit_result:
+                            case Ok(_):
+                                compiled.cleanup()
+                                Ok(BackendResult.Unit)
+                            case Err(e):
+                                compiled.cleanup()
+                                Err(BackendError.compile_error(e.message, e.span))
+            case Err(e):
+                Err(BackendError.compile_error(e.message, e.span))
 
     fn process_function(fn_: HirFunction) -> Result<BackendResult, BackendError>:
         Err(BackendError.not_implemented("compiler backend not yet implemented"))
@@ -858,7 +922,7 @@ struct SdnBackendImpl:
     - No function calls, no control flow, no side effects
     """
 
-impl SdnBackendImpl: Backend:
+impl Backend for SdnBackendImpl:
     fn name() -> text:
         "sdn"
 
@@ -868,7 +932,7 @@ impl SdnBackendImpl: Backend:
     fn process_module(module: HirModule) -> Result<BackendResult, BackendError>:
         # SDN modules can't have functions
         if not module.functions.is_empty():
-            return Err(BackendError.not_allowed("functions not allowed in SDN mode", None))
+            return Err(BackendError.not_allowed("functions not allowed in SDN mode", nil))
         Ok(BackendResult.Unit)
 
     fn process_function(fn_: HirFunction) -> Result<BackendResult, BackendError>:
@@ -908,7 +972,7 @@ impl SdnBackendImpl: Backend:
             case BoolLit(value):
                 Ok(Value.bool(value))
             case NilLit:
-                Ok(Value.nil())
+                Ok(Value.make_nil())
             case ArrayLit(elements, _):
                 var values: [Value] = []
                 for elem in elements:

@@ -151,6 +151,11 @@ thread_local! {
     /// When true, self.field = value assignments should error.
     /// This is set when entering a fn method (not me method) and cleared when leaving.
     pub(crate) static IN_IMMUTABLE_FN_METHOD: RefCell<bool> = RefCell::new(false);
+    /// Blanket impl methods registry.
+    /// When an impl block has #[default] attribute and generic params (e.g., impl<T> Display for T:),
+    /// its methods are stored here. Key is the trait name, value is the list of methods.
+    /// These methods apply to any type that doesn't have a concrete impl for the trait.
+    pub(crate) static BLANKET_IMPL_METHODS: RefCell<HashMap<String, Vec<simple_parser::ast::FunctionDef>>> = RefCell::new(HashMap::new());
 }
 
 //==============================================================================
@@ -482,4 +487,7 @@ pub fn clear_interpreter_state() {
 
     // Reset immutable fn method tracking
     IN_IMMUTABLE_FN_METHOD.with(|cell| *cell.borrow_mut() = false);
+
+    // Clear blanket impl methods
+    BLANKET_IMPL_METHODS.with(|cell| cell.borrow_mut().clear());
 }

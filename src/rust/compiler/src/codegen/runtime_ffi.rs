@@ -63,6 +63,8 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_array_set", &[I64, I64, I64], &[I8]),
     RuntimeFuncSpec::new("rt_array_pop", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_array_clear", &[I64], &[I8]),
+    RuntimeFuncSpec::new("rt_array_len", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_len", &[I64], &[I64]), // Generic length for any collection
     // =========================================================================
     // Tuple operations
     // =========================================================================
@@ -108,6 +110,20 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_vec_shuffle", &[I64, I64], &[I64]), // (vector, indices) -> shuffled vector
     RuntimeFuncSpec::new("rt_vec_blend", &[I64, I64, I64], &[I64]), // (vec1, vec2, indices) -> blended vector
     RuntimeFuncSpec::new("rt_vec_select", &[I64, I64, I64], &[I64]), // (mask, if_true, if_false) -> selected vector
+    // SIMD load/store operations
+    RuntimeFuncSpec::new("rt_vec_load", &[I64, I64], &[I64]), // (array, offset) -> vector
+    RuntimeFuncSpec::new("rt_vec_store", &[I64, I64, I64], &[]), // (vector, array, offset) -> ()
+    RuntimeFuncSpec::new("rt_vec_gather", &[I64, I64], &[I64]), // (array, indices) -> vector
+    RuntimeFuncSpec::new("rt_vec_scatter", &[I64, I64, I64], &[]), // (vector, array, indices) -> ()
+    // SIMD advanced operations
+    RuntimeFuncSpec::new("rt_vec_fma", &[I64, I64, I64], &[I64]), // (a, b, c) -> a * b + c
+    RuntimeFuncSpec::new("rt_vec_recip", &[I64], &[I64]), // (vector) -> 1.0 / vector
+    RuntimeFuncSpec::new("rt_vec_masked_load", &[I64, I64, I64, I64], &[I64]), // (array, offset, mask, default) -> vector
+    RuntimeFuncSpec::new("rt_vec_masked_store", &[I64, I64, I64, I64], &[]), // (vector, array, offset, mask) -> ()
+    RuntimeFuncSpec::new("rt_vec_min_vec", &[I64, I64], &[I64]), // (a, b) -> element-wise min
+    RuntimeFuncSpec::new("rt_vec_max_vec", &[I64, I64], &[I64]), // (a, b) -> element-wise max
+    RuntimeFuncSpec::new("rt_vec_clamp", &[I64, I64, I64], &[I64]), // (vec, lo, hi) -> clamped
+    RuntimeFuncSpec::new("rt_neighbor_load", &[I64, I64], &[I64]), // (array, direction) -> value
     // =========================================================================
     // GPU Atomic operations
     // =========================================================================
@@ -128,6 +144,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_string_starts_with", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_ends_with", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_eq", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_string_len", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_cstring_to_text", &[I64], &[I64]),
     // =========================================================================
     // Value creation/conversion
@@ -138,6 +155,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_value_nil", &[], &[I64]),
     RuntimeFuncSpec::new("rt_value_as_int", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_value_to_string", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_value_eq", &[I64, I64], &[I8]),
     // =========================================================================
     // Object operations
     // =========================================================================
@@ -691,6 +709,92 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_sdn_get", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_sdn_set", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_sdn_fmt", &[I64], &[I64]),
+    // =========================================================================
+    // Cranelift FFI (Self-Hosting Compiler Support)
+    // =========================================================================
+    // Module management
+    RuntimeFuncSpec::new("rt_cranelift_module_new", &[I64, I64], &[I64]),      // name (RuntimeValue), target -> module_handle
+    RuntimeFuncSpec::new("rt_cranelift_new_module", &[I64, I64, I64], &[I64]), // name_ptr, name_len, target -> module_handle
+    RuntimeFuncSpec::new("rt_cranelift_finalize_module", &[I64], &[I64]),      // module -> success
+    RuntimeFuncSpec::new("rt_cranelift_free_module", &[I64], &[]),             // module -> ()
+    // Signature building
+    RuntimeFuncSpec::new("rt_cranelift_new_signature", &[I64], &[I64]),        // call_conv -> sig_handle
+    RuntimeFuncSpec::new("rt_cranelift_sig_add_param", &[I64, I64], &[]),      // sig, type -> ()
+    RuntimeFuncSpec::new("rt_cranelift_sig_set_return", &[I64, I64], &[]),     // sig, type -> ()
+    // Function building
+    RuntimeFuncSpec::new("rt_cranelift_begin_function", &[I64, I64, I64, I64], &[I64]), // module, name_ptr, name_len, sig -> ctx
+    RuntimeFuncSpec::new("rt_cranelift_end_function", &[I64], &[I64]),         // ctx -> func_id
+    RuntimeFuncSpec::new("rt_cranelift_define_function", &[I64, I64, I64], &[I8]), // module, func_id, ctx -> success
+    // Block management
+    RuntimeFuncSpec::new("rt_cranelift_create_block", &[I64], &[I64]),         // ctx -> block
+    RuntimeFuncSpec::new("rt_cranelift_switch_to_block", &[I64, I64], &[]),    // ctx, block -> ()
+    RuntimeFuncSpec::new("rt_cranelift_seal_block", &[I64, I64], &[]),         // ctx, block -> ()
+    RuntimeFuncSpec::new("rt_cranelift_seal_all_blocks", &[I64], &[]),         // ctx -> ()
+    // Value creation
+    RuntimeFuncSpec::new("rt_cranelift_iconst", &[I64, I64, I64], &[I64]),     // ctx, type, value -> val
+    RuntimeFuncSpec::new("rt_cranelift_fconst", &[I64, I64, F64], &[I64]),     // ctx, type, value -> val
+    RuntimeFuncSpec::new("rt_cranelift_bconst", &[I64, I8], &[I64]),           // ctx, value -> val
+    RuntimeFuncSpec::new("rt_cranelift_null", &[I64, I64], &[I64]),            // ctx, type -> val
+    // Arithmetic
+    RuntimeFuncSpec::new("rt_cranelift_iadd", &[I64, I64, I64], &[I64]),       // ctx, a, b -> val
+    RuntimeFuncSpec::new("rt_cranelift_isub", &[I64, I64, I64], &[I64]),       // ctx, a, b -> val
+    RuntimeFuncSpec::new("rt_cranelift_imul", &[I64, I64, I64], &[I64]),       // ctx, a, b -> val
+    RuntimeFuncSpec::new("rt_cranelift_sdiv", &[I64, I64, I64], &[I64]),       // ctx, a, b -> val
+    RuntimeFuncSpec::new("rt_cranelift_udiv", &[I64, I64, I64], &[I64]),       // ctx, a, b -> val
+    RuntimeFuncSpec::new("rt_cranelift_srem", &[I64, I64, I64], &[I64]),       // ctx, a, b -> val
+    RuntimeFuncSpec::new("rt_cranelift_urem", &[I64, I64, I64], &[I64]),       // ctx, a, b -> val
+    RuntimeFuncSpec::new("rt_cranelift_fadd", &[I64, I64, I64], &[I64]),       // ctx, a, b -> val
+    RuntimeFuncSpec::new("rt_cranelift_fsub", &[I64, I64, I64], &[I64]),       // ctx, a, b -> val
+    RuntimeFuncSpec::new("rt_cranelift_fmul", &[I64, I64, I64], &[I64]),       // ctx, a, b -> val
+    RuntimeFuncSpec::new("rt_cranelift_fdiv", &[I64, I64, I64], &[I64]),       // ctx, a, b -> val
+    // Bitwise
+    RuntimeFuncSpec::new("rt_cranelift_band", &[I64, I64, I64], &[I64]),       // ctx, a, b -> val
+    RuntimeFuncSpec::new("rt_cranelift_bor", &[I64, I64, I64], &[I64]),        // ctx, a, b -> val
+    RuntimeFuncSpec::new("rt_cranelift_bxor", &[I64, I64, I64], &[I64]),       // ctx, a, b -> val
+    RuntimeFuncSpec::new("rt_cranelift_bnot", &[I64, I64], &[I64]),            // ctx, a -> val
+    RuntimeFuncSpec::new("rt_cranelift_ishl", &[I64, I64, I64], &[I64]),       // ctx, a, b -> val
+    RuntimeFuncSpec::new("rt_cranelift_sshr", &[I64, I64, I64], &[I64]),       // ctx, a, b -> val
+    RuntimeFuncSpec::new("rt_cranelift_ushr", &[I64, I64, I64], &[I64]),       // ctx, a, b -> val
+    // Comparison
+    RuntimeFuncSpec::new("rt_cranelift_icmp", &[I64, I64, I64, I64], &[I64]),  // ctx, cond, a, b -> val
+    RuntimeFuncSpec::new("rt_cranelift_fcmp", &[I64, I64, I64, I64], &[I64]),  // ctx, cond, a, b -> val
+    // Memory
+    RuntimeFuncSpec::new("rt_cranelift_load", &[I64, I64, I64, I64], &[I64]),  // ctx, type, addr, offset -> val
+    RuntimeFuncSpec::new("rt_cranelift_store", &[I64, I64, I64, I64], &[]),    // ctx, value, addr, offset -> ()
+    RuntimeFuncSpec::new("rt_cranelift_stack_slot", &[I64, I64, I64], &[I64]), // ctx, size, align -> slot
+    RuntimeFuncSpec::new("rt_cranelift_stack_addr", &[I64, I64, I64], &[I64]), // ctx, slot, offset -> addr
+    // Control flow
+    RuntimeFuncSpec::new("rt_cranelift_jump", &[I64, I64], &[]),               // ctx, block -> ()
+    RuntimeFuncSpec::new("rt_cranelift_brif", &[I64, I64, I64, I64], &[]),     // ctx, cond, then_block, else_block -> ()
+    RuntimeFuncSpec::new("rt_cranelift_return", &[I64, I64], &[]),             // ctx, value -> ()
+    RuntimeFuncSpec::new("rt_cranelift_return_void", &[I64], &[]),             // ctx -> ()
+    RuntimeFuncSpec::new("rt_cranelift_trap", &[I64, I64], &[]),               // ctx, code -> ()
+    // Function calls
+    RuntimeFuncSpec::new("rt_cranelift_call", &[I64, I64, I64, I64], &[I64]),  // ctx, func, args_ptr, args_len -> val
+    RuntimeFuncSpec::new("rt_cranelift_call_indirect", &[I64, I64, I64, I64, I64], &[I64]), // ctx, sig, addr, args_ptr, args_len -> val
+    // Type conversion
+    RuntimeFuncSpec::new("rt_cranelift_sextend", &[I64, I64, I64], &[I64]),    // ctx, to_type, value -> val
+    RuntimeFuncSpec::new("rt_cranelift_uextend", &[I64, I64, I64], &[I64]),    // ctx, to_type, value -> val
+    RuntimeFuncSpec::new("rt_cranelift_ireduce", &[I64, I64, I64], &[I64]),    // ctx, to_type, value -> val
+    RuntimeFuncSpec::new("rt_cranelift_fcvt_to_sint", &[I64, I64, I64], &[I64]),   // ctx, to_type, value -> val
+    RuntimeFuncSpec::new("rt_cranelift_fcvt_to_uint", &[I64, I64, I64], &[I64]),   // ctx, to_type, value -> val
+    RuntimeFuncSpec::new("rt_cranelift_fcvt_from_sint", &[I64, I64, I64], &[I64]), // ctx, to_type, value -> val
+    RuntimeFuncSpec::new("rt_cranelift_fcvt_from_uint", &[I64, I64, I64], &[I64]), // ctx, to_type, value -> val
+    RuntimeFuncSpec::new("rt_cranelift_bitcast", &[I64, I64, I64], &[I64]),    // ctx, to_type, value -> val
+    // Block parameters
+    RuntimeFuncSpec::new("rt_cranelift_append_block_param", &[I64, I64, I64], &[I64]), // ctx, block, type -> val
+    RuntimeFuncSpec::new("rt_cranelift_block_param", &[I64, I64, I64], &[I64]), // ctx, block, index -> val
+    // JIT execution
+    RuntimeFuncSpec::new("rt_cranelift_get_function_ptr", &[I64, I64, I64], &[I64]), // module, name_ptr, name_len -> ptr
+    RuntimeFuncSpec::new("rt_cranelift_call_function_ptr", &[I64, I64, I64], &[I64]), // ptr, args_ptr, args_len -> result
+    // Object file generation
+    RuntimeFuncSpec::new("rt_cranelift_emit_object", &[I64, I64, I64], &[I8]), // module, path_ptr, path_len -> success
+    // =========================================================================
+    // Bootstrap Self-Hosting FFI
+    // =========================================================================
+    RuntimeFuncSpec::new("rt_exec", &[I64], &[I32]),                           // cmd -> exit_code
+    RuntimeFuncSpec::new("rt_file_hash", &[I64], &[I64]),                      // path -> hash_text
+    RuntimeFuncSpec::new("rt_write_file", &[I64, I64], &[I8]),                 // path, content -> success
 ];
 
 #[cfg(test)]

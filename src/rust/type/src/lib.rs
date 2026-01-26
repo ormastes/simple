@@ -696,6 +696,9 @@ pub struct TypeChecker {
     /// When a binding exists, trait references resolve to the bound implementation type
     /// and dispatch is static (monomorphized). Without binding, dispatch is dynamic (vtable).
     interface_bindings: HashMap<String, Type>,
+    /// FString const_keys registry: variable name -> keys extracted from FString
+    /// Used to resolve DependentKeys types (e.g., `template.keys` -> ["user", "city"])
+    fstring_keys: HashMap<String, Vec<String>>,
 }
 
 // TypeChecker implementation (split for maintainability)

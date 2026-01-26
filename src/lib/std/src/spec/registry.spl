@@ -30,6 +30,13 @@ enum Given:
     Lazy(name: Any, block: Any)   # Lazy evaluated on first access - (Symbol, fn() -> Any)
     Eager(block: Any)              # Eagerly evaluated before each - fn() -> void
 
+# MockMode - Controls mock availability for tests
+enum MockMode:
+    All         # Unit tests - allow all mocks (default)
+    HalOnly     # Integration tests - only HAL mocks allowed
+    Disabled    # System tests - no mocks allowed
+    Custom      # Custom pattern-based restriction
+
 # Example - Individual test case
 class Example:
     description: text
@@ -38,9 +45,10 @@ class Example:
     tags: List<text>           # Tags like "slow", "integration", "gui"
     timeout_seconds: Option<i32>  # Optional timeout in seconds
     resource_limits: Option<ResourceLimits>  # Resource limits for isolated execution
+    mock_mode: MockMode        # Mock policy for this example
 
     fn new(description: text, block: fn()) -> Example:
-        return Example(description, block, false, [], nil, nil)
+        return Example(description, block, false, [], nil, nil, MockMode.All)
 
     me skip() -> Example:
         """Mark this example as skipped/pending."""
@@ -77,6 +85,26 @@ class Example:
     me with_resource_limits(limits: ResourceLimits) -> Example:
         """Set resource limits for this example."""
         self.resource_limits = Some(limits)
+        return self
+
+    me with_mock_mode(mode: MockMode) -> Example:
+        """Set mock policy mode for this example."""
+        self.mock_mode = mode
+        return self
+
+    me unit_test() -> Example:
+        """Mark as unit test (allow all mocks)."""
+        self.mock_mode = MockMode.All
+        return self
+
+    me integration_test() -> Example:
+        """Mark as integration test (HAL-only mocks)."""
+        self.mock_mode = MockMode.HalOnly
+        return self
+
+    me system_test() -> Example:
+        """Mark as system test (no mocks allowed)."""
+        self.mock_mode = MockMode.Disabled
         return self
 
     fn has_resource_limits() -> bool:
@@ -117,9 +145,10 @@ class ExampleGroup:
     children: List<ExampleGroup>
     test_examples: List<Example>
     hooks: List<Hook>
+    mock_mode: Option<MockMode>  # Optional mock policy for entire group
 
     fn new(description: text, parent: Option<ExampleGroup>) -> ExampleGroup:
-        return ExampleGroup(description, parent, [], [], [])
+        return ExampleGroup(description, parent, [], [], [], nil)
 
     me add_child(child: ExampleGroup):
         """Add a nested example group (context)."""
@@ -132,6 +161,18 @@ class ExampleGroup:
     me add_hook(hook: Hook):
         """Add a lifecycle hook."""
         self.hooks = self.hooks.push(hook)
+
+    me with_mock_mode(mode: MockMode):
+        """Set mock policy mode for all examples in this group."""
+        self.mock_mode = Some(mode)
+
+    fn get_effective_mock_mode() -> MockMode:
+        """Get the effective mock mode, inheriting from parent if not set."""
+        if self.mock_mode.?:
+            return self.mock_mode.unwrap()
+        if self.parent.?:
+            return self.parent.unwrap().get_effective_mock_mode()
+        return MockMode.All  # Default to allowing all mocks
 
     fn get_before_each_hooks() -> List<Any>:
         """Extract all before_each hook blocks."""

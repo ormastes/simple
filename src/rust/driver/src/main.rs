@@ -170,13 +170,7 @@ fn main() {
         "brief" => handle_brief(&args, global_flags.gc_log, global_flags.gc_off),
 
         // Dashboard
-        "dashboard" => {
-            // TODO: Execute Simple dashboard app
-            // For now, print placeholder
-            println!("Dashboard command - implementation in progress");
-            println!("Usage: simple dashboard [status|collect|help]");
-            0
-        }
+        "dashboard" => handle_dashboard(&args, global_flags.gc_log, global_flags.gc_off),
 
         // Verification
         "verify" => run_verify(&args, global_flags.gc_log, global_flags.gc_off),
@@ -327,10 +321,14 @@ fn handle_file_execution(
     let path = PathBuf::from(first);
     if path.exists() {
         // Collect remaining arguments to pass to the Simple program
+        // Filter out:
+        // - GC flags (internal to runtime)
+        // - Leading "--" separator (convention for separating runtime args from script args)
         let program_args: Vec<String> = args
             .iter()
             .skip(1) // Skip the file path
             .filter(|a| !a.starts_with("--gc")) // Skip GC flags
+            .skip_while(|a| *a == "--") // Skip leading "--" separator
             .cloned()
             .collect();
 

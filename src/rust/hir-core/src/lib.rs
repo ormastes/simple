@@ -979,6 +979,8 @@ pub enum ValueKind {
     EnumType,
     /// Enum variant constructor (callable to create enum)
     EnumVariantConstructor,
+    /// Trait type reference (represents a trait definition)
+    TraitType,
 
     // Async
     /// Future (async computation)
@@ -1065,6 +1067,7 @@ impl ValueKind {
             ValueKind::Constructor => "constructor",
             ValueKind::EnumType => "enum_type",
             ValueKind::EnumVariantConstructor => "enum_variant_constructor",
+            ValueKind::TraitType => "trait_type",
             ValueKind::Future => "future",
             ValueKind::Generator => "generator",
             ValueKind::Actor => "actor",

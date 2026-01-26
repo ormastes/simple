@@ -62,6 +62,7 @@ pub enum AssignOp {
     SubAssign,        // -=
     MulAssign,        // *=
     DivAssign,        // /=
+    ModAssign,        // %=
     SuspendAssign,    // ~= (suspension assignment for async-by-default)
     SuspendAddAssign, // ~+= (suspension compound add)
     SuspendSubAssign, // ~-= (suspension compound subtract)

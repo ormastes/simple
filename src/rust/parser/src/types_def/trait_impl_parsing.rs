@@ -198,6 +198,13 @@ impl<'a> Parser<'a> {
             if self.check(&TokenKind::Dedent) {
                 break;
             }
+            // Skip standalone docstrings (impl-level documentation)
+            // These are docstrings that appear before any method and aren't attached to a method
+            if matches!(&self.current.kind, TokenKind::String(_) | TokenKind::FString(_)) {
+                self.advance(); // consume the docstring
+                self.skip_newlines();
+                continue;
+            }
             // Check for associated type impl: `type Item = i64`
             if self.check(&TokenKind::Type) {
                 associated_types.push(self.parse_associated_type_impl()?);
@@ -222,6 +229,24 @@ impl<'a> Parser<'a> {
                 } else {
                     false
                 };
+
+                // Deprecated `var fn` syntax - emit warning and parse as mutable method
+                let is_var_fn = if self.check(&TokenKind::Var) && self.peek_is(&TokenKind::Fn) {
+                    use crate::error_recovery::{ErrorHint, ErrorHintLevel};
+                    let warning = ErrorHint {
+                        level: ErrorHintLevel::Warning,
+                        message: "Deprecated: `var fn` syntax".to_string(),
+                        span: self.current.span,
+                        suggestion: Some("Replace `var fn method()` with `me method()`".to_string()),
+                        help: None,
+                    };
+                    self.error_hints.push(warning);
+                    self.advance(); // consume 'var'
+                    true
+                } else {
+                    false
+                };
+
                 // Handle async functions and me methods in impl blocks
                 let item = if self.check(&TokenKind::Async) {
                     self.parse_async_function()?
@@ -231,6 +256,10 @@ impl<'a> Parser<'a> {
                 };
                 if let Node::Function(mut f) = item {
                     f.visibility = visibility;
+                    // Mark as mutable if using deprecated 'var fn' syntax
+                    if is_var_fn {
+                        f.is_me_method = true;
+                    }
                     // Add parsed decorators to the function
                     f.decorators.extend(decorators);
 
@@ -308,6 +337,13 @@ impl<'a> Parser<'a> {
             self.skip_newlines();
             if self.check(&TokenKind::Dedent) {
                 break;
+            }
+            // Skip standalone docstrings (trait-level documentation)
+            // These are docstrings that appear before any method and aren't attached to a method
+            if let TokenKind::String(_) = &self.current.kind {
+                self.advance(); // consume the docstring
+                self.skip_newlines();
+                continue;
             }
             // Check for associated type: `type Name` or `type Name: Bound` or `type Name = Default`
             if self.check(&TokenKind::Type) {

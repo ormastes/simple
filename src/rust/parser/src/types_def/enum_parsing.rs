@@ -47,6 +47,34 @@ impl<'a> Parser<'a> {
         self.expect(&TokenKind::Newline)?;
         self.expect(&TokenKind::Indent)?;
 
+        // Handle optional docstring after indent
+        let mut doc_comment = None;
+        self.skip_newlines();
+        match &self.current.kind {
+            TokenKind::String(content) => {
+                doc_comment = Some(DocComment {
+                    content: content.clone(),
+                });
+                self.advance();
+                self.skip_newlines();
+            }
+            TokenKind::FString(parts) => {
+                // Extract text from FStringToken parts for doc comment
+                use crate::token::FStringToken;
+                let content: String = parts
+                    .iter()
+                    .filter_map(|p| match p {
+                        FStringToken::Literal(s) => Some(s.clone()),
+                        FStringToken::Expr(_) => None, // Skip interpolated expressions
+                    })
+                    .collect();
+                doc_comment = Some(DocComment { content });
+                self.advance();
+                self.skip_newlines();
+            }
+            _ => {}
+        }
+
         let (variants, methods) = self.parse_enum_variants_and_methods()?;
 
         Ok(Node::Enum(EnumDef {
@@ -58,7 +86,7 @@ impl<'a> Parser<'a> {
             methods,
             visibility: Visibility::Private,
             attributes,
-            doc_comment: None,
+            doc_comment,
         }))
     }
 
@@ -96,8 +124,29 @@ impl<'a> Parser<'a> {
                     ));
                 }
             } else {
-                // Parse enum variant
+                // Parse enum variant(s) - may be comma-separated on same line
                 variants.push(self.parse_enum_variant()?);
+                // Handle comma-separated variants on the same line: Add, Sub, Mul
+                while self.check(&TokenKind::Comma) {
+                    self.advance();
+                    // Skip any whitespace tokens
+                    while self.check(&TokenKind::Newline)
+                        || self.check(&TokenKind::Indent)
+                        || self.check(&TokenKind::Dedent)
+                    {
+                        // If we hit newline/dedent, stop the comma-separated list
+                        break;
+                    }
+                    // If we're at dedent/newline, the line is done
+                    if self.check(&TokenKind::Dedent)
+                        || self.check(&TokenKind::Newline)
+                        || self.is_at_end()
+                    {
+                        break;
+                    }
+                    // Parse next variant in the comma-separated list
+                    variants.push(self.parse_enum_variant()?);
+                }
             }
         }
 
@@ -111,14 +160,17 @@ impl<'a> Parser<'a> {
         let name = self.expect_identifier()?;
 
         let fields = if self.check(&TokenKind::LParen) {
+            // Tuple-style variant: Variant(Type1, Type2)
             Some(self.parse_enum_field_list()?)
+        } else if self.check(&TokenKind::LBrace) {
+            // Struct-style variant: Variant { field1: Type1, field2: Type2 }
+            Some(self.parse_enum_struct_fields()?)
         } else {
             None
         };
 
-        if self.check(&TokenKind::Newline) {
-            self.advance();
-        }
+        // Note: Don't consume newline here - let the caller handle it
+        // This allows comma-separated variants: Add, Sub, Mul
 
         Ok(EnumVariant {
             span: self.make_span(start_span),
@@ -127,52 +179,113 @@ impl<'a> Parser<'a> {
         })
     }
 
+    /// Parse struct-style enum variant fields: `{ name1: Type1, name2: Type2 }`
+    fn parse_enum_struct_fields(&mut self) -> Result<Vec<EnumField>, ParseError> {
+        self.expect(&TokenKind::LBrace)?;
+        let mut fields = Vec::new();
+
+        // Skip newlines after opening brace
+        self.skip_newlines();
+
+        while !self.check(&TokenKind::RBrace) {
+            // Parse named field: `name: Type`
+            let field_name = self.expect_identifier()?;
+            self.expect(&TokenKind::Colon)?;
+            let field_type = self.parse_type()?;
+
+            fields.push(EnumField {
+                name: Some(field_name),
+                ty: field_type,
+            });
+
+            // Skip comma and newlines between fields
+            if self.check(&TokenKind::Comma) {
+                self.advance();
+                self.skip_newlines();
+            } else if self.check(&TokenKind::Newline) {
+                self.skip_newlines();
+            }
+        }
+
+        self.expect(&TokenKind::RBrace)?;
+        Ok(fields)
+    }
+
     /// Parse enum variant fields: `(Type1, Type2)` or `(name1: Type1, name2: Type2)`
     /// Supports both positional and named fields.
     fn parse_enum_field_list(&mut self) -> Result<Vec<EnumField>, ParseError> {
         self.expect(&TokenKind::LParen)?;
         let mut fields = Vec::new();
 
+        // Skip newlines after opening paren (for multi-line variant definitions)
+        self.skip_newlines();
+
         while !self.check(&TokenKind::RParen) {
             // Try to parse as named field: `name: Type`
-            // Look ahead to check if this is `Identifier Colon Type`
-            let field = if matches!(self.current.kind, TokenKind::Identifier { .. }) {
+            // Look ahead to check if this is `Identifier/Keyword Colon Type`
+            // Support keywords as field names (e.g., bounds, default, type)
+            let maybe_name = match &self.current.kind {
+                TokenKind::Identifier { name, .. } => Some(name.clone()),
+                // Allow keywords as field names
+                TokenKind::Type => Some("type".to_string()),
+                TokenKind::Default => Some("default".to_string()),
+                TokenKind::Result => Some("result".to_string()),
+                TokenKind::Bounds => Some("bounds".to_string()),
+                TokenKind::Alias => Some("alias".to_string()),
+                TokenKind::From => Some("from".to_string()),
+                TokenKind::To => Some("to".to_string()),
+                TokenKind::In => Some("in".to_string()),
+                TokenKind::Is => Some("is".to_string()),
+                TokenKind::As => Some("as".to_string()),
+                TokenKind::Match => Some("match".to_string()),
+                TokenKind::Use => Some("use".to_string()),
+                TokenKind::Unit => Some("unit".to_string()),
+                TokenKind::Out => Some("out".to_string()),
+                TokenKind::OutErr => Some("out_err".to_string()),
+                _ => None,
+            };
+
+            let field = if let Some(name) = maybe_name {
                 // Save position for potential backtrack
                 let saved_current = self.current.clone();
+                self.advance();
 
-                // Try to get the identifier
-                if let TokenKind::Identifier { name: ident, .. } = &self.current.kind {
-                    let name = ident.clone();
+                if self.check(&TokenKind::Colon) {
+                    // This is a named field: `name: Type`
                     self.advance();
-
-                    if self.check(&TokenKind::Colon) {
-                        // This is a named field: `name: Type`
-                        self.advance();
-                        let ty = self.parse_type()?;
-                        EnumField { name: Some(name), ty }
-                    } else {
-                        // Not a named field, backtrack and parse as type
-                        // Restore position (put current token back)
-                        self.pending_tokens.push_front(self.current.clone());
-                        self.current = saved_current;
-                        let ty = self.parse_type()?;
-                        EnumField { name: None, ty }
-                    }
+                    let ty = self.parse_type()?;
+                    EnumField { name: Some(name), ty }
                 } else {
-                    // Should not happen, but handle gracefully
+                    // Not a named field, backtrack and parse as type
+                    // Restore position (put current token back)
+                    self.pending_tokens.push_front(self.current.clone());
+                    self.current = saved_current;
                     let ty = self.parse_type()?;
                     EnumField { name: None, ty }
                 }
             } else {
-                // Not an identifier, just parse as type
+                // Not an identifier or keyword, just parse as type
                 let ty = self.parse_type()?;
                 EnumField { name: None, ty }
             };
 
             fields.push(field);
 
-            if !self.check(&TokenKind::RParen) {
-                self.expect(&TokenKind::Comma)?;
+            // Skip newlines after field (for multi-line variant definitions)
+            self.skip_newlines();
+
+            // Handle comma or closing paren
+            if self.check(&TokenKind::Comma) {
+                self.advance(); // consume comma
+                // Skip newlines after comma
+                self.skip_newlines();
+            } else if !self.check(&TokenKind::RParen) {
+                // Not comma and not RParen - error
+                return Err(ParseError::unexpected_token(
+                    "Comma",
+                    format!("{:?}", self.current.kind),
+                    self.current.span,
+                ));
             }
         }
 

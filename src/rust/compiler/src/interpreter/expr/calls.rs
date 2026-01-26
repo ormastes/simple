@@ -7,7 +7,7 @@ use crate::error::{codes, typo, CompileError, ErrorContext};
 use crate::value::Value;
 
 use super::super::{
-    evaluate_call, evaluate_method_call, exec_method_function, ClassDef, Enums, Env, FunctionDef, ImplMethods,
+    evaluate_call, evaluate_method_call, exec_method_function, find_and_exec_method_with_self, ClassDef, Enums, Env, FunctionDef, ImplMethods,
     BLOCK_SCOPED_ENUMS,
 };
 
@@ -29,16 +29,83 @@ pub(super) fn eval_call_expr(
             enums,
             impl_methods,
         )?)),
-        Expr::MethodCall { receiver, method, args } => Ok(Some(evaluate_method_call(
-            receiver,
-            method,
-            args,
-            env,
-            functions,
-            classes,
-            enums,
-            impl_methods,
-        )?)),
+        Expr::MethodCall { receiver, method, args } => {
+            // Check if receiver is an identifier - if so, we may need to update it
+            // after calling a mutating (me) method
+            if let Expr::Identifier(var_name) = receiver.as_ref() {
+                // Use the self-update variant to get both result and updated self
+                let (result, updated_self) = super::super::evaluate_method_call_with_self_update(
+                    receiver,
+                    method,
+                    args,
+                    env,
+                    functions,
+                    classes,
+                    enums,
+                    impl_methods,
+                )?;
+                // If self was updated (from a me method), update the variable in env
+                if let Some(new_self) = updated_self {
+                    env.insert(var_name.clone(), new_self);
+                }
+                Ok(Some(result))
+            } else if let Expr::FieldAccess { receiver: outer_receiver, field } = receiver.as_ref() {
+                // Handle nested field access like self.lexer.next_token()
+                // where self.lexer needs to be updated
+                if let Expr::Identifier(var_name) = outer_receiver.as_ref() {
+                    // Evaluate the outer receiver to get its current value
+                    let outer_val = evaluate_expr(outer_receiver, env, functions, classes, enums, impl_methods)?;
+                    if let Value::Object { class, mut fields } = outer_val {
+                        // Get the field value (the inner object)
+                        if let Some(field_val) = fields.get(field).cloned() {
+                            if let Value::Object { class: inner_class, fields: inner_fields } = field_val {
+                                // Call method with self-update on the inner object
+                                if let Some((result, updated_inner)) = super::super::find_and_exec_method_with_self(
+                                    method,
+                                    args,
+                                    &inner_class,
+                                    &inner_fields,
+                                    env,
+                                    functions,
+                                    classes,
+                                    enums,
+                                    impl_methods,
+                                )? {
+                                    // Update the field with the new inner object
+                                    fields.insert(field.clone(), updated_inner);
+                                    // Update the outer object in env
+                                    env.insert(var_name.clone(), Value::Object { class, fields });
+                                    return Ok(Some(result));
+                                }
+                            }
+                        }
+                    }
+                }
+                // Fall through to regular method call if nested update doesn't apply
+                Ok(Some(evaluate_method_call(
+                    receiver,
+                    method,
+                    args,
+                    env,
+                    functions,
+                    classes,
+                    enums,
+                    impl_methods,
+                )?))
+            } else {
+                // For other expressions (like temporaries), use regular method call
+                Ok(Some(evaluate_method_call(
+                    receiver,
+                    method,
+                    args,
+                    env,
+                    functions,
+                    classes,
+                    enums,
+                    impl_methods,
+                )?))
+            }
+        }
         Expr::FieldAccess { receiver, field } => {
             // Support module-style access (lib.foo) by resolving directly to functions/classes
             if let Expr::Identifier(module_name) = receiver.as_ref() {
@@ -140,19 +207,43 @@ pub(super) fn eval_call_expr(
                     ))
                 }
                 Value::Constructor { ref class_name } => {
-                    // Look up static method on class
+                    // Look up static method on class - check both class_def.methods and impl_methods
                     if let Some(class_def) = classes.get(class_name).cloned() {
+                        // First check methods defined in class body
                         if let Some(method) = class_def.methods.iter().find(|m| &m.name == field) {
+                            // Warn if using deprecated .new() pattern
+                            if field == "new" {
+                                eprintln!("[WARN] Deprecated: {}.new() should be replaced with {}(). Use direct construction instead.", class_name, class_name);
+                            }
                             // Return as a function value for call
-                            Ok(Value::Function {
+                            return Ok(Some(Value::Function {
                                 name: method.name.clone(),
                                 def: Box::new(method.clone()),
                                 captured_env: Env::new(),
-                            })
-                        } else {
+                            }));
+                        }
+                        // Then check methods defined in impl blocks
+                        if let Some(methods) = impl_methods.get(class_name) {
+                            if let Some(method) = methods.iter().find(|m| &m.name == field) {
+                                // Warn if using deprecated .new() pattern
+                                if field == "new" {
+                                    eprintln!("[WARN] Deprecated: {}.new() should be replaced with {}(). Use direct construction instead.", class_name, class_name);
+                                }
+                                return Ok(Some(Value::Function {
+                                    name: method.name.clone(),
+                                    def: Box::new(method.clone()),
+                                    captured_env: Env::new(),
+                                }));
+                            }
+                        }
+                        {
                             // E1013 - Unknown Method (static method on class)
-                            let available_methods: Vec<&str> =
+                            // Collect methods from both class body and impl blocks
+                            let mut available_methods: Vec<&str> =
                                 class_def.methods.iter().map(|m| m.name.as_str()).collect();
+                            if let Some(impl_meths) = impl_methods.get(class_name) {
+                                available_methods.extend(impl_meths.iter().map(|m| m.name.as_str()));
+                            }
                             let suggestion = if !available_methods.is_empty() {
                                 typo::suggest_name(field, available_methods.clone())
                             } else {
@@ -428,11 +519,13 @@ pub(super) fn eval_call_expr(
                     }
                 }
                 _ => {
+                    // Debug: show what value type we're trying to access
+                    eprintln!("[DEBUG FIELD ACCESS] Trying to access field '{}' on value type: {:?}", field, recv_val.type_name());
                     let ctx = ErrorContext::new()
                         .with_code(codes::UNDEFINED_FIELD)
                         .with_help("field access requires an object, array, dict, or enum value");
                     Err(CompileError::semantic_with_context(
-                        "undefined field: cannot access field on this value type",
+                        format!("undefined field '{}': cannot access field on value of type '{}'", field, recv_val.type_name()),
                         ctx,
                     ))
                 }

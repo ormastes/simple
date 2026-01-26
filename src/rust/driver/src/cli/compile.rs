@@ -159,15 +159,6 @@ pub fn compile_file_native(
         source.with_file_name(stem)
     });
 
-    // Read source
-    let source_content = match std::fs::read_to_string(source) {
-        Ok(content) => content,
-        Err(e) => {
-            eprintln!("error: cannot read {}: {}", source.display(), e);
-            return 1;
-        }
-    };
-
     // Build options
     let mut options = NativeBinaryOptions::new()
         .output(&out_path)
@@ -196,7 +187,8 @@ pub fn compile_file_native(
         }
     };
 
-    match pipeline.compile_to_native_binary(&source_content, &out_path, Some(options)) {
+    // Use compile_file_to_native_binary which properly resolves imports
+    match pipeline.compile_file_to_native_binary(source, &out_path, Some(options)) {
         Ok(result) => {
             println!(
                 "Compiled {} -> {} ({} bytes)",

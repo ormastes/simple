@@ -6,9 +6,9 @@
 #
 # This allows incremental parsing - only reparse changed functions.
 
-import compiler.lexer.*
-import compiler.treesitter.*
-import compiler.blocks.{ResolvedModule, ResolvedBlock, BlockValue}
+use lexer.*
+use treesitter.*
+use blocks.{ResolvedModule, ResolvedBlock, BlockValue}
 
 # ============================================================================
 # Full AST Types
@@ -115,8 +115,8 @@ struct Variant:
     kind: VariantKind
     span: Span
 
+"""Enum variant kind."""
 enum VariantKind:
-    """Enum variant kind."""
     Unit
     Tuple(types: [Type])
     Struct(fields: [Field])
@@ -163,8 +163,8 @@ struct Type:
     kind: TypeKind
     span: Span
 
+"""Type expression kind."""
 enum TypeKind:
-    """Type expression kind."""
     Named(name: text, args: [Type])
     Tuple(elements: [Type])
     Array(element: Type, size: Expr?)
@@ -178,8 +178,8 @@ enum TypeKind:
 # Tensor Suffix
 # ============================================================================
 
+"""Data type for tensors."""
 enum DType:
-    """Data type for tensors."""
     F16
     F32
     F64
@@ -193,14 +193,14 @@ enum DType:
     U32
     U64
 
+"""Device for tensor computation."""
 enum Device:
-    """Device for tensor computation."""
     CPU
     GPU             # Default GPU
     CUDA(id: i32)   # Specific CUDA device
 
+"""Tensor backend."""
 enum Backend:
-    """Tensor backend."""
     Native
     PyTorch
 
@@ -223,11 +223,11 @@ impl TensorSuffix:
     static fn from_string(s: text) -> TensorSuffix:
         """Parse a suffix string into TensorSuffix."""
         var suffix = TensorSuffix(
-            dtype: None,
-            device: None,
+            dtype: nil,
+            device: nil,
             trainable: false,
             pinned: false,
-            backend: None,
+            backend: nil,
             raw: s
         )
 
@@ -285,8 +285,8 @@ struct Expr:
     kind: ExprKind
     span: Span
 
+"""Expression kind."""
 enum ExprKind:
-    """Expression kind."""
     # Literals
     IntLit(value: i64)
     FloatLit(value: f64)
@@ -407,8 +407,8 @@ struct Pattern:
     kind: PatternKind
     span: Span
 
+"""Pattern kind."""
 enum PatternKind:
-    """Pattern kind."""
     Wildcard                                  # _
     Literal(value: Expr)                      # 42, "hello", true
     Binding(name: text, mutable: bool)        # x, var x
@@ -435,8 +435,8 @@ struct Stmt:
     kind: StmtKind
     span: Span
 
+"""Statement kind."""
 enum StmtKind:
-    """Statement kind."""
     Expr(expr: Expr)
     Val(name: text, type_: Type?, init: Expr)
     Var(name: text, type_: Type?, init: Expr?)
@@ -450,8 +450,8 @@ enum StmtKind:
     Yield(value: Expr?)
     Throw(value: Expr)
 
+"""Assignment operator."""
 enum AssignOp:
-    """Assignment operator."""
     Add     # +=
     Sub     # -=
     Mul     # *=
@@ -467,8 +467,8 @@ struct Block:
 # Operators
 # ============================================================================
 
+"""Binary operator."""
 enum BinOp:
-    """Binary operator."""
     # Arithmetic
     Add, Sub, Mul, Div, Mod, Pow
 
@@ -501,8 +501,8 @@ enum BinOp:
     # Other
     In, NotIn, Is, IsNot
 
+"""Unary operator."""
 enum UnaryOp:
-    """Unary operator."""
     Neg         # -
     Not         # not, !
     BitNot      # ~
@@ -532,8 +532,8 @@ impl Parser:
             current: Token.eof(0, 1),
             previous: Token.eof(0, 1),
             errors: [],
-            outline: None,
-            resolved_blocks: None
+            outline: nil,
+            resolved_blocks: nil
         )
         p.advance()
         p
@@ -558,10 +558,10 @@ impl Parser:
 
     me parse() -> Module:
         """Parse source into a full Module."""
-
-        # Pass 1: Get outline
-        val ts = TreeSitter.new(self.source)
-        self.outline = Some(ts.parse_outline())
+        # Pass 1: Get outline (reuse from resolved_blocks if available)
+        if not self.outline.?:
+            val ts = TreeSitter.new(self.source)
+            self.outline = Some(ts.parse_outline())
 
         # Pass 2: Fill in bodies
         self.parse_full()
@@ -605,12 +605,12 @@ impl Parser:
             val class_ = self.parse_class_body(class_outline)
             module.classes[class_.name] = class_
 
-        # Parse struct bodies (no code to parse, just convert)
+        # Parse struct bodies
         for struct_outline in outline.structs:
             val struct_ = self.convert_struct(struct_outline)
             module.structs[struct_.name] = struct_
 
-        # Parse enum bodies (no code to parse, just convert)
+        # Parse enum bodies
         for enum_outline in outline.enums:
             val enum_ = self.convert_enum(enum_outline)
             module.enums[enum_.name] = enum_
@@ -668,6 +668,9 @@ impl Parser:
             false
 
     me is_at_end() -> bool:
+        # Handle nil token as end of input
+        if not self.current.kind.?:
+            return true
         self.current.kind == TokenKind.Eof
 
     me skip_newlines():
@@ -683,8 +686,9 @@ impl Parser:
 
     me reset_to_span(span: Span):
         """Reset lexer to parse from a specific span."""
-        self.lexer = Lexer.new(self.source)
-        self.lexer.pos = span.start
+        var lexer = Lexer.new(self.source)
+        lexer.pos = span.start
+        self.lexer = lexer
 
         # Skip to the right position
         while self.lexer.pos < span.start and not self.lexer.is_at_end():
@@ -700,7 +704,7 @@ impl Parser:
     me convert_import(outline: ImportOutline) -> Import:
         var items: [ImportItem] = []
         for item in outline.items:
-            items = items.push(ImportItem(name: item, alias: None))
+            items = items.push(ImportItem(name: item, alias: nil))
 
         Import(
             module: outline.module,
@@ -721,7 +725,7 @@ impl Parser:
                     converted = converted.push(self.convert_type(elem))
                 TypeKind.Tuple(converted)
             case Array(element):
-                TypeKind.Array(self.convert_type(element), None)
+                TypeKind.Array(self.convert_type(element), nil)
             case Function(params, ret):
                 var converted_params: [Type] = []
                 for p in params:
@@ -847,16 +851,14 @@ impl Parser:
     me parse_function_body(outline: FunctionOutline) -> Function:
         """Parse function body from outline."""
         var type_params: [TypeParam] = []
-        # Note: outline doesn't have type_params directly, would need to add
 
         var params: [Param] = []
         for p in outline.params:
             params = params.push(self.convert_param(p))
 
-        val body = if outline.body_span.len() > 0:
-            self.parse_block_at_span(outline.body_span)
-        else:
-            Block(stmts: [], span: outline.body_span)
+        var body = Block(stmts: [], span: outline.body_span)
+        if outline.body_span.len() > 0:
+            body = self.parse_block_at_span(outline.body_span)
 
         Function(
             name: outline.name,
@@ -1145,7 +1147,7 @@ impl Parser:
                 inclusive = true
             val right = self.parse_additive_expr()
             return Expr(
-                kind: ExprKind.Range(Some(left), Some(right), inclusive, None),
+                kind: ExprKind.Range(Some(left), Some(right), inclusive, nil),
                 span: left.span.merge(right.span)
             )
 
@@ -1468,11 +1470,11 @@ impl Parser:
 
             case KwBreak:
                 self.advance()
-                Expr(kind: ExprKind.Break(None), span: start)
+                Expr(kind: ExprKind.Break(nil), span: start)
 
             case KwContinue:
                 self.advance()
-                Expr(kind: ExprKind.Continue(None), span: start)
+                Expr(kind: ExprKind.Continue(nil), span: start)
 
             case KwYield:
                 self.advance()
@@ -1509,7 +1511,7 @@ impl Parser:
         self.advance()
 
         # TODO: Parse interpolations
-        Expr(kind: ExprKind.StringLit(text, None), span: start)
+        Expr(kind: ExprKind.StringLit(text, nil), span: start)
 
     me parse_array_or_comprehension() -> Expr:
         """Parse array literal or list comprehension.
@@ -1681,14 +1683,32 @@ impl Parser:
             if self.check(TokenKind.Dedent):
                 break
 
-            self.expect(TokenKind.KwCase, "expected 'case' in match arm")
+            # Support both syntaxes:
+            # - `case pattern:` (traditional)
+            # - `| pattern ->` (Erlang-style, preferred)
+            val is_pipe_syntax = self.check(TokenKind.Pipe)
+            if is_pipe_syntax:
+                self.advance()  # consume `|`
+            elif self.check(TokenKind.KwCase):
+                self.advance()  # consume `case`
+            else:
+                self.error("expected 'case' or '|' in match arm")
+
             val pattern = self.parse_pattern()
 
             var guard: Expr? = None
             if self.match_token(TokenKind.KwIf):
                 guard = Some(self.parse_expr())
 
-            self.expect(TokenKind.Colon, "expected ':' after pattern")
+            # For `| pattern ->` syntax, expect `->`
+            # For `case pattern:` syntax, accept `:` or `->`
+            if is_pipe_syntax:
+                self.expect(TokenKind.Arrow, "expected '->' after pattern in | syntax")
+            elif self.check(TokenKind.Arrow):
+                self.advance()
+            else:
+                self.expect(TokenKind.Colon, "expected ':' or '->' after pattern")
+
             val body = self.parse_block()
 
             arms = arms.push(MatchArm(
@@ -1866,10 +1886,10 @@ impl Parser:
             else:
                 # Not a named argument, parse as expression
                 val expr = Expr(kind: ExprKind.Ident(name), span: start)
-                return CallArg(name: None, value: expr, span: start)
+                return CallArg(name: nil, value: expr, span: start)
 
         val value = self.parse_expr()
-        CallArg(name: None, value: value, span: start.merge(value.span))
+        CallArg(name: nil, value: value, span: start.merge(value.span))
 
     me parse_identifier() -> text:
         if self.check(TokenKind.Ident):
@@ -1883,15 +1903,19 @@ impl Parser:
     me parse_type() -> Type:
         """Parse a type expression (reuses outline type parsing logic)."""
         # Create temporary TreeSitter to parse type
-        val ts = TreeSitter.new(self.source)
-        ts.lexer.pos = self.lexer.pos
+        var ts = TreeSitter.new(self.source)
+        var ts_lexer = ts.lexer
+        ts_lexer.pos = self.lexer.pos
+        ts.lexer = ts_lexer
         ts.current = self.current
         ts.previous = self.previous
 
         val outline = ts.parse_type_outline()
         self.current = ts.current
         self.previous = ts.previous
-        self.lexer.pos = ts.lexer.pos
+        var my_lexer = self.lexer
+        my_lexer.pos = ts.lexer.pos
+        self.lexer = my_lexer
 
         self.convert_type(outline)
 
@@ -2067,6 +2091,12 @@ impl Parser:
 
     me parse_stmt() -> Stmt:
         """Parse a statement."""
+        # Guard against nil token
+        if not self.current.kind.?:
+            val empty_span = Span(start: 0, end: 0, line: 1, col: 1)
+            val empty_expr = Expr(kind: ExprKind.Error("unexpected nil token"), span: empty_span)
+            return Stmt(kind: StmtKind.Expr(empty_expr), span: empty_span)
+
         val start = self.current.span
 
         match self.peek():
@@ -2090,11 +2120,11 @@ impl Parser:
             case KwBreak:
                 self.advance()
                 self.skip_newlines()
-                Stmt(kind: StmtKind.Break(None), span: start)
+                Stmt(kind: StmtKind.Break(nil), span: start)
             case KwContinue:
                 self.advance()
                 self.skip_newlines()
-                Stmt(kind: StmtKind.Continue(None), span: start)
+                Stmt(kind: StmtKind.Continue(nil), span: start)
             case KwYield:
                 self.advance()
                 var value: Expr? = None
@@ -2111,7 +2141,9 @@ impl Parser:
                 self.parse_expr_or_assign_stmt()
 
     me parse_val_stmt() -> Stmt:
-        """Parse val statement."""
+        """Parse val statement.
+        Supports continuation on next line: val x = \n    expr
+        """
         val start = self.current.span
         self.advance()  # Consume 'val'
 
@@ -2122,13 +2154,25 @@ impl Parser:
             type_ = Some(self.parse_type())
 
         self.expect(TokenKind.Assign, "expected '=' in val declaration")
+        # Skip newlines after = to allow continuation on next line
+        self.skip_newlines()
+        # Track if we consumed an indent (need to consume matching dedent)
+        var consumed_indent = false
+        if self.match_token(TokenKind.Indent):
+            consumed_indent = true
         val init = self.parse_expr()
+        # Consume matching dedent if we consumed an indent
+        if consumed_indent:
+            self.skip_newlines()
+            self.match_token(TokenKind.Dedent)
         self.skip_newlines()
 
         Stmt(kind: StmtKind.Val(name, type_, init), span: start.merge(init.span))
 
     me parse_var_stmt() -> Stmt:
-        """Parse var statement."""
+        """Parse var statement.
+        Supports continuation on next line: var x = \n    expr
+        """
         val start = self.current.span
         self.advance()  # Consume 'var'
 
@@ -2140,7 +2184,17 @@ impl Parser:
 
         var init: Expr? = None
         if self.match_token(TokenKind.Assign):
+            # Skip newlines after = to allow continuation on next line
+            self.skip_newlines()
+            # Track if we consumed an indent (need to consume matching dedent)
+            var consumed_indent = false
+            if self.match_token(TokenKind.Indent):
+                consumed_indent = true
             init = Some(self.parse_expr())
+            # Consume matching dedent if we consumed an indent
+            if consumed_indent:
+                self.skip_newlines()
+                self.match_token(TokenKind.Dedent)
 
         self.skip_newlines()
 
@@ -2190,7 +2244,7 @@ impl Parser:
             self.advance()
             val value = self.parse_expr()
             self.skip_newlines()
-            return Stmt(kind: StmtKind.Assign(expr, None, value), span: start.merge(value.span))
+            return Stmt(kind: StmtKind.Assign(expr, nil, value), span: start.merge(value.span))
 
         if self.check(TokenKind.PlusEq):
             self.advance()
