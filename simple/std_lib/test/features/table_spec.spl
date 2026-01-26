@@ -1,0 +1,304 @@
+"""
+# Table (DataFrame) Specification
+
+**Feature IDs:** #2250-2260
+**Category:** Stdlib
+**Status:** Implemented
+
+Table/DataFrame-like data structure for tabular data:
+- Column-based storage with typed columns
+- SQL-like operations (select, where, join)
+- Aggregation and grouping
+- Statistical operations
+"""
+use std.spec.*
+use std.table.*
+
+describe "Table Construction":
+    """
+    Creating tables from various sources.
+    """
+
+    context "from columns":
+        it "creates table from column list":
+            val t = Table.from_columns([
+                Column.from_texts("name", ["Alice", "Bob", "Carol"]),
+                Column.from_ints("age", [25, 30, 35])
+            ])
+            expect t.nrows() == 3
+            expect t.ncols() == 2
+
+    context "from dictionary":
+        it "creates table from dict of arrays":
+            val t = Table.from_dict({
+                "name": ["Alice", "Bob"],
+                "age": [25, 30]
+            })
+            expect t.nrows() == 2
+            expect t.column_names() == ["name", "age"]
+
+describe "Column Access":
+    """
+    Accessing table columns.
+    """
+
+    context "by name":
+        it "gets column via get()":
+            val t = Table.from_dict({
+                "x": [1, 2, 3],
+                "y": [4, 5, 6]
+            })
+            val col = t.get("x")
+            expect col.len() == 3
+
+        it "gets column via dot syntax":
+            val t = Table.from_dict({
+                "age": [25, 30, 35],
+                "salary": [50000, 60000, 70000]
+            })
+            expect t.age.sum() == 90
+            expect t.salary.mean() == 60000.0
+
+describe "Column Reductions":
+    """
+    Statistical operations on columns.
+    """
+
+    context "sum":
+        it "sums numeric column":
+            val t = Table.from_dict({"values": [1, 2, 3, 4, 5]})
+            expect t.values.sum() == 15.0
+
+    context "mean":
+        it "computes mean":
+            val t = Table.from_dict({"values": [10, 20, 30]})
+            expect t.values.mean() == 20.0
+
+    context "min/max":
+        it "finds minimum":
+            val t = Table.from_dict({"values": [3, 1, 4, 1, 5]})
+            expect t.values.min() == 1
+
+        it "finds maximum":
+            val t = Table.from_dict({"values": [3, 1, 4, 1, 5]})
+            expect t.values.max() == 5
+
+    context "std/var":
+        it "computes standard deviation":
+            val t = Table.from_dict({"values": [2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0]})
+            expect t.values.std().approx(2.0, epsilon: 0.1)
+
+describe "Filtering":
+    """
+    Filtering table rows.
+    """
+
+    context "where":
+        it "filters by predicate":
+            val t = Table.from_dict({
+                "name": ["Alice", "Bob", "Carol"],
+                "age": [25, 30, 35]
+            })
+            val filtered = t.where(\row: row["age"] > 28)
+            expect filtered.nrows() == 2
+
+        it "chains multiple filters":
+            val t = Table.from_dict({
+                "name": ["Alice", "Bob", "Carol", "Dave"],
+                "age": [25, 30, 35, 28],
+                "dept": ["Eng", "Sales", "Eng", "Sales"]
+            })
+            val result = t
+                .where(\row: row["age"] > 26)
+                .where(\row: row["dept"] == "Eng")
+            expect result.nrows() == 1
+            expect result.name.get(0) == "Carol"
+
+    context "filter_by":
+        it "filters by single column":
+            val t = Table.from_dict({
+                "name": ["Alice", "Bob", "Carol"],
+                "age": [25, 30, 35]
+            })
+            val result = t.filter_by("age", \v: v > 28)
+            expect result.nrows() == 2
+
+describe "Selection":
+    """
+    Selecting and dropping columns.
+    """
+
+    context "select":
+        it "selects specific columns":
+            val t = Table.from_dict({
+                "a": [1, 2],
+                "b": [3, 4],
+                "c": [5, 6]
+            })
+            val result = t.select(["a", "c"])
+            expect result.ncols() == 2
+            expect result.column_names() == ["a", "c"]
+
+    context "drop":
+        it "drops specific columns":
+            val t = Table.from_dict({
+                "a": [1, 2],
+                "b": [3, 4],
+                "c": [5, 6]
+            })
+            val result = t.drop(["b"])
+            expect result.ncols() == 2
+            expect not result.has_column("b")
+
+describe "Sorting":
+    """
+    Sorting table rows.
+    """
+
+    context "sort_by":
+        it "sorts ascending by column":
+            val t = Table.from_dict({
+                "name": ["Carol", "Alice", "Bob"],
+                "age": [35, 25, 30]
+            })
+            val sorted = t.sort_by("age")
+            expect sorted.name.get(0) == "Alice"
+            expect sorted.name.get(2) == "Carol"
+
+        it "sorts descending":
+            val t = Table.from_dict({
+                "name": ["Carol", "Alice", "Bob"],
+                "age": [35, 25, 30]
+            })
+            val sorted = t.sort_by("age", ascending: false)
+            expect sorted.name.get(0) == "Carol"
+
+describe "Grouping and Aggregation":
+    """
+    Grouping rows and computing aggregates.
+    """
+
+    context "group_by":
+        it "groups by single column":
+            val t = Table.from_dict({
+                "dept": ["Eng", "Sales", "Eng", "Sales"],
+                "salary": [50000, 60000, 70000, 55000]
+            })
+            val result = t.group_by(["dept"]).agg({"salary": "mean"})
+            expect result.nrows() == 2
+
+        it "computes sum per group":
+            val t = Table.from_dict({
+                "category": ["A", "B", "A", "B"],
+                "value": [10, 20, 30, 40]
+            })
+            val result = t.group_by(["category"]).sum(["value"])
+            # A: 10+30=40, B: 20+40=60
+            expect result.nrows() == 2
+
+    context "aggregation functions":
+        it "supports multiple aggregations":
+            val t = Table.from_dict({
+                "group": ["X", "X", "Y", "Y"],
+                "value": [1, 2, 3, 4]
+            })
+            val result = t.group_by(["group"]).agg({
+                "value": "sum"
+            })
+            expect result.nrows() == 2
+
+describe "Joins":
+    """
+    Joining tables together.
+    """
+
+    context "inner join":
+        it "joins on common column":
+            val t1 = Table.from_dict({
+                "id": [1, 2, 3],
+                "name": ["Alice", "Bob", "Carol"]
+            })
+            val t2 = Table.from_dict({
+                "id": [2, 3, 4],
+                "dept": ["Eng", "Sales", "HR"]
+            })
+            val result = t1.join(t2, on: "id")
+            expect result.nrows() == 2  # Only ids 2 and 3 match
+            expect result.has_column("name")
+            expect result.has_column("dept")
+
+describe "Computed Columns":
+    """
+    Adding computed columns.
+    """
+
+    context "with_column":
+        it "adds new column":
+            val t = Table.from_dict({
+                "x": [1, 2, 3]
+            })
+            val result = t.with_column("y", [4, 5, 6])
+            expect result.ncols() == 2
+            expect result.y.sum() == 15.0
+
+    context "with_computed":
+        it "adds column from computation":
+            val t = Table.from_dict({
+                "price": [10, 20, 30],
+                "quantity": [2, 3, 1]
+            })
+            val result = t.with_computed("total", \row:
+                row["price"] * row["quantity"]
+            )
+            expect result.total.get(0) == 20
+            expect result.total.get(1) == 60
+            expect result.total.get(2) == 30
+
+describe "Chained Operations":
+    """
+    Fluent interface with method chaining.
+    """
+
+    it "chains filter, select, and aggregate":
+        val t = Table.from_dict({
+            "name": ["Alice", "Bob", "Carol", "Dave"],
+            "dept": ["Eng", "Sales", "Eng", "Sales"],
+            "salary": [50000, 60000, 75000, 55000]
+        })
+
+        val result = t
+            .where(\row: row["dept"] == "Eng")
+            .select(["name", "salary"])
+
+        expect result.nrows() == 2
+        expect result.ncols() == 2
+        expect result.salary.mean() == 62500.0
+
+    it "computes department statistics":
+        val t = Table.from_dict({
+            "dept": ["Eng", "Eng", "Sales", "Sales", "HR"],
+            "salary": [60000, 80000, 50000, 70000, 55000]
+        })
+
+        val stats = t.group_by(["dept"]).agg({
+            "salary": "mean"
+        })
+
+        expect stats.nrows() == 3
+
+describe "Column Utilities":
+    """
+    Column-level operations.
+    """
+
+    context "unique":
+        it "gets unique values":
+            val col = Column.from_texts("x", ["a", "b", "a", "c", "b"])
+            val unique = col.unique()
+            expect unique.len() == 3
+
+    context "value_counts":
+        it "counts value occurrences":
+            val col = Column.from_texts("x", ["a", "b", "a", "a", "b"])
+            val counts = col.value_counts()
+            expect counts.nrows() == 2

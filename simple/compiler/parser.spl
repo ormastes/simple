@@ -8,6 +8,7 @@
 
 import compiler.lexer.*
 import compiler.treesitter.*
+import compiler.blocks.{ResolvedModule, ResolvedBlock, BlockValue}
 
 # ============================================================================
 # Full AST Types
@@ -174,6 +175,108 @@ enum TypeKind:
     Error
 
 # ============================================================================
+# Tensor Suffix
+# ============================================================================
+
+enum DType:
+    """Data type for tensors."""
+    F16
+    F32
+    F64
+    BF16
+    I8
+    I16
+    I32
+    I64
+    U8
+    U16
+    U32
+    U64
+
+enum Device:
+    """Device for tensor computation."""
+    CPU
+    GPU             # Default GPU
+    CUDA(id: i32)   # Specific CUDA device
+
+enum Backend:
+    """Tensor backend."""
+    Native
+    PyTorch
+
+struct TensorSuffix:
+    """Suffix for array/tensor literals specifying dtype, device, etc.
+
+    Examples:
+    - f32        -> dtype=F32
+    - _f32_gpu   -> dtype=F32, device=GPU
+    - f32_tr_cuda -> dtype=F32, trainable=true, device=CUDA(0)
+    """
+    dtype: DType?
+    device: Device?
+    trainable: bool
+    pinned: bool
+    backend: Backend?
+    raw: text       # Original suffix string
+
+impl TensorSuffix:
+    static fn from_string(s: text) -> TensorSuffix:
+        """Parse a suffix string into TensorSuffix."""
+        var suffix = TensorSuffix(
+            dtype: None,
+            device: None,
+            trainable: false,
+            pinned: false,
+            backend: None,
+            raw: s
+        )
+
+        # Split by underscore and parse each part
+        var parts = s.split("_")
+        for part in parts:
+            if part == "":
+                continue
+
+            # Check dtype
+            match part:
+                case "f16": suffix.dtype = Some(DType.F16)
+                case "f32": suffix.dtype = Some(DType.F32)
+                case "f64": suffix.dtype = Some(DType.F64)
+                case "bf16": suffix.dtype = Some(DType.BF16)
+                case "i8": suffix.dtype = Some(DType.I8)
+                case "i16": suffix.dtype = Some(DType.I16)
+                case "i32": suffix.dtype = Some(DType.I32)
+                case "i64": suffix.dtype = Some(DType.I64)
+                case "u8": suffix.dtype = Some(DType.U8)
+                case "u16": suffix.dtype = Some(DType.U16)
+                case "u32": suffix.dtype = Some(DType.U32)
+                case "u64": suffix.dtype = Some(DType.U64)
+                # Check device
+                case "cpu": suffix.device = Some(Device.CPU)
+                case "gpu": suffix.device = Some(Device.GPU)
+                case "cuda": suffix.device = Some(Device.CUDA(0))
+                case "cuda0": suffix.device = Some(Device.CUDA(0))
+                case "cuda1": suffix.device = Some(Device.CUDA(1))
+                case "cuda2": suffix.device = Some(Device.CUDA(2))
+                case "cuda3": suffix.device = Some(Device.CUDA(3))
+                # Check modifiers
+                case "tr": suffix.trainable = true
+                case "pin": suffix.pinned = true
+                # Check backend
+                case "native": suffix.backend = Some(Backend.Native)
+                case "torch": suffix.backend = Some(Backend.PyTorch)
+                case _:
+                    # Unknown part - could be cudaN for N > 3
+                    if part.starts_with("cuda"):
+                        val id_str = part[4:]
+                        if id_str.len() > 0:
+                            # Parse the numeric ID
+                            val id = parse_int_literal(id_str)
+                            suffix.device = Some(Device.CUDA(id as i32))
+
+        suffix
+
+# ============================================================================
 # Expression AST
 # ============================================================================
 
@@ -236,6 +339,16 @@ enum ExprKind:
     # Object construction
     StructLit(type_: text, fields: [(text, Expr)])
     EnumLit(enum_: text, variant: text, payload: EnumPayload?)
+
+    # Math/DL blocks
+    LossBlock(body: Block)            # loss{ ... } - enables autograd, auto-backward
+    NogradBlock(body: Block)          # nograd{ ... } - disables gradient tracking
+
+    # Generic custom block (user-defined blocks like sh{}, sql{}, re{})
+    CustomBlock(kind: text, value: BlockValue)
+
+    # Tensor literals with suffix
+    ArrayLitSuffix(elements: [Expr], suffix: TensorSuffix)
 
     # Error recovery
     Error
@@ -359,6 +472,9 @@ enum BinOp:
     # Arithmetic
     Add, Sub, Mul, Div, Mod, Pow
 
+    # Matrix operations
+    MatMul              # @
+
     # Comparison
     Eq, NotEq, Lt, LtEq, Gt, GtEq
 
@@ -368,16 +484,31 @@ enum BinOp:
     # Bitwise
     BitAnd, BitOr, BitXor, Shl, Shr
 
+    # Broadcast operations (dotted operators)
+    BroadcastAdd        # .+
+    BroadcastSub        # .-
+    BroadcastMul        # .*
+    BroadcastDiv        # ./
+    BroadcastPow        # .^
+
+    # Pipeline/Composition operators
+    PipeForward         # |>
+    Compose             # >>
+    ComposeBack         # <<
+    Parallel            # //
+    LayerConnect        # ~>
+
     # Other
     In, NotIn, Is, IsNot
 
 enum UnaryOp:
     """Unary operator."""
-    Neg     # -
-    Not     # not, !
-    BitNot  # ~
-    Ref     # &
-    Deref   # *
+    Neg         # -
+    Not         # not, !
+    BitNot      # ~
+    Ref         # &
+    Deref       # *
+    Transpose   # ' (postfix, m{} only)
 
 # ============================================================================
 # Parser
@@ -391,6 +522,7 @@ struct Parser:
     previous: Token
     errors: [ParseError]
     outline: OutlineModule?
+    resolved_blocks: ResolvedModule?  # Pre-resolved blocks from BlockResolver
 
 impl Parser:
     static fn new(source: text) -> Parser:
@@ -400,7 +532,22 @@ impl Parser:
             current: Token.eof(0, 1),
             previous: Token.eof(0, 1),
             errors: [],
-            outline: None
+            outline: None,
+            resolved_blocks: None
+        )
+        p.advance()
+        p
+
+    static fn with_resolved_blocks(source: text, resolved: ResolvedModule) -> Parser:
+        """Create parser with pre-resolved blocks."""
+        var p = Parser(
+            source: source,
+            lexer: Lexer.new(source),
+            current: Token.eof(0, 1),
+            previous: Token.eof(0, 1),
+            errors: [],
+            outline: Some(resolved.outline),
+            resolved_blocks: Some(resolved)
         )
         p.advance()
         p
@@ -810,16 +957,98 @@ impl Parser:
 
     me parse_expr() -> Expr:
         """Parse an expression."""
-        self.parse_or_expr()
+        self.parse_pipeline_expr()
+
+    me parse_pipeline_expr() -> Expr:
+        """Parse pipeline expression (|>, ~>).
+
+        Pipeline operators have lowest precedence and are left-associative.
+        - |> : Forward pipe, passes left value as first argument to right function
+        - ~> : Layer connect, composes neural network layers with dimension checking
+        """
+        var left = self.parse_parallel_expr()
+
+        loop:
+            if self.match_token(TokenKind.PipeForward):
+                val right = self.parse_parallel_expr()
+                left = Expr(
+                    kind: ExprKind.Binary(BinOp.PipeForward, left, right),
+                    span: left.span.merge(right.span)
+                )
+            elif self.match_token(TokenKind.LayerConnect):
+                val right = self.parse_parallel_expr()
+                left = Expr(
+                    kind: ExprKind.Binary(BinOp.LayerConnect, left, right),
+                    span: left.span.merge(right.span)
+                )
+            else:
+                break
+
+        left
+
+    me parse_parallel_expr() -> Expr:
+        """Parse parallel expression (//).
+
+        Parallel operator combines branches for concurrent/parallel execution.
+        Left-associative.
+        """
+        var left = self.parse_composition_expr()
+
+        while self.match_token(TokenKind.Parallel):
+            val right = self.parse_composition_expr()
+            left = Expr(
+                kind: ExprKind.Binary(BinOp.Parallel, left, right),
+                span: left.span.merge(right.span)
+            )
+
+        left
+
+    me parse_composition_expr() -> Expr:
+        """Parse composition expression (>>, <<).
+
+        Composition operators are right-associative (like Haskell's . operator).
+        - >> : Forward compose, f >> g means g(f(x))
+        - << : Backward compose, f << g means f(g(x))
+        """
+        val left = self.parse_or_expr()
+
+        if self.match_token(TokenKind.Compose):
+            val right = self.parse_composition_expr()  # Right-associative
+            return Expr(
+                kind: ExprKind.Binary(BinOp.Compose, left, right),
+                span: left.span.merge(right.span)
+            )
+
+        if self.match_token(TokenKind.ComposeBack):
+            val right = self.parse_composition_expr()  # Right-associative
+            return Expr(
+                kind: ExprKind.Binary(BinOp.ComposeBack, left, right),
+                span: left.span.merge(right.span)
+            )
+
+        left
 
     me parse_or_expr() -> Expr:
         """Parse logical or expression."""
-        var left = self.parse_and_expr()
+        var left = self.parse_xor_expr()
 
         while self.match_token(TokenKind.KwOr) or self.match_token(TokenKind.PipePipe):
-            val right = self.parse_and_expr()
+            val right = self.parse_xor_expr()
             left = Expr(
                 kind: ExprKind.Binary(BinOp.Or, left, right),
+                span: left.span.merge(right.span)
+            )
+
+        left
+
+    me parse_xor_expr() -> Expr:
+        """Parse bitwise xor expression."""
+        var left = self.parse_and_expr()
+
+        while self.match_token(TokenKind.KwXor):
+            val right = self.parse_and_expr()
+            left = Expr(
+                kind: ExprKind.Binary(BinOp.BitXor, left, right),
                 span: left.span.merge(right.span)
             )
 
@@ -923,20 +1152,32 @@ impl Parser:
         left
 
     me parse_additive_expr() -> Expr:
-        """Parse additive expression."""
-        var left = self.parse_multiplicative_expr()
+        """Parse additive expression (including broadcast .+ and .-)."""
+        var left = self.parse_matmul_expr()
 
         loop:
             if self.match_token(TokenKind.Plus):
-                val right = self.parse_multiplicative_expr()
+                val right = self.parse_matmul_expr()
                 left = Expr(
                     kind: ExprKind.Binary(BinOp.Add, left, right),
                     span: left.span.merge(right.span)
                 )
             elif self.match_token(TokenKind.Minus):
-                val right = self.parse_multiplicative_expr()
+                val right = self.parse_matmul_expr()
                 left = Expr(
                     kind: ExprKind.Binary(BinOp.Sub, left, right),
+                    span: left.span.merge(right.span)
+                )
+            elif self.match_token(TokenKind.DotPlus):
+                val right = self.parse_matmul_expr()
+                left = Expr(
+                    kind: ExprKind.Binary(BinOp.BroadcastAdd, left, right),
+                    span: left.span.merge(right.span)
+                )
+            elif self.match_token(TokenKind.DotMinus):
+                val right = self.parse_matmul_expr()
+                left = Expr(
+                    kind: ExprKind.Binary(BinOp.BroadcastSub, left, right),
                     span: left.span.merge(right.span)
                 )
             else:
@@ -944,8 +1185,21 @@ impl Parser:
 
         left
 
+    me parse_matmul_expr() -> Expr:
+        """Parse matrix multiplication expression (@)."""
+        var left = self.parse_multiplicative_expr()
+
+        while self.match_token(TokenKind.At):
+            val right = self.parse_multiplicative_expr()
+            left = Expr(
+                kind: ExprKind.Binary(BinOp.MatMul, left, right),
+                span: left.span.merge(right.span)
+            )
+
+        left
+
     me parse_multiplicative_expr() -> Expr:
-        """Parse multiplicative expression."""
+        """Parse multiplicative expression (including broadcast .* and ./)."""
         var left = self.parse_power_expr()
 
         loop:
@@ -967,17 +1221,50 @@ impl Parser:
                     kind: ExprKind.Binary(BinOp.Mod, left, right),
                     span: left.span.merge(right.span)
                 )
+            elif self.match_token(TokenKind.DotStar):
+                val right = self.parse_power_expr()
+                left = Expr(
+                    kind: ExprKind.Binary(BinOp.BroadcastMul, left, right),
+                    span: left.span.merge(right.span)
+                )
+            elif self.match_token(TokenKind.DotSlash):
+                val right = self.parse_power_expr()
+                left = Expr(
+                    kind: ExprKind.Binary(BinOp.BroadcastDiv, left, right),
+                    span: left.span.merge(right.span)
+                )
+            elif self.match_token(TokenKind.ImplicitMul):
+                # Implicit multiplication (m{} only): 2x, 2(x+1), (a)(b)
+                val right = self.parse_power_expr()
+                left = Expr(
+                    kind: ExprKind.Binary(BinOp.Mul, left, right),
+                    span: left.span.merge(right.span)
+                )
             else:
                 break
 
         left
 
     me parse_power_expr() -> Expr:
-        """Parse power expression (right-associative)."""
+        """Parse power expression (right-associative, including .^ broadcast)."""
         val left = self.parse_unary_expr()
 
         if self.match_token(TokenKind.StarStar):
             val right = self.parse_power_expr()  # Right-associative
+            return Expr(
+                kind: ExprKind.Binary(BinOp.Pow, left, right),
+                span: left.span.merge(right.span)
+            )
+
+        if self.match_token(TokenKind.DotCaret):
+            val right = self.parse_power_expr()  # Right-associative
+            return Expr(
+                kind: ExprKind.Binary(BinOp.BroadcastPow, left, right),
+                span: left.span.merge(right.span)
+            )
+
+        if self.match_token(TokenKind.Caret):
+            val right = self.parse_power_expr()  # Right-associative (inside m{})
             return Expr(
                 kind: ExprKind.Binary(BinOp.Pow, left, right),
                 span: left.span.merge(right.span)
@@ -1088,6 +1375,12 @@ impl Parser:
                     kind: ExprKind.NullCoalesce(expr, right),
                     span: expr.span.merge(right.span)
                 )
+            elif self.match_token(TokenKind.Transpose):
+                # Postfix transpose (m{} only)
+                expr = Expr(
+                    kind: ExprKind.Unary(UnaryOp.Transpose, expr),
+                    span: expr.span.merge(self.previous.span)
+                )
             else:
                 break
 
@@ -1193,6 +1486,17 @@ impl Parser:
                 val value = self.parse_expr()
                 Expr(kind: ExprKind.Throw(value), span: start.merge(value.span))
 
+            case KwLoss:
+                self.parse_loss_block()
+
+            case KwNograd:
+                self.parse_nograd_block()
+
+            case BlockStart:
+                # Custom block (sh{}, sql{}, re{}, etc.)
+                val kind = self.current.text
+                self.parse_resolved_block(kind)
+
             case _:
                 self.error("expected expression")
                 self.advance()
@@ -1208,13 +1512,28 @@ impl Parser:
         Expr(kind: ExprKind.StringLit(text, None), span: start)
 
     me parse_array_or_comprehension() -> Expr:
-        """Parse array literal or list comprehension."""
+        """Parse array literal or list comprehension.
+
+        Handles suffix notation for tensor types:
+        - [1, 2, 3]f32        - f32 array
+        - [1, 2, 3]_f32_gpu   - f32 tensor on GPU
+        - [1, 2, 3]f32_tr_cuda - trainable f32 tensor on CUDA
+        """
         val start = self.current.span
         self.advance()  # Consume '['
 
+        # Check for empty array: [] or []f32
         if self.check(TokenKind.RBracket):
             self.advance()
             return Expr(kind: ExprKind.ArrayLit([]), span: start.merge(self.previous.span))
+        if self.check(TokenKind.ArraySuffix):
+            val suffix_text = self.current.text
+            self.advance()
+            val suffix = TensorSuffix.from_string(suffix_text)
+            return Expr(
+                kind: ExprKind.ArrayLitSuffix([], suffix),
+                span: start.merge(self.previous.span)
+            )
 
         # Check for comprehension
         if self.check(TokenKind.KwFor):
@@ -1225,10 +1544,21 @@ impl Parser:
         elements = elements.push(self.parse_expr())
 
         while self.match_token(TokenKind.Comma):
-            if self.check(TokenKind.RBracket):
+            if self.check(TokenKind.RBracket) or self.check(TokenKind.ArraySuffix):
                 break
             elements = elements.push(self.parse_expr())
 
+        # Check for suffix (ArraySuffix token includes the ] and suffix)
+        if self.check(TokenKind.ArraySuffix):
+            val suffix_text = self.current.text
+            self.advance()
+            val suffix = TensorSuffix.from_string(suffix_text)
+            return Expr(
+                kind: ExprKind.ArrayLitSuffix(elements, suffix),
+                span: start.merge(self.previous.span)
+            )
+
+        # Regular array, expect RBracket
         self.expect(TokenKind.RBracket, "expected ']' after array elements")
         Expr(kind: ExprKind.ArrayLit(elements), span: start.merge(self.previous.span))
 
@@ -1371,6 +1701,143 @@ impl Parser:
         self.match_token(TokenKind.Dedent)
 
         Expr(kind: ExprKind.Match(scrutinee, arms), span: start.merge(self.previous.span))
+
+    me parse_loss_block() -> Expr:
+        """Parse loss{ ... } block.
+
+        Loss blocks enable gradient tracking and auto-backward.
+        They inherit m{} math block features (^, ', implicit mul).
+        """
+        val start = self.current.span
+        self.advance()  # Consume 'loss' (math mode already enabled by lexer)
+        self.expect(TokenKind.LBrace, "expected '{' after 'loss'")
+        val body = self.parse_block()
+        self.expect(TokenKind.RBrace, "expected '}' after loss block")
+        Expr(kind: ExprKind.LossBlock(body), span: start.merge(self.previous.span))
+
+    me parse_nograd_block() -> Expr:
+        """Parse nograd{ ... } block.
+
+        Nograd blocks disable gradient tracking for faster inference.
+        They inherit m{} math block features (^, ', implicit mul).
+        """
+        val start = self.current.span
+        self.advance()  # Consume 'nograd' (math mode already enabled by lexer)
+        self.expect(TokenKind.LBrace, "expected '{' after 'nograd'")
+        val body = self.parse_block()
+        self.expect(TokenKind.RBrace, "expected '}' after nograd block")
+        Expr(kind: ExprKind.NogradBlock(body), span: start.merge(self.previous.span))
+
+    # ========================================================================
+    # Custom Block Parsing
+    # ========================================================================
+
+    me parse_resolved_block(kind: text) -> Expr:
+        """Parse a custom block using pre-resolved value.
+
+        Called when a BlockStart token is encountered. Looks up the
+        pre-resolved value and skips the payload tokens.
+
+        Args:
+            kind: The block kind (e.g., "sh", "sql", "re")
+        """
+        val start = self.current.span
+        self.advance()  # Consume BlockStart
+
+        # Look up pre-resolved value
+        if self.resolved_blocks.?:
+            val resolved = self.resolved_blocks.unwrap()
+            val block = resolved.lookup(start)
+
+            if block.?:
+                val rb = block.unwrap()
+                # Skip payload tokens (already processed by BlockResolver)
+                self.skip_to_block_end()
+
+                # Consume the closing brace/BlockEnd
+                if self.check(TokenKind.BlockEnd):
+                    self.advance()
+                elif self.check(TokenKind.RBrace):
+                    self.advance()
+
+                return Expr(
+                    kind: ExprKind.CustomBlock(rb.kind, rb.value),
+                    span: start.merge(self.previous.span)
+                )
+
+        # Fallback: inline parsing (block not pre-resolved)
+        self.parse_block_inline(kind, start)
+
+    me parse_block_inline(kind: text, start: Span) -> Expr:
+        """Parse a block inline when not pre-resolved.
+
+        This is a fallback for when blocks are parsed without going
+        through the BlockResolver phase.
+        """
+        # Expect opening brace
+        self.expect(TokenKind.LBrace, "expected '{{' after block keyword '{kind}'")
+
+        # For inline parsing, we treat it as a raw block
+        # Skip until matching closing brace
+        var brace_depth = 1
+        val payload_start = self.current.span.start
+
+        while brace_depth > 0 and not self.is_at_end():
+            match self.peek():
+                case LBrace:
+                    brace_depth = brace_depth + 1
+                    self.advance()
+                case RBrace:
+                    brace_depth = brace_depth - 1
+                    if brace_depth > 0:
+                        self.advance()
+                case BlockEnd:
+                    brace_depth = brace_depth - 1
+                    if brace_depth > 0:
+                        self.advance()
+                case _:
+                    self.advance()
+
+        val payload_end = self.previous.span.end
+        val payload = self.source[payload_start:payload_end]
+
+        # Consume closing brace
+        if self.check(TokenKind.RBrace) or self.check(TokenKind.BlockEnd):
+            self.advance()
+
+        # Create a Raw block value for inline parsing
+        Expr(
+            kind: ExprKind.CustomBlock(kind, BlockValue.Raw(payload)),
+            span: start.merge(self.previous.span)
+        )
+
+    me skip_to_block_end():
+        """Skip tokens until reaching the end of a block.
+
+        Used when the block payload has been pre-processed by BlockResolver.
+        """
+        var brace_depth = 1
+
+        while brace_depth > 0 and not self.is_at_end():
+            match self.peek():
+                case LBrace:
+                    brace_depth = brace_depth + 1
+                    self.advance()
+                case RBrace:
+                    brace_depth = brace_depth - 1
+                    if brace_depth > 0:
+                        self.advance()
+                    # Don't consume the final }
+                case BlockEnd:
+                    brace_depth = brace_depth - 1
+                    if brace_depth > 0:
+                        self.advance()
+                    # Don't consume the final BlockEnd
+                case BlockPayload:
+                    # Skip raw payload token
+                    self.advance()
+                case _:
+                    self.advance()
 
     me parse_call_args() -> [CallArg]:
         """Parse function call arguments."""
@@ -1802,3 +2269,4 @@ export Pattern, PatternKind, EnumPatternPayload
 export Stmt, StmtKind, AssignOp, Block
 export BinOp, UnaryOp
 export Parser
+export DType, Device, Backend, TensorSuffix

@@ -11,6 +11,7 @@ export eval_expr, evaluate
 export eval_literal, eval_binary_op, eval_unary_op
 export eval_array, eval_dict, eval_tuple
 export eval_call, eval_method_call
+export eval_loss_block, eval_nograd_block, eval_array_with_suffix
 
 import ..core.{Interpreter, Value, InterpreterError, RuntimeValue, Closure}
 
@@ -60,6 +61,15 @@ fn evaluate(interp: &Interpreter, expr: &Expr) -> Result<Value, InterpreterError
 
         case Expr::Lambda(params, body):
             return eval_lambda(interp, params, body)
+
+        case Expr::LossBlock(body):
+            return eval_loss_block(interp, body)
+
+        case Expr::NogradBlock(body):
+            return eval_nograd_block(interp, body)
+
+        case Expr::ArrayLitSuffix(elements, suffix):
+            return eval_array_with_suffix(interp, elements, suffix)
 
         case _:
             return Err(InterpreterError::NotImplemented(expr.to_string()))
@@ -142,3 +152,138 @@ fn eval_lambda(interp: &Interpreter, params: &Array<String>, body: &Expr) -> Res
 # Alias for main entry point
 fn eval_expr(interp: &Interpreter, expr: &Expr) -> Result<Value, InterpreterError>:
     return evaluate(interp, expr)
+
+# ============================================================================
+# Tensor/DL Block Evaluation
+# ============================================================================
+
+fn eval_loss_block(interp: &Interpreter, body: &Block) -> Result<Value, InterpreterError>:
+    """Evaluate a loss{ ... } block.
+
+    Loss blocks:
+    1. Enable gradient tracking
+    2. Evaluate the body (uses math block semantics from lexer)
+    3. Call backward() on the result automatically
+
+    Note: Math block features (^ for power, ' for transpose, implicit mul)
+    are already handled by the lexer/parser, so the body is standard AST.
+    """
+    # Save current autograd state (access via global dl config)
+    val prev_autograd = interp.env.get_global("__dl_autograd_enabled")
+    interp.env.set_global("__dl_autograd_enabled", Value::bool_(true))
+
+    # Evaluate the body
+    var result: Value = Value::nil()
+    for stmt in body.stmts:
+        result = interp.eval_stmt(stmt)?
+
+    # Auto-backward: if result is a tensor, call backward()
+    match result.data:
+        case RuntimeValue::Tensor(tensor):
+            tensor.backward()
+        case _:
+            # Non-tensor result, no backward needed
+            pass
+
+    # Restore previous autograd state
+    if prev_autograd.?:
+        interp.env.set_global("__dl_autograd_enabled", prev_autograd.unwrap())
+    else:
+        interp.env.set_global("__dl_autograd_enabled", Value::bool_(true))
+
+    Ok(result)
+
+fn eval_nograd_block(interp: &Interpreter, body: &Block) -> Result<Value, InterpreterError>:
+    """Evaluate a nograd{ ... } block.
+
+    Nograd blocks:
+    1. Disable gradient tracking (faster, less memory)
+    2. Evaluate the body
+    3. Restore previous autograd state
+
+    Note: Math block features are already handled by the lexer/parser.
+    """
+    # Save current autograd state
+    val prev_autograd = interp.env.get_global("__dl_autograd_enabled")
+    interp.env.set_global("__dl_autograd_enabled", Value::bool_(false))
+
+    # Evaluate the body
+    var result: Value = Value::nil()
+    for stmt in body.stmts:
+        result = interp.eval_stmt(stmt)?
+
+    # Restore previous autograd state
+    if prev_autograd.?:
+        interp.env.set_global("__dl_autograd_enabled", prev_autograd.unwrap())
+    else:
+        interp.env.set_global("__dl_autograd_enabled", Value::bool_(true))
+
+    Ok(result)
+
+fn eval_array_with_suffix(interp: &Interpreter, elements: &Array<Expr>, suffix: &TensorSuffix) -> Result<Value, InterpreterError>:
+    """Evaluate an array literal with tensor suffix.
+
+    Examples:
+    - [1, 2, 3]f32        -> f32 tensor
+    - [1, 2, 3]_f32_gpu   -> f32 tensor on GPU
+    - [1, 2, 3]f32_tr_cuda -> trainable f32 tensor on CUDA
+
+    The suffix specifies:
+    - dtype: Data type (f16, f32, f64, bf16, i8, i16, i32, i64, u8, u16, u32, u64)
+    - device: Target device (cpu, gpu, cuda, cuda0, cuda1, etc.)
+    - trainable: Whether to track gradients (tr suffix)
+    - pinned: Whether to use pinned memory (pin suffix)
+    - backend: Implementation backend (native, torch)
+    """
+    # Evaluate all elements
+    var values: Array<Value> = []
+    for elem in elements:
+        val v = evaluate(interp, elem)?
+        values = values.push(v)
+
+    # Get config defaults
+    val dl_config = interp.env.get_global("dl")
+
+    # Determine dtype (from suffix or config default)
+    val dtype = if suffix.dtype.?:
+        suffix.dtype.unwrap()
+    else:
+        match dl_config:
+            case Some(cfg) if cfg.has_field("default_dtype"):
+                cfg.get_field("default_dtype").as_dtype()
+            case _:
+                DType::F32  # Default to f32
+
+    # Determine device (from suffix or config default)
+    val device = if suffix.device.?:
+        suffix.device.unwrap()
+    else:
+        match dl_config:
+            case Some(cfg) if cfg.has_field("default_device"):
+                cfg.get_field("default_device").as_device()
+            case _:
+                Device::CPU  # Default to CPU
+
+    # Determine backend (from suffix or config default)
+    val backend = if suffix.backend.?:
+        suffix.backend.unwrap()
+    else:
+        match dl_config:
+            case Some(cfg) if cfg.has_field("default_backend"):
+                cfg.get_field("default_backend").as_backend()
+            case _:
+                Backend::PyTorch  # Default to PyTorch
+
+    # Create tensor with appropriate backend
+    match backend:
+        case Backend::Native:
+            val tensor = NativeTensor::from_values(values, dtype, device)
+            if suffix.trainable:
+                tensor.requires_grad = true
+            Ok(Value::tensor(tensor))
+
+        case Backend::PyTorch:
+            val tensor = TorchTensor::from_values(values, dtype, device, suffix.trainable)
+            if suffix.pinned:
+                tensor.pin_memory()
+            Ok(Value::tensor(tensor))

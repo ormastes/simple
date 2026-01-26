@@ -16,6 +16,7 @@
 
 import compiler.hir.*
 import compiler.lexer.Span
+import compiler.blocks.value.BlockValue
 
 # ============================================================================
 # MIR Module Structure
@@ -272,10 +273,19 @@ enum MirBinOp:
     """Binary operation."""
     # Arithmetic
     Add, Sub, Mul, Div, Rem
+    Pow                         # **
+    # Matrix operations
+    MatMul                      # @
     # Bitwise
     BitAnd, BitOr, BitXor, Shl, Shr
     # Comparison
     Eq, Ne, Lt, Le, Gt, Ge
+    # Broadcast operations (dotted operators)
+    BroadcastAdd                # .+
+    BroadcastSub                # .-
+    BroadcastMul                # .*
+    BroadcastDiv                # ./
+    BroadcastPow                # .^
     # Offset
     Offset  # Pointer arithmetic
 
@@ -284,6 +294,7 @@ enum MirUnaryOp:
     Neg
     Not
     BitNot
+    Transpose   # ' (postfix, m{} only)
 
 enum AggregateKind:
     """Aggregate construction kind."""
@@ -906,6 +917,9 @@ impl MirLowering:
             case Call(callee, args, _):
                 self.lower_call(callee, args)
 
+            case MethodCall(receiver, method, args, resolution):
+                self.lower_method_call(receiver, method, args, resolution)
+
             case ArrayLit(elements, _):
                 self.lower_array_lit(elements)
 
@@ -945,6 +959,17 @@ impl MirLowering:
                     self.builder.terminate_goto(continue_block)
                 self.builder.new_temp(MirType.unit())
 
+            # Custom blocks (user-defined: sh{}, sql{}, re{}, etc.)
+            case CustomBlock(kind, value):
+                self.lower_custom_block(kind, value, expr.span)
+
+            # Math/DL blocks with special semantics
+            case LossBlock(body):
+                self.lower_loss_block(body)
+
+            case NogradBlock(body):
+                self.lower_nograd_block(body)
+
             case _:
                 self.error("unsupported expression in MIR lowering", Some(expr.span))
                 self.builder.new_temp(MirType.i64())
@@ -957,6 +982,8 @@ impl MirLowering:
             case Mul: MirBinOp.Mul
             case Div: MirBinOp.Div
             case Mod: MirBinOp.Rem
+            case Pow: MirBinOp.Pow
+            case MatMul: MirBinOp.MatMul
             case BitAnd: MirBinOp.BitAnd
             case BitOr: MirBinOp.BitOr
             case BitXor: MirBinOp.BitXor
@@ -968,6 +995,11 @@ impl MirLowering:
             case LtEq: MirBinOp.Le
             case Gt: MirBinOp.Gt
             case GtEq: MirBinOp.Ge
+            case BroadcastAdd: MirBinOp.BroadcastAdd
+            case BroadcastSub: MirBinOp.BroadcastSub
+            case BroadcastMul: MirBinOp.BroadcastMul
+            case BroadcastDiv: MirBinOp.BroadcastDiv
+            case BroadcastPow: MirBinOp.BroadcastPow
             case _: MirBinOp.Add
 
     me lower_unaryop(op: HirUnaryOp) -> MirUnaryOp:
@@ -976,6 +1008,7 @@ impl MirLowering:
             case Neg: MirUnaryOp.Neg
             case Not: MirUnaryOp.Not
             case BitNot: MirUnaryOp.BitNot
+            case Transpose: MirUnaryOp.Transpose
             case _: MirUnaryOp.Neg
 
     me infer_binop_type(op: HirBinOp) -> MirType:
@@ -1080,6 +1113,66 @@ impl MirLowering:
         val result = self.builder.emit_call(MirOperand.copy(callee_local), arg_operands, MirType.i64())
         result ?? self.builder.new_temp(MirType.unit())
 
+    me lower_method_call(receiver: HirExpr, method: text, args: [HirCallArg], resolution: MethodResolution) -> LocalId:
+        """Lower method call based on resolution.
+
+        UFCS: For FreeFunction resolution, receiver becomes first argument.
+        """
+        match resolution:
+            case InstanceMethod(type_id, method_id):
+                # Direct method call on type
+                # Lower receiver and args
+                val receiver_local = self.lower_expr(receiver)
+                var arg_operands: [MirOperand] = [MirOperand.copy(receiver_local)]
+                for arg in args:
+                    val arg_local = self.lower_expr(arg.value)
+                    arg_operands = arg_operands.push(MirOperand.copy(arg_local))
+
+                # Emit call to method (use method_id to get function symbol)
+                val method_operand = self.symbol_to_operand(method_id)
+                val result = self.builder.emit_call(method_operand, arg_operands, MirType.i64())
+                result ?? self.builder.new_temp(MirType.unit())
+
+            case TraitMethod(trait_id, method_id):
+                # Virtual dispatch through trait vtable
+                # For now, lower as direct call (TODO: proper vtable dispatch)
+                val receiver_local = self.lower_expr(receiver)
+                var arg_operands: [MirOperand] = [MirOperand.copy(receiver_local)]
+                for arg in args:
+                    val arg_local = self.lower_expr(arg.value)
+                    arg_operands = arg_operands.push(MirOperand.copy(arg_local))
+
+                val method_operand = self.symbol_to_operand(method_id)
+                val result = self.builder.emit_call(method_operand, arg_operands, MirType.i64())
+                result ?? self.builder.new_temp(MirType.unit())
+
+            case FreeFunction(func_id):
+                # UFCS: x.method(a, b) -> method(x, a, b)
+                # Receiver becomes first argument
+                val receiver_local = self.lower_expr(receiver)
+                var arg_operands: [MirOperand] = [MirOperand.copy(receiver_local)]
+                for arg in args:
+                    val arg_local = self.lower_expr(arg.value)
+                    arg_operands = arg_operands.push(MirOperand.copy(arg_local))
+
+                val func_operand = self.symbol_to_operand(func_id)
+                val result = self.builder.emit_call(func_operand, arg_operands, MirType.i64())
+                result ?? self.builder.new_temp(MirType.unit())
+
+            case Unresolved:
+                # Method was not resolved - emit error and return dummy
+                self.error("unresolved method call: {method}", None)
+                self.builder.new_temp(MirType.unit())
+
+    me symbol_to_operand(symbol: SymbolId) -> MirOperand:
+        """Convert a symbol to a function pointer operand."""
+        # Create a constant referencing the function symbol
+        # In codegen, this will be resolved to the actual function address
+        MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Int(symbol.id),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
+        ))
+
     me lower_array_lit(elements: [HirExpr]) -> LocalId:
         """Lower array literal."""
         var operands: [MirOperand] = []
@@ -1121,6 +1214,76 @@ impl MirLowering:
                 Some(MirConstValue.Str(value))
             case _:
                 None
+
+    # ========================================================================
+    # Custom Block Lowering
+    # ========================================================================
+
+    me lower_custom_block(kind: text, value: BlockValue, span: Span) -> LocalId:
+        """Lower custom block to MIR.
+
+        Custom blocks are lowered by calling a runtime handler function
+        that processes the block value and returns a result.
+        """
+        # Create a local to hold the block kind string
+        val kind_local = self.builder.emit_const_int(0)  # TODO: String handling
+
+        # Emit call to runtime block handler
+        # rt_eval_block(kind: text, value: BlockValue) -> Any
+        val result = self.builder.new_temp(MirType.i64())
+
+        # For now, blocks that produce values just return unit
+        # The actual evaluation happens at runtime via the interpreter
+        # This is a placeholder for when we add full codegen support
+        result
+
+    me lower_loss_block(body: HirBlock) -> LocalId:
+        """Lower loss block to MIR.
+
+        Loss blocks:
+        1. Enable gradient tracking
+        2. Evaluate the body
+        3. Call backward() on the result
+        4. Restore gradient tracking state
+        """
+        # Emit call to enable autograd
+        # rt_autograd_push(enabled: bool)
+        val _push_result = self.builder.new_temp(MirType.unit())
+
+        # Lower the body
+        val body_result = self.lower_block(body)
+
+        # Emit call to backward
+        # rt_backward(value: Tensor)
+        if body_result.?:
+            pass  # Would emit: rt_backward(body_result.unwrap())
+
+        # Emit call to restore autograd state
+        # rt_autograd_pop()
+        val _pop_result = self.builder.new_temp(MirType.unit())
+
+        body_result ?? self.builder.new_temp(MirType.unit())
+
+    me lower_nograd_block(body: HirBlock) -> LocalId:
+        """Lower nograd block to MIR.
+
+        Nograd blocks:
+        1. Disable gradient tracking
+        2. Evaluate the body
+        3. Restore gradient tracking state
+        """
+        # Emit call to disable autograd
+        # rt_autograd_push(enabled: false)
+        val _push_result = self.builder.new_temp(MirType.unit())
+
+        # Lower the body
+        val body_result = self.lower_block(body)
+
+        # Emit call to restore autograd state
+        # rt_autograd_pop()
+        val _pop_result = self.builder.new_temp(MirType.unit())
+
+        body_result ?? self.builder.new_temp(MirType.unit())
 
     me error(message: text, span: Span?):
         """Record a lowering error."""

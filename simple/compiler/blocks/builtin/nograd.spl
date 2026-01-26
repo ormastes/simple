@@ -1,0 +1,98 @@
+# Nograd Block Definition
+#
+# The nograd{} block for computation without gradient tracking.
+
+import ..definition.{BlockDefinition, HighlightToken, BlockExample}
+import ..modes.{LexerMode, SyntaxFeatures}
+import ..context.{BlockContext, BlockError}
+import ..value.{BlockValue}
+import ...parser.{Parser, Block}
+
+# ============================================================================
+# Nograd Block Definition
+# ============================================================================
+
+struct NogradBlockDef: BlockDefinition:
+    """Nograd block definition for nograd{} expressions.
+
+    Inherits all math block features (^, ', implicit mul) and adds:
+    - Gradient tracking disabled (faster, less memory)
+
+    The nograd block is designed for inference and evaluation
+    where gradients are not needed.
+
+    Example:
+        val predictions = nograd{
+            model(test_data)
+        }
+        # No gradients computed - faster execution
+
+        # Equivalent to:
+        with torch.no_grad():
+            val predictions = model(test_data)
+    """
+
+impl NogradBlockDef: BlockDefinition:
+    fn kind() -> text:
+        "nograd"
+
+    fn lexer_mode() -> LexerMode:
+        LexerMode.Math
+
+    fn syntax_features() -> SyntaxFeatures:
+        SyntaxFeatures.nograd()
+
+    fn parse_payload(payload: text, ctx: BlockContext) -> Result<BlockValue, BlockError>:
+        """Parse nograd block payload as a block of statements.
+
+        Similar to loss{}, but without auto-backward.
+        """
+        val parser = Parser.new(payload)
+
+        match parser.parse_block():
+            case Ok(block):
+                if parser.has_errors():
+                    val errors = parser.errors()
+                    if errors.len() > 0:
+                        return Err(BlockError.parse(errors[0].message))
+                Ok(BlockValue.NogradBlock(block))
+
+            case Err(e):
+                Err(BlockError.parse(e.message))
+
+    fn description() -> text:
+        "No-gradient block for inference (faster, less memory)"
+
+    fn examples() -> [BlockExample]:
+        [
+            BlockExample(
+                code: "nograd{ model(x) }",
+                description: "Simple inference without gradients",
+                output: None
+            ),
+            BlockExample(
+                code: """nograd{
+    var total = 0.0
+    for batch in val_loader:
+        val pred = model(batch.x)
+        total = total + accuracy(pred, batch.y)
+    total / val_loader.len()
+}""",
+                description: "Validation loop without gradient tracking",
+                output: None
+            ),
+            BlockExample(
+                code: """val accuracy = nograd{
+    pred = m{ softmax(W @ x + b) }
+    (pred.argmax() == label).float().mean()
+}""",
+                description: "Computing accuracy during training",
+                output: None
+            )
+        ]
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export NogradBlockDef
