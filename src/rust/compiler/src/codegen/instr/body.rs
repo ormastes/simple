@@ -372,7 +372,21 @@ pub fn compile_function_body<M: Module>(
                     }
                 }
                 if let Some(v) = val {
-                    let mut ret_val = vreg_values[v];
+                    // Handle missing VReg (can happen in complex control flow)
+                    let mut ret_val = if let Some(&rv) = vreg_values.get(v) {
+                        rv
+                    } else {
+                        // Return a default value of the correct type
+                        let ret_ty = type_to_cranelift(func.return_type);
+                        match ret_ty {
+                            types::F32 => builder.ins().f32const(0.0),
+                            types::F64 => builder.ins().f64const(0.0),
+                            types::I8 => builder.ins().iconst(types::I8, 0),
+                            types::I16 => builder.ins().iconst(types::I16, 0),
+                            types::I32 => builder.ins().iconst(types::I32, 0),
+                            _ => builder.ins().iconst(types::I64, 0),
+                        }
+                    };
                     if generator_states.is_some() {
                         let wrap_id = runtime_funcs["rt_value_int"];
                         let wrap_ref = module.declare_func_in_func(wrap_id, builder.func);

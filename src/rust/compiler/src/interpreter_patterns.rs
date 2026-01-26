@@ -9,7 +9,7 @@ use crate::error::CompileError;
 use crate::value::Value;
 use simple_parser::ast::{Expr, FStringPart, Pattern, Type};
 
-use super::Enums;
+use super::{Enums, BLOCK_SCOPED_ENUMS};
 
 /// Check if a pattern is a catch-all that covers any value.
 pub(crate) fn is_catch_all_pattern(pattern: &Pattern) -> bool {
@@ -127,7 +127,10 @@ pub(crate) fn pattern_matches(
             } = value
             {
                 // Check if this identifier is a known variant of the enum
-                if let Some(enum_def) = enums.get(enum_name) {
+                // Look in both module-level enums and block-scoped enums
+                let enum_def = enums.get(enum_name).cloned()
+                    .or_else(|| BLOCK_SCOPED_ENUMS.with(|cell| cell.borrow().get(enum_name).cloned()));
+                if let Some(enum_def) = enum_def {
                     let is_variant = enum_def.variants.iter().any(|v| &v.name == name);
                     if is_variant {
                         // This is a unit variant pattern - match only if variant matches
@@ -401,8 +404,9 @@ pub(crate) fn check_enum_exhaustiveness(
     arm_patterns: &[&Pattern],
     enums: &Enums,
 ) -> Option<Vec<String>> {
-    // Get the enum definition
-    let enum_def = enums.get(enum_name)?;
+    // Get the enum definition from module-level or block-scoped enums
+    let enum_def = enums.get(enum_name).cloned()
+        .or_else(|| BLOCK_SCOPED_ENUMS.with(|cell| cell.borrow().get(enum_name).cloned()))?;
 
     // Get all variant names from the enum definition
     let all_variants: Vec<String> = enum_def.variants.iter().map(|v| v.name.clone()).collect();

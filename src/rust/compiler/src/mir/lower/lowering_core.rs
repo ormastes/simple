@@ -243,6 +243,8 @@ pub struct MirLowerer<'a> {
     pub(super) path_counter: u32,
     /// Current file being lowered (for coverage source locations)
     pub(super) current_file: Option<String>,
+    /// Last expression value for implicit returns (non-void functions)
+    pub(super) last_expr_value: Option<super::super::instructions::VReg>,
 }
 
 impl<'a> MirLowerer<'a> {
@@ -263,6 +265,7 @@ impl<'a> MirLowerer<'a> {
             condition_counters: HashMap::new(),
             path_counter: 0,
             current_file: None,
+            last_expr_value: None,
         }
     }
 
@@ -284,6 +287,7 @@ impl<'a> MirLowerer<'a> {
             condition_counters: HashMap::new(),
             path_counter: 0,
             current_file: None,
+            last_expr_value: None,
         }
     }
 
@@ -636,6 +640,9 @@ impl<'a> MirLowerer<'a> {
         // Explicit state transition: Idle -> Lowering
         self.begin_function(mir_func, &func.name, func.is_public())?;
 
+        // Reset last expression value for this function
+        self.last_expr_value = None;
+
         // Emit function entry path probe for coverage (#674)
         self.emit_function_entry_probe()?;
 
@@ -652,16 +659,20 @@ impl<'a> MirLowerer<'a> {
             self.lower_stmt(stmt, func.contract.as_ref())?;
         }
 
-        // Ensure void functions have a return (non-void functions should have explicit returns)
-        // Only convert Unreachable to Return(None) for void functions.
-        // For non-void functions, if we reach an Unreachable block, it means all paths
-        // returned earlier (e.g., if/else with returns in both branches), so we leave
-        // the terminator as Unreachable (dead code).
+        // Handle implicit returns and void function terminators
         let is_void = func.return_type == TypeId::VOID;
+        let last_expr = self.last_expr_value;
         self.with_func(|mir_func, current_block| {
             if let Some(block) = mir_func.block_mut(current_block) {
-                if matches!(block.terminator, Terminator::Unreachable) && is_void {
-                    block.terminator = Terminator::Return(None);
+                if matches!(block.terminator, Terminator::Unreachable) {
+                    if is_void {
+                        // Void function: return nothing
+                        block.terminator = Terminator::Return(None);
+                    } else if let Some(vreg) = last_expr {
+                        // Non-void function with implicit return: use last expression value
+                        block.terminator = Terminator::Return(Some(vreg));
+                    }
+                    // If no last_expr and not void, leave as Unreachable (will trap - indicates bug)
                 }
             }
         })?;

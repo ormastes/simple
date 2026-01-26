@@ -6,7 +6,7 @@ mod special;
 
 use super::{
     eval_arg, eval_arg_usize, evaluate_expr, exec_function, exec_function_with_captured_env, find_and_exec_method,
-    instantiate_class, try_method_missing, Enums, ImplMethods,
+    instantiate_class, try_method_missing, Enums, ImplMethods, BLOCK_SCOPED_ENUMS,
 };
 use crate::error::{codes, typo, CompileError, ErrorContext};
 use crate::value::{Env, Value};
@@ -243,7 +243,10 @@ pub(crate) fn evaluate_method_call(
         // EnumType method call = variant constructor call
         // EnumName.VariantName(args) -> create enum with payload
         Value::EnumType { enum_name } => {
-            if let Some(enum_def) = enums.get(enum_name).cloned() {
+            // Check both module-level enums and block-scoped enums
+            let enum_def = enums.get(enum_name).cloned()
+                .or_else(|| BLOCK_SCOPED_ENUMS.with(|cell| cell.borrow().get(enum_name).cloned()));
+            if let Some(enum_def) = enum_def {
                 // Check if the method name is a variant name
                 let variant_opt = enum_def.variants.iter().find(|v| v.name == method);
                 if let Some(variant) = variant_opt {

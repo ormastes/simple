@@ -166,6 +166,9 @@ fn main() {
         "todo-gen" => run_todo_gen(&args),
         "sspec-docgen" => run_sspec_docgen(&args),
 
+        // Brief view - LLM-friendly code overview
+        "brief" => handle_brief(&args, global_flags.gc_log, global_flags.gc_off),
+
         // Dashboard
         "dashboard" => {
             // TODO: Execute Simple dashboard app

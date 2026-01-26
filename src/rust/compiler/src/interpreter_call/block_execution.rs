@@ -3,7 +3,7 @@
 use super::super::interpreter_helpers::{bind_pattern_value, handle_method_call_with_self_update};
 use super::bdd::{BDD_AFTER_EACH, BDD_BEFORE_EACH, BDD_CONTEXT_DEFS, BDD_INDENT};
 use crate::error::{codes, CompileError, ErrorContext};
-use crate::interpreter::{evaluate_expr, exec_with, pattern_matches, EXTERN_FUNCTIONS, MODULE_GLOBALS};
+use crate::interpreter::{evaluate_expr, exec_with, pattern_matches, BLOCK_SCOPED_ENUMS, EXTERN_FUNCTIONS, MACRO_DEFINITION_ORDER, MODULE_GLOBALS, USER_MACROS};
 use crate::value::*;
 use simple_parser::ast::{ClassDef, EnumDef, Expr, FunctionDef, Node};
 use simple_runtime::value::diagram_ffi;
@@ -403,6 +403,27 @@ pub(super) fn exec_block_closure(
                     _ => last_value = Value::Nil,
                 }
             }
+            Node::Macro(m) => {
+                // Handle macro definitions inside block closures (e.g., in `it` blocks)
+                // Register the macro in USER_MACROS so it can be invoked within this block
+                USER_MACROS.with(|cell| cell.borrow_mut().insert(m.name.clone(), m.clone()));
+                // Track macro definition order for validation
+                MACRO_DEFINITION_ORDER.with(|cell| cell.borrow_mut().push(m.name.clone()));
+                last_value = Value::Nil;
+            }
+            Node::Enum(e) => {
+                // Handle enum definitions inside block closures (e.g., in `it` blocks)
+                // Register the enum type in the local environment so EnumName.VariantName works
+                local_env.insert(
+                    e.name.clone(),
+                    Value::EnumType {
+                        enum_name: e.name.clone(),
+                    },
+                );
+                // Also register in BLOCK_SCOPED_ENUMS for pattern matching support
+                BLOCK_SCOPED_ENUMS.with(|cell| cell.borrow_mut().insert(e.name.clone(), e.clone()));
+                last_value = Value::Nil;
+            }
             _ => {
                 last_value = Value::Nil;
             }
@@ -616,6 +637,27 @@ fn exec_block_closure_mut(
                     Control::Return(val) => return Ok(val),
                     _ => last_value = Value::Nil,
                 }
+            }
+            Node::Macro(m) => {
+                // Handle macro definitions inside block closures (e.g., in `it` blocks)
+                // Register the macro in USER_MACROS so it can be invoked within this block
+                USER_MACROS.with(|cell| cell.borrow_mut().insert(m.name.clone(), m.clone()));
+                // Track macro definition order for validation
+                MACRO_DEFINITION_ORDER.with(|cell| cell.borrow_mut().push(m.name.clone()));
+                last_value = Value::Nil;
+            }
+            Node::Enum(e) => {
+                // Handle enum definitions inside block closures (e.g., in `it` blocks)
+                // Register the enum type in the local environment so EnumName.VariantName works
+                local_env.insert(
+                    e.name.clone(),
+                    Value::EnumType {
+                        enum_name: e.name.clone(),
+                    },
+                );
+                // Also register in BLOCK_SCOPED_ENUMS for pattern matching support
+                BLOCK_SCOPED_ENUMS.with(|cell| cell.borrow_mut().insert(e.name.clone(), e.clone()));
+                last_value = Value::Nil;
             }
             _ => {
                 last_value = Value::Nil;

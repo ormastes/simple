@@ -94,6 +94,29 @@ impl<'a> Parser<'a> {
             return Ok(Expr::Array(Vec::new()));
         }
 
+        // Check for list comprehension with for-first syntax: [for pattern in iterable [if cond]: expr]
+        if self.check(&TokenKind::For) {
+            self.advance(); // consume 'for'
+            let (pattern, iterable, condition) = self.parse_comprehension_clause()?;
+            self.expect(&TokenKind::Colon)?;
+            // Skip whitespace after colon
+            while self.check(&TokenKind::Newline) || self.check(&TokenKind::Indent) || self.check(&TokenKind::Dedent) {
+                self.advance();
+            }
+            let expr = self.parse_expression()?;
+            // Skip whitespace before closing bracket
+            while self.check(&TokenKind::Newline) || self.check(&TokenKind::Indent) || self.check(&TokenKind::Dedent) {
+                self.advance();
+            }
+            self.expect(&TokenKind::RBracket)?;
+            return Ok(Expr::ListComprehension {
+                expr: Box::new(expr),
+                pattern,
+                iterable: Box::new(iterable),
+                condition,
+            });
+        }
+
         // Check for spread operator
         if self.check(&TokenKind::Star) {
             return self.parse_array_with_spreads();
@@ -177,6 +200,35 @@ impl<'a> Parser<'a> {
         if self.check(&TokenKind::RBrace) {
             self.advance();
             return Ok(Expr::Dict(Vec::new()));
+        }
+
+        // Check for dict comprehension with for-first syntax: {for pattern in iterable [if cond]: (key, value)}
+        if self.check(&TokenKind::For) {
+            self.advance(); // consume 'for'
+            let (pattern, iterable, condition) = self.parse_comprehension_clause()?;
+            self.expect(&TokenKind::Colon)?;
+            // Skip whitespace after colon
+            while self.check(&TokenKind::Newline) || self.check(&TokenKind::Indent) || self.check(&TokenKind::Dedent) {
+                self.advance();
+            }
+            // Parse the key-value tuple: (key, value)
+            self.expect(&TokenKind::LParen)?;
+            let key = self.parse_expression()?;
+            self.expect(&TokenKind::Comma)?;
+            let value = self.parse_expression()?;
+            self.expect(&TokenKind::RParen)?;
+            // Skip whitespace before closing brace
+            while self.check(&TokenKind::Newline) || self.check(&TokenKind::Indent) || self.check(&TokenKind::Dedent) {
+                self.advance();
+            }
+            self.expect(&TokenKind::RBrace)?;
+            return Ok(Expr::DictComprehension {
+                key: Box::new(key),
+                value: Box::new(value),
+                pattern,
+                iterable: Box::new(iterable),
+                condition,
+            });
         }
 
         // Check for dict spread: {**d1, **d2}

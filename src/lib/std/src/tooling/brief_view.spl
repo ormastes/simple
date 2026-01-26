@@ -1,0 +1,633 @@
+# Brief View Generator for LLM Integration
+# Purpose: Generate collapsed code overview with signatures only, reducing token usage
+#
+# Example output (tree format):
+#   src/app/service.spl
+#   ├─ class UserService @io
+#   │  ├─ fn get_user(id: i64) -> Result<User, Error>
+#   │  ├─ fn update_user(...) -> Result<(), Error>
+#   │  └─ fn delete_user(...) -> Result<(), Error>
+#   ├─ fn validate_request(req: Request) -> bool
+#   └─ const TIMEOUT: i64
+
+# Note: JSON functions implemented manually to avoid data.json dependency issues
+
+# FFI declarations for parsing and file operations
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_parse_brief_items(source: text) -> text
+
+# A single item in the brief view (function, class, struct, etc.)
+struct BriefItem:
+    kind: text           # "fn", "class", "struct", "enum", "trait", "const", "field", "method"
+    name: text           # Symbol name
+    signature: text      # One-line signature without body
+    line: i32            # Source line number (1-based)
+    visibility: text     # "pub" or ""
+    effects: List<text>  # ["@pure", "@io", "@async", etc.]
+    children: List<BriefItem>  # Nested items (methods, fields)
+    collapsed: bool      # Whether body is collapsed (always true in brief view)
+
+impl BriefItem:
+    # Create a new BriefItem
+    static fn new(kind: text, name: text, signature: text, line: i32) -> BriefItem:
+        BriefItem(
+            kind: kind,
+            name: name,
+            signature: signature,
+            line: line,
+            visibility: "",
+            effects: [],
+            children: [],
+            collapsed: true
+        )
+
+    # Create a public item
+    static fn public(kind: text, name: text, signature: text, line: i32) -> BriefItem:
+        BriefItem(
+            kind: kind,
+            name: name,
+            signature: signature,
+            line: line,
+            visibility: "pub",
+            effects: [],
+            children: [],
+            collapsed: true
+        )
+
+    # Add an effect annotation
+    me add_effect(effect: text):
+        self.effects = self.effects + [effect]
+
+    # Add a child item (method, field)
+    me add_child(child: BriefItem):
+        self.children = self.children + [child]
+
+    # Format as one-line signature
+    fn format_signature() -> text:
+        var sig = ""
+
+        # Visibility
+        if self.visibility.?:
+            sig = sig + self.visibility + " "
+
+        # Kind
+        sig = sig + self.kind + " "
+
+        # Name
+        sig = sig + self.name
+
+        # Additional signature (parameters, return type, etc.)
+        if self.signature.?:
+            sig = sig + self.signature
+
+        # Effects
+        if self.effects.?:
+            sig = sig + " "
+            for effect in self.effects:
+                sig = sig + effect + " "
+
+        sig.trim()
+
+    # Convert to JSON string (manual serialization)
+    fn to_json_string() -> text:
+        var result = '{{'
+        result = result + '"kind":"' + escape_json_string(self.kind) + '",'
+        result = result + '"name":"' + escape_json_string(self.name) + '",'
+        result = result + '"signature":"' + escape_json_string(self.signature) + '",'
+        result = result + '"line":' + self.line.to_string() + ','
+        result = result + '"visibility":"' + escape_json_string(self.visibility) + '",'
+        result = result + '"collapsed":' + (if self.collapsed: 'true' else: 'false') + ','
+
+        # Effects array
+        result = result + '"effects":['
+        var first_effect = true
+        for effect in self.effects:
+            if not first_effect:
+                result = result + ','
+            result = result + '"' + escape_json_string(effect) + '"'
+            first_effect = false
+        result = result + '],'
+
+        # Children array
+        result = result + '"children":['
+        var first_child = true
+        for child in self.children:
+            if not first_child:
+                result = result + ','
+            result = result + child.to_json_string()
+            first_child = false
+        result = result + ']'
+
+        result = result + '}}'
+        result
+
+
+# Brief view of an entire file
+struct BriefView:
+    file_path: text
+    items: List<BriefItem>
+    total_lines: i32
+    token_estimate: i32  # Estimated token count for this brief view
+
+impl BriefView:
+    # Create a new empty BriefView
+    static fn new(file_path: text) -> BriefView:
+        BriefView(
+            file_path: file_path,
+            items: [],
+            total_lines: 0,
+            token_estimate: 0
+        )
+
+    # Add an item to the view
+    me add_item(item: BriefItem):
+        self.items = self.items + [item]
+
+    # Render as tree-like output (human readable)
+    fn to_tree() -> text:
+        var output = self.file_path + "\n"
+
+        val count = self.items.len()
+        var i = 0
+        for item in self.items:
+            val is_last = i == count - 1
+            output = output + format_tree_item(item, "", is_last)
+            i = i + 1
+
+        output
+
+    # Render as JSON (for tooling/API)
+    fn to_json() -> text:
+        self.to_json_internal(true)
+
+    # Internal JSON rendering with optional pretty printing
+    fn to_json_internal(pretty: bool) -> text:
+        var nl = if pretty: '\n' else: ''
+        var sp = if pretty: '  ' else: ''
+
+        var result = '{{'
+        result = result + nl + sp + '"file_path": "' + escape_json_string(self.file_path) + '",'
+        result = result + nl + sp + '"total_lines": ' + self.total_lines.to_string() + ','
+        result = result + nl + sp + '"token_estimate": ' + self.token_estimate.to_string() + ','
+        result = result + nl + sp + '"items": ['
+
+        var first_item = true
+        for item in self.items:
+            if not first_item:
+                result = result + ','
+            result = result + nl + sp + sp + item.to_json_string()
+            first_item = false
+
+        result = result + nl + sp + ']'
+        result = result + nl + '}}'
+        result
+
+    # Render as compact JSON (single line)
+    fn to_json_compact() -> text:
+        self.to_json_internal(false)
+
+    # Expand a specific symbol to show full details
+    fn expand(name: text) -> BriefView:
+        # Create a new view with just the expanded symbol
+        var expanded = BriefView.new(self.file_path)
+        expanded.total_lines = self.total_lines
+
+        for item in self.items:
+            if item.name == name:
+                # Mark as not collapsed
+                var expanded_item = item
+                expanded_item.collapsed = false
+                # Use direct assignment instead of add_item to avoid method call issue
+                expanded.items = expanded.items + [expanded_item]
+            else:
+                # Check children
+                for child in item.children:
+                    if child.name == name:
+                        var expanded_child = child
+                        expanded_child.collapsed = false
+                        var parent = item
+                        parent.children = [expanded_child]
+                        expanded.items = expanded.items + [parent]
+
+        expanded
+
+
+# Format a tree item with proper indentation and box-drawing characters
+fn format_tree_item(item: BriefItem, prefix: text, is_last: bool) -> text:
+    var output = ""
+
+    # Determine connector
+    val connector = if is_last: "└─ " else: "├─ "
+
+    # Format the item line
+    output = output + prefix + connector + item.format_signature() + "\n"
+
+    # Format children if any
+    if item.children.?:
+        val child_prefix = if is_last: prefix + "   " else: prefix + "│  "
+
+        val child_count = item.children.len()
+        var j = 0
+        for child in item.children:
+            val child_is_last = j == child_count - 1
+            output = output + format_tree_item(child, child_prefix, child_is_last)
+            j = j + 1
+
+    output
+
+
+# Extract brief view from source code
+fn extract_brief(source: text) -> BriefView:
+    var view = BriefView.new("")
+
+    # Count total lines
+    val lines = source.split("\n")
+    view.total_lines = lines.len() as i32
+
+    # Parse items from source
+    var line_num = 0
+    for line in lines:
+        line_num = line_num + 1
+        val trimmed = line.trim()
+
+        # Skip empty lines and comments
+        if not trimmed.? or trimmed.starts_with("#"):
+            continue
+
+        # Detect function definitions
+        if trimmed.starts_with("fn ") or trimmed.starts_with("pub fn "):
+            val item = parse_function_brief(trimmed, line_num as i32)
+            view.add_item(item)
+
+        # Detect async functions
+        elif trimmed.starts_with("async fn ") or trimmed.starts_with("pub async fn "):
+            var item = parse_function_brief(trimmed, line_num as i32)
+            item.add_effect("@async")
+            view.add_item(item)
+
+        # Detect static functions
+        elif trimmed.starts_with("static fn ") or trimmed.starts_with("pub static fn "):
+            val item = parse_static_function_brief(trimmed, line_num as i32)
+            view.add_item(item)
+
+        # Detect mutable methods (me)
+        elif trimmed.starts_with("me ") or trimmed.starts_with("pub me "):
+            val item = parse_method_brief(trimmed, line_num as i32, true)
+            view.add_item(item)
+
+        # Detect class definitions
+        elif trimmed.starts_with("class ") or trimmed.starts_with("pub class "):
+            val item = parse_class_brief(trimmed, line_num as i32)
+            view.add_item(item)
+
+        # Detect struct definitions
+        elif trimmed.starts_with("struct ") or trimmed.starts_with("pub struct "):
+            val item = parse_struct_brief(trimmed, line_num as i32)
+            view.add_item(item)
+
+        # Detect enum definitions
+        elif trimmed.starts_with("enum ") or trimmed.starts_with("pub enum "):
+            val item = parse_enum_brief(trimmed, line_num as i32)
+            view.add_item(item)
+
+        # Detect trait definitions
+        elif trimmed.starts_with("trait ") or trimmed.starts_with("pub trait "):
+            val item = parse_trait_brief(trimmed, line_num as i32)
+            view.add_item(item)
+
+        # Detect const/val definitions
+        elif trimmed.starts_with("const ") or trimmed.starts_with("pub const "):
+            val item = parse_const_brief(trimmed, line_num as i32)
+            view.add_item(item)
+
+        # Detect impl blocks
+        elif trimmed.starts_with("impl "):
+            val item = parse_impl_brief(trimmed, line_num as i32)
+            view.add_item(item)
+
+    # Estimate tokens: roughly 1 token per 4 chars of source
+    # Use source length as a rough estimate (avoid JSON dependency here)
+    view.token_estimate = (source.len() / 4) as i32
+
+    view
+
+
+# Parse a function definition into a BriefItem
+fn parse_function_brief(line: text, line_num: i32) -> BriefItem:
+    val is_pub = line.starts_with("pub ")
+    var rest = if is_pub: line.substring(4, line.len()) else: line
+
+    # Remove "fn " prefix
+    rest = rest.substring(3, rest.len())
+
+    # Extract name (up to first '(')
+    val paren_idx = find_char(rest, '(')
+    val name = if paren_idx >= 0: rest.substring(0, paren_idx).trim() else: rest.split(":")[0].trim()
+
+    # Extract signature (everything after name up to ':')
+    val signature = extract_signature(rest)
+
+    var item = BriefItem.new("fn", name, signature, line_num)
+    if is_pub:
+        item.visibility = "pub"
+
+    item
+
+
+# Parse a static function definition
+fn parse_static_function_brief(line: text, line_num: i32) -> BriefItem:
+    val is_pub = line.starts_with("pub ")
+    var rest = if is_pub: line.substring(4, line.len()) else: line
+
+    # Remove "static fn " prefix
+    rest = rest.substring(10, rest.len())
+
+    val paren_idx = find_char(rest, '(')
+    val name = if paren_idx >= 0: rest.substring(0, paren_idx).trim() else: rest.split(":")[0].trim()
+
+    val signature = extract_signature(rest)
+
+    var item = BriefItem.new("static fn", name, signature, line_num)
+    if is_pub:
+        item.visibility = "pub"
+
+    item
+
+
+# Parse a method definition
+fn parse_method_brief(line: text, line_num: i32, is_mutable: bool) -> BriefItem:
+    val is_pub = line.starts_with("pub ")
+    var rest = if is_pub: line.substring(4, line.len()) else: line
+
+    # Remove "me " prefix
+    rest = rest.substring(3, rest.len())
+
+    val paren_idx = find_char(rest, '(')
+    val name = if paren_idx >= 0: rest.substring(0, paren_idx).trim() else: rest.split(":")[0].trim()
+
+    val signature = extract_signature(rest)
+
+    var item = BriefItem.new("me", name, signature, line_num)
+    if is_pub:
+        item.visibility = "pub"
+
+    item
+
+
+# Parse a class definition
+fn parse_class_brief(line: text, line_num: i32) -> BriefItem:
+    val is_pub = line.starts_with("pub ")
+    var rest = if is_pub: line.substring(4, line.len()) else: line
+
+    # Remove "class " prefix
+    rest = rest.substring(6, rest.len())
+
+    # Extract name (up to ':' or end)
+    val colon_idx = find_char(rest, ':')
+    val name = if colon_idx >= 0: rest.substring(0, colon_idx).trim() else: rest.trim()
+
+    var item = BriefItem.new("class", name, "", line_num)
+    if is_pub:
+        item.visibility = "pub"
+
+    item
+
+
+# Parse a struct definition
+fn parse_struct_brief(line: text, line_num: i32) -> BriefItem:
+    val is_pub = line.starts_with("pub ")
+    var rest = if is_pub: line.substring(4, line.len()) else: line
+
+    # Remove "struct " prefix
+    rest = rest.substring(7, rest.len())
+
+    val colon_idx = find_char(rest, ':')
+    val name = if colon_idx >= 0: rest.substring(0, colon_idx).trim() else: rest.trim()
+
+    var item = BriefItem.new("struct", name, "", line_num)
+    if is_pub:
+        item.visibility = "pub"
+
+    item
+
+
+# Parse an enum definition
+fn parse_enum_brief(line: text, line_num: i32) -> BriefItem:
+    val is_pub = line.starts_with("pub ")
+    var rest = if is_pub: line.substring(4, line.len()) else: line
+
+    # Remove "enum " prefix
+    rest = rest.substring(5, rest.len())
+
+    val colon_idx = find_char(rest, ':')
+    val name = if colon_idx >= 0: rest.substring(0, colon_idx).trim() else: rest.trim()
+
+    var item = BriefItem.new("enum", name, "", line_num)
+    if is_pub:
+        item.visibility = "pub"
+
+    item
+
+
+# Parse a trait definition
+fn parse_trait_brief(line: text, line_num: i32) -> BriefItem:
+    val is_pub = line.starts_with("pub ")
+    var rest = if is_pub: line.substring(4, line.len()) else: line
+
+    # Remove "trait " prefix
+    rest = rest.substring(6, rest.len())
+
+    val colon_idx = find_char(rest, ':')
+    val name = if colon_idx >= 0: rest.substring(0, colon_idx).trim() else: rest.trim()
+
+    var item = BriefItem.new("trait", name, "", line_num)
+    if is_pub:
+        item.visibility = "pub"
+
+    item
+
+
+# Parse a const definition
+fn parse_const_brief(line: text, line_num: i32) -> BriefItem:
+    val is_pub = line.starts_with("pub ")
+    var rest = if is_pub: line.substring(4, line.len()) else: line
+
+    # Remove "const " prefix
+    rest = rest.substring(6, rest.len())
+
+    # Extract name (up to ':' or '=')
+    val colon_idx = find_char(rest, ':')
+    val eq_idx = find_char(rest, '=')
+
+    # Determine name_end based on colon and eq positions
+    var name_end = rest.len()
+    if colon_idx >= 0 and (eq_idx < 0 or colon_idx < eq_idx):
+        name_end = colon_idx
+    elif eq_idx >= 0:
+        name_end = eq_idx
+
+    val name = rest.substring(0, name_end).trim()
+
+    # Extract type if present
+    val type_end = if eq_idx >= 0: eq_idx else: rest.len()
+    val signature = if colon_idx >= 0 and colon_idx < name_end: ": " + rest.substring(colon_idx + 1, type_end).trim() else: ""
+
+    var item = BriefItem.new("const", name, signature, line_num)
+    if is_pub:
+        item.visibility = "pub"
+
+    item
+
+
+# Parse an impl block
+fn parse_impl_brief(line: text, line_num: i32) -> BriefItem:
+    var rest = line.substring(5, line.len())  # Remove "impl "
+
+    val colon_idx = find_char(rest, ':')
+    val name = if colon_idx >= 0: rest.substring(0, colon_idx).trim() else: rest.trim()
+
+    BriefItem.new("impl", name, "", line_num)
+
+
+# Extract function signature (parameters and return type)
+fn extract_signature(rest: text) -> text:
+    val paren_start = find_char(rest, '(')
+    if paren_start < 0:
+        return ""
+
+    # Find matching closing paren
+    var depth = 0
+    var paren_end = -1
+    var i = paren_start
+    while i < rest.len():
+        val c = rest.char_at(i)
+        if c == '(':
+            depth = depth + 1
+        elif c == ')':
+            depth = depth - 1
+            if depth == 0:
+                paren_end = i
+                break
+        i = i + 1
+
+    if paren_end < 0:
+        return ""
+
+    # Get params
+    val params = rest.substring(paren_start, paren_end + 1)
+
+    # Check for return type
+    val after_paren = rest.substring(paren_end + 1, rest.len()).trim()
+    if after_paren.starts_with("->"):
+        # Extract return type (up to ':' which starts the body)
+        val arrow_rest = after_paren.substring(2, after_paren.len()).trim()
+        val body_start = find_char(arrow_rest, ':')
+        val return_type = if body_start >= 0: arrow_rest.substring(0, body_start).trim() else: arrow_rest
+
+        return params + " -> " + return_type
+    else:
+        return params
+
+
+# Find the first occurrence of a character in a string
+fn find_char(s: text, c: char) -> i32:
+    var i = 0
+    while i < s.len():
+        if s.char_at(i) == c:
+            return i as i32
+        i = i + 1
+    -1
+
+
+# Escape a string for JSON output
+fn escape_json_string(s: text) -> text:
+    # Simple escape: just replace backslash and quote
+    var result = s
+    # For now, just return as-is (basic escaping)
+    # TODO: Full JSON escaping
+    result
+
+
+# Extract brief view from a file
+fn extract_brief_from_file(file_path: text) -> Result<BriefView, text>:
+    if not rt_file_exists(file_path):
+        return Err("File not found: {file_path}")
+
+    val source = rt_file_read_text(file_path)
+    var view = extract_brief(source)
+    view.file_path = file_path
+
+    Ok(view)
+
+
+# CLI entry point for brief view command
+fn run_brief(args: List<text>) -> i32:
+    # Parse arguments
+    if args.is_empty():
+        print_brief_help()
+        return 1
+
+    val first = args[0]
+
+    # Check for help flag
+    if first == "-h" or first == "--help":
+        print_brief_help()
+        return 0
+
+    # Get file path (first non-flag argument)
+    var file_path = ""
+    var expand_name = ""
+    var json_output = false
+
+    for arg in args:
+        if arg == "--json":
+            json_output = true
+        elif arg.starts_with("--expand="):
+            expand_name = arg.substring(9, arg.len())
+        elif not arg.starts_with("-"):
+            file_path = arg
+
+    if not file_path.?:
+        eprint "error: file path required"
+        print_brief_help()
+        return 1
+
+    # Extract brief view
+    match extract_brief_from_file(file_path):
+        Err(e):
+            eprint "error: {e}"
+            return 1
+        Ok(view):
+            # Apply expand filter if specified
+            var output_view = if expand_name.?: view.expand(expand_name) else: view
+
+            # Output in requested format
+            if json_output:
+                print output_view.to_json()
+            else:
+                print output_view.to_tree()
+
+            return 0
+
+
+# Print help for brief command
+fn print_brief_help():
+    print "Simple Brief View - LLM-Friendly Code Overview"
+    print ""
+    print "Usage:"
+    print "  simple brief <file.spl>              Show brief view of file"
+    print "  simple brief <file.spl> --json       Output as JSON"
+    print "  simple brief <file.spl> --expand=X   Expand symbol X"
+    print ""
+    print "Options:"
+    print "  --json           Output in JSON format"
+    print "  --expand=<name>  Expand a specific symbol"
+    print "  -h, --help       Show this help"
+    print ""
+    print "Example output:"
+    print "  src/app/service.spl"
+    print "  ├─ class UserService @io"
+    print "  │  ├─ fn get_user(id: i64) -> Result<User, Error>"
+    print "  │  └─ fn update_user(...) -> Result<(), Error>"
+    print "  └─ fn validate_request(req: Request) -> bool"

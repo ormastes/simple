@@ -60,6 +60,7 @@ pub mod diagram;
 pub mod memory;
 pub mod cli;
 pub mod sdn;
+pub mod coverage;
 
 // Import parent interpreter types
 type Enums = HashMap<String, EnumDef>;
@@ -637,6 +638,17 @@ pub(crate) fn call_extern_function(
         "rt_sdn_get" => sdn::rt_sdn_get(&evaluated),
         "rt_sdn_set" => sdn::rt_sdn_set(&evaluated),
         "rt_sdn_fmt" => sdn::rt_sdn_fmt(&evaluated),
+
+        // ====================================================================
+        // Coverage Operations (7 functions)
+        // ====================================================================
+        "coverage_scan" => coverage::coverage_scan(&evaluated),
+        "coverage_class" => coverage::coverage_class(&evaluated),
+        "coverage_func" => coverage::coverage_func(&evaluated),
+        "coverage_report" => coverage::coverage_report(&evaluated),
+        "coverage_generate" => coverage::coverage_generate(&evaluated),
+        "coverage_check" => coverage::coverage_check(&evaluated),
+        "coverage_summary" => coverage::coverage_summary(&evaluated),
 
         // Unknown extern function
         _ => Err(common::unknown_function(name)),

@@ -106,3 +106,22 @@ pub fn handle_run(args: &[String], gc_log: bool, gc_off: bool) -> i32 {
     let path = PathBuf::from(&args[1]);
     crate::cli::basic::run_file(&path, gc_log, gc_off)
 }
+
+/// Handle 'brief' command - LLM-friendly code overview
+pub fn handle_brief(args: &[String], gc_log: bool, gc_off: bool) -> i32 {
+    // Skip the command name ("brief") and pass remaining args
+    let brief_args: Vec<String> = args[1..].iter()
+        .map(|a| format!("\"{}\"", a.replace("\"", "\\\"")))
+        .collect();
+
+    let code = format!(
+        r#"use tooling.brief_view.{{run_brief}}
+
+fn main() -> i64:
+    val args = [{}]
+    run_brief(args) as i64"#,
+        brief_args.join(", ")
+    );
+
+    crate::cli::basic::run_code(&code, gc_log, gc_off)
+}
