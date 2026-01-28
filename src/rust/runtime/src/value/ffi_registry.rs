@@ -96,7 +96,10 @@ impl FfiObjectStorage {
     /// Get a reference to an object by handle.
     ///
     /// Returns None if the handle doesn't exist or the type doesn't match.
-    pub fn get<T: Any + Send + Sync>(&self, handle: u32) -> Option<std::sync::MutexGuard<'_, HashMap<u32, Box<dyn Any + Send + Sync>>>> {
+    pub fn get<T: Any + Send + Sync>(
+        &self,
+        handle: u32,
+    ) -> Option<std::sync::MutexGuard<'_, HashMap<u32, Box<dyn Any + Send + Sync>>>> {
         let objects = self.objects.lock().unwrap();
         if objects.contains_key(&handle) {
             Some(objects)
@@ -110,19 +113,13 @@ impl FfiObjectStorage {
     /// This avoids lifetime issues by executing the closure while holding the lock.
     pub fn with<T: Any + Send + Sync, R, F: FnOnce(&T) -> R>(&self, handle: u32, f: F) -> Option<R> {
         let objects = self.objects.lock().unwrap();
-        objects
-            .get(&handle)
-            .and_then(|obj| obj.downcast_ref::<T>())
-            .map(f)
+        objects.get(&handle).and_then(|obj| obj.downcast_ref::<T>()).map(f)
     }
 
     /// Execute a function with a mutable reference to the object.
     pub fn with_mut<T: Any + Send + Sync, R, F: FnOnce(&mut T) -> R>(&self, handle: u32, f: F) -> Option<R> {
         let mut objects = self.objects.lock().unwrap();
-        objects
-            .get_mut(&handle)
-            .and_then(|obj| obj.downcast_mut::<T>())
-            .map(f)
+        objects.get_mut(&handle).and_then(|obj| obj.downcast_mut::<T>()).map(f)
     }
 
     /// Remove an object by handle.
@@ -312,9 +309,7 @@ impl FfiTypeRegistry {
         let handle = metadata.storage.insert(object);
 
         // Create the FFI object on the heap
-        unsafe {
-            super::ffi_object::rt_ffi_object_new(type_id, handle, metadata.vtable)
-        }
+        unsafe { super::ffi_object::rt_ffi_object_new(type_id, handle, metadata.vtable) }
     }
 
     /// Get a reference to an object's storage.
@@ -462,11 +457,7 @@ impl Default for FfiTypeRegistry {
 /// # Returns
 /// The assigned type ID, or 0 if registration fails.
 #[no_mangle]
-pub extern "C" fn rt_ffi_type_register(
-    name_ptr: *const u8,
-    name_len: u32,
-    vtable: *const FfiVtable,
-) -> u32 {
+pub extern "C" fn rt_ffi_type_register(name_ptr: *const u8, name_len: u32, vtable: *const FfiVtable) -> u32 {
     if name_ptr.is_null() || vtable.is_null() {
         return 0;
     }
@@ -513,9 +504,7 @@ pub extern "C" fn rt_ffi_type_name(type_id: u32) -> RuntimeValue {
         return RuntimeValue::NIL;
     };
 
-    unsafe {
-        super::collections::rt_string_new(name.as_ptr(), name.len() as u64)
-    }
+    unsafe { super::collections::rt_string_new(name.as_ptr(), name.len() as u64) }
 }
 
 /// Create a new FFI object.

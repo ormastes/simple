@@ -5,7 +5,10 @@ use crate::value::{Env, Value};
 use simple_parser::ast::{ClassDef, EnumDef, Expr, FunctionDef, Pattern};
 use std::collections::HashMap;
 
-use super::super::{evaluate_expr, evaluate_method_call_with_self_update, find_and_exec_method_with_self, Enums, ImplMethods, CONST_NAMES};
+use super::super::{
+    evaluate_expr, evaluate_method_call_with_self_update, find_and_exec_method_with_self, Enums, ImplMethods,
+    CONST_NAMES,
+};
 
 use super::collections::bind_sequence_pattern;
 use super::method_dispatch::call_method_on_value;
@@ -111,15 +114,7 @@ pub(crate) fn handle_functional_update(
 
 /// Array methods that mutate and should update the binding
 /// Note: sort, sorted, reverse, reversed, concat all return NEW arrays and are NOT mutating
-const ARRAY_MUTATING_METHODS: &[&str] = &[
-    "append",
-    "push",
-    "pop",
-    "insert",
-    "remove",
-    "extend",
-    "clear",
-];
+const ARRAY_MUTATING_METHODS: &[&str] = &["append", "push", "pop", "insert", "remove", "extend", "clear"];
 
 /// Handle method call on object with self-update tracking
 /// Returns (result, optional_updated_self) where updated_self is the object with mutations
@@ -195,16 +190,28 @@ pub(crate) fn handle_method_call_with_self_update(
         // 3. Call the method on the field (with self-update tracking)
         // 4. Update the parent's field with the mutated value
         // 5. Update the parent in env
-        if let Expr::FieldAccess { receiver: parent_receiver, field } = receiver.as_ref() {
+        if let Expr::FieldAccess {
+            receiver: parent_receiver,
+            field,
+        } = receiver.as_ref()
+        {
             if let Expr::Identifier(parent_name) = parent_receiver.as_ref() {
                 // Get parent object
                 if let Some(parent_val) = env.get(parent_name).cloned() {
-                    if let Value::Object { class: parent_class, mut fields } = parent_val {
+                    if let Value::Object {
+                        class: parent_class,
+                        mut fields,
+                    } = parent_val
+                    {
                         // Get the field value
                         if let Some(field_val) = fields.get(field).cloned() {
                             // For Object field values, use find_and_exec_method_with_self
                             // to properly execute the method and get the updated self
-                            if let Value::Object { class: field_class, fields: field_fields } = &field_val {
+                            if let Value::Object {
+                                class: field_class,
+                                fields: field_fields,
+                            } = &field_val
+                            {
                                 if let Some((result, updated_field)) = find_and_exec_method_with_self(
                                     method,
                                     args,

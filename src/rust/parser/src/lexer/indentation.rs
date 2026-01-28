@@ -148,7 +148,8 @@ impl<'a> super::Lexer<'a> {
                             if self.peek() == Some('\n') || self.peek().is_none() {
                                 // Multi-line doc block: ///\n...\n///
                                 // Use pending_token to allow Dedent handling first
-                                pending_token = Some(self.read_doc_block_triple_slash(start_pos, start_line, start_col));
+                                pending_token =
+                                    Some(self.read_doc_block_triple_slash(start_pos, start_line, start_col));
                                 break;
                             }
 

@@ -69,7 +69,8 @@ pub fn is_test_file(path: &Path) -> bool {
 pub fn is_skip_test_file(path: &Path) -> bool {
     if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
         // Match patterns like *_spec.spl.skip, *_test.spl.skip
-        let is_skip_ext = name.ends_with(".spl.skip") || name.ends_with(".simple.skip") || name.ends_with(".sscript.skip");
+        let is_skip_ext =
+            name.ends_with(".spl.skip") || name.ends_with(".simple.skip") || name.ends_with(".sscript.skip");
         let is_test = name.contains("_spec.") || name.contains("_test.");
         is_skip_ext && is_test
     } else {

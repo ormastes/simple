@@ -620,7 +620,10 @@ fn analyze_expr(expr: &Expr, reasons: &mut Vec<FallbackReason>) {
             analyze_expr(default, reasons);
             add_reason(reasons, FallbackReason::TryOperator);
         }
-        Expr::UnwrapElse { expr: inner, fallback_fn } => {
+        Expr::UnwrapElse {
+            expr: inner,
+            fallback_fn,
+        } => {
             analyze_expr(inner, reasons);
             analyze_expr(fallback_fn, reasons);
             add_reason(reasons, FallbackReason::TryOperator);
@@ -631,12 +634,18 @@ fn analyze_expr(expr: &Expr, reasons: &mut Vec<FallbackReason>) {
         }
 
         // Safe cast operators - require type checking at runtime
-        Expr::CastOr { expr: inner, default, .. } => {
+        Expr::CastOr {
+            expr: inner, default, ..
+        } => {
             analyze_expr(inner, reasons);
             analyze_expr(default, reasons);
             add_reason(reasons, FallbackReason::TryOperator);
         }
-        Expr::CastElse { expr: inner, fallback_fn, .. } => {
+        Expr::CastElse {
+            expr: inner,
+            fallback_fn,
+            ..
+        } => {
             analyze_expr(inner, reasons);
             analyze_expr(fallback_fn, reasons);
             add_reason(reasons, FallbackReason::TryOperator);

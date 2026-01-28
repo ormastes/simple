@@ -290,22 +290,8 @@ pub unsafe extern "C" fn rt_set_current_dir(path_ptr: *const u8, path_len: u64) 
 
 /// Protected paths that should never be removed
 const PROTECTED_PATHS: &[&str] = &[
-    "/",
-    "/home",
-    "/usr",
-    "/bin",
-    "/sbin",
-    "/etc",
-    "/var",
-    "/tmp",
-    "/opt",
-    "/lib",
-    "/lib64",
-    "/boot",
-    "/dev",
-    "/proc",
-    "/sys",
-    "/root",
+    "/", "/home", "/usr", "/bin", "/sbin", "/etc", "/var", "/tmp", "/opt", "/lib", "/lib64", "/boot", "/dev", "/proc",
+    "/sys", "/root",
 ];
 
 /// Check if a path is protected and should not be removed

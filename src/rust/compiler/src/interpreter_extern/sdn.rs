@@ -94,9 +94,7 @@ pub fn rt_sdn_get(args: &[Value]) -> Result<Value, CompileError> {
 /// Set value at path in SDN file
 pub fn rt_sdn_set(args: &[Value]) -> Result<Value, CompileError> {
     let (path, key, value) = match (args.first(), args.get(1), args.get(2)) {
-        (Some(Value::Str(p)), Some(Value::Str(k)), Some(Value::Str(v))) => {
-            (p.clone(), k.clone(), v.clone())
-        }
+        (Some(Value::Str(p)), Some(Value::Str(k)), Some(Value::Str(v))) => (p.clone(), k.clone(), v.clone()),
         _ => return Ok(Value::Int(1)),
     };
 
@@ -212,9 +210,7 @@ fn json_to_sdn(json: &serde_json::Value) -> SdnValue {
             }
         }
         serde_json::Value::String(s) => SdnValue::String(s.clone()),
-        serde_json::Value::Array(arr) => {
-            SdnValue::Array(arr.iter().map(json_to_sdn).collect())
-        }
+        serde_json::Value::Array(arr) => SdnValue::Array(arr.iter().map(json_to_sdn).collect()),
         serde_json::Value::Object(obj) => {
             let mut dict = indexmap::IndexMap::new();
             for (k, v) in obj {

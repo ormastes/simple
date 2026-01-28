@@ -634,9 +634,27 @@ pub extern "C" fn rt_vec_fma(a: RuntimeValue, b: RuntimeValue, c: RuntimeValue) 
         let vc = array_get_element(arr_c, i);
 
         // Convert to float for FMA operation
-        let fa = if va.is_float() { va.as_float() } else if va.is_int() { va.as_int() as f64 } else { 0.0 };
-        let fb = if vb.is_float() { vb.as_float() } else if vb.is_int() { vb.as_int() as f64 } else { 0.0 };
-        let fc = if vc.is_float() { vc.as_float() } else if vc.is_int() { vc.as_int() as f64 } else { 0.0 };
+        let fa = if va.is_float() {
+            va.as_float()
+        } else if va.is_int() {
+            va.as_int() as f64
+        } else {
+            0.0
+        };
+        let fb = if vb.is_float() {
+            vb.as_float()
+        } else if vb.is_int() {
+            vb.as_int() as f64
+        } else {
+            0.0
+        };
+        let fc = if vc.is_float() {
+            vc.as_float()
+        } else if vc.is_int() {
+            vc.as_int() as f64
+        } else {
+            0.0
+        };
 
         RuntimeValue::from_float(fa.mul_add(fb, fc))
     })
@@ -752,9 +770,7 @@ pub extern "C" fn rt_vec_masked_store(vec: RuntimeValue, arr: RuntimeValue, offs
 /// New vector with min(a[i], b[i]) for each i
 #[no_mangle]
 pub extern "C" fn rt_vec_min_vec(a: RuntimeValue, b: RuntimeValue) -> RuntimeValue {
-    apply_binary_op(a, b, |va, vb| {
-        if compare_values(va, vb) <= 0 { va } else { vb }
-    })
+    apply_binary_op(a, b, |va, vb| if compare_values(va, vb) <= 0 { va } else { vb })
 }
 
 /// Element-wise maximum of two vectors.
@@ -766,9 +782,7 @@ pub extern "C" fn rt_vec_min_vec(a: RuntimeValue, b: RuntimeValue) -> RuntimeVal
 /// New vector with max(a[i], b[i]) for each i
 #[no_mangle]
 pub extern "C" fn rt_vec_max_vec(a: RuntimeValue, b: RuntimeValue) -> RuntimeValue {
-    apply_binary_op(a, b, |va, vb| {
-        if compare_values(va, vb) >= 0 { va } else { vb }
-    })
+    apply_binary_op(a, b, |va, vb| if compare_values(va, vb) >= 0 { va } else { vb })
 }
 
 /// Clamp elements to range [lo, hi].
@@ -804,7 +818,11 @@ pub extern "C" fn rt_vec_clamp(vec: RuntimeValue, lo: RuntimeValue, hi: RuntimeV
 
         // clamp(v, lo, hi) = max(lo, min(v, hi))
         let clamped_hi = if compare_values(v, hi_v) <= 0 { v } else { hi_v };
-        if compare_values(clamped_hi, lo_v) >= 0 { clamped_hi } else { lo_v }
+        if compare_values(clamped_hi, lo_v) >= 0 {
+            clamped_hi
+        } else {
+            lo_v
+        }
     })
 }
 

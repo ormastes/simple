@@ -55,6 +55,20 @@ pub enum MirInst {
     /// Store to memory
     Store { addr: VReg, value: VReg, ty: TypeId },
 
+    /// Load from global variable
+    GlobalLoad {
+        dest: VReg,
+        global_name: String,
+        ty: TypeId,
+    },
+
+    /// Store to global variable
+    GlobalStore {
+        global_name: String,
+        value: VReg,
+        ty: TypeId,
+    },
+
     /// Get address of local variable
     LocalAddr { dest: VReg, local_index: usize },
 

@@ -37,3 +37,156 @@ class Logger:
 
     fn error(message: text):
         self.log(1, message)
+
+# ============================================================================
+# Type Inference Configuration
+# ============================================================================
+
+"""Default element type identifiers.
+
+These match the TypeId constants in the Rust compiler:
+- VOID = 0
+- I32 = 4
+- I64 = 5
+- F64 = 11
+- STRING = 12
+- ANY = 14
+"""
+enum TypeDefault:
+    Void        # TypeId(0)
+    Bool        # TypeId(1)
+    I8          # TypeId(2)
+    I16         # TypeId(3)
+    I32         # TypeId(4)
+    I64         # TypeId(5)
+    U8          # TypeId(6)
+    U16         # TypeId(7)
+    U32         # TypeId(8)
+    U64         # TypeId(9)
+    F32         # TypeId(10)
+    F64         # TypeId(11)
+    String      # TypeId(12)
+    Nil         # TypeId(13)
+    Any         # TypeId(14)
+
+impl TypeDefault:
+    fn to_text() -> text:
+        match self:
+            case Void: "void"
+            case Bool: "bool"
+            case I8: "i8"
+            case I16: "i16"
+            case I32: "i32"
+            case I64: "i64"
+            case U8: "u8"
+            case U16: "u16"
+            case U32: "u32"
+            case U64: "u64"
+            case F32: "f32"
+            case F64: "f64"
+            case String: "text"
+            case Nil: "nil"
+            case Any: "any"
+            case _: "unknown"
+
+    static fn from_text(s: text) -> TypeDefault?:
+        match s.lower():
+            case "void" | "unit" | "()": Some(TypeDefault.Void)
+            case "bool": Some(TypeDefault.Bool)
+            case "i8": Some(TypeDefault.I8)
+            case "i16": Some(TypeDefault.I16)
+            case "i32" | "int": Some(TypeDefault.I32)
+            case "i64" | "long": Some(TypeDefault.I64)
+            case "u8" | "byte": Some(TypeDefault.U8)
+            case "u16": Some(TypeDefault.U16)
+            case "u32" | "uint": Some(TypeDefault.U32)
+            case "u64" | "ulong": Some(TypeDefault.U64)
+            case "f32" | "float": Some(TypeDefault.F32)
+            case "f64" | "double": Some(TypeDefault.F64)
+            case "text" | "string" | "str": Some(TypeDefault.String)
+            case "nil" | "null" | "none": Some(TypeDefault.Nil)
+            case "any" | "dynamic": Some(TypeDefault.Any)
+            case _: nil
+
+struct TypeInferenceConfig:
+    """Configuration for type inference of empty collections.
+
+    Configurable at:
+    1. Project level via simple.sdn type_inference section
+    2. Module level via type_defaults.sdn file
+    """
+    empty_array_default: TypeDefault
+    empty_vector_default: TypeDefault
+    empty_dict_key_default: TypeDefault
+    empty_dict_value_default: TypeDefault
+    strict_empty_collections: bool
+
+impl TypeInferenceConfig:
+    static fn default() -> TypeInferenceConfig:
+        """Default configuration: i32 for arrays, f64 for vectors."""
+        TypeInferenceConfig(
+            empty_array_default: TypeDefault.I32,
+            empty_vector_default: TypeDefault.F64,
+            empty_dict_key_default: TypeDefault.String,
+            empty_dict_value_default: TypeDefault.Any,
+            strict_empty_collections: false
+        )
+
+    static fn strict() -> TypeInferenceConfig:
+        """Strict mode: require explicit type annotations for empty collections."""
+        TypeInferenceConfig(
+            empty_array_default: TypeDefault.I32,
+            empty_vector_default: TypeDefault.F64,
+            empty_dict_key_default: TypeDefault.String,
+            empty_dict_value_default: TypeDefault.Any,
+            strict_empty_collections: true
+        )
+
+    static fn from_sdn(content: text) -> Result<TypeInferenceConfig, text>:
+        """Parse type inference config from SDN content."""
+        var config = TypeInferenceConfig.default()
+
+        for line in content.split("\n"):
+            val trimmed = line.trim()
+            if trimmed.is_empty() or trimmed.starts_with("#") or trimmed.starts_with("|"):
+                continue
+            if trimmed.starts_with("type_inference"):
+                continue
+
+            # Parse "key, value" rows
+            val parts = trimmed.split(",")
+            if parts.len() >= 2:
+                val key = parts[0].trim()
+                val value = parts[1].trim()
+
+                match key:
+                    case "empty_array" | "empty_array_default":
+                        val ty = TypeDefault.from_text(value)
+                        if ty.?:
+                            config.empty_array_default = ty.unwrap()
+                    case "empty_vector" | "empty_vector_default":
+                        val ty = TypeDefault.from_text(value)
+                        if ty.?:
+                            config.empty_vector_default = ty.unwrap()
+                    case "empty_dict_key" | "empty_dict_key_default":
+                        val ty = TypeDefault.from_text(value)
+                        if ty.?:
+                            config.empty_dict_key_default = ty.unwrap()
+                    case "empty_dict_value" | "empty_dict_value_default":
+                        val ty = TypeDefault.from_text(value)
+                        if ty.?:
+                            config.empty_dict_value_default = ty.unwrap()
+                    case "strict" | "strict_empty_collections":
+                        config.strict_empty_collections = value == "true"
+                    case _:
+                        pass  # Ignore unknown keys
+
+        Ok(config)
+
+    fn merge(module_config: TypeInferenceConfig) -> TypeInferenceConfig:
+        """Merge module-level config over this config."""
+        # Module config takes full precedence
+        module_config
+
+export Config, Logger
+export TypeDefault, TypeInferenceConfig

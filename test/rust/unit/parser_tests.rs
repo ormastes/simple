@@ -708,7 +708,11 @@ fn test_parse_attribute_before_extern_fn() {
 extern fn some_ffi_function() -> i32
 "#;
     let result = parse(source);
-    assert!(result.is_ok(), "Should parse attribute before extern fn: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "Should parse attribute before extern fn: {:?}",
+        result.err()
+    );
 }
 
 #[test]

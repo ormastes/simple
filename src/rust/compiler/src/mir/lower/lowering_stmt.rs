@@ -46,20 +46,89 @@ impl<'a> MirLowerer<'a> {
 
             HirStmt::Assign { target, value } => {
                 let val_reg = self.lower_expr(value)?;
-                let addr_reg = self.lower_lvalue(target)?;
                 let ty = value.ty;
 
                 // Emit unit bound check if assigning to a unit type with constraints
                 self.emit_unit_bound_check(ty, val_reg)?;
 
-                self.with_func(|func, current_block| {
-                    let block = func.block_mut(current_block).unwrap();
-                    block.instructions.push(MirInst::Store {
-                        addr: addr_reg,
-                        value: val_reg,
-                        ty,
-                    });
-                })?;
+                // Handle different assignment targets
+                match &target.kind {
+                    // Field assignment: obj.field = value -> FieldSet
+                    HirExprKind::FieldAccess { receiver, field_index } => {
+                        let receiver_reg = self.lower_expr(receiver)?;
+                        let field_index = *field_index;
+                        let byte_offset = (field_index as u32) * 8;
+
+                        self.with_func(|func, current_block| {
+                            let block = func.block_mut(current_block).unwrap();
+                            block.instructions.push(MirInst::FieldSet {
+                                object: receiver_reg,
+                                byte_offset,
+                                field_type: ty,
+                                value: val_reg,
+                            });
+                        })?;
+                    }
+
+                    // Index assignment: arr[i] = value -> rt_array_set call
+                    HirExprKind::Index { receiver, index } => {
+                        let receiver_reg = self.lower_expr(receiver)?;
+                        let index_reg = self.lower_expr(index)?;
+
+                        // Use rt_array_set for array/dict index assignment
+                        let target = crate::mir::CallTarget::from_name("rt_array_set");
+                        self.with_func(|func, current_block| {
+                            let block = func.block_mut(current_block).unwrap();
+                            block.instructions.push(MirInst::Call {
+                                dest: None,
+                                target,
+                                args: vec![receiver_reg, index_reg, val_reg],
+                            });
+                        })?;
+                    }
+
+                    // Property setter: obj.field = value (when field access became MethodCall)
+                    // This happens when type information is lost or for dynamic property access
+                    HirExprKind::MethodCall { receiver, method, args, .. } if args.is_empty() => {
+                        let receiver_reg = self.lower_expr(receiver)?;
+
+                        // Create a string constant for the field name
+                        let field_name_reg = self.with_func(|func, current_block| {
+                            let dest = func.new_vreg();
+                            let block = func.block_mut(current_block).unwrap();
+                            block.instructions.push(MirInst::ConstString {
+                                dest,
+                                value: method.clone(),
+                            });
+                            dest
+                        })?;
+
+                        // Use rt_field_set for dynamic field assignment
+                        let target = crate::mir::CallTarget::from_name("rt_field_set");
+                        self.with_func(|func, current_block| {
+                            let block = func.block_mut(current_block).unwrap();
+                            block.instructions.push(MirInst::Call {
+                                dest: None,
+                                target,
+                                args: vec![receiver_reg, field_name_reg, val_reg],
+                            });
+                        })?;
+                    }
+
+                    // Local variable assignment: use address + store pattern
+                    _ => {
+                        let addr_reg = self.lower_lvalue(target)?;
+                        self.with_func(|func, current_block| {
+                            let block = func.block_mut(current_block).unwrap();
+                            block.instructions.push(MirInst::Store {
+                                addr: addr_reg,
+                                value: val_reg,
+                                ty,
+                            });
+                        })?;
+                    }
+                }
+
                 Ok(())
             }
 
@@ -399,29 +468,31 @@ impl<'a> MirLowerer<'a> {
                 // Lower the iterable expression
                 let collection_reg = self.lower_expr(iterable)?;
 
-                // Find the local index for the loop variable (pattern)
-                // It should be in params or locals
+                // Create a local for the loop variable if it doesn't exist
                 let pattern_local_index = self.with_func(|func, _| {
                     let num_params = func.params.len();
                     // First check params
                     for (i, param) in func.params.iter().enumerate() {
                         if param.name == *pattern {
-                            return Some(i);
+                            return i;
                         }
                     }
                     // Then check locals
                     for (i, local) in func.locals.iter().enumerate() {
                         if local.name == *pattern {
-                            return Some(num_params + i);
+                            return num_params + i;
                         }
                     }
-                    None
+                    // Not found - create a new local for the loop variable
+                    let index = num_params + func.locals.len();
+                    func.locals.push(crate::mir::function::MirLocal {
+                        name: pattern.clone(),
+                        ty: crate::hir::TypeId::ANY, // Type will be inferred from collection element type
+                        kind: crate::mir::effects::LocalKind::Local,
+                        is_ghost: false,
+                    });
+                    index
                 })?;
-
-                let pattern_local_index = pattern_local_index
-                    .ok_or_else(|| super::lowering_core::MirLowerError::Unsupported(
-                        format!("for loop variable '{}' not found in locals", pattern)
-                    ))?;
 
                 // Get collection length via rt_array_len call
                 let len_reg = self.with_func(|func, current_block| {
@@ -690,7 +761,7 @@ impl<'a> MirLowerer<'a> {
         // Strategy 2: Check if the type is Result and look up variant info
         if let Some(registry) = self.type_registry {
             if let Some(hir_type) = registry.get(expr.ty) {
-                if let HirType::Enum { name, variants: _ } = hir_type {
+                if let HirType::Enum { name, variants: _, .. } = hir_type {
                     // If the type is named "Result", check the expression pattern
                     if name == "Result" {
                         // For StructInit, check if the type name contains "Err"

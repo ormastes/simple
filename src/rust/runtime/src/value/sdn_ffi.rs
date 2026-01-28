@@ -113,11 +113,7 @@ pub extern "C" fn rt_sdn_get(path: RuntimeValue, key: RuntimeValue) -> RuntimeVa
 /// Set value at path in SDN file
 /// Returns 0 on success, 1 on error
 #[no_mangle]
-pub extern "C" fn rt_sdn_set(
-    path: RuntimeValue,
-    key: RuntimeValue,
-    value: RuntimeValue,
-) -> i64 {
+pub extern "C" fn rt_sdn_set(path: RuntimeValue, key: RuntimeValue, value: RuntimeValue) -> i64 {
     let path_str = match runtime_value_to_string(path) {
         Some(s) => s,
         None => return 1,
@@ -260,9 +256,7 @@ fn json_to_sdn(json: &serde_json::Value) -> SdnValue {
             }
         }
         serde_json::Value::String(s) => SdnValue::String(s.clone()),
-        serde_json::Value::Array(arr) => {
-            SdnValue::Array(arr.iter().map(json_to_sdn).collect())
-        }
+        serde_json::Value::Array(arr) => SdnValue::Array(arr.iter().map(json_to_sdn).collect()),
         serde_json::Value::Object(obj) => {
             let mut dict = indexmap::IndexMap::new();
             for (k, v) in obj {

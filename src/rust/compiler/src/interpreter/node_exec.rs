@@ -9,7 +9,9 @@ use super::async_support::await_value;
 use super::expr::evaluate_expr;
 use super::interpreter_helpers::{bind_pattern_value, handle_method_call_with_self_update, handle_functional_update};
 use super::interpreter_control::{exec_if, exec_while, exec_loop, exec_for, exec_match, exec_context, exec_with};
-use super::interpreter_state::{mark_as_moved, get_current_file, CONST_NAMES, IMMUTABLE_VARS, IN_IMMUTABLE_FN_METHOD, MODULE_GLOBALS};
+use super::interpreter_state::{
+    mark_as_moved, get_current_file, CONST_NAMES, IMMUTABLE_VARS, IN_IMMUTABLE_FN_METHOD, MODULE_GLOBALS,
+};
 use super::coverage_helpers::record_node_coverage;
 use crate::interpreter_unit::{is_unit_type, validate_unit_type, validate_unit_constraints};
 
@@ -243,17 +245,19 @@ pub(crate) fn exec_node(
             // Register literal function for custom string suffix handling
             // This enables syntax like: "value"_suffix -> LiteralFn.call("value")
             use super::interpreter_state::{LITERAL_FUNCTIONS, LiteralFunctionInfo};
-            LITERAL_FUNCTIONS.with(|cell: &std::cell::RefCell<std::collections::HashMap<String, LiteralFunctionInfo>>| {
-                cell.borrow_mut().insert(
-                    lit_fn.suffix.clone(),
-                    LiteralFunctionInfo {
-                        suffix: lit_fn.suffix.clone(),
-                        return_type: lit_fn.return_type.clone(),
-                        param_name: lit_fn.param_name.clone(),
-                        body: lit_fn.body.clone(),
-                    },
-                );
-            });
+            LITERAL_FUNCTIONS.with(
+                |cell: &std::cell::RefCell<std::collections::HashMap<String, LiteralFunctionInfo>>| {
+                    cell.borrow_mut().insert(
+                        lit_fn.suffix.clone(),
+                        LiteralFunctionInfo {
+                            suffix: lit_fn.suffix.clone(),
+                            return_type: lit_fn.return_type.clone(),
+                            param_name: lit_fn.param_name.clone(),
+                            body: lit_fn.body.clone(),
+                        },
+                    );
+                },
+            );
             Ok(Control::Next)
         }
         _ => Ok(Control::Next),
@@ -482,9 +486,9 @@ fn exec_assignment(
                     ))
                 }
             } else {
-                let ctx = ErrorContext::new()
-                    .with_code(codes::INVALID_ASSIGNMENT)
-                    .with_help("deeply nested field assignment (more than 2 levels) is not supported; use intermediate variables");
+                let ctx = ErrorContext::new().with_code(codes::INVALID_ASSIGNMENT).with_help(
+                    "deeply nested field assignment (more than 2 levels) is not supported; use intermediate variables",
+                );
                 Err(CompileError::semantic_with_context(
                     "invalid assignment: deeply nested field access requires intermediate variables",
                     ctx,
@@ -528,7 +532,10 @@ fn exec_assignment(
                     _ => "unknown[...]".to_string(),
                 };
                 // Debug output
-                eprintln!("DEBUG: cannot modify self in file: {}, assignment: {}", current_file, receiver_info);
+                eprintln!(
+                    "DEBUG: cannot modify self in file: {}, assignment: {}",
+                    current_file, receiver_info
+                );
                 let ctx = ErrorContext::new()
                     .with_code(codes::INVALID_ASSIGNMENT)
                     .with_help("use `me` instead of `fn` to allow self mutation in methods")
@@ -715,11 +722,19 @@ fn exec_assignment(
                 // This is obj.field1.field2[index] = value
                 if let Expr::Identifier(root_name) = inner_obj_expr.as_ref() {
                     if let Some(root_val) = env.get(root_name).cloned() {
-                        if let Value::Object { class: r_class, fields: r_fields } = root_val {
+                        if let Value::Object {
+                            class: r_class,
+                            fields: r_fields,
+                        } = root_val
+                        {
                             let mut root_fields = r_fields;
                             let root_class = r_class;
                             if let Some(inner_obj) = root_fields.get(inner_field_name).cloned() {
-                                if let Value::Object { class: i_class, fields: i_fields } = inner_obj {
+                                if let Value::Object {
+                                    class: i_class,
+                                    fields: i_fields,
+                                } = inner_obj
+                                {
                                     let mut inner_fields = i_fields;
                                     let inner_class = i_class;
                                     if let Some(container) = inner_fields.get(field_name).cloned() {
@@ -761,7 +776,13 @@ fn exec_assignment(
                                             fields: inner_fields,
                                         };
                                         root_fields.insert(inner_field_name.clone(), new_inner_obj);
-                                        env.insert(root_name.clone(), Value::Object { class: root_class, fields: root_fields });
+                                        env.insert(
+                                            root_name.clone(),
+                                            Value::Object {
+                                                class: root_class,
+                                                fields: root_fields,
+                                            },
+                                        );
                                         return Ok(Control::Next);
                                     }
                                 }
@@ -1015,7 +1036,8 @@ fn exec_augmented_assignment(
                                         fields: mut inner_fields,
                                     } => {
                                         // Evaluate the RHS
-                                        let mut rhs_value = evaluate_expr(&assign.value, env, functions, classes, enums, impl_methods)?;
+                                        let mut rhs_value =
+                                            evaluate_expr(&assign.value, env, functions, classes, enums, impl_methods)?;
 
                                         // If suspension, await the value
                                         if is_suspend {
@@ -1037,7 +1059,14 @@ fn exec_augmented_assignment(
                                                 left: Box::new(Expr::Identifier(temp_lhs.clone())),
                                                 right: Box::new(Expr::Identifier(temp_rhs.clone())),
                                             };
-                                            let result = evaluate_expr(&binary_expr, env, functions, classes, enums, impl_methods)?;
+                                            let result = evaluate_expr(
+                                                &binary_expr,
+                                                env,
+                                                functions,
+                                                classes,
+                                                enums,
+                                                impl_methods,
+                                            )?;
                                             env.remove(&temp_lhs);
                                             env.remove(&temp_rhs);
                                             result
@@ -1060,9 +1089,9 @@ fn exec_augmented_assignment(
                                         Ok(Control::Next)
                                     }
                                     _ => {
-                                        let ctx = ErrorContext::new()
-                                            .with_code(codes::INVALID_ASSIGNMENT)
-                                            .with_help("nested augmented field assignment requires inner value to be an object");
+                                        let ctx = ErrorContext::new().with_code(codes::INVALID_ASSIGNMENT).with_help(
+                                            "nested augmented field assignment requires inner value to be an object",
+                                        );
                                         Err(CompileError::semantic_with_context(
                                             format!(
                                                 "invalid assignment: cannot use augmented assignment on field '{}' of non-object field '{}'",
@@ -1111,9 +1140,9 @@ fn exec_augmented_assignment(
                 ))
             }
         } else {
-            let ctx = ErrorContext::new()
-                .with_code(codes::INVALID_ASSIGNMENT)
-                .with_help("augmented field assignment requires an identifier or simple nested field access as the object");
+            let ctx = ErrorContext::new().with_code(codes::INVALID_ASSIGNMENT).with_help(
+                "augmented field assignment requires an identifier or simple nested field access as the object",
+            );
             Err(CompileError::semantic_with_context(
                 "invalid assignment: augmented field assignment requires identifier or simple nested field access as object",
                 ctx,

@@ -128,7 +128,9 @@ pub(crate) fn pattern_matches(
             {
                 // Check if this identifier is a known variant of the enum
                 // Look in both module-level enums and block-scoped enums
-                let enum_def = enums.get(enum_name).cloned()
+                let enum_def = enums
+                    .get(enum_name)
+                    .cloned()
                     .or_else(|| BLOCK_SCOPED_ENUMS.with(|cell| cell.borrow().get(enum_name).cloned()));
                 if let Some(enum_def) = enum_def {
                     let is_variant = enum_def.variants.iter().any(|v| &v.name == name);
@@ -223,7 +225,11 @@ pub(crate) fn pattern_matches(
             payload,
         } => {
             // Special case: Nil matches Option::None
-            if matches!(value, Value::Nil) && (enum_name == "Option" || enum_name == "_") && variant == "None" && payload.is_none() {
+            if matches!(value, Value::Nil)
+                && (enum_name == "Option" || enum_name == "_")
+                && variant == "None"
+                && payload.is_none()
+            {
                 return Ok(true);
             }
             if let Value::Enum {
@@ -409,7 +415,9 @@ pub(crate) fn check_enum_exhaustiveness(
     enums: &Enums,
 ) -> Option<Vec<String>> {
     // Get the enum definition from module-level or block-scoped enums
-    let enum_def = enums.get(enum_name).cloned()
+    let enum_def = enums
+        .get(enum_name)
+        .cloned()
         .or_else(|| BLOCK_SCOPED_ENUMS.with(|cell| cell.borrow().get(enum_name).cloned()))?;
 
     // Get all variant names from the enum definition

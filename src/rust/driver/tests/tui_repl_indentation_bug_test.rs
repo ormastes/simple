@@ -23,10 +23,8 @@ impl PtySession {
             .map(PathBuf::from)
             .unwrap_or_else(|_| {
                 // Fallback: look in target/debug
-                let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
-                    .unwrap_or_else(|_| ".".to_string());
-                PathBuf::from(manifest_dir)
-                    .join("../../../target/debug/simple_old")
+                let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
+                PathBuf::from(manifest_dir).join("../../../target/debug/simple_old")
             });
         let pty_system = native_pty_system();
         let pair = pty_system.openpty(PtySize {

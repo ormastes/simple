@@ -909,7 +909,10 @@ pub(super) fn eval_bdd_builtin(
             };
 
             let exists = BDD_RESOURCE_VALUES.with(|cell| {
-                cell.borrow().get(&name_str).map(|(_, cached)| cached.is_some()).unwrap_or(false)
+                cell.borrow()
+                    .get(&name_str)
+                    .map(|(_, cached)| cached.is_some())
+                    .unwrap_or(false)
             });
 
             Ok(Some(Value::Bool(exists)))
@@ -956,7 +959,14 @@ pub(super) fn eval_bdd_builtin(
                             for (k, v) in fields {
                                 local_env.insert(k.clone(), v.clone());
                             }
-                            let _ = crate::interpreter::exec_block(&method.body, &mut local_env, functions, classes, enums, impl_methods);
+                            let _ = crate::interpreter::exec_block(
+                                &method.body,
+                                &mut local_env,
+                                functions,
+                                classes,
+                                enums,
+                                impl_methods,
+                            );
                         }
                     }
                 }
@@ -966,9 +976,8 @@ pub(super) fn eval_bdd_builtin(
         }
         "cleanup_all_resources" => {
             // Cleanup all resources (called at end of test)
-            let resources: Vec<(String, Option<Value>)> = BDD_RESOURCE_VALUES.with(|cell| {
-                cell.borrow().iter().map(|(k, (_, v))| (k.clone(), v.clone())).collect()
-            });
+            let resources: Vec<(String, Option<Value>)> = BDD_RESOURCE_VALUES
+                .with(|cell| cell.borrow().iter().map(|(k, (_, v))| (k.clone(), v.clone())).collect());
 
             // Clean up in reverse order (LIFO)
             for (name, cached) in resources.into_iter().rev() {
@@ -981,7 +990,14 @@ pub(super) fn eval_bdd_builtin(
                                 for (k, v) in fields {
                                     local_env.insert(k.clone(), v.clone());
                                 }
-                                let _ = crate::interpreter::exec_block(&method.body, &mut local_env, functions, classes, enums, impl_methods);
+                                let _ = crate::interpreter::exec_block(
+                                    &method.body,
+                                    &mut local_env,
+                                    functions,
+                                    classes,
+                                    enums,
+                                    impl_methods,
+                                );
                             }
                         }
                     }

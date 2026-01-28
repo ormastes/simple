@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use super::*;
 
 #[test]
@@ -46,6 +48,12 @@ fn test_function_def() {
         contract: None,
         is_abstract: false,
         bounds_block: None,
+        is_sync: false,
+        is_me_method: false,
+        return_constraint: None,
+        is_generic_template: false,
+        specialization_of: None,
+        type_bindings: HashMap::new(),
     };
     assert_eq!(func.name, "add");
     assert_eq!(func.params.len(), 1);
@@ -77,6 +85,12 @@ fn test_generic_function_def() {
         contract: None,
         is_abstract: false,
         bounds_block: None,
+        is_sync: false,
+        is_me_method: false,
+        return_constraint: None,
+        is_generic_template: true,
+        specialization_of: None,
+        type_bindings: HashMap::new(),
     };
     assert_eq!(func.name, "identity");
     assert_eq!(func.generic_params, vec!["T"]);

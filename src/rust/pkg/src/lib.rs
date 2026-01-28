@@ -3,7 +3,7 @@
 //! UV-style fast package management for Simple language.
 //!
 //! ## Features
-//! - `simple.toml` manifest parsing
+//! - `simple.sdn` manifest parsing (preferred, TOML legacy supported)
 //! - `simple.lock` lock file for reproducible builds
 //! - Path and Git dependencies
 //! - Global cache with hard links
@@ -33,3 +33,20 @@ pub use linker::Linker;
 pub use lock::LockFile;
 pub use manifest::Manifest;
 pub use version::{Version, VersionReq};
+
+/// Find manifest file in a directory
+///
+/// Prefers .sdn format, falls back to .toml for backwards compatibility
+pub fn find_manifest(dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    let sdn_path = dir.join("simple.sdn");
+    if sdn_path.exists() {
+        return Some(sdn_path);
+    }
+
+    let toml_path = dir.join("simple.toml");
+    if toml_path.exists() {
+        return Some(toml_path);
+    }
+
+    None
+}

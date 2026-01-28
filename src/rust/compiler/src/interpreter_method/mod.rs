@@ -5,9 +5,8 @@ mod primitives;
 mod special;
 
 use super::{
-    eval_arg, eval_arg_usize, evaluate_expr, exec_function, exec_function_with_captured_env,
-    exec_function_with_values, find_and_exec_method, instantiate_class, try_method_missing, Enums,
-    ImplMethods, BLOCK_SCOPED_ENUMS,
+    eval_arg, eval_arg_usize, evaluate_expr, exec_function, exec_function_with_captured_env, exec_function_with_values,
+    find_and_exec_method, instantiate_class, try_method_missing, Enums, ImplMethods, BLOCK_SCOPED_ENUMS,
 };
 use crate::error::{codes, typo, CompileError, ErrorContext};
 use crate::value::{Env, Value};
@@ -245,7 +244,9 @@ pub(crate) fn evaluate_method_call(
         // EnumName.VariantName(args) -> create enum with payload
         Value::EnumType { enum_name } => {
             // Check both module-level enums and block-scoped enums
-            let enum_def = enums.get(enum_name).cloned()
+            let enum_def = enums
+                .get(enum_name)
+                .cloned()
                 .or_else(|| BLOCK_SCOPED_ENUMS.with(|cell| cell.borrow().get(enum_name).cloned()));
             if let Some(enum_def) = enum_def {
                 // Check if the method name is a variant name
@@ -358,7 +359,11 @@ pub(crate) fn evaluate_method_call(
             // This allows patterns like: self.callback(arg) where callback is a lambda field
             if let Some(field_value) = fields.get(method) {
                 match field_value {
-                    Value::Lambda { params, body, env: captured_env } => {
+                    Value::Lambda {
+                        params,
+                        body,
+                        env: captured_env,
+                    } => {
                         // Call the lambda stored in the field
                         let mut arg_vals = Vec::new();
                         for arg in args {
@@ -372,7 +377,8 @@ pub(crate) fn evaluate_method_call(
                             }
                         }
                         // Evaluate the body expression
-                        let result = evaluate_expr(body.as_ref(), &mut local_env, functions, classes, enums, impl_methods)?;
+                        let result =
+                            evaluate_expr(body.as_ref(), &mut local_env, functions, classes, enums, impl_methods)?;
                         return Ok(result);
                     }
                     Value::Function { def, captured_env, .. } => {
@@ -477,7 +483,12 @@ pub(crate) fn evaluate_method_call(
                 "or_else" => {
                     // or_else on None calls the closure
                     let func = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
-                    if let Value::Lambda { params, body, env: captured } = func {
+                    if let Value::Lambda {
+                        params,
+                        body,
+                        env: captured,
+                    } = func
+                    {
                         let mut local_env = captured.clone();
                         // No args to bind for or_else
                         return evaluate_expr(&body, &mut local_env, functions, classes, enums, impl_methods);
@@ -500,7 +511,12 @@ pub(crate) fn evaluate_method_call(
                 "unwrap_or_else" => {
                     // Call the closure and return its result
                     let func = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
-                    if let Value::Lambda { params, body, env: captured } = func {
+                    if let Value::Lambda {
+                        params,
+                        body,
+                        env: captured,
+                    } = func
+                    {
                         let mut local_env = captured.clone();
                         return evaluate_expr(&body, &mut local_env, functions, classes, enums, impl_methods);
                     }
@@ -514,9 +530,17 @@ pub(crate) fn evaluate_method_call(
                     return Ok(Value::err(err_val));
                 }
                 "expect" => {
-                    let msg = eval_arg(args, 0, Value::Str("expected Some value".to_string()), env, functions, classes, enums, impl_methods)?;
-                    let ctx = ErrorContext::new()
-                        .with_code(codes::INVALID_OPERATION);
+                    let msg = eval_arg(
+                        args,
+                        0,
+                        Value::Str("expected Some value".to_string()),
+                        env,
+                        functions,
+                        classes,
+                        enums,
+                        impl_methods,
+                    )?;
+                    let ctx = ErrorContext::new().with_code(codes::INVALID_OPERATION);
                     return Err(CompileError::semantic_with_context(
                         format!("expect() failed: {}", msg.to_display_string()),
                         ctx,
@@ -538,15 +562,7 @@ pub(crate) fn evaluate_method_call(
             arg_values.push(val);
         }
         // Call the function with receiver as first argument
-        return exec_function_with_values(
-            &func,
-            &arg_values,
-            env,
-            functions,
-            classes,
-            enums,
-            impl_methods,
-        );
+        return exec_function_with_values(&func, &arg_values, env, functions, classes, enums, impl_methods);
     }
 
     // E1013 - Unknown Method (with helpful hints for common conversions)
@@ -566,7 +582,10 @@ pub(crate) fn evaluate_method_call(
             func_name, method
         ));
         return Err(CompileError::semantic_with_context(
-            format!("method `{}` not found on type `function` (function '{}' was not called)", method, func_name),
+            format!(
+                "method `{}` not found on type `function` (function '{}' was not called)",
+                method, func_name
+            ),
             ctx,
         ));
     }
@@ -649,15 +668,7 @@ pub(crate) fn evaluate_method_call_with_self_update(
                 arg_values.push(val);
             }
             // Call the function with receiver as first argument
-            let result = exec_function_with_values(
-                &func,
-                &arg_values,
-                env,
-                functions,
-                classes,
-                enums,
-                impl_methods,
-            )?;
+            let result = exec_function_with_values(&func, &arg_values, env, functions, classes, enums, impl_methods)?;
             return Ok((result, None)); // UFCS calls don't mutate self
         }
         // Collect available methods for typo suggestion

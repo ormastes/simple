@@ -509,6 +509,29 @@ impl<'a> MirLowerer<'a> {
         let mut module = MirModule::new();
         module.name = hir.name.clone();
 
+        // Copy global variables from HIR to MIR
+        // IMPORTANT: HIR globals HashMap is used for name resolution and contains:
+        // 1. Actual global variables (let/var at module scope)
+        // 2. Static variables
+        // 3. Const variables
+        // 4. ALL function names (both regular and extern) with their RETURN TYPE
+        //
+        // We need to filter out function names to avoid declaring them as globals.
+        // Functions are handled separately via HIR functions list.
+        // Build a set of function names to exclude
+        let function_names: std::collections::HashSet<&str> =
+            hir.functions.iter().map(|f| f.name.as_str()).collect();
+
+        for (name, ty) in &hir.globals {
+            // Skip if this name is a function
+            if function_names.contains(name.as_str()) {
+                continue;
+            }
+
+            // Only copy actual global/static/const variables
+            module.globals.push((name.clone(), *ty, true));
+        }
+
         for func in &hir.functions {
             let mir_func = self.lower_function(func)?;
             module.functions.push(mir_func);

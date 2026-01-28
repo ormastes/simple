@@ -7,10 +7,8 @@ use crate::manifest::{Dependency, DependencyDetail, Manifest};
 
 /// Load manifest from dir, returning error if not found
 fn load_manifest(dir: &Path) -> PkgResult<(std::path::PathBuf, Manifest)> {
-    let manifest_path = dir.join("simple.toml");
-    if !manifest_path.exists() {
-        return Err(PkgError::ManifestNotFound(manifest_path.display().to_string()));
-    }
+    let manifest_path = crate::find_manifest(dir)
+        .ok_or_else(|| PkgError::ManifestNotFound(dir.display().to_string()))?;
     let manifest = Manifest::load(&manifest_path)?;
     Ok((manifest_path, manifest))
 }
@@ -133,7 +131,7 @@ mod tests {
         )
         .unwrap();
 
-        let manifest = Manifest::load(&temp_dir.join("simple.toml")).unwrap();
+        let manifest = Manifest::load(&crate::find_manifest(&temp_dir).unwrap()).unwrap();
         assert!(manifest.dependencies.contains_key("http"));
         let dep = manifest.dependencies.get("http").unwrap();
         assert_eq!(dep.version_str(), Some("1.0"));
@@ -155,7 +153,7 @@ mod tests {
         )
         .unwrap();
 
-        let manifest = Manifest::load(&temp_dir.join("simple.toml")).unwrap();
+        let manifest = Manifest::load(&crate::find_manifest(&temp_dir).unwrap()).unwrap();
         let dep = manifest.dependencies.get("mylib").unwrap();
         assert!(dep.is_path());
         assert_eq!(dep.get_path(), Some("../mylib"));
@@ -178,7 +176,7 @@ mod tests {
         )
         .unwrap();
 
-        let manifest = Manifest::load(&temp_dir.join("simple.toml")).unwrap();
+        let manifest = Manifest::load(&crate::find_manifest(&temp_dir).unwrap()).unwrap();
         let dep = manifest.dependencies.get("json").unwrap();
         assert!(dep.is_git());
         assert_eq!(dep.get_git(), Some("https://github.com/user/json"));
@@ -201,7 +199,7 @@ mod tests {
         )
         .unwrap();
 
-        let manifest = Manifest::load(&temp_dir.join("simple.toml")).unwrap();
+        let manifest = Manifest::load(&crate::find_manifest(&temp_dir).unwrap()).unwrap();
         assert!(!manifest.dependencies.contains_key("test-utils"));
         assert!(manifest.dev_dependencies.contains_key("test-utils"));
 
@@ -227,7 +225,7 @@ mod tests {
         let removed = remove_dependency(&temp_dir, "http", false).unwrap();
         assert!(removed);
 
-        let manifest = Manifest::load(&temp_dir.join("simple.toml")).unwrap();
+        let manifest = Manifest::load(&crate::find_manifest(&temp_dir).unwrap()).unwrap();
         assert!(!manifest.dependencies.contains_key("http"));
 
         cleanup_test_project(&temp_dir);

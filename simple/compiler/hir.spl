@@ -14,6 +14,7 @@
 use parser.*
 use lexer.Span
 use blocks.{BlockValue, BlockRegistry, block_registry}
+use config.{TypeInferenceConfig, TypeDefault}
 
 # ============================================================================
 # HIR Module Structure
@@ -585,6 +586,11 @@ struct HirClass:
     doc_comment: text?
     span: Span
 
+    # Generic template metadata for .smf template storage
+    is_generic_template: bool
+    specialization_of: text?
+    type_bindings: Dict<text, HirType>
+
 struct HirStruct:
     """Struct definition in HIR."""
     symbol: SymbolId
@@ -594,6 +600,11 @@ struct HirStruct:
     is_public: bool
     doc_comment: text?
     span: Span
+
+    # Generic template metadata for .smf template storage
+    is_generic_template: bool
+    specialization_of: text?
+    type_bindings: Dict<text, HirType>
 
 struct HirField:
     """Struct/class field."""
@@ -613,6 +624,11 @@ struct HirEnum:
     is_public: bool
     doc_comment: text?
     span: Span
+
+    # Generic template metadata for .smf template storage
+    is_generic_template: bool
+    specialization_of: text?
+    type_bindings: Dict<text, HirType>
 
 struct HirVariant:
     """Enum variant."""
@@ -636,6 +652,11 @@ struct HirTrait:
     is_public: bool
     doc_comment: text?
     span: Span
+
+    # Generic template metadata for .smf template storage
+    is_generic_template: bool
+    specialization_of: text?
+    type_bindings: Dict<text, HirType>
 
 struct HirImpl:
     """Impl block in HIR."""
@@ -900,6 +921,7 @@ class HirLowering:
     errors: [LoweringError]
     current_function: SymbolId?
     loop_depth: i64
+    type_inference_config: TypeInferenceConfig?
 
 struct LoweringError:
     """Error during lowering."""
@@ -922,8 +944,56 @@ impl HirLowering:
             symbols: SymbolTable.new(),
             errors: [],
             current_function: nil,
-            loop_depth: 0
+            loop_depth: 0,
+            type_inference_config: nil
         )
+
+    static fn with_config(config: TypeInferenceConfig) -> HirLowering:
+        HirLowering(
+            symbols: SymbolTable.new(),
+            errors: [],
+            current_function: nil,
+            loop_depth: 0,
+            type_inference_config: Some(config)
+        )
+
+    me set_type_inference_config(config: TypeInferenceConfig):
+        """Set the type inference configuration."""
+        self.type_inference_config = Some(config)
+
+    fn get_empty_array_default() -> HirType:
+        """Get the default element type for empty arrays."""
+        val default_type = if self.type_inference_config.?:
+            self.type_inference_config.unwrap().empty_array_default
+        else:
+            TypeDefault.I32
+
+        # Convert TypeDefault to HirType
+        val span = Span.empty()
+        match default_type:
+            case TypeDefault.Void: HirType(kind: HirTypeKind.Unit, span: span)
+            case TypeDefault.Bool: HirType(kind: HirTypeKind.Bool, span: span)
+            case TypeDefault.I8: HirType(kind: HirTypeKind.Int(8, true), span: span)
+            case TypeDefault.I16: HirType(kind: HirTypeKind.Int(16, true), span: span)
+            case TypeDefault.I32: HirType(kind: HirTypeKind.Int(32, true), span: span)
+            case TypeDefault.I64: HirType(kind: HirTypeKind.Int(64, true), span: span)
+            case TypeDefault.U8: HirType(kind: HirTypeKind.Int(8, false), span: span)
+            case TypeDefault.U16: HirType(kind: HirTypeKind.Int(16, false), span: span)
+            case TypeDefault.U32: HirType(kind: HirTypeKind.Int(32, false), span: span)
+            case TypeDefault.U64: HirType(kind: HirTypeKind.Int(64, false), span: span)
+            case TypeDefault.F32: HirType(kind: HirTypeKind.Float(32), span: span)
+            case TypeDefault.F64: HirType(kind: HirTypeKind.Float(64), span: span)
+            case TypeDefault.String: HirType(kind: HirTypeKind.Str, span: span)
+            case TypeDefault.Nil: HirType(kind: HirTypeKind.Unit, span: span)
+            case TypeDefault.Any: HirType(kind: HirTypeKind.Error, span: span)  # Any not yet represented
+            case _: HirType(kind: HirTypeKind.Int(32, true), span: span)  # Default to i32
+
+    fn is_strict_empty_collections() -> bool:
+        """Check if strict mode is enabled for empty collections."""
+        if self.type_inference_config.?:
+            self.type_inference_config.unwrap().strict_empty_collections
+        else:
+            false
 
     me lower_module(module: Module) -> HirModule:
         """Lower a parsed module to HIR."""
@@ -1433,7 +1503,16 @@ impl HirLowering:
                 var hir_elements: [HirExpr] = []
                 for elem in elements:
                     hir_elements = hir_elements.push(self.lower_expr(elem))
-                HirExprKind.ArrayLit(hir_elements, nil)
+                # For empty arrays, use configured default element type
+                val elem_type = if hir_elements.is_empty():
+                    if self.is_strict_empty_collections():
+                        self.error("empty array requires explicit type annotation", e.span)
+                        nil
+                    else:
+                        Some(self.get_empty_array_default())
+                else:
+                    nil  # Type will be inferred from elements
+                HirExprKind.ArrayLit(hir_elements, elem_type)
 
             case TupleLit(elements):
                 var hir_elements: [HirExpr] = []

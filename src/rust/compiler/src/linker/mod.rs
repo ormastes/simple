@@ -21,6 +21,7 @@ mod builder;
 mod builder_macros;
 mod error;
 mod interner;
+pub mod lazy_instantiator;
 pub mod layout;
 mod native;
 mod native_binary;
@@ -57,3 +58,8 @@ pub use layout::{LayoutOptimizer, LayoutSegment, LayoutStats, LayoutSymbol};
 
 // Native binary exports (standalone executables)
 pub use native_binary::{compile_to_native_binary, NativeBinaryBuilder, NativeBinaryOptions, NativeBinaryResult};
+
+// Lazy instantiation exports (link-time template instantiation)
+pub use lazy_instantiator::{
+    LazyInstantiationResult, LazyInstantiationStats, LazyInstantiator, LazyInstantiatorConfig,
+};

@@ -96,6 +96,7 @@ pub struct InstrContext<'a, M: Module> {
     pub module: &'a mut M,
     pub func_ids: &'a HashMap<String, cranelift_module::FuncId>,
     pub runtime_funcs: &'a HashMap<&'static str, cranelift_module::FuncId>,
+    pub global_ids: &'a HashMap<String, cranelift_module::DataId>,
     pub vreg_values: &'a mut HashMap<VReg, cranelift_codegen::ir::Value>,
     pub local_addr_map: &'a mut HashMap<VReg, usize>,
     pub variables: &'a HashMap<usize, cranelift_frontend::Variable>,
@@ -158,6 +159,25 @@ pub fn compile_instruction<M: Module>(
 
         MirInst::Store { addr, value, .. } => {
             compile_store(ctx, builder, *addr, *value)?;
+        }
+
+        MirInst::GlobalLoad { dest, global_name, ty } => {
+            let global_id = ctx.global_ids.get(global_name)
+                .ok_or_else(|| format!("Global variable '{}' not found", global_name))?;
+            let global_ref = ctx.module.declare_data_in_func(*global_id, builder.func);
+            let global_addr = builder.ins().global_value(types::I64, global_ref);
+            let val = builder.ins().load(type_id_to_cranelift(*ty), MemFlags::new(), global_addr, 0);
+            ctx.vreg_values.insert(*dest, val);
+        }
+
+        MirInst::GlobalStore { global_name, value, ty } => {
+            let global_id = ctx.global_ids.get(global_name)
+                .ok_or_else(|| format!("Global variable '{}' not found", global_name))?;
+            let global_ref = ctx.module.declare_data_in_func(*global_id, builder.func);
+            let global_addr = builder.ins().global_value(types::I64, global_ref);
+            let val = ctx.vreg_values.get(value)
+                .ok_or_else(|| format!("GlobalStore: vreg {:?} not found", value))?;
+            builder.ins().store(MemFlags::new(), *val, global_addr, 0);
         }
 
         MirInst::UnaryOp { dest, op, operand } => {

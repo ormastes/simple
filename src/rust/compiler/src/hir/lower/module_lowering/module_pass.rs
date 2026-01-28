@@ -9,7 +9,9 @@ impl Lowerer {
     fn register_declarations_from_node(&mut self, item: &Node) -> LowerResult<()> {
         match item {
             Node::Struct(s) => {
-                self.register_struct(s)?;
+                let struct_type_id = self.register_struct(s)?;
+                // Register struct constructor in globals so it can be used as a value
+                self.globals.insert(s.name.clone(), struct_type_id);
             }
             Node::Function(f) => {
                 let ret_ty = self.resolve_type_opt(&f.return_type)?;
@@ -20,10 +22,13 @@ impl Lowerer {
                 }
             }
             Node::Class(c) => {
-                self.register_class(c)?;
+                let class_type_id = self.register_class(c)?;
+                // Register class constructor in globals so it can be used as a value
+                self.globals.insert(c.name.clone(), class_type_id);
             }
             Node::Enum(e) => {
-                let variants = e
+                eprintln!("[DEBUG register_enum] Registering enum: {} with {} variants", e.name, e.variants.len());
+                let variants: Vec<_> = e
                     .variants
                     .iter()
                     .map(|v| {
@@ -33,16 +38,35 @@ impl Lowerer {
                                 .map(|f| self.resolve_type(&f.ty).unwrap_or(TypeId::VOID))
                                 .collect()
                         });
+                        eprintln!("[DEBUG register_enum]   Variant {} with fields: {:?}", v.name, fields);
                         (v.name.clone(), fields)
                     })
                     .collect();
-                self.module.types.register_named(
+                eprintln!("[DEBUG register_enum] Final variants count: {}", variants.len());
+
+                // Get the enum type ID
+                let enum_type_id = self.module.types.lookup(&e.name)
+                    .unwrap_or_else(|| {
+                        eprintln!("[WARNING] Enum type not found during registration: {}", e.name);
+                        TypeId::VOID
+                    });
+
+                // Use update_named to update the placeholder created in Pass 0
+                self.module.types.update_named(
                     e.name.clone(),
                     HirType::Enum {
                         name: e.name.clone(),
                         variants,
+                        generic_params: e.generic_params.clone(),
+                        is_generic_template: e.is_generic_template,
+                        type_bindings: std::collections::HashMap::new(), // Will be filled during specialization
                     },
                 );
+
+                // Register enum name in globals so that Backend.Native can be resolved
+                // The enum name acts as a namespace for variant constructors
+                self.globals.insert(e.name.clone(), enum_type_id);
+                eprintln!("[DEBUG register_enum] Registered enum '{}' in globals with TypeId {:?}", e.name, enum_type_id);
             }
             Node::Mixin(m) => {
                 self.register_mixin(m)?;
@@ -110,9 +134,7 @@ impl Lowerer {
                 // For now, just register the class name as a named type
                 let type_id = self.module.types.register_named(
                     ec.name.clone(),
-                    crate::hir::types::HirType::ExternClass {
-                        name: ec.name.clone(),
-                    },
+                    crate::hir::types::HirType::ExternClass { name: ec.name.clone() },
                 );
                 // Also register it as a global so it can be used in type expressions
                 self.globals.insert(ec.name.clone(), type_id);
@@ -249,6 +271,9 @@ impl Lowerer {
                             name: s.name.clone(),
                             fields: vec![],
                             has_snapshot: false,
+                            generic_params: s.generic_params.clone(),
+                            is_generic_template: s.is_generic_template,
+                            type_bindings: std::collections::HashMap::new(),
                         },
                     );
                 }
@@ -260,6 +285,9 @@ impl Lowerer {
                             name: c.name.clone(),
                             fields: vec![],
                             has_snapshot: false,
+                            generic_params: c.generic_params.clone(),
+                            is_generic_template: c.is_generic_template,
+                            type_bindings: std::collections::HashMap::new(),
                         },
                     );
                 }
@@ -270,6 +298,9 @@ impl Lowerer {
                         HirType::Enum {
                             name: e.name.clone(),
                             variants: vec![],
+                            generic_params: e.generic_params.clone(),
+                            is_generic_template: e.is_generic_template,
+                            type_bindings: std::collections::HashMap::new(),
                         },
                     );
                 }
@@ -388,8 +419,29 @@ impl Lowerer {
                         self.module.functions.push(hir_func);
                     }
                 }
+                Node::Impl(impl_block) => {
+                    // Lower impl block methods
+                    // Extract the type name from the impl block's target
+                    let type_name = match &impl_block.target_type {
+                        simple_parser::ast::Type::Simple(name) => Some(name.clone()),
+                        simple_parser::ast::Type::Generic { name, .. } => Some(name.clone()),
+                        _ => None,
+                    };
+
+                    if let Some(type_name) = type_name {
+                        for method in &impl_block.methods {
+                            let hir_func = self.lower_function(method, Some(&type_name))?;
+                            self.module.functions.push(hir_func);
+                        }
+                    }
+                }
                 _ => {}
             }
+        }
+
+        // Copy global variables from HashMap to module's globals Vec
+        for (name, ty) in &self.globals {
+            self.module.globals.push((name.clone(), *ty));
         }
 
         // Third pass: lower AOP constructs (#1000-1050)
@@ -500,6 +552,21 @@ impl Lowerer {
                     for method in &s.methods {
                         let hir_func = self.lower_function(method, Some(&s.name))?;
                         self.module.functions.push(hir_func);
+                    }
+                }
+                Node::Impl(impl_block) => {
+                    // Lower impl block methods (second pass)
+                    let type_name = match &impl_block.target_type {
+                        simple_parser::ast::Type::Simple(name) => Some(name.clone()),
+                        simple_parser::ast::Type::Generic { name, .. } => Some(name.clone()),
+                        _ => None,
+                    };
+
+                    if let Some(type_name) = type_name {
+                        for method in &impl_block.methods {
+                            let hir_func = self.lower_function(method, Some(&type_name))?;
+                            self.module.functions.push(hir_func);
+                        }
                     }
                 }
                 _ => {}

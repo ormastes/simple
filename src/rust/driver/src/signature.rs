@@ -152,8 +152,7 @@ pub fn load_signature_from_db(db_path: &std::path::Path) -> Result<Option<Qualif
         return Ok(None);
     }
 
-    let content = std::fs::read_to_string(&sig_path)
-        .map_err(|e| format!("Failed to read signature file: {}", e))?;
+    let content = std::fs::read_to_string(&sig_path).map_err(|e| format!("Failed to read signature file: {}", e))?;
 
     if content.trim().is_empty() {
         return Ok(None);
@@ -166,19 +165,43 @@ pub fn load_signature_from_db(db_path: &std::path::Path) -> Result<Option<Qualif
             if let simple_sdn::SdnValue::Dict(dict) = root {
                 let hash = dict
                     .get("hash")
-                    .and_then(|v| if let simple_sdn::SdnValue::String(s) = v { Some(s.clone()) } else { None })
+                    .and_then(|v| {
+                        if let simple_sdn::SdnValue::String(s) = v {
+                            Some(s.clone())
+                        } else {
+                            None
+                        }
+                    })
                     .unwrap_or_default();
                 let signer = dict
                     .get("signer")
-                    .and_then(|v| if let simple_sdn::SdnValue::String(s) = v { Some(s.clone()) } else { None })
+                    .and_then(|v| {
+                        if let simple_sdn::SdnValue::String(s) = v {
+                            Some(s.clone())
+                        } else {
+                            None
+                        }
+                    })
                     .unwrap_or_default();
                 let signed_at = dict
                     .get("signed_at")
-                    .and_then(|v| if let simple_sdn::SdnValue::String(s) = v { Some(s.clone()) } else { None })
+                    .and_then(|v| {
+                        if let simple_sdn::SdnValue::String(s) = v {
+                            Some(s.clone())
+                        } else {
+                            None
+                        }
+                    })
                     .unwrap_or_default();
                 let record_count = dict
                     .get("record_count")
-                    .and_then(|v| if let simple_sdn::SdnValue::Int(n) = v { Some(*n as usize) } else { None })
+                    .and_then(|v| {
+                        if let simple_sdn::SdnValue::Int(n) = v {
+                            Some(*n as usize)
+                        } else {
+                            None
+                        }
+                    })
                     .unwrap_or(0);
 
                 if hash.is_empty() {
@@ -200,10 +223,7 @@ pub fn load_signature_from_db(db_path: &std::path::Path) -> Result<Option<Qualif
 }
 
 /// Save signature to test database SDN file
-pub fn save_signature_to_db(
-    db_path: &std::path::Path,
-    sig: &QualifiedIgnoreSignature,
-) -> Result<(), String> {
+pub fn save_signature_to_db(db_path: &std::path::Path, sig: &QualifiedIgnoreSignature) -> Result<(), String> {
     let sig_path = db_path.with_extension("sig.sdn");
 
     let content = format!(
@@ -218,19 +238,15 @@ pub fn save_signature_to_db(
 
     // Atomic write
     let temp_path = sig_path.with_extension("sig.sdn.tmp");
-    std::fs::write(&temp_path, &content)
-        .map_err(|e| format!("Failed to write signature file: {}", e))?;
-    std::fs::rename(&temp_path, &sig_path)
-        .map_err(|e| format!("Failed to finalize signature file: {}", e))?;
+    std::fs::write(&temp_path, &content).map_err(|e| format!("Failed to write signature file: {}", e))?;
+    std::fs::rename(&temp_path, &sig_path).map_err(|e| format!("Failed to finalize signature file: {}", e))?;
 
     Ok(())
 }
 
 /// Check if the database has any qualified_ignore records
 pub fn has_qualified_ignores(db: &TestDb) -> bool {
-    db.records
-        .values()
-        .any(|r| r.status == TestStatus::QualifiedIgnore)
+    db.records.values().any(|r| r.status == TestStatus::QualifiedIgnore)
 }
 
 /// Get all test IDs with qualified_ignore status

@@ -48,11 +48,15 @@ fn tag_int_as_runtime_value(
 
 /// Check if a runtime function returns a RuntimeValue that should be untagged to raw i64.
 /// These are functions that return RuntimeValue containing integers that need to be extracted.
+///
+/// NOTE: rt_array_get, rt_tuple_get, rt_index_get, rt_dict_get are NOT included here
+/// because they return RuntimeValue that could be any type (string, object, etc.),
+/// not just integers. Untagging should be done based on the expected result type,
+/// not the function name. The caller should handle type-specific untagging.
 fn needs_runtime_value_untagging(func_name: &str) -> bool {
-    matches!(
-        func_name,
-        "rt_array_get" | "rt_tuple_get" | "rt_index_get" | "rt_dict_get"
-    )
+    // Currently no functions need automatic untagging.
+    // Type-specific untagging is handled by the MIR Unbox instruction.
+    matches!(func_name, "")
 }
 
 /// Untag a RuntimeValue to raw i64 by right-shifting 3 bits.

@@ -186,10 +186,8 @@ fn test_repl_backspace_deletes_indent() {
     let binary = std::env::var("CARGO_BIN_EXE_simple_old")
         .map(PathBuf::from)
         .unwrap_or_else(|_| {
-            let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
-                .unwrap_or_else(|_| ".".to_string());
-            PathBuf::from(manifest_dir)
-                .join("../../../target/debug/simple_old")
+            let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
+            PathBuf::from(manifest_dir).join("../../../target/debug/simple_old")
         });
     assert!(binary.exists(), "REPL binary not found at {:?}", binary);
 

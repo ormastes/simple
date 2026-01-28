@@ -74,9 +74,8 @@ pub(super) fn eval_literal_expr(
             // 4. Fall back to Value::Unit if nothing found
 
             // Step 1: Check for explicit literal fn override
-            let literal_fn_result: Option<LiteralFunctionInfo> = LITERAL_FUNCTIONS.with(|cell| {
-                cell.borrow().get(suffix).cloned()
-            });
+            let literal_fn_result: Option<LiteralFunctionInfo> =
+                LITERAL_FUNCTIONS.with(|cell| cell.borrow().get(suffix).cloned());
 
             if let Some(lit_fn_info) = literal_fn_result {
                 // Execute the literal function body with the string value

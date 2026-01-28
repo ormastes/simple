@@ -94,6 +94,9 @@ mod tests {
             name: "Point".to_string(),
             fields: vec![("x".to_string(), TypeId::F64), ("y".to_string(), TypeId::F64)],
             has_snapshot: false,
+            generic_params: vec![],
+            is_generic_template: false,
+            type_bindings: std::collections::HashMap::new(),
         };
 
         let id = registry.register_named("Point".to_string(), struct_type.clone());

@@ -1,5 +1,7 @@
 //! Definition AST nodes (functions, structs, classes, traits, etc.)
 
+use std::collections::HashMap;
+
 use super::super::enums::*;
 use super::contracts::*;
 use super::core::*;
@@ -44,6 +46,14 @@ pub struct FunctionDef {
     /// Syntax: `fn f(x: T) -> U where result.len() == x.len():`
     /// The predicate can reference `result` and function parameters
     pub return_constraint: Option<Expr>,
+
+    // Generic template metadata for .smf template storage
+    /// True if this is an unspecialized generic template
+    pub is_generic_template: bool,
+    /// Base template name if this is a specialization
+    pub specialization_of: Option<String>,
+    /// Type parameter bindings for specializations (e.g., T -> Int)
+    pub type_bindings: HashMap<String, Type>,
 }
 
 impl FunctionDef {
@@ -266,6 +276,14 @@ pub struct StructDef {
     pub doc_comment: Option<DocComment>,
     /// Struct invariant (checked after constructor and public methods)
     pub invariant: Option<InvariantBlock>,
+
+    // Generic template metadata for .smf template storage
+    /// True if this is an unspecialized generic template
+    pub is_generic_template: bool,
+    /// Base template name if this is a specialization
+    pub specialization_of: Option<String>,
+    /// Type parameter bindings for specializations (e.g., T -> Int)
+    pub type_bindings: HashMap<String, Type>,
 }
 
 impl StructDef {
@@ -347,6 +365,14 @@ pub struct ClassDef {
     pub attributes: Vec<Attribute>,
     /// Documentation comment for API doc generation
     pub doc_comment: Option<DocComment>,
+
+    // Generic template metadata for .smf template storage
+    /// True if this is an unspecialized generic template
+    pub is_generic_template: bool,
+    /// Base template name if this is a specialization
+    pub specialization_of: Option<String>,
+    /// Type parameter bindings for specializations (e.g., T -> Int)
+    pub type_bindings: HashMap<String, Type>,
     /// Class invariant (checked after constructor and public methods)
     pub invariant: Option<InvariantBlock>,
     /// Macro invocations in class body (expanded at runtime to add fields/methods)
@@ -398,6 +424,14 @@ pub struct EnumDef {
     pub attributes: Vec<Attribute>,
     /// Documentation comment for API doc generation
     pub doc_comment: Option<DocComment>,
+
+    // Generic template metadata for .smf template storage
+    /// True if this is an unspecialized generic template
+    pub is_generic_template: bool,
+    /// Base template name if this is a specialization
+    pub specialization_of: Option<String>,
+    /// Type parameter bindings for specializations (e.g., T -> Int)
+    pub type_bindings: HashMap<String, Type>,
 }
 
 // Standalone unit type definition
@@ -424,6 +458,14 @@ pub struct TraitDef {
     pub visibility: Visibility,
     /// Documentation comment for API doc generation
     pub doc_comment: Option<DocComment>,
+
+    // Generic template metadata for .smf template storage
+    /// True if this is an unspecialized generic template
+    pub is_generic_template: bool,
+    /// Base template name if this is a specialization
+    pub specialization_of: Option<String>,
+    /// Type parameter bindings for specializations (e.g., T -> Type)
+    pub type_bindings: HashMap<String, Type>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

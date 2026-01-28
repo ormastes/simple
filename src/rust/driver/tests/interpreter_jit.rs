@@ -220,7 +220,7 @@ fn main() -> i64:
 fn jit_bitwise_xor() {
     let code = r#"
 fn main() -> i64:
-    return 0x55 ^ 0x7F
+    return 0x55 xor 0x7F
 "#;
     let result = run_jit(code).unwrap();
     assert_eq!(result.exit_code, 42);

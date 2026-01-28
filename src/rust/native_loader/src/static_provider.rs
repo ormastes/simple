@@ -52,9 +52,9 @@ impl RuntimeSymbolProvider for StaticSymbolProvider {
             rt_file_exists, rt_file_stat, rt_file_canonicalize, rt_file_read_text, rt_file_write_text, rt_file_copy,
             rt_file_remove, rt_file_rename, rt_file_read_lines, rt_file_append_text, rt_file_read_bytes,
             rt_file_write_bytes, rt_file_move, rt_dir_create, rt_dir_list, rt_dir_remove, rt_file_find, rt_dir_glob,
-            rt_dir_create_all, rt_dir_walk, rt_current_dir, rt_set_current_dir, rt_dir_remove_all,
-            rt_file_open, rt_file_get_size, rt_file_close, rt_path_basename, rt_path_dirname, rt_path_ext,
-            rt_path_absolute, rt_path_separator, rt_path_stem, rt_path_relative, rt_path_join,
+            rt_dir_create_all, rt_dir_walk, rt_current_dir, rt_set_current_dir, rt_dir_remove_all, rt_file_open,
+            rt_file_get_size, rt_file_close, rt_path_basename, rt_path_dirname, rt_path_ext, rt_path_absolute,
+            rt_path_separator, rt_path_stem, rt_path_relative, rt_path_join,
         };
         // Regex operations
         use simple_runtime::value::{
@@ -136,9 +136,9 @@ impl RuntimeSymbolProvider for StaticSymbolProvider {
         use simple_runtime::value::{
             rt_neighbor_load, rt_vec_abs, rt_vec_all, rt_vec_any, rt_vec_blend, rt_vec_ceil, rt_vec_clamp,
             rt_vec_extract, rt_vec_floor, rt_vec_fma, rt_vec_gather, rt_vec_load, rt_vec_masked_load,
-            rt_vec_masked_store, rt_vec_max, rt_vec_max_vec, rt_vec_min, rt_vec_min_vec, rt_vec_product,
-            rt_vec_recip, rt_vec_round, rt_vec_scatter, rt_vec_select, rt_vec_shuffle, rt_vec_sqrt,
-            rt_vec_store, rt_vec_sum, rt_vec_with,
+            rt_vec_masked_store, rt_vec_max, rt_vec_max_vec, rt_vec_min, rt_vec_min_vec, rt_vec_product, rt_vec_recip,
+            rt_vec_round, rt_vec_scatter, rt_vec_select, rt_vec_shuffle, rt_vec_sqrt, rt_vec_store, rt_vec_sum,
+            rt_vec_with,
         };
         // NOTE: Parser and compiler operations (rt_parse_simple_file, rt_api_surface_extract,
         // rt_symbol_usage_find) are not included to avoid cyclic dependency

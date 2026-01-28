@@ -75,15 +75,18 @@ impl ModuleLoader {
         R: Read + Seek,
         F: Fn(&str) -> Option<usize>,
     {
-        // Read header
-        debug!("Reading SMF header");
-        let header = SmfHeader::read(reader).map_err(|e| {
+        // ⭐ v1.1: Read header from trailer (EOF-128) with v1.0 fallback
+        debug!("Reading SMF header (trying v1.1 trailer, fallback to v1.0)");
+        let header = SmfHeader::read_trailer(reader).map_err(|e| {
             error!(error = %e, "Failed to read SMF header");
             e
         })?;
         trace!(
+            version = format!("{}.{}", header.version_major, header.version_minor),
             section_count = header.section_count,
             symbol_count = header.symbol_count,
+            has_stub = header.has_stub(),
+            compression = header.compression,
             "Header read successfully"
         );
 
@@ -92,14 +95,28 @@ impl ModuleLoader {
             e
         })?;
 
-        // Read sections
+        // ⭐ v1.1: Calculate base offset (accounts for executable stub)
+        let base_offset = if header.has_stub() {
+            debug!(
+                stub_size = header.stub_size,
+                smf_data_offset = header.smf_data_offset,
+                "File has executable stub, adjusting offsets"
+            );
+            header.smf_data_offset as u64
+        } else {
+            0
+        };
+
+        // Read sections (adjust offset by base_offset for v1.1 stub support)
+        let section_table_offset = base_offset + header.section_table_offset;
         debug!(
-            offset = header.section_table_offset,
+            offset = section_table_offset,
+            base_offset = base_offset,
             count = header.section_count,
             "Reading section table"
         );
-        reader.seek(SeekFrom::Start(header.section_table_offset)).map_err(|e| {
-            error!(offset = header.section_table_offset, error = %e, "Failed to seek to section table");
+        reader.seek(SeekFrom::Start(section_table_offset)).map_err(|e| {
+            error!(offset = section_table_offset, error = %e, "Failed to seek to section table");
             LoadError::Io(e)
         })?;
         let sections = self.read_sections(reader, header.section_count)?;
@@ -168,8 +185,10 @@ impl ModuleLoader {
                         )));
                     }
 
-                    reader.seek(SeekFrom::Start(section.offset)).map_err(|e| {
-                        error!(offset = section.offset, error = %e, "Failed to seek to code section");
+                    // ⭐ v1.1: Adjust section offset by base_offset (for stub support)
+                    let actual_offset = base_offset + section.offset;
+                    reader.seek(SeekFrom::Start(actual_offset)).map_err(|e| {
+                        error!(offset = actual_offset, error = %e, "Failed to seek to code section");
                         LoadError::Io(e)
                     })?;
 
@@ -215,8 +234,10 @@ impl ModuleLoader {
                             )));
                         }
 
-                        reader.seek(SeekFrom::Start(section.offset)).map_err(|e| {
-                            error!(offset = section.offset, error = %e, "Failed to seek to data section");
+                        // ⭐ v1.1: Adjust section offset by base_offset (for stub support)
+                        let actual_offset = base_offset + section.offset;
+                        reader.seek(SeekFrom::Start(actual_offset)).map_err(|e| {
+                            error!(offset = actual_offset, error = %e, "Failed to seek to data section");
                             LoadError::Io(e)
                         })?;
 

@@ -349,7 +349,7 @@ pub fn load_module_with_imports_validated(
         });
     }
 
-    let source = fs::read_to_string(&path).map_err(|e| CompileError::Io(format!("{e}")))?;
+    let source = fs::read_to_string(&path).map_err(|e| CompileError::Io(format!("Cannot read {:?}: {e}", path)))?;
     let mut parser = simple_parser::Parser::new(&source);
     let module = parser.parse().map_err(|e| CompileError::Parse(format!("{e}")))?;
 
@@ -407,12 +407,13 @@ pub fn load_module_with_imports_validated(
                         let func_effects = extract_function_effects(&imported);
                         for (func_name, effects) in func_effects {
                             if let Some(err) = check_import_compatibility(&func_name, &effects, effective_caps) {
-                                let ctx = ErrorContext::new()
-                                    .with_code(codes::UNSUPPORTED_FEATURE)
-                                    .with_help(&format!(
-                                        "Function `{}` uses effects not allowed by module capabilities",
-                                        func_name
-                                    ));
+                                let ctx =
+                                    ErrorContext::new()
+                                        .with_code(codes::UNSUPPORTED_FEATURE)
+                                        .with_help(&format!(
+                                            "Function `{}` uses effects not allowed by module capabilities",
+                                            func_name
+                                        ));
                                 return Err(CompileError::semantic_with_context(err, ctx));
                             }
                         }
@@ -468,7 +469,7 @@ fn resolve_use_to_path(use_stmt: &UseStmt, base: &Path) -> Option<PathBuf> {
         resolved = resolved.join(part);
     }
     resolved.set_extension("spl");
-    if resolved.exists() {
+    if resolved.exists() && resolved.is_file() {
         return Some(resolved);
     }
 
@@ -479,7 +480,7 @@ fn resolve_use_to_path(use_stmt: &UseStmt, base: &Path) -> Option<PathBuf> {
     }
     init_resolved = init_resolved.join("__init__");
     init_resolved.set_extension("spl");
-    if init_resolved.exists() {
+    if init_resolved.exists() && init_resolved.is_file() {
         return Some(init_resolved);
     }
 
@@ -490,7 +491,7 @@ fn resolve_use_to_path(use_stmt: &UseStmt, base: &Path) -> Option<PathBuf> {
     }
     mod_resolved = mod_resolved.join("mod");
     mod_resolved.set_extension("spl");
-    if mod_resolved.exists() {
+    if mod_resolved.exists() && mod_resolved.is_file() {
         return Some(mod_resolved);
     }
 
@@ -508,7 +509,7 @@ fn resolve_use_to_path(use_stmt: &UseStmt, base: &Path) -> Option<PathBuf> {
                 parent_resolved = parent_resolved.join(part);
             }
             parent_resolved.set_extension("spl");
-            if parent_resolved.exists() {
+            if parent_resolved.exists() && parent_resolved.is_file() {
                 return Some(parent_resolved);
             }
 
@@ -519,7 +520,7 @@ fn resolve_use_to_path(use_stmt: &UseStmt, base: &Path) -> Option<PathBuf> {
             }
             parent_init_resolved = parent_init_resolved.join("__init__");
             parent_init_resolved.set_extension("spl");
-            if parent_init_resolved.exists() {
+            if parent_init_resolved.exists() && parent_init_resolved.is_file() {
                 return Some(parent_init_resolved);
             }
 
@@ -530,7 +531,7 @@ fn resolve_use_to_path(use_stmt: &UseStmt, base: &Path) -> Option<PathBuf> {
             }
             parent_mod_resolved = parent_mod_resolved.join("mod");
             parent_mod_resolved.set_extension("spl");
-            if parent_mod_resolved.exists() {
+            if parent_mod_resolved.exists() && parent_mod_resolved.is_file() {
                 return Some(parent_mod_resolved);
             }
         } else {
@@ -563,7 +564,7 @@ fn resolve_use_to_path(use_stmt: &UseStmt, base: &Path) -> Option<PathBuf> {
                         stdlib_path = stdlib_path.join(part);
                     }
                     stdlib_path.set_extension("spl");
-                    if stdlib_path.exists() {
+                    if stdlib_path.exists() && stdlib_path.is_file() {
                         return Some(stdlib_path);
                     }
 
@@ -574,7 +575,7 @@ fn resolve_use_to_path(use_stmt: &UseStmt, base: &Path) -> Option<PathBuf> {
                     }
                     stdlib_init_path = stdlib_init_path.join("__init__");
                     stdlib_init_path.set_extension("spl");
-                    if stdlib_init_path.exists() {
+                    if stdlib_init_path.exists() && stdlib_init_path.is_file() {
                         return Some(stdlib_init_path);
                     }
 
@@ -585,7 +586,7 @@ fn resolve_use_to_path(use_stmt: &UseStmt, base: &Path) -> Option<PathBuf> {
                     }
                     stdlib_mod_path = stdlib_mod_path.join("mod");
                     stdlib_mod_path.set_extension("spl");
-                    if stdlib_mod_path.exists() {
+                    if stdlib_mod_path.exists() && stdlib_mod_path.is_file() {
                         return Some(stdlib_mod_path);
                     }
                 }

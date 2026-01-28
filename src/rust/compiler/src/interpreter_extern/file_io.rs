@@ -360,8 +360,8 @@ pub fn rt_set_current_dir(args: &[Value]) -> Result<Value, CompileError> {
 
 /// Protected paths list
 const PROTECTED_PATHS: &[&str] = &[
-    "/", "/home", "/usr", "/bin", "/sbin", "/etc", "/var", "/tmp",
-    "/opt", "/lib", "/lib64", "/boot", "/dev", "/proc", "/sys", "/root",
+    "/", "/home", "/usr", "/bin", "/sbin", "/etc", "/var", "/tmp", "/opt", "/lib", "/lib64", "/boot", "/dev", "/proc",
+    "/sys", "/root",
 ];
 
 fn is_protected_path(path: &Path) -> bool {
@@ -398,7 +398,10 @@ pub fn rt_dir_remove_all(args: &[Value]) -> Result<Value, CompileError> {
     };
 
     if is_protected_path(&canonical) {
-        eprintln!("rt_dir_remove_all: Refusing to remove protected path: {}", canonical.display());
+        eprintln!(
+            "rt_dir_remove_all: Refusing to remove protected path: {}",
+            canonical.display()
+        );
         return Ok(Value::Bool(false));
     }
 
@@ -436,30 +439,21 @@ pub fn rt_file_close(_args: &[Value]) -> Result<Value, CompileError> {
 /// Get basename
 pub fn rt_path_basename(args: &[Value]) -> Result<Value, CompileError> {
     let path = extract_path(args, 0)?;
-    let basename = Path::new(&path)
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("");
+    let basename = Path::new(&path).file_name().and_then(|s| s.to_str()).unwrap_or("");
     Ok(Value::Str(basename.to_string()))
 }
 
 /// Get dirname
 pub fn rt_path_dirname(args: &[Value]) -> Result<Value, CompileError> {
     let path = extract_path(args, 0)?;
-    let dirname = Path::new(&path)
-        .parent()
-        .and_then(|p| p.to_str())
-        .unwrap_or("");
+    let dirname = Path::new(&path).parent().and_then(|p| p.to_str()).unwrap_or("");
     Ok(Value::Str(dirname.to_string()))
 }
 
 /// Get extension
 pub fn rt_path_ext(args: &[Value]) -> Result<Value, CompileError> {
     let path = extract_path(args, 0)?;
-    let ext = Path::new(&path)
-        .extension()
-        .and_then(|s| s.to_str())
-        .unwrap_or("");
+    let ext = Path::new(&path).extension().and_then(|s| s.to_str()).unwrap_or("");
     Ok(Value::Str(ext.to_string()))
 }
 
@@ -479,10 +473,7 @@ pub fn rt_path_separator(_args: &[Value]) -> Result<Value, CompileError> {
 /// Get file stem
 pub fn rt_path_stem(args: &[Value]) -> Result<Value, CompileError> {
     let path = extract_path(args, 0)?;
-    let stem = Path::new(&path)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("");
+    let stem = Path::new(&path).file_stem().and_then(|s| s.to_str()).unwrap_or("");
     Ok(Value::Str(stem.to_string()))
 }
 

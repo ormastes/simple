@@ -269,7 +269,7 @@ fn parse_error_to_check_error(err: &ParseError, path: &Path) -> CheckError {
             expected: None,
             found: None,
         },
-        ParseError::UnexpectedToken { expected, found, span } => CheckError {
+        ParseError::UnexpectedToken { expected, found, span, .. } => CheckError {
             file: path.display().to_string(),
             line: span.line,
             column: span.column,
@@ -278,7 +278,7 @@ fn parse_error_to_check_error(err: &ParseError, path: &Path) -> CheckError {
             expected: Some(expected.clone()),
             found: Some(found.clone()),
         },
-        ParseError::MissingToken { expected, span } => CheckError {
+        ParseError::MissingToken { expected, span, .. } => CheckError {
             file: path.display().to_string(),
             line: span.line,
             column: span.column,
@@ -287,7 +287,7 @@ fn parse_error_to_check_error(err: &ParseError, path: &Path) -> CheckError {
             expected: Some(expected.clone()),
             found: None,
         },
-        ParseError::UnclosedString { span } => {
+        ParseError::UnclosedString { span, .. } => {
             let (line, column) = if let Some(s) = span { (s.line, s.column) } else { (0, 0) };
             CheckError {
                 file: path.display().to_string(),
@@ -299,7 +299,7 @@ fn parse_error_to_check_error(err: &ParseError, path: &Path) -> CheckError {
                 found: None,
             }
         }
-        ParseError::InvalidIndentation { line } => CheckError {
+        ParseError::InvalidIndentation { line, .. } => CheckError {
             file: path.display().to_string(),
             line: *line,
             column: 1,
@@ -308,7 +308,7 @@ fn parse_error_to_check_error(err: &ParseError, path: &Path) -> CheckError {
             expected: None,
             found: None,
         },
-        ParseError::InvalidPattern { span, message } => CheckError {
+        ParseError::InvalidPattern { span, message, .. } => CheckError {
             file: path.display().to_string(),
             line: span.line,
             column: span.column,
@@ -317,7 +317,7 @@ fn parse_error_to_check_error(err: &ParseError, path: &Path) -> CheckError {
             expected: None,
             found: None,
         },
-        ParseError::InvalidType { span, message } => CheckError {
+        ParseError::InvalidType { span, message, .. } => CheckError {
             file: path.display().to_string(),
             line: span.line,
             column: span.column,

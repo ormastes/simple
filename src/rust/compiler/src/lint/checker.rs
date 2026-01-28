@@ -989,12 +989,7 @@ impl LintChecker {
         }
 
         // Check a call expression
-        fn check_call(
-            checker: &mut LintChecker,
-            callee_name: &str,
-            args: &[Argument],
-            _span: Span,
-        ) {
+        fn check_call(checker: &mut LintChecker, callee_name: &str, args: &[Argument], _span: Span) {
             // Look up the function in the registry
             let func_info = match checker.functions.get(callee_name) {
                 Some(info) => info.clone(),
@@ -1044,10 +1039,7 @@ impl LintChecker {
                             type_str,
                             same_type_params.join("`, `")
                         ),
-                        Some(format!(
-                            "consider using named argument: `{}: <value>`",
-                            param.name
-                        )),
+                        Some(format!("consider using named argument: `{}: <value>`", param.name)),
                     );
                 }
             }
@@ -1105,7 +1097,12 @@ impl LintChecker {
                         check_stmt(checker, stmt);
                     }
                 }
-                Expr::If { condition, then_branch, else_branch, .. } => {
+                Expr::If {
+                    condition,
+                    then_branch,
+                    else_branch,
+                    ..
+                } => {
                     check_expr(checker, condition);
                     check_expr(checker, then_branch);
                     if let Some(eb) = else_branch {
@@ -1360,7 +1357,13 @@ impl LintChecker {
             }
 
             match node {
-                Node::Let(LetStmt { pattern, value, ty, span, .. }) => {
+                Node::Let(LetStmt {
+                    pattern,
+                    value,
+                    ty,
+                    span,
+                    ..
+                }) => {
                     if let Some(val) = value {
                         // Check if value creates a resource
                         if let Some(resource_type) = creates_resource(val) {

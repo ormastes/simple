@@ -34,10 +34,7 @@ impl<'a> Parser<'a> {
         // Generate: examples("name", [[...], [...]])
         let call_expr = Expr::Call {
             callee: Box::new(Expr::Identifier("examples".to_string())),
-            args: vec![
-                Argument::new(None, Expr::String(name)),
-                Argument::new(None, rows_expr),
-            ],
+            args: vec![Argument::new(None, Expr::String(name)), Argument::new(None, rows_expr)],
         };
 
         Ok(Node::Expression(call_expr))

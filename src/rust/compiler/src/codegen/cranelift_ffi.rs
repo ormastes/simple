@@ -128,7 +128,7 @@ fn type_from_code(code: i64) -> types::Type {
         CL_TYPE_I64 => types::I64,
         CL_TYPE_F32 => types::F32,
         CL_TYPE_F64 => types::F64,
-        CL_TYPE_B1 => types::I8, // Booleans as i8
+        CL_TYPE_B1 => types::I8,   // Booleans as i8
         CL_TYPE_PTR => types::I64, // Pointers as i64
         _ => types::I64,
     }
@@ -231,9 +231,15 @@ unsafe fn rt_cranelift_new_module_impl(name: &str, target: i64) -> i64 {
 
     // Select target triple based on target code
     let triple = match target {
-        CL_TARGET_X86_64 => "x86_64-unknown-linux-gnu".parse::<Triple>().unwrap_or_else(|_| Triple::host()),
-        CL_TARGET_AARCH64 => "aarch64-unknown-linux-gnu".parse::<Triple>().unwrap_or_else(|_| Triple::host()),
-        CL_TARGET_RISCV64 => "riscv64gc-unknown-linux-gnu".parse::<Triple>().unwrap_or_else(|_| Triple::host()),
+        CL_TARGET_X86_64 => "x86_64-unknown-linux-gnu"
+            .parse::<Triple>()
+            .unwrap_or_else(|_| Triple::host()),
+        CL_TARGET_AARCH64 => "aarch64-unknown-linux-gnu"
+            .parse::<Triple>()
+            .unwrap_or_else(|_| Triple::host()),
+        CL_TARGET_RISCV64 => "riscv64gc-unknown-linux-gnu"
+            .parse::<Triple>()
+            .unwrap_or_else(|_| Triple::host()),
         _ => Triple::host(),
     };
 
@@ -331,12 +337,7 @@ pub unsafe extern "C" fn rt_cranelift_sig_set_return(sig: i64, type_: i64) {
 /// Begin building a function.
 /// Returns function context handle, or 0 on failure.
 #[no_mangle]
-pub unsafe extern "C" fn rt_cranelift_begin_function(
-    module: i64,
-    name_ptr: i64,
-    name_len: i64,
-    sig: i64,
-) -> i64 {
+pub unsafe extern "C" fn rt_cranelift_begin_function(module: i64, name_ptr: i64, name_len: i64, sig: i64) -> i64 {
     let name = string_from_ptr(name_ptr, name_len);
     if name.is_empty() {
         return 0;
@@ -475,9 +476,14 @@ pub unsafe extern "C" fn rt_cranelift_iconst(ctx: i64, type_: i64, value: i64) -
     let mut contexts = FUNC_CONTEXTS.lock().unwrap();
     if let Some(fctx) = contexts.get_mut(&ctx) {
         let ty = type_from_code(type_);
-        let v = fctx.ctx.func.dfg.constants.insert(
-            cranelift_codegen::ir::ConstantData::from(value.to_le_bytes().as_slice()),
-        );
+        let v = fctx
+            .ctx
+            .func
+            .dfg
+            .constants
+            .insert(cranelift_codegen::ir::ConstantData::from(
+                value.to_le_bytes().as_slice(),
+            ));
         // Store a placeholder value ID
         let value_id = fctx.next_value_id;
         fctx.next_value_id += 1;
@@ -783,11 +789,7 @@ pub unsafe extern "C" fn rt_cranelift_block_param(ctx: i64, block: i64, index: i
 
 /// Get a function pointer from a JIT module.
 #[no_mangle]
-pub unsafe extern "C" fn rt_cranelift_get_function_ptr(
-    module: i64,
-    name_ptr: i64,
-    name_len: i64,
-) -> i64 {
+pub unsafe extern "C" fn rt_cranelift_get_function_ptr(module: i64, name_ptr: i64, name_len: i64) -> i64 {
     let name = string_from_ptr(name_ptr, name_len);
     if name.is_empty() {
         return 0;
@@ -807,11 +809,7 @@ pub unsafe extern "C" fn rt_cranelift_get_function_ptr(
 
 /// Call a JIT function pointer.
 #[no_mangle]
-pub unsafe extern "C" fn rt_cranelift_call_function_ptr(
-    ptr: i64,
-    args_ptr: i64,
-    args_len: i64,
-) -> i64 {
+pub unsafe extern "C" fn rt_cranelift_call_function_ptr(ptr: i64, args_ptr: i64, args_len: i64) -> i64 {
     if ptr == 0 {
         return 0;
     }
@@ -846,9 +844,15 @@ pub unsafe extern "C" fn rt_cranelift_new_aot_module(name_ptr: i64, name_len: i6
 
     // Select target triple based on target code
     let triple = match target {
-        CL_TARGET_X86_64 => "x86_64-unknown-linux-gnu".parse::<Triple>().unwrap_or_else(|_| Triple::host()),
-        CL_TARGET_AARCH64 => "aarch64-unknown-linux-gnu".parse::<Triple>().unwrap_or_else(|_| Triple::host()),
-        CL_TARGET_RISCV64 => "riscv64gc-unknown-linux-gnu".parse::<Triple>().unwrap_or_else(|_| Triple::host()),
+        CL_TARGET_X86_64 => "x86_64-unknown-linux-gnu"
+            .parse::<Triple>()
+            .unwrap_or_else(|_| Triple::host()),
+        CL_TARGET_AARCH64 => "aarch64-unknown-linux-gnu"
+            .parse::<Triple>()
+            .unwrap_or_else(|_| Triple::host()),
+        CL_TARGET_RISCV64 => "riscv64gc-unknown-linux-gnu"
+            .parse::<Triple>()
+            .unwrap_or_else(|_| Triple::host()),
         _ => Triple::host(),
     };
 
@@ -886,11 +890,7 @@ pub unsafe extern "C" fn rt_cranelift_new_aot_module(name_ptr: i64, name_len: i6
 /// Emit an object file from an AOT module.
 /// Returns true on success, false on failure.
 #[no_mangle]
-pub unsafe extern "C" fn rt_cranelift_emit_object(
-    module: i64,
-    path_ptr: i64,
-    path_len: i64,
-) -> bool {
+pub unsafe extern "C" fn rt_cranelift_emit_object(module: i64, path_ptr: i64, path_len: i64) -> bool {
     let path = string_from_ptr(path_ptr, path_len);
     if path.is_empty() {
         return false;
@@ -923,12 +923,7 @@ pub unsafe extern "C" fn rt_cranelift_emit_object(
 /// Define a function in an AOT module.
 /// Returns true on success.
 #[no_mangle]
-pub unsafe extern "C" fn rt_cranelift_aot_define_function(
-    module: i64,
-    name_ptr: i64,
-    name_len: i64,
-    ctx: i64,
-) -> bool {
+pub unsafe extern "C" fn rt_cranelift_aot_define_function(module: i64, name_ptr: i64, name_len: i64, ctx: i64) -> bool {
     let name = string_from_ptr(name_ptr, name_len);
     if name.is_empty() {
         return false;
@@ -948,11 +943,9 @@ pub unsafe extern "C" fn rt_cranelift_aot_define_function(
     // Declare and define the function in the AOT module
     let mut modules = AOT_MODULES.lock().unwrap();
     if let Some(mod_ctx) = modules.get_mut(&module) {
-        let func_id_result = mod_ctx.module.declare_function(
-            &name,
-            Linkage::Export,
-            &func_ctx.ctx.func.signature,
-        );
+        let func_id_result = mod_ctx
+            .module
+            .declare_function(&name, Linkage::Export, &func_ctx.ctx.func.signature);
 
         match func_id_result {
             Ok(id) => {
@@ -982,7 +975,10 @@ pub unsafe extern "C" fn rt_cranelift_aot_define_function(
 pub fn register_cranelift_ffi_functions(builder: &mut JITBuilder) {
     // Module management
     builder.symbol("rt_cranelift_new_module", rt_cranelift_new_module as *const u8);
-    builder.symbol("rt_cranelift_finalize_module", rt_cranelift_finalize_module as *const u8);
+    builder.symbol(
+        "rt_cranelift_finalize_module",
+        rt_cranelift_finalize_module as *const u8,
+    );
     builder.symbol("rt_cranelift_free_module", rt_cranelift_free_module as *const u8);
 
     // Signature building
@@ -993,13 +989,22 @@ pub fn register_cranelift_ffi_functions(builder: &mut JITBuilder) {
     // Function building
     builder.symbol("rt_cranelift_begin_function", rt_cranelift_begin_function as *const u8);
     builder.symbol("rt_cranelift_end_function", rt_cranelift_end_function as *const u8);
-    builder.symbol("rt_cranelift_define_function", rt_cranelift_define_function as *const u8);
+    builder.symbol(
+        "rt_cranelift_define_function",
+        rt_cranelift_define_function as *const u8,
+    );
 
     // Block management
     builder.symbol("rt_cranelift_create_block", rt_cranelift_create_block as *const u8);
-    builder.symbol("rt_cranelift_switch_to_block", rt_cranelift_switch_to_block as *const u8);
+    builder.symbol(
+        "rt_cranelift_switch_to_block",
+        rt_cranelift_switch_to_block as *const u8,
+    );
     builder.symbol("rt_cranelift_seal_block", rt_cranelift_seal_block as *const u8);
-    builder.symbol("rt_cranelift_seal_all_blocks", rt_cranelift_seal_all_blocks as *const u8);
+    builder.symbol(
+        "rt_cranelift_seal_all_blocks",
+        rt_cranelift_seal_all_blocks as *const u8,
+    );
 
     // Values
     builder.symbol("rt_cranelift_iconst", rt_cranelift_iconst as *const u8);
@@ -1061,17 +1066,29 @@ pub fn register_cranelift_ffi_functions(builder: &mut JITBuilder) {
     builder.symbol("rt_cranelift_bitcast", rt_cranelift_bitcast as *const u8);
 
     // Block parameters
-    builder.symbol("rt_cranelift_append_block_param", rt_cranelift_append_block_param as *const u8);
+    builder.symbol(
+        "rt_cranelift_append_block_param",
+        rt_cranelift_append_block_param as *const u8,
+    );
     builder.symbol("rt_cranelift_block_param", rt_cranelift_block_param as *const u8);
 
     // JIT execution
-    builder.symbol("rt_cranelift_get_function_ptr", rt_cranelift_get_function_ptr as *const u8);
-    builder.symbol("rt_cranelift_call_function_ptr", rt_cranelift_call_function_ptr as *const u8);
+    builder.symbol(
+        "rt_cranelift_get_function_ptr",
+        rt_cranelift_get_function_ptr as *const u8,
+    );
+    builder.symbol(
+        "rt_cranelift_call_function_ptr",
+        rt_cranelift_call_function_ptr as *const u8,
+    );
 
     // Object file generation / AOT compilation
     builder.symbol("rt_cranelift_new_aot_module", rt_cranelift_new_aot_module as *const u8);
     builder.symbol("rt_cranelift_emit_object", rt_cranelift_emit_object as *const u8);
-    builder.symbol("rt_cranelift_aot_define_function", rt_cranelift_aot_define_function as *const u8);
+    builder.symbol(
+        "rt_cranelift_aot_define_function",
+        rt_cranelift_aot_define_function as *const u8,
+    );
 }
 
 #[cfg(test)]

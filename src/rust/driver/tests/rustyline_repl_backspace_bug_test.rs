@@ -25,10 +25,8 @@ impl PtySession {
         let binary = std::env::var("CARGO_BIN_EXE_simple_old")
             .map(PathBuf::from)
             .unwrap_or_else(|_| {
-                let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
-                    .unwrap_or_else(|_| ".".to_string());
-                PathBuf::from(manifest_dir)
-                    .join("../../../target/debug/simple_old")
+                let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
+                PathBuf::from(manifest_dir).join("../../../target/debug/simple_old")
             });
         if !binary.exists() {
             return Err(format!("Binary not found at {:?}", binary).into());

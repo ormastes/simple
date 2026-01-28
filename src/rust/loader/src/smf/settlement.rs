@@ -89,6 +89,12 @@ pub struct SettlementHeader {
     /// Size of dependency table
     pub dep_table_size: u64,
 
+    // Template table (for generic constructs)
+    /// Offset to template table
+    pub template_table_offset: u64,
+    /// Size of template table
+    pub template_table_size: u64,
+
     // Debug and resources (optional, at end)
     /// Offset to debug info (0 if none)
     pub debug_offset: u64,
@@ -116,8 +122,8 @@ pub struct SettlementHeader {
     pub global_table_count: u32,
     /// Number of entries in type table
     pub type_table_count: u32,
-    /// Reserved
-    pub _reserved2: u32,
+    /// Number of entries in template table
+    pub template_table_count: u32,
 
     // Checksums for integrity
     /// CRC32 of code section
@@ -379,6 +385,113 @@ impl DependencyEntry {
     pub const SIZE: usize = std::mem::size_of::<Self>();
 }
 
+/// Template table for generic constructs.
+/// Stores serialized MIR/AST for generic functions, structs, enums, and traits.
+#[derive(Debug, Clone, Default)]
+pub struct TemplateTable {
+    /// Template entries for all generic constructs
+    pub entries: Vec<TemplateEntry>,
+}
+
+impl TemplateTable {
+    pub fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+        }
+    }
+
+    /// Add a template entry
+    pub fn add_entry(&mut self, entry: TemplateEntry) {
+        self.entries.push(entry);
+    }
+
+    /// Get template entry name from string table with bounds checking
+    pub fn entry_name<'a>(&self, entry: &TemplateEntry, string_table: &'a [u8]) -> &'a str {
+        let name_offset = entry.name_offset as usize;
+
+        // Bounds check on start offset
+        if name_offset >= string_table.len() {
+            return "";
+        }
+
+        // Find null terminator
+        let end = string_table
+            .get(name_offset..)
+            .and_then(|rest| rest.iter().position(|&b| b == 0).map(|i| name_offset + i))
+            .unwrap_or(string_table.len());
+
+        // Validate range before slicing
+        if end > string_table.len() {
+            return "";
+        }
+
+        // Convert to string
+        std::str::from_utf8(&string_table[name_offset..end]).unwrap_or("")
+    }
+
+    /// Find a template by name
+    /// Requires the string table to resolve name offsets
+    pub fn find_by_name(&self, name: &str, string_table: &[u8]) -> Option<&TemplateEntry> {
+        self.entries.iter().find(|e| {
+            self.entry_name(e, string_table) == name
+        })
+    }
+}
+
+/// Template entry for a single generic construct.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TemplateEntry {
+    /// Offset to template name in string table
+    pub name_offset: u32,
+    /// Generic kind: 0=Function, 1=Struct, 2=Enum, 3=Trait
+    pub kind: u8,
+    /// Number of generic type parameters
+    pub generic_param_count: u8,
+    /// Reserved for alignment
+    pub reserved: [u8; 2],
+    /// Offset to serialized MIR/AST in TemplateCode section
+    pub mir_offset: u64,
+    /// Size of serialized MIR/AST
+    pub mir_size: u32,
+    /// Offset to specializations list in TemplateMeta section
+    pub specializations_offset: u64,
+    /// Number of specializations
+    pub specializations_count: u32,
+    /// Reserved for future use
+    pub _reserved: u32,
+}
+
+impl TemplateEntry {
+    pub const SIZE: usize = std::mem::size_of::<Self>();
+
+    /// Template kind constants
+    pub const KIND_FUNCTION: u8 = 0;
+    pub const KIND_STRUCT: u8 = 1;
+    pub const KIND_ENUM: u8 = 2;
+    pub const KIND_TRAIT: u8 = 3;
+
+    /// Check if this is a function template
+    pub fn is_function(&self) -> bool {
+        self.kind == Self::KIND_FUNCTION
+    }
+
+    /// Check if this is a struct template
+    pub fn is_struct(&self) -> bool {
+        self.kind == Self::KIND_STRUCT
+    }
+
+    /// Check if this is an enum template
+    pub fn is_enum(&self) -> bool {
+        self.kind == Self::KIND_ENUM
+    }
+
+    /// Check if this is a trait template
+    pub fn is_trait(&self) -> bool {
+        self.kind == Self::KIND_TRAIT
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -426,5 +539,98 @@ mod tests {
         };
         assert!(entry.is_static());
         assert!(!entry.is_shared());
+    }
+
+    #[test]
+    fn test_template_table_string_lookup() {
+        // Create a string table with null-terminated strings
+        let mut string_table = Vec::new();
+        let offset1 = string_table.len() as u32;
+        string_table.extend_from_slice(b"my_function\0");
+        let offset2 = string_table.len() as u32;
+        string_table.extend_from_slice(b"MyStruct\0");
+        let offset3 = string_table.len() as u32;
+        string_table.extend_from_slice(b"MyEnum\0");
+
+        // Create template entries
+        let entry1 = TemplateEntry {
+            name_offset: offset1,
+            kind: TemplateEntry::KIND_FUNCTION,
+            generic_param_count: 2,
+            ..Default::default()
+        };
+        let entry2 = TemplateEntry {
+            name_offset: offset2,
+            kind: TemplateEntry::KIND_STRUCT,
+            generic_param_count: 1,
+            ..Default::default()
+        };
+        let entry3 = TemplateEntry {
+            name_offset: offset3,
+            kind: TemplateEntry::KIND_ENUM,
+            generic_param_count: 0,
+            ..Default::default()
+        };
+
+        // Create template table
+        let mut table = TemplateTable::new();
+        table.add_entry(entry1);
+        table.add_entry(entry2);
+        table.add_entry(entry3);
+
+        // Test entry_name
+        assert_eq!(table.entry_name(&entry1, &string_table), "my_function");
+        assert_eq!(table.entry_name(&entry2, &string_table), "MyStruct");
+        assert_eq!(table.entry_name(&entry3, &string_table), "MyEnum");
+
+        // Test find_by_name
+        let found1 = table.find_by_name("my_function", &string_table);
+        assert!(found1.is_some());
+        assert_eq!(found1.unwrap().kind, TemplateEntry::KIND_FUNCTION);
+        assert_eq!(found1.unwrap().generic_param_count, 2);
+
+        let found2 = table.find_by_name("MyStruct", &string_table);
+        assert!(found2.is_some());
+        assert_eq!(found2.unwrap().kind, TemplateEntry::KIND_STRUCT);
+        assert_eq!(found2.unwrap().generic_param_count, 1);
+
+        let found3 = table.find_by_name("MyEnum", &string_table);
+        assert!(found3.is_some());
+        assert_eq!(found3.unwrap().kind, TemplateEntry::KIND_ENUM);
+
+        // Test not found
+        let not_found = table.find_by_name("NonExistent", &string_table);
+        assert!(not_found.is_none());
+    }
+
+    #[test]
+    fn test_template_entry_kind_checks() {
+        let func_entry = TemplateEntry {
+            kind: TemplateEntry::KIND_FUNCTION,
+            ..Default::default()
+        };
+        assert!(func_entry.is_function());
+        assert!(!func_entry.is_struct());
+
+        let struct_entry = TemplateEntry {
+            kind: TemplateEntry::KIND_STRUCT,
+            ..Default::default()
+        };
+        assert!(struct_entry.is_struct());
+        assert!(!struct_entry.is_function());
+
+        let enum_entry = TemplateEntry {
+            kind: TemplateEntry::KIND_ENUM,
+            ..Default::default()
+        };
+        assert!(enum_entry.is_enum());
+        assert!(!enum_entry.is_trait());
+
+        let trait_entry = TemplateEntry {
+            kind: TemplateEntry::KIND_TRAIT,
+            ..Default::default()
+        };
+        assert!(trait_entry.is_trait());
+        assert!(!trait_entry.is_enum());
     }
 }

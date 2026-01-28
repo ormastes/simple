@@ -4,6 +4,11 @@
 import execution_mode.{ModeSet, string_to_mode}
 import mode_config.{ModeConfig, ProjectConfig, DirectoryConfig, FileConfig, FailureStrategy, string_to_failure_strategy, parse_mode_list}
 
+# FFI declarations for file operations
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_path_dirname(path: text) -> text
+
 ## SDN Configuration Parser
 # Parse .spec_config.sdn files for directory-level configuration
 
@@ -181,20 +186,14 @@ fn extract_attribute(line: text) -> Option<(text, text)>:
 
 # Discover project configuration from simple.toml
 fn discover_project_config(project_root: text) -> ProjectConfig:
-    @extern("runtime", "rt_file_read_text")
-    fn _rt_file_read_text(path_ptr: &u8, path_len: u64) -> text
-
-    @extern("runtime", "rt_file_exists")
-    fn _rt_file_exists(path_ptr: &u8, path_len: u64) -> bool
-
     val toml_path = "{project_root}/simple.toml"
 
     # Check if file exists
-    if not _rt_file_exists(toml_path.ptr(), toml_path.len()):
+    if not rt_file_exists(toml_path):
         return ProjectConfig.default()
 
     # Read and parse TOML
-    val content = _rt_file_read_text(toml_path.ptr(), toml_path.len())
+    val content = rt_file_read_text(toml_path)
     if content.is_empty():
         return ProjectConfig.default()
 
@@ -203,20 +202,14 @@ fn discover_project_config(project_root: text) -> ProjectConfig:
 
 # Discover directory configuration from .spec_config.sdn
 fn discover_directory_config(dir_path: text, parent: ModeConfig) -> ModeConfig:
-    @extern("runtime", "rt_file_read_text")
-    fn _rt_file_read_text(path_ptr: &u8, path_len: u64) -> text
-
-    @extern("runtime", "rt_file_exists")
-    fn _rt_file_exists(path_ptr: &u8, path_len: u64) -> bool
-
     val sdn_path = "{dir_path}/.spec_config.sdn"
 
     # Check if file exists
-    if not _rt_file_exists(sdn_path.ptr(), sdn_path.len()):
+    if not rt_file_exists(sdn_path):
         return parent
 
     # Read and parse SDN config
-    val content = _rt_file_read_text(sdn_path.ptr(), sdn_path.len())
+    val content = rt_file_read_text(sdn_path)
     if content.is_empty():
         return parent
 
@@ -238,18 +231,12 @@ fn discover_file_config(file_path: text, parent: ModeConfig) -> ModeConfig:
     Returns:
         ModeConfig with file-level overrides applied
     """
-    @extern("runtime", "rt_file_read_text")
-    fn _rt_file_read_text(path_ptr: &u8, path_len: u64) -> text
-
-    @extern("runtime", "rt_file_exists")
-    fn _rt_file_exists(path_ptr: &u8, path_len: u64) -> bool
-
     # Check if file exists
-    if not _rt_file_exists(file_path.ptr(), file_path.len()):
+    if not rt_file_exists(file_path):
         return parent
 
     # Read file content
-    val content = _rt_file_read_text(file_path.ptr(), file_path.len())
+    val content = rt_file_read_text(file_path)
     if content.is_empty():
         return parent
 
@@ -315,14 +302,8 @@ impl ConfigHierarchy:
 # Looks for simple.toml or .git directory
 fn extract_project_root(file_path: text) -> text:
     """Find project root by walking up directories looking for markers."""
-    @extern("runtime", "rt_path_dirname")
-    fn _rt_path_dirname(path_ptr: &u8, path_len: u64) -> text
-
-    @extern("runtime", "rt_file_exists")
-    fn _rt_file_exists(path_ptr: &u8, path_len: u64) -> bool
-
     # Start from the file's directory
-    var current_dir = _rt_path_dirname(file_path.ptr(), file_path.len())
+    var current_dir = rt_path_dirname(file_path)
     if current_dir.is_empty():
         current_dir = "."
 
@@ -331,16 +312,16 @@ fn extract_project_root(file_path: text) -> text:
     while iterations < 100:  # Safety limit
         # Check for simple.toml
         val toml_path = current_dir + "/simple.toml"
-        if _rt_file_exists(toml_path.ptr(), toml_path.len()):
+        if rt_file_exists(toml_path):
             return current_dir
 
         # Check for .git directory
         val git_path = current_dir + "/.git"
-        if _rt_file_exists(git_path.ptr(), git_path.len()):
+        if rt_file_exists(git_path):
             return current_dir
 
         # Go up one level
-        val parent = _rt_path_dirname(current_dir.ptr(), current_dir.len())
+        val parent = rt_path_dirname(current_dir)
 
         # Stop if we reached root (dirname returns empty or same path)
         if parent.is_empty() or parent == current_dir:
@@ -355,10 +336,7 @@ fn extract_project_root(file_path: text) -> text:
 # Extract directory from file path
 fn extract_directory(file_path: text) -> text:
     """Extract parent directory from file path."""
-    @extern("runtime", "rt_path_dirname")
-    fn _rt_path_dirname(path_ptr: &u8, path_len: u64) -> text
-
-    val dirname = _rt_path_dirname(file_path.ptr(), file_path.len())
+    val dirname = rt_path_dirname(file_path)
     if dirname.is_empty():
         return "."
     else:

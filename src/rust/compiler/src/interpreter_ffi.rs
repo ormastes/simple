@@ -131,6 +131,9 @@ pub fn init_interpreter_state(items: &[Node]) {
                         invariant: None,
                         macro_invocations: Vec::new(),
                         mixins: vec![],
+                        is_generic_template: s.is_generic_template,
+                        specialization_of: s.specialization_of.clone(),
+                        type_bindings: s.type_bindings.clone(),
                     },
                 );
             }

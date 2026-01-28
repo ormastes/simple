@@ -62,24 +62,17 @@ thread_local! {
 /// # Returns
 /// Unique ID for this resource registration
 #[no_mangle]
-pub extern "C" fn rt_resource_registry_register(
-    resource_name: *const c_char,
-    location: *const c_char,
-) -> i64 {
+pub extern "C" fn rt_resource_registry_register(resource_name: *const c_char, location: *const c_char) -> i64 {
     let resource_name = if resource_name.is_null() {
         "Unknown".to_string()
     } else {
-        unsafe { CStr::from_ptr(resource_name) }
-            .to_string_lossy()
-            .to_string()
+        unsafe { CStr::from_ptr(resource_name) }.to_string_lossy().to_string()
     };
 
     let location = if location.is_null() {
         "Unknown".to_string()
     } else {
-        unsafe { CStr::from_ptr(location) }
-            .to_string_lossy()
-            .to_string()
+        unsafe { CStr::from_ptr(location) }.to_string_lossy().to_string()
     };
 
     let id = NEXT_RESOURCE_ID.fetch_add(1, Ordering::SeqCst);
@@ -140,9 +133,7 @@ pub extern "C" fn rt_resource_registry_has_leaks() -> bool {
 /// Pointer to a C string containing the leak report, or NULL if no leaks
 #[no_mangle]
 pub extern "C" fn rt_resource_registry_leak_report() -> *mut c_char {
-    let entries: Vec<ResourceEntry> = RESOURCE_REGISTRY.with(|registry| {
-        registry.borrow().values().cloned().collect()
-    });
+    let entries: Vec<ResourceEntry> = RESOURCE_REGISTRY.with(|registry| registry.borrow().values().cloned().collect());
 
     if entries.is_empty() {
         return std::ptr::null_mut();
@@ -150,10 +141,7 @@ pub extern "C" fn rt_resource_registry_leak_report() -> *mut c_char {
 
     let mut report = format!("Resource Leaks Detected ({}):\n", entries.len());
     for entry in entries {
-        report.push_str(&format!(
-            "  - {} created at {}\n",
-            entry.resource_name, entry.location
-        ));
+        report.push_str(&format!("  - {} created at {}\n", entry.resource_name, entry.location));
     }
 
     match CString::new(report) {

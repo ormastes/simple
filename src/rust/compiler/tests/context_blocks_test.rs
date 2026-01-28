@@ -19,7 +19,7 @@ class Builder:
     fn __init__(self):
         self.count = 0
 
-    fn increment(self):
+    me increment():
         self.count = self.count + 1
         return self
 
@@ -48,7 +48,7 @@ class ConfigDSL:
     fn __init__(self):
         self.port = 0
 
-    fn set_port(self, p):
+    me set_port(p):
         self.port = p
         return self
 
@@ -75,11 +75,11 @@ class Calculator:
     fn __init__(self):
         self.value = 0
 
-    fn add(self, n):
+    me add(n):
         self.value = self.value + n
         return self
 
-    fn multiply(self, n):
+    me multiply(n):
         self.value = self.value * n
         return self
 
@@ -108,7 +108,7 @@ class Counter:
     fn __init__(self):
         self.value = 0
 
-    fn set(v):
+    me set(v):
         self.value = v
         return self
 

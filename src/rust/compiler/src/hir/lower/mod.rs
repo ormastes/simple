@@ -128,5 +128,23 @@ pub fn lower_with_context(module: &Module, current_file: &Path) -> LowerResult<H
     Lowerer::with_module_resolver(module_resolver, current_file.to_path_buf()).lower_module(module)
 }
 
+/// Convenience function to lower an AST module to HIR with lenient mode.
+/// Memory safety violations produce warnings instead of errors.
+/// Use this for bootstrap compilation and backwards compatibility.
+pub fn lower_lenient(module: &Module) -> LowerResult<HirModule> {
+    Lowerer::with_lenient_mode().lower_module(module)
+}
+
+/// Lower an AST module to HIR with lenient mode and module resolution support.
+/// Memory safety violations produce warnings instead of errors.
+/// Use this for bootstrap compilation and backwards compatibility.
+pub fn lower_with_context_lenient(module: &Module, current_file: &Path) -> LowerResult<HirModule> {
+    let module_resolver = ModuleResolver::single_file(current_file);
+    let mut lowerer = Lowerer::with_module_resolver(module_resolver, current_file.to_path_buf());
+    // Switch to lenient mode
+    lowerer.set_strict_mode(false);
+    lowerer.lower_module(module)
+}
+
 #[cfg(test)]
 mod tests;

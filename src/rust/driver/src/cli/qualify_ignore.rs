@@ -12,13 +12,13 @@
 //! - `simple qualify-ignore --status` - Show qualification status
 
 use crate::auth_db::{
-    add_authorized_email, authenticate_password, is_password_set, load_auth_config,
-    remove_authorized_email, set_password, OAuthProvider,
+    add_authorized_email, authenticate_password, is_password_set, load_auth_config, remove_authorized_email,
+    set_password, OAuthProvider,
 };
 use crate::oauth_flow::device_code_flow;
 use crate::signature::{
-    has_qualified_ignores, load_signature_from_db, save_signature_to_db, sign_qualified_ignores,
-    verify_signature, get_qualified_ignore_ids,
+    has_qualified_ignores, load_signature_from_db, save_signature_to_db, sign_qualified_ignores, verify_signature,
+    get_qualified_ignore_ids,
 };
 use crate::test_db::{load_test_db, save_test_db, TestDb, TestStatus};
 use std::path::PathBuf;
@@ -255,8 +255,8 @@ fn handle_set_password() -> Result<(), String> {
         return Err("Password must be at least 8 characters".to_string());
     }
 
-    let confirm = rpassword::prompt_password("Confirm password: ")
-        .map_err(|e| format!("Failed to read password: {}", e))?;
+    let confirm =
+        rpassword::prompt_password("Confirm password: ").map_err(|e| format!("Failed to read password: {}", e))?;
 
     if password != confirm {
         return Err("Passwords do not match".to_string());
@@ -311,11 +311,7 @@ fn handle_status(db_path: &PathBuf) -> Result<(), String> {
         .filter(|r| r.status == TestStatus::QualifiedIgnore)
         .count();
 
-    let ignored_count = db
-        .records
-        .values()
-        .filter(|r| r.status == TestStatus::Ignored)
-        .count();
+    let ignored_count = db.records.values().filter(|r| r.status == TestStatus::Ignored).count();
 
     println!("Qualified Ignore Status");
     println!("=======================");
@@ -377,8 +373,10 @@ fn handle_verify(db_path: &PathBuf) -> Result<(), String> {
             }
         }
         None => {
-            println!("No signature found for {} qualified_ignore records.",
-                get_qualified_ignore_ids(&db).len());
+            println!(
+                "No signature found for {} qualified_ignore records.",
+                get_qualified_ignore_ids(&db).len()
+            );
             println!("Run `simple qualify-ignore --all` to sign them.");
         }
     }
@@ -471,11 +469,7 @@ fn handle_qualify_all(db_path: &PathBuf, args: &QualifyIgnoreArgs) -> Result<(),
     Ok(())
 }
 
-fn handle_qualify_specific(
-    db_path: &PathBuf,
-    test_ids: &[String],
-    args: &QualifyIgnoreArgs,
-) -> Result<(), String> {
+fn handle_qualify_specific(db_path: &PathBuf, test_ids: &[String], args: &QualifyIgnoreArgs) -> Result<(), String> {
     let mut db = load_test_db(db_path)?;
 
     // Validate test IDs exist and are ignored
@@ -547,11 +541,7 @@ fn handle_qualify_specific(
     Ok(())
 }
 
-fn handle_unqualify(
-    db_path: &PathBuf,
-    test_ids: &[String],
-    args: &QualifyIgnoreArgs,
-) -> Result<(), String> {
+fn handle_unqualify(db_path: &PathBuf, test_ids: &[String], args: &QualifyIgnoreArgs) -> Result<(), String> {
     let mut db = load_test_db(db_path)?;
 
     // Validate test IDs exist and are qualified_ignore

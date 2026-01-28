@@ -74,6 +74,16 @@ impl Default for NativeBinaryOptions {
         // Add Simple runtime library path from cargo target directory
         if let Some(runtime_path) = Self::find_runtime_library_path() {
             library_paths.insert(0, runtime_path);
+        } else {
+            // Fallback: try current working directory + target/debug
+            let cwd_debug = std::env::current_dir()
+                .ok()
+                .map(|p| p.join("target/debug"));
+            if let Some(path) = cwd_debug {
+                if path.join("libsimple_runtime.a").exists() {
+                    library_paths.insert(0, path);
+                }
+            }
         }
 
         Self {
@@ -93,7 +103,7 @@ impl Default for NativeBinaryOptions {
                 "pthread".to_string(),
                 "dl".to_string(),
                 "m".to_string(),
-                "gcc_s".to_string(),  // Unwinding support
+                "gcc_s".to_string(), // Unwinding support
             ],
             #[cfg(not(target_os = "linux"))]
             libraries: vec!["c".to_string()],
@@ -196,7 +206,7 @@ impl NativeBinaryOptions {
                 // Check ../lib relative to executable
                 let lib_dir = exe_dir.join("../lib");
                 if lib_dir.join("libsimple_runtime.a").exists() {
-                    return Some(lib_dir.canonicalize().ok()?);
+                    return lib_dir.canonicalize().ok();
                 }
 
                 // Check same directory as executable
@@ -358,11 +368,28 @@ impl NativeBinaryBuilder {
         // Add user object file
         builder = builder.object(&obj_path);
 
-        // Add Simple runtime static library directly (not via -l)
+        // Add Simple runtime and compiler static libraries directly (not via -l)
         // This ensures static linking even when shared library exists
-        if let Some(runtime_dir) = NativeBinaryOptions::find_runtime_library_path() {
+        let runtime_dir = NativeBinaryOptions::find_runtime_library_path()
+            .or_else(|| {
+                // Fallback: try current working directory + target/debug
+                std::env::current_dir()
+                    .ok()
+                    .map(|p| p.join("target/debug"))
+                    .filter(|p| p.join("libsimple_runtime.a").exists())
+            });
+
+        if let Some(runtime_dir) = runtime_dir {
+            // Check if we need the compiler library (for self-hosting compiler)
+            let compiler_lib = runtime_dir.join("libsimple_compiler.a");
             let runtime_lib = runtime_dir.join("libsimple_runtime.a");
-            if runtime_lib.exists() {
+
+            if compiler_lib.exists() {
+                // Link compiler library ONLY (it already includes runtime as staticlib)
+                // The compiler staticlib bundles all dependencies including simple-runtime
+                builder = builder.object(&compiler_lib);
+            } else if runtime_lib.exists() {
+                // Only runtime library (normal programs without compiler features)
                 builder = builder.object(&runtime_lib);
             }
         }

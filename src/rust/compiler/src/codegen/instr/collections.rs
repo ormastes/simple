@@ -350,6 +350,7 @@ pub(super) fn compile_index_get<M: Module>(
     let coll_val = ctx.vreg_values[&collection];
     let idx_val = ctx.vreg_values[&index];
 
+    // Wrap index as RuntimeValue (integers need tagging)
     let value_int_id = ctx.runtime_funcs["rt_value_int"];
     let value_int_ref = ctx.module.declare_func_in_func(value_int_id, builder.func);
     let wrap_call = builder.ins().call(value_int_ref, &[idx_val]);
@@ -358,13 +359,10 @@ pub(super) fn compile_index_get<M: Module>(
     let call = builder.ins().call(index_get_ref, &[coll_val, wrapped_idx]);
     let runtime_value = builder.inst_results(call)[0];
 
-    // Unwrap RuntimeValue to raw i64 using rt_value_as_int
-    let value_as_int_id = ctx.runtime_funcs["rt_value_as_int"];
-    let value_as_int_ref = ctx.module.declare_func_in_func(value_as_int_id, builder.func);
-    let unwrap_call = builder.ins().call(value_as_int_ref, &[runtime_value]);
-    let result = builder.inst_results(unwrap_call)[0];
-
-    ctx.vreg_values.insert(dest, result);
+    // Return the RuntimeValue directly without unwrapping.
+    // The result could be any type (string, array, object, etc.) - not just integers.
+    // Type-specific unboxing is handled by MirInst::Unbox when needed.
+    ctx.vreg_values.insert(dest, runtime_value);
 }
 
 pub(super) fn compile_index_set<M: Module>(

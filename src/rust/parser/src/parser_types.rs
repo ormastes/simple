@@ -200,11 +200,11 @@ impl<'a> Parser<'a> {
                     lanes
                 }
                 _ => {
-                    return Err(ParseError::UnexpectedToken {
-                        expected: "lane count (2, 4, 8, or 16)".to_string(),
-                        found: format!("{:?}", self.current.kind),
-                        span: self.current.span.clone(),
-                    });
+                    return Err(ParseError::unexpected_token(
+                        "lane count (2, 4, 8, or 16)",
+                        format!("{:?}", self.current.kind),
+                        self.current.span,
+                    ));
                 }
             };
 
@@ -263,19 +263,19 @@ impl<'a> Parser<'a> {
                             keys.push(s.clone());
                             self.advance();
                         } else {
-                            return Err(ParseError::UnexpectedToken {
-                                expected: "string literal for const key".to_string(),
-                                found: format!("{:?}", self.current.kind),
-                                span: self.current.span.clone(),
-                            });
+                            return Err(ParseError::unexpected_token(
+                                "string literal for const key",
+                                format!("{:?}", self.current.kind),
+                                self.current.span,
+                            ));
                         }
                     }
                     _ => {
-                        return Err(ParseError::UnexpectedToken {
-                            expected: "string literal for const key".to_string(),
-                            found: format!("{:?}", self.current.kind),
-                            span: self.current.span.clone(),
-                        });
+                        return Err(ParseError::unexpected_token(
+                            "string literal for const key",
+                            format!("{:?}", self.current.kind),
+                            self.current.span,
+                        ));
                     }
                 }
                 if !self.check(&TokenKind::RParen) {
@@ -423,11 +423,11 @@ impl<'a> Parser<'a> {
             // Special handling for Constructor[T] or Constructor[T, (args)]
             if name == "Constructor" {
                 if args.is_empty() {
-                    return Err(ParseError::UnexpectedToken {
-                        expected: "type parameter for Constructor".to_string(),
-                        found: format!("{:?}", self.current.kind),
-                        span: self.current.span.clone(),
-                    });
+                    return Err(ParseError::unexpected_token(
+                        "type parameter for Constructor",
+                        format!("{:?}", self.current.kind),
+                        self.current.span,
+                    ));
                 }
                 let target = Box::new(args.remove(0));
                 // If there's a second arg, it should be a tuple of argument types

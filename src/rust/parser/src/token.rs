@@ -196,11 +196,11 @@ pub enum TokenKind {
     With,  // with (for context managers)
     Ghost, // ghost (verification-only code, erased at runtime)
     Macro,
-    Bang,   // ! (for macro invocations)
-    Vec,    // vec (for SIMD vector types)
-    Shared, // shared (for GPU shared memory)
-    Gpu,    // gpu (for GPU intrinsics namespace)
-    Bounds, // bounds (for @simd kernel bounds: clause)
+    Bang,    // ! (for macro invocations)
+    Vec,     // vec (for SIMD vector types)
+    Shared,  // shared (for GPU shared memory)
+    Gpu,     // gpu (for GPU intrinsics namespace)
+    Bounds,  // bounds (for @simd kernel bounds: clause)
     Dyn,     // dyn (for dynamic trait objects)
     Repr,    // repr (for unit representation constraints)
     Literal, // literal (for literal fn definitions)
@@ -305,17 +305,17 @@ pub enum TokenKind {
     TildeStarAssign,  // ~*= (suspension compound multiply)
     TildeSlashAssign, // ~/= (suspension compound divide)
 
-    Ampersand,    // &
-    Pipe,         // |
-    PipeForward,  // |>
-    DoublePipe,   // ||
-    DoubleAmp,    // &&
-    AndSuspend, // and~ (suspending boolean AND)
-    OrSuspend,  // or~ (suspending boolean OR)
-    Caret,      // ^
-    Tilde,      // ~
-    ShiftLeft,  // <<
-    ShiftRight, // >>
+    Ampersand,   // &
+    Pipe,        // |
+    PipeForward, // |>
+    DoublePipe,  // ||
+    DoubleAmp,   // &&
+    AndSuspend,  // and~ (suspending boolean AND)
+    OrSuspend,   // or~ (suspending boolean OR)
+    Caret,       // ^
+    Tilde,       // ~
+    ShiftLeft,   // <<
+    ShiftRight,  // >>
 
     Arrow,        // ->
     FatArrow,     // =>
@@ -342,10 +342,10 @@ pub enum TokenKind {
     QuestionDot,    // ?. (optional chaining)
     DotQuestion,    // .? (existence check - is present/non-empty)
     At,             // @
-    Hash,        // #
-    Dollar,      // $
-    Backslash,   // \
-    Underscore,  // _ (as pattern)
+    Hash,           // #
+    Dollar,         // $
+    Backslash,      // \
+    Underscore,     // _ (as pattern)
 
     // Indentation tokens
     Newline,

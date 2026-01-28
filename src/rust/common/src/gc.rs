@@ -151,12 +151,10 @@ impl MemoryTracker {
             }
 
             // Try to atomically update
-            match self.current_bytes.compare_exchange_weak(
-                current,
-                new_total,
-                Ordering::Relaxed,
-                Ordering::Relaxed,
-            ) {
+            match self
+                .current_bytes
+                .compare_exchange_weak(current, new_total, Ordering::Relaxed, Ordering::Relaxed)
+            {
                 Ok(_) => return Ok(()),
                 Err(_) => continue, // Retry
             }
@@ -169,12 +167,10 @@ impl MemoryTracker {
         loop {
             let current = self.current_bytes.load(Ordering::Relaxed);
             let new_value = current.saturating_sub(bytes);
-            match self.current_bytes.compare_exchange_weak(
-                current,
-                new_value,
-                Ordering::Relaxed,
-                Ordering::Relaxed,
-            ) {
+            match self
+                .current_bytes
+                .compare_exchange_weak(current, new_value, Ordering::Relaxed, Ordering::Relaxed)
+            {
                 Ok(_) => break,
                 Err(_) => continue,
             }

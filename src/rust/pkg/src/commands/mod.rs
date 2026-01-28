@@ -53,9 +53,10 @@ pub mod test_helpers {
         fs::create_dir_all(&dep_dir).unwrap();
         init_project(&dep_dir, Some(dep_name)).unwrap();
 
-        let mut manifest = Manifest::load(&temp_dir.join("simple.toml")).unwrap();
+        let manifest_path = crate::find_manifest(&temp_dir).unwrap();
+        let mut manifest = Manifest::load(&manifest_path).unwrap();
         manifest.add_dependency(dep_name, Dependency::path(&format!("./{}", dep_name)));
-        manifest.save(&temp_dir.join("simple.toml")).unwrap();
+        manifest.save(&manifest_path).unwrap();
 
         (temp_dir, dep_dir)
     }
@@ -74,10 +75,11 @@ pub mod test_helpers {
         init_project(&lib_a, Some("lib_a")).unwrap();
         init_project(&lib_b, Some("lib_b")).unwrap();
 
-        let mut manifest = Manifest::load(&temp_dir.join("simple.toml")).unwrap();
+        let manifest_path = crate::find_manifest(&temp_dir).unwrap();
+        let mut manifest = Manifest::load(&manifest_path).unwrap();
         manifest.add_dependency("lib_a", Dependency::path("./lib_a"));
         manifest.add_dependency("lib_b", Dependency::path("./lib_b"));
-        manifest.save(&temp_dir.join("simple.toml")).unwrap();
+        manifest.save(&manifest_path).unwrap();
 
         (temp_dir, lib_a, lib_b)
     }
@@ -98,14 +100,16 @@ pub mod test_helpers {
         let lib_a = temp_dir.join("lib_a");
         fs::create_dir_all(&lib_a).unwrap();
         init_project(&lib_a, Some("lib_a")).unwrap();
-        let mut lib_a_manifest = Manifest::load(&lib_a.join("simple.toml")).unwrap();
+        let lib_a_manifest_path = crate::find_manifest(&lib_a).unwrap();
+        let mut lib_a_manifest = Manifest::load(&lib_a_manifest_path).unwrap();
         lib_a_manifest.add_dependency("lib_b", Dependency::path("../lib_b"));
-        lib_a_manifest.save(&lib_a.join("simple.toml")).unwrap();
+        lib_a_manifest.save(&lib_a_manifest_path).unwrap();
 
         // Main project depends on lib_a
-        let mut manifest = Manifest::load(&temp_dir.join("simple.toml")).unwrap();
+        let manifest_path = crate::find_manifest(&temp_dir).unwrap();
+        let mut manifest = Manifest::load(&manifest_path).unwrap();
         manifest.add_dependency("lib_a", Dependency::path("./lib_a"));
-        manifest.save(&temp_dir.join("simple.toml")).unwrap();
+        manifest.save(&manifest_path).unwrap();
 
         (temp_dir, lib_a, lib_b)
     }

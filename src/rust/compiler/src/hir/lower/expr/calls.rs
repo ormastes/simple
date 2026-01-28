@@ -113,12 +113,8 @@ impl Lowerer {
                 } else {
                     Span::new(0, 0, 1, 1)
                 };
-                self.deprecation_warnings.add(DeprecationWarning::function(
-                    span,
-                    name.clone(),
-                    message,
-                    suggestion,
-                ));
+                self.deprecation_warnings
+                    .add(DeprecationWarning::function(span, name.clone(), message, suggestion));
             }
         }
 
@@ -268,6 +264,8 @@ impl Lowerer {
                 | "contains"
                 | "to_string"
                 | "to_int"
+                | "old"     // Contract expression: captures value at function entry
+                | "result" // Contract expression: accesses return value in postcondition
         );
         if !is_implicitly_pure && !self.is_pure_function(name) {
             return Err(LowerError::ImpureFunctionInContract {

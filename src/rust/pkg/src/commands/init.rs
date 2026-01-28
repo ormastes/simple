@@ -7,10 +7,10 @@ use crate::manifest::Manifest;
 
 /// Initialize a new Simple project in the given directory
 pub fn init_project(dir: &Path, name: Option<&str>) -> PkgResult<()> {
-    let manifest_path = dir.join("simple.toml");
+    let manifest_path = dir.join("simple.sdn");
 
-    // Check if already initialized
-    if manifest_path.exists() {
+    // Check if already initialized (check both .sdn and .toml)
+    if manifest_path.exists() || dir.join("simple.toml").exists() {
         return Err(PkgError::AlreadyInitialized(dir.display().to_string()));
     }
 
@@ -57,8 +57,8 @@ mod tests {
 
         init_project(&temp_dir, Some("myapp")).unwrap();
 
-        // Check manifest was created
-        let manifest_path = temp_dir.join("simple.toml");
+        // Check manifest was created (now creates .sdn)
+        let manifest_path = temp_dir.join("simple.sdn");
         assert!(manifest_path.exists());
 
         // Check manifest content
@@ -98,7 +98,7 @@ mod tests {
 
         init_project(&temp_dir, None).unwrap();
 
-        let manifest = Manifest::load(&temp_dir.join("simple.toml")).unwrap();
+        let manifest = Manifest::load(&crate::find_manifest(&temp_dir).unwrap()).unwrap();
         assert_eq!(manifest.package.name, "my-cool-project");
 
         // Cleanup

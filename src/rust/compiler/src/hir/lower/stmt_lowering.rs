@@ -59,6 +59,16 @@ impl Lowerer {
     fn lower_node(&mut self, node: &Node, ctx: &mut FunctionContext) -> LowerResult<Vec<HirStmt>> {
         match node {
             Node::Let(let_stmt) => {
+                // Check for tuple pattern destructuring: val (a, b) = expr
+                // Also handle Pattern::Typed wrapping a tuple pattern
+                let inner_pattern = match &let_stmt.pattern {
+                    Pattern::Typed { pattern, .. } => pattern.as_ref(),
+                    p => p,
+                };
+                if let Pattern::Tuple(patterns) = inner_pattern {
+                    return self.lower_tuple_destructuring(patterns, let_stmt, ctx);
+                }
+
                 // Lower the value first (if present) to get the actual TypeId
                 // This avoids the issue where infer_type and lower_expr create
                 // different TypeIds for the same type (e.g., array types)
@@ -239,7 +249,10 @@ impl Lowerer {
                 // Infer the element type from the iterable type
                 // Handles: Arrays [T] → T, Strings → u8, Tuples → common type
                 // Ranges and custom iterators fallback to i64
-                let element_ty = self.module.types.get_iterable_element(iterable.ty)
+                let element_ty = self
+                    .module
+                    .types
+                    .get_iterable_element(iterable.ty)
                     .unwrap_or(crate::hir::TypeId::I64);
 
                 // Add the loop variable to the context BEFORE lowering the body
@@ -321,6 +334,21 @@ impl Lowerer {
                 self.lower_match_stmt(match_stmt, ctx)
             }
 
+            Node::Pass(_) => {
+                // Pass is a no-op statement, returns empty statement list
+                Ok(vec![])
+            }
+
+            Node::Function(f) => {
+                // Nested function definition in statement position
+                // For now, skip with a warning - nested functions are not yet supported in native compilation
+                eprintln!(
+                    "[WARNING] Nested function '{}' is not yet supported in native compilation, skipping",
+                    f.name
+                );
+                Ok(vec![])
+            }
+
             _ => Err(LowerError::Unsupported(format!("{:?}", node))),
         }
     }
@@ -330,6 +358,11 @@ impl Lowerer {
         // Lower the subject expression once
         let subject_hir = self.lower_expr(&match_stmt.subject, ctx)?;
         let subject_ty = subject_hir.ty;
+        eprintln!(
+            "[DEBUG match_stmt] Subject type: {:?}, resolved: {:?}",
+            subject_ty,
+            self.module.types.get(subject_ty)
+        );
 
         // Create a temporary local to hold the subject value
         let subject_idx = ctx.locals.len();
@@ -389,8 +422,23 @@ impl Lowerer {
             condition
         };
 
-        // Lower the arm body
+        // Extract pattern bindings and add them to context
+        eprintln!("[DEBUG match_stmt] Processing arm pattern: {:?}", arm.pattern);
+        let bindings = self.extract_pattern_bindings(&arm.pattern, subject_ty);
+        eprintln!("[DEBUG match_stmt] Bindings: {:?}", bindings);
+        let saved_locals_len = ctx.locals.len();
+        for (name, ty) in &bindings {
+            ctx.add_local(name.clone(), *ty, Mutability::Immutable);
+        }
+
+        // Lower the arm body with bindings in scope
         let then_block = self.lower_block(&arm.body, ctx)?;
+
+        // Restore context (remove pattern bindings)
+        ctx.locals.truncate(saved_locals_len);
+        for (name, _) in &bindings {
+            ctx.local_map.remove(name);
+        }
 
         // Recursively build the else branch from remaining arms
         let else_block = self.lower_match_arms_stmt(subject_idx, subject_ty, remaining_arms, ctx)?;
@@ -399,11 +447,7 @@ impl Lowerer {
         let if_stmt = HirStmt::If {
             condition: final_condition,
             then_block,
-            else_block: if else_block.is_empty() {
-                None
-            } else {
-                Some(else_block)
-            },
+            else_block: if else_block.is_empty() { None } else { Some(else_block) },
         };
 
         Ok(vec![if_stmt])
@@ -435,8 +479,8 @@ impl Lowerer {
                 let lit_hir = self.lower_expr(lit_expr, ctx)?;
 
                 // Check if subject is a string type - use rt_string_eq for string comparison
-                let is_string = subject_ty == TypeId::STRING
-                    || matches!(self.module.types.get(subject_ty), Some(HirType::String));
+                let is_string =
+                    subject_ty == TypeId::STRING || matches!(self.module.types.get(subject_ty), Some(HirType::String));
 
                 if is_string {
                     // Use builtin string equality for string comparison
@@ -521,5 +565,79 @@ impl Lowerer {
                 ty: TypeId::BOOL,
             }),
         }
+    }
+
+    /// Lower a tuple destructuring let binding: val (a, b) = expr
+    ///
+    /// This is lowered to:
+    /// 1. Evaluate the tuple expression and store in a temp
+    /// 2. For each pattern element, create a let binding that indexes into the tuple
+    fn lower_tuple_destructuring(
+        &mut self,
+        patterns: &[Pattern],
+        let_stmt: &ast::LetStmt,
+        ctx: &mut FunctionContext,
+    ) -> LowerResult<Vec<HirStmt>> {
+        // Lower the value expression
+        let value = if let Some(v) = &let_stmt.value {
+            self.lower_expr(v, ctx)?
+        } else {
+            return Err(LowerError::CannotInferType);
+        };
+
+        let tuple_ty = value.ty;
+
+        // Create a temp variable to hold the tuple value
+        let temp_idx = ctx.add_local("__tuple_temp".to_string(), tuple_ty, Mutability::Immutable);
+
+        let mut stmts = vec![HirStmt::Let {
+            local_index: temp_idx,
+            ty: tuple_ty,
+            value: Some(value),
+        }];
+
+        // Get tuple element types if available
+        let element_types = if let Some(HirType::Tuple(types)) = self.module.types.get(tuple_ty) {
+            Some(types.clone())
+        } else {
+            None
+        };
+
+        // For each pattern element, create a let binding
+        for (i, pattern) in patterns.iter().enumerate() {
+            // Get the element type (if known) or use ANY
+            let elem_ty = element_types
+                .as_ref()
+                .and_then(|types| types.get(i).copied())
+                .unwrap_or(TypeId::ANY);
+
+            // Create an index expression: __tuple_temp[i]
+            let index_expr = HirExpr {
+                kind: HirExprKind::Index {
+                    receiver: Box::new(HirExpr {
+                        kind: HirExprKind::Local(temp_idx),
+                        ty: tuple_ty,
+                    }),
+                    index: Box::new(HirExpr {
+                        kind: HirExprKind::Integer(i as i64),
+                        ty: TypeId::I64,
+                    }),
+                },
+                ty: elem_ty,
+            };
+
+            // Extract variable name from pattern
+            if let Some(name) = Self::extract_pattern_name(pattern) {
+                let local_idx = ctx.add_local(name, elem_ty, let_stmt.mutability);
+                stmts.push(HirStmt::Let {
+                    local_index: local_idx,
+                    ty: elem_ty,
+                    value: Some(index_expr),
+                });
+            }
+            // Wildcards are ignored
+        }
+
+        Ok(stmts)
     }
 }

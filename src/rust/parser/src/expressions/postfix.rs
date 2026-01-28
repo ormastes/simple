@@ -129,9 +129,7 @@ impl<'a> Parser<'a> {
                                 end: None,
                                 step,
                             };
-                        } else if self.check(&TokenKind::Colon)
-                            || matches!(&self.current.kind, TokenKind::Symbol(_))
-                        {
+                        } else if self.check(&TokenKind::Colon) || matches!(&self.current.kind, TokenKind::Symbol(_)) {
                             // It's a slice
                             // Handle Symbol tokens as :identifier (e.g., arr[start:end] where :end is Symbol("end"))
                             // Note: Symbol tokens like :self may be followed by postfix operators (e.g., :self.pos)

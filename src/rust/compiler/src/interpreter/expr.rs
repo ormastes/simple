@@ -59,7 +59,7 @@ fn call_closure_no_args(
         } => {
             let mut captured_clone = captured.clone();
             exec_lambda(
-                &params,  // params is already Vec<String>
+                &params, // params is already Vec<String>
                 &body,
                 &[],
                 env,
@@ -70,9 +70,7 @@ fn call_closure_no_args(
                 impl_methods,
             )
         }
-        Value::Function {
-            def, captured_env, ..
-        } => {
+        Value::Function { def, captured_env, .. } => {
             let mut captured_env_clone = captured_env.clone();
             exec_function_with_captured_env(
                 &def,
@@ -428,7 +426,10 @@ pub(crate) fn evaluate_expr(
             }
         }
         // Safe unwrap with lazy default: expr unwrap else: closure
-        Expr::UnwrapElse { expr: inner, fallback_fn } => {
+        Expr::UnwrapElse {
+            expr: inner,
+            fallback_fn,
+        } => {
             let val = evaluate_expr(inner, env, functions, classes, enums, impl_methods)?;
             if let Some(unwrapped) = try_unwrap_option_or_result(&val) {
                 Ok(unwrapped)
@@ -487,7 +488,16 @@ pub(crate) fn evaluate_expr(
                 let temp_var_name = "__optional_chain_temp__".to_string();
                 env.insert(temp_var_name.clone(), unwrapped);
                 let temp_receiver = Box::new(Expr::Identifier(temp_var_name.clone()));
-                let result = evaluate_method_call(&temp_receiver, method, args, env, functions, classes, enums, impl_methods)?;
+                let result = evaluate_method_call(
+                    &temp_receiver,
+                    method,
+                    args,
+                    env,
+                    functions,
+                    classes,
+                    enums,
+                    impl_methods,
+                )?;
                 env.remove(&temp_var_name);
                 // Wrap result in Some
                 Ok(Value::Enum {
@@ -505,7 +515,11 @@ pub(crate) fn evaluate_expr(
             }
         }
         // Safe cast with default: expr as Type or: default
-        Expr::CastOr { expr: inner, target_type, default } => {
+        Expr::CastOr {
+            expr: inner,
+            target_type,
+            default,
+        } => {
             let val = evaluate_expr(inner, env, functions, classes, enums, impl_methods)?;
             match casting::cast_value(val, target_type) {
                 Ok(cast_val) => Ok(cast_val),
@@ -513,7 +527,11 @@ pub(crate) fn evaluate_expr(
             }
         }
         // Safe cast with lazy default: expr as Type else: closure
-        Expr::CastElse { expr: inner, target_type, fallback_fn } => {
+        Expr::CastElse {
+            expr: inner,
+            target_type,
+            fallback_fn,
+        } => {
             let val = evaluate_expr(inner, env, functions, classes, enums, impl_methods)?;
             match casting::cast_value(val, target_type) {
                 Ok(cast_val) => Ok(cast_val),
@@ -524,7 +542,10 @@ pub(crate) fn evaluate_expr(
             }
         }
         // Safe cast or early return: expr as Type or_return:
-        Expr::CastOrReturn { expr: inner, target_type } => {
+        Expr::CastOrReturn {
+            expr: inner,
+            target_type,
+        } => {
             let val = evaluate_expr(inner, env, functions, classes, enums, impl_methods)?;
             match casting::cast_value(val, target_type) {
                 Ok(cast_val) => Ok(cast_val),

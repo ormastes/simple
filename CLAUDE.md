@@ -381,11 +381,28 @@ See `/coding` skill for full details.
 - 📊 **Status**: See `doc/report/todo_status_2026-01-16.md`
 
 ### Config Files and Data Format
-- ✅ **USE SDN format** for all config/data files: `*.sdn`
-- ❌ **NEVER use JSON** - use SDN table format instead
-- ❌ **NEVER use TOML/YAML** - use SDN table format instead
-- 📖 **SDN Parser**: Use `simple_sdn::parse_document()` from `simple_sdn` crate
-- 📊 **Examples**: `doc/todo/todo_db.sdn`, `doc/feature/feature_db.sdn`
+- ✅ **USE SDN format** for all Simple config/data files: `*.sdn`
+  - **Package manifests**: `simple.sdn` (preferred) or `simple.toml` (legacy support)
+  - **Data/tracking files**: `*.sdn` only
+  - **Test configuration**: `simple.test.sdn`
+- ❌ **NEVER use JSON** for Simple configs - use SDN format instead
+- ❌ **NEVER use YAML** for Simple configs - use SDN format instead
+- ℹ️ **Rust tooling**: `Cargo.toml` is acceptable (Rust standard, not Simple config)
+- 📖 **SDN Parser**: Use `simple_sdn::parse()` from `simple_sdn` crate
+- 📊 **Examples**: `doc/todo/todo_db.sdn`, `doc/feature/feature_db.sdn`, `simple/simple.sdn`
+
+**Good Example (SDN manifest):**
+```sdn
+package:
+  name: my-project
+  version: 1.0.0
+
+dependencies:
+  http: 2.0
+  json:
+    version: 1.5
+    features: [serde]
+```
 
 **Good Example (SDN table format):**
 ```sdn
@@ -394,14 +411,20 @@ todos |id, keyword, area, priority, description, file, line|
     1, FIXME, runtime, P0, "Fix leak", gc.rs, 123
 ```
 
-**Bad Example (JSON - DO NOT USE):**
-```json
-{
-  "todos": [
-    {"id": "0", "keyword": "TODO", ...}
-  ]
-}
+**Legacy Support (will be phased out):**
+```toml
+# simple.toml - Legacy format (still supported, but prefer .sdn)
+[package]
+name = "my-project"
+version = "1.0.0"
 ```
+
+**Migration Status:**
+- ✅ SDN parser implemented in `src/rust/sdn/`
+- ✅ Package manifest supports both `.sdn` (preferred) and `.toml` (legacy)
+- ✅ Data tracking files use SDN exclusively
+- 🔄 Existing `.toml` manifests will be migrated to `.sdn` over time
+- 📝 Use `simple init` to create new projects with `.sdn` manifests
 
 ### Report
 - **DO NOT ADD REPORT TO JJ** unless request it. See `doc/report/` for more details.

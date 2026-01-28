@@ -90,7 +90,9 @@ pub fn runtime_to_value(rv: RuntimeValue) -> Value {
         }
         rt_tags::TAG_HEAP => {
             // Decode heap objects
-            use simple_runtime::value::{rt_array_get, rt_array_len, rt_string_data, rt_string_len, rt_tuple_get, rt_tuple_len, HeapObjectType};
+            use simple_runtime::value::{
+                rt_array_get, rt_array_len, rt_string_data, rt_string_len, rt_tuple_get, rt_tuple_len, HeapObjectType,
+            };
 
             let ptr = rv.as_heap_ptr();
             if ptr.is_null() {

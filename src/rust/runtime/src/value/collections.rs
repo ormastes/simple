@@ -233,10 +233,10 @@ pub extern "C" fn rt_array_push_grow(array: RuntimeValue, value: RuntimeValue) -
             let new_capacity = if old_capacity == 0 { 8 } else { old_capacity * 2 };
 
             // Calculate sizes
-            let old_size = std::mem::size_of::<RuntimeArray>()
-                + old_capacity as usize * std::mem::size_of::<RuntimeValue>();
-            let new_size = std::mem::size_of::<RuntimeArray>()
-                + new_capacity as usize * std::mem::size_of::<RuntimeValue>();
+            let old_size =
+                std::mem::size_of::<RuntimeArray>() + old_capacity as usize * std::mem::size_of::<RuntimeValue>();
+            let new_size =
+                std::mem::size_of::<RuntimeArray>() + new_capacity as usize * std::mem::size_of::<RuntimeValue>();
 
             let old_layout = std::alloc::Layout::from_size_align(old_size, 8).unwrap();
             let new_layout = std::alloc::Layout::from_size_align(new_size, 8).unwrap();
@@ -522,7 +522,11 @@ pub extern "C" fn rt_string_starts_with(string: RuntimeValue, prefix: RuntimeVal
     unsafe {
         let str_slice = std::slice::from_raw_parts(str_data, prefix_len as usize);
         let prefix_slice = std::slice::from_raw_parts(prefix_data, prefix_len as usize);
-        if str_slice == prefix_slice { 1 } else { 0 }
+        if str_slice == prefix_slice {
+            1
+        } else {
+            0
+        }
     }
 }
 
@@ -556,7 +560,11 @@ pub extern "C" fn rt_string_ends_with(string: RuntimeValue, suffix: RuntimeValue
         let start_offset = (str_len - suffix_len) as usize;
         let str_slice = std::slice::from_raw_parts(str_data.add(start_offset), suffix_len as usize);
         let suffix_slice = std::slice::from_raw_parts(suffix_data, suffix_len as usize);
-        if str_slice == suffix_slice { 1 } else { 0 }
+        if str_slice == suffix_slice {
+            1
+        } else {
+            0
+        }
     }
 }
 
@@ -589,7 +597,11 @@ pub extern "C" fn rt_string_eq(string1: RuntimeValue, string2: RuntimeValue) -> 
     unsafe {
         let slice1 = std::slice::from_raw_parts(data1, len1 as usize);
         let slice2 = std::slice::from_raw_parts(data2, len2 as usize);
-        if slice1 == slice2 { 1 } else { 0 }
+        if slice1 == slice2 {
+            1
+        } else {
+            0
+        }
     }
 }
 
@@ -820,10 +832,13 @@ pub extern "C" fn rt_array_sort(array: RuntimeValue) -> bool {
             // Compare by type first, then by value
             match (a.is_int(), b.is_int(), a.is_float(), b.is_float()) {
                 (true, true, _, _) => a.as_int().cmp(&b.as_int()),
-                (_, _, true, true) => a.as_float().partial_cmp(&b.as_float()).unwrap_or(std::cmp::Ordering::Equal),
+                (_, _, true, true) => a
+                    .as_float()
+                    .partial_cmp(&b.as_float())
+                    .unwrap_or(std::cmp::Ordering::Equal),
                 (true, false, _, true) => std::cmp::Ordering::Less, // int < float
                 (false, true, true, _) => std::cmp::Ordering::Greater, // float > int
-                _ => std::cmp::Ordering::Equal, // Other types: keep order
+                _ => std::cmp::Ordering::Equal,                     // Other types: keep order
             }
         });
         true
@@ -1267,7 +1282,11 @@ pub extern "C" fn rt_array_join(array: RuntimeValue, separator: RuntimeValue) ->
 
         // Get separator string
         let sep_len = rt_string_len(separator);
-        let sep_data = if sep_len > 0 { rt_string_data(separator) } else { std::ptr::null() };
+        let sep_data = if sep_len > 0 {
+            rt_string_data(separator)
+        } else {
+            std::ptr::null()
+        };
 
         // Build result by concatenating
         let mut result = rt_value_to_string(slice[0]);
@@ -1378,9 +1397,17 @@ pub extern "C" fn rt_array_range(start: i64, end: i64, step: i64) -> RuntimeValu
     }
 
     let count = if step > 0 {
-        if end <= start { 0 } else { ((end - start + step - 1) / step) as u64 }
+        if end <= start {
+            0
+        } else {
+            ((end - start + step - 1) / step) as u64
+        }
     } else {
-        if start <= end { 0 } else { ((start - end - step - 1) / (-step)) as u64 }
+        if start <= end {
+            0
+        } else {
+            ((start - end - step - 1) / (-step)) as u64
+        }
     };
 
     let result = rt_array_new(count);

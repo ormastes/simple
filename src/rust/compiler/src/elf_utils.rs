@@ -374,6 +374,26 @@ fn resolve_runtime_symbol(name: &str) -> Option<usize> {
         "doctest_path_has_extension" => simple_runtime::doctest_path_has_extension as usize,
         "doctest_path_contains" => simple_runtime::doctest_path_contains as usize,
 
+        // Cranelift FFI operations (for self-hosting compiler)
+        "rt_cranelift_module_new" => crate::codegen::cranelift_ffi::rt_cranelift_module_new as usize,
+        "rt_cranelift_new_module" => crate::codegen::cranelift_ffi::rt_cranelift_new_module as usize,
+        "rt_cranelift_finalize_module" => crate::codegen::cranelift_ffi::rt_cranelift_finalize_module as usize,
+        "rt_cranelift_free_module" => crate::codegen::cranelift_ffi::rt_cranelift_free_module as usize,
+        "rt_cranelift_new_signature" => crate::codegen::cranelift_ffi::rt_cranelift_new_signature as usize,
+        "rt_cranelift_sig_add_param" => crate::codegen::cranelift_ffi::rt_cranelift_sig_add_param as usize,
+        "rt_cranelift_sig_set_return" => crate::codegen::cranelift_ffi::rt_cranelift_sig_set_return as usize,
+        "rt_cranelift_begin_function" => crate::codegen::cranelift_ffi::rt_cranelift_begin_function as usize,
+        "rt_cranelift_end_function" => crate::codegen::cranelift_ffi::rt_cranelift_end_function as usize,
+        "rt_cranelift_define_function" => crate::codegen::cranelift_ffi::rt_cranelift_define_function as usize,
+        "rt_cranelift_create_block" => crate::codegen::cranelift_ffi::rt_cranelift_create_block as usize,
+        "rt_cranelift_switch_to_block" => crate::codegen::cranelift_ffi::rt_cranelift_switch_to_block as usize,
+        "rt_cranelift_seal_block" => crate::codegen::cranelift_ffi::rt_cranelift_seal_block as usize,
+        "rt_cranelift_seal_all_blocks" => crate::codegen::cranelift_ffi::rt_cranelift_seal_all_blocks as usize,
+        "rt_cranelift_iconst" => crate::codegen::cranelift_ffi::rt_cranelift_iconst as usize,
+        "rt_cranelift_return" => crate::codegen::cranelift_ffi::rt_cranelift_return as usize,
+        "rt_cranelift_return_void" => crate::codegen::cranelift_ffi::rt_cranelift_return_void as usize,
+        "rt_cranelift_emit_object" => crate::codegen::cranelift_ffi::rt_cranelift_emit_object as usize,
+
         _ => return None,
     };
 

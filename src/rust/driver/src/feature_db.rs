@@ -96,7 +96,20 @@ impl Record for FeatureRecord {
     }
 
     fn field_names() -> &'static [&'static str] {
-        &["id", "category", "name", "description", "spec", "interpreter", "jit", "smf_cranelift", "smf_llvm", "platforms", "status", "valid"]
+        &[
+            "id",
+            "category",
+            "name",
+            "description",
+            "spec",
+            "interpreter",
+            "jit",
+            "smf_cranelift",
+            "smf_llvm",
+            "platforms",
+            "status",
+            "valid",
+        ]
     }
 
     fn from_sdn_row(row: &[String]) -> Result<Self, String> {

@@ -32,7 +32,10 @@ impl Lowerer {
     /// # Returns
     /// Ok(()) if successful, Err if module can't be loaded or parsed
     pub(super) fn load_imported_types(&mut self, module_path: &ModulePath, target: &ImportTarget) -> LowerResult<()> {
-        eprintln!("[DEBUG import_loader] load_imported_types called for path: {:?}, target: {:?}", module_path, target);
+        eprintln!(
+            "[DEBUG import_loader] load_imported_types called for path: {:?}, target: {:?}",
+            module_path, target
+        );
 
         // Only proceed if we have a module resolver
         let (resolver, current_file) = match (&self.module_resolver, &self.current_file) {
@@ -47,12 +50,10 @@ impl Lowerer {
 
         // Resolve module path to filesystem location
         eprintln!("[DEBUG import_loader] Resolving path from file: {:?}", current_file);
-        let resolved = resolver
-            .resolve(module_path, current_file)
-            .map_err(|e| {
-                eprintln!("[DEBUG import_loader] Resolution failed: {:?}", e);
-                LowerError::ModuleResolution(format!("{:?}", e))
-            })?;
+        let resolved = resolver.resolve(module_path, current_file).map_err(|e| {
+            eprintln!("[DEBUG import_loader] Resolution failed: {:?}", e);
+            LowerError::ModuleResolution(format!("{:?}", e))
+        })?;
         eprintln!("[DEBUG import_loader] Resolved to: {:?}", resolved.path);
 
         // Prevent circular imports
@@ -63,7 +64,7 @@ impl Lowerer {
 
         // Read and parse the module file
         let source = std::fs::read_to_string(&resolved.path)
-            .map_err(|e| LowerError::ModuleResolution(format!("Failed to read module file: {}", e)))?;
+            .map_err(|e| LowerError::ModuleResolution(format!("Failed to read module file {:?}: {}", resolved.path, e)))?;
 
         let mut parser = simple_parser::Parser::new(&source);
         let imported_module = parser
@@ -76,7 +77,11 @@ impl Lowerer {
                 Node::Class(class_def) => {
                     if self.should_import_symbol(&class_def.name, target) {
                         // Register class type using existing type registration
-                        self.register_class(class_def)?;
+                        let class_type_id = self.register_class(class_def)?;
+
+                        // Also register the class constructor as a function in globals
+                        // This allows using the class name as a constructor: MyClass(...)
+                        self.globals.insert(class_def.name.clone(), class_type_id);
                     }
                 }
                 Node::Enum(enum_def) => {
@@ -100,6 +105,9 @@ impl Lowerer {
                             HirType::Enum {
                                 name: enum_def.name.clone(),
                                 variants,
+                                generic_params: enum_def.generic_params.clone(),
+                                is_generic_template: enum_def.is_generic_template,
+                                type_bindings: std::collections::HashMap::new(),
                             },
                         );
                     }
@@ -107,11 +115,20 @@ impl Lowerer {
                 Node::Struct(struct_def) => {
                     if self.should_import_symbol(&struct_def.name, target) {
                         // Register struct type using existing type registration
-                        self.register_struct(struct_def)?;
+                        let struct_type_id = self.register_struct(struct_def)?;
+
+                        // Also register the struct constructor as a function in globals
+                        // This allows using the struct name as a constructor: BlockExample(...)
+                        eprintln!("[DEBUG import_loader] Registering struct constructor: '{}' with TypeId {:?}",
+                                  struct_def.name, struct_type_id);
+                        self.globals.insert(struct_def.name.clone(), struct_type_id);
                     }
                 }
                 Node::Function(func_def) => {
-                    eprintln!("[DEBUG import_loader] Found function: '{}', checking if should import", func_def.name);
+                    eprintln!(
+                        "[DEBUG import_loader] Found function: '{}', checking if should import",
+                        func_def.name
+                    );
                     if self.should_import_symbol(&func_def.name, target) {
                         eprintln!("[DEBUG import_loader] Importing function: '{}'", func_def.name);
                         // Register function in globals
@@ -122,7 +139,10 @@ impl Lowerer {
                             self.pure_functions.insert(func_def.name.clone());
                         }
                     } else {
-                        eprintln!("[DEBUG import_loader] Skipping function: '{}' (not matching target)", func_def.name);
+                        eprintln!(
+                            "[DEBUG import_loader] Skipping function: '{}' (not matching target)",
+                            func_def.name
+                        );
                     }
                 }
                 Node::TypeAlias(type_alias) => {
@@ -174,6 +194,37 @@ impl Lowerer {
                                 TypeId::ANY
                             };
                             self.globals.insert(n, ty);
+                        }
+                    }
+                }
+                Node::Impl(impl_block) => {
+                    // Handle impl blocks - register methods as functions
+                    // Extract the type name from the impl block's target
+                    let type_name = match &impl_block.target_type {
+                        simple_parser::ast::Type::Simple(name) => Some(name.clone()),
+                        simple_parser::ast::Type::Generic { name, .. } => Some(name.clone()),
+                        _ => None,
+                    };
+
+                    if let Some(ref type_name) = type_name {
+                        // Check if this type is being imported
+                        if self.should_import_symbol(type_name, target) {
+                            eprintln!("[DEBUG import_loader] Processing impl block for type: '{}'", type_name);
+
+                            // Register all methods from the impl block
+                            for method in &impl_block.methods {
+                                eprintln!("[DEBUG import_loader] Registering method: '{}.{}'", type_name, method.name);
+
+                                // Register method in globals (methods are functions)
+                                let ret_ty = self.resolve_type_opt(&method.return_type)?;
+                                let method_full_name = format!("{}.{}", type_name, method.name);
+                                self.globals.insert(method_full_name, ret_ty);
+
+                                // Track pure functions
+                                if method.is_pure() {
+                                    self.pure_functions.insert(format!("{}.{}", type_name, method.name));
+                                }
+                            }
                         }
                     }
                 }

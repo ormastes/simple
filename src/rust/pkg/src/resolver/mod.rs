@@ -44,8 +44,7 @@ pub fn resolve(manifest: &Manifest, project_dir: &Path) -> PkgResult<DependencyG
 
         // If path dependency, load its manifest for transitive deps
         if let ResolvedSource::Path { absolute, .. } = &resolved.source {
-            let dep_manifest_path = absolute.join("simple.toml");
-            if dep_manifest_path.exists() {
+            if let Some(dep_manifest_path) = crate::find_manifest(absolute) {
                 if let Ok(dep_manifest) = Manifest::load(&dep_manifest_path) {
                     for (sub_name, sub_dep) in &dep_manifest.dependencies {
                         if !visited.contains(sub_name) {
@@ -93,15 +92,13 @@ fn resolve_single(name: &str, dep: &Dependency, context_dir: &Path) -> PkgResult
                     ))
                 })?;
 
-                // Validate path dependency has simple.toml
-                let manifest_path = abs_path.join("simple.toml");
-                if !manifest_path.exists() {
-                    return Err(PkgError::ManifestNotFound(format!(
-                        "Path dependency '{}' missing simple.toml at {}",
+                // Validate path dependency has simple.sdn or simple.toml
+                let manifest_path = crate::find_manifest(&abs_path)
+                    .ok_or_else(|| PkgError::ManifestNotFound(format!(
+                        "Path dependency '{}' missing simple.sdn or simple.toml at {}",
                         name,
                         abs_path.display()
-                    )));
-                }
+                    )))?;
 
                 // Load dependency manifest to get version and sub-deps
                 let dep_manifest = Manifest::load(&manifest_path)?;

@@ -61,7 +61,11 @@ pub extern "C" fn rt_cli_get_args() -> RuntimeValue {
 /// Check if a file exists (cli version)
 #[no_mangle]
 pub extern "C" fn rt_cli_file_exists(path: RuntimeValue) -> u8 {
-    if file_exists_impl(path) { 1 } else { 0 }
+    if file_exists_impl(path) {
+        1
+    } else {
+        0
+    }
 }
 
 /// Helper: check if a file exists
@@ -172,11 +176,7 @@ fn find_simple_old() -> Option<std::path::PathBuf> {
     }
 
     // 3. Check common development paths
-    let dev_paths = [
-        "target/debug/simple_old",
-        "target/release/simple_old",
-        "./simple_old",
-    ];
+    let dev_paths = ["target/debug/simple_old", "target/release/simple_old", "./simple_old"];
     for path in dev_paths {
         let p = std::path::PathBuf::from(path);
         if p.exists() {
@@ -240,12 +240,7 @@ pub extern "C" fn rt_cli_run_code(_code: RuntimeValue, _gc_log: u8, _gc_off: u8)
 }
 
 #[no_mangle]
-pub extern "C" fn rt_cli_run_file(
-    _path: RuntimeValue,
-    _args: RuntimeValue,
-    _gc_log: u8,
-    _gc_off: u8,
-) -> i64 {
+pub extern "C" fn rt_cli_run_file(_path: RuntimeValue, _args: RuntimeValue, _gc_log: u8, _gc_off: u8) -> i64 {
     not_implemented("rt_cli_run_file")
 }
 
@@ -370,7 +365,21 @@ pub extern "C" fn rt_cli_run_i18n(_args: RuntimeValue) -> i64 {
 }
 
 #[no_mangle]
-pub extern "C" fn rt_context_generate(_path: RuntimeValue, _target: RuntimeValue, _format: RuntimeValue) -> RuntimeValue {
+pub extern "C" fn rt_cli_run_lex(_args: RuntimeValue) -> i64 {
+    delegate_to_simple_old("lex", _args)
+}
+
+#[no_mangle]
+pub extern "C" fn rt_cli_run_brief(_args: RuntimeValue) -> i64 {
+    delegate_to_simple_old("brief", _args)
+}
+
+#[no_mangle]
+pub extern "C" fn rt_context_generate(
+    _path: RuntimeValue,
+    _target: RuntimeValue,
+    _format: RuntimeValue,
+) -> RuntimeValue {
     eprintln!("error: rt_context_generate is not available in standalone mode");
     rt_string_new("".as_ptr(), 0)
 }

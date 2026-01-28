@@ -281,12 +281,7 @@ pub unsafe extern "C" fn rt_file_write_bytes(
 /// Move file from source to destination
 /// Unlike rename, this works across filesystems by copying then deleting
 #[no_mangle]
-pub unsafe extern "C" fn rt_file_move(
-    src_ptr: *const u8,
-    src_len: u64,
-    dest_ptr: *const u8,
-    dest_len: u64,
-) -> bool {
+pub unsafe extern "C" fn rt_file_move(src_ptr: *const u8, src_len: u64, dest_ptr: *const u8, dest_len: u64) -> bool {
     if src_ptr.is_null() || dest_ptr.is_null() {
         return false;
     }

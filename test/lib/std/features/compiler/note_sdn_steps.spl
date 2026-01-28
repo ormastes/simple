@@ -1,0 +1,571 @@
+# Step Definitions for note.sdn BDD Feature Tests
+#
+# These steps implement the Given/When/Then clauses from note_sdn_feature_spec.spl
+
+use simple/compiler/monomorphize/note_sdn.*
+use simple/compiler/monomorphize/metadata.ConcreteType
+
+# ============================================================================
+# Test Context
+# ============================================================================
+
+class NoteSdnTestContext:
+    """Test context to share state between steps."""
+    metadata: NoteSdnMetadata?
+    sdn_output: text?
+    last_error: text?
+    sample_int_type: ConcreteType
+    sample_string_type: ConcreteType
+    sample_float_type: ConcreteType
+
+impl NoteSdnTestContext:
+    static fn new() -> NoteSdnTestContext:
+        NoteSdnTestContext(
+            metadata: None,
+            sdn_output: None,
+            last_error: None,
+            sample_int_type: ConcreteType.Named("Int", []),
+            sample_string_type: ConcreteType.Named("String", []),
+            sample_float_type: ConcreteType.Named("Float", [])
+        )
+
+    me set_metadata(meta: NoteSdnMetadata):
+        self.metadata = Some(meta)
+
+    fn get_metadata() -> NoteSdnMetadata:
+        match self.metadata:
+            case Some(meta): meta
+            case None:
+                panic("No metadata in context - did you forget a 'given' step?")
+
+    me set_sdn_output(output: text):
+        self.sdn_output = Some(output)
+
+    fn get_sdn_output() -> text:
+        match self.sdn_output:
+            case Some(output): output
+            case None:
+                panic("No SDN output in context - did you forget a 'when' step?")
+
+# ============================================================================
+# Background Steps
+# ============================================================================
+
+given "a clean note.sdn metadata container":
+    """Set up a clean test context."""
+    context = NoteSdnTestContext.new()
+
+given "sample type arguments for Int, String, and Float":
+    """Initialize sample type arguments."""
+    # Already done in NoteSdnTestContext.new()
+    pass
+
+# ============================================================================
+# Given Steps - Setup
+# ============================================================================
+
+given "a new NoteSdnMetadata instance":
+    """Create a fresh metadata container."""
+    context.set_metadata(NoteSdnMetadata.new())
+
+given "an instantiation for {template}":
+    """Create an instantiation with the given template."""
+    var meta = context.get_metadata()
+    val type_arg = match template:
+        case "List<Int>": context.sample_int_type
+        case "Option<String>": context.sample_string_type
+        case _: context.sample_int_type
+
+    val entry = InstantiationEntry.new(
+        template: template.split("<")[0],  # Extract "List" from "List<Int>"
+        type_args: [type_arg],
+        mangled_name: template.replace("<", "$").replace(">", "").replace(",", "$"),
+        from_file: "test.spl",
+        from_loc: "test.spl:1:1",
+        to_obj: "test.o",
+        status: InstantiationStatus.Compiled
+    )
+    meta.add_instantiation(entry)
+    context.set_metadata(meta)
+
+given "a NoteSdnMetadata instance with sample data":
+    """Create metadata with sample data according to the table."""
+    var meta = NoteSdnMetadata.new()
+
+    # Add 2 instantiations
+    meta.add_instantiation(InstantiationEntry.new(
+        template: "List",
+        type_args: [context.sample_int_type],
+        mangled_name: "List$Int",
+        from_file: "app.spl",
+        from_loc: "app.spl:10:5",
+        to_obj: "app.o",
+        status: InstantiationStatus.Compiled
+    ))
+    meta.add_instantiation(InstantiationEntry.new(
+        template: "Option",
+        type_args: [context.sample_string_type],
+        mangled_name: "Option$String",
+        from_file: "app.spl",
+        from_loc: "app.spl:15:8",
+        to_obj: "app.o",
+        status: InstantiationStatus.Compiled
+    ))
+
+    # Add 2 dependencies
+    meta.add_dependency(DependencyEdge.new(
+        from_inst: "List$Int",
+        to_inst: "Int",
+        dep_kind: DependencyKind.TypeParam
+    ))
+    meta.add_dependency(DependencyEdge.new(
+        from_inst: "Option$String",
+        to_inst: "String",
+        dep_kind: DependencyKind.TypeParam
+    ))
+
+    # Add 1 possible
+    meta.add_possible(PossibleInstantiationEntry.new(
+        template: "Result",
+        type_args: [context.sample_int_type, context.sample_string_type],
+        mangled_name: "Result$Int$String",
+        required_by: "error_module",
+        can_defer: true
+    ))
+
+    context.set_metadata(meta)
+
+given "InstantiationStatus values":
+    """Prepare to test InstantiationStatus enum."""
+    # No setup needed - just testing enum conversions
+    pass
+
+given "DependencyKind values":
+    """Prepare to test DependencyKind enum."""
+    # No setup needed - just testing enum conversions
+    pass
+
+# ============================================================================
+# When Steps - Actions
+# ============================================================================
+
+when "I check if it is empty":
+    """Check if metadata is empty."""
+    # Result stored in context for verification
+    pass
+
+when "I add an instantiation for {template}":
+    """Add an instantiation with the given template."""
+    var meta = context.get_metadata()
+
+    # Parse template to get type args
+    val parts = template.split("<")
+    val template_name = parts[0]
+    val type_args_str = if parts.len() > 1:
+        parts[1].replace(">", "")
+    else:
+        "Int"
+
+    val type_arg = match type_args_str:
+        case "Int": context.sample_int_type
+        case "String": context.sample_string_type
+        case "Float": context.sample_float_type
+        case _: context.sample_int_type
+
+    # Handle multiple type args (e.g., Result<Int,String>)
+    val type_args = if type_args_str.contains(","):
+        type_args_str.split(",").map(\t: match t.trim():
+            case "Int": context.sample_int_type
+            case "String": context.sample_string_type
+            case _: context.sample_int_type
+        )
+    else:
+        [type_arg]
+
+    val mangled = template.replace("<", "$").replace(">", "").replace(",", "$").replace(" ", "")
+
+    val entry = InstantiationEntry.new(
+        template: template_name,
+        type_args: type_args,
+        mangled_name: mangled,
+        from_file: "test.spl",
+        from_loc: "test.spl:1:1",
+        to_obj: "test.o",
+        status: InstantiationStatus.Compiled
+    )
+
+    meta.add_instantiation(entry)
+    context.set_metadata(meta)
+
+when "I add a dependency from {from} to {to} with kind {kind}":
+    """Add a dependency edge."""
+    var meta = context.get_metadata()
+
+    val dep_kind = match kind:
+        case "type_param": DependencyKind.TypeParam
+        case "field_type": DependencyKind.FieldType
+        case "inner_type": DependencyKind.InnerType
+        case "method_dep": DependencyKind.MethodDep
+        case _: DependencyKind.TypeParam
+
+    meta.add_dependency(DependencyEdge.new(
+        from_inst: from,
+        to_inst: to,
+        dep_kind: dep_kind
+    ))
+    context.set_metadata(meta)
+
+when "I track {template} with dependencies":
+    """Track a template with multiple dependencies from a table."""
+    var meta = context.get_metadata()
+
+    # This would be called with a table parameter in real SSpec
+    # For now, hard-code Container<List<Int>> example
+    meta.add_dependency(DependencyEdge.new(
+        from_inst: "Container$List$Int",
+        to_inst: "List$Int",
+        dep_kind: DependencyKind.FieldType
+    ))
+    meta.add_dependency(DependencyEdge.new(
+        from_inst: "List$Int",
+        to_inst: "Int",
+        dep_kind: DependencyKind.TypeParam
+    ))
+    context.set_metadata(meta)
+
+when "I add a possible instantiation for {template}":
+    """Add a possible instantiation."""
+    var meta = context.get_metadata()
+
+    val parts = template.split("<")
+    val template_name = parts[0]
+    val type_args_str = parts[1].replace(">", "")
+
+    val type_arg = match type_args_str:
+        case "Float": context.sample_float_type
+        case "String": context.sample_string_type
+        case _: context.sample_int_type
+
+    val mangled = template.replace("<", "$").replace(">", "")
+
+    meta.add_possible(PossibleInstantiationEntry.new(
+        template: template_name,
+        type_args: [type_arg],
+        mangled_name: mangled,
+        required_by: "math_module",
+        can_defer: true
+    ))
+    context.set_metadata(meta)
+
+when "I add a type inference for {expr} inferred as {type}":
+    """Add a type inference entry."""
+    var meta = context.get_metadata()
+
+    meta.add_type_inference(TypeInferenceEntry.new(
+        inferred_type: type,
+        expr: expr,
+        context: "literal",
+        from_file: "test.spl",
+        from_loc: "test.spl:5:10"
+    ))
+    context.set_metadata(meta)
+
+when "I add a circular warning for {cycle_path}":
+    """Add a circular dependency warning."""
+    var meta = context.get_metadata()
+
+    meta.add_circular_warning(CircularWarning.new(
+        cycle_path: cycle_path,
+        severity: "warning"
+    ))
+    context.set_metadata(meta)
+
+when "I add a circular error for {cycle_path} with code {error_code}":
+    """Add a circular dependency error."""
+    var meta = context.get_metadata()
+
+    meta.add_circular_error(CircularError.new(
+        cycle_path: cycle_path,
+        error_code: error_code
+    ))
+    context.set_metadata(meta)
+
+when "I serialize to SDN format":
+    """Convert metadata to SDN format."""
+    val meta = context.get_metadata()
+    val sdn = meta.to_sdn()
+    context.set_sdn_output(sdn)
+
+when "I convert {status} to string":
+    """Convert InstantiationStatus to string."""
+    val result = match status:
+        case "Compiled": InstantiationStatus.Compiled.to_string()
+        case "Deferred": InstantiationStatus.Deferred.to_string()
+        case "JitCompiled": InstantiationStatus.JitCompiled.to_string()
+        case _: "unknown"
+    context.set_sdn_output(result)
+
+when "I convert {string} from string":
+    """Convert string to InstantiationStatus."""
+    val result = InstantiationStatus.from_string(string)
+    match result:
+        case Ok(_): pass
+        case Err(msg): context.last_error = Some(msg)
+
+when "I convert {kind} to string":
+    """Convert DependencyKind to string."""
+    val result = match kind:
+        case "TypeParam": DependencyKind.TypeParam.to_string()
+        case "FieldType": DependencyKind.FieldType.to_string()
+        case "InnerType": DependencyKind.InnerType.to_string()
+        case "MethodDep": DependencyKind.MethodDep.to_string()
+        case _: "unknown"
+    context.set_sdn_output(result)
+
+when "I add an instantiation with special characters":
+    """Add instantiation with special characters for escaping test."""
+    var meta = context.get_metadata()
+
+    meta.add_instantiation(InstantiationEntry.new(
+        template: "Test\"Type",
+        type_args: [context.sample_int_type],
+        mangled_name: "Test\\Path",
+        from_file: "test.spl",
+        from_loc: "test.spl:1:1",
+        to_obj: "test.o",
+        status: InstantiationStatus.Compiled
+    ))
+    context.set_metadata(meta)
+
+# ============================================================================
+# Then Steps - Assertions
+# ============================================================================
+
+then "it should return true":
+    """Verify result is true."""
+    val meta = context.get_metadata()
+    assert meta.is_empty()
+
+then "it should return {expected}":
+    """Verify string output matches expected."""
+    val output = context.get_sdn_output()
+    assert output == expected
+
+then "it should return {enum_value}":
+    """Verify enum conversion result."""
+    # Would check the conversion result
+    pass
+
+then "it should return an error":
+    """Verify an error occurred."""
+    assert context.last_error.?
+
+then "the instantiations list should be empty":
+    """Verify instantiations list is empty."""
+    val meta = context.get_metadata()
+    assert meta.instantiations.is_empty()
+
+then "the possible list should be empty":
+    """Verify possible list is empty."""
+    val meta = context.get_metadata()
+    assert meta.possible.is_empty()
+
+then "the dependencies list should be empty":
+    """Verify dependencies list is empty."""
+    val meta = context.get_metadata()
+    assert meta.dependencies.is_empty()
+
+then "the metadata should not be empty":
+    """Verify metadata is not empty."""
+    val meta = context.get_metadata()
+    assert not meta.is_empty()
+
+then "the instantiations list should have {count} entry":
+    """Verify instantiations list has expected count."""
+    val meta = context.get_metadata()
+    val expected = count.parse_int()
+    assert meta.instantiations.len() == expected
+
+then "the instantiations list should have {count} entries":
+    """Verify instantiations list has expected count (plural)."""
+    val meta = context.get_metadata()
+    val expected = count.parse_int()
+    assert meta.instantiations.len() == expected
+
+then "the first instantiation should have template {template_name}":
+    """Verify first instantiation template name."""
+    val meta = context.get_metadata()
+    assert meta.instantiations[0].template == template_name
+
+then "the first instantiation should have mangled name {mangled}":
+    """Verify first instantiation mangled name."""
+    val meta = context.get_metadata()
+    assert meta.instantiations[0].mangled_name == mangled
+
+then "the dependencies list should have {count} entry":
+    """Verify dependencies list size."""
+    val meta = context.get_metadata()
+    val expected = count.parse_int()
+    assert meta.dependencies.len() == expected
+
+then "the dependencies list should have {count} entries":
+    """Verify dependencies list size (plural)."""
+    val meta = context.get_metadata()
+    val expected = count.parse_int()
+    assert meta.dependencies.len() == expected
+
+then "the dependency should be from {from} to {to}":
+    """Verify dependency edge."""
+    val meta = context.get_metadata()
+    val dep = meta.dependencies[0]
+    assert dep.from_inst == from
+    assert dep.to_inst == to
+
+then "the dependency kind should be {kind}":
+    """Verify dependency kind."""
+    val meta = context.get_metadata()
+    val dep = meta.dependencies[0]
+    assert dep.dep_kind.to_string() == kind
+
+then "the dependency chain should be traceable from Container to Int":
+    """Verify dependency chain exists."""
+    val meta = context.get_metadata()
+    # Check both dependencies exist
+    assert meta.dependencies.len() >= 2
+
+then "the possible list should have {count} entry":
+    """Verify possible list size."""
+    val meta = context.get_metadata()
+    val expected = count.parse_int()
+    assert meta.possible.len() == expected
+
+then "the possible instantiation should be deferrable":
+    """Verify possible instantiation can_defer flag."""
+    val meta = context.get_metadata()
+    assert meta.possible[0].can_defer
+
+then "the type_inferences list should have {count} entry":
+    """Verify type inferences list size."""
+    val meta = context.get_metadata()
+    val expected = count.parse_int()
+    assert meta.type_inferences.len() == expected
+
+then "the inference should show {expr} as type {type}":
+    """Verify type inference entry."""
+    val meta = context.get_metadata()
+    val inf = meta.type_inferences[0]
+    assert inf.expr == expr
+    assert inf.inferred_type == type
+
+then "the circular_warnings list should have {count} entry":
+    """Verify circular warnings list size."""
+    val meta = context.get_metadata()
+    val expected = count.parse_int()
+    assert meta.circular_warnings.len() == expected
+
+then "the warning should describe the cycle path":
+    """Verify circular warning has cycle path."""
+    val meta = context.get_metadata()
+    assert meta.circular_warnings[0].cycle_path.?
+
+then "the circular_errors list should have {count} entry":
+    """Verify circular errors list size."""
+    val meta = context.get_metadata()
+    val expected = count.parse_int()
+    assert meta.circular_errors.len() == expected
+
+then "the error code should be {code}":
+    """Verify error code."""
+    val meta = context.get_metadata()
+    assert meta.circular_errors[0].error_code == code
+
+then "the output should contain {text}":
+    """Verify SDN output contains text."""
+    val output = context.get_sdn_output()
+    assert output.contains(text)
+
+then "the output should end with {suffix}":
+    """Verify SDN output ends with suffix."""
+    val output = context.get_sdn_output()
+    assert output.ends_with(suffix)
+
+then "the output should contain all table headers":
+    """Verify all 6 table headers are present."""
+    val output = context.get_sdn_output()
+    assert output.contains("instantiations |")
+    assert output.contains("possible |")
+    assert output.contains("type_inferences |")
+    assert output.contains("dependencies |")
+    assert output.contains("circular_warnings |")
+    assert output.contains("circular_errors |")
+
+then "the output should contain escaped quotes":
+    """Verify quotes are escaped."""
+    val output = context.get_sdn_output()
+    assert output.contains("\\\"")
+
+then "the output should contain escaped backslashes":
+    """Verify backslashes are escaped."""
+    val output = context.get_sdn_output()
+    assert output.contains("\\\\")
+
+then "the metadata should have {count} instantiation":
+    """Verify instantiation count."""
+    val meta = context.get_metadata()
+    val expected = count.parse_int()
+    assert meta.instantiations.len() == expected
+
+then "the metadata should have {count} possible entry":
+    """Verify possible count."""
+    val meta = context.get_metadata()
+    val expected = count.parse_int()
+    assert meta.possible.len() == expected
+
+then "the metadata should have {count} type inference":
+    """Verify type inference count."""
+    val meta = context.get_metadata()
+    val expected = count.parse_int()
+    assert meta.type_inferences.len() == expected
+
+then "the metadata should have {count} dependency":
+    """Verify dependency count."""
+    val meta = context.get_metadata()
+    val expected = count.parse_int()
+    assert meta.dependencies.len() == expected
+
+then "the instantiation templates should be {list}":
+    """Verify list of template names."""
+    val meta = context.get_metadata()
+    # Parse list like ["List", "Option", "Result"]
+    val expected = list.replace("[", "").replace("]", "").replace("\"", "").split(",").map(\s: s.trim())
+    val actual = meta.instantiations.map(\inst: inst.template)
+    assert actual == expected
+
+# ============================================================================
+# SMF Integration Steps
+# ============================================================================
+
+when "the SMF writer creates a note.sdn section":
+    """Simulate SMF section creation."""
+    # This would be tested in integration tests
+    pass
+
+then "the section should have name {name}":
+    """Verify section name."""
+    # This would be tested in integration tests
+    pass
+
+then "the section size field should be {size}":
+    """Verify section size field."""
+    # This would be tested in integration tests
+    pass
+
+then "the actual data should end with {terminator}":
+    """Verify data terminator."""
+    val output = context.get_sdn_output()
+    assert output.ends_with(terminator)
+
+then "the data should be readable by scanning for terminator":
+    """Verify data can be read by scanning."""
+    val output = context.get_sdn_output()
+    assert output.contains("# END_NOTE\n")

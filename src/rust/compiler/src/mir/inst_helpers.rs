@@ -140,6 +140,8 @@ impl MirInst {
             MirInst::Cast { source, .. } => vec![*source],
             MirInst::Load { addr, .. } => vec![*addr],
             MirInst::Store { addr, value, .. } => vec![*addr, *value],
+            MirInst::GlobalLoad { .. } => vec![],
+            MirInst::GlobalStore { value, .. } => vec![*value],
             MirInst::LocalAddr { .. } => vec![],
             MirInst::GetElementPtr { base, index, .. } => vec![*base, *index],
             MirInst::Call { args, .. } => args.clone(),

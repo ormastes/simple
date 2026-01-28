@@ -110,7 +110,8 @@ pub fn handle_run(args: &[String], gc_log: bool, gc_off: bool) -> i32 {
 /// Handle 'brief' command - LLM-friendly code overview
 pub fn handle_brief(args: &[String], gc_log: bool, gc_off: bool) -> i32 {
     // Skip the command name ("brief") and pass remaining args
-    let brief_args: Vec<String> = args[1..].iter()
+    let brief_args: Vec<String> = args[1..]
+        .iter()
         .map(|a| format!("\"{}\"", a.replace("\"", "\\\"")))
         .collect();
 
@@ -129,9 +130,13 @@ fn main() -> i64:
 /// Handle 'dashboard' command - project dashboard CLI
 pub fn handle_dashboard(args: &[String], _gc_log: bool, _gc_off: bool) -> i32 {
     // Skip the command name ("dashboard")
-    let sub_args: Vec<&str> = if args.len() > 1 { args[1..].iter().map(|s| s.as_str()).collect() } else { vec![] };
+    let sub_args: Vec<&str> = if args.len() > 1 {
+        args[1..].iter().map(|s| s.as_str()).collect()
+    } else {
+        vec![]
+    };
 
-    let cmd = sub_args.first().map(|s| *s).unwrap_or("help");
+    let cmd = sub_args.first().copied().unwrap_or("help");
 
     match cmd {
         "status" => {

@@ -5,7 +5,10 @@ use crate::value::{Env, OptionVariant, ResultVariant, Value, METHOD_MISSING};
 use simple_parser::ast::{ClassDef, EnumDef, Expr, FunctionDef};
 use std::collections::HashMap;
 
-use super::super::{evaluate_expr, evaluate_method_call_with_self_update, exec_function, Control, Enums, ImplMethods, BLANKET_IMPL_METHODS};
+use super::super::{
+    evaluate_expr, evaluate_method_call_with_self_update, exec_function, Control, Enums, ImplMethods,
+    BLANKET_IMPL_METHODS,
+};
 use crate::interpreter::interpreter_call::{exec_function_with_values, exec_function_with_values_and_self};
 
 pub(crate) fn call_method_on_value(
@@ -203,15 +206,7 @@ pub(crate) fn call_method_on_value(
         let mut arg_values = vec![recv_val.clone()];
         arg_values.extend(_args.iter().cloned());
         // Call the function with receiver as first argument
-        return exec_function_with_values(
-            &func,
-            &arg_values,
-            _env,
-            _functions,
-            _classes,
-            _enums,
-            _impl_methods,
-        );
+        return exec_function_with_values(&func, &arg_values, _env, _functions, _classes, _enums, _impl_methods);
     }
 
     let ctx = ErrorContext::new()
