@@ -23,6 +23,7 @@ mod error;
 mod interner;
 pub mod lazy_instantiator;
 pub mod layout;
+pub mod mold_ffi;
 mod native;
 mod native_binary;
 mod object_parser;
@@ -63,3 +64,6 @@ pub use native_binary::{compile_to_native_binary, NativeBinaryBuilder, NativeBin
 pub use lazy_instantiator::{
     LazyInstantiationResult, LazyInstantiationStats, LazyInstantiator, LazyInstantiatorConfig,
 };
+
+// Mold FFI exports (linker detection and execution)
+pub use mold_ffi::{find_linker, LinkerType};
