@@ -176,6 +176,29 @@ impl Lowerer {
         })
     }
 
+    /// Lower a dictionary literal to HIR: {key: value, ...}
+    ///
+    /// Creates a dictionary with key-value pairs.
+    /// The type is represented as ANY since dictionaries are dynamically typed at runtime.
+    pub(super) fn lower_dict(
+        &mut self,
+        pairs: &[(Expr, Expr)],
+        ctx: &mut FunctionContext,
+    ) -> LowerResult<HirExpr> {
+        let mut hir_pairs = Vec::new();
+
+        for (key, value) in pairs {
+            let key_hir = self.lower_expr(key, ctx)?;
+            let value_hir = self.lower_expr(value, ctx)?;
+            hir_pairs.push((key_hir, value_hir));
+        }
+
+        Ok(HirExpr {
+            kind: HirExprKind::Dict(hir_pairs),
+            ty: TypeId::ANY, // Dictionaries are dynamically typed
+        })
+    }
+
     /// Lower a slice expression to HIR: receiver[start:end:step]
     ///
     /// Converts to a call to rt_slice(collection, start, end, step).

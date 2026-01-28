@@ -23,6 +23,7 @@ pub fn type_id_to_cranelift(type_id: TypeId) -> types::Type {
         TypeId::F64 => types::F64,
         TypeId::STRING => types::I64, // Pointer
         TypeId::NIL => types::I64,    // Tagged value
+        TypeId::ANY => types::I64,    // Dynamic type (RuntimeValue)
         // All other types (objects, closures, arrays, etc.) use i64 (RuntimeValue)
         _ => types::I64,
     }
@@ -38,7 +39,7 @@ pub fn type_id_size(type_id: TypeId) -> u32 {
         TypeId::I16 | TypeId::U16 => 2,
         TypeId::I32 | TypeId::U32 | TypeId::F32 => 4,
         TypeId::I64 | TypeId::U64 | TypeId::F64 => 8,
-        TypeId::STRING | TypeId::NIL => 8,
+        TypeId::STRING | TypeId::NIL | TypeId::ANY => 8,
         // All other types are pointer-sized (8 bytes)
         _ => 8,
     }
@@ -60,6 +61,7 @@ pub fn type_to_cranelift(ty: TypeId) -> types::Type {
         TypeId::F64 => types::F64,
         TypeId::STRING => types::I64, // String pointer
         TypeId::NIL => types::I64,    // Nil is pointer-sized
+        TypeId::ANY => types::I64,    // Dynamic Any type (RuntimeValue)
         _ => types::I64,              // Custom types default to pointer-sized
     }
 }

@@ -106,6 +106,8 @@ impl TypeId {
     pub const F64: TypeId = TypeId(11);
     pub const STRING: TypeId = TypeId(12);
     pub const NIL: TypeId = TypeId(13);
+    /// Any type - holds any dynamically typed value (used for DI containers, etc.)
+    pub const ANY: TypeId = TypeId(14);
 
     /// DEPRECATED: Use explicit errors instead of UNKNOWN.
     /// This constant exists for backwards compatibility but should be avoided.
@@ -140,6 +142,9 @@ pub struct HirMixinMethod {
 pub enum HirType {
     Void,
     Bool,
+    /// Any type - dynamically typed value (for DI containers, Any parameters, etc.)
+    /// At runtime, represented as RuntimeValue (i64 tagged union)
+    Any,
     Int {
         bits: u8,
         signedness: Signedness,

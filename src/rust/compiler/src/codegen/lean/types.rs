@@ -342,6 +342,7 @@ impl<'a> TypeTranslator<'a> {
                 Ok(LeanType::Primitive(name.clone()))
             }
             HirType::Unknown => Ok(LeanType::Primitive("Unit".to_string())),
+            HirType::Any => Ok(LeanType::Primitive("Unit".to_string())),
         }
     }
 

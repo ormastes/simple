@@ -63,16 +63,26 @@ impl Lowerer {
                 // This avoids the issue where infer_type and lower_expr create
                 // different TypeIds for the same type (e.g., array types)
                 let value = if let Some(v) = &let_stmt.value {
-                    Some(self.lower_expr(v, ctx)?)
+                    let lowered = self.lower_expr(v, ctx)?;
+                    Some(lowered)
                 } else {
                     None
                 };
 
+                // Extract type annotation from either let_stmt.ty OR Pattern::Typed
+                // In Simple syntax, `var x: T = v` puts the type in Pattern::Typed
+                let pattern_type = Self::extract_pattern_type(&let_stmt.pattern);
+
                 // Use explicit type annotation if provided, otherwise use the
                 // type from the lowered value to ensure TypeId consistency
                 let ty = if let Some(t) = &let_stmt.ty {
+                    // Type on the let statement itself
                     self.resolve_type(t)?
+                } else if let Some(ref pt) = pattern_type {
+                    // Type annotation on the pattern (var x: T = v)
+                    self.resolve_type(pt)?
                 } else if let Some(ref v) = value {
+                    // Infer from value
                     v.ty
                 } else {
                     return Err(LowerError::CannotInferType);

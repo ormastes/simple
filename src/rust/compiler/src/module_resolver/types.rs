@@ -105,23 +105,36 @@ impl ModuleResolver {
         let parent = file_path.parent().unwrap_or(std::path::Path::new(".")).to_path_buf();
 
         // Try to detect stdlib even in single-file mode
-        let stdlib_root = parent.join("src/lib/std/src");
-        let stdlib_root = if stdlib_root.exists() {
-            Some(stdlib_root)
-        } else {
-            // Try parent directories
-            let mut current = parent.clone();
+        // Check multiple possible stdlib locations
+        let stdlib_candidates = ["src/lib/std/src", "simple/std_lib/src", "std_lib/src"];
+
+        let stdlib_root = {
+            // First try relative to current file
             let mut found = None;
-            for _ in 0..5 {
-                let candidate = current.join("src/lib/std/src");
+            for candidate_path in &stdlib_candidates {
+                let candidate = parent.join(candidate_path);
                 if candidate.exists() {
                     found = Some(candidate);
                     break;
                 }
-                if let Some(p) = current.parent() {
-                    current = p.to_path_buf();
-                } else {
-                    break;
+            }
+
+            // If not found, try parent directories
+            if found.is_none() {
+                let mut current = parent.clone();
+                'outer: for _ in 0..5 {
+                    for candidate_path in &stdlib_candidates {
+                        let candidate = current.join(candidate_path);
+                        if candidate.exists() {
+                            found = Some(candidate);
+                            break 'outer;
+                        }
+                    }
+                    if let Some(p) = current.parent() {
+                        current = p.to_path_buf();
+                    } else {
+                        break;
+                    }
                 }
             }
             found

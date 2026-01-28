@@ -113,6 +113,13 @@ fn collect_old_expressions(expr: &HirExpr, results: &mut Vec<HirExpr>) {
         HirExprKind::NeighborAccess { array, .. } => {
             collect_old_expressions(array, results);
         }
+        // Dict literals
+        HirExprKind::Dict(entries) => {
+            for (key, value) in entries {
+                collect_old_expressions(key, results);
+                collect_old_expressions(value, results);
+            }
+        }
         // Literals and simple expressions - no recursion needed
         HirExprKind::Integer(_)
         | HirExprKind::Float(_)

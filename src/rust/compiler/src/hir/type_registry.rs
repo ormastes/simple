@@ -22,7 +22,7 @@ pub struct TypeIdAllocator {
 impl TypeIdAllocator {
     /// Create a new allocator starting after built-in types.
     pub fn new() -> Self {
-        Self { next: 14 } // Built-in types 0-13
+        Self { next: 15 } // Built-in types 0-14 (including Any)
     }
 
     /// Create an allocator with a custom starting ID.
@@ -91,6 +91,7 @@ impl TypeRegistry {
             .insert(TypeId::F64, HirType::Float { bits: 64 });
         registry.types.insert(TypeId::STRING, HirType::String);
         registry.types.insert(TypeId::NIL, HirType::Nil);
+        registry.types.insert(TypeId::ANY, HirType::Any);
 
         // Register type names (lowercase with bit-width)
         registry.name_to_id.insert("void".to_string(), TypeId::VOID);
@@ -118,6 +119,8 @@ impl TypeRegistry {
             .name_to_id
             .insert("String".to_string(), TypeId::STRING);
         registry.name_to_id.insert("nil".to_string(), TypeId::NIL);
+        // Dynamic Any type for DI containers, generic parameters, etc.
+        registry.name_to_id.insert("Any".to_string(), TypeId::ANY);
 
         registry
     }
@@ -262,6 +265,8 @@ impl TypeRegistry {
             // Functions and unknown types are not snapshot-safe
             Some(HirType::Function { .. }) => false,
             Some(HirType::Unknown) => false,
+            // Any type is not snapshot-safe (could contain mutable data)
+            Some(HirType::Any) => false,
             None => false,
         }
     }

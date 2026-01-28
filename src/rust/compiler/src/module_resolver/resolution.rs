@@ -53,11 +53,21 @@ impl ModuleResolver {
                 // If relative resolution failed and stdlib is available, try stdlib
                 if segments[0] != "crate" {
                     if let Some(ref stdlib_root) = self.stdlib_root {
-                        match self.resolve_from_base(stdlib_root, segments, path) {
-                            Ok(resolved) => return Ok(resolved),
-                            Err(_) => {
-                                // Stdlib resolution also failed, return original error
-                                return Err(err);
+                        // If path starts with "std_lib", strip that prefix since stdlib_root
+                        // already points to the std_lib directory
+                        let stdlib_segments = if !segments.is_empty() && segments[0] == "std_lib" {
+                            &segments[1..]
+                        } else {
+                            segments
+                        };
+
+                        if !stdlib_segments.is_empty() {
+                            match self.resolve_from_base(stdlib_root, stdlib_segments, path) {
+                                Ok(resolved) => return Ok(resolved),
+                                Err(_) => {
+                                    // Stdlib resolution also failed, return original error
+                                    return Err(err);
+                                }
                             }
                         }
                     }

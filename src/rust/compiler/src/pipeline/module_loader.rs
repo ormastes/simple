@@ -389,6 +389,42 @@ pub fn load_module_with_imports_validated(
                 items.push(item);
                 continue;
             }
+        } else if let Node::MultiUse(multi_use) = &item {
+            // Handle comma-separated imports: use a.B, c.D
+            for (module_path, target) in &multi_use.imports {
+                // Create a temporary UseStmt to reuse the resolution logic
+                let temp_use = UseStmt {
+                    span: multi_use.span.clone(),
+                    path: module_path.clone(),
+                    target: target.clone(),
+                    is_type_only: multi_use.is_type_only,
+                };
+                if let Some(resolved) = resolve_use_to_path(&temp_use, path.parent().unwrap_or(Path::new("."))) {
+                    let imported = load_module_with_imports_validated(&resolved, visited, Some(effective_caps))?;
+
+                    // Validate imported functions against our capabilities
+                    if !effective_caps.is_empty() {
+                        let func_effects = extract_function_effects(&imported);
+                        for (func_name, effects) in func_effects {
+                            if let Some(err) = check_import_compatibility(&func_name, &effects, effective_caps) {
+                                let ctx = ErrorContext::new()
+                                    .with_code(codes::UNSUPPORTED_FEATURE)
+                                    .with_help(&format!(
+                                        "Function `{}` uses effects not allowed by module capabilities",
+                                        func_name
+                                    ));
+                                return Err(CompileError::semantic_with_context(err, ctx));
+                            }
+                        }
+                    }
+
+                    // Add imported items for flattened access
+                    items.extend(imported.items);
+                }
+            }
+            // Keep the MultiUse so evaluate_module can create the module binding
+            items.push(item);
+            continue;
         }
         items.push(item);
     }

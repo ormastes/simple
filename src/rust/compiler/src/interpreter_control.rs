@@ -48,7 +48,7 @@ use std::collections::HashMap;
 // Import parent interpreter types and functions
 use super::{
     await_value, evaluate_expr, exec_block, exec_block_fn, Control, Enums, ImplMethods, BDD_CONTEXT_DEFS, BDD_INDENT,
-    BDD_LAZY_VALUES, CONTEXT_OBJECT, CONTEXT_VAR_NAME,
+    BDD_LAZY_VALUES, CONST_NAMES, CONTEXT_OBJECT, CONTEXT_VAR_NAME,
 };
 
 // Import helpers for pattern binding
@@ -357,7 +357,9 @@ pub fn exec_with(
 
     // Always call cleanup (even if body failed)
     // First try __exit__, then fall back to close() for Resource types
-    let exit_result = call_method_if_exists(&resource, "__exit__", &[], env, functions, classes, enums, impl_methods)?;
+    // Pass nil as exception argument (TODO: pass actual exception if body errored)
+    let exc_arg = Value::Nil;
+    let exit_result = call_method_if_exists(&resource, "__exit__", &[exc_arg], env, functions, classes, enums, impl_methods)?;
     if exit_result.is_none() {
         // No __exit__ method found - try close() for Resource trait compatibility
         let _ = call_method_if_exists(&resource, "close", &[], env, functions, classes, enums, impl_methods);
@@ -376,22 +378,40 @@ fn exec_method_body(
     method: &FunctionDef,
     receiver: &Value,
     fields: &HashMap<String, Value>,
+    args: &[Value],
     env: &mut Env,
     functions: &mut HashMap<String, FunctionDef>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
+    // Save current CONST_NAMES and clear for method scope
+    // This prevents const names from caller leaking into callee
+    let saved_const_names = CONST_NAMES.with(|cell| cell.borrow().clone());
+    CONST_NAMES.with(|cell| cell.borrow_mut().clear());
+
     let mut local_env = env.clone();
     local_env.insert("self".to_string(), receiver.clone());
     for (k, v) in fields {
         local_env.insert(k.clone(), v.clone());
     }
-    let result = exec_block(&method.body, &mut local_env, functions, classes, enums, impl_methods)?;
-    Ok(if let Control::Return(val) = result {
-        val
-    } else {
-        Value::Nil
+    // Bind method parameters to argument values, skipping `self` since it's already bound
+    let non_self_params: Vec<_> = method.params.iter().filter(|p| p.name != "self").collect();
+    for (i, param) in non_self_params.iter().enumerate() {
+        let arg_val = args.get(i).cloned().unwrap_or(Value::Nil);
+        local_env.insert(param.name.clone(), arg_val);
+    }
+    // Use exec_block_fn to handle implicit returns properly
+    let result = exec_block_fn(&method.body, &mut local_env, functions, classes, enums, impl_methods);
+
+    // ALWAYS restore CONST_NAMES before returning to avoid leaking to caller
+    CONST_NAMES.with(|cell| *cell.borrow_mut() = saved_const_names);
+
+    let (control, implicit_val) = result?;
+    // Return explicit return value if present, otherwise implicit value, otherwise Nil
+    Ok(match control {
+        Control::Return(val) => val,
+        _ => implicit_val.unwrap_or(Value::Nil),
     })
 }
 
@@ -399,7 +419,7 @@ fn exec_method_body(
 fn call_method_if_exists(
     receiver: &Value,
     method_name: &str,
-    _args: &[Value],
+    args: &[Value],
     env: &mut Env,
     functions: &mut HashMap<String, FunctionDef>,
     classes: &mut HashMap<String, ClassDef>,
@@ -414,6 +434,7 @@ fn call_method_if_exists(
                     &method,
                     receiver,
                     fields,
+                    args,
                     env,
                     functions,
                     classes,
@@ -429,6 +450,7 @@ fn call_method_if_exists(
                     method,
                     receiver,
                     fields,
+                    args,
                     env,
                     functions,
                     classes,

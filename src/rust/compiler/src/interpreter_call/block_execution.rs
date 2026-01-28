@@ -3,7 +3,7 @@
 use super::super::interpreter_helpers::{bind_pattern_value, handle_method_call_with_self_update};
 use super::bdd::{BDD_AFTER_EACH, BDD_BEFORE_EACH, BDD_CONTEXT_DEFS, BDD_INDENT};
 use crate::error::{codes, CompileError, ErrorContext};
-use crate::interpreter::{evaluate_expr, exec_with, pattern_matches, BLOCK_SCOPED_ENUMS, EXTERN_FUNCTIONS, MACRO_DEFINITION_ORDER, MODULE_GLOBALS, USER_MACROS};
+use crate::interpreter::{evaluate_expr, exec_with, pattern_matches, BLOCK_SCOPED_ENUMS, CONST_NAMES, EXTERN_FUNCTIONS, MACRO_DEFINITION_ORDER, MODULE_GLOBALS, USER_MACROS};
 use crate::value::*;
 use simple_parser::ast::{ClassDef, EnumDef, Expr, FunctionDef, Node};
 use simple_runtime::value::diagram_ffi;
@@ -66,6 +66,11 @@ pub(super) fn exec_block_closure(
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
     use super::bdd::exec_block_value;
+
+    // Save current CONST_NAMES and clear for block closure scope
+    // This prevents const names from caller leaking into the block
+    let saved_const_names = CONST_NAMES.with(|cell| cell.borrow().clone());
+    CONST_NAMES.with(|cell| cell.borrow_mut().clear());
 
     // Diagram tracing for block closure execution
     if diagram_ffi::is_diagram_enabled() {
@@ -399,7 +404,11 @@ pub(super) fn exec_block_closure(
                 // Delegates to the main interpreter's exec_with function
                 use crate::interpreter::Control;
                 match exec_with(with_stmt, &mut local_env, functions, classes, enums, impl_methods)? {
-                    Control::Return(val) => return Ok(val),
+                    Control::Return(val) => {
+                        // Restore CONST_NAMES before returning
+                        CONST_NAMES.with(|cell| *cell.borrow_mut() = saved_const_names);
+                        return Ok(val);
+                    }
                     _ => last_value = Value::Nil,
                 }
             }
@@ -430,6 +439,8 @@ pub(super) fn exec_block_closure(
         }
     }
 
+    // Restore CONST_NAMES before returning
+    CONST_NAMES.with(|cell| *cell.borrow_mut() = saved_const_names);
     Ok(last_value)
 }
 

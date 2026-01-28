@@ -546,7 +546,7 @@ impl CompilerPipeline {
     ) -> Result<crate::linker::NativeBinaryResult, CompileError> {
         // Load module with imports resolved (flattened into the module)
         let ast_module = load_module_with_imports(source_path, &mut HashSet::new())?;
-        self.compile_module_to_native_binary(ast_module, output, options)
+        self.compile_module_to_native_binary_with_context(ast_module, output, options, Some(source_path))
     }
 
     /// Compile an already-parsed module to a standalone native binary.
@@ -558,6 +558,21 @@ impl CompilerPipeline {
         ast_module: simple_parser::ast::Module,
         output: &Path,
         options: Option<crate::linker::NativeBinaryOptions>,
+    ) -> Result<crate::linker::NativeBinaryResult, CompileError> {
+        self.compile_module_to_native_binary_with_context(ast_module, output, options, None)
+    }
+
+    /// Compile an already-parsed module to a standalone native binary with source context.
+    ///
+    /// When source_path is provided, enables compile-time type checking for imports
+    /// by loading type definitions from imported modules.
+    #[instrument(skip(self, ast_module, output, source_path))]
+    pub fn compile_module_to_native_binary_with_context(
+        &mut self,
+        ast_module: simple_parser::ast::Module,
+        output: &Path,
+        options: Option<crate::linker::NativeBinaryOptions>,
+        source_path: Option<&Path>,
     ) -> Result<crate::linker::NativeBinaryResult, CompileError> {
         use crate::linker::{LayoutOptimizer, NativeBinaryBuilder, NativeBinaryOptions};
 
@@ -593,7 +608,12 @@ impl CompilerPipeline {
         self.validate_sync_constraints(&ast_module.items)?;
 
         // Type check and lower to MIR
-        let mir_module = self.type_check_and_lower(&ast_module)?;
+        // Use context-aware lowering when source path is provided (enables import type resolution)
+        let mir_module = if let Some(path) = source_path {
+            self.type_check_and_lower_with_context(&ast_module, path)?
+        } else {
+            self.type_check_and_lower(&ast_module)?
+        };
 
         // Get options
         let options = options.unwrap_or_else(|| NativeBinaryOptions::default().output(output));

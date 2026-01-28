@@ -551,3 +551,53 @@ pub fn coverage_summary(args: &[Value]) -> Result<Value, CompileError> {
 
     Ok(Value::Int(0))
 }
+
+// ============================================================================
+// FFI functions for coverage.spl (rt_coverage_* interface)
+// ============================================================================
+
+/// Check if coverage is enabled (always returns true in interpreter)
+pub fn rt_coverage_enabled(_args: &[Value]) -> Result<Value, CompileError> {
+    // In the interpreter, coverage tracking is always conceptually available
+    // via the global coverage infrastructure
+    Ok(Value::Bool(crate::coverage::get_global_coverage().is_some()))
+}
+
+/// Clear all coverage data
+pub fn rt_coverage_clear(_args: &[Value]) -> Result<Value, CompileError> {
+    if let Some(cov) = crate::coverage::get_global_coverage() {
+        if let Ok(mut guard) = cov.lock() {
+            guard.clear();
+        }
+    }
+    Ok(Value::Nil)
+}
+
+/// Get coverage data as SDN format string
+pub fn rt_coverage_dump_sdn(_args: &[Value]) -> Result<Value, CompileError> {
+    if let Some(cov) = crate::coverage::get_global_coverage() {
+        if let Ok(guard) = cov.lock() {
+            // Generate SDN format coverage data
+            let sdn = guard.to_sdn();
+            return Ok(Value::Str(sdn));
+        }
+    }
+    // Return empty string if no coverage data
+    Ok(Value::Str(String::new()))
+}
+
+/// Free SDN string (no-op in interpreter - GC handles memory)
+pub fn rt_coverage_free_sdn(_args: &[Value]) -> Result<Value, CompileError> {
+    // No-op in interpreter since Rust manages memory via garbage collection
+    Ok(Value::Nil)
+}
+
+/// Convert C string to Simple text (identity in interpreter)
+pub fn rt_cstring_to_text(args: &[Value]) -> Result<Value, CompileError> {
+    // In the interpreter, strings are already managed, so just pass through
+    match args.first() {
+        Some(Value::Str(s)) => Ok(Value::Str(s.clone())),
+        Some(Value::Int(0)) => Ok(Value::Str(String::new())), // null pointer
+        _ => Ok(Value::Str(String::new())),
+    }
+}

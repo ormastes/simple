@@ -188,6 +188,36 @@ impl Lowerer {
                     })
                 }
             }
+            Type::Generic { name, args } => {
+                // Handle common generic types used in stdlib
+                match name.as_str() {
+                    // Dict<K, V> - dictionary type, represented as Any at native level
+                    "Dict" => Ok(TypeId::ANY),
+                    // Option<T> - optional type
+                    "Option" if args.len() == 1 => {
+                        let inner = self.resolve_type(&args[0])?;
+                        Ok(self.module.types.register(HirType::Pointer {
+                            kind: PointerKind::Shared,
+                            capability: ReferenceCapability::Shared,
+                            inner,
+                        }))
+                    }
+                    // Result<T, E> - result type, represented as Any at native level
+                    "Result" => Ok(TypeId::ANY),
+                    // List<T> - same as array
+                    "List" if args.len() == 1 => {
+                        let elem = self.resolve_type(&args[0])?;
+                        Ok(self.module.types.register(HirType::Array {
+                            element: elem,
+                            size: None,
+                        }))
+                    }
+                    // Set<T> - represented as Any at native level
+                    "Set" => Ok(TypeId::ANY),
+                    // Other generic types - treat as Any (dynamically typed)
+                    _ => Ok(TypeId::ANY),
+                }
+            }
             _ => Err(LowerError::Unsupported(format!("{:?}", ty))),
         }
     }
@@ -244,6 +274,11 @@ impl Lowerer {
     }
 
     pub(super) fn get_index_element_type(&self, arr_ty: TypeId) -> LowerResult<TypeId> {
+        // Handle built-in ANY type directly
+        if arr_ty == TypeId::ANY {
+            return Ok(TypeId::ANY); // Indexing into Any returns Any
+        }
+
         if let Some(hir_ty) = self.module.types.get(arr_ty) {
             match hir_ty {
                 HirType::Array { element, .. } => Ok(*element),
@@ -253,6 +288,8 @@ impl Lowerer {
                     .copied()
                     .ok_or_else(|| LowerError::CannotInferIndexType("empty tuple".to_string())),
                 HirType::Pointer { inner, .. } => self.get_index_element_type(*inner),
+                // Any type (Dict, generic containers) - indexing returns Any
+                HirType::Any => Ok(TypeId::ANY),
                 _ => Err(LowerError::CannotInferIndexType(format!("{:?}", hir_ty))),
             }
         } else {
