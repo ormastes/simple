@@ -3,7 +3,7 @@
 use cranelift_codegen::ir::{condcodes::IntCC, types, InstBuilder};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_module::Module;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::hir::TypeId;
 use crate::mir::{BlockId, MirFunction, MirInst, Terminator, VReg};
@@ -11,6 +11,80 @@ use crate::mir::{BlockId, MirFunction, MirInst, Terminator, VReg};
 use super::super::types_util::type_to_cranelift;
 use super::async_ops::compile_yield;
 use super::{compile_instruction, InstrContext, InstrResult};
+
+/// Collect all VRegs used as destinations in a MIR function.
+fn collect_all_dest_vregs(func: &MirFunction) -> HashSet<VReg> {
+    let mut vregs = HashSet::new();
+    for block in &func.blocks {
+        for inst in &block.instructions {
+            if let Some(dest) = inst.dest() {
+                vregs.insert(dest);
+            }
+        }
+        // Also collect VRegs used in terminators (branch conditions, return values)
+        match &block.terminator {
+            Terminator::Return(Some(v)) => { vregs.insert(*v); }
+            Terminator::Branch { cond, .. } => { vregs.insert(*cond); }
+            _ => {}
+        }
+    }
+    vregs
+}
+
+/// Coerce a value to i64 for storage in a Variable declared as i64.
+fn coerce_to_i64(
+    builder: &mut FunctionBuilder,
+    val: cranelift_codegen::ir::Value,
+) -> cranelift_codegen::ir::Value {
+    let ty = builder.func.dfg.value_type(val);
+    if ty == types::I64 {
+        val
+    } else if ty.is_int() && ty.bits() < 64 {
+        builder.ins().sextend(types::I64, val)
+    } else if ty.is_int() && ty.bits() > 64 {
+        builder.ins().ireduce(types::I64, val)
+    } else if ty.is_float() {
+        builder.ins().bitcast(types::I64, cranelift_codegen::ir::MemFlags::new(), val)
+    } else {
+        // For vector types etc., just use as-is (will be i64 in most cases)
+        val
+    }
+}
+
+/// Safely def_var with type coercion to i64.
+fn def_var_coerced(
+    builder: &mut FunctionBuilder,
+    var: Variable,
+    val: cranelift_codegen::ir::Value,
+) {
+    let coerced = coerce_to_i64(builder, val);
+    builder.def_var(var, coerced);
+}
+
+/// Sync vreg_values → Variables: call def_var for all vregs that have values.
+fn sync_vregs_to_vars(
+    builder: &mut FunctionBuilder,
+    vreg_values: &HashMap<VReg, cranelift_codegen::ir::Value>,
+    vreg_vars: &HashMap<VReg, Variable>,
+) {
+    for (vreg, &val) in vreg_values {
+        if let Some(&var) = vreg_vars.get(vreg) {
+            def_var_coerced(builder, var, val);
+        }
+    }
+}
+
+/// Sync Variables → vreg_values: call use_var for all declared vreg Variables.
+fn sync_vars_to_vregs(
+    builder: &mut FunctionBuilder,
+    vreg_values: &mut HashMap<VReg, cranelift_codegen::ir::Value>,
+    vreg_vars: &HashMap<VReg, Variable>,
+) {
+    for (&vreg, &var) in vreg_vars {
+        let val = builder.use_var(var);
+        vreg_values.insert(vreg, val);
+    }
+}
 
 /// Compile a complete MIR function body.
 /// This is shared between AOT (cranelift.rs) and JIT (jit.rs) backends.
@@ -47,6 +121,19 @@ pub fn compile_function_body<M: Module>(
 
     // Track values and blocks
     let mut vreg_values: HashMap<VReg, cranelift_codegen::ir::Value> = HashMap::new();
+
+    // Declare Cranelift Variables for all VRegs to handle SSA across blocks.
+    // This lets Cranelift automatically insert phi nodes (block params) where needed.
+    let mut vreg_vars: HashMap<VReg, Variable> = HashMap::new();
+    {
+        let all_vregs = collect_all_dest_vregs(func);
+        for vreg in &all_vregs {
+            let var = Variable::from_u32(var_idx);
+            builder.declare_var(var, types::I64); // default to i64; type is refined on def_var
+            vreg_vars.insert(*vreg, var);
+            var_idx += 1;
+        }
+    }
 
     // Create blocks
     let mut blocks = HashMap::new();
@@ -86,6 +173,9 @@ pub fn compile_function_body<M: Module>(
                 let call = builder.ins().call(get_ref, &[ctx_param, idx_val]);
                 let val = builder.inst_results(call)[0];
                 vreg_values.insert(*reg, val);
+                if let Some(&var) = vreg_vars.get(reg) {
+                    def_var_coerced(&mut builder, var, val);
+                }
             }
         }
     }
@@ -261,6 +351,8 @@ pub fn compile_function_body<M: Module>(
 
         if mir_block.id != func.entry_block {
             builder.switch_to_block(cl_block);
+            // At block entry, populate vreg_values from Variables (SSA phi resolution)
+            sync_vars_to_vregs(&mut builder, &mut vreg_values, &vreg_vars);
         }
 
         if let Some(resume_map) = generator_resume_map.as_ref() {
@@ -273,6 +365,9 @@ pub fn compile_function_body<M: Module>(
                     let call = builder.ins().call(load_ref, &[gen_param, idx_val]);
                     let val = builder.inst_results(call)[0];
                     vreg_values.insert(*reg, val);
+                    if let Some(&var) = vreg_vars.get(reg) {
+                        builder.def_var(var, val);
+                    }
                 }
             }
         }
@@ -297,6 +392,9 @@ pub fn compile_function_body<M: Module>(
                         let call = builder.ins().call(get_ref, &[ctx_val, idx_val]);
                         let val = builder.inst_results(call)[0];
                         vreg_values.insert(*reg, val);
+                        if let Some(&var) = vreg_vars.get(reg) {
+                            builder.def_var(var, val);
+                        }
                     }
                 }
             }
@@ -322,6 +420,8 @@ pub fn compile_function_body<M: Module>(
                     async_state_map: &async_state_map,
                 };
                 compile_yield(&mut instr_ctx, &mut builder, *value)?;
+                // Sync vreg_values → Variables after yield
+                sync_vregs_to_vars(&mut builder, &vreg_values, &vreg_vars);
                 returned_via_yield = true;
                 break;
             } else {
@@ -341,6 +441,22 @@ pub fn compile_function_body<M: Module>(
                     async_state_map: &async_state_map,
                 };
                 compile_instruction(&mut instr_ctx, &mut builder, inst)?;
+                // Ensure all vreg values are i64 (extend smaller int types)
+                // and sync to Variables for cross-block SSA
+                if let Some(dest) = inst.dest() {
+                    if let Some(&val) = vreg_values.get(&dest) {
+                        let ty = builder.func.dfg.value_type(val);
+                        if ty.is_int() && ty.bits() < 64 {
+                            let extended = builder.ins().sextend(types::I64, val);
+                            vreg_values.insert(dest, extended);
+                            if let Some(&var) = vreg_vars.get(&dest) {
+                                builder.def_var(var, extended);
+                            }
+                        } else if let Some(&var) = vreg_vars.get(&dest) {
+                            def_var_coerced(&mut builder, var, val);
+                        }
+                    }
+                }
             }
         }
 
@@ -351,6 +467,8 @@ pub fn compile_function_body<M: Module>(
         if skip_entry_terminator && mir_block.id == func.entry_block {
             continue;
         }
+        // Sync all vreg_values to Variables before terminators (for cross-block SSA)
+        sync_vregs_to_vars(&mut builder, &vreg_values, &vreg_vars);
         match &mir_block.terminator {
             Terminator::Return(val) => {
                 let mut mark_done = false;
@@ -442,7 +560,21 @@ pub fn compile_function_body<M: Module>(
                 then_block,
                 else_block,
             } => {
-                let cond_val = vreg_values[cond];
+                let cond_val = vreg_values.get(cond).copied().unwrap_or_else(|| {
+                    // Use Variable if available, otherwise default to 0
+                    if let Some(&var) = vreg_vars.get(cond) {
+                        builder.use_var(var)
+                    } else {
+                        builder.ins().iconst(types::I64, 0)
+                    }
+                });
+                // brif expects i8 (boolean), coerce if needed
+                let cond_ty = builder.func.dfg.value_type(cond_val);
+                let cond_val = if cond_ty != types::I8 && cond_ty.is_int() {
+                    builder.ins().icmp_imm(IntCC::NotEqual, cond_val, 0)
+                } else {
+                    cond_val
+                };
                 let then_bl = *blocks.get(then_block).unwrap();
                 let else_bl = *blocks.get(else_block).unwrap();
                 builder.ins().brif(cond_val, then_bl, &[], else_bl, &[]);

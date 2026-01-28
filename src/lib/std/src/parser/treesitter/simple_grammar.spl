@@ -189,6 +189,9 @@ enum GrammarRule:
     Named(str, GrammarRule)       # Create node with name
     Field(str, GrammarRule)       # Named field for node
 
+    # Rule reference (for recursive grammars)
+    RuleRef(str)                  # Reference to named rule in grammar
+
 impl GrammarRule:
     # =========================================================================
     # Helper Methods
@@ -241,6 +244,7 @@ impl GrammarRule:
         """Check if rule contains sub-rules."""
         match self:
             case TokenRule(_): false
+            case RuleRef(_): false  # RuleRef is a reference, not containing sub-rules directly
             case _: true
 
     fn to_string() -> text:
@@ -254,6 +258,7 @@ impl GrammarRule:
             case OneOrMore(_): "one_or_more"
             case Named(_, _): "named"
             case Field(_, _): "field"
+            case RuleRef(name): "rule_ref({name})"
 
     fn summary() -> text:
         """Get summary of grammar rule."""
@@ -273,26 +278,41 @@ struct Grammar:
     entry_point: str
 
 # Build Simple language grammar (minimal subset)
+# Uses RuleRef for recursive rules to avoid infinite recursion
 fn build_simple_grammar() -> Grammar:
     return Grammar(
         entry_point: "module",
         rules: {
-            # Entry point
+            # Entry point - uses RuleRef for statement
             "module": GrammarRule.ZeroOrMore(
-                GrammarRule.Named("statement", statement_rule())
+                GrammarRule.RuleRef("statement")
             ),
 
-            # Statements
-            "statement": statement_rule(),
-            "function_def": function_def_rule(),
-            "let_stmt": let_stmt_rule(),
-            "return_stmt": return_stmt_rule(),
-            "expression_stmt": expression_stmt_rule(),
+            # Statements - uses RuleRef to break cycles
+            "statement": GrammarRule.Choice([
+                GrammarRule.Named("function_def", GrammarRule.RuleRef("function_def")),
+                GrammarRule.Named("let_stmt", GrammarRule.RuleRef("let_stmt")),
+                GrammarRule.Named("return_stmt", GrammarRule.RuleRef("return_stmt")),
+                GrammarRule.Named("expression_stmt", GrammarRule.RuleRef("expression")),
+            ]),
 
-            # Expressions
-            "expression": expression_rule(),
-            "binary_expr": binary_expr_rule(),
-            "unary_expr": unary_expr_rule(),
+            "function_def": function_def_rule_safe(),
+            "let_stmt": let_stmt_rule_safe(),
+            "return_stmt": return_stmt_rule_safe(),
+            "expression_stmt": GrammarRule.RuleRef("expression"),
+
+            # Block - uses RuleRef for statement
+            "block": GrammarRule.Named("block", GrammarRule.Seq([
+                GrammarRule.TokenRule(TokenKind.Newline),
+                GrammarRule.TokenRule(TokenKind.Indent),
+                GrammarRule.OneOrMore(GrammarRule.RuleRef("statement")),
+                GrammarRule.TokenRule(TokenKind.Dedent)
+            ])),
+
+            # Expressions - uses RuleRef to break cycles
+            "expression": GrammarRule.RuleRef("binary_expr"),
+            "binary_expr": binary_expr_rule_safe(),
+            "unary_expr": unary_expr_rule_safe(),
             "primary_expr": primary_expr_rule(),
 
             # Types
@@ -300,15 +320,12 @@ fn build_simple_grammar() -> Grammar:
         }
     )
 
+# Old versions kept for reference but not used (cause infinite recursion)
 fn statement_rule() -> GrammarRule:
-    return GrammarRule.Choice([
-        GrammarRule.Named("function_def", function_def_rule()),
-        GrammarRule.Named("let_stmt", let_stmt_rule()),
-        GrammarRule.Named("return_stmt", return_stmt_rule()),
-        GrammarRule.Named("expression_stmt", expression_stmt_rule()),
-    ])
+    return GrammarRule.RuleRef("statement")
 
-fn function_def_rule() -> GrammarRule:
+# Safe version that uses RuleRef for block
+fn function_def_rule_safe() -> GrammarRule:
     # fn name(params) -> return_type: body
     return GrammarRule.Seq([
         GrammarRule.TokenRule(TokenKind.Fn),
@@ -316,17 +333,20 @@ fn function_def_rule() -> GrammarRule:
             GrammarRule.Named("identifier", identifier_rule())),
         GrammarRule.TokenRule(TokenKind.LParen),
         GrammarRule.Field("params",
-            GrammarRule.Optional(parameter_list_rule())),
+            GrammarRule.Optional(parameter_list_rule_safe())),
         GrammarRule.TokenRule(TokenKind.RParen),
         GrammarRule.Optional(GrammarRule.Seq([
             GrammarRule.TokenRule(TokenKind.Arrow),
             GrammarRule.Field("return_type", type_expr_rule())
         ])),
         GrammarRule.TokenRule(TokenKind.Colon),
-        GrammarRule.Field("body", block_rule())
+        GrammarRule.Field("body", GrammarRule.RuleRef("block"))
     ])
 
-fn parameter_list_rule() -> GrammarRule:
+fn function_def_rule() -> GrammarRule:
+    return function_def_rule_safe()
+
+fn parameter_list_rule_safe() -> GrammarRule:
     return GrammarRule.Seq([
         parameter_rule(),
         GrammarRule.ZeroOrMore(GrammarRule.Seq([
@@ -334,6 +354,9 @@ fn parameter_list_rule() -> GrammarRule:
             parameter_rule()
         ]))
     ])
+
+fn parameter_list_rule() -> GrammarRule:
+    return parameter_list_rule_safe()
 
 fn parameter_rule() -> GrammarRule:
     # name: type
@@ -344,16 +367,11 @@ fn parameter_rule() -> GrammarRule:
     ]))
 
 fn block_rule() -> GrammarRule:
-    # Indented block: NEWLINE INDENT statements DEDENT
-    return GrammarRule.Named("block", GrammarRule.Seq([
-        GrammarRule.TokenRule(TokenKind.Newline),
-        GrammarRule.TokenRule(TokenKind.Indent),
-        GrammarRule.OneOrMore(statement_rule()),
-        GrammarRule.TokenRule(TokenKind.Dedent)
-    ]))
+    # Use RuleRef to avoid infinite recursion
+    return GrammarRule.RuleRef("block")
 
-fn let_stmt_rule() -> GrammarRule:
-    # val name: type = value
+fn let_stmt_rule_safe() -> GrammarRule:
+    # val name: type = value - uses RuleRef for expression
     return GrammarRule.Seq([
         GrammarRule.TokenRule(TokenKind.Let),
         GrammarRule.Optional(GrammarRule.TokenRule(TokenKind.Mut)),
@@ -363,31 +381,40 @@ fn let_stmt_rule() -> GrammarRule:
             GrammarRule.Field("type", type_expr_rule())
         ])),
         GrammarRule.TokenRule(TokenKind.Assign),
-        GrammarRule.Field("value", expression_rule())
+        GrammarRule.Field("value", GrammarRule.RuleRef("expression"))
+    ])
+
+fn let_stmt_rule() -> GrammarRule:
+    return let_stmt_rule_safe()
+
+fn return_stmt_rule_safe() -> GrammarRule:
+    return GrammarRule.Seq([
+        GrammarRule.TokenRule(TokenKind.Return),
+        GrammarRule.Optional(GrammarRule.Field("value", GrammarRule.RuleRef("expression")))
     ])
 
 fn return_stmt_rule() -> GrammarRule:
-    return GrammarRule.Seq([
-        GrammarRule.TokenRule(TokenKind.Return),
-        GrammarRule.Optional(GrammarRule.Field("value", expression_rule()))
-    ])
+    return return_stmt_rule_safe()
 
 fn expression_stmt_rule() -> GrammarRule:
-    return expression_rule()
+    return GrammarRule.RuleRef("expression")
 
 fn expression_rule() -> GrammarRule:
     # For Phase 1: simple precedence (just binary expressions)
-    return binary_expr_rule()
+    return GrammarRule.RuleRef("binary_expr")
 
-fn binary_expr_rule() -> GrammarRule:
-    # Simplified: unary (op unary)*
+fn binary_expr_rule_safe() -> GrammarRule:
+    # Simplified: unary (op unary)* - uses RuleRef for unary
     return GrammarRule.Named("binary_expr", GrammarRule.Seq([
-        unary_expr_rule(),
+        GrammarRule.RuleRef("unary_expr"),
         GrammarRule.ZeroOrMore(GrammarRule.Seq([
             GrammarRule.Field("op", binary_op_rule()),
-            unary_expr_rule()
+            GrammarRule.RuleRef("unary_expr")
         ]))
     ]))
+
+fn binary_expr_rule() -> GrammarRule:
+    return binary_expr_rule_safe()
 
 fn binary_op_rule() -> GrammarRule:
     return GrammarRule.Choice([
@@ -401,15 +428,19 @@ fn binary_op_rule() -> GrammarRule:
         GrammarRule.TokenRule(TokenKind.Gt),
     ])
 
-fn unary_expr_rule() -> GrammarRule:
+fn unary_expr_rule_safe() -> GrammarRule:
     # Prefix operators: -, not, <-, etc. OR primary expression
+    # Uses RuleRef for recursion to avoid stack overflow
     return GrammarRule.Choice([
         GrammarRule.Named("unary_expr", GrammarRule.Seq([
             GrammarRule.Field("op", unary_op_rule()),
-            unary_expr_rule()  # Recursive to support <-<-expr
+            GrammarRule.RuleRef("unary_expr")  # Use RuleRef for recursive call
         ])),
-        primary_expr_rule()
+        GrammarRule.RuleRef("primary_expr")
     ])
+
+fn unary_expr_rule() -> GrammarRule:
+    return unary_expr_rule_safe()
 
 fn unary_op_rule() -> GrammarRule:
     return GrammarRule.Choice([
@@ -435,7 +466,7 @@ fn identifier_rule() -> GrammarRule:
 fn paren_expr_rule() -> GrammarRule:
     return GrammarRule.Seq([
         GrammarRule.TokenRule(TokenKind.LParen),
-        expression_rule(),
+        GrammarRule.RuleRef("expression"),
         GrammarRule.TokenRule(TokenKind.RParen)
     ])
 

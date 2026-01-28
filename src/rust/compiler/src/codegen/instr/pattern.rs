@@ -39,20 +39,34 @@ pub(super) fn compile_pattern_test<M: Module>(
                     .ins()
                     .icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, subject_val, zero)
             }
-            _ => builder.ins().iconst(types::I8, 0),
+            _ => panic!("unimplemented pattern literal match codegen for: {:?}", lit),
         },
         MirPattern::Binding(_) => builder.ins().iconst(types::I8, 1),
-        MirPattern::Variant { .. } => {
+        MirPattern::Variant { enum_name, variant_name, .. } => {
+            // All enums now use rt_enum_new format consistently.
+            // rt_enum_discriminant extracts the discriminant.
             let disc_id = ctx.runtime_funcs["rt_enum_discriminant"];
             let disc_ref = ctx.module.declare_func_in_func(disc_id, builder.func);
             let call = builder.ins().call(disc_ref, &[subject_val]);
             let disc = builder.inst_results(call)[0];
-            let neg_one = builder.ins().iconst(types::I64, -1);
+
+            // Result/Option use small integer discriminants (Ok/Some=1, Err/None=0)
+            // Other enums use hashed variant names
+            let expected_disc = if enum_name == "Result" || enum_name == "Option" {
+                match variant_name.as_str() {
+                    "Ok" | "Some" => 1i64,
+                    "Err" | "None" => 0i64,
+                    _ => calculate_variant_discriminant(variant_name) as i64,
+                }
+            } else {
+                calculate_variant_discriminant(variant_name) as i64
+            };
+            let expected_val = builder.ins().iconst(types::I64, expected_disc);
             builder
                 .ins()
-                .icmp(cranelift_codegen::ir::condcodes::IntCC::NotEqual, disc, neg_one)
+                .icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, disc, expected_val)
         }
-        _ => builder.ins().iconst(types::I8, 0),
+        _ => panic!("unimplemented pattern match codegen for: {:?}", pattern),
     };
     ctx.vreg_values.insert(dest, result);
 }
@@ -67,6 +81,7 @@ pub(super) fn compile_pattern_bind<M: Module>(
     let current = ctx.vreg_values[&subject];
 
     let result = if binding.path.iter().any(|s| matches!(s, BindingStep::EnumPayload)) {
+        // All enums use rt_enum_new format, so use rt_enum_payload consistently
         let payload_id = ctx.runtime_funcs["rt_enum_payload"];
         let payload_ref = ctx.module.declare_func_in_func(payload_id, builder.func);
         let call = builder.ins().call(payload_ref, &[current]);

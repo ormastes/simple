@@ -24,6 +24,20 @@ use compiler.lexer.*
 use compiler.dim_constraints.*
 
 # ============================================================================
+# Typed Empty Dict Helpers (for bootstrap compiler inference)
+# ============================================================================
+
+fn empty_subst_map() -> Dict<i64, HirType>:
+    """Create empty substitution map."""
+    var result: Dict<i64, HirType> = {}
+    result
+
+fn empty_type_env() -> Dict<text, TypeScheme>:
+    """Create empty type environment."""
+    var result: Dict<text, TypeScheme> = {}
+    result
+
+# ============================================================================
 # Type Scheme (Polymorphic Types)
 # ============================================================================
 
@@ -61,7 +75,7 @@ struct Substitution:
 
 impl Substitution:
     static fn new() -> Substitution:
-        Substitution(map: {})
+        Substitution(map: empty_subst_map())
 
     fn get(id: i64) -> HirType?:
         """Look up a type variable."""
@@ -195,7 +209,7 @@ impl HmInferContext:
         Default dimension check mode is Assert (debug assertions).
         """
         HmInferContext(
-            env: {},
+            env: empty_type_env(),
             level: 0,
             next_var: 0,
             subst: Substitution.new(),
@@ -208,7 +222,7 @@ impl HmInferContext:
     static fn with_dim_check_mode(mode: DimCheckMode) -> HmInferContext:
         """Create a new inference context with specified dimension check mode."""
         HmInferContext(
-            env: {},
+            env: empty_type_env(),
             level: 0,
             next_var: 0,
             subst: Substitution.new(),
@@ -952,9 +966,8 @@ impl HmInferContext:
                 val int_ty = HirType(kind: HirTypeKind.Int(64, true), span: span)
                 Ok(HirType(kind: HirTypeKind.Slice(int_ty), span: span))
 
-            # Default: fresh type variable
             case _:
-                Ok(self.fresh_var(span))
+                Err(TypeInferError(message: "unsupported expression kind: {expr.kind}", span: span))
 
     me infer_binary_op(op: HirBinOp, left: HirType, right: HirType, span: Span) -> Result<HirType, TypeInferError>:
         """Infer type of binary operation."""
@@ -1022,7 +1035,7 @@ impl HmInferContext:
                 self.infer_broadcast_op(left, right, span)
 
             case _:
-                Ok(self.fresh_var(span))
+                Err(TypeInferError(message: "unsupported binary operator: {op}", span: span))
 
     me infer_unary_op(op: HirUnaryOp, operand: HirType, span: Span) -> Result<HirType, TypeInferError>:
         """Infer type of unary operation."""
@@ -1118,8 +1131,12 @@ impl HmInferContext:
                 match self.unify(right, fn_g):
                     case Err(e): return Err(e)
                     case _: pass
+                # Workaround: use temporary variables for method calls in array literals
+                val resolved_a = self.resolve(a)
+                val resolved_c = self.resolve(c)
+                val empty_effects: [Effect] = []
                 Ok(HirType(
-                    kind: HirTypeKind.Function([self.resolve(a)], self.resolve(c), []),
+                    kind: HirTypeKind.Function([resolved_a], resolved_c, empty_effects),
                     span: span
                 ))
             case _:
@@ -1306,8 +1323,7 @@ impl HmInferContext:
                     Err(TypeInferError.Other("matrix multiplication requires at least 2D tensors", span))
 
             case _:
-                # Non-tensor types: just return fresh tensor
-                Ok(self.fresh_var(span))
+                Err(TypeInferError(message: "unsupported matmul types", span: span))
 
     me infer_broadcast_op(left: HirType, right: HirType, span: Span) -> Result<HirType, TypeInferError>:
         """Infer type of broadcast operations (.+, .-, .*, ./, .^).
@@ -1346,10 +1362,7 @@ impl HmInferContext:
                 ))
 
             case _:
-                # Fall back to regular arithmetic
-                match self.unify(left, right):
-                    case Err(e): Err(e)
-                    case _: Ok(self.resolve(left))
+                Err(TypeInferError(message: "unsupported broadcast op types", span: span))
 
     fn broadcast_shapes(dims1: [DimExpr], dims2: [DimExpr], span: Span) -> [DimExpr]:
         """Compute broadcast result shape.
@@ -1590,7 +1603,7 @@ impl HmInferContext:
 
     me infer_module(module: HirModule):
         """Infer types for all functions in a module."""
-        for name, fn_ in module.functions:
+        for fn_ in module.functions.values():
             val symbol = module.symbols.get(fn_.symbol)
             if symbol.?:
                 self.infer_function(fn_)

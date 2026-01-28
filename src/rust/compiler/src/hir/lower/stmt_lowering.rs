@@ -242,8 +242,6 @@ impl Lowerer {
             }
 
             Node::For(for_stmt) => {
-                // Extract pattern name (simple case: single identifier)
-                let pattern = Self::extract_pattern_name(&for_stmt.pattern).unwrap_or_else(|| "item".to_string());
                 let iterable = self.lower_expr(&for_stmt.iterable, ctx)?;
 
                 // Infer the element type from the iterable type
@@ -255,17 +253,85 @@ impl Lowerer {
                     .get_iterable_element(iterable.ty)
                     .unwrap_or(crate::hir::TypeId::I64);
 
-                // Add the loop variable to the context BEFORE lowering the body
-                ctx.add_local(pattern.clone(), element_ty, Mutability::Immutable);
+                // Check if this is a tuple pattern for destructuring
+                if let Pattern::Tuple(patterns) = &for_stmt.pattern {
+                    // Tuple destructuring in for loop: for (x, y) in items:
+                    // Lower to: for __tuple_temp in items: { val x = __tuple_temp[0]; val y = __tuple_temp[1]; ... }
+                    let temp_name = "__for_tuple_temp".to_string();
+                    let temp_idx = ctx.add_local(temp_name.clone(), element_ty, Mutability::Immutable);
 
-                let body = self.lower_block(&for_stmt.body, ctx)?;
-                let invariants = self.lower_contract_clauses(&for_stmt.invariants, ctx)?;
-                Ok(vec![HirStmt::For {
-                    pattern,
-                    iterable,
-                    body,
-                    invariants,
-                }])
+                    // Get tuple element types if available
+                    let element_types = if let Some(HirType::Tuple(types)) = self.module.types.get(element_ty) {
+                        Some(types.clone())
+                    } else {
+                        None
+                    };
+
+                    // Create let bindings for each tuple element
+                    let mut destructure_stmts = Vec::new();
+                    for (i, pattern) in patterns.iter().enumerate() {
+                        let elem_ty = element_types
+                            .as_ref()
+                            .and_then(|types| types.get(i).copied())
+                            .unwrap_or(TypeId::ANY);
+
+                        // Create an index expression: __for_tuple_temp[i]
+                        let index_expr = HirExpr {
+                            kind: HirExprKind::Index {
+                                receiver: Box::new(HirExpr {
+                                    kind: HirExprKind::Local(temp_idx),
+                                    ty: element_ty,
+                                }),
+                                index: Box::new(HirExpr {
+                                    kind: HirExprKind::Integer(i as i64),
+                                    ty: TypeId::I64,
+                                }),
+                            },
+                            ty: elem_ty,
+                        };
+
+                        // Extract variable name from pattern
+                        if let Some(name) = Self::extract_pattern_name(pattern) {
+                            let local_idx = ctx.add_local(name, elem_ty, Mutability::Immutable);
+                            destructure_stmts.push(HirStmt::Let {
+                                local_index: local_idx,
+                                ty: elem_ty,
+                                value: Some(index_expr),
+                            });
+                        }
+                        // Wildcards are ignored
+                    }
+
+                    // Lower the body with destructured variables in scope
+                    let mut body = self.lower_block(&for_stmt.body, ctx)?;
+
+                    // Prepend destructure statements to body
+                    let mut new_body = destructure_stmts;
+                    new_body.append(&mut body);
+
+                    let invariants = self.lower_contract_clauses(&for_stmt.invariants, ctx)?;
+                    Ok(vec![HirStmt::For {
+                        pattern: temp_name,
+                        iterable,
+                        body: new_body,
+                        invariants,
+                    }])
+                } else {
+                    // Simple pattern (single identifier)
+                    let pattern = Self::extract_pattern_name(&for_stmt.pattern).unwrap_or_else(|| "item".to_string());
+
+                    // Add the loop variable to the context BEFORE lowering the body
+                    ctx.add_local(pattern.clone(), element_ty, Mutability::Immutable);
+
+                    let body = self.lower_block(&for_stmt.body, ctx)?;
+                    let invariants = self.lower_contract_clauses(&for_stmt.invariants, ctx)?;
+                    Ok(vec![HirStmt::For {
+                        pattern,
+                        iterable,
+                        body,
+                        invariants,
+                    }])
+                }
             }
 
             Node::Loop(loop_stmt) => {
@@ -349,12 +415,13 @@ impl Lowerer {
                 Ok(vec![])
             }
 
-            _ => Err(LowerError::Unsupported(format!("{:?}", node))),
+            _ => panic!("unimplemented HIR statement lowering for: {:?}", node),
         }
     }
 
     /// Lower a match statement to a chain of If-Else statements
     fn lower_match_stmt(&mut self, match_stmt: &MatchStmt, ctx: &mut FunctionContext) -> LowerResult<Vec<HirStmt>> {
+        eprintln!("[DEBUG match_stmt] ENTERING lower_match_stmt");
         // Lower the subject expression once
         let subject_hir = self.lower_expr(&match_stmt.subject, ctx)?;
         let subject_ty = subject_hir.ty;
@@ -367,6 +434,7 @@ impl Lowerer {
         // Create a temporary local to hold the subject value
         let subject_idx = ctx.locals.len();
         ctx.add_local("$match_subject".to_string(), subject_ty, Mutability::Immutable);
+        eprintln!("[DEBUG match_stmt] Created subject local idx: {}", subject_idx);
 
         // Store the subject value
         let store_stmt = HirStmt::Let {
@@ -374,6 +442,7 @@ impl Lowerer {
             ty: subject_ty,
             value: Some(subject_hir),
         };
+        eprintln!("[DEBUG match_stmt] About to process {} arms", match_stmt.arms.len());
 
         // Build the chain of If-Else statements from the arms
         let if_chain = self.lower_match_arms_stmt(subject_idx, subject_ty, &match_stmt.arms, ctx)?;
@@ -407,7 +476,17 @@ impl Lowerer {
         // Generate the condition for this pattern
         let condition = self.lower_pattern_condition_stmt(subject_idx, subject_ty, &arm.pattern, ctx)?;
 
-        // Handle guard expression if present
+        // Extract pattern bindings and add them to context
+        // This needs to happen after pattern condition but before guard/body
+        eprintln!("[DEBUG match_stmt] Processing arm pattern: {:?}", arm.pattern);
+        let bindings = self.extract_pattern_bindings(&arm.pattern, subject_ty);
+        eprintln!("[DEBUG match_stmt] Bindings: {:?}", bindings);
+        let saved_locals_len = ctx.locals.len();
+        for (name, ty) in &bindings {
+            ctx.add_local(name.clone(), *ty, Mutability::Immutable);
+        }
+
+        // Handle guard expression if present (bindings are now in scope)
         let final_condition = if let Some(guard) = &arm.guard {
             let guard_hir = self.lower_expr(guard, ctx)?;
             HirExpr {
@@ -421,15 +500,6 @@ impl Lowerer {
         } else {
             condition
         };
-
-        // Extract pattern bindings and add them to context
-        eprintln!("[DEBUG match_stmt] Processing arm pattern: {:?}", arm.pattern);
-        let bindings = self.extract_pattern_bindings(&arm.pattern, subject_ty);
-        eprintln!("[DEBUG match_stmt] Bindings: {:?}", bindings);
-        let saved_locals_len = ctx.locals.len();
-        for (name, ty) in &bindings {
-            ctx.add_local(name.clone(), *ty, Mutability::Immutable);
-        }
 
         // Lower the arm body with bindings in scope
         let then_block = self.lower_block(&arm.body, ctx)?;
@@ -559,11 +629,51 @@ impl Lowerer {
                     ty: TypeId::BOOL,
                 })
             }
-            // For more complex patterns, return false for now
-            _ => Ok(HirExpr {
-                kind: HirExprKind::Bool(false),
-                ty: TypeId::BOOL,
-            }),
+            Pattern::Enum { name, variant, .. } => {
+                // Call rt_enum_discriminant(subject) and compare to expected discriminant
+                let disc_call = HirExpr {
+                    kind: HirExprKind::BuiltinCall {
+                        name: "rt_enum_discriminant".to_string(),
+                        args: vec![subject_ref],
+                    },
+                    ty: TypeId::I64,
+                };
+
+                let expected_disc: i64 = match (name.as_str(), variant.as_str()) {
+                    ("Result" | "_", "Ok") => 1,
+                    ("Result" | "_", "Err") => 0,
+                    ("Option" | "_", "Some") => 1,
+                    ("Option" | "_", "None") => 0,
+                    (_, v) => {
+                        use std::collections::hash_map::DefaultHasher;
+                        use std::hash::{Hash, Hasher};
+                        let mut hasher = DefaultHasher::new();
+                        v.hash(&mut hasher);
+                        (hasher.finish() & 0xFFFFFFFF) as i64
+                    }
+                };
+
+                let expected_val = HirExpr {
+                    kind: HirExprKind::Integer(expected_disc),
+                    ty: TypeId::I64,
+                };
+
+                Ok(HirExpr {
+                    kind: HirExprKind::Binary {
+                        op: BinOp::Eq,
+                        left: Box::new(disc_call),
+                        right: Box::new(expected_val),
+                    },
+                    ty: TypeId::BOOL,
+                })
+            }
+            _ => {
+                eprintln!("[WARN] unimplemented pattern-to-expr lowering for: {:?}", pattern);
+                Ok(HirExpr {
+                    kind: HirExprKind::Bool(false),
+                    ty: TypeId::BOOL,
+                })
+            }
         }
     }
 

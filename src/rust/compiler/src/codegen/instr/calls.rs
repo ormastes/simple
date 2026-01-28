@@ -10,6 +10,7 @@ use crate::codegen::runtime_ffi::RUNTIME_FUNCS;
 use crate::mir::{CallTarget, VReg};
 
 use super::core::compile_builtin_io_call;
+use super::helpers::get_vreg_or_default;
 use super::{InstrContext, InstrResult};
 
 /// Get the return type for a runtime FFI function.
@@ -71,6 +72,64 @@ fn untag_runtime_value_to_int(
     builder.ins().sshr(value, three)
 }
 
+/// Adapt argument values to match a function's expected signature.
+/// Handles count mismatches (padding/truncating) and type mismatches (casting).
+pub(super) fn adapt_args_to_signature(
+    builder: &mut FunctionBuilder,
+    func_ref: cranelift_codegen::ir::FuncRef,
+    arg_vals: Vec<cranelift_codegen::ir::Value>,
+) -> Vec<cranelift_codegen::ir::Value> {
+    let sig_ref = builder.func.dfg.ext_funcs[func_ref].signature;
+    let sig = &builder.func.dfg.signatures[sig_ref];
+    let expected_count = sig.params.len();
+    // Collect expected types before mutating builder
+    let expected_types: Vec<_> = sig.params.iter().map(|p| p.value_type).collect();
+
+    let mut adapted = Vec::with_capacity(expected_count);
+    for i in 0..expected_count {
+        let expected_ty = expected_types[i];
+        if i < arg_vals.len() {
+            let val = arg_vals[i];
+            let actual_ty = builder.func.dfg.value_type(val);
+            if actual_ty == expected_ty {
+                adapted.push(val);
+            } else if actual_ty.is_int() && expected_ty.is_int() {
+                // Integer width conversion
+                if actual_ty.bits() < expected_ty.bits() {
+                    adapted.push(builder.ins().sextend(expected_ty, val));
+                } else {
+                    adapted.push(builder.ins().ireduce(expected_ty, val));
+                }
+            } else if actual_ty.is_int() && expected_ty.is_float() {
+                // Int to float conversion
+                if expected_ty == types::F32 {
+                    adapted.push(builder.ins().f32const(0.0));
+                } else {
+                    adapted.push(builder.ins().f64const(0.0));
+                }
+            } else if actual_ty.is_float() && expected_ty.is_int() {
+                // Float to int conversion
+                adapted.push(builder.ins().iconst(expected_ty, 0));
+            } else {
+                // Fallback: use the value as-is and hope for the best
+                adapted.push(val);
+            }
+        } else {
+            // Padding: create default value for missing argument
+            if expected_ty.is_int() {
+                adapted.push(builder.ins().iconst(expected_ty, 0));
+            } else if expected_ty == types::F32 {
+                adapted.push(builder.ins().f32const(0.0));
+            } else if expected_ty == types::F64 {
+                adapted.push(builder.ins().f64const(0.0));
+            } else {
+                adapted.push(builder.ins().iconst(types::I64, 0));
+            }
+        }
+    }
+    adapted
+}
+
 /// Compile Call instruction: dispatches to user-defined, built-in I/O, or runtime FFI functions
 ///
 /// This handles three types of function calls:
@@ -84,7 +143,38 @@ pub fn compile_call<M: Module>(
     target: &CallTarget,
     args: &[VReg],
 ) -> InstrResult<()> {
-    let func_name = target.name();
+    let func_name_raw = target.name();
+    // Map Simple builtin names to runtime FFI function names
+    let func_name: &str = match func_name_raw {
+        "sys_get_args" => "rt_get_args",
+        "sys_exit" => "rt_exit",
+        other => other,
+    };
+
+    // Handle Result/Option constructor builtins (Ok, Err, Some, None)
+    if matches!(func_name, "Ok" | "Err" | "Some" | "None") {
+        if let Some(d) = dest {
+            let enum_new_id = ctx.runtime_funcs["rt_enum_new"];
+            let enum_new_ref = ctx.module.declare_func_in_func(enum_new_id, builder.func);
+            let (enum_id, disc) = match func_name {
+                "Ok" => (0i64, 1i64),    // Result Ok
+                "Err" => (0i64, 0i64),   // Result Err
+                "Some" => (1i64, 1i64),  // Option Some
+                "None" => (1i64, 0i64),  // Option None
+                _ => unreachable!(),
+            };
+            let enum_id_val = builder.ins().iconst(types::I32, enum_id);
+            let disc_val = builder.ins().iconst(types::I32, disc);
+            let payload_val = if !args.is_empty() {
+                get_vreg_or_default(ctx, builder, &args[0])
+            } else {
+                builder.ins().iconst(types::I64, 0)
+            };
+            let call = builder.ins().call(enum_new_ref, &[enum_id_val, disc_val, payload_val]);
+            ctx.vreg_values.insert(*d, builder.inst_results(call)[0]);
+        }
+        return Ok(());
+    }
 
     // Check if this is a built-in I/O function (print, println, etc.)
     if let Some(result) = compile_builtin_io_call(ctx, builder, func_name, args, dest)? {
@@ -94,7 +184,8 @@ pub fn compile_call<M: Module>(
     } else if let Some(&callee_id) = ctx.func_ids.get(func_name) {
         // User-defined function
         let callee_ref = ctx.module.declare_func_in_func(callee_id, builder.func);
-        let arg_vals: Vec<_> = args.iter().map(|a| ctx.vreg_values[a]).collect();
+        let arg_vals: Vec<_> = args.iter().map(|a| get_vreg_or_default(ctx, builder, a)).collect();
+        let arg_vals = adapt_args_to_signature(builder, callee_ref, arg_vals);
         let call = builder.ins().call(callee_ref, &arg_vals);
         if let Some(d) = dest {
             let results = builder.inst_results(call);
@@ -111,21 +202,24 @@ pub fn compile_call<M: Module>(
         // Check if this function returns RuntimeValue that needs untagging
         let needs_untagging = needs_runtime_value_untagging(func_name);
 
-        let arg_vals: Vec<_> = args
-            .iter()
-            .enumerate()
-            .map(|(i, a)| {
-                let val = ctx.vreg_values[a];
-                // Tag the value if this argument position needs RuntimeValue
-                if let Some(ref indices) = tagging_indices {
-                    if indices.contains(&i) {
-                        return tag_int_as_runtime_value(builder, val);
-                    }
+        // First collect VReg values with defaults
+        let mut arg_vals = Vec::with_capacity(args.len());
+        for (i, a) in args.iter().enumerate() {
+            let val = get_vreg_or_default(ctx, builder, a);
+            // Tag the value if this argument position needs RuntimeValue
+            let val = if let Some(ref indices) = &tagging_indices {
+                if indices.contains(&i) {
+                    tag_int_as_runtime_value(builder, val)
+                } else {
+                    val
                 }
+            } else {
                 val
-            })
-            .collect();
+            };
+            arg_vals.push(val);
+        }
 
+        let arg_vals = adapt_args_to_signature(builder, runtime_ref, arg_vals);
         let call = builder.ins().call(runtime_ref, &arg_vals);
         if let Some(d) = dest {
             let results = builder.inst_results(call);

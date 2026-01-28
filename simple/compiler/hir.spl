@@ -288,8 +288,7 @@ impl SymbolTable:
         # This requires traversing impl blocks associated with the type
         # For now, use a naming convention: Type::method
         val qualified_name = "{type_sym.unwrap().name}::{method_name}"
-        for entry in self.symbols:
-            val sym = entry.1
+        for sym in self.symbols.values():
             if sym.name == qualified_name:
                 match sym.kind:
                     case Method: return Some(sym.id)
@@ -310,8 +309,7 @@ impl SymbolTable:
 
         # Look for trait method using qualified name
         val qualified_name = "{trait_sym.unwrap().name}::{method_name}"
-        for entry in self.symbols:
-            val sym = entry.1
+        for sym in self.symbols.values():
             if sym.name == qualified_name:
                 match sym.kind:
                     case Method: return Some(sym.id)
@@ -357,8 +355,7 @@ impl SymbolTable:
         val type_name = type_sym.unwrap().name
         val prefix = "{type_name}::"
 
-        for entry in self.symbols:
-            val sym = entry.1
+        for sym in self.symbols.values():
             if not sym.?:
                 pass
             elif not sym.name.?:
@@ -377,8 +374,7 @@ impl SymbolTable:
         """Get all function names (for error suggestions)."""
         var functions: [text] = []
 
-        for entry in self.symbols:
-            val sym = entry.1
+        for sym in self.symbols.values():
             match sym.kind:
                 case Function:
                     # Only include non-qualified names (free functions)
@@ -515,11 +511,11 @@ impl LayerType:
             device: nil
         )
 
-    fn with_device(device: DeviceType) -> LayerType:
+    static fn with_device_of(layer: LayerType, device: DeviceType) -> LayerType:
         LayerType(
-            input_shape: self.input_shape,
-            output_shape: self.output_shape,
-            params: self.params,
+            input_shape: layer.input_shape,
+            output_shape: layer.output_shape,
+            params: layer.params,
             device: Some(device)
         )
 
@@ -1211,13 +1207,60 @@ impl HirLowering:
             span: p.span
         )
 
+    me lower_type_list(types: [Type]) -> [HirType]:
+        """Lower a list of types to HIR."""
+        var result: [HirType] = []
+        for t in types:
+            result = result.push(self.lower_type(t))
+        result
+
+    me lower_expr_list(exprs: [Expr]) -> [HirExpr]:
+        """Lower a list of expressions to HIR."""
+        var result: [HirExpr] = []
+        for e in exprs:
+            result = result.push(self.lower_expr(e))
+        result
+
+    me lower_interpolation_list(interps: [Interpolation]) -> [HirInterpolation]:
+        """Lower a list of interpolations to HIR."""
+        var result: [HirInterpolation] = []
+        for i in interps:
+            result = result.push(HirInterpolation(
+                expr: self.lower_expr(i.expr),
+                format: i.format,
+                span: i.span
+            ))
+        result
+
+    me lower_dict_entry(entry: (Expr, Expr)) -> (HirExpr, HirExpr):
+        """Lower a single dict entry to HIR."""
+        val (key, value) = entry
+        (self.lower_expr(key), self.lower_expr(value))
+
+    me lower_dict_entries(entries: [(Expr, Expr)]) -> [(HirExpr, HirExpr)]:
+        """Lower dict entries to HIR."""
+        var result: [(HirExpr, HirExpr)] = []
+        for entry in entries:
+            result = result.push(self.lower_dict_entry(entry))
+        result
+
+    me lower_struct_field(field: (text, Expr)) -> (text, HirExpr):
+        """Lower a single struct field to HIR."""
+        val (name, value) = field
+        (name, self.lower_expr(value))
+
+    me lower_struct_fields(fields: [(text, Expr)]) -> [(text, HirExpr)]:
+        """Lower struct fields to HIR."""
+        var result: [(text, HirExpr)] = []
+        for field in fields:
+            result = result.push(self.lower_struct_field(field))
+        result
+
     me lower_type(t: Type) -> HirType:
         """Lower type expression."""
         val kind = match t.kind:
             case Named(name, args):
-                var hir_args: [HirType] = []
-                for arg in args:
-                    hir_args = hir_args.push(self.lower_type(arg))
+                val hir_args = self.lower_type_list(args)
 
                 # Check for builtin types
                 match name:
@@ -1246,19 +1289,14 @@ impl HirLowering:
                 if elements.is_empty():
                     HirTypeKind.Unit
                 else:
-                    var hir_elements: [HirType] = []
-                    for e in elements:
-                        hir_elements = hir_elements.push(self.lower_type(e))
-                    HirTypeKind.Tuple(hir_elements)
+                    HirTypeKind.Tuple(self.lower_type_list(elements))
 
             case Array(element, size):
                 val hir_element = self.lower_type(element)
                 HirTypeKind.Array(hir_element, nil)
 
             case Function(params, ret):
-                var hir_params: [HirType] = []
-                for p in params:
-                    hir_params = hir_params.push(self.lower_type(p))
+                val hir_params = self.lower_type_list(params)
                 val hir_ret = self.lower_type(ret)
                 HirTypeKind.Function(hir_params, hir_ret, [])
 
@@ -1481,16 +1519,7 @@ impl HirLowering:
                 HirExprKind.FloatLit(value, nil)
 
             case StringLit(value, interps):
-                var hir_interps: [HirInterpolation]? = None
-                if interps.?:
-                    var list: [HirInterpolation] = []
-                    for i in interps.unwrap():
-                        list = list.push(HirInterpolation(
-                            expr: self.lower_expr(i.expr),
-                            format: i.format,
-                            span: i.span
-                        ))
-                    hir_interps = Some(list)
+                val hir_interps = interps.map(\i: self.lower_interpolation_list(i))
                 HirExprKind.StringLit(value, hir_interps)
 
             case BoolLit(value):
@@ -1500,9 +1529,7 @@ impl HirLowering:
                 HirExprKind.NilLit
 
             case ArrayLit(elements):
-                var hir_elements: [HirExpr] = []
-                for elem in elements:
-                    hir_elements = hir_elements.push(self.lower_expr(elem))
+                val hir_elements = self.lower_expr_list(elements)
                 # For empty arrays, use configured default element type
                 val elem_type = if hir_elements.is_empty():
                     if self.is_strict_empty_collections():
@@ -1515,19 +1542,10 @@ impl HirLowering:
                 HirExprKind.ArrayLit(hir_elements, elem_type)
 
             case TupleLit(elements):
-                var hir_elements: [HirExpr] = []
-                for elem in elements:
-                    hir_elements = hir_elements.push(self.lower_expr(elem))
-                HirExprKind.TupleLit(hir_elements)
+                HirExprKind.TupleLit(self.lower_expr_list(elements))
 
             case DictLit(entries):
-                var hir_entries: [(HirExpr, HirExpr)] = []
-                for entry in entries:
-                    hir_entries = hir_entries.push((
-                        self.lower_expr(entry.0),
-                        self.lower_expr(entry.1)
-                    ))
-                HirExprKind.DictLit(hir_entries, nil, nil)
+                HirExprKind.DictLit(self.lower_dict_entries(entries), nil, nil)
 
             case Ident(name):
                 val symbol = self.symbols.lookup(name)
@@ -1661,8 +1679,8 @@ impl HirLowering:
 
             case StructLit(type_, fields):
                 var hir_fields: [(text, HirExpr)] = []
-                for field in fields:
-                    hir_fields = hir_fields.push((field.0, self.lower_expr(field.1)))
+                for (name, value) in fields:
+                    hir_fields = hir_fields.push((name, self.lower_expr(value)))
                 val symbol = self.symbols.lookup(type_)
                 val hir_type = if symbol.?:
                     HirType(kind: HirTypeKind.Named(symbol.unwrap(), []), span: e.span)
@@ -1684,8 +1702,8 @@ impl HirLowering:
                         HirEnumPayload.Tuple(hir_values)
                     case Struct(fields):
                         var hir_fields: [(text, HirExpr)] = []
-                        for f in fields:
-                            hir_fields = hir_fields.push((f.0, self.lower_expr(f.1)))
+                        for (fname, fvalue) in fields:
+                            hir_fields = hir_fields.push((fname, self.lower_expr(fvalue)))
                         HirEnumPayload.Struct(hir_fields)
                 )
                 HirExprKind.EnumLit(hir_type, variant, hir_payload)
@@ -1793,8 +1811,8 @@ impl HirLowering:
                 else:
                     HirType(kind: HirTypeKind.Error, span: p.span)
                 var hir_fields: [(text, HirPattern)] = []
-                for field in fields:
-                    hir_fields = hir_fields.push((field.0, self.lower_pattern(field.1)))
+                for (fname, fpat) in fields:
+                    hir_fields = hir_fields.push((fname, self.lower_pattern(fpat)))
                 HirPatternKind.Struct(hir_type, hir_fields)
 
             case Enum(enum_, variant, payload):
@@ -1811,8 +1829,8 @@ impl HirLowering:
                         HirPatternPayload.Tuple(hir_patterns)
                     case Struct(fields):
                         var hir_fields: [(text, HirPattern)] = []
-                        for f in fields:
-                            hir_fields = hir_fields.push((f.0, self.lower_pattern(f.1)))
+                        for (fname, fpat) in fields:
+                            hir_fields = hir_fields.push((fname, self.lower_pattern(fpat)))
                         HirPatternPayload.Struct(hir_fields)
                 )
                 HirPatternKind.Enum(hir_type, variant, hir_payload)
@@ -1983,9 +2001,9 @@ impl HirLowering:
                 ))
 
             case _:
-                # Fallback for unhandled statement kinds
+                self.error("unsupported statement kind", s.span)
                 HirStmtKind.Expr(HirExpr(
-                    kind: HirExprKind.NilLit,
+                    kind: HirExprKind.Error,
                     type_: nil,
                     span: s.span
                 ))

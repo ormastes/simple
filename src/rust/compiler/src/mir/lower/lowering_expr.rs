@@ -754,32 +754,19 @@ impl<'a> MirLowerer<'a> {
                     arg_regs.push(self.lower_expr(arg)?);
                 }
 
-                match dispatch {
-                    DispatchMode::Static => {
-                        // Static dispatch: direct function call (monomorphized)
-                        // The method name should be fully qualified as Type::method
-                        let func_name = method.clone();
-                        self.with_func(|func, current_block| {
-                            let dest = func.new_vreg();
-                            let block = func.block_mut(current_block).unwrap();
-                            block.instructions.push(MirInst::MethodCallStatic {
-                                dest: Some(dest),
-                                receiver: receiver_reg,
-                                func_name,
-                                args: arg_regs,
-                            });
-                            dest
-                        })
+                // Try to qualify method name with receiver type (e.g., "TreeSitter.expect")
+                let func_name = if let Some(registry) = self.type_registry {
+                    if let Some(type_name) = registry.get_type_name(receiver.ty) {
+                        format!("{}.{}", type_name, method)
+                    } else {
+                        method.clone()
                     }
-                    DispatchMode::Dynamic => {
-                        // Dynamic dispatch: currently Simple doesn't use vtable-based dispatch
-                        // for user types. Use static dispatch with method name matching instead.
-                        // This works because user classes don't have vtables - only trait objects would.
-                        //
-                        // TODO: Add proper vtable dispatch when trait objects are implemented.
-                        //
-                        // For now, use MethodCallStatic which will search for Type.method pattern.
-                        let func_name = method.clone();
+                } else {
+                    method.clone()
+                };
+
+                match dispatch {
+                    DispatchMode::Static | DispatchMode::Dynamic => {
                         self.with_func(|func, current_block| {
                             let dest = func.new_vreg();
                             let block = func.block_mut(current_block).unwrap();
@@ -995,7 +982,7 @@ impl<'a> MirLowerer<'a> {
                 })
             }
 
-            _ => Err(MirLowerError::Unsupported(format!("{:?}", expr_kind))),
+            _ => panic!("unimplemented MIR expression lowering for: {:?}", expr_kind),
         }
     }
 }

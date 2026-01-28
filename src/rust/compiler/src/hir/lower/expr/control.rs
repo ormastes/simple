@@ -267,7 +267,18 @@ impl Lowerer {
         // Generate the condition for this pattern
         let condition = self.lower_pattern_condition(subject_idx, subject_ty, &arm.pattern, ctx)?;
 
-        // Handle guard expression if present
+        // Extract pattern bindings and add them to context
+        // This needs to happen after pattern condition but before guard/body
+        let bindings = self.extract_pattern_bindings(&arm.pattern, subject_ty);
+        eprintln!("[DEBUG match] Pattern: {:?}", arm.pattern);
+        eprintln!("[DEBUG match] Bindings extracted: {:?}", bindings);
+        let saved_locals_len = ctx.locals.len();
+        for (name, ty) in &bindings {
+            eprintln!("[DEBUG match] Adding binding: {} with type {:?}", name, ty);
+            ctx.add_local(name.clone(), *ty, simple_parser::ast::Mutability::Immutable);
+        }
+
+        // Handle guard expression if present (bindings are now in scope)
         let final_condition = if let Some(guard) = &arm.guard {
             let guard_hir = self.lower_expr(guard, ctx)?;
             HirExpr {
@@ -281,16 +292,6 @@ impl Lowerer {
         } else {
             condition
         };
-
-        // Extract pattern bindings and add them to context
-        let bindings = self.extract_pattern_bindings(&arm.pattern, subject_ty);
-        eprintln!("[DEBUG match] Pattern: {:?}", arm.pattern);
-        eprintln!("[DEBUG match] Bindings extracted: {:?}", bindings);
-        let saved_locals_len = ctx.locals.len();
-        for (name, ty) in &bindings {
-            eprintln!("[DEBUG match] Adding binding: {} with type {:?}", name, ty);
-            ctx.add_local(name.clone(), *ty, simple_parser::ast::Mutability::Immutable);
-        }
 
         // Lower the arm body with bindings in scope
         let then_branch = self.lower_match_arm_body(&arm.body, ctx)?;
@@ -421,11 +422,53 @@ impl Lowerer {
                     ty: TypeId::BOOL,
                 })
             }
-            // For more complex patterns (struct, enum, tuple, array), return unsupported for now
-            _ => Ok(HirExpr {
-                kind: HirExprKind::Bool(false),
-                ty: TypeId::BOOL,
-            }),
+            Pattern::Enum { name, variant, .. } => {
+                // Call rt_enum_discriminant(subject) and compare to expected discriminant
+                let disc_call = HirExpr {
+                    kind: HirExprKind::BuiltinCall {
+                        name: "rt_enum_discriminant".to_string(),
+                        args: vec![subject_ref],
+                    },
+                    ty: TypeId::I64,
+                };
+
+                let expected_disc: i64 = match (name.as_str(), variant.as_str()) {
+                    ("Result" | "_", "Ok") => 1,
+                    ("Result" | "_", "Err") => 0,
+                    ("Option" | "_", "Some") => 1,
+                    ("Option" | "_", "None") => 0,
+                    (_, v) => {
+                        // Hash-based discriminant for other enums
+                        use std::collections::hash_map::DefaultHasher;
+                        use std::hash::{Hash, Hasher};
+                        let mut hasher = DefaultHasher::new();
+                        v.hash(&mut hasher);
+                        (hasher.finish() & 0xFFFFFFFF) as i64
+                    }
+                };
+
+                let expected_val = HirExpr {
+                    kind: HirExprKind::Integer(expected_disc),
+                    ty: TypeId::I64,
+                };
+
+                Ok(HirExpr {
+                    kind: HirExprKind::Binary {
+                        op: BinOp::Eq,
+                        left: Box::new(disc_call),
+                        right: Box::new(expected_val),
+                    },
+                    ty: TypeId::BOOL,
+                })
+            }
+            // For more complex patterns (struct, tuple, array), return false for now
+            _ => {
+                eprintln!("[WARN] unimplemented pattern-to-expr lowering for: {:?}", pattern);
+                Ok(HirExpr {
+                    kind: HirExprKind::Bool(false),
+                    ty: TypeId::BOOL,
+                })
+            }
         }
     }
 
@@ -509,6 +552,15 @@ impl Lowerer {
     pub fn extract_pattern_bindings(&self, pattern: &Pattern, subject_ty: TypeId) -> Vec<(String, TypeId)> {
         let mut bindings = Vec::new();
         eprintln!("[DEBUG pattern] Extracting bindings from: {:?}", pattern);
+        eprintln!("[DEBUG pattern] Pattern variant: {}", match pattern {
+            Pattern::Tuple(_) => "Tuple",
+            Pattern::Enum { .. } => "Enum",
+            Pattern::Identifier(_) => "Identifier",
+            Pattern::Wildcard => "Wildcard",
+            Pattern::Literal(_) => "Literal",
+            Pattern::Or(_) => "Or",
+            _ => "Other",
+        });
         eprintln!(
             "[DEBUG pattern] Subject type: {:?}, resolved: {:?}",
             subject_ty,
@@ -730,7 +782,6 @@ impl Lowerer {
                 }
                 _ => {
                     // Other statement types are not yet supported in do blocks
-                    // They would need to be lowered via the statement lowering path
                 }
             }
         }

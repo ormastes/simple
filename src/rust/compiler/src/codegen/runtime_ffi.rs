@@ -632,6 +632,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_cli_print_version", &[], &[]),
     RuntimeFuncSpec::new("rt_cli_get_args", &[], &[I64]),
     RuntimeFuncSpec::new("rt_cli_file_exists", &[I64], &[I8]),
+    RuntimeFuncSpec::new("rt_cli_read_file", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_cli_exit", &[I64], &[]),
     // Code execution
     RuntimeFuncSpec::new("rt_cli_run_code", &[I64, I8, I8], &[I64]),
@@ -668,6 +669,9 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_cli_run_todo_gen", &[I64], &[I64]),
     // i18n
     RuntimeFuncSpec::new("rt_cli_run_i18n", &[I64], &[I64]),
+    // Lexer and brief
+    RuntimeFuncSpec::new("rt_cli_run_lex", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_cli_run_brief", &[I64], &[I64]),
     // Context pack generation
     RuntimeFuncSpec::new("rt_context_generate", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_context_stats", &[I64, I64], &[I64]),
@@ -795,6 +799,90 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_exec", &[I64], &[I32]), // cmd -> exit_code
     RuntimeFuncSpec::new("rt_file_hash", &[I64], &[I64]), // path -> hash_text
     RuntimeFuncSpec::new("rt_write_file", &[I64, I64], &[I8]), // path, content -> success
+    // =========================================================================
+    // Environment Variable Operations
+    // =========================================================================
+    RuntimeFuncSpec::new("rt_env_get", &[I64, I64], &[I64]), // name_ptr, name_len -> RuntimeValue
+    RuntimeFuncSpec::new("rt_get_env", &[I64, I64], &[I64]), // alias for rt_env_get
+    RuntimeFuncSpec::new("rt_env_set", &[I64, I64, I64, I64], &[I8]), // name_ptr, name_len, val_ptr, val_len -> bool
+    RuntimeFuncSpec::new("rt_set_env", &[I64, I64, I64, I64], &[]), // alias, no return
+    RuntimeFuncSpec::new("rt_env_cwd", &[], &[I64]), // () -> RuntimeValue
+    RuntimeFuncSpec::new("rt_env_all", &[], &[I64]), // () -> RuntimeValue (array of tuples)
+    RuntimeFuncSpec::new("rt_env_vars", &[], &[I64]), // alias for rt_env_all
+    RuntimeFuncSpec::new("rt_env_exists", &[I64, I64], &[I8]), // name_ptr, name_len -> bool
+    RuntimeFuncSpec::new("rt_env_remove", &[I64, I64], &[I8]), // name_ptr, name_len -> bool
+    RuntimeFuncSpec::new("rt_env_home", &[], &[I64]), // () -> RuntimeValue
+    RuntimeFuncSpec::new("rt_env_temp", &[], &[I64]), // () -> RuntimeValue
+    RuntimeFuncSpec::new("rt_exit", &[I32], &[]), // code -> ! (never returns)
+    RuntimeFuncSpec::new("rt_get_args", &[], &[I64]), // () -> RuntimeValue (array of args)
+    RuntimeFuncSpec::new("rt_platform_name", &[], &[I64]), // () -> RuntimeValue
+    // =========================================================================
+    // File I/O Metadata Operations
+    // =========================================================================
+    RuntimeFuncSpec::new("rt_file_exists", &[I64, I64], &[I8]), // path_ptr, path_len -> bool
+    RuntimeFuncSpec::new("rt_file_stat", &[I64, I64, I64, I64, I64, I64, I64, I64], &[]), // path + 6 out ptrs
+    // =========================================================================
+    // File I/O Operations
+    // =========================================================================
+    RuntimeFuncSpec::new("rt_file_canonicalize", &[I64, I64], &[I64]), // path_ptr, path_len -> RuntimeValue
+    RuntimeFuncSpec::new("rt_file_read_text", &[I64, I64], &[I64]), // path_ptr, path_len -> RuntimeValue
+    RuntimeFuncSpec::new("rt_file_write_text", &[I64, I64, I64, I64], &[I8]), // path, content -> bool
+    RuntimeFuncSpec::new("rt_file_copy", &[I64, I64, I64, I64], &[I8]), // src, dest -> bool
+    RuntimeFuncSpec::new("rt_file_remove", &[I64, I64], &[I8]), // path -> bool
+    RuntimeFuncSpec::new("rt_file_rename", &[I64, I64, I64, I64], &[I8]), // old, new -> bool
+    RuntimeFuncSpec::new("rt_file_read_lines", &[I64, I64], &[I64]), // path -> RuntimeValue (array)
+    RuntimeFuncSpec::new("rt_file_append_text", &[I64, I64, I64, I64], &[I8]), // path, content -> bool
+    RuntimeFuncSpec::new("rt_file_read_bytes", &[I64, I64], &[I64]), // path -> RuntimeValue (array)
+    RuntimeFuncSpec::new("rt_file_write_bytes", &[I64, I64, I64, I64], &[I8]), // path, bytes -> bool
+    RuntimeFuncSpec::new("rt_file_move", &[I64, I64, I64, I64], &[I8]), // src, dest -> bool
+    // =========================================================================
+    // Directory Operations
+    // =========================================================================
+    RuntimeFuncSpec::new("rt_dir_create", &[I64, I64], &[I8]), // path -> bool
+    RuntimeFuncSpec::new("rt_dir_create_all", &[I64, I64], &[I8]), // path -> bool
+    RuntimeFuncSpec::new("rt_dir_list", &[I64, I64], &[I64]), // path -> RuntimeValue (array)
+    RuntimeFuncSpec::new("rt_dir_remove", &[I64, I64], &[I8]), // path -> bool
+    RuntimeFuncSpec::new("rt_dir_remove_all", &[I64, I64], &[I8]), // path -> bool
+    RuntimeFuncSpec::new("rt_file_find", &[I64, I64, I64, I64], &[I64]), // dir, pattern -> RuntimeValue
+    RuntimeFuncSpec::new("rt_dir_glob", &[I64, I64], &[I64]), // pattern -> RuntimeValue (array)
+    RuntimeFuncSpec::new("rt_dir_walk", &[I64, I64], &[I64]), // path -> RuntimeValue (array)
+    RuntimeFuncSpec::new("rt_current_dir", &[], &[I64]), // () -> RuntimeValue
+    RuntimeFuncSpec::new("rt_set_current_dir", &[I64, I64], &[I8]), // path -> bool
+    // =========================================================================
+    // File Descriptor Operations
+    // =========================================================================
+    RuntimeFuncSpec::new("rt_file_open", &[I64, I64, I64, I64], &[I32]), // path, mode -> fd
+    RuntimeFuncSpec::new("rt_file_get_size", &[I32], &[I64]), // fd -> size
+    RuntimeFuncSpec::new("rt_file_close", &[I32], &[I8]), // fd -> bool
+    // =========================================================================
+    // Path Operations
+    // =========================================================================
+    RuntimeFuncSpec::new("rt_path_basename", &[I64, I64], &[I64]), // path -> RuntimeValue
+    RuntimeFuncSpec::new("rt_path_dirname", &[I64, I64], &[I64]), // path -> RuntimeValue
+    RuntimeFuncSpec::new("rt_path_ext", &[I64, I64], &[I64]), // path -> RuntimeValue
+    RuntimeFuncSpec::new("rt_path_absolute", &[I64, I64], &[I64]), // path -> RuntimeValue
+    RuntimeFuncSpec::new("rt_path_separator", &[], &[I64]), // () -> RuntimeValue
+    RuntimeFuncSpec::new("rt_path_stem", &[I64, I64], &[I64]), // path -> RuntimeValue
+    RuntimeFuncSpec::new("rt_path_relative", &[I64, I64, I64, I64], &[I64]), // from, to -> RuntimeValue
+    RuntimeFuncSpec::new("rt_path_join", &[I64, I64, I64, I64], &[I64]), // path1, path2 -> RuntimeValue
+    // =========================================================================
+    // Runtime Configuration
+    // =========================================================================
+    RuntimeFuncSpec::new("rt_set_macro_trace", &[I8], &[]), // enable -> ()
+    RuntimeFuncSpec::new("rt_is_macro_trace_enabled", &[], &[I8]), // () -> bool
+    RuntimeFuncSpec::new("rt_set_debug_mode", &[I8], &[]), // enable -> ()
+    RuntimeFuncSpec::new("rt_is_debug_mode_enabled", &[], &[I8]), // () -> bool
+    // =========================================================================
+    // Regex Operations
+    // =========================================================================
+    RuntimeFuncSpec::new("ffi_regex_is_match", &[I64, I64, I64, I64], &[I8]), // pattern, text -> bool
+    RuntimeFuncSpec::new("ffi_regex_find", &[I64, I64, I64, I64], &[I64]), // pattern, text -> RuntimeValue
+    RuntimeFuncSpec::new("ffi_regex_find_all", &[I64, I64, I64, I64], &[I64]), // pattern, text -> RuntimeValue
+    RuntimeFuncSpec::new("ffi_regex_captures", &[I64, I64, I64, I64], &[I64]), // pattern, text -> RuntimeValue
+    RuntimeFuncSpec::new("ffi_regex_replace", &[I64, I64, I64, I64, I64, I64], &[I64]), // pattern, text, replacement -> RuntimeValue
+    RuntimeFuncSpec::new("ffi_regex_replace_all", &[I64, I64, I64, I64, I64, I64], &[I64]), // pattern, text, replacement -> RuntimeValue
+    RuntimeFuncSpec::new("ffi_regex_split", &[I64, I64, I64, I64], &[I64]), // pattern, text -> RuntimeValue
+    RuntimeFuncSpec::new("ffi_regex_split_n", &[I64, I64, I64, I64, I64], &[I64]), // pattern, text, n -> RuntimeValue
 ];
 
 #[cfg(test)]

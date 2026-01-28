@@ -21,7 +21,8 @@
         clean clean-coverage clean-duplication install-tools help \
         arch-test arch-test-visualize \
         check-todos gen-todos todos todos-p0 \
-        dashboard dashboard-collect dashboard-snapshot dashboard-trends dashboard-alerts
+        dashboard dashboard-collect dashboard-snapshot dashboard-trends dashboard-alerts \
+        bootstrap bootstrap-stage1 bootstrap-stage2 bootstrap-stage3 bootstrap-verify bootstrap-clean
 
 # Default target
 all: check
@@ -593,6 +594,72 @@ dashboard-alerts:
 	@./target/debug/simple dashboard check-alerts
 
 # ============================================================================
+# Bootstrap (Multi-Stage Self-Compilation)
+# ============================================================================
+#
+# Builds verified bootstrap pipeline: simple_old → simple_new1 → simple_new2 → simple_new3
+# Verification: simple_new2 and simple_new3 must be bitwise identical
+#
+# Usage:
+#   make bootstrap           - Run full bootstrap pipeline with verification
+#   make bootstrap-stage1    - Build simple_new1 using Rust runtime
+#   make bootstrap-stage2    - Build simple_new2 using simple_new1
+#   make bootstrap-stage3    - Build simple_new3 using simple_new2
+#   make bootstrap-verify    - Verify simple_new2 == simple_new3
+#   make bootstrap-clean     - Clean bootstrap artifacts
+
+BOOTSTRAP_DIR := target/bootstrap
+
+.PHONY: bootstrap bootstrap-stage1 bootstrap-stage2 bootstrap-stage3 bootstrap-verify bootstrap-clean
+
+bootstrap: bootstrap-clean bootstrap-stage1 bootstrap-stage2 bootstrap-stage3 bootstrap-verify
+	@echo ""
+	@echo "=============================================="
+	@echo "BOOTSTRAP COMPLETE"
+	@echo "=============================================="
+	@ls -lh $(BOOTSTRAP_DIR)/simple_new*
+
+bootstrap-stage1:
+	@echo "=== Stage 1: simple_old -> simple_new1 ==="
+	@mkdir -p $(BOOTSTRAP_DIR)
+	./target/debug/simple_old compile simple/compiler/main.spl -o $(BOOTSTRAP_DIR)/simple_new1 --native
+	@chmod +x $(BOOTSTRAP_DIR)/simple_new1
+	@echo "Stage 1 complete: $(BOOTSTRAP_DIR)/simple_new1"
+
+bootstrap-stage2: bootstrap-stage1
+	@echo "=== Stage 2: simple_new1 -> simple_new2 ==="
+	$(BOOTSTRAP_DIR)/simple_new1 -c -o $(BOOTSTRAP_DIR)/simple_new2 simple/compiler/main.spl
+	@chmod +x $(BOOTSTRAP_DIR)/simple_new2
+	@echo "Stage 2 complete: $(BOOTSTRAP_DIR)/simple_new2"
+
+bootstrap-stage3: bootstrap-stage2
+	@echo "=== Stage 3: simple_new2 -> simple_new3 ==="
+	$(BOOTSTRAP_DIR)/simple_new2 -c -o $(BOOTSTRAP_DIR)/simple_new3 simple/compiler/main.spl
+	@chmod +x $(BOOTSTRAP_DIR)/simple_new3
+	@echo "Stage 3 complete: $(BOOTSTRAP_DIR)/simple_new3"
+
+bootstrap-verify:
+	@echo "=== Verification: Comparing simple_new2 and simple_new3 ==="
+	@HASH2=$$(sha256sum $(BOOTSTRAP_DIR)/simple_new2 | cut -d' ' -f1); \
+	HASH3=$$(sha256sum $(BOOTSTRAP_DIR)/simple_new3 | cut -d' ' -f1); \
+	echo "  simple_new2 hash: $$HASH2"; \
+	echo "  simple_new3 hash: $$HASH3"; \
+	if [ "$$HASH2" = "$$HASH3" ]; then \
+		echo ""; \
+		echo "SUCCESS: simple_new2 == simple_new3"; \
+		echo "Bootstrap verification PASSED!"; \
+	else \
+		echo ""; \
+		echo "FAIL: simple_new2 != simple_new3"; \
+		echo "Non-determinism detected in compiler output."; \
+		exit 1; \
+	fi
+
+bootstrap-clean:
+	@echo "Cleaning bootstrap directory..."
+	rm -rf $(BOOTSTRAP_DIR)
+
+# ============================================================================
 # Help
 # ============================================================================
 
@@ -662,6 +729,14 @@ help:
 	@echo "  make dashboard-snapshot- Create daily snapshot"
 	@echo "  make dashboard-trends  - Show trend analysis"
 	@echo "  make dashboard-alerts  - Check for critical alerts"
+	@echo ""
+	@echo "Bootstrap (Self-Compilation):"
+	@echo "  make bootstrap        - Run full bootstrap pipeline with verification"
+	@echo "  make bootstrap-stage1 - Build simple_new1 using Rust runtime"
+	@echo "  make bootstrap-stage2 - Build simple_new2 using simple_new1"
+	@echo "  make bootstrap-stage3 - Build simple_new3 using simple_new2"
+	@echo "  make bootstrap-verify - Verify simple_new2 == simple_new3"
+	@echo "  make bootstrap-clean  - Clean bootstrap artifacts"
 	@echo ""
 	@echo "Other:"
 	@echo "  make install-tools - Install required tools"
