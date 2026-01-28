@@ -134,7 +134,8 @@ impl<'a> MirLowerer<'a> {
 
             HirStmt::Return(value) => {
                 let ret_reg = if let Some(v) = value {
-                    Some(self.lower_expr(v)?)
+                    let reg = self.lower_expr(v)?;
+                    Some(reg)
                 } else {
                     None
                 };

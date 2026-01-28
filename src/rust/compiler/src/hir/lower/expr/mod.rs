@@ -219,6 +219,10 @@ impl Lowerer {
             hir_args.push(expr);
         }
 
+        // Look up return type from module functions
+        let recv_ty = receiver_hir.ty;
+        let return_ty = self.lookup_method_return_type(recv_ty, method);
+
         // Generate generic method call for user-defined methods
         // Uses dynamic dispatch since we don't know the concrete type at compile time
         Ok(HirExpr {
@@ -228,8 +232,36 @@ impl Lowerer {
                 args: hir_args,
                 dispatch: DispatchMode::Dynamic,
             },
-            ty: TypeId::ANY, // Return type is dynamically determined
+            ty: return_ty,
         })
+    }
+
+    /// Look up the return type of a method from pre-registered signatures.
+    fn lookup_method_return_type(&self, recv_ty: TypeId, method: &str) -> TypeId {
+        // If receiver type is known, look up "TypeName.method"
+        if recv_ty != TypeId::ANY && recv_ty != TypeId::VOID {
+            if let Some(hir_ty) = self.module.types.get(recv_ty) {
+                let type_name = match hir_ty {
+                    HirType::Struct { name, .. } => Some(name.as_str()),
+                    HirType::Enum { name, .. } => Some(name.as_str()),
+                    _ => None,
+                };
+                if let Some(name) = type_name {
+                    let qualified = format!("{}.{}", name, method);
+                    if let Some(&ret_ty) = self.method_return_types.get(&qualified) {
+                        return ret_ty;
+                    }
+                }
+            }
+        }
+        // Search pre-registered methods for ".method" suffix
+        let suffix = format!(".{}", method);
+        for (name, &ret_ty) in &self.method_return_types {
+            if name.ends_with(&suffix) {
+                return ret_ty;
+            }
+        }
+        TypeId::ANY
     }
 
     /// Handle this.index(), this.thread_index(), this.group_index()
@@ -334,7 +366,7 @@ impl Lowerer {
                         Some(TypeId::ANY)
                     }
                 }
-                "contains" => Some(TypeId::BOOL),
+                "contains" | "is_empty" => Some(TypeId::BOOL),
                 "slice" | "filter" | "map" => Some(receiver.ty), // Returns same array type
                 "first" | "last" | "get" => {
                     // Returns element type (or Option<element>)

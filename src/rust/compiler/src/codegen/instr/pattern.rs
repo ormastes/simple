@@ -50,17 +50,8 @@ pub(super) fn compile_pattern_test<M: Module>(
             let call = builder.ins().call(disc_ref, &[subject_val]);
             let disc = builder.inst_results(call)[0];
 
-            // Result/Option use small integer discriminants (Ok/Some=1, Err/None=0)
-            // Other enums use hashed variant names
-            let expected_disc = if enum_name == "Result" || enum_name == "Option" {
-                match variant_name.as_str() {
-                    "Ok" | "Some" => 1i64,
-                    "Err" | "None" => 0i64,
-                    _ => calculate_variant_discriminant(variant_name) as i64,
-                }
-            } else {
-                calculate_variant_discriminant(variant_name) as i64
-            };
+            // All enums use hashed variant name discriminants consistently
+            let expected_disc = calculate_variant_discriminant(variant_name) as i64;
             let expected_val = builder.ins().iconst(types::I64, expected_disc);
             builder
                 .ins()

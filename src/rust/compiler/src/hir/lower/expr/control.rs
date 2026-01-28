@@ -224,7 +224,6 @@ impl Lowerer {
         arms: &[MatchArm],
         ctx: &mut FunctionContext,
     ) -> LowerResult<HirExpr> {
-        eprintln!("[DEBUG lower_match] Starting match lowering with {} arms", arms.len());
         // Lower the subject once and store in a local variable to avoid re-evaluation
         let subject_hir = self.lower_expr(subject, ctx)?;
         let subject_ty = subject_hir.ty;
@@ -270,11 +269,8 @@ impl Lowerer {
         // Extract pattern bindings and add them to context
         // This needs to happen after pattern condition but before guard/body
         let bindings = self.extract_pattern_bindings(&arm.pattern, subject_ty);
-        eprintln!("[DEBUG match] Pattern: {:?}", arm.pattern);
-        eprintln!("[DEBUG match] Bindings extracted: {:?}", bindings);
         let saved_locals_len = ctx.locals.len();
         for (name, ty) in &bindings {
-            eprintln!("[DEBUG match] Adding binding: {} with type {:?}", name, ty);
             ctx.add_local(name.clone(), *ty, simple_parser::ast::Mutability::Immutable);
         }
 
@@ -422,29 +418,15 @@ impl Lowerer {
                     ty: TypeId::BOOL,
                 })
             }
-            Pattern::Enum { name, variant, .. } => {
-                // Call rt_enum_discriminant(subject) and compare to expected discriminant
-                let disc_call = HirExpr {
-                    kind: HirExprKind::BuiltinCall {
-                        name: "rt_enum_discriminant".to_string(),
-                        args: vec![subject_ref],
-                    },
-                    ty: TypeId::I64,
-                };
-
-                let expected_disc: i64 = match (name.as_str(), variant.as_str()) {
-                    ("Result" | "_", "Ok") => 1,
-                    ("Result" | "_", "Err") => 0,
-                    ("Option" | "_", "Some") => 1,
-                    ("Option" | "_", "None") => 0,
-                    (_, v) => {
-                        // Hash-based discriminant for other enums
-                        use std::collections::hash_map::DefaultHasher;
-                        use std::hash::{Hash, Hasher};
-                        let mut hasher = DefaultHasher::new();
-                        v.hash(&mut hasher);
-                        (hasher.finish() & 0xFFFFFFFF) as i64
-                    }
+            Pattern::Enum { name: _, variant, .. } => {
+                // Use rt_enum_check_discriminant(subject, expected_disc) -> bool
+                // All enums use hashed variant name discriminants consistently
+                let expected_disc: i64 = {
+                    use std::collections::hash_map::DefaultHasher;
+                    use std::hash::{Hash, Hasher};
+                    let mut hasher = DefaultHasher::new();
+                    variant.hash(&mut hasher);
+                    (hasher.finish() & 0xFFFFFFFF) as i64
                 };
 
                 let expected_val = HirExpr {
@@ -453,10 +435,9 @@ impl Lowerer {
                 };
 
                 Ok(HirExpr {
-                    kind: HirExprKind::Binary {
-                        op: BinOp::Eq,
-                        left: Box::new(disc_call),
-                        right: Box::new(expected_val),
+                    kind: HirExprKind::BuiltinCall {
+                        name: "rt_enum_check_discriminant".to_string(),
+                        args: vec![subject_ref, expected_val],
                     },
                     ty: TypeId::BOOL,
                 })
@@ -481,15 +462,6 @@ impl Lowerer {
         variant_name: &str,
         expected_ty: TypeId,
     ) -> Option<Vec<TypeId>> {
-        eprintln!(
-            "[DEBUG enum_lookup] Looking for variant '{}' in enum '{}', expected_ty={:?}",
-            variant_name, enum_name, expected_ty
-        );
-        eprintln!(
-            "[DEBUG enum_lookup] expected_ty resolved to: {:?}",
-            self.module.types.get(expected_ty)
-        );
-
         // First, try to use the expected type if it's an enum
         if expected_ty != TypeId::ANY {
             if let Some(HirType::Enum {
@@ -498,23 +470,11 @@ impl Lowerer {
                 ..
             }) = self.module.types.get(expected_ty)
             {
-                eprintln!(
-                    "[DEBUG enum_lookup] Found enum '{}' with {} variants",
-                    enum_type_name,
-                    variants.len()
-                );
                 for (name, fields) in variants {
                     if name == variant_name {
-                        eprintln!("[DEBUG enum_lookup] MATCH! Returning {:?}", fields);
                         return fields.clone();
                     }
                 }
-                eprintln!(
-                    "[DEBUG enum_lookup] Variant '{}' not found in expected enum",
-                    variant_name
-                );
-            } else {
-                eprintln!("[DEBUG enum_lookup] expected_ty is NOT an enum");
             }
         }
 
@@ -551,23 +511,7 @@ impl Lowerer {
     /// Returns a list of (name, type) pairs for variables that should be bound.
     pub fn extract_pattern_bindings(&self, pattern: &Pattern, subject_ty: TypeId) -> Vec<(String, TypeId)> {
         let mut bindings = Vec::new();
-        eprintln!("[DEBUG pattern] Extracting bindings from: {:?}", pattern);
-        eprintln!("[DEBUG pattern] Pattern variant: {}", match pattern {
-            Pattern::Tuple(_) => "Tuple",
-            Pattern::Enum { .. } => "Enum",
-            Pattern::Identifier(_) => "Identifier",
-            Pattern::Wildcard => "Wildcard",
-            Pattern::Literal(_) => "Literal",
-            Pattern::Or(_) => "Or",
-            _ => "Other",
-        });
-        eprintln!(
-            "[DEBUG pattern] Subject type: {:?}, resolved: {:?}",
-            subject_ty,
-            self.module.types.get(subject_ty)
-        );
         self.collect_pattern_bindings(pattern, subject_ty, &mut bindings);
-        eprintln!("[DEBUG pattern] Found bindings: {:?}", bindings);
         bindings
     }
 
@@ -584,15 +528,9 @@ impl Lowerer {
             Pattern::Tuple(patterns) => {
                 // For tuples, try to get element types from expected type
                 let resolved_ty = self.module.types.get(expected_ty);
-                eprintln!(
-                    "[DEBUG pattern] Tuple pattern with expected_ty {:?}, resolved: {:?}",
-                    expected_ty, resolved_ty
-                );
                 let element_types = if let Some(HirType::Tuple(types)) = resolved_ty {
-                    eprintln!("[DEBUG pattern] Tuple element types: {:?}", types);
                     Some(types.clone())
                 } else {
-                    eprintln!("[DEBUG pattern] Expected type is not a Tuple, defaulting to ANY");
                     None
                 };
 
@@ -601,7 +539,6 @@ impl Lowerer {
                         .as_ref()
                         .and_then(|types| types.get(i).copied())
                         .unwrap_or(TypeId::ANY);
-                    eprintln!("[DEBUG pattern] Tuple element {} has type {:?}", i, elem_ty);
                     self.collect_pattern_bindings(p, elem_ty, bindings);
                 }
             }

@@ -388,6 +388,61 @@ impl<'a> MirLowerer<'a> {
                     });
                 }
 
+                // Special handling for print/println/eprint/eprintln - box numeric args
+                if matches!(name.as_str(), "print" | "println" | "eprint" | "eprintln" | "print_raw" | "eprint_raw" | "dprint") {
+                    let mut boxed_arg_regs = Vec::new();
+                    for arg in args {
+                        let arg_reg = self.lower_expr(arg)?;
+                        let needs_int_boxing = matches!(
+                            arg.ty,
+                            TypeId::I16 | TypeId::I32 | TypeId::I64 |
+                            TypeId::U8 | TypeId::U16 | TypeId::U32 | TypeId::U64
+                        );
+                        let needs_float_boxing = matches!(arg.ty, TypeId::F32 | TypeId::F64);
+                        let needs_bool_boxing = arg.ty == TypeId::BOOL || arg.ty == TypeId::I8;
+                        if needs_int_boxing || needs_float_boxing || needs_bool_boxing {
+                            let boxed = if needs_bool_boxing {
+                                // Use rt_value_bool for bool → RuntimeValue conversion
+                                self.with_func(|func, current_block| {
+                                    let boxed = func.new_vreg();
+                                    let block = func.block_mut(current_block).unwrap();
+                                    block.instructions.push(MirInst::Call {
+                                        dest: Some(boxed),
+                                        target: CallTarget::from_name("rt_value_bool"),
+                                        args: vec![arg_reg],
+                                    });
+                                    boxed
+                                })?
+                            } else {
+                                self.with_func(|func, current_block| {
+                                    let boxed = func.new_vreg();
+                                    let block = func.block_mut(current_block).unwrap();
+                                    if needs_int_boxing {
+                                        block.instructions.push(MirInst::BoxInt { dest: boxed, value: arg_reg });
+                                    } else {
+                                        block.instructions.push(MirInst::BoxFloat { dest: boxed, value: arg_reg });
+                                    }
+                                    boxed
+                                })?
+                            };
+                            boxed_arg_regs.push(boxed);
+                        } else {
+                            boxed_arg_regs.push(arg_reg);
+                        }
+                    }
+                    let target = CallTarget::from_name(name);
+                    return self.with_func(|func, current_block| {
+                        let dest = func.new_vreg();
+                        let block = func.block_mut(current_block).unwrap();
+                        block.instructions.push(MirInst::Call {
+                            dest: Some(dest),
+                            target,
+                            args: boxed_arg_regs,
+                        });
+                        dest
+                    });
+                }
+
                 // Lower all arguments
                 let mut arg_regs = Vec::new();
                 for arg in args {
@@ -726,19 +781,68 @@ impl<'a> MirLowerer<'a> {
             HirExprKind::Index { receiver, index } => {
                 let receiver_reg = self.lower_expr(receiver)?;
                 let index_reg = self.lower_expr(index)?;
+                let receiver_ty = receiver.ty;
 
-                // Use rt_array_get which works for both arrays and strings
-                let target = CallTarget::from_name("rt_array_get");
-                self.with_func(|func, current_block| {
-                    let dest = func.new_vreg();
-                    let block = func.block_mut(current_block).unwrap();
-                    block.instructions.push(MirInst::Call {
-                        dest: Some(dest),
-                        target,
-                        args: vec![receiver_reg, index_reg],
-                    });
-                    dest
-                })
+                // Check if the receiver is a tuple type
+                let is_tuple = self.type_registry
+                    .and_then(|tr| tr.get(receiver_ty))
+                    .map_or(false, |t| matches!(t, crate::hir::HirType::Tuple(_)));
+
+                let raw_result = if is_tuple {
+                    // Use rt_tuple_get(tuple_rv, index_u64) for tuples
+                    let target = CallTarget::from_name("rt_tuple_get");
+                    self.with_func(|func, current_block| {
+                        let dest = func.new_vreg();
+                        let block = func.block_mut(current_block).unwrap();
+                        block.instructions.push(MirInst::Call {
+                            dest: Some(dest),
+                            target,
+                            args: vec![receiver_reg, index_reg],
+                        });
+                        dest
+                    })?
+                } else {
+                    // Use rt_array_get(array_rv, index_i64) for arrays/strings
+                    let target = CallTarget::from_name("rt_array_get");
+                    self.with_func(|func, current_block| {
+                        let dest = func.new_vreg();
+                        let block = func.block_mut(current_block).unwrap();
+                        block.instructions.push(MirInst::Call {
+                            dest: Some(dest),
+                            target,
+                            args: vec![receiver_reg, index_reg],
+                        });
+                        dest
+                    })?
+                };
+
+                // rt_array_get returns RuntimeValue; unbox if the expected type is a native type
+                let needs_int_unbox = matches!(
+                    expr.ty,
+                    TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::I64 |
+                    TypeId::U8 | TypeId::U16 | TypeId::U32 | TypeId::U64 |
+                    TypeId::BOOL
+                );
+                let needs_float_unbox = matches!(expr.ty, TypeId::F32 | TypeId::F64);
+
+                if needs_int_unbox {
+                    self.with_func(|func, current_block| {
+                        let unboxed = func.new_vreg();
+                        let block = func.block_mut(current_block).unwrap();
+                        block.instructions.push(MirInst::UnboxInt { dest: unboxed, value: raw_result });
+                        unboxed
+                    })
+                } else if needs_float_unbox {
+                    self.with_func(|func, current_block| {
+                        let unboxed = func.new_vreg();
+                        let block = func.block_mut(current_block).unwrap();
+                        block.instructions.push(MirInst::UnboxFloat { dest: unboxed, value: raw_result });
+                        unboxed
+                    })
+                } else {
+                    // Strings, arrays, objects are already usable as pointers
+                    Ok(raw_result)
+                }
             }
 
             // Method call with dispatch mode (static vs dynamic)
@@ -786,26 +890,33 @@ impl<'a> MirLowerer<'a> {
             HirExprKind::Global(name) => {
                 // Check if this is an enum variant (contains ::)
                 if let Some((enum_name, variant)) = name.split_once("::") {
-                    // Look up the enum type to find the variant index
-                    if let Some(registry) = self.type_registry {
+                    // Look up the enum type to verify the variant exists
+                    let variant_exists = if let Some(registry) = self.type_registry {
                         if let Some(enum_type_id) = registry.lookup(enum_name) {
                             if let Some(HirType::Enum { variants, .. }) = registry.get(enum_type_id) {
-                                for (idx, (variant_name, _fields)) in variants.iter().enumerate() {
-                                    if variant_name == variant {
-                                        // Emit the discriminant value as an integer
-                                        return self.with_func(|func, current_block| {
-                                            let dest = func.new_vreg();
-                                            let block = func.block_mut(current_block).unwrap();
-                                            block.instructions.push(MirInst::ConstInt {
-                                                dest,
-                                                value: idx as i64,
-                                            });
-                                            dest
-                                        });
-                                    }
-                                }
+                                variants.iter().any(|(vn, _)| vn == variant)
+                            } else {
+                                false
                             }
+                        } else {
+                            false
                         }
+                    } else {
+                        false
+                    };
+
+                    if variant_exists {
+                        // Emit EnumUnit instruction for proper RuntimeEnum creation
+                        return self.with_func(|func, current_block| {
+                            let dest = func.new_vreg();
+                            let block = func.block_mut(current_block).unwrap();
+                            block.instructions.push(MirInst::EnumUnit {
+                                dest,
+                                enum_name: enum_name.to_string(),
+                                variant_name: variant.to_string(),
+                            });
+                            dest
+                        });
                     }
                     // Enum or variant not found - fall through to error
                     return Err(MirLowerError::Unsupported(format!("unknown enum variant: {}", name)));

@@ -237,6 +237,16 @@ impl Lowerer {
             args_hir.push(self.lower_expr(&arg.value, ctx)?);
         }
 
+        // Look up the return type from the module's functions
+        let return_ty = self.module.functions.iter()
+            .find(|f| f.name == qualified_name)
+            .map(|f| f.return_type)
+            .unwrap_or_else(|| {
+                // If not found as a function, check if class_name is a known type
+                // (constructor pattern: ClassName.factory() returns ClassName)
+                self.module.types.lookup(class_name).unwrap_or(TypeId::ANY)
+            });
+
         let func_expr = HirExpr {
             kind: HirExprKind::Global(qualified_name),
             ty: TypeId::VOID,
@@ -247,7 +257,7 @@ impl Lowerer {
                 func: Box::new(func_expr),
                 args: args_hir,
             },
-            ty: TypeId::VOID,
+            ty: return_ty,
         })
     }
 

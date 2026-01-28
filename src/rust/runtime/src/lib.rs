@@ -153,6 +153,7 @@ pub use value::{
     rt_dict_new,
     rt_dict_set,
     // Enum operations
+    rt_enum_check_discriminant,
     rt_enum_discriminant,
     rt_enum_new,
     rt_enum_payload,

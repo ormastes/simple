@@ -246,6 +246,13 @@ pub extern "C" fn rt_enum_discriminant(value: RuntimeValue) -> i64 {
     get_typed_ptr::<RuntimeEnum>(value, HeapObjectType::Enum).map_or(-1, |p| unsafe { (*p).discriminant as i64 })
 }
 
+/// Check if an enum value has the expected discriminant
+#[no_mangle]
+pub extern "C" fn rt_enum_check_discriminant(value: RuntimeValue, expected: i64) -> bool {
+    get_typed_ptr::<RuntimeEnum>(value, HeapObjectType::Enum)
+        .map_or(false, |p| unsafe { (*p).discriminant as i64 == expected })
+}
+
 /// Get the payload of an enum value
 #[no_mangle]
 pub extern "C" fn rt_enum_payload(value: RuntimeValue) -> RuntimeValue {

@@ -83,7 +83,16 @@ pub fn compile_store<M: Module>(
                 // Check type match - can mismatch in complex control flow
                 let actual_ty = builder.func.dfg.value_type(v);
                 if actual_ty != expected_cl_ty {
-                    create_default(builder)
+                    // Try to coerce between integer types
+                    if actual_ty.is_int() && expected_cl_ty.is_int() {
+                        if actual_ty.bits() > expected_cl_ty.bits() {
+                            builder.ins().ireduce(expected_cl_ty, v)
+                        } else {
+                            builder.ins().uextend(expected_cl_ty, v)
+                        }
+                    } else {
+                        create_default(builder)
+                    }
                 } else {
                     v
                 }

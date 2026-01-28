@@ -156,6 +156,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_value_as_int", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_value_to_string", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_value_eq", &[I64, I64], &[I8]),
+    RuntimeFuncSpec::new("rt_value_truthy", &[I64], &[I8]),
     // =========================================================================
     // Object operations
     // =========================================================================
@@ -173,6 +174,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // Enum operations
     // =========================================================================
     RuntimeFuncSpec::new("rt_enum_new", &[I32, I32, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_enum_check_discriminant", &[I64, I64], &[I8]),
     RuntimeFuncSpec::new("rt_enum_discriminant", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_enum_payload", &[I64], &[I64]),
     // =========================================================================

@@ -102,12 +102,10 @@ pub(super) fn compile_struct_init<M: Module>(
                 val
             } else {
                 // VReg not found - use default value (0 for pointers/integers)
-                eprintln!("[DEBUG StructInit] Missing VReg {:?}, using default 0", field_values[i]);
                 builder.ins().iconst(types::I64, 0)
             }
         } else {
             // More fields than values - use default 0
-            eprintln!("[DEBUG StructInit] field_values[{}] out of bounds (len={}), using default 0", i, field_values.len());
             builder.ins().iconst(types::I64, 0)
         };
         let _cranelift_ty = type_id_to_cranelift(*field_type);
@@ -226,6 +224,22 @@ fn try_compile_builtin_method_call<M: Module>(
 
         let call = builder.ins().call(slice_ref, &[receiver_val, start, end, step]);
         return Ok(Some(builder.inst_results(call)[0]));
+    }
+
+    // is_empty: compile as rt_len(receiver) == 0
+    if method == "is_empty" {
+        if let Some(&len_id) = ctx.runtime_funcs.get("rt_len") {
+            let len_ref = ctx.module.declare_func_in_func(len_id, builder.func);
+            let call = builder.ins().call(len_ref, &[receiver_val]);
+            let len_val = builder.inst_results(call)[0];
+            let zero = builder.ins().iconst(types::I64, 0);
+            let result = builder.ins().icmp(
+                cranelift_codegen::ir::condcodes::IntCC::Equal,
+                len_val,
+                zero,
+            );
+            return Ok(Some(result));
+        }
     }
 
     // Map method names to runtime functions

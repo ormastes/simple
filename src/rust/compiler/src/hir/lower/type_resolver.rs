@@ -241,26 +241,52 @@ impl Lowerer {
     }
 
     pub(super) fn get_field_info(&self, struct_ty: TypeId, field: &str) -> LowerResult<(usize, TypeId)> {
-        // Handle built-in ANY type directly - dynamic field access returns Any
+        // Handle built-in ANY type - search all known structs for the field
+        // When ambiguous, prefer the struct with the most fields (best guess)
         if struct_ty == TypeId::ANY {
-            return Ok((0, TypeId::ANY)); // Field index is 0 (unused), type is Any
+            let mut best: Option<(usize, TypeId, usize)> = None; // (idx, ty, field_count)
+            for (_, hir_ty) in self.module.types.iter() {
+                if let HirType::Struct { fields, .. } = hir_ty {
+                    for (idx, (field_name, field_ty)) in fields.iter().enumerate() {
+                        if field_name == field {
+                            let count = fields.len();
+                            if best.as_ref().map_or(true, |(_, _, c)| count > *c) {
+                                best = Some((idx, *field_ty, count));
+                            }
+                        }
+                    }
+                }
+            }
+            if let Some((idx, ty, _)) = best {
+                return Ok((idx, ty));
+            }
+            return Ok((0, TypeId::ANY)); // Fallback: dynamic field access
         }
 
         if let Some(hir_ty) = self.module.types.get(struct_ty) {
             match hir_ty {
-                // Any type - dynamic field access returns Any
+                // Any type - search all known structs for the field
+                // When ambiguous, prefer the struct with the most fields
                 HirType::Any => {
-                    return Ok((0, TypeId::ANY)); // Field index is 0 (unused), type is Any
+                    let mut best: Option<(usize, TypeId, usize)> = None;
+                    for (_, search_ty) in self.module.types.iter() {
+                        if let HirType::Struct { fields, .. } = search_ty {
+                            for (idx, (field_name, field_ty)) in fields.iter().enumerate() {
+                                if field_name == field {
+                                    let count = fields.len();
+                                    if best.as_ref().map_or(true, |(_, _, c)| count > *c) {
+                                        best = Some((idx, *field_ty, count));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if let Some((idx, ty, _)) = best {
+                        return Ok((idx, ty));
+                    }
+                    return Ok((0, TypeId::ANY));
                 }
                 HirType::Struct { name, fields, .. } => {
-                    eprintln!(
-                        "[DEBUG get_field_info] Looking for field '{}' in struct '{}'",
-                        field, name
-                    );
-                    eprintln!(
-                        "[DEBUG get_field_info] Available fields: {:?}",
-                        fields.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>()
-                    );
                     for (idx, (field_name, field_ty)) in fields.iter().enumerate() {
                         if field_name == field {
                             return Ok((idx, *field_ty));

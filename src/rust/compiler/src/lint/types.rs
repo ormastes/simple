@@ -502,6 +502,8 @@ Or in simple.sdn:
     [lints]
     resource_leak = "allow"
 "#.to_string(),
+            LintName::WildcardMatch => "Lint: wildcard_match\nLevel: allow\n\nWarns about wildcard catch-all patterns in match expressions.".to_string(),
+            LintName::NonExhaustiveMatch => "Lint: non_exhaustive_match\nLevel: warn\n\nWarns when match expressions may not cover all variants.".to_string(),
         }
     }
 
@@ -518,6 +520,8 @@ Or in simple.sdn:
             LintName::SSpecManualAssertions,
             LintName::UnnamedDuplicateTypedArgs,
             LintName::ResourceLeak,
+            LintName::WildcardMatch,
+            LintName::NonExhaustiveMatch,
         ]
     }
 }
