@@ -421,20 +421,13 @@ impl Lowerer {
 
     /// Lower a match statement to a chain of If-Else statements
     fn lower_match_stmt(&mut self, match_stmt: &MatchStmt, ctx: &mut FunctionContext) -> LowerResult<Vec<HirStmt>> {
-        eprintln!("[DEBUG match_stmt] ENTERING lower_match_stmt");
         // Lower the subject expression once
         let subject_hir = self.lower_expr(&match_stmt.subject, ctx)?;
         let subject_ty = subject_hir.ty;
-        eprintln!(
-            "[DEBUG match_stmt] Subject type: {:?}, resolved: {:?}",
-            subject_ty,
-            self.module.types.get(subject_ty)
-        );
 
         // Create a temporary local to hold the subject value
         let subject_idx = ctx.locals.len();
         ctx.add_local("$match_subject".to_string(), subject_ty, Mutability::Immutable);
-        eprintln!("[DEBUG match_stmt] Created subject local idx: {}", subject_idx);
 
         // Store the subject value
         let store_stmt = HirStmt::Let {
@@ -442,7 +435,6 @@ impl Lowerer {
             ty: subject_ty,
             value: Some(subject_hir),
         };
-        eprintln!("[DEBUG match_stmt] About to process {} arms", match_stmt.arms.len());
 
         // Build the chain of If-Else statements from the arms
         let if_chain = self.lower_match_arms_stmt(subject_idx, subject_ty, &match_stmt.arms, ctx)?;
@@ -468,9 +460,22 @@ impl Lowerer {
         let remaining_arms = &arms[1..];
 
         // Check if this is a wildcard pattern (always matches)
-        if matches!(&arm.pattern, Pattern::Wildcard | Pattern::Identifier(_)) {
-            // Wildcard or binding pattern - just execute the body
+        // But: if subject is an enum and the identifier matches a variant name,
+        // treat it as an enum pattern, not a binding.
+        if matches!(&arm.pattern, Pattern::Wildcard) {
             return self.lower_block(&arm.body, ctx);
+        }
+        if let Pattern::Identifier(name) = &arm.pattern {
+            let is_enum_variant = if let Some(HirType::Enum { variants, name: enum_name, .. }) = self.module.types.get(subject_ty) {
+                variants.iter().any(|(vn, _)| vn == name)
+            } else {
+                false
+            };
+            if !is_enum_variant {
+                // Plain binding pattern - always matches
+                return self.lower_block(&arm.body, ctx);
+            }
+            // Otherwise fall through to treat as enum pattern
         }
 
         // Generate the condition for this pattern
@@ -478,9 +483,7 @@ impl Lowerer {
 
         // Extract pattern bindings and add them to context
         // This needs to happen after pattern condition but before guard/body
-        eprintln!("[DEBUG match_stmt] Processing arm pattern: {:?}", arm.pattern);
         let bindings = self.extract_pattern_bindings(&arm.pattern, subject_ty);
-        eprintln!("[DEBUG match_stmt] Bindings: {:?}", bindings);
         let saved_locals_len = ctx.locals.len();
         for (name, ty) in &bindings {
             ctx.add_local(name.clone(), *ty, Mutability::Immutable);
@@ -501,8 +504,56 @@ impl Lowerer {
             condition
         };
 
+        // Generate payload extraction statements for enum bindings
+        let mut binding_stmts = Vec::new();
+        if let Pattern::Enum { payload: Some(payload_patterns), .. } = &arm.pattern {
+            // Extract payload from enum subject, then bind to locals
+            let payload_expr = HirExpr {
+                kind: HirExprKind::BuiltinCall {
+                    name: "rt_enum_payload".to_string(),
+                    args: vec![HirExpr {
+                        kind: HirExprKind::Local(subject_idx),
+                        ty: subject_ty,
+                    }],
+                },
+                ty: TypeId::ANY,
+            };
+
+            for (i, p) in payload_patterns.iter().enumerate() {
+                if let Pattern::Identifier(name) | Pattern::MutIdentifier(name) = p {
+                    if let Some(local_idx) = ctx.local_map.get(name) {
+                        let local_idx = *local_idx;
+                        // For single-payload enums, use payload directly
+                        // For multi-payload, would need tuple indexing
+                        let value = if payload_patterns.len() == 1 {
+                            payload_expr.clone()
+                        } else {
+                            // Multi-field: index into tuple payload
+                            HirExpr {
+                                kind: HirExprKind::Index {
+                                    receiver: Box::new(payload_expr.clone()),
+                                    index: Box::new(HirExpr {
+                                        kind: HirExprKind::Integer(i as i64),
+                                        ty: TypeId::I64,
+                                    }),
+                                },
+                                ty: TypeId::ANY,
+                            }
+                        };
+                        binding_stmts.push(HirStmt::Let {
+                            local_index: local_idx,
+                            ty: TypeId::ANY,
+                            value: Some(value),
+                        });
+                    }
+                }
+            }
+        }
+
         // Lower the arm body with bindings in scope
-        let then_block = self.lower_block(&arm.body, ctx)?;
+        let mut then_block = Vec::new();
+        then_block.extend(binding_stmts);
+        then_block.extend(self.lower_block(&arm.body, ctx)?);
 
         // Restore context (remove pattern bindings)
         ctx.locals.truncate(saved_locals_len);
@@ -537,12 +588,54 @@ impl Lowerer {
         };
 
         match pattern {
-            Pattern::Wildcard | Pattern::Identifier(_) => {
+            Pattern::Wildcard => {
                 // Always matches
                 Ok(HirExpr {
                     kind: HirExprKind::Bool(true),
                     ty: TypeId::BOOL,
                 })
+            }
+            Pattern::Identifier(name) => {
+                // Check if this identifier is an enum variant of the subject type
+                let enum_info = if let Some(HirType::Enum { variants, name: enum_name, .. }) = self.module.types.get(subject_ty) {
+                    if variants.iter().any(|(vn, _)| vn == name) {
+                        Some(enum_name.clone())
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+
+                if let Some(_enum_name) = enum_info {
+                    // Treat as enum variant pattern using rt_enum_check_discriminant
+                    let expected_disc: i64 = {
+                        use std::collections::hash_map::DefaultHasher;
+                        use std::hash::{Hash, Hasher};
+                        let mut hasher = DefaultHasher::new();
+                        name.hash(&mut hasher);
+                        (hasher.finish() & 0xFFFFFFFF) as i64
+                    };
+
+                    let expected_val = HirExpr {
+                        kind: HirExprKind::Integer(expected_disc),
+                        ty: TypeId::I64,
+                    };
+
+                    Ok(HirExpr {
+                        kind: HirExprKind::BuiltinCall {
+                            name: "rt_enum_check_discriminant".to_string(),
+                            args: vec![subject_ref, expected_val],
+                        },
+                        ty: TypeId::BOOL,
+                    })
+                } else {
+                    // Plain binding - always matches
+                    Ok(HirExpr {
+                        kind: HirExprKind::Bool(true),
+                        ty: TypeId::BOOL,
+                    })
+                }
             }
             Pattern::Literal(lit_expr) => {
                 // Compare subject == literal
@@ -629,28 +722,15 @@ impl Lowerer {
                     ty: TypeId::BOOL,
                 })
             }
-            Pattern::Enum { name, variant, .. } => {
-                // Call rt_enum_discriminant(subject) and compare to expected discriminant
-                let disc_call = HirExpr {
-                    kind: HirExprKind::BuiltinCall {
-                        name: "rt_enum_discriminant".to_string(),
-                        args: vec![subject_ref],
-                    },
-                    ty: TypeId::I64,
-                };
-
-                let expected_disc: i64 = match (name.as_str(), variant.as_str()) {
-                    ("Result" | "_", "Ok") => 1,
-                    ("Result" | "_", "Err") => 0,
-                    ("Option" | "_", "Some") => 1,
-                    ("Option" | "_", "None") => 0,
-                    (_, v) => {
-                        use std::collections::hash_map::DefaultHasher;
-                        use std::hash::{Hash, Hasher};
-                        let mut hasher = DefaultHasher::new();
-                        v.hash(&mut hasher);
-                        (hasher.finish() & 0xFFFFFFFF) as i64
-                    }
+            Pattern::Enum { name: _, variant, .. } => {
+                // Use rt_enum_check_discriminant(subject, expected_disc) -> bool
+                // All enums use hashed variant name discriminants consistently
+                let expected_disc: i64 = {
+                    use std::collections::hash_map::DefaultHasher;
+                    use std::hash::{Hash, Hasher};
+                    let mut hasher = DefaultHasher::new();
+                    variant.hash(&mut hasher);
+                    (hasher.finish() & 0xFFFFFFFF) as i64
                 };
 
                 let expected_val = HirExpr {
@@ -659,10 +739,9 @@ impl Lowerer {
                 };
 
                 Ok(HirExpr {
-                    kind: HirExprKind::Binary {
-                        op: BinOp::Eq,
-                        left: Box::new(disc_call),
-                        right: Box::new(expected_val),
+                    kind: HirExprKind::BuiltinCall {
+                        name: "rt_enum_check_discriminant".to_string(),
+                        args: vec![subject_ref, expected_val],
                     },
                     ty: TypeId::BOOL,
                 })

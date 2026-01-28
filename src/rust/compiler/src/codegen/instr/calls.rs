@@ -152,18 +152,24 @@ pub fn compile_call<M: Module>(
     };
 
     // Handle Result/Option constructor builtins (Ok, Err, Some, None)
-    if matches!(func_name, "Ok" | "Err" | "Some" | "None") {
+    // Also handle qualified names like "MyResult::Ok", "Option::None", etc.
+    let variant_name = func_name.rsplit_once("::")
+        .or_else(|| func_name.rsplit_once('.'))
+        .map(|(_, v)| v)
+        .unwrap_or(func_name);
+    if matches!(variant_name, "Ok" | "Err" | "Some" | "None") {
         if let Some(d) = dest {
             let enum_new_id = ctx.runtime_funcs["rt_enum_new"];
             let enum_new_ref = ctx.module.declare_func_in_func(enum_new_id, builder.func);
-            let (enum_id, disc) = match func_name {
-                "Ok" => (0i64, 1i64),    // Result Ok
-                "Err" => (0i64, 0i64),   // Result Err
-                "Some" => (1i64, 1i64),  // Option Some
-                "None" => (1i64, 0i64),  // Option None
-                _ => unreachable!(),
+            // Use hashed discriminants consistently with pattern matching
+            let disc = {
+                use std::collections::hash_map::DefaultHasher;
+                use std::hash::{Hash, Hasher};
+                let mut hasher = DefaultHasher::new();
+                variant_name.hash(&mut hasher);
+                (hasher.finish() & 0xFFFFFFFF) as i64
             };
-            let enum_id_val = builder.ins().iconst(types::I32, enum_id);
+            let enum_id_val = builder.ins().iconst(types::I32, 0);
             let disc_val = builder.ins().iconst(types::I32, disc);
             let payload_val = if !args.is_empty() {
                 get_vreg_or_default(ctx, builder, &args[0])

@@ -45,6 +45,8 @@ pub struct Lowerer {
     pub(super) deprecation_warnings: DeprecationWarningCollector,
     /// Type inference configuration for empty collections
     pub(super) type_inference_config: TypeInferenceConfig,
+    /// Pre-registered method return types: "ClassName.method" -> return TypeId
+    pub(super) method_return_types: HashMap<String, TypeId>,
 }
 
 impl Lowerer {
@@ -70,6 +72,7 @@ impl Lowerer {
             deprecated_items: HashMap::new(),
             deprecation_warnings: DeprecationWarningCollector::new(),
             type_inference_config: TypeInferenceConfig::default(),
+            method_return_types: HashMap::new(),
         }
     }
 
@@ -94,6 +97,7 @@ impl Lowerer {
             deprecated_items: HashMap::new(),
             deprecation_warnings: DeprecationWarningCollector::new(),
             type_inference_config: TypeInferenceConfig::default(),
+            method_return_types: HashMap::new(),
         }
     }
 
@@ -141,6 +145,7 @@ impl Lowerer {
             deprecated_items: HashMap::new(),
             deprecation_warnings: DeprecationWarningCollector::new(),
             type_inference_config: TypeInferenceConfig::default(),
+            method_return_types: HashMap::new(),
         }
     }
 

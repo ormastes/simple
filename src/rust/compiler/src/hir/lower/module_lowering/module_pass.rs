@@ -27,7 +27,6 @@ impl Lowerer {
                 self.globals.insert(c.name.clone(), class_type_id);
             }
             Node::Enum(e) => {
-                eprintln!("[DEBUG register_enum] Registering enum: {} with {} variants", e.name, e.variants.len());
                 let variants: Vec<_> = e
                     .variants
                     .iter()
@@ -38,11 +37,9 @@ impl Lowerer {
                                 .map(|f| self.resolve_type(&f.ty).unwrap_or(TypeId::VOID))
                                 .collect()
                         });
-                        eprintln!("[DEBUG register_enum]   Variant {} with fields: {:?}", v.name, fields);
                         (v.name.clone(), fields)
                     })
                     .collect();
-                eprintln!("[DEBUG register_enum] Final variants count: {}", variants.len());
 
                 // Get the enum type ID
                 let enum_type_id = self.module.types.lookup(&e.name)
@@ -66,7 +63,6 @@ impl Lowerer {
                 // Register enum name in globals so that Backend.Native can be resolved
                 // The enum name acts as a namespace for variant constructors
                 self.globals.insert(e.name.clone(), enum_type_id);
-                eprintln!("[DEBUG register_enum] Registered enum '{}' in globals with TypeId {:?}", e.name, enum_type_id);
             }
             Node::Mixin(m) => {
                 self.register_mixin(m)?;
@@ -374,6 +370,45 @@ impl Lowerer {
                 | Node::Pass(_)
                 | Node::Guard(_)
                 | Node::Defer(_) => {}
+            }
+        }
+
+        // Pre-register method return types (before lowering bodies)
+        for item in &ast_module.items {
+            match item {
+                Node::Function(f) => {
+                    let ret_ty = self.resolve_type_opt(&f.return_type).unwrap_or(TypeId::ANY);
+                    self.method_return_types.insert(f.name.clone(), ret_ty);
+                }
+                Node::Class(c) => {
+                    for method in &c.methods {
+                        let ret_ty = self.resolve_type_opt(&method.return_type).unwrap_or(TypeId::ANY);
+                        let qualified = format!("{}.{}", c.name, method.name);
+                        self.method_return_types.insert(qualified, ret_ty);
+                    }
+                }
+                Node::Struct(s) => {
+                    for method in &s.methods {
+                        let ret_ty = self.resolve_type_opt(&method.return_type).unwrap_or(TypeId::ANY);
+                        let qualified = format!("{}.{}", s.name, method.name);
+                        self.method_return_types.insert(qualified, ret_ty);
+                    }
+                }
+                Node::Impl(impl_block) => {
+                    let type_name = match &impl_block.target_type {
+                        simple_parser::ast::Type::Simple(name) => Some(name.clone()),
+                        simple_parser::ast::Type::Generic { name, .. } => Some(name.clone()),
+                        _ => None,
+                    };
+                    if let Some(type_name) = type_name {
+                        for method in &impl_block.methods {
+                            let ret_ty = self.resolve_type_opt(&method.return_type).unwrap_or(TypeId::ANY);
+                            let qualified = format!("{}.{}", type_name, method.name);
+                            self.method_return_types.insert(qualified, ret_ty);
+                        }
+                    }
+                }
+                _ => {}
             }
         }
 

@@ -85,7 +85,14 @@ pub(super) fn compile_collection_lit<M: Module>(
     // Add each element
     for (i, elem) in elements.iter().enumerate() {
         let elem_val = get_vreg_or_default(ctx, builder, elem);
-        let wrap_call = builder.ins().call(value_int_ref, &[elem_val]);
+        // Ensure element is i64 before calling rt_value_int (bools are i8)
+        let elem_ty = builder.func.dfg.value_type(elem_val);
+        let elem_i64 = if elem_ty == types::I8 || elem_ty == types::I16 || elem_ty == types::I32 {
+            builder.ins().uextend(types::I64, elem_val)
+        } else {
+            elem_val
+        };
+        let wrap_call = builder.ins().call(value_int_ref, &[elem_i64]);
         let wrapped = builder.inst_results(wrap_call)[0];
 
         if spec.needs_index {
