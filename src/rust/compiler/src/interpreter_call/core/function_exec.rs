@@ -53,14 +53,7 @@ fn execute_function_body(
     }
 
     // Execute function body - handle result manually to ensure flag restoration
-    let exec_result = exec_block_fn(
-        &func.body,
-        local_env,
-        functions,
-        classes,
-        enums,
-        impl_methods
-    );
+    let exec_result = exec_block_fn(&func.body, local_env, functions, classes, enums, impl_methods);
 
     // ALWAYS restore flags before handling the result to avoid flag leaking on error
     IN_IMMUTABLE_FN_METHOD.with(|cell| *cell.borrow_mut() = saved_in_immutable_fn);

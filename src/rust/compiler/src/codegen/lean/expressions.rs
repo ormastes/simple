@@ -717,8 +717,8 @@ impl<'a> ExprTranslator<'a> {
             BinOp::BitXor => "^^^".to_string(),
             BinOp::ShiftLeft => "<<<".to_string(),
             BinOp::ShiftRight => ">>>".to_string(),
-            BinOp::Is => "==".to_string(), // Identity check becomes equality
-            BinOp::In => "∈".to_string(),  // Membership
+            BinOp::Is => "==".to_string(),          // Identity check becomes equality
+            BinOp::In => "∈".to_string(),           // Membership
             BinOp::PipeForward => "|>".to_string(), // Function application
         }
     }

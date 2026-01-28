@@ -1,0 +1,326 @@
+# Hot-reload support for note.sdn section.
+#
+# This module provides functionality to update the note.sdn section
+# in SMF files without modifying the section table, enabling:
+# - Runtime updates after JIT compilation
+# - Incremental updates during development
+# - Cache invalidation signaling
+#
+# Phase 7: Hot-Reload Support
+
+import note_sdn.*
+import std/io/file.*
+
+# ============================================================================
+# Constants
+# ============================================================================
+
+val NOTE_SDN_TERMINATOR = "\n# END_NOTE\n"
+
+# ============================================================================
+# Result Types
+# ============================================================================
+
+enum HotReloadResult:
+    """Result of a hot-reload operation."""
+    Success
+    NeedRebuild(current_size: i32, required_size: i32, available_space: i32)
+    InvalidSmf(message: text)
+    IoError(message: text)
+
+impl HotReloadResult:
+    fn is_success() -> bool:
+        match self:
+            case Success: true
+            case _: false
+
+    fn needs_rebuild() -> bool:
+        match self:
+            case NeedRebuild(_, _, _): true
+            case _: false
+
+    fn is_error() -> bool:
+        match self:
+            case InvalidSmf(_): true
+            case IoError(_): true
+            case _: false
+
+# ============================================================================
+# Configuration
+# ============================================================================
+
+struct HotReloadConfig:
+    """Configuration for hot-reload operations."""
+    create_backup: bool
+    verify_after_write: bool
+    reserve_space_percent: i32
+    verbose: bool
+
+impl HotReloadConfig:
+    static fn default() -> HotReloadConfig:
+        HotReloadConfig(
+            create_backup: true,
+            verify_after_write: true,
+            reserve_space_percent: 10,
+            verbose: false
+        )
+
+# ============================================================================
+# Section Info
+# ============================================================================
+
+struct NoteSdnSectionInfo:
+    """Information about note.sdn section in SMF file."""
+    offset: i64
+    current_size: i32
+    available_space: i32
+
+# ============================================================================
+# Hot-Reload Manager
+# ============================================================================
+
+struct HotReloadManager:
+    """Hot-reload manager for SMF files."""
+    config: HotReloadConfig
+
+impl HotReloadManager:
+    static fn new(config: HotReloadConfig) -> HotReloadManager:
+        """Create a new hot-reload manager."""
+        HotReloadManager(config: config)
+
+    fn update_note_sdn(smf_path: text, new_metadata: NoteSdnMetadata) -> HotReloadResult:
+        """Update note.sdn section in an SMF file.
+
+        This uses the zero-size trick: the section table entry shows size=0,
+        so we can rewrite the section data without updating the section table.
+        """
+        # Serialize new metadata
+        val new_content = new_metadata.to_sdn()
+        val new_size = new_content.len()
+
+        if self.config.verbose:
+            print "[hot-reload] Updating {smf_path} with {new_size} bytes"
+
+        # Find note.sdn section info
+        val section_info_result = self.find_note_sdn_section(smf_path)
+        if section_info_result.is_err():
+            return HotReloadResult.InvalidSmf(section_info_result.unwrap_err())
+
+        val section_info = section_info_result.unwrap()
+
+        # Check if new data fits
+        if new_size > section_info.available_space:
+            return HotReloadResult.NeedRebuild(
+                current_size: section_info.current_size,
+                required_size: new_size,
+                available_space: section_info.available_space
+            )
+
+        # Create backup if configured
+        if self.config.create_backup:
+            val backup_result = self.create_backup(smf_path)
+            if backup_result.is_err():
+                return HotReloadResult.IoError(
+                    "Failed to create backup: {backup_result.unwrap_err()}"
+                )
+
+        # Write new data
+        val write_result = self.write_note_sdn(smf_path, section_info.offset, new_content)
+        if write_result.is_err():
+            return HotReloadResult.IoError(
+                "Failed to write: {write_result.unwrap_err()}"
+            )
+
+        # Verify if configured
+        if self.config.verify_after_write:
+            val verify_result = self.verify_note_sdn(smf_path, section_info.offset, new_content)
+            if verify_result.is_err():
+                return HotReloadResult.IoError(
+                    "Verification failed: {verify_result.unwrap_err()}"
+                )
+
+        HotReloadResult.Success
+
+    fn add_instantiation(smf_path: text, entry: InstantiationEntry) -> HotReloadResult:
+        """Add a new instantiation to an existing SMF file."""
+        # Load existing metadata
+        val load_result = self.load_note_sdn(smf_path)
+        if load_result.is_err():
+            return HotReloadResult.InvalidSmf(load_result.unwrap_err())
+
+        var metadata = load_result.unwrap()
+
+        # Add new entry
+        metadata = metadata.add_instantiation(entry)
+
+        # Update file
+        self.update_note_sdn(smf_path, metadata)
+
+    fn mark_as_jit_compiled(smf_path: text, mangled_name: text) -> HotReloadResult:
+        """Move an entry from 'possible' to 'instantiations' after JIT compilation."""
+        # Load existing metadata
+        val load_result = self.load_note_sdn(smf_path)
+        if load_result.is_err():
+            return HotReloadResult.InvalidSmf(load_result.unwrap_err())
+
+        var metadata = load_result.unwrap()
+
+        # Find in possible
+        var found_entry: PossibleInstantiationEntry? = None
+        for entry in metadata.possible:
+            if entry.mangled_name == mangled_name:
+                found_entry = Some(entry)
+                break
+
+        if not found_entry.?:
+            return HotReloadResult.InvalidSmf(
+                "Symbol {mangled_name} not found in possible table"
+            )
+
+        val entry = found_entry.unwrap()
+
+        # Remove from possible
+        metadata.possible = metadata.possible.filter(\p: p.mangled_name != mangled_name)
+
+        # Add to instantiations
+        val inst_entry = InstantiationEntry(
+            template: entry.template,
+            type_args: entry.type_args,
+            mangled_name: entry.mangled_name,
+            from_file: smf_path,
+            from_loc: "{smf_path}:jit",
+            to_obj: "jit_memory",
+            status: InstantiationStatus.JitCompiled
+        )
+        metadata = metadata.add_instantiation(inst_entry)
+
+        # Update file
+        self.update_note_sdn(smf_path, metadata)
+
+    fn find_note_sdn_section(smf_path: text) -> Result<NoteSdnSectionInfo, text>:
+        """Find note.sdn section information in SMF file."""
+        val content_result = File.read_string(smf_path)
+        if content_result.is_err():
+            return Err("Failed to read file: {content_result.unwrap_err()}")
+
+        val content = content_result.unwrap()
+        val file_size = content.len()
+
+        # Find note.sdn section start
+        val start_marker = "# Instantiation To/From Metadata"
+        val start_pos = content.index_of(start_marker)
+        if not start_pos.?:
+            return Err("note.sdn section not found")
+
+        val offset = start_pos.unwrap()
+
+        # Find current size (up to terminator)
+        val section_content = content[offset:]
+        val term_pos = section_content.index_of(NOTE_SDN_TERMINATOR)
+        val current_size = if term_pos.?:
+            term_pos.unwrap() + NOTE_SDN_TERMINATOR.len()
+        else:
+            section_content.len()
+
+        # Calculate available space
+        val available_space = file_size - offset
+
+        Ok(NoteSdnSectionInfo(
+            offset: offset as i64,
+            current_size: current_size,
+            available_space: available_space
+        ))
+
+    fn load_note_sdn(smf_path: text) -> Result<NoteSdnMetadata, text>:
+        """Load note.sdn metadata from SMF file."""
+        val content_result = File.read_string(smf_path)
+        if content_result.is_err():
+            return Err("Failed to read file: {content_result.unwrap_err()}")
+
+        val content = content_result.unwrap()
+
+        # Find and extract note.sdn section
+        val start_marker = "# Instantiation To/From Metadata"
+        val start_pos = content.index_of(start_marker)
+        if not start_pos.?:
+            return Err("note.sdn section not found")
+
+        val start = start_pos.unwrap()
+        val section_content = content[start:]
+
+        val term_pos = section_content.index_of(NOTE_SDN_TERMINATOR)
+        val end = if term_pos.?:
+            term_pos.unwrap() + NOTE_SDN_TERMINATOR.len()
+        else:
+            section_content.len()
+
+        val sdn_content = section_content[0:end]
+
+        # TODO: Parse SDN content
+        Ok(NoteSdnMetadata.new())
+
+    fn write_note_sdn(smf_path: text, offset: i64, content: text) -> Result<(), text>:
+        """Write note.sdn content to SMF file."""
+        # Read existing file
+        val file_content_result = File.read_string(smf_path)
+        if file_content_result.is_err():
+            return Err("Failed to read file: {file_content_result.unwrap_err()}")
+
+        val file_content = file_content_result.unwrap()
+
+        # Find terminator position
+        val section_start = offset as i32
+        val remaining = file_content[section_start:]
+        val term_pos = remaining.index_of(NOTE_SDN_TERMINATOR)
+        val old_section_end = if term_pos.?:
+            section_start + term_pos.unwrap() + NOTE_SDN_TERMINATOR.len()
+        else:
+            file_content.len()
+
+        # Construct new file content
+        val before = file_content[0:section_start]
+        val after = file_content[old_section_end:]
+        val new_file_content = before + content + after
+
+        # Write back
+        val write_result = File.write_string(smf_path, new_file_content)
+        if write_result.is_err():
+            return Err("Failed to write file: {write_result.unwrap_err()}")
+
+        Ok(())
+
+    fn verify_note_sdn(smf_path: text, offset: i64, expected: text) -> Result<(), text>:
+        """Verify note.sdn content after write."""
+        val content_result = File.read_string(smf_path)
+        if content_result.is_err():
+            return Err("Failed to read file: {content_result.unwrap_err()}")
+
+        val content = content_result.unwrap()
+        val actual = content[offset as i32 : (offset as i32) + expected.len()]
+
+        if actual != expected:
+            return Err("Content mismatch after write")
+
+        Ok(())
+
+    fn create_backup(smf_path: text) -> Result<(), text>:
+        """Create backup of SMF file."""
+        val backup_path = smf_path + ".bak"
+        val copy_result = File.copy(smf_path, backup_path)
+        if copy_result.is_err():
+            return Err("Failed to create backup: {copy_result.unwrap_err()}")
+
+        if self.config.verbose:
+            print "[hot-reload] Backup created: {backup_path}"
+
+        Ok(())
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export NOTE_SDN_TERMINATOR
+export HotReloadResult
+export HotReloadConfig
+export NoteSdnSectionInfo
+export HotReloadManager

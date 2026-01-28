@@ -72,33 +72,26 @@ pub use objects::{RuntimeClosure, RuntimeEnum, RuntimeObject, RuntimeShared, Run
 
 // Re-export FFI object types
 pub use ffi_object::{
-    FfiMethodEntry, FfiVtable, RuntimeFfiObject,
-    fnv1a_hash, fnv1a_hash_str, method_flags,
-    rt_ffi_object_call_method, rt_ffi_object_free, rt_ffi_object_handle,
-    rt_ffi_object_has_method, rt_ffi_object_is_ffi, rt_ffi_object_new,
+    FfiMethodEntry, FfiVtable, RuntimeFfiObject, fnv1a_hash, fnv1a_hash_str, method_flags, rt_ffi_object_call_method,
+    rt_ffi_object_free, rt_ffi_object_handle, rt_ffi_object_has_method, rt_ffi_object_is_ffi, rt_ffi_object_new,
     rt_ffi_object_type_id, rt_ffi_object_type_name, rt_ffi_object_vtable,
 };
 
 // Re-export FFI registry types and functions
 pub use ffi_registry::{
-    FfiObjectStorage, FfiTypeMetadata, FfiTypeRegistry,
-    get_registry,
-    rt_ffi_call_method, rt_ffi_clear_registry, rt_ffi_clone, rt_ffi_drop,
-    rt_ffi_has_method, rt_ffi_is_type, rt_ffi_new, rt_ffi_type_id,
-    rt_ffi_type_name, rt_ffi_type_register,
+    FfiObjectStorage, FfiTypeMetadata, FfiTypeRegistry, get_registry, rt_ffi_call_method, rt_ffi_clear_registry,
+    rt_ffi_clone, rt_ffi_drop, rt_ffi_has_method, rt_ffi_is_type, rt_ffi_new, rt_ffi_type_id, rt_ffi_type_name,
+    rt_ffi_type_register,
 };
 
 // Re-export FFI macro helpers and traits
 pub use ffi_macros::{
-    FfiError, FfiResult, FromRuntimeValue, IntoRuntimeValue,
-    get_arg, get_arg_as, get_bool_arg, get_float_arg, get_int_arg, get_string_arg,
-    sort_method_entries,
+    FfiError, FfiResult, FromRuntimeValue, IntoRuntimeValue, get_arg, get_arg_as, get_bool_arg, get_float_arg,
+    get_int_arg, get_string_arg, sort_method_entries,
 };
 
 // Re-export FFI example (Counter) for demonstration and testing
-pub use ffi_example::{
-    Counter, counter_new_ffi, counter_register_type, counter_vtable,
-};
+pub use ffi_example::{Counter, counter_new_ffi, counter_register_type, counter_vtable};
 
 // Re-export channel types
 pub use channels::RuntimeChannel;
@@ -850,6 +843,25 @@ pub use ffi::hash::clear_hash_registries;
 pub use ffi::concurrent::clear_concurrent_registries;
 pub use net::clear_socket_registry;
 
+// ============================================================================
+// Global Variables (Module-level mutable state)
+// ============================================================================
+
+use std::sync::Mutex;
+use std::collections::HashMap as StdHashMap;
+
+lazy_static::lazy_static! {
+    static ref GLOBAL_VARIABLES: Mutex<StdHashMap<String, i64>> = Mutex::new(StdHashMap::new());
+}
+
+// NOTE: rt_global_get and rt_global_set have been removed.
+// Global variables are now handled directly by Cranelift using GlobalLoad/GlobalStore
+// instructions, which compile to native global variable access without runtime calls.
+
+fn clear_global_variables() {
+    GLOBAL_VARIABLES.lock().unwrap().clear();
+}
+
 /// Clear all runtime registries to prevent memory leaks between test runs.
 /// This should be called before each test to ensure clean state.
 pub fn clear_all_runtime_registries() {
@@ -882,6 +894,9 @@ pub fn clear_all_runtime_registries() {
 
     // Clear memory-mapped file registry
     file_io::clear_mmap_registry();
+
+    // Clear global variables
+    clear_global_variables();
 
     // Clear FFI type registry
     rt_ffi_clear_registry();

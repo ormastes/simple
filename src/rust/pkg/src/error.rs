@@ -23,6 +23,9 @@ pub enum PkgError {
     #[error("Manifest not found: {0}")]
     ManifestNotFound(String),
 
+    #[error("Invalid manifest: {0}")]
+    InvalidManifest(String),
+
     #[error("Package not found: {0}")]
     PackageNotFound(String),
 

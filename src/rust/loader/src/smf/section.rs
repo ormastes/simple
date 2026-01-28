@@ -24,6 +24,10 @@ pub enum SectionType {
     TypeInfo = 9,
     Version = 10,
     SrcMap = 11,
+    /// Generic template bytecode (MIR/AST for functions, structs, enums, traits)
+    TemplateCode = 12,
+    /// Monomorphization metadata (specialization mappings)
+    TemplateMeta = 13,
 }
 
 impl SmfSection {

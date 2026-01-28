@@ -234,11 +234,7 @@ impl<'a> Parser<'a> {
                 is_type
             }
             // These tokens definitively start types
-            TokenKind::LBracket
-            | TokenKind::Fn
-            | TokenKind::Mut
-            | TokenKind::Dyn
-            | TokenKind::Ampersand => {
+            TokenKind::LBracket | TokenKind::Fn | TokenKind::Mut | TokenKind::Dyn | TokenKind::Ampersand => {
                 // Restore: push the consumed token back
                 self.pending_tokens.push_front(first_token);
                 self.current = saved_current;
@@ -409,6 +405,8 @@ impl<'a> Parser<'a> {
     /// Expect an identifier or a keyword that can be used as a path segment.
     /// This allows using reserved words like 'unit', 'test', etc. in module paths.
     pub(crate) fn expect_path_segment(&mut self) -> Result<String, ParseError> {
+        use crate::parse_context;
+
         // First try regular identifier
         if let TokenKind::Identifier { name, .. } = &self.current.kind {
             let name = name.clone();
@@ -466,10 +464,12 @@ impl<'a> Parser<'a> {
             TokenKind::Grid => "Grid",
             TokenKind::Flat => "Flat",
             _ => {
-                return Err(ParseError::unexpected_token(
+                let ctx = parse_context!(format!("parsing path segment, previous tokens analyzed"));
+                return Err(ParseError::unexpected_token_with_context(
                     "identifier",
                     format!("{:?}", self.current.kind),
                     self.current.span,
+                    ctx,
                 ));
             }
         };

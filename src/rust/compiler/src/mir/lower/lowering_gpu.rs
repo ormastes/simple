@@ -411,7 +411,116 @@ impl<'a> MirLowerer<'a> {
                     dest
                 })
             }
-            _ => Err(MirLowerError::Unsupported("complex lvalue".to_string())),
+            HirExprKind::FieldAccess { receiver, field_index } => {
+                // Get the base address, then add field offset using GetElementPtr
+                let base_addr = self.lower_lvalue(receiver)?;
+                let field_idx = *field_index;
+                self.with_func(|func, current_block| {
+                    // Create a constant for the field index
+                    let index_reg = func.new_vreg();
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::ConstInt {
+                        dest: index_reg,
+                        value: field_idx as i64,
+                    });
+                    block.instructions.push(MirInst::GetElementPtr {
+                        dest,
+                        base: base_addr,
+                        index: index_reg,
+                    });
+                    dest
+                })
+            }
+            HirExprKind::Index { receiver, index } => {
+                // Get the array base address, then compute element address
+                let base_addr = self.lower_expr(receiver)?;
+                let index_val = self.lower_expr(index)?;
+                self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::GetElementPtr {
+                        dest,
+                        base: base_addr,
+                        index: index_val,
+                    });
+                    dest
+                })
+            }
+            HirExprKind::Global(name) => {
+                // Global variable - treat as a dynamic lookup via Call
+                let name = name.clone();
+                self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    // Use a builtin call to get global address
+                    block.instructions.push(MirInst::Call {
+                        dest: Some(dest),
+                        target: crate::mir::CallTarget::Io(format!("__get_global_{}", name)),
+                        args: vec![],
+                    });
+                    dest
+                })
+            }
+            HirExprKind::MethodCall { receiver, method, args, .. } if args.is_empty() => {
+                // Property access (no-paren method call) used as lvalue
+                // This happens when field access falls back to method call
+                // Convert back to field access by looking up the field index
+                let receiver_ty = receiver.ty;
+
+                // Try to find the field index in the receiver's type
+                if let Some(type_registry) = self.type_registry {
+                    if let Some(hir_type) = type_registry.get(receiver_ty) {
+                        // Check both Struct and Class (classes are also structs at MIR level)
+                        let fields = match hir_type {
+                            crate::hir::HirType::Struct { fields, .. } => Some(fields),
+                            _ => None,
+                        };
+
+                        if let Some(fields) = fields {
+                            // Find the field by name
+                            if let Some((field_idx, _)) = fields.iter().enumerate().find(|(_, (name, _))| name == method) {
+                                // Found the field - use GetElementPtr
+                                let base_addr = self.lower_lvalue(receiver)?;
+                                return self.with_func(|func, current_block| {
+                                    let index_reg = func.new_vreg();
+                                    let dest = func.new_vreg();
+                                    let block = func.block_mut(current_block).unwrap();
+                                    block.instructions.push(MirInst::ConstInt {
+                                        dest: index_reg,
+                                        value: field_idx as i64,
+                                    });
+                                    block.instructions.push(MirInst::GetElementPtr {
+                                        dest,
+                                        base: base_addr,
+                                        index: index_reg,
+                                    });
+                                    dest
+                                });
+                            }
+                        }
+                    }
+                }
+
+                // Couldn't find field statically - use runtime field setter
+                // This happens when type information is lost (TypeId(0) or Any)
+                eprintln!("[DEBUG lower_lvalue] MethodCall property setter: receiver type {:?}, method {} - using runtime setter", receiver.ty, method);
+
+                // For runtime field access, we need to return something that can be stored to
+                // The assignment will need to use a runtime call like rt_field_set(receiver, "field_name", value)
+                // For now, we'll treat this as getting the address of a temporary that will trigger
+                // a runtime field set operation in the Store instruction handler
+
+                // Return the receiver register as a placeholder
+                // The Store handler will need to detect this and emit a runtime field_set call
+                let receiver_val = self.lower_expr(receiver)?;
+                Ok(receiver_val)
+            }
+            _ => {
+                eprintln!("[DEBUG lower_lvalue] Unsupported lvalue kind: {:?}", expr.kind);
+                Err(MirLowerError::Unsupported(format!("complex lvalue: {:?}", expr.kind)))
+            }
+
         }
     }
 

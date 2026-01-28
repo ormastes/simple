@@ -57,8 +57,6 @@ impl<'a> Parser<'a> {
             | TokenKind::Alias
             | TokenKind::Bounds
             | TokenKind::Default
-            | TokenKind::New
-            | TokenKind::Old
             | TokenKind::From
             | TokenKind::To => self.parse_primary_identifier(),
             TokenKind::Backslash | TokenKind::Pipe | TokenKind::Move => self.parse_primary_lambda(),
@@ -139,6 +137,32 @@ impl<'a> Parser<'a> {
             | TokenKind::Match
             | TokenKind::Dollar => self.parse_primary_control(),
             TokenKind::Grid | TokenKind::Tensor => self.parse_primary_math(),
+            TokenKind::At => {
+                // FFI call prefix: @rt_function_name
+                // No ambiguity: decorators only appear before declarations, not in expressions
+                // Matrix multiplication (@) requires a left operand, while @rt_func appears at expression start
+
+                // Peek at next token to see if it's an identifier
+                let next = self.pending_tokens.front().cloned().unwrap_or_else(|| {
+                    let tok = self.lexer.next_token();
+                    self.pending_tokens.push_back(tok.clone());
+                    tok
+                });
+
+                if matches!(next.kind, TokenKind::Identifier { .. }) {
+                    self.advance(); // consume '@'
+                    let name = self.expect_identifier()?;
+                    // Create identifier with @ prefix preserved for debugging/tooling
+                    Ok(Expr::Identifier(format!("@{}", name)))
+                } else {
+                    // Not an FFI call pattern - let it fall through to default error
+                    Err(ParseError::unexpected_token(
+                        "expression",
+                        format!("@ (matrix multiplication requires left operand, FFI calls require @identifier pattern)"),
+                        self.current.span,
+                    ))
+                }
+            }
             _ => Err(ParseError::unexpected_token(
                 "expression",
                 format!("{:?}", self.current.kind),

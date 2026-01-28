@@ -227,11 +227,7 @@ unsafe extern "C" fn counter_clone_ffi(handle: u32) -> u32 {
 }
 
 /// Get the counter value.
-unsafe extern "C" fn counter_get_ffi(
-    handle: u32,
-    _argc: u32,
-    _argv: *const RuntimeValue,
-) -> RuntimeValue {
+unsafe extern "C" fn counter_get_ffi(handle: u32, _argc: u32, _argv: *const RuntimeValue) -> RuntimeValue {
     let type_id = get_registry().get_type_id("Counter");
     if type_id == 0 {
         return RuntimeValue::NIL;
@@ -246,11 +242,7 @@ unsafe extern "C" fn counter_get_ffi(
 }
 
 /// Increment the counter by 1.
-unsafe extern "C" fn counter_increment_ffi(
-    handle: u32,
-    _argc: u32,
-    _argv: *const RuntimeValue,
-) -> RuntimeValue {
+unsafe extern "C" fn counter_increment_ffi(handle: u32, _argc: u32, _argv: *const RuntimeValue) -> RuntimeValue {
     let type_id = get_registry().get_type_id("Counter");
     if type_id == 0 {
         return RuntimeValue::NIL;
@@ -268,11 +260,7 @@ unsafe extern "C" fn counter_increment_ffi(
 }
 
 /// Increment the counter by a specific amount.
-unsafe extern "C" fn counter_increment_by_ffi(
-    handle: u32,
-    argc: u32,
-    argv: *const RuntimeValue,
-) -> RuntimeValue {
+unsafe extern "C" fn counter_increment_by_ffi(handle: u32, argc: u32, argv: *const RuntimeValue) -> RuntimeValue {
     let type_id = get_registry().get_type_id("Counter");
     if type_id == 0 {
         return RuntimeValue::NIL;
@@ -292,11 +280,7 @@ unsafe extern "C" fn counter_increment_by_ffi(
 }
 
 /// Reset the counter to 0.
-unsafe extern "C" fn counter_reset_ffi(
-    handle: u32,
-    _argc: u32,
-    _argv: *const RuntimeValue,
-) -> RuntimeValue {
+unsafe extern "C" fn counter_reset_ffi(handle: u32, _argc: u32, _argv: *const RuntimeValue) -> RuntimeValue {
     let type_id = get_registry().get_type_id("Counter");
     if type_id == 0 {
         return RuntimeValue::NIL;
@@ -314,11 +298,7 @@ unsafe extern "C" fn counter_reset_ffi(
 }
 
 /// Set the counter to a specific value.
-unsafe extern "C" fn counter_set_ffi(
-    handle: u32,
-    argc: u32,
-    argv: *const RuntimeValue,
-) -> RuntimeValue {
+unsafe extern "C" fn counter_set_ffi(handle: u32, argc: u32, argv: *const RuntimeValue) -> RuntimeValue {
     let type_id = get_registry().get_type_id("Counter");
     if type_id == 0 {
         return RuntimeValue::NIL;

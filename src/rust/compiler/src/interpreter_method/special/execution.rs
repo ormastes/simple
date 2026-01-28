@@ -120,14 +120,7 @@ pub fn exec_function_with_self_return(
     IN_IMMUTABLE_FN_METHOD.with(|cell| *cell.borrow_mut() = is_immutable_fn_method);
 
     // Execute the function body - handle result manually to ensure flag restoration
-    let exec_result = exec_block_fn(
-        &func.body,
-        &mut local_env,
-        functions,
-        classes,
-        enums,
-        impl_methods
-    );
+    let exec_result = exec_block_fn(&func.body, &mut local_env, functions, classes, enums, impl_methods);
 
     // ALWAYS restore flags before handling the result to avoid flag leaking on error
     IN_IMMUTABLE_FN_METHOD.with(|cell| *cell.borrow_mut() = saved_in_immutable_fn);
@@ -151,10 +144,17 @@ pub fn exec_function_with_self_return(
     // DEBUG: Check if updated_self is correct type
     if let Value::Object { class: self_class, .. } = &updated_self {
         if self_class != class_name {
-            eprintln!("[DEBUG EXEC_FN_SELF] WARNING: self class changed from '{}' to '{}'", class_name, self_class);
+            eprintln!(
+                "[DEBUG EXEC_FN_SELF] WARNING: self class changed from '{}' to '{}'",
+                class_name, self_class
+            );
         }
     } else {
-        eprintln!("[DEBUG EXEC_FN_SELF] WARNING: self is not an Object! type={}, class_name was '{}'", updated_self.type_name(), class_name);
+        eprintln!(
+            "[DEBUG EXEC_FN_SELF] WARNING: self is not an Object! type={}, class_name was '{}'",
+            updated_self.type_name(),
+            class_name
+        );
     }
 
     Ok((result, updated_self))

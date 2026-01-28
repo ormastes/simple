@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use simple_parser::ast::ReferenceCapability;
 
 //==============================================================================
@@ -108,6 +110,8 @@ impl TypeId {
     pub const NIL: TypeId = TypeId(13);
     /// Any type - holds any dynamically typed value (used for DI containers, etc.)
     pub const ANY: TypeId = TypeId(14);
+    /// Char type - single Unicode character (represented as u32 internally)
+    pub const CHAR: TypeId = TypeId(15);
 
     /// DEPRECATED: Use explicit errors instead of UNKNOWN.
     /// This constant exists for backwards compatibility but should be avoided.
@@ -145,6 +149,8 @@ pub enum HirType {
     /// Any type - dynamically typed value (for DI containers, Any parameters, etc.)
     /// At runtime, represented as RuntimeValue (i64 tagged union)
     Any,
+    /// Char type - single Unicode character (stored as u32 code point)
+    Char,
     Int {
         bits: u8,
         signedness: Signedness,
@@ -178,10 +184,18 @@ pub enum HirType {
         fields: Vec<(String, TypeId)>,
         /// CTR-062: Whether this struct has custom snapshot semantics (#[snapshot])
         has_snapshot: bool,
+        // Generic template metadata
+        generic_params: Vec<String>,
+        is_generic_template: bool,
+        type_bindings: HashMap<String, TypeId>,
     },
     Enum {
         name: String,
         variants: Vec<(String, Option<Vec<TypeId>>)>,
+        // Generic template metadata
+        generic_params: Vec<String>,
+        is_generic_template: bool,
+        type_bindings: HashMap<String, TypeId>,
     },
     /// Semantic unit type with optional repr constraints
     /// e.g., `_cm:u12 where range: 0..4000, checked`
@@ -227,6 +241,8 @@ pub enum HirType {
         trait_bounds: Vec<String>,
         /// Required methods that the target must implement
         required_methods: Vec<String>,
+        // Generic template metadata
+        is_generic_template: bool,
     },
     /// External class for FFI object-based bindings
     ExternClass {

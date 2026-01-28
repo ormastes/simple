@@ -101,6 +101,17 @@ pub struct MirFunction {
     pub layout_phase: LayoutPhase,
     /// Whether this function is an event loop anchor point.
     pub is_event_loop_anchor: bool,
+
+    // Generic template metadata for .smf template storage
+    /// Generic type parameter names (e.g., ["T", "U"] for fn foo<T, U>)
+    pub generic_params: Vec<String>,
+    /// True if this is an unspecialized generic template (should be stored in .smf)
+    pub is_generic_template: bool,
+    /// Base template name if this is a specialization (e.g., "identity" for "identity$Int")
+    pub specialization_of: Option<String>,
+    /// Type parameter bindings for specializations (e.g., T -> Int)
+    pub type_bindings: HashMap<String, TypeId>,
+
     next_vreg: u32,
     next_block: u32,
 }
@@ -128,6 +139,10 @@ impl MirFunction {
             inferred_effect: None,
             layout_phase: LayoutPhase::default(),
             is_event_loop_anchor: false,
+            generic_params: Vec::new(),
+            is_generic_template: false,
+            specialization_of: None,
+            type_bindings: HashMap::new(),
             next_vreg: 0,
             next_block: 1,
         }
@@ -286,6 +301,8 @@ impl MirFunction {
 pub struct MirModule {
     pub name: Option<String>,
     pub functions: Vec<MirFunction>,
+    /// Global variables: (name, type_id, is_mutable)
+    pub globals: Vec<(String, crate::hir::TypeId, bool)>,
 }
 
 impl MirModule {
@@ -293,6 +310,7 @@ impl MirModule {
         Self {
             name: None,
             functions: Vec::new(),
+            globals: Vec::new(),
         }
     }
 }

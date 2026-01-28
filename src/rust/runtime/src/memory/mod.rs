@@ -8,9 +8,7 @@ pub use gcless::GclessAllocator;
 pub use no_gc::NoGcAllocator;
 
 // Re-export memory limit types from common
-pub use simple_common::gc::{
-    AllocResult, MemoryLimitConfig, MemoryLimitExceeded, MemoryTracker, DEFAULT_MEMORY_LIMIT,
-};
+pub use simple_common::gc::{AllocResult, MemoryLimitConfig, MemoryLimitExceeded, MemoryTracker, DEFAULT_MEMORY_LIMIT};
 
 use std::sync::Mutex;
 

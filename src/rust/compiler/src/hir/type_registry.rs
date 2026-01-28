@@ -22,7 +22,7 @@ pub struct TypeIdAllocator {
 impl TypeIdAllocator {
     /// Create a new allocator starting after built-in types.
     pub fn new() -> Self {
-        Self { next: 15 } // Built-in types 0-14 (including Any)
+        Self { next: 16 } // Built-in types 0-15 (including Any and Char)
     }
 
     /// Create an allocator with a custom starting ID.
@@ -92,6 +92,7 @@ impl TypeRegistry {
         registry.types.insert(TypeId::STRING, HirType::String);
         registry.types.insert(TypeId::NIL, HirType::Nil);
         registry.types.insert(TypeId::ANY, HirType::Any);
+        registry.types.insert(TypeId::CHAR, HirType::Char);
 
         // Register type names (lowercase with bit-width)
         registry.name_to_id.insert("void".to_string(), TypeId::VOID);
@@ -121,6 +122,8 @@ impl TypeRegistry {
         registry.name_to_id.insert("nil".to_string(), TypeId::NIL);
         // Dynamic Any type for DI containers, generic parameters, etc.
         registry.name_to_id.insert("Any".to_string(), TypeId::ANY);
+        // char type: Unicode code point (32-bit)
+        registry.name_to_id.insert("char".to_string(), TypeId::CHAR);
 
         registry
     }
@@ -142,8 +145,27 @@ impl TypeRegistry {
         id
     }
 
+    /// Update an existing named type in place, keeping its TypeId.
+    /// If the type doesn't exist yet, creates a new one.
+    /// This is useful for forward declarations (e.g., enum placeholders).
+    pub fn update_named(&mut self, name: String, ty: HirType) -> TypeId {
+        if let Some(&existing_id) = self.name_to_id.get(&name) {
+            // Update in place - keep the same TypeId
+            self.types.insert(existing_id, ty);
+            existing_id
+        } else {
+            // No existing type, register as new
+            self.register_named(name, ty)
+        }
+    }
+
     pub fn get(&self, id: TypeId) -> Option<&HirType> {
         self.types.get(&id)
+    }
+
+    /// Iterate over all registered types
+    pub fn iter(&self) -> impl Iterator<Item = (TypeId, &HirType)> {
+        self.types.iter().map(|(id, ty)| (*id, ty))
     }
 
     /// Get the element type of an array type
@@ -213,6 +235,7 @@ impl TypeRegistry {
             Some(HirType::Float { .. }) => true,
             Some(HirType::String) => true, // Strings are immutable
             Some(HirType::Nil) => true,
+            Some(HirType::Char) => true,   // Chars are primitives
             Some(HirType::Enum { .. }) => true, // Enums captured by discriminant
 
             // Tuples are safe if all elements are safe

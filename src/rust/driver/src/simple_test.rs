@@ -27,8 +27,8 @@ use crate::{Interpreter, RunConfig};
 use crate::test_db::{self, TestStatus, TestFailure as DbTestFailure};
 use simple_compiler::i18n::clear_registry as clear_i18n_state;
 use simple_compiler::interpreter::{
-    clear_bdd_state, clear_class_instantiation_state, clear_effects_state, clear_interpreter_state,
-    clear_io_state, clear_macro_state, clear_module_cache, clear_net_state,
+    clear_bdd_state, clear_class_instantiation_state, clear_effects_state, clear_interpreter_state, clear_io_state,
+    clear_macro_state, clear_module_cache, clear_net_state,
 };
 use simple_runtime::value::clear_all_runtime_registries;
 
@@ -310,11 +310,11 @@ pub fn run_test_file(path: &Path) -> SimpleTestResult {
 
     // Clear additional module-specific state to prevent memory leaks
     clear_class_instantiation_state(); // Clear IN_NEW_METHOD tracking
-    clear_macro_state();               // Clear macro contract cache and expansion state
-    clear_effects_state();             // Clear effect tracking state
-    clear_io_state();                  // Close and clear file handles
-    clear_net_state();                 // Close and clear socket handles
-    clear_i18n_state();                // Clear locale strings cache
+    clear_macro_state(); // Clear macro contract cache and expansion state
+    clear_effects_state(); // Clear effect tracking state
+    clear_io_state(); // Close and clear file handles
+    clear_net_state(); // Close and clear socket handles
+    clear_i18n_state(); // Clear locale strings cache
 
     // Clear runtime registries (HP collections, regex cache, diagram state, etc.)
     clear_all_runtime_registries();

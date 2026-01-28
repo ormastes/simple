@@ -867,11 +867,7 @@ impl Parser<'_> {
     ///     me execute(sql: text) -> Result<Int, DbError>
     ///     fn close()
     /// ```
-    fn parse_extern_class_impl(
-        &mut self,
-        start_span: Span,
-        attributes: Vec<Attribute>,
-    ) -> Result<Node, ParseError> {
+    fn parse_extern_class_impl(&mut self, start_span: Span, attributes: Vec<Attribute>) -> Result<Node, ParseError> {
         use crate::ast::{DocComment, ExternClassDef, ExternMethodDef, ExternMethodKind};
 
         self.expect(&TokenKind::Class)?;
@@ -1156,10 +1152,7 @@ mod tests {
         let mut parser = Parser::new(source);
         let module = parser.parse().expect("Should parse extern fn");
 
-        let extern_fn = module
-            .items
-            .iter()
-            .find(|n| matches!(n, crate::ast::Node::Extern(_)));
+        let extern_fn = module.items.iter().find(|n| matches!(n, crate::ast::Node::Extern(_)));
         assert!(extern_fn.is_some(), "Should parse extern fn");
 
         if let Some(crate::ast::Node::Extern(func)) = extern_fn {

@@ -95,13 +95,7 @@ pub extern "C" fn rt_log_clear_scope_levels() {
 /// - `scope_ptr`, `scope_len`: Scope name (e.g., "parser", "gc")
 /// - `msg_ptr`, `msg_len`: Message to log
 #[no_mangle]
-pub extern "C" fn rt_log_emit(
-    level: i64,
-    scope_ptr: *const u8,
-    scope_len: u64,
-    msg_ptr: *const u8,
-    msg_len: u64,
-) {
+pub extern "C" fn rt_log_emit(level: i64, scope_ptr: *const u8, scope_len: u64, msg_ptr: *const u8, msg_len: u64) {
     // Get current log level for scope
     let current_level = rt_log_get_scope_level(scope_ptr, scope_len);
 
@@ -223,7 +217,11 @@ pub extern "C" fn rt_log_level_name(level: i64) -> *const u8 {
 #[no_mangle]
 pub extern "C" fn rt_log_is_enabled(level: i64, scope_ptr: *const u8, scope_len: u64) -> u8 {
     let current_level = rt_log_get_scope_level(scope_ptr, scope_len);
-    if level <= current_level { 1 } else { 0 }
+    if level <= current_level {
+        1
+    } else {
+        0
+    }
 }
 
 // ============================================================================

@@ -224,6 +224,7 @@ impl Lowerer {
         arms: &[MatchArm],
         ctx: &mut FunctionContext,
     ) -> LowerResult<HirExpr> {
+        eprintln!("[DEBUG lower_match] Starting match lowering with {} arms", arms.len());
         // Lower the subject once and store in a local variable to avoid re-evaluation
         let subject_hir = self.lower_expr(subject, ctx)?;
         let subject_ty = subject_hir.ty;
@@ -281,9 +282,25 @@ impl Lowerer {
             condition
         };
 
-        // Lower the arm body
+        // Extract pattern bindings and add them to context
+        let bindings = self.extract_pattern_bindings(&arm.pattern, subject_ty);
+        eprintln!("[DEBUG match] Pattern: {:?}", arm.pattern);
+        eprintln!("[DEBUG match] Bindings extracted: {:?}", bindings);
+        let saved_locals_len = ctx.locals.len();
+        for (name, ty) in &bindings {
+            eprintln!("[DEBUG match] Adding binding: {} with type {:?}", name, ty);
+            ctx.add_local(name.clone(), *ty, simple_parser::ast::Mutability::Immutable);
+        }
+
+        // Lower the arm body with bindings in scope
         let then_branch = self.lower_match_arm_body(&arm.body, ctx)?;
         let then_ty = then_branch.ty;
+
+        // Restore context (remove pattern bindings)
+        ctx.locals.truncate(saved_locals_len);
+        for (name, _) in &bindings {
+            ctx.local_map.remove(name);
+        }
 
         // Recursively build the else branch from remaining arms
         let else_branch = self.lower_match_arms(subject_idx, subject_ty, remaining_arms, ctx)?;
@@ -324,8 +341,8 @@ impl Lowerer {
                 let lit_hir = self.lower_expr(lit_expr, ctx)?;
 
                 // Check if subject is a string type - use rt_string_eq for string comparison
-                let is_string = subject_ty == TypeId::STRING
-                    || matches!(self.module.types.get(subject_ty), Some(HirType::String));
+                let is_string =
+                    subject_ty == TypeId::STRING || matches!(self.module.types.get(subject_ty), Some(HirType::String));
 
                 if is_string {
                     // Use builtin string equality for string comparison
@@ -412,12 +429,183 @@ impl Lowerer {
         }
     }
 
+    /// Look up the field types for an enum variant.
+    /// Returns None if the enum or variant is not found.
+    /// If expected_ty is provided and is an enum type, use it directly.
+    fn get_enum_variant_field_types_with_hint(
+        &self,
+        enum_name: &str,
+        variant_name: &str,
+        expected_ty: TypeId,
+    ) -> Option<Vec<TypeId>> {
+        eprintln!(
+            "[DEBUG enum_lookup] Looking for variant '{}' in enum '{}', expected_ty={:?}",
+            variant_name, enum_name, expected_ty
+        );
+        eprintln!(
+            "[DEBUG enum_lookup] expected_ty resolved to: {:?}",
+            self.module.types.get(expected_ty)
+        );
+
+        // First, try to use the expected type if it's an enum
+        if expected_ty != TypeId::ANY {
+            if let Some(HirType::Enum {
+                name: enum_type_name,
+                variants,
+                ..
+            }) = self.module.types.get(expected_ty)
+            {
+                eprintln!(
+                    "[DEBUG enum_lookup] Found enum '{}' with {} variants",
+                    enum_type_name,
+                    variants.len()
+                );
+                for (name, fields) in variants {
+                    if name == variant_name {
+                        eprintln!("[DEBUG enum_lookup] MATCH! Returning {:?}", fields);
+                        return fields.clone();
+                    }
+                }
+                eprintln!(
+                    "[DEBUG enum_lookup] Variant '{}' not found in expected enum",
+                    variant_name
+                );
+            } else {
+                eprintln!("[DEBUG enum_lookup] expected_ty is NOT an enum");
+            }
+        }
+
+        // Handle wildcard enum name "_" - search all enums for the variant
+        if enum_name == "_" {
+            // Search all types for an enum with this variant
+            for (_, hir_type) in self.module.types.iter() {
+                if let HirType::Enum { variants, .. } = hir_type {
+                    for (name, fields) in variants {
+                        if name == variant_name {
+                            return fields.clone();
+                        }
+                    }
+                }
+            }
+            return None;
+        }
+
+        // Look up the enum type by name
+        let type_id = self.module.types.lookup(enum_name)?;
+        let hir_type = self.module.types.get(type_id)?;
+
+        if let HirType::Enum { variants, .. } = hir_type {
+            for (name, fields) in variants {
+                if name == variant_name {
+                    return fields.clone();
+                }
+            }
+        }
+        None
+    }
+
+    /// Extract variable bindings from a pattern.
+    /// Returns a list of (name, type) pairs for variables that should be bound.
+    pub fn extract_pattern_bindings(&self, pattern: &Pattern, subject_ty: TypeId) -> Vec<(String, TypeId)> {
+        let mut bindings = Vec::new();
+        eprintln!("[DEBUG pattern] Extracting bindings from: {:?}", pattern);
+        eprintln!(
+            "[DEBUG pattern] Subject type: {:?}, resolved: {:?}",
+            subject_ty,
+            self.module.types.get(subject_ty)
+        );
+        self.collect_pattern_bindings(pattern, subject_ty, &mut bindings);
+        eprintln!("[DEBUG pattern] Found bindings: {:?}", bindings);
+        bindings
+    }
+
+    /// Recursively collect bindings from a pattern
+    fn collect_pattern_bindings(&self, pattern: &Pattern, expected_ty: TypeId, bindings: &mut Vec<(String, TypeId)>) {
+        match pattern {
+            Pattern::Identifier(name) => {
+                // Variable binding - use expected type
+                bindings.push((name.clone(), expected_ty));
+            }
+            Pattern::MutIdentifier(name) => {
+                bindings.push((name.clone(), expected_ty));
+            }
+            Pattern::Tuple(patterns) => {
+                // For tuples, try to get element types from expected type
+                let resolved_ty = self.module.types.get(expected_ty);
+                eprintln!(
+                    "[DEBUG pattern] Tuple pattern with expected_ty {:?}, resolved: {:?}",
+                    expected_ty, resolved_ty
+                );
+                let element_types = if let Some(HirType::Tuple(types)) = resolved_ty {
+                    eprintln!("[DEBUG pattern] Tuple element types: {:?}", types);
+                    Some(types.clone())
+                } else {
+                    eprintln!("[DEBUG pattern] Expected type is not a Tuple, defaulting to ANY");
+                    None
+                };
+
+                for (i, p) in patterns.iter().enumerate() {
+                    let elem_ty = element_types
+                        .as_ref()
+                        .and_then(|types| types.get(i).copied())
+                        .unwrap_or(TypeId::ANY);
+                    eprintln!("[DEBUG pattern] Tuple element {} has type {:?}", i, elem_ty);
+                    self.collect_pattern_bindings(p, elem_ty, bindings);
+                }
+            }
+            Pattern::Enum {
+                name: enum_name,
+                variant: variant_name,
+                payload,
+            } => {
+                // Enum pattern like Some(x) or Int(bits_a, signed_a)
+                // Try to look up the actual variant field types
+                if let Some(patterns) = payload {
+                    // Try to find the enum type and variant to get field types
+                    // Use expected_ty as a hint when enum_name is wildcard
+                    let field_types = self.get_enum_variant_field_types_with_hint(enum_name, variant_name, expected_ty);
+
+                    for (i, p) in patterns.iter().enumerate() {
+                        let field_ty = field_types
+                            .as_ref()
+                            .and_then(|types| types.get(i).copied())
+                            .unwrap_or(TypeId::ANY);
+                        self.collect_pattern_bindings(p, field_ty, bindings);
+                    }
+                }
+            }
+            Pattern::Struct { name: _, fields } => {
+                // Struct pattern like Point { x, y }
+                for (_field_name, field_pattern) in fields {
+                    self.collect_pattern_bindings(field_pattern, TypeId::ANY, bindings);
+                }
+            }
+            Pattern::Array(patterns) => {
+                for p in patterns {
+                    self.collect_pattern_bindings(p, TypeId::ANY, bindings);
+                }
+            }
+            Pattern::Or(patterns) => {
+                // Or patterns should bind the same variables - just use first pattern
+                if let Some(first) = patterns.first() {
+                    self.collect_pattern_bindings(first, expected_ty, bindings);
+                }
+            }
+            Pattern::Typed { pattern, ty: _ } => {
+                // Type annotation on pattern - recurse into inner pattern
+                self.collect_pattern_bindings(pattern, expected_ty, bindings);
+            }
+            // Patterns that don't introduce bindings
+            Pattern::Wildcard
+            | Pattern::Literal(_)
+            | Pattern::Range { .. }
+            | Pattern::Rest
+            | Pattern::MoveIdentifier(_) => {}
+        }
+    }
+
     /// Lower a match arm body (block of statements) to a single HIR expression
-    fn lower_match_arm_body(
-        &mut self,
-        body: &ast::Block,
-        ctx: &mut FunctionContext,
-    ) -> LowerResult<HirExpr> {
+    fn lower_match_arm_body(&mut self, body: &ast::Block, ctx: &mut FunctionContext) -> LowerResult<HirExpr> {
         // If body is empty, return Nil
         if body.statements.is_empty() {
             return Ok(HirExpr {
@@ -464,6 +652,26 @@ impl Lowerer {
                             ty: TypeId::NIL,
                         };
                     }
+                }
+                // Handle Let statements to add local variables
+                simple_parser::ast::Node::Let(let_stmt) => {
+                    // Lower the initializer expression (if present)
+                    let init_ty = if let Some(ref value) = let_stmt.value {
+                        let init_expr = self.lower_expr(value, ctx)?;
+                        init_expr.ty
+                    } else {
+                        TypeId::NIL
+                    };
+
+                    // Extract variable name from pattern
+                    if let simple_parser::ast::Pattern::Identifier(name) = &let_stmt.pattern {
+                        // Add the variable to the context
+                        ctx.add_local(name.clone(), init_ty, let_stmt.mutability);
+                        // The let statement doesn't produce a value itself
+                    } else if let simple_parser::ast::Pattern::MutIdentifier(name) = &let_stmt.pattern {
+                        ctx.add_local(name.clone(), init_ty, simple_parser::ast::Mutability::Mutable);
+                    }
+                    // Other patterns (typed, tuple, etc.) would need more complex handling
                 }
                 // Skip other statement types for now
                 _ => {}
@@ -528,6 +736,159 @@ impl Lowerer {
         }
 
         Ok(last_expr)
+    }
+
+    /// Lower a null coalescing expression (expr ?? default) to HIR
+    ///
+    /// The `??` operator returns the left operand if it's not nil,
+    /// otherwise returns the right operand. This is lowered to:
+    /// `if expr != nil then expr else default`
+    ///
+    /// For simplicity, we evaluate expr once and check against nil.
+    pub(super) fn lower_coalesce(
+        &mut self,
+        expr: &Expr,
+        default: &Expr,
+        ctx: &mut FunctionContext,
+    ) -> LowerResult<HirExpr> {
+        let expr_hir = self.lower_expr(expr, ctx)?;
+        let default_hir = self.lower_expr(default, ctx)?;
+
+        // Create a nil check: expr != nil
+        let nil_expr = HirExpr {
+            kind: HirExprKind::Nil,
+            ty: TypeId::NIL,
+        };
+        let condition = HirExpr {
+            kind: HirExprKind::Binary {
+                op: BinOp::NotEq,
+                left: Box::new(expr_hir.clone()),
+                right: Box::new(nil_expr),
+            },
+            ty: TypeId::BOOL,
+        };
+
+        // The result type is the type of the expression (or default if expr could be nil)
+        let result_ty = if expr_hir.ty == TypeId::NIL {
+            default_hir.ty
+        } else {
+            expr_hir.ty
+        };
+
+        Ok(HirExpr {
+            kind: HirExprKind::If {
+                condition: Box::new(condition),
+                then_branch: Box::new(expr_hir),
+                else_branch: Some(Box::new(default_hir)),
+            },
+            ty: result_ty,
+        })
+    }
+
+    /// Lower an existence check expression (expr.?) to HIR
+    ///
+    /// The `.?` operator checks if a value is "present":
+    /// - For Option types: true if Some, false if None
+    /// - For collections: true if non-empty, false if empty
+    /// - For Result types: use result.ok.? or result.err.?
+    /// - For primitives: always true (they always exist)
+    ///
+    /// This is lowered to a nil check: `expr != nil`
+    /// For more sophisticated checks (e.g., empty collections), the interpreter
+    /// handles this at runtime through the appropriate FFI calls.
+    pub(super) fn lower_exists_check(&mut self, expr: &Expr, ctx: &mut FunctionContext) -> LowerResult<HirExpr> {
+        let expr_hir = self.lower_expr(expr, ctx)?;
+
+        // Create a nil check: expr != nil
+        let nil_expr = HirExpr {
+            kind: HirExprKind::Nil,
+            ty: TypeId::NIL,
+        };
+
+        Ok(HirExpr {
+            kind: HirExprKind::Binary {
+                op: BinOp::NotEq,
+                left: Box::new(expr_hir),
+                right: Box::new(nil_expr),
+            },
+            ty: TypeId::BOOL,
+        })
+    }
+
+    /// Lower a try expression (expr?) to HIR
+    ///
+    /// The `?` operator unwraps a Result type:
+    /// - If Ok(value), returns the value
+    /// - If Err(error), propagates the error (early return)
+    ///
+    /// For native compilation, we simplify this to just unwrapping the value.
+    /// The actual error propagation would require more complex control flow
+    /// (generating early returns), which we'll implement in a future phase.
+    ///
+    /// For now, this is equivalent to calling .unwrap() on the result.
+    pub(super) fn lower_try(&mut self, inner: &Expr, ctx: &mut FunctionContext) -> LowerResult<HirExpr> {
+        // Lower the inner expression
+        let inner_hir = self.lower_expr(inner, ctx)?;
+
+        // Generate an unwrap call on the result
+        // This uses the MethodCall HIR node with dynamic dispatch
+        Ok(HirExpr {
+            kind: HirExprKind::MethodCall {
+                receiver: Box::new(inner_hir),
+                method: "unwrap".to_string(),
+                args: vec![],
+                dispatch: DispatchMode::Dynamic,
+            },
+            ty: TypeId::ANY, // The unwrapped type is dynamically determined
+        })
+    }
+
+    /// Lower a range expression (start..end or start..=end) to HIR
+    ///
+    /// Ranges are represented as a builtin call that creates a Range object.
+    /// The inclusive flag determines whether the end is included.
+    pub(super) fn lower_range(
+        &mut self,
+        start: Option<&Expr>,
+        end: Option<&Expr>,
+        bound: simple_parser::ast::RangeBound,
+        ctx: &mut FunctionContext,
+    ) -> LowerResult<HirExpr> {
+        // Lower start and end expressions
+        let start_hir = if let Some(s) = start {
+            self.lower_expr(s, ctx)?
+        } else {
+            HirExpr {
+                kind: HirExprKind::Integer(0),
+                ty: TypeId::I64,
+            }
+        };
+
+        let end_hir = if let Some(e) = end {
+            self.lower_expr(e, ctx)?
+        } else {
+            // If no end, use a large value (or could return error)
+            HirExpr {
+                kind: HirExprKind::Integer(i64::MAX),
+                ty: TypeId::I64,
+            }
+        };
+
+        // Check if inclusive
+        let inclusive = matches!(bound, simple_parser::ast::RangeBound::Inclusive);
+
+        // Create a Range using a builtin call
+        Ok(HirExpr {
+            kind: HirExprKind::BuiltinCall {
+                name: if inclusive {
+                    "rt_range_inclusive".to_string()
+                } else {
+                    "rt_range".to_string()
+                },
+                args: vec![start_hir, end_hir],
+            },
+            ty: TypeId::ANY, // Range type - could be more specific
+        })
     }
 }
 

@@ -6,7 +6,9 @@ use super::evaluate_expr;
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::value::{Value, ATTR_STRONG};
 
-use super::super::{exec_node, exec_if_expr, exec_match_expr, pattern_matches, ClassDef, Control, Enums, Env, FunctionDef, ImplMethods};
+use super::super::{
+    exec_node, exec_if_expr, exec_match_expr, pattern_matches, ClassDef, Control, Enums, Env, FunctionDef, ImplMethods,
+};
 
 pub(super) fn eval_control_expr(
     expr: &Expr,
@@ -49,7 +51,11 @@ pub(super) fn eval_control_expr(
             };
             // If branch returned a BlockClosure (from DoBlock), execute it immediately
             // This handles the case where if branches are parsed as DoBlock expressions
-            let result = if let Value::BlockClosure { nodes, env: captured_env } = branch_result {
+            let result = if let Value::BlockClosure {
+                nodes,
+                env: captured_env,
+            } = branch_result
+            {
                 let mut block_env = captured_env.clone();
                 let mut last_val = Value::Nil;
                 for node in &nodes {
@@ -60,7 +66,8 @@ pub(super) fn eval_control_expr(
                         Control::Next => {
                             // Get the expression value if it was an expression node
                             if let Node::Expression(expr) = node {
-                                last_val = evaluate_expr(expr, &mut block_env, functions, classes, enums, impl_methods)?;
+                                last_val =
+                                    evaluate_expr(expr, &mut block_env, functions, classes, enums, impl_methods)?;
                             }
                         }
                     }
@@ -137,17 +144,26 @@ pub(super) fn eval_control_expr(
                         if is_last {
                             match stmt {
                                 Node::Expression(expr) => {
-                                    result = evaluate_expr(expr, &mut arm_env, functions, classes, enums, impl_methods)?;
+                                    result =
+                                        evaluate_expr(expr, &mut arm_env, functions, classes, enums, impl_methods)?;
                                     continue;
                                 }
                                 Node::If(if_stmt) => {
                                     // Use exec_if_expr to properly capture the implicit return value
-                                    result = exec_if_expr(if_stmt, &mut arm_env, functions, classes, enums, impl_methods)?;
+                                    result =
+                                        exec_if_expr(if_stmt, &mut arm_env, functions, classes, enums, impl_methods)?;
                                     continue;
                                 }
                                 Node::Match(match_stmt) => {
                                     // Use exec_match_expr to properly capture the implicit return value
-                                    result = exec_match_expr(match_stmt, &mut arm_env, functions, classes, enums, impl_methods)?;
+                                    result = exec_match_expr(
+                                        match_stmt,
+                                        &mut arm_env,
+                                        functions,
+                                        classes,
+                                        enums,
+                                        impl_methods,
+                                    )?;
                                     continue;
                                 }
                                 _ => {}

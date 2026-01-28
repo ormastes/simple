@@ -46,13 +46,7 @@ pub fn mock_policy_init_patterns(args: &[Value]) -> Result<Value, CompileError> 
             // Collect patterns as strings
             let pattern_strings: Vec<String> = patterns
                 .iter()
-                .filter_map(|v| {
-                    if let Value::Str(s) = v {
-                        Some(s.clone())
-                    } else {
-                        None
-                    }
-                })
+                .filter_map(|v| if let Value::Str(s) = v { Some(s.clone()) } else { None })
                 .collect();
 
             // Convert to 'static refs by leaking (this is fine for test setup)

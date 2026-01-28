@@ -1,10 +1,14 @@
 pub mod header;
+pub mod jit_instantiator;
+pub mod note_loader;
 pub mod reloc;
 pub mod section;
 pub mod settlement;
 pub mod symbol;
 
 pub use header::*;
+pub use jit_instantiator::*;
+pub use note_loader::*;
 pub use reloc::*;
 pub use section::*;
 pub use settlement::*;

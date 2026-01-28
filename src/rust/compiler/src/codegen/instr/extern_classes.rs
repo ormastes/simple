@@ -88,9 +88,7 @@ fn compile_ffi_static_call<M: Module>(
         for (i, arg) in args.iter().enumerate() {
             let arg_val = ctx.vreg_values[arg];
             let offset = (i * 8) as i32;
-            builder
-                .ins()
-                .store(MemFlags::new(), arg_val, base_addr, offset);
+            builder.ins().store(MemFlags::new(), arg_val, base_addr, offset);
         }
         base_addr
     } else {
@@ -175,9 +173,7 @@ fn compile_ffi_instance_call<M: Module>(
         for (i, arg) in args.iter().enumerate() {
             let arg_val = ctx.vreg_values[arg];
             let offset = (i * 8) as i32;
-            builder
-                .ins()
-                .store(MemFlags::new(), arg_val, base_addr, offset);
+            builder.ins().store(MemFlags::new(), arg_val, base_addr, offset);
         }
         base_addr
     } else {

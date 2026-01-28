@@ -23,11 +23,16 @@ impl Lowerer {
     /// inherits all invariants from the parent. This ensures Liskov Substitution
     /// Principle - a child class must maintain all parent invariants.
     pub(crate) fn register_class(&mut self, c: &ast::ClassDef) -> LowerResult<TypeId> {
+        eprintln!("[DEBUG register_class] Registering class: {}", c.name);
         // Collect class's own fields
         let mut fields: Vec<_> = c
             .fields
             .iter()
-            .map(|f| (f.name.clone(), self.resolve_type(&f.ty).unwrap_or(TypeId::VOID)))
+            .map(|f| {
+                let ty = self.resolve_type(&f.ty).unwrap_or(TypeId::VOID);
+                eprintln!("[DEBUG register_class] Field {} resolved to {:?}", f.name, ty);
+                (f.name.clone(), ty)
+            })
             .collect();
 
         // Apply mixins: add mixin fields to the class
@@ -52,12 +57,16 @@ impl Lowerer {
             }
         }
 
-        let type_id = self.module.types.register_named(
+        // Use update_named to update the placeholder created in Pass 0
+        let type_id = self.module.types.update_named(
             c.name.clone(),
             HirType::Struct {
                 name: c.name.clone(),
                 fields,
                 has_snapshot: c.is_snapshot(),
+                generic_params: c.generic_params.clone(),
+                is_generic_template: c.is_generic_template,
+                type_bindings: std::collections::HashMap::new(), // Will be filled during specialization
             },
         );
 
@@ -95,19 +104,32 @@ impl Lowerer {
     }
 
     pub(crate) fn register_struct(&mut self, s: &ast::StructDef) -> LowerResult<TypeId> {
+        eprintln!("[DEBUG register_struct] Registering struct: {}", s.name);
         let mut fields = Vec::new();
         for field in &s.fields {
-            let ty = self.resolve_type(&field.ty)?;
-            fields.push((field.name.clone(), ty));
+            match self.resolve_type(&field.ty) {
+                Ok(ty) => {
+                    eprintln!("[DEBUG register_struct] Field {} resolved to {:?}", field.name, ty);
+                    fields.push((field.name.clone(), ty));
+                }
+                Err(e) => {
+                    eprintln!("[DEBUG register_struct] Field {} FAILED: {:?}", field.name, e);
+                    return Err(e);
+                }
+            }
         }
 
         let hir_type = HirType::Struct {
             name: s.name.clone(),
             fields,
             has_snapshot: s.is_snapshot(),
+            generic_params: s.generic_params.clone(),
+            is_generic_template: s.is_generic_template,
+            type_bindings: std::collections::HashMap::new(), // Will be filled during specialization
         };
 
-        let type_id = self.module.types.register_named(s.name.clone(), hir_type);
+        // Use update_named to update the placeholder created in Pass 0
+        let type_id = self.module.types.update_named(s.name.clone(), hir_type);
 
         // Register struct invariant if present
         if let Some(ref invariant) = s.invariant {
@@ -169,6 +191,7 @@ impl Lowerer {
             methods,
             trait_bounds,
             required_methods,
+            is_generic_template: !m.generic_params.is_empty(),
         };
 
         let type_id = self.module.types.register_named(m.name.clone(), hir_type);
@@ -235,6 +258,11 @@ impl Lowerer {
 
         // Store trait info in module
         self.module.trait_infos.insert(t.name.clone(), trait_info);
+
+        // Also register the trait name as a type alias to ANY
+        // This allows trait names to be used in type positions (return types, parameters)
+        // At runtime, trait objects are dynamically dispatched
+        self.module.types.register_alias(t.name.clone(), TypeId::ANY);
 
         Ok(())
     }

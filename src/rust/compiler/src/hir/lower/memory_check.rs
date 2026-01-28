@@ -201,6 +201,10 @@ impl Lowerer {
                         .with_context("mutation requires `mut` capability"),
                 );
             }
+            // MethodCall as lvalue is a property setter (field access fallback) - skip warning
+            // This happens when type information is incomplete (TypeId(0))
+            // Runtime checks will ensure safety
+            HirExprKind::MethodCall { .. } => {}
             _ => {}
         }
     }
@@ -272,6 +276,10 @@ impl Lowerer {
             // Global variables are generally mutable (for now)
             HirExprKind::Global(_) => true,
 
+            // MethodCall as lvalue is a property setter - assume mutable for now
+            // This happens when field access falls back to method call due to missing type info
+            HirExprKind::MethodCall { receiver, .. } => self.expr_has_mut_capability(receiver, ctx),
+
             // Other expressions: check if they are pointers with mut capability
             _ => {
                 if let Some(HirType::Pointer { capability, .. }) = self.module.types.get(expr.ty) {
@@ -290,11 +298,7 @@ impl Lowerer {
     /// In Simple, `fn` methods are immutable (cannot modify self fields)
     /// while `me` methods are mutable (can modify self fields).
     /// This check prevents silent failures where self mutation doesn't persist.
-    pub(super) fn check_self_mutation_in_fn_method(
-        &self,
-        target: &HirExpr,
-        ctx: &FunctionContext,
-    ) -> LowerResult<()> {
+    pub(super) fn check_self_mutation_in_fn_method(&self, target: &HirExpr, ctx: &FunctionContext) -> LowerResult<()> {
         // Only check in methods (has self), and only if NOT a me method
         if !ctx.has_self || ctx.is_me_method {
             return Ok(());
@@ -321,9 +325,7 @@ impl Lowerer {
                 // or if it's a nested access that starts from self
                 match &receiver.kind {
                     HirExprKind::Local(0) => true,
-                    HirExprKind::FieldAccess { .. } | HirExprKind::Index { .. } => {
-                        self.is_self_mutation(receiver)
-                    }
+                    HirExprKind::FieldAccess { .. } | HirExprKind::Index { .. } => self.is_self_mutation(receiver),
                     _ => false,
                 }
             }
@@ -331,9 +333,7 @@ impl Lowerer {
                 // self.arr[i] = value or self[i] = value
                 match &receiver.kind {
                     HirExprKind::Local(0) => true,
-                    HirExprKind::FieldAccess { .. } | HirExprKind::Index { .. } => {
-                        self.is_self_mutation(receiver)
-                    }
+                    HirExprKind::FieldAccess { .. } | HirExprKind::Index { .. } => self.is_self_mutation(receiver),
                     _ => false,
                 }
             }

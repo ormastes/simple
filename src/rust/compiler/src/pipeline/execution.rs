@@ -328,8 +328,23 @@ impl CompilerPipeline {
         // 9. Generate machine code via selected backend
         let object_code = self.compile_mir_to_object(&mir_module, Target::host())?;
 
-        // 10. Wrap object code in SMF format
-        Ok(generate_smf_from_object(&object_code, self.gc.as_ref()))
+        // 10. Partition generic templates from specialized instances
+        let (templates, _specialized, metadata) = crate::monomorphize::partition_generic_constructs(&ast_module);
+
+        // 11. Wrap object code in SMF format with optional templates
+        if templates.is_empty() {
+            // No templates - use simple builder
+            Ok(generate_smf_from_object(&object_code, self.gc.as_ref()))
+        } else {
+            // Include templates in SMF
+            Ok(crate::smf_writer::generate_smf_with_templates(
+                &object_code,
+                Some(&templates),
+                Some(&metadata),
+                self.gc.as_ref(),
+                Target::host(),
+            ))
+        }
     }
 
     /// Compile source code to SMF bytes for a specific target architecture.
@@ -407,17 +422,30 @@ impl CompilerPipeline {
         // 9. Generate machine code via selected backend for the target architecture
         let object_code = self.compile_mir_to_object(&mir_module, target)?;
 
-        // 10. For WASM targets, link into a complete module; otherwise wrap in SMF
+        // 10. Partition generic templates from specialized instances
+        let (templates, _specialized, metadata) = crate::monomorphize::partition_generic_constructs(&ast_module);
+
+        // 11. For WASM targets, link into a complete module; otherwise wrap in SMF
         if target.arch.is_wasm() {
             // Link WASM object file into a complete WASM module
             link_wasm_object(&object_code)
         } else {
-            // Wrap object code in SMF format for native targets
-            Ok(generate_smf_from_object_for_target(
-                &object_code,
-                self.gc.as_ref(),
-                target,
-            ))
+            // Wrap object code in SMF format for native targets with optional templates
+            if templates.is_empty() {
+                Ok(generate_smf_from_object_for_target(
+                    &object_code,
+                    self.gc.as_ref(),
+                    target,
+                ))
+            } else {
+                Ok(crate::smf_writer::generate_smf_with_templates(
+                    &object_code,
+                    Some(&templates),
+                    Some(&metadata),
+                    self.gc.as_ref(),
+                    target,
+                ))
+            }
         }
     }
 

@@ -40,6 +40,12 @@ struct MirFunction:
     entry_block: BlockId
     span: Span
 
+    # Generic template metadata for .smf template storage
+    generic_params: [text]
+    is_generic_template: bool
+    specialization_of: text?
+    type_bindings: Dict<text, HirType>
+
 struct MirSignature:
     """Function signature."""
     params: [MirType]
@@ -403,7 +409,11 @@ impl MirBuilder:
             locals: [],
             blocks: [],
             entry_block: BlockId.entry(),
-            span: span
+            span: span,
+            generic_params: [],
+            is_generic_template: false,
+            specialization_of: nil,
+            type_bindings: {}
         ))
         self.next_local_id = 0
         self.next_block_id = 1
@@ -607,6 +617,19 @@ impl MirBuilder:
 
         dest
 
+    me emit_call_indirect(ptr: MirOperand, args: [MirOperand], sig: MirSignature, return_type: MirType) -> LocalId?:
+        """Emit an indirect function call (through closure or function pointer)."""
+        var dest: LocalId? = None
+        if return_type.kind != MirTypeKind.Unit:
+            dest = Some(self.new_temp(return_type))
+
+        self.emit(MirInst(
+            kind: MirInstKind.CallIndirect(dest, ptr, args, sig),
+            span: nil
+        ))
+
+        dest
+
     me emit_cast(operand: MirOperand, target: MirType) -> LocalId:
         """Emit a type cast."""
         val dest = self.new_temp(target)
@@ -633,6 +656,13 @@ impl MirBuilder:
             span: nil
         ))
         dest
+
+    me emit_set_field(base: MirOperand, field: i64, value: MirOperand):
+        """Emit field assignment."""
+        self.emit(MirInst(
+            kind: MirInstKind.SetField(base, field, value),
+            span: nil
+        ))
 
     # ========================================================================
     # Terminators
@@ -861,6 +891,29 @@ impl MirLowering:
                         self.builder.emit_copy(local.unwrap(), result)
                     else:
                         self.builder.emit_copy(local.unwrap(), value_local)
+
+            case Field(base, field, resolved):
+                # Field assignment: obj.field = value
+                val receiver = self.lower_expr(base)
+                # For now, use field index 0 (TODO: proper field resolution)
+                val field_index = 0
+                self.builder.emit_set_field(MirOperand.copy(receiver), field_index, MirOperand.copy(value_local))
+
+            case Index(base, index):
+                # Index assignment: arr[i] = value
+                # Lower to runtime call: rt_array_set(arr, index, value)
+                val receiver = self.lower_expr(base)
+                val index_local = self.lower_expr(index)
+
+                # Create function operand for rt_array_set
+                val func_operand = MirOperand(kind: MirOperandKind.Const(
+                    MirConstValue.Int(0),  # Function symbol (will be resolved in codegen)
+                    MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.unit(), is_variadic: false)))
+                ))
+
+                # Emit call with no return value
+                self.builder.emit_call(func_operand, [MirOperand.copy(receiver), MirOperand.copy(index_local), MirOperand.copy(value_local)], MirType.unit())
+
             case _:
                 self.error("unsupported assignment target", Some(target.span))
 
@@ -971,6 +1024,9 @@ impl MirLowering:
 
             case NogradBlock(body):
                 self.lower_nograd_block(body)
+
+            case Range(start, end, inclusive, step):
+                self.lower_range(start, end, inclusive, step)
 
             case _:
                 self.error("unsupported expression in MIR lowering", Some(expr.span))
@@ -1104,16 +1160,33 @@ impl MirLowering:
         )
 
     me lower_call(callee: HirExpr, args: [HirCallArg]) -> LocalId:
-        """Lower function call."""
-        val callee_local = self.lower_expr(callee)
+        """Lower function call.
 
+        Handles both direct calls (Var) and indirect calls (closures, function pointers).
+        """
         var arg_operands: [MirOperand] = []
         for arg in args:
             val arg_local = self.lower_expr(arg.value)
             arg_operands = arg_operands.push(MirOperand.copy(arg_local))
 
-        val result = self.builder.emit_call(MirOperand.copy(callee_local), arg_operands, MirType.i64())
-        result ?? self.builder.new_temp(MirType.unit())
+        # Check if this is a direct call (Var) or indirect call
+        match callee.kind:
+            case Var(symbol):
+                # Direct call - use Call instruction
+                val func_operand = self.symbol_to_operand(symbol)
+                val result = self.builder.emit_call(func_operand, arg_operands, MirType.i64())
+                result ?? self.builder.new_temp(MirType.unit())
+
+            case _:
+                # Indirect call - lower callee expression and use CallIndirect
+                val callee_local = self.lower_expr(callee)
+                val sig = MirSignature(
+                    params: [],  # TODO: Extract parameter types from callee type
+                    return_type: MirType.i64(),
+                    is_variadic: false
+                )
+                val result = self.builder.emit_call_indirect(MirOperand.copy(callee_local), arg_operands, sig, MirType.i64())
+                result ?? self.builder.new_temp(MirType.unit())
 
     me lower_method_call(receiver: HirExpr, method: text, args: [HirCallArg], resolution: MethodResolution) -> LocalId:
         """Lower method call based on resolution.
@@ -1286,6 +1359,30 @@ impl MirLowering:
         val _pop_result = self.builder.new_temp(MirType.unit())
 
         body_result ?? self.builder.new_temp(MirType.unit())
+
+    me lower_range(start: HirExpr?, end: HirExpr?, inclusive: bool, step: HirExpr?) -> LocalId:
+        """Lower range expression to runtime call.
+
+        Generates call to rt_range(start, end) or rt_range_inclusive(start, end).
+        Step parameter is currently ignored (TODO: support step in runtime).
+        """
+        # Lower start and end to locals
+        val start_local = if start.?: self.lower_expr(start.unwrap()) else: self.builder.emit_const_int(0)
+        val end_local = if end.?: self.lower_expr(end.unwrap()) else: self.builder.emit_const_int(0)
+
+        # Create function operand for rt_range or rt_range_inclusive
+        val func_operand = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Int(0),  # Function symbol (will be resolved in codegen)
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
+        ))
+
+        # Emit call: rt_range(start, end) or rt_range_inclusive(start, end)
+        val result = self.builder.emit_call(func_operand, [
+            MirOperand.copy(start_local),
+            MirOperand.copy(end_local)
+        ], MirType.i64())
+
+        result ?? self.builder.new_temp(MirType.i64())
 
     me error(message: text, span: Span?):
         """Record a lowering error."""

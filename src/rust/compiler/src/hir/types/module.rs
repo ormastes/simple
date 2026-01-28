@@ -32,6 +32,9 @@ pub struct HirTraitInfo {
     pub methods: HashMap<String, HirMethodSignature>,
     /// Total number of vtable slots (equals methods.len())
     pub vtable_size: u32,
+    // Generic template metadata
+    pub is_generic_template: bool,
+    pub type_bindings: HashMap<String, TypeId>,
 }
 
 impl HirTraitInfo {
@@ -42,6 +45,8 @@ impl HirTraitInfo {
             generic_params: Vec::new(),
             methods: HashMap::new(),
             vtable_size: 0,
+            is_generic_template: false,
+            type_bindings: HashMap::new(),
         }
     }
 
@@ -86,6 +91,17 @@ pub struct HirImport {
     pub is_type_only: bool,
 }
 
+/// HIR representation of an impl block
+#[derive(Debug, Clone)]
+pub struct HirImpl {
+    /// The type this impl block is for
+    pub type_id: TypeId,
+    /// Optional trait being implemented
+    pub trait_id: Option<TypeId>,
+    /// Methods: name -> function name
+    pub methods: HashMap<String, String>,
+}
+
 /// HIR module
 #[derive(Debug)]
 pub struct HirModule {
@@ -111,6 +127,8 @@ pub struct HirModule {
     pub trait_infos: HashMap<String, HirTraitInfo>,
     /// Lean 4 verification blocks for embedding formal proofs
     pub lean_blocks: Vec<HirLeanBlock>,
+    /// Impl blocks
+    pub impls: Vec<HirImpl>,
 }
 
 impl HirModule {
@@ -129,6 +147,7 @@ impl HirModule {
             imports: Vec::new(),
             trait_infos: HashMap::new(),
             lean_blocks: Vec::new(),
+            impls: Vec::new(),
         }
     }
 

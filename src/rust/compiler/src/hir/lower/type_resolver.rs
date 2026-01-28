@@ -241,9 +241,26 @@ impl Lowerer {
     }
 
     pub(super) fn get_field_info(&self, struct_ty: TypeId, field: &str) -> LowerResult<(usize, TypeId)> {
+        // Handle built-in ANY type directly - dynamic field access returns Any
+        if struct_ty == TypeId::ANY {
+            return Ok((0, TypeId::ANY)); // Field index is 0 (unused), type is Any
+        }
+
         if let Some(hir_ty) = self.module.types.get(struct_ty) {
             match hir_ty {
+                // Any type - dynamic field access returns Any
+                HirType::Any => {
+                    return Ok((0, TypeId::ANY)); // Field index is 0 (unused), type is Any
+                }
                 HirType::Struct { name, fields, .. } => {
+                    eprintln!(
+                        "[DEBUG get_field_info] Looking for field '{}' in struct '{}'",
+                        field, name
+                    );
+                    eprintln!(
+                        "[DEBUG get_field_info] Available fields: {:?}",
+                        fields.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>()
+                    );
                     for (idx, (field_name, field_ty)) in fields.iter().enumerate() {
                         if field_name == field {
                             return Ok((idx, *field_ty));
@@ -279,6 +296,11 @@ impl Lowerer {
             return Ok(TypeId::ANY); // Indexing into Any returns Any
         }
 
+        // Handle built-in String type (indexing into string returns string/char)
+        if arr_ty == TypeId::STRING {
+            return Ok(TypeId::STRING); // String indexing returns a single-char string
+        }
+
         if let Some(hir_ty) = self.module.types.get(arr_ty) {
             match hir_ty {
                 HirType::Array { element, .. } => Ok(*element),
@@ -288,8 +310,14 @@ impl Lowerer {
                     .copied()
                     .ok_or_else(|| LowerError::CannotInferIndexType("empty tuple".to_string())),
                 HirType::Pointer { inner, .. } => self.get_index_element_type(*inner),
+                // String type - indexing returns a single-char string
+                HirType::String => Ok(TypeId::STRING),
                 // Any type (Dict, generic containers) - indexing returns Any
                 HirType::Any => Ok(TypeId::ANY),
+                // Struct type - dynamic indexing (like dict["key"]) returns Any
+                HirType::Struct { .. } => Ok(TypeId::ANY),
+                // Enum type - indexing is dynamic
+                HirType::Enum { .. } => Ok(TypeId::ANY),
                 _ => Err(LowerError::CannotInferIndexType(format!("{:?}", hir_ty))),
             }
         } else {

@@ -6,7 +6,7 @@
 use simple_parser::Expr;
 
 use crate::hir::lower::context::FunctionContext;
-use crate::hir::lower::error::LowerResult;
+use crate::hir::lower::error::{LowerError, LowerResult};
 use crate::hir::lower::lowerer::Lowerer;
 use crate::hir::types::*;
 
@@ -34,15 +34,17 @@ impl Lowerer {
     /// Lower an array literal to HIR
     ///
     /// Creates an array type with a fixed size.
-    /// Empty arrays default to VOID element type (will fail if used without explicit type annotation).
+    /// Empty arrays use the configured default element type from type_inference_config.
     pub(super) fn lower_array(&mut self, exprs: &[Expr], ctx: &mut FunctionContext) -> LowerResult<HirExpr> {
         let mut hir_exprs = Vec::new();
         let elem_ty = if let Some(first) = exprs.first() {
             self.infer_type(first, ctx)?
         } else {
-            // Empty array needs explicit type annotation
-            // For now, default to VOID to allow empty arrays (will fail later if used)
-            TypeId::VOID
+            // Empty array - use configured default or error if strict mode
+            if self.type_inference_config.strict_empty_collections {
+                return Err(LowerError::EmptyArrayNeedsType);
+            }
+            self.type_inference_config.empty_array_default
         };
 
         for e in exprs {
@@ -106,14 +108,17 @@ impl Lowerer {
     /// Lower a vector literal to HIR
     ///
     /// Creates a SIMD vector type with the number of lanes equal to the number of elements.
-    /// Empty vectors default to VOID element type (will fail if used without explicit type annotation).
+    /// Empty vectors use the configured default element type from type_inference_config.
     pub(super) fn lower_vec_literal(&mut self, exprs: &[Expr], ctx: &mut FunctionContext) -> LowerResult<HirExpr> {
         let mut hir_exprs = Vec::new();
         let elem_ty = if let Some(first) = exprs.first() {
             self.infer_type(first, ctx)?
         } else {
-            // Empty vector needs explicit type annotation
-            TypeId::VOID
+            // Empty vector - use configured default or error if strict mode
+            if self.type_inference_config.strict_empty_collections {
+                return Err(LowerError::EmptyArrayNeedsType);
+            }
+            self.type_inference_config.empty_vector_default
         };
 
         for e in exprs {
@@ -180,11 +185,7 @@ impl Lowerer {
     ///
     /// Creates a dictionary with key-value pairs.
     /// The type is represented as ANY since dictionaries are dynamically typed at runtime.
-    pub(super) fn lower_dict(
-        &mut self,
-        pairs: &[(Expr, Expr)],
-        ctx: &mut FunctionContext,
-    ) -> LowerResult<HirExpr> {
+    pub(super) fn lower_dict(&mut self, pairs: &[(Expr, Expr)], ctx: &mut FunctionContext) -> LowerResult<HirExpr> {
         let mut hir_pairs = Vec::new();
 
         for (key, value) in pairs {

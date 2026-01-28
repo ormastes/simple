@@ -68,7 +68,8 @@ pub(crate) fn exec_block_fn(
             if let simple_parser::ast::Node::Expression(expr) = stmt {
                 // Evaluate and capture the value for implicit return
                 // Use handle_method_call_with_self_update to properly track mutations
-                let (val, update) = handle_method_call_with_self_update(expr, env, functions, classes, enums, impl_methods)?;
+                let (val, update) =
+                    handle_method_call_with_self_update(expr, env, functions, classes, enums, impl_methods)?;
                 if let Some((name, new_self)) = update {
                     env.insert(name, new_self);
                 }

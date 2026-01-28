@@ -37,7 +37,12 @@ impl Lowerer {
             Expr::Call { callee, args } => self.lower_call(callee, args, ctx),
             Expr::FieldAccess { receiver, field } => self.lower_field_access(receiver, field, ctx),
             Expr::Index { receiver, index } => self.lower_index(receiver, index, ctx),
-            Expr::Slice { receiver, start, end, step } => self.lower_slice(receiver, start.as_deref(), end.as_deref(), step.as_deref(), ctx),
+            Expr::Slice {
+                receiver,
+                start,
+                end,
+                step,
+            } => self.lower_slice(receiver, start.as_deref(), end.as_deref(), step.as_deref(), ctx),
             Expr::Tuple(exprs) => self.lower_tuple(exprs, ctx),
             Expr::Array(exprs) => self.lower_array(exprs, ctx),
             Expr::Dict(pairs) => self.lower_dict(pairs, ctx),
@@ -81,7 +86,24 @@ impl Lowerer {
             Expr::Match { subject, arms } => self.lower_match(subject, arms, ctx),
             // Do block: do: statements... (block as expression)
             Expr::DoBlock(statements) => self.lower_do_block(statements, ctx),
-            _ => Err(LowerError::Unsupported(format!("{:?}", expr))),
+            // Null coalescing: expr ?? default
+            Expr::Coalesce { expr, default } => self.lower_coalesce(expr, default, ctx),
+            // Existence check: expr.? (is present/non-empty)
+            Expr::ExistsCheck(inner) => self.lower_exists_check(inner, ctx),
+            // Try expression: expr? - unwrap Result or propagate error
+            Expr::Try(inner) => {
+                eprintln!("[DEBUG lower_expr] Matched Try expression");
+                self.lower_try(inner, ctx)
+            },
+            // Range expression: start..end or start..=end
+            Expr::Range { start, end, bound } => {
+                eprintln!("[DEBUG lower_expr] Matched Range expression");
+                self.lower_range(start.as_deref(), end.as_deref(), *bound, ctx)
+            }
+            _ => {
+                eprintln!("[DEBUG lower_expr] Unmatched expression: {:?}", expr);
+                Err(LowerError::Unsupported(format!("{:?}", expr)))
+            },
         }
     }
 
@@ -90,6 +112,14 @@ impl Lowerer {
     // ============================================================================
 
     fn lower_identifier(&self, name: &str, ctx: &mut FunctionContext) -> LowerResult<HirExpr> {
+        // Handle "None" as alias for nil (Python compatibility)
+        if name == "None" {
+            return Ok(HirExpr {
+                kind: HirExprKind::Nil,
+                ty: TypeId::NIL,
+            });
+        }
+
         // Check if this is a contract binding (ret, err, result in postconditions)
         if ctx.is_postcondition_binding(name) {
             return Ok(HirExpr {
@@ -332,7 +362,8 @@ impl Lowerer {
 
         // Any type (Dict, generic containers) methods
         // These are dynamically typed at runtime
-        let is_any = matches!(receiver.ty, TypeId::ANY) || matches!(self.module.types.get(receiver.ty), Some(HirType::Any));
+        let is_any =
+            matches!(receiver.ty, TypeId::ANY) || matches!(self.module.types.get(receiver.ty), Some(HirType::Any));
 
         if is_any {
             let result_ty = match method {

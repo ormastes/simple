@@ -445,11 +445,7 @@ pub unsafe fn get_arg(argv: *const RuntimeValue, argc: u32, index: u32) -> Optio
 /// # Safety
 /// - `argv` must be valid for `argc` elements
 #[inline]
-pub unsafe fn get_arg_as<T: FromRuntimeValue>(
-    argv: *const RuntimeValue,
-    argc: u32,
-    index: u32,
-) -> Option<T> {
+pub unsafe fn get_arg_as<T: FromRuntimeValue>(argv: *const RuntimeValue, argc: u32, index: u32) -> Option<T> {
     get_arg(argv, argc, index).and_then(T::from_runtime_value)
 }
 
@@ -582,9 +578,9 @@ mod tests {
         assert_eq!(v.as_int(), 42);
 
         // Float
-        let v = 3.14f64.into_runtime_value();
+        let v = 2.5f64.into_runtime_value();
         assert!(v.is_float());
-        assert!((v.as_float() - 3.14).abs() < 0.001);
+        assert!((v.as_float() - 2.5).abs() < 0.001);
     }
 
     #[test]
@@ -603,9 +599,9 @@ mod tests {
         assert_eq!(u32::from_runtime_value(v), Some(42));
 
         // Float
-        let v = RuntimeValue::from_float(3.14);
+        let v = RuntimeValue::from_float(2.5);
         let f = f64::from_runtime_value(v).unwrap();
-        assert!((f - 3.14).abs() < 0.001);
+        assert!((f - 2.5).abs() < 0.001);
     }
 
     #[test]

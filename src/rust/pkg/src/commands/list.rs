@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use crate::error::PkgResult;
+use crate::error::{PkgError, PkgResult};
 use crate::linker::Linker;
 use crate::lock::{LockFile, PackageSource};
 use crate::manifest::Manifest;
@@ -65,7 +65,8 @@ pub struct TreeNode {
 
 /// Build a dependency tree
 pub fn dependency_tree(dir: &Path) -> PkgResult<TreeNode> {
-    let manifest_path = dir.join("simple.toml");
+    let manifest_path = crate::find_manifest(dir)
+        .ok_or_else(|| PkgError::ManifestNotFound(dir.display().to_string()))?;
     let lock_path = dir.join("simple.lock");
 
     let manifest = Manifest::load(&manifest_path)?;

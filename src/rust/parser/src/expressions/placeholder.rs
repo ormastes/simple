@@ -49,12 +49,10 @@ fn count_placeholders(expr: &Expr) -> usize {
         Expr::Binary { left, right, .. } => count_placeholders(left) + count_placeholders(right),
         Expr::Unary { operand, .. } => count_placeholders(operand),
         Expr::Call { callee, args } => {
-            count_placeholders(callee)
-                + args.iter().map(|a| count_placeholders(&a.value)).sum::<usize>()
+            count_placeholders(callee) + args.iter().map(|a| count_placeholders(&a.value)).sum::<usize>()
         }
         Expr::MethodCall { receiver, args, .. } => {
-            count_placeholders(receiver)
-                + args.iter().map(|a| count_placeholders(&a.value)).sum::<usize>()
+            count_placeholders(receiver) + args.iter().map(|a| count_placeholders(&a.value)).sum::<usize>()
         }
         Expr::FieldAccess { receiver, .. } => count_placeholders(receiver),
         Expr::Index { receiver, index } => count_placeholders(receiver) + count_placeholders(index),
@@ -127,11 +125,7 @@ fn replace_placeholders(expr: Expr, counter: &mut usize) -> Expr {
                 .map(|a| Argument::with_span(a.name, replace_placeholders(a.value, counter), a.span))
                 .collect(),
         },
-        Expr::MethodCall {
-            receiver,
-            method,
-            args,
-        } => Expr::MethodCall {
+        Expr::MethodCall { receiver, method, args } => Expr::MethodCall {
             receiver: Box::new(replace_placeholders(*receiver, counter)),
             method,
             args: args
@@ -158,12 +152,8 @@ fn replace_placeholders(expr: Expr, counter: &mut usize) -> Expr {
             then_branch: Box::new(replace_placeholders(*then_branch, counter)),
             else_branch: else_branch.map(|e| Box::new(replace_placeholders(*e, counter))),
         },
-        Expr::Tuple(items) => {
-            Expr::Tuple(items.into_iter().map(|e| replace_placeholders(e, counter)).collect())
-        }
-        Expr::Array(items) => {
-            Expr::Array(items.into_iter().map(|e| replace_placeholders(e, counter)).collect())
-        }
+        Expr::Tuple(items) => Expr::Tuple(items.into_iter().map(|e| replace_placeholders(e, counter)).collect()),
+        Expr::Array(items) => Expr::Array(items.into_iter().map(|e| replace_placeholders(e, counter)).collect()),
         Expr::Dict(entries) => Expr::Dict(
             entries
                 .into_iter()

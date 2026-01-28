@@ -335,9 +335,10 @@ impl<'a> super::Lexer<'a> {
                             continue;
                         } else {
                             // Check if preceded by identifier char, digit, or ')' -> transpose operator
-                            let is_postfix = expr.chars().last().map_or(false, |last| {
-                                last.is_alphanumeric() || last == '_' || last == ')'
-                            });
+                            let is_postfix = expr
+                                .chars()
+                                .last()
+                                .map_or(false, |last| last.is_alphanumeric() || last == '_' || last == ')');
                             if is_postfix {
                                 // This is transpose operator, not string start
                                 expr.push(c);

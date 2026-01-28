@@ -22,12 +22,7 @@ pub struct DeprecationWarning {
 
 impl DeprecationWarning {
     /// Create a new deprecation warning for a function
-    pub fn function(
-        span: Span,
-        name: String,
-        message: Option<String>,
-        suggestion: Option<String>,
-    ) -> Self {
+    pub fn function(span: Span, name: String, message: Option<String>, suggestion: Option<String>) -> Self {
         Self {
             span,
             deprecated_name: name,
@@ -38,12 +33,7 @@ impl DeprecationWarning {
     }
 
     /// Create a new deprecation warning for a type
-    pub fn type_usage(
-        span: Span,
-        name: String,
-        message: Option<String>,
-        suggestion: Option<String>,
-    ) -> Self {
+    pub fn type_usage(span: Span, name: String, message: Option<String>, suggestion: Option<String>) -> Self {
         Self {
             span,
             deprecated_name: name,
@@ -54,12 +44,7 @@ impl DeprecationWarning {
     }
 
     /// Create a new deprecation warning for a method
-    pub fn method(
-        span: Span,
-        name: String,
-        message: Option<String>,
-        suggestion: Option<String>,
-    ) -> Self {
+    pub fn method(span: Span, name: String, message: Option<String>, suggestion: Option<String>) -> Self {
         Self {
             span,
             deprecated_name: name,
@@ -71,15 +56,9 @@ impl DeprecationWarning {
 
     /// Format the warning as a human-readable string
     pub fn format(&self) -> String {
-        let mut output = format!(
-            "warning: use of deprecated {} '{}'\n",
-            self.kind, self.deprecated_name
-        );
+        let mut output = format!("warning: use of deprecated {} '{}'\n", self.kind, self.deprecated_name);
 
-        output.push_str(&format!(
-            "  --> line {}:{}\n",
-            self.span.line, self.span.column
-        ));
+        output.push_str(&format!("  --> line {}:{}\n", self.span.line, self.span.column));
 
         if let Some(ref msg) = self.message {
             output.push_str(&format!("   = note: \"{}\"\n", msg));
@@ -114,35 +93,17 @@ impl DeprecationWarningCollector {
     }
 
     /// Add a function deprecation warning
-    pub fn add_function(
-        &mut self,
-        span: Span,
-        name: String,
-        message: Option<String>,
-        suggestion: Option<String>,
-    ) {
+    pub fn add_function(&mut self, span: Span, name: String, message: Option<String>, suggestion: Option<String>) {
         self.add(DeprecationWarning::function(span, name, message, suggestion));
     }
 
     /// Add a type deprecation warning
-    pub fn add_type(
-        &mut self,
-        span: Span,
-        name: String,
-        message: Option<String>,
-        suggestion: Option<String>,
-    ) {
+    pub fn add_type(&mut self, span: Span, name: String, message: Option<String>, suggestion: Option<String>) {
         self.add(DeprecationWarning::type_usage(span, name, message, suggestion));
     }
 
     /// Add a method deprecation warning
-    pub fn add_method(
-        &mut self,
-        span: Span,
-        name: String,
-        message: Option<String>,
-        suggestion: Option<String>,
-    ) {
+    pub fn add_method(&mut self, span: Span, name: String, message: Option<String>, suggestion: Option<String>) {
         self.add(DeprecationWarning::method(span, name, message, suggestion));
     }
 

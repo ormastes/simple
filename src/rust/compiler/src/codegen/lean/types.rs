@@ -238,7 +238,7 @@ impl<'a> TypeTranslator<'a> {
                     deriving: vec!["Repr".to_string()],
                 })
             }
-            HirType::Enum { name, variants } => {
+            HirType::Enum { name, variants, .. } => {
                 let lean_variants: Result<Vec<_>, _> = variants
                     .iter()
                     .map(|(n, types_opt)| {
@@ -343,6 +343,7 @@ impl<'a> TypeTranslator<'a> {
             }
             HirType::Unknown => Ok(LeanType::Primitive("Unit".to_string())),
             HirType::Any => Ok(LeanType::Primitive("Unit".to_string())),
+            HirType::Char => Ok(LeanType::Primitive("Char".to_string())),
         }
     }
 

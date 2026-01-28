@@ -34,7 +34,7 @@ pub fn resolve_module_path(parts: &[String], base_dir: &Path) -> Result<PathBuf,
         resolved = resolved.join(part);
     }
     resolved.set_extension("spl");
-    if resolved.exists() {
+    if resolved.exists() && resolved.is_file() {
         return Ok(resolved);
     }
 
@@ -45,7 +45,7 @@ pub fn resolve_module_path(parts: &[String], base_dir: &Path) -> Result<PathBuf,
     }
     init_resolved = init_resolved.join("__init__");
     init_resolved.set_extension("spl");
-    if init_resolved.exists() {
+    if init_resolved.exists() && init_resolved.is_file() {
         return Ok(init_resolved);
     }
 
@@ -63,7 +63,7 @@ pub fn resolve_module_path(parts: &[String], base_dir: &Path) -> Result<PathBuf,
                 parent_resolved = parent_resolved.join(part);
             }
             parent_resolved.set_extension("spl");
-            if parent_resolved.exists() {
+            if parent_resolved.exists() && parent_resolved.is_file() {
                 trace!(path = ?parent_resolved, "Found module in parent directory");
                 return Ok(parent_resolved);
             }
@@ -75,7 +75,7 @@ pub fn resolve_module_path(parts: &[String], base_dir: &Path) -> Result<PathBuf,
             }
             parent_init_resolved = parent_init_resolved.join("__init__");
             parent_init_resolved.set_extension("spl");
-            if parent_init_resolved.exists() {
+            if parent_init_resolved.exists() && parent_init_resolved.is_file() {
                 trace!(path = ?parent_init_resolved, "Found module __init__.spl in parent directory");
                 return Ok(parent_init_resolved);
             }
@@ -107,7 +107,7 @@ pub fn resolve_module_path(parts: &[String], base_dir: &Path) -> Result<PathBuf,
                         stdlib_path = stdlib_path.join(part);
                     }
                     stdlib_path.set_extension("spl");
-                    if stdlib_path.exists() {
+                    if stdlib_path.exists() && stdlib_path.is_file() {
                         return Ok(stdlib_path);
                     }
 
@@ -118,7 +118,7 @@ pub fn resolve_module_path(parts: &[String], base_dir: &Path) -> Result<PathBuf,
                     }
                     stdlib_init_path = stdlib_init_path.join("__init__");
                     stdlib_init_path.set_extension("spl");
-                    if stdlib_init_path.exists() {
+                    if stdlib_init_path.exists() && stdlib_init_path.is_file() {
                         return Ok(stdlib_init_path);
                     }
                 }

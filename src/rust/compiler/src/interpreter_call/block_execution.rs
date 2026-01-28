@@ -3,7 +3,10 @@
 use super::super::interpreter_helpers::{bind_pattern_value, handle_method_call_with_self_update};
 use super::bdd::{BDD_AFTER_EACH, BDD_BEFORE_EACH, BDD_CONTEXT_DEFS, BDD_INDENT};
 use crate::error::{codes, CompileError, ErrorContext};
-use crate::interpreter::{evaluate_expr, exec_with, pattern_matches, BLOCK_SCOPED_ENUMS, CONST_NAMES, EXTERN_FUNCTIONS, MACRO_DEFINITION_ORDER, MODULE_GLOBALS, USER_MACROS};
+use crate::interpreter::{
+    evaluate_expr, exec_with, pattern_matches, BLOCK_SCOPED_ENUMS, CONST_NAMES, EXTERN_FUNCTIONS,
+    MACRO_DEFINITION_ORDER, MODULE_GLOBALS, USER_MACROS,
+};
 use crate::value::*;
 use simple_parser::ast::{ClassDef, EnumDef, Expr, FunctionDef, Node};
 use simple_runtime::value::diagram_ffi;

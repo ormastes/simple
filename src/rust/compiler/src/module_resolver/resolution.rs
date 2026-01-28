@@ -102,7 +102,7 @@ impl ModuleResolver {
 
             // Check for __init__.spl in each directory
             let init_path = current.join("__init__.spl");
-            if init_path.exists() {
+            if init_path.exists() && init_path.is_file() {
                 // Directory module - continue navigation
             } else if !current.exists() {
                 // E1034 - Unresolved Import
@@ -124,7 +124,7 @@ impl ModuleResolver {
         // Try directory with __init__.spl first
         let dir_path = current.join(last);
         let init_path = dir_path.join("__init__.spl");
-        if init_path.exists() {
+        if init_path.exists() && init_path.is_file() {
             return Ok(ResolvedModule {
                 path: init_path,
                 module_path: original_path.clone(),
@@ -135,7 +135,7 @@ impl ModuleResolver {
 
         // Try .spl file
         let file_path = current.join(format!("{}.spl", last));
-        if file_path.exists() {
+        if file_path.exists() && file_path.is_file() {
             return Ok(ResolvedModule {
                 path: file_path,
                 module_path: original_path.clone(),

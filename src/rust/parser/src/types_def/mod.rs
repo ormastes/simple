@@ -11,6 +11,8 @@
 mod enum_parsing;
 mod trait_impl_parsing;
 
+use std::collections::HashMap;
+
 use crate::ast::*;
 use crate::error::ParseError;
 use crate::token::{Span, TokenKind};
@@ -64,6 +66,9 @@ impl<'a> Parser<'a> {
             attributes,
             doc_comment,
             invariant,
+            is_generic_template: !generic_params.is_empty(),
+            specialization_of: None,
+            type_bindings: HashMap::new(),
         };
 
         // If struct implements a trait, generate both struct and impl nodes
@@ -134,12 +139,13 @@ impl<'a> Parser<'a> {
         let where_clause = self.parse_where_clause()?;
 
         // Check for empty class (no body)
-        let (fields, methods, invariant, macro_invocations, mut mixins, doc_comment) = if self.check(&TokenKind::Newline) || self.is_at_end() {
-            // Empty class - no fields, methods, invariant, etc.
-            (Vec::new(), Vec::new(), None, Vec::new(), Vec::new(), None)
-        } else {
-            self.parse_class_body()?
-        };
+        let (fields, methods, invariant, macro_invocations, mut mixins, doc_comment) =
+            if self.check(&TokenKind::Newline) || self.is_at_end() {
+                // Empty class - no fields, methods, invariant, etc.
+                (Vec::new(), Vec::new(), None, Vec::new(), Vec::new(), None)
+            } else {
+                self.parse_class_body()?
+            };
 
         // Prepend explicit mixins from `with` clause
         mixins.splice(0..0, explicit_mixins);
@@ -147,7 +153,7 @@ impl<'a> Parser<'a> {
         Ok(Node::Class(ClassDef {
             span: self.make_span(start_span),
             name,
-            generic_params,
+            generic_params: generic_params.clone(),
             where_clause,
             fields,
             methods,
@@ -159,6 +165,9 @@ impl<'a> Parser<'a> {
             invariant,
             macro_invocations,
             mixins,
+            is_generic_template: !generic_params.is_empty(),
+            specialization_of: None,
+            type_bindings: HashMap::new(),
         }))
     }
 
@@ -440,7 +449,7 @@ impl<'a> Parser<'a> {
                 };
                 self.error_hints.push(warning);
                 self.advance(); // consume 'var'
-                // Now parse as mutable method (fn will be parsed next)
+                                // Now parse as mutable method (fn will be parsed next)
                 let item = self.parse_item()?;
                 if let Node::Function(mut f) = item {
                     f.is_me_method = true;

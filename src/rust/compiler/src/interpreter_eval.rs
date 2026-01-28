@@ -266,6 +266,9 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                         invariant: None,
                         macro_invocations: Vec::new(),
                         mixins: vec![],
+                        is_generic_template: false,
+                        specialization_of: None,
+                        type_bindings: std::collections::HashMap::new(),
                     },
                 );
             }
@@ -443,6 +446,9 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                         invariant: None,
                         macro_invocations: Vec::new(),
                         mixins: vec![],
+                        is_generic_template: false,
+                        specialization_of: None,
+                        type_bindings: std::collections::HashMap::new(),
                     },
                 );
                 env.insert(
@@ -813,17 +819,19 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
             Node::LiteralFunction(lit_fn) => {
                 // Register literal function for custom string suffix handling
                 use super::interpreter_state::{LITERAL_FUNCTIONS, LiteralFunctionInfo};
-                LITERAL_FUNCTIONS.with(|cell: &std::cell::RefCell<std::collections::HashMap<String, LiteralFunctionInfo>>| {
-                    cell.borrow_mut().insert(
-                        lit_fn.suffix.clone(),
-                        LiteralFunctionInfo {
-                            suffix: lit_fn.suffix.clone(),
-                            return_type: lit_fn.return_type.clone(),
-                            param_name: lit_fn.param_name.clone(),
-                            body: lit_fn.body.clone(),
-                        },
-                    );
-                });
+                LITERAL_FUNCTIONS.with(
+                    |cell: &std::cell::RefCell<std::collections::HashMap<String, LiteralFunctionInfo>>| {
+                        cell.borrow_mut().insert(
+                            lit_fn.suffix.clone(),
+                            LiteralFunctionInfo {
+                                suffix: lit_fn.suffix.clone(),
+                                return_type: lit_fn.return_type.clone(),
+                                param_name: lit_fn.param_name.clone(),
+                                body: lit_fn.body.clone(),
+                            },
+                        );
+                    },
+                );
             }
             Node::ModDecl(mod_decl) => {
                 // Handle inline modules with a body
@@ -854,7 +862,12 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                                 classes.insert(c.name.clone(), c.clone()); // Also register unqualified for internal use
 
                                 // Add constructor to module dict
-                                module_dict.insert(c.name.clone(), Value::Constructor { class_name: c.name.clone() });
+                                module_dict.insert(
+                                    c.name.clone(),
+                                    Value::Constructor {
+                                        class_name: c.name.clone(),
+                                    },
+                                );
                             }
                             Node::Struct(s) => {
                                 // Convert struct to class-like for simple handling
@@ -873,12 +886,20 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                                     invariant: s.invariant.clone(),
                                     macro_invocations: vec![],
                                     mixins: vec![],
+                                    is_generic_template: s.is_generic_template,
+                                    specialization_of: s.specialization_of.clone(),
+                                    type_bindings: s.type_bindings.clone(),
                                 };
                                 let prefixed_name = format!("{}.{}", mod_decl.name, s.name);
                                 classes.insert(prefixed_name, class_def.clone());
                                 classes.insert(s.name.clone(), class_def);
 
-                                module_dict.insert(s.name.clone(), Value::Constructor { class_name: s.name.clone() });
+                                module_dict.insert(
+                                    s.name.clone(),
+                                    Value::Constructor {
+                                        class_name: s.name.clone(),
+                                    },
+                                );
                             }
                             Node::Enum(e) => {
                                 let prefixed_name = format!("{}.{}", mod_decl.name, e.name);
@@ -898,7 +919,14 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                             }
                             Node::Const(c) => {
                                 // Evaluate const value and add to module dict
-                                if let Ok(val) = evaluate_expr(&c.value, &mut env, &mut functions, &mut classes, &enums, &impl_methods) {
+                                if let Ok(val) = evaluate_expr(
+                                    &c.value,
+                                    &mut env,
+                                    &mut functions,
+                                    &mut classes,
+                                    &enums,
+                                    &impl_methods,
+                                ) {
                                     module_dict.insert(c.name.clone(), val);
                                 }
                             }

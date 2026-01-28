@@ -20,6 +20,7 @@ pub fn compile_function_body<M: Module>(
     func: &MirFunction,
     func_ids: &HashMap<String, cranelift_module::FuncId>,
     runtime_funcs: &HashMap<&'static str, cranelift_module::FuncId>,
+    global_ids: &HashMap<String, cranelift_module::DataId>,
 ) -> InstrResult<()> {
     let mut func_ctx = FunctionBuilderContext::new();
     let mut builder = FunctionBuilder::new(cranelift_func, &mut func_ctx);
@@ -309,6 +310,7 @@ pub fn compile_function_body<M: Module>(
                     module,
                     func_ids,
                     runtime_funcs,
+                    global_ids,
                     vreg_values: &mut vreg_values,
                     local_addr_map: &mut local_addr_map,
                     variables: &variables,
@@ -327,6 +329,7 @@ pub fn compile_function_body<M: Module>(
                     module,
                     func_ids,
                     runtime_funcs,
+                    global_ids,
                     vreg_values: &mut vreg_values,
                     local_addr_map: &mut local_addr_map,
                     variables: &variables,
@@ -384,10 +387,14 @@ pub fn compile_function_body<M: Module>(
                             let val_type = builder.func.dfg.value_type(rv);
                             if val_type == ret_ty {
                                 rv
-                            } else if val_type == types::I64 && (ret_ty == types::I32 || ret_ty == types::I16 || ret_ty == types::I8) {
+                            } else if val_type == types::I64
+                                && (ret_ty == types::I32 || ret_ty == types::I16 || ret_ty == types::I8)
+                            {
                                 // Truncate i64 to smaller integer type
                                 builder.ins().ireduce(ret_ty, rv)
-                            } else if (val_type == types::I8 || val_type == types::I16 || val_type == types::I32) && ret_ty == types::I64 {
+                            } else if (val_type == types::I8 || val_type == types::I16 || val_type == types::I32)
+                                && ret_ty == types::I64
+                            {
                                 // Extend smaller integer to i64
                                 builder.ins().sextend(types::I64, rv)
                             } else {

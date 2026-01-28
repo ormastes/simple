@@ -13,6 +13,7 @@ use crate::error::{codes, CompileError, ErrorContext};
 use crate::hir::{LayoutAnchor, LayoutConfig, LayoutPhase};
 use crate::lint::{LintConfig, LintLevel, LintName};
 use crate::module_resolver::ModuleResolver;
+use crate::type_inference_config::TypeInferenceConfig;
 
 /// Project context holding all project-level configuration
 #[derive(Debug)]
@@ -39,6 +40,8 @@ pub struct ProjectContext {
     pub deterministic: DeterministicConfig,
     /// Layout configuration for 4KB page locality optimization
     pub layout_config: Option<LayoutConfig>,
+    /// Type inference configuration for empty collections
+    pub type_inference_config: TypeInferenceConfig,
 }
 
 impl ProjectContext {
@@ -85,6 +88,7 @@ impl ProjectContext {
             aop_config: None,
             deterministic: DeterministicConfig::default(),
             layout_config,
+            type_inference_config: TypeInferenceConfig::default(),
         })
     }
 
@@ -217,6 +221,14 @@ impl ProjectContext {
         // Try to load layout.sdn if it exists
         let layout_config = Self::load_layout_config(root);
 
+        // Parse type inference configuration
+        let type_inference_config = if let Some(ti_table) = toml.get("type_inference").and_then(|v| v.as_table()) {
+            TypeInferenceConfig::from_toml(ti_table)
+                .map_err(|e| crate::error::factory::invalid_config("type_inference", &e))?
+        } else {
+            TypeInferenceConfig::default()
+        };
+
         Ok(Self {
             root: root.to_path_buf(),
             source_root,
@@ -229,6 +241,7 @@ impl ProjectContext {
             aop_config,
             deterministic,
             layout_config,
+            type_inference_config,
         })
     }
 
@@ -253,6 +266,7 @@ impl ProjectContext {
             aop_config: None,
             deterministic: DeterministicConfig::default(),
             layout_config: None,
+            type_inference_config: TypeInferenceConfig::default(),
         }
     }
 

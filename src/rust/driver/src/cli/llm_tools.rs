@@ -313,10 +313,14 @@ fn collect_constraints(items: &[simple_parser::ast::Node]) -> Vec<TypeConstraint
         match item {
             Node::Function(func) => {
                 // Collect function signature constraint
-                let params_str: Vec<String> = func.params.iter().map(|p| {
-                    format!("{}: {}", p.name, type_to_string_opt(&p.ty))
-                }).collect();
-                let ret_str = func.return_type.as_ref()
+                let params_str: Vec<String> = func
+                    .params
+                    .iter()
+                    .map(|p| format!("{}: {}", p.name, type_to_string_opt(&p.ty)))
+                    .collect();
+                let ret_str = func
+                    .return_type
+                    .as_ref()
                     .map(|t| type_to_string(t))
                     .unwrap_or_else(|| "()".to_string());
 
@@ -381,10 +385,14 @@ fn collect_constraints(items: &[simple_parser::ast::Node]) -> Vec<TypeConstraint
                 }
                 // Collect methods
                 for method in &c.methods {
-                    let params_str: Vec<String> = method.params.iter().map(|p| {
-                        format!("{}: {}", p.name, type_to_string_opt(&p.ty))
-                    }).collect();
-                    let ret_str = method.return_type.as_ref()
+                    let params_str: Vec<String> = method
+                        .params
+                        .iter()
+                        .map(|p| format!("{}: {}", p.name, type_to_string_opt(&p.ty)))
+                        .collect();
+                    let ret_str = method
+                        .return_type
+                        .as_ref()
                         .map(|t| type_to_string(t))
                         .unwrap_or_else(|| "()".to_string());
 
@@ -398,10 +406,14 @@ fn collect_constraints(items: &[simple_parser::ast::Node]) -> Vec<TypeConstraint
             }
             Node::Trait(t) => {
                 for method in &t.methods {
-                    let params_str: Vec<String> = method.params.iter().map(|p| {
-                        format!("{}: {}", p.name, type_to_string_opt(&p.ty))
-                    }).collect();
-                    let ret_str = method.return_type.as_ref()
+                    let params_str: Vec<String> = method
+                        .params
+                        .iter()
+                        .map(|p| format!("{}: {}", p.name, type_to_string_opt(&p.ty)))
+                        .collect();
+                    let ret_str = method
+                        .return_type
+                        .as_ref()
                         .map(|t| type_to_string(t))
                         .unwrap_or_else(|| "()".to_string());
 
@@ -425,10 +437,14 @@ fn collect_constraints(items: &[simple_parser::ast::Node]) -> Vec<TypeConstraint
             }
             Node::Impl(impl_block) => {
                 for method in &impl_block.methods {
-                    let params_str: Vec<String> = method.params.iter().map(|p| {
-                        format!("{}: {}", p.name, type_to_string_opt(&p.ty))
-                    }).collect();
-                    let ret_str = method.return_type.as_ref()
+                    let params_str: Vec<String> = method
+                        .params
+                        .iter()
+                        .map(|p| format!("{}: {}", p.name, type_to_string_opt(&p.ty)))
+                        .collect();
+                    let ret_str = method
+                        .return_type
+                        .as_ref()
                         .map(|t| type_to_string(t))
                         .unwrap_or_else(|| "()".to_string());
 
@@ -483,7 +499,10 @@ fn type_to_string(ty: &simple_parser::ast::Type) -> String {
         }
         Type::Function { params, ret } => {
             let params_str: Vec<String> = params.iter().map(|p| type_to_string(p)).collect();
-            let ret_str = ret.as_ref().map(|r| type_to_string(r)).unwrap_or_else(|| "()".to_string());
+            let ret_str = ret
+                .as_ref()
+                .map(|r| type_to_string(r))
+                .unwrap_or_else(|| "()".to_string());
             format!("fn({}) -> {}", params_str.join(", "), ret_str)
         }
         Type::Optional(inner) => format!("{}?", type_to_string(inner)),
@@ -543,14 +562,17 @@ pub fn run_constr(args: &[String]) -> i32 {
 
     if json_output {
         // Output as JSON
-        let constraints_json: Vec<serde_json::Value> = constraints.iter().map(|c| {
-            serde_json::json!({
-                "kind": c.kind.as_str(),
-                "name": c.name,
-                "type": c.type_info,
-                "location": c.location,
+        let constraints_json: Vec<serde_json::Value> = constraints
+            .iter()
+            .map(|c| {
+                serde_json::json!({
+                    "kind": c.kind.as_str(),
+                    "name": c.name,
+                    "type": c.type_info,
+                    "location": c.location,
+                })
             })
-        }).collect();
+            .collect();
 
         let output = serde_json::json!({
             "file": path.display().to_string(),
@@ -583,10 +605,22 @@ pub fn run_constr(args: &[String]) -> i32 {
             }
         } else {
             // Summary only
-            let func_count = constraints.iter().filter(|c| matches!(c.kind, ConstraintKind::FunctionSignature)).count();
-            let field_count = constraints.iter().filter(|c| matches!(c.kind, ConstraintKind::FieldType)).count();
-            let var_count = constraints.iter().filter(|c| matches!(c.kind, ConstraintKind::VariableDecl)).count();
-            let bound_count = constraints.iter().filter(|c| matches!(c.kind, ConstraintKind::TraitBound)).count();
+            let func_count = constraints
+                .iter()
+                .filter(|c| matches!(c.kind, ConstraintKind::FunctionSignature))
+                .count();
+            let field_count = constraints
+                .iter()
+                .filter(|c| matches!(c.kind, ConstraintKind::FieldType))
+                .count();
+            let var_count = constraints
+                .iter()
+                .filter(|c| matches!(c.kind, ConstraintKind::VariableDecl))
+                .count();
+            let bound_count = constraints
+                .iter()
+                .filter(|c| matches!(c.kind, ConstraintKind::TraitBound))
+                .count();
 
             println!("  Function signatures: {}", func_count);
             println!("  Field types: {}", field_count);

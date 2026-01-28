@@ -3,6 +3,8 @@
 //! This module handles parsing of function definitions, including decorators,
 //! attributes, doc comments, and contract blocks.
 
+use std::collections::HashMap;
+
 use crate::ast::*;
 use crate::effect_inference::has_suspension_in_body;
 use crate::error::ParseError;
@@ -188,7 +190,7 @@ impl<'a> Parser<'a> {
                 start_span.column,
             ),
             name,
-            generic_params,
+            generic_params: generic_params.clone(),
             params,
             return_type,
             where_clause,
@@ -204,6 +206,9 @@ impl<'a> Parser<'a> {
             is_me_method,
             bounds_block,
             return_constraint,
+            is_generic_template: !generic_params.is_empty(),
+            specialization_of: None,
+            type_bindings: HashMap::new(),
         }))
     }
 
@@ -398,10 +403,7 @@ impl<'a> Parser<'a> {
         if let Type::Simple(type_name) = &param_type {
             if type_name != "text" && type_name != "str" && type_name != "String" {
                 return Err(ParseError::syntax_error_with_span(
-                    format!(
-                        "Literal function parameter must be of type 'text', got '{}'",
-                        type_name
-                    ),
+                    format!("Literal function parameter must be of type 'text', got '{}'", type_name),
                     self.previous.span,
                 ));
             }

@@ -42,6 +42,10 @@ pub mod symbol_flags {
     pub const EVENT_LOOP_ANCHOR: u8 = 0x04;
     /// Layout pinned flag (bit 3) - should not be moved by optimizer
     pub const LAYOUT_PINNED: u8 = 0x08;
+    /// Generic template flag (bit 4) - this symbol is a generic template
+    pub const GENERIC_TEMPLATE: u8 = 0x10;
+    /// Specialized instance flag (bit 5) - this symbol is a specialization
+    pub const SPECIALIZED: u8 = 0x20;
 }
 
 #[repr(C)]
@@ -56,12 +60,20 @@ pub struct SmfSymbol {
     /// - bits 0-1: Layout phase (startup=0, first_frame=1, steady=2, cold=3)
     /// - bit 2: Event loop anchor flag
     /// - bit 3: Layout pinned flag
-    /// - bits 4-7: Reserved for future use
+    /// - bit 4: Generic template flag
+    /// - bit 5: Specialized instance flag
+    /// - bits 6-7: Reserved for future use
     pub flags: u8,
     pub value: u64,
     pub size: u64,
     pub type_id: u32,
     pub version: u32,
+    /// Number of generic type parameters (0 if not generic)
+    pub template_param_count: u8,
+    /// Reserved for alignment
+    pub reserved: [u8; 3],
+    /// Offset to template definition in TemplateCode section (0 if not a template)
+    pub template_offset: u64,
 }
 
 impl SmfSymbol {
@@ -78,6 +90,16 @@ impl SmfSymbol {
     /// Check if this symbol's layout is pinned.
     pub fn is_layout_pinned(&self) -> bool {
         self.flags & symbol_flags::LAYOUT_PINNED != 0
+    }
+
+    /// Check if this symbol is a generic template.
+    pub fn is_generic_template(&self) -> bool {
+        self.flags & symbol_flags::GENERIC_TEMPLATE != 0
+    }
+
+    /// Check if this symbol is a specialized instance.
+    pub fn is_specialized(&self) -> bool {
+        self.flags & symbol_flags::SPECIALIZED != 0
     }
 }
 

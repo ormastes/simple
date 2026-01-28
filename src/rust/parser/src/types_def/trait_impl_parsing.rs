@@ -7,6 +7,8 @@
 // - Associated type parsing (declarations and implementations)
 // - Trait method parsing (abstract and default implementations)
 
+use std::collections::HashMap;
+
 use crate::ast::*;
 use crate::error::ParseError;
 use crate::token::TokenKind;
@@ -69,13 +71,16 @@ impl<'a> Parser<'a> {
         Ok(Node::Trait(TraitDef {
             span: self.make_span(start_span),
             name,
-            generic_params,
+            generic_params: generic_params.clone(),
             super_traits,
             where_clause,
             associated_types,
             methods,
             visibility: Visibility::Private,
             doc_comment: None,
+            is_generic_template: !generic_params.is_empty(),
+            specialization_of: None,
+            type_bindings: HashMap::new(),
         }))
     }
 
@@ -103,11 +108,11 @@ impl<'a> Parser<'a> {
             let trait_name_str = match &first_type {
                 Type::Simple(name) | Type::Generic { name, .. } => name.clone(),
                 _ => {
-                    return Err(ParseError::UnexpectedToken {
-                        expected: "simple trait name".to_string(),
-                        found: format!("{:?}", first_type),
-                        span: self.current.span.clone(),
-                    })
+                    return Err(ParseError::unexpected_token(
+                        "simple trait name",
+                        format!("{:?}", first_type),
+                        self.current.span,
+                    ))
                 }
             };
             (Some(trait_name_str), target)
@@ -171,11 +176,11 @@ impl<'a> Parser<'a> {
 
         // Check for newline (required)
         if !self.check(&TokenKind::Newline) {
-            return Err(ParseError::UnexpectedToken {
-                expected: "Newline after impl block colon".to_string(),
-                found: format!("{:?}", self.current.kind),
-                span: self.current.span,
-            });
+            return Err(ParseError::unexpected_token(
+                "Newline after impl block colon",
+                format!("{:?}", self.current.kind),
+                self.current.span,
+            ));
         }
         self.advance(); // consume newline
 
@@ -265,7 +270,8 @@ impl<'a> Parser<'a> {
 
                     // Implicit static: constructor-like names are automatically static
                     // unless explicitly marked with 'static' (which was already handled above)
-                    if !is_static && is_constructor_name(&f.name) {
+                    // BUT: `me` methods (mutable methods) are never static, even if they have constructor names
+                    if !is_static && !f.is_me_method && is_constructor_name(&f.name) {
                         is_static = true;
                     }
 
@@ -518,7 +524,7 @@ impl<'a> Parser<'a> {
         Ok(FunctionDef {
             span: self.make_span(start_span),
             name,
-            generic_params,
+            generic_params: generic_params.clone(),
             params,
             return_type,
             where_clause,
@@ -534,6 +540,9 @@ impl<'a> Parser<'a> {
             is_me_method: false,
             bounds_block: None,
             return_constraint: None,
+            is_generic_template: !generic_params.is_empty(),
+            specialization_of: None,
+            type_bindings: HashMap::new(),
         })
     }
 }

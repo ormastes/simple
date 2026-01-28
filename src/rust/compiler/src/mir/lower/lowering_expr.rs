@@ -149,56 +149,54 @@ impl<'a> MirLowerer<'a> {
                     arg_regs.push(self.lower_expr(arg)?);
                 }
 
-                // Get function name and create CallTarget with effect information
-                let call_target = if let HirExprKind::Global(name) = &callee.kind {
-                    if let Some(param_info) = self.inject_functions.get(name).cloned() {
-                        // Per-parameter injection (#1013)
-                        // Build final arg list by injecting params marked as injectable
-                        let mut final_args = Vec::new();
-                        let mut provided_idx = 0;
+                // Direct call or indirect call?
+                if let HirExprKind::Global(name) = &callee.kind {
+                    // Direct call - DI injection is handled at the HIR level
+                    // The function signature already includes all parameters (including @inject ones)
+                    // So we don't inject at call sites during MIR lowering
+                    // NOTE: DI injection at MIR level was causing signature mismatches
+                    // because functions were registered with all params but calls tried to inject again
 
-                        for (param_idx, (param_ty, is_injectable)) in param_info.iter().enumerate() {
-                            if *is_injectable {
-                                // This parameter should be DI-injected
-                                if self.di_config.is_none() {
-                                    return Err(MirLowerError::Unsupported(format!(
-                                        "missing di config for injected call to '{}'",
-                                        name
-                                    )));
-                                }
-                                let injected = self.resolve_di_arg(*param_ty, name, param_idx)?;
-                                final_args.push(injected);
-                            } else {
-                                // This parameter should be provided by caller
-                                if provided_idx >= arg_regs.len() {
-                                    return Err(MirLowerError::Unsupported(format!(
-                                        "missing argument at position {} for call to '{}'",
-                                        provided_idx, name
-                                    )));
-                                }
-                                final_args.push(arg_regs[provided_idx]);
-                                provided_idx += 1;
-                            }
-                        }
-
-                        // Replace arg_regs with final_args
-                        arg_regs = final_args;
-                    }
-                    CallTarget::from_name(name)
+                    let call_target = CallTarget::from_name(name);
+                    self.with_func(|func, current_block| {
+                        let dest = func.new_vreg();
+                        let block = func.block_mut(current_block).unwrap();
+                        block.instructions.push(MirInst::Call {
+                            dest: Some(dest),
+                            target: call_target,
+                            args: arg_regs,
+                        });
+                        dest
+                    })
                 } else {
-                    return Err(MirLowerError::Unsupported("indirect call".to_string()));
-                };
+                    // Indirect call through closure/function pointer
+                    let callee_reg = self.lower_expr(callee)?;
+                    let callee_ty = callee.ty;
 
-                self.with_func(|func, current_block| {
-                    let dest = func.new_vreg();
-                    let block = func.block_mut(current_block).unwrap();
-                    block.instructions.push(MirInst::Call {
-                        dest: Some(dest),
-                        target: call_target,
-                        args: arg_regs,
-                    });
-                    dest
-                })
+                    let (param_types, return_type) = if let Some(reg) = self.type_registry {
+                        if let Some(HirType::Function { params, ret }) = reg.get(callee_ty) {
+                            (params.clone(), *ret)
+                        } else {
+                            (vec![TypeId::ANY; arg_regs.len()], TypeId::ANY)
+                        }
+                    } else {
+                        (vec![TypeId::ANY; arg_regs.len()], TypeId::ANY)
+                    };
+
+                    self.with_func(|func, current_block| {
+                        let dest = func.new_vreg();
+                        let block = func.block_mut(current_block).unwrap();
+                        block.instructions.push(MirInst::IndirectCall {
+                            dest: Some(dest),
+                            callee: callee_reg,
+                            param_types,
+                            return_type,
+                            args: arg_regs,
+                            effect: crate::mir::effects::Effect::Io,
+                        });
+                        dest
+                    })
+                }
             }
 
             HirExprKind::Lambda {
@@ -826,21 +824,16 @@ impl<'a> MirLowerer<'a> {
                     return Err(MirLowerError::Unsupported(format!("unknown enum variant: {}", name)));
                 }
 
-                // Regular global variable - access via runtime call
+                // Regular global variable - load via GlobalLoad instruction
                 let name = name.clone();
+                let ty = expr_ty; // Use the expression's type
                 self.with_func(|func, current_block| {
                     let dest = func.new_vreg();
-                    let name_reg = func.new_vreg();
                     let block = func.block_mut(current_block).unwrap();
-                    // Store the name as a string constant and call rt_global_get
-                    block.instructions.push(MirInst::ConstString {
-                        dest: name_reg,
-                        value: name,
-                    });
-                    block.instructions.push(MirInst::Call {
-                        dest: Some(dest),
-                        target: CallTarget::from_name("rt_global_get"),
-                        args: vec![name_reg],
+                    block.instructions.push(MirInst::GlobalLoad {
+                        dest,
+                        global_name: name,
+                        ty,
                     });
                     dest
                 })
@@ -852,7 +845,18 @@ impl<'a> MirLowerer<'a> {
                 // Dict is represented as a runtime value (i64 pointer)
                 let pairs_count = pairs.len();
 
-                // Emit call to create empty dict
+                // Emit call to create empty dict with capacity
+                let capacity = std::cmp::max(8, pairs_count * 2) as i64;
+                let capacity_reg = self.with_func(|func, current_block| {
+                    let reg = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::ConstInt {
+                        dest: reg,
+                        value: capacity,
+                    });
+                    reg
+                })?;
+
                 let dict_target = CallTarget::from_name("rt_dict_new");
                 let dict_reg = self.with_func(|func, current_block| {
                     let dest = func.new_vreg();
@@ -860,7 +864,7 @@ impl<'a> MirLowerer<'a> {
                     block.instructions.push(MirInst::Call {
                         dest: Some(dest),
                         target: dict_target,
-                        args: vec![],
+                        args: vec![capacity_reg],
                     });
                     dest
                 })?;
@@ -882,6 +886,113 @@ impl<'a> MirLowerer<'a> {
                 }
 
                 Ok(dict_reg)
+            }
+
+            HirExprKind::Nil => {
+                // Nil is represented as integer 0 (null pointer)
+                self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::ConstInt { dest, value: 0 });
+                    dest
+                })
+            }
+
+            HirExprKind::If { condition, then_branch, else_branch } => {
+                use crate::hir::TypeId;
+                use crate::mir::effects::LocalKind;
+                use crate::mir::function::MirLocal;
+
+                // Lower condition
+                let cond_reg = self.lower_expr(condition)?;
+
+                // Create temporary local for result BEFORE branching
+                let temp_local_index = self.with_func(|func, _| {
+                    let index = func.params.len() + func.locals.len();
+                    func.locals.push(MirLocal {
+                        name: format!("$if_merge_{}", index),
+                        ty: expr_ty,
+                        kind: LocalKind::Local,
+                        is_ghost: false,
+                    });
+                    index
+                })?;
+
+                // Get address of temp local
+                let temp_addr = self.with_func(|func, current_block| {
+                    let addr = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::LocalAddr {
+                        dest: addr,
+                        local_index: temp_local_index,
+                    });
+                    addr
+                })?;
+
+                // Create basic blocks
+                let (then_id, else_id, merge_id) = self.with_func(|func, current_block| {
+                    let then_id = func.new_block();
+                    let else_id = func.new_block();
+                    let merge_id = func.new_block();
+
+                    // Set branch terminator
+                    let block = func.block_mut(current_block).unwrap();
+                    block.terminator = crate::mir::Terminator::Branch {
+                        cond: cond_reg,
+                        then_block: then_id,
+                        else_block: else_id,
+                    };
+                    (then_id, else_id, merge_id)
+                })?;
+
+                // Lower then branch
+                self.set_current_block(then_id)?;
+                let then_value = self.lower_expr(then_branch)?;
+                self.with_func(|func, current_block| {
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::Store {
+                        addr: temp_addr,
+                        value: then_value,
+                        ty: expr_ty,
+                    });
+                })?;
+                self.finalize_block_jump(merge_id)?;
+
+                // Lower else branch
+                self.set_current_block(else_id)?;
+                let else_value = if let Some(else_expr) = else_branch {
+                    self.lower_expr(else_expr)?
+                } else {
+                    // No else branch - use nil (0)
+                    self.with_func(|func, current_block| {
+                        let dest = func.new_vreg();
+                        let block = func.block_mut(current_block).unwrap();
+                        block.instructions.push(MirInst::ConstInt { dest, value: 0 });
+                        dest
+                    })?
+                };
+                self.with_func(|func, current_block| {
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::Store {
+                        addr: temp_addr,
+                        value: else_value,
+                        ty: expr_ty,
+                    });
+                })?;
+                self.finalize_block_jump(merge_id)?;
+
+                // Load merged value in merge block
+                self.set_current_block(merge_id)?;
+                self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::Load {
+                        dest,
+                        addr: temp_addr,
+                        ty: expr_ty,
+                    });
+                    dest
+                })
             }
 
             _ => Err(MirLowerError::Unsupported(format!("{:?}", expr_kind))),

@@ -279,10 +279,19 @@ pub fn run_tests(options: TestOptions) -> TestRunResult {
     // Complete test run tracking
     if let Some(run) = test_run {
         // Count crashed/timed out tests from results
-        let crashed_count = result.files.iter()
-            .filter(|f| f.error.as_ref().map(|e| e.contains("crash") || e.contains("signal")).unwrap_or(false))
+        let crashed_count = result
+            .files
+            .iter()
+            .filter(|f| {
+                f.error
+                    .as_ref()
+                    .map(|e| e.contains("crash") || e.contains("signal"))
+                    .unwrap_or(false)
+            })
             .count();
-        let timed_out_count = result.files.iter()
+        let timed_out_count = result
+            .files
+            .iter()
             .filter(|f| f.error.as_ref().map(|e| e.contains("timed out")).unwrap_or(false))
             .count();
 
@@ -761,10 +770,7 @@ fn run_list_skip_features(test_files: &[PathBuf], planned_only: bool, quiet: boo
     }
 
     // Group by category
-    features.sort_by(|a, b| {
-        a.category.cmp(&b.category)
-            .then_with(|| a.title.cmp(&b.title))
-    });
+    features.sort_by(|a, b| a.category.cmp(&b.category).then_with(|| a.title.cmp(&b.title)));
 
     if !quiet {
         let mut current_category: Option<String> = None;
@@ -846,10 +852,7 @@ fn truncate_str(s: &str, max_len: usize) -> String {
 // Run Management
 // ============================================================================
 
-use crate::test_db::{
-    TestRunRecord, TestRunStatus,
-    cleanup_stale_runs, list_runs, prune_old_runs,
-};
+use crate::test_db::{TestRunRecord, TestRunStatus, cleanup_stale_runs, list_runs, prune_old_runs};
 
 /// Handle run management commands (--list-runs, --cleanup-runs, --prune-runs)
 fn handle_run_management(options: &TestOptions) -> TestRunResult {
@@ -858,7 +861,8 @@ fn handle_run_management(options: &TestOptions) -> TestRunResult {
 
     // Cleanup stale runs first (if requested or before listing)
     if options.cleanup_runs {
-        match cleanup_stale_runs(&db_path, 2) {  // 2 hours = stale
+        match cleanup_stale_runs(&db_path, 2) {
+            // 2 hours = stale
             Ok(cleaned) => {
                 if !quiet {
                     if cleaned.is_empty() {
@@ -901,9 +905,7 @@ fn handle_run_management(options: &TestOptions) -> TestRunResult {
 
     // List runs (if requested)
     if options.list_runs {
-        let status_filter = options.runs_status_filter.as_ref().map(|s| {
-            TestRunStatus::from_str(s)
-        });
+        let status_filter = options.runs_status_filter.as_ref().map(|s| TestRunStatus::from_str(s));
 
         match list_runs(&db_path, status_filter) {
             Ok(runs) => {
@@ -912,8 +914,10 @@ fn handle_run_management(options: &TestOptions) -> TestRunResult {
                         println!("No test runs found.");
                     } else {
                         println!("Test Runs ({} total):\n", runs.len());
-                        println!("{:<30} {:<10} {:<20} {:<8} {:>6} {:>6} {:>6}",
-                            "Run ID", "Status", "Start Time", "PID", "Tests", "Pass", "Fail");
+                        println!(
+                            "{:<30} {:<10} {:<20} {:<8} {:>6} {:>6} {:>6}",
+                            "Run ID", "Status", "Start Time", "PID", "Tests", "Pass", "Fail"
+                        );
                         println!("{}", "-".repeat(100));
 
                         for run in &runs {
@@ -924,7 +928,8 @@ fn handle_run_management(options: &TestOptions) -> TestRunResult {
                                 run.start_time.clone()
                             };
 
-                            println!("{:<30} {:<10} {:<20} {:<8} {:>6} {:>6} {:>6}",
+                            println!(
+                                "{:<30} {:<10} {:<20} {:<8} {:>6} {:>6} {:>6}",
                                 run.run_id,
                                 run.status.to_string(),
                                 start_time,
@@ -940,8 +945,10 @@ fn handle_run_management(options: &TestOptions) -> TestRunResult {
                         let completed = runs.iter().filter(|r| r.status == TestRunStatus::Completed).count();
                         let crashed = runs.iter().filter(|r| r.status == TestRunStatus::Crashed).count();
 
-                        println!("\nSummary: {} running, {} completed, {} crashed",
-                            running, completed, crashed);
+                        println!(
+                            "\nSummary: {} running, {} completed, {} crashed",
+                            running, completed, crashed
+                        );
                     }
                 }
             }

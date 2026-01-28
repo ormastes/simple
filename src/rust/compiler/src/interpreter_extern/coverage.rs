@@ -7,8 +7,7 @@ use crate::error::CompileError;
 use crate::value::Value;
 use simple_mock_helper::api_scanner::{scan_directory, write_yaml};
 use simple_mock_helper::coverage::{
-    compute_class_coverage, load_llvm_cov_export, load_public_api_spec, print_class_coverage_table,
-    LlvmCovExport,
+    compute_class_coverage, load_llvm_cov_export, load_public_api_spec, print_class_coverage_table, LlvmCovExport,
 };
 use simple_mock_helper::coverage_extended::{
     print_coverage_summary, CoverageAnalyzer, CoverageType, ExtendedCoverageReport,
@@ -94,13 +93,9 @@ fn is_class_touched(type_name: &str, methods: &[String], touched: &HashMap<Strin
 
 /// Print header box
 fn print_header(title: &str) {
-    println!(
-        "╔══════════════════════════════════════════════════════════════════════════════╗"
-    );
+    println!("╔══════════════════════════════════════════════════════════════════════════════╗");
     println!("║{:^78}║", title);
-    println!(
-        "╚══════════════════════════════════════════════════════════════════════════════╝"
-    );
+    println!("╚══════════════════════════════════════════════════════════════════════════════╝");
     println!();
 }
 
@@ -150,11 +145,7 @@ pub fn coverage_class(args: &[Value]) -> Result<Value, CompileError> {
     let coverage_json = get_str_arg(args, 0);
     let source = get_str_arg(args, 1);
     let filter = get_str_arg(args, 2);
-    let filter_opt = if filter.is_empty() {
-        None
-    } else {
-        Some(filter.as_str())
-    };
+    let filter_opt = if filter.is_empty() { None } else { Some(filter.as_str()) };
 
     let coverage_path = Path::new(&coverage_json);
     let source_path = Path::new(&source);
@@ -219,11 +210,7 @@ pub fn coverage_func(args: &[Value]) -> Result<Value, CompileError> {
     let coverage_json = get_str_arg(args, 0);
     let source = get_str_arg(args, 1);
     let filter = get_str_arg(args, 2);
-    let filter_opt = if filter.is_empty() {
-        None
-    } else {
-        Some(filter.as_str())
-    };
+    let filter_opt = if filter.is_empty() { None } else { Some(filter.as_str()) };
 
     let coverage_path = Path::new(&coverage_json);
     let source_path = Path::new(&source);
@@ -288,11 +275,7 @@ pub fn coverage_func(args: &[Value]) -> Result<Value, CompileError> {
         if *is_touched {
             total_touched += 1;
         }
-        let status = if *is_touched {
-            "✓ TOUCHED"
-        } else {
-            "✗ NOT TOUCHED"
-        };
+        let status = if *is_touched { "✓ TOUCHED" } else { "✗ NOT TOUCHED" };
         let display_name = if func_name.len() > 58 {
             format!("{}...", &func_name[..55])
         } else {
@@ -302,11 +285,7 @@ pub fn coverage_func(args: &[Value]) -> Result<Value, CompileError> {
     }
 
     println!("{}", "─".repeat(72));
-    print_summary(
-        total_touched,
-        total_funcs,
-        "public functions/methods touched",
-    );
+    print_summary(total_touched, total_funcs, "public functions/methods touched");
 
     Ok(Value::Int(0))
 }
@@ -512,16 +491,10 @@ pub fn coverage_check(args: &[Value]) -> Result<Value, CompileError> {
     };
 
     if report.meets_threshold(threshold) {
-        println!(
-            "PASS: Coverage {:.1}% meets threshold {:.1}%",
-            percent, threshold
-        );
+        println!("PASS: Coverage {:.1}% meets threshold {:.1}%", percent, threshold);
         Ok(Value::Int(0))
     } else {
-        println!(
-            "FAIL: Coverage {:.1}% below threshold {:.1}%",
-            percent, threshold
-        );
+        println!("FAIL: Coverage {:.1}% below threshold {:.1}%", percent, threshold);
         Ok(Value::Int(1))
     }
 }

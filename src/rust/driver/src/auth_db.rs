@@ -71,8 +71,7 @@ pub fn load_auth_config() -> Result<AuthConfig, String> {
         return Ok(AuthConfig::default());
     }
 
-    let content = fs::read_to_string(&path)
-        .map_err(|e| format!("Failed to read auth config: {}", e))?;
+    let content = fs::read_to_string(&path).map_err(|e| format!("Failed to read auth config: {}", e))?;
 
     if content.trim().is_empty() {
         return Ok(AuthConfig::default());
@@ -133,8 +132,7 @@ pub fn save_auth_config(config: &AuthConfig) -> Result<(), String> {
 
     // Ensure directory exists
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|e| format!("Failed to create auth config directory: {}", e))?;
+        fs::create_dir_all(parent).map_err(|e| format!("Failed to create auth config directory: {}", e))?;
     }
 
     // Build SDN content
@@ -162,10 +160,8 @@ pub fn save_auth_config(config: &AuthConfig) -> Result<(), String> {
 
     // Atomic write
     let temp_path = path.with_extension("sdn.tmp");
-    fs::write(&temp_path, &content)
-        .map_err(|e| format!("Failed to write auth config: {}", e))?;
-    fs::rename(&temp_path, &path)
-        .map_err(|e| format!("Failed to finalize auth config: {}", e))?;
+    fs::write(&temp_path, &content).map_err(|e| format!("Failed to write auth config: {}", e))?;
+    fs::rename(&temp_path, &path).map_err(|e| format!("Failed to finalize auth config: {}", e))?;
 
     // Set restrictive permissions on Unix
     #[cfg(unix)]
@@ -175,8 +171,7 @@ pub fn save_auth_config(config: &AuthConfig) -> Result<(), String> {
             .map_err(|e| format!("Failed to get file metadata: {}", e))?
             .permissions();
         perms.set_mode(0o600); // Owner read/write only
-        fs::set_permissions(&path, perms)
-            .map_err(|e| format!("Failed to set file permissions: {}", e))?;
+        fs::set_permissions(&path, perms).map_err(|e| format!("Failed to set file permissions: {}", e))?;
     }
 
     Ok(())
@@ -195,8 +190,7 @@ pub fn hash_password(password: &str) -> Result<String, String> {
 
 /// Verify a password against a stored hash
 pub fn verify_password(password: &str, hash: &str) -> Result<bool, String> {
-    let parsed_hash = PasswordHash::new(hash)
-        .map_err(|e| format!("Invalid password hash format: {}", e))?;
+    let parsed_hash = PasswordHash::new(hash).map_err(|e| format!("Invalid password hash format: {}", e))?;
 
     Ok(Argon2::default()
         .verify_password(password.as_bytes(), &parsed_hash)

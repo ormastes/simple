@@ -275,7 +275,11 @@ pub fn rt_process_run(args: &[Value]) -> Result<Value, CompileError> {
             }
             runtime_arr
         }
-        _ => return Err(CompileError::runtime("rt_process_run: args must be an array of strings")),
+        _ => {
+            return Err(CompileError::runtime(
+                "rt_process_run: args must be an array of strings",
+            ))
+        }
     };
 
     unsafe {

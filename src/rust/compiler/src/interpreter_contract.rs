@@ -236,7 +236,12 @@ fn collect_old_expressions(expr: &Expr, out: &mut Vec<Expr>) {
             collect_old_expressions(receiver, out);
             collect_old_expressions(index, out);
         }
-        Expr::If { condition, then_branch, else_branch, .. } => {
+        Expr::If {
+            condition,
+            then_branch,
+            else_branch,
+            ..
+        } => {
             collect_old_expressions(condition, out);
             collect_old_expressions(then_branch, out);
             if let Some(else_expr) = else_branch {
@@ -275,10 +280,7 @@ fn collect_old_expressions(expr: &Expr, out: &mut Vec<Expr>) {
 ///
 /// Scans the contract's postconditions for old() expressions and evaluates them
 /// at function entry.
-pub fn ast_capture_old_values<F>(
-    contract: &ContractBlock,
-    mut eval_fn: F,
-) -> Result<AstOldValueCapture, CompileError>
+pub fn ast_capture_old_values<F>(contract: &ContractBlock, mut eval_fn: F) -> Result<AstOldValueCapture, CompileError>
 where
     F: FnMut(&Expr) -> Result<Value, CompileError>,
 {
@@ -354,14 +356,35 @@ where
         }
         // For compound expressions, recursively evaluate
         Expr::Binary { left, op, right, .. } => {
-            let l = ast_eval_in_contract_context(left, |e, env| eval_fn(e, env), old_captures, result_value, result_binding, env)?;
-            let r = ast_eval_in_contract_context(right, |e, env| eval_fn(e, env), old_captures, result_value, result_binding, env)?;
+            let l = ast_eval_in_contract_context(
+                left,
+                |e, env| eval_fn(e, env),
+                old_captures,
+                result_value,
+                result_binding,
+                env,
+            )?;
+            let r = ast_eval_in_contract_context(
+                right,
+                |e, env| eval_fn(e, env),
+                old_captures,
+                result_value,
+                result_binding,
+                env,
+            )?;
             // Re-construct and evaluate the binary op with evaluated values
             // We need to pass through to regular evaluation
             eval_binary_op(&l, op, &r)
         }
         Expr::Unary { op, operand, .. } => {
-            let val = ast_eval_in_contract_context(operand, |e, env| eval_fn(e, env), old_captures, result_value, result_binding, env)?;
+            let val = ast_eval_in_contract_context(
+                operand,
+                |e, env| eval_fn(e, env),
+                old_captures,
+                result_value,
+                result_binding,
+                env,
+            )?;
             eval_unary_op(op, &val)
         }
         // For other expressions, delegate to normal evaluation
@@ -431,12 +454,7 @@ fn eval_unary_op(op: &UnaryOp, val: &Value) -> Result<Value, CompileError> {
 }
 
 /// Check AST-level contract clause
-fn ast_check_clause<F>(
-    clause: &ContractClause,
-    mut eval_fn: F,
-    kind: &str,
-    func_name: &str,
-) -> Result<(), CompileError>
+fn ast_check_clause<F>(clause: &ContractClause, mut eval_fn: F, kind: &str, func_name: &str) -> Result<(), CompileError>
 where
     F: FnMut(&Expr) -> Result<Value, CompileError>,
 {
@@ -470,11 +488,7 @@ where
 }
 
 /// Check entry contracts (preconditions and entry invariants) using AST
-pub fn ast_check_entry_contracts<F>(
-    contract: &ContractBlock,
-    eval_fn: F,
-    func_name: &str,
-) -> Result<(), CompileError>
+pub fn ast_check_entry_contracts<F>(contract: &ContractBlock, eval_fn: F, func_name: &str) -> Result<(), CompileError>
 where
     F: FnMut(&Expr) -> Result<Value, CompileError> + Clone,
 {
@@ -507,10 +521,7 @@ where
     F: FnMut(&Expr, &mut Env) -> Result<Value, CompileError> + Clone,
 {
     // Get the postcondition binding name (default: "ret")
-    let result_binding = contract
-        .postcondition_binding
-        .as_deref()
-        .unwrap_or("ret");
+    let result_binding = contract.postcondition_binding.as_deref().unwrap_or("ret");
 
     // Check exit invariants (no special context needed)
     for clause in &contract.invariants {
@@ -555,15 +566,9 @@ where
 
         if !is_true {
             let msg = if let Some(ref custom_msg) = clause.message {
-                format!(
-                    "Postcondition violation in function '{}': {}",
-                    func_name, custom_msg
-                )
+                format!("Postcondition violation in function '{}': {}", func_name, custom_msg)
             } else {
-                format!(
-                    "Postcondition violation in function '{}'",
-                    func_name
-                )
+                format!("Postcondition violation in function '{}'", func_name)
             };
             return Err(CompileError::contract_violation(msg));
         }

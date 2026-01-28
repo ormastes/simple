@@ -93,9 +93,9 @@ fn cast_to_numeric(val: Value, target: NumericType) -> Result<Value, CompileErro
             }
         }
         _ => {
-            let ctx = ErrorContext::new()
-                .with_code(codes::TYPE_MISMATCH)
-                .with_help(format!("only int, float, bool, and single-char strings can be cast to numeric types"));
+            let ctx = ErrorContext::new().with_code(codes::TYPE_MISMATCH).with_help(format!(
+                "only int, float, bool, and single-char strings can be cast to numeric types"
+            ));
             Err(CompileError::semantic_with_context(
                 format!("type mismatch: cannot cast {} to {}", val.type_name(), target.name()),
                 ctx,

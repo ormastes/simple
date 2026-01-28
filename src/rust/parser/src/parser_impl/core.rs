@@ -389,7 +389,7 @@ impl<'a> Parser<'a> {
             TokenKind::Literal => self.parse_literal_function(),
             // Module system (Features #104-111)
             TokenKind::Use => self.parse_use(),
-            TokenKind::Import => self.parse_import(),    // alias for use
+            TokenKind::Import => self.parse_import(), // alias for use
             TokenKind::From => {
                 // Disambiguate: 'from module import ...' vs 'from' as identifier
                 // Check if followed by an identifier (module name) - if so, it's an import
@@ -598,11 +598,11 @@ impl<'a> Parser<'a> {
                 self.advance();
                 let attr_name = self.expect_identifier()?;
                 if attr_name != "inject" {
-                    return Err(ParseError::UnexpectedToken {
-                        expected: "inject".to_string(),
-                        found: attr_name,
-                        span: self.current.span,
-                    });
+                    return Err(ParseError::unexpected_token(
+                        "inject",
+                        attr_name,
+                        self.current.span,
+                    ));
                 }
                 true
             } else {

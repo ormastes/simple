@@ -43,13 +43,14 @@ pub mod log_level {
 }
 
 /// Log level enum
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Default)]
 #[repr(u8)]
 pub enum LogLevel {
     Off = 0,
     Fatal = 1,
     Error = 2,
     Warn = 3,
+    #[default]
     Info = 4,
     Debug = 5,
     Trace = 6,
@@ -85,12 +86,6 @@ impl LogLevel {
             LogLevel::Verbose => "verbose",
             LogLevel::All => "all",
         }
-    }
-}
-
-impl Default for LogLevel {
-    fn default() -> Self {
-        LogLevel::Info
     }
 }
 
@@ -266,11 +261,7 @@ impl VariantLayout {
         Self::new(name, discriminant)
     }
 
-    pub fn with_payload(
-        name: impl Into<String>,
-        discriminant: u64,
-        fields: Vec<FieldLayout>,
-    ) -> Self {
+    pub fn with_payload(name: impl Into<String>, discriminant: u64, fields: Vec<FieldLayout>) -> Self {
         let payload_size = fields.iter().map(|f| f.offset + f.size).max().unwrap_or(0);
         Self {
             name: name.into(),
@@ -315,8 +306,7 @@ impl EnumLayout {
 
     /// Add a variant
     pub fn add_variant(&mut self, variant: VariantLayout) {
-        self.variant_indices
-            .insert(variant.name.clone(), self.variants.len());
+        self.variant_indices.insert(variant.name.clone(), self.variants.len());
         self.max_payload_size = self.max_payload_size.max(variant.payload_size);
         self.variants.push(variant);
 
@@ -636,9 +626,7 @@ impl BaseTokenKind {
             BaseTokenKind::Integer => TokenCategory::IntegerLiteral,
             BaseTokenKind::Float => TokenCategory::FloatLiteral,
             BaseTokenKind::String => TokenCategory::StringLiteral,
-            BaseTokenKind::Bool | BaseTokenKind::KwTrue | BaseTokenKind::KwFalse => {
-                TokenCategory::BoolLiteral
-            }
+            BaseTokenKind::Bool | BaseTokenKind::KwTrue | BaseTokenKind::KwFalse => TokenCategory::BoolLiteral,
             BaseTokenKind::Null | BaseTokenKind::KwNull => TokenCategory::NullLiteral,
 
             // Identifiers
@@ -746,9 +734,7 @@ impl BaseTokenKind {
             | BaseTokenKind::Underscore => TokenCategory::Punctuation,
 
             // Whitespace
-            BaseTokenKind::Newline | BaseTokenKind::Indent | BaseTokenKind::Dedent => {
-                TokenCategory::Whitespace
-            }
+            BaseTokenKind::Newline | BaseTokenKind::Indent | BaseTokenKind::Dedent => TokenCategory::Whitespace,
 
             // Comments
             BaseTokenKind::Comment => TokenCategory::Comment,
@@ -1121,10 +1107,7 @@ impl ValueKind {
     pub fn is_callable(&self) -> bool {
         matches!(
             self,
-            ValueKind::Closure
-                | ValueKind::NativeFunction
-                | ValueKind::Constructor
-                | ValueKind::EnumVariantConstructor
+            ValueKind::Closure | ValueKind::NativeFunction | ValueKind::Constructor | ValueKind::EnumVariantConstructor
         )
     }
 
@@ -1132,11 +1115,7 @@ impl ValueKind {
     pub fn is_async(&self) -> bool {
         matches!(
             self,
-            ValueKind::Future
-                | ValueKind::Generator
-                | ValueKind::Actor
-                | ValueKind::Channel
-                | ValueKind::MonoioFuture
+            ValueKind::Future | ValueKind::Generator | ValueKind::Actor | ValueKind::Channel | ValueKind::MonoioFuture
         )
     }
 
@@ -1144,11 +1123,7 @@ impl ValueKind {
     pub fn is_sync_primitive(&self) -> bool {
         matches!(
             self,
-            ValueKind::Mutex
-                | ValueKind::RwLock
-                | ValueKind::Semaphore
-                | ValueKind::Barrier
-                | ValueKind::Atomic
+            ValueKind::Mutex | ValueKind::RwLock | ValueKind::Semaphore | ValueKind::Barrier | ValueKind::Atomic
         )
     }
 
@@ -1185,29 +1160,17 @@ impl std::fmt::Display for ValueKind {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HighLevelOp {
     /// Type assertion at runtime
-    TypeAssert {
-        expected: String,
-    },
+    TypeAssert { expected: String },
     /// Capability check (mut, iso, etc.)
-    CapabilityCheck {
-        capability: String,
-    },
+    CapabilityCheck { capability: String },
     /// Effect boundary (IO, Async, etc.)
-    EffectBoundary {
-        effect: String,
-    },
+    EffectBoundary { effect: String },
     /// Contract precondition
-    Precondition {
-        condition: String,
-    },
+    Precondition { condition: String },
     /// Contract postcondition
-    Postcondition {
-        condition: String,
-    },
+    Postcondition { condition: String },
     /// Class invariant check
-    Invariant {
-        condition: String,
-    },
+    Invariant { condition: String },
 }
 
 //==============================================================================

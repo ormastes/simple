@@ -64,10 +64,20 @@ pub fn declare_functions<M: Module>(
     let mut func_ids = std::collections::HashMap::new();
 
     for func in functions {
+        // Skip if already declared (handles duplicate functions in MIR)
+        if func_ids.contains_key(&func.name) {
+            continue;
+        }
+
         let sig = build_mir_signature(func);
-        // Always export "main" for native binary compatibility
-        // Other functions are exported if marked public
-        let linkage = if func.is_public() || func.name == "main" {
+
+        // Determine linkage:
+        // - Extern functions (empty blocks) use Import linkage
+        // - "main" is always exported for native binary compatibility
+        // - Other functions use Export (public) or Local (private) based on visibility
+        let linkage = if func.blocks.is_empty() {
+            Linkage::Import
+        } else if func.is_public() || func.name == "main" {
             Linkage::Export
         } else {
             Linkage::Local

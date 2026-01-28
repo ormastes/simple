@@ -119,10 +119,24 @@ impl Record for TestRecord {
 
     fn field_names() -> &'static [&'static str] {
         &[
-            "test_id", "test_name", "test_file", "category", "status", "last_run",
-            "failure", "execution_history", "timing", "timing_config",
-            "related_bugs", "related_features", "tags", "description", "valid",
-            "qualified_by", "qualified_at", "qualified_reason"
+            "test_id",
+            "test_name",
+            "test_file",
+            "category",
+            "status",
+            "last_run",
+            "failure",
+            "execution_history",
+            "timing",
+            "timing_config",
+            "related_bugs",
+            "related_features",
+            "tags",
+            "description",
+            "valid",
+            "qualified_by",
+            "qualified_at",
+            "qualified_reason",
         ]
     }
 
@@ -150,8 +164,7 @@ impl Record for TestRecord {
         let execution_history: ExecutionHistory =
             serde_json::from_str(&get_field(7)).unwrap_or_else(|_| ExecutionHistory::default());
 
-        let timing: TimingData =
-            serde_json::from_str(&get_field(8)).unwrap_or_else(|_| TimingData::default());
+        let timing: TimingData = serde_json::from_str(&get_field(8)).unwrap_or_else(|_| TimingData::default());
 
         let timing_config: Option<TimingConfig> = {
             let json = get_field(9);
@@ -165,15 +178,27 @@ impl Record for TestRecord {
         // Parse qualified ignore fields
         let qualified_by = {
             let s = get_field(15);
-            if s.is_empty() { None } else { Some(s) }
+            if s.is_empty() {
+                None
+            } else {
+                Some(s)
+            }
         };
         let qualified_at = {
             let s = get_field(16);
-            if s.is_empty() { None } else { Some(s) }
+            if s.is_empty() {
+                None
+            } else {
+                Some(s)
+            }
         };
         let qualified_reason = {
             let s = get_field(17);
-            if s.is_empty() { None } else { Some(s) }
+            if s.is_empty() {
+                None
+            } else {
+                Some(s)
+            }
         };
 
         Ok(TestRecord {
@@ -478,9 +503,7 @@ impl TestRunRecord {
         #[cfg(unix)]
         {
             // Check if process exists by sending signal 0
-            unsafe {
-                libc::kill(self.pid as i32, 0) == 0
-            }
+            unsafe { libc::kill(self.pid as i32, 0) == 0 }
         }
         #[cfg(not(unix))]
         {
@@ -502,8 +525,17 @@ impl Record for TestRunRecord {
 
     fn field_names() -> &'static [&'static str] {
         &[
-            "run_id", "start_time", "end_time", "pid", "hostname", "status",
-            "test_count", "passed", "failed", "crashed", "timed_out"
+            "run_id",
+            "start_time",
+            "end_time",
+            "pid",
+            "hostname",
+            "status",
+            "test_count",
+            "passed",
+            "failed",
+            "crashed",
+            "timed_out",
         ]
     }
 
@@ -640,11 +672,7 @@ pub fn prune_old_runs(db_path: &Path, keep_count: usize) -> Result<usize, String
     runs.sort_by(|a, b| b.start_time.cmp(&a.start_time));
 
     // Keep only the most recent N
-    let to_delete: Vec<String> = runs
-        .iter()
-        .skip(keep_count)
-        .map(|r| r.run_id.clone())
-        .collect();
+    let to_delete: Vec<String> = runs.iter().skip(keep_count).map(|r| r.run_id.clone()).collect();
 
     let deleted_count = to_delete.len();
     for run_id in to_delete {
@@ -895,15 +923,27 @@ fn parse_test_db_sdn(doc: &simple_sdn::SdnDocument) -> Result<TestDb, String> {
             // Parse qualified ignore fields
             let qualified_by = {
                 let s = get_field("qualified_by");
-                if s.is_empty() { None } else { Some(s) }
+                if s.is_empty() {
+                    None
+                } else {
+                    Some(s)
+                }
             };
             let qualified_at = {
                 let s = get_field("qualified_at");
-                if s.is_empty() { None } else { Some(s) }
+                if s.is_empty() {
+                    None
+                } else {
+                    Some(s)
+                }
             };
             let qualified_reason = {
                 let s = get_field("qualified_reason");
-                if s.is_empty() { None } else { Some(s) }
+                if s.is_empty() {
+                    None
+                } else {
+                    Some(s)
+                }
             };
 
             let record = TestRecord {
@@ -951,12 +991,7 @@ pub fn save_test_db(path: &Path, db: &TestDb) -> Result<(), String> {
             if !existing_content.trim().is_empty() {
                 let backup_path = path.with_extension("sdn.prev");
                 if let Err(e) = fs::write(&backup_path, &existing_content) {
-                    debug_log!(
-                        DebugLevel::Basic,
-                        "TestDB",
-                        "Warning: Failed to create backup: {}",
-                        e
-                    );
+                    debug_log!(DebugLevel::Basic, "TestDB", "Warning: Failed to create backup: {}", e);
                 }
             }
         }
@@ -992,11 +1027,7 @@ pub fn save_test_db(path: &Path, db: &TestDb) -> Result<(), String> {
         .iter()
         .map(|record| {
             // Use Record::to_sdn_row() for consistent serialization
-            record
-                .to_sdn_row()
-                .into_iter()
-                .map(SdnValue::String)
-                .collect()
+            record.to_sdn_row().into_iter().map(SdnValue::String).collect()
         })
         .collect();
 
@@ -1334,7 +1365,11 @@ pub fn generate_test_result_docs(db: &TestDb, output_dir: &Path) -> Result<(), S
     md.push_str(&format!("| ❌ Failed | {} | {:.1}% |\n", failed, pct(failed)));
     md.push_str(&format!("| ⏭️ Skipped | {} | {:.1}% |\n", skipped, pct(skipped)));
     md.push_str(&format!("| 🔕 Ignored | {} | {:.1}% |\n", ignored, pct(ignored)));
-    md.push_str(&format!("| 🔐 Qualified Ignore | {} | {:.1}% |\n\n", qualified_ignored, pct(qualified_ignored)));
+    md.push_str(&format!(
+        "| 🔐 Qualified Ignore | {} | {:.1}% |\n\n",
+        qualified_ignored,
+        pct(qualified_ignored)
+    ));
 
     // Failed tests section
     if failed > 0 {
@@ -1597,7 +1632,10 @@ pub fn generate_test_result_docs(db: &TestDb, output_dir: &Path) -> Result<(), S
 
     if !qualified_ignored_tests.is_empty() {
         md.push_str("---\n\n");
-        md.push_str(&format!("## 🔐 Qualified Ignored Tests ({})\n\n", qualified_ignored_tests.len()));
+        md.push_str(&format!(
+            "## 🔐 Qualified Ignored Tests ({})\n\n",
+            qualified_ignored_tests.len()
+        ));
         md.push_str("Tests ignored with authorized qualification:\n\n");
         md.push_str("| Test | Qualified By | Reason | Date |\n");
         md.push_str("|------|-------------|--------|------|\n");
@@ -1605,7 +1643,9 @@ pub fn generate_test_result_docs(db: &TestDb, output_dir: &Path) -> Result<(), S
         for test in qualified_ignored_tests.iter().take(20) {
             let qualified_by = test.qualified_by.as_deref().unwrap_or("-");
             let reason = test.qualified_reason.as_deref().unwrap_or("-");
-            let date = test.qualified_at.as_deref()
+            let date = test
+                .qualified_at
+                .as_deref()
                 .and_then(|s| s.split('T').next())
                 .unwrap_or("-");
             md.push_str(&format!(

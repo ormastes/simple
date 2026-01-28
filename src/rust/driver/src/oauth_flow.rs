@@ -32,11 +32,7 @@ impl OAuthConfig {
             client_id: client_id.to_string(),
             device_auth_endpoint: "https://oauth2.googleapis.com/device/code".to_string(),
             token_endpoint: "https://oauth2.googleapis.com/token".to_string(),
-            scopes: vec![
-                "openid".to_string(),
-                "email".to_string(),
-                "profile".to_string(),
-            ],
+            scopes: vec!["openid".to_string(), "email".to_string(), "profile".to_string()],
         }
     }
 
@@ -48,10 +44,8 @@ impl OAuthConfig {
         Self {
             provider: OAuthProvider::Microsoft,
             client_id: client_id.to_string(),
-            device_auth_endpoint:
-                "https://login.microsoftonline.com/common/oauth2/v2.0/devicecode".to_string(),
-            token_endpoint: "https://login.microsoftonline.com/common/oauth2/v2.0/token"
-                .to_string(),
+            device_auth_endpoint: "https://login.microsoftonline.com/common/oauth2/v2.0/devicecode".to_string(),
+            token_endpoint: "https://login.microsoftonline.com/common/oauth2/v2.0/token".to_string(),
             scopes: vec![
                 "openid".to_string(),
                 "email".to_string(),
@@ -144,8 +138,7 @@ fn load_client_id_from_config(provider: &str) -> Result<String, String> {
         return Err("Config file not found".to_string());
     }
 
-    let content = std::fs::read_to_string(&config_path)
-        .map_err(|e| format!("Failed to read config: {}", e))?;
+    let content = std::fs::read_to_string(&config_path).map_err(|e| format!("Failed to read config: {}", e))?;
 
     // Simple parsing - look for provider_client_id: "value"
     let key = format!("{}_client_id", provider);
@@ -195,13 +188,22 @@ pub fn device_code_flow(provider: OAuthProvider) -> Result<DeviceFlowResult, Str
         println!("And enter code: {}", device_code_response.user_code);
     }
     println!();
-    println!("Waiting for authentication (expires in {} seconds)...", device_code_response.expires_in);
+    println!(
+        "Waiting for authentication (expires in {} seconds)...",
+        device_code_response.expires_in
+    );
 
     // Step 3: Poll for token
     let poll_interval = Duration::from_secs(device_code_response.interval.unwrap_or(5));
     let deadline = Instant::now() + Duration::from_secs(device_code_response.expires_in);
 
-    let token_response = poll_for_token(&client, &config, &device_code_response.device_code, poll_interval, deadline)?;
+    let token_response = poll_for_token(
+        &client,
+        &config,
+        &device_code_response.device_code,
+        poll_interval,
+        deadline,
+    )?;
 
     println!("Authentication successful!");
 
@@ -223,9 +225,9 @@ pub fn device_code_flow(provider: OAuthProvider) -> Result<DeviceFlowResult, Str
     let oauth_token = OAuthToken {
         access_token: token_response.access_token.clone(),
         refresh_token: token_response.refresh_token.clone(),
-        expires_at: token_response.expires_in.map(|secs| {
-            (chrono::Utc::now() + chrono::Duration::seconds(secs as i64)).to_rfc3339()
-        }),
+        expires_at: token_response
+            .expires_in
+            .map(|secs| (chrono::Utc::now() + chrono::Duration::seconds(secs as i64)).to_rfc3339()),
         provider,
     };
     store_oauth_token(&email, oauth_token)?;
@@ -239,16 +241,10 @@ pub fn device_code_flow(provider: OAuthProvider) -> Result<DeviceFlowResult, Str
 }
 
 /// Request a device code from the OAuth provider
-fn request_device_code(
-    client: &reqwest::blocking::Client,
-    config: &OAuthConfig,
-) -> Result<DeviceCodeResponse, String> {
+fn request_device_code(client: &reqwest::blocking::Client, config: &OAuthConfig) -> Result<DeviceCodeResponse, String> {
     let scope = config.scopes.join(" ");
 
-    let params = [
-        ("client_id", config.client_id.as_str()),
-        ("scope", &scope),
-    ];
+    let params = [("client_id", config.client_id.as_str()), ("scope", &scope)];
 
     let response = client
         .post(&config.device_auth_endpoint)
@@ -366,10 +362,7 @@ fn get_user_info(
 }
 
 /// Refresh an expired access token
-pub fn refresh_access_token(
-    provider: OAuthProvider,
-    refresh_token: &str,
-) -> Result<TokenResponse, String> {
+pub fn refresh_access_token(provider: OAuthProvider, refresh_token: &str) -> Result<TokenResponse, String> {
     let config = load_oauth_config(provider)?;
     let client = reqwest::blocking::Client::new();
 

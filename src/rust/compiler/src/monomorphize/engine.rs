@@ -250,6 +250,15 @@ impl<'a> Monomorphizer<'a> {
         specialized.generic_params.clear();
         specialized.where_clause.clear();
 
+        // Track specialization metadata
+        specialized.is_generic_template = false; // This is now a specialized instance
+        specialized.specialization_of = Some(s.name.clone()); // Track base template
+        // Convert ConcreteType bindings to Type bindings for AST
+        specialized.type_bindings = bindings
+            .iter()
+            .map(|(k, v)| (k.clone(), concrete_to_ast_type(v)))
+            .collect();
+
         self.substitute_in_fields_and_methods(&mut specialized, &bindings);
 
         specialized
@@ -263,6 +272,15 @@ impl<'a> Monomorphizer<'a> {
         specialized.name = key.mangled_name();
         specialized.generic_params.clear();
         specialized.where_clause.clear();
+
+        // Track specialization metadata
+        specialized.is_generic_template = false; // This is now a specialized instance
+        specialized.specialization_of = Some(c.name.clone()); // Track base template
+        // Convert ConcreteType bindings to Type bindings for AST
+        specialized.type_bindings = bindings
+            .iter()
+            .map(|(k, v)| (k.clone(), concrete_to_ast_type(v)))
+            .collect();
 
         self.substitute_in_fields_and_methods(&mut specialized, &bindings);
 
@@ -462,7 +480,13 @@ impl<'a> Monomorphizer<'a> {
                     callee: Box::new(self.substitute_in_expr(callee, bindings)),
                     args: args
                         .iter()
-                        .map(|a| simple_parser::ast::Argument::with_span(a.name.clone(), self.substitute_in_expr(&a.value, bindings), a.span))
+                        .map(|a| {
+                            simple_parser::ast::Argument::with_span(
+                                a.name.clone(),
+                                self.substitute_in_expr(&a.value, bindings),
+                                a.span,
+                            )
+                        })
                         .collect(),
                 }
             }
@@ -483,7 +507,13 @@ impl<'a> Monomorphizer<'a> {
                 method: method.clone(),
                 args: args
                     .iter()
-                    .map(|a| simple_parser::ast::Argument::with_span(a.name.clone(), self.substitute_in_expr(&a.value, bindings), a.span))
+                    .map(|a| {
+                        simple_parser::ast::Argument::with_span(
+                            a.name.clone(),
+                            self.substitute_in_expr(&a.value, bindings),
+                            a.span,
+                        )
+                    })
                     .collect(),
             },
             // Field access
@@ -564,5 +594,56 @@ impl<'a> Monomorphizer<'a> {
             // Literals and identifiers don't need substitution
             _ => expr.clone(),
         }
+    }
+
+    // ========================================================================
+    // Public API for deferred monomorphization
+    // ========================================================================
+
+    /// Specialize a function template with a specialization key.
+    ///
+    /// Used by DeferredMonomorphizer for on-demand instantiation.
+    pub fn specialize_function_with_key(&mut self, key: &SpecializationKey) -> Result<FunctionDef, crate::error::CompileError> {
+        // Find the template
+        let func = self
+            .generic_functions
+            .get(&key.name)
+            .ok_or_else(|| crate::error::CompileError::Codegen(format!("Function template not found: {}", key.name)))?
+            .clone();
+
+        // Specialize it
+        Ok(self.specialize_function(&func, key))
+    }
+
+    /// Specialize a struct template with a specialization key.
+    pub fn specialize_struct_with_key(&mut self, key: &SpecializationKey) -> Result<simple_parser::ast::StructDef, crate::error::CompileError> {
+        let struct_def = self
+            .generic_structs
+            .get(&key.name)
+            .ok_or_else(|| crate::error::CompileError::Codegen(format!("Struct template not found: {}", key.name)))?
+            .clone();
+
+        Ok(self.specialize_struct(&struct_def, key))
+    }
+
+    /// Specialize a class template with a specialization key.
+    pub fn specialize_class_with_key(&mut self, key: &SpecializationKey) -> Result<ClassDef, crate::error::CompileError> {
+        let class_def = self
+            .generic_classes
+            .get(&key.name)
+            .ok_or_else(|| crate::error::CompileError::Codegen(format!("Class template not found: {}", key.name)))?
+            .clone();
+
+        Ok(self.specialize_class(&class_def, key))
+    }
+
+    /// Specialize an enum template with a specialization key.
+    pub fn specialize_enum_with_key(&mut self, key: &SpecializationKey) -> Result<simple_parser::ast::EnumDef, crate::error::CompileError> {
+        // Enums are not currently tracked in generic_* maps in the engine
+        // This is a placeholder that would need enum support added
+        Err(crate::error::CompileError::Codegen(format!(
+            "Enum specialization not yet implemented: {}",
+            key.name
+        )))
     }
 }

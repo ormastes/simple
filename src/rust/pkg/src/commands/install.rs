@@ -26,7 +26,8 @@ pub struct InstallResult {
 
 /// Install all dependencies for a project
 pub fn install_dependencies(dir: &Path) -> PkgResult<InstallResult> {
-    let manifest_path = dir.join("simple.toml");
+    let manifest_path = crate::find_manifest(dir)
+        .ok_or_else(|| PkgError::ManifestNotFound(dir.display().to_string()))?;
     let lock_path = dir.join("simple.lock");
 
     if !manifest_path.exists() {
@@ -216,9 +217,9 @@ mod tests {
         init_project(&dep_dir, Some("mylib")).unwrap();
 
         // Add the dependency
-        let mut manifest = Manifest::load(&temp_dir.join("simple.toml")).unwrap();
+        let mut manifest = Manifest::load(&crate::find_manifest(&temp_dir).unwrap()).unwrap();
         manifest.add_dependency("mylib", Dependency::path("./mylib"));
-        manifest.save(&temp_dir.join("simple.toml")).unwrap();
+        manifest.save(&crate::find_manifest(&temp_dir).unwrap()).unwrap();
 
         (temp_dir, dep_dir)
     }
@@ -282,9 +283,9 @@ mod tests {
         let temp_dir = setup_test_project("install", "registry-skip");
 
         // Add a registry dependency
-        let mut manifest = Manifest::load(&temp_dir.join("simple.toml")).unwrap();
+        let mut manifest = Manifest::load(&crate::find_manifest(&temp_dir).unwrap()).unwrap();
         manifest.add_dependency("http", Dependency::version("1.0"));
-        manifest.save(&temp_dir.join("simple.toml")).unwrap();
+        manifest.save(&crate::find_manifest(&temp_dir).unwrap()).unwrap();
 
         // Install
         let result = install_dependencies(&temp_dir).unwrap();
@@ -304,9 +305,9 @@ mod tests {
         fs::create_dir_all(&dep_dir).unwrap();
         init_project(&dep_dir, Some("mylib")).unwrap();
 
-        let mut manifest = Manifest::load(&temp_dir.join("simple.toml")).unwrap();
+        let mut manifest = Manifest::load(&crate::find_manifest(&temp_dir).unwrap()).unwrap();
         manifest.add_dependency("mylib", Dependency::path("./mylib"));
-        manifest.save(&temp_dir.join("simple.toml")).unwrap();
+        manifest.save(&crate::find_manifest(&temp_dir).unwrap()).unwrap();
 
         install_dependencies(&temp_dir).unwrap();
 
@@ -334,9 +335,9 @@ mod tests {
         let temp_dir = setup_test_project("install", "missing-dep");
 
         // Add a dependency to nonexistent path
-        let mut manifest = Manifest::load(&temp_dir.join("simple.toml")).unwrap();
+        let mut manifest = Manifest::load(&crate::find_manifest(&temp_dir).unwrap()).unwrap();
         manifest.add_dependency("ghost", Dependency::path("./nonexistent"));
-        manifest.save(&temp_dir.join("simple.toml")).unwrap();
+        manifest.save(&crate::find_manifest(&temp_dir).unwrap()).unwrap();
 
         let result = install_dependencies(&temp_dir);
         assert!(result.is_err());

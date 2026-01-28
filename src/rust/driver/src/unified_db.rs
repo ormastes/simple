@@ -221,8 +221,7 @@ impl<T: Record> Database<T> {
         existing_dict.insert(T::table_name().to_string(), table);
 
         // Create empty document for serialization
-        let mut doc = simple_sdn::SdnDocument::parse("_placeholder: 1")
-            .map_err(|e| io::Error::other(e.to_string()))?;
+        let mut doc = simple_sdn::SdnDocument::parse("_placeholder: 1").map_err(|e| io::Error::other(e.to_string()))?;
         *doc.root_mut() = simple_sdn::SdnValue::Dict(existing_dict);
 
         let content = doc.to_sdn();

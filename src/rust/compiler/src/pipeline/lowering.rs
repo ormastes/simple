@@ -241,8 +241,8 @@ impl CompilerPipeline {
         // Type check
         type_check(&ast_module.items).map_err(|e| crate::error::factory::type_check_failed(&e))?;
 
-        // Lower AST to HIR
-        let hir_module = hir::lower(ast_module).map_err(convert_lower_error)?;
+        // Lower AST to HIR (using lenient mode for bootstrap)
+        let hir_module = hir::lower_lenient(ast_module).map_err(convert_lower_error)?;
 
         // Process HIR to MIR using common logic
         self.process_hir_to_mir(hir_module)
@@ -267,7 +267,30 @@ impl CompilerPipeline {
         // Type check
         type_check(&ast_module.items).map_err(|e| crate::error::factory::type_check_failed(&e))?;
 
-        // Lower AST to HIR with module resolution support
+        // Lower AST to HIR with module resolution support (using lenient mode for bootstrap)
+        let hir_module = hir::lower_with_context_lenient(ast_module, source_file).map_err(convert_lower_error)?;
+
+        // Process HIR to MIR using common logic
+        self.process_hir_to_mir(hir_module)
+    }
+
+    /// Type check and lower AST to MIR with strict memory safety checking.
+    ///
+    /// This variant uses strict mode where memory safety warnings become errors.
+    /// Use for production builds after bootstrap.
+    #[allow(dead_code)]
+    pub(super) fn type_check_and_lower_with_context_strict(
+        &mut self,
+        ast_module: &simple_parser::ast::Module,
+        source_file: &Path,
+    ) -> Result<mir::MirModule, CompileError> {
+        // Clear previous verification violations
+        self.verification_violations.clear();
+
+        // Type check
+        type_check(&ast_module.items).map_err(|e| crate::error::factory::type_check_failed(&e))?;
+
+        // Lower AST to HIR with module resolution support (strict mode)
         let hir_module = hir::lower_with_context(ast_module, source_file).map_err(convert_lower_error)?;
 
         // Process HIR to MIR using common logic

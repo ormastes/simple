@@ -51,6 +51,7 @@ pub struct CodegenBackend<M: Module> {
     pub ctx: Context,
     pub func_ids: HashMap<String, cranelift_module::FuncId>,
     pub runtime_funcs: HashMap<&'static str, cranelift_module::FuncId>,
+    pub global_ids: HashMap<String, cranelift_module::DataId>,
     pub body_stub: Option<cranelift_module::FuncId>,
     pub target: Target,
 }
@@ -198,6 +199,7 @@ impl<M: Module> CodegenBackend<M> {
             ctx,
             func_ids: HashMap::new(),
             runtime_funcs,
+            global_ids: HashMap::new(),
             body_stub: None,
             target,
         })
@@ -241,8 +243,97 @@ impl<M: Module> CodegenBackend<M> {
 
     /// Declare all functions from a MIR module
     pub fn declare_functions(&mut self, functions: &[MirFunction]) -> BackendResult<()> {
-        self.func_ids =
-            super::shared::declare_functions(&mut self.module, functions).map_err(BackendError::ModuleError)?;
+        eprintln!("[DEBUG declare_functions] Called with {} functions, {} runtime funcs already declared",
+                  functions.len(), self.runtime_funcs.len());
+
+        let mut func_ids = HashMap::new();
+
+        // First, add runtime function IDs for functions that are already declared
+        for (name, id) in &self.runtime_funcs {
+            func_ids.insert(name.to_string(), *id);
+        }
+
+        let total_mir_functions = functions.len();
+        let mut skipped_count = 0;
+        let mut declared_count = 0;
+
+        // Then declare non-runtime functions
+        for func in functions {
+            // Skip functions that are already declared as runtime functions
+            // This handles extern functions from Simple code that match runtime functions
+            if self.runtime_funcs.contains_key(func.name.as_str()) {
+                skipped_count += 1;
+                continue;
+            }
+
+            let sig = super::shared::build_mir_signature(func);
+
+            // Determine linkage (same logic as in shared::declare_functions)
+            let linkage = if func.blocks.is_empty() {
+                cranelift_module::Linkage::Import
+            } else if func.is_public() || func.name == "main" {
+                cranelift_module::Linkage::Export
+            } else {
+                cranelift_module::Linkage::Local
+            };
+
+            if func.name.contains("resolve") && (func.name.contains("blocks") || func.name.contains("BlockResolver")) {
+                eprintln!("[DEBUG resolve] Function: '{}', params: {}, returns: {:?}, has_body: {}",
+                          func.name, func.params.len(), func.return_type, !func.blocks.is_empty());
+                for (i, param) in func.params.iter().enumerate() {
+                    eprintln!("[DEBUG resolve]   param {}: name='{}', ty={:?}", i, param.name, param.ty);
+                }
+                eprintln!("[DEBUG resolve] Signature params: {}", sig.params.len());
+            }
+
+            let func_id = self.module
+                .declare_function(&func.name, linkage, &sig)
+                .map_err(|e| BackendError::ModuleError(format!("Failed to declare '{}': {}", func.name, e)))?;
+
+            // Debug: print ALL user function IDs to identify fn2
+            if func_id.as_u32() >= 467 {
+                eprintln!("[DEBUG fn_id] funcid{} = fn{} = '{}' ({} params)",
+                          func_id.as_u32(), func_id.as_u32() - 467, func.name, func.params.len());
+            }
+
+            func_ids.insert(func.name.clone(), func_id);
+            declared_count += 1;
+        }
+
+        self.func_ids = func_ids;
+        Ok(())
+    }
+
+    /// Declare all global variables from a MIR module
+    pub fn declare_globals(&mut self, globals: &[(String, TypeId, bool)]) -> BackendResult<()> {
+        use super::types_util::type_to_cranelift;
+
+        eprintln!("[DEBUG declare_globals] Declaring {} globals (skipping {} runtime funcs)",
+                  globals.len(), self.runtime_funcs.len());
+
+        for (name, ty, is_mutable) in globals {
+            // Skip globals that are actually runtime functions (extern functions)
+            if self.runtime_funcs.contains_key(name.as_str()) {
+                eprintln!("[DEBUG] Skipping runtime function global: '{}'", name);
+                continue;
+            }
+
+            eprintln!("[DEBUG] Global: '{}', type: {:?}, mutable: {}", name, ty, is_mutable);
+            let data_id = self.module
+                .declare_data(name, cranelift_module::Linkage::Export, *is_mutable, false)
+                .map_err(|e| BackendError::ModuleError(e.to_string()))?;
+
+            // Initialize with zero (will be set by runtime initialization)
+            let mut data_desc = cranelift_module::DataDescription::new();
+            let size = super::types_util::type_id_size(*ty) as usize;
+            data_desc.define_zeroinit(size);
+
+            self.module
+                .define_data(data_id, &data_desc)
+                .map_err(|e| BackendError::ModuleError(e.to_string()))?;
+
+            self.global_ids.insert(name.clone(), data_id);
+        }
         Ok(())
     }
 
@@ -264,12 +355,13 @@ impl<M: Module> CodegenBackend<M> {
             func,
             &self.func_ids,
             &self.runtime_funcs,
+            &self.global_ids,
         )
         .map_err(BackendError::ModuleError)?;
 
         // Verify the function before defining
         if let Err(errors) = cranelift_codegen::verify_function(&self.ctx.func, self.module.isa()) {
-            return Err(BackendError::ModuleError(format!("Verifier errors:\n{}", errors)));
+            return Err(BackendError::ModuleError(format!("Verifier errors in '{}': {}", func.name, errors)));
         }
 
         // Define the function
@@ -287,7 +379,19 @@ impl<M: Module> CodegenBackend<M> {
         // Expand with outlined functions for body_block users
         let functions = expand_with_outlined(mir);
 
-        // First pass: declare all functions
+        eprintln!("[DEBUG compile_all_functions] MIR functions: {}, After expansion: {}, Globals: {}",
+                  mir.functions.len(), functions.len(), mir.globals.len());
+
+        // Check for duplicate function names
+        let mut seen_names = std::collections::HashSet::new();
+        for func in &functions {
+            if !seen_names.insert(&func.name) {
+                eprintln!("[WARNING] Duplicate function name: {}", func.name);
+            }
+        }
+
+        // First pass: declare globals and functions
+        self.declare_globals(&mir.globals)?;
         self.declare_functions(&functions)?;
 
         // Second pass: compile function bodies

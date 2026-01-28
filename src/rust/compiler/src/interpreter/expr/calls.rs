@@ -7,8 +7,8 @@ use crate::error::{codes, typo, CompileError, ErrorContext};
 use crate::value::Value;
 
 use super::super::{
-    evaluate_call, evaluate_method_call, exec_method_function, find_and_exec_method_with_self, ClassDef, Enums, Env, FunctionDef, ImplMethods,
-    BLOCK_SCOPED_ENUMS,
+    evaluate_call, evaluate_method_call, exec_method_function, find_and_exec_method_with_self, ClassDef, Enums, Env,
+    FunctionDef, ImplMethods, BLOCK_SCOPED_ENUMS,
 };
 
 pub(super) fn eval_call_expr(
@@ -49,7 +49,11 @@ pub(super) fn eval_call_expr(
                     env.insert(var_name.clone(), new_self);
                 }
                 Ok(Some(result))
-            } else if let Expr::FieldAccess { receiver: outer_receiver, field } = receiver.as_ref() {
+            } else if let Expr::FieldAccess {
+                receiver: outer_receiver,
+                field,
+            } = receiver.as_ref()
+            {
                 // Handle nested field access like self.lexer.next_token()
                 // where self.lexer needs to be updated
                 if let Expr::Identifier(var_name) = outer_receiver.as_ref() {
@@ -58,7 +62,11 @@ pub(super) fn eval_call_expr(
                     if let Value::Object { class, mut fields } = outer_val {
                         // Get the field value (the inner object)
                         if let Some(field_val) = fields.get(field).cloned() {
-                            if let Value::Object { class: inner_class, fields: inner_fields } = field_val {
+                            if let Value::Object {
+                                class: inner_class,
+                                fields: inner_fields,
+                            } = field_val
+                            {
                                 // Call method with self-update on the inner object
                                 if let Some((result, updated_inner)) = super::super::find_and_exec_method_with_self(
                                     method,
@@ -295,7 +303,9 @@ pub(super) fn eval_call_expr(
                 // EnumName.VariantName syntax
                 Value::EnumType { ref enum_name } => {
                     // Check both module-level enums and block-scoped enums
-                    let enum_def = enums.get(enum_name).cloned()
+                    let enum_def = enums
+                        .get(enum_name)
+                        .cloned()
                         .or_else(|| BLOCK_SCOPED_ENUMS.with(|cell| cell.borrow().get(enum_name).cloned()));
                     if let Some(enum_def) = enum_def {
                         // Check if the field is a valid variant name
@@ -368,12 +378,21 @@ pub(super) fn eval_call_expr(
                     _ => {
                         // Try calling as a no-arg method (e.g., str.upper, str.trim)
                         let empty_args: Vec<Argument> = vec![];
-                        match evaluate_method_call(receiver, field, &empty_args, env, functions, classes, enums, impl_methods) {
+                        match evaluate_method_call(
+                            receiver,
+                            field,
+                            &empty_args,
+                            env,
+                            functions,
+                            classes,
+                            enums,
+                            impl_methods,
+                        ) {
                             Ok(result) => Ok(result),
                             Err(_) => {
-                                let ctx = ErrorContext::new()
-                                    .with_code(codes::UNDEFINED_FIELD)
-                                    .with_help("available properties: len, byte_len, char_count, is_empty; or use method() syntax");
+                                let ctx = ErrorContext::new().with_code(codes::UNDEFINED_FIELD).with_help(
+                                    "available properties: len, byte_len, char_count, is_empty; or use method() syntax",
+                                );
                                 Err(CompileError::semantic_with_context(
                                     format!("undefined field: unknown property or method '{field}' on String"),
                                     ctx,
@@ -390,7 +409,16 @@ pub(super) fn eval_call_expr(
                     _ => {
                         // Try calling as a no-arg method (e.g., arr.first, arr.last, arr.reverse)
                         let empty_args: Vec<Argument> = vec![];
-                        match evaluate_method_call(receiver, field, &empty_args, env, functions, classes, enums, impl_methods) {
+                        match evaluate_method_call(
+                            receiver,
+                            field,
+                            &empty_args,
+                            env,
+                            functions,
+                            classes,
+                            enums,
+                            impl_methods,
+                        ) {
                             Ok(result) => Ok(result),
                             Err(_) => {
                                 let ctx = ErrorContext::new()
@@ -411,7 +439,16 @@ pub(super) fn eval_call_expr(
                     _ => {
                         // Try calling as a no-arg method
                         let empty_args: Vec<Argument> = vec![];
-                        match evaluate_method_call(receiver, field, &empty_args, env, functions, classes, enums, impl_methods) {
+                        match evaluate_method_call(
+                            receiver,
+                            field,
+                            &empty_args,
+                            env,
+                            functions,
+                            classes,
+                            enums,
+                            impl_methods,
+                        ) {
                             Ok(result) => Ok(result),
                             Err(_) => {
                                 let ctx = ErrorContext::new()
@@ -437,7 +474,16 @@ pub(super) fn eval_call_expr(
                         } else {
                             // Try calling as a no-arg method (e.g., dict.keys, dict.values)
                             let empty_args: Vec<Argument> = vec![];
-                            match evaluate_method_call(receiver, field, &empty_args, env, functions, classes, enums, impl_methods) {
+                            match evaluate_method_call(
+                                receiver,
+                                field,
+                                &empty_args,
+                                env,
+                                functions,
+                                classes,
+                                enums,
+                                impl_methods,
+                            ) {
                                 Ok(result) => Ok(result),
                                 Err(_) => {
                                     let ctx = ErrorContext::new()
@@ -466,12 +512,21 @@ pub(super) fn eval_call_expr(
                             _ => {
                                 // Try calling as a no-arg method
                                 let empty_args: Vec<Argument> = vec![];
-                                match evaluate_method_call(receiver, field, &empty_args, env, functions, classes, enums, impl_methods) {
+                                match evaluate_method_call(
+                                    receiver,
+                                    field,
+                                    &empty_args,
+                                    env,
+                                    functions,
+                                    classes,
+                                    enums,
+                                    impl_methods,
+                                ) {
                                     Ok(result) => Ok(result),
                                     Err(_) => {
-                                        let ctx = ErrorContext::new()
-                                            .with_code(codes::UNDEFINED_FIELD)
-                                            .with_help("available properties: is_some, is_none; or use method() syntax");
+                                        let ctx = ErrorContext::new().with_code(codes::UNDEFINED_FIELD).with_help(
+                                            "available properties: is_some, is_none; or use method() syntax",
+                                        );
                                         Err(CompileError::semantic_with_context(
                                             format!("undefined field: unknown property or method '{field}' on Option"),
                                             ctx,
@@ -487,7 +542,16 @@ pub(super) fn eval_call_expr(
                             _ => {
                                 // Try calling as a no-arg method
                                 let empty_args: Vec<Argument> = vec![];
-                                match evaluate_method_call(receiver, field, &empty_args, env, functions, classes, enums, impl_methods) {
+                                match evaluate_method_call(
+                                    receiver,
+                                    field,
+                                    &empty_args,
+                                    env,
+                                    functions,
+                                    classes,
+                                    enums,
+                                    impl_methods,
+                                ) {
                                     Ok(result) => Ok(result),
                                     Err(_) => {
                                         let ctx = ErrorContext::new()
@@ -504,14 +568,25 @@ pub(super) fn eval_call_expr(
                     } else {
                         // Try calling as a no-arg method for other enums
                         let empty_args: Vec<Argument> = vec![];
-                        match evaluate_method_call(receiver, field, &empty_args, env, functions, classes, enums, impl_methods) {
+                        match evaluate_method_call(
+                            receiver,
+                            field,
+                            &empty_args,
+                            env,
+                            functions,
+                            classes,
+                            enums,
+                            impl_methods,
+                        ) {
                             Ok(result) => Ok(result),
                             Err(_) => {
-                                let ctx = ErrorContext::new()
-                                    .with_code(codes::UNDEFINED_FIELD)
-                                    .with_help(format!("check that the property or method '{field}' exists on enum {enum_name}"));
+                                let ctx = ErrorContext::new().with_code(codes::UNDEFINED_FIELD).with_help(format!(
+                                    "check that the property or method '{field}' exists on enum {enum_name}"
+                                ));
                                 Err(CompileError::semantic_with_context(
-                                    format!("undefined field: unknown property or method '{field}' on enum {enum_name}"),
+                                    format!(
+                                        "undefined field: unknown property or method '{field}' on enum {enum_name}"
+                                    ),
                                     ctx,
                                 ))
                             }
@@ -520,12 +595,20 @@ pub(super) fn eval_call_expr(
                 }
                 _ => {
                     // Debug: show what value type we're trying to access
-                    eprintln!("[DEBUG FIELD ACCESS] Trying to access field '{}' on value type: {:?}", field, recv_val.type_name());
+                    eprintln!(
+                        "[DEBUG FIELD ACCESS] Trying to access field '{}' on value type: {:?}",
+                        field,
+                        recv_val.type_name()
+                    );
                     let ctx = ErrorContext::new()
                         .with_code(codes::UNDEFINED_FIELD)
                         .with_help("field access requires an object, array, dict, or enum value");
                     Err(CompileError::semantic_with_context(
-                        format!("undefined field '{}': cannot access field on value of type '{}'", field, recv_val.type_name()),
+                        format!(
+                            "undefined field '{}': cannot access field on value of type '{}'",
+                            field,
+                            recv_val.type_name()
+                        ),
                         ctx,
                     ))
                 }

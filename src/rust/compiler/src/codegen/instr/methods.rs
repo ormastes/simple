@@ -49,13 +49,17 @@ fn call_runtime_3<M: Module>(
     builder.inst_results(call)[0]
 }
 
-/// Wrap a value with rt_value_int
+/// Pass value through for array/dict operations.
+/// Values that are already RuntimeValue (strings, arrays, objects) should be passed directly.
+/// Only raw integers need boxing via MirInst::BoxInt, which is done at MIR level.
 fn wrap_value<M: Module>(
-    ctx: &mut InstrContext<'_, M>,
-    builder: &mut FunctionBuilder,
+    _ctx: &mut InstrContext<'_, M>,
+    _builder: &mut FunctionBuilder,
     val: cranelift_codegen::ir::Value,
 ) -> cranelift_codegen::ir::Value {
-    call_runtime_1(ctx, builder, "rt_value_int", val)
+    // Just pass the value through - values are already in RuntimeValue format
+    // or will be boxed at MIR level via BoxInt if needed.
+    val
 }
 
 /// Call a len method with fallback to 0 if not present
@@ -117,11 +121,23 @@ pub(super) fn compile_builtin_method<M: Module>(
         }
         ("String", "starts_with") | ("string", "starts_with") => {
             let arg_val = ctx.vreg_values[&args[0]];
-            Some(call_runtime_2(ctx, builder, "rt_string_starts_with", receiver_val, arg_val))
+            Some(call_runtime_2(
+                ctx,
+                builder,
+                "rt_string_starts_with",
+                receiver_val,
+                arg_val,
+            ))
         }
         ("String", "ends_with") | ("string", "ends_with") => {
             let arg_val = ctx.vreg_values[&args[0]];
-            Some(call_runtime_2(ctx, builder, "rt_string_ends_with", receiver_val, arg_val))
+            Some(call_runtime_2(
+                ctx,
+                builder,
+                "rt_string_ends_with",
+                receiver_val,
+                arg_val,
+            ))
         }
         ("Dict", "get") | ("dict", "get") => {
             let key_val = ctx.vreg_values[&args[0]];

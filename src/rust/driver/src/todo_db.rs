@@ -59,7 +59,19 @@ impl Record for TodoRecord {
     }
 
     fn field_names() -> &'static [&'static str] {
-        &["id", "keyword", "area", "priority", "description", "file", "line", "issue", "blocked", "status", "valid"]
+        &[
+            "id",
+            "keyword",
+            "area",
+            "priority",
+            "description",
+            "file",
+            "line",
+            "issue",
+            "blocked",
+            "status",
+            "valid",
+        ]
     }
 
     fn from_sdn_row(row: &[String]) -> Result<Self, String> {

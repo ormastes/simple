@@ -350,7 +350,7 @@ main = if d.contains_key("hello"): 1 else: 0
 fn runner_handles_bitwise_operations() {
     run_expect("main = 12 & 10", 8); // 1100 & 1010 = 1000
     run_expect("main = 12 | 10", 14); // 1100 | 1010 = 1110
-    run_expect("main = 12 ^ 10", 6); // 1100 ^ 1010 = 0110
+    run_expect("main = 12 xor 10", 6); // 1100 xor 1010 = 0110
     run_expect("main = 1 << 4", 16); // shift left
     run_expect("main = 16 >> 2", 4); // shift right
     run_expect("main = ~0", -1); // bitwise not

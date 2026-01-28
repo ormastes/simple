@@ -6,6 +6,8 @@
 // - Enum variant parsing
 // - Enum field list parsing
 
+use std::collections::HashMap;
+
 use crate::ast::*;
 use crate::error::ParseError;
 use crate::token::{Span, TokenKind};
@@ -80,13 +82,16 @@ impl<'a> Parser<'a> {
         Ok(Node::Enum(EnumDef {
             span: self.make_span(start_span),
             name,
-            generic_params,
+            generic_params: generic_params.clone(),
             where_clause,
             variants,
             methods,
             visibility: Visibility::Private,
             attributes,
             doc_comment,
+            is_generic_template: !generic_params.is_empty(),
+            specialization_of: None,
+            type_bindings: HashMap::new(),
         }))
     }
 
@@ -129,19 +134,15 @@ impl<'a> Parser<'a> {
                 // Handle comma-separated variants on the same line: Add, Sub, Mul
                 while self.check(&TokenKind::Comma) {
                     self.advance();
-                    // Skip any whitespace tokens
-                    while self.check(&TokenKind::Newline)
+                    // If we hit newline/indent/dedent after comma, stop the comma-separated list
+                    if self.check(&TokenKind::Newline)
                         || self.check(&TokenKind::Indent)
                         || self.check(&TokenKind::Dedent)
                     {
-                        // If we hit newline/dedent, stop the comma-separated list
                         break;
                     }
                     // If we're at dedent/newline, the line is done
-                    if self.check(&TokenKind::Dedent)
-                        || self.check(&TokenKind::Newline)
-                        || self.is_at_end()
-                    {
+                    if self.check(&TokenKind::Dedent) || self.check(&TokenKind::Newline) || self.is_at_end() {
                         break;
                     }
                     // Parse next variant in the comma-separated list
@@ -277,7 +278,7 @@ impl<'a> Parser<'a> {
             // Handle comma or closing paren
             if self.check(&TokenKind::Comma) {
                 self.advance(); // consume comma
-                // Skip newlines after comma
+                                // Skip newlines after comma
                 self.skip_newlines();
             } else if !self.check(&TokenKind::RParen) {
                 // Not comma and not RParen - error

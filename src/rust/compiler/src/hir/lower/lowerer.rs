@@ -9,6 +9,7 @@ use super::super::types::{HirModule, TypeId};
 use super::deprecation_warning::DeprecationWarningCollector;
 use super::memory_warning::MemoryWarningCollector;
 use crate::module_resolver::ModuleResolver;
+use crate::type_inference_config::TypeInferenceConfig;
 
 pub struct Lowerer {
     pub(super) module: HirModule,
@@ -42,6 +43,8 @@ pub struct Lowerer {
     pub(super) deprecated_items: HashMap<String, Option<String>>,
     /// Deprecation warning collector
     pub(super) deprecation_warnings: DeprecationWarningCollector,
+    /// Type inference configuration for empty collections
+    pub(super) type_inference_config: TypeInferenceConfig,
 }
 
 impl Lowerer {
@@ -57,7 +60,7 @@ impl Lowerer {
             module_resolver: None,
             current_file: None,
             loaded_modules: HashSet::new(),
-            memory_warnings: MemoryWarningCollector::strict(), // STRICT by default for Rust-level safety
+            memory_warnings: MemoryWarningCollector::strict(), // STRICT mode for Rust-level safety
             lifetime_context: LifetimeContext::new(),
             capability_env: CapabilityEnv::new(),
             type_aliases: HashMap::new(),
@@ -66,6 +69,7 @@ impl Lowerer {
             function_aliases_reverse: HashMap::new(),
             deprecated_items: HashMap::new(),
             deprecation_warnings: DeprecationWarningCollector::new(),
+            type_inference_config: TypeInferenceConfig::default(),
         }
     }
 
@@ -89,7 +93,24 @@ impl Lowerer {
             function_aliases_reverse: HashMap::new(),
             deprecated_items: HashMap::new(),
             deprecation_warnings: DeprecationWarningCollector::new(),
+            type_inference_config: TypeInferenceConfig::default(),
         }
+    }
+
+    /// Create a lowerer with custom type inference configuration
+    pub fn with_type_inference_config(mut self, config: TypeInferenceConfig) -> Self {
+        self.type_inference_config = config;
+        self
+    }
+
+    /// Set type inference configuration
+    pub fn set_type_inference_config(&mut self, config: TypeInferenceConfig) {
+        self.type_inference_config = config;
+    }
+
+    /// Get the current type inference configuration
+    pub fn type_inference_config(&self) -> &TypeInferenceConfig {
+        &self.type_inference_config
     }
 
     /// Alias for `new()` - strict mode is now the default
@@ -119,12 +140,23 @@ impl Lowerer {
             function_aliases_reverse: HashMap::new(),
             deprecated_items: HashMap::new(),
             deprecation_warnings: DeprecationWarningCollector::new(),
+            type_inference_config: TypeInferenceConfig::default(),
         }
     }
 
     /// Get the collected memory warnings
     pub fn memory_warnings(&self) -> &MemoryWarningCollector {
         &self.memory_warnings
+    }
+
+    /// Get mutable access to the memory warnings collector
+    pub fn memory_warnings_mut(&mut self) -> &mut MemoryWarningCollector {
+        &mut self.memory_warnings
+    }
+
+    /// Set whether to use strict mode for memory safety checks
+    pub fn set_strict_mode(&mut self, strict: bool) {
+        self.memory_warnings.set_strict(strict);
     }
 
     /// Take ownership of the memory warnings

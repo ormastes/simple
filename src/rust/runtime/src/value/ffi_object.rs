@@ -103,13 +103,7 @@ impl FfiMethodEntry {
     /// # Safety
     /// The `name_ptr` must point to valid UTF-8 data that lives at least as long as this entry.
     /// The `func_ptr` must point to a valid function with the appropriate signature.
-    pub const fn new(
-        name_hash: u64,
-        name_ptr: *const u8,
-        name_len: u32,
-        flags: u32,
-        func_ptr: *const (),
-    ) -> Self {
+    pub const fn new(name_hash: u64, name_ptr: *const u8, name_len: u32, flags: u32, func_ptr: *const ()) -> Self {
         Self {
             name_hash,
             name_ptr,
@@ -308,11 +302,7 @@ use std::alloc::{Layout, alloc_zeroed, dealloc};
 /// # Returns
 /// A RuntimeValue containing the FFI object, or NIL on allocation failure.
 #[no_mangle]
-pub unsafe extern "C" fn rt_ffi_object_new(
-    type_id: u32,
-    handle: u32,
-    vtable: *const FfiVtable,
-) -> RuntimeValue {
+pub unsafe extern "C" fn rt_ffi_object_new(type_id: u32, handle: u32, vtable: *const FfiVtable) -> RuntimeValue {
     if vtable.is_null() {
         return RuntimeValue::NIL;
     }
@@ -380,9 +370,7 @@ pub extern "C" fn rt_ffi_object_handle(value: RuntimeValue) -> u32 {
 /// The vtable pointer, or null if the value is not an FFI object.
 #[no_mangle]
 pub extern "C" fn rt_ffi_object_vtable(value: RuntimeValue) -> *const FfiVtable {
-    get_ffi_object(value)
-        .map(|obj| obj.vtable)
-        .unwrap_or(std::ptr::null())
+    get_ffi_object(value).map(|obj| obj.vtable).unwrap_or(std::ptr::null())
 }
 
 /// Check if a value is an FFI object.
@@ -418,11 +406,7 @@ pub extern "C" fn rt_ffi_object_type_name(value: RuntimeValue) -> RuntimeValue {
 /// # Returns
 /// `true` if the method exists, `false` otherwise.
 #[no_mangle]
-pub extern "C" fn rt_ffi_object_has_method(
-    value: RuntimeValue,
-    name_ptr: *const u8,
-    name_len: u32,
-) -> bool {
+pub extern "C" fn rt_ffi_object_has_method(value: RuntimeValue, name_ptr: *const u8, name_len: u32) -> bool {
     let Some(obj) = get_ffi_object(value) else {
         return false;
     };
@@ -553,6 +537,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::manual_c_str_literals)]
     fn test_method_entry_flags() {
         let entry = FfiMethodEntry::new(
             fnv1a_hash_str("test"),
@@ -567,6 +552,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::manual_c_str_literals)]
     fn test_vtable_lookup() {
         // Create a sorted method table
         static METHODS: [FfiMethodEntry; 3] = [
@@ -594,14 +580,7 @@ mod tests {
             },
         ];
 
-        let vtable = FfiVtable::new(
-            b"Test\0".as_ptr(),
-            4,
-            3,
-            METHODS.as_ptr(),
-            None,
-            None,
-        );
+        let vtable = FfiVtable::new(b"Test\0".as_ptr(), 4, 3, METHODS.as_ptr(), None, None);
 
         assert_eq!(vtable.methods().len(), 3);
         assert!(unsafe { vtable.name() } == "Test");

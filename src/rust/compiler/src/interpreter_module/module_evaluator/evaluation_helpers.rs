@@ -98,6 +98,9 @@ pub(super) fn register_definitions(
                     invariant: s.invariant.clone(),
                     macro_invocations: vec![],
                     mixins: vec![],
+                    is_generic_template: s.is_generic_template,
+                    specialization_of: s.specialization_of.clone(),
+                    type_bindings: s.type_bindings.clone(),
                 };
                 local_classes.insert(s.name.clone(), class_def.clone());
                 global_classes.insert(s.name.clone(), class_def);

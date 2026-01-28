@@ -115,12 +115,7 @@ pub fn run_rust_tests(workspace_root: &Path, ignored_only: bool) -> Vec<TestFile
             parse_cargo_test_output(&combined)
         }
         Err(e) => {
-            debug_log!(
-                DebugLevel::Basic,
-                "RustTests",
-                "Failed to run cargo test: {}",
-                e
-            );
+            debug_log!(DebugLevel::Basic, "RustTests", "Failed to run cargo test: {}", e);
             Vec::new()
         }
     }
@@ -143,12 +138,7 @@ pub fn run_rust_doctests(workspace_root: &Path) -> Vec<TestFileResult> {
             parse_cargo_test_output(&combined)
         }
         Err(e) => {
-            debug_log!(
-                DebugLevel::Basic,
-                "RustTests",
-                "Failed to run cargo test --doc: {}",
-                e
-            );
+            debug_log!(DebugLevel::Basic, "RustTests", "Failed to run cargo test --doc: {}", e);
             Vec::new()
         }
     }
@@ -159,10 +149,7 @@ fn list_tests_with_args(workspace_root: &Path, extra_args: &[&str]) -> Vec<Strin
     let mut args = vec!["test", "--workspace", "--"];
     args.extend(extra_args);
 
-    let output = Command::new("cargo")
-        .args(&args)
-        .current_dir(workspace_root)
-        .output();
+    let output = Command::new("cargo").args(&args).current_dir(workspace_root).output();
 
     match output {
         Ok(output) => {
@@ -170,12 +157,7 @@ fn list_tests_with_args(workspace_root: &Path, extra_args: &[&str]) -> Vec<Strin
             parse_test_list(&stdout)
         }
         Err(e) => {
-            debug_log!(
-                DebugLevel::Detailed,
-                "RustTests",
-                "Failed to list tests: {}",
-                e
-            );
+            debug_log!(DebugLevel::Detailed, "RustTests", "Failed to list tests: {}", e);
             Vec::new()
         }
     }

@@ -7,15 +7,12 @@
 use crate::error::CompileError;
 use crate::value::Value;
 use simple_runtime::value::ffi::{
-    rt_sandbox_reset, rt_sandbox_set_cpu_time, rt_sandbox_set_memory,
-    rt_sandbox_set_fd_limit, rt_sandbox_set_thread_limit, rt_sandbox_disable_network,
-    rt_sandbox_set_network_allowlist, rt_sandbox_set_network_blocklist,
-    rt_sandbox_add_allowed_domain, rt_sandbox_add_blocked_domain,
-    rt_sandbox_set_fs_readonly, rt_sandbox_set_fs_restricted, rt_sandbox_set_fs_overlay,
-    rt_sandbox_add_read_path, rt_sandbox_add_write_path,
-    rt_sandbox_apply, rt_sandbox_cleanup, rt_sandbox_is_configured,
-    rt_sandbox_get_cpu_time, rt_sandbox_get_memory,
-    rt_sandbox_get_network_mode, rt_sandbox_get_fs_mode,
+    rt_sandbox_reset, rt_sandbox_set_cpu_time, rt_sandbox_set_memory, rt_sandbox_set_fd_limit,
+    rt_sandbox_set_thread_limit, rt_sandbox_disable_network, rt_sandbox_set_network_allowlist,
+    rt_sandbox_set_network_blocklist, rt_sandbox_add_allowed_domain, rt_sandbox_add_blocked_domain,
+    rt_sandbox_set_fs_readonly, rt_sandbox_set_fs_restricted, rt_sandbox_set_fs_overlay, rt_sandbox_add_read_path,
+    rt_sandbox_add_write_path, rt_sandbox_apply, rt_sandbox_cleanup, rt_sandbox_is_configured, rt_sandbox_get_cpu_time,
+    rt_sandbox_get_memory, rt_sandbox_get_network_mode, rt_sandbox_get_fs_mode,
 };
 
 /// Reset the sandbox configuration to defaults.
@@ -33,7 +30,11 @@ pub fn rt_sandbox_set_cpu_time_fn(args: &[Value]) -> Result<Value, CompileError>
     let seconds = match args.first() {
         Some(Value::Int(n)) => *n as u64,
         Some(Value::Float(f)) => *f as u64,
-        _ => return Err(CompileError::runtime("rt_sandbox_set_cpu_time: seconds must be a number")),
+        _ => {
+            return Err(CompileError::runtime(
+                "rt_sandbox_set_cpu_time: seconds must be a number",
+            ))
+        }
     };
     rt_sandbox_set_cpu_time(seconds);
     Ok(Value::Nil)
@@ -72,7 +73,11 @@ pub fn rt_sandbox_set_thread_limit_fn(args: &[Value]) -> Result<Value, CompileEr
     let count = match args.first() {
         Some(Value::Int(n)) => *n as u64,
         Some(Value::Float(f)) => *f as u64,
-        _ => return Err(CompileError::runtime("rt_sandbox_set_thread_limit: count must be a number")),
+        _ => {
+            return Err(CompileError::runtime(
+                "rt_sandbox_set_thread_limit: count must be a number",
+            ))
+        }
     };
     rt_sandbox_set_thread_limit(count);
     Ok(Value::Nil)
@@ -108,7 +113,11 @@ pub fn rt_sandbox_set_network_blocklist_fn(_args: &[Value]) -> Result<Value, Com
 pub fn rt_sandbox_add_allowed_domain_fn(args: &[Value]) -> Result<Value, CompileError> {
     let domain = match args.first() {
         Some(Value::Str(s)) => s.clone(),
-        _ => return Err(CompileError::runtime("rt_sandbox_add_allowed_domain: domain must be a string")),
+        _ => {
+            return Err(CompileError::runtime(
+                "rt_sandbox_add_allowed_domain: domain must be a string",
+            ))
+        }
     };
     unsafe {
         rt_sandbox_add_allowed_domain(domain.as_ptr(), domain.len() as u64);
@@ -122,7 +131,11 @@ pub fn rt_sandbox_add_allowed_domain_fn(args: &[Value]) -> Result<Value, Compile
 pub fn rt_sandbox_add_blocked_domain_fn(args: &[Value]) -> Result<Value, CompileError> {
     let domain = match args.first() {
         Some(Value::Str(s)) => s.clone(),
-        _ => return Err(CompileError::runtime("rt_sandbox_add_blocked_domain: domain must be a string")),
+        _ => {
+            return Err(CompileError::runtime(
+                "rt_sandbox_add_blocked_domain: domain must be a string",
+            ))
+        }
     };
     unsafe {
         rt_sandbox_add_blocked_domain(domain.as_ptr(), domain.len() as u64);
@@ -174,7 +187,11 @@ pub fn rt_sandbox_add_read_path_fn(args: &[Value]) -> Result<Value, CompileError
 pub fn rt_sandbox_add_write_path_fn(args: &[Value]) -> Result<Value, CompileError> {
     let path = match args.first() {
         Some(Value::Str(s)) => s.clone(),
-        _ => return Err(CompileError::runtime("rt_sandbox_add_write_path: path must be a string")),
+        _ => {
+            return Err(CompileError::runtime(
+                "rt_sandbox_add_write_path: path must be a string",
+            ))
+        }
     };
     unsafe {
         rt_sandbox_add_write_path(path.as_ptr(), path.len() as u64);

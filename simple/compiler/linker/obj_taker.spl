@@ -1,0 +1,643 @@
+# ObjTaker - Shared object extraction with type inference.
+#
+# This module provides a unified component for extracting objects from SMF files
+# and instantiating generic templates with inferred types. Used by both:
+# - Linker: link-time instantiation
+# - Loader: load-time/JIT instantiation
+#
+# Key features:
+# - Template loading from TemplateCode sections
+# - Type inference using compiler.type_infer
+# - Caching for efficiency
+# - Cross-module type unification
+
+import ../type_infer.*
+import ../monomorphize/note_sdn.*
+import ../monomorphize/metadata.*
+
+# ============================================================================
+# Result Types
+# ============================================================================
+
+enum ObjTakeResult:
+    """Result of taking an object from SMF."""
+    Code(bytes: [u8], symbol: SmfSymbol, ty: HirType?)
+    Template(template: Template, symbol: SmfSymbol)
+    Deferred(symbol: text, hints: DeferredHints)
+    NotFound(symbol: text)
+    Error(message: text)
+
+impl ObjTakeResult:
+    fn is_success() -> bool:
+        match self:
+            case Code(_, _, _): true
+            case Template(_, _): true
+            case _: false
+
+    fn is_error() -> bool:
+        match self:
+            case Error(_): true
+            case NotFound(_): true
+            case _: false
+
+# ============================================================================
+# SMF Symbol (simplified view)
+# ============================================================================
+
+struct SmfSymbol:
+    """Symbol information from SMF file."""
+    name: text
+    section_index: i32
+    offset: i64
+    size: i64
+    ty: SymbolType
+    binding: SymbolBinding
+    is_generic_template: bool
+    template_param_count: i32
+    template_offset: i64
+
+enum SymbolType:
+    Function
+    Data
+    Type
+    Trait
+    Actor
+    Constant
+    Unknown
+
+enum SymbolBinding:
+    Local
+    Global
+    Weak
+
+impl SmfSymbol:
+    fn is_function() -> bool:
+        match self.ty:
+            case Function: true
+            case _: false
+
+    fn is_exported() -> bool:
+        match self.binding:
+            case Global: true
+            case Weak: true
+            case _: false
+
+# ============================================================================
+# Template
+# ============================================================================
+
+struct Template:
+    """Generic template from TemplateCode section."""
+    name: text
+    type_params: [text]
+    kind: TemplateKind
+    body: [u8]  # Serialized AST/MIR
+    constraints: [TypeConstraint]
+
+enum TemplateKind:
+    Function
+    Struct
+    Class
+    Enum
+    Trait
+
+struct TypeConstraint:
+    """Type constraint on a generic parameter."""
+    param: text
+    bound: text  # Trait name or type
+
+impl Template:
+    fn arity() -> i32:
+        self.type_params.len() as i32
+
+    fn substitute(type_args: [HirType]) -> SubstitutedTemplate:
+        """Substitute type parameters with concrete types."""
+        SubstitutedTemplate(
+            template: self,
+            type_args: type_args,
+            mangled_name: mangle_name(self.name, type_args)
+        )
+
+struct SubstitutedTemplate:
+    """Template with type arguments applied."""
+    template: Template
+    type_args: [HirType]
+    mangled_name: text
+
+# ============================================================================
+# Deferred Hints
+# ============================================================================
+
+struct DeferredHints:
+    """Hints for deferred type inference at link/load time."""
+    symbol: text
+    type_vars: [DeferredTypeVar]
+    constraints: [DeferredConstraint]
+    usage_sites: [UsageSite]
+
+struct DeferredTypeVar:
+    """A type variable to be resolved."""
+    id: i64
+    name: text
+    fallback: HirType?
+
+struct DeferredConstraint:
+    """Constraint on deferred type variables."""
+    kind: ConstraintKind
+    lhs: i64  # Type var ID or resolved type
+    rhs: i64
+    source_loc: text
+
+enum ConstraintKind:
+    Equals
+    Subtype
+    Implements
+    HasField
+    HasMethod
+
+struct UsageSite:
+    """Location where symbol is used (for type inference)."""
+    file: text
+    loc: text
+    context_type: HirType?
+
+# ============================================================================
+# ObjTaker
+# ============================================================================
+
+struct ObjTaker:
+    """Shared component for object extraction with type inference."""
+    # Type inference engine
+    inference: TypeInferenceEngine
+    # Template cache: name -> Template
+    template_cache: Dict<text, Template>
+    # Instance cache: mangled_name -> code bytes
+    instance_cache: Dict<text, [u8]>
+    # Loaded SMF metadata
+    smf_metadata: Dict<text, NoteSdnMetadata>
+    # Configuration
+    config: ObjTakerConfig
+
+struct ObjTakerConfig:
+    """Configuration for ObjTaker."""
+    enable_caching: bool
+    max_cache_size: i32
+    verbose: bool
+    allow_deferred: bool
+
+impl ObjTakerConfig:
+    static fn default() -> ObjTakerConfig:
+        ObjTakerConfig(
+            enable_caching: true,
+            max_cache_size: 10000,
+            verbose: false,
+            allow_deferred: true
+        )
+
+impl ObjTaker:
+    static fn new(config: ObjTakerConfig) -> ObjTaker:
+        """Create a new ObjTaker."""
+        ObjTaker(
+            inference: TypeInferenceEngine.new(),
+            template_cache: {},
+            instance_cache: {},
+            smf_metadata: {},
+            config: config
+        )
+
+    static fn with_defaults() -> ObjTaker:
+        """Create ObjTaker with default configuration."""
+        ObjTaker.new(ObjTakerConfig.default())
+
+    # ========================================================================
+    # Main API
+    # ========================================================================
+
+    me take_object(smf_reader: SmfReader, symbol_name: text) -> ObjTakeResult:
+        """Extract object from SMF, applying type inference as needed.
+
+        Routes to appropriate handler based on symbol type:
+        - Generic template -> take_generic()
+        - Has deferred types -> take_deferred()
+        - Concrete -> take_concrete()
+        """
+        # Check instance cache first
+        if self.config.enable_caching and self.instance_cache.contains_key(symbol_name):
+            val cached = self.instance_cache[symbol_name]
+            return ObjTakeResult.Code(
+                bytes: cached,
+                symbol: SmfSymbol(
+                    name: symbol_name,
+                    section_index: 0,
+                    offset: 0,
+                    size: cached.len() as i64,
+                    ty: SymbolType.Function,
+                    binding: SymbolBinding.Global,
+                    is_generic_template: false,
+                    template_param_count: 0,
+                    template_offset: 0
+                ),
+                ty: None
+            )
+
+        # Find symbol in SMF
+        val symbol_result = smf_reader.lookup_symbol(symbol_name)
+        if symbol_result.is_err():
+            return ObjTakeResult.NotFound(symbol_name)
+
+        val symbol = symbol_result.unwrap()
+
+        # Route based on symbol type
+        if symbol.is_generic_template:
+            self.take_generic(smf_reader, symbol)
+        else if self.has_deferred_hints(smf_reader, symbol):
+            self.take_deferred(smf_reader, symbol)
+        else:
+            self.take_concrete(smf_reader, symbol)
+
+    me take_with_types(smf_reader: SmfReader, symbol_name: text, type_args: [HirType]) -> ObjTakeResult:
+        """Take object with explicit type arguments."""
+        val mangled = mangle_name(symbol_name, type_args)
+
+        # Check cache
+        if self.config.enable_caching and self.instance_cache.contains_key(mangled):
+            val cached = self.instance_cache[mangled]
+            return ObjTakeResult.Code(
+                bytes: cached,
+                symbol: SmfSymbol(
+                    name: mangled,
+                    section_index: 0,
+                    offset: 0,
+                    size: cached.len() as i64,
+                    ty: SymbolType.Function,
+                    binding: SymbolBinding.Global,
+                    is_generic_template: false,
+                    template_param_count: 0,
+                    template_offset: 0
+                ),
+                ty: None
+            )
+
+        # Find template
+        val symbol_result = smf_reader.lookup_symbol(symbol_name)
+        if symbol_result.is_err():
+            return ObjTakeResult.NotFound(symbol_name)
+
+        val symbol = symbol_result.unwrap()
+        if not symbol.is_generic_template:
+            return ObjTakeResult.Error("Symbol {symbol_name} is not a generic template")
+
+        # Load and instantiate template
+        val template = self.load_template(smf_reader, symbol)?
+        self.instantiate(template, type_args)
+
+    # ========================================================================
+    # Internal Methods
+    # ========================================================================
+
+    me take_generic(smf_reader: SmfReader, symbol: SmfSymbol) -> ObjTakeResult:
+        """Take generic template and instantiate with inferred types."""
+        if self.config.verbose:
+            print "[obj-taker] Taking generic: {symbol.name}"
+
+        # 1. Load template
+        val template_result = self.load_template(smf_reader, symbol)
+        if template_result.is_err():
+            return ObjTakeResult.Error(template_result.unwrap_err())
+
+        val template = template_result.unwrap()
+
+        # 2. Get usage hints from note.sdn
+        val hints = self.get_usage_hints(smf_reader, symbol.name)
+
+        # 3. Try to infer type arguments
+        val inferred = self.infer_type_args(template, hints)
+        if inferred.is_err():
+            # Cannot infer - return template for deferred instantiation
+            if self.config.allow_deferred:
+                return ObjTakeResult.Template(template: template, symbol: symbol)
+            else:
+                return ObjTakeResult.Error("Cannot infer type arguments for {symbol.name}")
+
+        val type_args = inferred.unwrap()
+
+        # 4. Instantiate with inferred types
+        self.instantiate(template, type_args)
+
+    me take_deferred(smf_reader: SmfReader, symbol: SmfSymbol) -> ObjTakeResult:
+        """Take object with deferred type inference."""
+        if self.config.verbose:
+            print "[obj-taker] Taking deferred: {symbol.name}"
+
+        val hints = self.get_deferred_hints(smf_reader, symbol)
+        if not self.config.allow_deferred:
+            return ObjTakeResult.Error("Deferred types not allowed for {symbol.name}")
+
+        ObjTakeResult.Deferred(symbol: symbol.name, hints: hints)
+
+    me take_concrete(smf_reader: SmfReader, symbol: SmfSymbol) -> ObjTakeResult:
+        """Take concrete (non-generic) object."""
+        if self.config.verbose:
+            print "[obj-taker] Taking concrete: {symbol.name}"
+
+        val code_result = smf_reader.read_code(symbol)
+        if code_result.is_err():
+            return ObjTakeResult.Error(code_result.unwrap_err())
+
+        val code = code_result.unwrap()
+
+        # Cache if enabled
+        if self.config.enable_caching:
+            self.instance_cache[symbol.name] = code
+
+        ObjTakeResult.Code(bytes: code, symbol: symbol, ty: None)
+
+    me load_template(smf_reader: SmfReader, symbol: SmfSymbol) -> Result<Template, text>:
+        """Load template from TemplateCode section."""
+        # Check cache
+        if self.template_cache.contains_key(symbol.name):
+            return Ok(self.template_cache[symbol.name])
+
+        # Read template section
+        val template_bytes = smf_reader.read_template_section(symbol)?
+
+        # Parse template
+        val template = parse_template(template_bytes, symbol)?
+
+        # Cache
+        if self.config.enable_caching:
+            self.template_cache[symbol.name] = template
+
+        Ok(template)
+
+    fn has_deferred_hints(smf_reader: SmfReader, symbol: SmfSymbol) -> bool:
+        """Check if symbol has deferred type hints."""
+        val metadata = self.get_metadata(smf_reader)
+        if not metadata.?:
+            return false
+
+        metadata.unwrap().type_inferences.any(\t: t.symbol == symbol.name)
+
+    fn get_metadata(smf_reader: SmfReader) -> NoteSdnMetadata?:
+        """Get cached or load metadata from SMF."""
+        val path = smf_reader.path()
+        if self.smf_metadata.contains_key(path):
+            return Some(self.smf_metadata[path])
+
+        val metadata_result = smf_reader.read_note_sdn()
+        if metadata_result.is_ok():
+            val metadata = metadata_result.unwrap()
+            self.smf_metadata[path] = metadata
+            Some(metadata)
+        else:
+            None
+
+    fn get_usage_hints(smf_reader: SmfReader, symbol_name: text) -> [UsageSite]:
+        """Get usage hints for a symbol from note.sdn."""
+        val metadata = self.get_metadata(smf_reader)
+        if not metadata.?:
+            return []
+
+        # Find type inferences related to this symbol
+        metadata.unwrap().type_inferences
+            .filter(\t: t.symbol == symbol_name or t.context.contains(symbol_name))
+            .map(\t: UsageSite(
+                file: t.from_file,
+                loc: t.from_loc,
+                context_type: None  # TODO: Parse type from inference entry
+            ))
+
+    fn get_deferred_hints(smf_reader: SmfReader, symbol: SmfSymbol) -> DeferredHints:
+        """Build deferred hints for a symbol."""
+        val metadata = self.get_metadata(smf_reader)
+        var type_vars: [DeferredTypeVar] = []
+        var constraints: [DeferredConstraint] = []
+        var usage_sites: [UsageSite] = []
+
+        if metadata.?:
+            val m = metadata.unwrap()
+
+            # Extract type inferences for this symbol
+            for ti in m.type_inferences:
+                if ti.symbol == symbol.name:
+                    usage_sites = usage_sites.push(UsageSite(
+                        file: ti.from_file,
+                        loc: ti.from_loc,
+                        context_type: None
+                    ))
+
+        DeferredHints(
+            symbol: symbol.name,
+            type_vars: type_vars,
+            constraints: constraints,
+            usage_sites: usage_sites
+        )
+
+    me infer_type_args(template: Template, hints: [UsageSite]) -> Result<[HirType], text>:
+        """Infer type arguments from usage hints."""
+        if hints.is_empty():
+            return Err("No usage hints available for inference")
+
+        # Use type inference engine
+        var inferred: [HirType] = []
+
+        for param in template.type_params:
+            # Try to find a hint that constrains this parameter
+            var found_type: HirType? = None
+
+            for hint in hints:
+                if hint.context_type.?:
+                    # TODO: Unify and extract type for this parameter
+                    found_type = hint.context_type
+                    break
+
+            if not found_type.?:
+                # Cannot infer - use fresh type variable
+                return Err("Cannot infer type for parameter {param}")
+
+            inferred = inferred.push(found_type.unwrap())
+
+        Ok(inferred)
+
+    me instantiate(template: Template, type_args: [HirType]) -> ObjTakeResult:
+        """Instantiate template with type arguments."""
+        if type_args.len() != template.type_params.len():
+            return ObjTakeResult.Error(
+                "Type argument count mismatch: expected {template.type_params.len()}, got {type_args.len()}"
+            )
+
+        val substituted = template.substitute(type_args)
+
+        if self.config.verbose:
+            print "[obj-taker] Instantiating {template.name} as {substituted.mangled_name}"
+
+        # Generate code for instantiation
+        val code = generate_instantiation_code(substituted)
+
+        # Cache
+        if self.config.enable_caching:
+            self.instance_cache[substituted.mangled_name] = code
+
+        ObjTakeResult.Code(
+            bytes: code,
+            symbol: SmfSymbol(
+                name: substituted.mangled_name,
+                section_index: 0,
+                offset: 0,
+                size: code.len() as i64,
+                ty: SymbolType.Function,
+                binding: SymbolBinding.Global,
+                is_generic_template: false,
+                template_param_count: 0,
+                template_offset: 0
+            ),
+            ty: None
+        )
+
+    # ========================================================================
+    # Cache Management
+    # ========================================================================
+
+    me clear_cache():
+        """Clear all caches."""
+        self.template_cache = {}
+        self.instance_cache = {}
+        self.smf_metadata = {}
+
+    fn cache_stats() -> CacheStats:
+        """Get cache statistics."""
+        CacheStats(
+            template_count: self.template_cache.len(),
+            instance_count: self.instance_cache.len(),
+            metadata_count: self.smf_metadata.len()
+        )
+
+struct CacheStats:
+    """Cache statistics."""
+    template_count: i32
+    instance_count: i32
+    metadata_count: i32
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+fn mangle_name(base: text, type_args: [HirType]) -> text:
+    """Mangle a generic name with type arguments."""
+    if type_args.is_empty():
+        return base
+
+    val args_str = type_args.map(\t: type_to_mangled_str(t)).join("_")
+    "{base}${args_str}"
+
+fn type_to_mangled_str(ty: HirType) -> text:
+    """Convert type to mangled string representation."""
+    match ty.kind:
+        case Int(bits, signed):
+            if signed: "i{bits}" else: "u{bits}"
+        case Float(bits):
+            "f{bits}"
+        case Bool: "bool"
+        case String: "str"
+        case Void: "void"
+        case Named(name, _): name
+        case Array(elem, _): "arr_{type_to_mangled_str(elem)}"
+        case _: "unknown"
+
+fn parse_template(bytes: [u8], symbol: SmfSymbol) -> Result<Template, text>:
+    """Parse template from serialized bytes."""
+    # TODO: Implement proper template parsing
+    # For now, create placeholder template
+    Ok(Template(
+        name: symbol.name,
+        type_params: generate_type_params(symbol.template_param_count),
+        kind: TemplateKind.Function,
+        body: bytes,
+        constraints: []
+    ))
+
+fn generate_type_params(count: i32) -> [text]:
+    """Generate type parameter names T, U, V, etc."""
+    val names = ["T", "U", "V", "W", "X", "Y", "Z"]
+    var result: [text] = []
+    for i in 0..count:
+        if i < names.len():
+            result = result.push(names[i])
+        else:
+            result = result.push("T{i}")
+    result
+
+fn generate_instantiation_code(substituted: SubstitutedTemplate) -> [u8]:
+    """Generate code for an instantiated template."""
+    # TODO: Implement proper code generation
+    # For now, return placeholder
+    []
+
+# ============================================================================
+# SMF Reader Interface (to be implemented by smf_reader.spl)
+# ============================================================================
+
+trait SmfReader:
+    """Interface for reading SMF files."""
+    fn path() -> text
+    fn lookup_symbol(name: text) -> Result<SmfSymbol, text>
+    fn read_code(symbol: SmfSymbol) -> Result<[u8], text>
+    fn read_template_section(symbol: SmfSymbol) -> Result<[u8], text>
+    fn read_note_sdn() -> Result<NoteSdnMetadata, text>
+
+# ============================================================================
+# Type Inference Engine Interface
+# ============================================================================
+
+struct TypeInferenceEngine:
+    """Wrapper for type inference from compiler.type_infer."""
+    substitution: Substitution
+    next_var_id: i64
+
+impl TypeInferenceEngine:
+    static fn new() -> TypeInferenceEngine:
+        TypeInferenceEngine(
+            substitution: Substitution.new(),
+            next_var_id: 0
+        )
+
+    me fresh_var() -> HirType:
+        """Create a fresh type variable."""
+        val id = self.next_var_id
+        self.next_var_id = self.next_var_id + 1
+        HirType(kind: HirTypeKind.Infer(id, 0), span: None)
+
+    me unify(t1: HirType, t2: HirType) -> Result<(), text>:
+        """Unify two types."""
+        # Delegate to type_infer module
+        val result = self.substitution.unify(t1, t2)
+        if result.is_err():
+            Err("Cannot unify types")
+        else:
+            Ok(())
+
+    fn resolve(ty: HirType) -> HirType:
+        """Resolve type through substitutions."""
+        self.substitution.apply(ty)
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export ObjTaker
+export ObjTakerConfig
+export ObjTakeResult
+export SmfSymbol
+export SymbolType
+export SymbolBinding
+export Template
+export TemplateKind
+export SubstitutedTemplate
+export DeferredHints
+export DeferredTypeVar
+export DeferredConstraint
+export ConstraintKind
+export UsageSite
+export CacheStats
+export SmfReader
+export TypeInferenceEngine

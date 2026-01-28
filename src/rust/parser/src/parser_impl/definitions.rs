@@ -81,10 +81,7 @@ impl<'a> Parser<'a> {
     }
 
     /// Parse a class alias with decorators
-    pub(crate) fn parse_class_alias_with_decorators(
-        &mut self,
-        decorators: Vec<Decorator>,
-    ) -> Result<Node, ParseError> {
+    pub(crate) fn parse_class_alias_with_decorators(&mut self, decorators: Vec<Decorator>) -> Result<Node, ParseError> {
         let start_span = self.current.span;
 
         self.expect(&TokenKind::Alias)?;

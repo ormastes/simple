@@ -22,6 +22,8 @@ impl HasEffects for MirInst {
             | MirInst::Cast { .. }
             | MirInst::Load { .. }
             | MirInst::Store { .. }
+            | MirInst::GlobalLoad { .. }
+            | MirInst::GlobalStore { .. }
             | MirInst::LocalAddr { .. }
             | MirInst::GetElementPtr { .. }
             | MirInst::IndexGet { .. }

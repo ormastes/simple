@@ -33,7 +33,7 @@ impl Lowerer {
 
             // Check if receiver is an enum type - handle as enum variant access
             if let Some(type_id) = self.module.types.lookup(recv_name) {
-                if let Some(HirType::Enum { name: _, variants }) = self.module.types.get(type_id) {
+                if let Some(HirType::Enum { name: _, variants, .. }) = self.module.types.get(type_id) {
                     // Check if field is a valid variant name
                     for (variant_name, variant_fields) in variants {
                         if variant_name == field {
@@ -77,32 +77,50 @@ impl Lowerer {
             return Ok(result);
         }
 
-        // Regular struct field access
-        let (field_index, field_ty) = self.get_field_info(recv_hir.ty, field)?;
-
-        // Track field access lifetime if receiver is a local variable reference
-        if let HirExprKind::Local(idx) = &recv_hir.kind {
-            if let Some(local) = ctx.get_local(*idx) {
-                // Get the base origin and create a field origin
-                if let Some(base_origin) = self.lifetime_context.get_variable_origin(&local.name).cloned() {
-                    let field_origin = ReferenceOrigin::Field {
-                        base: Box::new(base_origin),
-                        field: field.to_string(),
-                    };
-                    // Register field access for tracking (using a synthetic name)
-                    let field_name = format!("{}.{}", local.name, field);
-                    self.lifetime_context.register_variable(&field_name, field_origin);
+        // Try regular struct field access first
+        match self.get_field_info(recv_hir.ty, field) {
+            Ok((field_index, field_ty)) => {
+                // Track field access lifetime if receiver is a local variable reference
+                if let HirExprKind::Local(idx) = &recv_hir.kind {
+                    if let Some(local) = ctx.get_local(*idx) {
+                        // Get the base origin and create a field origin
+                        if let Some(base_origin) =
+                            self.lifetime_context.get_variable_origin(&local.name).cloned()
+                        {
+                            let field_origin = ReferenceOrigin::Field {
+                                base: Box::new(base_origin),
+                                field: field.to_string(),
+                            };
+                            // Register field access for tracking (using a synthetic name)
+                            let field_name = format!("{}.{}", local.name, field);
+                            self.lifetime_context.register_variable(&field_name, field_origin);
+                        }
+                    }
                 }
-            }
-        }
 
-        Ok(HirExpr {
-            kind: HirExprKind::FieldAccess {
-                receiver: recv_hir,
-                field_index,
-            },
-            ty: field_ty,
-        })
+                Ok(HirExpr {
+                    kind: HirExprKind::FieldAccess {
+                        receiver: recv_hir,
+                        field_index,
+                    },
+                    ty: field_ty,
+                })
+            }
+            Err(LowerError::CannotInferFieldType { .. }) => {
+                // Field not found - treat as no-paren method call
+                // This handles cases like container.resolve where resolve is a method
+                Ok(HirExpr {
+                    kind: HirExprKind::MethodCall {
+                        receiver: recv_hir,
+                        method: field.to_string(),
+                        args: vec![],
+                        dispatch: DispatchMode::Dynamic,
+                    },
+                    ty: TypeId::ANY, // Method return type is unknown at this point
+                })
+            }
+            Err(e) => Err(e),
+        }
     }
 
     /// Lower thread_group field access to GPU intrinsics

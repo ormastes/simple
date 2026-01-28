@@ -359,7 +359,16 @@ pub fn exec_with(
     // First try __exit__, then fall back to close() for Resource types
     // Pass nil as exception argument (TODO: pass actual exception if body errored)
     let exc_arg = Value::Nil;
-    let exit_result = call_method_if_exists(&resource, "__exit__", &[exc_arg], env, functions, classes, enums, impl_methods)?;
+    let exit_result = call_method_if_exists(
+        &resource,
+        "__exit__",
+        &[exc_arg],
+        env,
+        functions,
+        classes,
+        enums,
+        impl_methods,
+    )?;
     if exit_result.is_none() {
         // No __exit__ method found - try close() for Resource trait compatibility
         let _ = call_method_if_exists(&resource, "close", &[], env, functions, classes, enums, impl_methods);

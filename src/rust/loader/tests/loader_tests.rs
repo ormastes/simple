@@ -126,7 +126,12 @@ impl SmfBuilder {
             window_height: 0,
             prefetch_hint: 0,
             prefetch_file_count: 0,
-            reserved: [0; 1],
+            reserved: [0; 5],
+            compression: 0,
+            compression_level: 0,
+            reserved_compression: [0; 2],
+            stub_size: 0,
+            smf_data_offset: 0,
         };
 
         let code_section = Self::make_section(
@@ -150,6 +155,9 @@ impl SmfBuilder {
             size: 0,
             type_id: 0,
             version: 0,
+            template_param_count: 0,
+            reserved: [0; 3],
+            template_offset: 0,
         };
 
         let mut buf = Vec::new();
@@ -230,6 +238,9 @@ fn symbol_table_resolves_by_name() {
         size: 0,
         type_id: 0,
         version: 0,
+        template_param_count: 0,
+        reserved: [0; 3],
+        template_offset: 0,
     };
     let sym_bar = SmfSymbol {
         name_offset: 4,
@@ -242,6 +253,9 @@ fn symbol_table_resolves_by_name() {
         size: 0,
         type_id: 0,
         version: 0,
+        template_param_count: 0,
+        reserved: [0; 3],
+        template_offset: 0,
     };
 
     let table = SymbolTable::new(vec![sym_foo, sym_bar], name_bytes.clone());
@@ -265,6 +279,9 @@ fn relocations_patch_local_symbol() {
         size: 0,
         type_id: 0,
         version: 0,
+        template_param_count: 0,
+        reserved: [0; 3],
+        template_offset: 0,
     };
     let string_table = b"local\0".to_vec();
     let table = SymbolTable::new(vec![sym], string_table);

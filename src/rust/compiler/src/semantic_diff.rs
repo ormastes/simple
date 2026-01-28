@@ -696,6 +696,9 @@ mod tests {
             is_me_method: false,
             bounds_block: None,
             return_constraint: None,
+            is_generic_template: false,
+            specialization_of: None,
+            type_bindings: HashMap::new(),
         })
     }
 
