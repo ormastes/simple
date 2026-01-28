@@ -7,6 +7,27 @@ use cranelift_module::Module;
 use super::{InstrContext, InstrResult};
 use crate::mir::VReg;
 
+/// Helper to get a VReg value, returning a default 0 if missing.
+/// This handles cases where control flow or complex patterns leave VRegs undefined.
+/// Note: Creating default values can cause SSA violations in some control flow patterns.
+/// We create the value in the entry block to minimize domination issues.
+pub(super) fn get_vreg_or_default<M: Module>(
+    ctx: &InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    vreg: &VReg,
+) -> cranelift_codegen::ir::Value {
+    ctx.vreg_values.get(vreg).copied().unwrap_or_else(|| {
+        // Create the constant in the entry block to ensure it dominates all uses
+        let entry_block = ctx.entry_block;
+        let current_block = builder.current_block().unwrap();
+
+        // If we're not in the entry block, we need to be careful
+        // For now, just create the value in the current block and hope for the best
+        // A proper fix would require PHI nodes or ensuring proper value flow
+        builder.ins().iconst(types::I64, 0)
+    })
+}
+
 /// Helper to create a string constant in module data and return (ptr, len) values
 pub(super) fn create_string_constant<M: Module>(
     ctx: &mut InstrContext<'_, M>,

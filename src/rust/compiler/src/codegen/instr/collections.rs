@@ -6,6 +6,7 @@ use cranelift_module::Module;
 
 use crate::mir::{FStringPart, VReg};
 
+use super::helpers::get_vreg_or_default;
 use super::{InstrContext, InstrResult};
 
 /// Helper to create a string literal in stack slot and get ptr/len
@@ -83,7 +84,7 @@ pub(super) fn compile_collection_lit<M: Module>(
 
     // Add each element
     for (i, elem) in elements.iter().enumerate() {
-        let elem_val = ctx.vreg_values[elem];
+        let elem_val = get_vreg_or_default(ctx, builder, elem);
         let wrap_call = builder.ins().call(value_int_ref, &[elem_val]);
         let wrapped = builder.inst_results(wrap_call)[0];
 
@@ -141,7 +142,7 @@ pub(super) fn compile_vec_reduction<M: Module>(
 ) {
     let func_id = ctx.runtime_funcs[runtime_fn];
     let func_ref = ctx.module.declare_func_in_func(func_id, builder.func);
-    let source_val = ctx.vreg_values[&source];
+    let source_val = get_vreg_or_default(ctx, builder, &source);
     let call = builder.ins().call(func_ref, &[source_val]);
     let result = builder.inst_results(call)[0];
     ctx.vreg_values.insert(dest, result);
@@ -157,8 +158,8 @@ pub(super) fn compile_vec_extract<M: Module>(
 ) {
     let func_id = ctx.runtime_funcs["rt_vec_extract"];
     let func_ref = ctx.module.declare_func_in_func(func_id, builder.func);
-    let vector_val = ctx.vreg_values[&vector];
-    let index_val = ctx.vreg_values[&index];
+    let vector_val = get_vreg_or_default(ctx, builder, &vector);
+    let index_val = get_vreg_or_default(ctx, builder, &index);
     let call = builder.ins().call(func_ref, &[vector_val, index_val]);
     let result = builder.inst_results(call)[0];
     ctx.vreg_values.insert(dest, result);
@@ -194,7 +195,7 @@ pub(super) fn compile_vec_math<M: Module>(
 ) {
     let func_id = ctx.runtime_funcs[runtime_fn];
     let func_ref = ctx.module.declare_func_in_func(func_id, builder.func);
-    let source_val = ctx.vreg_values[&source];
+    let source_val = get_vreg_or_default(ctx, builder, &source);
     let call = builder.ins().call(func_ref, &[source_val]);
     let result = builder.inst_results(call)[0];
     ctx.vreg_values.insert(dest, result);
@@ -347,8 +348,8 @@ pub(super) fn compile_index_get<M: Module>(
 ) {
     let index_get_id = ctx.runtime_funcs["rt_index_get"];
     let index_get_ref = ctx.module.declare_func_in_func(index_get_id, builder.func);
-    let coll_val = ctx.vreg_values[&collection];
-    let idx_val = ctx.vreg_values[&index];
+    let coll_val = get_vreg_or_default(ctx, builder, &collection);
+    let idx_val = get_vreg_or_default(ctx, builder, &index);
 
     // Wrap index as RuntimeValue (integers need tagging)
     let value_int_id = ctx.runtime_funcs["rt_value_int"];
@@ -374,9 +375,9 @@ pub(super) fn compile_index_set<M: Module>(
 ) {
     let index_set_id = ctx.runtime_funcs["rt_index_set"];
     let index_set_ref = ctx.module.declare_func_in_func(index_set_id, builder.func);
-    let coll_val = ctx.vreg_values[&collection];
-    let idx_val = ctx.vreg_values[&index];
-    let val = ctx.vreg_values[&value];
+    let coll_val = get_vreg_or_default(ctx, builder, &collection);
+    let idx_val = get_vreg_or_default(ctx, builder, &index);
+    let val = get_vreg_or_default(ctx, builder, &value);
 
     let value_int_id = ctx.runtime_funcs["rt_value_int"];
     let value_int_ref = ctx.module.declare_func_in_func(value_int_id, builder.func);

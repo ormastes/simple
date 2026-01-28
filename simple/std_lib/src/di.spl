@@ -171,8 +171,22 @@ impl Container:
             instance: Some(instance)
         )
 
-    fn resolve<T>(name: text) -> Result<T, text>:
-        """Resolve a dependency by name."""
+    # TODO: Re-enable generic version after bootstrap generics support
+    # fn resolve<T>(name: text) -> Result<T, text>:
+    #     """Resolve a dependency by name."""
+    #     val binding = self.bindings[name]
+    #     if binding.is_none():
+    #         return Err("No binding for: {name}")
+    #     val b = binding.unwrap()
+    #     if b.singleton and b.instance.is_some():
+    #         return Ok(b.instance.unwrap() as T)
+    #     val instance = b.factory()
+    #     if b.singleton:
+    #         self.instances[name] = instance
+    #     Ok(instance as T)
+
+    me resolve_any(name: text) -> Result<Any, text>:
+        """Resolve a dependency by name as Any (non-generic version)."""
         val binding = self.bindings[name]
         if binding.is_none():
             return Err("No binding for: {name}")
@@ -181,7 +195,7 @@ impl Container:
 
         # Return cached instance for singletons
         if b.singleton and b.instance.is_some():
-            return Ok(b.instance.unwrap() as T)
+            return Ok(b.instance.unwrap())
 
         # Create new instance
         val instance = b.factory()
@@ -190,7 +204,23 @@ impl Container:
         if b.singleton:
             self.instances[name] = instance
 
-        Ok(instance as T)
+        Ok(instance)
+
+    fn resolve_simple(name: text) -> Result<Any, text>:
+        """Resolve a dependency by name without caching (immutable self)."""
+        val binding = self.bindings[name]
+        if binding.is_none():
+            return Err("No binding for: {name}")
+
+        val b = binding.unwrap()
+
+        # Return cached instance if available
+        if b.instance.is_some():
+            return Ok(b.instance.unwrap())
+
+        # Create new instance (but don't cache - this is fn not me)
+        val instance = b.factory()
+        Ok(instance)
 
     fn has(name: text) -> bool:
         """Check if a binding exists."""
@@ -307,8 +337,8 @@ struct InterpreterBackend:
 impl Backend for InterpreterBackend:
     fn process(hir: DiHirModule, ctx: BackendContext) -> Result<BackendOutput, text>:
         # Delegate to interpreter instruction module
-        val instruction_module = get_container().resolve<InstructionModule>("InstructionModule")
-        if instruction_module.is_err():
+        val instruction_module_result = get_container().resolve_simple("InstructionModule")
+        if instruction_module_result.is_err():
             return Err("Failed to resolve instruction module")
 
         # TODO: Execute HIR via instruction module
@@ -481,8 +511,9 @@ impl InstructionModule for NoOpInstructionModule:
             case DictNew(pairs):
                 var dict: Dict<Value, Value> = {}
                 for pair in pairs:
-                    val key = self.execute(pair.0, ctx)
-                    val value = self.execute(pair.1, ctx)
+                    val (key_inst, value_inst) = pair
+                    val key = self.execute(key_inst, ctx)
+                    val value = self.execute(value_inst, ctx)
                     if key.is_err() or value.is_err():
                         return Err("Failed to construct dict")
                     dict[key.unwrap()] = value.unwrap()
@@ -539,7 +570,7 @@ struct ExecutionContext:
     globals: Dict<text, Value>
 
 enum Value:
-    None
+    Nil
     Int(i64)
     Float(f64)
     Bool(bool)
@@ -549,7 +580,7 @@ enum Value:
 
 impl Value:
     static fn none() -> Value:
-        Value.None
+        Value.Nil
 
     static fn int(n: i64) -> Value:
         Value.Int(n)
@@ -613,9 +644,14 @@ pub fn get_container() -> Container:
         global_container = Some(Container.for_dev())
     global_container.unwrap()
 
-pub fn resolve<T>(name: text) -> Result<T, text>:
-    """Resolve dependency from global container."""
-    get_container().resolve(name)
+# TODO: Re-enable generic version after bootstrap generics support
+# pub fn resolve<T>(name: text) -> Result<T, text>:
+#     """Resolve dependency from global container."""
+#     get_container().resolve(name)
+
+pub fn resolve_simple(name: text) -> Result<Any, text>:
+    """Resolve dependency from global container (non-generic)."""
+    get_container().resolve_simple(name)
 
 # ============================================================================
 # Exports

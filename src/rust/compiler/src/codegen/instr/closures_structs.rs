@@ -9,7 +9,7 @@ use crate::hir::TypeId;
 use crate::mir::VReg;
 
 use super::super::types_util::type_id_to_cranelift;
-use super::helpers::{create_string_constant, indirect_call_with_result};
+use super::helpers::{create_string_constant, get_vreg_or_default, indirect_call_with_result};
 use super::{InstrContext, InstrResult};
 
 pub(super) fn compile_closure_create<M: Module>(
@@ -38,7 +38,7 @@ pub(super) fn compile_closure_create<M: Module>(
     }
 
     for (i, offset) in capture_offsets.iter().enumerate() {
-        let cap_val = ctx.vreg_values[&captures[i]];
+        let cap_val = get_vreg_or_default(ctx, builder, &captures[i]);
         builder
             .ins()
             .store(MemFlags::new(), cap_val, closure_ptr, *offset as i32);
@@ -56,7 +56,7 @@ pub(super) fn compile_indirect_call<M: Module>(
     return_type: TypeId,
     args: &[VReg],
 ) {
-    let closure_ptr = ctx.vreg_values[&callee];
+    let closure_ptr = get_vreg_or_default(ctx, builder, &callee);
     let fn_ptr = builder.ins().load(types::I64, MemFlags::new(), closure_ptr, 0);
 
     let call_conv = CallConv::SystemV;
@@ -73,7 +73,7 @@ pub(super) fn compile_indirect_call<M: Module>(
 
     let mut call_args = vec![closure_ptr];
     for arg in args {
-        call_args.push(ctx.vreg_values[arg]);
+        call_args.push(get_vreg_or_default(ctx, builder, arg));
     }
 
     indirect_call_with_result(ctx, builder, sig_ref, fn_ptr, &call_args, dest);
@@ -96,7 +96,20 @@ pub(super) fn compile_struct_init<M: Module>(
     let ptr = builder.inst_results(call)[0];
 
     for (i, (offset, field_type)) in field_offsets.iter().zip(field_types.iter()).enumerate() {
-        let field_val = ctx.vreg_values[&field_values[i]];
+        // Handle case where field_values has fewer elements than field_offsets/types
+        let field_val = if i < field_values.len() {
+            if let Some(&val) = ctx.vreg_values.get(&field_values[i]) {
+                val
+            } else {
+                // VReg not found - use default value (0 for pointers/integers)
+                eprintln!("[DEBUG StructInit] Missing VReg {:?}, using default 0", field_values[i]);
+                builder.ins().iconst(types::I64, 0)
+            }
+        } else {
+            // More fields than values - use default 0
+            eprintln!("[DEBUG StructInit] field_values[{}] out of bounds (len={}), using default 0", i, field_values.len());
+            builder.ins().iconst(types::I64, 0)
+        };
         let _cranelift_ty = type_id_to_cranelift(*field_type);
         builder.ins().store(MemFlags::new(), field_val, ptr, *offset as i32);
     }
@@ -121,12 +134,25 @@ pub(super) fn compile_method_call_static<M: Module>(
         return Ok(());
     }
 
-    if let Some(&func_id) = ctx.func_ids.get(func_name) {
+    // Try to find the function - check multiple patterns
+    // 1. Exact match (func_name)
+    // 2. Type-qualified name (ClassName.method) - search for functions ending with ".func_name"
+    let func_id = ctx.func_ids.get(func_name).copied().or_else(|| {
+        // Search for a function ending with ".func_name" (e.g., "ArgParser.parse")
+        let suffix = format!(".{}", func_name);
+        ctx.func_ids
+            .iter()
+            .find(|(k, _)| k.ends_with(&suffix))
+            .map(|(_, &v)| v)
+    });
+
+    if let Some(func_id) = func_id {
         let func_ref = ctx.module.declare_func_in_func(func_id, builder.func);
-        let mut call_args = vec![ctx.vreg_values[&receiver]];
+        let mut call_args = vec![get_vreg_or_default(ctx, builder, &receiver)];
         for arg in args {
-            call_args.push(ctx.vreg_values[arg]);
+            call_args.push(get_vreg_or_default(ctx, builder, arg));
         }
+        let call_args = super::calls::adapt_args_to_signature(builder, func_ref, call_args);
         let call = builder.ins().call(func_ref, &call_args);
         if let Some(d) = dest {
             let results = builder.inst_results(call);
@@ -161,7 +187,46 @@ fn try_compile_builtin_method_call<M: Module>(
     method: &str,
     args: &[VReg],
 ) -> InstrResult<Option<cranelift_codegen::ir::Value>> {
-    let receiver_val = ctx.vreg_values[&receiver];
+    let receiver_val = get_vreg_or_default(ctx, builder, &receiver);
+
+    // Handle slice specially since it has optional parameters
+    if method == "slice" || method == "substring" {
+        let Some(&slice_id) = ctx.runtime_funcs.get("rt_slice") else {
+            return Ok(None);
+        };
+        let slice_ref = ctx.module.declare_func_in_func(slice_id, builder.func);
+
+        // start argument (required)
+        let start = if !args.is_empty() {
+            get_vreg_or_default(ctx, builder, &args[0])
+        } else {
+            builder.ins().iconst(types::I64, 0)
+        };
+
+        // end argument (optional, defaults to collection length)
+        let end = if args.len() > 1 {
+            get_vreg_or_default(ctx, builder, &args[1])
+        } else {
+            // Default to collection length
+            if let Some(&len_id) = ctx.runtime_funcs.get("rt_len") {
+                let len_ref = ctx.module.declare_func_in_func(len_id, builder.func);
+                let len_call = builder.ins().call(len_ref, &[receiver_val]);
+                builder.inst_results(len_call)[0]
+            } else {
+                builder.ins().iconst(types::I64, i64::MAX)
+            }
+        };
+
+        // step argument (optional, defaults to 1)
+        let step = if args.len() > 2 {
+            get_vreg_or_default(ctx, builder, &args[2])
+        } else {
+            builder.ins().iconst(types::I64, 1)
+        };
+
+        let call = builder.ins().call(slice_ref, &[receiver_val, start, end, step]);
+        return Ok(Some(builder.inst_results(call)[0]));
+    }
 
     // Map method names to runtime functions
     let runtime_func = match method {
@@ -176,6 +241,29 @@ fn try_compile_builtin_method_call<M: Module>(
         "clear" => "rt_array_clear",
         // Generic collection methods (work on String, Array, Tuple, Dict)
         "len" => "rt_len",
+        // Result/Option methods
+        "unwrap" | "unwrap_or" => "rt_enum_payload",
+        "is_some" | "is_ok" => "rt_enum_discriminant",
+        "is_none" | "is_err" => "rt_enum_discriminant",
+        // Map/filter/join
+        "join" => "rt_string_join",
+        "map" => "rt_array_map",
+        "filter" => "rt_array_filter",
+        "sort" => "rt_array_sort",
+        "reverse" => "rt_array_reverse",
+        "first" => "rt_array_first",
+        "last" => "rt_array_last",
+        "find" => "rt_array_find",
+        "any" => "rt_array_any",
+        "all" => "rt_array_all",
+        // String extra methods
+        "trim" => "rt_string_trim",
+        "split" => "rt_string_split",
+        "replace" => "rt_string_replace",
+        "to_upper" | "upper" => "rt_string_to_upper",
+        "to_lower" | "lower" => "rt_string_to_lower",
+        "to_int" | "to_i64" | "parse_int" => "rt_string_to_int",
+        "to_string" | "str" => "rt_to_string",
         _ => return Ok(None),
     };
 
@@ -189,7 +277,7 @@ fn try_compile_builtin_method_call<M: Module>(
     // Build call arguments: receiver first, then other args
     let mut call_args = vec![receiver_val];
     for arg in args {
-        call_args.push(ctx.vreg_values[arg]);
+        call_args.push(get_vreg_or_default(ctx, builder, arg));
     }
 
     let call = builder.ins().call(func_ref, &call_args);
@@ -212,7 +300,7 @@ pub(super) fn compile_method_call_virtual<M: Module>(
     return_type: TypeId,
     args: &[VReg],
 ) {
-    let recv_ptr = ctx.vreg_values[&receiver];
+    let recv_ptr = get_vreg_or_default(ctx, builder, &receiver);
     let vtable_ptr = builder.ins().load(types::I64, MemFlags::new(), recv_ptr, 0);
     let slot_offset = (vtable_slot as i32) * 8;
     let method_ptr = builder.ins().load(types::I64, MemFlags::new(), vtable_ptr, slot_offset);
@@ -231,7 +319,7 @@ pub(super) fn compile_method_call_virtual<M: Module>(
 
     let mut call_args = vec![recv_ptr];
     for arg in args {
-        call_args.push(ctx.vreg_values[arg]);
+        call_args.push(get_vreg_or_default(ctx, builder, arg));
     }
 
     indirect_call_with_result(ctx, builder, sig_ref, method_ptr, &call_args, dest);

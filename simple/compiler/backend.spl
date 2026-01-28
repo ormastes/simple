@@ -306,12 +306,17 @@ struct Environment:
     scopes: [Dict<SymbolId, Value>]
     globals: Dict<SymbolId, Value>
 
+fn empty_env_scope() -> Dict<SymbolId, Value>:
+    """Create an empty scope dict (typed for bootstrap inference)."""
+    var result: Dict<SymbolId, Value> = {}
+    result
+
 impl Environment:
     static fn new() -> Environment:
-        Environment(scopes: [{}], globals: {})
+        Environment(scopes: [empty_env_scope()], globals: empty_env_scope())
 
     me push_scope():
-        self.scopes = self.scopes.push({})
+        self.scopes = self.scopes.push(empty_env_scope())
 
     me pop_scope():
         if self.scopes.len() > 1:
@@ -527,9 +532,9 @@ impl Backend for InterpreterBackendImpl:
 
             case DictLit(entries, _, _):
                 var dict: Dict<text, Value> = {}
-                for entry in entries:
-                    val key = self.eval_expr(entry.0, ctx)?
-                    val value = self.eval_expr(entry.1, ctx)?
+                for (key_expr, value_expr) in entries:
+                    val key = self.eval_expr(key_expr, ctx)?
+                    val value = self.eval_expr(value_expr, ctx)?
                     match key:
                         case String(k):
                             dict[k] = value
@@ -778,7 +783,8 @@ impl InterpreterBackendImpl:
         ctx.env.push_scope()
 
         # Bind captured variables
-        for symbol, value in closure.captures:
+        for symbol in closure.captures.keys():
+            val value = closure.captures[symbol]
             ctx.env.define(symbol, value)
 
         # Bind parameters
@@ -983,9 +989,9 @@ impl Backend for SdnBackendImpl:
                 Ok(Value.Array(values))
             case DictLit(entries, _, _):
                 var dict: Dict<text, Value> = {}
-                for entry in entries:
-                    val key = self.eval_expr(entry.0, ctx)?
-                    val value = self.eval_expr(entry.1, ctx)?
+                for (key_expr, value_expr) in entries:
+                    val key = self.eval_expr(key_expr, ctx)?
+                    val value = self.eval_expr(value_expr, ctx)?
                     match key:
                         case String(k):
                             dict[k] = value
@@ -1016,10 +1022,18 @@ impl Backend for SdnBackendImpl:
             case TupleLit(elements):
                 elements.all(\e: self.is_allowed(e))
             case DictLit(entries, _, _):
-                entries.all(\e: self.is_allowed(e.0) and self.is_allowed(e.1))
+                self.all_dict_entries_allowed(entries)
             # Everything else is blocked
             case _:
                 false
+
+    fn all_dict_entries_allowed(entries: [(HirExpr, HirExpr)]) -> bool:
+        """Check if all dict entries are allowed in SDN mode."""
+        for entry in entries:
+            val (key, value) = entry
+            if not self.is_allowed(key) or not self.is_allowed(value):
+                return false
+        true
 
     fn is_allowed_stmt(stmt: HirStmt) -> bool:
         # No statements allowed in SDN mode

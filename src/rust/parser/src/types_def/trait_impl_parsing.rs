@@ -18,7 +18,10 @@ use super::super::Parser;
 /// Check if a function name follows constructor naming patterns
 /// These names are implicitly treated as static methods
 fn is_constructor_name(name: &str) -> bool {
-    matches!(name, "new" | "create" | "default" | "init") || name.starts_with("from_") || name.starts_with("with_")
+    // Note: Removed `with_*` from auto-static detection because it's commonly used
+    // for builder pattern methods like `with_note()` that need `self`.
+    // Only `from_*` remains as a factory method pattern (e.g., `from_string`).
+    matches!(name, "new" | "create" | "default" | "init") || name.starts_with("from_")
 }
 
 impl<'a> Parser<'a> {

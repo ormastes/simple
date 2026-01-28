@@ -49,6 +49,10 @@ pub enum LintName {
     UnnamedDuplicateTypedArgs,
     /// Resource types not properly closed within scope
     ResourceLeak,
+    /// Wildcard `_` pattern used in match arms
+    WildcardMatch,
+    /// Not all enum/option variants explicitly listed in match
+    NonExhaustiveMatch,
 }
 
 impl LintName {
@@ -65,6 +69,8 @@ impl LintName {
             LintName::SSpecManualAssertions => "sspec_manual_assertions",
             LintName::UnnamedDuplicateTypedArgs => "unnamed_duplicate_typed_args",
             LintName::ResourceLeak => "resource_leak",
+            LintName::WildcardMatch => "wildcard_match",
+            LintName::NonExhaustiveMatch => "non_exhaustive_match",
         }
     }
 
@@ -81,6 +87,8 @@ impl LintName {
             "sspec_manual_assertions" => Some(LintName::SSpecManualAssertions),
             "unnamed_duplicate_typed_args" => Some(LintName::UnnamedDuplicateTypedArgs),
             "resource_leak" => Some(LintName::ResourceLeak),
+            "wildcard_match" => Some(LintName::WildcardMatch),
+            "non_exhaustive_match" => Some(LintName::NonExhaustiveMatch),
             _ => None,
         }
     }
@@ -99,6 +107,8 @@ impl LintName {
             LintName::SSpecManualAssertions => LintLevel::Warn,
             LintName::UnnamedDuplicateTypedArgs => LintLevel::Warn,
             LintName::ResourceLeak => LintLevel::Warn,
+            LintName::WildcardMatch => LintLevel::Allow,
+            LintName::NonExhaustiveMatch => LintLevel::Warn,
         }
     }
 
