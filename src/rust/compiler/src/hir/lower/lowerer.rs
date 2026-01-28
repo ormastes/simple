@@ -157,6 +157,15 @@ impl Lowerer {
         }
     }
 
+    /// Extract type annotation from a Pattern::Typed wrapper.
+    /// Returns None if the pattern doesn't have a type annotation.
+    pub(super) fn extract_pattern_type(pattern: &Pattern) -> Option<&simple_parser::Type> {
+        match pattern {
+            Pattern::Typed { ty, .. } => Some(ty),
+            _ => None,
+        }
+    }
+
     /// Get the lifetime context
     pub fn lifetime_context(&self) -> &LifetimeContext {
         &self.lifetime_context

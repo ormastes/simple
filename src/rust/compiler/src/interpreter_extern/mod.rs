@@ -643,7 +643,7 @@ pub(crate) fn call_extern_function(
         "rt_sdn_fmt" => sdn::rt_sdn_fmt(&evaluated),
 
         // ====================================================================
-        // Coverage Operations (7 functions)
+        // Coverage Operations (7 functions + 5 FFI functions)
         // ====================================================================
         "coverage_scan" => coverage::coverage_scan(&evaluated),
         "coverage_class" => coverage::coverage_class(&evaluated),
@@ -652,6 +652,12 @@ pub(crate) fn call_extern_function(
         "coverage_generate" => coverage::coverage_generate(&evaluated),
         "coverage_check" => coverage::coverage_check(&evaluated),
         "coverage_summary" => coverage::coverage_summary(&evaluated),
+        // FFI functions for coverage.spl
+        "rt_coverage_enabled" => coverage::rt_coverage_enabled(&evaluated),
+        "rt_coverage_clear" => coverage::rt_coverage_clear(&evaluated),
+        "rt_coverage_dump_sdn" => coverage::rt_coverage_dump_sdn(&evaluated),
+        "rt_coverage_free_sdn" => coverage::rt_coverage_free_sdn(&evaluated),
+        "rt_cstring_to_text" => coverage::rt_cstring_to_text(&evaluated),
 
         // ====================================================================
         // Cranelift FFI Functions (for self-hosting compiler)

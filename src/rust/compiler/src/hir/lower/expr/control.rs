@@ -75,12 +75,32 @@ impl Lowerer {
         // Collect parameter names and types
         let param_info: Vec<(String, TypeId)> = params
             .iter()
-            .map(|p| (p.name.clone(), TypeId::I64)) // Default to I64 for untyped params
+            .map(|p| {
+                let ty = if let Some(ref t) = p.ty {
+                    self.resolve_type(t).unwrap_or(TypeId::I64)
+                } else {
+                    TypeId::I64 // Default to I64 for untyped params
+                };
+                (p.name.clone(), ty)
+            })
             .collect();
 
-        // Lower the lambda body
+        // Add lambda parameters to context as locals for body lowering
+        let saved_locals_len = ctx.locals.len();
+        for (name, ty) in &param_info {
+            ctx.add_local(name.clone(), *ty, simple_parser::ast::Mutability::Immutable);
+        }
+
+        // Lower the lambda body with access to parameters
         let body_hir = Box::new(self.lower_expr(body, ctx)?);
         let body_ty = body_hir.ty;
+
+        // Restore context (remove lambda parameters)
+        ctx.locals.truncate(saved_locals_len);
+        // Also need to remove from local_map
+        for (name, _) in &param_info {
+            ctx.local_map.remove(name);
+        }
 
         Ok(HirExpr {
             kind: HirExprKind::Lambda {
@@ -447,6 +467,63 @@ impl Lowerer {
                 }
                 // Skip other statement types for now
                 _ => {}
+            }
+        }
+
+        Ok(last_expr)
+    }
+
+    /// Lower a do block expression to HIR
+    ///
+    /// A do block is a sequence of statements that evaluates to the result
+    /// of the last expression. It's essentially an anonymous block expression.
+    /// For now, we only support Expression nodes in do blocks.
+    pub(super) fn lower_do_block(
+        &mut self,
+        statements: &[simple_parser::ast::Node],
+        ctx: &mut FunctionContext,
+    ) -> LowerResult<HirExpr> {
+        // If the block is empty, return nil
+        if statements.is_empty() {
+            return Ok(HirExpr {
+                kind: HirExprKind::Nil,
+                ty: TypeId::NIL,
+            });
+        }
+
+        // If there's only one expression statement, lower it directly
+        if statements.len() == 1 {
+            if let simple_parser::ast::Node::Expression(expr) = &statements[0] {
+                return self.lower_expr(expr, ctx);
+            }
+        }
+
+        // For multiple statements, evaluate each expression and return the last result
+        // TODO: Full statement support would require exposing lower_node or creating a block HIR node
+        let mut last_expr = HirExpr {
+            kind: HirExprKind::Nil,
+            ty: TypeId::NIL,
+        };
+
+        for stmt in statements {
+            match stmt {
+                simple_parser::ast::Node::Expression(expr) => {
+                    last_expr = self.lower_expr(expr, ctx)?;
+                }
+                simple_parser::ast::Node::Return(ret_stmt) => {
+                    if let Some(expr) = &ret_stmt.value {
+                        last_expr = self.lower_expr(expr, ctx)?;
+                    } else {
+                        last_expr = HirExpr {
+                            kind: HirExprKind::Nil,
+                            ty: TypeId::NIL,
+                        };
+                    }
+                }
+                _ => {
+                    // Other statement types are not yet supported in do blocks
+                    // They would need to be lowered via the statement lowering path
+                }
             }
         }
 

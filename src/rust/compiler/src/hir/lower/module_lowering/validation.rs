@@ -206,6 +206,12 @@ impl Lowerer {
             HirExprKind::NeighborAccess { array, .. } => {
                 self.check_expr_for_async_calls(array, caller_name, function_suspension)?;
             }
+            HirExprKind::Dict(entries) => {
+                for (key, value) in entries {
+                    self.check_expr_for_async_calls(key, caller_name, function_suspension)?;
+                    self.check_expr_for_async_calls(value, caller_name, function_suspension)?;
+                }
+            }
             // Leaf expressions - no recursive calls needed
             HirExprKind::Integer(_)
             | HirExprKind::Float(_)

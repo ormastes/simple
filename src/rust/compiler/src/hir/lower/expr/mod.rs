@@ -40,6 +40,7 @@ impl Lowerer {
             Expr::Slice { receiver, start, end, step } => self.lower_slice(receiver, start.as_deref(), end.as_deref(), step.as_deref(), ctx),
             Expr::Tuple(exprs) => self.lower_tuple(exprs, ctx),
             Expr::Array(exprs) => self.lower_array(exprs, ctx),
+            Expr::Dict(pairs) => self.lower_dict(pairs, ctx),
             Expr::ArrayRepeat { value, count } => self.lower_array_repeat(value, count, ctx),
             Expr::VecLiteral(exprs) => self.lower_vec_literal(exprs, ctx),
             Expr::If {
@@ -78,6 +79,8 @@ impl Lowerer {
             Expr::Path(segments) => self.lower_path(segments, ctx),
             // Match expression: match subject: case pattern: body
             Expr::Match { subject, arms } => self.lower_match(subject, arms, ctx),
+            // Do block: do: statements... (block as expression)
+            Expr::DoBlock(statements) => self.lower_do_block(statements, ctx),
             _ => Err(LowerError::Unsupported(format!("{:?}", expr))),
         }
     }
@@ -179,11 +182,24 @@ impl Lowerer {
             return Ok(result);
         }
 
-        // For now, regular method calls are unsupported in native compilation
-        Err(LowerError::Unsupported(format!(
-            "Method call {:?}.{}() not supported in native compilation",
-            receiver, method
-        )))
+        // Lower arguments for generic method call
+        let mut hir_args = Vec::new();
+        for arg in args {
+            let expr = self.lower_expr(&arg.value, ctx)?;
+            hir_args.push(expr);
+        }
+
+        // Generate generic method call for user-defined methods
+        // Uses dynamic dispatch since we don't know the concrete type at compile time
+        Ok(HirExpr {
+            kind: HirExprKind::MethodCall {
+                receiver: Box::new(receiver_hir),
+                method: method.to_string(),
+                args: hir_args,
+                dispatch: DispatchMode::Dynamic,
+            },
+            ty: TypeId::ANY, // Return type is dynamically determined
+        })
     }
 
     /// Handle this.index(), this.thread_index(), this.group_index()
@@ -278,10 +294,26 @@ impl Lowerer {
         if is_array {
             let result_ty = match method {
                 "len" => Some(TypeId::I64),
-                "push" | "clear" => Some(TypeId::VOID),
-                "pop" => Some(TypeId::I64), // Returns element (simplified)
+                "push" => Some(receiver.ty), // Returns the new array (same type)
+                "clear" => Some(TypeId::VOID),
+                "pop" => {
+                    // pop returns the element type
+                    if let Some(HirType::Array { element, .. }) = self.module.types.get(receiver.ty) {
+                        Some(*element)
+                    } else {
+                        Some(TypeId::ANY)
+                    }
+                }
                 "contains" => Some(TypeId::BOOL),
-                "slice" => Some(receiver.ty), // Returns same array type
+                "slice" | "filter" | "map" => Some(receiver.ty), // Returns same array type
+                "first" | "last" | "get" => {
+                    // Returns element type (or Option<element>)
+                    if let Some(HirType::Array { element, .. }) = self.module.types.get(receiver.ty) {
+                        Some(*element)
+                    } else {
+                        Some(TypeId::ANY)
+                    }
+                }
                 _ => None,
             };
 
@@ -292,6 +324,44 @@ impl Lowerer {
                         method: method.to_string(),
                         args: hir_args,
                         dispatch: DispatchMode::Static,
+                    },
+                    ty,
+                }));
+            }
+        }
+
+        // Any type (Dict, generic containers) methods
+        // These are dynamically typed at runtime
+        let is_any = matches!(receiver.ty, TypeId::ANY) || matches!(self.module.types.get(receiver.ty), Some(HirType::Any));
+
+        if is_any {
+            let result_ty = match method {
+                // Dict/Map operations
+                "get" | "remove" => Some(TypeId::ANY), // Returns Any (dynamic value)
+                "insert" | "set" | "put" | "clear" => Some(TypeId::VOID),
+                "contains_key" | "has" | "contains" => Some(TypeId::BOOL),
+                "len" | "size" => Some(TypeId::I64),
+                "keys" | "values" | "items" | "entries" => Some(TypeId::ANY), // Returns iterator/list
+                "is_empty" => Some(TypeId::BOOL),
+                // Optional operations (for Option/Result types stored as Any)
+                "is_some" | "is_none" | "is_ok" | "is_err" => Some(TypeId::BOOL),
+                "unwrap" | "unwrap_or" | "expect" => Some(TypeId::ANY),
+                "map" | "and_then" | "or_else" => Some(TypeId::ANY),
+                // Type conversion
+                "to_string" | "to_text" => Some(TypeId::STRING),
+                "to_int" | "to_i64" => Some(TypeId::I64),
+                "to_float" | "to_f64" => Some(TypeId::F64),
+                "to_bool" => Some(TypeId::BOOL),
+                _ => None,
+            };
+
+            if let Some(ty) = result_ty {
+                return Ok(Some(HirExpr {
+                    kind: HirExprKind::MethodCall {
+                        receiver: Box::new(receiver.clone()),
+                        method: method.to_string(),
+                        args: hir_args,
+                        dispatch: DispatchMode::Dynamic, // Dynamic dispatch for Any types
                     },
                     ty,
                 }));

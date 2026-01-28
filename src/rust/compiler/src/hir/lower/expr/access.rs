@@ -30,6 +30,37 @@ impl Lowerer {
             if recv_name == "thread_group" {
                 return self.lower_thread_group_field(field);
             }
+
+            // Check if receiver is an enum type - handle as enum variant access
+            if let Some(type_id) = self.module.types.lookup(recv_name) {
+                if let Some(HirType::Enum { name: _, variants }) = self.module.types.get(type_id) {
+                    // Check if field is a valid variant name
+                    for (variant_name, variant_fields) in variants {
+                        if variant_name == field {
+                            // This is an enum variant with no payload (or with payload to be filled later)
+                            if variant_fields.is_none() {
+                                // Unit variant - return enum value
+                                return Ok(HirExpr {
+                                    kind: HirExprKind::Global(format!("{}::{}", recv_name, field)),
+                                    ty: type_id,
+                                });
+                            } else {
+                                // Variant with fields - return constructor reference
+                                // This will be called later with arguments
+                                return Ok(HirExpr {
+                                    kind: HirExprKind::Global(format!("{}::{}", recv_name, field)),
+                                    ty: type_id,
+                                });
+                            }
+                        }
+                    }
+                    // Variant not found
+                    return Err(LowerError::Unsupported(format!(
+                        "enum '{}' has no variant named '{}'",
+                        recv_name, field
+                    )));
+                }
+            }
         }
 
         let recv_hir = Box::new(self.lower_expr(receiver, ctx)?);

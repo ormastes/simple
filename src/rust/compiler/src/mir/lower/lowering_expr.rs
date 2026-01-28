@@ -774,45 +774,114 @@ impl<'a> MirLowerer<'a> {
                         })
                     }
                     DispatchMode::Dynamic => {
-                        // Dynamic dispatch: vtable lookup at runtime
-                        // Try to resolve vtable slot from trait info
-                        let receiver_type = receiver.ty;
-
-                        // Try to get trait name from receiver type
-                        let trait_name = self
-                            .type_registry
-                            .and_then(|reg| reg.get_type_name(receiver_type))
-                            .map(|s| s.to_string());
-
-                        // Resolve vtable slot and param types from trait info
-                        let (vtable_slot, param_types) = if let Some(ref tname) = trait_name {
-                            let slot = self.get_vtable_slot(tname, method).unwrap_or(0);
-                            let params = self
-                                .get_trait_method_signature(tname, method)
-                                .map(|(p, _)| p)
-                                .unwrap_or_default();
-                            (slot, params)
-                        } else {
-                            // Fallback: slot 0, no param types
-                            (0, vec![])
-                        };
-
-                        let return_type = expr_ty;
+                        // Dynamic dispatch: currently Simple doesn't use vtable-based dispatch
+                        // for user types. Use static dispatch with method name matching instead.
+                        // This works because user classes don't have vtables - only trait objects would.
+                        //
+                        // TODO: Add proper vtable dispatch when trait objects are implemented.
+                        //
+                        // For now, use MethodCallStatic which will search for Type.method pattern.
+                        let func_name = method.clone();
                         self.with_func(|func, current_block| {
                             let dest = func.new_vreg();
                             let block = func.block_mut(current_block).unwrap();
-                            block.instructions.push(MirInst::MethodCallVirtual {
+                            block.instructions.push(MirInst::MethodCallStatic {
                                 dest: Some(dest),
                                 receiver: receiver_reg,
-                                vtable_slot,
-                                param_types,
-                                return_type,
+                                func_name,
                                 args: arg_regs,
                             });
                             dest
                         })
                     }
                 }
+            }
+
+            // Global enum variant or global variable
+            HirExprKind::Global(name) => {
+                // Check if this is an enum variant (contains ::)
+                if let Some((enum_name, variant)) = name.split_once("::") {
+                    // Look up the enum type to find the variant index
+                    if let Some(registry) = self.type_registry {
+                        if let Some(enum_type_id) = registry.lookup(enum_name) {
+                            if let Some(HirType::Enum { variants, .. }) = registry.get(enum_type_id) {
+                                for (idx, (variant_name, _fields)) in variants.iter().enumerate() {
+                                    if variant_name == variant {
+                                        // Emit the discriminant value as an integer
+                                        return self.with_func(|func, current_block| {
+                                            let dest = func.new_vreg();
+                                            let block = func.block_mut(current_block).unwrap();
+                                            block.instructions.push(MirInst::ConstInt {
+                                                dest,
+                                                value: idx as i64,
+                                            });
+                                            dest
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    // Enum or variant not found - fall through to error
+                    return Err(MirLowerError::Unsupported(format!("unknown enum variant: {}", name)));
+                }
+
+                // Regular global variable - access via runtime call
+                let name = name.clone();
+                self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let name_reg = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    // Store the name as a string constant and call rt_global_get
+                    block.instructions.push(MirInst::ConstString {
+                        dest: name_reg,
+                        value: name,
+                    });
+                    block.instructions.push(MirInst::Call {
+                        dest: Some(dest),
+                        target: CallTarget::from_name("rt_global_get"),
+                        args: vec![name_reg],
+                    });
+                    dest
+                })
+            }
+
+            // Dictionary literal
+            HirExprKind::Dict(pairs) => {
+                // Create an empty dict and insert pairs
+                // Dict is represented as a runtime value (i64 pointer)
+                let pairs_count = pairs.len();
+
+                // Emit call to create empty dict
+                let dict_target = CallTarget::from_name("rt_dict_new");
+                let dict_reg = self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::Call {
+                        dest: Some(dest),
+                        target: dict_target,
+                        args: vec![],
+                    });
+                    dest
+                })?;
+
+                // Insert each pair
+                for (key_expr, value_expr) in pairs {
+                    let key_reg = self.lower_expr(key_expr)?;
+                    let value_reg = self.lower_expr(value_expr)?;
+                    let insert_target = CallTarget::from_name("rt_dict_insert");
+                    self.with_func(|func, current_block| {
+                        let block = func.block_mut(current_block).unwrap();
+                        block.instructions.push(MirInst::Call {
+                            dest: None,
+                            target: insert_target,
+                            args: vec![dict_reg, key_reg, value_reg],
+                        });
+                        ()
+                    })?;
+                }
+
+                Ok(dict_reg)
             }
 
             _ => Err(MirLowerError::Unsupported(format!("{:?}", expr_kind))),

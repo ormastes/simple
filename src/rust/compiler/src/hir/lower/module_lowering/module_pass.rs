@@ -117,6 +117,38 @@ impl Lowerer {
                 // Also register it as a global so it can be used in type expressions
                 self.globals.insert(ec.name.clone(), type_id);
             }
+            Node::Static(s) => {
+                // Register global/static variable
+                // Resolve the type if provided, otherwise use Any for dynamic typing
+                let ty = if let Some(ref t) = s.ty {
+                    self.resolve_type(t).unwrap_or(TypeId::ANY)
+                } else {
+                    TypeId::ANY
+                };
+                self.globals.insert(s.name.clone(), ty);
+            }
+            Node::Const(c) => {
+                // Register constant
+                let ty = if let Some(ref t) = c.ty {
+                    self.resolve_type(t).unwrap_or(TypeId::ANY)
+                } else {
+                    TypeId::ANY
+                };
+                self.globals.insert(c.name.clone(), ty);
+            }
+            Node::Let(l) => {
+                // Register module-level variable (var at module scope = global)
+                // Extract name from pattern, handling Pattern::Typed wrapper
+                let name = extract_pattern_name(&l.pattern);
+                if let Some(n) = name {
+                    let ty = if let Some(ref t) = l.ty {
+                        self.resolve_type(t).unwrap_or(TypeId::ANY)
+                    } else {
+                        TypeId::ANY
+                    };
+                    self.globals.insert(n, ty);
+                }
+            }
             _ => {}
         }
         Ok(())
@@ -547,5 +579,16 @@ impl Lowerer {
             lifetime_lean4,
             lifetime_violations,
         ))
+    }
+}
+
+/// Extract the variable name from a pattern, handling Pattern::Typed wrapper.
+fn extract_pattern_name(pattern: &simple_parser::Pattern) -> Option<String> {
+    use simple_parser::Pattern;
+    match pattern {
+        Pattern::Identifier(n) => Some(n.clone()),
+        Pattern::MutIdentifier(n) => Some(n.clone()),
+        Pattern::Typed { pattern: inner, .. } => extract_pattern_name(inner),
+        _ => None,
     }
 }

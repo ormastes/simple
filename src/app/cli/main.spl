@@ -211,31 +211,7 @@ struct Token:
     line: i64
     column: i64
 
-struct SimpleLexer:
-    source: str
-    pos: i64
-    line: i64
-    column: i64
-
-fn lexer_new(source: str) -> SimpleLexer:
-    SimpleLexer(source: source, pos: 0, line: 1, column: 1)
-
-fn lexer_current(lex: SimpleLexer) -> str:
-    val p = lex.pos
-    val e = p + 1
-    if p < lex.source.len():
-        lex.source[p:e]
-    else:
-        ""
-
-fn lexer_peek(lex: SimpleLexer) -> str:
-    val p = lex.pos + 1
-    val e = p + 1
-    if p < lex.source.len():
-        lex.source[p:e]
-    else:
-        ""
-
+# Helper functions for character classification
 fn is_alpha(ch: str) -> bool:
     if ch.len() == 0:
         return false
@@ -250,77 +226,6 @@ fn is_digit(ch: str) -> bool:
 
 fn is_whitespace(ch: str) -> bool:
     ch == " " or ch == "\t" or ch == "\r"
-
-me lexer_advance(lex: SimpleLexer):
-    val p = lex.pos
-    val e = p + 1
-    if p < lex.source.len():
-        if lex.source[p:e] == "\n":
-            lex.line = lex.line + 1
-            lex.column = 1
-        else:
-            lex.column = lex.column + 1
-        lex.pos = e
-
-me lexer_skip_whitespace(lex: SimpleLexer):
-    while lex.pos < lex.source.len() and is_whitespace(lexer_current(lex)):
-        lexer_advance(lex)
-
-me lexer_skip_comment(lex: SimpleLexer):
-    # Skip # comment to end of line
-    while lex.pos < lex.source.len() and lexer_current(lex) != "\n":
-        lexer_advance(lex)
-
-fn lexer_read_identifier(lex: SimpleLexer) -> str:
-    val start = lex.pos
-    while lex.pos < lex.source.len():
-        val ch = lexer_current(lex)
-        if is_alpha(ch) or is_digit(ch):
-            lexer_advance(lex)
-        else:
-            break
-    val end = lex.pos
-    lex.source[start:end]
-
-fn lexer_read_number(lex: SimpleLexer) -> Token:
-    val start = lex.pos
-    val start_line = lex.line
-    val start_col = lex.column
-    var has_dot = false
-
-    while lex.pos < lex.source.len():
-        val ch = lexer_current(lex)
-        if is_digit(ch):
-            lexer_advance(lex)
-        elif ch == "." and not has_dot:
-            has_dot = true
-            lexer_advance(lex)
-        else:
-            break
-
-    val end = lex.pos
-    val text = lex.source[start:end]
-    if has_dot:
-        Token(kind: TokenKind.Float(0.0), text: text, line: start_line, column: start_col)
-    else:
-        Token(kind: TokenKind.Integer(0), text: text, line: start_line, column: start_col)
-
-fn lexer_read_string(lex: SimpleLexer) -> Token:
-    val start_line = lex.line
-    val start_col = lex.column
-    val quote = lexer_current(lex)
-    lexer_advance(lex)  # skip opening quote
-    val start = lex.pos
-
-    while lex.pos < lex.source.len() and lexer_current(lex) != quote:
-        if lexer_current(lex) == "\\":
-            lexer_advance(lex)  # skip escape
-        lexer_advance(lex)
-
-    val end = lex.pos
-    val text = lex.source[start:end]
-    lexer_advance(lex)  # skip closing quote
-    Token(kind: TokenKind.String(text), text: text, line: start_line, column: start_col)
 
 fn keyword_or_identifier(text: str) -> TokenKind:
     match text:
@@ -357,109 +262,205 @@ fn keyword_or_identifier(text: str) -> TokenKind:
         case "is": TokenKind.Is
         case _: TokenKind.Identifier(text)
 
-fn lexer_next_token(lex: SimpleLexer) -> Token:
-    lexer_skip_whitespace(lex)
+# SimpleLexer class with methods defined in body
+class SimpleLexer:
+    source: str
+    pos: i64
+    line: i64
+    column: i64
 
-    if lex.pos >= lex.source.len():
-        return Token(kind: TokenKind.Eof, text: "", line: lex.line, column: lex.column)
+    # Read-only methods
+    fn current() -> str:
+        val p = self.pos
+        val e = p + 1
+        if p < self.source.len():
+            self.source[p:e]
+        else:
+            ""
 
-    val ch = lexer_current(lex)
-    val start_line = lex.line
-    val start_col = lex.column
+    fn peek() -> str:
+        val p = self.pos + 1
+        val e = p + 1
+        if p < self.source.len():
+            self.source[p:e]
+        else:
+            ""
 
-    # Comments
-    if ch == "#":
-        lexer_skip_comment(lex)
-        return Token(kind: TokenKind.Comment, text: "#", line: start_line, column: start_col)
+    # Mutable methods
+    me advance():
+        val p = self.pos
+        val e = p + 1
+        if p < self.source.len():
+            if self.source[p:e] == "\n":
+                self.line = self.line + 1
+                self.column = 1
+            else:
+                self.column = self.column + 1
+            self.pos = e
 
-    # Newline
-    if ch == "\n":
-        lexer_advance(lex)
-        return Token(kind: TokenKind.Newline, text: "\\n", line: start_line, column: start_col)
+    me skip_whitespace():
+        while self.pos < self.source.len() and is_whitespace(self.current()):
+            self.advance()
 
-    # Identifiers and keywords
-    if is_alpha(ch):
-        val text = lexer_read_identifier(lex)
-        return Token(kind: keyword_or_identifier(text), text: text, line: start_line, column: start_col)
+    me skip_comment():
+        # Skip # comment to end of line
+        while self.pos < self.source.len() and self.current() != "\n":
+            self.advance()
 
-    # Numbers
-    if is_digit(ch):
-        return lexer_read_number(lex)
+    me read_identifier() -> str:
+        val start = self.pos
+        while self.pos < self.source.len():
+            val ch = self.current()
+            if is_alpha(ch) or is_digit(ch):
+                self.advance()
+            else:
+                break
+        val end = self.pos
+        self.source[start:end]
 
-    # Strings
-    if ch == "\"" or ch == "'":
-        return lexer_read_string(lex)
+    me read_number() -> Token:
+        val start = self.pos
+        val start_line = self.line
+        val start_col = self.column
+        var has_dot = false
 
-    # Two-character operators
-    val next = lexer_peek(lex)
-    if ch == "-" and next == ">":
-        lexer_advance(lex)
-        lexer_advance(lex)
-        return Token(kind: TokenKind.Arrow, text: "->", line: start_line, column: start_col)
-    if ch == "=" and next == "=":
-        lexer_advance(lex)
-        lexer_advance(lex)
-        return Token(kind: TokenKind.Eq, text: "==", line: start_line, column: start_col)
-    if ch == "!" and next == "=":
-        lexer_advance(lex)
-        lexer_advance(lex)
-        return Token(kind: TokenKind.NotEq, text: "!=", line: start_line, column: start_col)
-    if ch == "<" and next == "=":
-        lexer_advance(lex)
-        lexer_advance(lex)
-        return Token(kind: TokenKind.LtEq, text: "<=", line: start_line, column: start_col)
-    if ch == ">" and next == "=":
-        lexer_advance(lex)
-        lexer_advance(lex)
-        return Token(kind: TokenKind.GtEq, text: ">=", line: start_line, column: start_col)
+        while self.pos < self.source.len():
+            val ch = self.current()
+            if is_digit(ch):
+                self.advance()
+            elif ch == "." and not has_dot:
+                has_dot = true
+                self.advance()
+            else:
+                break
 
-    # Single-character tokens - use if-else for braces (f-string conflict)
-    lexer_advance(lex)
-    val lbrace = r"{".char_at(0)
-    val rbrace = r"}".char_at(0)
-    if ch == "+":
-        Token(kind: TokenKind.Plus, text: "+", line: start_line, column: start_col)
-    elif ch == "-":
-        Token(kind: TokenKind.Minus, text: "-", line: start_line, column: start_col)
-    elif ch == "*":
-        Token(kind: TokenKind.Star, text: "*", line: start_line, column: start_col)
-    elif ch == "/":
-        Token(kind: TokenKind.Slash, text: "/", line: start_line, column: start_col)
-    elif ch == "%":
-        Token(kind: TokenKind.Percent, text: "%", line: start_line, column: start_col)
-    elif ch == "=":
-        Token(kind: TokenKind.Assign, text: "=", line: start_line, column: start_col)
-    elif ch == "<":
-        Token(kind: TokenKind.Lt, text: "<", line: start_line, column: start_col)
-    elif ch == ">":
-        Token(kind: TokenKind.Gt, text: ">", line: start_line, column: start_col)
-    elif ch == ":":
-        Token(kind: TokenKind.Colon, text: ":", line: start_line, column: start_col)
-    elif ch == ".":
-        Token(kind: TokenKind.Dot, text: ".", line: start_line, column: start_col)
-    elif ch == ",":
-        Token(kind: TokenKind.Comma, text: ",", line: start_line, column: start_col)
-    elif ch == "(":
-        Token(kind: TokenKind.LParen, text: "(", line: start_line, column: start_col)
-    elif ch == ")":
-        Token(kind: TokenKind.RParen, text: ")", line: start_line, column: start_col)
-    elif ch == lbrace:
-        Token(kind: TokenKind.LBrace, text: ch, line: start_line, column: start_col)
-    elif ch == rbrace:
-        Token(kind: TokenKind.RBrace, text: ch, line: start_line, column: start_col)
-    elif ch == "[":
-        Token(kind: TokenKind.LBracket, text: "[", line: start_line, column: start_col)
-    elif ch == "]":
-        Token(kind: TokenKind.RBracket, text: "]", line: start_line, column: start_col)
-    else:
-        Token(kind: TokenKind.Error("Unknown character"), text: ch, line: start_line, column: start_col)
+        val end = self.pos
+        val text = self.source[start:end]
+        if has_dot:
+            Token(kind: TokenKind.Float(0.0), text: text, line: start_line, column: start_col)
+        else:
+            Token(kind: TokenKind.Integer(0), text: text, line: start_line, column: start_col)
+
+    me read_string() -> Token:
+        val start_line = self.line
+        val start_col = self.column
+        val quote = self.current()
+        self.advance()  # skip opening quote
+        val start = self.pos
+
+        while self.pos < self.source.len() and self.current() != quote:
+            if self.current() == "\\":
+                self.advance()  # skip escape
+            self.advance()
+
+        val end = self.pos
+        val text = self.source[start:end]
+        self.advance()  # skip closing quote
+        Token(kind: TokenKind.String(text), text: text, line: start_line, column: start_col)
+
+    me next_token() -> Token:
+        self.skip_whitespace()
+
+        if self.pos >= self.source.len():
+            return Token(kind: TokenKind.Eof, text: "", line: self.line, column: self.column)
+
+        val ch = self.current()
+        val start_line = self.line
+        val start_col = self.column
+
+        # Comments
+        if ch == "#":
+            self.skip_comment()
+            return Token(kind: TokenKind.Comment, text: "#", line: start_line, column: start_col)
+
+        # Newline
+        if ch == "\n":
+            self.advance()
+            return Token(kind: TokenKind.Newline, text: "\\n", line: start_line, column: start_col)
+
+        # Identifiers and keywords
+        if is_alpha(ch):
+            val text = self.read_identifier()
+            return Token(kind: keyword_or_identifier(text), text: text, line: start_line, column: start_col)
+
+        # Numbers
+        if is_digit(ch):
+            return self.read_number()
+
+        # Strings
+        if ch == "\"" or ch == "'":
+            return self.read_string()
+
+        # Two-character operators
+        val next = self.peek()
+        if ch == "-" and next == ">":
+            self.advance()
+            self.advance()
+            return Token(kind: TokenKind.Arrow, text: "->", line: start_line, column: start_col)
+        if ch == "=" and next == "=":
+            self.advance()
+            self.advance()
+            return Token(kind: TokenKind.Eq, text: "==", line: start_line, column: start_col)
+        if ch == "!" and next == "=":
+            self.advance()
+            self.advance()
+            return Token(kind: TokenKind.NotEq, text: "!=", line: start_line, column: start_col)
+        if ch == "<" and next == "=":
+            self.advance()
+            self.advance()
+            return Token(kind: TokenKind.LtEq, text: "<=", line: start_line, column: start_col)
+        if ch == ">" and next == "=":
+            self.advance()
+            self.advance()
+            return Token(kind: TokenKind.GtEq, text: ">=", line: start_line, column: start_col)
+
+        # Single-character tokens - use if-else for braces (f-string conflict)
+        self.advance()
+        val lbrace = r"{".char_at(0)
+        val rbrace = r"}".char_at(0)
+        if ch == "+":
+            Token(kind: TokenKind.Plus, text: "+", line: start_line, column: start_col)
+        elif ch == "-":
+            Token(kind: TokenKind.Minus, text: "-", line: start_line, column: start_col)
+        elif ch == "*":
+            Token(kind: TokenKind.Star, text: "*", line: start_line, column: start_col)
+        elif ch == "/":
+            Token(kind: TokenKind.Slash, text: "/", line: start_line, column: start_col)
+        elif ch == "%":
+            Token(kind: TokenKind.Percent, text: "%", line: start_line, column: start_col)
+        elif ch == "=":
+            Token(kind: TokenKind.Assign, text: "=", line: start_line, column: start_col)
+        elif ch == "<":
+            Token(kind: TokenKind.Lt, text: "<", line: start_line, column: start_col)
+        elif ch == ">":
+            Token(kind: TokenKind.Gt, text: ">", line: start_line, column: start_col)
+        elif ch == ":":
+            Token(kind: TokenKind.Colon, text: ":", line: start_line, column: start_col)
+        elif ch == ".":
+            Token(kind: TokenKind.Dot, text: ".", line: start_line, column: start_col)
+        elif ch == ",":
+            Token(kind: TokenKind.Comma, text: ",", line: start_line, column: start_col)
+        elif ch == "(":
+            Token(kind: TokenKind.LParen, text: "(", line: start_line, column: start_col)
+        elif ch == ")":
+            Token(kind: TokenKind.RParen, text: ")", line: start_line, column: start_col)
+        elif ch == lbrace:
+            Token(kind: TokenKind.LBrace, text: ch, line: start_line, column: start_col)
+        elif ch == rbrace:
+            Token(kind: TokenKind.RBrace, text: ch, line: start_line, column: start_col)
+        elif ch == "[":
+            Token(kind: TokenKind.LBracket, text: "[", line: start_line, column: start_col)
+        elif ch == "]":
+            Token(kind: TokenKind.RBracket, text: "]", line: start_line, column: start_col)
+        else:
+            Token(kind: TokenKind.Error("Unknown character"), text: ch, line: start_line, column: start_col)
 
 fn tokenize(source: str) -> [Token]:
-    var lex = lexer_new(source)
+    var lex: SimpleLexer = SimpleLexer(source: source, pos: 0, line: 1, column: 1)
     var tokens: [Token] = []
 
     loop:
-        val tok = lexer_next_token(lex)
+        val tok: Token = lex.next_token()
         tokens.push(tok)
         match tok.kind:
             case TokenKind.Eof:

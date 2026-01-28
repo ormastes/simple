@@ -966,7 +966,12 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
         )?;
         // Await the result if it's a Promise (async function)
         let result = await_value(result)?;
-        return result.as_int().map(|v| v as i32);
+        // If main returns unit/tuple (void), treat it as exit code 0
+        return match &result {
+            Value::Tuple(t) if t.is_empty() => Ok(0),
+            Value::Nil => Ok(0),
+            _ => result.as_int().map(|v| v as i32),
+        };
     }
 
     // Fall back to checking for `main = <value>` binding

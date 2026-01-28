@@ -97,6 +97,9 @@ pub enum HirExprKind {
         ty: TypeId,
         fields: Vec<HirExpr>,
     },
+    /// Dictionary literal: {key1: value1, key2: value2}
+    /// Keys and values are stored as pairs of expressions
+    Dict(Vec<(HirExpr, HirExpr)>),
 
     // Control flow expressions
     If {
@@ -246,6 +249,17 @@ impl HirExprKind {
                 ty: *ty,
                 fields: fields.iter().map(|f| f.substitute_local(from_idx, to_idx)).collect(),
             },
+            HirExprKind::Dict(pairs) => HirExprKind::Dict(
+                pairs
+                    .iter()
+                    .map(|(k, v)| {
+                        (
+                            k.substitute_local(from_idx, to_idx),
+                            v.substitute_local(from_idx, to_idx),
+                        )
+                    })
+                    .collect(),
+            ),
             HirExprKind::If {
                 condition,
                 then_branch,
@@ -338,6 +352,12 @@ impl HirExprKind {
                 ty: *ty,
                 fields: fields.iter().map(|f| f.substitute_self_with_result()).collect(),
             },
+            HirExprKind::Dict(pairs) => HirExprKind::Dict(
+                pairs
+                    .iter()
+                    .map(|(k, v)| (k.substitute_self_with_result(), v.substitute_self_with_result()))
+                    .collect(),
+            ),
             HirExprKind::If {
                 condition,
                 then_branch,

@@ -122,6 +122,14 @@ impl Lowerer {
             }
         }
 
+        // Handle static method calls: ClassName.method(args)
+        // This handles Expr::Path with 2 segments like Container.with_profile()
+        if let Expr::Path(segments) = callee {
+            if segments.len() == 2 {
+                return self.lower_static_method_call(&segments[0], &segments[1], args, ctx);
+            }
+        }
+
         // Regular function call
         let func_hir = Box::new(self.lower_expr(callee, ctx)?);
         let mut args_hir = Vec::new();
@@ -227,6 +235,15 @@ impl Lowerer {
             }
             "to_string" => Ok(Some(self.lower_builtin_call(name, args, TypeId::STRING, ctx)?)),
             "to_int" => Ok(Some(self.lower_builtin_call(name, args, TypeId::I64, ctx)?)),
+            // Option/Result constructors (needed for stdlib)
+            "Some" | "Ok" => {
+                // Wrap value in Some/Ok variant - return ANY since it's a generic wrapper
+                Ok(Some(self.lower_builtin_call(name, args, TypeId::ANY, ctx)?))
+            }
+            "None" | "Err" => {
+                // None/Err variants - no argument needed for None
+                Ok(Some(self.lower_builtin_call(name, args, TypeId::ANY, ctx)?))
+            }
             _ => Ok(None),
         }
     }

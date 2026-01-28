@@ -32,10 +32,13 @@ impl Lowerer {
     /// # Returns
     /// Ok(()) if successful, Err if module can't be loaded or parsed
     pub(super) fn load_imported_types(&mut self, module_path: &ModulePath, target: &ImportTarget) -> LowerResult<()> {
+        eprintln!("[DEBUG import_loader] load_imported_types called for path: {:?}, target: {:?}", module_path, target);
+
         // Only proceed if we have a module resolver
         let (resolver, current_file) = match (&self.module_resolver, &self.current_file) {
             (Some(r), Some(f)) => (r, f),
             _ => {
+                eprintln!("[DEBUG import_loader] No module resolver available, skipping");
                 // No module resolver available - skip type loading
                 // This maintains backward compatibility with existing code
                 return Ok(());
@@ -43,9 +46,14 @@ impl Lowerer {
         };
 
         // Resolve module path to filesystem location
+        eprintln!("[DEBUG import_loader] Resolving path from file: {:?}", current_file);
         let resolved = resolver
             .resolve(module_path, current_file)
-            .map_err(|e| LowerError::ModuleResolution(format!("{:?}", e)))?;
+            .map_err(|e| {
+                eprintln!("[DEBUG import_loader] Resolution failed: {:?}", e);
+                LowerError::ModuleResolution(format!("{:?}", e))
+            })?;
+        eprintln!("[DEBUG import_loader] Resolved to: {:?}", resolved.path);
 
         // Prevent circular imports
         if self.loaded_modules.contains(&resolved.path) {
@@ -103,7 +111,9 @@ impl Lowerer {
                     }
                 }
                 Node::Function(func_def) => {
+                    eprintln!("[DEBUG import_loader] Found function: '{}', checking if should import", func_def.name);
                     if self.should_import_symbol(&func_def.name, target) {
+                        eprintln!("[DEBUG import_loader] Importing function: '{}'", func_def.name);
                         // Register function in globals
                         let ret_ty = self.resolve_type_opt(&func_def.return_type)?;
                         self.globals.insert(func_def.name.clone(), ret_ty);
@@ -111,6 +121,8 @@ impl Lowerer {
                         if func_def.is_pure() {
                             self.pure_functions.insert(func_def.name.clone());
                         }
+                    } else {
+                        eprintln!("[DEBUG import_loader] Skipping function: '{}' (not matching target)", func_def.name);
                     }
                 }
                 Node::TypeAlias(type_alias) => {
@@ -125,14 +137,46 @@ impl Lowerer {
                         self.register_trait(trait_def)?;
                     }
                 }
-                // Constants not yet supported in HIR lowering
-                // Implementation would require:
-                // 1. Add HirConst variant to HIR (similar to HirFunction, HirStruct)
-                // 2. Implement const expression evaluation at compile time
-                // 3. Store evaluated constants in symbol table/globals
-                // 4. Handle const imports similar to function registration above
-                // 5. Support const visibility and re-exports
-                // See Node::Const in AST and ConstStmt definition in ast/nodes/statements.rs
+                Node::Static(static_stmt) => {
+                    if self.should_import_symbol(&static_stmt.name, target) {
+                        // Register static/global variable
+                        let ty = if let Some(ref t) = static_stmt.ty {
+                            self.resolve_type(t).unwrap_or(TypeId::ANY)
+                        } else {
+                            TypeId::ANY
+                        };
+                        self.globals.insert(static_stmt.name.clone(), ty);
+                    }
+                }
+                Node::Const(const_stmt) => {
+                    if self.should_import_symbol(&const_stmt.name, target) {
+                        // Register constant
+                        let ty = if let Some(ref t) = const_stmt.ty {
+                            self.resolve_type(t).unwrap_or(TypeId::ANY)
+                        } else {
+                            TypeId::ANY
+                        };
+                        self.globals.insert(const_stmt.name.clone(), ty);
+                    }
+                }
+                Node::Let(let_stmt) => {
+                    // Handle module-level let (global variable)
+                    let name = match &let_stmt.pattern {
+                        simple_parser::Pattern::Identifier(n) => Some(n.clone()),
+                        simple_parser::Pattern::MutIdentifier(n) => Some(n.clone()),
+                        _ => None,
+                    };
+                    if let Some(n) = name {
+                        if self.should_import_symbol(&n, target) {
+                            let ty = if let Some(ref t) = let_stmt.ty {
+                                self.resolve_type(t).unwrap_or(TypeId::ANY)
+                            } else {
+                                TypeId::ANY
+                            };
+                            self.globals.insert(n, ty);
+                        }
+                    }
+                }
                 _ => {}
             }
         }
