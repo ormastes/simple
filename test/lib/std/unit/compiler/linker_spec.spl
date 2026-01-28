@@ -1,0 +1,148 @@
+# Linker Integration Tests
+#
+# Tests for the Simple linker including:
+# - ObjTaker with HM type inference
+# - Link-time instantiation
+# - Cross-module type unification
+# - Mold backend integration
+
+import compiler.linker.*
+import compiler.type_infer.*
+
+describe "Linker":
+    describe "ObjTaker":
+        it "creates with default config":
+            val taker = ObjTaker.with_defaults()
+            val stats = taker.cache_stats()
+            stats.template_count.should_eq(0)
+            stats.instance_count.should_eq(0)
+
+        it "uses HmInferContext for type inference":
+            val config = ObjTakerConfig.default()
+            val taker = ObjTaker.new(config)
+            # Verify it has an inference context
+            taker.infer_ctx.level.should_eq(0)
+
+        it "shares inference context when created with existing context":
+            val shared_ctx = HmInferContext.with_builtins()
+            val config = ObjTakerConfig.default()
+            val taker = ObjTaker.with_inference_context(shared_ctx, config)
+            # Modify shared context
+            val fresh = shared_ctx.fresh_var(Span(start: 0, end: 0, line: 0, col: 0))
+            # Taker should see the same next_var
+            taker.infer_ctx.next_var.should_eq(shared_ctx.next_var)
+
+    describe "LinkConfig":
+        it "creates default config":
+            val config = LinkConfig.default()
+            config.output_format.should_eq(OutputFormat.Smf)
+            config.pie.should_eq(true)
+            config.verbose.should_eq(false)
+
+        it "creates native config":
+            val config = LinkConfig.native("output.bin")
+            config.output_format.should_eq(OutputFormat.Native)
+            config.output_path.should_eq("output.bin")
+
+        it "creates smf config":
+            val config = LinkConfig.smf("output.smf")
+            config.output_format.should_eq(OutputFormat.Smf)
+            config.output_path.should_eq("output.smf")
+
+    describe "Linker":
+        it "creates with config":
+            val config = LinkConfig.default()
+            val linker = Linker.new(config)
+            linker.config.output_format.should_eq(OutputFormat.Smf)
+
+        it "shares inference context between linker and obj_taker":
+            val config = LinkConfig.default()
+            val linker = Linker.new(config)
+            # Both should use the same inference context
+            val fresh1 = linker.infer_ctx.fresh_var(Span(start: 0, end: 0, line: 0, col: 0))
+            # ObjTaker should see the updated next_var
+            linker.obj_taker.infer_ctx.next_var.should_eq(linker.infer_ctx.next_var)
+
+    describe "MoldBackend":
+        it "finds a linker":
+            val result = find_linker()
+            # Should find at least one linker (mold, lld, or ld)
+            result.is_ok().should_eq(true)
+
+        it "creates backend with default config":
+            val config = MoldConfig.default()
+            config.pie.should_eq(true)
+            config.verbose.should_eq(false)
+
+describe "Loader":
+    describe "ModuleLoaderConfig":
+        it "creates default config":
+            val config = ModuleLoaderConfig.default()
+            config.enable_jit.should_eq(true)
+            config.enable_cache.should_eq(true)
+            config.hot_reload.should_eq(false)
+
+    describe "ModuleLoader":
+        it "creates with defaults":
+            val loader = ModuleLoader.with_defaults()
+            val stats = loader.stats()
+            stats.module_count.should_eq(0)
+            stats.symbol_count.should_eq(0)
+
+        it "shares inference context with obj_taker":
+            val loader = ModuleLoader.with_defaults()
+            val fresh = loader.infer_ctx.fresh_var(Span(start: 0, end: 0, line: 0, col: 0))
+            loader.obj_taker.infer_ctx.next_var.should_eq(loader.infer_ctx.next_var)
+
+describe "Type Inference Integration":
+    describe "Cross-module unification":
+        it "unifies types from different modules":
+            val ctx = HmInferContext.with_builtins()
+            val span = Span(start: 0, end: 0, line: 0, col: 0)
+
+            # Create type variables representing types from different modules
+            val module_a_type = ctx.fresh_var(span)  # T from module A
+            val module_b_type = ctx.fresh_var(span)  # U from module B
+
+            # Simulate cross-module unification (both used with Int)
+            val int_type = HirType(kind: HirTypeKind.Int(64, true), span: span)
+            ctx.unify(module_a_type, int_type)
+            ctx.unify(module_b_type, int_type)
+
+            # Both should resolve to Int
+            val resolved_a = ctx.subst.apply(module_a_type)
+            val resolved_b = ctx.subst.apply(module_b_type)
+
+            match resolved_a.kind:
+                case Int(bits, signed):
+                    bits.should_eq(64)
+                    signed.should_eq(true)
+                case _:
+                    fail("Expected Int type")
+
+            match resolved_b.kind:
+                case Int(bits, signed):
+                    bits.should_eq(64)
+                    signed.should_eq(true)
+                case _:
+                    fail("Expected Int type")
+
+    describe "Generic instantiation":
+        it "infers type arguments from usage":
+            val ctx = HmInferContext.with_builtins()
+            val span = Span(start: 0, end: 0, line: 0, col: 0)
+
+            # Simulate identity<T>(x: T) -> T called with Int
+            val t_var = ctx.fresh_var(span)  # Type parameter T
+            val arg_type = HirType(kind: HirTypeKind.Int(64, true), span: span)
+
+            # Unify T with Int (from call site)
+            ctx.unify(t_var, arg_type)
+
+            # T should resolve to Int
+            val resolved = ctx.subst.apply(t_var)
+            match resolved.kind:
+                case Int(bits, _):
+                    bits.should_eq(64)
+                case _:
+                    fail("Expected Int type")

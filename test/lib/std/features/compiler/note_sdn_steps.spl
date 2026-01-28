@@ -2,8 +2,7 @@
 #
 # These steps implement the Given/When/Then clauses from note_sdn_feature_spec.spl
 
-use simple/compiler/monomorphize/note_sdn.*
-use simple/compiler/monomorphize/metadata.ConcreteType
+use simple.compiler.monomorphize.note_sdn.*
 
 # ============================================================================
 # Test Context
@@ -14,20 +13,14 @@ class NoteSdnTestContext:
     metadata: NoteSdnMetadata?
     sdn_output: text?
     last_error: text?
-    sample_int_type: ConcreteType
-    sample_string_type: ConcreteType
-    sample_float_type: ConcreteType
 
 impl NoteSdnTestContext:
-    static fn new() -> NoteSdnTestContext:
-        NoteSdnTestContext(
+    static fn create() -> NoteSdnTestContext:
+        NoteSdnTestContext {
             metadata: None,
             sdn_output: None,
-            last_error: None,
-            sample_int_type: ConcreteType.Named("Int", []),
-            sample_string_type: ConcreteType.Named("String", []),
-            sample_float_type: ConcreteType.Named("Float", [])
-        )
+            last_error: None
+        }
 
     me set_metadata(meta: NoteSdnMetadata):
         self.metadata = Some(meta)
@@ -53,11 +46,11 @@ impl NoteSdnTestContext:
 
 given "a clean note.sdn metadata container":
     """Set up a clean test context."""
-    context = NoteSdnTestContext.new()
+    context = NoteSdnTestContext.create()
 
 given "sample type arguments for Int, String, and Float":
     """Initialize sample type arguments."""
-    # Already done in NoteSdnTestContext.new()
+    # Type args are stored as text in the simplified API
     pass
 
 # ============================================================================
@@ -68,23 +61,28 @@ given "a new NoteSdnMetadata instance":
     """Create a fresh metadata container."""
     context.set_metadata(NoteSdnMetadata.new())
 
-given "an instantiation for {template}":
+given "an instantiation for {template_desc}":
     """Create an instantiation with the given template."""
     var meta = context.get_metadata()
-    val type_arg = match template:
-        case "List<Int>": context.sample_int_type
-        case "Option<String>": context.sample_string_type
-        case _: context.sample_int_type
 
-    val entry = InstantiationEntry.new(
-        template: template.split("<")[0],  # Extract "List" from "List<Int>"
-        type_args: [type_arg],
-        mangled_name: template.replace("<", "$").replace(">", "").replace(",", "$"),
+    # Parse template description (e.g., "List<Int>")
+    val parts = template_desc.split("<")
+    val template_name = parts[0]
+    val type_args = if parts.len() > 1:
+        parts[1].replace(">", "")
+    else:
+        "Int"
+    val mangled = template_desc.replace("<", "$").replace(">", "").replace(",", "$").replace(" ", "")
+
+    val entry = InstantiationEntry {
+        template_name: template_name,
+        type_args: type_args,
+        mangled_name: mangled,
         from_file: "test.spl",
         from_loc: "test.spl:1:1",
         to_obj: "test.o",
         status: InstantiationStatus.Compiled
-    )
+    }
     meta.add_instantiation(entry)
     context.set_metadata(meta)
 
@@ -93,45 +91,52 @@ given "a NoteSdnMetadata instance with sample data":
     var meta = NoteSdnMetadata.new()
 
     # Add 2 instantiations
-    meta.add_instantiation(InstantiationEntry.new(
-        template: "List",
-        type_args: [context.sample_int_type],
+    val entry1 = InstantiationEntry {
+        template_name: "List",
+        type_args: "Int",
         mangled_name: "List$Int",
         from_file: "app.spl",
         from_loc: "app.spl:10:5",
         to_obj: "app.o",
         status: InstantiationStatus.Compiled
-    ))
-    meta.add_instantiation(InstantiationEntry.new(
-        template: "Option",
-        type_args: [context.sample_string_type],
+    }
+    meta.add_instantiation(entry1)
+
+    val entry2 = InstantiationEntry {
+        template_name: "Option",
+        type_args: "String",
         mangled_name: "Option$String",
         from_file: "app.spl",
         from_loc: "app.spl:15:8",
         to_obj: "app.o",
         status: InstantiationStatus.Compiled
-    ))
+    }
+    meta.add_instantiation(entry2)
 
     # Add 2 dependencies
-    meta.add_dependency(DependencyEdge.new(
+    val dep1 = DependencyEdge {
         from_inst: "List$Int",
         to_inst: "Int",
         dep_kind: DependencyKind.TypeParam
-    ))
-    meta.add_dependency(DependencyEdge.new(
+    }
+    meta.add_dependency(dep1)
+
+    val dep2 = DependencyEdge {
         from_inst: "Option$String",
         to_inst: "String",
         dep_kind: DependencyKind.TypeParam
-    ))
+    }
+    meta.add_dependency(dep2)
 
     # Add 1 possible
-    meta.add_possible(PossibleInstantiationEntry.new(
-        template: "Result",
-        type_args: [context.sample_int_type, context.sample_string_type],
+    val poss = PossibleInstantiationEntry {
+        template_name: "Result",
+        type_args: "Int,String",
         mangled_name: "Result$Int$String",
         required_by: "error_module",
         can_defer: true
-    ))
+    }
+    meta.add_possible(poss)
 
     context.set_metadata(meta)
 
@@ -154,50 +159,34 @@ when "I check if it is empty":
     # Result stored in context for verification
     pass
 
-when "I add an instantiation for {template}":
+when "I add an instantiation for {template_desc}":
     """Add an instantiation with the given template."""
     var meta = context.get_metadata()
 
     # Parse template to get type args
-    val parts = template.split("<")
+    val parts = template_desc.split("<")
     val template_name = parts[0]
     val type_args_str = if parts.len() > 1:
         parts[1].replace(">", "")
     else:
         "Int"
 
-    val type_arg = match type_args_str:
-        case "Int": context.sample_int_type
-        case "String": context.sample_string_type
-        case "Float": context.sample_float_type
-        case _: context.sample_int_type
+    val mangled = template_desc.replace("<", "$").replace(">", "").replace(",", "$").replace(" ", "")
 
-    # Handle multiple type args (e.g., Result<Int,String>)
-    val type_args = if type_args_str.contains(","):
-        type_args_str.split(",").map(\t: match t.trim():
-            case "Int": context.sample_int_type
-            case "String": context.sample_string_type
-            case _: context.sample_int_type
-        )
-    else:
-        [type_arg]
-
-    val mangled = template.replace("<", "$").replace(">", "").replace(",", "$").replace(" ", "")
-
-    val entry = InstantiationEntry.new(
-        template: template_name,
-        type_args: type_args,
+    val entry = InstantiationEntry {
+        template_name: template_name,
+        type_args: type_args_str,
         mangled_name: mangled,
         from_file: "test.spl",
         from_loc: "test.spl:1:1",
         to_obj: "test.o",
         status: InstantiationStatus.Compiled
-    )
+    }
 
     meta.add_instantiation(entry)
     context.set_metadata(meta)
 
-when "I add a dependency from {from} to {to} with kind {kind}":
+when "I add a dependency from {from_inst} to {to_inst} with kind {kind}":
     """Add a dependency edge."""
     var meta = context.get_metadata()
 
@@ -208,86 +197,87 @@ when "I add a dependency from {from} to {to} with kind {kind}":
         case "method_dep": DependencyKind.MethodDep
         case _: DependencyKind.TypeParam
 
-    meta.add_dependency(DependencyEdge.new(
-        from_inst: from,
-        to_inst: to,
+    val edge = DependencyEdge {
+        from_inst: from_inst,
+        to_inst: to_inst,
         dep_kind: dep_kind
-    ))
+    }
+    meta.add_dependency(edge)
     context.set_metadata(meta)
 
-when "I track {template} with dependencies":
+when "I track {template_desc} with dependencies":
     """Track a template with multiple dependencies from a table."""
     var meta = context.get_metadata()
 
-    # This would be called with a table parameter in real SSpec
-    # For now, hard-code Container<List<Int>> example
-    meta.add_dependency(DependencyEdge.new(
+    # Hard-code Container<List<Int>> example
+    val dep1 = DependencyEdge {
         from_inst: "Container$List$Int",
         to_inst: "List$Int",
         dep_kind: DependencyKind.FieldType
-    ))
-    meta.add_dependency(DependencyEdge.new(
+    }
+    meta.add_dependency(dep1)
+
+    val dep2 = DependencyEdge {
         from_inst: "List$Int",
         to_inst: "Int",
         dep_kind: DependencyKind.TypeParam
-    ))
+    }
+    meta.add_dependency(dep2)
     context.set_metadata(meta)
 
-when "I add a possible instantiation for {template}":
+when "I add a possible instantiation for {template_desc}":
     """Add a possible instantiation."""
     var meta = context.get_metadata()
 
-    val parts = template.split("<")
+    val parts = template_desc.split("<")
     val template_name = parts[0]
     val type_args_str = parts[1].replace(">", "")
+    val mangled = template_desc.replace("<", "$").replace(">", "")
 
-    val type_arg = match type_args_str:
-        case "Float": context.sample_float_type
-        case "String": context.sample_string_type
-        case _: context.sample_int_type
-
-    val mangled = template.replace("<", "$").replace(">", "")
-
-    meta.add_possible(PossibleInstantiationEntry.new(
-        template: template_name,
-        type_args: [type_arg],
+    val poss = PossibleInstantiationEntry {
+        template_name: template_name,
+        type_args: type_args_str,
         mangled_name: mangled,
         required_by: "math_module",
         can_defer: true
-    ))
+    }
+    meta.add_possible(poss)
     context.set_metadata(meta)
 
-when "I add a type inference for {expr} inferred as {type}":
+when "I add a type inference for {expr} inferred as {inferred_type}":
     """Add a type inference entry."""
     var meta = context.get_metadata()
 
-    meta.add_type_inference(TypeInferenceEntry.new(
-        inferred_type: type,
+    val inf = TypeInferenceEntry {
+        inferred_type: inferred_type,
         expr: expr,
         context: "literal",
         from_file: "test.spl",
         from_loc: "test.spl:5:10"
-    ))
+    }
+    meta.add_type_inference(inf)
     context.set_metadata(meta)
 
 when "I add a circular warning for {cycle_path}":
     """Add a circular dependency warning."""
     var meta = context.get_metadata()
 
-    meta.add_circular_warning(CircularWarning.new(
+    val warn = CircularWarning {
         cycle_path: cycle_path,
         severity: "warning"
-    ))
+    }
+    meta.add_circular_warning(warn)
     context.set_metadata(meta)
 
 when "I add a circular error for {cycle_path} with code {error_code}":
     """Add a circular dependency error."""
     var meta = context.get_metadata()
 
-    meta.add_circular_error(CircularError.new(
+    val err = CircularError {
         cycle_path: cycle_path,
         error_code: error_code
-    ))
+    }
+    meta.add_circular_error(err)
     context.set_metadata(meta)
 
 when "I serialize to SDN format":
@@ -305,14 +295,14 @@ when "I convert {status} to string":
         case _: "unknown"
     context.set_sdn_output(result)
 
-when "I convert {string} from string":
+when "I convert {str_val} from string":
     """Convert string to InstantiationStatus."""
-    val result = InstantiationStatus.from_string(string)
+    val result = InstantiationStatus.from_string(str_val)
     match result:
         case Ok(_): pass
         case Err(msg): context.last_error = Some(msg)
 
-when "I convert {kind} to string":
+when "I convert {kind} kind to string":
     """Convert DependencyKind to string."""
     val result = match kind:
         case "TypeParam": DependencyKind.TypeParam.to_string()
@@ -326,15 +316,16 @@ when "I add an instantiation with special characters":
     """Add instantiation with special characters for escaping test."""
     var meta = context.get_metadata()
 
-    meta.add_instantiation(InstantiationEntry.new(
-        template: "Test\"Type",
-        type_args: [context.sample_int_type],
+    val entry = InstantiationEntry {
+        template_name: "Test\"Type",
+        type_args: "Int",
         mangled_name: "Test\\Path",
         from_file: "test.spl",
         from_loc: "test.spl:1:1",
         to_obj: "test.o",
         status: InstantiationStatus.Compiled
-    ))
+    }
+    meta.add_instantiation(entry)
     context.set_metadata(meta)
 
 # ============================================================================
@@ -350,11 +341,6 @@ then "it should return {expected}":
     """Verify string output matches expected."""
     val output = context.get_sdn_output()
     assert output == expected
-
-then "it should return {enum_value}":
-    """Verify enum conversion result."""
-    # Would check the conversion result
-    pass
 
 then "it should return an error":
     """Verify an error occurred."""
@@ -392,10 +378,10 @@ then "the instantiations list should have {count} entries":
     val expected = count.parse_int()
     assert meta.instantiations.len() == expected
 
-then "the first instantiation should have template {template_name}":
+then "the first instantiation should have template {name}":
     """Verify first instantiation template name."""
     val meta = context.get_metadata()
-    assert meta.instantiations[0].template == template_name
+    assert meta.instantiations[0].template_name == name
 
 then "the first instantiation should have mangled name {mangled}":
     """Verify first instantiation mangled name."""
@@ -414,12 +400,12 @@ then "the dependencies list should have {count} entries":
     val expected = count.parse_int()
     assert meta.dependencies.len() == expected
 
-then "the dependency should be from {from} to {to}":
+then "the dependency should be from {from_inst} to {to_inst}":
     """Verify dependency edge."""
     val meta = context.get_metadata()
     val dep = meta.dependencies[0]
-    assert dep.from_inst == from
-    assert dep.to_inst == to
+    assert dep.from_inst == from_inst
+    assert dep.to_inst == to_inst
 
 then "the dependency kind should be {kind}":
     """Verify dependency kind."""
@@ -450,12 +436,12 @@ then "the type_inferences list should have {count} entry":
     val expected = count.parse_int()
     assert meta.type_inferences.len() == expected
 
-then "the inference should show {expr} as type {type}":
+then "the inference should show {expr} as type {inferred_type}":
     """Verify type inference entry."""
     val meta = context.get_metadata()
     val inf = meta.type_inferences[0]
     assert inf.expr == expr
-    assert inf.inferred_type == type
+    assert inf.inferred_type == inferred_type
 
 then "the circular_warnings list should have {count} entry":
     """Verify circular warnings list size."""
@@ -538,7 +524,7 @@ then "the instantiation templates should be {list}":
     val meta = context.get_metadata()
     # Parse list like ["List", "Option", "Result"]
     val expected = list.replace("[", "").replace("]", "").replace("\"", "").split(",").map(\s: s.trim())
-    val actual = meta.instantiations.map(\inst: inst.template)
+    val actual = meta.instantiations.map(\inst: inst.template_name)
     assert actual == expected
 
 # ============================================================================
