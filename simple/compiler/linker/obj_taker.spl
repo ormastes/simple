@@ -167,8 +167,8 @@ struct UsageSite:
 
 struct ObjTaker:
     """Shared component for object extraction with type inference."""
-    # Type inference engine
-    inference: TypeInferenceEngine
+    # Type inference context (from compiler.type_infer)
+    infer_ctx: HmInferContext
     # Template cache: name -> Template
     template_cache: Dict<text, Template>
     # Instance cache: mangled_name -> code bytes
@@ -196,9 +196,9 @@ impl ObjTakerConfig:
 
 impl ObjTaker:
     static fn new(config: ObjTakerConfig) -> ObjTaker:
-        """Create a new ObjTaker."""
+        """Create a new ObjTaker with HM type inference context."""
         ObjTaker(
-            inference: TypeInferenceEngine.new(),
+            infer_ctx: HmInferContext.with_builtins(),
             template_cache: {},
             instance_cache: {},
             smf_metadata: {},
@@ -208,6 +208,16 @@ impl ObjTaker:
     static fn with_defaults() -> ObjTaker:
         """Create ObjTaker with default configuration."""
         ObjTaker.new(ObjTakerConfig.default())
+
+    static fn with_inference_context(ctx: HmInferContext, config: ObjTakerConfig) -> ObjTaker:
+        """Create ObjTaker with existing inference context (for sharing across modules)."""
+        ObjTaker(
+            infer_ctx: ctx,
+            template_cache: {},
+            instance_cache: {},
+            smf_metadata: {},
+            config: config
+        )
 
     # ========================================================================
     # Main API
@@ -434,30 +444,64 @@ impl ObjTaker:
         )
 
     me infer_type_args(template: Template, hints: [UsageSite]) -> Result<[HirType], text>:
-        """Infer type arguments from usage hints."""
-        if hints.is_empty():
-            return Err("No usage hints available for inference")
+        """Infer type arguments from usage hints using HM inference.
 
-        # Use type inference engine
-        var inferred: [HirType] = []
+        Uses HmInferContext to:
+        1. Create fresh type variables for each template parameter
+        2. Unify with usage context types from hints
+        3. Resolve final concrete types through substitution
+        """
+        val dummy_span = Span(start: 0, end: 0, line: 0, col: 0)
 
+        # Create fresh type variables for each template parameter
+        var param_vars: Dict<text, HirType> = {}
         for param in template.type_params:
-            # Try to find a hint that constrains this parameter
-            var found_type: HirType? = None
+            val fresh = self.infer_ctx.fresh_var(dummy_span)
+            param_vars[param] = fresh
 
-            for hint in hints:
-                if hint.context_type.?:
-                    # TODO: Unify and extract type for this parameter
-                    found_type = hint.context_type
-                    break
+        # Unify with usage hints
+        for hint in hints:
+            if hint.context_type.?:
+                val context_ty = hint.context_type.unwrap()
+                # Try to extract type bindings from context
+                # This unifies the fresh variables with concrete types from usage
+                self.unify_with_context(param_vars, context_ty)
 
-            if not found_type.?:
-                # Cannot infer - use fresh type variable
+        # Resolve all parameters through substitution
+        var inferred: [HirType] = []
+        for param in template.type_params:
+            val var_ty = param_vars[param]
+            val resolved = self.infer_ctx.subst.apply(var_ty)
+
+            # Check if fully resolved (not still a type variable)
+            if self.is_unresolved(resolved):
                 return Err("Cannot infer type for parameter {param}")
 
-            inferred = inferred.push(found_type.unwrap())
+            inferred = inferred.push(resolved)
 
         Ok(inferred)
+
+    fn is_unresolved(ty: HirType) -> bool:
+        """Check if type is still an unresolved type variable."""
+        match ty.kind:
+            case Infer(_, _): true
+            case _: false
+
+    me unify_with_context(param_vars: Dict<text, HirType>, context_ty: HirType):
+        """Unify template parameter variables with context type."""
+        # Extract type information from context and unify
+        # This is a simplified version - full implementation would
+        # traverse the context type structure
+        match context_ty.kind:
+            case Named(name, args):
+                # If context has type arguments, unify with corresponding params
+                for (i, arg) in args.enumerate():
+                    if i < param_vars.len():
+                        val param_name = param_vars.keys()[i]
+                        val param_var = param_vars[param_name]
+                        self.infer_ctx.unify(param_var, arg)
+            case _:
+                pass
 
     me instantiate(template: Template, type_args: [HirType]) -> ObjTakeResult:
         """Instantiate template with type arguments."""
@@ -586,39 +630,25 @@ trait SmfReader:
     fn read_note_sdn() -> Result<NoteSdnMetadata, text>
 
 # ============================================================================
-# Type Inference Engine Interface
+# Type Inference Integration
 # ============================================================================
-
-struct TypeInferenceEngine:
-    """Wrapper for type inference from compiler.type_infer."""
-    substitution: Substitution
-    next_var_id: i64
-
-impl TypeInferenceEngine:
-    static fn new() -> TypeInferenceEngine:
-        TypeInferenceEngine(
-            substitution: Substitution.new(),
-            next_var_id: 0
-        )
-
-    me fresh_var() -> HirType:
-        """Create a fresh type variable."""
-        val id = self.next_var_id
-        self.next_var_id = self.next_var_id + 1
-        HirType(kind: HirTypeKind.Infer(id, 0), span: None)
-
-    me unify(t1: HirType, t2: HirType) -> Result<(), text>:
-        """Unify two types."""
-        # Delegate to type_infer module
-        val result = self.substitution.unify(t1, t2)
-        if result.is_err():
-            Err("Cannot unify types")
-        else:
-            Ok(())
-
-    fn resolve(ty: HirType) -> HirType:
-        """Resolve type through substitutions."""
-        self.substitution.apply(ty)
+#
+# ObjTaker uses the existing HmInferContext from compiler.type_infer for:
+# - Creating fresh type variables
+# - Unifying types during instantiation
+# - Resolving substituted types
+# - Generalizing polymorphic types
+#
+# The HmInferContext provides full Hindley-Milner inference with:
+# - Level-based generalization
+# - Substitution tracking
+# - Dimension constraint solving (for tensor types)
+#
+# Usage:
+#   val ctx = HmInferContext.with_builtins()
+#   val fresh = ctx.fresh_var(span)
+#   ctx.unify(t1, t2)
+#   val resolved = ctx.subst.apply(ty)
 
 # ============================================================================
 # Exports
@@ -640,4 +670,4 @@ export ConstraintKind
 export UsageSite
 export CacheStats
 export SmfReader
-export TypeInferenceEngine
+# Note: Uses HmInferContext from compiler.type_infer for type inference
