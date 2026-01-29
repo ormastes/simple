@@ -1,0 +1,326 @@
+"""
+MCP Error Handler Tests
+Feature: MCP Error Handling and Crash Prevention
+Category: MCP, Error Handling
+Status: Complete
+
+Tests for error handling, validation, and crash recovery.
+"""
+
+use std.spec
+use std.mcp.core.error_handler.*
+use std.mcp.core.protocol.*
+
+describe "ErrorCategory":
+    it "converts to string correctly":
+        expect(ErrorCategory.Transport.to_string() == "Transport")
+        expect(ErrorCategory.Protocol.to_string() == "Protocol")
+        expect(ErrorCategory.Validation.to_string() == "Validation")
+        expect(ErrorCategory.Resource.to_string() == "Resource")
+        expect(ErrorCategory.Tool.to_string() == "Tool")
+        expect(ErrorCategory.Internal.to_string() == "Internal")
+        expect(ErrorCategory.Timeout.to_string() == "Timeout")
+        expect(ErrorCategory.RateLimit.to_string() == "RateLimit")
+
+describe "McpError":
+    it "creates error with category and message":
+        val err = McpError.new(ErrorCategory.Validation, "Invalid input", ERROR_VALIDATION)
+        expect(err.category == ErrorCategory.Validation)
+        expect(err.message == "Invalid input")
+        expect(err.code == ERROR_VALIDATION)
+        expect(err.recoverable)
+
+    it "can be marked as unrecoverable":
+        val err = McpError.new(ErrorCategory.Internal, "Fatal error", ERROR_INTERNAL)
+            .unrecoverable()
+        expect(not err.recoverable)
+
+    it "can have details attached":
+        val err = McpError.new(ErrorCategory.Tool, "Tool failed", -1)
+            .with_details({"tool": "test", "reason": "timeout"})
+        expect(err.details.get("tool") == "test")
+        expect(err.details.get("reason") == "timeout")
+
+    it "converts to JSON-RPC error":
+        val err = McpError.new(ErrorCategory.Protocol, "Parse error", ERROR_PARSE)
+        val json_err = err.to_json_rpc_error()
+        expect(json_err.code == ERROR_PARSE)
+        expect(json_err.message.contains("Protocol"))
+        expect(json_err.message.contains("Parse error"))
+
+describe "ValidationLimits":
+    it "creates default limits":
+        val limits = ValidationLimits.default()
+        expect(limits.max_content_length == 10_000_000)
+        expect(limits.max_string_length == 1_000_000)
+        expect(limits.max_array_size == 10_000)
+        expect(limits.max_dict_size == 1_000)
+        expect(limits.max_json_depth == 32)
+        expect(limits.max_uri_length == 2_048)
+        expect(limits.max_tool_name_length == 256)
+
+    it "creates strict limits":
+        val limits = ValidationLimits.strict()
+        expect(limits.max_content_length == 1_000_000)
+        expect(limits.max_string_length == 100_000)
+        expect(limits.max_array_size == 1_000)
+        expect(limits.max_dict_size == 100)
+
+describe "InputValidator - content length":
+    val validator = InputValidator.default()
+
+    it "accepts valid content length":
+        val result = validator.validate_content_length(1000)
+        expect(result.ok.?)
+
+    it "accepts zero length":
+        val result = validator.validate_content_length(0)
+        expect(result.ok.?)
+
+    it "rejects negative content length":
+        val result = validator.validate_content_length(-1)
+        expect(result.err.?)
+        match result:
+            case Err(error):
+                expect(error.category == ErrorCategory.Validation)
+                expect(error.message.contains("Negative"))
+            case _:
+                fail("Expected error")
+
+    it "rejects excessive content length":
+        val result = validator.validate_content_length(11_000_000)
+        expect(result.err.?)
+        match result:
+            case Err(error):
+                expect(error.message.contains("exceeds limit"))
+            case _:
+                fail("Expected error")
+
+describe "InputValidator - string validation":
+    val validator = InputValidator.default()
+
+    it "accepts valid string":
+        val result = validator.validate_string("Hello, world!", "test_field")
+        expect(result.ok.?)
+
+    it "accepts empty string":
+        val result = validator.validate_string("", "empty_field")
+        expect(result.ok.?)
+
+    it "rejects excessive string length":
+        val long_str = "x" * 1_000_001
+        val result = validator.validate_string(long_str, "large_field")
+        expect(result.err.?)
+
+describe "InputValidator - URI validation":
+    val validator = InputValidator.default()
+
+    it "accepts valid file URI":
+        val result = validator.validate_uri("file:///home/user/test.spl")
+        expect(result.ok.?)
+
+    it "accepts valid symbol URI":
+        val result = validator.validate_uri("symbol://project/MyClass")
+        expect(result.ok.?)
+
+    it "accepts valid project URI":
+        val result = validator.validate_uri("project://myproject/src")
+        expect(result.ok.?)
+
+    it "accepts valid http URI":
+        val result = validator.validate_uri("http://example.com/resource")
+        expect(result.ok.?)
+
+    it "accepts valid https URI":
+        val result = validator.validate_uri("https://example.com/resource")
+        expect(result.ok.?)
+
+    it "rejects empty URI":
+        val result = validator.validate_uri("")
+        expect(result.err.?)
+        match result:
+            case Err(error):
+                expect(error.message.contains("Empty URI"))
+            case _:
+                fail("Expected error")
+
+    it "rejects invalid URI scheme":
+        val result = validator.validate_uri("invalid://test")
+        expect(result.err.?)
+        match result:
+            case Err(error):
+                expect(error.message.contains("Invalid URI scheme"))
+            case _:
+                fail("Expected error")
+
+    it "rejects excessive URI length":
+        val long_uri = "file://" + ("x" * 2_100)
+        val result = validator.validate_uri(long_uri)
+        expect(result.err.?)
+
+describe "InputValidator - tool name validation":
+    val validator = InputValidator.default()
+
+    it "accepts valid tool name":
+        val result = validator.validate_tool_name("read_code")
+        expect(result.ok.?)
+
+    it "accepts tool name with slashes":
+        val result = validator.validate_tool_name("tools/list")
+        expect(result.ok.?)
+
+    it "accepts tool name with hyphens":
+        val result = validator.validate_tool_name("get-info")
+        expect(result.ok.?)
+
+    it "rejects empty tool name":
+        val result = validator.validate_tool_name("")
+        expect(result.err.?)
+
+    it "rejects tool name with invalid characters":
+        val result = validator.validate_tool_name("tool@name")
+        expect(result.err.?)
+
+    it "rejects tool name with spaces":
+        val result = validator.validate_tool_name("tool name")
+        expect(result.err.?)
+
+    it "rejects excessive tool name length":
+        val long_name = "t" * 300
+        val result = validator.validate_tool_name(long_name)
+        expect(result.err.?)
+
+describe "InputValidator - array size validation":
+    val validator = InputValidator.default()
+
+    it "accepts valid array size":
+        val result = validator.validate_array_size(100, "test_array")
+        expect(result.ok.?)
+
+    it "accepts zero size":
+        val result = validator.validate_array_size(0, "empty_array")
+        expect(result.ok.?)
+
+    it "rejects negative size":
+        val result = validator.validate_array_size(-1, "bad_array")
+        expect(result.err.?)
+
+    it "rejects excessive size":
+        val result = validator.validate_array_size(11_000, "huge_array")
+        expect(result.err.?)
+
+describe "InputValidator - dict size validation":
+    val validator = InputValidator.default()
+
+    it "accepts valid dict size":
+        val result = validator.validate_dict_size(50, "test_dict")
+        expect(result.ok.?)
+
+    it "rejects negative size":
+        val result = validator.validate_dict_size(-5, "bad_dict")
+        expect(result.err.?)
+
+    it "rejects excessive size":
+        val result = validator.validate_dict_size(1_500, "huge_dict")
+        expect(result.err.?)
+
+describe "CrashRecovery":
+    it "initializes with zero errors":
+        val recovery = CrashRecovery.new()
+        expect(recovery.consecutive_errors == 0)
+        expect(recovery.total_errors == 0)
+        expect(recovery.enabled)
+
+    it "tracks consecutive errors":
+        val recovery = CrashRecovery.new()
+        val err1 = McpError.new(ErrorCategory.Protocol, "Error 1", -1)
+        val err2 = McpError.new(ErrorCategory.Protocol, "Error 2", -1)
+
+        recovery.record_error(err1)
+        expect(recovery.consecutive_errors == 1)
+        expect(recovery.total_errors == 1)
+
+        recovery.record_error(err2)
+        expect(recovery.consecutive_errors == 2)
+        expect(recovery.total_errors == 2)
+
+    it "resets consecutive errors on success":
+        val recovery = CrashRecovery.new()
+        val err = McpError.new(ErrorCategory.Protocol, "Error", -1)
+
+        recovery.record_error(err)
+        recovery.record_error(err)
+        expect(recovery.consecutive_errors == 2)
+
+        recovery.record_success()
+        expect(recovery.consecutive_errors == 0)
+        expect(recovery.total_errors == 2)
+
+    it "signals stop after max consecutive errors":
+        val recovery = CrashRecovery.new()
+        val err = McpError.new(ErrorCategory.Protocol, "Error", -1)
+
+        expect(not recovery.should_stop())
+
+        for i in 0..5:
+            recovery.record_error(err)
+
+        expect(recovery.should_stop())
+
+    it "can be disabled":
+        val recovery = CrashRecovery.new()
+        recovery.disable()
+        expect(not recovery.enabled)
+
+describe "CrashRecovery - safe_call":
+    it "executes successful operation":
+        val recovery = CrashRecovery.new()
+
+        val result = recovery.safe_call(
+            \: Ok(42),
+            "test_operation"
+        )
+
+        expect(result.ok.?)
+        match result:
+            case Ok(value):
+                expect(value == 42)
+            case _:
+                fail("Expected Ok")
+
+    it "handles error in operation":
+        val recovery = CrashRecovery.new()
+        val err = McpError.new(ErrorCategory.Tool, "Tool failed", -1)
+
+        val result = recovery.safe_call(
+            \: Err(err),
+            "failing_operation"
+        )
+
+        expect(result.err.?)
+        expect(recovery.consecutive_errors == 1)
+
+    it "propagates unrecoverable errors":
+        val recovery = CrashRecovery.new()
+        val err = McpError.new(ErrorCategory.Internal, "Fatal", ERROR_INTERNAL)
+            .unrecoverable()
+
+        val result = recovery.safe_call(
+            \: Err(err),
+            "fatal_operation"
+        )
+
+        expect(result.err.?)
+
+describe "Error code constants":
+    it "defines standard JSON-RPC error codes":
+        expect(ERROR_PARSE == -32700)
+        expect(ERROR_INVALID_REQUEST == -32600)
+        expect(ERROR_METHOD_NOT_FOUND == -32601)
+        expect(ERROR_INVALID_PARAMS == -32602)
+        expect(ERROR_INTERNAL == -32603)
+
+    it "defines custom error codes":
+        expect(ERROR_TIMEOUT == -32000)
+        expect(ERROR_RATE_LIMIT == -32001)
+        expect(ERROR_VALIDATION == -32002)
