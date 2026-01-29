@@ -503,7 +503,12 @@ pub fn compile_function_body<M: Module>(
                             builder.ins().return_(&[]);
                         }
                     } else {
-                        let ret_ty = type_to_cranelift(func.return_type);
+                        // Use signature return type (main returns I32 for C ABI)
+                        let ret_ty = if func.name == "main" {
+                            types::I32
+                        } else {
+                            type_to_cranelift(func.return_type)
+                        };
                         // Handle missing VReg (can happen in complex control flow)
                         let mut ret_val = if let Some(&rv) = vreg_values.get(v) {
                             // Coerce value type to match function return type

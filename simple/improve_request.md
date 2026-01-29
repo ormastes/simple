@@ -22,6 +22,8 @@ Track improvement ideas discovered while developing Simple standard library and 
 | JSON Library | ✅ Implemented | Medium |
 | Error Handling (`?` operator) | ✅ Implemented | Medium |
 | Symbol Table Cross-Refs | ✅ Implemented | Low |
+| MCP Server Auto-Install for Claude Code | 🔍 PROPOSED | High |
+| symbol_table_spec.spl timeout (>30s) | 🔍 PROPOSED | Medium |
 
 **Summary:** 16 implemented, 1 partial, 0 blocked, 0 proposed
 

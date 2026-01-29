@@ -678,4 +678,176 @@ mod tests {
         assert_eq!(config.network.mode, NetworkMode::None);
         assert_eq!(config.filesystem.mode, FilesystemMode::ReadOnly);
     }
+
+    // ============================================================================
+    // Additional Comprehensive Tests (Phase 1 Coverage Improvement)
+    // ============================================================================
+
+    #[test]
+    fn test_network_isolation_allowlist_mode() {
+        let allowed = vec!["127.0.0.1".to_string(), "localhost".to_string()];
+        let config = SandboxConfig::new().with_network_allowlist(allowed.clone());
+
+        assert_eq!(config.network.mode, NetworkMode::AllowList);
+        assert_eq!(config.network.allowed_domains.len(), 2);
+        assert!(config.network.allowed_domains.contains("localhost"));
+    }
+
+    #[test]
+    fn test_network_isolation_blocklist_mode() {
+        let blocked = vec!["8.8.8.8".to_string(), "malicious.example".to_string()];
+        let config = SandboxConfig::new().with_network_blocklist(blocked);
+
+        assert_eq!(config.network.mode, NetworkMode::BlockList);
+        assert_eq!(config.network.blocked_domains.len(), 2);
+        assert!(config.network.blocked_domains.contains("8.8.8.8"));
+    }
+
+    #[test]
+    fn test_filesystem_restricted_mode() {
+        let read_paths = vec![PathBuf::from("/etc"), PathBuf::from("/usr")];
+        let write_paths = vec![PathBuf::from("/tmp")];
+        let config = SandboxConfig::new().with_restricted_paths(read_paths, write_paths);
+
+        assert_eq!(config.filesystem.mode, FilesystemMode::Restricted);
+        assert_eq!(config.filesystem.read_paths.len(), 2);
+        assert_eq!(config.filesystem.write_paths.len(), 1);
+    }
+
+    #[test]
+    fn test_resource_limits_combined() {
+        let config = SandboxConfig::new()
+            .with_cpu_time(Duration::from_secs(10))
+            .with_memory(512 * 1024 * 1024)
+            .with_file_descriptors(100)
+            .with_threads(50);
+
+        assert_eq!(config.limits.cpu_time, Some(Duration::from_secs(10)));
+        assert_eq!(config.limits.memory, Some(512 * 1024 * 1024));
+        assert_eq!(config.limits.file_descriptors, Some(100));
+        assert_eq!(config.limits.threads, Some(50));
+    }
+
+    #[test]
+    fn test_empty_allowlist() {
+        let config = SandboxConfig::new().with_network_allowlist(vec![]);
+        assert_eq!(config.network.mode, NetworkMode::AllowList);
+        assert!(config.network.allowed_domains.is_empty());
+    }
+
+    #[test]
+    fn test_empty_blocklist() {
+        let config = SandboxConfig::new().with_network_blocklist(vec![]);
+        assert_eq!(config.network.mode, NetworkMode::BlockList);
+        assert!(config.network.blocked_domains.is_empty());
+    }
+
+    #[test]
+    fn test_overlay_with_restricted_paths() {
+        // Note: Order matters in builder pattern - last mode call wins
+        let config = SandboxConfig::new()
+            .with_read_paths(vec![PathBuf::from("/usr")])
+            .with_overlay();
+
+        // Overlay mode should be set (last call wins)
+        assert_eq!(config.filesystem.mode, FilesystemMode::Overlay);
+        assert!(config.filesystem.use_overlay);
+        // Read paths from earlier call should be preserved
+        assert!(!config.filesystem.read_paths.is_empty());
+    }
+
+    #[test]
+    fn test_zero_resource_limits() {
+        // Zero limits should be accepted (means unlimited or immediate termination)
+        let config = SandboxConfig::new()
+            .with_cpu_time(Duration::from_secs(0))
+            .with_memory(0);
+
+        assert_eq!(config.limits.cpu_time, Some(Duration::from_secs(0)));
+        assert_eq!(config.limits.memory, Some(0));
+    }
+
+    #[test]
+    fn test_default_config_has_full_access() {
+        let config = SandboxConfig::default();
+
+        assert_eq!(config.network.mode, NetworkMode::Full);
+        assert_eq!(config.filesystem.mode, FilesystemMode::Full);
+        assert!(config.limits.cpu_time.is_none());
+        assert!(config.limits.memory.is_none());
+    }
+
+    #[test]
+    fn test_multiple_read_paths() {
+        let paths = vec![
+            PathBuf::from("/etc"),
+            PathBuf::from("/usr"),
+            PathBuf::from("/var/log"),
+        ];
+        let config = SandboxConfig::new().with_read_paths(paths.clone());
+
+        assert_eq!(config.filesystem.read_paths.len(), 3);
+        for path in paths {
+            assert!(config.filesystem.read_paths.contains(&path));
+        }
+    }
+
+    #[test]
+    fn test_config_chaining() {
+        // Test that builder pattern allows method chaining
+        let config = SandboxConfig::new()
+            .with_no_network()
+            .with_memory(100 * 1024 * 1024)
+            .with_file_descriptors(50);
+
+        assert_eq!(config.network.mode, NetworkMode::None);
+        assert_eq!(config.limits.memory, Some(100 * 1024 * 1024));
+        assert_eq!(config.limits.file_descriptors, Some(50));
+    }
+
+    #[test]
+    fn test_resolve_localhost() {
+        let mut domains = HashSet::new();
+        domains.insert("localhost".to_string());
+
+        let ips = resolve_domains_to_ips(&domains);
+
+        // Should contain at least one of the localhost IPs
+        if !ips.is_empty() {
+            let has_localhost = ips.iter().any(|ip| {
+                ip == "127.0.0.1" || ip == "::1" || ip.starts_with("127.0.")
+            });
+            assert!(has_localhost, "Expected localhost IP in: {:?}", ips);
+        }
+    }
+
+    #[test]
+    fn test_large_cpu_time_limit() {
+        // Test with a very large CPU time limit
+        let config = SandboxConfig::new().with_cpu_time(Duration::from_secs(86400)); // 24 hours
+
+        assert_eq!(config.limits.cpu_time, Some(Duration::from_secs(86400)));
+    }
+
+    #[test]
+    fn test_large_memory_limit() {
+        // Test with a very large memory limit (16GB)
+        let config = SandboxConfig::new().with_memory(16 * 1024 * 1024 * 1024);
+
+        assert_eq!(config.limits.memory, Some(16 * 1024 * 1024 * 1024));
+    }
+
+    #[test]
+    fn test_path_deduplication() {
+        // HashSet should deduplicate identical paths
+        let paths = vec![
+            PathBuf::from("/tmp"),
+            PathBuf::from("/tmp"), // Duplicate
+            PathBuf::from("/var"),
+        ];
+        let config = SandboxConfig::new().with_read_paths(paths);
+
+        // Should have 2 unique paths
+        assert_eq!(config.filesystem.read_paths.len(), 2);
+    }
 }

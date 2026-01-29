@@ -129,6 +129,11 @@ fn collect_old_expressions(expr: &HirExpr, results: &mut Vec<HirExpr>) {
         | HirExprKind::Global(_)
         | HirExprKind::Nil
         | HirExprKind::ContractResult => {}
+        // Let-in expressions
+        HirExprKind::LetIn { value, body, .. } => {
+            collect_old_expressions(value, results);
+            collect_old_expressions(body, results);
+        }
     }
 }
 

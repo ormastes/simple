@@ -83,6 +83,13 @@ pub enum HirStmt {
     Calc {
         steps: Vec<HirCalcStep>,
     },
+    /// Defer statement for RAII/cleanup patterns
+    /// defer: body or defer expr
+    /// Semantics: LIFO execution at all exit points (return, end-of-block, error)
+    /// In codegen: injected at scope exit points
+    Defer {
+        body: Vec<HirStmt>,
+    },
 }
 
 /// A single step in a calculational proof

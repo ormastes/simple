@@ -194,6 +194,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_unwrap_or_self", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_is_none", &[I64], &[I8]),
     RuntimeFuncSpec::new("rt_is_some", &[I64], &[I8]),
+    RuntimeFuncSpec::new("rt_option_map", &[I64, I64], &[I64]),
     // =========================================================================
     // Unique pointer operations (GC-collaborative manual memory)
     // =========================================================================

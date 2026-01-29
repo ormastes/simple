@@ -646,4 +646,256 @@ let msg = "TODO: this is not a real TODO";
         let todo = &result.todos[0];
         assert_eq!(todo.blocked, vec!["100", "101", "102"]);
     }
+
+    #[test]
+    fn test_todoitem_normalized_priority() {
+        let item = TodoItem {
+            keyword: "TODO".to_string(),
+            area: "runtime".to_string(),
+            priority: "critical".to_string(),
+            description: "Test".to_string(),
+            issue: None,
+            blocked: vec![],
+            file: PathBuf::from("test.rs"),
+            line: 1,
+            raw_text: "".to_string(),
+        };
+        assert_eq!(item.normalized_priority(), "P0");
+
+        let item2 = TodoItem {
+            priority: "high".to_string(),
+            ..item.clone()
+        };
+        assert_eq!(item2.normalized_priority(), "P1");
+
+        let item3 = TodoItem {
+            priority: "medium".to_string(),
+            ..item.clone()
+        };
+        assert_eq!(item3.normalized_priority(), "P2");
+
+        let item4 = TodoItem {
+            priority: "low".to_string(),
+            ..item.clone()
+        };
+        assert_eq!(item4.normalized_priority(), "P3");
+    }
+
+    #[test]
+    fn test_todoitem_validation_both_invalid() {
+        let item = TodoItem {
+            keyword: "TODO".to_string(),
+            area: "invalid_area".to_string(),
+            priority: "P99".to_string(),
+            description: "Test".to_string(),
+            issue: None,
+            blocked: vec![],
+            file: PathBuf::from("test.rs"),
+            line: 1,
+            raw_text: "".to_string(),
+        };
+
+        assert!(!item.is_valid());
+        let errors = item.validation_errors();
+        assert_eq!(errors.len(), 2);
+        assert!(errors[0].contains("Invalid area"));
+        assert!(errors[1].contains("Invalid priority"));
+    }
+
+    #[test]
+    fn test_parse_markdown_html_comments() {
+        let parser = TodoParser::new();
+        let content = r#"
+# My Document
+
+<!-- TODO: [doc][P2] Update examples -->
+
+Some text here.
+
+<!-- FIXME: [doc][P1] Fix typo [#456] -->
+"#;
+        let result = parser.parse_markdown(content, Path::new("README.md")).unwrap();
+
+        assert_eq!(result.todos.len(), 2);
+
+        let todo1 = &result.todos[0];
+        assert_eq!(todo1.keyword, "TODO");
+        assert_eq!(todo1.area, "doc");
+        assert_eq!(todo1.priority, "P2");
+        assert_eq!(todo1.description, "Update examples");
+
+        let todo2 = &result.todos[1];
+        assert_eq!(todo2.keyword, "FIXME");
+        assert_eq!(todo2.issue, Some("456".to_string()));
+    }
+
+    #[test]
+    fn test_parse_doc_comments() {
+        let parser = TodoParser::new();
+        let content = r#"
+/// Module documentation
+/// TODO: [doc][P3] Add more examples
+pub struct MyStruct {
+    /// TODO: [runtime][P2] Optimize this field
+    field: i32,
+}
+"#;
+        let result = parser.parse_rust(content, Path::new("test.rs")).unwrap();
+
+        assert_eq!(result.todos.len(), 2);
+        assert_eq!(result.todos[0].area, "doc");
+        assert_eq!(result.todos[1].area, "runtime");
+    }
+
+    #[test]
+    fn test_blocked_issues_without_hash() {
+        let parser = TodoParser::new();
+        let content = "// TODO: [runtime][P1] Test [blocked:100,200]";
+        let result = parser.parse_rust(content, Path::new("test.rs")).unwrap();
+
+        assert_eq!(result.todos.len(), 1);
+        let todo = &result.todos[0];
+        assert_eq!(todo.blocked, vec!["100", "200"]);
+    }
+
+    #[test]
+    fn test_case_sensitive_priority() {
+        let parser = TodoParser::new().with_invalid();
+        let content = r#"
+// TODO: [runtime][CRITICAL] Test 1
+// TODO: [runtime][High] Test 2
+// TODO: [runtime][MEDIUM] Test 3
+// TODO: [runtime][LOW] Test 4
+"#;
+        let result = parser.parse_rust(content, Path::new("test.rs")).unwrap();
+
+        // Parser is case-sensitive for priorities in parsing,
+        // but normalization handles case-insensitivity
+        // With with_invalid(), we get the TODOs even if invalid
+        assert_eq!(result.todos.len(), 4);
+
+        // Check normalized priorities work for any case
+        assert_eq!(result.todos[0].normalized_priority(), "P0");
+        assert_eq!(result.todos[1].normalized_priority(), "P1");
+        assert_eq!(result.todos[2].normalized_priority(), "P2");
+        assert_eq!(result.todos[3].normalized_priority(), "P3");
+    }
+
+    #[test]
+    fn test_all_valid_areas() {
+        let parser = TodoParser::new();
+        let areas = vec![
+            "runtime", "codegen", "compiler", "parser", "type", "stdlib",
+            "gpu", "ui", "test", "driver", "loader", "pkg", "doc",
+        ];
+
+        for area in areas {
+            let content = format!("// TODO: [{}][P1] Test", area);
+            let result = parser.parse_rust(&content, Path::new("test.rs")).unwrap();
+            assert_eq!(result.todos.len(), 1, "Failed for area: {}", area);
+            assert!(result.todos[0].is_valid(), "Invalid area: {}", area);
+        }
+    }
+
+    #[test]
+    fn test_all_valid_priorities() {
+        let parser = TodoParser::new();
+        let priorities = vec!["P0", "P1", "P2", "P3", "critical", "high", "medium", "low"];
+
+        for priority in priorities {
+            let content = format!("// TODO: [runtime][{}] Test", priority);
+            let result = parser.parse_rust(&content, Path::new("test.rs")).unwrap();
+            assert_eq!(result.todos.len(), 1, "Failed for priority: {}", priority);
+            assert!(result.todos[0].is_valid(), "Invalid priority: {}", priority);
+        }
+    }
+
+    #[test]
+    fn test_empty_description() {
+        let parser = TodoParser::new();
+        let content = "// TODO: [runtime][P1]";
+        let result = parser.parse_rust(content, Path::new("test.rs")).unwrap();
+
+        // Empty description should cause parse error
+        assert_eq!(result.todos.len(), 0);
+        assert_eq!(result.errors.len(), 1);
+    }
+
+    #[test]
+    fn test_special_characters_in_description() {
+        let parser = TodoParser::new();
+        let content = r#"// TODO: [runtime][P1] Fix <angle> & {curly} brackets"#;
+        let result = parser.parse_rust(content, Path::new("test.rs")).unwrap();
+
+        assert_eq!(result.todos.len(), 1);
+        let desc = &result.todos[0].description;
+        assert!(desc.contains("<angle>"));
+        assert!(desc.contains("{curly}"));
+    }
+
+    #[test]
+    fn test_inline_comments_not_parsed() {
+        let parser = TodoParser::new();
+        let content = r#"let x = "done"; // TODO: [runtime][P1] Inline comment not parsed"#;
+        let result = parser.parse_rust(content, Path::new("test.rs")).unwrap();
+
+        // Parser only processes lines that START with //, not inline comments after code
+        assert_eq!(result.todos.len(), 0);
+    }
+
+    #[test]
+    fn test_simple_hash_comment_leading_whitespace() {
+        let parser = TodoParser::new();
+        let content = "        # TODO: [runtime][P2] Deeply indented";
+        let result = parser.parse_simple(content, Path::new("test.spl")).unwrap();
+
+        assert_eq!(result.todos.len(), 1);
+        assert_eq!(result.todos[0].description, "Deeply indented");
+    }
+
+    #[test]
+    fn test_multiple_markdown_comments_same_line() {
+        let parser = TodoParser::new();
+        let content = "<!-- TODO: [doc][P2] First --> text <!-- FIXME: [doc][P1] Second -->";
+        let result = parser.parse_markdown(content, Path::new("test.md")).unwrap();
+
+        assert_eq!(result.todos.len(), 2);
+        assert_eq!(result.todos[0].keyword, "TODO");
+        assert_eq!(result.todos[1].keyword, "FIXME");
+    }
+
+    #[test]
+    fn test_language_detection() {
+        assert_eq!(detect_language(Path::new("test.rs")), Language::Rust);
+        assert_eq!(detect_language(Path::new("test.spl")), Language::Simple);
+        assert_eq!(detect_language(Path::new("README.md")), Language::Markdown);
+        assert_eq!(detect_language(Path::new("test.txt")), Language::Unknown);
+        assert_eq!(detect_language(Path::new("src/my.module.rs")), Language::Rust);
+    }
+
+    #[test]
+    fn test_is_in_string_helper() {
+        assert_eq!(is_in_string("let x = \"TODO", "TODO"), true);
+        assert_eq!(is_in_string("let x = \"done\"; // TODO", "TODO"), false);
+        assert_eq!(is_in_string("let x = 'TODO", "TODO"), true);
+        assert_eq!(is_in_string("let x = 'done'; // TODO", "TODO"), false);
+        assert_eq!(is_in_string("no keyword here", "TODO"), false);
+    }
+
+    #[test]
+    fn test_normalize_priority_all_variants() {
+        assert_eq!(normalize_priority("critical"), "P0");
+        assert_eq!(normalize_priority("CRITICAL"), "P0");
+        assert_eq!(normalize_priority("high"), "P1");
+        assert_eq!(normalize_priority("High"), "P1");
+        assert_eq!(normalize_priority("medium"), "P2");
+        assert_eq!(normalize_priority("MEDIUM"), "P2");
+        assert_eq!(normalize_priority("low"), "P3");
+        assert_eq!(normalize_priority("LOW"), "P3");
+        assert_eq!(normalize_priority("P0"), "P0");
+        assert_eq!(normalize_priority("P1"), "P1");
+        assert_eq!(normalize_priority("P2"), "P2");
+        assert_eq!(normalize_priority("P3"), "P3");
+        assert_eq!(normalize_priority("invalid"), "invalid");
+    }
 }

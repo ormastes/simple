@@ -140,10 +140,13 @@ fn get_field_value(val: &Value, field: &str) -> Result<Value, CompileError> {
         Value::Array(arr) => match field {
             "len" => Ok(Value::Int(arr.len() as i64)),
             "is_empty" => Ok(Value::Bool(arr.is_empty())),
+            // Neighbor access for stencil computations (returns first/last element as boundary)
+            "left_neighbor" => Ok(arr.first().cloned().unwrap_or(Value::Nil)),
+            "right_neighbor" => Ok(arr.last().cloned().unwrap_or(Value::Nil)),
             _ => {
                 let ctx = ErrorContext::new()
                     .with_code(codes::UNDEFINED_FIELD)
-                    .with_help("available properties on Array: len, is_empty");
+                    .with_help("available properties on Array: len, is_empty, left_neighbor, right_neighbor");
                 Err(CompileError::semantic_with_context(
                     format!("unknown property '{field}' on Array"),
                     ctx,

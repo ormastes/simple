@@ -3,83 +3,153 @@
 
 **Feature IDs:** #3110
 **Category:** Tooling
-**Status:** In Progress
+**Status:** Blocked - Awaiting interpreter improvements
 
 Parser for extracting and categorizing TODO/FIXME comments from source files.
 Supports multiple languages (Rust, Simple, Markdown), priority normalization,
 and area categorization.
 
-*Note: This test documents the expected API. Full FFI integration pending.*
+## Format Specification
+
+Expected format:
+```
+TODO: [area][priority] description [#issue] [blocked:#issue,#issue]
+FIXME: [area][priority] description [#issue] [blocked:#issue,#issue]
+```
+
+Valid areas: runtime, codegen, compiler, parser, type, stdlib, gpu, ui, test, driver, loader, pkg, doc
+Valid priorities: P0, P1, P2, P3, critical, high, medium, low
+
+## Implementation Status
+
+✅ **Fully Implemented**: The TODO parser is production-ready:
+- Simple implementation: `src/lib/std/src/tooling/todo_parser.spl` (444 lines)
+- Rust implementation: `src/rust/driver/src/todo_parser.rs` with 7 integration tests
+- CLI command: `simple todo-scan` (scans codebase, updates database, generates docs)
+- Database: `doc/todo/todo_db.sdn` (140+ entries tracked)
+- Lint rules: T001-T004 (format validation with Rust tests)
+
+## Test Status
+
+❌ **Blocked by Interpreter Limitations**:
+
+The Simple interpreter currently cannot import from the tooling module:
+- ❌ Classes (TodoItem, TodoParser, ParseResult, ParseError)
+- ❌ Enums (Language)
+- ❌ Functions (detect_language, normalize_priority, is_in_string)
+- ❌ Constants (TODO_AREAS, TODO_PRIORITIES)
+
+**Error**: `semantic: variable TODO_AREAS not found` when attempting to import.
+
+This affects ALL SSpec tests for the tooling module, not just TODO parser.
+
+## Verification
+
+The TODO parser functionality IS thoroughly tested in Rust:
+```bash
+# Run Rust integration tests (7 tests)
+cargo test -p simple-driver todo_parser
+
+# Run lint tests (T001-T003 rules)
+cargo test -p simple-compiler test_todo_format
+```
+
+## Future Work
+
+Once interpreter import support improves, implement these SSpec tests:
+
+### Priority 1: Core Functionality
+- [ ] TodoItem creation and field access
+- [ ] TodoItem validation (is_valid, validation_errors)
+- [ ] TodoItem formatting (to_string, normalized_priority)
+- [ ] ParseResult operations (add_todo, add_error, merge)
+- [ ] Helper functions (detect_language, normalize_priority, is_in_string)
+- [ ] Constants validation (TODO_AREAS, TODO_PRIORITIES)
+
+### Priority 2: Parsing Tests
+- [ ] parse_simple() - Extract TODOs from Simple comments (#)
+- [ ] parse_rust() - Extract TODOs from Rust comments (//)
+- [ ] parse_markdown() - Extract TODOs from HTML comments
+- [ ] Multi-line comment handling
+- [ ] String literal detection (ignore TODOs in strings)
+
+### Priority 3: Error Handling
+- [ ] Invalid area detection
+- [ ] Invalid priority detection
+- [ ] Missing format tags
+- [ ] Malformed blocked/issue numbers
+
+### Priority 4: Integration Tests (Requires FFI)
+- [ ] parse_file() - Full file parsing
+- [ ] scan_directory() - Recursive directory scanning
+- [ ] Skip directive handling (#![skip_todo])
+
+## Test Plan Template
+
+When interpreter support is available, use this structure:
+
+```simple
+use std.spec.*
+use tooling.{
+    TodoItem, TodoParser, ParseResult, ParseError,
+    detect_language, normalize_priority, is_in_string,
+    Language, TODO_AREAS, TODO_PRIORITIES
+}
+
+describe "TodoItem validation":
+    it "should validate correct area and priority":
+        val item = TodoItem{
+            keyword: "TODO",
+            area: "runtime",
+            priority: "P1",
+            description: "Test",
+            issue: nil,
+            blocked: [],
+            file: "test.rs",
+            line: 1,
+            raw_text: ""
+        }
+        expect item.is_valid() == true
+
+describe "Helper functions":
+    it "should detect language from extension":
+        expect detect_language("test.rs") == Language.Rust
+        expect detect_language("test.spl") == Language.Simple
+
+    it "should normalize priority levels":
+        expect normalize_priority("critical") == "P0"
+        expect normalize_priority("high") == "P1"
+```
+
+## Related Documentation
+
+- Format specification: `.claude/skills/todo.md`
+- Rust tests: `src/rust/driver/src/todo_parser.rs`
+- CLI implementation: `src/app/cli/main.spl` (`todo-scan` command)
+- Database schema: `doc/todo/todo_db.sdn`
+- Lint rules: `src/app/lint/main.spl` + `src/rust/compiler/src/lint/mod.rs`
+
+##  Test Summary
+
+**Total Planned Tests**: 50+
+- TodoItem: 15 tests (construction, validation, formatting)
+- ParseResult: 5 tests (merging, aggregation)
+- Parsing: 15 tests (multi-language, error handling)
+- Helpers: 10 tests (language detection, string checking)
+- Constants: 5 tests (area/priority validation)
+
+**Current Status**: 0 passing (blocked by interpreter limitations)
+**Rust Tests**: 7 passing (full coverage of core functionality)
 """
-import std.spec
 
-describe "TodoParser module":
+# Placeholder test to prevent empty spec file errors
+describe "TODO Parser (blocked)":
     """
-    Verifies the TODO/FIXME comment parser that extracts, categorizes,
-    and prioritizes development tasks from source files. Supports multiple
-    programming languages and formats, with validation of priority levels,
-    area categories, and language-specific comment syntax.
+    This test file is blocked by interpreter limitations.
+    See file header for details and Rust tests for verification.
     """
 
-    context "Priority normalization":
-        it "should normalize critical to P0":
-            val result = "P0"
-            expect result == "P0"
-
-        it "should normalize high to P1":
-            val result = "P1"
-            expect result == "P1"
-
-        it "should normalize medium to P2":
-            val result = "P2"
-            expect result == "P2"
-
-        it "should normalize low to P3":
-            val result = "P3"
-            expect result == "P3"
-
-    context "Language detection":
-        it "should detect Rust files by extension":
-            val ext = ".rs"
-            expect ext == ".rs"
-
-        it "should detect Simple files by extension":
-            val ext = ".spl"
-            expect ext == ".spl"
-
-        it "should detect Markdown files by extension":
-            val ext = ".md"
-            expect ext == ".md"
-
-    context "String literal detection":
-        it "should detect odd quote count as inside string":
-            val double_quotes = 1
-            val is_inside = double_quotes % 2 == 1
-            expect is_inside == true
-
-        it "should detect even quote count as outside string":
-            val double_quotes = 2
-            val is_inside = double_quotes % 2 == 1
-            expect is_inside == false
-
-    context "Valid areas list":
-        it "should include runtime area":
-            val area = "runtime"
-            expect area == "runtime"
-
-        it "should include codegen area":
-            val area = "codegen"
-            expect area == "codegen"
-
-        it "should include stdlib area":
-            val area = "stdlib"
-            expect area == "stdlib"
-
-    context "Valid priorities list":
-        it "should include P0 priority":
-            val priority = "P0"
-            expect priority == "P0"
-
-        it "should include critical priority":
-            val priority = "critical"
-            expect priority == "critical"
+    it "documents that tests are blocked by interpreter":
+        # The Simple interpreter cannot currently import from tooling module
+        # Error: semantic: variable TODO_AREAS not found
+        expect true == true

@@ -699,4 +699,188 @@ mod tests {
         assert_eq!(builder.options.output, PathBuf::from("test"));
         assert!(builder.options.strip);
     }
+
+    // ============================================================================
+    // Phase 3: Additional Comprehensive Tests for Linker Module
+    // ============================================================================
+
+    #[test]
+    fn test_library_path_detection() {
+        // Test that system library paths are detected
+        let paths = NativeBinaryOptions::detect_system_library_paths();
+
+        // Should find at least some standard library paths on Unix systems
+        #[cfg(target_family = "unix")]
+        {
+            assert!(
+                !paths.is_empty(),
+                "Should detect at least one system library path"
+            );
+        }
+    }
+
+    #[test]
+    fn test_find_runtime_library() {
+        // Test runtime library detection (may return None in some build configs)
+        let runtime_path = NativeBinaryOptions::find_runtime_library_path();
+
+        if let Some(path) = runtime_path {
+            // If found, should be a valid directory
+            assert!(
+                path.is_dir() || path.parent().map(|p| p.is_dir()).unwrap_or(false),
+                "Runtime path should be a directory: {:?}",
+                path
+            );
+        }
+    }
+
+    // Note: CRT file detection is done by NativeBinaryBuilder.find_crt_files()
+    // which is a private method, so we can't test it directly.
+    // Integration tests will cover this functionality.
+
+    #[test]
+    fn test_options_with_multiple_libraries() {
+        let options = NativeBinaryOptions::new()
+            .library("pthread")
+            .library("dl")
+            .library("m");
+
+        // Note: .library() adds to existing libraries (which include defaults)
+        assert!(options.libraries.contains(&"pthread".to_string()));
+        assert!(options.libraries.contains(&"dl".to_string()));
+        assert!(options.libraries.contains(&"m".to_string()));
+    }
+
+    #[test]
+    fn test_options_with_library_paths() {
+        let path1 = PathBuf::from("/usr/lib");
+        let path2 = PathBuf::from("/usr/local/lib");
+
+        let options = NativeBinaryOptions::new()
+            .library_path(path1.clone())
+            .library_path(path2.clone());
+
+        // Note: .library_path() adds to existing paths (which may include defaults)
+        assert!(options.library_paths.contains(&path1));
+        assert!(options.library_paths.contains(&path2));
+    }
+
+    #[test]
+    fn test_shared_library_mode() {
+        let options = NativeBinaryOptions::new().shared(true).pie(false);
+
+        assert!(options.shared);
+        assert!(!options.pie); // Shared libs typically don't use PIE
+    }
+
+    #[test]
+    fn test_layout_optimization_enabled() {
+        let options = NativeBinaryOptions::new().layout_optimize(true);
+
+        assert!(options.layout_optimize);
+    }
+
+    #[test]
+    fn test_layout_profile_path() {
+        let profile_path = PathBuf::from("/tmp/profile.data");
+        let options = NativeBinaryOptions::new().layout_profile(profile_path.clone());
+
+        assert_eq!(options.layout_profile, Some(profile_path));
+    }
+
+    #[test]
+    fn test_map_file_generation() {
+        let options = NativeBinaryOptions::new().map(true);
+
+        assert!(options.generate_map);
+    }
+
+    #[test]
+    fn test_verbose_mode() {
+        let options = NativeBinaryOptions::new().verbose(true);
+
+        assert!(options.verbose);
+    }
+
+    #[test]
+    fn test_target_architecture() {
+        let options = NativeBinaryOptions::new().target(Target::host());
+
+        assert_eq!(options.target, Target::host());
+    }
+
+    #[test]
+    fn test_default_options_has_libc() {
+        let options = NativeBinaryOptions::default();
+
+        #[cfg(target_os = "linux")]
+        {
+            assert!(
+                options.libraries.contains(&"c".to_string()),
+                "Default options should include libc"
+            );
+        }
+    }
+
+    #[test]
+    fn test_builder_chaining() {
+        let builder = NativeBinaryBuilder::new(vec![])
+            .output("myapp")
+            .strip(true)
+            .pie(false)
+            .library("pthread")
+            .verbose(true);
+
+        assert_eq!(builder.options.output, PathBuf::from("myapp"));
+        assert!(builder.options.strip);
+        assert!(!builder.options.pie);
+        assert!(builder.options.libraries.contains(&"pthread".to_string()));
+        assert!(builder.options.verbose);
+    }
+
+    #[test]
+    fn test_builder_with_layout_optimizer() {
+        let optimizer = LayoutOptimizer::new();
+        let builder = NativeBinaryBuilder::new(vec![]).with_layout_optimizer(optimizer);
+
+        assert!(builder.layout_optimizer.is_some());
+    }
+
+    #[test]
+    fn test_builder_options_method() {
+        let options = NativeBinaryOptions::new().strip(true).pie(false);
+        let builder = NativeBinaryBuilder::new(vec![]).options(options.clone());
+
+        assert_eq!(builder.options.strip, options.strip);
+        assert_eq!(builder.options.pie, options.pie);
+    }
+
+    #[test]
+    fn test_empty_object_code() {
+        let builder = NativeBinaryBuilder::new(vec![]);
+
+        assert!(builder.object_code.is_empty());
+    }
+
+    #[test]
+    fn test_non_empty_object_code() {
+        let code = vec![0x7f, 0x45, 0x4c, 0x46]; // ELF magic number
+        let builder = NativeBinaryBuilder::new(code.clone());
+
+        assert_eq!(builder.object_code, code);
+    }
+
+    #[test]
+    fn test_output_path_relative() {
+        let options = NativeBinaryOptions::new().output("bin/myapp");
+
+        assert_eq!(options.output, PathBuf::from("bin/myapp"));
+    }
+
+    #[test]
+    fn test_output_path_absolute() {
+        let options = NativeBinaryOptions::new().output("/usr/local/bin/myapp");
+
+        assert_eq!(options.output, PathBuf::from("/usr/local/bin/myapp"));
+    }
 }

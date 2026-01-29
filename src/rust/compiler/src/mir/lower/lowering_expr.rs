@@ -1364,7 +1364,43 @@ impl<'a> MirLowerer<'a> {
                 })
             }
 
-            _ => panic!("unimplemented MIR expression lowering for: {:?}", expr_kind),
+            HirExprKind::LetIn { local_idx, value, body } => {
+                // Store the value into the local variable, then evaluate body
+                let val_reg = self.lower_expr(value)?;
+                let value_ty = value.ty;
+                self.with_func(|func, current_block| {
+                    let addr = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::LocalAddr {
+                        dest: addr,
+                        local_index: *local_idx,
+                    });
+                    block.instructions.push(MirInst::Store {
+                        addr,
+                        value: val_reg,
+                        ty: value_ty,
+                    });
+                })?;
+                self.lower_expr(body)
+            }
+
+            HirExprKind::ArrayRepeat { value, count } => {
+                // Array repeat: [value; count] - creates array with count copies of value
+                // Lower to runtime call: rt_array_repeat(value, count)
+                let value_reg = self.lower_expr(value)?;
+                let count_reg = self.lower_expr(count)?;
+
+                self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::Call {
+                        dest: Some(dest),
+                        target: CallTarget::from_name("rt_array_repeat"),
+                        args: vec![value_reg, count_reg],
+                    });
+                    dest
+                })
+            }
         }
     }
 }

@@ -429,7 +429,151 @@ impl Lowerer {
             | Node::ExportUseStmt(_)
             | Node::AutoImportStmt(_) => Ok(vec![]),
 
-            _ => panic!("unimplemented HIR statement lowering for: {:?}", node),
+            // Guard statement: ? condition -> result
+            // Desugars to: if condition: return result
+            Node::Guard(guard_stmt) => {
+                let result_hir = self.lower_expr(&guard_stmt.result, ctx)?;
+
+                match &guard_stmt.condition {
+                    Some(cond) => {
+                        // ? condition -> result
+                        let cond_hir = self.lower_expr(cond, ctx)?;
+                        Ok(vec![HirStmt::If {
+                            condition: cond_hir,
+                            then_block: vec![HirStmt::Return(Some(result_hir))],
+                            else_block: None,
+                        }])
+                    }
+                    None => {
+                        // ? else -> result (unconditional early return)
+                        Ok(vec![HirStmt::Return(Some(result_hir))])
+                    }
+                }
+            }
+
+            // Defer statement: defer: body or defer expr
+            // Note: Full implementation requires scope tracking for LIFO execution at exit points.
+            // For now, we add the HIR variant and will implement full codegen in Phase 2.
+            Node::Defer(defer_stmt) => {
+                let body_stmts = match &defer_stmt.body {
+                    simple_parser::ast::DeferBody::Expr(e) => {
+                        vec![HirStmt::Expr(self.lower_expr(e, ctx)?)]
+                    }
+                    simple_parser::ast::DeferBody::Block(b) => self.lower_block(b, ctx)?,
+                };
+                Ok(vec![HirStmt::Defer { body: body_stmts }])
+            }
+
+            // With statement: with resource as name: body
+            // Desugars to: __enter__/__exit__ protocol
+            Node::With(with_stmt) => {
+                let resource_hir = self.lower_expr(&with_stmt.resource, ctx)?;
+                let resource_ty = resource_hir.ty;
+
+                // Create temp for resource
+                let temp_idx = ctx.locals.len();
+                ctx.add_local("$with_resource".to_string(), resource_ty, Mutability::Immutable);
+
+                // Call __enter__
+                let enter_call = HirExpr {
+                    kind: HirExprKind::MethodCall {
+                        receiver: Box::new(HirExpr {
+                            kind: HirExprKind::Local(temp_idx),
+                            ty: resource_ty,
+                        }),
+                        method: "__enter__".to_string(),
+                        args: vec![],
+                        dispatch: DispatchMode::Dynamic,
+                    },
+                    ty: resource_ty, // __enter__ returns self or similar type
+                };
+
+                let mut stmts = vec![HirStmt::Let {
+                    local_index: temp_idx,
+                    ty: resource_ty,
+                    value: Some(resource_hir),
+                }];
+
+                // Optional binding: with resource as name
+                if let Some(name) = &with_stmt.name {
+                    let name_idx = ctx.locals.len();
+                    ctx.add_local(name.clone(), resource_ty, Mutability::Immutable);
+                    stmts.push(HirStmt::Let {
+                        local_index: name_idx,
+                        ty: resource_ty,
+                        value: Some(enter_call),
+                    });
+                } else {
+                    // No binding, just call __enter__ for side effects
+                    stmts.push(HirStmt::Expr(enter_call));
+                }
+
+                // Lower body
+                let mut body_stmts = self.lower_block(&with_stmt.body, ctx)?;
+
+                // Call __exit__(None) - pass None for exception (no exception handling yet)
+                let exit_call = HirExpr {
+                    kind: HirExprKind::MethodCall {
+                        receiver: Box::new(HirExpr {
+                            kind: HirExprKind::Local(temp_idx),
+                            ty: resource_ty,
+                        }),
+                        method: "__exit__".to_string(),
+                        args: vec![HirExpr {
+                            kind: HirExprKind::Nil,
+                            ty: TypeId::NIL,
+                        }],
+                        dispatch: DispatchMode::Dynamic,
+                    },
+                    ty: TypeId::VOID,
+                };
+                body_stmts.push(HirStmt::Expr(exit_call));
+
+                stmts.extend(body_stmts);
+                Ok(stmts)
+            }
+
+            // Context statement: context obj: body
+            // Requires expression-level context tracking - mark as unsupported for native codegen
+            Node::Context(_) => Err(LowerError::Unsupported(
+                "Context statements require interpreter mode. Native codegen support is planned."
+                    .to_string(),
+            )),
+
+            // Module-level definitions that should not appear in statement context
+            Node::Function(_)
+            | Node::Struct(_)
+            | Node::Bitfield(_)
+            | Node::Class(_)
+            | Node::Enum(_)
+            | Node::Trait(_)
+            | Node::Impl(_)
+            | Node::InterfaceBinding(_)
+            | Node::Mixin(_)
+            | Node::Actor(_)
+            | Node::TypeAlias(_)
+            | Node::ClassAlias(_)
+            | Node::FunctionAlias(_)
+            | Node::Extern(_)
+            | Node::ExternClass(_)
+            | Node::Const(_)
+            | Node::Static(_)
+            | Node::LeanBlock(_)
+            | Node::Macro(_)
+            | Node::Unit(_)
+            | Node::UnitFamily(_)
+            | Node::CompoundUnit(_)
+            | Node::HandlePool(_)
+            | Node::LiteralFunction(_)
+            | Node::ModDecl(_)
+            | Node::RequiresCapabilities(_)
+            | Node::AopAdvice(_)
+            | Node::DiBinding(_)
+            | Node::ArchitectureRule(_)
+            | Node::MockDecl(_) => Err(LowerError::Unsupported(format!(
+                "Definition type {:?} cannot appear as a statement in function body",
+                node
+            ))),
         }
     }
 

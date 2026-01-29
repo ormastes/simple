@@ -116,7 +116,6 @@ pub(crate) fn extract_elf_text_section(elf_data: &[u8]) -> Option<Vec<u8>> {
     }
 
     let mut code = elf_data[text_offset..text_offset + text_size].to_vec();
-
     // Apply relocations if present
     if let (Some((rela_offset, rela_size)), Some((symtab_off, symtab_size, symtab_link))) =
         (rela_text_section, symtab_section)
@@ -143,6 +142,16 @@ pub(crate) fn extract_elf_text_section(elf_data: &[u8]) -> Option<Vec<u8>> {
             symtab_size,
             strtab_off,
             text_offset,
+        );
+
+        // Handle GOT-relative relocations by appending inline GOT entries
+        apply_got_relocations(
+            &mut code,
+            elf_data,
+            rela_offset,
+            rela_size,
+            symtab_off,
+            strtab_off,
         );
     }
 
@@ -238,6 +247,124 @@ fn apply_elf_relocations(
                 let value = ((sym_addr as i64) + r_addend - (patch_addr as i64)) as i32;
 
                 code[r_offset..r_offset + 4].copy_from_slice(&value.to_le_bytes());
+            }
+        }
+    }
+}
+
+/// Find the offset of a named symbol within the .text section of an ELF object.
+/// Returns the symbol's value (offset within .text) or None if not found.
+pub(crate) fn find_symbol_offset_in_object(object_code: &[u8], symbol_name: &str) -> Option<u64> {
+    if object_code.len() < 64 || &object_code[0..4] != b"\x7fELF" {
+        return None;
+    }
+
+    let e_shoff = u64::from_le_bytes(object_code[40..48].try_into().ok()?) as usize;
+    let e_shentsize = u16::from_le_bytes(object_code[58..60].try_into().ok()?) as usize;
+    let e_shnum = u16::from_le_bytes(object_code[60..62].try_into().ok()?) as usize;
+
+    if e_shoff == 0 || e_shnum == 0 {
+        return None;
+    }
+
+    // Find .symtab and .strtab sections
+    let mut symtab: Option<(usize, usize, u32)> = None; // (offset, size, link)
+    for i in 0..e_shnum {
+        let sh_offset = e_shoff + i * e_shentsize;
+        if sh_offset + e_shentsize > object_code.len() {
+            continue;
+        }
+        let sh_type = u32::from_le_bytes(object_code[sh_offset + 4..sh_offset + 8].try_into().ok()?);
+        // SHT_SYMTAB = 2
+        if sh_type == 2 {
+            let offset = u64::from_le_bytes(object_code[sh_offset + 24..sh_offset + 32].try_into().ok()?) as usize;
+            let size = u64::from_le_bytes(object_code[sh_offset + 32..sh_offset + 40].try_into().ok()?) as usize;
+            let link = u32::from_le_bytes(object_code[sh_offset + 40..sh_offset + 44].try_into().ok()?);
+            symtab = Some((offset, size, link));
+            break;
+        }
+    }
+
+    let (symtab_off, symtab_size, strtab_idx) = symtab?;
+
+    // Get strtab offset from linked section
+    let strtab_sh_offset = e_shoff + strtab_idx as usize * e_shentsize;
+    if strtab_sh_offset + e_shentsize > object_code.len() {
+        return None;
+    }
+    let strtab_off = u64::from_le_bytes(
+        object_code[strtab_sh_offset + 24..strtab_sh_offset + 32].try_into().ok()?,
+    ) as usize;
+
+    // Iterate symbols (ELF64 symbol entry = 24 bytes)
+    const SYM_ENTRY_SIZE: usize = 24;
+    let num_syms = symtab_size / SYM_ENTRY_SIZE;
+    for i in 0..num_syms {
+        let sym_entry = symtab_off + i * SYM_ENTRY_SIZE;
+        if sym_entry + SYM_ENTRY_SIZE > object_code.len() {
+            continue;
+        }
+        let st_name = u32::from_le_bytes(object_code[sym_entry..sym_entry + 4].try_into().ok()?) as usize;
+        let st_value = u64::from_le_bytes(object_code[sym_entry + 8..sym_entry + 16].try_into().ok()?);
+        let name = get_elf_string(object_code, strtab_off, st_name);
+        if name == symbol_name {
+            return Some(st_value);
+        }
+    }
+    None
+}
+
+/// Handle GOT-relative relocations (R_X86_64_GOTPCREL = 9, GOTPCRELX = 41, REX_GOTPCRELX = 42).
+/// Appends inline GOT entries to the code buffer and patches the displacement.
+fn apply_got_relocations(
+    code: &mut Vec<u8>,
+    elf_data: &[u8],
+    rela_offset: usize,
+    rela_size: usize,
+    symtab_off: usize,
+    strtab_off: usize,
+) {
+    const RELA_ENTRY_SIZE: usize = 24;
+    const SYM_ENTRY_SIZE: usize = 24;
+    const R_X86_64_GOTPCREL: u32 = 9;
+    const R_X86_64_GOTPCRELX: u32 = 41;
+    const R_X86_64_REX_GOTPCRELX: u32 = 42;
+
+    let num_relocs = rela_size / RELA_ENTRY_SIZE;
+    // Track original code size (before GOT entries)
+    let original_code_size = code.len();
+
+    for i in 0..num_relocs {
+        let rela_entry = rela_offset + i * RELA_ENTRY_SIZE;
+        if rela_entry + RELA_ENTRY_SIZE > elf_data.len() {
+            continue;
+        }
+
+        let r_offset = u64::from_le_bytes(elf_data[rela_entry..rela_entry + 8].try_into().unwrap()) as usize;
+        let r_info = u64::from_le_bytes(elf_data[rela_entry + 8..rela_entry + 16].try_into().unwrap());
+        let r_addend = i64::from_le_bytes(elf_data[rela_entry + 16..rela_entry + 24].try_into().unwrap());
+
+        let r_type = (r_info & 0xffffffff) as u32;
+        let r_sym = (r_info >> 32) as usize;
+
+        if r_type != R_X86_64_GOTPCREL && r_type != R_X86_64_GOTPCRELX && r_type != R_X86_64_REX_GOTPCRELX {
+            continue;
+        }
+
+        let sym_entry = symtab_off + r_sym * SYM_ENTRY_SIZE;
+        if sym_entry + SYM_ENTRY_SIZE > elf_data.len() {
+            continue;
+        }
+        let st_name = u32::from_le_bytes(elf_data[sym_entry..sym_entry + 4].try_into().unwrap()) as usize;
+        let sym_name = get_elf_string(elf_data, strtab_off, st_name);
+
+        if let Some(sym_addr) = resolve_runtime_symbol(&sym_name) {
+            if r_offset < original_code_size && r_offset + 4 <= original_code_size {
+                let got_offset = code.len();
+                code.extend_from_slice(&(sym_addr as u64).to_le_bytes());
+                // RIP-relative: disp = target - (r_offset + 4), where r_offset+4 is RIP after the disp field
+                let disp = (got_offset as i64) - ((r_offset + 4) as i64);
+                code[r_offset..r_offset + 4].copy_from_slice(&(disp as i32).to_le_bytes());
             }
         }
     }
@@ -348,6 +475,10 @@ fn resolve_runtime_symbol(name: &str) -> Option<usize> {
         // Interpreter bridge FFI
         "rt_interp_call" => value::rt_interp_call as usize,
         "rt_interp_eval" => value::rt_interp_eval as usize,
+
+        // Comparison/equality operations
+        "rt_value_compare" => value::rt_value_compare as usize,
+        "rt_value_eq" => value::rt_value_eq as usize,
 
         // Error handling
         "rt_function_not_found" => value::rt_function_not_found as usize,

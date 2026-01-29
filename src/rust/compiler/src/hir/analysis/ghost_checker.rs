@@ -186,6 +186,12 @@ impl<'a> GhostChecker<'a> {
                     self.check_ghost_expr(&step.expr, func_name);
                 }
             }
+            HirStmt::Defer { body } => {
+                // Defer blocks can contain ghost code
+                for stmt in body {
+                    self.check_ghost_stmt(stmt, func_name);
+                }
+            }
             HirStmt::Break | HirStmt::Continue | HirStmt::Return(None) => {}
         }
     }
@@ -350,6 +356,12 @@ impl<'a> GhostChecker<'a> {
                 // Calc blocks are verification-only, check each step's expression
                 for step in steps {
                     self.check_non_ghost_expr(&step.expr, func_name, true);
+                }
+            }
+            HirStmt::Defer { body } => {
+                // Defer blocks are regular code, check for ghost calls
+                for stmt in body {
+                    self.check_non_ghost_stmt(stmt, func_name, in_contract);
                 }
             }
             HirStmt::Break | HirStmt::Continue | HirStmt::Return(None) => {}

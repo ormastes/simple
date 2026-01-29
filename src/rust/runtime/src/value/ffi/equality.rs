@@ -65,25 +65,13 @@ pub extern "C" fn rt_value_eq(a: RuntimeValue, b: RuntimeValue) -> u8 {
                 let enum_b = ptr_b as *const crate::value::objects::RuntimeEnum;
                 let disc_a = (*enum_a).discriminant;
                 let disc_b = (*enum_b).discriminant;
-                eprintln!(
-                    "[rt_value_eq] enum cmp: disc_a={} disc_b={} id_a={} id_b={} payload_a={:#x} payload_b={:#x}",
-                    disc_a, disc_b, (*enum_a).enum_id, (*enum_b).enum_id,
-                    (*enum_a).payload.to_raw(), (*enum_b).payload.to_raw()
-                );
                 if disc_a != disc_b {
                     return 0;
                 }
                 // Recursively compare payloads
                 return rt_value_eq((*enum_a).payload, (*enum_b).payload);
             }
-            // Log ALL heap comparisons for debugging
-            eprintln!(
-                "[rt_value_eq] heap: a_type={} b_type={} a_raw={:#x} b_raw={:#x}",
-                (*ptr_a).object_type as u8,
-                (*ptr_b).object_type as u8,
-                a.to_raw(),
-                b.to_raw()
-            );
+            // Other heap object types: fall through to return 0
         }
     }
 
