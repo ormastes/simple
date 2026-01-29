@@ -96,23 +96,22 @@ fn add(a: i32, b: i32) -> i32:
 
 #[test]
 fn test_partition_all_generic_constructs() {
-    let source = r#"
-        fn identity<T>(x: T) -> T:
-            return x
+    let source = r#"fn identity<T>(x: T) -> T:
+    return x
 
-        struct Container<T>:
-            value: T
+struct Container<T>:
+    value: T
 
-        class Holder<T>:
-            data: T
+class Holder<T>:
+    data: T
 
-        enum Option<T>:
-            Some(T)
-            None
+enum Option<T>:
+    Some(T)
+    None
 
-        trait Comparable<T>:
-            fn compare(other: T) -> i32
-    "#;
+trait Comparable<T>:
+    fn compare(other: T) -> i32
+"#;
 
     let module = Parser::new(source).parse().expect("Parse failed");
     let (templates, _, metadata) = partition_generic_constructs(&module);
