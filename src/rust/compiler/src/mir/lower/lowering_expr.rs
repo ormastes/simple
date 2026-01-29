@@ -150,9 +150,7 @@ impl<'a> MirLowerer<'a> {
                 }
 
                 // Direct call or indirect call?
-                eprintln!("[MIR-CALL-DEBUG] callee.kind={:?}", std::mem::discriminant(&callee.kind));
                 if let HirExprKind::Global(name) = &callee.kind {
-                    eprintln!("[MIR-CALL-DEBUG] Global name='{}'", name);
                     // Check if this is an enum variant constructor (e.g., "Color::Blue" or "Color.Blue")
                     if let Some((enum_name, variant_name)) = name.split_once("::").or_else(|| name.split_once('.')) {
                         // Check if this is an enum type via the type registry or callee type
@@ -1124,15 +1122,13 @@ impl<'a> MirLowerer<'a> {
                 if let Some((enum_name, variant)) = name.split_once("::").or_else(|| name.split_once('.')) {
                     // Look up the enum type to verify the variant exists
                     let variant_exists = if let Some(registry) = self.type_registry {
-                        if let Some(enum_type_id) = registry.lookup(enum_name) {
-                            if let Some(HirType::Enum { variants, .. }) = registry.get(enum_type_id) {
-                                variants.iter().any(|(vn, _)| vn == variant)
-                            } else {
-                                false
-                            }
-                        } else {
-                            false
-                        }
+                        // Try looking up by enum_name first
+                        let by_name = if let Some(enum_type_id) = registry.lookup(enum_name) {
+                            matches!(registry.get(enum_type_id), Some(HirType::Enum { .. }))
+                        } else { false };
+                        // Also check the expression's type
+                        let by_expr_ty = matches!(registry.get(expr_ty), Some(HirType::Enum { .. }));
+                        by_name || by_expr_ty
                     } else {
                         false
                     };
