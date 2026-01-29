@@ -188,6 +188,54 @@ pub fn load_and_merge_module(
     let module_path = match resolve_module_path(&parts, base_dir) {
         Ok(p) => p,
         Err(e) => {
+            eprintln!("[DEBUG Fallback] Resolution failed for {:?}, import_item_name={:?}, parts.len()={}", parts, import_item_name, parts.len());
+            // FALLBACK: If resolution fails and we're not already extracting an item,
+            // try treating the last path component as an item name instead of a module name.
+            // E.g., `use app.lsp.server.LspServer` fails to find app/lsp/server/LspServer.spl,
+            // so try loading app/lsp/server.spl and extract "LspServer" from it.
+            if import_item_name.is_none() && parts.len() > 1 {
+                eprintln!("[DEBUG Fallback] Trying fallback logic...");
+                debug!(
+                    "Module resolution failed for {:?}, trying fallback: treating last component as item name",
+                    parts.join(".")
+                );
+                // Pop the last component and treat it as an item name
+                let mut parent_parts = parts.clone();
+                let item_name = parent_parts.pop().unwrap();
+                eprintln!("[DEBUG Fallback] Split into parent={:?}, item={}", parent_parts, item_name);
+
+                // Try to resolve the parent path
+                if let Ok(parent_module_path) = resolve_module_path(&parent_parts, base_dir) {
+                    // Successfully resolved parent module - recursively load it and extract the item
+                    decrement_load_depth();
+
+                    // Recursively call load_and_merge_module with the parent path
+                    let mut modified_use_stmt = use_stmt.clone();
+                    modified_use_stmt.path.segments = parent_parts.clone();
+                    // Keep the same target (which was the item name)
+                    modified_use_stmt.target = ImportTarget::Single(item_name.clone());
+
+                    return load_and_merge_module(
+                        &modified_use_stmt,
+                        current_file,
+                        functions,
+                        classes,
+                        enums,
+                    ).and_then(|module_value| {
+                        // Extract the specific item from the loaded module
+                        if let Value::Dict(exports_dict) = &module_value {
+                            if let Some(value) = exports_dict.get(&item_name) {
+                                return Ok(value.clone());
+                            }
+                        }
+                        Err(CompileError::Runtime(format!(
+                            "Module {:?} does not export '{}'",
+                            parent_parts.join("."), item_name
+                        )))
+                    });
+                }
+            }
+
             decrement_load_depth();
             debug!(module = %parts.join("."), error = %e, "Failed to resolve module");
             return Err(e);
