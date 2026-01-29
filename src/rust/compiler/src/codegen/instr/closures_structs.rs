@@ -370,7 +370,15 @@ fn try_compile_builtin_method_call<M: Module>(
     } else if results.is_empty() {
         Ok(Some(builder.ins().iconst(types::I64, 0)))
     } else {
-        Ok(Some(results[0]))
+        let result = results[0];
+        // Extend smaller return types (e.g., I8 from rt_contains) to I64
+        let result_type = builder.func.dfg.value_type(result);
+        if result_type == types::I8 {
+            let extended = builder.ins().uextend(types::I64, result);
+            Ok(Some(extended))
+        } else {
+            Ok(Some(result))
+        }
     }
 }
 

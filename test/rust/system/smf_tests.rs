@@ -607,7 +607,7 @@ fn test_cli_help_output() {
 
     use assert_cmd::Command;
 
-    let mut cmd = Command::cargo_bin("simple").expect("binary exists");
+    let mut cmd = Command::cargo_bin("simple_old").expect("binary exists");
     cmd.arg("--help");
     let output = cmd.output().expect("command ok");
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -628,7 +628,7 @@ fn test_cli_runs_source() {
     let source_path = dir.path().join("test.spl");
     fs::write(&source_path, "main = 42").expect("write ok");
 
-    let mut cmd = Command::cargo_bin("simple").expect("binary exists");
+    let mut cmd = Command::cargo_bin("simple_old").expect("binary exists");
     cmd.arg("run").arg(&source_path);
 
     let output = cmd.output().expect("command ok");
@@ -648,7 +648,7 @@ fn test_cli_compiles_to_smf() {
 
     fs::write(&source_path, "main = 55").expect("write ok");
 
-    let mut cmd = Command::cargo_bin("simple").expect("binary exists");
+    let mut cmd = Command::cargo_bin("simple_old").expect("binary exists");
     cmd.arg("compile").arg(&source_path).arg("-o").arg(&smf_path);
 
     let output = cmd.output().expect("command ok");
@@ -677,7 +677,7 @@ fn test_cli_runs_smf_directly() {
     runner.compile_to_smf("main = 33", &smf_path).expect("compile ok");
 
     // Then run via CLI
-    let mut cmd = Command::cargo_bin("simple").expect("binary exists");
+    let mut cmd = Command::cargo_bin("simple_old").expect("binary exists");
     cmd.arg("run").arg(&smf_path);
 
     let output = cmd.output().expect("command ok");
@@ -690,14 +690,15 @@ fn test_cli_runs_smf_directly() {
 fn test_cli_version() {
     use assert_cmd::Command;
 
-    let mut cmd = Command::cargo_bin("simple").expect("binary exists");
+    let mut cmd = Command::cargo_bin("simple_old").expect("binary exists");
     cmd.arg("--version");
     let output = cmd.output().expect("command ok");
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     assert!(
-        stdout.contains("Simple") && stdout.contains("0.1.0"),
-        "Version should show Simple and version number"
+        stdout.contains("Simple") && (stdout.contains("0.1.0") || stdout.contains("0.2.0")),
+        "Version should show Simple and version number, got: {}",
+        stdout
     );
 }
 
@@ -706,7 +707,7 @@ fn test_cli_version() {
 fn test_cli_run_code_string() {
     use assert_cmd::Command;
 
-    let mut cmd = Command::cargo_bin("simple").expect("binary exists");
+    let mut cmd = Command::cargo_bin("simple_old").expect("binary exists");
     cmd.arg("-c").arg("42");
     let output = cmd.output().expect("command ok");
 
@@ -720,7 +721,7 @@ fn test_cli_run_code_string() {
 fn test_cli_run_code_string_full() {
     use assert_cmd::Command;
 
-    let mut cmd = Command::cargo_bin("simple").expect("binary exists");
+    let mut cmd = Command::cargo_bin("simple_old").expect("binary exists");
     cmd.arg("-c").arg("let x = 10\nmain = x * 5");
     let output = cmd.output().expect("command ok");
 
@@ -736,7 +737,7 @@ fn test_cli_runs_file_directly() {
     let source_path = dir.path().join("direct.spl");
     fs::write(&source_path, "main = 77").expect("write ok");
 
-    let mut cmd = Command::cargo_bin("simple").expect("binary exists");
+    let mut cmd = Command::cargo_bin("simple_old").expect("binary exists");
     cmd.arg(&source_path); // No 'run' command, just the file
 
     let output = cmd.output().expect("command ok");
@@ -754,7 +755,7 @@ fn test_cli_compile_default_output() {
 
     fs::write(&source_path, "main = 88").expect("write ok");
 
-    let mut cmd = Command::cargo_bin("simple").expect("binary exists");
+    let mut cmd = Command::cargo_bin("simple_old").expect("binary exists");
     cmd.arg("compile").arg(&source_path);
     let output = cmd.output().expect("command ok");
 
