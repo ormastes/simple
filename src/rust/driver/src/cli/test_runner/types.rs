@@ -181,7 +181,7 @@ pub struct TestOptions {
     pub keep_artifacts: bool,
     /// Run each test file in a separate process (safe mode)
     pub safe_mode: bool,
-    /// Timeout in seconds for each test file in safe mode (default: 30)
+    /// Timeout in seconds for each test file in safe mode (default: 60)
     pub safe_mode_timeout: u64,
     /// Enable parallel test execution (requires safe_mode)
     pub parallel: bool,
@@ -252,7 +252,7 @@ impl Default for TestOptions {
             force_rebuild: false,
             keep_artifacts: false,
             safe_mode: false,
-            safe_mode_timeout: 30,
+            safe_mode_timeout: 60,
             // Default: sequential (single-threaded) execution
             // Parallel requires explicit --parallel or -p flag
             parallel: false,
