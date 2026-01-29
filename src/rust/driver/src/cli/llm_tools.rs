@@ -254,7 +254,7 @@ pub fn run_mcp(args: &[String]) -> i32 {
         }
     } else {
         // Default collapsed mode
-        let mut generator = McpGenerator::new();
+        let mut generator = McpGenerator::new().public_only(false);
         if show_coverage {
             generator = generator.show_coverage(true);
         }

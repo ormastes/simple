@@ -468,8 +468,33 @@ impl Backend for InterpreterBackendImpl:
         BackendKind.Interpreter
 
     fn process_module(module: HirModule) -> Result<BackendResult, BackendError>:
-        # Register all definitions
-        Ok(BackendResult.Unit)
+        # Create evaluation context
+        val env = Environment.new()
+        val ctx = EvalContext(env: env, module: module, backend: self)
+
+        # Register all functions as global values
+        for symbol in module.functions.keys():
+            val fn_ = module.functions[symbol]
+            ctx.env.define_global(symbol, Value.Function(FunctionValue(symbol: symbol, name: fn_.name)))
+
+        # Register builtin functions from symbol table
+        for sym_id in module.symbols.symbols.keys():
+            val sym = module.symbols.symbols[sym_id]
+            if sym.kind == SymbolKind.Function and not module.functions.contains_key(sym.id):
+                ctx.env.define_global(sym.id, Value.Function(FunctionValue(symbol: sym.id, name: sym.name)))
+
+        # Find and call main function
+        var main_fn: HirFunction? = nil
+        for symbol in module.functions.keys():
+            val fn_ = module.functions[symbol]
+            if fn_.name == "main":
+                main_fn = Some(fn_)
+
+        if main_fn.?:
+            val result = self.call_hir_function(main_fn.unwrap(), [], ctx)?
+            Ok(BackendResult.Value(result))
+        else:
+            Ok(BackendResult.Unit)
 
     fn process_function(fn_: HirFunction) -> Result<BackendResult, BackendError>:
         Ok(BackendResult.Unit)
@@ -745,9 +770,14 @@ impl InterpreterBackendImpl:
     fn call_function(fn_value: Value, args: [Value], ctx: EvalContext, span: Span) -> Result<Value, BackendError>:
         match fn_value:
             case Function(f):
+                # Check for builtin functions first
+                val builtin_result = self.try_call_builtin(f.name, args)
+                if builtin_result.?:
+                    return builtin_result.unwrap()
+
                 # Look up function in module
                 if not ctx.module.functions.contains_key(f.symbol):
-                    return Err(BackendError.runtime_error("function not found", Some(span)))
+                    return Err(BackendError.runtime_error("function '{f.name}' not found", Some(span)))
 
                 val fn_ = ctx.module.functions[f.symbol]
                 self.call_hir_function(fn_, args, ctx)
@@ -811,6 +841,48 @@ impl InterpreterBackendImpl:
             case Div: self.eval_binop(HirBinOp.Div, left, right, span)
             case Mod: self.eval_binop(HirBinOp.Mod, left, right, span)
             case _: Err(BackendError.not_implemented("assignment operator not implemented"))
+
+    fn try_call_builtin(name: text, args: [Value]) -> Result<Value, BackendError>?:
+        """Try to call a builtin function. Returns None if not a builtin."""
+        match name:
+            case "print":
+                if args.len() > 0:
+                    val msg = self.value_to_string(args[0])
+                    print msg
+                else:
+                    print ""
+                Some(Ok(Value.Unit))
+            case "println":
+                if args.len() > 0:
+                    val msg = self.value_to_string(args[0])
+                    print msg
+                else:
+                    print ""
+                Some(Ok(Value.Unit))
+            case "to_string":
+                if args.len() > 0:
+                    Some(Ok(Value.string(self.value_to_string(args[0]))))
+                else:
+                    Some(Ok(Value.string("")))
+            case _:
+                nil
+
+    fn value_to_string(value: Value) -> text:
+        """Convert a Value to its string representation."""
+        match value:
+            case Nil: "nil"
+            case Unit: "()"
+            case Bool(b): if b: "true" else: "false"
+            case Int(i): "{i}"
+            case Float(f): "{f}"
+            case Char(c): "{c}"
+            case String(s): s
+            case Array(elements):
+                var parts: [text] = []
+                for elem in elements:
+                    parts = parts.push(self.value_to_string(elem))
+                "[{parts.join(\", \")}]"
+            case _: "<{value.type_name()}>"
 
 # ============================================================================
 # Compiler Backend Implementation

@@ -174,8 +174,9 @@ pub(crate) fn compile_builtin_io_call<M: Module>(
     match func_name {
         "print" | "println" | "eprint" | "eprintln" => {
             // Determine which runtime function to use
+            // Note: In Simple, 'print' adds a newline (Python 3 convention)
             let (print_value_fn, print_str_fn) = match func_name {
-                "print" => ("rt_print_value", "rt_print_str"),
+                "print" => ("rt_println_value", "rt_println_str"),
                 "println" => ("rt_println_value", "rt_println_str"),
                 "eprint" => ("rt_eprint_value", "rt_eprint_str"),
                 "eprintln" => ("rt_eprintln_value", "rt_eprintln_str"),
@@ -201,8 +202,9 @@ pub(crate) fn compile_builtin_io_call<M: Module>(
                     let space_ptr = builder.ins().global_value(types::I64, space_gv);
                     let space_len = builder.ins().iconst(types::I64, 1);
 
-                    // Use the base print_str function (not println)
+                    // Use the base print_str function (not println) for space separator
                     let base_str_fn = match func_name {
+                        "print" => "rt_print_str",
                         "println" => "rt_print_str",
                         "eprintln" => "rt_eprint_str",
                         _ => print_str_fn,
@@ -213,13 +215,14 @@ pub(crate) fn compile_builtin_io_call<M: Module>(
                 }
 
                 // Print the argument value using rt_print_value / rt_println_value
-                // For the last arg of println/eprintln, use the ln variant
+                // For the last arg of print/println/eprintln, use the ln variant
                 let is_last = i == args.len() - 1;
-                let fn_to_use = if is_last && (func_name == "println" || func_name == "eprintln") {
+                let fn_to_use = if is_last && (func_name == "print" || func_name == "println" || func_name == "eprintln") {
                     print_value_fn
                 } else {
                     // Use non-newline variant for intermediate args
                     match func_name {
+                        "print" => "rt_print_value",
                         "println" => "rt_print_value",
                         "eprintln" => "rt_eprint_value",
                         _ => print_value_fn,
@@ -233,7 +236,7 @@ pub(crate) fn compile_builtin_io_call<M: Module>(
             }
 
             // Handle empty print (just prints nothing or newline)
-            if args.is_empty() && (func_name == "println" || func_name == "eprintln") {
+            if args.is_empty() && (func_name == "print" || func_name == "println" || func_name == "eprintln") {
                 // Print just a newline
                 let newline_data_id = ctx
                     .module
@@ -249,7 +252,7 @@ pub(crate) fn compile_builtin_io_call<M: Module>(
                 let newline_ptr = builder.ins().global_value(types::I64, newline_gv);
                 let newline_len = builder.ins().iconst(types::I64, 1);
 
-                let base_str_fn = if func_name == "println" {
+                let base_str_fn = if func_name == "print" || func_name == "println" {
                     "rt_print_str"
                 } else {
                     "rt_eprint_str"
