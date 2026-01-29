@@ -169,20 +169,19 @@ main = SIZE
 // "#, 3);
 // }
 
-// Impl blocks - testing static method syntax
-// #[test]
-// fn runner_handles_impl_blocks() {
-//     run_expect(r#"
-// struct Point:
-//     x: i64
-//     y: i64
-// impl Point:
-//     fn sum(self):
-//         return self.x + self.y
-// let p = Point { x: 10, y: 20 }
-// main = p.sum()
-// "#, 30);
-// }
+#[test]
+fn runner_handles_impl_blocks() {
+    run_expect(r#"
+struct Point:
+    x: i64
+    y: i64
+impl Point:
+    fn sum(self):
+        return self.x + self.y
+let p = Point { x: 10, y: 20 }
+main = p.sum()
+"#, 30);
+}
 
 // Context blocks need special parser/runtime support
 // #[test]
