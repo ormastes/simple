@@ -269,7 +269,9 @@ fn parse_error_to_check_error(err: &ParseError, path: &Path) -> CheckError {
             expected: None,
             found: None,
         },
-        ParseError::UnexpectedToken { expected, found, span, .. } => CheckError {
+        ParseError::UnexpectedToken {
+            expected, found, span, ..
+        } => CheckError {
             file: path.display().to_string(),
             line: span.line,
             column: span.column,

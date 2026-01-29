@@ -782,12 +782,16 @@ mod hir_types_tests {
             name: "Point".to_string(),
             fields: vec![("x".to_string(), TypeId::I32), ("y".to_string(), TypeId::I32)],
             has_snapshot: false,
+            generic_params: vec![],
+            is_generic_template: false,
+            type_bindings: std::collections::HashMap::new(),
         };
         match ty {
             HirType::Struct {
                 name,
                 fields,
                 has_snapshot,
+                ..
             } => {
                 assert_eq!(name, "Point");
                 assert_eq!(fields.len(), 2);
@@ -806,9 +810,12 @@ mod hir_types_tests {
                 ("Green".to_string(), None),
                 ("Blue".to_string(), None),
             ],
+            generic_params: vec![],
+            is_generic_template: false,
+            type_bindings: std::collections::HashMap::new(),
         };
         match ty {
-            HirType::Enum { name, variants } => {
+            HirType::Enum { name, variants, .. } => {
                 assert_eq!(name, "Color");
                 assert_eq!(variants.len(), 3);
             }

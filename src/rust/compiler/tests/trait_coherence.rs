@@ -253,6 +253,9 @@ fn test_check_module_integration() {
         methods: vec![],
         visibility: Visibility::Public,
         doc_comment: None,
+        is_generic_template: false,
+        specialization_of: None,
+        type_bindings: std::collections::HashMap::new(),
     };
 
     let struct_def = StructDef {
@@ -266,6 +269,9 @@ fn test_check_module_integration() {
         attributes: vec![],
         methods: vec![],
         invariant: None,
+        is_generic_template: false,
+        specialization_of: None,
+        type_bindings: std::collections::HashMap::new(),
     };
 
     let impl_block = make_impl_block(Some("Printable".to_string()), make_type("Person"), vec![], vec![]);

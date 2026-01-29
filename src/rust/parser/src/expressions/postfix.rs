@@ -236,6 +236,7 @@ impl<'a> Parser<'a> {
                                 args: vec![Argument::new(None, trailing_lambda)],
                             };
                         } else if self.check(&TokenKind::LBrace)
+                            && !self.no_brace_postfix
                             && field.chars().next().map_or(false, |c| c.is_uppercase())
                         {
                             // Qualified struct initialization: module.StructName { ... }
@@ -283,7 +284,7 @@ impl<'a> Parser<'a> {
                                 name: full_name,
                                 fields,
                             };
-                        } else if self.check(&TokenKind::LBrace) {
+                        } else if self.check(&TokenKind::LBrace) && !self.no_brace_postfix {
                             // Method call with dict argument: obj.method {...}
                             // Parse the dict as the single argument
                             let dict_expr = self.parse_expression()?;

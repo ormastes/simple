@@ -16,8 +16,8 @@ pub struct SmfHeader {
 
     // Flags and counts (20 bytes) ⭐ v1.1: added compression fields
     pub flags: u32,
-    pub compression: u8,          // ⭐ NEW v1.1: 0=none, 1=zstd, 2=lz4
-    pub compression_level: u8,    // ⭐ NEW v1.1: 0=default, 1-22=level
+    pub compression: u8,               // ⭐ NEW v1.1: 0=none, 1=zstd, 2=lz4
+    pub compression_level: u8,         // ⭐ NEW v1.1: 0=default, 1-22=level
     pub reserved_compression: [u8; 2], // ⭐ NEW v1.1: reserved for compression options
     pub section_count: u32,
     pub section_table_offset: u64,
@@ -29,8 +29,8 @@ pub struct SmfHeader {
 
     // Execution (16 bytes) ⭐ v1.1: added stub fields
     pub entry_point: u64,
-    pub stub_size: u32,           // ⭐ NEW v1.1: Size of executable stub (0=pure SMF)
-    pub smf_data_offset: u32,     // ⭐ NEW v1.1: Offset where SMF data begins
+    pub stub_size: u32,       // ⭐ NEW v1.1: Size of executable stub (0=pure SMF)
+    pub smf_data_offset: u32, // ⭐ NEW v1.1: Offset where SMF data begins
 
     // Hashing (16 bytes)
     pub module_hash: u64,
@@ -44,7 +44,7 @@ pub struct SmfHeader {
     pub prefetch_file_count: u8, // Expected number of files to prefetch
     pub reserved: [u8; 5],       // ⭐ Increased to pad to 128 bytes
 
-    // Total: 128 bytes
+                                 // Total: 128 bytes
 }
 
 impl SmfHeader {
@@ -142,12 +142,12 @@ impl SmfHeader {
         Self {
             magic: *SMF_MAGIC,
             version_major: 1,
-            version_minor: 1,  // ⭐ v1.1: trailer-based header
+            version_minor: 1, // ⭐ v1.1: trailer-based header
             platform: Platform::from_target_os(os) as u8,
             arch: Arch::from_target_arch(arch) as u8,
             flags: 0,
-            compression: 0,         // ⭐ NEW: default no compression
-            compression_level: 0,   // ⭐ NEW: default level
+            compression: 0,       // ⭐ NEW: default no compression
+            compression_level: 0, // ⭐ NEW: default level
             reserved_compression: [0; 2],
             section_count: 0,
             section_table_offset: 0,
@@ -155,8 +155,8 @@ impl SmfHeader {
             symbol_count: 0,
             exported_count: 0,
             entry_point: 0,
-            stub_size: 0,           // ⭐ NEW: no stub by default
-            smf_data_offset: 0,     // ⭐ NEW: SMF data at offset 0
+            stub_size: 0,       // ⭐ NEW: no stub by default
+            smf_data_offset: 0, // ⭐ NEW: SMF data at offset 0
             module_hash: 0,
             source_hash: 0,
             app_type: 0,        // Default to CLI
@@ -247,7 +247,7 @@ pub const SMF_FLAG_EXECUTABLE: u32 = 0x0001;
 pub const SMF_FLAG_RELOADABLE: u32 = 0x0002;
 pub const SMF_FLAG_DEBUG_INFO: u32 = 0x0004;
 pub const SMF_FLAG_PIC: u32 = 0x0008;
-pub const SMF_FLAG_HAS_STUB: u32 = 0x0010;  // ⭐ NEW v1.1: File has executable stub
+pub const SMF_FLAG_HAS_STUB: u32 = 0x0010; // ⭐ NEW v1.1: File has executable stub
 
 // Note: SMF_FLAG_COMPRESSED (bit 4) removed - use header.compression field instead
 

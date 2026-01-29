@@ -45,8 +45,9 @@ pub fn compile_load<M: Module>(
             ctx.vreg_values.insert(dest, val);
         }
     } else {
-        let val = ctx.vreg_values[&addr];
-        ctx.vreg_values.insert(dest, val);
+        if let Some(&val) = ctx.vreg_values.get(&addr) {
+            ctx.vreg_values.insert(dest, val);
+        }
     }
     Ok(())
 }
@@ -97,7 +98,6 @@ pub fn compile_store<M: Module>(
                     v
                 }
             } else {
-                // Value not found - can happen when storing a value from an unvisited branch
                 create_default(builder)
             };
             builder.def_var(var, val);

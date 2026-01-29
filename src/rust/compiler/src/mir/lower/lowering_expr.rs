@@ -355,8 +355,14 @@ impl<'a> MirLowerer<'a> {
                     // Check if argument is a native integer or float type that needs boxing
                     let needs_boxing = matches!(
                         arg.ty,
-                        TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::I64 |
-                        TypeId::U8 | TypeId::U16 | TypeId::U32 | TypeId::U64
+                        TypeId::I8
+                            | TypeId::I16
+                            | TypeId::I32
+                            | TypeId::I64
+                            | TypeId::U8
+                            | TypeId::U16
+                            | TypeId::U32
+                            | TypeId::U64
                     );
                     let needs_float_boxing = matches!(arg.ty, TypeId::F32 | TypeId::F64);
 
@@ -365,12 +371,18 @@ impl<'a> MirLowerer<'a> {
                         let boxed_arg = if needs_boxing {
                             let boxed = func.new_vreg();
                             let block = func.block_mut(current_block).unwrap();
-                            block.instructions.push(MirInst::BoxInt { dest: boxed, value: arg_reg });
+                            block.instructions.push(MirInst::BoxInt {
+                                dest: boxed,
+                                value: arg_reg,
+                            });
                             boxed
                         } else if needs_float_boxing {
                             let boxed = func.new_vreg();
                             let block = func.block_mut(current_block).unwrap();
-                            block.instructions.push(MirInst::BoxFloat { dest: boxed, value: arg_reg });
+                            block.instructions.push(MirInst::BoxFloat {
+                                dest: boxed,
+                                value: arg_reg,
+                            });
                             boxed
                         } else {
                             // Strings, arrays, etc. are already RuntimeValues
@@ -389,14 +401,22 @@ impl<'a> MirLowerer<'a> {
                 }
 
                 // Special handling for print/println/eprint/eprintln - box numeric args
-                if matches!(name.as_str(), "print" | "println" | "eprint" | "eprintln" | "print_raw" | "eprint_raw" | "dprint") {
+                if matches!(
+                    name.as_str(),
+                    "print" | "println" | "eprint" | "eprintln" | "print_raw" | "eprint_raw" | "dprint"
+                ) {
                     let mut boxed_arg_regs = Vec::new();
                     for arg in args {
                         let arg_reg = self.lower_expr(arg)?;
                         let needs_int_boxing = matches!(
                             arg.ty,
-                            TypeId::I16 | TypeId::I32 | TypeId::I64 |
-                            TypeId::U8 | TypeId::U16 | TypeId::U32 | TypeId::U64
+                            TypeId::I16
+                                | TypeId::I32
+                                | TypeId::I64
+                                | TypeId::U8
+                                | TypeId::U16
+                                | TypeId::U32
+                                | TypeId::U64
                         );
                         let needs_float_boxing = matches!(arg.ty, TypeId::F32 | TypeId::F64);
                         let needs_bool_boxing = arg.ty == TypeId::BOOL || arg.ty == TypeId::I8;
@@ -418,9 +438,15 @@ impl<'a> MirLowerer<'a> {
                                     let boxed = func.new_vreg();
                                     let block = func.block_mut(current_block).unwrap();
                                     if needs_int_boxing {
-                                        block.instructions.push(MirInst::BoxInt { dest: boxed, value: arg_reg });
+                                        block.instructions.push(MirInst::BoxInt {
+                                            dest: boxed,
+                                            value: arg_reg,
+                                        });
                                     } else {
-                                        block.instructions.push(MirInst::BoxFloat { dest: boxed, value: arg_reg });
+                                        block.instructions.push(MirInst::BoxFloat {
+                                            dest: boxed,
+                                            value: arg_reg,
+                                        });
                                     }
                                     boxed
                                 })?
@@ -574,7 +600,51 @@ impl<'a> MirLowerer<'a> {
             HirExprKind::Tuple(elements) => {
                 let mut elem_regs = Vec::new();
                 for elem in elements {
-                    elem_regs.push(self.lower_expr(elem)?);
+                    let reg = self.lower_expr(elem)?;
+                    // Box native-typed elements so they become RuntimeValues for the tuple
+                    let needs_int_boxing = matches!(
+                        elem.ty,
+                        TypeId::I16 | TypeId::I32 | TypeId::I64 | TypeId::U8 | TypeId::U16 | TypeId::U32 | TypeId::U64
+                    );
+                    let needs_float_boxing = matches!(elem.ty, TypeId::F32 | TypeId::F64);
+                    let needs_bool_boxing = elem.ty == TypeId::BOOL || elem.ty == TypeId::I8;
+                    if needs_int_boxing || needs_float_boxing || needs_bool_boxing {
+                        let boxed = if needs_bool_boxing {
+                            self.with_func(|func, current_block| {
+                                let boxed = func.new_vreg();
+                                let block = func.block_mut(current_block).unwrap();
+                                block.instructions.push(MirInst::Call {
+                                    dest: Some(boxed),
+                                    target: CallTarget::from_name("rt_value_bool"),
+                                    args: vec![reg],
+                                });
+                                boxed
+                            })?
+                        } else if needs_float_boxing {
+                            self.with_func(|func, current_block| {
+                                let boxed = func.new_vreg();
+                                let block = func.block_mut(current_block).unwrap();
+                                block.instructions.push(MirInst::BoxFloat {
+                                    dest: boxed,
+                                    value: reg,
+                                });
+                                boxed
+                            })?
+                        } else {
+                            self.with_func(|func, current_block| {
+                                let boxed = func.new_vreg();
+                                let block = func.block_mut(current_block).unwrap();
+                                block.instructions.push(MirInst::BoxInt {
+                                    dest: boxed,
+                                    value: reg,
+                                });
+                                boxed
+                            })?
+                        };
+                        elem_regs.push(boxed);
+                    } else {
+                        elem_regs.push(reg);
+                    }
                 }
                 self.with_func(|func, current_block| {
                     let dest = func.new_vreg();
@@ -590,7 +660,52 @@ impl<'a> MirLowerer<'a> {
             HirExprKind::Array(elements) => {
                 let mut elem_regs = Vec::new();
                 for elem in elements {
-                    elem_regs.push(self.lower_expr(elem)?);
+                    let reg = self.lower_expr(elem)?;
+                    // Box native-typed elements so they become RuntimeValues for the array
+                    let needs_int_boxing = matches!(
+                        elem.ty,
+                        TypeId::I16 | TypeId::I32 | TypeId::I64 | TypeId::U8 | TypeId::U16 | TypeId::U32 | TypeId::U64
+                    );
+                    let needs_float_boxing = matches!(elem.ty, TypeId::F32 | TypeId::F64);
+                    let needs_bool_boxing = elem.ty == TypeId::BOOL || elem.ty == TypeId::I8;
+                    if needs_int_boxing || needs_float_boxing || needs_bool_boxing {
+                        let boxed = if needs_bool_boxing {
+                            self.with_func(|func, current_block| {
+                                let boxed = func.new_vreg();
+                                let block = func.block_mut(current_block).unwrap();
+                                block.instructions.push(MirInst::Call {
+                                    dest: Some(boxed),
+                                    target: CallTarget::from_name("rt_value_bool"),
+                                    args: vec![reg],
+                                });
+                                boxed
+                            })?
+                        } else if needs_float_boxing {
+                            self.with_func(|func, current_block| {
+                                let boxed = func.new_vreg();
+                                let block = func.block_mut(current_block).unwrap();
+                                block.instructions.push(MirInst::BoxFloat {
+                                    dest: boxed,
+                                    value: reg,
+                                });
+                                boxed
+                            })?
+                        } else {
+                            self.with_func(|func, current_block| {
+                                let boxed = func.new_vreg();
+                                let block = func.block_mut(current_block).unwrap();
+                                block.instructions.push(MirInst::BoxInt {
+                                    dest: boxed,
+                                    value: reg,
+                                });
+                                boxed
+                            })?
+                        };
+                        elem_regs.push(boxed);
+                    } else {
+                        // Strings, objects, etc. are already RuntimeValues
+                        elem_regs.push(reg);
+                    }
                 }
                 self.with_func(|func, current_block| {
                     let dest = func.new_vreg();
@@ -784,7 +899,8 @@ impl<'a> MirLowerer<'a> {
                 let receiver_ty = receiver.ty;
 
                 // Check if the receiver is a tuple type
-                let is_tuple = self.type_registry
+                let is_tuple = self
+                    .type_registry
                     .and_then(|tr| tr.get(receiver_ty))
                     .map_or(false, |t| matches!(t, crate::hir::HirType::Tuple(_)));
 
@@ -802,15 +918,54 @@ impl<'a> MirLowerer<'a> {
                         dest
                     })?
                 } else {
-                    // Use rt_array_get(array_rv, index_i64) for arrays/strings
-                    let target = CallTarget::from_name("rt_array_get");
+                    // Box the index as RuntimeValue if it's a native type
+                    let boxed_index = {
+                        let needs_int_boxing = matches!(
+                            index.ty,
+                            TypeId::I16
+                                | TypeId::I32
+                                | TypeId::I64
+                                | TypeId::U8
+                                | TypeId::U16
+                                | TypeId::U32
+                                | TypeId::U64
+                        );
+                        let needs_bool_boxing = index.ty == TypeId::BOOL || index.ty == TypeId::I8;
+                        if needs_int_boxing {
+                            self.with_func(|func, current_block| {
+                                let boxed = func.new_vreg();
+                                let block = func.block_mut(current_block).unwrap();
+                                block.instructions.push(MirInst::BoxInt {
+                                    dest: boxed,
+                                    value: index_reg,
+                                });
+                                boxed
+                            })?
+                        } else if needs_bool_boxing {
+                            self.with_func(|func, current_block| {
+                                let boxed = func.new_vreg();
+                                let block = func.block_mut(current_block).unwrap();
+                                block.instructions.push(MirInst::Call {
+                                    dest: Some(boxed),
+                                    target: CallTarget::from_name("rt_value_bool"),
+                                    args: vec![index_reg],
+                                });
+                                boxed
+                            })?
+                        } else {
+                            // String keys etc. are already RuntimeValues
+                            index_reg
+                        }
+                    };
+                    // Use rt_index_get(collection_rv, index_rv) for arrays/strings/dicts
+                    let target = CallTarget::from_name("rt_index_get");
                     self.with_func(|func, current_block| {
                         let dest = func.new_vreg();
                         let block = func.block_mut(current_block).unwrap();
                         block.instructions.push(MirInst::Call {
                             dest: Some(dest),
                             target,
-                            args: vec![receiver_reg, index_reg],
+                            args: vec![receiver_reg, boxed_index],
                         });
                         dest
                     })?
@@ -819,9 +974,15 @@ impl<'a> MirLowerer<'a> {
                 // rt_array_get returns RuntimeValue; unbox if the expected type is a native type
                 let needs_int_unbox = matches!(
                     expr.ty,
-                    TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::I64 |
-                    TypeId::U8 | TypeId::U16 | TypeId::U32 | TypeId::U64 |
-                    TypeId::BOOL
+                    TypeId::I8
+                        | TypeId::I16
+                        | TypeId::I32
+                        | TypeId::I64
+                        | TypeId::U8
+                        | TypeId::U16
+                        | TypeId::U32
+                        | TypeId::U64
+                        | TypeId::BOOL
                 );
                 let needs_float_unbox = matches!(expr.ty, TypeId::F32 | TypeId::F64);
 
@@ -829,14 +990,20 @@ impl<'a> MirLowerer<'a> {
                     self.with_func(|func, current_block| {
                         let unboxed = func.new_vreg();
                         let block = func.block_mut(current_block).unwrap();
-                        block.instructions.push(MirInst::UnboxInt { dest: unboxed, value: raw_result });
+                        block.instructions.push(MirInst::UnboxInt {
+                            dest: unboxed,
+                            value: raw_result,
+                        });
                         unboxed
                     })
                 } else if needs_float_unbox {
                     self.with_func(|func, current_block| {
                         let unboxed = func.new_vreg();
                         let block = func.block_mut(current_block).unwrap();
-                        block.instructions.push(MirInst::UnboxFloat { dest: unboxed, value: raw_result });
+                        block.instructions.push(MirInst::UnboxFloat {
+                            dest: unboxed,
+                            value: raw_result,
+                        });
                         unboxed
                     })
                 } else {
@@ -870,19 +1037,17 @@ impl<'a> MirLowerer<'a> {
                 };
 
                 match dispatch {
-                    DispatchMode::Static | DispatchMode::Dynamic => {
-                        self.with_func(|func, current_block| {
-                            let dest = func.new_vreg();
-                            let block = func.block_mut(current_block).unwrap();
-                            block.instructions.push(MirInst::MethodCallStatic {
-                                dest: Some(dest),
-                                receiver: receiver_reg,
-                                func_name,
-                                args: arg_regs,
-                            });
-                            dest
-                        })
-                    }
+                    DispatchMode::Static | DispatchMode::Dynamic => self.with_func(|func, current_block| {
+                        let dest = func.new_vreg();
+                        let block = func.block_mut(current_block).unwrap();
+                        block.instructions.push(MirInst::MethodCallStatic {
+                            dest: Some(dest),
+                            receiver: receiver_reg,
+                            func_name,
+                            args: arg_regs,
+                        });
+                        dest
+                    }),
                 }
             }
 
@@ -996,7 +1161,11 @@ impl<'a> MirLowerer<'a> {
                 })
             }
 
-            HirExprKind::If { condition, then_branch, else_branch } => {
+            HirExprKind::If {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
                 use crate::hir::TypeId;
                 use crate::mir::effects::LocalKind;
                 use crate::mir::function::MirLocal;

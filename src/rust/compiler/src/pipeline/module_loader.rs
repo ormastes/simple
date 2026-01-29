@@ -389,6 +389,71 @@ pub fn load_module_with_imports_validated(
                 items.push(item);
                 continue;
             }
+        } else if let Node::ExportUseStmt(export_use) = &item {
+            // Handle export use statements (e.g., `export describe, context from dsl`)
+            // Skip bare exports (empty path) - they only mark local symbols for export
+            if export_use.path.segments.is_empty() {
+                items.push(item);
+                continue;
+            }
+            let temp_use = UseStmt {
+                span: export_use.span.clone(),
+                path: export_use.path.clone(),
+                target: export_use.target.clone(),
+                is_type_only: false,
+            };
+            if let Some(resolved) = resolve_use_to_path(&temp_use, path.parent().unwrap_or(Path::new("."))) {
+                let imported = load_module_with_imports_validated(&resolved, visited, Some(effective_caps))?;
+
+                if !effective_caps.is_empty() {
+                    let func_effects = extract_function_effects(&imported);
+                    for (func_name, effects) in func_effects {
+                        if let Some(err) = check_import_compatibility(&func_name, &effects, effective_caps) {
+                            let ctx = ErrorContext::new()
+                                .with_code(codes::UNSUPPORTED_FEATURE)
+                                .with_help(&format!(
+                                    "Function `{}` uses effects not allowed by module capabilities",
+                                    func_name
+                                ));
+                            return Err(CompileError::semantic_with_context(err, ctx));
+                        }
+                    }
+                }
+
+                items.extend(imported.items);
+                items.push(item);
+                continue;
+            }
+        } else if let Node::CommonUseStmt(common_use) = &item {
+            // Handle common use statements
+            let temp_use = UseStmt {
+                span: common_use.span.clone(),
+                path: common_use.path.clone(),
+                target: common_use.target.clone(),
+                is_type_only: false,
+            };
+            if let Some(resolved) = resolve_use_to_path(&temp_use, path.parent().unwrap_or(Path::new("."))) {
+                let imported = load_module_with_imports_validated(&resolved, visited, Some(effective_caps))?;
+
+                if !effective_caps.is_empty() {
+                    let func_effects = extract_function_effects(&imported);
+                    for (func_name, effects) in func_effects {
+                        if let Some(err) = check_import_compatibility(&func_name, &effects, effective_caps) {
+                            let ctx = ErrorContext::new()
+                                .with_code(codes::UNSUPPORTED_FEATURE)
+                                .with_help(&format!(
+                                    "Function `{}` uses effects not allowed by module capabilities",
+                                    func_name
+                                ));
+                            return Err(CompileError::semantic_with_context(err, ctx));
+                        }
+                    }
+                }
+
+                items.extend(imported.items);
+                items.push(item);
+                continue;
+            }
         } else if let Node::MultiUse(multi_use) = &item {
             // Handle comma-separated imports: use a.B, c.D
             for (module_path, target) in &multi_use.imports {

@@ -7,8 +7,8 @@ use crate::manifest::{Dependency, DependencyDetail, Manifest};
 
 /// Load manifest from dir, returning error if not found
 fn load_manifest(dir: &Path) -> PkgResult<(std::path::PathBuf, Manifest)> {
-    let manifest_path = crate::find_manifest(dir)
-        .ok_or_else(|| PkgError::ManifestNotFound(dir.display().to_string()))?;
+    let manifest_path =
+        crate::find_manifest(dir).ok_or_else(|| PkgError::ManifestNotFound(dir.display().to_string()))?;
     let manifest = Manifest::load(&manifest_path)?;
     Ok((manifest_path, manifest))
 }

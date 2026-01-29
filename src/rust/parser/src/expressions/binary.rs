@@ -69,13 +69,32 @@ impl<'a> Parser<'a> {
     parse_binary_single!(parse_bitwise_xor, parse_bitwise_and, Xor, BinOp::BitXor);
     parse_binary_single!(parse_bitwise_and, parse_shift, Ampersand, BinOp::BitAnd);
 
-    // Multi-token operators
-    parse_binary_multi!(parse_equality, parse_comparison,
-        Eq => BinOp::Eq,
-        NotEq => BinOp::NotEq,
-        Is => BinOp::Is,
-        In => BinOp::In,
-    );
+    // Equality and membership operators (manual for `not in` support)
+    pub(crate) fn parse_equality(&mut self) -> Result<Expr, ParseError> {
+        let mut left = self.parse_comparison()?;
+        loop {
+            let kind = self.current.kind.clone();
+            let op = match &kind {
+                TokenKind::Eq => BinOp::Eq,
+                TokenKind::NotEq => BinOp::NotEq,
+                TokenKind::Is => BinOp::Is,
+                TokenKind::In => BinOp::In,
+                TokenKind::Not if self.peek_is(&TokenKind::In) => {
+                    self.advance(); // consume 'not'
+                    BinOp::NotIn
+                }
+                _ => break,
+            };
+            self.advance();
+            let right = self.parse_comparison()?;
+            left = Expr::Binary {
+                op,
+                left: Box::new(left),
+                right: Box::new(right),
+            };
+        }
+        Ok(left)
+    }
 
     /// Parse comparisons with chaining support: a < b < c becomes (a < b) and (b < c)
     pub(crate) fn parse_comparison(&mut self) -> Result<Expr, ParseError> {

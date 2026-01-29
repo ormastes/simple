@@ -84,7 +84,10 @@ impl GenericTemplate {
     pub fn as_function(&self) -> Result<&FunctionDef, CompileError> {
         match self {
             GenericTemplate::Function(f) => Ok(f),
-            _ => Err(CompileError::Codegen(format!("{} is not a function template", self.name()))),
+            _ => Err(CompileError::Codegen(format!(
+                "{} is not a function template",
+                self.name()
+            ))),
         }
     }
 
@@ -92,7 +95,10 @@ impl GenericTemplate {
     pub fn as_struct(&self) -> Result<&StructDef, CompileError> {
         match self {
             GenericTemplate::Struct(s) => Ok(s),
-            _ => Err(CompileError::Codegen(format!("{} is not a struct template", self.name()))),
+            _ => Err(CompileError::Codegen(format!(
+                "{} is not a struct template",
+                self.name()
+            ))),
         }
     }
 
@@ -100,7 +106,10 @@ impl GenericTemplate {
     pub fn as_class(&self) -> Result<&ClassDef, CompileError> {
         match self {
             GenericTemplate::Class(c) => Ok(c),
-            _ => Err(CompileError::Codegen(format!("{} is not a class template", self.name()))),
+            _ => Err(CompileError::Codegen(format!(
+                "{} is not a class template",
+                self.name()
+            ))),
         }
     }
 
@@ -108,7 +117,10 @@ impl GenericTemplate {
     pub fn as_enum(&self) -> Result<&EnumDef, CompileError> {
         match self {
             GenericTemplate::Enum(e) => Ok(e),
-            _ => Err(CompileError::Codegen(format!("{} is not an enum template", self.name()))),
+            _ => Err(CompileError::Codegen(format!(
+                "{} is not an enum template",
+                self.name()
+            ))),
         }
     }
 }
@@ -161,8 +173,8 @@ impl DeferredMonomorphizer {
     /// Extracts TemplateCode and TemplateMeta sections and populates the template cache.
     pub fn load_templates_from_smf(&mut self, smf_path: &Path) -> Result<(), CompileError> {
         // Read SMF file
-        let smf_bytes = std::fs::read(smf_path)
-            .map_err(|e| CompileError::Io(format!("Failed to read SMF file: {}", e)))?;
+        let smf_bytes =
+            std::fs::read(smf_path).map_err(|e| CompileError::Io(format!("Failed to read SMF file: {}", e)))?;
 
         // Parse SMF header and sections
         // TODO: Implement proper SMF parsing with simple_loader
@@ -210,7 +222,8 @@ impl DeferredMonomorphizer {
             if offset + 4 > data.len() {
                 break;
             }
-            let name_len = u32::from_le_bytes([data[offset], data[offset + 1], data[offset + 2], data[offset + 3]]) as usize;
+            let name_len =
+                u32::from_le_bytes([data[offset], data[offset + 1], data[offset + 2], data[offset + 3]]) as usize;
             offset += 4;
 
             // Read name
@@ -237,7 +250,12 @@ impl DeferredMonomorphizer {
     }
 
     /// Create a placeholder template (will be replaced with full deserialization).
-    fn create_placeholder_template(&self, kind: u8, name: &str, param_count: u8) -> Result<GenericTemplate, CompileError> {
+    fn create_placeholder_template(
+        &self,
+        kind: u8,
+        name: &str,
+        param_count: u8,
+    ) -> Result<GenericTemplate, CompileError> {
         // Create minimal placeholder templates
         // TODO: Replace with full AST deserialization
         let generic_params = (0..param_count).map(|i| format!("T{}", i)).collect();
@@ -376,22 +394,30 @@ impl DeferredMonomorphizer {
         // For now, just create empty metadata entries
         for i in 0..func_count {
             let name = format!("func_{}", i);
-            self.metadata.functions.insert(name.clone(), GenericFunctionMeta::new(name, vec![]));
+            self.metadata
+                .functions
+                .insert(name.clone(), GenericFunctionMeta::new(name, vec![]));
         }
 
         for i in 0..struct_count {
             let name = format!("struct_{}", i);
-            self.metadata.structs.insert(name.clone(), GenericStructMeta::new(name, vec![]));
+            self.metadata
+                .structs
+                .insert(name.clone(), GenericStructMeta::new(name, vec![]));
         }
 
         for i in 0..enum_count {
             let name = format!("enum_{}", i);
-            self.metadata.enums.insert(name.clone(), GenericEnumMeta::new(name, vec![]));
+            self.metadata
+                .enums
+                .insert(name.clone(), GenericEnumMeta::new(name, vec![]));
         }
 
         for i in 0..trait_count {
             let name = format!("trait_{}", i);
-            self.metadata.traits.insert(name.clone(), GenericTraitMeta::new(name, vec![]));
+            self.metadata
+                .traits
+                .insert(name.clone(), GenericTraitMeta::new(name, vec![]));
         }
 
         Ok(())
@@ -403,7 +429,11 @@ impl DeferredMonomorphizer {
     /// - The template doesn't exist
     /// - The template is not a function
     /// - Type argument count doesn't match
-    pub fn instantiate_function(&mut self, name: &str, type_args: &[ConcreteType]) -> Result<FunctionDef, CompileError> {
+    pub fn instantiate_function(
+        &mut self,
+        name: &str,
+        type_args: &[ConcreteType],
+    ) -> Result<FunctionDef, CompileError> {
         let key = SpecializationKey::new(name.to_string(), type_args.to_vec());
 
         // Check cache first
@@ -531,7 +561,11 @@ impl DeferredMonomorphizer {
     }
 
     /// Perform monomorphization on a function template.
-    fn monomorphize_function(&self, template: &FunctionDef, type_args: &[ConcreteType]) -> Result<FunctionDef, CompileError> {
+    fn monomorphize_function(
+        &self,
+        template: &FunctionDef,
+        type_args: &[ConcreteType],
+    ) -> Result<FunctionDef, CompileError> {
         // Create a minimal module for monomorphization
         let module = Module {
             name: Some("deferred".to_string()),

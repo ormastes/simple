@@ -1,18 +1,18 @@
 //! Codegen coverage tests for MIR instruction categories.
 //!
-//! This test file ensures codegen coverage for instruction categories
-//! that are supported by the JIT compiler.
+//! Uses `backend_test!` macro to run on both Interpreter and JIT.
+//! Previously JIT-only; now gains interpreter coverage for free.
 
-use simple_driver::run_jit;
+mod test_helpers;
 
 // =============================================================================
-// Struct/Class Initialization and Field Access (WORKING)
+// Struct/Class Initialization and Field Access
 // =============================================================================
 
-#[test]
-fn codegen_struct_init_simple() {
-    // Tests: StructInit, FieldGet
-    let code = r#"
+backend_test!(
+    codegen_struct_init_simple,
+    interp_jit,
+    r#"
 struct Point:
     x: i64
     y: i64
@@ -20,15 +20,14 @@ struct Point:
 fn main() -> i64:
     val p = Point(x: 40, y: 2)
     return p.x + p.y
-"#;
-    let result = run_jit(code).unwrap();
-    assert_eq!(result.exit_code, 42);
-}
+"#,
+    42
+);
 
-#[test]
-fn codegen_nested_struct() {
-    // Tests: StructInit with nested structs, FieldGet chain
-    let code = r#"
+backend_test!(
+    codegen_nested_struct,
+    interp_jit,
+    r#"
 struct Inner:
     v: i64
 
@@ -40,119 +39,112 @@ fn main() -> i64:
     val inner = Inner(v: 10)
     val outer = Outer(a: inner.v, b: 32)
     return outer.a + outer.b
-"#;
-    let result = run_jit(code).unwrap();
-    assert_eq!(result.exit_code, 42);
-}
+"#,
+    42
+);
 
 // =============================================================================
-// Pointer Operations (WORKING)
+// Pointer Operations
 // =============================================================================
 
-#[test]
-fn codegen_pointer_new_deref() {
-    // Tests: PointerNew, PointerDeref
-    let code = r#"
+backend_test!(
+    codegen_pointer_new_deref,
+    interp_jit,
+    r#"
 fn main() -> i64:
     val p = &42
     return *p
-"#;
-    let result = run_jit(code).unwrap();
-    assert_eq!(result.exit_code, 42);
-}
+"#,
+    42
+);
 
 // =============================================================================
-// Type Cast Operations (WORKING)
+// Type Cast Operations
 // =============================================================================
 
-#[test]
-fn codegen_cast_int_to_float_back() {
-    // Tests: Cast instruction
-    let code = r#"
+backend_test!(
+    codegen_cast_int_to_float_back,
+    interp_jit,
+    r#"
 fn main() -> i64:
     val x: i64 = 42
     val f: f64 = x as f64
     val back: i64 = f as i64
     return back
-"#;
-    let result = run_jit(code).unwrap();
-    assert_eq!(result.exit_code, 42);
-}
+"#,
+    42
+);
 
 // =============================================================================
-// Copy Operations (WORKING)
+// Copy Operations
 // =============================================================================
 
-#[test]
-fn codegen_copy_operation() {
-    // Tests: Copy instruction
-    let code = r#"
+backend_test!(
+    codegen_copy_operation,
+    interp_jit,
+    r#"
 fn main() -> i64:
     val a: i64 = 42
     val b: i64 = a
     return b
-"#;
-    let result = run_jit(code).unwrap();
-    assert_eq!(result.exit_code, 42);
-}
+"#,
+    42
+);
 
 // =============================================================================
-// Collection Operations - Array (WORKING)
+// Collection Operations - Array
 // =============================================================================
 
-#[test]
-#[ignore = "array indexing in JIT returns wrong value - needs investigation"]
-fn codegen_array_literal() {
-    // Tests: ArrayLit, IndexGet (via rt_array_get)
-    let code = r#"
+// array indexing in JIT returns wrong value - interpreter only
+backend_test!(
+    codegen_array_literal,
+    interp,
+    r#"
 fn main() -> i64:
     val arr = [10, 20, 42, 30]
     return arr[2]
-"#;
-    let result = run_jit(code).unwrap();
-    assert_eq!(result.exit_code, 42);
-}
+"#,
+    42
+);
 
 // =============================================================================
-// String Operations (WORKING)
+// String Operations
 // =============================================================================
 
-#[test]
-fn codegen_const_string() {
-    // Tests: ConstString
-    let code = r#"
+backend_test!(
+    codegen_const_string,
+    interp_jit,
+    r#"
 fn main() -> i64:
     val s = "hello"
     return 42
-"#;
-    let result = run_jit(code).unwrap();
-    assert_eq!(result.exit_code, 42);
-}
+"#,
+    42
+);
 
 // =============================================================================
-// Value Boxing/Unboxing (WORKING)
+// Value Boxing/Unboxing
 // =============================================================================
 
-#[test]
-fn codegen_box_unbox_int() {
-    // Tests: BoxInt, UnboxInt - used at FFI boundaries
-    let code = r#"
+backend_test!(
+    codegen_box_unbox_int,
+    interp_jit,
+    r#"
 fn main() -> i64:
     val x: i64 = 42
     return x
-"#;
-    let result = run_jit(code).unwrap();
-    assert_eq!(result.exit_code, 42);
-}
+"#,
+    42
+);
 
 // =============================================================================
-// Memory Safety Operations (WORKING)
+// Memory Safety Operations
 // =============================================================================
 
-#[test]
-fn codegen_scope_cleanup() {
-    // Tests: Drop, EndScope (implicit at scope boundaries)
-    let code = r#"
+backend_test!(
+    codegen_scope_cleanup,
+    interp_jit,
+    r#"
 fn scoped_work() -> i64:
     val x: i64 = 10
     val y: i64 = 32
@@ -160,19 +152,18 @@ fn scoped_work() -> i64:
 
 fn main() -> i64:
     return scoped_work()
-"#;
-    let result = run_jit(code).unwrap();
-    assert_eq!(result.exit_code, 42);
-}
+"#,
+    42
+);
 
 // =============================================================================
-// GC and Memory Operations (WORKING)
+// GC and Memory Operations
 // =============================================================================
 
-#[test]
-fn codegen_gc_alloc() {
-    // Tests: GcAlloc (used implicitly for heap-allocated structures)
-    let code = r#"
+backend_test!(
+    codegen_gc_alloc,
+    interp_jit,
+    r#"
 struct BigStruct:
     a: i64
     b: i64
@@ -182,108 +173,101 @@ struct BigStruct:
 fn main() -> i64:
     val s = BigStruct(a: 10, b: 20, c: 10, d: 2)
     return s.a + s.b + s.c + s.d
-"#;
-    let result = run_jit(code).unwrap();
-    assert_eq!(result.exit_code, 42);
-}
+"#,
+    42
+);
 
 // =============================================================================
-// Unary Operations (WORKING)
+// Unary Operations
 // =============================================================================
 
-#[test]
-fn codegen_unary_neg() {
-    // Tests: UnaryOp (negation)
-    let code = r#"
+backend_test!(
+    codegen_unary_neg,
+    interp_jit,
+    r#"
 fn main() -> i64:
     val x: i64 = -42
     return -x
-"#;
-    let result = run_jit(code).unwrap();
-    assert_eq!(result.exit_code, 42);
-}
+"#,
+    42
+);
 
-#[test]
-fn codegen_unary_not() {
-    // Tests: UnaryOp (logical not)
-    let code = r#"
+backend_test!(
+    codegen_unary_not,
+    interp_jit,
+    r#"
 fn main() -> i64:
     val b: bool = false
     if not b:
         return 42
     else:
         return 0
-"#;
-    let result = run_jit(code).unwrap();
-    assert_eq!(result.exit_code, 42);
-}
+"#,
+    42
+);
 
 // =============================================================================
-// Const Bool Operations (WORKING)
+// Const Bool Operations
 // =============================================================================
 
-#[test]
-fn codegen_const_bool_true() {
-    // Tests: ConstBool
-    let code = r#"
+backend_test!(
+    codegen_const_bool_true,
+    interp_jit,
+    r#"
 fn main() -> i64:
     val b: bool = true
     if b:
         return 42
     else:
         return 0
-"#;
-    let result = run_jit(code).unwrap();
-    assert_eq!(result.exit_code, 42);
-}
+"#,
+    42
+);
 
-#[test]
-fn codegen_const_bool_false() {
-    // Tests: ConstBool
-    let code = r#"
+backend_test!(
+    codegen_const_bool_false,
+    interp_jit,
+    r#"
 fn main() -> i64:
     val b: bool = false
     if b:
         return 0
     else:
         return 42
-"#;
-    let result = run_jit(code).unwrap();
-    assert_eq!(result.exit_code, 42);
-}
+"#,
+    42
+);
 
 // =============================================================================
-// Const Float Operations (WORKING)
+// Const Float Operations
 // =============================================================================
 
-#[test]
-fn codegen_const_float() {
-    // Tests: ConstFloat
-    let code = r#"
+backend_test!(
+    codegen_const_float,
+    interp_jit,
+    r#"
 fn main() -> i64:
     val f: f64 = 42.5
     return f as i64
-"#;
-    let result = run_jit(code).unwrap();
-    assert_eq!(result.exit_code, 42);
-}
+"#,
+    42
+);
 
 // =============================================================================
-// Local Address and Element Pointer Operations (WORKING)
+// Local Address and Element Pointer Operations
 // =============================================================================
 
-#[test]
-fn codegen_local_addr() {
-    // Tests: LocalAddr, Load, Store
-    let code = r#"
+backend_test!(
+    codegen_local_addr,
+    interp_jit,
+    r#"
 fn main() -> i64:
     var x: i64 = 0
     x = 42
     return x
-"#;
-    let result = run_jit(code).unwrap();
-    assert_eq!(result.exit_code, 42);
-}
+"#,
+    42
+);
 
 // =============================================================================
 // TODO: Features needing JIT implementation

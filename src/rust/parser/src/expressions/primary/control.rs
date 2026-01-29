@@ -274,6 +274,13 @@ impl<'a> Parser<'a> {
         self.advance();
         let body = if self.check(&TokenKind::Newline) {
             self.parse_block()?
+        } else if self.check(&TokenKind::Return) || self.check(&TokenKind::Break) || self.check(&TokenKind::Continue) {
+            // Allow return/break/continue as match arm bodies (diverging arms)
+            let stmt = self.parse_item()?;
+            Block {
+                span: self.previous.span,
+                statements: vec![stmt],
+            }
         } else {
             let expr = self.parse_expression()?;
             Block {

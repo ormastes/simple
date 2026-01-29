@@ -238,7 +238,10 @@ impl Lowerer {
         }
 
         // Look up the return type from the module's functions
-        let return_ty = self.module.functions.iter()
+        let return_ty = self
+            .module
+            .functions
+            .iter()
             .find(|f| f.name == qualified_name)
             .map(|f| f.return_type)
             .unwrap_or_else(|| {

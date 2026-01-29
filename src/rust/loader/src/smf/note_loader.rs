@@ -75,7 +75,8 @@ impl LoadedNoteSdn {
     pub fn build_dependency_graph(&self) -> HashMap<String, Vec<String>> {
         let mut graph: HashMap<String, Vec<String>> = HashMap::new();
         for dep in &self.dependencies {
-            graph.entry(dep.from_inst.clone())
+            graph
+                .entry(dep.from_inst.clone())
                 .or_default()
                 .push(dep.to_inst.clone());
         }
@@ -145,12 +146,10 @@ pub struct LoadedCircularError {
 /// Load note.sdn section from an SMF file reader.
 ///
 /// Uses the zero-size trick: scans from section offset until terminator.
-pub fn load_note_sdn<R: Read + Seek>(
-    reader: &mut R,
-    section: &SmfSection,
-) -> Result<LoadedNoteSdn, String> {
+pub fn load_note_sdn<R: Read + Seek>(reader: &mut R, section: &SmfSection) -> Result<LoadedNoteSdn, String> {
     // Seek to section offset
-    reader.seek(SeekFrom::Start(section.offset))
+    reader
+        .seek(SeekFrom::Start(section.offset))
         .map_err(|e| format!("Failed to seek to note.sdn section: {}", e))?;
 
     // Read until we find the terminator (zero-size trick)
@@ -167,7 +166,8 @@ fn read_until_terminator<R: Read>(reader: &mut R, terminator: &str) -> Result<St
     let terminator_bytes = terminator.as_bytes();
 
     loop {
-        let bytes_read = reader.read(&mut buffer)
+        let bytes_read = reader
+            .read(&mut buffer)
             .map_err(|e| format!("Failed to read note.sdn: {}", e))?;
 
         if bytes_read == 0 {
@@ -199,7 +199,8 @@ fn read_until_terminator<R: Read>(reader: &mut R, terminator: &str) -> Result<St
 pub fn parse_note_sdn(content: &str) -> Result<LoadedNoteSdn, String> {
     let mut result = LoadedNoteSdn::new();
     let mut current_table: Option<&str> = None;
-    let mut columns: Vec<String> = Vec::new();
+    // TODO(sdn): Use parsed columns for table validation
+    let mut _columns: Vec<String> = Vec::new();
 
     for line in content.lines() {
         let line = line.trim();
@@ -216,7 +217,7 @@ pub fn parse_note_sdn(content: &str) -> Result<LoadedNoteSdn, String> {
             if parts.len() >= 2 {
                 let table_name = parts[0].trim();
                 let cols_str = parts[1].trim_end_matches('|');
-                columns = cols_str.split(',').map(|s| s.trim().to_string()).collect();
+                _columns = cols_str.split(',').map(|s| s.trim().to_string()).collect();
                 current_table = Some(match table_name {
                     "instantiations" => "instantiations",
                     "possible" => "possible",
@@ -348,7 +349,7 @@ fn unescape_sdn(s: &str) -> String {
     // Remove surrounding quotes if present
     let s = s.trim();
     let s = if s.starts_with('"') && s.ends_with('"') {
-        &s[1..s.len()-1]
+        &s[1..s.len() - 1]
     } else {
         s
     };

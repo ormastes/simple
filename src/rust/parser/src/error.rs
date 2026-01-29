@@ -33,20 +33,11 @@ impl ParseContext {
 #[macro_export]
 macro_rules! parse_context {
     () => {
-        $crate::error::ParseContext::new(
-            file!(),
-            concat!(module_path!(), "::", line!()),
-            line!(),
-            column!()
-        )
+        $crate::error::ParseContext::new(file!(), concat!(module_path!(), "::", line!()), line!(), column!())
     };
     ($state:expr) => {
-        $crate::error::ParseContext::new(
-            file!(),
-            concat!(module_path!(), "::", line!()),
-            line!(),
-            column!()
-        ).with_state($state.to_string())
+        $crate::error::ParseContext::new(file!(), concat!(module_path!(), "::", line!()), line!(), column!())
+            .with_state($state.to_string())
     };
 }
 
@@ -71,9 +62,7 @@ pub enum ParseError {
     },
 
     #[error("Unexpected end of file")]
-    UnexpectedEof {
-        context: Option<ParseContext>,
-    },
+    UnexpectedEof { context: Option<ParseContext> },
 
     #[error("Invalid integer literal: {0}")]
     InvalidInteger(String, Option<ParseContext>),
@@ -91,10 +80,7 @@ pub enum ParseError {
     },
 
     #[error("Invalid indentation")]
-    InvalidIndentation {
-        line: usize,
-        context: Option<ParseContext>,
-    },
+    InvalidIndentation { line: usize, context: Option<ParseContext> },
 
     #[error("Unterminated block comment")]
     UnterminatedBlockComment {
@@ -197,36 +183,73 @@ impl ParseError {
     /// Add context to an existing error
     pub fn with_context(self, context: ParseContext) -> Self {
         match self {
-            Self::SyntaxError { message, line, column, span, context: _ } => {
-                Self::SyntaxError { message, line, column, span, context: Some(context) }
-            }
-            Self::UnexpectedToken { expected, found, span, context: _ } => {
-                Self::UnexpectedToken { expected, found, span, context: Some(context) }
-            }
-            Self::UnexpectedEof { context: _ } => {
-                Self::UnexpectedEof { context: Some(context) }
-            }
+            Self::SyntaxError {
+                message,
+                line,
+                column,
+                span,
+                context: _,
+            } => Self::SyntaxError {
+                message,
+                line,
+                column,
+                span,
+                context: Some(context),
+            },
+            Self::UnexpectedToken {
+                expected,
+                found,
+                span,
+                context: _,
+            } => Self::UnexpectedToken {
+                expected,
+                found,
+                span,
+                context: Some(context),
+            },
+            Self::UnexpectedEof { context: _ } => Self::UnexpectedEof { context: Some(context) },
             Self::InvalidInteger(s, _) => Self::InvalidInteger(s, Some(context)),
             Self::InvalidFloat(s, _) => Self::InvalidFloat(s, Some(context)),
             Self::InvalidEscape(s, _) => Self::InvalidEscape(s, Some(context)),
-            Self::UnclosedString { span, context: _ } => {
-                Self::UnclosedString { span, context: Some(context) }
-            }
-            Self::InvalidIndentation { line, context: _ } => {
-                Self::InvalidIndentation { line, context: Some(context) }
-            }
-            Self::UnterminatedBlockComment { span, context: _ } => {
-                Self::UnterminatedBlockComment { span, context: Some(context) }
-            }
-            Self::MissingToken { expected, span, context: _ } => {
-                Self::MissingToken { expected, span, context: Some(context) }
-            }
-            Self::InvalidPattern { span, message, context: _ } => {
-                Self::InvalidPattern { span, message, context: Some(context) }
-            }
-            Self::InvalidType { span, message, context: _ } => {
-                Self::InvalidType { span, message, context: Some(context) }
-            }
+            Self::UnclosedString { span, context: _ } => Self::UnclosedString {
+                span,
+                context: Some(context),
+            },
+            Self::InvalidIndentation { line, context: _ } => Self::InvalidIndentation {
+                line,
+                context: Some(context),
+            },
+            Self::UnterminatedBlockComment { span, context: _ } => Self::UnterminatedBlockComment {
+                span,
+                context: Some(context),
+            },
+            Self::MissingToken {
+                expected,
+                span,
+                context: _,
+            } => Self::MissingToken {
+                expected,
+                span,
+                context: Some(context),
+            },
+            Self::InvalidPattern {
+                span,
+                message,
+                context: _,
+            } => Self::InvalidPattern {
+                span,
+                message,
+                context: Some(context),
+            },
+            Self::InvalidType {
+                span,
+                message,
+                context: _,
+            } => Self::InvalidType {
+                span,
+                message,
+                context: Some(context),
+            },
         }
     }
 
@@ -293,7 +316,12 @@ impl ParseError {
                 }
                 add_context(diag, context.as_ref())
             }
-            ParseError::UnexpectedToken { expected, found, span, context } => {
+            ParseError::UnexpectedToken {
+                expected,
+                found,
+                span,
+                context,
+            } => {
                 let diag = Diagnostic::error(format!("unexpected token: expected {}, found {}", expected, found))
                     .with_code("E0002")
                     .with_parser_label(*span, format!("expected {} here", expected))
@@ -350,7 +378,11 @@ impl ParseError {
                 }
                 add_context(diag, context.as_ref())
             }
-            ParseError::MissingToken { expected, span, context } => {
+            ParseError::MissingToken {
+                expected,
+                span,
+                context,
+            } => {
                 let diag = Diagnostic::error(format!("missing expected token: {}", expected))
                     .with_code("E0010")
                     .with_parser_label(*span, format!("expected {} here", expected));

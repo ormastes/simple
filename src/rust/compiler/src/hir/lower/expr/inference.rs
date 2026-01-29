@@ -11,6 +11,7 @@ impl Lowerer {
             Expr::Integer(_) => Ok(TypeId::I64),
             Expr::Float(_) => Ok(TypeId::F64),
             Expr::String(_) => Ok(TypeId::STRING),
+            Expr::FString { .. } => Ok(TypeId::STRING),
             Expr::Bool(_) => Ok(TypeId::BOOL),
             Expr::Nil => Ok(TypeId::NIL),
             Expr::Identifier(name) => {

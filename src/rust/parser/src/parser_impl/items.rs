@@ -221,8 +221,33 @@ impl<'a> Parser<'a> {
                     target,
                 }))
             }
+            TokenKind::Val => {
+                // pub val - public immutable binding
+                self.parse_val()
+            }
+            TokenKind::Var => {
+                // pub var - public mutable binding
+                self.parse_var()
+            }
+            // Handle 'pub effect Name:' as 'pub enum Name:' (effect types are enums)
+            TokenKind::Identifier { name, .. } if name == "effect" => {
+                self.advance(); // consume 'effect'
+                let mut node = self.parse_enum_body_after_keyword()?;
+                if let Node::Enum(ref mut e) = node {
+                    e.visibility = Visibility::Public;
+                }
+                Ok(node)
+            }
+            // Handle 'pub me' as public mutable method
+            TokenKind::Me => {
+                let mut node = self.parse_function()?;
+                if let Node::Function(ref mut f) = node {
+                    f.visibility = Visibility::Public;
+                }
+                Ok(node)
+            }
             _ => Err(ParseError::unexpected_token(
-                "fn, struct, class, enum, trait, actor, const, static, type, extern, macro, mod, use, or import after 'pub'",
+                "fn, struct, class, enum, trait, actor, const, static, type, extern, macro, mod, use, val, var, or import after 'pub'",
                 format!("{:?}", self.current.kind),
                 self.current.span,
             )),

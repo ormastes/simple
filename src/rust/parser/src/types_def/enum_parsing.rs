@@ -27,6 +27,12 @@ impl<'a> Parser<'a> {
         self.parse_enum_body(start_span, attributes)
     }
 
+    /// Parse enum body without consuming the keyword (for `effect` alias)
+    pub(crate) fn parse_enum_body_after_keyword(&mut self) -> Result<Node, ParseError> {
+        let start_span = self.current.span;
+        self.parse_enum_body(start_span, vec![])
+    }
+
     // === Union (alias for enum with data variants) ===
 
     pub(crate) fn parse_union(&mut self) -> Result<Node, ParseError> {
@@ -170,6 +176,14 @@ impl<'a> Parser<'a> {
             None
         };
 
+        // Check for discriminant value: Variant = 0
+        let discriminant = if self.check(&TokenKind::Assign) {
+            self.advance();
+            Some(self.parse_expression()?)
+        } else {
+            None
+        };
+
         // Note: Don't consume newline here - let the caller handle it
         // This allows comma-separated variants: Add, Sub, Mul
 
@@ -177,6 +191,7 @@ impl<'a> Parser<'a> {
             span: self.make_span(start_span),
             name,
             fields,
+            discriminant,
         })
     }
 

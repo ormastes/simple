@@ -46,8 +46,8 @@ pub fn update_all(dir: &Path) -> PkgResult<UpdateResult> {
 ///
 /// Removes only the specified package from the lock file and re-resolves.
 pub fn update_package(dir: &Path, name: &str) -> PkgResult<UpdateResult> {
-    let manifest_path = crate::find_manifest(dir)
-        .ok_or_else(|| PkgError::ManifestNotFound(dir.display().to_string()))?;
+    let manifest_path =
+        crate::find_manifest(dir).ok_or_else(|| PkgError::ManifestNotFound(dir.display().to_string()))?;
     let lock_path = dir.join("simple.lock");
 
     let manifest = Manifest::load(&manifest_path)?;

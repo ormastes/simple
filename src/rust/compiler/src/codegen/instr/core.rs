@@ -80,14 +80,21 @@ pub(super) fn compile_binop<M: Module>(
         BinOp::Is => builder
             .ins()
             .icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, lhs, rhs),
-        BinOp::In => {
+        BinOp::In | BinOp::NotIn => {
             // Ensure both operands are i64 for runtime function call
             let lhs_i64 = ensure_i64(builder, lhs);
             let rhs_i64 = ensure_i64(builder, rhs);
             let contains_id = ctx.runtime_funcs["rt_contains"];
             let contains_ref = ctx.module.declare_func_in_func(contains_id, builder.func);
             let call = builder.ins().call(contains_ref, &[rhs_i64, lhs_i64]);
-            builder.inst_results(call)[0]
+            let result = builder.inst_results(call)[0];
+            if matches!(op, BinOp::NotIn) {
+                // Negate the result for `not in`
+                let one = builder.ins().iconst(cranelift_codegen::ir::types::I64, 1);
+                builder.ins().bxor(result, one)
+            } else {
+                result
+            }
         }
         BinOp::And | BinOp::AndSuspend => {
             let lhs_bool = builder

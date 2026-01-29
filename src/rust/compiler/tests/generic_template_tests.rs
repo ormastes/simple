@@ -1,12 +1,12 @@
 //! Tests for generic template bytecode storage and deferred monomorphization.
 
 use simple_compiler::monomorphize::{
-    partition_generic_constructs, DeferredMonomorphizer, GenericTemplate, InstantiationMode,
-    MonomorphizationMetadata, SpecializationKey,
+    partition_generic_constructs, DeferredMonomorphizer, GenericTemplate, InstantiationMode, MonomorphizationMetadata,
+    SpecializationKey,
 };
 use simple_compiler::monomorphize::{ConcreteType, GenericTemplates, SpecializedInstances};
 use simple_parser::ast::{ClassDef, EnumDef, FunctionDef, Module, Node, StructDef, TraitDef, Type};
-use simple_parser::parse_module;
+use simple_parser::Parser;
 use std::collections::HashMap;
 
 // ============================================================================
@@ -20,7 +20,7 @@ fn test_partition_generic_function() {
             return x
     "#;
 
-    let module = parse_module(source, "test").expect("Parse failed");
+    let module = Parser::new(source).parse().expect("Parse failed");
     let (templates, specialized, metadata) = partition_generic_constructs(&module);
 
     // Should have 1 template function
@@ -44,7 +44,7 @@ fn test_partition_generic_struct() {
             value: T
     "#;
 
-    let module = parse_module(source, "test").expect("Parse failed");
+    let module = Parser::new(source).parse().expect("Parse failed");
     let (templates, specialized, _) = partition_generic_constructs(&module);
 
     assert_eq!(templates.structs.len(), 1);
@@ -63,7 +63,7 @@ fn test_partition_generic_enum() {
             Err(E)
     "#;
 
-    let module = parse_module(source, "test").expect("Parse failed");
+    let module = Parser::new(source).parse().expect("Parse failed");
     let (templates, specialized, metadata) = partition_generic_constructs(&module);
 
     assert_eq!(templates.enums.len(), 1);
@@ -85,7 +85,7 @@ fn test_partition_mixed_generic_and_regular() {
             return a + b
     "#;
 
-    let module = parse_module(source, "test").expect("Parse failed");
+    let module = Parser::new(source).parse().expect("Parse failed");
     let (templates, specialized, _) = partition_generic_constructs(&module);
 
     // identity<T> should be in templates
@@ -118,7 +118,7 @@ fn test_partition_all_generic_constructs() {
             fn compare(other: T) -> i32
     "#;
 
-    let module = parse_module(source, "test").expect("Parse failed");
+    let module = Parser::new(source).parse().expect("Parse failed");
     let (templates, _, metadata) = partition_generic_constructs(&module);
 
     assert_eq!(templates.functions.len(), 1);
@@ -149,7 +149,7 @@ fn test_metadata_tracks_specializations() {
     specialized.specialization_of = Some("identity".to_string());
     specialized.type_bindings = {
         let mut bindings = HashMap::new();
-        bindings.insert("T".to_string(), Type::Named("Int".to_string()));
+        bindings.insert("T".to_string(), Type::Simple("Int".to_string()));
         bindings
     };
 
@@ -166,7 +166,6 @@ fn test_metadata_tracks_specializations() {
         structs: vec![],
         classes: vec![],
         enums: vec![],
-        trait_impls: vec![],
     };
 
     let metadata =
@@ -203,7 +202,6 @@ fn test_metadata_multiple_specializations() {
         structs: vec![],
         classes: vec![],
         enums: vec![],
-        trait_impls: vec![],
     };
 
     let metadata =
@@ -227,28 +225,29 @@ fn test_metadata_multiple_specializations() {
 
 #[test]
 fn test_deferred_mono_new() {
-    let mut mono = DeferredMonomorphizer::new(InstantiationMode::LinkTime);
+    let mono = DeferredMonomorphizer::new(InstantiationMode::LinkTime);
 
-    assert!(mono.template_cache.is_empty());
-    assert!(mono.specialization_cache.is_empty());
-    assert_eq!(mono.mode, InstantiationMode::LinkTime);
+    let stats = mono.get_stats();
+    assert_eq!(stats.template_count, 0);
+    assert_eq!(stats.specialization_count, 0);
+    assert_eq!(mono.mode(), InstantiationMode::LinkTime);
 }
 
 #[test]
 fn test_deferred_mono_get_stats() {
-    let mut mono = DeferredMonomorphizer::new(InstantiationMode::JitTime);
+    let mono = DeferredMonomorphizer::new(InstantiationMode::JitTime);
     let stats = mono.get_stats();
 
     assert_eq!(stats.template_count, 0);
     assert_eq!(stats.specialization_count, 0);
-    assert_eq!(stats.mode, InstantiationMode::JitTime);
+    assert_eq!(mono.mode(), InstantiationMode::JitTime);
 }
 
 #[test]
 fn test_deferred_mono_cache_template() {
     // Test that monomorphizer can be created and used
     // (Cannot directly test template cache as it's private)
-    let mut mono = DeferredMonomorphizer::new(InstantiationMode::LinkTime);
+    let mono = DeferredMonomorphizer::new(InstantiationMode::LinkTime);
 
     let stats = mono.get_stats();
     assert_eq!(stats.template_count, 0);
@@ -272,8 +271,8 @@ fn test_deferred_mono_caching() {
     let mono_link = DeferredMonomorphizer::new(InstantiationMode::LinkTime);
     let mono_jit = DeferredMonomorphizer::new(InstantiationMode::JitTime);
 
-    assert_eq!(mono_link.get_stats().mode, InstantiationMode::LinkTime);
-    assert_eq!(mono_jit.get_stats().mode, InstantiationMode::JitTime);
+    assert_eq!(mono_link.mode(), InstantiationMode::LinkTime);
+    assert_eq!(mono_jit.mode(), InstantiationMode::JitTime);
 }
 
 #[test]
@@ -423,10 +422,10 @@ fn test_concrete_type_function() {
 
 fn create_test_function(name: &str, generic_params: Vec<String>) -> FunctionDef {
     use simple_parser::ast::{Block, Visibility};
-    use simple_parser::lexer::Span;
+    use simple_parser::token::Span;
 
     FunctionDef {
-        span: Span::default(),
+        span: Span::new(0, 0, 0, 0),
         name: name.to_string(),
         generic_params,
         params: vec![],

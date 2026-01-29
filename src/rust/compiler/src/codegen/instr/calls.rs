@@ -148,12 +148,15 @@ pub fn compile_call<M: Module>(
     let func_name: &str = match func_name_raw {
         "sys_get_args" => "rt_get_args",
         "sys_exit" => "rt_exit",
+        // Map text-argument file FFI to RuntimeValue wrappers
+        "rt_file_read_text" => "rt_file_read_text_rv",
         other => other,
     };
 
     // Handle Result/Option constructor builtins (Ok, Err, Some, None)
     // Also handle qualified names like "MyResult::Ok", "Option::None", etc.
-    let variant_name = func_name.rsplit_once("::")
+    let variant_name = func_name
+        .rsplit_once("::")
         .or_else(|| func_name.rsplit_once('.'))
         .map(|(_, v)| v)
         .unwrap_or(func_name);

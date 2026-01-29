@@ -30,6 +30,9 @@ fn test_snapshot_safe_struct() {
             name: "Point".to_string(),
             fields: vec![("x".to_string(), TypeId::I64), ("y".to_string(), TypeId::I64)],
             has_snapshot: false,
+            generic_params: vec![],
+            is_generic_template: false,
+            type_bindings: std::collections::HashMap::new(),
         },
     );
 
@@ -76,6 +79,9 @@ fn test_snapshot_annotation_makes_type_safe() {
             name: "UnsafeStruct".to_string(),
             fields: vec![("data".to_string(), mutable_ptr_type)],
             has_snapshot: false, // No #[snapshot] attribute
+            generic_params: vec![],
+            is_generic_template: false,
+            type_bindings: std::collections::HashMap::new(),
         },
     );
 
@@ -92,6 +98,9 @@ fn test_snapshot_annotation_makes_type_safe() {
             name: "SafeStruct".to_string(),
             fields: vec![("data".to_string(), mutable_ptr_type)],
             has_snapshot: true, // Has #[snapshot] attribute
+            generic_params: vec![],
+            is_generic_template: false,
+            type_bindings: std::collections::HashMap::new(),
         },
     );
 
@@ -113,6 +122,9 @@ fn test_snapshot_annotation_on_primitive_struct() {
             name: "PointWithSnapshot".to_string(),
             fields: vec![("x".to_string(), TypeId::I64), ("y".to_string(), TypeId::I64)],
             has_snapshot: true,
+            generic_params: vec![],
+            is_generic_template: false,
+            type_bindings: std::collections::HashMap::new(),
         },
     );
 

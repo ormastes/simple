@@ -42,11 +42,10 @@ impl Lowerer {
                     .collect();
 
                 // Get the enum type ID
-                let enum_type_id = self.module.types.lookup(&e.name)
-                    .unwrap_or_else(|| {
-                        eprintln!("[WARNING] Enum type not found during registration: {}", e.name);
-                        TypeId::VOID
-                    });
+                let enum_type_id = self.module.types.lookup(&e.name).unwrap_or_else(|| {
+                    eprintln!("[WARNING] Enum type not found during registration: {}", e.name);
+                    TypeId::VOID
+                });
 
                 // Use update_named to update the placeholder created in Pass 0
                 self.module.types.update_named(

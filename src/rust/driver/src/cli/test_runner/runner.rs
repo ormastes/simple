@@ -10,7 +10,10 @@ use simple_compiler::{init_coverage, is_coverage_enabled};
 
 use crate::runner::Runner;
 use super::test_discovery::{discover_tests_with_skip, is_skip_test_file, matches_tag};
-use super::types::{TestFileResult, TestLevel, TestOptions, TestRunResult, OutputFormat, DebugLevel, debug_log};
+use super::types::{
+    TestFileResult, TestExecutionMode, TestLevel, TestOptions, TestRunResult, OutputFormat, DebugLevel, debug_log,
+};
+use super::build_cache::BuildCache;
 use super::execution::run_test_file;
 use super::doctest::{run_doctests, run_md_doctests};
 use super::parallel::run_tests_parallel;
@@ -193,6 +196,17 @@ pub fn run_tests(options: TestOptions) -> TestRunResult {
         }
     };
 
+    // Create build cache for SMF/native modes
+    let build_cache = if options.execution_mode != TestExecutionMode::Interpreter {
+        Some(BuildCache::new(options.force_rebuild))
+    } else {
+        None
+    };
+
+    if options.execution_mode != TestExecutionMode::Interpreter && !quiet {
+        println!("Execution mode: {}", options.execution_mode.name());
+    }
+
     // Execute tests
     // Default: Sequential (single-threaded) execution
     // Parallel: Only when --parallel or -p flag is explicitly passed
@@ -203,7 +217,7 @@ pub fn run_tests(options: TestOptions) -> TestRunResult {
             run_tests_parallel(&test_files, &options, quiet)
         } else {
             // Sequential execution (default - single-threaded)
-            execute_test_files(runner.as_ref(), &test_files, &options, quiet)
+            execute_test_files(runner.as_ref(), &test_files, &options, build_cache.as_ref(), quiet)
         };
 
     // Determine if all tests were run (no filters applied)
@@ -430,6 +444,7 @@ fn execute_test_files(
     runner: Option<&Runner>,
     test_files: &[PathBuf],
     options: &TestOptions,
+    build_cache: Option<&BuildCache>,
     quiet: bool,
 ) -> (Vec<TestFileResult>, usize, usize, usize, usize) {
     debug_log!(
@@ -475,22 +490,55 @@ fn execute_test_files(
             path.display()
         );
 
-        let result = if options.safe_mode {
-            // Safe mode - run in separate process
-            super::execution::run_test_file_safe_mode(path, options)
-        } else if let Some(runner) = runner {
-            // Normal mode - run in same process
-            super::execution::run_test_file(runner, path)
-        } else {
-            // No runner available - this shouldn't happen
-            TestFileResult {
-                path: path.to_path_buf(),
-                passed: 0,
-                failed: 1,
-                skipped: 0,
-                ignored: 0,
-                duration_ms: 0,
-                error: Some("No runner available (internal error)".to_string()),
+        let result = match options.execution_mode {
+            TestExecutionMode::Smf => {
+                if let Some(cache) = build_cache {
+                    super::execution::run_test_file_smf_mode(path, cache)
+                } else {
+                    TestFileResult {
+                        path: path.to_path_buf(),
+                        passed: 0,
+                        failed: 1,
+                        skipped: 0,
+                        ignored: 0,
+                        duration_ms: 0,
+                        error: Some("Build cache not initialized for SMF mode".to_string()),
+                    }
+                }
+            }
+            TestExecutionMode::Native => {
+                if let Some(cache) = build_cache {
+                    super::execution::run_test_file_native_mode(path, cache, options)
+                } else {
+                    TestFileResult {
+                        path: path.to_path_buf(),
+                        passed: 0,
+                        failed: 1,
+                        skipped: 0,
+                        ignored: 0,
+                        duration_ms: 0,
+                        error: Some("Build cache not initialized for native mode".to_string()),
+                    }
+                }
+            }
+            TestExecutionMode::Interpreter => {
+                if options.safe_mode {
+                    // Safe mode - run in separate process
+                    super::execution::run_test_file_safe_mode(path, options)
+                } else if let Some(runner) = runner {
+                    // Normal mode - run in same process
+                    super::execution::run_test_file(runner, path)
+                } else {
+                    TestFileResult {
+                        path: path.to_path_buf(),
+                        passed: 0,
+                        failed: 1,
+                        skipped: 0,
+                        ignored: 0,
+                        duration_ms: 0,
+                        error: Some("No runner available (internal error)".to_string()),
+                    }
+                }
             }
         };
         total_passed += result.passed;

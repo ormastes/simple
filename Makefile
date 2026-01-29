@@ -619,12 +619,14 @@ bootstrap: bootstrap-clean bootstrap-stage1 bootstrap-stage2 bootstrap-stage3 bo
 	@echo "=============================================="
 	@ls -lh $(BOOTSTRAP_DIR)/simple_new*
 
+BOOTSTRAP_STAGE1_NAME ?= simple_new1
+
 bootstrap-stage1:
-	@echo "=== Stage 1: simple_old -> simple_new1 ==="
+	@echo "=== Stage 1: simple_old -> $(BOOTSTRAP_STAGE1_NAME) ==="
 	@mkdir -p $(BOOTSTRAP_DIR)
-	./target/debug/simple_old compile simple/compiler/main.spl -o $(BOOTSTRAP_DIR)/simple_new1 --native
-	@chmod +x $(BOOTSTRAP_DIR)/simple_new1
-	@echo "Stage 1 complete: $(BOOTSTRAP_DIR)/simple_new1"
+	./target/debug/simple_old compile simple/compiler/main.spl -o $(BOOTSTRAP_DIR)/$(BOOTSTRAP_STAGE1_NAME) --native
+	@chmod +x $(BOOTSTRAP_DIR)/$(BOOTSTRAP_STAGE1_NAME)
+	@echo "Stage 1 complete: $(BOOTSTRAP_DIR)/$(BOOTSTRAP_STAGE1_NAME)"
 
 bootstrap-stage2: bootstrap-stage1
 	@echo "=== Stage 2: simple_new1 -> simple_new2 ==="

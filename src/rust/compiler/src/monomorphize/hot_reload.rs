@@ -83,11 +83,7 @@ impl HotReloadManager {
     ///
     /// This uses the zero-size trick: the section table entry shows size=0,
     /// so we can rewrite the section data without updating the section table.
-    pub fn update_note_sdn(
-        &self,
-        smf_path: &Path,
-        new_metadata: &NoteSdnMetadata,
-    ) -> HotReloadResult {
+    pub fn update_note_sdn(&self, smf_path: &Path, new_metadata: &NoteSdnMetadata) -> HotReloadResult {
         // Serialize new metadata
         let new_content = new_metadata.to_sdn();
         let new_size = new_content.len();
@@ -140,11 +136,7 @@ impl HotReloadManager {
     }
 
     /// Add a new instantiation to an existing SMF file.
-    pub fn add_instantiation(
-        &self,
-        smf_path: &Path,
-        entry: InstantiationEntry,
-    ) -> HotReloadResult {
+    pub fn add_instantiation(&self, smf_path: &Path, entry: InstantiationEntry) -> HotReloadResult {
         // Load existing metadata
         let mut metadata = match self.load_note_sdn(smf_path) {
             Ok(m) => m,
@@ -159,11 +151,7 @@ impl HotReloadManager {
     }
 
     /// Move an entry from 'possible' to 'instantiations' after JIT compilation.
-    pub fn mark_as_jit_compiled(
-        &self,
-        smf_path: &Path,
-        mangled_name: &str,
-    ) -> HotReloadResult {
+    pub fn mark_as_jit_compiled(&self, smf_path: &Path, mangled_name: &str) -> HotReloadResult {
         // Load existing metadata
         let mut metadata = match self.load_note_sdn(smf_path) {
             Ok(m) => m,
@@ -171,7 +159,8 @@ impl HotReloadManager {
         };
 
         // Find in possible
-        let possible_entry = metadata.possible
+        let possible_entry = metadata
+            .possible
             .iter()
             .find(|p| p.mangled_name == mangled_name)
             .cloned();
@@ -203,10 +192,10 @@ impl HotReloadManager {
 
     /// Find note.sdn section information in SMF file.
     fn find_note_sdn_section(&self, smf_path: &Path) -> Result<NoteSdnSectionInfo, String> {
-        let mut file = File::open(smf_path)
-            .map_err(|e| format!("Failed to open file: {}", e))?;
+        let mut file = File::open(smf_path).map_err(|e| format!("Failed to open file: {}", e))?;
 
-        let file_size = file.metadata()
+        let file_size = file
+            .metadata()
             .map_err(|e| format!("Failed to get file size: {}", e))?
             .len();
 
@@ -218,12 +207,14 @@ impl HotReloadManager {
 
         // Find note.sdn section start
         let start_marker = "# Instantiation To/From Metadata";
-        let offset = content.find(start_marker)
+        let offset = content
+            .find(start_marker)
             .ok_or_else(|| "note.sdn section not found".to_string())? as u64;
 
         // Find current size (up to terminator)
         let section_content = &content[offset as usize..];
-        let current_size = section_content.find(NOTE_SDN_TERMINATOR)
+        let current_size = section_content
+            .find(NOTE_SDN_TERMINATOR)
             .map(|pos| pos + NOTE_SDN_TERMINATOR.len())
             .unwrap_or(section_content.len());
 
@@ -240,8 +231,7 @@ impl HotReloadManager {
 
     /// Load note.sdn metadata from SMF file.
     fn load_note_sdn(&self, smf_path: &Path) -> Result<NoteSdnMetadata, String> {
-        let mut file = File::open(smf_path)
-            .map_err(|e| format!("Failed to open file: {}", e))?;
+        let mut file = File::open(smf_path).map_err(|e| format!("Failed to open file: {}", e))?;
 
         let mut content = String::new();
         file.read_to_string(&mut content)
@@ -249,11 +239,13 @@ impl HotReloadManager {
 
         // Find and extract note.sdn section
         let start_marker = "# Instantiation To/From Metadata";
-        let start = content.find(start_marker)
+        let start = content
+            .find(start_marker)
             .ok_or_else(|| "note.sdn section not found".to_string())?;
 
         let section_content = &content[start..];
-        let end = section_content.find(NOTE_SDN_TERMINATOR)
+        let end = section_content
+            .find(NOTE_SDN_TERMINATOR)
             .map(|pos| pos + NOTE_SDN_TERMINATOR.len())
             .unwrap_or(section_content.len());
 
@@ -265,12 +257,7 @@ impl HotReloadManager {
     }
 
     /// Write note.sdn content to SMF file.
-    fn write_note_sdn(
-        &self,
-        smf_path: &Path,
-        offset: u64,
-        content: &str,
-    ) -> Result<(), String> {
+    fn write_note_sdn(&self, smf_path: &Path, offset: u64, content: &str) -> Result<(), String> {
         let mut file = OpenOptions::new()
             .write(true)
             .open(smf_path)
@@ -282,21 +269,14 @@ impl HotReloadManager {
         file.write_all(content.as_bytes())
             .map_err(|e| format!("Failed to write: {}", e))?;
 
-        file.flush()
-            .map_err(|e| format!("Failed to flush: {}", e))?;
+        file.flush().map_err(|e| format!("Failed to flush: {}", e))?;
 
         Ok(())
     }
 
     /// Verify note.sdn content after write.
-    fn verify_note_sdn(
-        &self,
-        smf_path: &Path,
-        offset: u64,
-        expected: &str,
-    ) -> Result<(), String> {
-        let mut file = File::open(smf_path)
-            .map_err(|e| format!("Failed to open file: {}", e))?;
+    fn verify_note_sdn(&self, smf_path: &Path, offset: u64, expected: &str) -> Result<(), String> {
+        let mut file = File::open(smf_path).map_err(|e| format!("Failed to open file: {}", e))?;
 
         file.seek(SeekFrom::Start(offset))
             .map_err(|e| format!("Failed to seek: {}", e))?;
@@ -316,8 +296,7 @@ impl HotReloadManager {
     /// Create backup of SMF file.
     fn create_backup(&self, smf_path: &Path) -> Result<(), String> {
         let backup_path = smf_path.with_extension("smf.bak");
-        std::fs::copy(smf_path, &backup_path)
-            .map_err(|e| format!("Failed to create backup: {}", e))?;
+        std::fs::copy(smf_path, &backup_path).map_err(|e| format!("Failed to create backup: {}", e))?;
 
         if self.config.verbose {
             eprintln!("[hot-reload] Backup created: {:?}", backup_path);

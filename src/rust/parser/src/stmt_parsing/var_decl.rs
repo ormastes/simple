@@ -365,6 +365,12 @@ impl Parser<'_> {
     pub(crate) fn parse_static(&mut self) -> Result<Node, ParseError> {
         let start_span = self.current.span;
         self.expect(&TokenKind::Static)?;
+
+        // Handle `static fn` at module level (treat as regular function)
+        if self.check(&TokenKind::Fn) || self.check(&TokenKind::Me) {
+            return self.parse_function_with_decorators(vec![]);
+        }
+
         let mutability = if self.check(&TokenKind::Mut) {
             self.advance();
             Mutability::Mutable
@@ -824,9 +830,59 @@ impl Parser<'_> {
         let start_span = self.current.span;
         self.expect(&TokenKind::Extern)?;
 
-        // Check if this is `extern class` or `extern fn`
+        // Check if this is `extern class` or `extern fn` or `extern "C":` block
         if self.check(&TokenKind::Class) {
             return self.parse_extern_class_impl(start_span, attributes);
+        }
+
+        // Check for extern "C": block syntax (block of FFI declarations)
+        if matches!(&self.current.kind, TokenKind::String(_) | TokenKind::FString(_) | TokenKind::RawString(_)) {
+            self.advance(); // consume "C" or other ABI string
+            self.expect(&TokenKind::Colon)?;
+            // Parse block of extern fn declarations
+            self.advance(); // consume newline
+            if self.check(&TokenKind::Indent) {
+                self.advance();
+            }
+            let mut nodes = Vec::new();
+            while !self.check(&TokenKind::Dedent) && !self.is_at_end() {
+                while self.check(&TokenKind::Newline) {
+                    self.advance();
+                }
+                if self.check(&TokenKind::Dedent) || self.is_at_end() {
+                    break;
+                }
+                // Parse each line as extern fn
+                self.expect(&TokenKind::Fn)?;
+                let name = self.expect_identifier()?;
+                let params = self.parse_parameters()?;
+                let return_type = if self.check(&TokenKind::Arrow) {
+                    self.advance();
+                    Some(self.parse_type()?)
+                } else {
+                    None
+                };
+                nodes.push(Node::Extern(ExternDef {
+                    span: Span::new(start_span.start, self.previous.span.end, start_span.line, start_span.column),
+                    name,
+                    params,
+                    return_type,
+                    visibility: Visibility::Private,
+                    attributes: attributes.clone(),
+                }));
+                while self.check(&TokenKind::Newline) {
+                    self.advance();
+                }
+            }
+            if self.check(&TokenKind::Dedent) {
+                self.advance();
+            }
+            // Return multiple extern declarations wrapped in an expression do-block
+            if nodes.len() == 1 {
+                return Ok(nodes.into_iter().next().unwrap());
+            }
+            // Wrap multiple nodes as Expression(DoBlock(nodes))
+            return Ok(Node::Expression(Expr::DoBlock(nodes)));
         }
 
         // Otherwise, parse extern function

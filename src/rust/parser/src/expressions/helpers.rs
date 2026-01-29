@@ -102,13 +102,46 @@ impl<'a> Parser<'a> {
         }))
     }
 
+    /// Parse a curly-brace delimited block as an expression: { stmt; stmt; expr }
+    fn parse_brace_block_expr(&mut self) -> Result<Expr, ParseError> {
+        self.expect(&TokenKind::LBrace)?;
+        // Skip newlines after opening brace
+        while self.check(&TokenKind::Newline) || self.check(&TokenKind::Indent) || self.check(&TokenKind::Dedent) {
+            self.advance();
+        }
+        if self.check(&TokenKind::RBrace) {
+            self.advance();
+            return Ok(Expr::DoBlock(Vec::new()));
+        }
+        // For simple single-expression blocks like { "alive" }
+        let expr = self.parse_expression()?;
+        // Skip newlines before closing brace
+        while self.check(&TokenKind::Newline) || self.check(&TokenKind::Indent) || self.check(&TokenKind::Dedent) {
+            self.advance();
+        }
+        self.expect(&TokenKind::RBrace)?;
+        Ok(expr)
+    }
+
     /// Parse an if/elif expression (shared logic)
     pub(crate) fn parse_if_expr(&mut self) -> Result<Expr, ParseError> {
+        // Temporarily disable brace postfix to prevent { body } from being consumed as method call
+        let old_no_brace = self.no_brace_postfix;
+        self.no_brace_postfix = true;
         let (let_pattern, condition) = self.parse_optional_let_pattern()?;
-        self.expect(&TokenKind::Colon)?;
+        self.no_brace_postfix = old_no_brace;
+
+        // Support both colon syntax (if cond: body) and curly brace syntax (if cond { body })
+        let use_braces = self.check(&TokenKind::LBrace);
+        if !use_braces {
+            self.expect(&TokenKind::Colon)?;
+        }
 
         // Support both inline and block-form syntax for then branch
-        let then_branch = if self.check(&TokenKind::Newline) {
+        let then_branch = if use_braces {
+            // Curly brace form: if cond { body } else { body }
+            self.parse_brace_block_expr()?
+        } else if self.check(&TokenKind::Newline) {
             // Block-form: parse as DoBlock expression
             self.advance(); // consume Newline
             self.expect(&TokenKind::Indent)?;
@@ -151,6 +184,9 @@ impl<'a> Parser<'a> {
                 // This is 'else if', treat it as elif
                 self.advance(); // consume 'if'
                 Some(Box::new(self.parse_if_expr()?))
+            } else if self.check(&TokenKind::LBrace) {
+                // Curly brace form: else { body }
+                Some(Box::new(self.parse_brace_block_expr()?))
             } else {
                 self.expect(&TokenKind::Colon)?;
 

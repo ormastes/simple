@@ -58,8 +58,8 @@ pub use note_sdn::{
     NoteSdnMetadata, PossibleInstantiationEntry, TypeInferenceEntry,
 };
 pub use cycle_detector::{
-    analyze_and_update_cycles, detect_cycles, detect_type_inference_cycles, topological_sort,
-    would_create_cycle, CycleDetectionResult,
+    analyze_and_update_cycles, detect_cycles, detect_type_inference_cycles, topological_sort, would_create_cycle,
+    CycleDetectionResult,
 };
 pub use parallel::{monomorphize_modules_parallel, MonoStats, ParallelMonoConfig, ParallelMonoTable, ParallelMonomorphizer};
 pub use partition::{build_monomorphization_metadata, partition_generic_constructs, GenericTemplates, SpecializedInstances};

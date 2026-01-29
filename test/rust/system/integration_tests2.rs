@@ -31,12 +31,17 @@ fn test_smf_header_read_integration() {
         platform: Platform::Any as u8,
         arch: Arch::X86_64 as u8,
         flags: SMF_FLAG_EXECUTABLE,
+        compression: 0,
+        compression_level: 0,
+        reserved_compression: [0; 2],
         section_count: 0,
         section_table_offset: SmfHeader::SIZE as u64,
         symbol_table_offset: SmfHeader::SIZE as u64,
         symbol_count: 0,
         exported_count: 0,
         entry_point: 0,
+        stub_size: 0,
+        smf_data_offset: 0,
         module_hash: 0,
         source_hash: 0,
         app_type: 0,
@@ -44,7 +49,7 @@ fn test_smf_header_read_integration() {
         window_height: 0,
         prefetch_hint: 0,
         prefetch_file_count: 0,
-        reserved: [0; 1],
+        reserved: [0; 5],
     };
 
     // Serialize to bytes
@@ -73,12 +78,17 @@ fn test_smf_header_properties_integration() {
         platform: Platform::Any as u8,
         arch: Arch::X86_64 as u8,
         flags: SMF_FLAG_EXECUTABLE,
+        compression: 0,
+        compression_level: 0,
+        reserved_compression: [0; 2],
         section_count: 1,
         section_table_offset: 64,
         symbol_table_offset: 128,
         symbol_count: 1,
         exported_count: 1,
         entry_point: 0,
+        stub_size: 0,
+        smf_data_offset: 0,
         module_hash: 12345,
         source_hash: 67890,
         app_type: 0,
@@ -86,7 +96,7 @@ fn test_smf_header_properties_integration() {
         window_height: 0,
         prefetch_hint: 0,
         prefetch_file_count: 0,
-        reserved: [0; 1],
+        reserved: [0; 5],
     };
 
     assert!(header.is_executable());
@@ -148,6 +158,9 @@ fn test_symbol_table_integration() {
         size: 6,
         type_id: 0,
         version: 0,
+        template_param_count: 0,
+        reserved: [0; 3],
+        template_offset: 0,
     };
 
     let string_table = b"main\0".to_vec();

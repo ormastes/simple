@@ -7,7 +7,8 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use crate::runner::Runner;
-use super::types::TestFileResult;
+use super::types::{TestFileResult, TestExecutionMode};
+use super::build_cache::BuildCache;
 
 /// Parse test output to extract pass/fail counts
 pub fn parse_test_output(output: &str) -> (usize, usize) {
@@ -312,6 +313,159 @@ fn wait_with_timeout(mut child: std::process::Child, timeout: Duration) -> Resul
 
             Err(format!("Test timed out after {} seconds", timeout.as_secs()))
         }
+    }
+}
+
+/// Run a single test file in SMF loader mode.
+///
+/// Compiles the test file to SMF format, then loads and executes it via the
+/// SMF loader (Settlement). Output is captured and parsed for test results.
+pub fn run_test_file_smf_mode(path: &Path, cache: &BuildCache) -> TestFileResult {
+    let start = Instant::now();
+
+    // Compile to SMF
+    let smf_path = match cache.compile_test_to_smf(path) {
+        Ok(p) => p,
+        Err(e) => {
+            return TestFileResult {
+                path: path.to_path_buf(),
+                passed: 0,
+                failed: 1,
+                skipped: 0,
+                ignored: 0,
+                duration_ms: start.elapsed().as_millis() as u64,
+                error: Some(format!("SMF compilation failed: {}", e)),
+            };
+        }
+    };
+
+    // Load and execute via Runner's SMF execution
+    let runner = Runner::new();
+    match runner.run_smf(&smf_path) {
+        Ok(exit_code) => {
+            let duration_ms = start.elapsed().as_millis() as u64;
+            // For SMF mode, we rely on exit code since output goes to stdout
+            // In safe mode subprocess variant, output would be captured
+            let (passed, failed) = if exit_code == 0 { (1, 0) } else { (0, 1) };
+            TestFileResult {
+                path: path.to_path_buf(),
+                passed,
+                failed,
+                skipped: 0,
+                ignored: 0,
+                duration_ms,
+                error: None,
+            }
+        }
+        Err(e) => TestFileResult {
+            path: path.to_path_buf(),
+            passed: 0,
+            failed: 1,
+            skipped: 0,
+            ignored: 0,
+            duration_ms: start.elapsed().as_millis() as u64,
+            error: Some(format!("SMF execution failed: {}", e)),
+        },
+    }
+}
+
+/// Run a single test file in native binary mode.
+///
+/// Compiles the test file to a native ELF binary, then executes it as a
+/// subprocess. Output is captured and parsed for "X examples, Y failures".
+pub fn run_test_file_native_mode(
+    path: &Path,
+    cache: &BuildCache,
+    options: &super::types::TestOptions,
+) -> TestFileResult {
+    let start = Instant::now();
+
+    // Compile to native binary
+    let binary_path = match cache.compile_test_to_native(path) {
+        Ok(p) => p,
+        Err(e) => {
+            return TestFileResult {
+                path: path.to_path_buf(),
+                passed: 0,
+                failed: 1,
+                skipped: 0,
+                ignored: 0,
+                duration_ms: start.elapsed().as_millis() as u64,
+                error: Some(format!("Native compilation failed: {}", e)),
+            };
+        }
+    };
+
+    // Execute the binary as a subprocess
+    let mut cmd = Command::new(&binary_path);
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+
+    // Propagate test environment variables
+    if let Ok(mode) = std::env::var("SIMPLE_TEST_MODE") {
+        cmd.env("SIMPLE_TEST_MODE", mode);
+    }
+    if let Ok(filter) = std::env::var("SIMPLE_TEST_FILTER") {
+        cmd.env("SIMPLE_TEST_FILTER", filter);
+    }
+
+    let child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(e) => {
+            return TestFileResult {
+                path: path.to_path_buf(),
+                passed: 0,
+                failed: 1,
+                skipped: 0,
+                ignored: 0,
+                duration_ms: start.elapsed().as_millis() as u64,
+                error: Some(format!("Failed to spawn native binary: {}", e)),
+            };
+        }
+    };
+
+    let timeout_duration = Duration::from_secs(options.safe_mode_timeout);
+    let wait_result = wait_with_timeout(child, timeout_duration);
+    let duration_ms = start.elapsed().as_millis() as u64;
+
+    match wait_result {
+        Ok((exit_code, stdout, stderr)) => {
+            let combined_output = format!("{}\n{}", stdout, stderr);
+            let (passed, failed) = parse_test_output(&combined_output);
+
+            // Fall back to exit code if parsing found nothing
+            let (passed, failed) = if passed == 0 && failed == 0 {
+                if exit_code == 0 {
+                    (1, 0)
+                } else {
+                    (0, 1)
+                }
+            } else {
+                (passed, failed)
+            };
+
+            TestFileResult {
+                path: path.to_path_buf(),
+                passed,
+                failed,
+                skipped: 0,
+                ignored: 0,
+                duration_ms,
+                error: if exit_code != 0 && failed == 0 {
+                    Some(format!("Process exited with code {}", exit_code))
+                } else {
+                    None
+                },
+            }
+        }
+        Err(e) => TestFileResult {
+            path: path.to_path_buf(),
+            passed: 0,
+            failed: 1,
+            skipped: 0,
+            ignored: 0,
+            duration_ms,
+            error: Some(e),
+        },
     }
 }
 

@@ -490,6 +490,14 @@ impl<'a> Parser<'a> {
                     }
                 }
 
+                // Handle optional `pub` keyword after decorators
+                let _is_pub2 = if self.check(&TokenKind::Pub) {
+                    self.advance();
+                    true
+                } else {
+                    false
+                };
+
                 // Handle optional `static` keyword for static methods
                 let is_static = if self.check(&TokenKind::Static) {
                     self.advance();
@@ -499,7 +507,7 @@ impl<'a> Parser<'a> {
                 };
 
                 // Parse the function (with decorators already parsed)
-                let item = if decorators.is_empty() {
+                let item = if decorators.is_empty() && !_is_pub2 {
                     self.parse_item()?
                 } else {
                     // Parse function directly with decorators
@@ -651,6 +659,14 @@ impl<'a> Parser<'a> {
                     }
                 }
 
+                // Handle optional `pub` keyword after decorators
+                let _is_pub = if self.check(&TokenKind::Pub) {
+                    self.advance();
+                    true
+                } else {
+                    false
+                };
+
                 // Handle optional `static` keyword for static methods
                 let is_static = if self.check(&TokenKind::Static) {
                     self.advance();
@@ -660,7 +676,7 @@ impl<'a> Parser<'a> {
                 };
 
                 // Parse the function (with decorators already parsed)
-                let item = if decorators.is_empty() {
+                let item = if decorators.is_empty() && !_is_pub {
                     self.parse_item()?
                 } else {
                     // Parse function directly with decorators

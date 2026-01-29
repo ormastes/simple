@@ -64,8 +64,13 @@ impl<'a> Parser<'a> {
 
         // Accept both 'fn' and 'me' keywords
         // 'me' indicates a mutable method (modifies self)
+        // Also accept 'me fn' as equivalent to 'me'
         let is_me_method = if self.check(&TokenKind::Me) {
             self.advance();
+            // Optionally consume 'fn' after 'me' (me fn is equivalent to me)
+            if self.check(&TokenKind::Fn) {
+                self.advance();
+            }
             true
         } else {
             self.expect(&TokenKind::Fn)?;
@@ -97,9 +102,12 @@ impl<'a> Parser<'a> {
         // Skip newlines before the function body colon or abstract semicolon
         self.skip_newlines();
 
-        // Check for abstract method (semicolon instead of body)
+        // Check for abstract/extern method (semicolon instead of body, or no body at all)
         let is_abstract = if self.check(&TokenKind::Semicolon) {
             self.advance();
+            true
+        } else if !self.check(&TokenKind::Colon) {
+            // No colon means bodyless declaration (e.g., @extern fn foo() -> T)
             true
         } else {
             false
@@ -506,6 +514,14 @@ impl<'a> Parser<'a> {
         if self.check(&TokenKind::Impl) && !impl_attributes.is_empty() {
             return self.parse_impl_with_attrs(impl_attributes);
         }
+
+        // Handle optional `pub` keyword before function
+        let _is_pub = if self.check(&TokenKind::Pub) {
+            self.advance();
+            true
+        } else {
+            false
+        };
 
         // Now parse the function with the collected decorators and effects
         let mut node = self.parse_function_with_decorators(decorators)?;

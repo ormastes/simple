@@ -181,6 +181,9 @@ fn test_symbol_table_new() {
         size: 10,
         type_id: 0,
         version: 0,
+        template_param_count: 0,
+        reserved: [0; 3],
+        template_offset: 0,
     }];
 
     let string_table = b"\0main\0".to_vec();
@@ -201,6 +204,9 @@ fn test_symbol_table_lookup() {
         size: 20,
         type_id: 0,
         version: 0,
+        template_param_count: 0,
+        reserved: [0; 3],
+        template_offset: 0,
     }];
 
     let string_table = b"\0entry\0".to_vec();
@@ -229,6 +235,9 @@ fn test_symbol_table_symbol_name() {
         size: 0,
         type_id: 0,
         version: 0,
+        template_param_count: 0,
+        reserved: [0; 3],
+        template_offset: 0,
     }];
 
     let string_table = b"\0test_func\0".to_vec();
@@ -252,6 +261,9 @@ fn test_symbol_table_exports() {
             size: 0,
             type_id: 0,
             version: 0,
+            template_param_count: 0,
+            reserved: [0; 3],
+            template_offset: 0,
         },
         LoaderSmfSymbol {
             name_offset: 10,
@@ -264,6 +276,9 @@ fn test_symbol_table_exports() {
             size: 10,
             type_id: 0,
             version: 0,
+            template_param_count: 0,
+            reserved: [0; 3],
+            template_offset: 0,
         },
     ];
 

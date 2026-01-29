@@ -138,10 +138,7 @@ pub(super) fn compile_method_call_static<M: Module>(
     let func_id = ctx.func_ids.get(func_name).copied().or_else(|| {
         // Search for a function ending with ".func_name" (e.g., "ArgParser.parse")
         let suffix = format!(".{}", func_name);
-        ctx.func_ids
-            .iter()
-            .find(|(k, _)| k.ends_with(&suffix))
-            .map(|(_, &v)| v)
+        ctx.func_ids.iter().find(|(k, _)| k.ends_with(&suffix)).map(|(_, &v)| v)
     });
 
     if let Some(func_id) = func_id {
@@ -233,11 +230,9 @@ fn try_compile_builtin_method_call<M: Module>(
             let call = builder.ins().call(len_ref, &[receiver_val]);
             let len_val = builder.inst_results(call)[0];
             let zero = builder.ins().iconst(types::I64, 0);
-            let result = builder.ins().icmp(
-                cranelift_codegen::ir::condcodes::IntCC::Equal,
-                len_val,
-                zero,
-            );
+            let result = builder
+                .ins()
+                .icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, len_val, zero);
             return Ok(Some(result));
         }
     }
@@ -249,6 +244,7 @@ fn try_compile_builtin_method_call<M: Module>(
         "ends_with" => "rt_string_ends_with",
         "concat" => "rt_string_concat",
         "contains" => "rt_contains",
+        "char_at" | "at" => "rt_string_char_at",
         // Array methods
         "push" => "rt_array_push",
         "pop" => "rt_array_pop",
@@ -257,8 +253,45 @@ fn try_compile_builtin_method_call<M: Module>(
         "len" => "rt_len",
         // Result/Option methods
         "unwrap" | "unwrap_or" => "rt_enum_payload",
-        "is_some" | "is_ok" => "rt_enum_discriminant",
-        "is_none" | "is_err" => "rt_enum_discriminant",
+        "is_none" => {
+            let Some(&func_id) = ctx.runtime_funcs.get("rt_is_none") else {
+                return Ok(None);
+            };
+            let func_ref = ctx.module.declare_func_in_func(func_id, builder.func);
+            let call = builder.ins().call(func_ref, &[receiver_val]);
+            let bool_result = builder.inst_results(call)[0];
+            let result = builder.ins().sextend(types::I64, bool_result);
+            return Ok(Some(result));
+        }
+        "is_some" => {
+            let Some(&func_id) = ctx.runtime_funcs.get("rt_is_some") else {
+                return Ok(None);
+            };
+            let func_ref = ctx.module.declare_func_in_func(func_id, builder.func);
+            let call = builder.ins().call(func_ref, &[receiver_val]);
+            let bool_result = builder.inst_results(call)[0];
+            let result = builder.ins().sextend(types::I64, bool_result);
+            return Ok(Some(result));
+        }
+        "is_ok" | "is_err" => {
+            let check_variant = if method == "is_ok" { "Ok" } else { "Err" };
+            let disc = {
+                use std::collections::hash_map::DefaultHasher;
+                use std::hash::{Hash, Hasher};
+                let mut hasher = DefaultHasher::new();
+                check_variant.hash(&mut hasher);
+                (hasher.finish() & 0xFFFFFFFF) as i64
+            };
+            let Some(&check_id) = ctx.runtime_funcs.get("rt_enum_check_discriminant") else {
+                return Ok(None);
+            };
+            let check_ref = ctx.module.declare_func_in_func(check_id, builder.func);
+            let disc_val = builder.ins().iconst(types::I64, disc);
+            let call = builder.ins().call(check_ref, &[receiver_val, disc_val]);
+            let bool_result = builder.inst_results(call)[0];
+            let result = builder.ins().sextend(types::I64, bool_result);
+            return Ok(Some(result));
+        }
         // Map/filter/join
         "join" => "rt_string_join",
         "map" => "rt_array_map",
@@ -278,6 +311,9 @@ fn try_compile_builtin_method_call<M: Module>(
         "to_lower" | "lower" => "rt_string_to_lower",
         "to_int" | "to_i64" | "parse_int" => "rt_string_to_int",
         "to_string" | "str" => "rt_to_string",
+        // Dict methods
+        "keys" => "rt_dict_keys",
+        "values" => "rt_dict_values",
         _ => return Ok(None),
     };
 

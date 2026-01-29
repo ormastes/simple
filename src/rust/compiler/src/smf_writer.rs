@@ -11,8 +11,8 @@ use std::sync::Arc;
 use simple_common::gc::GcAllocator;
 use simple_common::target::Target;
 use simple_loader::smf::{
-    hash_name, Arch, SectionType, SmfHeader, SmfSection, SmfSymbol, SymbolBinding, SymbolType,
-    SECTION_FLAG_EXEC, SECTION_FLAG_READ, SMF_FLAG_EXECUTABLE, SMF_MAGIC,
+    hash_name, Arch, SectionType, SmfHeader, SmfSection, SmfSymbol, SymbolBinding, SymbolType, SECTION_FLAG_EXEC,
+    SECTION_FLAG_READ, SMF_FLAG_EXECUTABLE, SMF_MAGIC,
 };
 
 use crate::elf_utils::extract_code_from_object;
@@ -116,7 +116,7 @@ fn build_smf_with_all_sections(
         platform: simple_loader::smf::Platform::from_target_os(target.os) as u8,
         arch: Arch::from_target_arch(target.arch) as u8,
         flags: SMF_FLAG_EXECUTABLE,
-        compression: 0,  // No compression
+        compression: 0, // No compression
         compression_level: 0,
         reserved_compression: [0; 2],
         section_count: section_count as u32,
@@ -125,7 +125,7 @@ fn build_smf_with_all_sections(
         symbol_count: 1,
         exported_count: 1,
         entry_point: 0,
-        stub_size: 0,    // Pure SMF (no stub)
+        stub_size: 0, // Pure SMF (no stub)
         smf_data_offset: 0,
         module_hash: 0,
         source_hash: 0,
@@ -134,7 +134,7 @@ fn build_smf_with_all_sections(
         window_height: 0,
         prefetch_hint: 0,
         prefetch_file_count: 0,
-        reserved: [0; 5],  // Updated to 5 bytes
+        reserved: [0; 5], // Updated to 5 bytes
     };
 
     // Build sections
@@ -372,11 +372,7 @@ fn serialize_trait_placeholder(buf: &mut Vec<u8>, trait_def: &simple_parser::ast
 /// Build an SMF module with the given code bytes for a specific target architecture.
 fn build_smf_with_code_for_target(code_bytes: &[u8], gc: Option<&Arc<dyn GcAllocator>>, target: Target) -> Vec<u8> {
     // Delegate to the original smf_builder
-    crate::smf_builder::generate_smf_from_object_for_target(
-        &code_bytes_to_object(code_bytes),
-        gc,
-        target,
-    )
+    crate::smf_builder::generate_smf_from_object_for_target(&code_bytes_to_object(code_bytes), gc, target)
 }
 
 /// Helper to convert code bytes to a minimal object format for compatibility.

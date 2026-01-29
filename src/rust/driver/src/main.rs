@@ -135,8 +135,8 @@ fn main() {
         "test" => handle_test(&args, global_flags.gc_log, global_flags.gc_off),
 
         // Code quality
-        "lint" => run_lint(&args),
-        "fmt" => run_fmt(&args),
+        "lint" => handle_lint(&args, global_flags.gc_log, global_flags.gc_off),
+        "fmt" => handle_fmt(&args, global_flags.gc_log, global_flags.gc_off),
         "check" => handle_check(&args),
 
         // Localization
@@ -144,9 +144,9 @@ fn main() {
 
         // Migration and tooling
         "migrate" => run_migrate(&args),
-        "mcp" => run_mcp(&args),
+        "mcp" => handle_mcp(&args, global_flags.gc_log, global_flags.gc_off),
         "diff" => run_diff(&args),
-        "context" => run_context(&args),
+        "context" => handle_context(&args, global_flags.gc_log, global_flags.gc_off),
         "constr" => run_constr(&args),
 
         // Analysis
@@ -164,16 +164,16 @@ fn main() {
         "spec-gen" => run_spec_gen(&args),
         "todo-scan" => run_todo_scan(&args),
         "todo-gen" => run_todo_gen(&args),
-        "sspec-docgen" => run_sspec_docgen(&args),
+        "sspec-docgen" => handle_sspec_docgen(&args, global_flags.gc_log, global_flags.gc_off),
 
         // Brief view - LLM-friendly code overview
         "brief" => handle_brief(&args, global_flags.gc_log, global_flags.gc_off),
 
         // Dashboard
-        "dashboard" => handle_dashboard(&args, global_flags.gc_log, global_flags.gc_off),
+        "dashboard" => handle_dashboard_dispatch(&args, global_flags.gc_log, global_flags.gc_off),
 
         // Verification
-        "verify" => run_verify(&args, global_flags.gc_log, global_flags.gc_off),
+        "verify" => handle_verify(&args, global_flags.gc_log, global_flags.gc_off),
 
         // Qualified ignore management
         "qualify-ignore" => {
@@ -206,6 +206,18 @@ fn main() {
         // Lock file management
         "lock" => handle_lock(&args),
 
+        // Coverage
+        "coverage" => handle_coverage(&args, global_flags.gc_log, global_flags.gc_off),
+
+        // Dependency graph
+        "depgraph" => handle_depgraph(&args, global_flags.gc_log, global_flags.gc_off),
+
+        // LSP server
+        "lsp" => handle_lsp(&args, global_flags.gc_log, global_flags.gc_off),
+
+        // DAP server
+        "dap" => handle_dap(&args, global_flags.gc_log, global_flags.gc_off),
+
         // Explicit run command
         "run" => handle_run(&args, global_flags.gc_log, global_flags.gc_off),
 
@@ -227,8 +239,97 @@ fn main() {
     }
 }
 
-/// Handle test command with watch support
+/// Resolve the path to a Simple app, checking multiple locations:
+/// 1. Relative to CWD (development: running from project root)
+/// 2. Relative to the executable's directory (installed/native)
+/// 3. SIMPLE_HOME environment variable
+fn resolve_app_path(relative_path: &str) -> Option<PathBuf> {
+    // 1. Relative to CWD
+    let cwd_path = PathBuf::from(relative_path);
+    if cwd_path.exists() {
+        return Some(cwd_path);
+    }
+
+    // 2. Relative to executable directory
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            // Try alongside the binary (installed layout)
+            let exe_relative = exe_dir.join(relative_path);
+            if exe_relative.exists() {
+                return Some(exe_relative);
+            }
+            // Try ../../ from target/debug/ (development layout)
+            if let Some(project_root) = exe_dir.parent().and_then(|p| p.parent()) {
+                let project_relative = project_root.join(relative_path);
+                if project_relative.exists() {
+                    return Some(project_relative);
+                }
+            }
+        }
+    }
+
+    // 3. SIMPLE_HOME env var
+    if let Ok(home) = std::env::var("SIMPLE_HOME") {
+        let home_path = PathBuf::from(home).join(relative_path);
+        if home_path.exists() {
+            return Some(home_path);
+        }
+    }
+
+    None
+}
+
+/// Dispatch a command to its Simple app, returning None if app not found
+fn dispatch_to_simple_app(app_relative_path: &str, args: &[String], gc_log: bool, gc_off: bool) -> Option<i32> {
+    let app_path = resolve_app_path(app_relative_path)?;
+    let mut full_args = vec!["simple_old".to_string(), app_path.to_string_lossy().to_string()];
+    full_args.extend(args[1..].iter().cloned());
+    Some(run_file_with_args(&app_path, gc_log, gc_off, full_args))
+}
+
+/// Handle test command - dispatch to Simple runner or Rust runner
 fn handle_test(args: &[String], gc_log: bool, gc_off: bool) -> i32 {
+    // Recursion guard - child processes use Rust runner directly
+    if std::env::var("SIMPLE_TEST_RUNNER_RUST").is_ok() {
+        return handle_test_rust(args, gc_log, gc_off);
+    }
+
+    // Features requiring Rust runner (advanced features not yet in Simple runner)
+    let needs_rust = args[1..].iter().any(|a| {
+        a == "--watch" || a == "--parallel" || a == "-p"
+            || a.starts_with("--doctest") || a == "--json"
+            || a.starts_with("--diagram") || a.starts_with("--seq-")
+            || a == "--rust-tests" || a == "--list-runs"
+            || a == "--cleanup-runs" || a.starts_with("--prune-runs")
+            || a == "--capture-screenshots" || a == "--full-parallel"
+            || a == "--rust-ignored"
+    });
+
+    if needs_rust {
+        return handle_test_rust(args, gc_log, gc_off);
+    }
+
+    // Dispatch to Simple runner
+    if let Some(app_path) = resolve_app_path("src/app/test_runner_new/main.spl") {
+        let mut full_args = vec![
+            "simple_old".to_string(),
+            app_path.to_string_lossy().to_string(),
+        ];
+        full_args.extend(args[1..].iter().cloned());
+        if gc_log {
+            full_args.push("--gc-log".to_string());
+        }
+        if gc_off {
+            full_args.push("--gc=off".to_string());
+        }
+        return run_file_with_args(&app_path, gc_log, gc_off, full_args);
+    }
+
+    handle_test_rust(args, gc_log, gc_off)
+}
+
+/// Original Rust test runner implementation (fallback)
+fn handle_test_rust(args: &[String], gc_log: bool, gc_off: bool) -> i32 {
     // Parse test options from remaining args
     let test_args: Vec<String> = args[1..].to_vec();
     let mut options = test_runner::parse_test_args(&test_args);
@@ -349,8 +450,129 @@ fn handle_file_execution(
     }
 }
 
-/// Run sspec-docgen command
-fn run_sspec_docgen(args: &[String]) -> i32 {
+/// Handle fmt command - dispatch to Simple formatter or Rust formatter
+fn handle_fmt(args: &[String], gc_log: bool, gc_off: bool) -> i32 {
+    if std::env::var("SIMPLE_FMT_RUST").is_ok() {
+        return run_fmt(args);
+    }
+    let needs_rust = args[1..].iter().any(|a| a == "--json");
+    if needs_rust {
+        return run_fmt(args);
+    }
+    if let Some(code) = dispatch_to_simple_app("src/app/formatter/main.spl", args, gc_log, gc_off) {
+        return code;
+    }
+    run_fmt(args)
+}
+
+/// Handle lint command - dispatch to Simple linter or Rust linter
+fn handle_lint(args: &[String], gc_log: bool, gc_off: bool) -> i32 {
+    if std::env::var("SIMPLE_LINT_RUST").is_ok() {
+        return run_lint(args);
+    }
+    let needs_rust = args[1..].iter().any(|a| a == "--json" || a == "--fix");
+    if needs_rust {
+        return run_lint(args);
+    }
+    if let Some(code) = dispatch_to_simple_app("src/app/lint/main.spl", args, gc_log, gc_off) {
+        return code;
+    }
+    run_lint(args)
+}
+
+/// Handle sspec-docgen command - dispatch to Simple app or Rust implementation
+fn handle_sspec_docgen(args: &[String], gc_log: bool, gc_off: bool) -> i32 {
+    if std::env::var("SIMPLE_SSPEC_DOCGEN_RUST").is_ok() {
+        return run_sspec_docgen_rust(args);
+    }
+    if let Some(code) = dispatch_to_simple_app("src/app/sspec_docgen/main.spl", args, gc_log, gc_off) {
+        return code;
+    }
+    run_sspec_docgen_rust(args)
+}
+
+/// Handle context command - dispatch to Simple app or Rust implementation
+fn handle_context(args: &[String], gc_log: bool, gc_off: bool) -> i32 {
+    if std::env::var("SIMPLE_CONTEXT_RUST").is_ok() {
+        return run_context(args);
+    }
+    if let Some(code) = dispatch_to_simple_app("src/app/context/main.spl", args, gc_log, gc_off) {
+        return code;
+    }
+    run_context(args)
+}
+
+/// Handle mcp command - dispatch to Simple app or Rust implementation
+fn handle_mcp(args: &[String], gc_log: bool, gc_off: bool) -> i32 {
+    if std::env::var("SIMPLE_MCP_RUST").is_ok() {
+        return run_mcp(args);
+    }
+    if let Some(code) = dispatch_to_simple_app("src/app/mcp/main.spl", args, gc_log, gc_off) {
+        return code;
+    }
+    run_mcp(args)
+}
+
+/// Handle verify command - dispatch to Simple app or Rust implementation
+fn handle_verify(args: &[String], gc_log: bool, gc_off: bool) -> i32 {
+    if std::env::var("SIMPLE_VERIFY_RUST").is_ok() {
+        return run_verify(args, gc_log, gc_off);
+    }
+    if let Some(code) = dispatch_to_simple_app("src/app/verify/main.spl", args, gc_log, gc_off) {
+        return code;
+    }
+    run_verify(args, gc_log, gc_off)
+}
+
+/// Handle dashboard command - dispatch to Simple app or Rust implementation
+fn handle_dashboard_dispatch(args: &[String], gc_log: bool, gc_off: bool) -> i32 {
+    if std::env::var("SIMPLE_DASHBOARD_RUST").is_ok() {
+        return handle_dashboard(args, gc_log, gc_off);
+    }
+    if let Some(code) = dispatch_to_simple_app("src/app/dashboard/main.spl", args, gc_log, gc_off) {
+        return code;
+    }
+    handle_dashboard(args, gc_log, gc_off)
+}
+
+/// Handle coverage command - dispatch to Simple app
+fn handle_coverage(args: &[String], gc_log: bool, gc_off: bool) -> i32 {
+    if let Some(code) = dispatch_to_simple_app("src/app/coverage/main.spl", args, gc_log, gc_off) {
+        return code;
+    }
+    eprintln!("error: coverage app not found (install Simple or run from project root)");
+    1
+}
+
+/// Handle depgraph command - dispatch to Simple app
+fn handle_depgraph(args: &[String], gc_log: bool, gc_off: bool) -> i32 {
+    if let Some(code) = dispatch_to_simple_app("src/app/depgraph/main.spl", args, gc_log, gc_off) {
+        return code;
+    }
+    eprintln!("error: depgraph app not found (install Simple or run from project root)");
+    1
+}
+
+/// Handle lsp command - dispatch to Simple app
+fn handle_lsp(args: &[String], gc_log: bool, gc_off: bool) -> i32 {
+    if let Some(code) = dispatch_to_simple_app("src/app/lsp/main.spl", args, gc_log, gc_off) {
+        return code;
+    }
+    eprintln!("error: lsp app not found (install Simple or run from project root)");
+    1
+}
+
+/// Handle dap command - dispatch to Simple app
+fn handle_dap(args: &[String], gc_log: bool, gc_off: bool) -> i32 {
+    if let Some(code) = dispatch_to_simple_app("src/app/dap/main.spl", args, gc_log, gc_off) {
+        return code;
+    }
+    eprintln!("error: dap app not found (install Simple or run from project root)");
+    1
+}
+
+/// Original Rust sspec-docgen implementation (fallback)
+fn run_sspec_docgen_rust(args: &[String]) -> i32 {
     // Parse arguments
     let mut output_dir = PathBuf::from("doc/spec");
     let mut spec_files: Vec<PathBuf> = Vec::new();

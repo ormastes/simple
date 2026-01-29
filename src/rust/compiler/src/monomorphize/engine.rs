@@ -253,7 +253,7 @@ impl<'a> Monomorphizer<'a> {
         // Track specialization metadata
         specialized.is_generic_template = false; // This is now a specialized instance
         specialized.specialization_of = Some(s.name.clone()); // Track base template
-        // Convert ConcreteType bindings to Type bindings for AST
+                                                              // Convert ConcreteType bindings to Type bindings for AST
         specialized.type_bindings = bindings
             .iter()
             .map(|(k, v)| (k.clone(), concrete_to_ast_type(v)))
@@ -276,7 +276,7 @@ impl<'a> Monomorphizer<'a> {
         // Track specialization metadata
         specialized.is_generic_template = false; // This is now a specialized instance
         specialized.specialization_of = Some(c.name.clone()); // Track base template
-        // Convert ConcreteType bindings to Type bindings for AST
+                                                              // Convert ConcreteType bindings to Type bindings for AST
         specialized.type_bindings = bindings
             .iter()
             .map(|(k, v)| (k.clone(), concrete_to_ast_type(v)))
@@ -603,7 +603,10 @@ impl<'a> Monomorphizer<'a> {
     /// Specialize a function template with a specialization key.
     ///
     /// Used by DeferredMonomorphizer for on-demand instantiation.
-    pub fn specialize_function_with_key(&mut self, key: &SpecializationKey) -> Result<FunctionDef, crate::error::CompileError> {
+    pub fn specialize_function_with_key(
+        &mut self,
+        key: &SpecializationKey,
+    ) -> Result<FunctionDef, crate::error::CompileError> {
         // Find the template
         let func = self
             .generic_functions
@@ -616,7 +619,10 @@ impl<'a> Monomorphizer<'a> {
     }
 
     /// Specialize a struct template with a specialization key.
-    pub fn specialize_struct_with_key(&mut self, key: &SpecializationKey) -> Result<simple_parser::ast::StructDef, crate::error::CompileError> {
+    pub fn specialize_struct_with_key(
+        &mut self,
+        key: &SpecializationKey,
+    ) -> Result<simple_parser::ast::StructDef, crate::error::CompileError> {
         let struct_def = self
             .generic_structs
             .get(&key.name)
@@ -627,7 +633,10 @@ impl<'a> Monomorphizer<'a> {
     }
 
     /// Specialize a class template with a specialization key.
-    pub fn specialize_class_with_key(&mut self, key: &SpecializationKey) -> Result<ClassDef, crate::error::CompileError> {
+    pub fn specialize_class_with_key(
+        &mut self,
+        key: &SpecializationKey,
+    ) -> Result<ClassDef, crate::error::CompileError> {
         let class_def = self
             .generic_classes
             .get(&key.name)
@@ -638,7 +647,10 @@ impl<'a> Monomorphizer<'a> {
     }
 
     /// Specialize an enum template with a specialization key.
-    pub fn specialize_enum_with_key(&mut self, key: &SpecializationKey) -> Result<simple_parser::ast::EnumDef, crate::error::CompileError> {
+    pub fn specialize_enum_with_key(
+        &mut self,
+        key: &SpecializationKey,
+    ) -> Result<simple_parser::ast::EnumDef, crate::error::CompileError> {
         // Enums are not currently tracked in generic_* maps in the engine
         // This is a placeholder that would need enum support added
         Err(crate::error::CompileError::Codegen(format!(

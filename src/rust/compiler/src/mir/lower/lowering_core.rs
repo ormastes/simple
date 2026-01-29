@@ -519,8 +519,7 @@ impl<'a> MirLowerer<'a> {
         // We need to filter out function names to avoid declaring them as globals.
         // Functions are handled separately via HIR functions list.
         // Build a set of function names to exclude
-        let function_names: std::collections::HashSet<&str> =
-            hir.functions.iter().map(|f| f.name.as_str()).collect();
+        let function_names: std::collections::HashSet<&str> = hir.functions.iter().map(|f| f.name.as_str()).collect();
 
         for (name, ty) in &hir.globals {
             // Skip if this name is a function

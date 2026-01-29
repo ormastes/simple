@@ -76,30 +76,19 @@ pub(super) fn compile_collection_lit<M: Module>(
     let call = builder.ins().call(create_ref, &[size]);
     let collection = builder.inst_results(call)[0];
 
-    // Get add function and value wrapper
+    // Get add function
     let add_id = ctx.runtime_funcs[spec.add_fn];
     let add_ref = ctx.module.declare_func_in_func(add_id, builder.func);
-    let value_int_id = ctx.runtime_funcs["rt_value_int"];
-    let value_int_ref = ctx.module.declare_func_in_func(value_int_id, builder.func);
 
-    // Add each element
+    // Add each element (elements are pre-boxed as RuntimeValues at MIR level)
     for (i, elem) in elements.iter().enumerate() {
         let elem_val = get_vreg_or_default(ctx, builder, elem);
-        // Ensure element is i64 before calling rt_value_int (bools are i8)
-        let elem_ty = builder.func.dfg.value_type(elem_val);
-        let elem_i64 = if elem_ty == types::I8 || elem_ty == types::I16 || elem_ty == types::I32 {
-            builder.ins().uextend(types::I64, elem_val)
-        } else {
-            elem_val
-        };
-        let wrap_call = builder.ins().call(value_int_ref, &[elem_i64]);
-        let wrapped = builder.inst_results(wrap_call)[0];
 
         if spec.needs_index {
             let idx = builder.ins().iconst(types::I64, i as i64);
-            builder.ins().call(add_ref, &[collection, idx, wrapped]);
+            builder.ins().call(add_ref, &[collection, idx, elem_val]);
         } else {
-            builder.ins().call(add_ref, &[collection, wrapped]);
+            builder.ins().call(add_ref, &[collection, elem_val]);
         }
     }
 
@@ -331,17 +320,12 @@ pub(super) fn compile_dict_lit<M: Module>(
 
     let dict_set_id = ctx.runtime_funcs["rt_dict_set"];
     let dict_set_ref = ctx.module.declare_func_in_func(dict_set_id, builder.func);
-    let value_int_id = ctx.runtime_funcs["rt_value_int"];
-    let value_int_ref = ctx.module.declare_func_in_func(value_int_id, builder.func);
 
     for (key, val) in keys.iter().zip(values.iter()) {
         let key_val = ctx.vreg_values[key];
         let val_val = ctx.vreg_values[val];
-        let wrap_key = builder.ins().call(value_int_ref, &[key_val]);
-        let wrapped_key = builder.inst_results(wrap_key)[0];
-        let wrap_val = builder.ins().call(value_int_ref, &[val_val]);
-        let wrapped_val = builder.inst_results(wrap_val)[0];
-        builder.ins().call(dict_set_ref, &[dict, wrapped_key, wrapped_val]);
+        // Pass keys and values directly - they are already RuntimeValues.
+        builder.ins().call(dict_set_ref, &[dict, key_val, val_val]);
     }
     ctx.vreg_values.insert(dest, dict);
 }
@@ -358,13 +342,10 @@ pub(super) fn compile_index_get<M: Module>(
     let coll_val = get_vreg_or_default(ctx, builder, &collection);
     let idx_val = get_vreg_or_default(ctx, builder, &index);
 
-    // Wrap index as RuntimeValue (integers need tagging)
-    let value_int_id = ctx.runtime_funcs["rt_value_int"];
-    let value_int_ref = ctx.module.declare_func_in_func(value_int_id, builder.func);
-    let wrap_call = builder.ins().call(value_int_ref, &[idx_val]);
-    let wrapped_idx = builder.inst_results(wrap_call)[0];
-
-    let call = builder.ins().call(index_get_ref, &[coll_val, wrapped_idx]);
+    // Pass the index directly - all values in AOT codegen are already RuntimeValues
+    // (tagged integers, heap pointers, etc.). Wrapping with rt_value_int would corrupt
+    // non-integer keys (e.g., string keys for dict access).
+    let call = builder.ins().call(index_get_ref, &[coll_val, idx_val]);
     let runtime_value = builder.inst_results(call)[0];
 
     // Return the RuntimeValue directly without unwrapping.
@@ -386,14 +367,9 @@ pub(super) fn compile_index_set<M: Module>(
     let idx_val = get_vreg_or_default(ctx, builder, &index);
     let val = get_vreg_or_default(ctx, builder, &value);
 
-    let value_int_id = ctx.runtime_funcs["rt_value_int"];
-    let value_int_ref = ctx.module.declare_func_in_func(value_int_id, builder.func);
-    let wrap_idx = builder.ins().call(value_int_ref, &[idx_val]);
-    let wrapped_idx = builder.inst_results(wrap_idx)[0];
-    let wrap_val = builder.ins().call(value_int_ref, &[val]);
-    let wrapped_val = builder.inst_results(wrap_val)[0];
-
-    builder.ins().call(index_set_ref, &[coll_val, wrapped_idx, wrapped_val]);
+    // Pass index and value directly - all values in AOT codegen are already RuntimeValues.
+    // Wrapping with rt_value_int would corrupt non-integer keys/values.
+    builder.ins().call(index_set_ref, &[coll_val, idx_val, val]);
 }
 
 pub(super) fn compile_slice_op<M: Module>(

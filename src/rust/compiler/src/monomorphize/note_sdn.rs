@@ -220,11 +220,7 @@ impl InstantiationEntry {
         to_obj: String,
         status: InstantiationStatus,
     ) -> Self {
-        let type_args_str = type_args
-            .iter()
-            .map(|t| t.to_string())
-            .collect::<Vec<_>>()
-            .join(",");
+        let type_args_str = type_args.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(",");
 
         Self {
             template,
@@ -291,11 +287,7 @@ impl PossibleInstantiationEntry {
         required_by: String,
         can_defer: bool,
     ) -> Self {
-        let type_args_str = type_args
-            .iter()
-            .map(|t| t.to_string())
-            .collect::<Vec<_>>()
-            .join(",");
+        let type_args_str = type_args.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(",");
 
         Self {
             template,
@@ -323,13 +315,7 @@ pub struct TypeInferenceEntry {
 }
 
 impl TypeInferenceEntry {
-    pub fn new(
-        inferred_type: String,
-        expr: String,
-        context: String,
-        from_file: String,
-        from_loc: String,
-    ) -> Self {
+    pub fn new(inferred_type: String, expr: String, context: String, from_file: String, from_loc: String) -> Self {
         Self {
             inferred_type,
             expr,
@@ -406,10 +392,7 @@ pub struct CircularWarning {
 
 impl CircularWarning {
     pub fn new(cycle_path: String, severity: String) -> Self {
-        Self {
-            cycle_path,
-            severity,
-        }
+        Self { cycle_path, severity }
     }
 }
 
@@ -424,10 +407,7 @@ pub struct CircularError {
 
 impl CircularError {
     pub fn new(cycle_path: String, error_code: String) -> Self {
-        Self {
-            cycle_path,
-            error_code,
-        }
+        Self { cycle_path, error_code }
     }
 }
 
@@ -482,11 +462,7 @@ mod tests {
     fn test_dependency_edge() {
         let mut note = NoteSdnMetadata::new();
 
-        let edge = DependencyEdge::new(
-            "List$Int".to_string(),
-            "Int".to_string(),
-            DependencyKind::TypeParam,
-        );
+        let edge = DependencyEdge::new("List$Int".to_string(), "Int".to_string(), DependencyKind::TypeParam);
 
         note.add_dependency(edge);
 
@@ -498,10 +474,7 @@ mod tests {
     fn test_circular_warning() {
         let mut note = NoteSdnMetadata::new();
 
-        let warning = CircularWarning::new(
-            "Node$T->Option$Node$T->Node$T".to_string(),
-            "warning".to_string(),
-        );
+        let warning = CircularWarning::new("Node$T->Option$Node$T->Node$T".to_string(), "warning".to_string());
 
         note.add_circular_warning(warning);
 

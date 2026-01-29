@@ -10,8 +10,8 @@ use simple_parser::ast::{ClassDef, EnumDef, FunctionDef, Module, Node, StructDef
 use std::collections::HashMap;
 
 use crate::monomorphize::metadata::{
-    GenericEnumMeta, GenericFunctionMeta, GenericStructMeta, GenericTraitMeta,
-    MonomorphizationMetadata, SpecializationEntry,
+    GenericEnumMeta, GenericFunctionMeta, GenericStructMeta, GenericTraitMeta, MonomorphizationMetadata,
+    SpecializationEntry,
 };
 use crate::monomorphize::types::ConcreteType;
 
@@ -117,7 +117,12 @@ pub fn partition_generic_constructs(
                         f.name.clone(),
                         f.type_bindings
                             .iter()
-                            .map(|(k, v)| (k.clone(), crate::monomorphize::util::ast_type_to_concrete(v, &empty_bindings)))
+                            .map(|(k, v)| {
+                                (
+                                    k.clone(),
+                                    crate::monomorphize::util::ast_type_to_concrete(v, &empty_bindings),
+                                )
+                            })
                             .collect(),
                     ));
                 } else {
@@ -156,7 +161,12 @@ pub fn partition_generic_constructs(
                         s.name.clone(),
                         s.type_bindings
                             .iter()
-                            .map(|(k, v)| (k.clone(), crate::monomorphize::util::ast_type_to_concrete(v, &empty_bindings)))
+                            .map(|(k, v)| {
+                                (
+                                    k.clone(),
+                                    crate::monomorphize::util::ast_type_to_concrete(v, &empty_bindings),
+                                )
+                            })
                             .collect(),
                     ));
                 } else {
@@ -195,7 +205,12 @@ pub fn partition_generic_constructs(
                         c.name.clone(),
                         c.type_bindings
                             .iter()
-                            .map(|(k, v)| (k.clone(), crate::monomorphize::util::ast_type_to_concrete(v, &empty_bindings)))
+                            .map(|(k, v)| {
+                                (
+                                    k.clone(),
+                                    crate::monomorphize::util::ast_type_to_concrete(v, &empty_bindings),
+                                )
+                            })
                             .collect(),
                     ));
                 } else {
@@ -233,7 +248,12 @@ pub fn partition_generic_constructs(
                         e.name.clone(),
                         e.type_bindings
                             .iter()
-                            .map(|(k, v)| (k.clone(), crate::monomorphize::util::ast_type_to_concrete(v, &empty_bindings)))
+                            .map(|(k, v)| {
+                                (
+                                    k.clone(),
+                                    crate::monomorphize::util::ast_type_to_concrete(v, &empty_bindings),
+                                )
+                            })
                             .collect(),
                     ));
                 } else {
@@ -331,7 +351,12 @@ pub fn build_monomorphization_metadata(
                     func.name.clone(),
                     func.type_bindings
                         .iter()
-                        .map(|(k, v)| (k.clone(), crate::monomorphize::util::ast_type_to_concrete(v, &empty_bindings)))
+                        .map(|(k, v)| {
+                            (
+                                k.clone(),
+                                crate::monomorphize::util::ast_type_to_concrete(v, &empty_bindings),
+                            )
+                        })
                         .collect(),
                 ));
             }
@@ -351,9 +376,15 @@ pub fn build_monomorphization_metadata(
                 meta.specializations.push(SpecializationEntry::new(
                     type_args,
                     struct_def.name.clone(),
-                    struct_def.type_bindings
+                    struct_def
+                        .type_bindings
                         .iter()
-                        .map(|(k, v)| (k.clone(), crate::monomorphize::util::ast_type_to_concrete(v, &empty_bindings)))
+                        .map(|(k, v)| {
+                            (
+                                k.clone(),
+                                crate::monomorphize::util::ast_type_to_concrete(v, &empty_bindings),
+                            )
+                        })
                         .collect(),
                 ));
             }
@@ -372,9 +403,15 @@ pub fn build_monomorphization_metadata(
                 meta.specializations.push(SpecializationEntry::new(
                     type_args,
                     class_def.name.clone(),
-                    class_def.type_bindings
+                    class_def
+                        .type_bindings
                         .iter()
-                        .map(|(k, v)| (k.clone(), crate::monomorphize::util::ast_type_to_concrete(v, &empty_bindings)))
+                        .map(|(k, v)| {
+                            (
+                                k.clone(),
+                                crate::monomorphize::util::ast_type_to_concrete(v, &empty_bindings),
+                            )
+                        })
                         .collect(),
                 ));
             }
@@ -393,9 +430,15 @@ pub fn build_monomorphization_metadata(
                 meta.specializations.push(SpecializationEntry::new(
                     type_args,
                     enum_def.name.clone(),
-                    enum_def.type_bindings
+                    enum_def
+                        .type_bindings
                         .iter()
-                        .map(|(k, v)| (k.clone(), crate::monomorphize::util::ast_type_to_concrete(v, &empty_bindings)))
+                        .map(|(k, v)| {
+                            (
+                                k.clone(),
+                                crate::monomorphize::util::ast_type_to_concrete(v, &empty_bindings),
+                            )
+                        })
                         .collect(),
                 ));
             }
