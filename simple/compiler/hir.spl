@@ -994,9 +994,7 @@ impl HirLowering:
     me lower_module(module: Module) -> HirModule:
         """Lower a parsed module to HIR."""
         # First pass: declare all top-level symbols
-        print "[lower_module] declaring symbols..."
         self.declare_module_symbols(module)
-        print "[lower_module] symbols declared"
 
         # Second pass: lower definitions
         var functions: Dict<SymbolId, HirFunction> = {}
@@ -1007,12 +1005,9 @@ impl HirLowering:
         var impls: [HirImpl] = []
         var constants: Dict<SymbolId, HirConst> = {}
 
-        print "[lower_module] lowering {module.functions.keys().len()} functions..."
         for name in module.functions.keys():
-            print "[lower_module] lowering fn: {name}"
             val fn_ = module.functions[name]
             val hir_fn = self.lower_function(fn_)
-            print "[lower_module] fn lowered: {name}"
             functions[hir_fn.symbol] = hir_fn
 
         for name in module.classes.keys():
@@ -1124,56 +1119,40 @@ impl HirLowering:
 
     me lower_function(fn_: Function) -> HirFunction:
         """Lower function to HIR."""
-        print "[lower_fn] start: {fn_.name}"
         # Workaround: Store symbols in local var first to avoid interpreter bug
         # where chained method calls corrupt 'self'
         var symbols_table = self.symbols
-        print "[lower_fn] looking up symbol..."
         val fn_symbol_id = symbols_table.lookup(fn_.name).unwrap()
-        print "[lower_fn] symbol found"
 
         # Workaround: Create the Some value separately to avoid interpreter bug
         val opt_fn_id: SymbolId? = Some(fn_symbol_id)
         self.current_function = opt_fn_id
-        print "[lower_fn] current_function set"
 
         # Re-get symbols from self after field modification
         symbols_table = self.symbols
         symbols_table.push_scope(ScopeKind.Function)
         self.symbols = symbols_table
-        print "[lower_fn] scope pushed"
 
         # Lower type parameters
         var type_params: [HirTypeParam] = []
         for tp in fn_.type_params:
             type_params = type_params.push(self.lower_type_param(tp))
-        print "[lower_fn] type_params done"
 
         # Lower parameters
         var params: [HirParam] = []
         for p in fn_.params:
             params = params.push(self.lower_param(p))
-        print "[lower_fn] params done"
 
-        # Lower return type
-        print "[lower_fn] lowering return type..."
-        print "[lower_fn] fn_.return_type exists? checking..."
-        val has_ret = fn_.return_type.?
-        print "[lower_fn] has return type: {has_ret}"
+        # Lower return type — use explicit check instead of .map() ?? default
+        # to avoid crash with null coalescing on Option.map result
         var return_type = HirType(kind: HirTypeKind.Unit, span: fn_.span)
-        print "[lower_fn] default return type created"
-        if has_ret:
-            print "[lower_fn] mapping return type..."
+        if fn_.return_type.?:
             val mapped = fn_.return_type.map(\t: self.lower_type(t))
-            print "[lower_fn] mapped"
             if mapped.?:
                 return_type = mapped.unwrap()
-        print "[lower_fn] return type done"
 
         # Lower body
-        print "[lower_fn] lowering body..."
         val body = self.lower_block(fn_.body)
-        print "[lower_fn] body done"
 
         # Workaround: Store symbols in local var to avoid interpreter bug
         symbols_table = self.symbols

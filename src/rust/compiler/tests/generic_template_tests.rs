@@ -15,10 +15,9 @@ use std::collections::HashMap;
 
 #[test]
 fn test_partition_generic_function() {
-    let source = r#"
-        fn identity<T>(x: T) -> T:
-            return x
-    "#;
+    let source = r#"fn identity<T>(x: T) -> T:
+    return x
+"#;
 
     let module = Parser::new(source).parse().expect("Parse failed");
     let (templates, specialized, metadata) = partition_generic_constructs(&module);
@@ -39,10 +38,9 @@ fn test_partition_generic_function() {
 
 #[test]
 fn test_partition_generic_struct() {
-    let source = r#"
-        struct Container<T>:
-            value: T
-    "#;
+    let source = r#"struct Container<T>:
+    value: T
+"#;
 
     let module = Parser::new(source).parse().expect("Parse failed");
     let (templates, specialized, _) = partition_generic_constructs(&module);
@@ -57,11 +55,10 @@ fn test_partition_generic_struct() {
 
 #[test]
 fn test_partition_generic_enum() {
-    let source = r#"
-        enum Result<T, E>:
-            Ok(T)
-            Err(E)
-    "#;
+    let source = r#"enum Result<T, E>:
+    Ok(T)
+    Err(E)
+"#;
 
     let module = Parser::new(source).parse().expect("Parse failed");
     let (templates, specialized, metadata) = partition_generic_constructs(&module);
@@ -77,13 +74,12 @@ fn test_partition_generic_enum() {
 
 #[test]
 fn test_partition_mixed_generic_and_regular() {
-    let source = r#"
-        fn identity<T>(x: T) -> T:
-            return x
+    let source = r#"fn identity<T>(x: T) -> T:
+    return x
 
-        fn add(a: i32, b: i32) -> i32:
-            return a + b
-    "#;
+fn add(a: i32, b: i32) -> i32:
+    return a + b
+"#;
 
     let module = Parser::new(source).parse().expect("Parse failed");
     let (templates, specialized, _) = partition_generic_constructs(&module);
