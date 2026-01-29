@@ -554,31 +554,25 @@ class CompilerDriver:
     # --------------------------------------------------------------------------
 
     fn interpret() -> CompileResult:
-        print "[interpret] start"
-        val backend = self.ctx.di.resolve("Backend")
-        print "[interpret] backend resolved"
+        # Delegate to simple_old runtime for interpretation
+        # The bootstrap compiler's struct field access has codegen issues
+        # that prevent the self-hosted interpreter/JIT from working
+        if self.ctx.options.input_files.len() == 0:
+            return CompileResult.Error("No source file specified for interpret mode")
+        val source_file = self.ctx.options.input_files[0]
 
-        # Find main module - try by name first
-        # The module name is the file stem (e.g., test_hello), not "main"
-        # So iterate to find the module with a main function
-        var target_module: HirModule? = nil
-        print "[interpret] looking for module with main function..."
-        for name in self.ctx.hir_modules.keys():
-            print "[interpret] checking module: {name}"
-            val mod_ = self.ctx.hir_modules[name]
-            # Check symbol table for a function named "main"
-            for sym_id in mod_.symbols.symbols.keys():
-                val sym = mod_.symbols.symbols[sym_id]
-                if sym.name == "main":
-                    print "[interpret] found main symbol in module: {name}"
-                    target_module = Some(mod_)
+        val simple_old = find_simple_old_binary()
+        if simple_old == "":
+            return CompileResult.Error("Cannot find simple_old binary for interpretation")
 
-        if target_module.?:
-            print "[interpret] calling run_module..."
-            return self.run_module(backend, target_module.unwrap())
-
-        print "[interpret] no module with main function found"
-        CompileResult.RuntimeError("No module with main function found")
+        val result = rt_shell("{simple_old} {source_file}")
+        if result.stdout.?:
+            print result.stdout
+        if result.exit_code != 0:
+            if result.stderr.?:
+                return CompileResult.Error(result.stderr)
+            return CompileResult.Error("Interpret failed with exit code {result.exit_code}")
+        CompileResult.Success(BackendResult.Unit)
 
     fn run_module(backend: Backend, module: HirModule) -> CompileResult:
         match backend.process_module(module):
@@ -694,21 +688,16 @@ class CompilerDriver:
     # --------------------------------------------------------------------------
 
     me lower_to_mir() -> bool:
-        print "[mir] hir_modules count={self.ctx.hir_modules.keys().len()}"
         val lowering = MirLowering.new(create_symbol_table())
 
         for name in self.ctx.hir_modules.keys():
-            print "[mir] lowering module: {name}"
             val hir_module = self.ctx.hir_modules[name]
             match lowering.lower_module(hir_module):
                 case Ok(mir_module):
-                    print "[mir] module {name} lowered OK"
                     self.ctx.mir_modules[name] = mir_module
                 case Err(e):
-                    print "[mir] module {name} FAILED: {e}"
                     self.ctx.add_error("MIR lowering error in {name}: {e}")
 
-        print "[mir] result: {self.ctx.mir_modules.keys().len()} modules, {self.ctx.errors.len()} errors"
         not self.ctx.has_errors()
 
 # ------------------------------------------------------------------------------
@@ -726,6 +715,20 @@ fn find_runtime_lib_dir() -> text:
     if rt_file_exists("target/release/libsimple_compiler.so"):
         return "target/release"
     "target/debug"
+
+# ------------------------------------------------------------------------------
+# Binary Discovery
+# ------------------------------------------------------------------------------
+
+fn find_simple_old_binary() -> text:
+    val env_path = rt_env_get("SIMPLE_OLD_PATH")
+    if env_path.? and env_path != "":
+        return env_path
+    if rt_file_exists("./target/debug/simple_old"):
+        return "./target/debug/simple_old"
+    if rt_file_exists("./target/release/simple_old"):
+        return "./target/release/simple_old"
+    ""
 
 # ------------------------------------------------------------------------------
 # Convenience Functions

@@ -308,10 +308,10 @@ impl<'a> Parser<'a> {
                             let colon_span = self.current.span;
                             let warning = ErrorHint {
                                 level: ErrorHintLevel::Warning,
-                                message: "Deprecated syntax for static method/variant access".to_string(),
+                                message: "Use dot (.) instead of double colon (::) for static methods and enum variants".to_string(),
                                 span: colon_span,
-                                suggestion: Some("Use dot syntax (.) instead of double colon (::)".to_string()),
-                                help: Some("Example: Type.new() instead of Type::new()".to_string()),
+                                suggestion: Some("Replace '::' with '.' - Simple uses dot notation for all member access".to_string()),
+                                help: Some("Examples: Type.new() not Type::new(), Option.Some(x) not Option::Some(x), Point.origin() not Point::origin()".to_string()),
                             };
                             self.error_hints.push(warning);
 
