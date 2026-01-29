@@ -183,16 +183,23 @@ main = p.sum()
 "#, 30);
 }
 
-// Context blocks need special parser/runtime support
-// #[test]
-// fn runner_handles_context_blocks() {
-//     run_expect(r#"
-// fn get_from_context():
-//     return context.value
-// context { value: 100 }:
-//     main = get_from_context()
-// "#, 100);
-// }
+// Context blocks - now working!
+#[test]
+fn runner_handles_context_blocks() {
+    run_expect(r#"
+class Container:
+    value: i64
+
+    fn get_value(self):
+        return self.value
+
+val container = Container { value: 100 }
+var result = 0
+context container:
+    result = get_value()
+main = result
+"#, 100);
+}
 
 // Macros may need different invocation syntax
 // #[test]
@@ -451,14 +458,16 @@ main = 42
     );
 }
 
-// method_missing needs special class/method resolution
+// method_missing - works in interpreter, needs type annotations for compiler
+// Keeping commented until compiler supports untyped method_missing params
 // #[test]
 // fn runner_handles_method_missing() {
 //     run_expect(r#"
 // class Flexible:
-//     fn method_missing(name, args):
+//     fn method_missing(self, name, args, block):
 //         return 99
-// let f = Flexible {}
+//
+// val f = Flexible {}
 // main = f.unknown_method()
 // "#, 99);
 // }
