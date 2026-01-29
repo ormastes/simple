@@ -25,6 +25,14 @@ pub(crate) fn compile_to_mir_with_di(source: &str, di_toml: &str) -> MirLowerRes
     lower_to_mir_with_mode_and_di(&hir_module, ContractMode::All, Some(di_config))
 }
 
+/// Like compile_to_mir but returns None instead of panicking on parse/HIR errors
+pub(crate) fn try_compile_to_mir(source: &str) -> Option<MirLowerResult<MirModule>> {
+    let mut parser = Parser::new(source);
+    let ast = parser.parse().ok()?;
+    let hir_module = hir::lower(&ast).ok()?;
+    Some(lower_to_mir(&hir_module))
+}
+
 pub(crate) fn compile_to_mir_with_mode(source: &str, mode: ContractMode) -> MirLowerResult<MirModule> {
     let mut parser = Parser::new(source);
     let ast = parser.parse().expect("parse failed");

@@ -34,6 +34,19 @@ fn call_runtime_2<M: Module>(
     builder.inst_results(call)[0]
 }
 
+/// Helper to call a runtime function with 2 args that returns void
+fn call_runtime_2_void<M: Module>(
+    ctx: &mut InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    func_name: &str,
+    arg1: cranelift_codegen::ir::Value,
+    arg2: cranelift_codegen::ir::Value,
+) {
+    let func_id = ctx.runtime_funcs[func_name];
+    let func_ref = ctx.module.declare_func_in_func(func_id, builder.func);
+    builder.ins().call(func_ref, &[arg1, arg2]);
+}
+
 /// Helper to call a runtime function with 3 args and get its result
 fn call_runtime_3<M: Module>(
     ctx: &mut InstrContext<'_, M>,
@@ -78,7 +91,7 @@ fn call_len_method<M: Module>(
     }
 }
 
-pub(super) fn compile_builtin_method<M: Module>(
+pub(crate) fn compile_builtin_method<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     dest: &Option<VReg>,
@@ -92,8 +105,9 @@ pub(super) fn compile_builtin_method<M: Module>(
         ("Array", "push") | ("array", "push") => {
             let arg_val = ctx.vreg_values[&args[0]];
             let wrapped = wrap_value(ctx, builder, arg_val);
-            let result_i8 = call_runtime_2(ctx, builder, "rt_array_push", receiver_val, wrapped);
-            Some(builder.ins().uextend(types::I64, result_i8))
+            call_runtime_2_void(ctx, builder, "rt_array_push", receiver_val, wrapped);
+            // push() modifies in-place and returns the receiver for chaining
+            Some(receiver_val)
         }
         ("Array", "len") | ("array", "len") => Some(call_len_method(ctx, builder, "rt_array_len", receiver_val)),
         ("Array", "get") | ("array", "get") => {

@@ -47,6 +47,8 @@ mod types;
 #[cfg(all(feature = "vulkan", feature = "vulkan-graphics"))]
 mod instr_graphics;
 
+pub mod emitter;
+
 #[cfg(feature = "vulkan")]
 pub use backend::VulkanBackend;
 #[cfg(feature = "vulkan")]

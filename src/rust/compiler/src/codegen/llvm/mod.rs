@@ -8,6 +8,7 @@
 /// Requires the `llvm` feature flag and LLVM 18 toolchain to be enabled.
 // Module structure
 mod backend_core;
+pub mod emitter;
 mod functions;
 mod gpu_instructions;
 mod instructions;

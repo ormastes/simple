@@ -8,7 +8,7 @@ use crate::mir::{BindingStep, MirLiteral, MirPattern, PatternBinding, VReg};
 
 use super::{InstrContext, InstrResult};
 
-pub(super) fn compile_pattern_test<M: Module>(
+pub(crate) fn compile_pattern_test<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     dest: VReg,
@@ -66,7 +66,7 @@ pub(super) fn compile_pattern_test<M: Module>(
     ctx.vreg_values.insert(dest, result);
 }
 
-pub(super) fn compile_pattern_bind<M: Module>(
+pub(crate) fn compile_pattern_bind<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     dest: VReg,
@@ -96,7 +96,7 @@ fn calculate_variant_discriminant(variant_name: &str) -> u32 {
     (hasher.finish() & 0xFFFFFFFF) as u32
 }
 
-pub(super) fn compile_enum_unit<M: Module>(
+pub(crate) fn compile_enum_unit<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     dest: VReg,
@@ -115,7 +115,7 @@ pub(super) fn compile_enum_unit<M: Module>(
     ctx.vreg_values.insert(dest, result);
 }
 
-pub(super) fn compile_enum_with<M: Module>(
+pub(crate) fn compile_enum_with<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     dest: VReg,

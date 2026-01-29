@@ -176,7 +176,7 @@ impl<'a> MirLowerer<'a> {
 }
 
 /// Map built-in type IDs to their names for DI resolution
-fn builtin_type_name(type_id: TypeId) -> Option<&'static str> {
+pub(super) fn builtin_type_name(type_id: TypeId) -> Option<&'static str> {
     match type_id {
         TypeId::VOID => Some("void"),
         TypeId::BOOL => Some("bool"),

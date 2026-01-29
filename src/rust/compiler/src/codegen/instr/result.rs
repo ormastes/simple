@@ -37,7 +37,7 @@ fn create_enum_value<M: Module>(
     ctx.vreg_values.insert(dest, result);
 }
 
-pub(super) fn compile_try_unwrap<M: Module>(
+pub(crate) fn compile_try_unwrap<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     dest: VReg,
@@ -73,7 +73,7 @@ pub(super) fn compile_try_unwrap<M: Module>(
     ctx.vreg_values.insert(error_dest, val);
 }
 
-pub(super) fn compile_option_some<M: Module>(
+pub(crate) fn compile_option_some<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     dest: VReg,
@@ -82,11 +82,11 @@ pub(super) fn compile_option_some<M: Module>(
     create_enum_value(ctx, builder, dest, 1, 1, Some(value)); // Option enum_id=1, Some=1
 }
 
-pub(super) fn compile_option_none<M: Module>(ctx: &mut InstrContext<'_, M>, builder: &mut FunctionBuilder, dest: VReg) {
+pub(crate) fn compile_option_none<M: Module>(ctx: &mut InstrContext<'_, M>, builder: &mut FunctionBuilder, dest: VReg) {
     create_enum_value(ctx, builder, dest, 1, 0, None); // Option enum_id=1, None=0
 }
 
-pub(super) fn compile_result_ok<M: Module>(
+pub(crate) fn compile_result_ok<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     dest: VReg,
@@ -95,7 +95,7 @@ pub(super) fn compile_result_ok<M: Module>(
     create_enum_value(ctx, builder, dest, 0, 1, Some(value)); // Result enum_id=0, Ok=1
 }
 
-pub(super) fn compile_result_err<M: Module>(
+pub(crate) fn compile_result_err<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     dest: VReg,

@@ -164,6 +164,17 @@ impl TypeChecker {
 
         // Use remaining vars for reserved names
         let _ = (var12, var13);
+
+        // BDD/SSpec testing functions
+        self.env.insert("describe".to_string(), generic_fn.clone());
+        self.env.insert("context".to_string(), generic_fn.clone());
+        self.env.insert("it".to_string(), generic_fn.clone());
+        self.env.insert("test".to_string(), generic_fn.clone());
+        self.env.insert("example".to_string(), generic_fn.clone());
+        self.env.insert("specify".to_string(), generic_fn.clone());
+        self.env.insert("expect".to_string(), generic_fn.clone());
+        self.env.insert("before_each".to_string(), generic_fn.clone());
+        self.env.insert("after_each".to_string(), generic_fn.clone());
     }
 
     pub fn fresh_var(&mut self) -> Type {

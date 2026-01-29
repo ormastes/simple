@@ -10,7 +10,7 @@ use crate::mir::{BlockId, VReg};
 use super::super::shared::get_func_block_addr;
 use super::{InstrContext, InstrResult};
 
-pub(super) fn build_ctx_array<M: Module>(
+pub(crate) fn build_ctx_array<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     body_block: BlockId,
@@ -37,7 +37,7 @@ pub(super) fn build_ctx_array<M: Module>(
     }
 }
 
-pub(super) fn compile_future_create<M: Module>(
+pub(crate) fn compile_future_create<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     dest: VReg,
@@ -53,7 +53,7 @@ pub(super) fn compile_future_create<M: Module>(
     ctx.vreg_values.insert(dest, result);
 }
 
-pub(super) fn compile_actor_spawn<M: Module>(
+pub(crate) fn compile_actor_spawn<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     dest: VReg,
@@ -69,7 +69,7 @@ pub(super) fn compile_actor_spawn<M: Module>(
     ctx.vreg_values.insert(dest, result);
 }
 
-pub(super) fn compile_generator_create<M: Module>(
+pub(crate) fn compile_generator_create<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     dest: VReg,
@@ -92,7 +92,7 @@ pub(super) fn compile_generator_create<M: Module>(
     ctx.vreg_values.insert(dest, result);
 }
 
-pub(super) fn compile_yield<M: Module>(
+pub(crate) fn compile_yield<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     value: VReg,
@@ -130,7 +130,7 @@ pub(super) fn compile_yield<M: Module>(
 
 /// Compile an Await instruction with state machine support.
 /// Similar to Yield but for async functions: saves state, returns suspended future.
-pub(super) fn compile_await<M: Module>(
+pub(crate) fn compile_await<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     dest: VReg,
@@ -233,7 +233,7 @@ pub(super) fn compile_await<M: Module>(
 /// * `mir_block_id` - Current MIR block ID
 /// * `entry_block` - Entry block for state machine
 #[allow(dead_code)]
-pub(super) fn compile_await_monoio<M: Module>(
+pub(crate) fn compile_await_monoio<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     dest: VReg,

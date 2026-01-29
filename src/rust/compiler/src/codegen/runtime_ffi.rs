@@ -169,6 +169,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_value_as_int", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_value_to_string", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_value_eq", &[I64, I64], &[I8]),
+    RuntimeFuncSpec::new("rt_value_compare", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_value_truthy", &[I64], &[I8]),
     // =========================================================================
     // Object operations
@@ -919,6 +920,11 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_bdd_after_each", &[I64], &[]),       // block (fn ptr)
     RuntimeFuncSpec::new("rt_bdd_format_results", &[], &[I64]),   // -> failures count
     RuntimeFuncSpec::new("rt_bdd_clear_state", &[], &[]),
+    // RuntimeValue-based BDD wrappers (for Cranelift codegen)
+    RuntimeFuncSpec::new("rt_bdd_describe_start_rv", &[I64], &[]),  // name as RuntimeValue string
+    RuntimeFuncSpec::new("rt_bdd_it_start_rv", &[I64], &[]),        // name as RuntimeValue string
+    RuntimeFuncSpec::new("rt_bdd_expect_eq_rv", &[I64, I64], &[]),  // actual, expected as RuntimeValues
+    RuntimeFuncSpec::new("rt_bdd_expect_truthy_rv", &[I64], &[]),   // value as RuntimeValue
 ];
 
 #[cfg(test)]

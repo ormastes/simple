@@ -495,7 +495,13 @@ pub fn compile_function_body<M: Module>(
                     // If function returns void, discard the return value
                     // (this can happen when return with value is used in a void function)
                     if func.return_type == TypeId::VOID {
-                        builder.ins().return_(&[]);
+                        if func.name == "main" {
+                            // C main() must return 0 for success
+                            let zero = builder.ins().iconst(types::I32, 0);
+                            builder.ins().return_(&[zero]);
+                        } else {
+                            builder.ins().return_(&[]);
+                        }
                     } else {
                         let ret_ty = type_to_cranelift(func.return_type);
                         // Handle missing VReg (can happen in complex control flow)
@@ -543,7 +549,12 @@ pub fn compile_function_body<M: Module>(
                     let nil_val = builder.inst_results(call)[0];
                     builder.ins().return_(&[nil_val]);
                 } else if func.return_type == TypeId::VOID {
-                    builder.ins().return_(&[]);
+                    if func.name == "main" {
+                        let zero = builder.ins().iconst(types::I32, 0);
+                        builder.ins().return_(&[zero]);
+                    } else {
+                        builder.ins().return_(&[]);
+                    }
                 } else {
                     builder.ins().trap(cranelift_codegen::ir::TrapCode::unwrap_user(1));
                 }

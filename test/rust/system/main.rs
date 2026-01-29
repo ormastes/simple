@@ -14,6 +14,7 @@ fn init() {
 }
 
 mod cli_tests;
+mod command_dispatch_tests;
 mod core_tests;
 mod coverage_tests;
 mod coverage_tests2;

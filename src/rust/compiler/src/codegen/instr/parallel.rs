@@ -34,7 +34,7 @@ fn get_array_length<M: Module>(
 }
 
 /// Compile a parallel map operation
-pub(super) fn compile_par_map<M: Module>(
+pub(crate) fn compile_par_map<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     dest: VReg,
@@ -64,7 +64,7 @@ pub(super) fn compile_par_map<M: Module>(
 }
 
 /// Compile a parallel reduce operation
-pub(super) fn compile_par_reduce<M: Module>(
+pub(crate) fn compile_par_reduce<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     dest: VReg,
@@ -96,7 +96,7 @@ pub(super) fn compile_par_reduce<M: Module>(
 }
 
 /// Compile a parallel filter operation
-pub(super) fn compile_par_filter<M: Module>(
+pub(crate) fn compile_par_filter<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     dest: VReg,
@@ -126,7 +126,7 @@ pub(super) fn compile_par_filter<M: Module>(
 }
 
 /// Compile a parallel for_each operation
-pub(super) fn compile_par_for_each<M: Module>(
+pub(crate) fn compile_par_for_each<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     input: VReg,

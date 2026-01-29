@@ -832,18 +832,9 @@ pub extern "C" fn rt_index_get(collection: RuntimeValue, index: RuntimeValue) ->
                 }
             }
             HeapObjectType::String => {
-                // String indexing returns character code
+                // String indexing returns a single-char string (consistent with char_at)
                 if index.is_int() {
-                    let str_ptr = ptr as *const RuntimeString;
-                    let len = (*str_ptr).len as i64;
-                    let idx = index.as_int();
-                    let idx = if idx < 0 { len + idx } else { idx };
-                    if idx < 0 || idx >= len {
-                        RuntimeValue::NIL
-                    } else {
-                        let data = str_ptr.add(1) as *const u8;
-                        RuntimeValue::from_int(*data.add(idx as usize) as i64)
-                    }
+                    rt_string_char_at(collection, index.as_int())
                 } else {
                     RuntimeValue::NIL
                 }

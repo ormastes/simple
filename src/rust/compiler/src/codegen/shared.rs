@@ -105,7 +105,10 @@ pub fn build_mir_signature(func: &MirFunction) -> Signature {
     }
 
     // Add return type
-    if func.return_type != TypeId::VOID {
+    if func.name == "main" {
+        // C main() must return i32 for proper exit code
+        sig.returns.push(AbiParam::new(types::I32));
+    } else if func.return_type != TypeId::VOID {
         let ret_ty = type_to_cranelift(func.return_type);
         sig.returns.push(AbiParam::new(ret_ty));
     }
