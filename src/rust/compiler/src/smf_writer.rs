@@ -156,7 +156,7 @@ fn build_smf_with_all_sections(
     // Template code section
     if has_templates {
         let mut sec_name = [0u8; 16];
-        sec_name[..12].copy_from_slice(b"template_code");
+        sec_name[..13].copy_from_slice(b"template_code");
         sections.push(SmfSection {
             section_type: SectionType::TemplateCode,
             flags: SECTION_FLAG_READ,

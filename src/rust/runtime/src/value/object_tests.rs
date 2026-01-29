@@ -359,3 +359,54 @@ fn test_unique_independent_instances() {
     assert_eq!(rt_unique_get(unique1).as_int(), 999);
     assert_eq!(rt_unique_get(unique2).as_int(), 200);
 }
+
+// ============================================================================
+// Option Map Tests
+// ============================================================================
+
+#[test]
+fn test_option_map_none() {
+    use super::rt_option_map;
+
+    // None.map(closure) should return None/nil
+    let none_val = RuntimeValue::NIL;
+    let closure = rt_closure_new(std::ptr::null(), 0);
+    let result = rt_option_map(none_val, closure);
+    assert!(result.is_nil() || super::rt_is_none(result));
+}
+
+#[test]
+fn test_option_map_none_enum() {
+    use super::rt_option_map;
+
+    // Create a proper None enum
+    let none_disc = hash_variant_discriminant("None");
+    let none_val = rt_enum_new(0, none_disc, RuntimeValue::NIL);
+    let closure = rt_closure_new(std::ptr::null(), 0);
+    let result = rt_option_map(none_val, closure);
+    // Should return the original None
+    assert!(super::rt_is_none(result));
+}
+
+#[test]
+fn test_option_map_some_with_identity() {
+    use super::rt_option_map;
+    use super::rt_option_map;
+
+    // Create Some(42) enum
+    let some_disc = hash_variant_discriminant("Some");
+    let some_val = rt_enum_new(0, some_disc, RuntimeValue::from_int(42));
+
+    // Identity closure: returns its second arg (the payload)
+    extern "C" fn identity(_closure: RuntimeValue, payload: RuntimeValue) -> RuntimeValue {
+        payload
+    }
+
+    let closure = rt_closure_new(identity as *const u8, 0);
+    let result = rt_option_map(some_val, closure);
+
+    // Result should be Some(42)
+    assert!(!super::rt_is_none(result));
+    let payload = rt_enum_payload(result);
+    assert_eq!(payload.as_int(), 42);
+}
