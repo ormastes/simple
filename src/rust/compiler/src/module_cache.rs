@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use tracing::trace;
 
 use crate::value::Value;
+use simple_parser::ast::{ClassDef, EnumDef, FunctionDef};
 
 /// Maximum depth for recursive module loading to prevent infinite loops
 pub const MAX_MODULE_DEPTH: usize = 50;
@@ -18,6 +19,12 @@ pub const MAX_MODULE_DEPTH: usize = 50;
 // Key: normalized module path, Value: module exports dict
 thread_local! {
     pub static MODULE_EXPORTS_CACHE: RefCell<HashMap<PathBuf, Value>> = RefCell::new(HashMap::new());
+    // Cache for ClassDef objects - needed for static method calls on imported classes
+    pub static MODULE_CLASSES_CACHE: RefCell<HashMap<PathBuf, HashMap<String, ClassDef>>> = RefCell::new(HashMap::new());
+    // Cache for FunctionDef objects
+    pub static MODULE_FUNCTIONS_CACHE: RefCell<HashMap<PathBuf, HashMap<String, FunctionDef>>> = RefCell::new(HashMap::new());
+    // Cache for EnumDef objects
+    pub static MODULE_ENUMS_CACHE: RefCell<HashMap<PathBuf, HashMap<String, EnumDef>>> = RefCell::new(HashMap::new());
     // Track modules currently being loaded to prevent circular import infinite recursion
     pub static MODULES_LOADING: RefCell<std::collections::HashSet<PathBuf>> = RefCell::new(std::collections::HashSet::new());
     // Track current loading depth to prevent infinite recursion
@@ -30,6 +37,9 @@ thread_local! {
 /// Clear the module exports cache (useful between test runs)
 pub fn clear_module_cache() {
     MODULE_EXPORTS_CACHE.with(|cache| cache.borrow_mut().clear());
+    MODULE_CLASSES_CACHE.with(|cache| cache.borrow_mut().clear());
+    MODULE_FUNCTIONS_CACHE.with(|cache| cache.borrow_mut().clear());
+    MODULE_ENUMS_CACHE.with(|cache| cache.borrow_mut().clear());
     MODULES_LOADING.with(|loading| loading.borrow_mut().clear());
     MODULE_LOAD_DEPTH.with(|depth| *depth.borrow_mut() = 0);
     PARTIAL_MODULE_EXPORTS_CACHE.with(|cache| cache.borrow_mut().clear());
@@ -140,6 +150,78 @@ pub fn cache_module_exports(path: &Path, exports: Value) {
     MODULE_EXPORTS_CACHE.with(|cache| {
         cache.borrow_mut().insert(key, exports);
     });
+}
+
+/// Cache module definitions (classes, functions, enums) for a path
+pub fn cache_module_definitions(
+    path: &Path,
+    classes: &HashMap<String, ClassDef>,
+    functions: &HashMap<String, FunctionDef>,
+    enums: &HashMap<String, EnumDef>,
+) {
+    let key = normalize_path_key(path);
+    trace!(path = ?key, classes = classes.len(), functions = functions.len(), enums = enums.len(), "Caching module definitions");
+    MODULE_CLASSES_CACHE.with(|cache| {
+        cache.borrow_mut().insert(key.clone(), classes.clone());
+    });
+    MODULE_FUNCTIONS_CACHE.with(|cache| {
+        cache.borrow_mut().insert(key.clone(), functions.clone());
+    });
+    MODULE_ENUMS_CACHE.with(|cache| {
+        cache.borrow_mut().insert(key, enums.clone());
+    });
+}
+
+/// Get cached module definitions and merge them into the provided HashMaps
+/// Returns true if definitions were found and merged, false otherwise
+pub fn merge_cached_module_definitions(
+    path: &Path,
+    classes: &mut HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    enums: &mut HashMap<String, EnumDef>,
+) -> bool {
+    let key = normalize_path_key(path);
+    eprintln!("[DEBUG merge] Trying to merge cached definitions for path: {:?}", key);
+    let mut found = false;
+
+    MODULE_CLASSES_CACHE.with(|cache| {
+        let cache_borrow = cache.borrow();
+        eprintln!("[DEBUG merge] Classes cache has {} entries", cache_borrow.len());
+        eprintln!("[DEBUG merge] Cache keys: {:?}", cache_borrow.keys().collect::<Vec<_>>());
+        if let Some(cached_classes) = cache_borrow.get(&key) {
+            eprintln!("[DEBUG merge] Found cached classes for this path: {} classes", cached_classes.len());
+            for (name, class_def) in cached_classes {
+                eprintln!("[DEBUG merge] Adding class '{}' to classes HashMap", name);
+                classes.insert(name.clone(), class_def.clone());
+            }
+            found = true;
+        } else {
+            eprintln!("[DEBUG merge] No cached classes found for this path");
+        }
+    });
+
+    MODULE_FUNCTIONS_CACHE.with(|cache| {
+        if let Some(cached_functions) = cache.borrow().get(&key) {
+            for (name, func_def) in cached_functions {
+                if name != "main" {  // Don't add "main" from imported modules
+                    functions.insert(name.clone(), func_def.clone());
+                }
+            }
+        }
+    });
+
+    MODULE_ENUMS_CACHE.with(|cache| {
+        if let Some(cached_enums) = cache.borrow().get(&key) {
+            for (name, enum_def) in cached_enums {
+                enums.insert(name.clone(), enum_def.clone());
+            }
+        }
+    });
+
+    if found {
+        trace!(path = ?key, "Merged cached module definitions");
+    }
+    found
 }
 
 /// Get partial module exports (type definitions only) for circular import resolution

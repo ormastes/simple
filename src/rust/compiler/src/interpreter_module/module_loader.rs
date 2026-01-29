@@ -23,9 +23,9 @@ use crate::error::CompileError;
 use crate::value::{Env, Value};
 
 use super::module_cache::{
-    cache_module_exports, clear_partial_module_exports, decrement_load_depth, get_cached_module_exports,
-    get_partial_module_exports, increment_load_depth, is_module_loading, mark_module_loading, unmark_module_loading,
-    MAX_MODULE_DEPTH,
+    cache_module_definitions, cache_module_exports, clear_partial_module_exports, decrement_load_depth,
+    get_cached_module_exports, get_partial_module_exports, increment_load_depth, is_module_loading,
+    mark_module_loading, merge_cached_module_definitions, unmark_module_loading, MAX_MODULE_DEPTH,
 };
 use super::module_evaluator::evaluate_module_exports;
 use super::path_resolution::resolve_module_path;
@@ -197,6 +197,10 @@ pub fn load_and_merge_module(
 
     // Check cache first - if we've already loaded this module, return cached exports
     if let Some(cached_exports) = get_cached_module_exports(&module_path) {
+        // Merge cached definitions (classes, functions, enums) into caller's HashMaps
+        // This ensures that static method calls work on imported classes
+        merge_cached_module_definitions(&module_path, classes, functions, enums);
+
         decrement_load_depth();
         // If importing a specific item, extract it from cached exports
         if let Some(item_name) = import_item_name {
@@ -258,7 +262,7 @@ pub fn load_and_merge_module(
 
     // Evaluate the module to get its environment (including imports)
     debug!(path = ?module_path, "Evaluating module exports");
-    let (module_env, module_exports) =
+    let (module_env, module_exports, module_functions, module_classes, module_enums) =
         match evaluate_module_exports(&module.items, Some(&module_path), functions, classes, enums) {
             Ok(result) => result,
             Err(e) => {
@@ -276,7 +280,7 @@ pub fn load_and_merge_module(
     let filtered_env: Env = module_env
         .iter()
         .filter(|(_, v)| !matches!(v, Value::Function { .. }))
-        .map(|(k, v)| (k.clone(), v.clone()))
+        .map(|(k, v): (&String, &Value)| (k.clone(), v.clone()))
         .collect();
 
     let mut exports: HashMap<String, Value> = HashMap::new();
@@ -302,6 +306,9 @@ pub fn load_and_merge_module(
     // Cache the full module exports for future use
     let exports_value = Value::Dict(exports.clone());
     cache_module_exports(&module_path, exports_value);
+
+    // Also cache the module definitions (classes, functions, enums) for future imports
+    cache_module_definitions(&module_path, &module_classes, &module_functions, &module_enums);
 
     // Clear partial exports now that full exports are available
     clear_partial_module_exports(&module_path);

@@ -278,6 +278,9 @@ impl<'a> Parser<'a> {
                         is_static = true;
                     }
 
+                    // Set the is_static flag on the function
+                    f.is_static = is_static;
+
                     // Auto-inject 'self' parameter for instance methods (non-static) if not present
                     if !is_static && (f.params.is_empty() || f.params[0].name != "self") {
                         // Inject implicit self parameter at the beginning
@@ -558,6 +561,7 @@ impl<'a> Parser<'a> {
             contract: None,
             is_abstract,
             is_sync: false,
+            is_static: false,
             is_me_method: false,
             bounds_block: None,
             return_constraint: None,

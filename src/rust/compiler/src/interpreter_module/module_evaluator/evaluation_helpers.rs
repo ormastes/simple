@@ -73,6 +73,7 @@ pub(super) fn register_definitions(
             Node::Class(c) => {
                 local_classes.insert(c.name.clone(), c.clone());
                 global_classes.insert(c.name.clone(), c.clone());
+                eprintln!("[DEBUG] Added class '{}' to global_classes (now {} classes)", c.name, global_classes.len());
                 exports.insert(
                     c.name.clone(),
                     Value::Constructor {

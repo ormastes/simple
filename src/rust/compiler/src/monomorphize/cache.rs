@@ -640,6 +640,7 @@ mod tests {
             bounds_block: None,
             return_constraint: None,
             is_generic_template: false,
+            is_static: false,
             specialization_of: None,
             type_bindings: std::collections::HashMap::new(),
         }

@@ -1088,6 +1088,24 @@ pub(super) fn eval_bdd_builtin(
             let expected = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
             Ok(Some(Value::Matcher(MatcherValue::Exact(Box::new(expected)))))
         }
+        "GreaterThan" => {
+            let threshold = eval_arg(args, 0, Value::Int(0), env, functions, classes, enums, impl_methods)?;
+            let n = match threshold {
+                Value::Int(i) => i,
+                Value::Float(f) => f as i64,
+                _ => 0,
+            };
+            Ok(Some(Value::Matcher(MatcherValue::GreaterThan(n))))
+        }
+        "LessThan" => {
+            let threshold = eval_arg(args, 0, Value::Int(0), env, functions, classes, enums, impl_methods)?;
+            let n = match threshold {
+                Value::Int(i) => i,
+                Value::Float(f) => f as i64,
+                _ => 0,
+            };
+            Ok(Some(Value::Matcher(MatcherValue::LessThan(n))))
+        }
         // BDD Registry FFI functions - shared across all modules
         "__bdd_register_group" => {
             let group = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;

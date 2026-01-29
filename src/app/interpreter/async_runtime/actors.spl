@@ -102,30 +102,30 @@ fn process_all_actors():
 # Spawn a new actor
 fn eval_spawn(interp: &Interpreter, handler: &Expr) -> Result<Value, InterpreterError>:
     # Get next actor ID
-    val id = unsafe {
-        val id = NEXT_ACTOR_ID
+    value id = unsafe {
+        value id = NEXT_ACTOR_ID
         NEXT_ACTOR_ID += 1
         id
     }
 
     # Evaluate the handler function
-    val handler_val = interp.evaluate(handler)?
+    value handler_val = interp.evaluate(handler)?
 
     # Create actor
     match handler_val.as_function():
         case Some(func):
             # Capture the interpreter and function for handler invocation
-            val captured_interp = interp.clone()
-            val captured_func = func.clone()
+            value captured_interp = interp.clone()
+            value captured_func = func.clone()
 
-            val actor = Actor.new(id, |msg| {
+            value actor = Actor.new(id, |msg| {
                 # Invoke the handler function with the message
                 match call_handler(&captured_interp, &captured_func, msg.payload):
                     case Ok(_): Ok(())
                     case Err(e): Err(e)
             })
 
-            val actor_ref = actor.get_ref()
+            value actor_ref = actor.get_ref()
 
             # Register actor with runtime for message processing
             register_actor(actor)
@@ -142,13 +142,13 @@ fn call_handler(interp: &Interpreter, func: &Value, msg: Value) -> Result<Value,
 
 # Send a message to an actor
 fn eval_send(interp: &Interpreter, target: &Expr, message: &Expr) -> Result<Value, InterpreterError>:
-    val target_val = interp.evaluate(target)?
-    val msg_val = interp.evaluate(message)?
+    value target_val = interp.evaluate(target)?
+    value msg_val = interp.evaluate(message)?
 
     match target_val.as_actor_ref():
         case Some(actor_ref):
             actor_ref.send(msg_val)
-            return Ok(Value.nil())
+            return Ok(Value.null())
 
         case None:
             return Err(InterpreterError.TypeError("send target must be actor ref".to_string()))
@@ -160,17 +160,17 @@ fn eval_receive(interp: &Interpreter, timeout: Option<&Expr>) -> Result<Value, I
         case Some(actor):
             match timeout:
                 case Some(timeout_expr):
-                    val timeout_val = interp.evaluate(timeout_expr)?
+                    value timeout_val = interp.evaluate(timeout_expr)?
                     match timeout_val.as_int():
                         case Some(ms):
                             match actor.mailbox.recv_timeout(Duration.from_millis(ms as u64)):
                                 case Some(msg): return Ok(msg.payload)
-                                case None: return Ok(Value.nil())
+                                case None: return Ok(Value.null())
                         case None:
                             return Err(InterpreterError.TypeError("timeout must be integer".to_string()))
 
                 case None:
-                    val msg = actor.receive_blocking()
+                    value msg = actor.receive_blocking()
                     return Ok(msg.payload)
 
         case None:
@@ -181,15 +181,15 @@ fn eval_receive_match(interp: &Interpreter, patterns: &Array<MatchArm>) -> Resul
     match interp.current_actor():
         case Some(actor):
             # Stash for messages that don't match (selective receive)
-            val stash: Array<Message> = []
+            value stash: Array<Message> = []
 
             # Keep receiving until we get a matching message
             loop:
-                val msg = actor.receive_blocking()
+                value msg = actor.receive_blocking()
 
                 # Try to match against patterns
                 for arm in patterns:
-                    if val Some(result) = try_match_message(interp, &msg.payload, arm)?:
+                    if value Some(result) = try_match_message(interp, &msg.payload, arm)?:
                         # Requeue stashed messages before returning
                         for stashed_msg in stash.iter().rev():
                             actor.mailbox.send_front(stashed_msg.clone())
@@ -215,25 +215,25 @@ fn try_match_message(interp: &Interpreter, msg: &Value, arm: &MatchArm) -> Resul
     match match_pattern(msg, &arm.pattern)?:
         case Some(bindings):
             # Pattern matched, check guard if present
-            if val Some(guard) = arm.guard.as_ref():
+            if value Some(guard) = arm.guard.as_ref():
                 interp.env.push_scope()
-                for (name, val) in bindings:
-                    interp.env.define_str(name, val)
+                for (name, value) in bindings:
+                    interp.env.define_str(name, value)
 
-                val guard_result = interp.evaluate(guard)?
+                value guard_result = interp.evaluate(guard)?
                 if not guard_result.is_truthy():
                     interp.env.pop_scope()
                     return Ok(None)
 
-                val result = interp.evaluate(&arm.body)?
+                value result = interp.evaluate(&arm.body)?
                 interp.env.pop_scope()
                 return Ok(Some(result))
             else:
                 interp.env.push_scope()
-                for (name, val) in bindings:
-                    interp.env.define_str(name, val)
+                for (name, value) in bindings:
+                    interp.env.define_str(name, value)
 
-                val result = interp.evaluate(&arm.body)?
+                value result = interp.evaluate(&arm.body)?
                 interp.env.pop_scope()
                 return Ok(Some(result))
 
