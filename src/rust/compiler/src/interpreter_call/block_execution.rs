@@ -21,6 +21,14 @@ fn get_iterator_values(iterable: &Value) -> Result<Vec<Value>, CompileError> {
         Value::Tuple(t) => Ok(t.clone()),
         Value::Str(s) => Ok(s.chars().map(|c| Value::Str(c.to_string())).collect()),
         Value::Generator(gen) => Ok(gen.collect_remaining()),
+        Value::Dict(map) => {
+            // Iterate over dict returns (key, value) tuples
+            let entries: Vec<Value> = map
+                .iter()
+                .map(|(k, v)| Value::Tuple(vec![Value::Str(k.clone()), v.clone()]))
+                .collect();
+            Ok(entries)
+        }
         Value::Object { class, fields } => {
             if class == "Range" || class == BUILTIN_RANGE {
                 let start = fields.get("start").and_then(|v| v.as_int().ok()).unwrap_or(0);
@@ -40,7 +48,7 @@ fn get_iterator_values(iterable: &Value) -> Result<Vec<Value>, CompileError> {
             }
             let ctx = ErrorContext::new()
                 .with_code(codes::TYPE_MISMATCH)
-                .with_help("only arrays, tuples, strings, generators, and Range objects are iterable");
+                .with_help("only arrays, tuples, strings, dicts, generators, and Range objects are iterable");
             Err(CompileError::semantic_with_context(
                 format!("object of class '{}' is not iterable", class),
                 ctx,
@@ -49,7 +57,7 @@ fn get_iterator_values(iterable: &Value) -> Result<Vec<Value>, CompileError> {
         _ => {
             let ctx = ErrorContext::new()
                 .with_code(codes::TYPE_MISMATCH)
-                .with_help("only arrays, tuples, strings, generators, and Range objects are iterable");
+                .with_help("only arrays, tuples, strings, dicts, generators, and Range objects are iterable");
             Err(CompileError::semantic_with_context(
                 format!("value of type '{}' is not iterable", iterable.type_name()),
                 ctx,
