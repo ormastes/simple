@@ -53,6 +53,8 @@ mod pkg_tests;
 mod public_api_coverage_tests;
 mod runner_tests;
 mod simple_basic;
+mod smf_linker_tests;
+mod smf_settlement_types_tests;
 mod smf_tests;
 mod struct_coverage_tests;
 
