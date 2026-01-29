@@ -52,6 +52,11 @@ thread_local! {
 
     // Stack of current ExampleGroup objects for nested describe/context
     pub(crate) static BDD_GROUP_STACK: RefCell<Vec<Value>> = RefCell::new(Vec::new());
+
+    // Hook caches: indexed by stack depth to avoid O(n²) recomputation
+    // Maps stack_depth -> flattened hooks for that depth
+    static BDD_BEFORE_EACH_CACHE: RefCell<HashMap<usize, Vec<Value>>> = RefCell::new(HashMap::new());
+    static BDD_AFTER_EACH_CACHE: RefCell<HashMap<usize, Vec<Value>>> = RefCell::new(HashMap::new());
 }
 
 /// Create an ExampleGroup Value object
@@ -170,6 +175,65 @@ fn update_last_child_in_current_group(updated_child: &Value) {
             }
         }
     });
+}
+
+/// Invalidate hook caches (called when hooks are added or when entering/exiting contexts)
+fn invalidate_hook_caches() {
+    BDD_BEFORE_EACH_CACHE.with(|cell| cell.borrow_mut().clear());
+    BDD_AFTER_EACH_CACHE.with(|cell| cell.borrow_mut().clear());
+}
+
+/// Get before_each hooks with caching (O(1) after first call per nesting level)
+fn get_before_each_hooks_cached() -> Vec<Value> {
+    BDD_BEFORE_EACH.with(|hooks_cell| {
+        let hooks_stack = hooks_cell.borrow();
+        let depth = hooks_stack.len();
+
+        BDD_BEFORE_EACH_CACHE.with(|cache_cell| {
+            let mut cache = cache_cell.borrow_mut();
+
+            // Check cache first
+            if let Some(cached) = cache.get(&depth) {
+                return cached.clone();
+            }
+
+            // Not cached - compute and store
+            let flattened: Vec<Value> = hooks_stack
+                .iter()
+                .flat_map(|level| level.clone())
+                .collect();
+
+            cache.insert(depth, flattened.clone());
+            flattened
+        })
+    })
+}
+
+/// Get after_each hooks with caching (O(1) after first call per nesting level)
+fn get_after_each_hooks_cached() -> Vec<Value> {
+    BDD_AFTER_EACH.with(|hooks_cell| {
+        let hooks_stack = hooks_cell.borrow();
+        let depth = hooks_stack.len();
+
+        BDD_AFTER_EACH_CACHE.with(|cache_cell| {
+            let mut cache = cache_cell.borrow_mut();
+
+            // Check cache first
+            if let Some(cached) = cache.get(&depth) {
+                return cached.clone();
+            }
+
+            // Not cached - compute and store (reverse for after hooks)
+            let flattened: Vec<Value> = hooks_stack
+                .iter()
+                .rev()
+                .flat_map(|level| level.clone())
+                .collect();
+
+            cache.insert(depth, flattened.clone());
+            flattened
+        })
+    })
 }
 
 /// Build a helpful failure message for expect by inspecting the expression
@@ -362,6 +426,8 @@ pub(super) fn eval_bdd_builtin(
             BDD_INDENT.with(|cell| *cell.borrow_mut() += 1);
             BDD_BEFORE_EACH.with(|cell| cell.borrow_mut().push(vec![]));
             BDD_AFTER_EACH.with(|cell| cell.borrow_mut().push(vec![]));
+            // Invalidate hook cache when entering new context
+            invalidate_hook_caches();
 
             if let Some(ctx_blocks) = ctx_def_blocks {
                 for ctx_block in ctx_blocks {
@@ -373,6 +439,8 @@ pub(super) fn eval_bdd_builtin(
 
             BDD_BEFORE_EACH.with(|cell| cell.borrow_mut().pop());
             BDD_AFTER_EACH.with(|cell| cell.borrow_mut().pop());
+            // Invalidate hook cache when exiting context
+            invalidate_hook_caches();
             BDD_INDENT.with(|cell| *cell.borrow_mut() -= 1);
 
             // Pop finished group from stack
@@ -479,16 +547,16 @@ pub(super) fn eval_bdd_builtin(
             // This prevents values created during one test from persisting into subsequent tests.
             let mut test_env = env.clone();
 
-            let before_hooks: Vec<Value> =
-                BDD_BEFORE_EACH.with(|cell| cell.borrow().iter().flat_map(|level| level.clone()).collect());
+            // Use cached hooks to avoid O(n²) performance with deeply nested contexts
+            let before_hooks = get_before_each_hooks_cached();
             for hook in before_hooks {
                 exec_block_value(hook, &mut test_env, functions, classes, enums, impl_methods)?;
             }
 
             let result = exec_block_value(block, &mut test_env, functions, classes, enums, impl_methods);
 
-            let after_hooks: Vec<Value> =
-                BDD_AFTER_EACH.with(|cell| cell.borrow().iter().rev().flat_map(|level| level.clone()).collect());
+            // Use cached hooks to avoid O(n²) performance with deeply nested contexts
+            let after_hooks = get_after_each_hooks_cached();
             for hook in after_hooks {
                 let _ = exec_block_value(hook, &mut test_env, functions, classes, enums, impl_methods);
             }
