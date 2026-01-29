@@ -343,10 +343,7 @@ pub(crate) fn evaluate_call(
             }
 
             // Check for class associated function (static method)
-            eprintln!("[DEBUG] Looking for class '{}' in classes HashMap (has {} entries)", type_name, classes.len());
-            eprintln!("[DEBUG] Available classes: {:?}", classes.keys().collect::<Vec<_>>());
             if let Some(class_def) = classes.get(type_name).cloned() {
-                eprintln!("[DEBUG] Found class '{}', looking for method '{}'", type_name, method_name);
                 if let Some(func) = class_def.methods.iter().find(|m| m.name == *method_name) {
                     // If calling a `new` method, mark it to prevent double execution via instantiate_class
                     let is_new_method = method_name == "new";

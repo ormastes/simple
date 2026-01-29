@@ -124,6 +124,32 @@ pub fn resolve_module_path(parts: &[String], base_dir: &Path) -> Result<PathBuf,
                 }
             } // End of if stdlib_candidate.exists()
         } // End of for stdlib_subpath
+
+        // Try src/ directory (for app modules like app.lsp.server)
+        let src_candidate = current.join("src");
+        if src_candidate.exists() {
+            // Try module.spl in src/
+            let mut src_path = src_candidate.clone();
+            for part in parts {
+                src_path = src_path.join(part);
+            }
+            src_path.set_extension("spl");
+            if src_path.exists() && src_path.is_file() {
+                return Ok(src_path);
+            }
+
+            // Try __init__.spl in src/
+            let mut src_init_path = src_candidate.clone();
+            for part in parts {
+                src_init_path = src_init_path.join(part);
+            }
+            src_init_path = src_init_path.join("__init__");
+            src_init_path.set_extension("spl");
+            if src_init_path.exists() && src_init_path.is_file() {
+                return Ok(src_init_path);
+            }
+        }
+
         if let Some(parent) = current.parent() {
             current = parent.to_path_buf();
         } else {

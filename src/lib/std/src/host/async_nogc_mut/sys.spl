@@ -1,7 +1,8 @@
 # System module - Process control and standard streams
 # Provides access to stdin, stdout, stderr, arguments, and process control
 
-use host.io.term
+use host.common.io.term_ffi.{native_stdout, native_stderr, native_stdin, native_term_write, native_term_flush}
+use host.common.io.term_types.RawHandle
 
 # Extern declarations for FFI
 extern fn rt_get_args() -> List<text>
@@ -9,26 +10,24 @@ extern fn rt_exit(code: i32) -> void
 
 # Standard output stream
 pub class Stdout:
-    term: term.Terminal
+    handle: RawHandle
 
     pub fn new() -> Stdout:
-        return Stdout { term: term.Terminal.default() }
+        return Stdout { handle: native_stdout() }
 
     @io
     pub fn write(self, s: text) -> Result<i32, text>:
-        match self.term.write(s):
-            case Ok(count):
-                return Ok(count.bytes as i32)
-            case Err(e):
-                return Err("Write error: {e}")
+        val written = native_term_write(self.handle, s.as_ptr(), s.len())
+        if written < 0:
+            return Err("Write error: {written}")
+        return Ok(written as i32)
 
     @io
     pub fn flush(self) -> Result<(), text>:
-        match self.term.flush():
-            case Ok(_):
-                return Ok(())
-            case Err(e):
-                return Err("Flush error: {e}")
+        val result = native_term_flush(self.handle)
+        if result != 0:
+            return Err("Flush error: {result}")
+        return Ok(())
 
     # =========================================================================
     # Helper Methods
@@ -86,18 +85,17 @@ pub class Stdout:
 
 # Standard error stream
 pub class Stderr:
-    term: term.Terminal
+    handle: RawHandle
 
     pub fn new() -> Stderr:
-        return Stderr { term: term.Terminal.default() }
+        return Stderr { handle: native_stderr() }
 
     @io
     pub fn write(self, s: text) -> Result<i32, text>:
-        match self.term.write_err(s):
-            case Ok(count):
-                return Ok(count.bytes as i32)
-            case Err(e):
-                return Err("Write error: {e}")
+        val written = native_term_write(self.handle, s.as_ptr(), s.len())
+        if written < 0:
+            return Err("Write error: {written}")
+        return Ok(written as i32)
 
     # =========================================================================
     # Helper Methods
@@ -198,14 +196,17 @@ pub class Args:
         """
         return rt_get_args().len() > 1
 
-# Global stdout instance
-pub val stdout: Stdout = Stdout.new()
+# Get the global stdout instance
+pub fn stdout() -> Stdout:
+    Stdout.new()
 
-# Global stderr instance
-pub val stderr: Stderr = Stderr.new()
+# Get the global stderr instance
+pub fn stderr() -> Stderr:
+    Stderr.new()
 
-# Global args instance
-pub val args: Args = Args.new()
+# Get the global args instance
+pub fn args() -> Args:
+    Args.new()
 
 # Exit the process with the given code
 @io

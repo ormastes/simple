@@ -1106,6 +1106,33 @@ pub(super) fn eval_bdd_builtin(
             };
             Ok(Some(Value::Matcher(MatcherValue::LessThan(n))))
         }
+        "to_equal" => {
+            // Alias for eq
+            let expected = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
+            Ok(Some(Value::Matcher(MatcherValue::Exact(Box::new(expected)))))
+        }
+        "be_close_to" => {
+            let target = eval_arg(args, 0, Value::Float(0.0), env, functions, classes, enums, impl_methods)?;
+            let epsilon = if args.len() > 1 {
+                eval_arg(args, 1, Value::Float(0.001), env, functions, classes, enums, impl_methods)?
+            } else {
+                Value::Float(0.001)
+            };
+            let target_f = match target {
+                Value::Float(f) => f,
+                Value::Int(i) => i as f64,
+                _ => 0.0,
+            };
+            let epsilon_f = match epsilon {
+                Value::Float(f) => f,
+                Value::Int(i) => i as f64,
+                _ => 0.001,
+            };
+            Ok(Some(Value::Matcher(MatcherValue::BeCloseTo {
+                target: target_f,
+                epsilon: epsilon_f,
+            })))
+        }
         // BDD Registry FFI functions - shared across all modules
         "__bdd_register_group" => {
             let group = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
