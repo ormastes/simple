@@ -380,7 +380,13 @@ fn test_option_map_none_enum() {
     use super::rt_option_map;
 
     // Create a proper None enum
-    let none_disc = hash_variant_discriminant("None");
+    let none_disc = {
+            use std::collections::hash_map::DefaultHasher;
+            use std::hash::{Hash, Hasher};
+            let mut h = DefaultHasher::new();
+            "None".hash(&mut h);
+            (h.finish() & 0xFFFFFFFF) as u32
+        };
     let none_val = rt_enum_new(0, none_disc, RuntimeValue::NIL);
     let closure = rt_closure_new(std::ptr::null(), 0);
     let result = rt_option_map(none_val, closure);
@@ -391,10 +397,15 @@ fn test_option_map_none_enum() {
 #[test]
 fn test_option_map_some_with_identity() {
     use super::rt_option_map;
-    use super::rt_option_map;
 
     // Create Some(42) enum
-    let some_disc = hash_variant_discriminant("Some");
+    let some_disc = {
+            use std::collections::hash_map::DefaultHasher;
+            use std::hash::{Hash, Hasher};
+            let mut h = DefaultHasher::new();
+            "Some".hash(&mut h);
+            (h.finish() & 0xFFFFFFFF) as u32
+        };
     let some_val = rt_enum_new(0, some_disc, RuntimeValue::from_int(42));
 
     // Identity closure: returns its second arg (the payload)
