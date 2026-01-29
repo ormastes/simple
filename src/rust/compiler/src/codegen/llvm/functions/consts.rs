@@ -10,7 +10,7 @@ impl LlvmBackend {
     // ============================================================================
 
     #[cfg(feature = "llvm")]
-    fn compile_const_int(
+    pub(in crate::codegen::llvm) fn compile_const_int(
         &self,
         dest: crate::mir::VReg,
         value: i64,
@@ -22,7 +22,7 @@ impl LlvmBackend {
     }
 
     #[cfg(feature = "llvm")]
-    fn compile_const_bool(
+    pub(in crate::codegen::llvm) fn compile_const_bool(
         &self,
         dest: crate::mir::VReg,
         value: bool,
@@ -34,7 +34,7 @@ impl LlvmBackend {
     }
 
     #[cfg(feature = "llvm")]
-    fn compile_const_float(
+    pub(in crate::codegen::llvm) fn compile_const_float(
         &self,
         dest: crate::mir::VReg,
         value: f64,
@@ -46,7 +46,7 @@ impl LlvmBackend {
     }
 
     #[cfg(feature = "llvm")]
-    fn compile_const_string(
+    pub(in crate::codegen::llvm) fn compile_const_string(
         &self,
         dest: crate::mir::VReg,
         value: &str,
@@ -63,7 +63,7 @@ impl LlvmBackend {
     }
 
     #[cfg(feature = "llvm")]
-    fn compile_const_symbol(
+    pub(in crate::codegen::llvm) fn compile_const_symbol(
         &self,
         dest: crate::mir::VReg,
         value: &str,

@@ -90,6 +90,14 @@ impl Lowerer {
             Expr::Coalesce { expr, default } => self.lower_coalesce(expr, default, ctx),
             // Existence check: expr.? (is present/non-empty)
             Expr::ExistsCheck(inner) => self.lower_exists_check(inner, ctx),
+            // Await expression: await expr
+            Expr::Await(inner) => {
+                let future_hir = Box::new(self.lower_expr(inner, ctx)?);
+                Ok(HirExpr {
+                    kind: HirExprKind::Await(future_hir),
+                    ty: TypeId::I64,
+                })
+            }
             // Try expression: expr? - unwrap Result or propagate error
             Expr::Try(inner) => {
                 eprintln!("[DEBUG lower_expr] Matched Try expression");

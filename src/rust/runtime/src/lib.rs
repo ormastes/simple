@@ -13,6 +13,7 @@ pub mod concurrency;
 pub mod concurrent;
 pub mod coverage;
 pub mod cuda_runtime;
+pub mod debug;
 pub mod executor;
 pub mod memory;
 #[cfg(feature = "monoio-net")]
@@ -405,6 +406,15 @@ pub use parallel::{
 pub use coverage::{
     rt_coverage_clear, rt_coverage_condition_probe, rt_coverage_decision_probe, rt_coverage_dump_sdn,
     rt_coverage_enabled, rt_coverage_free_sdn, rt_coverage_path_finalize, rt_coverage_path_probe, CoverageData,
+};
+
+// Re-export debug FFI functions
+pub use debug::{
+    rt_debug_add_breakpoint, rt_debug_continue, rt_debug_current_file, rt_debug_current_line,
+    rt_debug_is_active, rt_debug_list_breakpoints, rt_debug_locals, rt_debug_pause,
+    rt_debug_remove_all_breakpoints, rt_debug_remove_breakpoint, rt_debug_set_active,
+    rt_debug_set_step_mode, rt_debug_stack_depth, rt_debug_stack_trace, DebugFrame, DebugState,
+    StepMode,
 };
 
 // Re-export concurrent collections types and FFI functions (#1108-#1112)

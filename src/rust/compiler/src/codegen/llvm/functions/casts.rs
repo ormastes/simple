@@ -12,7 +12,7 @@ impl LlvmBackend {
     // ============================================================================
 
     #[cfg(feature = "llvm")]
-    fn compile_cast(
+    pub(in crate::codegen::llvm) fn compile_cast(
         &self,
         source_val: inkwell::values::BasicValueEnum<'static>,
         from_type: &crate::hir::TypeId,

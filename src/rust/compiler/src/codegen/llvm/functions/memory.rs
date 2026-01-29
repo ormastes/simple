@@ -10,7 +10,7 @@ impl LlvmBackend {
     // ============================================================================
 
     #[cfg(feature = "llvm")]
-    fn compile_load(
+    pub(in crate::codegen::llvm) fn compile_load(
         &self,
         dest: crate::mir::VReg,
         addr: crate::mir::VReg,
@@ -38,7 +38,7 @@ impl LlvmBackend {
     }
 
     #[cfg(feature = "llvm")]
-    fn compile_store(
+    pub(in crate::codegen::llvm) fn compile_store(
         &self,
         addr: crate::mir::VReg,
         value: crate::mir::VReg,
@@ -66,7 +66,7 @@ impl LlvmBackend {
     }
 
     #[cfg(feature = "llvm")]
-    fn compile_gc_alloc(
+    pub(in crate::codegen::llvm) fn compile_gc_alloc(
         &self,
         dest: crate::mir::VReg,
         ty: &crate::hir::TypeId,

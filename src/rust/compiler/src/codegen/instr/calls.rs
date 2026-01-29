@@ -257,6 +257,9 @@ pub fn compile_call<M: Module>(
                 ctx.vreg_values.insert(*d, final_result);
             }
         }
+    } else {
+        eprintln!("[WARN compile_call] Function '{}' not found in func_ids ({} entries) or runtime_funcs ({} entries)",
+            func_name, ctx.func_ids.len(), ctx.runtime_funcs.len());
     }
 
     Ok(())

@@ -14,7 +14,7 @@ impl LlvmBackend {
     // ============================================================================
 
     #[cfg(feature = "llvm")]
-    fn compile_array_lit(
+    pub(in crate::codegen::llvm) fn compile_array_lit(
         &self,
         dest: crate::mir::VReg,
         elements: &[crate::mir::VReg],
@@ -49,7 +49,7 @@ impl LlvmBackend {
     }
 
     #[cfg(feature = "llvm")]
-    fn compile_tuple_lit(
+    pub(in crate::codegen::llvm) fn compile_tuple_lit(
         &self,
         dest: crate::mir::VReg,
         elements: &[crate::mir::VReg],
@@ -82,7 +82,7 @@ impl LlvmBackend {
     }
 
     #[cfg(feature = "llvm")]
-    fn compile_dict_lit(
+    pub(in crate::codegen::llvm) fn compile_dict_lit(
         &self,
         dest: crate::mir::VReg,
         keys: &[crate::mir::VReg],
@@ -139,7 +139,7 @@ impl LlvmBackend {
     }
 
     #[cfg(feature = "llvm")]
-    fn compile_index_get(
+    pub(in crate::codegen::llvm) fn compile_index_get(
         &self,
         dest: crate::mir::VReg,
         collection: crate::mir::VReg,
@@ -171,7 +171,7 @@ impl LlvmBackend {
     }
 
     #[cfg(feature = "llvm")]
-    fn compile_index_set(
+    pub(in crate::codegen::llvm) fn compile_index_set(
         &self,
         collection: crate::mir::VReg,
         index: crate::mir::VReg,
@@ -202,7 +202,7 @@ impl LlvmBackend {
     }
 
     #[cfg(feature = "llvm")]
-    fn compile_slice_op(
+    pub(in crate::codegen::llvm) fn compile_slice_op(
         &self,
         dest: crate::mir::VReg,
         collection: crate::mir::VReg,
