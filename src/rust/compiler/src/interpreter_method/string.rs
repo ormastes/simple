@@ -48,8 +48,8 @@ if let Value::Str(ref s) = recv_val {
                 None => Value::none(),
             });
         }
-        "up" | "upper" | "to_upper" | "to_uppercase" => return Ok(Value::Str(s.to_uppercase())),
-        "down" | "lower" | "to_lower" | "to_lowercase" => return Ok(Value::Str(s.to_lowercase())),
+        "up" | "upper" | "uppercase" | "to_upper" | "to_uppercase" => return Ok(Value::Str(s.to_uppercase())),
+        "down" | "lower" | "lowercase" | "to_lower" | "to_lowercase" => return Ok(Value::Str(s.to_lowercase())),
         "capitalize" => {
             // Uppercase first character, lowercase the rest
             let mut chars = s.chars();
