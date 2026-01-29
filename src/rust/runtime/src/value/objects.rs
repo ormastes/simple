@@ -318,34 +318,25 @@ pub extern "C" fn rt_is_some(value: RuntimeValue) -> bool {
 /// The closure is a RuntimeValue containing a function pointer (RuntimeClosure).
 #[no_mangle]
 pub extern "C" fn rt_option_map(value: RuntimeValue, closure: RuntimeValue) -> RuntimeValue {
-    eprintln!("[rt_option_map] value={:#x} closure={:#x} is_none={} is_nil={} is_heap={}",
-        value.to_raw(), closure.to_raw(), rt_is_none(value), value.is_nil(), value.is_heap());
-
     // If None/nil, return as-is
     if rt_is_none(value) {
-        eprintln!("[rt_option_map] value is None, returning as-is");
         return value;
     }
 
     // Extract the payload from Some(x)
     let payload = rt_enum_payload(value);
-    eprintln!("[rt_option_map] payload={:#x}", payload.to_raw());
 
     // Get function pointer from closure
     let func_ptr = rt_closure_func_ptr(closure);
-    eprintln!("[rt_option_map] func_ptr={:?} closure_is_heap={}", func_ptr, closure.is_heap());
     if func_ptr.is_null() {
-        eprintln!("[rt_option_map] func_ptr is null, returning NIL");
         return RuntimeValue::NIL;
     }
 
     // Call the closure: fn(closure, payload) -> RuntimeValue
     // Closures are called with the closure itself as first arg (for captures) and the value as second
-    eprintln!("[rt_option_map] calling closure...");
     let func: extern "C" fn(RuntimeValue, RuntimeValue) -> RuntimeValue =
         unsafe { std::mem::transmute(func_ptr) };
     let result = func(closure, payload);
-    eprintln!("[rt_option_map] closure returned {:#x}", result.to_raw());
 
     // Wrap result in Some
     let some_disc = hash_variant_discriminant("Some");
