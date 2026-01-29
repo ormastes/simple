@@ -49,13 +49,15 @@ pub(crate) fn compile_binop<M: Module>(
             let cmp_ref = ctx.module.declare_func_in_func(cmp_id, builder.func);
             let call = builder.ins().call(cmp_ref, &[lhs_i64, rhs_i64]);
             let cmp_result = builder.inst_results(call)[0];
-            match op {
+            // icmp_imm returns I8, extend to I64
+            let cmp_i8 = match op {
                 BinOp::Lt => builder.ins().icmp_imm(cranelift_codegen::ir::condcodes::IntCC::SignedLessThan, cmp_result, 0),
                 BinOp::Gt => builder.ins().icmp_imm(cranelift_codegen::ir::condcodes::IntCC::SignedGreaterThan, cmp_result, 0),
                 BinOp::LtEq => builder.ins().icmp_imm(cranelift_codegen::ir::condcodes::IntCC::SignedLessThanOrEqual, cmp_result, 0),
                 BinOp::GtEq => builder.ins().icmp_imm(cranelift_codegen::ir::condcodes::IntCC::SignedGreaterThanOrEqual, cmp_result, 0),
                 _ => unreachable!(),
-            }
+            };
+            ensure_i64(builder, cmp_i8)
         }
         BinOp::Eq => {
             // Use rt_value_eq for deep equality comparison (handles strings, etc.)
@@ -65,7 +67,9 @@ pub(crate) fn compile_binop<M: Module>(
             let eq_id = ctx.runtime_funcs["rt_value_eq"];
             let eq_ref = ctx.module.declare_func_in_func(eq_id, builder.func);
             let call = builder.ins().call(eq_ref, &[lhs_i64, rhs_i64]);
-            builder.inst_results(call)[0]
+            // rt_value_eq returns I8, extend to I64 for consistency
+            let result = builder.inst_results(call)[0];
+            ensure_i64(builder, result)
         }
         BinOp::NotEq => {
             // Use rt_value_eq and negate the result
@@ -75,15 +79,22 @@ pub(crate) fn compile_binop<M: Module>(
             let eq_id = ctx.runtime_funcs["rt_value_eq"];
             let eq_ref = ctx.module.declare_func_in_func(eq_id, builder.func);
             let call = builder.ins().call(eq_ref, &[lhs_i64, rhs_i64]);
-            let eq_result = builder.inst_results(call)[0];
+            // rt_value_eq returns I8, extend to I64 before negation
+            let eq_result = ensure_i64(builder, builder.inst_results(call)[0]);
             // Negate: eq_result == 0 ? 1 : 0
-            builder
+            let negated = builder
                 .ins()
-                .icmp_imm(cranelift_codegen::ir::condcodes::IntCC::Equal, eq_result, 0)
+                .icmp_imm(cranelift_codegen::ir::condcodes::IntCC::Equal, eq_result, 0);
+            // icmp_imm returns I8, extend to I64
+            ensure_i64(builder, negated)
         }
-        BinOp::Is => builder
-            .ins()
-            .icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, lhs, rhs),
+        BinOp::Is => {
+            // icmp returns I8, extend to I64
+            let result = builder
+                .ins()
+                .icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, lhs, rhs);
+            ensure_i64(builder, result)
+        }
         BinOp::In | BinOp::NotIn => {
             // Ensure both operands are i64 for runtime function call
             let lhs_i64 = ensure_i64(builder, lhs);
@@ -91,7 +102,8 @@ pub(crate) fn compile_binop<M: Module>(
             let contains_id = ctx.runtime_funcs["rt_contains"];
             let contains_ref = ctx.module.declare_func_in_func(contains_id, builder.func);
             let call = builder.ins().call(contains_ref, &[rhs_i64, lhs_i64]);
-            let result = builder.inst_results(call)[0];
+            // rt_contains returns I8, extend to I64
+            let result = ensure_i64(builder, builder.inst_results(call)[0]);
             if matches!(op, BinOp::NotIn) {
                 // Negate the result for `not in`
                 let one = builder.ins().iconst(cranelift_codegen::ir::types::I64, 1);
@@ -107,7 +119,9 @@ pub(crate) fn compile_binop<M: Module>(
             let rhs_bool = builder
                 .ins()
                 .icmp_imm(cranelift_codegen::ir::condcodes::IntCC::NotEqual, rhs, 0);
-            builder.ins().band(lhs_bool, rhs_bool)
+            // band on I8 values returns I8, extend to I64
+            let result = builder.ins().band(lhs_bool, rhs_bool);
+            ensure_i64(builder, result)
         }
         BinOp::Or | BinOp::OrSuspend => {
             let lhs_bool = builder
@@ -116,7 +130,9 @@ pub(crate) fn compile_binop<M: Module>(
             let rhs_bool = builder
                 .ins()
                 .icmp_imm(cranelift_codegen::ir::condcodes::IntCC::NotEqual, rhs, 0);
-            builder.ins().bor(lhs_bool, rhs_bool)
+            // bor on I8 values returns I8, extend to I64
+            let result = builder.ins().bor(lhs_bool, rhs_bool);
+            ensure_i64(builder, result)
         }
         BinOp::Pow => {
             let loop_header = builder.create_block();

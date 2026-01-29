@@ -718,6 +718,8 @@ pub(super) fn eval_bdd_builtin(
                     current.push(block);
                 }
             });
+            // Invalidate hook cache when new hook is added
+            invalidate_hook_caches();
 
             Ok(Some(Value::Nil))
         }
@@ -730,6 +732,8 @@ pub(super) fn eval_bdd_builtin(
                     current.push(block);
                 }
             });
+            // Invalidate hook cache when new hook is added
+            invalidate_hook_caches();
 
             Ok(Some(Value::Nil))
         }
@@ -1258,6 +1262,8 @@ pub fn clear_bdd_state() {
     BDD_CONTEXT_DEFS.with(|cell| cell.borrow_mut().clear());
     BDD_BEFORE_EACH.with(|cell| *cell.borrow_mut() = vec![vec![]]);
     BDD_AFTER_EACH.with(|cell| *cell.borrow_mut() = vec![vec![]]);
+    // Clear hook caches when resetting BDD state
+    invalidate_hook_caches();
     BDD_LAZY_VALUES.with(|cell| cell.borrow_mut().clear());
     BDD_RESOURCE_VALUES.with(|cell| cell.borrow_mut().clear());
     BDD_GROUP_STACK.with(|cell| cell.borrow_mut().clear());
