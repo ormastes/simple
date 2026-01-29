@@ -446,7 +446,14 @@ pub(crate) fn compile_fstring_format<M: Module>(
                 let call = builder.ins().call(string_new_ref, &[ptr, len_val]);
                 builder.inst_results(call)[0]
             }
-            FStringPart::Expr(vreg) => ctx.vreg_values[vreg],
+            FStringPart::Expr(vreg) => {
+                // Convert expression value to string for interpolation
+                let val = ctx.vreg_values[vreg];
+                let to_str_id = ctx.runtime_funcs["rt_value_to_string"];
+                let to_str_ref = ctx.module.declare_func_in_func(to_str_id, builder.func);
+                let call = builder.ins().call(to_str_ref, &[val]);
+                builder.inst_results(call)[0]
+            }
         };
 
         let concat_call = builder.ins().call(string_concat_ref, &[result, part_str]);
