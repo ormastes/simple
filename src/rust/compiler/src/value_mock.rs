@@ -224,33 +224,25 @@ impl MatcherValue {
         match self {
             MatcherValue::Any => true,
             MatcherValue::Exact(expected) => values_equal(value, expected),
-            MatcherValue::GreaterThan(n) => {
-                if let super::Value::Int(v) = value {
-                    *v > *n
-                } else {
-                    false
-                }
-            }
-            MatcherValue::LessThan(n) => {
-                if let super::Value::Int(v) = value {
-                    *v < *n
-                } else {
-                    false
-                }
-            }
-            MatcherValue::GreaterOrEqual(n) => {
-                if let super::Value::Int(v) = value {
-                    *v >= *n
-                } else {
-                    false
-                }
-            }
-            MatcherValue::LessOrEqual(n) => {
-                if let super::Value::Int(v) = value {
-                    *v <= *n
-                } else {
-                    false
-                }
+            MatcherValue::GreaterThan(n) => match value {
+                super::Value::Int(v) => *v > *n,
+                super::Value::Float(v) => *v > (*n as f64),
+                _ => false,
+            },
+            MatcherValue::LessThan(n) => match value {
+                super::Value::Int(v) => *v < *n,
+                super::Value::Float(v) => *v < (*n as f64),
+                _ => false,
+            },
+            MatcherValue::GreaterOrEqual(n) => match value {
+                super::Value::Int(v) => *v >= *n,
+                super::Value::Float(v) => *v >= (*n as f64),
+                _ => false,
+            },
+            MatcherValue::LessOrEqual(n) => match value {
+                super::Value::Int(v) => *v <= *n,
+                super::Value::Float(v) => *v <= (*n as f64),
+                _ => false,
             }
             MatcherValue::Contains(s) => {
                 if let super::Value::Str(v) = value {

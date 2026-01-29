@@ -75,7 +75,30 @@ pub fn eval_cbrt(args: &[MathValue]) -> Result<MathValue, CompileError> {
 // ==========================================================================
 
 pub fn eval_abs(args: &[MathValue]) -> Result<MathValue, CompileError> {
-    unary_math_fn(args, |x| x.abs())
+    if args.len() != 1 {
+        let ctx = ErrorContext::new()
+            .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+            .with_help("abs() requires exactly 1 argument");
+        return Err(CompileError::semantic_with_context(
+            format!("abs() requires 1 argument, got {}", args.len()),
+            ctx,
+        ));
+    }
+
+    // Preserve type: Int -> Int, Float -> Float
+    match &args[0] {
+        MathValue::Int(i) => Ok(MathValue::Int(i.abs())),
+        MathValue::Float(f) => Ok(MathValue::Float(f.abs())),
+        MathValue::Bool(b) => Ok(MathValue::Int(if *b { 1 } else { 0 })),
+        MathValue::Tensor(t) => {
+            let data: Vec<f64> = t.data.iter().map(|&x| x.abs()).collect();
+            Ok(MathValue::Tensor(Tensor {
+                data,
+                shape: t.shape.clone(),
+                strides: t.strides.clone(),
+            }))
+        }
+    }
 }
 
 pub fn eval_floor(args: &[MathValue]) -> Result<MathValue, CompileError> {

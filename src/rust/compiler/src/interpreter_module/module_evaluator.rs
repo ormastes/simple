@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use simple_parser::ast::{ClassDef, EnumDef, Node};
+use simple_parser::ast::{ClassDef, EnumDef, FunctionDef, Node};
 
 use crate::error::CompileError;
 use crate::value::{Env, Value};
@@ -29,7 +29,7 @@ pub fn evaluate_module_exports(
     global_functions: &mut HashMap<String, simple_parser::ast::FunctionDef>,
     global_classes: &mut HashMap<String, ClassDef>,
     global_enums: &mut Enums,
-) -> Result<(Env, HashMap<String, Value>), CompileError> {
+) -> Result<(Env, HashMap<String, Value>, HashMap<String, simple_parser::ast::FunctionDef>, HashMap<String, ClassDef>, Enums), CompileError> {
     let mut env: Env = HashMap::new();
     let mut exports: HashMap<String, Value> = HashMap::new();
     let mut local_functions: HashMap<String, simple_parser::ast::FunctionDef> = HashMap::new();
@@ -85,5 +85,6 @@ pub fn evaluate_module_exports(
     // Process bare export statements
     process_bare_exports(&bare_exports, &env, &mut exports);
 
-    Ok((env, exports))
+    // Return env, exports, and the local definitions for caching
+    Ok((env, exports, local_functions, local_classes, local_enums))
 }

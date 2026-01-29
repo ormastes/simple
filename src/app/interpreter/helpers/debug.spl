@@ -43,7 +43,7 @@ fn is_trace_enabled() -> bool:
 # Debug print (respects debug level)
 fn debug_print(level: DebugLevel, msg: &str):
     if should_print(level):
-        val prefix = match level:
+        value prefix = match level:
             case DebugLevel.Error: "[ERROR]"
             case DebugLevel.Warn: "[WARN]"
             case DebugLevel.Info: "[INFO]"
@@ -54,7 +54,7 @@ fn debug_print(level: DebugLevel, msg: &str):
         io.println("{prefix} {msg}")
 
 fn should_print(level: DebugLevel) -> bool:
-    val current = get_debug_level()
+    value current = get_debug_level()
     return level_to_int(level) <= level_to_int(current)
 
 fn level_to_int(level: DebugLevel) -> i32:
@@ -88,7 +88,7 @@ struct Breakpoint:
     enabled: bool
 
 struct StackFrame:
-    function: String
+    fn_name: String
     file: String
     line: u32
     locals: Dict<String, Value>
@@ -105,7 +105,7 @@ impl Debugger:
 
     # Breakpoint management
     fn add_breakpoint(file: &str, line: u32, condition: Option<String>):
-        val key = "{file}:{line}"
+        value key = "{file}:{line}"
         self.breakpoints.set(key, Breakpoint {
             file: file.to_string(),
             line: line,
@@ -115,17 +115,17 @@ impl Debugger:
         })
 
     fn remove_breakpoint(file: &str, line: u32):
-        val key = "{file}:{line}"
+        value key = "{file}:{line}"
         self.breakpoints.remove(&key)
 
     fn toggle_breakpoint(file: &str, line: u32):
-        val key = "{file}:{line}"
-        if val Some(bp) = self.breakpoints.get_mut(&key):
+        value key = "{file}:{line}"
+        if value Some(bp) = self.breakpoints.get_mut(&key):
             bp.enabled = not bp.enabled
 
     fn has_breakpoint(file: &str, line: u32) -> bool:
-        val key = "{file}:{line}"
-        if val Some(bp) = self.breakpoints.get(&key):
+        value key = "{file}:{line}"
+        if value Some(bp) = self.breakpoints.get(&key):
             return bp.enabled
         return false
 
@@ -137,15 +137,17 @@ impl Debugger:
         if idx < self.watch_expressions.len():
             self.watch_expressions.remove(idx)
 
-    fn evaluate_watches(interp: &Interpreter) -> Array<(String, Result<Value, String>)>:
-        val results: Array<(String, Result<Value, String>)> = []
+    fn evaluate_watches(interp: &Interpreter) -> Array:
+        value results = []
 
         for expr in self.watch_expressions:
-            match interp.eval_expression_string(&expr):
-                case Ok(val):
-                    results.push((expr.clone(), Ok(val)))
-                case Err(e):
-                    results.push((expr.clone(), Err(e.to_string())))
+            value result = interp.eval_expression_string(&expr)
+            if result.is_ok():
+                value v = result.unwrap()
+                results.push((expr.clone(), Ok(v)))
+            else:
+                value e = result.unwrap_err()
+                results.push((expr.clone(), Err(e.to_string())))
 
         return results
 
@@ -162,9 +164,9 @@ impl Debugger:
         return Some(&self.call_stack[self.call_stack.len() - 1])
 
     fn get_stack_trace() -> Array<String>:
-        val trace: Array<String> = []
+        value trace = []
         for (i, frame) in self.call_stack.iter().enumerate().rev():
-            trace.push("  #{i}: {frame.function} at {frame.file}:{frame.line}")
+            trace.push("  #{i}: {frame.fn_name} at {frame.file}:{frame.line}")
         return trace
 
     # Stepping control
@@ -188,8 +190,8 @@ impl Debugger:
     fn should_break(file: &str, line: u32) -> bool:
         # Check breakpoints
         if self.has_breakpoint(file, line):
-            val key = "{file}:{line}"
-            if val Some(bp) = self.breakpoints.get_mut(&key):
+            value key = "{file}:{line}"
+            if value Some(bp) = self.breakpoints.get_mut(&key):
                 bp.hit_count += 1
                 return true
 
@@ -211,7 +213,7 @@ impl Debugger:
 
 # REPL debugger commands
 fn handle_debug_command(debugger: &mut Debugger, interp: &Interpreter, cmd: &str) -> Result<String, String>:
-    val parts: Array<String> = cmd.split_whitespace().collect()
+    value parts = cmd.split_whitespace().collect()
     if parts.is_empty():
         return Ok("".to_string())
 
@@ -220,26 +222,28 @@ fn handle_debug_command(debugger: &mut Debugger, interp: &Interpreter, cmd: &str
             if parts.len() < 2:
                 return Err("Usage: break <file>:<line>".to_string())
             # Parse file:line
-            val loc = parts[1].split(":")
+            value loc = parts[1].split(":")
             if loc.len() != 2:
                 return Err("Invalid breakpoint format".to_string())
-            val file = loc[0]
-            val line = match loc[1].parse.<u32>():
-                case Ok(n): n
-                case Err(_): return Err("Invalid line number".to_string())
+            value file = loc[0]
+            value parse_result = loc[1].parse()
+            if not parse_result.is_ok():
+                return Err("Invalid line number".to_string())
+            value line = parse_result.unwrap()
             debugger.add_breakpoint(file, line, None)
             return Ok("Breakpoint set at {file}:{line}".to_string())
 
         case "delete" | "d":
             if parts.len() < 2:
                 return Err("Usage: delete <file>:<line>".to_string())
-            val loc = parts[1].split(":")
+            value loc = parts[1].split(":")
             if loc.len() != 2:
                 return Err("Invalid breakpoint format".to_string())
-            val file = loc[0]
-            val line = match loc[1].parse.<u32>():
-                case Ok(n): n
-                case Err(_): return Err("Invalid line number".to_string())
+            value file = loc[0]
+            value parse_result = loc[1].parse()
+            if not parse_result.is_ok():
+                return Err("Invalid line number".to_string())
+            value line = parse_result.unwrap()
             debugger.remove_breakpoint(file, line)
             return Ok("Breakpoint removed".to_string())
 
@@ -260,23 +264,23 @@ fn handle_debug_command(debugger: &mut Debugger, interp: &Interpreter, cmd: &str
             return Ok("Stepping out...".to_string())
 
         case "backtrace" | "bt":
-            val trace = debugger.get_stack_trace()
+            value trace = debugger.get_stack_trace()
             return Ok(trace.join("\n"))
 
         case "print" | "p":
             if parts.len() < 2:
                 return Err("Usage: print <expr>".to_string())
-            val expr = parts[1..].join(" ")
-            match interp.eval_expression_string(&expr):
-                case Ok(val):
-                    return Ok(val.to_string())
-                case Err(e):
-                    return Err(e.to_string())
+            value expr = parts[1..].join(" ")
+            value result = interp.eval_expression_string(&expr)
+            if result.is_ok():
+                return Ok(result.unwrap().to_string())
+            else:
+                return Err(result.unwrap_err().to_string())
 
         case "watch" | "w":
             if parts.len() < 2:
                 return Err("Usage: watch <expr>".to_string())
-            val expr = parts[1..].join(" ")
+            value expr = parts[1..].join(" ")
             debugger.add_watch(expr)
             return Ok("Watch added".to_string())
 

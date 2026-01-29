@@ -10,37 +10,37 @@ export eval_match, eval_case
 # Evaluate a match expression
 fn eval_match(interp: &Interpreter, scrutinee: &Expr, arms: &Array<MatchArm>) -> Result<Value, InterpreterError>:
     # Evaluate the value being matched
-    val val = evaluate(interp, scrutinee)?
+    value value = evaluate(interp, scrutinee)?
 
     # Try each arm
     for arm in arms:
-        if val Some(result) = try_match_arm(interp, &val, arm)?:
+        if value Some(result) = try_match_arm(interp, &val, arm)?:
             return Ok(result)
 
     # No arm matched - this should be caught by exhaustiveness checker
     return Err(InterpreterError.MatchError("non-exhaustive match".to_string()))
 
 # Evaluate a single case clause
-fn eval_case(interp: &Interpreter, val: &Value, pattern: &Pattern, guard: Option<&Expr>, body: &Expr) -> Result<Option<Value>, InterpreterError>:
+fn eval_case(interp: &Interpreter, value: &Value, pattern: &Pattern, guard: Option<&Expr>, body: &Expr) -> Result<Option<Value>, InterpreterError>:
     # Try to match the pattern
-    val bindings = match_pattern(val, pattern)?
+    value bindings = match_pattern(val, pattern)?
 
     match bindings:
         case Some(binds):
             # Pattern matched, check guard
-            if val Some(guard_expr) = guard:
+            if value Some(guard_expr) = guard:
                 # Temporarily bind pattern variables
                 interp.env.push_scope()
                 for (name, bound_val) in binds:
                     interp.env.define_str(name, bound_val)
 
-                val guard_result = evaluate(interp, guard_expr)?
+                value guard_result = evaluate(interp, guard_expr)?
                 if not guard_result.is_truthy():
                     interp.env.pop_scope()
                     return Ok(None)  # Guard failed
 
                 # Guard passed, evaluate body
-                val result = evaluate(interp, body)?
+                value result = evaluate(interp, body)?
                 interp.env.pop_scope()
                 return Ok(Some(result))
             else:
@@ -49,7 +49,7 @@ fn eval_case(interp: &Interpreter, val: &Value, pattern: &Pattern, guard: Option
                 for (name, bound_val) in binds:
                     interp.env.define_str(name, bound_val)
 
-                val result = evaluate(interp, body)?
+                value result = evaluate(interp, body)?
                 interp.env.pop_scope()
                 return Ok(Some(result))
 
@@ -57,17 +57,17 @@ fn eval_case(interp: &Interpreter, val: &Value, pattern: &Pattern, guard: Option
             return Ok(None)  # Pattern didn't match
 
 # Try to match a single arm
-fn try_match_arm(interp: &Interpreter, val: &Value, arm: &MatchArm) -> Result<Option<Value>, InterpreterError>:
-    return eval_case(interp, val, &arm.pattern, arm.guard.as_ref(), &arm.body)
+fn try_match_arm(interp: &Interpreter, value: &Value, arm: &MatchArm) -> Result<Option<Value>, InterpreterError>:
+    return eval_case(interp, value, &arm.pattern, arm.guard.as_ref(), &arm.body)
 
 # Pattern matching returns bindings if successful
-fn match_pattern(val: &Value, pattern: &Pattern) -> Result<Option<Array<(String, Value)>>, InterpreterError>:
+fn match_pattern(value: &Value, pattern: &Pattern) -> Result<Option<Array<(String, Value)>>, InterpreterError>:
     match pattern:
         case Pattern.Wildcard:
             return Ok(Some([]))
 
         case Pattern.Identifier(name):
-            return Ok(Some([(name.clone(), val.clone())]))
+            return Ok(Some([(name.clone(), value.clone())]))
 
         case Pattern.Literal(lit):
             if matches_literal(val, lit):
@@ -84,7 +84,7 @@ fn match_pattern(val: &Value, pattern: &Pattern) -> Result<Option<Array<(String,
             return match_enum(val, variant, data)
 
         case Pattern.Or(left, right):
-            if val Some(binds) = match_pattern(val, left)?:
+            if value Some(binds) = match_pattern(val, left)?:
                 return Ok(Some(binds))
             return match_pattern(val, right)
 
@@ -92,7 +92,7 @@ fn match_pattern(val: &Value, pattern: &Pattern) -> Result<Option<Array<(String,
             return Err(InterpreterError.NotImplemented("pattern".to_string()))
 
 # Check if value matches literal pattern
-fn matches_literal(val: &Value, lit: &Literal) -> bool:
+fn matches_literal(value: &Value, lit: &Literal) -> bool:
     match (val.data.clone(), lit):
         case (RuntimeValue.Int(n), Literal.Int(m)):
             return n == *m
@@ -108,13 +108,13 @@ fn matches_literal(val: &Value, lit: &Literal) -> bool:
             return false
 
 # Match tuple pattern
-fn match_tuple(val: &Value, patterns: &Array<Pattern>) -> Result<Option<Array<(String, Value)>>, InterpreterError>:
-    match val.as_array():
+fn match_tuple(value: &Value, patterns: &Array<Pattern>) -> Result<Option<Array<(String, Value)>>, InterpreterError>:
+    match value.as_array():
         case Some(arr):
             if arr.len() != patterns.len():
                 return Ok(None)
 
-            val all_bindings: Array<(String, Value)> = []
+            value all_bindings: Array<(String, Value)> = []
             for i in 0..patterns.len():
                 match match_pattern(&arr[i], &patterns[i])?:
                     case Some(binds):
@@ -128,15 +128,15 @@ fn match_tuple(val: &Value, patterns: &Array<Pattern>) -> Result<Option<Array<(S
             return Ok(None)
 
 # Match struct pattern
-fn match_struct(val: &Value, name: &str, field_patterns: &Array<(String, Pattern)>) -> Result<Option<Array<(String, Value)>>, InterpreterError>:
-    match val.data.clone():
+fn match_struct(value: &Value, name: &str, field_patterns: &Array<(String, Pattern)>) -> Result<Option<Array<(String, Value)>>, InterpreterError>:
+    match value.data.clone():
         case RuntimeValue.Struct { name: struct_name, fields }:
             # Check struct name matches
             if struct_name != name:
                 return Ok(None)
 
             # Match all field patterns
-            val all_bindings: Array<(String, Value)> = []
+            value all_bindings: Array<(String, Value)> = []
             for (field_name, field_pattern) in field_patterns:
                 match fields.get(field_name):
                     case Some(field_val):
@@ -155,7 +155,7 @@ fn match_struct(val: &Value, name: &str, field_patterns: &Array<(String, Pattern
             if class != name:
                 return Ok(None)
 
-            val all_bindings: Array<(String, Value)> = []
+            value all_bindings: Array<(String, Value)> = []
             for (field_name, field_pattern) in field_patterns:
                 match fields.get(field_name):
                     case Some(field_val):
@@ -173,8 +173,8 @@ fn match_struct(val: &Value, name: &str, field_patterns: &Array<(String, Pattern
             return Ok(None)
 
 # Match enum pattern
-fn match_enum(val: &Value, variant: &str, data_pattern: Option<&Pattern>) -> Result<Option<Array<(String, Value)>>, InterpreterError>:
-    match val.data.clone():
+fn match_enum(value: &Value, variant: &str, data_pattern: Option<&Pattern>) -> Result<Option<Array<(String, Value)>>, InterpreterError>:
+    match value.data.clone():
         case RuntimeValue.Enum { variant: v, data }:
             if v != variant:
                 return Ok(None)

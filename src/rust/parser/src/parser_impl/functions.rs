@@ -211,6 +211,7 @@ impl<'a> Parser<'a> {
             contract,
             is_abstract,
             is_sync: false,
+            is_static: false,
             is_me_method,
             bounds_block,
             return_constraint,

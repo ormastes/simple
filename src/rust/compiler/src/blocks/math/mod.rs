@@ -50,12 +50,8 @@ impl BlockHandler for MathBlock {
         // Evaluate the expression
         let result = eval::evaluate(&expr)?;
 
-        // Return as a Block value
-        Ok(Value::Block {
-            kind: "m".to_string(),
-            payload: payload.to_string(),
-            result: Some(Box::new(result)),
-        })
+        // Return the evaluated result directly
+        Ok(result)
     }
 
     fn kind(&self) -> &'static str {
@@ -71,36 +67,24 @@ mod tests {
     fn test_simple_integer() {
         let handler = MathBlock;
         let result = handler.evaluate("42").unwrap();
-        if let Value::Block { result: Some(r), .. } = result {
-            assert_eq!(*r, Value::Int(42));
-        } else {
-            panic!("expected block with result");
-        }
+        assert_eq!(result, Value::Int(42));
     }
 
     #[test]
     fn test_simple_addition() {
         let handler = MathBlock;
         let result = handler.evaluate("1 + 2").unwrap();
-        if let Value::Block { result: Some(r), .. } = result {
-            assert_eq!(*r, Value::Int(3));
-        } else {
-            panic!("expected block with result");
-        }
+        assert_eq!(result, Value::Int(3));
     }
 
     #[test]
     fn test_pi_constant() {
         let handler = MathBlock;
         let result = handler.evaluate("pi").unwrap();
-        if let Value::Block { result: Some(r), .. } = result {
-            if let Value::Float(f) = *r {
-                assert!((f - std::f64::consts::PI).abs() < 0.0001);
-            } else {
-                panic!("expected float");
-            }
+        if let Value::Float(f) = result {
+            assert!((f - std::f64::consts::PI).abs() < 0.0001);
         } else {
-            panic!("expected block with result");
+            panic!("expected float");
         }
     }
 

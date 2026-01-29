@@ -218,6 +218,7 @@ mod tests {
             is_sync: false,
             is_me_method: false,
             is_generic_template: true,
+            is_static: false,
             specialization_of: None,
             type_bindings: HashMap::new(),
             bounds_block: None,

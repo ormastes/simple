@@ -514,6 +514,9 @@ impl<'a> Parser<'a> {
                     self.parse_function_with_decorators(decorators)?
                 };
                 if let Node::Function(mut f) = item {
+                    // Set the is_static flag on the function
+                    f.is_static = is_static;
+
                     // Auto-inject 'self' parameter for instance methods (non-static) if not present
                     // Skip auto-injection for constructors (methods named "new")
                     if !is_static && f.name != "new" && (f.params.is_empty() || f.params[0].name != "self") {
@@ -683,6 +686,9 @@ impl<'a> Parser<'a> {
                     self.parse_function_with_decorators(decorators)?
                 };
                 if let Node::Function(mut f) = item {
+                    // Set the is_static flag on the function
+                    f.is_static = is_static;
+
                     // Auto-inject 'self' parameter for instance methods (non-static) if not present
                     // Skip auto-injection for constructors (methods named "new")
                     if !is_static && f.name != "new" && (f.params.is_empty() || f.params[0].name != "self") {
