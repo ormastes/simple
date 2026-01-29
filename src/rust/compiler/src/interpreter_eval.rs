@@ -743,7 +743,6 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
             }
             // Module system nodes
             Node::UseStmt(use_stmt) => {
-                eprintln!("[DEBUG UseStmt] Processing use statement for path: {:?}, target: {:?}", use_stmt.path.segments, use_stmt.target);
                 // Handle runtime module loading
                 // Determine the binding name (alias or imported item name)
                 let binding_name = match &use_stmt.target {
@@ -771,9 +770,6 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                     &mut enums,
                 ) {
                     Ok(value) => {
-                        eprintln!("[DEBUG UseStmt] Module loaded successfully!");
-                        eprintln!("[DEBUG] After load_and_merge_module, classes HashMap has {} entries", classes.len());
-                        eprintln!("[DEBUG] Classes: {:?}", classes.keys().collect::<Vec<_>>());
                         // Unpack module exports into current namespace
                         // This allows direct access like: import std.spec; ExecutionMode.Variant
                         if let Value::Dict(exports) = &value {
@@ -796,7 +792,6 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                         // Module loading failed - log and use empty dict as fallback
                         // This allows the program to continue, with errors appearing
                         // when the module members are accessed
-                        eprintln!("[DEBUG UseStmt] Module loading FAILED for '{}': {:?}", binding_name, e);
                         tracing::debug!("Module loading failed for '{}': {:?}", binding_name, e);
                         let empty = Value::Dict(HashMap::new());
                         env.insert(binding_name.clone(), empty.clone());

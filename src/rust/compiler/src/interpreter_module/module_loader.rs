@@ -205,29 +205,56 @@ pub fn load_and_merge_module(
                 eprintln!("[DEBUG Fallback] Split into parent={:?}, item={}", parent_parts, item_name);
 
                 // Try to resolve the parent path
-                if let Ok(parent_module_path) = resolve_module_path(&parent_parts, base_dir) {
+                let parent_resolution = resolve_module_path(&parent_parts, base_dir);
+                eprintln!("[DEBUG Fallback] Parent path resolution: {:?}", parent_resolution.as_ref().map(|p| p.display().to_string()).map_err(|e| format!("{:?}", e)));
+                if let Ok(parent_module_path) = parent_resolution {
+                    eprintln!("[DEBUG Fallback] Parent path resolved successfully, recursing...");
                     // Successfully resolved parent module - recursively load it and extract the item
                     decrement_load_depth();
 
                     // Recursively call load_and_merge_module with the parent path
+                    // IMPORTANT: We need to construct the use_stmt such that it loads the PARENT module
+                    // without trying to extract an item, because we'll extract the item ourselves below.
                     let mut modified_use_stmt = use_stmt.clone();
-                    modified_use_stmt.path.segments = parent_parts.clone();
-                    // Keep the same target (which was the item name)
-                    modified_use_stmt.target = ImportTarget::Single(item_name.clone());
+                    // For parent_parts = ["app", "lsp"], we need the parser form where:
+                    //   - path.segments contains all but the last part
+                    //   - target contains the last part
+                    // So if parent_parts = ["app", "lsp", "server"], we want:
+                    //   - path.segments = ["app", "lsp"]
+                    //   - target = Single("server")
+                    if parent_parts.len() >= 2 {
+                        modified_use_stmt.path.segments = parent_parts[..parent_parts.len()-1].to_vec();
+                        modified_use_stmt.target = ImportTarget::Single(parent_parts[parent_parts.len()-1].clone());
+                    } else if parent_parts.len() == 1 {
+                        // Single component like ["spec"] - path is empty, target is the component
+                        modified_use_stmt.path.segments = vec![];
+                        modified_use_stmt.target = ImportTarget::Single(parent_parts[0].clone());
+                    } else {
+                        // Empty parent_parts - shouldn't happen but handle it
+                        modified_use_stmt.path.segments = vec![];
+                        modified_use_stmt.target = ImportTarget::Glob;
+                    }
 
-                    return load_and_merge_module(
+                    let result = load_and_merge_module(
                         &modified_use_stmt,
                         current_file,
                         functions,
                         classes,
                         enums,
-                    ).and_then(|module_value| {
+                    );
+                    eprintln!("[DEBUG Fallback] Recursive load result: {:?}", result.as_ref().map(|_| "Ok").map_err(|e| format!("{:?}", e)));
+
+                    return result.and_then(|module_value| {
+                        eprintln!("[DEBUG Fallback] Got module value, extracting '{}'", item_name);
                         // Extract the specific item from the loaded module
                         if let Value::Dict(exports_dict) = &module_value {
+                            eprintln!("[DEBUG Fallback] Module exports: {:?}", exports_dict.keys().collect::<Vec<_>>());
                             if let Some(value) = exports_dict.get(&item_name) {
+                                eprintln!("[DEBUG Fallback] Successfully extracted '{}', returning", item_name);
                                 return Ok(value.clone());
                             }
                         }
+                        eprintln!("[DEBUG Fallback] Failed to extract '{}'", item_name);
                         Err(CompileError::Runtime(format!(
                             "Module {:?} does not export '{}'",
                             parent_parts.join("."), item_name

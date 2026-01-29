@@ -216,6 +216,8 @@ pub enum MatcherValue {
     BeTrue,
     /// BDD matcher: expect value to be false
     BeFalse,
+    /// BDD matcher: expect float value to be close to target (within epsilon)
+    BeCloseTo { target: f64, epsilon: f64 },
 }
 
 impl MatcherValue {
@@ -285,6 +287,11 @@ impl MatcherValue {
             }
             MatcherValue::BeTrue => matches!(value, super::Value::Bool(true)),
             MatcherValue::BeFalse => matches!(value, super::Value::Bool(false)),
+            MatcherValue::BeCloseTo { target, epsilon } => match value {
+                super::Value::Float(f) => (f - target).abs() <= *epsilon,
+                super::Value::Int(i) => ((*i as f64) - target).abs() <= *epsilon,
+                _ => false,
+            },
         }
     }
 }
