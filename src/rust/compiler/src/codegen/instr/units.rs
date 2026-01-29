@@ -13,7 +13,7 @@ use super::{InstrContext, InstrResult};
 
 /// Compile a unit bound check instruction.
 /// This checks if a value is within the unit type's allowed range.
-pub(super) fn compile_unit_bound_check<M: Module>(
+pub(crate) fn compile_unit_bound_check<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     value: VReg,
@@ -90,7 +90,7 @@ pub(super) fn compile_unit_bound_check<M: Module>(
 
 /// Compile a UnitWiden instruction - widen a unit value to a larger representation.
 /// This is a lossless conversion (e.g., u8 → u16, i8 → i32).
-pub(super) fn compile_unit_widen<M: Module>(
+pub(crate) fn compile_unit_widen<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     dest: VReg,
@@ -122,7 +122,7 @@ pub(super) fn compile_unit_widen<M: Module>(
 
 /// Compile a UnitNarrow instruction - narrow a unit value to a smaller representation.
 /// This may overflow and requires bounds checking.
-pub(super) fn compile_unit_narrow<M: Module>(
+pub(crate) fn compile_unit_narrow<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     dest: VReg,
@@ -189,7 +189,7 @@ pub(super) fn compile_unit_narrow<M: Module>(
 }
 
 /// Compile a UnitSaturate instruction - clamp a value to unit bounds.
-pub(super) fn compile_unit_saturate<M: Module>(
+pub(crate) fn compile_unit_saturate<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     dest: VReg,

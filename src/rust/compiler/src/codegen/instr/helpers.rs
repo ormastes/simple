@@ -11,7 +11,7 @@ use crate::mir::VReg;
 /// This handles cases where control flow or complex patterns leave VRegs undefined.
 /// Note: Creating default values can cause SSA violations in some control flow patterns.
 /// We create the value in the entry block to minimize domination issues.
-pub(super) fn get_vreg_or_default<M: Module>(
+pub(crate) fn get_vreg_or_default<M: Module>(
     ctx: &InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     vreg: &VReg,
@@ -29,7 +29,7 @@ pub(super) fn get_vreg_or_default<M: Module>(
 }
 
 /// Helper to create a string constant in module data and return (ptr, len) values
-pub(super) fn create_string_constant<M: Module>(
+pub(crate) fn create_string_constant<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     text: &str,
@@ -51,7 +51,7 @@ pub(super) fn create_string_constant<M: Module>(
 }
 
 /// Helper to perform indirect call with result handling
-pub(super) fn indirect_call_with_result<M: Module>(
+pub(crate) fn indirect_call_with_result<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     sig_ref: cranelift_codegen::ir::SigRef,

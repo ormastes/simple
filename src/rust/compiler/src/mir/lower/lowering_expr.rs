@@ -150,7 +150,65 @@ impl<'a> MirLowerer<'a> {
                 }
 
                 // Direct call or indirect call?
+                eprintln!("[MIR-CALL-DEBUG] callee.kind={:?}", std::mem::discriminant(&callee.kind));
                 if let HirExprKind::Global(name) = &callee.kind {
+                    eprintln!("[MIR-CALL-DEBUG] Global name='{}'", name);
+                    // Check if this is an enum variant constructor (e.g., "Color::Blue" or "Color.Blue")
+                    if let Some((enum_name, variant_name)) = name.split_once("::").or_else(|| name.split_once('.')) {
+                        // Check if this is an enum type via the type registry or callee type
+                        let is_enum = if let Some(registry) = self.type_registry {
+                            if let Some(type_id) = registry.lookup(enum_name) {
+                                matches!(registry.get(type_id), Some(crate::hir::HirType::Enum { .. }))
+                            } else {
+                                // Also check the callee's type - if it resolves to an enum
+                                matches!(registry.get(callee.ty), Some(crate::hir::HirType::Enum { .. }))
+                            }
+                        } else { false };
+
+                        if is_enum && !arg_regs.is_empty() {
+                            // For single-arg variants, use the arg directly as payload
+                            // For multi-arg variants, wrap args in an array as the payload
+                            let payload_reg = if arg_regs.len() == 1 {
+                                arg_regs[0]
+                            } else {
+                                // Create an array with all args as the payload
+                                let array_reg = self.with_func(|func, current_block| {
+                                    let dest = func.new_vreg();
+                                    let block = func.block_mut(current_block).unwrap();
+                                    block.instructions.push(MirInst::Call {
+                                        dest: Some(dest),
+                                        target: CallTarget::from_name("rt_array_new"),
+                                        args: vec![],
+                                    });
+                                    dest
+                                })?;
+                                // Push each arg into the array
+                                for arg in &arg_regs {
+                                    self.with_func(|func, current_block| {
+                                        let block = func.block_mut(current_block).unwrap();
+                                        block.instructions.push(MirInst::Call {
+                                            dest: None,
+                                            target: CallTarget::from_name("rt_array_push"),
+                                            args: vec![array_reg, *arg],
+                                        });
+                                    })?;
+                                }
+                                array_reg
+                            };
+                            return self.with_func(|func, current_block| {
+                                let dest = func.new_vreg();
+                                let block = func.block_mut(current_block).unwrap();
+                                block.instructions.push(MirInst::EnumWith {
+                                    dest,
+                                    enum_name: enum_name.to_string(),
+                                    variant_name: variant_name.to_string(),
+                                    payload: payload_reg,
+                                });
+                                dest
+                            });
+                        }
+                    }
+
                     // Direct call - DI injection is handled at the HIR level
                     // The function signature already includes all parameters (including @inject ones)
                     // So we don't inject at call sites during MIR lowering
@@ -476,6 +534,9 @@ impl<'a> MirLowerer<'a> {
                 }
 
                 // Create a call to the builtin function
+                if name.contains("enum") {
+                    eprintln!("[MIR-BUILTIN] lowering BuiltinCall: name={}, args={}", name, arg_regs.len());
+                }
                 let target = CallTarget::from_name(name);
                 self.with_func(|func, current_block| {
                     let dest = func.new_vreg();
@@ -830,12 +891,18 @@ impl<'a> MirLowerer<'a> {
                         }
                         (field_types, offsets, offset)
                     } else {
-                        // Fallback: use empty struct
-                        (Vec::new(), Vec::new(), 0u32)
+                        // Fallback: derive layout from field count (8 bytes per field)
+                        let n = field_regs.len();
+                        let field_types: Vec<TypeId> = (0..n).map(|_| TypeId::ANY).collect();
+                        let field_offsets: Vec<u32> = (0..n).map(|i| (i * 8) as u32).collect();
+                        (field_types, field_offsets, (n * 8) as u32)
                     }
                 } else {
-                    // No type registry, use empty struct
-                    (Vec::new(), Vec::new(), 0u32)
+                    // No type registry - derive layout from field count (8 bytes per field)
+                    let n = field_regs.len();
+                    let field_types: Vec<TypeId> = (0..n).map(|_| TypeId::ANY).collect();
+                    let field_offsets: Vec<u32> = (0..n).map(|i| (i * 8) as u32).collect();
+                    (field_types, field_offsets, (n * 8) as u32)
                 };
 
                 self.with_func(|func, current_block| {
@@ -1053,8 +1120,8 @@ impl<'a> MirLowerer<'a> {
 
             // Global enum variant or global variable
             HirExprKind::Global(name) => {
-                // Check if this is an enum variant (contains ::)
-                if let Some((enum_name, variant)) = name.split_once("::") {
+                // Check if this is an enum variant (contains :: or .)
+                if let Some((enum_name, variant)) = name.split_once("::").or_else(|| name.split_once('.')) {
                     // Look up the enum type to verify the variant exists
                     let variant_exists = if let Some(registry) = self.type_registry {
                         if let Some(enum_type_id) = registry.lookup(enum_name) {

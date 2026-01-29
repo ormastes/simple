@@ -259,7 +259,9 @@ pub extern "C" fn rt_enum_discriminant(value: RuntimeValue) -> i64 {
 #[no_mangle]
 pub extern "C" fn rt_enum_check_discriminant(value: RuntimeValue, expected: i64) -> bool {
     get_typed_ptr::<RuntimeEnum>(value, HeapObjectType::Enum)
-        .map_or(false, |p| unsafe { (*p).discriminant as i64 == expected })
+        .map_or(false, |p| unsafe {
+            (*p).discriminant as i64 == expected
+        })
 }
 
 /// Unwrap an optional value: if it's a Some enum, return its payload; otherwise return as-is.

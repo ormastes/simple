@@ -436,6 +436,49 @@ pub(super) fn exec_block_closure(
                 BLOCK_SCOPED_ENUMS.with(|cell| cell.borrow_mut().insert(e.name.clone(), e.clone()));
                 last_value = Value::Nil;
             }
+            Node::Struct(s) => {
+                // Handle struct definitions inside block closures (e.g., in `it` blocks)
+                local_env.insert(
+                    s.name.clone(),
+                    Value::Constructor {
+                        class_name: s.name.clone(),
+                    },
+                );
+                classes.insert(
+                    s.name.clone(),
+                    ClassDef {
+                        span: s.span,
+                        name: s.name.clone(),
+                        generic_params: Vec::new(),
+                        where_clause: vec![],
+                        fields: s.fields.clone(),
+                        methods: s.methods.clone(),
+                        parent: None,
+                        visibility: s.visibility,
+                        effects: Vec::new(),
+                        attributes: Vec::new(),
+                        doc_comment: None,
+                        invariant: None,
+                        macro_invocations: vec![],
+                        mixins: vec![],
+                        is_generic_template: false,
+                        specialization_of: None,
+                        type_bindings: std::collections::HashMap::new(),
+                    },
+                );
+                last_value = Value::Nil;
+            }
+            Node::Class(c) => {
+                // Handle class definitions inside block closures (e.g., in `it` blocks)
+                classes.insert(c.name.clone(), c.clone());
+                local_env.insert(
+                    c.name.clone(),
+                    Value::Constructor {
+                        class_name: c.name.clone(),
+                    },
+                );
+                last_value = Value::Nil;
+            }
             _ => {
                 last_value = Value::Nil;
             }
@@ -671,6 +714,47 @@ fn exec_block_closure_mut(
                 );
                 // Also register in BLOCK_SCOPED_ENUMS for pattern matching support
                 BLOCK_SCOPED_ENUMS.with(|cell| cell.borrow_mut().insert(e.name.clone(), e.clone()));
+                last_value = Value::Nil;
+            }
+            Node::Struct(s) => {
+                local_env.insert(
+                    s.name.clone(),
+                    Value::Constructor {
+                        class_name: s.name.clone(),
+                    },
+                );
+                classes.insert(
+                    s.name.clone(),
+                    ClassDef {
+                        span: s.span,
+                        name: s.name.clone(),
+                        generic_params: Vec::new(),
+                        where_clause: vec![],
+                        fields: s.fields.clone(),
+                        methods: s.methods.clone(),
+                        parent: None,
+                        visibility: s.visibility,
+                        effects: Vec::new(),
+                        attributes: Vec::new(),
+                        doc_comment: None,
+                        invariant: None,
+                        macro_invocations: vec![],
+                        mixins: vec![],
+                        is_generic_template: false,
+                        specialization_of: None,
+                        type_bindings: std::collections::HashMap::new(),
+                    },
+                );
+                last_value = Value::Nil;
+            }
+            Node::Class(c) => {
+                classes.insert(c.name.clone(), c.clone());
+                local_env.insert(
+                    c.name.clone(),
+                    Value::Constructor {
+                        class_name: c.name.clone(),
+                    },
+                );
                 last_value = Value::Nil;
             }
             _ => {

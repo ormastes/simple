@@ -12,7 +12,7 @@ use super::super::types_util::type_id_to_cranelift;
 use super::helpers::{create_string_constant, get_vreg_or_default, indirect_call_with_result};
 use super::{InstrContext, InstrResult};
 
-pub(super) fn compile_closure_create<M: Module>(
+pub(crate) fn compile_closure_create<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     dest: VReg,
@@ -47,7 +47,7 @@ pub(super) fn compile_closure_create<M: Module>(
     ctx.vreg_values.insert(dest, closure_ptr);
 }
 
-pub(super) fn compile_indirect_call<M: Module>(
+pub(crate) fn compile_indirect_call<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     dest: &Option<VReg>,
@@ -79,7 +79,7 @@ pub(super) fn compile_indirect_call<M: Module>(
     indirect_call_with_result(ctx, builder, sig_ref, fn_ptr, &call_args, dest);
 }
 
-pub(super) fn compile_struct_init<M: Module>(
+pub(crate) fn compile_struct_init<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     dest: VReg,
@@ -115,7 +115,7 @@ pub(super) fn compile_struct_init<M: Module>(
     ctx.vreg_values.insert(dest, ptr);
 }
 
-pub(super) fn compile_method_call_static<M: Module>(
+pub(crate) fn compile_method_call_static<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     dest: &Option<VReg>,
@@ -333,14 +333,20 @@ fn try_compile_builtin_method_call<M: Module>(
     let call = builder.ins().call(func_ref, &call_args);
     let results = builder.inst_results(call);
 
-    if results.is_empty() {
+    // Methods that mutate in-place (push, clear, reverse, sort) should return the receiver
+    // so that chaining like `self.items = self.items.push(x)` works correctly.
+    let in_place_mutating = matches!(runtime_func, "rt_array_push" | "rt_array_clear" | "rt_array_reverse" | "rt_array_sort");
+
+    if in_place_mutating {
+        Ok(Some(receiver_val))
+    } else if results.is_empty() {
         Ok(Some(builder.ins().iconst(types::I64, 0)))
     } else {
         Ok(Some(results[0]))
     }
 }
 
-pub(super) fn compile_method_call_virtual<M: Module>(
+pub(crate) fn compile_method_call_virtual<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     dest: &Option<VReg>,

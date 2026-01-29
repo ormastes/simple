@@ -10,7 +10,7 @@ use super::helpers::get_vreg_or_default;
 use super::{InstrContext, InstrResult};
 
 /// Helper to create a string literal in stack slot and get ptr/len
-pub(super) fn create_stack_string(
+pub(crate) fn create_stack_string(
     builder: &mut FunctionBuilder,
     value: &str,
 ) -> (cranelift_codegen::ir::Value, cranelift_codegen::ir::Value) {
@@ -56,7 +56,7 @@ const TUPLE_SPEC: CollectionSpec = CollectionSpec {
 };
 
 /// Compile a collection literal (array or tuple) using the given spec
-pub(super) fn compile_collection_lit<M: Module>(
+pub(crate) fn compile_collection_lit<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     dest: VReg,
@@ -95,7 +95,7 @@ pub(super) fn compile_collection_lit<M: Module>(
     ctx.vreg_values.insert(dest, collection);
 }
 
-pub(super) fn compile_array_lit<M: Module>(
+pub(crate) fn compile_array_lit<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     dest: VReg,
@@ -104,7 +104,7 @@ pub(super) fn compile_array_lit<M: Module>(
     compile_collection_lit(ctx, builder, dest, elements, &ARRAY_SPEC);
 }
 
-pub(super) fn compile_tuple_lit<M: Module>(
+pub(crate) fn compile_tuple_lit<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     dest: VReg,
@@ -116,7 +116,7 @@ pub(super) fn compile_tuple_lit<M: Module>(
 /// Compile a SIMD vector literal
 /// For now, we represent vectors as arrays. A full implementation would use
 /// Cranelift's SIMD vector types for better performance.
-pub(super) fn compile_vec_lit<M: Module>(
+pub(crate) fn compile_vec_lit<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     dest: VReg,
@@ -129,7 +129,7 @@ pub(super) fn compile_vec_lit<M: Module>(
 
 /// Compile a SIMD vector reduction operation (sum, product, min, max, all, any)
 /// Takes a vector and reduces it to a scalar value using the specified runtime function.
-pub(super) fn compile_vec_reduction<M: Module>(
+pub(crate) fn compile_vec_reduction<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     dest: VReg,
@@ -145,7 +145,7 @@ pub(super) fn compile_vec_reduction<M: Module>(
 }
 
 /// Compile SIMD lane extract: v[idx] -> element
-pub(super) fn compile_vec_extract<M: Module>(
+pub(crate) fn compile_vec_extract<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     dest: VReg,
@@ -162,7 +162,7 @@ pub(super) fn compile_vec_extract<M: Module>(
 }
 
 /// Compile SIMD lane insert: v.with(idx, val) -> new vector
-pub(super) fn compile_vec_with<M: Module>(
+pub(crate) fn compile_vec_with<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     dest: VReg,
@@ -182,7 +182,7 @@ pub(super) fn compile_vec_with<M: Module>(
 
 /// Compile SIMD element-wise math operation (sqrt, abs, floor, ceil, round)
 /// Takes a vector and returns a vector with the operation applied to each element.
-pub(super) fn compile_vec_math<M: Module>(
+pub(crate) fn compile_vec_math<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     dest: VReg,
@@ -199,7 +199,7 @@ pub(super) fn compile_vec_math<M: Module>(
 
 /// Compile SIMD shuffle: reorder lanes within a single vector
 /// v.shuffle([3, 2, 1, 0]) -> reordered vector
-pub(super) fn compile_vec_shuffle<M: Module>(
+pub(crate) fn compile_vec_shuffle<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     dest: VReg,
@@ -217,7 +217,7 @@ pub(super) fn compile_vec_shuffle<M: Module>(
 
 /// Compile SIMD blend: merge two vectors using an indices array
 /// a.blend(b, [0, 1, 4, 5]) -> merged vector (0-N from a, N-2N from b)
-pub(super) fn compile_vec_blend<M: Module>(
+pub(crate) fn compile_vec_blend<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     dest: VReg,
@@ -237,7 +237,7 @@ pub(super) fn compile_vec_blend<M: Module>(
 
 /// Compile SIMD masked select: mask.select(a, b)
 /// Returns a where mask is true, b where mask is false
-pub(super) fn compile_vec_select<M: Module>(
+pub(crate) fn compile_vec_select<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     dest: VReg,
@@ -257,7 +257,7 @@ pub(super) fn compile_vec_select<M: Module>(
 
 /// Compile GPU atomic operation: add, sub, min, max, and, or, xor, exchange
 /// Returns the old value at the memory location
-pub(super) fn compile_gpu_atomic<M: Module>(
+pub(crate) fn compile_gpu_atomic<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     dest: VReg,
@@ -287,7 +287,7 @@ pub(super) fn compile_gpu_atomic<M: Module>(
 
 /// Compile GPU atomic compare-exchange
 /// Returns the old value at the memory location
-pub(super) fn compile_gpu_atomic_cmpxchg<M: Module>(
+pub(crate) fn compile_gpu_atomic_cmpxchg<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     dest: VReg,
@@ -305,7 +305,7 @@ pub(super) fn compile_gpu_atomic_cmpxchg<M: Module>(
     ctx.vreg_values.insert(dest, result);
 }
 
-pub(super) fn compile_dict_lit<M: Module>(
+pub(crate) fn compile_dict_lit<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     dest: VReg,
@@ -330,7 +330,7 @@ pub(super) fn compile_dict_lit<M: Module>(
     ctx.vreg_values.insert(dest, dict);
 }
 
-pub(super) fn compile_index_get<M: Module>(
+pub(crate) fn compile_index_get<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     dest: VReg,
@@ -354,7 +354,7 @@ pub(super) fn compile_index_get<M: Module>(
     ctx.vreg_values.insert(dest, runtime_value);
 }
 
-pub(super) fn compile_index_set<M: Module>(
+pub(crate) fn compile_index_set<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     collection: VReg,
@@ -372,7 +372,7 @@ pub(super) fn compile_index_set<M: Module>(
     builder.ins().call(index_set_ref, &[coll_val, idx_val, val]);
 }
 
-pub(super) fn compile_slice_op<M: Module>(
+pub(crate) fn compile_slice_op<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     dest: VReg,
@@ -400,7 +400,7 @@ pub(super) fn compile_slice_op<M: Module>(
     ctx.vreg_values.insert(dest, result);
 }
 
-pub(super) fn compile_const_string<M: Module>(
+pub(crate) fn compile_const_string<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     dest: VReg,
@@ -420,7 +420,7 @@ pub(super) fn compile_const_string<M: Module>(
     ctx.vreg_values.insert(dest, result);
 }
 
-pub(super) fn compile_fstring_format<M: Module>(
+pub(crate) fn compile_fstring_format<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     dest: VReg,

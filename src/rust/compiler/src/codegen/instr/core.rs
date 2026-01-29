@@ -21,7 +21,7 @@ fn ensure_i64(builder: &mut FunctionBuilder, val: cranelift_codegen::ir::Value) 
     }
 }
 
-pub(super) fn compile_binop<M: Module>(
+pub(crate) fn compile_binop<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     op: BinOp,
@@ -39,20 +39,22 @@ pub(super) fn compile_binop<M: Module>(
         BinOp::BitXor => builder.ins().bxor(lhs, rhs),
         BinOp::ShiftLeft => builder.ins().ishl(lhs, rhs),
         BinOp::ShiftRight => builder.ins().sshr(lhs, rhs),
-        BinOp::Lt => builder
-            .ins()
-            .icmp(cranelift_codegen::ir::condcodes::IntCC::SignedLessThan, lhs, rhs),
-        BinOp::Gt => builder
-            .ins()
-            .icmp(cranelift_codegen::ir::condcodes::IntCC::SignedGreaterThan, lhs, rhs),
-        BinOp::LtEq => builder
-            .ins()
-            .icmp(cranelift_codegen::ir::condcodes::IntCC::SignedLessThanOrEqual, lhs, rhs),
-        BinOp::GtEq => builder.ins().icmp(
-            cranelift_codegen::ir::condcodes::IntCC::SignedGreaterThanOrEqual,
-            lhs,
-            rhs,
-        ),
+        BinOp::Lt | BinOp::Gt | BinOp::LtEq | BinOp::GtEq => {
+            // Use rt_value_compare for proper comparison of all types (int, float, string/char)
+            let lhs_i64 = ensure_i64(builder, lhs);
+            let rhs_i64 = ensure_i64(builder, rhs);
+            let cmp_id = ctx.runtime_funcs["rt_value_compare"];
+            let cmp_ref = ctx.module.declare_func_in_func(cmp_id, builder.func);
+            let call = builder.ins().call(cmp_ref, &[lhs_i64, rhs_i64]);
+            let cmp_result = builder.inst_results(call)[0];
+            match op {
+                BinOp::Lt => builder.ins().icmp_imm(cranelift_codegen::ir::condcodes::IntCC::SignedLessThan, cmp_result, 0),
+                BinOp::Gt => builder.ins().icmp_imm(cranelift_codegen::ir::condcodes::IntCC::SignedGreaterThan, cmp_result, 0),
+                BinOp::LtEq => builder.ins().icmp_imm(cranelift_codegen::ir::condcodes::IntCC::SignedLessThanOrEqual, cmp_result, 0),
+                BinOp::GtEq => builder.ins().icmp_imm(cranelift_codegen::ir::condcodes::IntCC::SignedGreaterThanOrEqual, cmp_result, 0),
+                _ => unreachable!(),
+            }
+        }
         BinOp::Eq => {
             // Use rt_value_eq for deep equality comparison (handles strings, etc.)
             // Ensure both operands are i64 (FFI functions may return smaller types)
@@ -160,7 +162,7 @@ pub(super) fn compile_binop<M: Module>(
 
 /// Compile built-in I/O function calls (print, println, eprint, eprintln, etc.)
 /// Returns Some(result_value) if the function was handled, None if not a built-in I/O function.
-pub(super) fn compile_builtin_io_call<M: Module>(
+pub(crate) fn compile_builtin_io_call<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     func_name: &str,
@@ -264,7 +266,7 @@ pub(super) fn compile_builtin_io_call<M: Module>(
     }
 }
 
-pub(super) fn compile_interp_call<M: Module>(
+pub(crate) fn compile_interp_call<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     dest: &Option<VReg>,

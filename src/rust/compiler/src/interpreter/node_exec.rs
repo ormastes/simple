@@ -10,7 +10,7 @@ use super::expr::evaluate_expr;
 use super::interpreter_helpers::{bind_pattern_value, handle_method_call_with_self_update, handle_functional_update};
 use super::interpreter_control::{exec_if, exec_while, exec_loop, exec_for, exec_match, exec_context, exec_with};
 use super::interpreter_state::{
-    mark_as_moved, get_current_file, CONST_NAMES, IMMUTABLE_VARS, IN_IMMUTABLE_FN_METHOD, MODULE_GLOBALS,
+    mark_as_moved, get_current_file, BLOCK_SCOPED_ENUMS, CONST_NAMES, IMMUTABLE_VARS, IN_IMMUTABLE_FN_METHOD, MODULE_GLOBALS,
 };
 use super::coverage_helpers::record_node_coverage;
 use crate::interpreter_unit::{is_unit_type, validate_unit_type, validate_unit_constraints};
@@ -256,6 +256,60 @@ pub(crate) fn exec_node(
                             body: lit_fn.body.clone(),
                         },
                     );
+                },
+            );
+            Ok(Control::Next)
+        }
+        Node::Struct(s) => {
+            // Register struct constructor in local scope
+            env.insert(
+                s.name.clone(),
+                Value::Constructor {
+                    class_name: s.name.clone(),
+                },
+            );
+            classes.insert(
+                s.name.clone(),
+                ClassDef {
+                    span: s.span,
+                    name: s.name.clone(),
+                    generic_params: Vec::new(),
+                    where_clause: vec![],
+                    fields: s.fields.clone(),
+                    methods: s.methods.clone(),
+                    parent: None,
+                    visibility: s.visibility,
+                    effects: Vec::new(),
+                    attributes: Vec::new(),
+                    doc_comment: None,
+                    invariant: None,
+                    macro_invocations: vec![],
+                    mixins: vec![],
+                    is_generic_template: false,
+                    specialization_of: None,
+                    type_bindings: std::collections::HashMap::new(),
+                },
+            );
+            Ok(Control::Next)
+        }
+        Node::Class(c) => {
+            // Register class constructor in local scope
+            classes.insert(c.name.clone(), c.clone());
+            env.insert(
+                c.name.clone(),
+                Value::Constructor {
+                    class_name: c.name.clone(),
+                },
+            );
+            Ok(Control::Next)
+        }
+        Node::Enum(e) => {
+            // Register enum type in local scope via thread-local
+            BLOCK_SCOPED_ENUMS.with(|cell| cell.borrow_mut().insert(e.name.clone(), e.clone()));
+            env.insert(
+                e.name.clone(),
+                Value::EnumType {
+                    enum_name: e.name.clone(),
                 },
             );
             Ok(Control::Next)

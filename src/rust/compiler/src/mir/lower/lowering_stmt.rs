@@ -278,12 +278,30 @@ impl<'a> MirLowerer<'a> {
                 let cond_reg = self.lower_expr(condition)?;
 
                 // Emit decision probe for coverage (before branch)
-                // Line/column require span tracking in HIR expressions
-                // Currently using placeholder values (0, 0) for decision probes
                 self.emit_decision_probe(cond_reg, 0, 0)?;
 
                 // Save last_expr_value before branches (for proper value merging)
                 let saved_last_expr = self.last_expr_value;
+
+                // Pre-allocate a temporary local for value merging BEFORE branching.
+                // This is critical: when branches contain nested if/else, the current
+                // block after lowering is an inner merge block, not then_id/else_id.
+                // We must store values in the current block before finalize_block_jump,
+                // not go back to then_id/else_id after the fact.
+                use crate::hir::TypeId;
+                use crate::mir::effects::LocalKind;
+                use crate::mir::function::MirLocal;
+
+                let temp_local_index = self.with_func(|func, _| {
+                    let index = func.params.len() + func.locals.len();
+                    func.locals.push(MirLocal {
+                        name: format!("__if_merge_{}", index),
+                        ty: TypeId::I64,
+                        kind: LocalKind::Local,
+                        is_ghost: false,
+                    });
+                    index
+                })?;
 
                 // Create blocks
                 let (then_id, else_id, merge_id) = self.with_func(|func, current_block| {
@@ -308,6 +326,22 @@ impl<'a> MirLowerer<'a> {
                     self.lower_stmt(stmt, contract)?;
                 }
                 let then_value = self.last_expr_value;
+                // Store then value in temp local BEFORE finalize (current block may be inner merge)
+                if let Some(tv) = then_value {
+                    self.with_func(|func, current_block| {
+                        let addr = func.new_vreg();
+                        let block = func.block_mut(current_block).unwrap();
+                        block.instructions.push(MirInst::LocalAddr {
+                            dest: addr,
+                            local_index: temp_local_index,
+                        });
+                        block.instructions.push(MirInst::Store {
+                            addr,
+                            value: tv,
+                            ty: TypeId::I64,
+                        });
+                    })?;
+                }
                 self.finalize_block_jump(merge_id)?;
 
                 // Lower else block
@@ -319,68 +353,30 @@ impl<'a> MirLowerer<'a> {
                     }
                 }
                 let else_value = self.last_expr_value;
+                // Store else value in temp local BEFORE finalize
+                if let Some(ev) = else_value {
+                    self.with_func(|func, current_block| {
+                        let addr = func.new_vreg();
+                        let block = func.block_mut(current_block).unwrap();
+                        block.instructions.push(MirInst::LocalAddr {
+                            dest: addr,
+                            local_index: temp_local_index,
+                        });
+                        block.instructions.push(MirInst::Store {
+                            addr,
+                            value: ev,
+                            ty: TypeId::I64,
+                        });
+                    })?;
+                }
                 self.finalize_block_jump(merge_id)?;
 
-                // Handle value merging for if/else as expression
-                // If both branches produce different values, we need to merge them
-                // using a temporary local to ensure proper SSA domination
+                // Load merged value in merge block
                 self.set_current_block(merge_id)?;
 
                 match (then_value, else_value) {
-                    (Some(tv), Some(ev)) if tv != ev => {
-                        // Both branches produced different values - need to merge
-                        // Add a temporary local to hold the merged value
-                        use crate::hir::TypeId;
-                        use crate::mir::effects::LocalKind;
-                        use crate::mir::function::MirLocal;
-
-                        let temp_local_index = self.with_func(|func, _| {
-                            let index = func.params.len() + func.locals.len();
-                            func.locals.push(MirLocal {
-                                name: format!("__if_merge_{}", index),
-                                ty: TypeId::I64, // Use i64 as generic merge type
-                                kind: LocalKind::Local,
-                                is_ghost: false,
-                            });
-                            index
-                        })?;
-
-                        // Go back to then block and add store before jump
-                        self.set_current_block(then_id)?;
-                        self.with_func(|func, current_block| {
-                            let dest = func.new_vreg();
-                            let block = func.block_mut(current_block).unwrap();
-                            // Insert store before the terminator
-                            block.instructions.push(MirInst::LocalAddr {
-                                dest,
-                                local_index: temp_local_index,
-                            });
-                            block.instructions.push(MirInst::Store {
-                                addr: dest,
-                                value: tv,
-                                ty: TypeId::I64,
-                            });
-                        })?;
-
-                        // Go back to else block and add store before jump
-                        self.set_current_block(else_id)?;
-                        self.with_func(|func, current_block| {
-                            let dest = func.new_vreg();
-                            let block = func.block_mut(current_block).unwrap();
-                            // Insert store before the terminator
-                            block.instructions.push(MirInst::LocalAddr {
-                                dest,
-                                local_index: temp_local_index,
-                            });
-                            block.instructions.push(MirInst::Store {
-                                addr: dest,
-                                value: ev,
-                                ty: TypeId::I64,
-                            });
-                        })?;
-
-                        // Back to merge block - load the merged value
-                        self.set_current_block(merge_id)?;
+                    (Some(_), _) | (_, Some(_)) => {
+                        // At least one branch produced a value - load from temp local
                         let merged_value = self.with_func(|func, current_block| {
                             let addr = func.new_vreg();
                             let value = func.new_vreg();
@@ -397,11 +393,6 @@ impl<'a> MirLowerer<'a> {
                             value
                         })?;
                         self.last_expr_value = Some(merged_value);
-                    }
-                    (Some(v), _) | (_, Some(v)) => {
-                        // Only one branch produced a value (or same value)
-                        // This case is rare but handle it gracefully
-                        self.last_expr_value = Some(v);
                     }
                     (None, None) => {
                         // Neither branch produced a value - restore saved

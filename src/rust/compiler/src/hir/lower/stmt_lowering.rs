@@ -1,4 +1,4 @@
-use simple_parser::{self as ast, ast::ContractClause, ast::MatchStmt, ast::Mutability, ast::Pattern, Node};
+use simple_parser::{self as ast, ast::ContractClause, ast::Expr, ast::MatchStmt, ast::Mutability, ast::Pattern, Node};
 
 use super::super::lifetime::{ReferenceOrigin, ScopeKind};
 use super::super::types::*;
@@ -391,6 +391,11 @@ impl Lowerer {
             }
 
             Node::Expression(expr) => {
+                // Intercept BDD/SSpec calls at statement level so we can emit
+                // start/body/end sequences (describe, it, expect, etc.)
+                if let Some(stmts) = self.try_lower_bdd_statement(expr, ctx)? {
+                    return Ok(stmts);
+                }
                 let hir_expr = self.lower_expr(expr, ctx)?;
                 Ok(vec![HirStmt::Expr(hir_expr)])
             }
@@ -863,5 +868,188 @@ impl Lowerer {
         }
 
         Ok(stmts)
+    }
+
+    /// Try to lower a BDD/SSpec call expression as a statement sequence.
+    /// Returns Some(stmts) if the expression is a BDD call, None otherwise.
+    ///
+    /// Handles: describe, context, it, test, expect, before_each, after_each
+    fn try_lower_bdd_statement(
+        &mut self,
+        expr: &Expr,
+        ctx: &mut FunctionContext,
+    ) -> LowerResult<Option<Vec<HirStmt>>> {
+        let (name, args) = match expr {
+            Expr::Call { callee, args } => {
+                if let Expr::Identifier(name) = callee.as_ref() {
+                    (name.as_str(), args)
+                } else {
+                    return Ok(None);
+                }
+            }
+            _ => return Ok(None),
+        };
+
+        match name {
+            "describe" | "context" => {
+                // describe "name": body
+                // → rt_bdd_describe_start_rv(name), <body>, rt_bdd_describe_end()
+                let mut stmts = Vec::new();
+
+                // Lower the name argument (first arg)
+                let name_hir = if !args.is_empty() {
+                    self.lower_expr(&args[0].value, ctx)?
+                } else {
+                    HirExpr { kind: HirExprKind::String("unnamed".to_string()), ty: TypeId::STRING }
+                };
+
+                // Emit rt_bdd_describe_start_rv(name)
+                stmts.push(HirStmt::Expr(HirExpr {
+                    kind: HirExprKind::BuiltinCall {
+                        name: "rt_bdd_describe_start_rv".to_string(),
+                        args: vec![name_hir],
+                    },
+                    ty: TypeId::NIL,
+                }));
+
+                // Lower body (second arg: Lambda { body: DoBlock([...]) })
+                if args.len() > 1 {
+                    self.lower_bdd_body(&args[1].value, &mut stmts, ctx)?;
+                }
+
+                // Emit rt_bdd_describe_end()
+                stmts.push(HirStmt::Expr(HirExpr {
+                    kind: HirExprKind::BuiltinCall {
+                        name: "rt_bdd_describe_end".to_string(),
+                        args: vec![],
+                    },
+                    ty: TypeId::NIL,
+                }));
+
+                Ok(Some(stmts))
+            }
+
+            "it" | "test" | "example" | "specify" => {
+                // it "name": body
+                // → rt_bdd_it_start_rv(name), <body>, rt_bdd_it_end(passed)
+                let mut stmts = Vec::new();
+
+                let name_hir = if !args.is_empty() {
+                    self.lower_expr(&args[0].value, ctx)?
+                } else {
+                    HirExpr { kind: HirExprKind::String("unnamed".to_string()), ty: TypeId::STRING }
+                };
+
+                // Emit rt_bdd_it_start_rv(name)
+                stmts.push(HirStmt::Expr(HirExpr {
+                    kind: HirExprKind::BuiltinCall {
+                        name: "rt_bdd_it_start_rv".to_string(),
+                        args: vec![name_hir],
+                    },
+                    ty: TypeId::NIL,
+                }));
+
+                // Lower body
+                if args.len() > 1 {
+                    self.lower_bdd_body(&args[1].value, &mut stmts, ctx)?;
+                }
+
+                // Emit rt_bdd_it_end(1) - passed=1, failure is detected by expect
+                stmts.push(HirStmt::Expr(HirExpr {
+                    kind: HirExprKind::BuiltinCall {
+                        name: "rt_bdd_it_end".to_string(),
+                        args: vec![HirExpr { kind: HirExprKind::Integer(1), ty: TypeId::I64 }],
+                    },
+                    ty: TypeId::NIL,
+                }));
+
+                Ok(Some(stmts))
+            }
+
+            "expect" => {
+                // expect expr  → rt_bdd_expect_truthy_rv(expr)
+                // expect a == b → rt_bdd_expect_eq_rv(a, b)
+                if args.is_empty() {
+                    return Ok(None);
+                }
+                let arg_expr = &args[0].value;
+
+                // Check for equality comparison: expect a == b
+                if let Expr::Binary { op, left, right } = arg_expr {
+                    if matches!(op, simple_parser::BinOp::Eq) {
+                        let left_hir = self.lower_expr(left, ctx)?;
+                        let right_hir = self.lower_expr(right, ctx)?;
+                        return Ok(Some(vec![HirStmt::Expr(HirExpr {
+                            kind: HirExprKind::BuiltinCall {
+                                name: "rt_bdd_expect_eq_rv".to_string(),
+                                args: vec![left_hir, right_hir],
+                            },
+                            ty: TypeId::NIL,
+                        })]));
+                    }
+                }
+
+                // General case: expect <expr>
+                let expr_hir = self.lower_expr(arg_expr, ctx)?;
+                Ok(Some(vec![HirStmt::Expr(HirExpr {
+                    kind: HirExprKind::BuiltinCall {
+                        name: "rt_bdd_expect_truthy_rv".to_string(),
+                        args: vec![expr_hir],
+                    },
+                    ty: TypeId::NIL,
+                })]))
+            }
+
+            "before_each" => {
+                // For now, just execute the block inline (simplified)
+                if args.len() > 0 {
+                    let mut stmts = Vec::new();
+                    self.lower_bdd_body(&args[0].value, &mut stmts, ctx)?;
+                    if !stmts.is_empty() {
+                        return Ok(Some(stmts));
+                    }
+                }
+                Ok(None)
+            }
+
+            "after_each" => {
+                // For now, skip after_each (simplified)
+                Ok(Some(vec![]))
+            }
+
+            _ => Ok(None),
+        }
+    }
+
+    /// Extract and lower the body of a BDD block (describe/it/before_each).
+    /// The body is typically a Lambda { body: DoBlock([nodes]) } from colon-block syntax.
+    fn lower_bdd_body(
+        &mut self,
+        body_expr: &Expr,
+        stmts: &mut Vec<HirStmt>,
+        ctx: &mut FunctionContext,
+    ) -> LowerResult<()> {
+        // Colon-block: Lambda { params: [], body: DoBlock([...]) }
+        if let Expr::Lambda { body, .. } = body_expr {
+            if let Expr::DoBlock(body_stmts) = body.as_ref() {
+                for stmt in body_stmts {
+                    let lowered = self.lower_node(stmt, ctx)?;
+                    stmts.extend(lowered);
+                }
+                return Ok(());
+            }
+        }
+        // Direct DoBlock (shouldn't happen but handle it)
+        if let Expr::DoBlock(body_stmts) = body_expr {
+            for stmt in body_stmts {
+                let lowered = self.lower_node(stmt, ctx)?;
+                stmts.extend(lowered);
+            }
+            return Ok(());
+        }
+        // Fallback: lower as expression
+        let body_hir = self.lower_expr(body_expr, ctx)?;
+        stmts.push(HirStmt::Expr(body_hir));
+        Ok(())
     }
 }

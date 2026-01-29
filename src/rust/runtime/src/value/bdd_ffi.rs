@@ -256,6 +256,82 @@ pub extern "C" fn rt_bdd_clear_state() {
 }
 
 // ============================================================================
+// RuntimeValue-based wrappers (for Cranelift codegen)
+// ============================================================================
+
+/// Extract a string from a RuntimeValue, returning the string content.
+unsafe fn rv_to_string(rv: RuntimeValue) -> String {
+    if rv.is_nil() {
+        return String::new();
+    }
+    if rv.is_heap() {
+        let ptr = rv.as_heap_ptr();
+        if (*ptr).object_type == crate::value::heap::HeapObjectType::String {
+            let str_ptr = ptr as *const super::collections::RuntimeString;
+            return (*str_ptr).as_str().to_string();
+        }
+    }
+    format!("{}", rv.as_int())
+}
+
+/// describe_start accepting a RuntimeValue string.
+#[no_mangle]
+pub extern "C" fn rt_bdd_describe_start_rv(name_rv: i64) {
+    let name = unsafe { rv_to_string(RuntimeValue(name_rv as u64)) };
+
+    BDD_INDENT.with(|cell| {
+        let indent = *cell.borrow();
+        println!("{}{}", indent_str(indent), name);
+    });
+
+    BDD_DESCRIBE_STACK.with(|cell| cell.borrow_mut().push(name));
+    BDD_INDENT.with(|cell| *cell.borrow_mut() += 1);
+    BDD_COUNTS.with(|cell| *cell.borrow_mut() = (0, 0));
+    BDD_BEFORE_EACH.with(|cell| cell.borrow_mut().push(vec![]));
+    BDD_AFTER_EACH.with(|cell| cell.borrow_mut().push(vec![]));
+}
+
+/// it_start accepting a RuntimeValue string.
+#[no_mangle]
+pub extern "C" fn rt_bdd_it_start_rv(name_rv: i64) {
+    let name = unsafe { rv_to_string(RuntimeValue(name_rv as u64)) };
+
+    BDD_EXPECT_FAILED.with(|cell| *cell.borrow_mut() = false);
+    BDD_FAILURE_MSG.with(|cell| *cell.borrow_mut() = None);
+    BDD_INSIDE_IT.with(|cell| *cell.borrow_mut() = true);
+
+    BDD_INDENT.with(|cell| {
+        let indent = *cell.borrow();
+        print!("{}  {}", indent_str(indent), name);
+    });
+}
+
+/// expect_eq accepting RuntimeValues directly.
+#[no_mangle]
+pub extern "C" fn rt_bdd_expect_eq_rv(actual: i64, expected: i64) {
+    let actual_rv = RuntimeValue(actual as u64);
+    let expected_rv = RuntimeValue(expected as u64);
+    // Compare as RuntimeValues
+    if actual_rv != expected_rv {
+        let msg = format!("Expected {} to equal {}", actual, expected);
+        BDD_EXPECT_FAILED.with(|cell| *cell.borrow_mut() = true);
+        BDD_FAILURE_MSG.with(|cell| *cell.borrow_mut() = Some(msg));
+    }
+}
+
+/// expect_truthy accepting a RuntimeValue.
+#[no_mangle]
+pub extern "C" fn rt_bdd_expect_truthy_rv(value: i64) {
+    let rv = RuntimeValue(value as u64);
+    let is_truthy = !rv.is_nil() && rv.as_bool();
+    if !is_truthy {
+        let msg = format!("Expected value to be truthy, got {:?}", rv);
+        BDD_EXPECT_FAILED.with(|cell| *cell.borrow_mut() = true);
+        BDD_FAILURE_MSG.with(|cell| *cell.borrow_mut() = Some(msg));
+    }
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 

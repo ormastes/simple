@@ -68,6 +68,90 @@ pub extern "C" fn rt_value_eq(a: RuntimeValue, b: RuntimeValue) -> u8 {
     0
 }
 
+/// Compare two RuntimeValues for ordering.
+/// Returns -1 if a < b, 0 if a == b, 1 if a > b.
+/// Handles integers, floats, strings/chars (lexicographic), and booleans.
+#[no_mangle]
+pub extern "C" fn rt_value_compare(a: RuntimeValue, b: RuntimeValue) -> i64 {
+    // Same raw value
+    if a.to_raw() == b.to_raw() {
+        return 0;
+    }
+
+    // Integer comparison
+    if a.is_int() && b.is_int() {
+        let ai = a.as_int();
+        let bi = b.as_int();
+        return if ai < bi { -1 } else if ai > bi { 1 } else { 0 };
+    }
+
+    // Float comparison
+    if a.is_float() && b.is_float() {
+        let af = a.as_float();
+        let bf = b.as_float();
+        return if af < bf { -1 } else if af > bf { 1 } else { 0 };
+    }
+
+    // Bool comparison (false < true)
+    if a.is_bool() && b.is_bool() {
+        let ab = a.as_bool() as i64;
+        let bb = b.as_bool() as i64;
+        return ab - bb;
+    }
+
+    // String/char comparison (lexicographic)
+    if a.is_heap() && b.is_heap() {
+        let ptr_a = a.as_heap_ptr();
+        let ptr_b = b.as_heap_ptr();
+        unsafe {
+            if (*ptr_a).object_type == HeapObjectType::String
+                && (*ptr_b).object_type == HeapObjectType::String
+            {
+                let str_a = ptr_a as *const RuntimeString;
+                let str_b = ptr_b as *const RuntimeString;
+                let len_a = (*str_a).len as usize;
+                let len_b = (*str_b).len as usize;
+                let data_a = (str_a.add(1)) as *const u8;
+                let data_b = (str_b.add(1)) as *const u8;
+                let min_len = len_a.min(len_b);
+                let slice_a = std::slice::from_raw_parts(data_a, min_len);
+                let slice_b = std::slice::from_raw_parts(data_b, min_len);
+                match slice_a.cmp(slice_b) {
+                    std::cmp::Ordering::Less => return -1,
+                    std::cmp::Ordering::Greater => return 1,
+                    std::cmp::Ordering::Equal => {
+                        // Equal prefix, shorter string is less
+                        return if len_a < len_b {
+                            -1
+                        } else if len_a > len_b {
+                            1
+                        } else {
+                            0
+                        };
+                    }
+                }
+            }
+        }
+    }
+
+    // Mixed int/float comparison
+    if a.is_int() && b.is_float() {
+        let af = a.as_int() as f64;
+        let bf = b.as_float();
+        return if af < bf { -1 } else if af > bf { 1 } else { 0 };
+    }
+    if a.is_float() && b.is_int() {
+        let af = a.as_float();
+        let bf = b.as_int() as f64;
+        return if af < bf { -1 } else if af > bf { 1 } else { 0 };
+    }
+
+    // Fallback: compare raw bits
+    let ra = a.to_raw() as i64;
+    let rb = b.to_raw() as i64;
+    if ra < rb { -1 } else if ra > rb { 1 } else { 0 }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

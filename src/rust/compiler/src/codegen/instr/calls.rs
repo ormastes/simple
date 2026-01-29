@@ -74,7 +74,7 @@ fn untag_runtime_value_to_int(
 
 /// Adapt argument values to match a function's expected signature.
 /// Handles count mismatches (padding/truncating) and type mismatches (casting).
-pub(super) fn adapt_args_to_signature(
+pub(crate) fn adapt_args_to_signature(
     builder: &mut FunctionBuilder,
     func_ref: cranelift_codegen::ir::FuncRef,
     arg_vals: Vec<cranelift_codegen::ir::Value>,
