@@ -143,6 +143,22 @@ impl<'a> Parser<'a> {
                 self.advance();
                 h
             }
+            TokenKind::FString(parts) => {
+                let mut value = String::new();
+                for part in parts {
+                    match part {
+                        crate::token::FStringToken::Literal(s) => value.push_str(s),
+                        crate::token::FStringToken::Expr(_) => {
+                            return Err(ParseError::syntax_error_with_span(
+                                "lean hint cannot contain interpolated expressions",
+                                self.current.span,
+                            ));
+                        }
+                    }
+                }
+                self.advance();
+                value
+            }
             _ => {
                 return Err(ParseError::syntax_error_with_span(
                     "expected string literal for lean hint tactic",
@@ -268,6 +284,22 @@ impl<'a> Parser<'a> {
                         let justification = s.clone();
                         self.advance();
                         return Ok(Some(justification));
+                    }
+                    TokenKind::FString(parts) => {
+                        let mut value = String::new();
+                        for part in parts {
+                            match part {
+                                crate::token::FStringToken::Literal(s) => value.push_str(s),
+                                crate::token::FStringToken::Expr(_) => {
+                                    return Err(ParseError::syntax_error_with_span(
+                                        "calc justification cannot contain interpolated expressions",
+                                        self.current.span,
+                                    ));
+                                }
+                            }
+                        }
+                        self.advance();
+                        return Ok(Some(value));
                     }
                     _ => {
                         return Err(ParseError::syntax_error_with_span(

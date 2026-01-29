@@ -9,460 +9,455 @@
 #   simple mcp expand <file> <sym> # Expand specific symbol
 #   simple mcp json <file.spl>     # Generate JSON output
 
-use core.*
-use core.json.*
-use host.async_nogc_mut.io.fs.*
-use host.async_nogc_mut.sys.*
-use mcp.*
-use mcp.core.*
-use mcp.core.server.*
-use mcp.core.transport.*
-use mcp.simple_lang.*
-use mcp.lsp.*
-use app.mcp.session.*
-use app.mcp.editor.*
-use app.debug.coordinator.*
-use app.debug.interpreter_backend.*
+# FFI declarations for system functions
+extern fn sys_get_args() -> List<String>
+extern fn sys_exit(code: Int)
+extern fn native_fs_read_string(path: String) -> String
+
+# Brace helpers (avoid f-string interpolation issues)
+fn LB() -> String:
+    123 as char
+
+fn RB() -> String:
+    125 as char
+
+fn Q() -> String:
+    "\""
+
+# Option unwrap helper
+fn unwrap_idx(opt) -> Int:
+    match opt:
+        case Some(i):
+            return i
+        case None:
+            return -1
+
+fn unwrap_str(result) -> String:
+    match result:
+        case Ok(s):
+            return s
+        case Err(_):
+            return ""
 
 # Main entry point
 fn main():
-    args = sys_get_args()
+    val args = sys_get_args()
 
     if args.len() < 2:
         print_usage()
         sys_exit(1)
 
-    command = args[1]
+    val command = args[1]
 
     if command == "--help" or command == "-h":
         print_usage()
         sys_exit(0)
 
     elif command == "server":
-        # Start MCP server mode
-        debug_mode = has_flag(args, "--debug")
+        val debug_mode = has_flag(args, "--debug")
         start_server(debug_mode)
 
     elif command == "read":
-        # Read file in MCP mode
         handle_read(args)
 
     elif command == "expand":
-        # Expand specific symbol
         handle_expand(args)
 
     elif command == "search":
-        # Search for symbols
         handle_search(args)
 
     elif command == "json":
-        # Generate JSON output
         handle_json(args)
 
     else:
-        # Default: treat as file path for reading
         handle_default_read(args)
 
 # Print usage information
 fn print_usage():
-    println("MCP (Model Context Protocol) Server for Simple Language")
-    println("")
-    println("Usage:")
-    println("  simple mcp server [--debug]          # Start MCP server (stdio)")
-    println("  simple mcp <file.spl>                # Generate MCP outline")
-    println("  simple mcp read <file.spl>           # Read file in MCP mode")
-    println("  simple mcp expand <file.spl> <sym>   # Expand specific symbol")
-    println("  simple mcp search <query>            # Search for symbols")
-    println("  simple mcp json <file.spl> [--meta]  # Generate JSON output")
-    println("")
-    println("Server Mode:")
-    println("  The server mode implements the Model Context Protocol over stdio.")
-    println("  It can be used with MCP-compatible clients like Claude Code.")
-    println("")
-    println("Options:")
-    println("  --help, -h          Show this help message")
-    println("  --debug             Enable debug logging (server mode)")
-    println("  --all               Show private symbols too")
-    println("  --public            Filter to public symbols only (default)")
-    println("  --meta              Include metadata in JSON output")
-    println("  --expand=<what>     What to expand: signature|body|all")
-    println("  --show-coverage     Display test coverage overlays")
-    println("")
-    println("Examples:")
-    println("  simple mcp server                    # Start MCP server")
-    println("  simple mcp user.spl")
-    println("  simple mcp expand user.spl User")
-    println("  simple mcp json user.spl --meta")
+    print("MCP (Model Context Protocol) Server for Simple Language")
+    print("")
+    print("Usage:")
+    print("  simple mcp server [--debug]          # Start MCP server (stdio)")
+    print("  simple mcp <file.spl>                # Generate MCP outline")
+    print("  simple mcp read <file.spl>           # Read file in MCP mode")
+    print("  simple mcp expand <file.spl> <sym>   # Expand specific symbol")
+    print("  simple mcp search <query>            # Search for symbols")
+    print("  simple mcp json <file.spl> [--meta]  # Generate JSON output")
+    print("")
+    print("Server Mode:")
+    print("  The server mode implements the Model Context Protocol over stdio.")
+    print("  It can be used with MCP-compatible clients like Claude Code.")
+    print("")
+    print("Options:")
+    print("  --help, -h          Show this help message")
+    print("  --debug             Enable debug logging (server mode)")
+    print("  --all               Show private symbols too")
+    print("  --meta              Include metadata in JSON output")
+    print("  --expand=<what>     What to expand: signature|body|all")
+    print("  --show-coverage     Display test coverage overlays")
+    print("")
+    print("Examples:")
+    print("  simple mcp server                    # Start MCP server")
+    print("  simple mcp user.spl")
+    print("  simple mcp expand user.spl User")
+    print("  simple mcp json user.spl --meta")
 
-# Start MCP server
-fn start_server(debug_mode: bool):
-    # Create provider for Simple language files
-    provider = SimpleLangProvider.new(".")
+# --- MCP JSON-RPC Server (stdio) ---
 
-    # Create MCP server
-    server = McpServer.new("simple-mcp", "1.0.0", provider)
-
+fn start_server(debug_mode: Bool):
     if debug_mode:
-        server.enable_debug()
+        debug_log("MCP server starting in debug mode")
 
-    # Register tools for Simple language operations
-    register_tools(server, provider)
+    # Send nothing until we get initialize request
+    var running = true
+    while running:
+        val line = read_stdin_message()
+        if line == "":
+            running = false
+        else:
+            val response = handle_jsonrpc(line, debug_mode)
+            if response != "":
+                write_stdout_message(response)
 
-    # Run the server (blocks until shutdown)
-    server.run_stdio()
+fn debug_log(msg: String):
+    eprint("DEBUG: " + msg)
 
-# Tool handler classes - use classes to capture provider reference
-# (Simple uses \x: syntax for lambdas, not fn(x) -> T:)
+fn read_stdin_message() -> String:
+    # Read Content-Length header
+    var header = input()
+    if header == "":
+        return ""
 
-class ReadCodeHandler:
-    pub provider: SimpleLangProvider
+    # Strip trailing \r if present
+    if header.ends_with("\r"):
+        header = header.substring(0, header.len() - 1)
 
-    pub fn new(provider: SimpleLangProvider) -> ReadCodeHandler:
-        return ReadCodeHandler:
-            provider: provider
+    # Parse content length
+    var content_length = 0
+    if header.starts_with("Content-Length:"):
+        val len_str = header.replace("Content-Length:", "").trim()
+        content_length = len_str.to_int()
 
-    pub fn handle(self, args: Dict<String, Any>) -> String:
-        path = args.get("path", "") as String
-        show_all = args.get("show_all", false) as bool
+    if content_length == 0:
+        return ""
 
-        match fs_read_text(path):
-            case Ok(source):
-                self.provider.register_simple_file(path, source)
-                uri = "file://" + path
-                return self.provider.get_file_mcp(uri, show_all)
-            case Err(e):
-                return "Error reading file: " + e
+    # Skip blank line after headers
+    input()
 
-class ExpandSymbolHandler:
-    pub fn new() -> ExpandSymbolHandler:
-        return ExpandSymbolHandler:
+    # Read body (JSON-RPC body is typically one line)
+    val body = input()
+    body
 
-    pub fn handle(self, args: Dict<String, Any>) -> String:
-        path = args.get("path", "") as String
-        symbol_name = args.get("symbol", "") as String
-        what = args.get("what", "all") as String
+fn write_stdout_message(body: String):
+    var header = "Content-Length: "
+    header = header + body.len().to_string()
+    header = header + "\r\n\r\n"
+    print_raw(header)
+    print_raw(body)
 
-        match fs_read_text(path):
-            case Ok(source):
-                symbols = parse_file(source)
-                symbol_opt = find_symbol(symbols, symbol_name)
+fn handle_jsonrpc(body: String, debug_mode: Bool) -> String:
+    if debug_mode:
+        debug_log("Request: " + body)
 
-                match symbol_opt:
-                    case Some(symbol):
-                        return format_single_symbol(symbol, what)
-                    case None:
-                        return "Symbol not found: " + symbol_name
-            case Err(e):
-                return "Error reading file: " + e
+    # Simple JSON parsing for method extraction
+    val method = extract_json_string(body, "method")
+    val id = extract_json_value(body, "id")
 
-class SearchSymbolsHandler:
-    pub provider: SimpleLangProvider
+    if method == "initialize":
+        return make_initialize_response(id)
+    elif method == "initialized":
+        return ""  # Notification, no response
+    elif method == "shutdown":
+        return make_result_response(id, "null")
+    elif method == "exit":
+        sys_exit(0)
+        return ""
+    elif method == "tools/list":
+        return make_tools_list_response(id)
+    elif method == "tools/call":
+        val tool_name = extract_nested_string(body, "params", "name")
+        return handle_tool_call(id, tool_name, body, debug_mode)
+    else:
+        if debug_mode:
+            debug_log("Unknown method: " + method)
+        return make_error_response(id, -32601, "Method not found: " + method)
 
-    pub fn new(provider: SimpleLangProvider) -> SearchSymbolsHandler:
-        return SearchSymbolsHandler:
-            provider: provider
+fn jp(key: String, val_str: String) -> String:
+    var r = Q()
+    r = r + key
+    r = r + Q()
+    r = r + ":"
+    r = r + val_str
+    r
 
-    pub fn handle(self, args: Dict<String, Any>) -> String:
-        query = args.get("query", "") as String
+fn js(s: String) -> String:
+    var r = Q()
+    r = r + s
+    r = r + Q()
+    r
 
-        resources = self.provider.search_resources(query)
+fn jo1(pair: String) -> String:
+    var r = LB()
+    r = r + pair
+    r = r + RB()
+    r
 
-        result = "Found " + resources.len().to_string() + " symbols:\n"
-        for res in resources:
-            result = result + "- " + res.name + " (" + res.uri + ")\n"
+fn jo2(p1: String, p2: String) -> String:
+    var r = LB()
+    r = r + p1
+    r = r + ","
+    r = r + p2
+    r = r + RB()
+    r
 
-        return result
+fn jo3(p1: String, p2: String, p3: String) -> String:
+    var r = LB()
+    r = r + p1
+    r = r + ","
+    r = r + p2
+    r = r + ","
+    r = r + p3
+    r = r + RB()
+    r
 
-class ListFilesHandler:
-    pub fn new() -> ListFilesHandler:
-        return ListFilesHandler:
+fn make_initialize_response(id: String) -> String:
+    val server_info = jo2(jp("name", js("simple-mcp")), jp("version", js("1.0.0")))
+    val caps = jo1(jp("tools", jo1("")))
+    val result = jo3(jp("protocolVersion", js("2024-11-05")), jp("capabilities", caps), jp("serverInfo", server_info))
+    jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", result))
 
-    pub fn handle(self, args: Dict<String, Any>) -> String:
-        path = args.get("path", ".") as String
+fn make_tool_schema(name: String, desc: String, prop_name: String, prop_desc: String, required: Bool) -> String:
+    val prop = jo2(jp("type", js("string")), jp("description", js(prop_desc)))
+    val props = jo1(jp(prop_name, prop))
+    var req_arr = "[]"
+    if required:
+        req_arr = "[" + js(prop_name) + "]"
+    val schema = jo3(jp("type", js("object")), jp("properties", props), jp("required", req_arr))
+    jo3(jp("name", js(name)), jp("description", js(desc)), jp("inputSchema", schema))
 
-        match fs_read_dir(path):
-            case Ok(entries):
-                result = "Simple files in " + path + ":\n"
-                for entry in entries.entries:
-                    if entry.name.ends_with(".spl"):
-                        result = result + "- " + entry.name + "\n"
-                return result
-            case Err(e):
-                return "Error listing directory: " + e
+fn make_tools_list_response(id: String) -> String:
+    val t1 = make_tool_schema("read_code", "Read a Simple language source file", "path", "File path", true)
+    val t2 = make_tool_schema("list_files", "List Simple language files in a directory", "path", "Directory path", false)
+    val t3 = make_tool_schema("search_code", "Search for code patterns", "query", "Search query", true)
+    val t4 = make_tool_schema("file_info", "Get file information", "path", "File path", true)
+    var tools = "["
+    tools = tools + t1
+    tools = tools + ","
+    tools = tools + t2
+    tools = tools + ","
+    tools = tools + t3
+    tools = tools + ","
+    tools = tools + t4
+    tools = tools + "]"
+    val result = jo1(jp("tools", tools))
+    jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", result))
 
-class FileInfoHandler:
-    pub fn new() -> FileInfoHandler:
-        return FileInfoHandler:
+fn handle_tool_call(id: String, tool_name: String, body: String, debug_mode: Bool) -> String:
+    if debug_mode:
+        debug_log("Tool call: " + tool_name)
 
-    pub fn handle(self, args: Dict<String, Any>) -> String:
-        path = args.get("path", "") as String
+    if tool_name == "read_code":
+        val path = extract_nested_string(body, "arguments", "path")
+        val content = read_file_safe(path)
+        val escaped = escape_json(content)
+        return make_tool_result(id, escaped)
 
-        match fs_read_text(path):
-            case Ok(source):
-                symbols = parse_file(source)
-                pub_symbols = filter_public_symbols(symbols)
+    elif tool_name == "list_files":
+        val path = extract_nested_string(body, "arguments", "path")
+        var dir = path
+        if dir == "":
+            dir = "."
+        val listing = list_spl_files(dir)
+        val escaped = escape_json(listing)
+        return make_tool_result(id, escaped)
 
-                lines = source.split("\n").len()
+    elif tool_name == "search_code":
+        val query = extract_nested_string(body, "arguments", "query")
+        val results = search_files(query)
+        val escaped = escape_json(results)
+        return make_tool_result(id, escaped)
 
-                result = "File: " + path + "\n"
-                result = result + "Lines: " + lines.to_string() + "\n"
-                result = result + "Total symbols: " + symbols.len().to_string() + "\n"
-                result = result + "Public symbols: " + pub_symbols.len().to_string() + "\n"
+    elif tool_name == "file_info":
+        val path = extract_nested_string(body, "arguments", "path")
+        val info = get_file_info(path)
+        val escaped = escape_json(info)
+        return make_tool_result(id, escaped)
 
-                # Count by type
-                classes = 0
-                functions = 0
-                traits = 0
-                for sym in symbols:
-                    match sym.kind:
-                        case SymbolKind.Class:
-                            classes = classes + 1
-                        case SymbolKind.Struct:
-                            classes = classes + 1
-                        case SymbolKind.Function:
-                            functions = functions + 1
-                        case SymbolKind.Method:
-                            functions = functions + 1
-                        case SymbolKind.Trait:
-                            traits = traits + 1
-                        case _:
-                            pass
+    else:
+        return make_error_response(id, -32602, "Unknown tool: " + tool_name)
 
-                result = result + "Classes/Structs: " + classes.to_string() + "\n"
-                result = result + "Functions/Methods: " + functions.to_string() + "\n"
-                result = result + "Traits: " + traits.to_string() + "\n"
+fn make_tool_result(id: String, content: String) -> String:
+    val text_obj = jo2(jp("type", js("text")), jp("text", js(content)))
+    val result = jo1(jp("content", "[" + text_obj + "]"))
+    jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", result))
 
-                return result
-            case Err(e):
-                return "Error reading file: " + e
+fn make_result_response(id: String, result: String) -> String:
+    jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", result))
 
-# Register MCP tools using handler classes
-fn register_tools(server: McpServer, provider: SimpleLangProvider):
-    # Create handlers
-    read_handler = ReadCodeHandler.new(provider)
-    expand_handler = ExpandSymbolHandler.new()
-    search_handler = SearchSymbolsHandler.new(provider)
-    list_handler = ListFilesHandler.new()
-    info_handler = FileInfoHandler.new()
+fn make_error_response(id: String, code: Int, message: String) -> String:
+    val err = jo2(jp("code", code.to_string()), jp("message", js(escape_json(message))))
+    jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("error", err))
 
-    # Create LSP handlers
-    lsp_def_handler = LspDefinitionHandler.new()
-    lsp_ref_handler = LspReferencesHandler.new()
-    lsp_hover_handler = LspHoverHandler.new()
-    lsp_symbols_handler = LspSymbolsHandler.new()
-    lsp_diag_handler = LspDiagnosticsHandler.new()
+# --- Tool implementations ---
 
-    # Register tools with backslash lambda syntax
-    server.register_simple_tool(
-        "read_code",
-        "Read a Simple language source file in MCP format (token-efficient preview with block marks)",
-        \args: read_handler.handle(args)
-    )
+fn read_file_safe(path: String) -> String:
+    val content = unwrap_str(native_fs_read_string(path))
+    if content == "":
+        return "Error: could not read file: " + path
+    content
 
-    server.register_simple_tool(
-        "expand_symbol",
-        "Expand a specific symbol to show its full implementation details",
-        \args: expand_handler.handle(args)
-    )
+fn list_spl_files(dir: String) -> String:
+    "Simple files in " + dir + ":\\n(directory listing requires fs_read_dir FFI)"
 
-    server.register_simple_tool(
-        "search_symbols",
-        "Search for symbols across Simple language files",
-        \args: search_handler.handle(args)
-    )
+fn search_files(query: String) -> String:
+    "Search for '" + query + "' requires filesystem iteration FFI"
 
-    server.register_simple_tool(
-        "list_files",
-        "List Simple language files in a directory",
-        \args: list_handler.handle(args)
-    )
+fn get_file_info(path: String) -> String:
+    val content = unwrap_str(native_fs_read_string(path))
+    if content == "":
+        return "Error: could not read file: " + path
+    val lines = content.split("\n")
+    var line_count = lines.len()
+    var fn_count = 0
+    var class_count = 0
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.starts_with("fn ") or trimmed.starts_with("me ") or trimmed.starts_with("static fn "):
+            fn_count = fn_count + 1
+        elif trimmed.starts_with("class ") or trimmed.starts_with("struct "):
+            class_count = class_count + 1
+    "File: " + path + "\\nLines: " + line_count.to_string() + "\\nFunctions: " + fn_count.to_string() + "\\nClasses/Structs: " + class_count.to_string()
 
-    server.register_simple_tool(
-        "file_info",
-        "Get information about a Simple language file (symbol count, etc.)",
-        \args: info_handler.handle(args)
-    )
+# --- JSON helpers (minimal, no library dependency) ---
 
-    # Register LSP MCP tools
-    server.register_simple_tool(
-        "lsp_definition",
-        "Find the definition location of a symbol at a given position in a Simple language file",
-        \args: lsp_def_handler.handle(args)
-    )
+fn extract_json_string(json: String, key: String) -> String:
+    val search = Q() + key + Q() + ":"
+    val idx = unwrap_idx(json.index_of(search))
+    if idx < 0:
+        return ""
+    val slen = search.len()
+    val start = idx + slen
+    val after = json.substring(start)
+    val trimmed = after.trim()
+    if trimmed.starts_with(Q()):
+        val rest = trimmed.substring(1)
+        val end = unwrap_idx(rest.index_of(Q()))
+        if end >= 0:
+            return rest.substring(0, end)
+    ""
 
-    server.register_simple_tool(
-        "lsp_references",
-        "Find all references to a symbol at a given position in a Simple language file",
-        \args: lsp_ref_handler.handle(args)
-    )
+fn extract_json_value(json: String, key: String) -> String:
+    val search = Q() + key + Q() + ":"
+    val idx = unwrap_idx(json.index_of(search))
+    if idx < 0:
+        return "null"
+    val slen = search.len()
+    val start = idx + slen
+    val after = json.substring(start)
+    val trimmed = after.trim()
+    # Read until comma, closing brace, or end
+    var end = 0
+    for ch in trimmed:
+        if ch == "," or ch == RB() or ch == "]":
+            break
+        end = end + 1
+    trimmed.substring(0, end).trim()
 
-    server.register_simple_tool(
-        "lsp_hover",
-        "Get hover information (type info, documentation) for a symbol in a Simple language file",
-        \args: lsp_hover_handler.handle(args)
-    )
+fn extract_nested_string(json: String, outer_key: String, inner_key: String) -> String:
+    val search = Q() + outer_key + Q() + ":"
+    val idx = unwrap_idx(json.index_of(search))
+    if idx < 0:
+        return ""
+    val slen = search.len()
+    val start = idx + slen
+    val after = json.substring(start)
+    extract_json_string(after, inner_key)
 
-    server.register_simple_tool(
-        "lsp_symbols",
-        "Get all symbols (functions, classes, variables) in a Simple language document",
-        \args: lsp_symbols_handler.handle(args)
-    )
+fn escape_json(text: String) -> String:
+    var result = text
+    result = result.replace("\\", "\\\\")
+    result = result.replace(Q(), "\\" + Q())
+    result = result.replace("\n", "\\n")
+    result = result.replace("\r", "\\r")
+    result = result.replace("\t", "\\t")
+    result
 
-    server.register_simple_tool(
-        "lsp_diagnostics",
-        "Get parse errors and semantic warnings for a Simple language file",
-        \args: lsp_diag_handler.handle(args)
-    )
+# --- CLI mode handlers ---
 
-# Handle read command (CLI mode)
 fn handle_read(args: List<String>):
     if args.len() < 3:
-        println("Error: Missing file path")
-        println("Usage: simple mcp read <file.spl>")
+        print("Error: Missing file path")
+        print("Usage: simple mcp read <file.spl>")
         sys_exit(1)
+    val file_path = args[2]
+    val content = unwrap_str(native_fs_read_string(file_path))
+    if content == "":
+        print("Error reading file: " + file_path)
+        sys_exit(1)
+    print(content)
 
-    file_path = args[2]
-    show_all = has_flag(args, "--all")
-    show_coverage = has_flag(args, "--show-coverage")
-
-    match fs_read_text(file_path):
-        case Ok(source):
-            if show_coverage:
-                symbols = parse_file(source)
-                coverage = parse_coverage_data("")
-                text = format_coverage_overlay(symbols, coverage)
-                println(text)
-            else:
-                text = mcp_from_source(source, show_all)
-                println(text)
-        case Err(e):
-            println("Error reading file: " + e)
-            sys_exit(1)
-
-# Handle expand command
 fn handle_expand(args: List<String>):
     if args.len() < 4:
-        println("Error: Missing file path or symbol name")
-        println("Usage: simple mcp expand <file.spl> <symbol> [--expand=<what>]")
+        print("Error: Missing file path or symbol name")
+        print("Usage: simple mcp expand <file.spl> <symbol>")
         sys_exit(1)
+    val file_path = args[2]
+    val symbol_name = args[3]
+    val content = unwrap_str(native_fs_read_string(file_path))
+    if content == "":
+        print("Error reading file: " + file_path)
+        sys_exit(1)
+    # Find symbol in content (basic search)
+    val lines = content.split("\n")
+    var found = false
+    var line_num = 0
+    for line in lines:
+        line_num = line_num + 1
+        if line.contains(symbol_name):
+            print(line_num.to_string() + ": " + line)
+            found = true
+    if not found:
+        print("Symbol not found: " + symbol_name)
 
-    file_path = args[2]
-    symbol_name = args[3]
-    what = get_flag_value(args, "--expand", "all")
-
-    match fs_read_text(file_path):
-        case Ok(source):
-            symbols = parse_file(source)
-            symbol_opt = find_symbol(symbols, symbol_name)
-
-            match symbol_opt:
-                case Some(symbol):
-                    text = format_single_symbol(symbol, what)
-                    println(text)
-                case None:
-                    println("Error: Symbol not found: " + symbol_name)
-                    sys_exit(1)
-        case Err(e):
-            println("Error reading file: " + e)
-            sys_exit(1)
-
-# Handle search command
 fn handle_search(args: List<String>):
     if args.len() < 3:
-        println("Error: Missing search query")
-        println("Usage: simple mcp search <query> [--public]")
+        print("Error: Missing search query")
+        print("Usage: simple mcp search <query>")
         sys_exit(1)
+    val query = args[2]
+    print("Search for '" + query + "' (CLI mode)")
 
-    query = args[2]
-    filter = "all"
-    if has_flag(args, "--public"):
-        filter = "public"
-
-    results = search(query, filter)
-    for result in results:
-        println(result)
-
-# Handle JSON output command
 fn handle_json(args: List<String>):
     if args.len() < 3:
-        println("Error: Missing file path")
-        println("Usage: simple mcp json <file.spl> [--meta] [--all]")
+        print("Error: Missing file path")
+        print("Usage: simple mcp json <file.spl>")
         sys_exit(1)
+    val file_path = args[2]
+    val content = unwrap_str(native_fs_read_string(file_path))
+    if content == "":
+        print("Error reading file: " + file_path)
+        sys_exit(1)
+    # Output as basic JSON
+    val escaped = escape_json(content)
+    val lb = LB()
+    val rb = RB()
+    val q = Q()
+    print(lb + q + "file" + q + ":" + q + escape_json(file_path) + q + "," + q + "content" + q + ":" + q + escaped + q + rb)
 
-    file_path = args[2]
-    show_all = has_flag(args, "--all")
-    include_meta = has_flag(args, "--meta")
-
-    match fs_read_text(file_path):
-        case Ok(source):
-            json_output = mcp_json_from_source(source, show_all, include_meta)
-            println(json_output)
-        case Err(e):
-            println("Error reading file: " + e)
-            sys_exit(1)
-
-# Handle default read (just file path)
 fn handle_default_read(args: List<String>):
-    file_path = args[1]
-    show_all = has_flag(args, "--all")
-
-    match fs_read_text(file_path):
-        case Ok(source):
-            text = mcp_from_source(source, show_all)
-            println(text)
-        case Err(e):
-            println("Error reading file: " + e)
-            sys_exit(1)
+    val file_path = args[1]
+    val content = unwrap_str(native_fs_read_string(file_path))
+    if content == "":
+        print("Error reading file: " + file_path)
+        sys_exit(1)
+    print(content)
 
 # Check if a flag is present in args
-fn has_flag(args: List<String>, flag: String) -> bool:
+fn has_flag(args: List<String>, flag: String) -> Bool:
     for arg in args:
         if arg == flag:
             return true
     return false
-
-# Get value of a flag like --expand=all
-fn get_flag_value(args: List<String>, flag_prefix: String, default: String) -> String:
-    for arg in args:
-        if arg.starts_with(flag_prefix + "="):
-            parts = arg.split("=")
-            if parts.len() >= 2:
-                return parts[1]
-    return default
-
-# Search function - searches for query in files matching filter pattern
-fn search(query: String, filter: String) -> List<String>:
-    var results: List<String> = []
-
-    # Determine search directory (current dir or specified)
-    val search_dir = "."
-
-    # Get pattern for file matching
-    val pattern = if filter.is_empty() then "**/*.spl" else filter
-
-    # Find matching files
-    val files = match fs_glob(search_dir, pattern):
-        case Ok(file_list): file_list
-        case Err(_): return ["Error: Could not list files"]
-
-    # Search in each file
-    for file_path in files:
-        val content = match fs_read_text(file_path):
-            case Ok(text): text
-            case Err(_): continue
-
-        # Search for query in content
-        val lines = content.split("\n")
-        var line_num = 1
-        for line in lines:
-            if line.contains(query):
-                results.push("{file_path}:{line_num}: {line.trim()}")
-            line_num = line_num + 1
-
-    if results.is_empty():
-        return ["No matches found for '{query}'"]
-
-    return results
 
 # Entry point
 main()

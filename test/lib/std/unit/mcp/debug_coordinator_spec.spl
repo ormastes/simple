@@ -1,0 +1,302 @@
+"""
+Debug Coordinator Tests
+Feature: Debug Backend Coordination
+Category: MCP, Debug
+Status: In Progress
+
+Tests for the DebugCoordinator that routes debug commands to
+appropriate backends, and the DebugBackend trait interface types.
+"""
+
+import std.spec
+
+# ----------- Inline type definitions for testing -----------
+
+class FrameInfo:
+    index: Int
+    function_name: String
+    file: String
+    line: Int
+    column: Int
+
+    static fn of(index: Int, function_name: String, file: String, line: Int) -> FrameInfo:
+        FrameInfo(
+            index: index,
+            function_name: function_name,
+            file: file,
+            line: line,
+            column: 0
+        )
+
+class VarInfo:
+    name: String
+    value: String
+    type_name: String
+
+    static fn of(name: String, value: String, type_name: String) -> VarInfo:
+        VarInfo(name: name, value: value, type_name: type_name)
+
+class LocationInfo:
+    file: String
+    line: Int
+    column: Int
+    function_name: String
+
+    static fn at(file: String, line: Int, function_name: String) -> LocationInfo:
+        LocationInfo(file: file, line: line, column: 0, function_name: function_name)
+
+# Mock backend for testing coordination logic
+class MockBackend:
+    name_val: String
+    attached: Bool
+    running: Bool
+    paused: Bool
+    breakpoints: List<String>
+    step_count: Int
+    last_step_mode: String
+
+    static fn create(name: String) -> MockBackend:
+        MockBackend(
+            name_val: name,
+            attached: false,
+            running: false,
+            paused: false,
+            breakpoints: [],
+            step_count: 0,
+            last_step_mode: ""
+        )
+
+impl MockBackend:
+    fn name() -> String:
+        self.name_val
+
+    me attach(program_path: String, args: List<String>) -> Result<Nil, String>:
+        self.attached = true
+        Ok(nil)
+
+    me detach() -> Result<Nil, String>:
+        self.attached = false
+        self.running = false
+        Ok(nil)
+
+    me run() -> Result<Nil, String>:
+        if not self.attached:
+            return Err("Not attached")
+        self.running = true
+        Ok(nil)
+
+    me pause() -> Result<Nil, String>:
+        self.paused = true
+        self.running = false
+        Ok(nil)
+
+    me resume() -> Result<Nil, String>:
+        self.paused = false
+        self.running = true
+        Ok(nil)
+
+    me step_over() -> Result<Nil, String>:
+        self.step_count = self.step_count + 1
+        self.last_step_mode = "over"
+        Ok(nil)
+
+    me step_in() -> Result<Nil, String>:
+        self.step_count = self.step_count + 1
+        self.last_step_mode = "in"
+        Ok(nil)
+
+    me step_out() -> Result<Nil, String>:
+        self.step_count = self.step_count + 1
+        self.last_step_mode = "out"
+        Ok(nil)
+
+    me add_breakpoint(file: String, line: Int) -> Result<Int, String>:
+        val key = "{file}:{line}"
+        self.breakpoints.push(key)
+        Ok(self.breakpoints.len())
+
+    me remove_breakpoint(file: String, line: Int) -> Result<Nil, String>:
+        val key = "{file}:{line}"
+        self.breakpoints = self.breakpoints.filter(\bp: bp != key)
+        Ok(nil)
+
+    fn stack_trace() -> Result<List<FrameInfo>, String>:
+        Ok([
+            FrameInfo.of(0, "main", "test.spl", 1),
+            FrameInfo.of(1, "helper", "test.spl", 10)
+        ])
+
+    fn locals() -> Result<List<VarInfo>, String>:
+        Ok([
+            VarInfo.of("x", "42", "Int"),
+            VarInfo.of("name", "Alice", "String")
+        ])
+
+    fn evaluate(expr: String) -> Result<String, String>:
+        Ok("(result of {expr})")
+
+    fn current_location() -> Result<LocationInfo, String>:
+        Ok(LocationInfo.at("test.spl", 5, "main"))
+
+# ----------- Tests -----------
+
+describe "FrameInfo":
+    it "creates frame info":
+        val frame = FrameInfo.of(0, "main", "test.spl", 42)
+        expect(frame.index == 0)
+        expect(frame.function_name == "main")
+        expect(frame.file == "test.spl")
+        expect(frame.line == 42)
+        expect(frame.column == 0)
+
+describe "VarInfo":
+    it "creates variable info":
+        val v = VarInfo.of("count", "10", "Int")
+        expect(v.name == "count")
+        expect(v.value == "10")
+        expect(v.type_name == "Int")
+
+describe "LocationInfo":
+    it "creates location info":
+        val loc = LocationInfo.at("main.spl", 15, "run")
+        expect(loc.file == "main.spl")
+        expect(loc.line == 15)
+        expect(loc.function_name == "run")
+
+describe "MockBackend":
+    context "lifecycle":
+        it "starts detached":
+            val backend = MockBackend.create("test")
+            expect(not backend.attached)
+            expect(not backend.running)
+
+        it "attaches successfully":
+            var backend = MockBackend.create("test")
+            match backend.attach("prog.spl", []):
+                case Ok(_): expect(backend.attached)
+                case Err(_): expect(false)
+
+        it "runs after attach":
+            var backend = MockBackend.create("test")
+            backend.attach("prog.spl", [])
+            match backend.run():
+                case Ok(_): expect(backend.running)
+                case Err(_): expect(false)
+
+        it "fails to run without attach":
+            var backend = MockBackend.create("test")
+            match backend.run():
+                case Ok(_): expect(false)
+                case Err(e): expect(e == "Not attached")
+
+        it "detaches cleanly":
+            var backend = MockBackend.create("test")
+            backend.attach("prog.spl", [])
+            backend.run()
+            backend.detach()
+            expect(not backend.attached)
+            expect(not backend.running)
+
+    context "execution control":
+        it "pauses running program":
+            var backend = MockBackend.create("test")
+            backend.attach("prog.spl", [])
+            backend.run()
+            backend.pause()
+            expect(backend.paused)
+            expect(not backend.running)
+
+        it "resumes paused program":
+            var backend = MockBackend.create("test")
+            backend.attach("prog.spl", [])
+            backend.run()
+            backend.pause()
+            backend.resume()
+            expect(not backend.paused)
+            expect(backend.running)
+
+    context "stepping":
+        it "tracks step over":
+            var backend = MockBackend.create("test")
+            backend.step_over()
+            expect(backend.step_count == 1)
+            expect(backend.last_step_mode == "over")
+
+        it "tracks step in":
+            var backend = MockBackend.create("test")
+            backend.step_in()
+            expect(backend.last_step_mode == "in")
+
+        it "tracks step out":
+            var backend = MockBackend.create("test")
+            backend.step_out()
+            expect(backend.last_step_mode == "out")
+
+        it "accumulates step count":
+            var backend = MockBackend.create("test")
+            backend.step_over()
+            backend.step_in()
+            backend.step_out()
+            expect(backend.step_count == 3)
+
+    context "breakpoints":
+        it "adds breakpoints":
+            var backend = MockBackend.create("test")
+            match backend.add_breakpoint("test.spl", 10):
+                case Ok(id): expect(id == 1)
+                case Err(_): expect(false)
+            expect(backend.breakpoints.len() == 1)
+
+        it "adds multiple breakpoints":
+            var backend = MockBackend.create("test")
+            backend.add_breakpoint("test.spl", 10)
+            backend.add_breakpoint("test.spl", 20)
+            backend.add_breakpoint("other.spl", 5)
+            expect(backend.breakpoints.len() == 3)
+
+        it "removes breakpoints":
+            var backend = MockBackend.create("test")
+            backend.add_breakpoint("test.spl", 10)
+            backend.add_breakpoint("test.spl", 20)
+            backend.remove_breakpoint("test.spl", 10)
+            expect(backend.breakpoints.len() == 1)
+
+    context "inspection":
+        it "returns stack trace":
+            val backend = MockBackend.create("test")
+            match backend.stack_trace():
+                case Ok(frames):
+                    expect(frames.len() == 2)
+                    expect(frames[0].function_name == "main")
+                    expect(frames[1].function_name == "helper")
+                case Err(_):
+                    expect(false)
+
+        it "returns local variables":
+            val backend = MockBackend.create("test")
+            match backend.locals():
+                case Ok(vars):
+                    expect(vars.len() == 2)
+                    expect(vars[0].name == "x")
+                    expect(vars[0].value == "42")
+                    expect(vars[1].name == "name")
+                case Err(_):
+                    expect(false)
+
+        it "evaluates expressions":
+            val backend = MockBackend.create("test")
+            match backend.evaluate("x + 1"):
+                case Ok(result):
+                    expect(result.contains("x + 1"))
+                case Err(_):
+                    expect(false)
+
+        it "returns current location":
+            val backend = MockBackend.create("test")
+            match backend.current_location():
+                case Ok(loc):
+                    expect(loc.file == "test.spl")
+                    expect(loc.line == 5)
+                    expect(loc.function_name == "main")
+                case Err(_):
+                    expect(false)

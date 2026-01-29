@@ -202,7 +202,9 @@ impl Lowerer {
                 }
             }
             // Static method calls on classes/structs
-            else if self.module.types.lookup(recv_name).is_some() {
+            // Only treat as static method if the name is NOT a local variable
+            // (e.g., `text` is both a type alias and could be a variable name)
+            else if ctx.lookup(recv_name).is_none() && self.module.types.lookup(recv_name).is_some() {
                 return self.lower_static_method_call(recv_name, method, args, ctx);
             }
         }

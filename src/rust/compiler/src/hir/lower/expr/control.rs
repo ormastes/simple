@@ -337,9 +337,16 @@ impl Lowerer {
                 // Compare subject == literal
                 let lit_hir = self.lower_expr(lit_expr, ctx)?;
 
-                // Check if subject is a string type - use rt_string_eq for string comparison
+                // Check if subject or literal is a string type - use rt_string_eq for string comparison
+                // Also check CHAR and ANY since string indexing returns single-char strings
+                // and the literal may be a string (e.g., char literals like '(' are strings)
                 let is_string =
-                    subject_ty == TypeId::STRING || matches!(self.module.types.get(subject_ty), Some(HirType::String));
+                    subject_ty == TypeId::STRING
+                    || subject_ty == TypeId::CHAR
+                    || matches!(self.module.types.get(subject_ty), Some(HirType::String | HirType::Char))
+                    || lit_hir.ty == TypeId::STRING
+                    || lit_hir.ty == TypeId::CHAR
+                    || (subject_ty == TypeId::ANY && matches!(lit_hir.kind, HirExprKind::String(_)));
 
                 if is_string {
                     // Use builtin string equality for string comparison

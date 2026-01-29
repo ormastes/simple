@@ -33,9 +33,16 @@ pub extern "C" fn rt_value_eq(a: RuntimeValue, b: RuntimeValue) -> u8 {
     }
 
     // For heap objects, compare by content
+    // Guard: raw untagged integers can have TAG_HEAP bits (0b001), producing
+    // invalid low addresses. Real heap pointers are always above 0x1000.
     if a.is_heap() && b.is_heap() {
         let ptr_a = a.as_heap_ptr();
         let ptr_b = b.as_heap_ptr();
+        if ptr_a.is_null() || ptr_b.is_null()
+            || (ptr_a as usize) < 0x1000 || (ptr_b as usize) < 0x1000
+        {
+            return 0;
+        }
         unsafe {
             if (*ptr_a).object_type == HeapObjectType::String && (*ptr_b).object_type == HeapObjectType::String {
                 let str_a = ptr_a as *const RuntimeString;
@@ -56,12 +63,27 @@ pub extern "C" fn rt_value_eq(a: RuntimeValue, b: RuntimeValue) -> u8 {
             if (*ptr_a).object_type == HeapObjectType::Enum && (*ptr_b).object_type == HeapObjectType::Enum {
                 let enum_a = ptr_a as *const crate::value::objects::RuntimeEnum;
                 let enum_b = ptr_b as *const crate::value::objects::RuntimeEnum;
-                if (*enum_a).discriminant != (*enum_b).discriminant {
+                let disc_a = (*enum_a).discriminant;
+                let disc_b = (*enum_b).discriminant;
+                eprintln!(
+                    "[rt_value_eq] enum cmp: disc_a={} disc_b={} id_a={} id_b={} payload_a={:#x} payload_b={:#x}",
+                    disc_a, disc_b, (*enum_a).enum_id, (*enum_b).enum_id,
+                    (*enum_a).payload.to_raw(), (*enum_b).payload.to_raw()
+                );
+                if disc_a != disc_b {
                     return 0;
                 }
                 // Recursively compare payloads
                 return rt_value_eq((*enum_a).payload, (*enum_b).payload);
             }
+            // Log ALL heap comparisons for debugging
+            eprintln!(
+                "[rt_value_eq] heap: a_type={} b_type={} a_raw={:#x} b_raw={:#x}",
+                (*ptr_a).object_type as u8,
+                (*ptr_b).object_type as u8,
+                a.to_raw(),
+                b.to_raw()
+            );
         }
     }
 
@@ -86,10 +108,17 @@ pub extern "C" fn rt_value_compare(a: RuntimeValue, b: RuntimeValue) -> i64 {
     }
 
     // Float comparison
+    // Guard: raw untagged integers can have TAG_FLOAT bits (0b010). Verify both
+    // values produce valid (non-subnormal) floats before comparing as floats.
     if a.is_float() && b.is_float() {
         let af = a.as_float();
         let bf = b.as_float();
-        return if af < bf { -1 } else if af > bf { 1 } else { 0 };
+        let a_valid = af.is_normal() || af.is_infinite() || af.is_nan() || af == 0.0;
+        let b_valid = bf.is_normal() || bf.is_infinite() || bf.is_nan() || bf == 0.0;
+        if a_valid && b_valid {
+            return if af < bf { -1 } else if af > bf { 1 } else { 0 };
+        }
+        // Fall through to raw comparison for raw untagged integers
     }
 
     // Bool comparison (false < true)
@@ -100,50 +129,67 @@ pub extern "C" fn rt_value_compare(a: RuntimeValue, b: RuntimeValue) -> i64 {
     }
 
     // String/char comparison (lexicographic)
+    // Guard: raw untagged integers can have TAG_HEAP bits (0b001), producing
+    // very low invalid addresses when as_heap_ptr strips the tag. Real heap
+    // pointers are always above the first page (typically > 0x1000).
     if a.is_heap() && b.is_heap() {
         let ptr_a = a.as_heap_ptr();
         let ptr_b = b.as_heap_ptr();
-        unsafe {
-            if (*ptr_a).object_type == HeapObjectType::String
-                && (*ptr_b).object_type == HeapObjectType::String
-            {
-                let str_a = ptr_a as *const RuntimeString;
-                let str_b = ptr_b as *const RuntimeString;
-                let len_a = (*str_a).len as usize;
-                let len_b = (*str_b).len as usize;
-                let data_a = (str_a.add(1)) as *const u8;
-                let data_b = (str_b.add(1)) as *const u8;
-                let min_len = len_a.min(len_b);
-                let slice_a = std::slice::from_raw_parts(data_a, min_len);
-                let slice_b = std::slice::from_raw_parts(data_b, min_len);
-                match slice_a.cmp(slice_b) {
-                    std::cmp::Ordering::Less => return -1,
-                    std::cmp::Ordering::Greater => return 1,
-                    std::cmp::Ordering::Equal => {
-                        // Equal prefix, shorter string is less
-                        return if len_a < len_b {
-                            -1
-                        } else if len_a > len_b {
-                            1
-                        } else {
-                            0
-                        };
+        let a_valid = !ptr_a.is_null() && (ptr_a as usize) >= 0x1000;
+        let b_valid = !ptr_b.is_null() && (ptr_b as usize) >= 0x1000;
+        if a_valid && b_valid {
+            unsafe {
+                if (*ptr_a).object_type == HeapObjectType::String
+                    && (*ptr_b).object_type == HeapObjectType::String
+                {
+                    let str_a = ptr_a as *const RuntimeString;
+                    let str_b = ptr_b as *const RuntimeString;
+                    let len_a = (*str_a).len as usize;
+                    let len_b = (*str_b).len as usize;
+                    let data_a = (str_a.add(1)) as *const u8;
+                    let data_b = (str_b.add(1)) as *const u8;
+                    let min_len = len_a.min(len_b);
+                    let slice_a = std::slice::from_raw_parts(data_a, min_len);
+                    let slice_b = std::slice::from_raw_parts(data_b, min_len);
+                    match slice_a.cmp(slice_b) {
+                        std::cmp::Ordering::Less => return -1,
+                        std::cmp::Ordering::Greater => return 1,
+                        std::cmp::Ordering::Equal => {
+                            return if len_a < len_b {
+                                -1
+                            } else if len_a > len_b {
+                                1
+                            } else {
+                                0
+                            };
+                        }
                     }
                 }
             }
         }
+        // Invalid heap pointers fall through to raw comparison
     }
 
     // Mixed int/float comparison
+    // Guard: native codegen stores integers as raw untagged values (see constants.rs).
+    // Raw integers >= 8 can have tag bits matching TAG_FLOAT (0b010), causing
+    // misidentification. Real floats encoded via RuntimeValue::from_float always
+    // produce normal/infinite/NaN f64 values, while raw integers misidentified as
+    // floats produce subnormal values (< 2^-1022). Skip mixed comparison for
+    // subnormal "floats" — the raw fallback comparison handles them correctly.
     if a.is_int() && b.is_float() {
-        let af = a.as_int() as f64;
         let bf = b.as_float();
-        return if af < bf { -1 } else if af > bf { 1 } else { 0 };
+        if bf.is_normal() || bf.is_infinite() || bf.is_nan() {
+            let af = a.as_int() as f64;
+            return if af < bf { -1 } else if af > bf { 1 } else { 0 };
+        }
     }
     if a.is_float() && b.is_int() {
         let af = a.as_float();
-        let bf = b.as_int() as f64;
-        return if af < bf { -1 } else if af > bf { 1 } else { 0 };
+        if af.is_normal() || af.is_infinite() || af.is_nan() {
+            let bf = b.as_int() as f64;
+            return if af < bf { -1 } else if af > bf { 1 } else { 0 };
+        }
     }
 
     // Fallback: compare raw bits

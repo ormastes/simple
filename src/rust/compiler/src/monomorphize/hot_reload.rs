@@ -325,27 +325,16 @@ mod tests {
 
     fn create_test_smf() -> NamedTempFile {
         let mut file = NamedTempFile::new().unwrap();
-        let content = r#"# Some SMF header content
-
-# Instantiation To/From Metadata
-# Format version: 1.0
-
-instantiations |id, template, type_args, mangled_name, from_file, from_loc, to_obj, status|
-
-possible |id, template, type_args, mangled_name, required_by, can_defer|
-
-type_inferences |id, inferred_type, expr, context, from_file, from_loc|
-
-dependencies |from_inst, to_inst, dep_kind|
-
-circular_warnings |id, cycle_path, severity|
-
-circular_errors |id, cycle_path, error_code|
-
-# END_NOTE
-
-# More SMF content after note.sdn
-"#;
+        // Generate content that matches to_sdn() output format exactly,
+        // with padding to ensure enough available space for updates.
+        let metadata = NoteSdnMetadata::new();
+        let note_content = metadata.to_sdn();
+        let content = format!(
+            "# Some SMF header content\n\n{}\n# More SMF content after note.sdn\n\n\
+             # Padding to ensure available space for hot-reload updates\n\
+             {:>200}\n",
+            note_content, ""
+        );
         file.write_all(content.as_bytes()).unwrap();
         file.flush().unwrap();
         file

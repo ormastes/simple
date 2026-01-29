@@ -23,10 +23,12 @@ pub fn compile_field_get<M: Module>(
     field_type: TypeId,
 ) -> InstrResult<()> {
     let obj_ptr = get_vreg_or_default(ctx, builder, &object);
-    let cranelift_ty = type_id_to_cranelift(field_type);
+    // Always load as I64 since all struct fields are stored in 8-byte slots
+    // (field_index * 8 layout). Loading a smaller type (e.g., I8 for bool)
+    // would truncate values like enum RuntimeValue pointers to their lowest byte.
     let val = builder
         .ins()
-        .load(cranelift_ty, MemFlags::new(), obj_ptr, byte_offset as i32);
+        .load(types::I64, MemFlags::new(), obj_ptr, byte_offset as i32);
     ctx.vreg_values.insert(dest, val);
     Ok(())
 }

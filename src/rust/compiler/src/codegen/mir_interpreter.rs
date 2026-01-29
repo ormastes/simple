@@ -62,7 +62,7 @@ impl MirInterpreterEmitter {
         self.values.insert(dest, value);
     }
 
-    fn get(&self, vreg: VReg) -> i64 {
+    pub fn get(&self, vreg: VReg) -> i64 {
         self.values.get(&vreg).copied().unwrap_or(0)
     }
 
