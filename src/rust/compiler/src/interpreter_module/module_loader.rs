@@ -188,13 +188,11 @@ pub fn load_and_merge_module(
     let module_path = match resolve_module_path(&parts, base_dir) {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("[DEBUG Fallback] Resolution failed for {:?}, import_item_name={:?}, parts.len()={}", parts, import_item_name, parts.len());
             // FALLBACK: If resolution fails and we're not already extracting an item,
             // try treating the last path component as an item name instead of a module name.
             // E.g., `use app.lsp.server.LspServer` fails to find app/lsp/server/LspServer.spl,
             // so try loading app/lsp/server.spl and extract "LspServer" from it.
             if import_item_name.is_none() && parts.len() > 1 {
-                eprintln!("[DEBUG Fallback] Trying fallback logic...");
                 debug!(
                     "Module resolution failed for {:?}, trying fallback: treating last component as item name",
                     parts.join(".")
@@ -202,13 +200,9 @@ pub fn load_and_merge_module(
                 // Pop the last component and treat it as an item name
                 let mut parent_parts = parts.clone();
                 let item_name = parent_parts.pop().unwrap();
-                eprintln!("[DEBUG Fallback] Split into parent={:?}, item={}", parent_parts, item_name);
 
                 // Try to resolve the parent path
-                let parent_resolution = resolve_module_path(&parent_parts, base_dir);
-                eprintln!("[DEBUG Fallback] Parent path resolution: {:?}", parent_resolution.as_ref().map(|p| p.display().to_string()).map_err(|e| format!("{:?}", e)));
-                if let Ok(parent_module_path) = parent_resolution {
-                    eprintln!("[DEBUG Fallback] Parent path resolved successfully, recursing...");
+                if let Ok(_parent_module_path) = resolve_module_path(&parent_parts, base_dir) {
                     // Successfully resolved parent module - recursively load it and extract the item
                     decrement_load_depth();
 
@@ -235,26 +229,19 @@ pub fn load_and_merge_module(
                         modified_use_stmt.target = ImportTarget::Glob;
                     }
 
-                    let result = load_and_merge_module(
+                    return load_and_merge_module(
                         &modified_use_stmt,
                         current_file,
                         functions,
                         classes,
                         enums,
-                    );
-                    eprintln!("[DEBUG Fallback] Recursive load result: {:?}", result.as_ref().map(|_| "Ok").map_err(|e| format!("{:?}", e)));
-
-                    return result.and_then(|module_value| {
-                        eprintln!("[DEBUG Fallback] Got module value, extracting '{}'", item_name);
+                    ).and_then(|module_value| {
                         // Extract the specific item from the loaded module
                         if let Value::Dict(exports_dict) = &module_value {
-                            eprintln!("[DEBUG Fallback] Module exports: {:?}", exports_dict.keys().collect::<Vec<_>>());
                             if let Some(value) = exports_dict.get(&item_name) {
-                                eprintln!("[DEBUG Fallback] Successfully extracted '{}', returning", item_name);
                                 return Ok(value.clone());
                             }
                         }
-                        eprintln!("[DEBUG Fallback] Failed to extract '{}'", item_name);
                         Err(CompileError::Runtime(format!(
                             "Module {:?} does not export '{}'",
                             parent_parts.join("."), item_name

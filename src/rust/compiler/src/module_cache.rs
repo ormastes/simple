@@ -181,22 +181,14 @@ pub fn merge_cached_module_definitions(
     enums: &mut HashMap<String, EnumDef>,
 ) -> bool {
     let key = normalize_path_key(path);
-    eprintln!("[DEBUG merge] Trying to merge cached definitions for path: {:?}", key);
     let mut found = false;
 
     MODULE_CLASSES_CACHE.with(|cache| {
-        let cache_borrow = cache.borrow();
-        eprintln!("[DEBUG merge] Classes cache has {} entries", cache_borrow.len());
-        eprintln!("[DEBUG merge] Cache keys: {:?}", cache_borrow.keys().collect::<Vec<_>>());
-        if let Some(cached_classes) = cache_borrow.get(&key) {
-            eprintln!("[DEBUG merge] Found cached classes for this path: {} classes", cached_classes.len());
+        if let Some(cached_classes) = cache.borrow().get(&key) {
             for (name, class_def) in cached_classes {
-                eprintln!("[DEBUG merge] Adding class '{}' to classes HashMap", name);
                 classes.insert(name.clone(), class_def.clone());
             }
             found = true;
-        } else {
-            eprintln!("[DEBUG merge] No cached classes found for this path");
         }
     });
 
