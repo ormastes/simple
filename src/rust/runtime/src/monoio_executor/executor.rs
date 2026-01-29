@@ -450,4 +450,198 @@ mod tests {
         let exec = AsyncExecutor::new();
         assert_eq!(exec.pending_count(), 0);
     }
+
+    // ============================================================================
+    // Phase 3: Comprehensive Monoio Executor Tests
+    // ============================================================================
+
+    #[test]
+    fn test_executor_creation() {
+        let exec = AsyncExecutor::new();
+        assert!(!exec.is_initialized());
+        assert_eq!(exec.pending_count(), 0);
+    }
+
+    #[test]
+    fn test_executor_default() {
+        let exec = AsyncExecutor::default();
+        assert!(!exec.is_initialized());
+        assert_eq!(exec.pending_count(), 0);
+    }
+
+    #[test]
+    fn test_init_with_custom_entries() {
+        let mut exec = AsyncExecutor::new();
+        exec.init(512);
+        assert!(exec.is_initialized());
+    }
+
+    #[test]
+    fn test_init_with_small_entries() {
+        let mut exec = AsyncExecutor::new();
+        exec.init(32);
+        assert!(exec.is_initialized());
+    }
+
+    #[test]
+    fn test_init_with_large_entries() {
+        let mut exec = AsyncExecutor::new();
+        exec.init(4096);
+        assert!(exec.is_initialized());
+    }
+
+    #[test]
+    fn test_multiple_init_calls() {
+        let mut exec = AsyncExecutor::new();
+        exec.init(256);
+        assert!(exec.is_initialized());
+
+        // Re-init with different value
+        exec.init(512);
+        assert!(exec.is_initialized());
+    }
+
+    #[test]
+    fn test_is_initialized_before_init() {
+        let exec = AsyncExecutor::new();
+        assert!(!exec.is_initialized());
+    }
+
+    #[test]
+    fn test_resource_counts_initial() {
+        let exec = AsyncExecutor::new();
+        let (streams, listeners, sockets) = exec.resource_counts();
+        assert_eq!(streams, 0);
+        assert_eq!(listeners, 0);
+        assert_eq!(sockets, 0);
+    }
+
+    #[test]
+    fn test_pending_count_initial() {
+        let exec = AsyncExecutor::new();
+        assert_eq!(exec.pending_count(), 0);
+    }
+
+    #[test]
+    fn test_executor_new_vs_default() {
+        let exec1 = AsyncExecutor::new();
+        let exec2 = AsyncExecutor::default();
+
+        assert_eq!(exec1.is_initialized(), exec2.is_initialized());
+        assert_eq!(exec1.pending_count(), exec2.pending_count());
+    }
+
+    #[test]
+    fn test_init_idempotency() {
+        let mut exec = AsyncExecutor::new();
+        exec.init(256);
+        let was_initialized = exec.is_initialized();
+
+        exec.init(256);
+        assert_eq!(exec.is_initialized(), was_initialized);
+    }
+
+    #[test]
+    fn test_zero_entries() {
+        let mut exec = AsyncExecutor::new();
+        exec.init(0);
+        assert!(exec.is_initialized());
+    }
+
+    #[test]
+    fn test_max_entries() {
+        let mut exec = AsyncExecutor::new();
+        exec.init(u32::MAX);
+        assert!(exec.is_initialized());
+    }
+
+    #[test]
+    fn test_executor_state_after_creation() {
+        let exec = AsyncExecutor::new();
+
+        // Verify all initial state
+        assert!(!exec.is_initialized());
+        assert_eq!(exec.pending_count(), 0);
+
+        let (streams, listeners, sockets) = exec.resource_counts();
+        assert_eq!(streams, 0);
+        assert_eq!(listeners, 0);
+        assert_eq!(sockets, 0);
+    }
+
+    #[test]
+    fn test_executor_state_after_init() {
+        let mut exec = AsyncExecutor::new();
+        exec.init(256);
+
+        // Verify state after init
+        assert!(exec.is_initialized());
+        assert_eq!(exec.pending_count(), 0);
+
+        let (streams, listeners, sockets) = exec.resource_counts();
+        assert_eq!(streams, 0);
+        assert_eq!(listeners, 0);
+        assert_eq!(sockets, 0);
+    }
+
+    #[test]
+    fn test_typical_entries_values() {
+        // Test common entry values used in practice
+        let values = vec![32, 64, 128, 256, 512, 1024, 2048];
+
+        for entries in values {
+            let mut exec = AsyncExecutor::new();
+            exec.init(entries);
+            assert!(exec.is_initialized());
+        }
+    }
+
+    #[test]
+    fn test_executor_memory_layout() {
+        use std::mem::size_of;
+
+        // Verify struct size is reasonable (not accidentally huge)
+        let size = size_of::<AsyncExecutor>();
+
+        // Should be less than 1KB (actual size depends on HashMap internals)
+        assert!(size < 1024, "AsyncExecutor size is {} bytes", size);
+    }
+
+    #[test]
+    fn test_multiple_executors() {
+        // Verify multiple executors can coexist
+        let mut exec1 = AsyncExecutor::new();
+        let mut exec2 = AsyncExecutor::new();
+
+        exec1.init(256);
+        exec2.init(512);
+
+        assert!(exec1.is_initialized());
+        assert!(exec2.is_initialized());
+
+        assert_eq!(exec1.pending_count(), 0);
+        assert_eq!(exec2.pending_count(), 0);
+    }
+
+    #[test]
+    fn test_resource_counts_consistency() {
+        let exec = AsyncExecutor::new();
+        let (streams1, listeners1, sockets1) = exec.resource_counts();
+        let (streams2, listeners2, sockets2) = exec.resource_counts();
+
+        // Multiple calls should return same values
+        assert_eq!(streams1, streams2);
+        assert_eq!(listeners1, listeners2);
+        assert_eq!(sockets1, sockets2);
+    }
+
+    #[test]
+    fn test_pending_count_consistency() {
+        let exec = AsyncExecutor::new();
+        let count1 = exec.pending_count();
+        let count2 = exec.pending_count();
+
+        // Multiple calls should return same value
+        assert_eq!(count1, count2);
+    }
 }

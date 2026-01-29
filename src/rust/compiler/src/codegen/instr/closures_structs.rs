@@ -324,7 +324,21 @@ fn try_compile_builtin_method_call<M: Module>(
         "to_lower" | "lower" => "rt_string_to_lower",
         "to_int" | "to_i64" | "parse_int" => "rt_string_to_int",
         "to_string" | "str" => "rt_to_string",
-        // Dict methods
+        // Dict/collection methods
+        "get" => "rt_index_get",
+        "set" => {
+            if args.len() >= 2 {
+                let key_val = get_vreg_or_default(ctx, builder, &args[0]);
+                let val_val = get_vreg_or_default(ctx, builder, &args[1]);
+                if let Some(&func_id) = ctx.runtime_funcs.get("rt_dict_set") {
+                    let func_ref = ctx.module.declare_func_in_func(func_id, builder.func);
+                    let call = builder.ins().call(func_ref, &[receiver_val, key_val, val_val]);
+                    let result = builder.inst_results(call)[0];
+                    return Ok(Some(builder.ins().uextend(types::I64, result)));
+                }
+            }
+            return Ok(None);
+        }
         "keys" => "rt_dict_keys",
         "values" => "rt_dict_values",
         "contains_key" | "has_key" => "rt_contains",

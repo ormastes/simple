@@ -186,12 +186,11 @@ fn infers_path_expression() {
     check(&items).expect("type check ok");
 }
 
-// Range expressions are not yet supported by the parser
-// #[test]
-// fn infers_range_expression() {
-//     let items = parse_items("let r = 0 .. 10\nmain = 0");
-//     check(&items).expect("type check ok");
-// }
+#[test]
+fn infers_range_expression() {
+    let items = parse_items("let r = 0 .. 10\nmain = 0");
+    check(&items).expect("type check ok");
+}
 
 #[test]
 fn infers_impl_block() {
@@ -300,13 +299,6 @@ fn infers_in_operator() {
     let items = parse_items("let arr = [1, 2, 3]\nlet b = 1 in arr\nmain = if b: 1 else: 0");
     check(&items).expect("type check ok");
 }
-
-// Range expressions with .. syntax - parser may not support this yet
-// #[test]
-// fn infers_range_expression() {
-//     let items = parse_items("let r = 0..10\nmain = 0");
-//     check(&items).expect("type check ok");
-// }
 
 #[test]
 fn infers_extern_function() {
@@ -471,12 +463,11 @@ fn infers_array_pattern() {
     check(&items).expect("type check ok");
 }
 
-// Or patterns with | syntax - parser may not support this yet
-// #[test]
-// fn infers_or_pattern() {
-//     let items = parse_items("let x = 1\nmatch x:\n    1 | 2 =>\n        10\n    _ =>\n        0\nmain = 0");
-//     check(&items).expect("type check ok");
-// }
+#[test]
+fn infers_or_pattern() {
+    let items = parse_items("let x = 1\nmatch x:\n    1 | 2 =>\n        10\n    _ =>\n        0\nmain = 0");
+    check(&items).expect("type check ok");
+}
 
 #[test]
 fn infers_enum_pattern_in_match() {
@@ -496,12 +487,11 @@ fn infers_actor_definition() {
     check(&items).expect("type check ok");
 }
 
-// Match as expression (assign to variable) - parser may need different syntax
-// #[test]
-// fn infers_match_expression_as_value() {
-//     let items = parse_items("let x = 1\nlet r = match x:\n    1 =>\n        10\n    _ =>\n        0\nmain = r");
-//     check(&items).expect("type check ok");
-// }
+#[test]
+fn infers_match_expression_as_value() {
+    let items = parse_items("let x = 1\nlet r = match x:\n    1 =>\n        10\n    _ =>\n        0\nmain = r");
+    check(&items).expect("type check ok");
+}
 
 #[test]
 fn catches_type_mismatch_in_binary_op() {
