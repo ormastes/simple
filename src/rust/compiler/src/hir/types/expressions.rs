@@ -165,6 +165,14 @@ pub enum HirExprKind {
         args: Vec<HirExpr>,
     },
 
+    /// Let-in expression: store a value in a local, then evaluate body.
+    /// Used by match expressions to store the subject before testing arms.
+    LetIn {
+        local_idx: usize,
+        value: Box<HirExpr>,
+        body: Box<HirExpr>,
+    },
+
     /// SIMD neighbor access: array.left_neighbor or array.right_neighbor
     /// Accesses element at (this.index() - 1) or (this.index() + 1)
     NeighborAccess {

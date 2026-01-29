@@ -42,8 +42,14 @@
 | Exported Enum Scope Loss Across Tests | ✅ FIXED | Critical |
 | Multi-Mode Feature Parse Errors | ✅ FIXED | Critical |
 | Regex NFA Matcher Returns Empty Matches | ✅ FIXED | High |
+| MCP dispatch_to_simple_app arg offset | 🔍 OPEN | High |
+| simple_new1 help output missing newlines | 🔍 OPEN | Medium |
+| simple_new1 segfault in interpreter mode | 🔍 OPEN | Critical |
+| Bootstrap stage 2 MIR lowering produces 0 modules | 🔍 OPEN | Critical |
+| Rust MCP backend returns empty text | 🔍 OPEN | Medium |
+| MCP dependencies_spec.spl parse error | 🔍 OPEN | Low |
 
-**Summary:** 37 fixed, 0 open, 1 investigating, 1 workaround (Updated 2026-01-12)
+**Summary:** 37 fixed, 6 open, 1 investigating, 1 workaround (Updated 2026-01-29)
 
 ---
 
@@ -3038,4 +3044,155 @@ Any module that imports `io.fs` will fail to parse, including:
 ### Note
 
 This is separate from the "expected expression, found Colon" errors that were fixed in verification modules. The @extern syntax is a feature that needs parser support.
+
+---
+
+## MCP dispatch_to_simple_app Arg Offset
+
+**Date:** 2026-01-29
+**Severity:** High
+**Status:** Open
+**Component:** `src/rust/driver/src/main.rs:283-288`
+
+### Description
+
+`dispatch_to_simple_app` constructs args as `["simple_old", "<script_path>", ...user_args]`. The Simple app receives these via `sys_get_args()` and uses `args[1]` as the subcommand. But `args[1]` is the script file path, not the subcommand — all indices are shifted by 1.
+
+### Reproduction
+
+```bash
+./target/debug/simple_old mcp server    # Tries to read "src/app/mcp/main.spl" as MCP file
+./target/debug/simple_old mcp read x.spl  # args[1] = script path, not "read"
+```
+
+### Root Cause
+
+`dispatch_to_simple_app` line 285-286:
+```rust
+let mut full_args = vec!["simple_old".to_string(), app_path.to_string_lossy().to_string()];
+full_args.extend(args[1..].iter().cloned());
+// Result: ["simple_old", "src/app/mcp/main.spl", "server"]
+// App sees args[1] = file path, not "server"
+```
+
+### Fix
+
+Either strip the script path from args before passing to interpreter, or have Simple apps skip `args[1]` when dispatched.
+
+---
+
+## simple_new1 Help Output Missing Newlines
+
+**Date:** 2026-01-29
+**Severity:** Medium
+**Status:** Open
+**Component:** Bootstrap compiler / codegen `print` function
+
+### Description
+
+`simple_new1` (compiled by `simple_old --native`) outputs help text with no newlines — all text runs together on one line.
+
+### Reproduction
+
+```bash
+make bootstrap-stage1
+./target/bootstrap/simple_new1 --help
+# All output on single line, no line breaks
+```
+
+### Root Cause
+
+The compiled `print()` function in the native binary likely doesn't append `\n` or the string escape handling is broken in codegen.
+
+---
+
+## simple_new1 Segfault in Interpreter Mode
+
+**Date:** 2026-01-29
+**Severity:** Critical
+**Status:** Open
+**Component:** Bootstrap compiler interpreter
+
+### Description
+
+Running `simple_new1` in interpreter mode (`-i`, default) segfaults during HIR lowering. Also shows `Runtime error: Function 'map' not found` during parsing.
+
+### Reproduction
+
+```bash
+echo 'fn main():
+    print("Hello")
+' > /tmp/test.spl
+./target/bootstrap/simple_new1 /tmp/test.spl
+# Segmentation fault (core dumped)
+```
+
+### Notes
+
+Parsing completes but HIR lowering triggers the crash. The `map` function not found error suggests stdlib functions aren't being linked properly in the self-hosted interpreter.
+
+---
+
+## Bootstrap Stage 2: MIR Lowering Produces 0 Modules
+
+**Date:** 2026-01-29
+**Severity:** Critical
+**Status:** Open
+**Component:** Bootstrap compiler MIR lowering
+
+### Description
+
+When `simple_new1` compiles itself (`-c -o simple_new2 simple/compiler/main.spl`), the MIR lowering step produces 0 modules from 1 HIR module, causing linking to fail.
+
+### Reproduction
+
+```bash
+./target/bootstrap/simple_new1 -c -o simple_new2 simple/compiler/main.spl
+# Output: [mir] result: 0 modules, 0 errors
+# Error: Codegen error: Linking failed: No object files to link
+```
+
+### Notes
+
+HIR lowering and method resolution succeed. The MIR lowering silently drops all modules without reporting errors — likely a missing case or incorrect module passing between phases.
+
+---
+
+## Rust MCP Backend Returns Empty Text
+
+**Date:** 2026-01-29
+**Severity:** Medium
+**Status:** Open
+**Component:** `src/rust/driver/src/cli/llm_tools.rs:187`
+
+### Description
+
+The Rust-native MCP backend (`SIMPLE_MCP_RUST=1`) returns `{"text": ""}` for valid Simple source files.
+
+### Reproduction
+
+```bash
+SIMPLE_MCP_RUST=1 ./target/debug/simple_old mcp src/app/mcp/main.spl
+# Output: {"text": ""}
+```
+
+---
+
+## MCP dependencies_spec.spl Parse Error
+
+**Date:** 2026-01-29
+**Severity:** Low
+**Status:** Open
+**Component:** `test/lib/std/unit/mcp/dependencies_spec.spl`
+
+### Description
+
+The MCP dependencies test file fails with parse error: "expected expression, found Colon".
+
+### Reproduction
+
+```bash
+./target/debug/simple_old test test/lib/std/unit/mcp/dependencies_spec.spl
+# FAIL: 0 passed, 1 failed
+```
 

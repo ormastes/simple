@@ -836,6 +836,18 @@ impl<'a> MirLowerer<'a> {
                 // At runtime, this is a no-op
                 Ok(())
             }
+
+            HirStmt::Defer { body } => {
+                // Defer statement for RAII/cleanup patterns
+                // Full implementation requires scope tracking and injecting defer bodies at all exit points
+                // For MVP: lower the body statements immediately (simplified semantics)
+                // TODO(defer): Track defer blocks and inject at scope exit points (return, break, end-of-block)
+                // TODO(defer): Implement LIFO ordering when multiple defers exist
+                for stmt in body {
+                    self.lower_stmt(stmt, contract)?;
+                }
+                Ok(())
+            }
         }
     }
 

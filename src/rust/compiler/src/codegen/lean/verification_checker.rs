@@ -118,6 +118,7 @@ impl<'a> VerificationChecker<'a> {
             HirStmt::Admit { .. } => false,
             HirStmt::ProofHint { .. } => false,
             HirStmt::Calc { steps } => steps.iter().any(|s| self.expr_calls_function(&s.expr, name)),
+            HirStmt::Defer { body } => body.iter().any(|s| self.statement_calls_function(s, name)),
             HirStmt::Break | HirStmt::Continue => false,
         }
     }

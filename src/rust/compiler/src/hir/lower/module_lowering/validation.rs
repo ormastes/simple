@@ -93,6 +93,10 @@ impl Lowerer {
                 }
             }
             HirStmt::Let { value: None, .. } | HirStmt::Return(None) | HirStmt::Break | HirStmt::Continue => {}
+            HirStmt::Defer { .. } => {
+                // Defer statements can contain async calls - check the body
+                // TODO: Implement defer body validation for async calls
+            }
         }
         Ok(())
     }
@@ -221,6 +225,10 @@ impl Lowerer {
             | HirExprKind::Local(_)
             | HirExprKind::Global(_)
             | HirExprKind::ContractResult => {}
+            HirExprKind::LetIn { value, body, .. } => {
+                self.check_expr_for_async_calls(value, caller_name, function_suspension)?;
+                self.check_expr_for_async_calls(body, caller_name, function_suspension)?;
+            }
         }
         Ok(())
     }

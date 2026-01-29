@@ -297,7 +297,17 @@ fn try_compile_builtin_method_call<M: Module>(
         }
         // Map/filter/join
         "join" => "rt_string_join",
-        "map" => "rt_array_map",
+        "map" => {
+            // Use rt_option_map for Option.map (also works for arrays since
+            // rt_option_map checks if the value is an enum with Some/None)
+            if let Some(&func_id) = ctx.runtime_funcs.get("rt_option_map") {
+                let func_ref = ctx.module.declare_func_in_func(func_id, builder.func);
+                let closure_val = get_vreg_or_default(ctx, builder, &args[0]);
+                let call = builder.ins().call(func_ref, &[receiver_val, closure_val]);
+                return Ok(Some(builder.inst_results(call)[0]));
+            }
+            return Ok(None);
+        }
         "filter" => "rt_array_filter",
         "sort" => "rt_array_sort",
         "reverse" => "rt_array_reverse",
@@ -317,6 +327,7 @@ fn try_compile_builtin_method_call<M: Module>(
         // Dict methods
         "keys" => "rt_dict_keys",
         "values" => "rt_dict_values",
+        "contains_key" | "has_key" => "rt_contains",
         _ => return Ok(None),
     };
 

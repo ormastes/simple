@@ -182,6 +182,14 @@ pub(super) fn eval_collection_expr(
             }
             Ok(Some(Value::Array(arr)))
         }
+        // Vec literals are treated as arrays at runtime
+        Expr::VecLiteral(items) => {
+            let mut arr = Vec::new();
+            for item in items {
+                arr.push(evaluate_expr(item, env, functions, classes, enums, impl_methods)?);
+            }
+            Ok(Some(Value::Array(arr)))
+        }
         Expr::ArrayRepeat { value, count } => {
             // Evaluate the count first
             let count_val = evaluate_expr(count, env, functions, classes, enums, impl_methods)?;

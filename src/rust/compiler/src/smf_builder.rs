@@ -41,11 +41,15 @@ pub fn generate_smf_bytes(return_value: i32, gc: Option<&Arc<dyn GcAllocator>>) 
 
 /// Build an SMF module with the given code bytes and a main symbol.
 fn build_smf_with_code(code_bytes: &[u8], gc: Option<&Arc<dyn GcAllocator>>) -> Vec<u8> {
-    build_smf_with_code_for_target(code_bytes, gc, Target::host())
+    build_smf_with_code_for_target(code_bytes, 0, gc, Target::host())
+}
+
+fn build_smf_with_code_entry(code_bytes: &[u8], entry_offset: u64, gc: Option<&Arc<dyn GcAllocator>>) -> Vec<u8> {
+    build_smf_with_code_for_target(code_bytes, entry_offset, gc, Target::host())
 }
 
 /// Build an SMF module with the given code bytes for a specific target architecture.
-fn build_smf_with_code_for_target(code_bytes: &[u8], gc: Option<&Arc<dyn GcAllocator>>, target: Target) -> Vec<u8> {
+fn build_smf_with_code_for_target(code_bytes: &[u8], entry_offset: u64, gc: Option<&Arc<dyn GcAllocator>>, target: Target) -> Vec<u8> {
     let section_table_offset = SmfHeader::SIZE as u64;
     let section_table_size = std::mem::size_of::<SmfSection>() as u64;
     let code_offset = section_table_offset + section_table_size;
@@ -70,7 +74,7 @@ fn build_smf_with_code_for_target(code_bytes: &[u8], gc: Option<&Arc<dyn GcAlloc
         symbol_table_offset,
         symbol_count: 1,
         exported_count: 1,
-        entry_point: 0,
+        entry_point: entry_offset,
         stub_size: 0, // Pure SMF (no stub)
         smf_data_offset: 0,
         module_hash: 0,
@@ -213,7 +217,7 @@ pub fn generate_smf_bytes_for_target(return_value: i32, gc: Option<&Arc<dyn GcAl
         }
     };
 
-    build_smf_with_code_for_target(&code_bytes, gc, target)
+    build_smf_with_code_for_target(&code_bytes, 0, gc, target)
 }
 
 /// Generate SMF from Cranelift object code for a specific target.
@@ -222,14 +226,16 @@ pub fn generate_smf_from_object_for_target(
     gc: Option<&Arc<dyn GcAllocator>>,
     target: Target,
 ) -> Vec<u8> {
+    let entry_offset = crate::elf_utils::find_symbol_offset_in_object(object_code, "main").unwrap_or(0);
     let code_bytes = extract_code_from_object(object_code);
-    build_smf_with_code_for_target(&code_bytes, gc, target)
+    build_smf_with_code_for_target(&code_bytes, entry_offset, gc, target)
 }
 
 /// Generate SMF from Cranelift object code (using current host target).
 pub fn generate_smf_from_object(object_code: &[u8], gc: Option<&Arc<dyn GcAllocator>>) -> Vec<u8> {
+    let entry_offset = crate::elf_utils::find_symbol_offset_in_object(object_code, "main").unwrap_or(0);
     let code_bytes = extract_code_from_object(object_code);
-    build_smf_with_code(&code_bytes, gc)
+    build_smf_with_code_entry(&code_bytes, entry_offset, gc)
 }
 
 /// Helper to write a struct to a byte buffer.

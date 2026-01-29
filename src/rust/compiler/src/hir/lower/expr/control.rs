@@ -233,9 +233,18 @@ impl Lowerer {
         ctx.add_local("$match_subject".to_string(), subject_ty, Mutability::Immutable);
 
         // Build the chain of If-Else expressions from the arms
-        let result = self.lower_match_arms(subject_idx, subject_ty, arms, ctx)?;
+        let if_chain = self.lower_match_arms(subject_idx, subject_ty, arms, ctx)?;
+        let result_ty = if_chain.ty;
 
-        Ok(result)
+        // Wrap in LetIn to store the subject before evaluating the if-else chain
+        Ok(HirExpr {
+            kind: HirExprKind::LetIn {
+                local_idx: subject_idx,
+                value: Box::new(subject_hir),
+                body: Box::new(if_chain),
+            },
+            ty: result_ty,
+        })
     }
 
     /// Lower match arms to a chain of If-Else expressions

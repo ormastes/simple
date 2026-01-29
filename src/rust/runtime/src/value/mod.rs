@@ -174,8 +174,8 @@ pub use hpcollections::{
 // Re-export object FFI functions
 pub use objects::{
     rt_closure_func_ptr, rt_closure_get_capture, rt_closure_new, rt_closure_set_capture, rt_enum_check_discriminant,
-    rt_enum_discriminant, rt_enum_new, rt_enum_payload, rt_object_class_id, rt_object_field_count, rt_object_field_get,
-    rt_object_field_set, rt_object_new,
+    rt_enum_discriminant, rt_enum_new, rt_enum_payload, rt_option_map, rt_object_class_id, rt_object_field_count,
+    rt_object_field_get, rt_object_field_set, rt_object_new,
 };
 
 // Re-export unique pointer FFI functions
