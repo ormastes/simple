@@ -2,8 +2,6 @@
 
 use simple_compiler::smf_writer::generate_smf_with_templates;
 use simple_compiler::monomorphize::{GenericTemplates, MonomorphizationMetadata};
-use simple_loader::smf::{SectionType, SmfFile, SmfSymbol};
-use simple_parser::ast::{FunctionDef, StructDef, EnumDef, ClassDef, TraitDef};
 use simple_common::target::Target;
 use std::collections::HashMap;
 
@@ -39,15 +37,9 @@ fn test_smf_with_templates() {
         traits: vec![],
     };
 
-    let metadata = MonomorphizationMetadata::empty();
+    let metadata = MonomorphizationMetadata::new();
 
-    let smf = generate_smf_with_templates(
-        &object_code,
-        Some(&templates),
-        Some(&metadata),
-        None,
-        Target::host(),
-    );
+    let smf = generate_smf_with_templates(&object_code, Some(&templates), Some(&metadata), None, Target::host());
 
     assert!(!smf.is_empty());
 
@@ -69,13 +61,7 @@ fn test_smf_template_section_magic() {
         traits: vec![],
     };
 
-    let smf = generate_smf_with_templates(
-        &object_code,
-        Some(&templates),
-        None,
-        None,
-        Target::host(),
-    );
+    let smf = generate_smf_with_templates(&object_code, Some(&templates), None, None, Target::host());
 
     // TODO: Parse SMF and verify TemplateCode section has GTPL magic
     // This requires SMF parsing support which may not be fully implemented yet
@@ -88,7 +74,7 @@ fn test_smf_template_section_magic() {
 fn test_smf_metadata_section() {
     let object_code = vec![0x7F, b'E', b'L', b'F'];
 
-    let mut metadata = MonomorphizationMetadata::empty();
+    let mut metadata = MonomorphizationMetadata::new();
     // Add some metadata
     metadata.functions.insert(
         "identity".to_string(),
@@ -99,13 +85,7 @@ fn test_smf_metadata_section() {
         },
     );
 
-    let smf = generate_smf_with_templates(
-        &object_code,
-        None,
-        Some(&metadata),
-        None,
-        Target::host(),
-    );
+    let smf = generate_smf_with_templates(&object_code, None, Some(&metadata), None, Target::host());
 
     assert!(!smf.is_empty());
 }
@@ -122,13 +102,7 @@ fn test_smf_all_generic_constructs() {
         traits: vec![create_test_trait("Comparable", vec!["T".to_string()])],
     };
 
-    let smf = generate_smf_with_templates(
-        &object_code,
-        Some(&templates),
-        None,
-        None,
-        Target::host(),
-    );
+    let smf = generate_smf_with_templates(&object_code, Some(&templates), None, None, Target::host());
 
     assert!(!smf.is_empty());
 
@@ -156,13 +130,7 @@ fn test_template_serialization_function() {
         traits: vec![],
     };
 
-    let smf = generate_smf_with_templates(
-        &object_code,
-        Some(&templates),
-        None,
-        None,
-        Target::host(),
-    );
+    let smf = generate_smf_with_templates(&object_code, Some(&templates), None, None, Target::host());
 
     // TODO: Deserialize and verify function was serialized correctly
     // This requires full deserialization support (Phase 3 TODO)
@@ -184,13 +152,7 @@ fn test_template_serialization_multiple_params() {
         traits: vec![],
     };
 
-    let smf = generate_smf_with_templates(
-        &object_code,
-        Some(&templates),
-        None,
-        None,
-        Target::host(),
-    );
+    let smf = generate_smf_with_templates(&object_code, Some(&templates), None, None, Target::host());
 
     assert!(!smf.is_empty());
 }
@@ -199,7 +161,7 @@ fn test_template_serialization_multiple_params() {
 fn test_metadata_serialization() {
     let object_code = vec![0x7F, b'E', b'L', b'F'];
 
-    let mut metadata = MonomorphizationMetadata::empty();
+    let mut metadata = MonomorphizationMetadata::new();
 
     // Add function metadata
     metadata.functions.insert(
@@ -207,23 +169,15 @@ fn test_metadata_serialization() {
         simple_compiler::monomorphize::GenericFunctionMeta {
             base_name: "square".to_string(),
             generic_params: vec!["T".to_string()],
-            specializations: vec![
-                simple_compiler::monomorphize::SpecializationEntry {
-                    type_args: vec![simple_compiler::monomorphize::ConcreteType::Int],
-                    mangled_name: "square$Int".to_string(),
-                    bindings: HashMap::new(),
-                },
-            ],
+            specializations: vec![simple_compiler::monomorphize::SpecializationEntry {
+                type_args: vec![simple_compiler::monomorphize::ConcreteType::Int],
+                mangled_name: "square$Int".to_string(),
+                bindings: HashMap::new(),
+            }],
         },
     );
 
-    let smf = generate_smf_with_templates(
-        &object_code,
-        None,
-        Some(&metadata),
-        None,
-        Target::host(),
-    );
+    let smf = generate_smf_with_templates(&object_code, None, Some(&metadata), None, Target::host());
 
     // TODO: Deserialize and verify metadata
     assert!(!smf.is_empty());
@@ -247,13 +201,7 @@ fn test_symbol_table_template_marker() {
         traits: vec![],
     };
 
-    let smf_bytes = generate_smf_with_templates(
-        &object_code,
-        Some(&templates),
-        None,
-        None,
-        Target::host(),
-    );
+    let smf_bytes = generate_smf_with_templates(&object_code, Some(&templates), None, None, Target::host());
 
     // TODO: Parse SMF and check symbol table
     // let smf = parse_smf(&smf_bytes).unwrap();
@@ -282,13 +230,7 @@ fn test_smf_backward_compatible() {
         enums: vec![],
         traits: vec![],
     };
-    let smf_new = generate_smf_with_templates(
-        &object_code,
-        Some(&templates),
-        None,
-        None,
-        Target::host(),
-    );
+    let smf_new = generate_smf_with_templates(&object_code, Some(&templates), None, None, Target::host());
 
     // Both should have valid SMF magic
     assert_eq!(&smf_old[0..4], b"SMF\0");
@@ -315,13 +257,7 @@ fn test_empty_templates_object() {
     };
 
     // Empty templates should fall back to no-template path
-    let smf = generate_smf_with_templates(
-        &object_code,
-        Some(&templates),
-        None,
-        None,
-        Target::host(),
-    );
+    let smf = generate_smf_with_templates(&object_code, Some(&templates), None, None, Target::host());
 
     let smf_no_templates = generate_smf_with_templates(&object_code, None, None, None, Target::host());
 
@@ -336,10 +272,7 @@ fn test_large_template_set() {
     // Create many templates
     let mut functions = Vec::new();
     for i in 0..20 {
-        functions.push(create_test_function(
-            &format!("func{}", i),
-            vec!["T".to_string()],
-        ));
+        functions.push(create_test_function(&format!("func{}", i), vec!["T".to_string()]));
     }
 
     let templates = GenericTemplates {
@@ -350,13 +283,7 @@ fn test_large_template_set() {
         traits: vec![],
     };
 
-    let smf = generate_smf_with_templates(
-        &object_code,
-        Some(&templates),
-        None,
-        None,
-        Target::host(),
-    );
+    let smf = generate_smf_with_templates(&object_code, Some(&templates), None, None, Target::host());
 
     // Should successfully generate even with many templates
     assert!(!smf.is_empty());
@@ -384,7 +311,7 @@ fn test_smf_target_x86_64() {
         Some(&templates),
         None,
         None,
-        Target::x86_64_unknown_linux_gnu(),
+        Target::parse("x86_64-linux").unwrap(),
     );
 
     assert!(!smf.is_empty());
@@ -409,7 +336,7 @@ fn test_smf_target_aarch64() {
         Some(&templates),
         None,
         None,
-        Target::aarch64_unknown_linux_gnu(),
+        Target::parse("aarch64-macos").unwrap(),
     );
 
     assert!(!smf.is_empty());
@@ -419,108 +346,117 @@ fn test_smf_target_aarch64() {
 // Helper Functions
 // ============================================================================
 
-fn create_test_function(name: &str, generic_params: Vec<String>) -> FunctionDef {
-    use simple_parser::ast::{Visibility, Span};
+fn create_test_function(name: &str, generic_params: Vec<String>) -> simple_parser::ast::FunctionDef {
+    use simple_parser::ast::Visibility;
+    use simple_parser::token::Span;
 
-    FunctionDef {
+    simple_parser::ast::FunctionDef {
         name: name.to_string(),
-        generic_params,
+        generic_params: generic_params.clone(),
         params: vec![],
         return_type: None,
-        body: None,
+        body: simple_parser::ast::Block::default(),
         is_generic_template: !generic_params.is_empty(),
         specialization_of: None,
         type_bindings: HashMap::new(),
         attributes: vec![],
-        where_clause: None,
+        where_clause: vec![],
         effects: vec![],
-        contracts: None,
-        span: Span::default(),
-        is_async: false,
-        is_generator: false,
-        is_extern: false,
-        extern_abi: None,
+        contract: None,
+        span: Span::new(0, 0, 0, 0),
         visibility: Visibility::Public,
-        deprecation: None,
+        decorators: vec![],
+        doc_comment: None,
+        is_abstract: false,
+        is_sync: false,
+        bounds_block: None,
+        is_me_method: false,
+        return_constraint: None,
     }
 }
 
-fn create_test_struct(name: &str, generic_params: Vec<String>) -> StructDef {
-    use simple_parser::ast::{Visibility, Span};
+fn create_test_struct(name: &str, generic_params: Vec<String>) -> simple_parser::ast::StructDef {
+    use simple_parser::ast::Visibility;
+    use simple_parser::token::Span;
 
-    StructDef {
+    simple_parser::ast::StructDef {
         name: name.to_string(),
-        generic_params,
-        fields: vec![],
-        is_generic_template: !generic_params.is_empty(),
-        specialization_of: None,
-        type_bindings: HashMap::new(),
-        where_clause: None,
-        attributes: vec![],
-        invariant: None,
-        span: Span::default(),
-        visibility: Visibility::Public,
-        deprecation: None,
-    }
-}
-
-fn create_test_class(name: &str, generic_params: Vec<String>) -> ClassDef {
-    use simple_parser::ast::{Visibility, Span};
-
-    ClassDef {
-        name: name.to_string(),
-        generic_params,
+        generic_params: generic_params.clone(),
         fields: vec![],
         methods: vec![],
         is_generic_template: !generic_params.is_empty(),
         specialization_of: None,
         type_bindings: HashMap::new(),
-        where_clause: None,
+        where_clause: vec![],
+        attributes: vec![],
+        invariant: None,
+        span: Span::new(0, 0, 0, 0),
+        visibility: Visibility::Public,
+        doc_comment: None,
+    }
+}
+
+fn create_test_class(name: &str, generic_params: Vec<String>) -> simple_parser::ast::ClassDef {
+    use simple_parser::ast::Visibility;
+    use simple_parser::token::Span;
+
+    simple_parser::ast::ClassDef {
+        name: name.to_string(),
+        generic_params: generic_params.clone(),
+        fields: vec![],
+        methods: vec![],
+        is_generic_template: !generic_params.is_empty(),
+        specialization_of: None,
+        type_bindings: HashMap::new(),
+        where_clause: vec![],
         attributes: vec![],
         parent: None,
         mixins: vec![],
         invariant: None,
         effects: vec![],
         macro_invocations: vec![],
-        span: Span::default(),
+        span: Span::new(0, 0, 0, 0),
         visibility: Visibility::Public,
-        deprecation: None,
+        doc_comment: None,
     }
 }
 
-fn create_test_enum(name: &str, generic_params: Vec<String>) -> EnumDef {
-    use simple_parser::ast::{Visibility, Span};
+fn create_test_enum(name: &str, generic_params: Vec<String>) -> simple_parser::ast::EnumDef {
+    use simple_parser::ast::Visibility;
+    use simple_parser::token::Span;
 
-    EnumDef {
+    simple_parser::ast::EnumDef {
         name: name.to_string(),
-        generic_params,
+        generic_params: generic_params.clone(),
         variants: vec![],
+        methods: vec![],
         is_generic_template: !generic_params.is_empty(),
         specialization_of: None,
         type_bindings: HashMap::new(),
-        where_clause: None,
+        where_clause: vec![],
         attributes: vec![],
-        span: Span::default(),
+        span: Span::new(0, 0, 0, 0),
         visibility: Visibility::Public,
-        deprecation: None,
+        doc_comment: None,
     }
 }
 
-fn create_test_trait(name: &str, generic_params: Vec<String>) -> TraitDef {
-    use simple_parser::ast::{Span, Visibility};
+fn create_test_trait(name: &str, generic_params: Vec<String>) -> simple_parser::ast::TraitDef {
+    use simple_parser::ast::{Visibility};
+    use simple_parser::token::Span;
 
-    TraitDef {
+    simple_parser::ast::TraitDef {
         name: name.to_string(),
-        generic_params,
+        generic_params: generic_params.clone(),
         methods: vec![],
         super_traits: vec![],
         associated_types: vec![],
-        where_clause: None,
+        where_clause: vec![],
         is_generic_template: !generic_params.is_empty(),
         specialization_of: None,
         type_bindings: HashMap::new(),
-        span: Span::default(),
+        span: Span::new(0, 0, 0, 0),
         visibility: Visibility::Public,
-        deprecation: None,
+        doc_comment: None,
     }
 }

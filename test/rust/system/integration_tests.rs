@@ -81,6 +81,9 @@ fn test_type_registry_register_integration() {
         name: "Point".to_string(),
         fields: vec![("x".to_string(), TypeId::F64), ("y".to_string(), TypeId::F64)],
         has_snapshot: false,
+        generic_params: vec![],
+        is_generic_template: false,
+        type_bindings: std::collections::HashMap::new(),
     };
     let struct_id = registry.register_named("Point".to_string(), struct_type.clone());
     assert_eq!(registry.get(struct_id), Some(&struct_type));

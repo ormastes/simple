@@ -167,6 +167,10 @@ impl<'a> super::Lexer<'a> {
             } else {
                 // Regular character (including newlines)
                 self.advance();
+                if ch == '\n' {
+                    self.line += 1;
+                    self.column = 1;
+                }
                 value.push(ch);
             }
         }
@@ -399,6 +403,8 @@ impl<'a> super::Lexer<'a> {
                 if is_triple {
                     // Newlines are allowed in triple-quoted f-strings
                     self.advance();
+                    self.line += 1;
+                    self.column = 1;
                     current_literal.push(ch);
                 } else {
                     return TokenKind::Error("Unterminated f-string".to_string());

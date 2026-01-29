@@ -219,6 +219,15 @@ pub extern "C" fn rt_closure_func_ptr(closure: RuntimeValue) -> *const u8 {
 // Enum FFI functions
 // ============================================================================
 
+/// Hash a variant name to get its discriminant, matching the compiler's hashing scheme.
+pub fn hash_variant_discriminant(variant_name: &str) -> u32 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    variant_name.hash(&mut hasher);
+    (hasher.finish() & 0xFFFFFFFF) as u32
+}
+
 /// Allocate a new enum value
 #[no_mangle]
 pub extern "C" fn rt_enum_new(enum_id: u32, discriminant: u32, payload: RuntimeValue) -> RuntimeValue {
@@ -253,10 +262,53 @@ pub extern "C" fn rt_enum_check_discriminant(value: RuntimeValue, expected: i64)
         .map_or(false, |p| unsafe { (*p).discriminant as i64 == expected })
 }
 
+/// Unwrap an optional value: if it's a Some enum, return its payload; otherwise return as-is.
+/// Used by the `??` operator's then-branch to unwrap Option values.
+#[no_mangle]
+pub extern "C" fn rt_unwrap_or_self(value: RuntimeValue) -> RuntimeValue {
+    if let Some(p) = get_typed_ptr::<RuntimeEnum>(value, HeapObjectType::Enum) {
+        unsafe { (*p).payload }
+    } else {
+        // Not an enum — return the value itself (could be a raw string, int, etc.)
+        value
+    }
+}
+
 /// Get the payload of an enum value
 #[no_mangle]
 pub extern "C" fn rt_enum_payload(value: RuntimeValue) -> RuntimeValue {
-    get_typed_ptr::<RuntimeEnum>(value, HeapObjectType::Enum).map_or(RuntimeValue::NIL, |p| unsafe { (*p).payload })
+    let result = get_typed_ptr::<RuntimeEnum>(value, HeapObjectType::Enum)
+        .map_or(RuntimeValue::NIL, |p| unsafe { (*p).payload });
+    result
+}
+
+/// Check if a value is None/nil.
+/// Returns true if:
+/// - value is nil (raw 0 / TAG_SPECIAL with SPECIAL_NIL)
+/// - value is an enum with discriminant hash("None")
+#[no_mangle]
+pub extern "C" fn rt_is_none(value: RuntimeValue) -> bool {
+    // Check for raw nil (value == 0 or TAG_SPECIAL with NIL)
+    if value.0 == 0 || value.0 == super::tags::TAG_SPECIAL as u64 {
+        return true;
+    }
+    if value.is_nil() {
+        return true;
+    }
+    // Check for enum None variant
+    rt_enum_check_discriminant(value, {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut hasher = DefaultHasher::new();
+        "None".hash(&mut hasher);
+        (hasher.finish() & 0xFFFFFFFF) as i64
+    })
+}
+
+/// Check if a value is Some (not None/nil).
+#[no_mangle]
+pub extern "C" fn rt_is_some(value: RuntimeValue) -> bool {
+    !rt_is_none(value)
 }
 
 // ============================================================================

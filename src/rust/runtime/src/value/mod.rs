@@ -19,6 +19,7 @@
 
 mod actors;
 mod args;
+pub mod bdd_ffi;
 mod async_gen;
 mod channels;
 pub mod cli_ffi;
@@ -172,9 +173,9 @@ pub use hpcollections::{
 
 // Re-export object FFI functions
 pub use objects::{
-    rt_closure_func_ptr, rt_closure_get_capture, rt_closure_new, rt_closure_set_capture,
-    rt_enum_check_discriminant, rt_enum_discriminant, rt_enum_new, rt_enum_payload, rt_object_class_id, rt_object_field_count, rt_object_field_get, rt_object_field_set,
-    rt_object_new,
+    rt_closure_func_ptr, rt_closure_get_capture, rt_closure_new, rt_closure_set_capture, rt_enum_check_discriminant,
+    rt_enum_discriminant, rt_enum_new, rt_enum_payload, rt_object_class_id, rt_object_field_count, rt_object_field_get,
+    rt_object_field_set, rt_object_new,
 };
 
 // Re-export unique pointer FFI functions
@@ -296,7 +297,7 @@ pub use ffi::rt_time_now_seconds;
 pub use ffi::{
     rt_condition_probe, rt_decision_probe, rt_env_all, rt_env_cwd, rt_env_exists, rt_env_get, rt_env_home,
     rt_env_remove, rt_env_set, rt_env_temp, rt_env_vars, rt_exit, rt_get_env, rt_path_probe, rt_platform_name,
-    rt_process_execute, rt_process_run, rt_process_spawn, rt_set_env,
+    rt_process_execute, rt_process_run, rt_process_run_timeout, rt_process_spawn, rt_set_env,
 };
 
 // Re-export runtime configuration FFI functions
@@ -309,7 +310,7 @@ pub use ffi::{
     rt_file_stat,
     // File ops
     rt_file_canonicalize,
-    rt_file_read_text,
+    rt_file_read_text, rt_file_read_text_rv,
     rt_file_write_text,
     rt_file_copy,
     rt_file_remove,
@@ -825,6 +826,13 @@ pub use monoio_future::{
     rt_monoio_future_is_pending, rt_monoio_future_is_ready, rt_monoio_future_new, rt_monoio_future_set_async_state,
     rt_monoio_future_set_error, rt_monoio_future_set_result, rt_monoio_is_pending, IoOperationType, MonoioFuture,
     FUTURE_STATE_ERROR, FUTURE_STATE_PENDING, FUTURE_STATE_READY, PENDING_MARKER,
+};
+
+// Re-export BDD FFI functions (for native/SMF test execution)
+pub use bdd_ffi::{
+    rt_bdd_after_each, rt_bdd_before_each, rt_bdd_clear_state, rt_bdd_describe_end, rt_bdd_describe_start,
+    rt_bdd_expect_eq, rt_bdd_expect_fail, rt_bdd_expect_truthy, rt_bdd_format_results, rt_bdd_has_failure,
+    rt_bdd_it_end, rt_bdd_it_start,
 };
 
 // ============================================================================

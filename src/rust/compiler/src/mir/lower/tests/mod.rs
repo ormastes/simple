@@ -9,3 +9,4 @@ mod refinement_types;
 mod purity_tests;
 mod snapshot_tests;
 mod module_boundary;
+mod branch_coverage;

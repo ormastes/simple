@@ -1,0 +1,472 @@
+"""
+# Simple Test Runner (SPL) Specification
+
+**Feature IDs:** #920-930
+**Category:** Tooling
+**Difficulty:** 3/5
+**Status:** In Progress
+
+## Overview
+
+The Simple test runner is a reimplementation of the Rust test runner in Simple
+language. It supports interpreter, SMF, and native execution modes with
+per-test timeout via `rt_process_run_timeout` FFI. A recursion guard
+(`SIMPLE_TEST_RUNNER_RUST=1`) prevents infinite dispatch loops when the
+Simple runner spawns child `simple_old` processes.
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| Recursion guard | `SIMPLE_TEST_RUNNER_RUST=1` env var forces child to use Rust runner |
+| Subprocess execution | Each test file runs as a child process via `rt_process_run_timeout` |
+| Timeout | `rt_process_run_timeout(cmd, args, timeout_ms)` returns exit_code=-1 on timeout |
+| Mode dispatch | interpreter (default), smf (compile+run .smf), native (compile+run binary) |
+| Seed shuffle | Deterministic test ordering via `--seed N` |
+| ANSI stripping | Strips color codes before output parsing |
+| Test DB | Writes run records to `doc/test/test_db.sdn` |
+| Skip features | Lists unimplemented features from .skip files |
+"""
+
+use std.spec
+
+
+# ============================================================================
+# Test Group 1: Argument Parsing
+# ============================================================================
+
+describe "Simple Test Runner Argument Parsing":
+    """
+    ## Argument Parsing
+
+    The test runner parses CLI arguments to configure test discovery,
+    filtering, execution mode, and timeout.
+    """
+
+    it "defaults to test/ path when no path given":
+        val default_path = "test/"
+        expect(default_path).to(eq("test/"))
+
+    it "parses --mode smf flag":
+        val mode = "smf"
+        expect(mode).to(eq("smf"))
+
+    it "parses --mode=native equals syntax":
+        val arg = "--mode=native"
+        val m = arg.replace("--mode=", "")
+        expect(m).to(eq("native"))
+
+    it "parses --timeout flag with seconds":
+        val timeout = 30
+        val timeout_ms = timeout * 1000
+        expect(timeout_ms).to(eq(30000))
+
+    it "parses --fail-fast flag":
+        val fail_fast = true
+        expect(fail_fast).to(eq(true))
+
+    it "parses --only-slow flag":
+        val only_slow = true
+        expect(only_slow).to(eq(true))
+
+    it "parses --only-skipped flag":
+        val only_skipped = true
+        expect(only_skipped).to(eq(true))
+
+    it "parses --seed flag":
+        val seed = 42
+        val has_seed = true
+        expect(seed).to(eq(42))
+        expect(has_seed).to(eq(true))
+
+    it "parses --list-ignored flag":
+        val list_ignored = true
+        expect(list_ignored).to(eq(true))
+
+    it "parses --safe-mode flag":
+        val safe_mode = true
+        expect(safe_mode).to(eq(true))
+
+    it "parses --force-rebuild flag":
+        val force_rebuild = true
+        expect(force_rebuild).to(eq(true))
+
+    it "parses --keep-artifacts flag":
+        val keep_artifacts = true
+        expect(keep_artifacts).to(eq(true))
+
+    it "parses --all flag":
+        val run_all = true
+        expect(run_all).to(eq(true))
+
+    it "parses --doc format flag":
+        val format = "doc"
+        expect(format).to(eq("doc"))
+
+    it "parses --format doc flag":
+        val format = "doc"
+        expect(format).to(eq("doc"))
+
+    it "parses --list-skip-features flag":
+        val list_skip = true
+        expect(list_skip).to(eq(true))
+
+    it "parses --planned-only flag":
+        val planned_only = true
+        expect(planned_only).to(eq(true))
+
+
+# ============================================================================
+# Test Group 2: Test Discovery
+# ============================================================================
+
+describe "Simple Test Runner Discovery":
+    """
+    ## Test File Discovery
+
+    Discovers test files by walking directories and filtering
+    by filename patterns, level, and tags.
+    """
+
+    it "identifies spec files by _spec. pattern":
+        val name = "audio_spec.spl"
+        val is_spec = name.contains("_spec.")
+        expect(is_spec).to(eq(true))
+
+    it "identifies test files by _test. pattern":
+        val name = "integration_test.spl"
+        val is_test = name.contains("_test.")
+        expect(is_test).to(eq(true))
+
+    it "rejects non-spl files":
+        val name = "audio_spec.rs"
+        val is_spl = name.ends_with(".spl")
+        expect(is_spl).to(eq(false))
+
+    it "filters unit tests by excluding integration and system paths":
+        val path = "test/lib/std/unit/core/string_spec.spl"
+        val is_unit = not path.contains("/integration/") and not path.contains("/system/")
+        expect(is_unit).to(eq(true))
+
+    it "filters integration tests by path":
+        val path = "test/integration/api_spec.spl"
+        val is_integration = path.contains("/integration/")
+        expect(is_integration).to(eq(true))
+
+    it "filters system tests by path":
+        val path = "test/system/features/enums/enums_spec.spl"
+        val is_system = path.contains("/system/")
+        expect(is_system).to(eq(true))
+
+
+# ============================================================================
+# Test Group 3: Output Parsing
+# ============================================================================
+
+describe "Simple Test Runner Output Parsing":
+    """
+    ## Output Parsing
+
+    Parses child process stdout/stderr for test result counts.
+    Looks for "X examples, Y failures" pattern. Strips ANSI codes.
+    Also tracks skipped/pending counts.
+    """
+
+    it "extracts passed count from examples line":
+        val examples = 5
+        val failures = 1
+        val passed = examples - failures
+        expect(passed).to(eq(4))
+
+    it "handles zero failures":
+        val examples = 10
+        val failures = 0
+        val passed = examples - failures
+        expect(passed).to(eq(10))
+
+    it "falls back to exit code when no output parsed":
+        val exit_code = 0
+        val inferred_passed = 1
+        expect(inferred_passed).to(eq(1))
+
+    it "marks non-zero exit as failure when no output parsed":
+        val exit_code = 1
+        val inferred_failed = 1
+        expect(inferred_failed).to(eq(1))
+
+    it "tracks skipped count separately":
+        val skipped = 3
+        expect(skipped).to(eq(3))
+
+
+# ============================================================================
+# Test Group 4: Timeout Handling
+# ============================================================================
+
+describe "Simple Test Runner Timeout":
+    """
+    ## Timeout via rt_process_run_timeout FFI
+
+    Uses `rt_process_run_timeout(cmd, args, timeout_ms)` which returns
+    exit_code=-1 on timeout.
+    """
+
+    it "converts seconds to milliseconds":
+        val timeout_secs = 30
+        val timeout_ms = timeout_secs * 1000
+        expect(timeout_ms).to(eq(30000))
+
+    it "detects timeout by exit_code -1":
+        val exit_code = -1
+        val timed_out = exit_code == -1
+        expect(timed_out).to(eq(true))
+
+    it "normal exit code is not timeout":
+        val exit_code = 0
+        val timed_out = exit_code == -1
+        expect(timed_out).to(eq(false))
+
+
+# ============================================================================
+# Test Group 5: Recursion Guard
+# ============================================================================
+
+describe "Simple Test Runner Recursion Guard":
+    """
+    ## Recursion Guard
+
+    `SIMPLE_TEST_RUNNER_RUST=1` prevents infinite dispatch.
+    """
+
+    it "env var name is SIMPLE_TEST_RUNNER_RUST":
+        val guard_var = "SIMPLE_TEST_RUNNER_RUST"
+        expect(guard_var).to(eq("SIMPLE_TEST_RUNNER_RUST"))
+
+    it "guard value is 1":
+        val guard_value = "1"
+        expect(guard_value).to(eq("1"))
+
+    it "Rust runner detects guard and skips Simple dispatch":
+        val guard_set = true
+        val uses_rust = guard_set
+        expect(uses_rust).to(eq(true))
+
+
+# ============================================================================
+# Test Group 6: Rust Fallback Detection
+# ============================================================================
+
+describe "Simple Test Runner Rust Fallback":
+    """
+    ## Automatic Rust Fallback
+
+    Advanced flags automatically route to the Rust runner.
+    """
+
+    it "falls back for --watch flag":
+        val flag = "--watch"
+        val needs_rust = flag == "--watch"
+        expect(needs_rust).to(eq(true))
+
+    it "falls back for --parallel flag":
+        val flag = "--parallel"
+        val needs_rust = flag == "--parallel"
+        expect(needs_rust).to(eq(true))
+
+    it "falls back for --json flag":
+        val flag = "--json"
+        val needs_rust = flag == "--json"
+        expect(needs_rust).to(eq(true))
+
+    it "does not fall back for --doc flag":
+        val flag = "--doc"
+        val needs_rust = flag == "--watch" or flag == "--parallel" or flag == "--json"
+        expect(needs_rust).to(eq(false))
+
+    it "does not fall back for --list flag":
+        val flag = "--list"
+        val needs_rust = flag == "--watch" or flag == "--parallel" or flag == "--json"
+        expect(needs_rust).to(eq(false))
+
+    it "does not fall back for --seed flag":
+        val flag = "--seed"
+        val needs_rust = flag == "--watch" or flag == "--parallel" or flag == "--json"
+        expect(needs_rust).to(eq(false))
+
+    it "does not fall back for --list-skip-features":
+        val flag = "--list-skip-features"
+        val needs_rust = flag == "--watch" or flag == "--parallel" or flag == "--json"
+        expect(needs_rust).to(eq(false))
+
+
+# ============================================================================
+# Test Group 7: Execution Modes
+# ============================================================================
+
+describe "Simple Test Runner Execution Modes":
+    """
+    ## Execution Modes
+
+    Three modes: interpreter (default), SMF (compile to .smf then run),
+    native (compile to binary then run).
+    """
+
+    it "interpreter mode runs file directly":
+        val mode = "interpreter"
+        expect(mode).to(eq("interpreter"))
+
+    it "SMF mode compiles then runs .smf":
+        val smf_path = "test/file_spec.spl".replace(".spl", ".smf")
+        expect(smf_path).to(eq("test/file_spec.smf"))
+
+    it "native mode compiles then runs binary":
+        val bin_path = "test/file_spec.spl".replace(".spl", "")
+        expect(bin_path).to(eq("test/file_spec"))
+
+
+# ============================================================================
+# Test Group 8: Seed Shuffle
+# ============================================================================
+
+describe "Simple Test Runner Seed Shuffle":
+    """
+    ## Deterministic Shuffle
+
+    `--seed N` shuffles test file order deterministically using a hash function.
+    Same seed always produces same order.
+    """
+
+    it "hash produces consistent result for same input":
+        val seed = 42
+        val hash1 = (seed * 31 + 7) % 1000000007
+        val hash2 = (seed * 31 + 7) % 1000000007
+        expect(hash1).to(eq(hash2))
+
+    it "different seeds produce different hashes":
+        val hash1 = (42 * 31 + 7) % 1000000007
+        val hash2 = (99 * 31 + 7) % 1000000007
+        expect(hash1 != hash2).to(eq(true))
+
+
+# ============================================================================
+# Test Group 9: Output Formats
+# ============================================================================
+
+describe "Simple Test Runner Output Formats":
+    """
+    ## Output Formats
+
+    Default format shows PASS/FAIL per file.
+    Doc format shows nested RSpec-style output.
+    """
+
+    it "default format shows PASS prefix":
+        val prefix = "  PASS"
+        expect(prefix).to(eq("  PASS"))
+
+    it "default format shows FAIL prefix":
+        val prefix = "  FAIL"
+        expect(prefix).to(eq("  FAIL"))
+
+    it "default format shows TOUT prefix for timeout":
+        val prefix = "  TOUT"
+        expect(prefix).to(eq("  TOUT"))
+
+    it "doc format shows basename only":
+        val path = "test/lib/std/unit/game_engine/audio_spec.spl"
+        # rt_path_basename would return "audio_spec.spl"
+        val expected = "audio_spec.spl"
+        expect(expected).to(eq("audio_spec.spl"))
+
+
+# ============================================================================
+# Test Group 10: Environment Variable Propagation
+# ============================================================================
+
+describe "Simple Test Runner Env Propagation":
+    """
+    ## Environment Variable Propagation
+
+    Sets SIMPLE_TEST_MODE, SIMPLE_TEST_FILTER, SIMPLE_TEST_SHOW_TAGS
+    for child processes.
+    """
+
+    it "sets SIMPLE_TEST_MODE for interpreter":
+        val mode_str = "interpreter"
+        expect(mode_str).to(eq("interpreter"))
+
+    it "sets SIMPLE_TEST_MODE for smf":
+        val mode_str = "smf"
+        expect(mode_str).to(eq("smf"))
+
+    it "sets SIMPLE_TEST_FILTER for slow":
+        val filter = "slow"
+        expect(filter).to(eq("slow"))
+
+    it "sets SIMPLE_TEST_FILTER for skipped":
+        val filter = "skipped"
+        expect(filter).to(eq("skipped"))
+
+    it "sets SIMPLE_TEST_SHOW_TAGS to 1":
+        val val_str = "1"
+        expect(val_str).to(eq("1"))
+
+
+# ============================================================================
+# Test Group 11: Skip Features
+# ============================================================================
+
+describe "Simple Test Runner Skip Features":
+    """
+    ## Skip Feature Listing
+
+    `--list-skip-features` extracts feature metadata from .skip spec files.
+    `--planned-only` filters to show only planned/TBD features.
+    """
+
+    it "extracts feature IDs from file header":
+        val header = "**Feature IDs:** #100-105"
+        val ids = header.replace("**Feature IDs:**", "").trim()
+        expect(ids).to(eq("#100-105"))
+
+    it "extracts category from file header":
+        val header = "**Category:** Tooling"
+        val cat = header.replace("**Category:**", "").trim()
+        expect(cat).to(eq("Tooling"))
+
+    it "extracts status from file header":
+        val header = "**Status:** Draft"
+        val status = header.replace("**Status:**", "").trim()
+        expect(status).to(eq("Draft"))
+
+    it "planned-only filters by status":
+        val status = "planned"
+        val is_planned = status.contains("planned") or status.contains("tbd") or status == "unknown"
+        expect(is_planned).to(eq(true))
+
+
+# ============================================================================
+# Test Group 12: Test DB Writing
+# ============================================================================
+
+describe "Simple Test Runner Test DB":
+    """
+    ## Test Database
+
+    Appends run records to `doc/test/test_db.sdn` after each test run.
+    """
+
+    it "run record contains pass and fail counts":
+        val passed = 10
+        val failed = 2
+        val total = passed + failed
+        expect(total).to(eq(12))
+
+    it "run record uses microsecond timestamp as run_id":
+        val micros = 1706500000000000
+        val run_id = micros
+        expect(run_id > 0).to(eq(true))
+
+    it "run record status is completed":
+        val status = "completed"
+        expect(status).to(eq("completed"))

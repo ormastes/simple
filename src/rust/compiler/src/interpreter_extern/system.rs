@@ -10,6 +10,7 @@ use simple_runtime::value::{
     rt_env_home as ffi_env_home, rt_env_remove as ffi_env_remove, rt_env_set as ffi_env_set,
     rt_env_temp as ffi_env_temp, rt_set_debug_mode as ffi_set_debug_mode, rt_set_macro_trace as ffi_set_macro_trace,
     rt_process_run as ffi_process_run,
+    rt_process_run_timeout as ffi_process_run_timeout,
 };
 
 /// Get command-line arguments
@@ -284,6 +285,56 @@ pub fn rt_process_run(args: &[Value]) -> Result<Value, CompileError> {
 
     unsafe {
         let result = ffi_process_run(cmd.as_ptr(), cmd.len() as u64, args_array);
+        Ok(runtime_to_value(result))
+    }
+}
+
+/// Run a command with timeout and capture output
+///
+/// Callable from Simple as: `rt_process_run_timeout(cmd, args, timeout_ms)`
+///
+/// # Arguments
+/// * `args` - Evaluated arguments [cmd: String, args: List<String>, timeout_ms: Int]
+///
+/// # Returns
+/// * Tuple of (stdout: String, stderr: String, exit_code: Int) where exit_code=-1 on timeout
+pub fn rt_process_run_timeout(args: &[Value]) -> Result<Value, CompileError> {
+    use simple_runtime::value::{rt_array_new, rt_array_push, rt_string_new};
+
+    if args.len() < 3 {
+        return Err(CompileError::runtime("rt_process_run_timeout requires 3 arguments (cmd, args, timeout_ms)"));
+    }
+
+    let cmd = match &args[0] {
+        Value::Str(s) => s.clone(),
+        _ => return Err(CompileError::runtime("rt_process_run_timeout: cmd must be a string")),
+    };
+
+    let args_array = match &args[1] {
+        Value::Array(arr) => {
+            let runtime_arr = rt_array_new(arr.len() as u64);
+            for item in arr.iter() {
+                if let Value::Str(s) = item {
+                    let runtime_str = rt_string_new(s.as_ptr(), s.len() as u64);
+                    rt_array_push(runtime_arr, runtime_str);
+                }
+            }
+            runtime_arr
+        }
+        _ => {
+            return Err(CompileError::runtime(
+                "rt_process_run_timeout: args must be an array of strings",
+            ))
+        }
+    };
+
+    let timeout_ms = match &args[2] {
+        Value::Int(n) => *n,
+        _ => return Err(CompileError::runtime("rt_process_run_timeout: timeout_ms must be an integer")),
+    };
+
+    unsafe {
+        let result = ffi_process_run_timeout(cmd.as_ptr(), cmd.len() as u64, args_array, timeout_ms);
         Ok(runtime_to_value(result))
     }
 }

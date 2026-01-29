@@ -63,8 +63,9 @@ impl Lowerer {
         self.loaded_modules.insert(resolved.path.clone());
 
         // Read and parse the module file
-        let source = std::fs::read_to_string(&resolved.path)
-            .map_err(|e| LowerError::ModuleResolution(format!("Failed to read module file {:?}: {}", resolved.path, e)))?;
+        let source = std::fs::read_to_string(&resolved.path).map_err(|e| {
+            LowerError::ModuleResolution(format!("Failed to read module file {:?}: {}", resolved.path, e))
+        })?;
 
         let mut parser = simple_parser::Parser::new(&source);
         let imported_module = parser
@@ -119,8 +120,10 @@ impl Lowerer {
 
                         // Also register the struct constructor as a function in globals
                         // This allows using the struct name as a constructor: BlockExample(...)
-                        eprintln!("[DEBUG import_loader] Registering struct constructor: '{}' with TypeId {:?}",
-                                  struct_def.name, struct_type_id);
+                        eprintln!(
+                            "[DEBUG import_loader] Registering struct constructor: '{}' with TypeId {:?}",
+                            struct_def.name, struct_type_id
+                        );
                         self.globals.insert(struct_def.name.clone(), struct_type_id);
                     }
                 }
@@ -213,7 +216,10 @@ impl Lowerer {
 
                             // Register all methods from the impl block
                             for method in &impl_block.methods {
-                                eprintln!("[DEBUG import_loader] Registering method: '{}.{}'", type_name, method.name);
+                                eprintln!(
+                                    "[DEBUG import_loader] Registering method: '{}.{}'",
+                                    type_name, method.name
+                                );
 
                                 // Register method in globals (methods are functions)
                                 let ret_ty = self.resolve_type_opt(&method.return_type)?;

@@ -158,7 +158,9 @@ impl<'a> Parser<'a> {
                     // Not an FFI call pattern - let it fall through to default error
                     Err(ParseError::unexpected_token(
                         "expression",
-                        format!("@ (matrix multiplication requires left operand, FFI calls require @identifier pattern)"),
+                        format!(
+                            "@ (matrix multiplication requires left operand, FFI calls require @identifier pattern)"
+                        ),
                         self.current.span,
                     ))
                 }

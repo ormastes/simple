@@ -37,10 +37,7 @@ impl MonomorphizationMetadata {
 
     /// Check if metadata is empty (no generic constructs)
     pub fn is_empty(&self) -> bool {
-        self.functions.is_empty()
-            && self.structs.is_empty()
-            && self.enums.is_empty()
-            && self.traits.is_empty()
+        self.functions.is_empty() && self.structs.is_empty() && self.enums.is_empty() && self.traits.is_empty()
     }
 }
 
@@ -143,7 +140,6 @@ pub struct SpecializationEntry {
     pub mangled_name: String,
     /// Type parameter bindings (e.g., T -> Int, U -> String)
     pub bindings: HashMap<String, ConcreteType>,
-
     // TODO: Add optimization_level field for future profile-guided optimization
     // pub optimization_level: OptimizationLevel,
 }
@@ -160,11 +156,7 @@ impl SpecializationEntry {
     }
 
     /// Create a specialization entry with explicit bindings
-    pub fn new(
-        type_args: Vec<ConcreteType>,
-        mangled_name: String,
-        bindings: HashMap<String, ConcreteType>,
-    ) -> Self {
+    pub fn new(type_args: Vec<ConcreteType>, mangled_name: String, bindings: HashMap<String, ConcreteType>) -> Self {
         Self {
             type_args,
             mangled_name,
@@ -187,12 +179,7 @@ pub struct TraitImplEntry {
 }
 
 impl TraitImplEntry {
-    pub fn new(
-        trait_name: String,
-        type_args: Vec<ConcreteType>,
-        impl_for_type: String,
-        mangled_name: String,
-    ) -> Self {
+    pub fn new(trait_name: String, type_args: Vec<ConcreteType>, impl_for_type: String, mangled_name: String) -> Self {
         Self {
             trait_name,
             type_args,

@@ -269,7 +269,6 @@ impl Lowerer {
         // Extract pattern bindings and add them to context
         // This needs to happen after pattern condition but before guard/body
         let bindings = self.extract_pattern_bindings(&arm.pattern, subject_ty);
-        let saved_locals_len = ctx.locals.len();
         for (name, ty) in &bindings {
             ctx.add_local(name.clone(), *ty, simple_parser::ast::Mutability::Immutable);
         }
@@ -293,8 +292,9 @@ impl Lowerer {
         let then_branch = self.lower_match_arm_body(&arm.body, ctx)?;
         let then_ty = then_branch.ty;
 
-        // Restore context (remove pattern bindings)
-        ctx.locals.truncate(saved_locals_len);
+        // Restore context (remove pattern bindings from name scope only)
+        // Keep locals in ctx.locals so they get proper indices in the final function.
+        // Truncating would cause local_index references in HIR stmts to be out of bounds.
         for (name, _) in &bindings {
             ctx.local_map.remove(name);
         }
@@ -419,6 +419,27 @@ impl Lowerer {
                 })
             }
             Pattern::Enum { name: _, variant, .. } => {
+                // Special handling for None - check both nil and enum None
+                if variant == "None" {
+                    return Ok(HirExpr {
+                        kind: HirExprKind::BuiltinCall {
+                            name: "rt_is_none".to_string(),
+                            args: vec![subject_ref],
+                        },
+                        ty: TypeId::BOOL,
+                    });
+                }
+                // Special handling for Some - check not-none
+                if variant == "Some" {
+                    return Ok(HirExpr {
+                        kind: HirExprKind::BuiltinCall {
+                            name: "rt_is_some".to_string(),
+                            args: vec![subject_ref],
+                        },
+                        ty: TypeId::BOOL,
+                    });
+                }
+
                 // Use rt_enum_check_discriminant(subject, expected_disc) -> bool
                 // All enums use hashed variant name discriminants consistently
                 let expected_disc: i64 = {
@@ -763,10 +784,20 @@ impl Lowerer {
             expr_hir.ty
         };
 
+        // Unwrap the then-branch: if expr is Some(x), return x, not Some(x).
+        // Use rt_unwrap_or_self which handles both enum and raw values.
+        let unwrapped_expr = HirExpr {
+            kind: HirExprKind::BuiltinCall {
+                name: "rt_unwrap_or_self".to_string(),
+                args: vec![expr_hir],
+            },
+            ty: result_ty,
+        };
+
         Ok(HirExpr {
             kind: HirExprKind::If {
                 condition: Box::new(condition),
-                then_branch: Box::new(expr_hir),
+                then_branch: Box::new(unwrapped_expr),
                 else_branch: Some(Box::new(default_hir)),
             },
             ty: result_ty,

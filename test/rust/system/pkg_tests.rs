@@ -151,7 +151,7 @@ version = "0.1.0"
 [dependencies]
 http = "1.0"
 "#;
-    let manifest = Manifest::parse(content).unwrap();
+    let manifest = Manifest::parse(content, false).unwrap();
     assert_eq!(manifest.package.name, "myapp");
     assert_eq!(manifest.package.version, "0.1.0");
     assert!(manifest.dependencies.contains_key("http"));
@@ -168,7 +168,7 @@ mylib = { git = "https://github.com/user/mylib" }
 utils = { path = "../utils" }
 http = { version = "1.0", optional = true }
 "#;
-    let manifest = Manifest::parse(content).unwrap();
+    let manifest = Manifest::parse(content, false).unwrap();
 
     let mylib = manifest.dependencies.get("mylib").unwrap();
     assert!(mylib.is_git());

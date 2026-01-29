@@ -462,7 +462,9 @@ impl<'a> MirLowerer<'a> {
                     dest
                 })
             }
-            HirExprKind::MethodCall { receiver, method, args, .. } if args.is_empty() => {
+            HirExprKind::MethodCall {
+                receiver, method, args, ..
+            } if args.is_empty() => {
                 // Property access (no-paren method call) used as lvalue
                 // This happens when field access falls back to method call
                 // Convert back to field access by looking up the field index
@@ -479,7 +481,9 @@ impl<'a> MirLowerer<'a> {
 
                         if let Some(fields) = fields {
                             // Find the field by name
-                            if let Some((field_idx, _)) = fields.iter().enumerate().find(|(_, (name, _))| name == method) {
+                            if let Some((field_idx, _)) =
+                                fields.iter().enumerate().find(|(_, (name, _))| name == method)
+                            {
                                 // Found the field - use GetElementPtr
                                 let base_addr = self.lower_lvalue(receiver)?;
                                 return self.with_func(|func, current_block| {
@@ -520,7 +524,6 @@ impl<'a> MirLowerer<'a> {
                 eprintln!("[DEBUG lower_lvalue] Unsupported lvalue kind: {:?}", expr.kind);
                 Err(MirLowerError::Unsupported(format!("complex lvalue: {:?}", expr.kind)))
             }
-
         }
     }
 

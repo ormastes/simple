@@ -93,12 +93,13 @@ fn resolve_single(name: &str, dep: &Dependency, context_dir: &Path) -> PkgResult
                 })?;
 
                 // Validate path dependency has simple.sdn or simple.toml
-                let manifest_path = crate::find_manifest(&abs_path)
-                    .ok_or_else(|| PkgError::ManifestNotFound(format!(
+                let manifest_path = crate::find_manifest(&abs_path).ok_or_else(|| {
+                    PkgError::ManifestNotFound(format!(
                         "Path dependency '{}' missing simple.sdn or simple.toml at {}",
                         name,
                         abs_path.display()
-                    )))?;
+                    ))
+                })?;
 
                 // Load dependency manifest to get version and sub-deps
                 let dep_manifest = Manifest::load(&manifest_path)?;

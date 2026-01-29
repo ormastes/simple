@@ -1,103 +1,113 @@
 //! JIT compilation tests
+//!
+//! Uses `backend_test!` macro to generate per-backend tests.
+//! Tests marked `interp_jit` run on both Interpreter and JIT.
+//! Tests that previously had `#[ignore]` due to JIT SIGSEGV on ==/!=
+//! are now `interp` only (still tested on interpreter, JIT skipped).
 
-use simple_driver::run_jit;
+mod test_helpers;
 
-#[test]
-fn jit_simple_return() {
-    let code = r#"
+// =============================================================================
+// Feature #1: Arithmetic & Expressions
+// =============================================================================
+
+backend_test!(
+    jit_simple_return,
+    interp_jit,
+    r#"
 fn main() -> i64:
     return 42
-"#;
-    let result = run_jit(code).unwrap();
-    assert_eq!(result.exit_code, 42);
-}
+"#,
+    42
+);
 
-#[test]
-fn jit_arithmetic_add() {
-    let code = r#"
+backend_test!(
+    jit_arithmetic_add,
+    interp_jit,
+    r#"
 fn main() -> i64:
     return 10 + 32
-"#;
-    let result = run_jit(code).unwrap();
-    assert_eq!(result.exit_code, 42);
-}
+"#,
+    42
+);
 
-#[test]
-fn jit_arithmetic_sub() {
-    let code = r#"
+backend_test!(
+    jit_arithmetic_sub,
+    interp_jit,
+    r#"
 fn main() -> i64:
     return 50 - 8
-"#;
-    let result = run_jit(code).unwrap();
-    assert_eq!(result.exit_code, 42);
-}
+"#,
+    42
+);
 
-#[test]
-fn jit_arithmetic_mul() {
-    let code = r#"
+backend_test!(
+    jit_arithmetic_mul,
+    interp_jit,
+    r#"
 fn main() -> i64:
     return 6 * 7
-"#;
-    let result = run_jit(code).unwrap();
-    assert_eq!(result.exit_code, 42);
-}
+"#,
+    42
+);
 
-#[test]
-fn jit_arithmetic_div() {
-    let code = r#"
+backend_test!(
+    jit_arithmetic_div,
+    interp_jit,
+    r#"
 fn main() -> i64:
     return 84 / 2
-"#;
-    let result = run_jit(code).unwrap();
-    assert_eq!(result.exit_code, 42);
-}
+"#,
+    42
+);
 
-#[test]
-fn jit_arithmetic_mod() {
-    let code = r#"
+backend_test!(
+    jit_arithmetic_mod,
+    interp_jit,
+    r#"
 fn main() -> i64:
     return 142 % 100
-"#;
-    let result = run_jit(code).unwrap();
-    assert_eq!(result.exit_code, 42);
-}
+"#,
+    42
+);
 
-#[test]
-fn jit_negation() {
-    let code = r#"
+backend_test!(
+    jit_negation,
+    interp_jit,
+    r#"
 fn main() -> i64:
     return -(-42)
-"#;
-    let result = run_jit(code).unwrap();
-    assert_eq!(result.exit_code, 42);
-}
+"#,
+    42
+);
 
-#[test]
-fn jit_complex_expression() {
-    let code = r#"
+backend_test!(
+    jit_complex_expression,
+    interp_jit,
+    r#"
 fn main() -> i64:
     return (10 + 5) * 3 - 3
-"#;
-    let result = run_jit(code).unwrap();
-    assert_eq!(result.exit_code, 42);
-}
+"#,
+    42
+);
 
-#[test]
-fn jit_function_call() {
-    let code = r#"
+backend_test!(
+    jit_function_call,
+    interp_jit,
+    r#"
 fn double(x: i64) -> i64:
     return x * 2
 
 fn main() -> i64:
     return double(21)
-"#;
-    let result = run_jit(code).unwrap();
-    assert_eq!(result.exit_code, 42);
-}
+"#,
+    42
+);
 
-#[test]
-fn jit_multiple_function_calls() {
-    let code = r#"
+backend_test!(
+    jit_multiple_function_calls,
+    interp_jit,
+    r#"
 fn add(a: i64, b: i64) -> i64:
     return a + b
 
@@ -106,67 +116,67 @@ fn mul(a: i64, b: i64) -> i64:
 
 fn main() -> i64:
     return add(mul(6, 7), 0)
-"#;
-    let result = run_jit(code).unwrap();
-    assert_eq!(result.exit_code, 42);
-}
+"#,
+    42
+);
 
-#[test]
-fn jit_conditional_if_true() {
-    let code = r#"
+backend_test!(
+    jit_conditional_if_true,
+    interp_jit,
+    r#"
 fn main() -> i64:
     if 1 > 0:
         return 42
     else:
         return 0
-"#;
-    let result = run_jit(code).unwrap();
-    assert_eq!(result.exit_code, 42);
-}
+"#,
+    42
+);
 
-#[test]
-fn jit_conditional_if_false() {
-    let code = r#"
+backend_test!(
+    jit_conditional_if_false,
+    interp_jit,
+    r#"
 fn main() -> i64:
     if 0 > 1:
         return 0
     else:
         return 42
-"#;
-    let result = run_jit(code).unwrap();
-    assert_eq!(result.exit_code, 42);
-}
+"#,
+    42
+);
 
-#[test]
-fn jit_comparison_lt() {
-    let code = r#"
+backend_test!(
+    jit_comparison_lt,
+    interp_jit,
+    r#"
 fn main() -> i64:
     if 5 < 10:
         return 42
     else:
         return 0
-"#;
-    let result = run_jit(code).unwrap();
-    assert_eq!(result.exit_code, 42);
-}
+"#,
+    42
+);
 
-#[test]
-#[ignore] // FIXME: SIGSEGV crash in JIT compiler when handling == comparison
-fn jit_comparison_eq() {
-    let code = r#"
+// FIXME: SIGSEGV crash in JIT compiler when handling == comparison
+backend_test!(
+    jit_comparison_eq,
+    interp,
+    r#"
 fn main() -> i64:
     if 42 == 42:
         return 42
     else:
         return 0
-"#;
-    let result = run_jit(code).unwrap();
-    assert_eq!(result.exit_code, 42);
-}
+"#,
+    42
+);
 
-#[test]
-fn jit_recursive_factorial() {
-    let code = r#"
+backend_test!(
+    jit_recursive_factorial,
+    interp_jit,
+    r#"
 fn factorial(n: i64) -> i64:
     if n <= 1:
         return 1
@@ -175,14 +185,14 @@ fn factorial(n: i64) -> i64:
 
 fn main() -> i64:
     return factorial(5)
-"#;
-    let result = run_jit(code).unwrap();
-    assert_eq!(result.exit_code, 120);
-}
+"#,
+    120
+);
 
-#[test]
-fn jit_recursive_fibonacci() {
-    let code = r#"
+backend_test!(
+    jit_recursive_fibonacci,
+    interp_jit,
+    r#"
 fn fib(n: i64) -> i64:
     if n <= 1:
         return n
@@ -191,157 +201,157 @@ fn fib(n: i64) -> i64:
 
 fn main() -> i64:
     return fib(10)
-"#;
-    let result = run_jit(code).unwrap();
-    assert_eq!(result.exit_code, 55);
-}
+"#,
+    55
+);
 
-#[test]
-fn jit_bitwise_and() {
-    let code = r#"
+backend_test!(
+    jit_bitwise_and,
+    interp_jit,
+    r#"
 fn main() -> i64:
     return 0xFF & 0x2A
-"#;
-    let result = run_jit(code).unwrap();
-    assert_eq!(result.exit_code, 42);
-}
+"#,
+    42
+);
 
-#[test]
-fn jit_bitwise_or() {
-    let code = r#"
+backend_test!(
+    jit_bitwise_or,
+    interp_jit,
+    r#"
 fn main() -> i64:
     return 0x20 | 0x0A
-"#;
-    let result = run_jit(code).unwrap();
-    assert_eq!(result.exit_code, 42);
-}
+"#,
+    42
+);
 
-#[test]
-fn jit_bitwise_xor() {
-    let code = r#"
+backend_test!(
+    jit_bitwise_xor,
+    interp_jit,
+    r#"
 fn main() -> i64:
     return 0x55 xor 0x7F
-"#;
-    let result = run_jit(code).unwrap();
-    assert_eq!(result.exit_code, 42);
-}
+"#,
+    42
+);
 
-#[test]
-fn jit_shift_left() {
-    let code = r#"
+backend_test!(
+    jit_shift_left,
+    interp_jit,
+    r#"
 fn main() -> i64:
     return 21 << 1
-"#;
-    let result = run_jit(code).unwrap();
-    assert_eq!(result.exit_code, 42);
-}
+"#,
+    42
+);
 
-#[test]
-fn jit_shift_right() {
-    let code = r#"
+backend_test!(
+    jit_shift_right,
+    interp_jit,
+    r#"
 fn main() -> i64:
     return 84 >> 1
-"#;
-    let result = run_jit(code).unwrap();
-    assert_eq!(result.exit_code, 42);
-}
+"#,
+    42
+);
 
 // =============================================================================
 // Feature #2: Variables & Let Bindings
 // =============================================================================
 
-#[test]
-fn jit_let_binding_simple() {
-    let code = r#"
+backend_test!(
+    jit_let_binding_simple,
+    interp_jit,
+    r#"
 fn main() -> i64:
     let x: i64 = 42
     return x
-"#;
-    let result = run_jit(code).unwrap();
-    assert_eq!(result.exit_code, 42);
-}
+"#,
+    42
+);
 
-#[test]
-fn jit_let_binding_expression() {
-    let code = r#"
+backend_test!(
+    jit_let_binding_expression,
+    interp_jit,
+    r#"
 fn main() -> i64:
     let x: i64 = 10 + 32
     return x
-"#;
-    let result = run_jit(code).unwrap();
-    assert_eq!(result.exit_code, 42);
-}
+"#,
+    42
+);
 
-#[test]
-fn jit_multiple_let_bindings() {
-    let code = r#"
+backend_test!(
+    jit_multiple_let_bindings,
+    interp_jit,
+    r#"
 fn main() -> i64:
     let a: i64 = 6
     let b: i64 = 7
     return a * b
-"#;
-    let result = run_jit(code).unwrap();
-    assert_eq!(result.exit_code, 42);
-}
+"#,
+    42
+);
 
-#[test]
-fn jit_let_binding_chain() {
-    let code = r#"
+backend_test!(
+    jit_let_binding_chain,
+    interp_jit,
+    r#"
 fn main() -> i64:
     let a: i64 = 10
     let b: i64 = a + 5
     let c: i64 = b * 2
     let d: i64 = c + 12
     return d
-"#;
-    let result = run_jit(code).unwrap();
-    assert_eq!(result.exit_code, 42);
-}
+"#,
+    42
+);
 
-#[test]
-fn jit_mutable_variable() {
-    let code = r#"
+backend_test!(
+    jit_mutable_variable,
+    interp_jit,
+    r#"
 fn main() -> i64:
     let mut x: i64 = 0
     x = 42
     return x
-"#;
-    let result = run_jit(code).unwrap();
-    assert_eq!(result.exit_code, 42);
-}
+"#,
+    42
+);
 
-#[test]
-fn jit_mutable_increment() {
-    let code = r#"
+backend_test!(
+    jit_mutable_increment,
+    interp_jit,
+    r#"
 fn main() -> i64:
     let mut x: i64 = 40
     x = x + 2
     return x
-"#;
-    let result = run_jit(code).unwrap();
-    assert_eq!(result.exit_code, 42);
-}
+"#,
+    42
+);
 
 // =============================================================================
 // Feature #6: Loops (while)
 // =============================================================================
 
-#[test]
-fn jit_while_loop_simple() {
-    let code = r#"
+backend_test!(
+    jit_while_loop_simple,
+    interp_jit,
+    r#"
 fn main() -> i64:
     let mut i: i64 = 0
     while i < 42:
         i = i + 1
     return i
-"#;
-    let result = run_jit(code).unwrap();
-    assert_eq!(result.exit_code, 42);
-}
+"#,
+    42
+);
 
-#[test]
-fn jit_while_loop_sum() {
-    let code = r#"
+backend_test!(
+    jit_while_loop_sum,
+    interp_jit,
+    r#"
 fn main() -> i64:
     let mut sum: i64 = 0
     let mut i: i64 = 1
@@ -349,15 +359,14 @@ fn main() -> i64:
         sum = sum + i
         i = i + 1
     return sum
-"#;
-    let result = run_jit(code).unwrap();
-    // Sum of 1..9 = 45, but we want 42 so let's adjust
-    assert_eq!(result.exit_code, 45);
-}
+"#,
+    45
+);
 
-#[test]
-fn jit_while_loop_countdown() {
-    let code = r#"
+backend_test!(
+    jit_while_loop_countdown,
+    interp_jit,
+    r#"
 fn main() -> i64:
     let mut n: i64 = 10
     let mut res: i64 = 0
@@ -365,15 +374,14 @@ fn main() -> i64:
         res = res + n
         n = n - 1
     return res
-"#;
-    let result = run_jit(code).unwrap();
-    // Sum of 10..1 = 55
-    assert_eq!(result.exit_code, 55);
-}
+"#,
+    55
+);
 
-#[test]
-fn jit_nested_while_loops() {
-    let code = r#"
+backend_test!(
+    jit_nested_while_loops,
+    interp_jit,
+    r#"
 fn main() -> i64:
     let mut res: i64 = 0
     let mut i: i64 = 0
@@ -384,202 +392,199 @@ fn main() -> i64:
             j = j + 1
         i = i + 1
     return res
-"#;
-    let result = run_jit(code).unwrap();
-    // 6 * 7 = 42
-    assert_eq!(result.exit_code, 42);
-}
+"#,
+    42
+);
 
 // =============================================================================
 // Feature #4: Logical Operators
 // =============================================================================
 
-#[test]
-fn jit_logical_and_true() {
-    let code = r#"
+backend_test!(
+    jit_logical_and_true,
+    interp_jit,
+    r#"
 fn main() -> i64:
     if 1 > 0 and 2 > 1:
         return 42
     else:
         return 0
-"#;
-    let result = run_jit(code).unwrap();
-    assert_eq!(result.exit_code, 42);
-}
+"#,
+    42
+);
 
-#[test]
-fn jit_logical_and_false() {
-    let code = r#"
+backend_test!(
+    jit_logical_and_false,
+    interp_jit,
+    r#"
 fn main() -> i64:
     if 1 > 0 and 0 > 1:
         return 0
     else:
         return 42
-"#;
-    let result = run_jit(code).unwrap();
-    assert_eq!(result.exit_code, 42);
-}
+"#,
+    42
+);
 
-#[test]
-fn jit_logical_or_true() {
-    let code = r#"
+backend_test!(
+    jit_logical_or_true,
+    interp_jit,
+    r#"
 fn main() -> i64:
     if 0 > 1 or 1 > 0:
         return 42
     else:
         return 0
-"#;
-    let result = run_jit(code).unwrap();
-    assert_eq!(result.exit_code, 42);
-}
+"#,
+    42
+);
 
-#[test]
-fn jit_logical_or_false() {
-    let code = r#"
+backend_test!(
+    jit_logical_or_false,
+    interp_jit,
+    r#"
 fn main() -> i64:
     if 0 > 1 or 0 > 2:
         return 0
     else:
         return 42
-"#;
-    let result = run_jit(code).unwrap();
-    assert_eq!(result.exit_code, 42);
-}
+"#,
+    42
+);
 
-#[test]
-#[ignore] // FIXME: SIGSEGV crash in JIT compiler when handling != comparison
-fn jit_comparison_not_equal() {
-    let code = r#"
+// FIXME: SIGSEGV crash in JIT compiler when handling != comparison
+backend_test!(
+    jit_comparison_not_equal,
+    interp,
+    r#"
 fn main() -> i64:
     if 41 != 42:
         return 42
     else:
         return 0
-"#;
-    let result = run_jit(code).unwrap();
-    assert_eq!(result.exit_code, 42);
-}
+"#,
+    42
+);
 
-#[test]
-fn jit_comparison_lte() {
-    let code = r#"
+backend_test!(
+    jit_comparison_lte,
+    interp_jit,
+    r#"
 fn main() -> i64:
     if 42 <= 42:
         return 42
     else:
         return 0
-"#;
-    let result = run_jit(code).unwrap();
-    assert_eq!(result.exit_code, 42);
-}
+"#,
+    42
+);
 
-#[test]
-fn jit_comparison_gte() {
-    let code = r#"
+backend_test!(
+    jit_comparison_gte,
+    interp_jit,
+    r#"
 fn main() -> i64:
     if 42 >= 42:
         return 42
     else:
         return 0
-"#;
-    let result = run_jit(code).unwrap();
-    assert_eq!(result.exit_code, 42);
-}
+"#,
+    42
+);
 
 // =============================================================================
 // Feature #93-95: Hex, Binary, Octal Literals
 // =============================================================================
 
-#[test]
-fn jit_hex_literal() {
-    let code = r#"
+backend_test!(
+    jit_hex_literal,
+    interp_jit,
+    r#"
 fn main() -> i64:
     return 0x2A
-"#;
-    let result = run_jit(code).unwrap();
-    assert_eq!(result.exit_code, 42);
-}
+"#,
+    42
+);
 
-#[test]
-fn jit_hex_literal_uppercase() {
-    let code = r#"
+backend_test!(
+    jit_hex_literal_uppercase,
+    interp_jit,
+    r#"
 fn main() -> i64:
     return 0X2A
-"#;
-    let result = run_jit(code).unwrap();
-    assert_eq!(result.exit_code, 42);
-}
+"#,
+    42
+);
 
-#[test]
-fn jit_binary_literal() {
-    let code = r#"
+backend_test!(
+    jit_binary_literal,
+    interp_jit,
+    r#"
 fn main() -> i64:
     return 0b101010
-"#;
-    let result = run_jit(code).unwrap();
-    assert_eq!(result.exit_code, 42);
-}
+"#,
+    42
+);
 
-#[test]
-fn jit_binary_literal_uppercase() {
-    let code = r#"
+backend_test!(
+    jit_binary_literal_uppercase,
+    interp_jit,
+    r#"
 fn main() -> i64:
     return 0B101010
-"#;
-    let result = run_jit(code).unwrap();
-    assert_eq!(result.exit_code, 42);
-}
+"#,
+    42
+);
 
-#[test]
-fn jit_octal_literal() {
-    let code = r#"
+backend_test!(
+    jit_octal_literal,
+    interp_jit,
+    r#"
 fn main() -> i64:
     return 0o52
-"#;
-    let result = run_jit(code).unwrap();
-    assert_eq!(result.exit_code, 42);
-}
+"#,
+    42
+);
 
-#[test]
-fn jit_octal_literal_uppercase() {
-    let code = r#"
+backend_test!(
+    jit_octal_literal_uppercase,
+    interp_jit,
+    r#"
 fn main() -> i64:
     return 0O52
-"#;
-    let result = run_jit(code).unwrap();
-    assert_eq!(result.exit_code, 42);
-}
+"#,
+    42
+);
 
-#[test]
-fn jit_hex_in_expression() {
-    let code = r#"
+backend_test!(
+    jit_hex_in_expression,
+    interp_jit,
+    r#"
 fn main() -> i64:
     return 0x20 + 0x0A
-"#;
-    let result = run_jit(code).unwrap();
-    // 0x20 = 32, 0x0A = 10, sum = 42
-    assert_eq!(result.exit_code, 42);
-}
+"#,
+    42
+);
 
-#[test]
-fn jit_binary_in_expression() {
-    let code = r#"
+backend_test!(
+    jit_binary_in_expression,
+    interp_jit,
+    r#"
 fn main() -> i64:
     return 0b100000 + 0b1010
-"#;
-    let result = run_jit(code).unwrap();
-    // 0b100000 = 32, 0b1010 = 10, sum = 42
-    assert_eq!(result.exit_code, 42);
-}
+"#,
+    42
+);
 
 // =============================================================================
 // Feature #5: Control Flow (if/elif/else)
 // =============================================================================
 
-#[test]
-#[ignore] // FIXME: SIGSEGV crash - uses == comparison which crashes in JIT
-fn jit_if_elif_else_first() {
-    let code = r#"
+// FIXME: SIGSEGV crash - uses == comparison which crashes in JIT
+backend_test!(
+    jit_if_elif_else_first,
+    interp,
+    r#"
 fn main() -> i64:
     let x: i64 = 1
     if x == 1:
@@ -588,15 +593,15 @@ fn main() -> i64:
         return 0
     else:
         return 0
-"#;
-    let result = run_jit(code).unwrap();
-    assert_eq!(result.exit_code, 42);
-}
+"#,
+    42
+);
 
-#[test]
-#[ignore] // FIXME: SIGSEGV crash - uses == comparison which crashes in JIT
-fn jit_if_elif_else_second() {
-    let code = r#"
+// FIXME: SIGSEGV crash - uses == comparison which crashes in JIT
+backend_test!(
+    jit_if_elif_else_second,
+    interp,
+    r#"
 fn main() -> i64:
     let x: i64 = 2
     if x == 1:
@@ -605,15 +610,15 @@ fn main() -> i64:
         return 42
     else:
         return 0
-"#;
-    let result = run_jit(code).unwrap();
-    assert_eq!(result.exit_code, 42);
-}
+"#,
+    42
+);
 
-#[test]
-#[ignore] // FIXME: SIGSEGV crash - uses == comparison which crashes in JIT
-fn jit_if_elif_else_third() {
-    let code = r#"
+// FIXME: SIGSEGV crash - uses == comparison which crashes in JIT
+backend_test!(
+    jit_if_elif_else_third,
+    interp,
+    r#"
 fn main() -> i64:
     let x: i64 = 3
     if x == 1:
@@ -622,14 +627,14 @@ fn main() -> i64:
         return 0
     else:
         return 42
-"#;
-    let result = run_jit(code).unwrap();
-    assert_eq!(result.exit_code, 42);
-}
+"#,
+    42
+);
 
-#[test]
-fn jit_nested_if() {
-    let code = r#"
+backend_test!(
+    jit_nested_if,
+    interp_jit,
+    r#"
 fn main() -> i64:
     let x: i64 = 10
     let y: i64 = 5
@@ -640,19 +645,19 @@ fn main() -> i64:
             return 0
     else:
         return 0
-"#;
-    let result = run_jit(code).unwrap();
-    assert_eq!(result.exit_code, 42);
-}
+"#,
+    42
+);
 
 // =============================================================================
 // Integration Tests: Complex Programs
 // =============================================================================
 
-#[test]
-#[ignore] // FIXME: SIGSEGV crash - uses == comparison which crashes in JIT
-fn jit_gcd() {
-    let code = r#"
+// FIXME: SIGSEGV crash - uses == comparison which crashes in JIT
+backend_test!(
+    jit_gcd,
+    interp,
+    r#"
 fn gcd(a: i64, b: i64) -> i64:
     if b == 0:
         return a
@@ -661,15 +666,14 @@ fn gcd(a: i64, b: i64) -> i64:
 
 fn main() -> i64:
     return gcd(84, 126)
-"#;
-    let result = run_jit(code).unwrap();
-    // GCD(84, 126) = 42
-    assert_eq!(result.exit_code, 42);
-}
+"#,
+    42
+);
 
-#[test]
-fn jit_sum_of_squares() {
-    let code = r#"
+backend_test!(
+    jit_sum_of_squares,
+    interp_jit,
+    r#"
 fn square(x: i64) -> i64:
     return x * x
 
@@ -681,15 +685,14 @@ fn sum_squares(n: i64) -> i64:
 
 fn main() -> i64:
     return sum_squares(4)
-"#;
-    let result = run_jit(code).unwrap();
-    // 1 + 4 + 9 + 16 = 30
-    assert_eq!(result.exit_code, 30);
-}
+"#,
+    30
+);
 
-#[test]
-fn jit_iterative_power() {
-    let code = r#"
+backend_test!(
+    jit_iterative_power,
+    interp_jit,
+    r#"
 fn power(base: i64, exp: i64) -> i64:
     let mut res: i64 = 1
     let mut i: i64 = 0
@@ -700,16 +703,15 @@ fn power(base: i64, exp: i64) -> i64:
 
 fn main() -> i64:
     return power(2, 5) + 10
-"#;
-    let result = run_jit(code).unwrap();
-    // 2^5 = 32, 32 + 10 = 42
-    assert_eq!(result.exit_code, 42);
-}
+"#,
+    42
+);
 
-#[test]
-#[ignore] // FIXME: SIGSEGV crash - uses == comparison which crashes in JIT
-fn jit_is_even_odd() {
-    let code = r#"
+// FIXME: SIGSEGV crash - uses == comparison which crashes in JIT
+backend_test!(
+    jit_is_even_odd,
+    interp,
+    r#"
 fn is_even(n: i64) -> i64:
     if n % 2 == 0:
         return 1
@@ -720,16 +722,14 @@ fn main() -> i64:
     let a: i64 = is_even(42)
     let b: i64 = is_even(41)
     return a * 42 + b * 0
-"#;
-    let result = run_jit(code).unwrap();
-    // is_even(42) = 1, is_even(41) = 0
-    // 1 * 42 + 0 * 0 = 42
-    assert_eq!(result.exit_code, 42);
-}
+"#,
+    42
+);
 
-#[test]
-fn jit_abs() {
-    let code = r#"
+backend_test!(
+    jit_abs,
+    interp_jit,
+    r#"
 fn abs(x: i64) -> i64:
     if x < 0:
         return -x
@@ -738,14 +738,14 @@ fn abs(x: i64) -> i64:
 
 fn main() -> i64:
     return abs(-42)
-"#;
-    let result = run_jit(code).unwrap();
-    assert_eq!(result.exit_code, 42);
-}
+"#,
+    42
+);
 
-#[test]
-fn jit_max_of_three() {
-    let code = r#"
+backend_test!(
+    jit_max_of_three,
+    interp_jit,
+    r#"
 fn max(a: i64, b: i64) -> i64:
     if a > b:
         return a
@@ -757,7 +757,6 @@ fn max3(a: i64, b: i64, c: i64) -> i64:
 
 fn main() -> i64:
     return max3(10, 42, 30)
-"#;
-    let result = run_jit(code).unwrap();
-    assert_eq!(result.exit_code, 42);
-}
+"#,
+    42
+);

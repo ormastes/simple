@@ -204,50 +204,93 @@ impl Manifest {
     fn parse_sdn(content: &str) -> PkgResult<Self> {
         use simple_sdn::parse;
         let doc = parse(content).map_err(|e| PkgError::InvalidManifest(e.to_string()))?;
-        let package_val = doc.get("package")
+        let package_val = doc
+            .get("package")
             .ok_or_else(|| PkgError::InvalidManifest("Missing 'package' section".to_string()))?;
         let package = Self::parse_package(package_val)?;
-        let dependencies = doc.get("dependencies")
+        let dependencies = doc
+            .get("dependencies")
             .map(|v| Self::parse_dependencies(v))
-            .transpose()?.unwrap_or_default();
-        let dev_dependencies = doc.get("dev_dependencies")
+            .transpose()?
+            .unwrap_or_default();
+        let dev_dependencies = doc
+            .get("dev_dependencies")
             .or_else(|| doc.get("dev-dependencies"))
             .map(|v| Self::parse_dependencies(v))
-            .transpose()?.unwrap_or_default();
-        let features = doc.get("features")
+            .transpose()?
+            .unwrap_or_default();
+        let features = doc
+            .get("features")
             .map(|v| Self::parse_features(v))
-            .transpose()?.unwrap_or_default();
-        let registry = doc.get("registry")
+            .transpose()?
+            .unwrap_or_default();
+        let registry = doc
+            .get("registry")
             .map(|v| Self::parse_registry(v))
-            .transpose()?.unwrap_or_default();
-        let verify = doc.get("verify")
+            .transpose()?
+            .unwrap_or_default();
+        let verify = doc
+            .get("verify")
             .map(|v| Self::parse_verify(v))
-            .transpose()?.unwrap_or_default();
-        Ok(Manifest { package, dependencies, dev_dependencies, features, registry, verify })
+            .transpose()?
+            .unwrap_or_default();
+        Ok(Manifest {
+            package,
+            dependencies,
+            dev_dependencies,
+            features,
+            registry,
+            verify,
+        })
     }
 
     fn parse_package(val: &simple_sdn::SdnValue) -> PkgResult<Package> {
-        let dict = val.as_dict()
+        let dict = val
+            .as_dict()
             .ok_or_else(|| PkgError::InvalidManifest("'package' must be a dict".to_string()))?;
-        let name = dict.get("name").and_then(|v| v.as_str())
+        let name = dict
+            .get("name")
+            .and_then(|v| v.as_str())
             .ok_or_else(|| PkgError::InvalidManifest("Missing package.name".to_string()))?
             .to_string();
-        let version = dict.get("version").and_then(|v| v.as_str()).unwrap_or("0.1.0").to_string();
-        let authors = dict.get("authors").and_then(|v| v.as_array())
+        let version = dict
+            .get("version")
+            .and_then(|v| v.as_str())
+            .unwrap_or("0.1.0")
+            .to_string();
+        let authors = dict
+            .get("authors")
+            .and_then(|v| v.as_array())
             .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
             .unwrap_or_default();
         let description = dict.get("description").and_then(|v| v.as_str()).map(String::from);
         let license = dict.get("license").and_then(|v| v.as_str()).map(String::from);
         let repository = dict.get("repository").and_then(|v| v.as_str()).map(String::from);
-        let keywords = dict.get("keywords").and_then(|v| v.as_array())
+        let keywords = dict
+            .get("keywords")
+            .and_then(|v| v.as_array())
             .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
             .unwrap_or_default();
-        let main = dict.get("main").and_then(|v| v.as_str()).unwrap_or("src/main.spl").to_string();
-        Ok(Package { name, version, authors, description, license, repository, keywords, main })
+        let main = dict
+            .get("main")
+            .and_then(|v| v.as_str())
+            .unwrap_or("src/main.spl")
+            .to_string();
+        Ok(Package {
+            name,
+            version,
+            authors,
+            description,
+            license,
+            repository,
+            keywords,
+            main,
+        })
     }
 
     fn parse_dependencies(val: &simple_sdn::SdnValue) -> PkgResult<HashMap<String, Dependency>> {
-        let dict = val.as_dict()
+        let dict = val
+            .as_dict()
             .ok_or_else(|| PkgError::InvalidManifest("dependencies must be a dict".to_string()))?;
         let mut deps = HashMap::new();
         for (key, value) in dict.iter() {
@@ -260,7 +303,10 @@ impl Manifest {
             } else if let Some(d) = value.as_dict() {
                 Dependency::Detailed(Self::parse_dependency_detail(d)?)
             } else {
-                return Err(PkgError::InvalidManifest(format!("Invalid dependency format for '{}'", key)));
+                return Err(PkgError::InvalidManifest(format!(
+                    "Invalid dependency format for '{}'",
+                    key
+                )));
             };
             deps.insert(key.clone(), dep);
         }
@@ -276,42 +322,55 @@ impl Manifest {
             rev: dict.get("rev").and_then(|v| v.as_str()).map(String::from),
             path: dict.get("path").and_then(|v| v.as_str()).map(String::from),
             optional: dict.get("optional").and_then(|v| v.as_bool()).unwrap_or(false),
-            features: dict.get("features").and_then(|v| v.as_array())
+            features: dict
+                .get("features")
+                .and_then(|v| v.as_array())
                 .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
                 .unwrap_or_default(),
         })
     }
 
     fn parse_features(val: &simple_sdn::SdnValue) -> PkgResult<HashMap<String, Vec<String>>> {
-        let dict = val.as_dict()
+        let dict = val
+            .as_dict()
             .ok_or_else(|| PkgError::InvalidManifest("features must be a dict".to_string()))?;
         let mut features = HashMap::new();
         for (key, value) in dict.iter() {
-            let list = value.as_array()
+            let list = value
+                .as_array()
                 .ok_or_else(|| PkgError::InvalidManifest(format!("Feature '{}' must be an array", key)))?
-                .iter().filter_map(|v| v.as_str().map(String::from)).collect();
+                .iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect();
             features.insert(key.clone(), list);
         }
         Ok(features)
     }
 
     fn parse_registry(val: &simple_sdn::SdnValue) -> PkgResult<RegistryConfig> {
-        let dict = val.as_dict()
+        let dict = val
+            .as_dict()
             .ok_or_else(|| PkgError::InvalidManifest("registry must be a dict".to_string()))?;
-        let default = dict.get("default").and_then(|v| v.as_str())
-            .unwrap_or("https://github.com/simple-lang/registry").to_string();
+        let default = dict
+            .get("default")
+            .and_then(|v| v.as_str())
+            .unwrap_or("https://github.com/simple-lang/registry")
+            .to_string();
         Ok(RegistryConfig { default })
     }
 
     fn parse_verify(val: &simple_sdn::SdnValue) -> PkgResult<VerifyConfig> {
-        let dict = val.as_dict()
+        let dict = val
+            .as_dict()
             .ok_or_else(|| PkgError::InvalidManifest("verify must be a dict".to_string()))?;
         Ok(VerifyConfig {
             enabled: dict.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false),
             lean_path: dict.get("lean_path").and_then(|v| v.as_str()).map(String::from),
             output_dir: dict.get("output_dir").and_then(|v| v.as_str()).map(String::from),
             generate_stubs: dict.get("generate_stubs").and_then(|v| v.as_bool()).unwrap_or(true),
-            modules: dict.get("modules").and_then(|v| v.as_array())
+            modules: dict
+                .get("modules")
+                .and_then(|v| v.as_array())
                 .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
                 .unwrap_or_default(),
             check_proofs: dict.get("check_proofs").and_then(|v| v.as_bool()).unwrap_or(false),

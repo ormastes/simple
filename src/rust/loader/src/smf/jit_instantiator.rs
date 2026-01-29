@@ -123,8 +123,7 @@ impl JitInstantiator {
         // 3. Read from section offset until terminator
 
         // Placeholder implementation
-        let mut file = std::fs::File::open(smf_path)
-            .map_err(|e| format!("Failed to open SMF file: {}", e))?;
+        let mut file = std::fs::File::open(smf_path).map_err(|e| format!("Failed to open SMF file: {}", e))?;
 
         let mut content = String::new();
         file.read_to_string(&mut content)
@@ -223,11 +222,7 @@ impl JitInstantiator {
     }
 
     /// Perform JIT compilation.
-    fn do_jit_compile(
-        &mut self,
-        entry: &LoadedPossible,
-        smf_path: &Path,
-    ) -> JitInstantiationResult {
+    fn do_jit_compile(&mut self, entry: &LoadedPossible, smf_path: &Path) -> JitInstantiationResult {
         // TODO: Actual JIT compilation logic would:
         // 1. Load template bytecode from TemplateCode section
         // 2. Parse type arguments from mangled name
@@ -242,8 +237,10 @@ impl JitInstantiator {
         let placeholder_address = 0xDEADBEEF;
 
         // Cache the result
-        self.jit_cache
-            .insert(entry.mangled_name.clone(), (placeholder_code.clone(), placeholder_address));
+        self.jit_cache.insert(
+            entry.mangled_name.clone(),
+            (placeholder_code.clone(), placeholder_address),
+        );
 
         // Register in symbol table if available
         if let Some(ref table) = self.symbol_table {

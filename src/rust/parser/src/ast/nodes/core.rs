@@ -818,6 +818,7 @@ pub enum BinOp {
     // Other
     Is,
     In,
+    NotIn,
     // Pipeline
     PipeForward, // |> pipe forward operator
 }
@@ -936,6 +937,7 @@ pub struct EnumVariant {
     pub span: Span,
     pub name: String,
     pub fields: Option<Vec<EnumField>>, // None = unit, Some = tuple/struct
+    pub discriminant: Option<Expr>,      // Optional explicit value: Variant = 0
 }
 
 #[derive(Debug, Clone, PartialEq)]

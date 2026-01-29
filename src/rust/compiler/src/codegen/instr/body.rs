@@ -23,8 +23,12 @@ fn collect_all_dest_vregs(func: &MirFunction) -> HashSet<VReg> {
         }
         // Also collect VRegs used in terminators (branch conditions, return values)
         match &block.terminator {
-            Terminator::Return(Some(v)) => { vregs.insert(*v); }
-            Terminator::Branch { cond, .. } => { vregs.insert(*cond); }
+            Terminator::Return(Some(v)) => {
+                vregs.insert(*v);
+            }
+            Terminator::Branch { cond, .. } => {
+                vregs.insert(*cond);
+            }
             _ => {}
         }
     }
@@ -32,10 +36,7 @@ fn collect_all_dest_vregs(func: &MirFunction) -> HashSet<VReg> {
 }
 
 /// Coerce a value to i64 for storage in a Variable declared as i64.
-fn coerce_to_i64(
-    builder: &mut FunctionBuilder,
-    val: cranelift_codegen::ir::Value,
-) -> cranelift_codegen::ir::Value {
+fn coerce_to_i64(builder: &mut FunctionBuilder, val: cranelift_codegen::ir::Value) -> cranelift_codegen::ir::Value {
     let ty = builder.func.dfg.value_type(val);
     if ty == types::I64 {
         val
@@ -44,7 +45,9 @@ fn coerce_to_i64(
     } else if ty.is_int() && ty.bits() > 64 {
         builder.ins().ireduce(types::I64, val)
     } else if ty.is_float() {
-        builder.ins().bitcast(types::I64, cranelift_codegen::ir::MemFlags::new(), val)
+        builder
+            .ins()
+            .bitcast(types::I64, cranelift_codegen::ir::MemFlags::new(), val)
     } else {
         // For vector types etc., just use as-is (will be i64 in most cases)
         val
@@ -52,11 +55,7 @@ fn coerce_to_i64(
 }
 
 /// Safely def_var with type coercion to i64.
-fn def_var_coerced(
-    builder: &mut FunctionBuilder,
-    var: Variable,
-    val: cranelift_codegen::ir::Value,
-) {
+fn def_var_coerced(builder: &mut FunctionBuilder, var: Variable, val: cranelift_codegen::ir::Value) {
     let coerced = coerce_to_i64(builder, val);
     builder.def_var(var, coerced);
 }
@@ -402,7 +401,7 @@ pub fn compile_function_body<M: Module>(
 
         // Compile instructions; if we hit a Yield, it already emits a return, so skip the terminator.
         let mut returned_via_yield = false;
-        for inst in &mir_block.instructions {
+        for (inst_idx, inst) in mir_block.instructions.iter().enumerate() {
             if let MirInst::Yield { value } = inst {
                 let mut instr_ctx = InstrContext {
                     module,

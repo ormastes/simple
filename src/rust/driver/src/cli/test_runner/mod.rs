@@ -23,6 +23,7 @@ mod execution;
 mod doctest;
 mod runner;
 mod args;
+mod build_cache;
 mod diagrams;
 mod watch;
 mod discovery;
@@ -35,7 +36,7 @@ mod rust_tests;
 pub mod static_registry;
 
 // Re-export public API for backward compatibility
-pub use types::{TestLevel, OutputFormat, TestOptions, TestFileResult, TestRunResult};
+pub use types::{TestLevel, TestExecutionMode, OutputFormat, TestOptions, TestFileResult, TestRunResult};
 pub use execution::{parse_test_output, run_test_file};
 pub use runner::run_tests;
 pub use args::parse_test_args;

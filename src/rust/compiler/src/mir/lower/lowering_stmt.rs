@@ -4,7 +4,7 @@
 //! including control flow (if, while, loop, break, continue) and assignments.
 
 use super::lowering_core::{LoopContext, MirLowerResult, MirLowerer};
-use crate::hir::{HirContract, HirExpr, HirExprKind, HirStmt, HirType};
+use crate::hir::{HirContract, HirExpr, HirExprKind, HirStmt, HirType, TypeId};
 use crate::mir::blocks::Terminator;
 use crate::mir::instructions::MirInst;
 
@@ -70,26 +70,117 @@ impl<'a> MirLowerer<'a> {
                         })?;
                     }
 
-                    // Index assignment: arr[i] = value -> rt_array_set call
+                    // Index assignment: arr[i] = value -> rt_index_set call
                     HirExprKind::Index { receiver, index } => {
                         let receiver_reg = self.lower_expr(receiver)?;
                         let index_reg = self.lower_expr(index)?;
 
-                        // Use rt_array_set for array/dict index assignment
-                        let target = crate::mir::CallTarget::from_name("rt_array_set");
+                        // Box index if it's a native type (int index for arrays)
+                        let boxed_index = {
+                            let needs_int_boxing = matches!(
+                                index.ty,
+                                TypeId::I16
+                                    | TypeId::I32
+                                    | TypeId::I64
+                                    | TypeId::U8
+                                    | TypeId::U16
+                                    | TypeId::U32
+                                    | TypeId::U64
+                            );
+                            let needs_bool_boxing = index.ty == TypeId::BOOL || index.ty == TypeId::I8;
+                            if needs_int_boxing {
+                                self.with_func(|func, current_block| {
+                                    let boxed = func.new_vreg();
+                                    let block = func.block_mut(current_block).unwrap();
+                                    block.instructions.push(MirInst::BoxInt {
+                                        dest: boxed,
+                                        value: index_reg,
+                                    });
+                                    boxed
+                                })?
+                            } else if needs_bool_boxing {
+                                self.with_func(|func, current_block| {
+                                    let boxed = func.new_vreg();
+                                    let block = func.block_mut(current_block).unwrap();
+                                    block.instructions.push(MirInst::Call {
+                                        dest: Some(boxed),
+                                        target: crate::mir::CallTarget::from_name("rt_value_bool"),
+                                        args: vec![index_reg],
+                                    });
+                                    boxed
+                                })?
+                            } else {
+                                index_reg
+                            }
+                        };
+
+                        // Box value if it's a native type
+                        let boxed_val = {
+                            let needs_int_boxing = matches!(
+                                value.ty,
+                                TypeId::I16
+                                    | TypeId::I32
+                                    | TypeId::I64
+                                    | TypeId::U8
+                                    | TypeId::U16
+                                    | TypeId::U32
+                                    | TypeId::U64
+                            );
+                            let needs_float_boxing = matches!(value.ty, TypeId::F32 | TypeId::F64);
+                            let needs_bool_boxing = value.ty == TypeId::BOOL || value.ty == TypeId::I8;
+                            if needs_int_boxing {
+                                self.with_func(|func, current_block| {
+                                    let boxed = func.new_vreg();
+                                    let block = func.block_mut(current_block).unwrap();
+                                    block.instructions.push(MirInst::BoxInt {
+                                        dest: boxed,
+                                        value: val_reg,
+                                    });
+                                    boxed
+                                })?
+                            } else if needs_float_boxing {
+                                self.with_func(|func, current_block| {
+                                    let boxed = func.new_vreg();
+                                    let block = func.block_mut(current_block).unwrap();
+                                    block.instructions.push(MirInst::BoxFloat {
+                                        dest: boxed,
+                                        value: val_reg,
+                                    });
+                                    boxed
+                                })?
+                            } else if needs_bool_boxing {
+                                self.with_func(|func, current_block| {
+                                    let boxed = func.new_vreg();
+                                    let block = func.block_mut(current_block).unwrap();
+                                    block.instructions.push(MirInst::Call {
+                                        dest: Some(boxed),
+                                        target: crate::mir::CallTarget::from_name("rt_value_bool"),
+                                        args: vec![val_reg],
+                                    });
+                                    boxed
+                                })?
+                            } else {
+                                val_reg
+                            }
+                        };
+
+                        // Use rt_index_set for array/dict index assignment (handles both types)
+                        let target = crate::mir::CallTarget::from_name("rt_index_set");
                         self.with_func(|func, current_block| {
                             let block = func.block_mut(current_block).unwrap();
                             block.instructions.push(MirInst::Call {
                                 dest: None,
                                 target,
-                                args: vec![receiver_reg, index_reg, val_reg],
+                                args: vec![receiver_reg, boxed_index, boxed_val],
                             });
                         })?;
                     }
 
                     // Property setter: obj.field = value (when field access became MethodCall)
                     // This happens when type information is lost or for dynamic property access
-                    HirExprKind::MethodCall { receiver, method, args, .. } if args.is_empty() => {
+                    HirExprKind::MethodCall {
+                        receiver, method, args, ..
+                    } if args.is_empty() => {
                         let receiver_reg = self.lower_expr(receiver)?;
 
                         // Create a string constant for the field name
@@ -461,6 +552,22 @@ impl<'a> MirLowerer<'a> {
                 body,
                 ..
             } => {
+                // Check if this is a range-based for loop (0..n or 0..=n)
+                // Range iterables are represented as BuiltinCall("rt_range"/"rt_range_inclusive")
+                if let HirExprKind::BuiltinCall { name, args: range_args } = &iterable.kind {
+                    if (name == "rt_range" || name == "rt_range_inclusive") && range_args.len() == 2 {
+                        let is_inclusive = name == "rt_range_inclusive";
+                        return self.lower_for_range(
+                            pattern,
+                            &range_args[0],
+                            &range_args[1],
+                            is_inclusive,
+                            body,
+                            contract,
+                        );
+                    }
+                }
+
                 // For loops use index-based iteration over collections
                 // 1. Evaluate iterable once
                 // 2. Get length
@@ -843,5 +950,160 @@ impl<'a> MirLowerer<'a> {
             let block = func.block_mut(current_block).unwrap();
             block.instructions.push(MirInst::EndScope { local_index });
         })
+    }
+
+    /// Lower a for-range loop (e.g., `for i in 0..n`) as a counter-based loop.
+    /// This avoids creating a range collection object and uses direct integer comparison.
+    fn lower_for_range(
+        &mut self,
+        pattern: &str,
+        start_expr: &crate::hir::HirExpr,
+        end_expr: &crate::hir::HirExpr,
+        inclusive: bool,
+        body: &[crate::hir::HirStmt],
+        contract: Option<&HirContract>,
+    ) -> MirLowerResult<()> {
+        use crate::hir::BinOp;
+        use crate::mir::MirInst;
+
+        // Lower start and end expressions
+        let start_reg = self.lower_expr(start_expr)?;
+        let end_reg = self.lower_expr(end_expr)?;
+
+        // Create or find the loop variable local
+        let pattern_local_index = self.with_func(|func, _| {
+            let num_params = func.params.len();
+            for (i, param) in func.params.iter().enumerate() {
+                if param.name == pattern {
+                    return i;
+                }
+            }
+            for (i, local) in func.locals.iter().enumerate() {
+                if local.name == pattern {
+                    return num_params + i;
+                }
+            }
+            let index = num_params + func.locals.len();
+            func.locals.push(crate::mir::function::MirLocal {
+                name: pattern.to_string(),
+                ty: crate::hir::TypeId::I64,
+                kind: crate::mir::effects::LocalKind::Local,
+                is_ghost: false,
+            });
+            index
+        })?;
+
+        // Store start value to the loop variable
+        self.with_func(|func, current_block| {
+            let addr = func.new_vreg();
+            let block = func.block_mut(current_block).unwrap();
+            block.instructions.push(MirInst::LocalAddr {
+                dest: addr,
+                local_index: pattern_local_index,
+            });
+            block.instructions.push(MirInst::Store {
+                addr,
+                value: start_reg,
+                ty: crate::hir::TypeId::I64,
+            });
+        })?;
+
+        // Create blocks
+        let (header_id, body_id, exit_id) = self.with_func(|func, current_block| {
+            let header_id = func.new_block();
+            let body_id = func.new_block();
+            let exit_id = func.new_block();
+            let block = func.block_mut(current_block).unwrap();
+            block.terminator = Terminator::Jump(header_id);
+            (header_id, body_id, exit_id)
+        })?;
+
+        self.push_loop(LoopContext {
+            continue_target: header_id,
+            break_target: exit_id,
+        })?;
+
+        // Header: load loop var, compare with end, branch
+        self.set_current_block(header_id)?;
+        let cond_reg = self.with_func(|func, current_block| {
+            let addr = func.new_vreg();
+            let current_val = func.new_vreg();
+            let cond = func.new_vreg();
+
+            let block = func.block_mut(current_block).unwrap();
+            block.instructions.push(MirInst::LocalAddr {
+                dest: addr,
+                local_index: pattern_local_index,
+            });
+            block.instructions.push(MirInst::Load {
+                dest: current_val,
+                addr,
+                ty: crate::hir::TypeId::I64,
+            });
+
+            // For exclusive range: i < end; for inclusive: i <= end
+            let op = if inclusive { BinOp::LtEq } else { BinOp::Lt };
+            block.instructions.push(MirInst::BinOp {
+                dest: cond,
+                op,
+                left: current_val,
+                right: end_reg,
+            });
+            cond
+        })?;
+
+        self.with_func(|func, current_block| {
+            let block = func.block_mut(current_block).unwrap();
+            block.terminator = Terminator::Branch {
+                cond: cond_reg,
+                then_block: body_id,
+                else_block: exit_id,
+            };
+        })?;
+
+        // Body: execute body, then increment
+        self.set_current_block(body_id)?;
+
+        // Execute body statements
+        for stmt in body {
+            self.lower_stmt(stmt, contract)?;
+        }
+
+        // Increment loop variable
+        self.with_func(|func, current_block| {
+            let addr = func.new_vreg();
+            let current_val = func.new_vreg();
+            let one = func.new_vreg();
+            let new_val = func.new_vreg();
+
+            let block = func.block_mut(current_block).unwrap();
+            block.instructions.push(MirInst::LocalAddr {
+                dest: addr,
+                local_index: pattern_local_index,
+            });
+            block.instructions.push(MirInst::Load {
+                dest: current_val,
+                addr,
+                ty: crate::hir::TypeId::I64,
+            });
+            block.instructions.push(MirInst::ConstInt { dest: one, value: 1 });
+            block.instructions.push(MirInst::BinOp {
+                dest: new_val,
+                op: BinOp::Add,
+                left: current_val,
+                right: one,
+            });
+            block.instructions.push(MirInst::Store {
+                addr,
+                value: new_val,
+                ty: crate::hir::TypeId::I64,
+            });
+        })?;
+
+        self.finalize_block_jump(header_id)?;
+
+        self.pop_loop()?;
+        self.set_current_block(exit_id)?;
+        Ok(())
     }
 }

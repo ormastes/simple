@@ -420,6 +420,8 @@ pub enum BinOp {
     Is,
     /// Membership test (element in collection)
     In,
+    /// Negated membership test (element not in collection)
+    NotIn,
     // Logical
     And,
     Or,
@@ -462,6 +464,7 @@ impl From<simple_parser::BinOp> for BinOp {
             simple_parser::BinOp::ShiftRight => BinOp::ShiftRight,
             simple_parser::BinOp::Is => BinOp::Is,
             simple_parser::BinOp::In => BinOp::In,
+            simple_parser::BinOp::NotIn => BinOp::NotIn,
             simple_parser::BinOp::PipeForward => BinOp::PipeForward,
         }
     }

@@ -26,8 +26,8 @@ pub struct InstallResult {
 
 /// Install all dependencies for a project
 pub fn install_dependencies(dir: &Path) -> PkgResult<InstallResult> {
-    let manifest_path = crate::find_manifest(dir)
-        .ok_or_else(|| PkgError::ManifestNotFound(dir.display().to_string()))?;
+    let manifest_path =
+        crate::find_manifest(dir).ok_or_else(|| PkgError::ManifestNotFound(dir.display().to_string()))?;
     let lock_path = dir.join("simple.lock");
 
     if !manifest_path.exists() {

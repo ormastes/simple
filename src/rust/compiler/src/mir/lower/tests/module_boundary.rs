@@ -104,6 +104,9 @@ fn test_get_type_name() {
             name: "MyStruct".to_string(),
             fields: vec![("x".to_string(), TypeId::I64)],
             has_snapshot: false,
+            generic_params: vec![],
+            is_generic_template: false,
+            type_bindings: std::collections::HashMap::new(),
         },
     );
 
@@ -113,6 +116,9 @@ fn test_get_type_name() {
         HirType::Enum {
             name: "MyEnum".to_string(),
             variants: vec![("A".to_string(), None), ("B".to_string(), None)],
+            generic_params: vec![],
+            is_generic_template: false,
+            type_bindings: std::collections::HashMap::new(),
         },
     );
 

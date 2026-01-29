@@ -42,7 +42,11 @@ pub(super) fn compile_pattern_test<M: Module>(
             _ => panic!("unimplemented pattern literal match codegen for: {:?}", lit),
         },
         MirPattern::Binding(_) => builder.ins().iconst(types::I8, 1),
-        MirPattern::Variant { enum_name, variant_name, .. } => {
+        MirPattern::Variant {
+            enum_name,
+            variant_name,
+            ..
+        } => {
             // All enums now use rt_enum_new format consistently.
             // rt_enum_discriminant extracts the discriminant.
             let disc_id = ctx.runtime_funcs["rt_enum_discriminant"];

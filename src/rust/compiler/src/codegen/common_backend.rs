@@ -243,8 +243,11 @@ impl<M: Module> CodegenBackend<M> {
 
     /// Declare all functions from a MIR module
     pub fn declare_functions(&mut self, functions: &[MirFunction]) -> BackendResult<()> {
-        eprintln!("[DEBUG declare_functions] Called with {} functions, {} runtime funcs already declared",
-                  functions.len(), self.runtime_funcs.len());
+        eprintln!(
+            "[DEBUG declare_functions] Called with {} functions, {} runtime funcs already declared",
+            functions.len(),
+            self.runtime_funcs.len()
+        );
 
         let mut func_ids = HashMap::new();
 
@@ -253,16 +256,13 @@ impl<M: Module> CodegenBackend<M> {
             func_ids.insert(name.to_string(), *id);
         }
 
-        let total_mir_functions = functions.len();
-        let mut skipped_count = 0;
-        let mut declared_count = 0;
+        let _total_mir_functions = functions.len();
 
         // Then declare non-runtime functions
         for func in functions {
             // Skip functions that are already declared as runtime functions
             // This handles extern functions from Simple code that match runtime functions
             if self.runtime_funcs.contains_key(func.name.as_str()) {
-                skipped_count += 1;
                 continue;
             }
 
@@ -278,26 +278,39 @@ impl<M: Module> CodegenBackend<M> {
             };
 
             if func.name.contains("resolve") && (func.name.contains("blocks") || func.name.contains("BlockResolver")) {
-                eprintln!("[DEBUG resolve] Function: '{}', params: {}, returns: {:?}, has_body: {}",
-                          func.name, func.params.len(), func.return_type, !func.blocks.is_empty());
+                eprintln!(
+                    "[DEBUG resolve] Function: '{}', params: {}, returns: {:?}, has_body: {}",
+                    func.name,
+                    func.params.len(),
+                    func.return_type,
+                    !func.blocks.is_empty()
+                );
                 for (i, param) in func.params.iter().enumerate() {
-                    eprintln!("[DEBUG resolve]   param {}: name='{}', ty={:?}", i, param.name, param.ty);
+                    eprintln!(
+                        "[DEBUG resolve]   param {}: name='{}', ty={:?}",
+                        i, param.name, param.ty
+                    );
                 }
                 eprintln!("[DEBUG resolve] Signature params: {}", sig.params.len());
             }
 
-            let func_id = self.module
+            let func_id = self
+                .module
                 .declare_function(&func.name, linkage, &sig)
                 .map_err(|e| BackendError::ModuleError(format!("Failed to declare '{}': {}", func.name, e)))?;
 
             // Debug: print ALL user function IDs to identify fn2
             if func_id.as_u32() >= 467 {
-                eprintln!("[DEBUG fn_id] funcid{} = fn{} = '{}' ({} params)",
-                          func_id.as_u32(), func_id.as_u32() - 467, func.name, func.params.len());
+                eprintln!(
+                    "[DEBUG fn_id] funcid{} = fn{} = '{}' ({} params)",
+                    func_id.as_u32(),
+                    func_id.as_u32() - 467,
+                    func.name,
+                    func.params.len()
+                );
             }
 
             func_ids.insert(func.name.clone(), func_id);
-            declared_count += 1;
         }
 
         self.func_ids = func_ids;
@@ -308,8 +321,11 @@ impl<M: Module> CodegenBackend<M> {
     pub fn declare_globals(&mut self, globals: &[(String, TypeId, bool)]) -> BackendResult<()> {
         use super::types_util::type_to_cranelift;
 
-        eprintln!("[DEBUG declare_globals] Declaring {} globals (skipping {} runtime funcs)",
-                  globals.len(), self.runtime_funcs.len());
+        eprintln!(
+            "[DEBUG declare_globals] Declaring {} globals (skipping {} runtime funcs)",
+            globals.len(),
+            self.runtime_funcs.len()
+        );
 
         for (name, ty, is_mutable) in globals {
             // Skip globals that are actually runtime functions (extern functions)
@@ -319,7 +335,8 @@ impl<M: Module> CodegenBackend<M> {
             }
 
             eprintln!("[DEBUG] Global: '{}', type: {:?}, mutable: {}", name, ty, is_mutable);
-            let data_id = self.module
+            let data_id = self
+                .module
                 .declare_data(name, cranelift_module::Linkage::Export, *is_mutable, false)
                 .map_err(|e| BackendError::ModuleError(e.to_string()))?;
 
@@ -361,14 +378,20 @@ impl<M: Module> CodegenBackend<M> {
 
         // Verify the function before defining - log errors but try to compile anyway
         if let Err(errors) = cranelift_codegen::verify_function(&self.ctx.func, self.module.isa()) {
-            eprintln!("[WARNING] Verifier errors in '{}': {} (attempting compilation anyway)", func.name, errors);
+            eprintln!(
+                "[WARNING] Verifier errors in '{}': {} (attempting compilation anyway)",
+                func.name, errors
+            );
         }
 
         // Define the function (may fail if verifier errors are critical)
         match self.module.define_function(func_id, &mut self.ctx) {
             Ok(()) => {}
             Err(e) => {
-                return Err(BackendError::ModuleError(format!("Compilation error in '{}': {}", func.name, e)));
+                return Err(BackendError::ModuleError(format!(
+                    "Compilation error in '{}': {}",
+                    func.name, e
+                )));
             }
         }
 
@@ -382,8 +405,12 @@ impl<M: Module> CodegenBackend<M> {
         // Expand with outlined functions for body_block users
         let functions = expand_with_outlined(mir);
 
-        eprintln!("[DEBUG compile_all_functions] MIR functions: {}, After expansion: {}, Globals: {}",
-                  mir.functions.len(), functions.len(), mir.globals.len());
+        eprintln!(
+            "[DEBUG compile_all_functions] MIR functions: {}, After expansion: {}, Globals: {}",
+            mir.functions.len(),
+            functions.len(),
+            mir.globals.len()
+        );
 
         // Check for duplicate function names and deduplicate
         let mut seen_names = std::collections::HashSet::new();
@@ -437,21 +464,25 @@ impl<M: Module> CodegenBackend<M> {
                     builder.ins().return_(&[]);
                 } else {
                     // Create zero values for each return type
-                    let return_vals: Vec<_> = sig.returns.iter().map(|abi_param| {
-                        let ty = abi_param.value_type;
-                        if ty.is_int() {
-                            builder.ins().iconst(ty, 0)
-                        } else if ty.is_float() {
-                            if ty == types::F32 {
-                                builder.ins().f32const(0.0)
+                    let return_vals: Vec<_> = sig
+                        .returns
+                        .iter()
+                        .map(|abi_param| {
+                            let ty = abi_param.value_type;
+                            if ty.is_int() {
+                                builder.ins().iconst(ty, 0)
+                            } else if ty.is_float() {
+                                if ty == types::F32 {
+                                    builder.ins().f32const(0.0)
+                                } else {
+                                    builder.ins().f64const(0.0)
+                                }
                             } else {
-                                builder.ins().f64const(0.0)
+                                // Default to i64 for pointer types
+                                builder.ins().iconst(types::I64, 0)
                             }
-                        } else {
-                            // Default to i64 for pointer types
-                            builder.ins().iconst(types::I64, 0)
-                        }
-                    }).collect();
+                        })
+                        .collect();
                     builder.ins().return_(&return_vals);
                 }
                 builder.finalize();

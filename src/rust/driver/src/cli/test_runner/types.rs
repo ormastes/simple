@@ -49,6 +49,39 @@ macro_rules! debug_log {
 // Export the macro for use in other modules
 pub(crate) use debug_log;
 
+/// Test execution mode
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TestExecutionMode {
+    /// Interpreter mode (current default)
+    #[default]
+    Interpreter,
+    /// SMF loader mode (compile to SMF, load via Settlement)
+    Smf,
+    /// Native binary mode (compile to ELF, run as subprocess)
+    Native,
+}
+
+impl TestExecutionMode {
+    /// Parse from string (for CLI)
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "interpreter" | "interp" => Some(Self::Interpreter),
+            "smf" | "loader" => Some(Self::Smf),
+            "native" | "binary" => Some(Self::Native),
+            _ => None,
+        }
+    }
+
+    /// Display name
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Interpreter => "interpreter",
+            Self::Smf => "smf",
+            Self::Native => "native",
+        }
+    }
+}
+
 /// Test level filter
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TestLevel {
@@ -140,6 +173,12 @@ pub struct TestOptions {
     pub skip_features_planned_only: bool,
     /// Show tags in test output
     pub show_tags: bool,
+    /// Test execution mode (interpreter, smf, native)
+    pub execution_mode: TestExecutionMode,
+    /// Force rebuild of cached test artifacts
+    pub force_rebuild: bool,
+    /// Keep compiled test artifacts after run
+    pub keep_artifacts: bool,
     /// Run each test file in a separate process (safe mode)
     pub safe_mode: bool,
     /// Timeout in seconds for each test file in safe mode (default: 30)
@@ -209,6 +248,9 @@ impl Default for TestOptions {
             list_skip_features: false,
             skip_features_planned_only: false,
             show_tags: false,
+            execution_mode: TestExecutionMode::Interpreter,
+            force_rebuild: false,
+            keep_artifacts: false,
             safe_mode: false,
             safe_mode_timeout: 30,
             // Default: sequential (single-threaded) execution

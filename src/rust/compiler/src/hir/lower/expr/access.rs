@@ -84,9 +84,7 @@ impl Lowerer {
                 if let HirExprKind::Local(idx) = &recv_hir.kind {
                     if let Some(local) = ctx.get_local(*idx) {
                         // Get the base origin and create a field origin
-                        if let Some(base_origin) =
-                            self.lifetime_context.get_variable_origin(&local.name).cloned()
-                        {
+                        if let Some(base_origin) = self.lifetime_context.get_variable_origin(&local.name).cloned() {
                             let field_origin = ReferenceOrigin::Field {
                                 base: Box::new(base_origin),
                                 field: field.to_string(),

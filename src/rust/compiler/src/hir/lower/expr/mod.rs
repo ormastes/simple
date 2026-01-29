@@ -94,7 +94,7 @@ impl Lowerer {
             Expr::Try(inner) => {
                 eprintln!("[DEBUG lower_expr] Matched Try expression");
                 self.lower_try(inner, ctx)
-            },
+            }
             // Range expression: start..end or start..=end
             Expr::Range { start, end, bound } => {
                 eprintln!("[DEBUG lower_expr] Matched Range expression");
@@ -103,7 +103,7 @@ impl Lowerer {
             _ => {
                 eprintln!("[DEBUG lower_expr] Unmatched expression: {:?}", expr);
                 Err(LowerError::Unsupported(format!("{:?}", expr)))
-            },
+            }
         }
     }
 

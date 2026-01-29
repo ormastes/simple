@@ -32,7 +32,7 @@ pub extern "C" fn rt_value_eq(a: RuntimeValue, b: RuntimeValue) -> u8 {
         return 1;
     }
 
-    // For heap objects, compare by content for strings
+    // For heap objects, compare by content
     if a.is_heap() && b.is_heap() {
         let ptr_a = a.as_heap_ptr();
         let ptr_b = b.as_heap_ptr();
@@ -51,6 +51,16 @@ pub extern "C" fn rt_value_eq(a: RuntimeValue, b: RuntimeValue) -> u8 {
                     }
                 }
                 return 1;
+            }
+            // Enum comparison: same discriminant and same payload
+            if (*ptr_a).object_type == HeapObjectType::Enum && (*ptr_b).object_type == HeapObjectType::Enum {
+                let enum_a = ptr_a as *const crate::value::objects::RuntimeEnum;
+                let enum_b = ptr_b as *const crate::value::objects::RuntimeEnum;
+                if (*enum_a).discriminant != (*enum_b).discriminant {
+                    return 0;
+                }
+                // Recursively compare payloads
+                return rt_value_eq((*enum_a).payload, (*enum_b).payload);
             }
         }
     }

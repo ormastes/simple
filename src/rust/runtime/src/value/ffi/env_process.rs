@@ -392,6 +392,105 @@ pub unsafe extern "C" fn rt_process_execute(cmd_ptr: *const u8, cmd_len: u64, ar
     }
 }
 
+/// Execute a command with timeout and capture output
+/// Returns tuple (stdout: String, stderr: String, exit_code: Int)
+/// exit_code = -1 on timeout or spawn failure
+#[no_mangle]
+pub unsafe extern "C" fn rt_process_run_timeout(cmd_ptr: *const u8, cmd_len: u64, args: RuntimeValue, timeout_ms: i64) -> RuntimeValue {
+    use std::process::Command;
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Duration;
+
+    if cmd_ptr.is_null() {
+        let empty_str = rt_string_new(b"".as_ptr(), 0);
+        let tuple = rt_tuple_new(3);
+        rt_tuple_set(tuple, 0, empty_str);
+        rt_tuple_set(tuple, 1, empty_str);
+        rt_tuple_set(tuple, 2, RuntimeValue::from_int(-1));
+        return tuple;
+    }
+
+    let cmd_bytes = std::slice::from_raw_parts(cmd_ptr, cmd_len as usize);
+    let cmd_str = match std::str::from_utf8(cmd_bytes) {
+        Ok(s) => s,
+        Err(_) => {
+            let empty_str = rt_string_new(b"".as_ptr(), 0);
+            let tuple = rt_tuple_new(3);
+            rt_tuple_set(tuple, 0, empty_str);
+            rt_tuple_set(tuple, 1, empty_str);
+            rt_tuple_set(tuple, 2, RuntimeValue::from_int(-1));
+            return tuple;
+        }
+    };
+
+    let mut command = Command::new(cmd_str);
+
+    let args_len = rt_array_len(args);
+    if args_len > 0 {
+        for i in 0..args_len {
+            let arg_val = rt_array_get(args, i);
+            if let Some(arg_str) = extract_string(arg_val) {
+                command.arg(arg_str);
+            }
+        }
+    }
+
+    let mut child = match command
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(_) => {
+            let empty_str = rt_string_new(b"".as_ptr(), 0);
+            let tuple = rt_tuple_new(3);
+            rt_tuple_set(tuple, 0, empty_str);
+            rt_tuple_set(tuple, 1, empty_str);
+            rt_tuple_set(tuple, 2, RuntimeValue::from_int(-1));
+            return tuple;
+        }
+    };
+
+    let (tx, rx) = mpsc::channel();
+    let handle = thread::spawn(move || {
+        let output = child.wait_with_output();
+        let _ = tx.send(output);
+    });
+
+    let timeout_dur = Duration::from_millis(timeout_ms as u64);
+    match rx.recv_timeout(timeout_dur) {
+        Ok(Ok(output)) => {
+            let _ = handle.join();
+            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            let exit_code = output.status.code().unwrap_or(-1) as i64;
+
+            let stdout_val = rt_string_new(stdout.as_ptr(), stdout.len() as u64);
+            let stderr_val = rt_string_new(stderr.as_ptr(), stderr.len() as u64);
+
+            let tuple = rt_tuple_new(3);
+            rt_tuple_set(tuple, 0, stdout_val);
+            rt_tuple_set(tuple, 1, stderr_val);
+            rt_tuple_set(tuple, 2, RuntimeValue::from_int(exit_code));
+            tuple
+        }
+        _ => {
+            // Timeout or error - try to kill the process
+            // The thread holds the child, so we can't kill directly.
+            // But on timeout the channel sender is dropped when thread finishes.
+            let timeout_msg = b"TIMEOUT";
+            let timeout_str = rt_string_new(timeout_msg.as_ptr(), timeout_msg.len() as u64);
+            let empty_str = rt_string_new(b"".as_ptr(), 0);
+            let tuple = rt_tuple_new(3);
+            rt_tuple_set(tuple, 0, empty_str);
+            rt_tuple_set(tuple, 1, timeout_str);
+            rt_tuple_set(tuple, 2, RuntimeValue::from_int(-1));
+            tuple
+        }
+    }
+}
+
 // ============================================================================
 // Platform Detection
 // ============================================================================

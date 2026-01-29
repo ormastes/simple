@@ -5,6 +5,135 @@
 
 use simple_driver::interpreter::{Interpreter, RunConfig, RunningType};
 
+// ============================================================================
+// Backend-parameterized test infrastructure
+// ============================================================================
+
+/// Supported execution backends for parameterized tests.
+#[derive(Debug, Clone, Copy)]
+pub enum Backend {
+    Interpreter,
+    Jit,
+    Aot,
+}
+
+impl Backend {
+    fn running_type(&self) -> RunningType {
+        match self {
+            Backend::Interpreter => RunningType::Interpreter,
+            Backend::Jit => RunningType::Compiler,
+            Backend::Aot => RunningType::CompileAndRun,
+        }
+    }
+}
+
+/// Run source on a single backend and assert expected exit code.
+pub fn run_on(backend: Backend, src: &str, expected: i32) {
+    let interpreter = Interpreter::new();
+    let result = interpreter
+        .run(
+            src,
+            RunConfig {
+                running_type: backend.running_type(),
+                in_memory: !matches!(backend, Backend::Aot),
+                ..Default::default()
+            },
+        )
+        .unwrap_or_else(|e| panic!("{:?} failed: {}", backend, e));
+    assert_eq!(
+        result.exit_code, expected,
+        "{:?}: expected {}, got {}",
+        backend, expected, result.exit_code
+    );
+}
+
+/// Run source on a single backend and assert expected stdout output.
+#[allow(dead_code)]
+pub fn run_on_stdout(backend: Backend, src: &str, expected: &str) {
+    let interpreter = Interpreter::new();
+    let result = interpreter
+        .run(
+            src,
+            RunConfig {
+                running_type: backend.running_type(),
+                in_memory: !matches!(backend, Backend::Aot),
+                capture_output: true,
+                ..Default::default()
+            },
+        )
+        .unwrap_or_else(|e| panic!("{:?} failed: {}", backend, e));
+    assert_eq!(
+        result.stdout, expected,
+        "{:?}: expected stdout '{}', got '{}'",
+        backend, expected, result.stdout
+    );
+}
+
+/// Run source on a single backend and assert it produces an error containing `err_substr`.
+#[allow(dead_code)]
+pub fn run_on_error(backend: Backend, src: &str, err_substr: &str) {
+    let interpreter = Interpreter::new();
+    match interpreter.run(
+        src,
+        RunConfig {
+            running_type: backend.running_type(),
+            in_memory: !matches!(backend, Backend::Aot),
+            ..Default::default()
+        },
+    ) {
+        Err(e) => {
+            let msg = e.to_string();
+            assert!(
+                msg.contains(err_substr),
+                "{:?}: expected error containing '{}', got: {}",
+                backend,
+                err_substr,
+                msg
+            );
+        }
+        Ok(_) => panic!(
+            "{:?}: expected error containing '{}', but execution succeeded",
+            backend, err_substr
+        ),
+    }
+}
+
+/// Generate one `#[test]` per backend.
+///
+/// Usage:
+///   backend_test!(test_name, [Interpreter, Jit], "source", 42);
+///   backend_test!(test_name, all, "source", 42);        // Interpreter+Jit+Aot
+///   backend_test!(test_name, interp_jit, "source", 42); // Interpreter+Jit
+///   backend_test!(test_name, interp, "source", 42);     // Interpreter only
+///   backend_test!(test_name, jit, "source", 42);        // Jit only
+#[macro_export]
+macro_rules! backend_test {
+    ($name:ident, [$($backend:ident),+ $(,)?], $src:expr, $expected:expr) => {
+        $(
+            paste::paste! {
+                #[test]
+                fn [< $name _ $backend:lower >]() {
+                    test_helpers::run_on(
+                        test_helpers::Backend::$backend, $src, $expected,
+                    );
+                }
+            }
+        )+
+    };
+    ($name:ident, all, $src:expr, $expected:expr) => {
+        backend_test!($name, [Interpreter, Jit, Aot], $src, $expected);
+    };
+    ($name:ident, interp_jit, $src:expr, $expected:expr) => {
+        backend_test!($name, [Interpreter, Jit], $src, $expected);
+    };
+    ($name:ident, interp, $src:expr, $expected:expr) => {
+        backend_test!($name, [Interpreter], $src, $expected);
+    };
+    ($name:ident, jit, $src:expr, $expected:expr) => {
+        backend_test!($name, [Jit], $src, $expected);
+    };
+}
+
 /// Helper to run source and assert expected exit code.
 /// Runs BOTH modes: interpreter and JIT compiler.
 /// Code must have explicit type annotations (Rust-style).

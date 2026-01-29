@@ -64,6 +64,9 @@ pub struct Parser<'a> {
     /// Count of INDENT tokens consumed during pattern parsing that need matching DEDENTs
     /// consumed after the match arm body. Reset to 0 after consuming the dedents.
     pub(crate) pattern_indent_count: usize,
+    /// When true, postfix parsing won't consume `{ ... }` after field access.
+    /// Used to prevent ambiguity in `if cond { body }` syntax.
+    pub(crate) no_brace_postfix: bool,
 }
 
 impl<'a> Parser<'a> {
@@ -86,6 +89,7 @@ impl<'a> Parser<'a> {
             current_scope: "module".to_string(),
             error_hints: Vec::new(),
             pattern_indent_count: 0,
+            no_brace_postfix: false,
         };
 
         // Check for common mistakes in the initial token
@@ -164,6 +168,7 @@ impl<'a> Parser<'a> {
             current_scope: "module".to_string(),
             error_hints: Vec::new(),
             pattern_indent_count: 0,
+            no_brace_postfix: false,
         }
     }
 
@@ -598,11 +603,7 @@ impl<'a> Parser<'a> {
                 self.advance();
                 let attr_name = self.expect_identifier()?;
                 if attr_name != "inject" {
-                    return Err(ParseError::unexpected_token(
-                        "inject",
-                        attr_name,
-                        self.current.span,
-                    ));
+                    return Err(ParseError::unexpected_token("inject", attr_name, self.current.span));
                 }
                 true
             } else {

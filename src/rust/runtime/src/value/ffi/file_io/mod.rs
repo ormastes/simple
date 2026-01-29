@@ -36,7 +36,7 @@ pub mod path;
 // Re-export all public functions for compatibility
 pub use metadata::{rt_file_exists, rt_file_stat};
 pub use file_ops::{
-    rt_file_canonicalize, rt_file_read_text, rt_file_write_text, rt_file_copy, rt_file_remove, rt_file_rename,
+    rt_file_canonicalize, rt_file_read_text, rt_file_read_text_rv, rt_file_write_text, rt_file_copy, rt_file_remove, rt_file_rename,
     rt_file_read_lines, rt_file_append_text, rt_file_read_bytes, rt_file_write_bytes, rt_file_move,
 };
 pub use directory::{

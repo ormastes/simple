@@ -108,6 +108,47 @@ impl<'a> Parser<'a> {
         result
     }
 
+    /// Check if the current `{` begins a struct initialization (identifier followed by colon).
+    /// Returns true for patterns like `{ field: value }`, false for dict literals `{ "key": value }`.
+    pub(crate) fn peek_is_struct_init(&mut self) -> bool {
+        // Save current state
+        let saved_current = self.current.clone();
+        let saved_previous = self.previous.clone();
+        let mut consumed = Vec::new();
+
+        // Advance past '{'
+        self.advance();
+        consumed.push(self.current.clone());
+        // Skip newlines
+        while self.check(&TokenKind::Newline) {
+            self.advance();
+            consumed.push(self.current.clone());
+        }
+
+        // Check if it's `identifier :` pattern (struct init)
+        let is_struct = if let TokenKind::Identifier { .. } = &self.current.kind {
+            self.advance();
+            consumed.push(self.current.clone());
+            // Skip newlines
+            while self.check(&TokenKind::Newline) {
+                self.advance();
+                consumed.push(self.current.clone());
+            }
+            self.check(&TokenKind::Colon)
+        } else {
+            false
+        };
+
+        // Restore state - push all consumed tokens back to front of pending queue
+        for token in consumed.into_iter().rev() {
+            self.pending_tokens.push_front(token);
+        }
+        self.current = saved_current;
+        self.previous = saved_previous;
+
+        is_struct
+    }
+
     /// Peek through newlines to check if the next meaningful token matches.
     /// Used for multi-line method chaining:
     ///   - obj.method()\n.another()  (dot at same indentation level)
@@ -373,6 +414,8 @@ impl<'a> Parser<'a> {
             // Allow 'unit' to be used as identifier (field names like 'unit: Type')
             // The 'unit' keyword is only used for unit type context
             TokenKind::Unit => "unit".to_string(),
+            // Allow 'actor' to be used as identifier (parameter names like 'actor: VoidPtr')
+            TokenKind::Actor => "actor".to_string(),
             _ => {
                 return Err(ParseError::unexpected_token(
                     "identifier",

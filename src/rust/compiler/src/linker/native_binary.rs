@@ -76,9 +76,7 @@ impl Default for NativeBinaryOptions {
             library_paths.insert(0, runtime_path);
         } else {
             // Fallback: try current working directory + target/debug
-            let cwd_debug = std::env::current_dir()
-                .ok()
-                .map(|p| p.join("target/debug"));
+            let cwd_debug = std::env::current_dir().ok().map(|p| p.join("target/debug"));
             if let Some(path) = cwd_debug {
                 if path.join("libsimple_runtime.a").exists() {
                     library_paths.insert(0, path);
@@ -370,14 +368,13 @@ impl NativeBinaryBuilder {
 
         // Add Simple runtime and compiler static libraries directly (not via -l)
         // This ensures static linking even when shared library exists
-        let runtime_dir = NativeBinaryOptions::find_runtime_library_path()
-            .or_else(|| {
-                // Fallback: try current working directory + target/debug
-                std::env::current_dir()
-                    .ok()
-                    .map(|p| p.join("target/debug"))
-                    .filter(|p| p.join("libsimple_runtime.a").exists())
-            });
+        let runtime_dir = NativeBinaryOptions::find_runtime_library_path().or_else(|| {
+            // Fallback: try current working directory + target/debug
+            std::env::current_dir()
+                .ok()
+                .map(|p| p.join("target/debug"))
+                .filter(|p| p.join("libsimple_runtime.a").exists())
+        });
 
         if let Some(runtime_dir) = runtime_dir {
             // Check if we need the compiler library (for self-hosting compiler)

@@ -226,34 +226,11 @@ pub extern "C" fn rt_array_push(array: RuntimeValue, value: RuntimeValue) -> boo
 pub extern "C" fn rt_array_push_grow(array: RuntimeValue, value: RuntimeValue) -> bool {
     let arr = as_typed_ptr!(mut array, HeapObjectType::Array, RuntimeArray, false);
     unsafe {
-        // If array is at capacity, grow it
+        // If array is at capacity, cannot grow in-place (RuntimeValue is by-value,
+        // so we can't update the caller's pointer after realloc moves memory).
+        // Callers must pre-allocate sufficient capacity.
         if (*arr).len >= (*arr).capacity {
-            // Calculate new capacity (double or minimum 8)
-            let old_capacity = (*arr).capacity;
-            let new_capacity = if old_capacity == 0 { 8 } else { old_capacity * 2 };
-
-            // Calculate sizes
-            let old_size =
-                std::mem::size_of::<RuntimeArray>() + old_capacity as usize * std::mem::size_of::<RuntimeValue>();
-            let new_size =
-                std::mem::size_of::<RuntimeArray>() + new_capacity as usize * std::mem::size_of::<RuntimeValue>();
-
-            let old_layout = std::alloc::Layout::from_size_align(old_size, 8).unwrap();
-            let new_layout = std::alloc::Layout::from_size_align(new_size, 8).unwrap();
-
-            // Reallocate
-            let new_ptr = std::alloc::realloc(arr as *mut u8, old_layout, new_layout.size());
-            if new_ptr.is_null() {
-                return false; // Allocation failed
-            }
-
-            // Update the array pointer in the caller's RuntimeValue
-            // Note: We can't change the original RuntimeValue, so this approach
-            // won't work for resizing. We need a different strategy.
-            //
-            // For now, we'll create the array with a reasonable initial capacity
-            // and fail if exceeded. A proper solution would use indirection.
-            return false; // Can't grow in-place with current design
+            return false;
         }
 
         let data_ptr = (arr.add(1)) as *mut RuntimeValue;
@@ -605,6 +582,35 @@ pub extern "C" fn rt_string_eq(string1: RuntimeValue, string2: RuntimeValue) -> 
     }
 }
 
+/// Get a single character from a string at the given index.
+/// Returns the character as a new single-character string (RuntimeValue).
+/// Returns nil (TAG_SPECIAL 3) if index is out of bounds.
+#[no_mangle]
+pub extern "C" fn rt_string_char_at(string: RuntimeValue, index: i64) -> RuntimeValue {
+    let len = rt_string_len(string);
+    if len < 0 || index < 0 || index >= len {
+        return RuntimeValue::NIL;
+    }
+
+    let data = rt_string_data(string);
+    if data.is_null() {
+        return RuntimeValue::NIL;
+    }
+
+    unsafe {
+        let bytes = std::slice::from_raw_parts(data, len as usize);
+        // Find the character at the given index (UTF-8 aware)
+        let s = std::str::from_utf8_unchecked(bytes);
+        if let Some(c) = s.chars().nth(index as usize) {
+            let mut buf = [0u8; 4];
+            let char_str = c.encode_utf8(&mut buf);
+            rt_string_new(char_str.as_ptr(), char_str.len() as u64)
+        } else {
+            RuntimeValue::NIL
+        }
+    }
+}
+
 /// Create a string from a null-terminated C string
 ///
 /// # Safety
@@ -628,6 +634,165 @@ pub unsafe extern "C" fn rt_cstring_to_text(cstr: *const i8) -> RuntimeValue {
     };
 
     rt_string_new(cstr as *const u8, len)
+}
+
+/// Split a string by a delimiter, returning an array of strings
+#[no_mangle]
+pub extern "C" fn rt_string_split(string: RuntimeValue, delimiter: RuntimeValue) -> RuntimeValue {
+    let str_len = rt_string_len(string);
+    let del_len = rt_string_len(delimiter);
+    if str_len < 0 || del_len < 0 {
+        return rt_array_new(0);
+    }
+
+    let str_data = rt_string_data(string);
+    let del_data = rt_string_data(delimiter);
+    if str_data.is_null() || (del_len > 0 && del_data.is_null()) {
+        return rt_array_new(0);
+    }
+
+    // Pre-count splits to allocate with correct capacity
+    let split_count = unsafe {
+        let s = std::str::from_utf8_unchecked(std::slice::from_raw_parts(str_data, str_len as usize));
+        let d = std::str::from_utf8_unchecked(std::slice::from_raw_parts(del_data, del_len as usize));
+        s.split(d).count() as u64
+    };
+    let result = rt_array_new(split_count);
+    unsafe {
+        let s = std::str::from_utf8_unchecked(std::slice::from_raw_parts(str_data, str_len as usize));
+        let d = std::str::from_utf8_unchecked(std::slice::from_raw_parts(del_data, del_len as usize));
+        for part in s.split(d) {
+            let part_rv = rt_string_new(part.as_ptr(), part.len() as u64);
+            rt_array_push(result, part_rv);
+        }
+    }
+    result
+}
+
+/// Replace all occurrences of a pattern in a string
+#[no_mangle]
+pub extern "C" fn rt_string_replace(
+    string: RuntimeValue,
+    pattern: RuntimeValue,
+    replacement: RuntimeValue,
+) -> RuntimeValue {
+    let str_len = rt_string_len(string);
+    let pat_len = rt_string_len(pattern);
+    let rep_len = rt_string_len(replacement);
+    if str_len < 0 || pat_len < 0 || rep_len < 0 {
+        return string;
+    }
+
+    let str_data = rt_string_data(string);
+    let pat_data = rt_string_data(pattern);
+    let rep_data = rt_string_data(replacement);
+
+    unsafe {
+        let s = std::str::from_utf8_unchecked(std::slice::from_raw_parts(str_data, str_len as usize));
+        let p = std::str::from_utf8_unchecked(std::slice::from_raw_parts(pat_data, pat_len as usize));
+        let r = std::str::from_utf8_unchecked(std::slice::from_raw_parts(rep_data, rep_len as usize));
+        let result = s.replace(p, r);
+        rt_string_new(result.as_ptr(), result.len() as u64)
+    }
+}
+
+/// Trim whitespace from both ends of a string
+#[no_mangle]
+pub extern "C" fn rt_string_trim(string: RuntimeValue) -> RuntimeValue {
+    let len = rt_string_len(string);
+    if len <= 0 {
+        return string;
+    }
+    let data = rt_string_data(string);
+    unsafe {
+        let s = std::str::from_utf8_unchecked(std::slice::from_raw_parts(data, len as usize));
+        let trimmed = s.trim();
+        rt_string_new(trimmed.as_ptr(), trimmed.len() as u64)
+    }
+}
+
+/// Join an array of strings with a separator
+/// Called as array.join(separator) so array is first arg
+#[no_mangle]
+pub extern "C" fn rt_string_join(array: RuntimeValue, separator: RuntimeValue) -> RuntimeValue {
+    let arr_len = rt_array_len(array);
+    if arr_len <= 0 {
+        return rt_string_new(std::ptr::null(), 0);
+    }
+
+    let sep_len = rt_string_len(separator);
+    let sep_data = rt_string_data(separator);
+
+    let mut result = String::new();
+    for i in 0..arr_len {
+        if i > 0 && sep_len > 0 {
+            unsafe {
+                let sep = std::str::from_utf8_unchecked(std::slice::from_raw_parts(sep_data, sep_len as usize));
+                result.push_str(sep);
+            }
+        }
+        let elem = rt_array_get(array, i);
+        let elem_len = rt_string_len(elem);
+        if elem_len > 0 {
+            let elem_data = rt_string_data(elem);
+            unsafe {
+                let s = std::str::from_utf8_unchecked(std::slice::from_raw_parts(elem_data, elem_len as usize));
+                result.push_str(s);
+            }
+        }
+    }
+    rt_string_new(result.as_ptr(), result.len() as u64)
+}
+
+/// Convert a string to uppercase
+#[no_mangle]
+pub extern "C" fn rt_string_to_upper(string: RuntimeValue) -> RuntimeValue {
+    let len = rt_string_len(string);
+    if len <= 0 {
+        return string;
+    }
+    let data = rt_string_data(string);
+    unsafe {
+        let s = std::str::from_utf8_unchecked(std::slice::from_raw_parts(data, len as usize));
+        let upper = s.to_uppercase();
+        rt_string_new(upper.as_ptr(), upper.len() as u64)
+    }
+}
+
+/// Convert a string to lowercase
+#[no_mangle]
+pub extern "C" fn rt_string_to_lower(string: RuntimeValue) -> RuntimeValue {
+    let len = rt_string_len(string);
+    if len <= 0 {
+        return string;
+    }
+    let data = rt_string_data(string);
+    unsafe {
+        let s = std::str::from_utf8_unchecked(std::slice::from_raw_parts(data, len as usize));
+        let lower = s.to_lowercase();
+        rt_string_new(lower.as_ptr(), lower.len() as u64)
+    }
+}
+
+/// Convert a string to an integer, returns 0 on failure
+#[no_mangle]
+pub extern "C" fn rt_string_to_int(string: RuntimeValue) -> i64 {
+    let len = rt_string_len(string);
+    if len <= 0 {
+        return 0;
+    }
+    let data = rt_string_data(string);
+    unsafe {
+        let s = std::str::from_utf8_unchecked(std::slice::from_raw_parts(data, len as usize));
+        s.trim().parse::<i64>().unwrap_or(0)
+    }
+}
+
+/// Convert any value to a string representation
+#[no_mangle]
+pub extern "C" fn rt_to_string(value: RuntimeValue) -> RuntimeValue {
+    use super::ffi::io_print::rt_value_to_string;
+    rt_value_to_string(value)
 }
 
 // Dict FFI functions are in dict.rs module
@@ -683,7 +848,7 @@ pub extern "C" fn rt_index_get(collection: RuntimeValue, index: RuntimeValue) ->
                     RuntimeValue::NIL
                 }
             }
-            // Dict indexing would go here
+            HeapObjectType::Dict => super::dict::rt_dict_get(collection, index),
             _ => RuntimeValue::NIL,
         }
     }
@@ -707,7 +872,7 @@ pub extern "C" fn rt_index_set(collection: RuntimeValue, index: RuntimeValue, va
                     false
                 }
             }
-            // Dict indexing would go here
+            HeapObjectType::Dict => super::dict::rt_dict_set(collection, index, value),
             _ => false,
         }
     }
@@ -1451,17 +1616,13 @@ pub extern "C" fn rt_contains(collection: RuntimeValue, value: RuntimeValue) -> 
                 0
             }
             HeapObjectType::Dict => {
-                // For dicts, 'in' checks if the key exists
-                let dict = ptr as *const RuntimeDict;
-                // Entries are stored after the RuntimeDict header as pairs of RuntimeValue
-                let entries_ptr = (dict as *const u8).add(std::mem::size_of::<RuntimeDict>()) as *const RuntimeValue;
-                for i in 0..(*dict).len as usize {
-                    let key = *entries_ptr.add(i * 2);
-                    if rt_value_eq(key, value) != 0 {
-                        return 1;
-                    }
+                // For dicts, 'in' checks if the key exists using hash lookup
+                let result = super::dict::rt_dict_get(collection, value);
+                if result.is_nil() {
+                    0
+                } else {
+                    1
                 }
-                0
             }
             HeapObjectType::String => {
                 // For strings, check if value (as string) is a substring

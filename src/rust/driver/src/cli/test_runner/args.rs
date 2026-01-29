@@ -4,7 +4,7 @@
 
 use std::path::PathBuf;
 
-use super::types::{TestLevel, OutputFormat, TestOptions};
+use super::types::{TestLevel, TestExecutionMode, OutputFormat, TestOptions};
 
 /// Parse test command arguments
 pub fn parse_test_args(args: &[String]) -> TestOptions {
@@ -137,6 +137,34 @@ pub fn parse_test_args(args: &[String]) -> TestOptions {
                 options.skip_features_planned_only = true;
             }
             "--show-tags" => options.show_tags = true,
+            // Execution mode
+            "--mode" => {
+                i += 1;
+                if i < args.len() {
+                    if let Some(mode) = TestExecutionMode::from_str(&args[i]) {
+                        options.execution_mode = mode;
+                        // SMF and native modes require safe mode (subprocess execution)
+                        if mode != TestExecutionMode::Interpreter {
+                            options.safe_mode = true;
+                        }
+                    } else {
+                        eprintln!("Warning: Unknown execution mode '{}', using interpreter", args[i]);
+                    }
+                }
+            }
+            arg if arg.starts_with("--mode=") => {
+                let mode_str = arg.trim_start_matches("--mode=");
+                if let Some(mode) = TestExecutionMode::from_str(mode_str) {
+                    options.execution_mode = mode;
+                    if mode != TestExecutionMode::Interpreter {
+                        options.safe_mode = true;
+                    }
+                } else {
+                    eprintln!("Warning: Unknown execution mode '{}', using interpreter", mode_str);
+                }
+            }
+            "--force-rebuild" => options.force_rebuild = true,
+            "--keep-artifacts" => options.keep_artifacts = true,
             "--safe-mode" | "--safe" => options.safe_mode = true,
             "--timeout" => {
                 i += 1;

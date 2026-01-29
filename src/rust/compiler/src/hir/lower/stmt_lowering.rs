@@ -251,7 +251,7 @@ impl Lowerer {
                     .module
                     .types
                     .get_iterable_element(iterable.ty)
-                    .unwrap_or(crate::hir::TypeId::I64);
+                    .unwrap_or(crate::hir::TypeId::ANY);
 
                 // Check if this is a tuple pattern for destructuring
                 if let Pattern::Tuple(patterns) = &for_stmt.pattern {
@@ -466,7 +466,12 @@ impl Lowerer {
             return self.lower_block(&arm.body, ctx);
         }
         if let Pattern::Identifier(name) = &arm.pattern {
-            let is_enum_variant = if let Some(HirType::Enum { variants, name: enum_name, .. }) = self.module.types.get(subject_ty) {
+            let is_enum_variant = if let Some(HirType::Enum {
+                variants,
+                name: enum_name,
+                ..
+            }) = self.module.types.get(subject_ty)
+            {
                 variants.iter().any(|(vn, _)| vn == name)
             } else {
                 false
@@ -484,7 +489,6 @@ impl Lowerer {
         // Extract pattern bindings and add them to context
         // This needs to happen after pattern condition but before guard/body
         let bindings = self.extract_pattern_bindings(&arm.pattern, subject_ty);
-        let saved_locals_len = ctx.locals.len();
         for (name, ty) in &bindings {
             ctx.add_local(name.clone(), *ty, Mutability::Immutable);
         }
@@ -506,7 +510,11 @@ impl Lowerer {
 
         // Generate payload extraction statements for enum bindings
         let mut binding_stmts = Vec::new();
-        if let Pattern::Enum { payload: Some(payload_patterns), .. } = &arm.pattern {
+        if let Pattern::Enum {
+            payload: Some(payload_patterns),
+            ..
+        } = &arm.pattern
+        {
             // Extract payload from enum subject, then bind to locals
             let payload_expr = HirExpr {
                 kind: HirExprKind::BuiltinCall {
@@ -555,8 +563,9 @@ impl Lowerer {
         then_block.extend(binding_stmts);
         then_block.extend(self.lower_block(&arm.body, ctx)?);
 
-        // Restore context (remove pattern bindings)
-        ctx.locals.truncate(saved_locals_len);
+        // Restore context (remove pattern bindings from name scope only)
+        // Keep locals in ctx.locals so they get proper indices in the final function.
+        // Truncating would cause local_index references in HIR stmts to be out of bounds.
         for (name, _) in &bindings {
             ctx.local_map.remove(name);
         }
@@ -597,7 +606,12 @@ impl Lowerer {
             }
             Pattern::Identifier(name) => {
                 // Check if this identifier is an enum variant of the subject type
-                let enum_info = if let Some(HirType::Enum { variants, name: enum_name, .. }) = self.module.types.get(subject_ty) {
+                let enum_info = if let Some(HirType::Enum {
+                    variants,
+                    name: enum_name,
+                    ..
+                }) = self.module.types.get(subject_ty)
+                {
                     if variants.iter().any(|(vn, _)| vn == name) {
                         Some(enum_name.clone())
                     } else {
@@ -723,6 +737,27 @@ impl Lowerer {
                 })
             }
             Pattern::Enum { name: _, variant, .. } => {
+                // Special handling for None - check both nil and enum None
+                if variant == "None" {
+                    return Ok(HirExpr {
+                        kind: HirExprKind::BuiltinCall {
+                            name: "rt_is_none".to_string(),
+                            args: vec![subject_ref],
+                        },
+                        ty: TypeId::BOOL,
+                    });
+                }
+                // Special handling for Some - check not-none
+                if variant == "Some" {
+                    return Ok(HirExpr {
+                        kind: HirExprKind::BuiltinCall {
+                            name: "rt_is_some".to_string(),
+                            args: vec![subject_ref],
+                        },
+                        ty: TypeId::BOOL,
+                    });
+                }
+
                 // Use rt_enum_check_discriminant(subject, expected_disc) -> bool
                 // All enums use hashed variant name discriminants consistently
                 let expected_disc: i64 = {

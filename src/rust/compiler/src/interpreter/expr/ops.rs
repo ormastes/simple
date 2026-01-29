@@ -410,18 +410,19 @@ pub(super) fn eval_op_expr(
                 BinOp::BitXor => Ok(Value::Int(left_val.as_int()? ^ right_val.as_int()?)),
                 BinOp::ShiftLeft => Ok(Value::Int(left_val.as_int()? << right_val.as_int()?)),
                 BinOp::ShiftRight => Ok(Value::Int(left_val.as_int()? >> right_val.as_int()?)),
-                BinOp::In => {
+                BinOp::In | BinOp::NotIn => {
                     // Membership test: check if left is in right (array, tuple, dict, or string)
-                    match right_val {
-                        Value::Array(arr) => Ok(Value::Bool(arr.contains(&left_val))),
-                        Value::Tuple(tup) => Ok(Value::Bool(tup.contains(&left_val))),
+                    let negate = matches!(op, BinOp::NotIn);
+                    let result = match right_val {
+                        Value::Array(arr) => Ok(Value::Bool(arr.contains(&left_val) ^ negate)),
+                        Value::Tuple(tup) => Ok(Value::Bool(tup.contains(&left_val) ^ negate)),
                         Value::Dict(dict) => {
                             let key = left_val.to_key_string();
-                            Ok(Value::Bool(dict.contains_key(&key)))
+                            Ok(Value::Bool(dict.contains_key(&key) ^ negate))
                         }
                         Value::Str(s) => {
                             let needle = left_val.to_key_string();
-                            Ok(Value::Bool(s.contains(&needle)))
+                            Ok(Value::Bool(s.contains(&needle) ^ negate))
                         }
                         _ => {
                             let ctx = ErrorContext::new()
@@ -435,7 +436,8 @@ pub(super) fn eval_op_expr(
                                 ctx,
                             ))
                         }
-                    }
+                    };
+                    result
                 }
                 BinOp::MatMul => {
                     // Matrix multiplication (@) - for now, treat as element-wise multiply for numbers

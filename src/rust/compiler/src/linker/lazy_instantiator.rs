@@ -9,8 +9,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use crate::monomorphize::{
-    DependencyEdge, DependencyKind, InstantiationEntry, InstantiationStatus,
-    NoteSdnMetadata, PossibleInstantiationEntry,
+    DependencyEdge, DependencyKind, InstantiationEntry, InstantiationStatus, NoteSdnMetadata,
+    PossibleInstantiationEntry,
 };
 
 /// Result of lazy instantiation attempt.
@@ -197,11 +197,7 @@ impl LazyInstantiator {
     }
 
     /// Perform the actual instantiation.
-    fn do_instantiate(
-        &mut self,
-        entry: &PossibleInstantiationEntry,
-        source_path: &str,
-    ) -> LazyInstantiationResult {
+    fn do_instantiate(&mut self, entry: &PossibleInstantiationEntry, source_path: &str) -> LazyInstantiationResult {
         // Create instantiation entry
         let inst_entry = InstantiationEntry::new(
             entry.template.clone(),
@@ -226,7 +222,8 @@ impl LazyInstantiator {
 
         // TODO: Generate actual code
         let placeholder_code = vec![0u8; 0];
-        self.instantiated.insert(entry.mangled_name.clone(), placeholder_code.clone());
+        self.instantiated
+            .insert(entry.mangled_name.clone(), placeholder_code.clone());
 
         LazyInstantiationResult::Success {
             code: placeholder_code,
@@ -245,10 +242,7 @@ impl LazyInstantiator {
     }
 
     /// Instantiate all missing symbols that can be instantiated.
-    pub fn instantiate_all_missing(
-        &mut self,
-        missing_symbols: &[String],
-    ) -> Vec<LazyInstantiationResult> {
+    pub fn instantiate_all_missing(&mut self, missing_symbols: &[String]) -> Vec<LazyInstantiationResult> {
         let instantiable = self.get_instantiable_missing(missing_symbols);
         let mut results = Vec::new();
 

@@ -61,9 +61,7 @@ pub use layout::{LayoutOptimizer, LayoutSegment, LayoutStats, LayoutSymbol};
 pub use native_binary::{compile_to_native_binary, NativeBinaryBuilder, NativeBinaryOptions, NativeBinaryResult};
 
 // Lazy instantiation exports (link-time template instantiation)
-pub use lazy_instantiator::{
-    LazyInstantiationResult, LazyInstantiationStats, LazyInstantiator, LazyInstantiatorConfig,
-};
+pub use lazy_instantiator::{LazyInstantiationResult, LazyInstantiationStats, LazyInstantiator, LazyInstantiatorConfig};
 
 // Mold FFI exports (linker detection and execution)
 pub use mold_ffi::{find_linker, LinkerType};

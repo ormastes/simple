@@ -395,9 +395,7 @@ pub struct TemplateTable {
 
 impl TemplateTable {
     pub fn new() -> Self {
-        Self {
-            entries: Vec::new(),
-        }
+        Self { entries: Vec::new() }
     }
 
     /// Add a template entry
@@ -432,9 +430,7 @@ impl TemplateTable {
     /// Find a template by name
     /// Requires the string table to resolve name offsets
     pub fn find_by_name(&self, name: &str, string_table: &[u8]) -> Option<&TemplateEntry> {
-        self.entries.iter().find(|e| {
-            self.entry_name(e, string_table) == name
-        })
+        self.entries.iter().find(|e| self.entry_name(e, string_table) == name)
     }
 }
 

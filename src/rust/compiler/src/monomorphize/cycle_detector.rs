@@ -54,15 +54,13 @@ pub fn detect_cycles(metadata: &NoteSdnMetadata) -> CycleDetectionResult {
         let cycle_path = cycle.join("->");
 
         if is_hard_cycle(&cycle, &metadata.dependencies) {
-            result.errors.push(CircularError::new(
-                cycle_path.clone(),
-                "E0420".to_string(),
-            ));
+            result
+                .errors
+                .push(CircularError::new(cycle_path.clone(), "E0420".to_string()));
         } else {
-            result.warnings.push(CircularWarning::new(
-                cycle_path.clone(),
-                "warning".to_string(),
-            ));
+            result
+                .warnings
+                .push(CircularWarning::new(cycle_path.clone(), "warning".to_string()));
         }
 
         result.all_cycles.push(cycle);
@@ -76,7 +74,8 @@ fn build_graph(dependencies: &[DependencyEdge]) -> HashMap<String, Vec<String>> 
     let mut graph: HashMap<String, Vec<String>> = HashMap::new();
 
     for dep in dependencies {
-        graph.entry(dep.from_inst.clone())
+        graph
+            .entry(dep.from_inst.clone())
             .or_default()
             .push(dep.to_inst.clone());
     }
@@ -102,14 +101,7 @@ fn find_all_cycles(graph: &HashMap<String, Vec<String>>) -> Vec<Vec<String>> {
     // DFS from each node
     for node in &all_nodes {
         if !visited.contains(node) {
-            find_cycles_dfs(
-                node,
-                graph,
-                &mut visited,
-                &mut rec_stack,
-                &mut path,
-                &mut cycles,
-            );
+            find_cycles_dfs(node, graph, &mut visited, &mut rec_stack, &mut path, &mut cycles);
         }
     }
 
@@ -212,16 +204,10 @@ pub fn analyze_and_update_cycles(metadata: &mut NoteSdnMetadata) {
 }
 
 /// Check if adding a new dependency would create a cycle.
-pub fn would_create_cycle(
-    metadata: &NoteSdnMetadata,
-    new_from: &str,
-    new_to: &str,
-) -> Option<Vec<String>> {
+pub fn would_create_cycle(metadata: &NoteSdnMetadata, new_from: &str, new_to: &str) -> Option<Vec<String>> {
     // Build graph with the new edge
     let mut graph = build_graph(&metadata.dependencies);
-    graph.entry(new_from.to_string())
-        .or_default()
-        .push(new_to.to_string());
+    graph.entry(new_from.to_string()).or_default().push(new_to.to_string());
 
     // Check for path from new_to back to new_from (which would create cycle)
     let mut visited = HashSet::new();

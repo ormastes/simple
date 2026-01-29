@@ -369,7 +369,21 @@ impl<'a> Parser<'a> {
                 if is_async {
                     self.advance();
                 }
-                let mut method = self.parse_trait_method()?;
+                // Handle 'me' (mutable method) keyword before fn
+                let is_me = self.check(&TokenKind::Me);
+                if is_me {
+                    self.advance();
+                    // Optionally consume 'fn' after 'me'
+                    if self.check(&TokenKind::Fn) {
+                        self.advance();
+                    }
+                }
+                let mut method = if is_me {
+                    // Parse as trait method but without expecting 'fn' token
+                    self.parse_trait_method_after_fn()?
+                } else {
+                    self.parse_trait_method()?
+                };
                 method.decorators = decorators;
                 if is_async {
                     method.effects.push(crate::ast::Effect::Async);
@@ -495,8 +509,12 @@ impl<'a> Parser<'a> {
     /// Abstract: `fn foo(self) -> i64` (ends with newline)
     /// Default:  `fn foo(self) -> i64:\n    return 0`
     fn parse_trait_method(&mut self) -> Result<FunctionDef, ParseError> {
-        let start_span = self.current.span;
         self.expect(&TokenKind::Fn)?;
+        self.parse_trait_method_after_fn()
+    }
+
+    fn parse_trait_method_after_fn(&mut self) -> Result<FunctionDef, ParseError> {
+        let start_span = self.current.span;
 
         let name = self.expect_identifier()?;
         let generic_params = self.parse_generic_params_as_strings()?;

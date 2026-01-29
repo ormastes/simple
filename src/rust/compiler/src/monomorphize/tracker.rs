@@ -8,8 +8,8 @@
 use std::collections::{HashMap, HashSet};
 
 use super::note_sdn::{
-    CircularError, CircularWarning, DependencyEdge, DependencyKind, InstantiationEntry,
-    InstantiationStatus, NoteSdnMetadata, PossibleInstantiationEntry, TypeInferenceEntry,
+    CircularError, CircularWarning, DependencyEdge, DependencyKind, InstantiationEntry, InstantiationStatus,
+    NoteSdnMetadata, PossibleInstantiationEntry, TypeInferenceEntry,
 };
 use super::cycle_detector::{detect_cycles, analyze_and_update_cycles};
 use super::types::ConcreteType;
@@ -112,13 +112,7 @@ impl InstantiationTracker {
     }
 
     /// Track a type inference event.
-    pub fn track_type_inference(
-        &mut self,
-        inferred_type: &str,
-        expr: &str,
-        context: &str,
-        source_loc: &str,
-    ) {
+    pub fn track_type_inference(&mut self, inferred_type: &str, expr: &str, context: &str, source_loc: &str) {
         let entry = TypeInferenceEntry::new(
             inferred_type.to_string(),
             expr.to_string(),
@@ -131,27 +125,15 @@ impl InstantiationTracker {
     }
 
     /// Track a dependency between instantiations.
-    pub fn track_dependency(
-        &mut self,
-        from_inst: &str,
-        to_inst: &str,
-        dep_kind: DependencyKind,
-    ) {
+    pub fn track_dependency(&mut self, from_inst: &str, to_inst: &str, dep_kind: DependencyKind) {
         // If from_inst is not yet tracked, queue the dependency
         if !self.tracked_names.contains(from_inst) {
-            self.pending_deps.push((
-                from_inst.to_string(),
-                to_inst.to_string(),
-                dep_kind,
-            ));
+            self.pending_deps
+                .push((from_inst.to_string(), to_inst.to_string(), dep_kind));
             return;
         }
 
-        let edge = DependencyEdge::new(
-            from_inst.to_string(),
-            to_inst.to_string(),
-            dep_kind,
-        );
+        let edge = DependencyEdge::new(from_inst.to_string(), to_inst.to_string(), dep_kind);
 
         self.metadata.add_dependency(edge);
     }
@@ -291,10 +273,7 @@ mod tests {
 
     #[test]
     fn test_tracker_basic() {
-        let mut tracker = InstantiationTracker::new(
-            "test.spl".to_string(),
-            "test.o".to_string(),
-        );
+        let mut tracker = InstantiationTracker::new("test.spl".to_string(), "test.o".to_string());
 
         tracker.track_instantiation(
             "List",
@@ -312,10 +291,7 @@ mod tests {
 
     #[test]
     fn test_tracker_dependencies() {
-        let mut tracker = InstantiationTracker::new(
-            "test.spl".to_string(),
-            "test.o".to_string(),
-        );
+        let mut tracker = InstantiationTracker::new("test.spl".to_string(), "test.o".to_string());
 
         tracker.track_instantiation(
             "List",
@@ -335,10 +311,7 @@ mod tests {
 
     #[test]
     fn test_tracker_possible() {
-        let mut tracker = InstantiationTracker::new(
-            "test.spl".to_string(),
-            "test.o".to_string(),
-        );
+        let mut tracker = InstantiationTracker::new("test.spl".to_string(), "test.o".to_string());
 
         tracker.track_possible(
             "List",
@@ -356,10 +329,7 @@ mod tests {
 
     #[test]
     fn test_tracking_context() {
-        let mut tracker = InstantiationTracker::new(
-            "test.spl".to_string(),
-            "test.o".to_string(),
-        );
+        let mut tracker = InstantiationTracker::new("test.spl".to_string(), "test.o".to_string());
 
         {
             let mut ctx = TrackingContext::start(
@@ -380,10 +350,7 @@ mod tests {
 
     #[test]
     fn test_no_duplicates() {
-        let mut tracker = InstantiationTracker::new(
-            "test.spl".to_string(),
-            "test.o".to_string(),
-        );
+        let mut tracker = InstantiationTracker::new("test.spl".to_string(), "test.o".to_string());
 
         tracker.track_instantiation(
             "List",

@@ -96,7 +96,7 @@ impl TypeChecker {
                         Ok(Type::Int)
                     }
                     // Is and In operators
-                    BinOp::Is | BinOp::In => Ok(Type::Bool),
+                    BinOp::Is | BinOp::In | BinOp::NotIn => Ok(Type::Bool),
                     // Pipe forward: result type depends on the function being called
                     // For now, infer from function return type if available, else fresh var
                     BinOp::PipeForward => {

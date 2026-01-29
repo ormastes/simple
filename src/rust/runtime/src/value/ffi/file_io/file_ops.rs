@@ -73,6 +73,34 @@ pub unsafe extern "C" fn rt_file_read_text(path_ptr: *const u8, path_len: u64) -
     }
 }
 
+/// Read entire file as text (RuntimeValue wrapper)
+/// Takes a RuntimeValue string, extracts ptr/len, and calls rt_file_read_text.
+/// Returns Some(content) on success, None on failure — matching `text?` return type.
+#[no_mangle]
+pub unsafe extern "C" fn rt_file_read_text_rv(path: RuntimeValue) -> RuntimeValue {
+    use crate::value::collections::{rt_string_data, rt_string_len};
+    use crate::value::objects::rt_enum_new;
+    if path.is_nil() || path.0 == 0 {
+        // Return None enum
+        let none_disc = crate::value::objects::hash_variant_discriminant("None");
+        return rt_enum_new(0, none_disc as u32, RuntimeValue::NIL);
+    }
+    let len = rt_string_len(path);
+    let ptr = rt_string_data(path);
+    if ptr.is_null() {
+        let none_disc = crate::value::objects::hash_variant_discriminant("None");
+        return rt_enum_new(0, none_disc as u32, RuntimeValue::NIL);
+    }
+    let result = rt_file_read_text(ptr, len as u64);
+    if result.is_nil() {
+        let none_disc = crate::value::objects::hash_variant_discriminant("None");
+        rt_enum_new(0, none_disc as u32, RuntimeValue::NIL)
+    } else {
+        let some_disc = crate::value::objects::hash_variant_discriminant("Some");
+        rt_enum_new(0, some_disc as u32, result)
+    }
+}
+
 /// Write text to file
 #[no_mangle]
 pub unsafe extern "C" fn rt_file_write_text(
