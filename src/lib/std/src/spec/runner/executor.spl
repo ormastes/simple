@@ -2,13 +2,13 @@
 # Executes registered tests with hook support and result capture
 # Extended with resource-limited execution support
 
-import spec.registry.{ExampleGroup, Example, Hook, MockMode, get_all_groups}
-import spec.runner.filter.{TestFilter}
-import spec.runtime.{Runtime, ExampleState}
-import spec.progress.{init_progress, reset_progress}
-import core.time.{Timer}
-import concurrency.resource_limits.{ResourceLimits, LimitViolation, LimitedResult}
-import concurrency.threads.{spawn_limited, LimitedThreadHandle}
+use spec.registry.{ExampleGroup, Example, Hook, MockMode, get_all_groups}
+use spec.runner.filter.{TestFilter}
+use spec.runtime.{Runtime, ExampleState}
+use spec.progress.{init_progress, reset_progress}
+use core.time.{Timer}
+use concurrency.resource_limits.{ResourceLimits, LimitViolation, LimitedResult}
+use concurrency.threads.{spawn_limited, LimitedThreadHandle}
 
 # FFI declarations for mock policy
 extern fn __mock_policy_init_all() -> ()
@@ -295,9 +295,9 @@ impl TestExecutor:
         # Initialize mock policy for this test
         self.init_mock_policy_for_mode(mock_mode)
 
-        # Collect all before_each hooks from hierarchy
-        val before_hooks = self.collect_before_each_hooks(group)
-        val after_hooks = self.collect_after_each_hooks(group)
+        # Get hooks from group hierarchy (uses cached O(1) lookup)
+        val before_hooks = group.get_all_before_each_hooks()
+        val after_hooks = group.get_all_after_each_hooks()
 
         # Start timer
         val timer = Timer.start()
@@ -366,37 +366,14 @@ impl TestExecutor:
         # Wait for the thread to complete and get the result
         return handle.join_result()
 
-    fn collect_before_each_hooks(group: ExampleGroup) -> List<Any>:
-        """Collect before_each hooks from group hierarchy."""
-        var hooks: List<Any> = []
-
-        # Collect from parent chain (bottom-up)
-        match group.parent:
-            case Some(parent):
-                hooks = self.collect_before_each_hooks(parent)
-            case None:
-                pass
-
-        # Add this group's hooks
-        hooks.extend(group.get_before_each_hooks())
-
-        return hooks
-
-    fn collect_after_each_hooks(group: ExampleGroup) -> List<Any>:
-        """Collect after_each hooks from group hierarchy."""
-        var hooks: List<Any> = []
-
-        # Add this group's hooks first
-        hooks.extend(group.get_after_each_hooks())
-
-        # Then parent's hooks (top-down for cleanup)
-        match group.parent:
-            case Some(parent):
-                hooks.extend(self.collect_after_each_hooks(parent))
-            case None:
-                pass
-
-        return hooks
+    # REMOVED: Old O(n²) hook collection methods replaced with cached O(1) methods
+    # The functionality is now in ExampleGroup.get_all_before_each_hooks() and
+    # ExampleGroup.get_all_after_each_hooks() which use caching to avoid
+    # the performance issue.
+    #
+    # Previous bug: These methods recursively walked the parent chain and copied
+    # hooks at each level, resulting in O(n²) complexity for deeply nested contexts.
+    # With N nested contexts and M tests, total cost was O(N² × M).
 
     fn execute_group(group: ExampleGroup, results: ExecutionResults) -> void:
         """Execute all examples in a group and its children."""
@@ -455,6 +432,14 @@ impl TestExecutor:
         results.start_time = Timer.now()
 
         val groups = get_all_groups()
+
+        # Precompute hook caches for all groups to avoid O(n²) performance
+        # This is critical for tests with deeply nested contexts (10+ levels)
+        print "[DEBUG] Precomputing hooks for {groups.len()} groups"
+        for group in groups:
+            print "[DEBUG] Precomputing hooks for group: {group.description}"
+            group.precompute_hooks()
+        print "[DEBUG] Hook precomputation complete"
 
         for group in groups:
             self.execute_group(group, results)

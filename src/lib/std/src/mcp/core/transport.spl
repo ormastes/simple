@@ -4,7 +4,9 @@
 
 use core.*
 use core.json.*
-use mcp.core.protocol.*
+use std.mcp.core.protocol.*
+use std.mcp.core.logger.*
+use std.mcp.core.error_handler.*
 
 # Transport interface
 pub trait Transport:
@@ -29,12 +31,16 @@ pub class StdioTransport:
     pub alive: bool
     pub buffer: text
     pub debug_mode: bool
+    pub validator: InputValidator
+    pub error_count: i64
 
     pub fn new() -> StdioTransport:
         return StdioTransport:
             alive: true
             buffer: ""
             debug_mode: false
+            validator: InputValidator.default()
+            error_count: 0
 
     pub fn enable_debug(self):
         self.debug_mode = true
@@ -74,11 +80,17 @@ pub class StdioTransport:
         stdout_write(data)
         stdout_flush()
 
-    # Write to stderr for debug logging
+    # Write to stderr for debug logging (also to file)
     fn log_debug(msg: text):
+        log_debug("StdioTransport: " + msg)
         if self.debug_mode:
             stderr_write("[MCP] " + msg + "\n")
             stderr_flush()
+
+    # Log error
+    fn log_error(msg: text):
+        log_error("StdioTransport: " + msg)
+        self.error_count = self.error_count + 1
 
     # Parse Content-Length header
     fn parse_content_length(header: text) -> Option<i64>:
@@ -99,10 +111,24 @@ pub class StdioTransport:
             else:
                 break
 
-        return Some(length)
+        # Validate content length
+        match self.validator.validate_content_length(length):
+            case Ok(_):
+                return Some(length)
+            case Err(error):
+                self.log_error("Invalid content length: {error.message}")
+                return None
 
-    # Parse JSON into JsonRpcRequest
+    # Parse JSON into JsonRpcRequest (with validation)
     fn parse_request(json_str: text) -> Result<JsonRpcRequest, text>:
+        # Validate JSON string length first
+        match self.validator.validate_string(json_str, "request_body"):
+            case Ok(_):
+                pass
+            case Err(error):
+                self.log_error("Request validation failed: {error.message}")
+                return Err(error.message)
+
         match json.parse(json_str):
             case Ok(JsonValue.Object(obj)):
                 # Extract fields
@@ -236,7 +262,7 @@ impl Transport for StdioTransport:
         return self.alive
 
 # TCP FFI imports
-import net.tcp.{monoio_tcp_connect, monoio_tcp_read, monoio_tcp_write, monoio_tcp_close}
+use net.tcp.{monoio_tcp_connect, monoio_tcp_read, monoio_tcp_write, monoio_tcp_close}
 
 # TCP transport for MCP over network
 pub class TcpTransport:

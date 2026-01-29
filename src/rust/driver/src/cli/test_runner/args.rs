@@ -169,7 +169,7 @@ pub fn parse_test_args(args: &[String]) -> TestOptions {
             "--timeout" => {
                 i += 1;
                 if i < args.len() {
-                    options.safe_mode_timeout = args[i].parse().unwrap_or(30);
+                    options.safe_mode_timeout = args[i].parse().unwrap_or(60);
                 }
             }
             // Parallel execution options

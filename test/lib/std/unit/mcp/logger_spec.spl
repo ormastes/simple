@@ -1,0 +1,322 @@
+"""
+MCP Logger Tests
+Feature: MCP File-based Logging
+Category: MCP, Logging
+Status: Complete
+
+Tests for file-based logging system.
+"""
+
+use std.spec
+use std.mcp.core.logger.*
+
+describe "LogLevel":
+    it "converts to string":
+        expect(LogLevel.Trace.to_string() == "TRACE")
+        expect(LogLevel.Debug.to_string() == "DEBUG")
+        expect(LogLevel.Info.to_string() == "INFO")
+        expect(LogLevel.Warn.to_string() == "WARN")
+        expect(LogLevel.Error.to_string() == "ERROR")
+        expect(LogLevel.Fatal.to_string() == "FATAL")
+
+    it "has correct priority ordering":
+        expect(LogLevel.Trace.to_priority() < LogLevel.Debug.to_priority())
+        expect(LogLevel.Debug.to_priority() < LogLevel.Info.to_priority())
+        expect(LogLevel.Info.to_priority() < LogLevel.Warn.to_priority())
+        expect(LogLevel.Warn.to_priority() < LogLevel.Error.to_priority())
+        expect(LogLevel.Error.to_priority() < LogLevel.Fatal.to_priority())
+
+    it "has specific priority values":
+        expect(LogLevel.Trace.to_priority() == 0)
+        expect(LogLevel.Debug.to_priority() == 1)
+        expect(LogLevel.Info.to_priority() == 2)
+        expect(LogLevel.Warn.to_priority() == 3)
+        expect(LogLevel.Error.to_priority() == 4)
+        expect(LogLevel.Fatal.to_priority() == 5)
+
+describe "McpLogger - initialization":
+    it "creates logger with file path":
+        val logger = McpLogger.new("/tmp/test.log")
+        expect(logger.file_path == "/tmp/test.log")
+        expect(logger.enabled)
+        expect(logger.min_level == LogLevel.Debug)
+
+    it "creates logger with custom level":
+        val logger = McpLogger.with_level(LogLevel.Warn)
+        expect(logger.min_level == LogLevel.Warn)
+
+    it "has default configuration":
+        val logger = McpLogger.new("")
+        expect(logger.max_file_size == 10_000_000)
+        expect(logger.buffer_size == 10)
+        expect(logger.current_size == 0)
+        expect(logger.buffer.is_empty())
+
+    it "can be disabled":
+        val logger = McpLogger.new("/tmp/test.log")
+        logger.disable()
+        expect(not logger.enabled)
+
+    it "can be re-enabled":
+        val logger = McpLogger.new("/tmp/test.log")
+        logger.disable()
+        logger.enable()
+        expect(logger.enabled)
+
+describe "McpLogger - configuration":
+    it "sets max file size":
+        val logger = McpLogger.new("")
+        logger.set_max_size(5_000_000)
+        expect(logger.max_file_size == 5_000_000)
+
+    it "sets buffer size":
+        val logger = McpLogger.new("")
+        logger.set_buffer_size(20)
+        expect(logger.buffer_size == 20)
+
+describe "McpLogger - filtering by level":
+    it "logs at or above min level":
+        val logger = McpLogger.new("")
+        logger.min_level = LogLevel.Warn
+
+        # These should be filtered out (below Warn)
+        logger.trace("trace message")
+        logger.debug("debug message")
+        logger.info("info message")
+
+        # These should be logged (at or above Warn)
+        logger.warn("warn message")
+        logger.error("error message")
+        logger.fatal("fatal message")
+
+        # Buffer should have 3 entries (warn, error, fatal)
+        expect(logger.buffer.len() == 3)
+
+    it "logs all levels when min is Trace":
+        val logger = McpLogger.new("")
+        logger.min_level = LogLevel.Trace
+
+        logger.trace("trace")
+        logger.debug("debug")
+        logger.info("info")
+        logger.warn("warn")
+        logger.error("error")
+        logger.fatal("fatal")
+
+        expect(logger.buffer.len() == 6)
+
+describe "McpLogger - convenience methods":
+    it "provides trace method":
+        val logger = McpLogger.new("")
+        logger.min_level = LogLevel.Trace
+        logger.trace("trace message")
+        expect(logger.buffer.len() == 1)
+        expect(logger.buffer[0].contains("TRACE"))
+
+    it "provides debug method":
+        val logger = McpLogger.new("")
+        logger.debug("debug message")
+        expect(logger.buffer.len() == 1)
+        expect(logger.buffer[0].contains("DEBUG"))
+
+    it "provides info method":
+        val logger = McpLogger.new("")
+        logger.info("info message")
+        expect(logger.buffer.len() == 1)
+        expect(logger.buffer[0].contains("INFO"))
+
+    it "provides warn method":
+        val logger = McpLogger.new("")
+        logger.warn("warn message")
+        expect(logger.buffer.len() == 1)
+        expect(logger.buffer[0].contains("WARN"))
+
+    it "provides error method":
+        val logger = McpLogger.new("")
+        logger.error("error message")
+        expect(logger.buffer.first.?.contains("ERROR"))
+
+    it "provides fatal method":
+        val logger = McpLogger.new("")
+        logger.fatal("fatal message")
+        expect(logger.buffer.first.?.contains("FATAL"))
+
+describe "McpLogger - context logging":
+    it "logs with context dict":
+        val logger = McpLogger.new("")
+        val context = {"user": "alice", "action": "login"}
+
+        logger.info_ctx("User action", context)
+
+        expect(logger.buffer.len() == 1)
+        val entry = logger.buffer[0]
+        expect(entry.contains("INFO"))
+        expect(entry.contains("User action"))
+        expect(entry.contains("Context:"))
+        expect(entry.contains("user=alice"))
+        expect(entry.contains("action=login"))
+
+    it "logs with empty context":
+        val logger = McpLogger.new("")
+        logger.debug_ctx("Debug message", {})
+
+        expect(logger.buffer.len() == 1)
+        val entry = logger.buffer[0]
+        expect(entry.contains("DEBUG"))
+        expect(not entry.contains("Context:"))
+
+describe "McpLogger - buffering":
+    it "buffers log entries":
+        val logger = McpLogger.new("")
+        logger.set_buffer_size(5)
+
+        logger.debug("message 1")
+        logger.debug("message 2")
+        logger.debug("message 3")
+
+        expect(logger.buffer.len() == 3)
+
+    it "auto-flushes on error level":
+        val logger = McpLogger.new("")
+        logger.set_buffer_size(100)  # Large buffer
+
+        logger.debug("debug message")
+        logger.error("error message")
+
+        # Buffer should be empty after error (auto-flushed)
+        expect(logger.buffer.is_empty())
+
+    it "auto-flushes on fatal level":
+        val logger = McpLogger.new("")
+        logger.set_buffer_size(100)
+
+        logger.debug("debug message")
+        logger.fatal("fatal message")
+
+        expect(logger.buffer.is_empty())
+
+    it "can be manually flushed":
+        val logger = McpLogger.new("")
+
+        logger.debug("message 1")
+        logger.debug("message 2")
+
+        expect(logger.buffer.len() == 2)
+
+        val result = logger.flush()
+        expect(result.ok.?)
+        expect(logger.buffer.is_empty())
+
+describe "McpLogger - disabled logging":
+    it "does not log when disabled":
+        val logger = McpLogger.new("")
+        logger.disable()
+
+        logger.debug("debug message")
+        logger.error("error message")
+
+        expect(logger.buffer.is_empty())
+
+    it "logs again when re-enabled":
+        val logger = McpLogger.new("")
+        logger.disable()
+        logger.debug("message 1")
+
+        logger.enable()
+        logger.debug("message 2")
+
+        expect(logger.buffer.len() == 1)
+
+describe "Global logger functions":
+    it "provides global log_debug function":
+        log_debug("test debug")
+        # Should not crash (logger may not be initialized)
+
+    it "provides global log_info function":
+        log_info("test info")
+
+    it "provides global log_warn function":
+        log_warn("test warn")
+
+    it "provides global log_error function":
+        log_error("test error")
+
+    it "provides global log_fatal function":
+        log_fatal("test fatal")
+
+describe "Global logger with context":
+    it "provides context versions":
+        val ctx = {"key": "value"}
+
+        log_trace_ctx("trace", ctx)
+        log_debug_ctx("debug", ctx)
+        log_info_ctx("info", ctx)
+        log_warn_ctx("warn", ctx)
+        log_error_ctx("error", ctx)
+        log_fatal_ctx("fatal", ctx)
+
+describe "Logger format":
+    it "formats entry with timestamp":
+        val logger = McpLogger.new("")
+        logger.info("test message")
+
+        expect(logger.buffer.len() == 1)
+        val entry = logger.buffer[0]
+
+        # Should have timestamp, level, and message
+        expect(entry.contains("["))
+        expect(entry.contains("]"))
+        expect(entry.contains("INFO"))
+        expect(entry.contains("test message"))
+
+    it "formats entry with newline":
+        val logger = McpLogger.new("")
+        logger.debug("test")
+
+        val entry = logger.buffer[0]
+        expect(entry.ends_with("\n"))
+
+describe "Logger edge cases":
+    it "handles empty message":
+        val logger = McpLogger.new("")
+        logger.info("")
+        expect(logger.buffer.len() == 1)
+
+    it "handles very long message":
+        val logger = McpLogger.new("")
+        val long_msg = "x" * 10000
+        logger.info(long_msg)
+        expect(logger.buffer.len() == 1)
+
+    it "handles special characters in message":
+        val logger = McpLogger.new("")
+        logger.info("Message with\nnewline\tand\ttab")
+        expect(logger.buffer.len() == 1)
+
+    it "handles message with quotes":
+        val logger = McpLogger.new("")
+        logger.info("Message with \"quotes\" inside")
+        expect(logger.buffer.len() == 1)
+
+describe "Multiple log entries":
+    it "maintains order of entries":
+        val logger = McpLogger.new("")
+
+        logger.info("first")
+        logger.info("second")
+        logger.info("third")
+
+        expect(logger.buffer.len() == 3)
+        expect(logger.buffer[0].contains("first"))
+        expect(logger.buffer[1].contains("second"))
+        expect(logger.buffer[2].contains("third"))
+
+    it "handles mixed log levels":
+        val logger = McpLogger.new("")
+        logger.min_level = LogLevel.Trace
+
+        logger.trace("trace")
+        logger.info("info")
+        logger.warn("warn")
+
+        expect(logger.buffer.len() == 3)

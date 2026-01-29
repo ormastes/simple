@@ -1,0 +1,166 @@
+# MCP Safe Server Wrapper
+# Wraps McpServer with crash recovery, logging, and validation
+# Ensures MCP crashes don't affect Claude sessions
+
+use std.mcp.core.server.*
+use std.mcp.core.protocol.*
+use std.mcp.core.transport.*
+use std.mcp.core.logger.*
+use std.mcp.core.error_handler.*
+use std.mcp.core.provider.*
+
+# Safe server wrapper with crash isolation
+pub class SafeMcpServer:
+    pub server: McpServer
+    pub recovery: CrashRecovery
+    pub log_file: text
+    pub initialized: bool
+
+    pub fn new(name: text, version: text, provider: ResourceProvider) -> SafeMcpServer:
+        var server = McpServer.new(name, version, provider)
+        return SafeMcpServer(
+            server: server,
+            recovery: CrashRecovery.new(),
+            log_file: "",
+            initialized: false
+        )
+
+    # Initialize with logging
+    pub fn init_with_logging(log_file: text) -> Result<(), text>:
+        self.log_file = log_file
+
+        # Initialize file logger
+        match init_logger(log_file):
+            case Ok(_):
+                log_info("SafeMcpServer initialized with logging: {log_file}")
+                self.initialized = true
+                Ok(())
+            case Err(e):
+                Err("Failed to initialize logger: {e}")
+
+    # Set validation mode
+    pub fn set_strict_validation():
+        self.server.set_validation_limits(ValidationLimits.strict())
+        log_info("Strict validation enabled")
+
+    # Set debug mode
+    pub fn enable_debug():
+        self.server.enable_debug()
+
+    # Register tool with error wrapping
+    pub fn register_tool_safe(tool: Tool, handler: ToolHandler):
+        self.server.register_tool(tool, handler)
+        log_debug("Registered tool: {tool.name}")
+
+    # Set transport
+    pub fn set_transport(transport: Transport):
+        self.server.set_transport(transport)
+        log_debug("Transport configured")
+
+    # Run server with full crash recovery
+    pub fn run_safe() -> Result<(), text>:
+        log_info("Starting safe server loop")
+
+        # Ensure we have a transport
+        if self.server.transport.is_none():
+            val error = "No transport configured"
+            log_error(error)
+            return Err(error)
+
+        # Run server loop with crash recovery
+        match self.run_loop_protected():
+            case Ok(_):
+                log_info("Server loop completed successfully")
+                Ok(())
+            case Err(error):
+                log_fatal("Server loop failed: {error}")
+                Err(error)
+
+    # Protected server loop
+    fn run_loop_protected() -> Result<(), text>:
+        # Wrap the entire server run in error recovery
+        self.server.run()
+        Ok(())
+
+    # Run with stdio transport
+    pub fn run_stdio_safe() -> Result<(), text>:
+        log_info("Starting server with stdio transport")
+
+        # Create stdio transport with validation
+        var transport = StdioTransport.new()
+
+        if self.server.debug_mode:
+            transport.enable_debug()
+
+        self.server.set_transport(transport)
+
+        # Run with recovery
+        self.run_safe()
+
+    # Shutdown server gracefully
+    pub fn shutdown():
+        log_info("Shutting down server")
+        self.server.stop()
+
+        # Flush logs
+        match flush_logs():
+            case Ok(_):
+                pass
+            case Err(e):
+                stderr_write("Warning: Failed to flush logs: {e}\n")
+
+# Helper to create and run a safe MCP server
+pub fn run_safe_mcp_server(name: text, version: text,
+                            provider: ResourceProvider,
+                            log_file: Option<text>,
+                            debug: bool,
+                            strict: bool) -> Result<(), text>:
+    # Create safe server
+    var safe_server = SafeMcpServer.new(name, version, provider)
+
+    # Initialize logging if requested
+    match log_file:
+        case Some(path):
+            match safe_server.init_with_logging(path):
+                case Ok(_):
+                    if debug:
+                        stderr_write("[MCP] Logging to: {path}\n")
+                case Err(e):
+                    stderr_write("[MCP] WARNING: {e}\n")
+                    stderr_write("[MCP] Continuing without file logging\n")
+        case None:
+            # No file logging
+            pass
+
+    # Enable debug mode if requested
+    if debug:
+        safe_server.enable_debug()
+        stderr_write("[MCP] Debug mode enabled\n")
+
+    # Enable strict validation if requested
+    if strict:
+        safe_server.set_strict_validation()
+        if debug:
+            stderr_write("[MCP] Strict validation enabled\n")
+
+    # Run server
+    safe_server.run_stdio_safe()
+
+# Helper to get argument value
+fn get_arg_value(args: List<text>, flag: text) -> text:
+    for i in 0..args.len():
+        if args[i] == flag and i + 1 < args.len():
+            return args[i + 1]
+        elif args[i].starts_with(flag + "="):
+            return args[i].substring(flag.len() + 1, args[i].len())
+    return ""
+
+# Helper to check for flag
+fn has_flag(args: List<text>, flag: text) -> bool:
+    for arg in args:
+        if arg == flag:
+            return true
+    return false
+
+extern fn stderr_write(s: text)
+extern fn stderr_flush()

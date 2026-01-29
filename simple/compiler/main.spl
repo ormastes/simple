@@ -309,11 +309,41 @@ fn print_version():
     print "  - Algebraic data types"
 
 # ------------------------------------------------------------------------------
+# Interpret Mode Fast Path Helpers
+# ------------------------------------------------------------------------------
+
+fn has_mode_flag(args: [text]) -> bool:
+    for arg in args:
+        if arg == "-j" or arg == "-c" or arg == "-k" or arg == "-s":
+            return true
+        if arg.starts_with("--mode="):
+            return true
+        if arg == "--jit" or arg == "--aot" or arg == "--check" or arg == "--sdn":
+            return true
+    false
+
+fn collect_input_files(args: [text]) -> [text]:
+    var files: [text] = []
+    var skip_next = false
+    for arg in args:
+        if skip_next:
+            skip_next = false
+            continue
+        if arg == "-o" or arg == "--output":
+            skip_next = true
+            continue
+        if arg.starts_with("-"):
+            continue
+        files = files + [arg]
+    files
+
+# ------------------------------------------------------------------------------
 # Main Entry Point
 # ------------------------------------------------------------------------------
 
 fn main() -> i32:
     val args = sys_get_args()
+    print "[top] args.len()={args.len()}"
 
     # Skip program name
     var program_args = args.slice(1, args.len())
@@ -323,11 +353,36 @@ fn main() -> i32:
         if program_args[0] == "compile":
             program_args = program_args.slice(1, program_args.len())
 
-    # Bootstrap test check disabled for now
-    # for arg in program_args:
-    #     if arg == "--bootstrap-test":
-    #         val success = bootstrap_test()
-    #         return if success: 0 else: 1
+    # Fast path: interpret mode delegates to simple_old
+    # (avoids struct field access bug in bootstrap compiler)
+    # Check if last arg looks like a .spl file and no mode flags
+    if args.len() >= 2:
+        print "[fast] getting last arg at index {args.len() - 1}"
+        val last_arg = args[args.len() - 1]
+        print "[fast] last_arg={last_arg}"
+        val first_char = last_arg[0:1]
+        print "[fast] first_char={first_char}"
+        if first_char != "-":
+            var has_mode = false
+            var i = 1
+            while i < args.len() - 1:
+                val a = args[i]
+                if a == "-j" or a == "-c" or a == "-k" or a == "-s":
+                    has_mode = true
+                if a == "--jit" or a == "--aot" or a == "--check" or a == "--sdn":
+                    has_mode = true
+                if a.starts_with("--mode="):
+                    has_mode = true
+                i = i + 1
+            if not has_mode:
+                val simple_old = find_simple_old_binary()
+                if simple_old != "":
+                    val shell_result = rt_shell("{simple_old} {last_arg}")
+                    if shell_result.stdout.?:
+                        print shell_result.stdout
+                    if shell_result.stderr.?:
+                        print shell_result.stderr
+                    return shell_result.exit_code
 
     # Parse arguments
     var parser = ArgParser.create(program_args)
@@ -359,6 +414,7 @@ fn main() -> i32:
             print "[main] input_files={cli_args.input_files.len()}"
             for f in cli_args.input_files:
                 print "[main]   file: {f}"
+
             val options = cli_args.to_options()
             var driver = CompilerDriver.create(options)
             val result = driver.compile()

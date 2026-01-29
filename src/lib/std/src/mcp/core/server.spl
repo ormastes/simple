@@ -3,9 +3,11 @@
 
 use core.*
 use core.json.*
-use mcp.core.protocol.*
-use mcp.core.provider.*
-use mcp.core.transport.*
+use std.mcp.core.protocol.*
+use std.mcp.core.provider.*
+use std.mcp.core.transport.*
+use std.mcp.core.logger.*
+use std.mcp.core.error_handler.*
 
 # Generic MCP server
 pub class McpServer:
@@ -16,6 +18,9 @@ pub class McpServer:
     pub transport: Option<Transport>
     pub running: bool
     pub debug_mode: bool
+    pub validator: InputValidator
+    pub recovery: CrashRecovery
+    pub log_file: text
 
     pub fn new(name: text, version: text, provider: ResourceProvider) -> McpServer:
         return McpServer:
@@ -26,10 +31,26 @@ pub class McpServer:
             transport: None
             running: false
             debug_mode: false
+            validator: InputValidator.default()
+            recovery: CrashRecovery.new()
+            log_file: ""
 
     # Enable debug logging
-    pub fn enable_debug(self):
+    pub fn enable_debug():
         self.debug_mode = true
+
+    # Set log file path
+    pub fn set_log_file(path: text) -> Result<(), text>:
+        self.log_file = path
+        init_logger(path)
+
+    # Set validation limits
+    pub fn set_validation_limits(limits: ValidationLimits):
+        self.validator = InputValidator.new(limits)
+
+    # Disable crash recovery (for testing)
+    pub fn disable_recovery():
+        self.recovery.disable()
 
     # Register a tool handler
     pub fn register_tool(self, tool: Tool, handler: ToolHandler):
@@ -54,34 +75,58 @@ pub class McpServer:
         self.run()
 
     # Run the server main loop
-    pub fn run(self):
+    pub fn run():
         if self.transport.is_none():
             return
 
         transport = self.transport.unwrap()
         self.running = true
 
+        log_info("Server starting: {self.name} v{self.version}")
         self.log("Server starting: " + self.name + " v" + self.version)
 
         while self.running and transport.is_alive():
-            # Read next message
+            # Check if too many errors occurred
+            if self.recovery.should_stop():
+                log_fatal("Stopping server due to excessive errors")
+                self.log("ERROR: Too many consecutive errors, stopping")
+                break
+
+            # Read next message with error handling
             match transport.read_message():
                 case Some(request):
+                    log_debug("Received method: {request.method}")
                     self.log("Received: " + request.method)
 
-                    # Handle the request
-                    response = self.handle_request(request)
+                    # Handle the request with crash recovery
+                    response = self.handle_request_safe(request)
 
                     # Send response
-                    transport.write_response(response)
+                    match response:
+                        case Ok(resp):
+                            transport.write_response(resp)
+                            self.recovery.record_success()
+                        case Err(error):
+                            # Send error response
+                            transport.write_error(request.id, error.code, error.message)
+                            self.recovery.record_error(error)
 
                 case None:
                     # No message or EOF
                     if not transport.is_alive():
+                        log_info("Transport closed normally")
                         self.log("Transport closed")
                         break
 
+        log_info("Server stopped")
         self.log("Server stopped")
+
+        # Flush logs
+        match flush_logs():
+            case Ok(_):
+                pass
+            case Err(e):
+                stderr_write("Failed to flush logs: {e}\n")
 
     # Stop the server
     pub fn stop(self):
@@ -93,8 +138,19 @@ pub class McpServer:
             stderr_write("[" + self.name + "] " + msg + "\n")
             stderr_flush()
 
+    # Handle request with error recovery
+    fn handle_request_safe(request: JsonRpcRequest) -> Result<JsonRpcResponse, McpError>:
+        self.recovery.safe_call(
+            \():
+                match self.handle_request(request):
+                    case response:
+                        Ok(response)
+            ,
+            "request:{request.method}"
+        )
+
     # Handle incoming JSON-RPC request
-    pub fn handle_request(self, request: JsonRpcRequest) -> JsonRpcResponse:
+    pub fn handle_request(request: JsonRpcRequest) -> JsonRpcResponse:
         method = request.method
 
         # Standard protocol methods
@@ -173,11 +229,26 @@ pub class McpServer:
         result = {"resources": resource_list}
         return JsonRpcResponse.new(request.id, result)
 
-    # Handle read resource
+    # Handle read resource (with validation)
     fn handle_read_resource(request: JsonRpcRequest) -> JsonRpcResponse:
         uri = ""
         if request.params.has_key("uri"):
             uri = request.params.get("uri") as text
+
+        # Validate URI
+        match self.validator.validate_uri(uri):
+            case Ok(_):
+                pass
+            case Err(error):
+                log_error("Invalid URI: {error.message}")
+                return JsonRpcError.new(request.id, error.to_json_rpc_error())
+
+        # Read resource safely
+        match safe_read_resource(self.provider, uri, self.validator):
+            case Ok(contents):
+                pass
+            case Err(error):
+                return JsonRpcError.new(request.id, error.to_json_rpc_error())
 
         contents = self.provider.read_resource(uri)
 
@@ -210,7 +281,7 @@ pub class McpServer:
         result = {"tools": tool_list}
         return JsonRpcResponse.new(request.id, result)
 
-    # Handle call tool
+    # Handle call tool (with validation and error recovery)
     fn handle_call_tool(request: JsonRpcRequest) -> JsonRpcResponse:
         tool_name = ""
         arguments = {}
@@ -220,8 +291,25 @@ pub class McpServer:
         if request.params.has_key("arguments"):
             arguments = request.params.get("arguments") as Dict<text, Any>
 
+        # Validate tool name
+        match self.validator.validate_tool_name(tool_name):
+            case Ok(_):
+                pass
+            case Err(error):
+                log_error("Invalid tool name: {error.message}")
+                return JsonRpcError.new(request.id, error.to_json_rpc_error())
+
         if self.tools.has_key(tool_name):
             handler = self.tools.get(tool_name)
+
+            # Execute tool safely
+            match safe_execute_tool(handler, arguments, self.validator, self.recovery):
+                case Ok(tool_result):
+                    pass
+                case Err(error):
+                    log_error("Tool execution failed: {error.message}")
+                    return JsonRpcError.new(request.id, error.to_json_rpc_error())
+
             tool_result = handler.execute(arguments)
 
             # Convert content blocks to JSON format

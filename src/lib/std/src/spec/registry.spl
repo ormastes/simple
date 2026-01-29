@@ -11,7 +11,7 @@
 # The registry maintains global state for registered groups, contexts, and
 # shared examples, allowing the DSL functions to coordinate test execution.
 
-import concurrency.resource_limits.{ResourceLimits}
+use concurrency.resource_limits.{ResourceLimits}
 
 # ============================================================================
 # Core Types
@@ -146,9 +146,12 @@ class ExampleGroup:
     test_examples: List<Example>
     hooks: List<Hook>
     mock_mode: Option<MockMode>  # Optional mock policy for entire group
+    # Performance optimization: cached hook lists to avoid O(n²) collection
+    cached_before_each_hooks: Option<List<Any>>
+    cached_after_each_hooks: Option<List<Any>>
 
     fn new(description: text, parent: Option<ExampleGroup>) -> ExampleGroup:
-        return ExampleGroup(description, parent, [], [], [], nil)
+        return ExampleGroup(description, parent, [], [], [], nil, nil, nil)
 
     me add_child(child: ExampleGroup):
         """Add a nested example group (context)."""
@@ -161,6 +164,9 @@ class ExampleGroup:
     me add_hook(hook: Hook):
         """Add a lifecycle hook."""
         self.hooks = self.hooks.push(hook)
+        # Invalidate caches since we added a new hook
+        self.cached_before_each_hooks = nil
+        self.cached_after_each_hooks = nil
 
     me with_mock_mode(mode: MockMode):
         """Set mock policy mode for all examples in this group."""
@@ -217,6 +223,98 @@ class ExampleGroup:
                 case _:
                     ()
         return blocks
+
+    fn get_all_before_each_hooks() -> List<Any>:
+        """
+        Get all before_each hooks from this group and ancestors.
+        Hooks are returned in parent->child order (top-down).
+
+        This computes hooks on-demand. For better performance with deeply
+        nested contexts, use precompute_hooks() before test execution.
+        """
+        # Return cached version if available
+        match self.cached_before_each_hooks:
+            case Some(cached):
+                print "[CACHE HIT] before_each hooks for: {self.description}"
+                return cached
+            case None:
+                print "[CACHE MISS] before_each hooks for: {self.description}"
+                pass
+
+        # Compute hooks from parent chain
+        var hooks: List<Any> = []
+
+        # First collect from parent (if any)
+        match self.parent:
+            case Some(parent):
+                hooks = parent.get_all_before_each_hooks()
+            case None:
+                pass
+
+        # Then add this group's hooks
+        hooks = hooks.extend(self.get_before_each_hooks())
+
+        return hooks
+
+    fn get_all_after_each_hooks() -> List<Any>:
+        """
+        Get all after_each hooks from this group and ancestors.
+        Hooks are returned in child->parent order (bottom-up for cleanup).
+
+        This computes hooks on-demand. For better performance with deeply
+        nested contexts, use precompute_hooks() before test execution.
+        """
+        # Return cached version if available
+        match self.cached_after_each_hooks:
+            case Some(cached):
+                return cached
+            case None:
+                pass
+
+        # Compute hooks (this group first, then parent)
+        var hooks: List<Any> = []
+
+        # Add this group's hooks first
+        hooks = hooks.extend(self.get_after_each_hooks())
+
+        # Then add parent's hooks
+        match self.parent:
+            case Some(parent):
+                hooks = hooks.extend(parent.get_all_after_each_hooks())
+            case None:
+                pass
+
+        return hooks
+
+    me precompute_hooks():
+        """
+        Precompute and cache hook lists for this group.
+        This is a mutable method that caches results to avoid O(n²) lookups.
+        Call this once on all groups before running tests.
+        """
+        # Compute and cache before_each hooks
+        var before_hooks: List<Any> = []
+        match self.parent:
+            case Some(parent):
+                before_hooks = parent.get_all_before_each_hooks()
+            case None:
+                pass
+        before_hooks = before_hooks.extend(self.get_before_each_hooks())
+        self.cached_before_each_hooks = Some(before_hooks)
+
+        # Compute and cache after_each hooks
+        var after_hooks: List<Any> = []
+        after_hooks = after_hooks.extend(self.get_after_each_hooks())
+        match self.parent:
+            case Some(parent):
+                after_hooks = after_hooks.extend(parent.get_all_after_each_hooks())
+            case None:
+                pass
+        self.cached_after_each_hooks = Some(after_hooks)
+
+        # Recursively precompute for all children
+        for child in self.children:
+            child.precompute_hooks()
 
     fn full_description() -> text:
         """Get the full hierarchical description path."""

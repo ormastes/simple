@@ -201,6 +201,27 @@ pub static DICT_METHODS: &[MethodInfo] = &[
         is_mutating: false,
         description: "creates a shallow copy",
     },
+    MethodInfo {
+        name: "merge",
+        runtime_fn: RuntimeFn::Simple("rt_dict_merge"),
+        param_count: 1,
+        is_mutating: false,
+        description: "merges another dict",
+    },
+    MethodInfo {
+        name: "items",
+        runtime_fn: RuntimeFn::Simple("rt_dict_items"),
+        param_count: 0,
+        is_mutating: false,
+        description: "returns (key, value) tuples",
+    },
+    MethodInfo {
+        name: "get_or",
+        runtime_fn: RuntimeFn::Simple("rt_dict_get_or"),
+        param_count: 2,
+        is_mutating: false,
+        description: "returns value or default",
+    },
 ];
 
 /// String built-in methods.
