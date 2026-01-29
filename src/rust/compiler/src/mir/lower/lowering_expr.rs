@@ -421,10 +421,21 @@ impl<'a> MirLowerer<'a> {
                             | TypeId::U64
                     );
                     let needs_float_boxing = matches!(arg.ty, TypeId::F32 | TypeId::F64);
+                    let needs_bool_boxing = arg.ty == TypeId::BOOL;
 
                     return self.with_func(|func, current_block| {
-                        // Box the argument if it's a native numeric type
-                        let boxed_arg = if needs_boxing {
+                        // Box the argument if it's a native type
+                        let boxed_arg = if needs_bool_boxing {
+                            // Bool needs special boxing via rt_value_bool to preserve true/false
+                            let boxed = func.new_vreg();
+                            let block = func.block_mut(current_block).unwrap();
+                            block.instructions.push(MirInst::Call {
+                                dest: Some(boxed),
+                                target: CallTarget::from_name("rt_value_bool"),
+                                args: vec![arg_reg],
+                            });
+                            boxed
+                        } else if needs_boxing {
                             let boxed = func.new_vreg();
                             let block = func.block_mut(current_block).unwrap();
                             block.instructions.push(MirInst::BoxInt {
