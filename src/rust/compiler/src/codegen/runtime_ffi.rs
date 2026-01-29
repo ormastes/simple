@@ -283,6 +283,14 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_executor_shutdown", &[], &[]),
     RuntimeFuncSpec::new("rt_executor_is_manual", &[], &[I64]),
     // =========================================================================
+    // Async runtime scheduler (cooperative scheduling)
+    // =========================================================================
+    RuntimeFuncSpec::new("rt_async_spawn", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_async_schedule_await", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_async_run_until_complete", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_async_spawn_task", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_async_poll_tasks", &[], &[I64]),
+    // =========================================================================
     // Isolated Thread operations
     // =========================================================================
     RuntimeFuncSpec::new("rt_thread_spawn_isolated", &[I64, I64], &[I64]),

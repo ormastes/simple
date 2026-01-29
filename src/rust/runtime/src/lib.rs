@@ -8,6 +8,7 @@
 #![allow(dead_code)]
 
 pub mod aop;
+pub mod async_runtime;
 pub mod concurrency;
 pub mod concurrent;
 pub mod coverage;
@@ -101,6 +102,12 @@ pub extern "C" fn simple_runtime_abi_version() -> u32 {
 pub use value::{
     HeapHeader, HeapObjectType, RuntimeArray, RuntimeChannel, RuntimeClosure, RuntimeEnum, RuntimeObject,
     RuntimeShared, RuntimeString, RuntimeTuple, RuntimeUnique, RuntimeValue, RuntimeWeak,
+};
+
+// Re-export async runtime scheduler FFI functions
+pub use async_runtime::{
+    rt_async_poll_tasks, rt_async_run_until_complete, rt_async_schedule_await, rt_async_spawn,
+    rt_async_spawn_task, AsyncScheduler,
 };
 
 // Re-export AOP runtime FFI functions

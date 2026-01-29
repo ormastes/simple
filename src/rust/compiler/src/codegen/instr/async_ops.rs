@@ -195,10 +195,12 @@ pub(crate) fn compile_await<M: Module>(
         }
     }
 
-    // Fallback: no state machine, just call await directly (eager mode)
+    // Fallback: no state machine — use cooperative scheduler if available,
+    // otherwise fall back to eager (blocking) await.
     let await_id = ctx
         .runtime_funcs
-        .get("rt_future_await")
+        .get("rt_async_schedule_await")
+        .or_else(|| ctx.runtime_funcs.get("rt_future_await"))
         .or_else(|| ctx.runtime_funcs.get("rt_await"))
         .copied();
     if let Some(await_id) = await_id {
