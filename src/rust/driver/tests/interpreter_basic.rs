@@ -330,7 +330,7 @@ fn main() -> i64:
             },
         )
         .unwrap();
-    assert_eq!(result.stdout, "hello from compiler");
+    assert_eq!(result.stdout, "hello from compiler\n");
     assert_eq!(result.exit_code, 0);
 }
 
@@ -352,7 +352,7 @@ fn main() -> i64:
             },
         )
         .unwrap();
-    assert_eq!(result.stdout, "a b c");
+    assert_eq!(result.stdout, "a b c\n");
     assert_eq!(result.exit_code, 0);
 }
 
