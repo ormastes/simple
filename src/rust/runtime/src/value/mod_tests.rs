@@ -255,11 +255,19 @@ fn test_index_get() {
     let val = rt_index_get(arr, RuntimeValue::from_int(0));
     assert_eq!(val.as_int(), 10);
 
-    // String indexing (returns char code)
+    // String indexing (returns single-char string)
     let s = b"ABC";
     let str_val = rt_string_new(s.as_ptr(), s.len() as u64);
     let char_val = rt_index_get(str_val, RuntimeValue::from_int(0));
-    assert_eq!(char_val.as_int(), 65); // 'A'
+
+    // Should return a single-character string "A", not a char code
+    assert!(!char_val.is_nil());
+    let char_data = rt_string_data(char_val);
+    let char_len = rt_string_len(char_val);
+    assert_eq!(char_len, 1);
+    unsafe {
+        assert_eq!(*char_data, b'A');
+    }
 }
 
 #[test]

@@ -163,7 +163,8 @@ fn test_array_out_of_bounds() {
     assert!(!rt_array_set(array, 100, RuntimeValue::from_int(99)));
 }
 
-// Note: Array growth/reallocation not fully implemented yet
+// Note: Array growth/reallocation not fully implemented at FFI level yet
+// (works in interpreter but rt_array_push fails when capacity exceeded)
 // #[test]
 // fn test_array_growth() {
 //     let array = rt_array_new(2);  // Small initial capacity

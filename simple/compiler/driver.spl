@@ -554,22 +554,31 @@ class CompilerDriver:
     # --------------------------------------------------------------------------
 
     fn interpret() -> CompileResult:
+        print "[interpret] start"
         val backend = self.ctx.di.resolve("Backend")
+        print "[interpret] backend resolved"
 
-        # Find main module and main function
-        val main_module = self.ctx.hir_modules.get("main")
-        if main_module == nil:
-            # Try first module
-            if self.ctx.hir_modules.is_empty():
-                return CompileResult.RuntimeError("No modules to execute")
-            val keys = self.ctx.hir_modules.keys()
-            val first_name = keys.first() ?? ""
-            if first_name == "":
-                return CompileResult.RuntimeError("No modules to execute")
-            val first_module = self.ctx.hir_modules[first_name]
-            return self.run_module(backend, first_module)
+        # Find main module - try by name first
+        # The module name is the file stem (e.g., test_hello), not "main"
+        # So iterate to find the module with a main function
+        var target_module: HirModule? = nil
+        print "[interpret] looking for module with main function..."
+        for name in self.ctx.hir_modules.keys():
+            print "[interpret] checking module: {name}"
+            val mod_ = self.ctx.hir_modules[name]
+            # Check symbol table for a function named "main"
+            for sym_id in mod_.symbols.symbols.keys():
+                val sym = mod_.symbols.symbols[sym_id]
+                if sym.name == "main":
+                    print "[interpret] found main symbol in module: {name}"
+                    target_module = Some(mod_)
 
-        self.run_module(backend, main_module)
+        if target_module.?:
+            print "[interpret] calling run_module..."
+            return self.run_module(backend, target_module.unwrap())
+
+        print "[interpret] no module with main function found"
+        CompileResult.RuntimeError("No module with main function found")
 
     fn run_module(backend: Backend, module: HirModule) -> CompileResult:
         match backend.process_module(module):
