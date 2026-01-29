@@ -256,7 +256,8 @@ pub use async_gen::{
 // Re-export core FFI functions
 pub use ffi::{
     rt_alloc, rt_free, rt_function_not_found, rt_interp_call, rt_interp_eval, rt_method_not_found, rt_ptr_to_value,
-    rt_value_as_bool, rt_value_as_float, rt_value_as_int, rt_value_bool, rt_value_eq, rt_value_float, rt_value_int,
+    rt_value_as_bool, rt_value_as_float, rt_value_as_int, rt_value_bool, rt_value_compare, rt_value_eq,
+    rt_value_float, rt_value_int,
     rt_value_is_bool, rt_value_is_float, rt_value_is_heap, rt_value_is_int, rt_value_is_nil, rt_value_nil,
     rt_value_to_ptr, rt_value_truthy,
 };

@@ -320,12 +320,26 @@ impl<'a> MirLowerer<'a> {
             }
 
             HirExprKind::GeneratorCreate { body } => {
-                // Lower the body expression first to get any setup
-                let _body_reg = self.lower_expr(body)?;
+                // Save current block
+                let original_block = self.with_func(|_, current_block| current_block)?;
 
-                // Create a new block for the generator body
+                // Create body block and switch to it
                 let body_block = self.with_func(|func, _| func.new_block())?;
+                self.set_current_block(body_block)?;
 
+                // Lower body expression INTO the body_block
+                let body_reg = self.lower_expr(body)?;
+
+                // Add return terminator to body_block
+                self.with_func(|func, current_block| {
+                    let block = func.block_mut(current_block).unwrap();
+                    block.terminator = crate::mir::Terminator::Return(Some(body_reg));
+                })?;
+
+                // Switch back to original block
+                self.set_current_block(original_block)?;
+
+                // Emit GeneratorCreate in original block
                 self.with_func(|func, current_block| {
                     let dest = func.new_vreg();
                     let block = func.block_mut(current_block).unwrap();
@@ -335,12 +349,26 @@ impl<'a> MirLowerer<'a> {
             }
 
             HirExprKind::FutureCreate { body } => {
-                // Lower the body expression first
-                let _body_reg = self.lower_expr(body)?;
+                // Save current block
+                let original_block = self.with_func(|_, current_block| current_block)?;
 
-                // Create a new block for the future body
+                // Create body block and switch to it
                 let body_block = self.with_func(|func, _| func.new_block())?;
+                self.set_current_block(body_block)?;
 
+                // Lower body expression INTO the body_block
+                let body_reg = self.lower_expr(body)?;
+
+                // Add return terminator to body_block
+                self.with_func(|func, current_block| {
+                    let block = func.block_mut(current_block).unwrap();
+                    block.terminator = crate::mir::Terminator::Return(Some(body_reg));
+                })?;
+
+                // Switch back to original block
+                self.set_current_block(original_block)?;
+
+                // Emit FutureCreate in original block
                 self.with_func(|func, current_block| {
                     let dest = func.new_vreg();
                     let block = func.block_mut(current_block).unwrap();

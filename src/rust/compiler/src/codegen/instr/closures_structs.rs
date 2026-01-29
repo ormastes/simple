@@ -184,6 +184,9 @@ fn try_compile_builtin_method_call<M: Module>(
 ) -> InstrResult<Option<cranelift_codegen::ir::Value>> {
     let receiver_val = get_vreg_or_default(ctx, builder, &receiver);
 
+    // Extract plain method name from qualified name (e.g., "text.len" -> "len")
+    let method = method.rsplit('.').next().unwrap_or(method);
+
     // Handle slice specially since it has optional parameters
     if method == "slice" || method == "substring" {
         let Some(&slice_id) = ctx.runtime_funcs.get("rt_slice") else {

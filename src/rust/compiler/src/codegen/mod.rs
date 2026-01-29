@@ -28,6 +28,11 @@ mod llvm_tests;
 #[path = "codegen_instr_tests.rs"]
 mod codegen_instr_tests;
 
+#[cfg(test)]
+#[cfg(not(doctest))]
+#[path = "codegen_shared_tests.rs"]
+mod codegen_shared_tests;
+
 pub use backend_trait::{BackendKind, NativeBackend};
 pub use buffer_pool::{
     acquire_thread_buffer, clear_thread_buffer_pool, init_thread_buffer_pool, init_thread_buffer_pool_with_config,

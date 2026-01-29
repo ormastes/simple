@@ -46,6 +46,7 @@ impl RuntimeSymbolProvider for StaticSymbolProvider {
             rt_path_probe, rt_platform_name, rt_print_str, rt_print_value, rt_println_str, rt_println_value,
             rt_process_execute, rt_process_run, rt_process_spawn, rt_set_debug_mode, rt_set_env, rt_set_macro_trace,
             rt_value_eq,
+            rt_value_compare,
         };
         // File I/O operations
         use simple_runtime::value::{
@@ -235,6 +236,7 @@ impl RuntimeSymbolProvider for StaticSymbolProvider {
             rt_value_is_bool,
             rt_value_is_heap,
             rt_value_eq,
+            rt_value_compare,
             // Object operations
             rt_object_new,
             rt_object_field_get,
