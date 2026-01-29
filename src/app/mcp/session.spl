@@ -1,0 +1,127 @@
+# Session Manager for MCP Debug Server
+# Manages multiple debug sessions, each targeting a different backend.
+
+use core.*
+
+# Session state enum
+enum SessionState:
+    Created
+    Running
+    Paused
+    Terminated
+
+# Target type for debug sessions
+enum TargetType:
+    Interpreter    # Tree-walking interpreter
+    Smf            # SMF bytecode format
+    Native         # Native binary (ELF/Mach-O)
+
+# A debug session
+class DebugSession:
+    id: String
+    target_type: TargetType
+    program_path: String
+    state: SessionState
+    breakpoints: List<SessionBreakpoint>
+    args: List<String>
+
+    static fn create(id: String, target_type: TargetType, program_path: String) -> DebugSession:
+        DebugSession(
+            id: id,
+            target_type: target_type,
+            program_path: program_path,
+            state: SessionState.Created,
+            breakpoints: [],
+            args: []
+        )
+
+# Breakpoint within a session
+class SessionBreakpoint:
+    id: Int
+    file: String
+    line: Int
+    condition: Option<String>
+    enabled: Bool
+    hit_count: Int
+
+    static fn at_line(id: Int, file: String, line: Int) -> SessionBreakpoint:
+        SessionBreakpoint(
+            id: id,
+            file: file,
+            line: line,
+            condition: None,
+            enabled: true,
+            hit_count: 0
+        )
+
+# Session Manager
+class SessionManager:
+    sessions: Dict<String, DebugSession>
+    next_session_id: Int
+    next_bp_id: Int
+
+    static fn empty() -> SessionManager:
+        SessionManager(
+            sessions: {},
+            next_session_id: 1,
+            next_bp_id: 1
+        )
+
+impl SessionManager:
+    # Create a new debug session
+    fn create_session(target_type: TargetType, program_path: String) -> String:
+        val id = "session_{self.next_session_id}"
+        self.next_session_id = self.next_session_id + 1
+        val session = DebugSession.create(id, target_type, program_path)
+        self.sessions[id] = session
+        id
+
+    # Get a session by id
+    fn get_session(id: String) -> Option<DebugSession>:
+        self.sessions.get(id)
+
+    # List all sessions
+    fn list_sessions() -> List<DebugSession>:
+        var result: List<DebugSession> = []
+        for (_, session) in self.sessions.items():
+            result.push(session)
+        result
+
+    # Remove a session
+    fn remove_session(id: String) -> Bool:
+        match self.sessions.get(id):
+            case Some(_):
+                self.sessions.remove(id)
+                true
+            case None:
+                false
+
+    # Add breakpoint to session
+    fn add_breakpoint(session_id: String, file: String, line: Int) -> Option<Int>:
+        match self.sessions.get(session_id):
+            case Some(session):
+                val bp_id = self.next_bp_id
+                self.next_bp_id = self.next_bp_id + 1
+                val bp = SessionBreakpoint.at_line(bp_id, file, line)
+                session.breakpoints.push(bp)
+                Some(bp_id)
+            case None:
+                None
+
+    # Remove breakpoint from session
+    fn remove_breakpoint(session_id: String, bp_id: Int) -> Bool:
+        match self.sessions.get(session_id):
+            case Some(session):
+                val initial_len = session.breakpoints.len()
+                session.breakpoints = session.breakpoints.filter(\bp: bp.id != bp_id)
+                session.breakpoints.len() < initial_len
+            case None:
+                false
+
+    # Update session state
+    me set_state(session_id: String, new_state: SessionState):
+        match self.sessions.get(session_id):
+            case Some(session):
+                session.state = new_state
+            case None:
+                pass

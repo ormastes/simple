@@ -679,21 +679,82 @@ fn preprocess_sspec_file(file_path: text) -> text:
     if content == "":
         return file_path
 
-    # Split into imports and body, wrap body in fn main():
+    # Split into imports/top-level-defs and body, wrap body in fn main():
     val lines = content.split("\n")
     var imports = ""
+    var top_level = ""
     var body = ""
+    var in_docstring = false
+    var in_top_fn = false
+    var top_fn_indent = 0
+
     for line in lines:
         val trimmed = line.trim()
-        if trimmed.starts_with("import "):
-            imports = imports + line + "\n"
-        else:
-            if trimmed.len() > 0:
-                body = body + "    " + line + "\n"
-            else:
-                body = body + "\n"
 
-    val wrapped = imports + "\nfn main():\n" + body
+        # Track multi-line docstrings (""")
+        if trimmed.starts_with("\"\"\""):
+            # Toggle docstring state. A line with """ toggles in/out.
+            # If we see """ at start of line and we're NOT in a function body,
+            # treat docstrings at top level as body (they'll go into main).
+            if in_docstring:
+                in_docstring = false
+                if in_top_fn:
+                    top_level = top_level + line + "\n"
+                else:
+                    body = body + "    " + line + "\n"
+                continue
+            else:
+                in_docstring = true
+                if in_top_fn:
+                    top_level = top_level + line + "\n"
+                else:
+                    body = body + "    " + line + "\n"
+                continue
+
+        if in_docstring:
+            if in_top_fn:
+                top_level = top_level + line + "\n"
+            else:
+                body = body + "    " + line + "\n"
+            continue
+
+        # Import/use statements go before fn main()
+        if trimmed.starts_with("import ") or trimmed.starts_with("use "):
+            imports = imports + line + "\n"
+            continue
+
+        # Top-level function definitions (at column 0 only) stay outside main
+        if not in_top_fn:
+            val line_indent = line.len() - trimmed.len()
+            if line_indent == 0:
+                if trimmed.starts_with("fn ") or trimmed.starts_with("async fn ") or trimmed.starts_with("static fn "):
+                    in_top_fn = true
+                    top_fn_indent = 0
+                    top_level = top_level + line + "\n"
+                    continue
+
+        # If we're inside a top-level function definition, keep collecting
+        # lines until we see a line at the same or lesser indentation (not blank)
+        if in_top_fn:
+            if trimmed.len() == 0:
+                top_level = top_level + "\n"
+                continue
+            val current_indent = line.len() - trimmed.len()
+            if current_indent > top_fn_indent:
+                top_level = top_level + line + "\n"
+                continue
+            else:
+                # This line is at same/lesser indent — end of function
+                in_top_fn = false
+                # Fall through to body processing
+
+        # Everything else goes into fn main() body
+        if trimmed.len() > 0:
+            body = body + "    " + line + "\n"
+        else:
+            body = body + "\n"
+
+    val wrapped = imports + "\n" + top_level + "\nfn main():\n" + body
     val tmp_path = "/tmp/sspec_wrapped_" + file_path.replace("/", "_")
     rt_file_write_text(tmp_path, wrapped)
     tmp_path

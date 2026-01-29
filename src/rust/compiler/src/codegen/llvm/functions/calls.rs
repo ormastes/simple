@@ -14,7 +14,7 @@ impl LlvmBackend {
     // ============================================================================
 
     #[cfg(feature = "llvm")]
-    fn compile_call(
+    pub(in crate::codegen::llvm) fn compile_call(
         &self,
         dest: Option<crate::mir::VReg>,
         target: &crate::mir::CallTarget,
@@ -63,7 +63,7 @@ impl LlvmBackend {
     }
 
     #[cfg(feature = "llvm")]
-    fn compile_indirect_call(
+    pub(in crate::codegen::llvm) fn compile_indirect_call(
         &self,
         dest: Option<crate::mir::VReg>,
         callee: crate::mir::VReg,
@@ -158,7 +158,7 @@ impl LlvmBackend {
     }
 
     #[cfg(feature = "llvm")]
-    fn compile_interp_call(
+    pub(in crate::codegen::llvm) fn compile_interp_call(
         &self,
         dest: Option<crate::mir::VReg>,
         func_name: &str,
@@ -209,7 +209,7 @@ impl LlvmBackend {
     }
 
     #[cfg(feature = "llvm")]
-    fn compile_interp_eval(
+    pub(in crate::codegen::llvm) fn compile_interp_eval(
         &self,
         dest: crate::mir::VReg,
         expr_index: usize,

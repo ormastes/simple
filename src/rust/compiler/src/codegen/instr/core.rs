@@ -40,18 +40,19 @@ pub(crate) fn compile_binop<M: Module>(
         BinOp::ShiftLeft => builder.ins().ishl(lhs, rhs),
         BinOp::ShiftRight => builder.ins().sshr(lhs, rhs),
         BinOp::Lt | BinOp::Gt | BinOp::LtEq | BinOp::GtEq => {
-            // Use rt_value_compare for proper comparison of all types (int, float, string/char)
+            // Use native icmp for comparison. Native codegen stores integers as raw
+            // untagged values (see constants.rs), so rt_value_compare would misinterpret
+            // the tag bits for values >= 8. Native icmp works correctly for both raw
+            // untagged integers and tagged RuntimeValue integers (since x<<3 preserves
+            // signed integer ordering).
+            // TODO: For string/char comparison, detect heap types and use rt_value_compare.
             let lhs_i64 = ensure_i64(builder, lhs);
             let rhs_i64 = ensure_i64(builder, rhs);
-            let cmp_id = ctx.runtime_funcs["rt_value_compare"];
-            let cmp_ref = ctx.module.declare_func_in_func(cmp_id, builder.func);
-            let call = builder.ins().call(cmp_ref, &[lhs_i64, rhs_i64]);
-            let cmp_result = builder.inst_results(call)[0];
             match op {
-                BinOp::Lt => builder.ins().icmp_imm(cranelift_codegen::ir::condcodes::IntCC::SignedLessThan, cmp_result, 0),
-                BinOp::Gt => builder.ins().icmp_imm(cranelift_codegen::ir::condcodes::IntCC::SignedGreaterThan, cmp_result, 0),
-                BinOp::LtEq => builder.ins().icmp_imm(cranelift_codegen::ir::condcodes::IntCC::SignedLessThanOrEqual, cmp_result, 0),
-                BinOp::GtEq => builder.ins().icmp_imm(cranelift_codegen::ir::condcodes::IntCC::SignedGreaterThanOrEqual, cmp_result, 0),
+                BinOp::Lt => builder.ins().icmp(IntCC::SignedLessThan, lhs_i64, rhs_i64),
+                BinOp::Gt => builder.ins().icmp(IntCC::SignedGreaterThan, lhs_i64, rhs_i64),
+                BinOp::LtEq => builder.ins().icmp(IntCC::SignedLessThanOrEqual, lhs_i64, rhs_i64),
+                BinOp::GtEq => builder.ins().icmp(IntCC::SignedGreaterThanOrEqual, lhs_i64, rhs_i64),
                 _ => unreachable!(),
             }
         }

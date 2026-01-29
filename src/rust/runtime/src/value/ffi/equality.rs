@@ -13,15 +13,8 @@ use crate::value::heap::{HeapHeader, HeapObjectType};
 /// Compare two RuntimeValues for equality
 #[no_mangle]
 pub extern "C" fn rt_value_eq(a: RuntimeValue, b: RuntimeValue) -> u8 {
-    // Debug: show raw values being compared
-    let a_raw = a.to_raw();
-    let b_raw = b.to_raw();
-    if a.is_heap() || b.is_heap() {
-        eprintln!("[rt_value_eq] a_raw={:#x} b_raw={:#x} a_heap={} b_heap={} a_int={} b_int={}",
-            a_raw, b_raw, a.is_heap(), b.is_heap(), a.is_int(), b.is_int());
-    }
     // Quick check: same raw value
-    if a_raw == b_raw {
+    if a.to_raw() == b.to_raw() {
         return 1;
     }
 
@@ -63,15 +56,12 @@ pub extern "C" fn rt_value_eq(a: RuntimeValue, b: RuntimeValue) -> u8 {
             if (*ptr_a).object_type == HeapObjectType::Enum && (*ptr_b).object_type == HeapObjectType::Enum {
                 let enum_a = ptr_a as *const crate::value::objects::RuntimeEnum;
                 let enum_b = ptr_b as *const crate::value::objects::RuntimeEnum;
-                let da = (*enum_a).discriminant;
-                let db = (*enum_b).discriminant;
-                if da != db {
+                if (*enum_a).discriminant != (*enum_b).discriminant {
                     return 0;
                 }
                 // Recursively compare payloads
                 return rt_value_eq((*enum_a).payload, (*enum_b).payload);
             }
-            // Not both same type - not equal
         }
     }
 
@@ -265,5 +255,17 @@ mod tests {
 
         // +0.0 == -0.0 in Rust
         assert_eq!(rt_value_eq(pos_zero, neg_zero), 1);
+    }
+
+    #[test]
+    fn test_enum_equality() {
+        use crate::value::objects::rt_enum_new;
+        // Create two enums with same discriminant
+        let a = rt_enum_new(0, 42, RuntimeValue::NIL);
+        let b = rt_enum_new(0, 42, RuntimeValue::NIL);
+        let c = rt_enum_new(0, 99, RuntimeValue::NIL);
+
+        assert_eq!(rt_value_eq(a, b), 1, "same disc should be equal");
+        assert_eq!(rt_value_eq(a, c), 0, "diff disc should not be equal");
     }
 }

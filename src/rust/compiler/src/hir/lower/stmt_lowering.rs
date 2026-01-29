@@ -420,6 +420,15 @@ impl Lowerer {
                 Ok(vec![])
             }
 
+            // Import statements are resolved at the module level (module_pass.rs).
+            // When they appear inside a function body (e.g. SSpec test files wrapped
+            // into main), they are a no-op at code generation time.
+            Node::UseStmt(_)
+            | Node::MultiUse(_)
+            | Node::CommonUseStmt(_)
+            | Node::ExportUseStmt(_)
+            | Node::AutoImportStmt(_) => Ok(vec![]),
+
             _ => panic!("unimplemented HIR statement lowering for: {:?}", node),
         }
     }

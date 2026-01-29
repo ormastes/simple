@@ -12,7 +12,7 @@ impl LlvmBackend {
     // ============================================================================
 
     #[cfg(feature = "llvm")]
-    fn compile_struct_init(
+    pub(in crate::codegen::llvm) fn compile_struct_init(
         &self,
         dest: crate::mir::VReg,
         struct_size: u32,
@@ -55,7 +55,7 @@ impl LlvmBackend {
     }
 
     #[cfg(feature = "llvm")]
-    fn compile_field_get(
+    pub(in crate::codegen::llvm) fn compile_field_get(
         &self,
         dest: crate::mir::VReg,
         object: crate::mir::VReg,
@@ -101,7 +101,7 @@ impl LlvmBackend {
     }
 
     #[cfg(feature = "llvm")]
-    fn compile_field_set(
+    pub(in crate::codegen::llvm) fn compile_field_set(
         &self,
         object: crate::mir::VReg,
         byte_offset: u32,
@@ -146,7 +146,7 @@ impl LlvmBackend {
     }
 
     #[cfg(feature = "llvm")]
-    fn compile_closure_create(
+    pub(in crate::codegen::llvm) fn compile_closure_create(
         &self,
         dest: crate::mir::VReg,
         func_name: &str,
