@@ -771,6 +771,10 @@ pub fn handle_dict_methods(
             // Return empty dict (functional style - original is not modified)
             Value::Dict(HashMap::new())
         }
+        "clone" | "copy" => {
+            // Return a shallow copy of the dict
+            Value::Dict(map.clone())
+        }
         "get_or" => {
             let key = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?.to_key_string();
             let default = eval_arg(args, 1, Value::Nil, env, functions, classes, enums, impl_methods)?;
