@@ -3,7 +3,7 @@
 // Special type methods: Unit, Option, Result, Mock, Future, Channel, ThreadPool, TraitObject, Object, Constructor
 
 use crate::error::CompileError;
-use crate::interpreter::{bind_args, exec_block_fn, Control, Enums, ImplMethods, CONST_NAMES, IN_IMMUTABLE_FN_METHOD};
+use crate::interpreter::{bind_args, exec_block_fn, Control, Enums, ImplMethods, CONST_NAMES, IMMUTABLE_VARS, IN_IMMUTABLE_FN_METHOD};
 use crate::value::{Env, OptionVariant, ResultVariant, SpecialEnumType, Value};
 use simple_parser::ast::{Argument, ClassDef, FunctionDef};
 use std::collections::HashMap;
@@ -109,9 +109,9 @@ pub fn exec_function_with_self_return(
         local_env.insert(name, val);
     }
 
-    // Save current CONST_NAMES and clear for function scope
-    let saved_const_names = CONST_NAMES.with(|cell| cell.borrow().clone());
-    CONST_NAMES.with(|cell| cell.borrow_mut().clear());
+    // Save current CONST_NAMES and IMMUTABLE_VARS, clear for function scope
+    let saved_const_names = CONST_NAMES.with(|cell| std::mem::take(&mut *cell.borrow_mut()));
+    let saved_immutable_vars = IMMUTABLE_VARS.with(|cell| std::mem::take(&mut *cell.borrow_mut()));
 
     // Save and set IN_IMMUTABLE_FN_METHOD flag
     // Methods always have self here, so check if this is a me method
@@ -126,6 +126,7 @@ pub fn exec_function_with_self_return(
     // ALWAYS restore flags before handling the result to avoid flag leaking on error
     IN_IMMUTABLE_FN_METHOD.with(|cell| *cell.borrow_mut() = saved_in_immutable_fn);
     CONST_NAMES.with(|cell| *cell.borrow_mut() = saved_const_names);
+    IMMUTABLE_VARS.with(|cell| *cell.borrow_mut() = saved_immutable_vars);
 
     // Now extract result, potentially returning error
     let result = match exec_result {

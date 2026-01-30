@@ -4,7 +4,7 @@ use super::arg_binding::{bind_args, bind_args_with_values};
 use super::async_support::{is_async_function, wrap_in_promise};
 use super::macros::*;
 use crate::error::CompileError;
-use crate::interpreter::{exec_block_fn, Control, CONST_NAMES, IN_IMMUTABLE_FN_METHOD};
+use crate::interpreter::{exec_block_fn, Control, CONST_NAMES, IMMUTABLE_VARS, IN_IMMUTABLE_FN_METHOD};
 use crate::interpreter_unit::{is_unit_type, validate_unit_type};
 use crate::value::*;
 use simple_parser::ast::{Argument, ClassDef, EnumDef, FunctionDef, SelfMode, Type};
@@ -32,10 +32,10 @@ fn execute_function_body(
     impl_methods: &ImplMethods,
     wrap_async: bool,
 ) -> Result<Value, CompileError> {
-    // Save current CONST_NAMES and clear for function scope
-    // This prevents const names from caller leaking into callee
-    let saved_const_names = CONST_NAMES.with(|cell| cell.borrow().clone());
-    CONST_NAMES.with(|cell| cell.borrow_mut().clear());
+    // Save current CONST_NAMES and IMMUTABLE_VARS, clear for function scope
+    // Use std::mem::take to swap+clear in one step (avoids clone allocation)
+    let saved_const_names = CONST_NAMES.with(|cell| std::mem::take(&mut *cell.borrow_mut()));
+    let saved_immutable_vars = IMMUTABLE_VARS.with(|cell| std::mem::take(&mut *cell.borrow_mut()));
 
     // Check if this is an immutable fn method (has self but not is_me_method)
     // Save and set IN_IMMUTABLE_FN_METHOD flag to detect self mutation errors
@@ -59,6 +59,7 @@ fn execute_function_body(
     // ALWAYS restore flags before handling the result to avoid flag leaking on error
     IN_IMMUTABLE_FN_METHOD.with(|cell| *cell.borrow_mut() = saved_in_immutable_fn);
     CONST_NAMES.with(|cell| *cell.borrow_mut() = saved_const_names);
+    IMMUTABLE_VARS.with(|cell| *cell.borrow_mut() = saved_immutable_vars);
 
     // Now extract result, potentially returning error
     let result = match exec_result {
@@ -124,7 +125,7 @@ pub(crate) fn exec_function_with_values_and_self(
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
-    self_ctx: Option<(&str, &HashMap<String, Value>)>,
+    self_ctx: Option<(&str, &Arc<HashMap<String, Value>>)>,
 ) -> Result<Value, CompileError> {
     with_effect_check!(func, {
         let mut local_env = Env::new();
@@ -136,12 +137,12 @@ pub(crate) fn exec_function_with_values_and_self(
                 // For enum methods, self should be the enum value directly
                 local_env.insert("self".into(), fields.get("self").unwrap().clone());
             } else {
-                // For class methods, self is an Object
+                // For class methods, self is an Object — Arc::clone is O(1)
                 local_env.insert(
                     "self".into(),
                     Value::Object {
                         class: class_name.to_string(),
-                        fields: Arc::new(fields.clone()),
+                        fields: Arc::clone(fields),
                     },
                 );
             }
