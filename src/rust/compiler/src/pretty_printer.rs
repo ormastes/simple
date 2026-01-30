@@ -588,7 +588,8 @@ impl PrettyPrinter {
     fn print_use(&mut self, use_stmt: &UseStmt) {
         self.write_indent();
         self.write("use ");
-        self.write(&use_stmt.path);
+        // ModulePath has segments: Vec<String>
+        self.write(&use_stmt.path.segments.join("::"));
         self.output.push('\n');
     }
 
@@ -617,14 +618,11 @@ impl PrettyPrinter {
                 if i > 0 {
                     self.write(", ");
                 }
-                match field {
-                    EnumVariantField::Unnamed(ty) => self.print_type(ty),
-                    EnumVariantField::Named { name, field_type } => {
-                        self.write(name);
-                        self.write(": ");
-                        self.print_type(field_type);
-                    }
+                if let Some(ref name) = field.name {
+                    self.write(name);
+                    self.write(": ");
                 }
+                self.print_type(&field.ty);
             }
             self.write(")");
         }
@@ -637,7 +635,7 @@ impl PrettyPrinter {
 
     fn print_param(&mut self, param: &Parameter) {
         self.write(&param.name);
-        if let Some(ref type_ann) = param.param_type {
+        if let Some(ref type_ann) = param.ty {
             self.write(": ");
             self.print_type(type_ann);
         }
@@ -649,10 +647,18 @@ impl PrettyPrinter {
 
     fn print_pattern(&mut self, pattern: &Pattern) {
         match pattern {
-            Pattern::Identifier(name, _) => self.write(name),
+            Pattern::Identifier(name) => self.write(name),
+            Pattern::MutIdentifier(name) => {
+                self.write("mut ");
+                self.write(name);
+            }
+            Pattern::MoveIdentifier(name) => {
+                self.write("move ");
+                self.write(name);
+            }
             Pattern::Wildcard => self.write("_"),
             Pattern::Literal(expr) => self.print_expr(expr),
-            Pattern::Tuple(patterns, _) => {
+            Pattern::Tuple(patterns) => {
                 self.write("(");
                 for (i, p) in patterns.iter().enumerate() {
                     if i > 0 {
@@ -662,24 +668,45 @@ impl PrettyPrinter {
                 }
                 self.write(")");
             }
-            Pattern::Constructor { name, fields, .. } => {
+            Pattern::Array(patterns) => {
+                self.write("[");
+                for (i, p) in patterns.iter().enumerate() {
+                    if i > 0 {
+                        self.write(", ");
+                    }
+                    self.print_pattern(p);
+                }
+                self.write("]");
+            }
+            Pattern::Struct { name, fields } => {
                 self.write(name);
-                if let Some(fields) = fields {
+                self.write(" { ");
+                for (i, (field_name, field_pattern)) in fields.iter().enumerate() {
+                    if i > 0 {
+                        self.write(", ");
+                    }
+                    self.write(field_name);
+                    self.write(": ");
+                    self.print_pattern(field_pattern);
+                }
+                self.write(" }");
+            }
+            Pattern::Enum { name, variant, payload } => {
+                self.write(name);
+                self.write("::");
+                self.write(variant);
+                if let Some(patterns) = payload {
                     self.write("(");
-                    for (i, field) in fields.iter().enumerate() {
+                    for (i, p) in patterns.iter().enumerate() {
                         if i > 0 {
                             self.write(", ");
                         }
-                        if let Some(ref name) = field.field_name {
-                            self.write(name);
-                            self.write(": ");
-                        }
-                        self.print_pattern(&field.pattern);
+                        self.print_pattern(p);
                     }
                     self.write(")");
                 }
             }
-            Pattern::Or(patterns, _) => {
+            Pattern::Or(patterns) => {
                 for (i, p) in patterns.iter().enumerate() {
                     if i > 0 {
                         self.write(" | ");
@@ -687,15 +714,29 @@ impl PrettyPrinter {
                     self.print_pattern(p);
                 }
             }
-            _ => self.write("_"),
+            Pattern::Typed { pattern, ty } => {
+                self.print_pattern(pattern);
+                self.write(": ");
+                self.print_type(ty);
+            }
+            Pattern::Range { start, end, inclusive } => {
+                self.print_expr(start);
+                if *inclusive {
+                    self.write("..=");
+                } else {
+                    self.write("..");
+                }
+                self.print_expr(end);
+            }
+            Pattern::Rest => self.write("..."),
         }
     }
 
     fn print_type(&mut self, ty: &Type) {
         match ty {
-            Type::Simple { name, .. } => self.write(name),
-            Type::Generic { base, args, .. } => {
-                self.print_type(base);
+            Type::Simple(name) => self.write(name),
+            Type::Generic { name, args } => {
+                self.write(name);
                 self.write("<");
                 for (i, arg) in args.iter().enumerate() {
                     if i > 0 {
@@ -705,7 +746,17 @@ impl PrettyPrinter {
                 }
                 self.write(">");
             }
-            Type::Function { params, return_type, .. } => {
+            Type::Capability { capability, inner } => {
+                self.write(&format!("{:?}", capability));
+                self.write(" ");
+                self.print_type(inner);
+            }
+            Type::Pointer { kind, inner } => {
+                self.write(&format!("{:?}", kind));
+                self.write(" ");
+                self.print_type(inner);
+            }
+            Type::Function { params, ret } => {
                 self.write("fn(");
                 for (i, param) in params.iter().enumerate() {
                     if i > 0 {
@@ -713,10 +764,13 @@ impl PrettyPrinter {
                     }
                     self.print_type(param);
                 }
-                self.write(") -> ");
-                self.print_type(return_type);
+                self.write(")");
+                if let Some(ret_type) = ret {
+                    self.write(" -> ");
+                    self.print_type(ret_type);
+                }
             }
-            Type::Tuple { elements, .. } => {
+            Type::Tuple(elements) => {
                 self.write("(");
                 for (i, elem) in elements.iter().enumerate() {
                     if i > 0 {
@@ -726,57 +780,82 @@ impl PrettyPrinter {
                 }
                 self.write(")");
             }
-            Type::Optional { inner, .. } => {
+            Type::Optional(inner) => {
                 self.print_type(inner);
                 self.write("?");
             }
-            Type::Array { element_type, .. } => {
+            Type::Array { element, size } => {
                 self.write("[");
-                self.print_type(element_type);
+                self.print_type(element);
+                if let Some(size_expr) = size {
+                    self.write("; ");
+                    self.print_expr(size_expr);
+                }
                 self.write("]");
             }
-            _ => self.write("Any"),
+            Type::Union(types) => {
+                for (i, t) in types.iter().enumerate() {
+                    if i > 0 {
+                        self.write(" | ");
+                    }
+                    self.print_type(t);
+                }
+            }
+            Type::DynTrait(name) => {
+                self.write("dyn ");
+                self.write(name);
+            }
+            _ => self.write("/* unknown type */"),
         }
     }
 
     fn print_expr(&mut self, expr: &Expr) {
         match expr {
-            Expr::Identifier(name, _) => self.write(name),
-            Expr::Integer(n, suffix, _) => {
+            Expr::Identifier(name) => self.write(name),
+            Expr::Integer(n) => {
                 self.write(&n.to_string());
-                if let Some(suffix) = suffix {
-                    match suffix {
-                        NumericSuffix::I8 => self.write("i8"),
-                        NumericSuffix::I16 => self.write("i16"),
-                        NumericSuffix::I32 => self.write("i32"),
-                        NumericSuffix::I64 => self.write("i64"),
-                        NumericSuffix::U8 => self.write("u8"),
-                        NumericSuffix::U16 => self.write("u16"),
-                        NumericSuffix::U32 => self.write("u32"),
-                        NumericSuffix::U64 => self.write("u64"),
-                        NumericSuffix::F32 => self.write("f32"),
-                        NumericSuffix::F64 => self.write("f64"),
-                        NumericSuffix::Usize => self.write("usize"),
+            }
+            Expr::TypedInteger(n, suffix) => {
+                self.write(&n.to_string());
+                match suffix {
+                    NumericSuffix::I8 => self.write("i8"),
+                    NumericSuffix::I16 => self.write("i16"),
+                    NumericSuffix::I32 => self.write("i32"),
+                    NumericSuffix::I64 => self.write("i64"),
+                    NumericSuffix::U8 => self.write("u8"),
+                    NumericSuffix::U16 => self.write("u16"),
+                    NumericSuffix::U32 => self.write("u32"),
+                    NumericSuffix::U64 => self.write("u64"),
+                    NumericSuffix::F32 => self.write("f32"),
+                    NumericSuffix::F64 => self.write("f64"),
+                    NumericSuffix::Unit(unit) => {
+                        self.write("_");
+                        self.write(unit);
                     }
                 }
             }
-            Expr::Float(f, suffix, _) => {
+            Expr::Float(f) => {
                 self.write(&f.to_string());
-                if let Some(suffix) = suffix {
-                    match suffix {
-                        NumericSuffix::F32 => self.write("f32"),
-                        NumericSuffix::F64 => self.write("f64"),
-                        _ => {}
+            }
+            Expr::TypedFloat(f, suffix) => {
+                self.write(&f.to_string());
+                match suffix {
+                    NumericSuffix::F32 => self.write("f32"),
+                    NumericSuffix::F64 => self.write("f64"),
+                    NumericSuffix::Unit(unit) => {
+                        self.write("_");
+                        self.write(unit);
                     }
+                    _ => {}
                 }
             }
-            Expr::String(s, _) => {
+            Expr::String(s) => {
                 self.write("\"");
                 self.write(&s.replace('"', "\\\""));
                 self.write("\"");
             }
-            Expr::Bool(b, _) => self.write(if *b { "true" } else { "false" }),
-            Expr::Array(elements, _) => {
+            Expr::Bool(b) => self.write(if *b { "true" } else { "false" }),
+            Expr::Array(elements) => {
                 self.write("[");
                 for (i, elem) in elements.iter().enumerate() {
                     if i > 0 {
@@ -786,7 +865,7 @@ impl PrettyPrinter {
                 }
                 self.write("]");
             }
-            Expr::Dict(entries, _) => {
+            Expr::Dict(entries) => {
                 self.write("{");
                 for (i, (key, value)) in entries.iter().enumerate() {
                     if i > 0 {
@@ -798,7 +877,7 @@ impl PrettyPrinter {
                 }
                 self.write("}");
             }
-            Expr::Tuple(elements, _) => {
+            Expr::Tuple(elements) => {
                 self.write("(");
                 for (i, elem) in elements.iter().enumerate() {
                     if i > 0 {
@@ -819,8 +898,8 @@ impl PrettyPrinter {
                 self.write(&format!("{:?}", op)); // TODO: Better operator printing
                 self.print_expr(operand);
             }
-            Expr::Call { func, args, .. } => {
-                self.print_expr(func);
+            Expr::Call { callee, args } => {
+                self.print_expr(callee);
                 self.write("(");
                 for (i, arg) in args.iter().enumerate() {
                     if i > 0 {
@@ -834,13 +913,13 @@ impl PrettyPrinter {
                 }
                 self.write(")");
             }
-            Expr::FieldAccess { object, field, .. } => {
-                self.print_expr(object);
+            Expr::FieldAccess { receiver, field } => {
+                self.print_expr(receiver);
                 self.write(".");
                 self.write(field);
             }
-            Expr::Index { object, index, .. } => {
-                self.print_expr(object);
+            Expr::Index { receiver, index } => {
+                self.print_expr(receiver);
                 self.write("[");
                 self.print_expr(index);
                 self.write("]");
@@ -852,7 +931,7 @@ impl PrettyPrinter {
                         self.write(", ");
                     }
                     self.write(&param.name);
-                    if let Some(ref ty) = param.param_type {
+                    if let Some(ref ty) = param.ty {
                         self.write(": ");
                         self.print_type(ty);
                     }
