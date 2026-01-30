@@ -1,0 +1,203 @@
+# TreeSitter Types - Outline Structure Definitions
+#
+# This module contains outline data structures produced by tree-sitter parsing:
+# - OutlineModule: Top-level module structure
+# - FunctionOutline, ClassOutline, StructOutline, etc.: Definition outlines
+# - TypeOutline: Type expression outlines
+# - ParseError: Tree-sitter parsing errors
+#
+# The tree-sitter implementation is in treesitter.spl
+
+use compiler.lexer.*
+
+# ============================================================================
+# Outline AST Types
+# ============================================================================
+
+struct OutlineModule:
+    """High-level module structure."""
+    name: text
+    imports: [ImportOutline]
+    exports: [ExportOutline]
+    functions: [FunctionOutline]
+    classes: [ClassOutline]
+    structs: [StructOutline]
+    enums: [EnumOutline]
+    traits: [TraitOutline]
+    impls: [ImplOutline]
+    type_aliases: [TypeAliasOutline]
+    constants: [ConstOutline]
+    inline_blocks: [BlockOutline]  # Blocks found in expressions (m{}, loss{}, sh{}, etc.)
+    errors: [ParseError]
+
+struct BlockOutline:
+    """Outline for a block expression (m{}, loss{}, sh{}, sql{}, etc.)
+
+    Captures the block without parsing its payload.
+    Used for custom block resolution phase.
+    """
+    kind: text              # Block keyword (e.g., "m", "loss", "sh", "sql")
+    payload: text           # Raw payload text between braces
+    payload_span: Span      # Span of payload for error mapping
+    span: Span              # Full span including keyword and braces
+    parent_context: text?   # Optional: function/method where block appears
+
+struct ImportOutline:
+    """Import declaration outline."""
+    module: text
+    items: [text]           # Empty means import all
+    alias: text?            # "as" alias
+    span: Span
+
+struct ExportOutline:
+    """Export declaration outline."""
+    items: [text]
+    span: Span
+
+struct FunctionOutline:
+    """Function signature without body."""
+    name: text
+    params: [ParamOutline]
+    return_type: TypeOutline?
+    is_async: bool
+    is_static: bool
+    is_public: bool
+    is_method: bool         # Has implicit self
+    is_mutable: bool        # Uses 'me' instead of 'fn'
+    doc_comment: text?
+    span: Span
+    body_span: Span         # Span of body (for later parsing)
+
+struct ParamOutline:
+    """Function parameter."""
+    name: text
+    type_: TypeOutline?
+    default_span: Span?     # Span of default value (for later parsing)
+    span: Span
+
+struct ClassOutline:
+    """Class definition outline."""
+    name: text
+    type_params: [TypeParamOutline]
+    fields: [FieldOutline]
+    methods: [FunctionOutline]
+    is_public: bool
+    doc_comment: text?
+    span: Span
+
+struct StructOutline:
+    """Struct definition outline."""
+    name: text
+    type_params: [TypeParamOutline]
+    fields: [FieldOutline]
+    is_public: bool
+    doc_comment: text?
+    span: Span
+
+struct FieldOutline:
+    """Struct/class field."""
+    name: text
+    type_: TypeOutline
+    is_public: bool
+    default_span: Span?     # Span of default value
+    span: Span
+
+struct EnumOutline:
+    """Enum definition outline."""
+    name: text
+    type_params: [TypeParamOutline]
+    variants: [VariantOutline]
+    is_public: bool
+    doc_comment: text?
+    span: Span
+
+struct VariantOutline:
+    """Enum variant."""
+    name: text
+    payload: VariantPayload?
+    span: Span
+
+"""Enum variant payload type."""
+enum VariantPayload:
+    Tuple(types: [TypeOutline])
+    Struct(fields: [FieldOutline])
+
+struct TraitOutline:
+    """Trait definition outline."""
+    name: text
+    type_params: [TypeParamOutline]
+    methods: [FunctionOutline]
+    is_public: bool
+    doc_comment: text?
+    span: Span
+
+struct ImplOutline:
+    """Impl block outline."""
+    type_: TypeOutline
+    trait_: TypeOutline?    # None for inherent impl
+    methods: [FunctionOutline]
+    span: Span
+
+struct TypeAliasOutline:
+    """Type alias outline."""
+    name: text
+    type_params: [TypeParamOutline]
+    type_: TypeOutline
+    is_public: bool
+    span: Span
+
+struct ConstOutline:
+    """Constant/variable at module level."""
+    name: text
+    type_: TypeOutline?
+    is_mutable: bool        # val vs var
+    is_public: bool
+    value_span: Span        # Span of value expression
+    span: Span
+
+struct TypeParamOutline:
+    """Generic type parameter."""
+    name: text
+    bounds: [TypeOutline]
+    default: TypeOutline?
+    span: Span
+
+struct TypeOutline:
+    """Type expression outline."""
+    kind: TypeOutlineKind
+    span: Span
+
+"""Type expression kinds."""
+enum TypeOutlineKind:
+    Named(name: text, args: [TypeOutline])      # Foo, Foo<T, U>
+    Tuple(elements: [TypeOutline])               # (A, B, C)
+    Array(element: TypeOutline)                  # [T]
+    Function(params: [TypeOutline], ret: TypeOutline)  # fn(A, B) -> C
+    Optional(inner: TypeOutline)                 # T?
+    Reference(inner: TypeOutline, mutable: bool) # &T, &mut T
+    Infer                                        # _ (inferred)
+
+struct ParseError:
+    """Parse error with recovery."""
+    message: text
+    span: Span
+    severity: ErrorSeverity
+
+enum ErrorSeverity:
+    Error
+    Warning
+    Info
+
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export OutlineModule, BlockOutline
+export ImportOutline, ExportOutline
+export FunctionOutline, ParamOutline
+export ClassOutline, StructOutline, FieldOutline
+export EnumOutline, VariantOutline, VariantPayload
+export TraitOutline, ImplOutline, TypeAliasOutline, ConstOutline
+export TypeParamOutline, TypeOutline, TypeOutlineKind
+export ParseError

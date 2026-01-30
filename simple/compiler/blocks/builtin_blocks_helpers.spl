@@ -1,0 +1,414 @@
+# Builtin Block Helpers - Helper Functions and Registration
+#
+# This module contains helper functions for builtin blocks:
+# - SQL keyword lists and query parsing
+# - Shell command parsing
+# - Regex validation
+# - JSON parsing and conversion
+# - Block registration
+#
+# Block definitions are in builtin_blocks_defs.spl
+
+use blocks.{BlockDefinition, BlockValue, BlockRegistry}
+use builtin_blocks_defs.*
+use value.{ConstValue, JsonValue}
+
+fn sql_keywords() -> [text]:
+    """Return SQL keywords for syntax highlighting."""
+    val s = "SELECT"
+    val f = "FROM"
+    val w = "WHERE"
+    [s, f, w, "INSERT", "INTO", "VALUES",
+     "UPDATE", "SET", "DELETE", "CREATE", "TABLE", "DROP",
+     "ALTER", "INDEX", "JOIN", "LEFT", "RIGHT", "INNER",
+     "OUTER", "ON", "AND", "OR", "NOT", "NULL", "IS",
+     "ORDER", "BY", "ASC", "DESC", "LIMIT", "OFFSET",
+     "GROUP", "HAVING", "AS", "DISTINCT", "COUNT", "SUM",
+     "AVG", "MIN", "MAX", "RETURNING", "CASCADE", "PRIMARY",
+     "KEY", "FOREIGN", "REFERENCES", "DEFAULT", "UNIQUE"]
+
+fn parse_shell_commands(raw: text) -> ShellCommands:
+    """Parse shell command string into structured commands."""
+    var commands: [ShellCommand] = []
+
+    # Split by pipes first
+    val parts = raw.split("|")
+
+    for part in parts:
+        val trimmed = part.trim()
+        if trimmed.is_empty():
+            continue
+
+        # Split by whitespace for args
+        val tokens = trimmed.split(" ").filter(\s: not s.is_empty())
+        if tokens.is_empty():
+            continue
+
+        val program = tokens[0]
+        var args: [text] = []
+        var redirects: [Redirect] = []
+
+        var i = 1
+        while i < tokens.len():
+            val tok = tokens[i]
+            if tok == ">":
+                if i + 1 < tokens.len():
+                    redirects = redirects.push(Redirect(
+                        kind: RedirectKind.StdoutToFile,
+                        target: tokens[i + 1]
+                    ))
+                    i = i + 2
+                    continue
+            else if tok == ">>":
+                if i + 1 < tokens.len():
+                    redirects = redirects.push(Redirect(
+                        kind: RedirectKind.StdoutAppend,
+                        target: tokens[i + 1]
+                    ))
+                    i = i + 2
+                    continue
+            else if tok == "<":
+                if i + 1 < tokens.len():
+                    redirects = redirects.push(Redirect(
+                        kind: RedirectKind.StdinFromFile,
+                        target: tokens[i + 1]
+                    ))
+                    i = i + 2
+                    continue
+            else if tok == "2>":
+                if i + 1 < tokens.len():
+                    redirects = redirects.push(Redirect(
+                        kind: RedirectKind.StderrToFile,
+                        target: tokens[i + 1]
+                    ))
+                    i = i + 2
+                    continue
+            else if tok == "2>&1":
+                redirects = redirects.push(Redirect(
+                    kind: RedirectKind.StderrToStdout,
+                    target: ""
+                ))
+                i = i + 1
+                continue
+            else:
+                args = args.push(tok)
+            i = i + 1
+
+        commands = commands.push(ShellCommand(
+            program: program,
+            args: args,
+            redirects: redirects,
+            pipe_to: nil
+        ))
+
+    # Link commands in pipeline (build new array to avoid in-place mutation issue)
+    var linked_commands: [ShellCommand] = []
+    var i = 0
+    while i < commands.len():
+        val cmd = commands[i]
+        val next_cmd = if i + 1 < commands.len(): Some(commands[i + 1]) else: nil
+        linked_commands = linked_commands.push(ShellCommand(
+            program: cmd.program,
+            args: cmd.args,
+            redirects: cmd.redirects,
+            pipe_to: next_cmd
+        ))
+        i = i + 1
+
+    ShellCommands(raw: raw, commands: linked_commands)
+
+fn parse_sql_query(raw: text) -> SqlQuery:
+    """Parse SQL query string."""
+    val upper = raw.upper().trim()
+
+    # Determine query kind
+    val kind = if upper.starts_with("SELECT" + ""):
+        SqlKind.Select
+    else if upper.starts_with("INSERT" + ""):
+        SqlKind.Insert
+    else if upper.starts_with("UPDATE" + ""):
+        SqlKind.Update
+    else if upper.starts_with("DELETE" + ""):
+        SqlKind.Delete
+    else if upper.starts_with("CREATE" + ""):
+        SqlKind.Create
+    else if upper.starts_with("ALTER" + ""):
+        SqlKind.Alter
+    else if upper.starts_with("DROP" + ""):
+        SqlKind.Drop
+    else:
+        SqlKind.Other
+
+    # Extract table names (simple heuristic)
+    var tables: [text] = []
+    val words = raw.split(" ").filter(\s: not s.is_empty())
+    var i = 0
+    while i < words.len():
+        val word = words[i].upper()
+        if word == "FROM" + "" or word == "INTO" + "" or word == "UPDATE" + "" or word == "JOIN" + "":
+            if i + 1 < words.len():
+                tables = tables.push(words[i + 1].replace("," + "", "" + ""))
+        i = i + 1
+
+    # Extract parameters ($1, $2, :name)
+    var params: [SqlParam] = []
+    var pos = 0
+    i = 0
+    while i < raw.len():
+        if raw[i] == '$' and i + 1 < raw.len() and raw[i + 1].is_digit():
+            val start = i + 1
+            var end = start
+            while end < raw.len() and raw[end].is_digit():
+                end = end + 1
+            val num = raw[start:end].parse_i64() ?? (pos + 1)
+            params = params.push(SqlParam(name: "${num}", position: pos))
+            pos = pos + 1
+            i = end
+            continue
+        else if raw[i] == ':' and i + 1 < raw.len() and raw[i + 1].is_alphabetic():
+            val start = i + 1
+            var end = start
+            while end < raw.len() and (raw[end].is_alphanumeric() or raw[end] == '_'):
+                end = end + 1
+            val name = raw[start:end]
+            params = params.push(SqlParam(name: name, position: pos))
+            pos = pos + 1
+            i = end
+            continue
+        i = i + 1
+
+    SqlQuery(
+        raw: raw,
+        kind: kind,
+        tables: tables,
+        columns: [],  # TODO: Extract columns
+        params: params
+    )
+
+fn validate_regex(pattern: text) -> Result<(), text>:
+    """Validate regex pattern syntax."""
+    # Basic validation - check balanced brackets/parens
+    var paren_depth = 0
+    var bracket_depth = 0
+    var i = 0
+
+    while i < pattern.len():
+        val c = pattern[i]
+
+        # Handle escape sequences
+        if c == '\\' and i + 1 < pattern.len():
+            i = i + 2
+            continue
+
+        match c:
+            case '(':
+                paren_depth = paren_depth + 1
+            case ')':
+                paren_depth = paren_depth - 1
+                if paren_depth < 0:
+                    return Err("Unmatched closing parenthesis")
+            case '[':
+                bracket_depth = bracket_depth + 1
+            case ']':
+                bracket_depth = bracket_depth - 1
+                if bracket_depth < 0:
+                    return Err("Unmatched closing bracket")
+            case _:
+                pass
+
+        i = i + 1
+
+    if paren_depth != 0:
+        return Err("Unmatched opening parenthesis")
+    if bracket_depth != 0:
+        return Err("Unmatched opening bracket")
+
+    Ok(())
+
+# Helper struct for JSON parsing (avoids nested functions)
+struct JsonParser:
+    input: text
+    pos: i64
+
+impl JsonParser:
+    me skip_whitespace():
+        """Skip whitespace characters."""
+        while self.pos < self.input.len() and self.input[self.pos].is_whitespace():
+            self.pos = self.pos + 1
+
+    me parse_value() -> Result<JsonValue, text>:
+        """Parse a JSON value."""
+        self.skip_whitespace()
+        if self.pos >= self.input.len():
+            return Err("Unexpected end of JSON")
+
+        val c = self.input[self.pos]
+
+        # Null
+        if c == 'n' and self.input[self.pos:].starts_with("null"):
+            self.pos = self.pos + 4
+            return Ok(JsonValue(kind: JsonKind.Null))
+
+        # Boolean
+        if c == 't' and self.input[self.pos:].starts_with("true"):
+            self.pos = self.pos + 4
+            return Ok(JsonValue(kind: JsonKind.Bool(true)))
+        if c == 'f' and self.input[self.pos:].starts_with("false"):
+            self.pos = self.pos + 5
+            return Ok(JsonValue(kind: JsonKind.Bool(false)))
+
+        # String
+        if c == '"':
+            self.pos = self.pos + 1
+            val start = self.pos
+            while self.pos < self.input.len() and self.input[self.pos] != '"':
+                if self.input[self.pos] == '\\' and self.pos + 1 < self.input.len():
+                    self.pos = self.pos + 2
+                else:
+                    self.pos = self.pos + 1
+            if self.pos >= self.input.len():
+                return Err("Unterminated string")
+            val s = self.input[start:self.pos]
+            self.pos = self.pos + 1
+            return Ok(JsonValue(kind: JsonKind.String(s)))
+
+        # Number
+        if c == '-' or c.is_digit():
+            val start = self.pos
+            if c == '-':
+                self.pos = self.pos + 1
+            while self.pos < self.input.len() and self.input[self.pos].is_digit():
+                self.pos = self.pos + 1
+            if self.pos < self.input.len() and self.input[self.pos] == '.':
+                self.pos = self.pos + 1
+                while self.pos < self.input.len() and self.input[self.pos].is_digit():
+                    self.pos = self.pos + 1
+            val num = self.input[start:self.pos].parse_f64() ?? 0.0
+            return Ok(JsonValue(kind: JsonKind.Number(num)))
+
+        # Array
+        if c == '[':
+            self.pos = self.pos + 1
+            var elements: [JsonValue] = []
+            self.skip_whitespace()
+            if self.pos < self.input.len() and self.input[self.pos] == ']':
+                self.pos = self.pos + 1
+                return Ok(JsonValue(kind: JsonKind.Array(elements)))
+            while true:
+                match self.parse_value():
+                    case Ok(v):
+                        elements = elements.push(v)
+                    case Err(e):
+                        return Err(e)
+                self.skip_whitespace()
+                if self.pos >= self.input.len():
+                    return Err("Unterminated array")
+                if self.input[self.pos] == ']':
+                    self.pos = self.pos + 1
+                    return Ok(JsonValue(kind: JsonKind.Array(elements)))
+                if self.input[self.pos] != ',':
+                    return Err("Expected ',' or ']' in array")
+                self.pos = self.pos + 1
+
+        # Object
+        if c == '{':
+            self.pos = self.pos + 1
+            var fields: [(text, JsonValue)] = []
+            self.skip_whitespace()
+            if self.pos < self.input.len() and self.input[self.pos] == '}':
+                self.pos = self.pos + 1
+                return Ok(JsonValue(kind: JsonKind.Object(fields)))
+            while true:
+                self.skip_whitespace()
+                if self.pos >= self.input.len() or self.input[self.pos] != '"':
+                    return Err("Expected string key in object")
+                self.pos = self.pos + 1
+                val key_start = self.pos
+                while self.pos < self.input.len() and self.input[self.pos] != '"':
+                    self.pos = self.pos + 1
+                if self.pos >= self.input.len():
+                    return Err("Unterminated key string")
+                val key = self.input[key_start:self.pos]
+                self.pos = self.pos + 1
+                self.skip_whitespace()
+                if self.pos >= self.input.len() or self.input[self.pos] != ':':
+                    return Err("Expected ':' after key")
+                self.pos = self.pos + 1
+                match self.parse_value():
+                    case Ok(v):
+                        fields = fields.push((key, v))
+                    case Err(e):
+                        return Err(e)
+                self.skip_whitespace()
+                if self.pos >= self.input.len():
+                    return Err("Unterminated object")
+                if self.input[self.pos] == '}':
+                    self.pos = self.pos + 1
+                    return Ok(JsonValue(kind: JsonKind.Object(fields)))
+                if self.input[self.pos] != ',':
+                    return Err("Expected ',' or '}' in object")
+                self.pos = self.pos + 1
+
+        Err("Invalid JSON value at position {self.pos}")
+
+fn parse_json(raw: text) -> Result<JsonValue, text>:
+    """Parse JSON string to JsonValue."""
+    val trimmed = raw.trim()
+    if trimmed.is_empty():
+        return Err("Empty JSON")
+
+    var parser = JsonParser(input: trimmed, pos: 0)
+    parser.parse_value()
+
+fn json_field_to_const(field: (text, JsonValue)) -> (text, ConstValue):
+    """Convert a JSON field tuple to a const field tuple."""
+    val (name, value) = field
+    (name, json_to_const(value))
+
+fn json_to_const(jv: JsonValue) -> ConstValue:
+    """Convert JsonValue to ConstValue."""
+    match jv.kind:
+        case Null:
+            ConstValue.Nil
+        case Bool(b):
+            ConstValue.Bool(b)
+        case Number(n):
+            ConstValue.Float(n)
+        case String(s):
+            ConstValue.String(s)
+        case Array(elements):
+            ConstValue.Array(elements.map(\e: json_to_const(e)))
+        case Object(fields):
+            ConstValue.Struct("JsonObject", fields.map(\f: json_field_to_const(f)))
+
+# ============================================================================
+# Registration
+# ============================================================================
+
+fn register_builtin_blocks(registry: BlockRegistry):
+    """Register all builtin blocks with the given registry."""
+    registry.register(MathBlockDef())
+    registry.register(LossBlockDef())
+    registry.register(NogradBlockDef())
+    registry.register(ShellBlockDef())
+    registry.register(SqlBlockDef())
+    registry.register(RegexBlockDef())
+    registry.register(JsonBlockDef())
+    registry.register(MarkdownBlockDef())
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export MathBlockDef, LossBlockDef, NogradBlockDef
+export ShellBlockDef, SqlBlockDef, RegexBlockDef
+export JsonBlockDef, MarkdownBlockDef
+export register_builtin_blocks
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export sql_keywords, parse_shell_commands, parse_sql_query
+export validate_regex, parse_json, json_to_const
+export register_builtin_blocks

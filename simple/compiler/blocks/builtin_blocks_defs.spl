@@ -1,0 +1,754 @@
+# Builtin Block Definitions - Core Block Type Definitions
+#
+# This module contains all builtin block type definitions:
+# - Math blocks (m{...}): Mathematical notation
+# - Loss blocks (loss{...}): Automatic differentiation
+# - Nograd blocks (nograd{...}): Gradient-free zones
+# - Shell blocks (sh{...}): Shell command execution
+# - SQL blocks (sql{...}): SQL query parsing
+# - Regex blocks (re{...}): Regular expression patterns
+# - JSON blocks (json{...}): JSON parsing
+# - Markdown blocks (md{...}): Markdown content
+#
+# Helper functions and registration are in builtin_blocks_helpers.spl
+
+use blocks.{BlockDefinition, BlockValue, BlockRegistry}
+use compiler.hir.HirType
+use value.ConstValue
+
+struct MathBlockDef(BlockDefinition):
+    r"""Math block: enables math-like syntax.
+
+    Features:
+    - ^ as power operator (x^2)
+    - ' as transpose operator (A')
+    - Implicit multiplication (2x, (a)(b))
+    - Broadcast operators (.+ .- .* ./ .^)
+    - Matrix multiplication (@)
+
+    Example:
+        val result = m{ x^2 + 2*x*y + y^2 }
+        val norm = m{ sqrt(x'x) }
+    """
+
+impl MathBlockDef:
+    fn kind() -> text:
+        "m"
+
+    fn parse_payload(payload: text, ctx: BlockContext) -> Result<BlockValue, BlockError>:
+        # Math blocks return raw payload - parsed with math mode by parser
+        Ok(BlockValue.Raw(payload))
+
+    fn lexer_mode() -> LexerMode:
+        LexerMode.Math
+
+    fn syntax_features() -> SyntaxFeatures:
+        SyntaxFeatures.math()
+
+    fn description() -> text:
+        "Math block with power (^), transpose ('), and implicit multiplication"
+
+    fn examples() -> [BlockExample]:
+        [
+            BlockExample(
+                code: "m\{ x^2 + y^2 }",
+                description: "Power operator",
+                output: nil
+            ),
+            BlockExample(
+                code: "m\{ A' @ A }",
+                description: "Transpose and matrix multiply",
+                output: nil
+            ),
+            BlockExample(
+                code: "m\{ 2x + 3y }",
+                description: "Implicit multiplication",
+                output: nil
+            )
+        ]
+
+    fn highlight(payload: text) -> [HighlightToken]:
+        # Basic highlighting for math expressions
+        var tokens: [HighlightToken] = []
+        var i = 0
+        while i < payload.len():
+            val c = payload[i]
+            match c:
+                case '^' | '\'' | '@' | '+' | '-' | '*' | '/':
+                    tokens = tokens.push(HighlightToken(
+                        start: i,
+                        end: i + 1,
+                        kind: HighlightKind.Operator
+                    ))
+                case '0' | '1' | '2' | '3' | '4' | '5' | '6' | '7' | '8' | '9':
+                    val start = i
+                    while i < payload.len() and payload[i].is_digit():
+                        i = i + 1
+                    tokens = tokens.push(HighlightToken(
+                        start: start,
+                        end: i,
+                        kind: HighlightKind.Number
+                    ))
+                    continue
+                case _:
+                    pass
+            i = i + 1
+        tokens
+
+# ============================================================================
+# Loss Block (loss{})
+# ============================================================================
+
+struct LossBlockDef(BlockDefinition):
+    r"""Loss block: math mode with automatic backward pass.
+
+    Inherits all math block features plus:
+    - Automatic gradient tracking
+    - Calls .backward() on the result
+
+    Example:
+        loss{
+            pred = model(x)
+            cross_entropy(pred, y)
+        }
+    """
+
+impl LossBlockDef:
+    fn kind() -> text:
+        "loss"
+
+    fn parse_payload(payload: text, ctx: BlockContext) -> Result<BlockValue, BlockError>:
+        # Loss blocks return raw payload - converted to LossBlock by parser
+        Ok(BlockValue.Raw(payload))
+
+    fn lexer_mode() -> LexerMode:
+        LexerMode.Math
+
+    fn syntax_features() -> SyntaxFeatures:
+        SyntaxFeatures.loss()
+
+    fn description() -> text:
+        "Loss computation with auto-backward"
+
+    fn examples() -> [BlockExample]:
+        [
+            BlockExample(
+                code: "loss\{ mse(pred, target) }",
+                description: "MSE loss with auto-backward",
+                output: nil
+            ),
+            BlockExample(
+                code: "loss\{\n    logits = model(x)\n    cross_entropy(logits, y)\n}",
+                description: "Multi-line loss computation",
+                output: nil
+            )
+        ]
+
+# ============================================================================
+# Nograd Block (nograd{})
+# ============================================================================
+
+struct NogradBlockDef(BlockDefinition):
+    r"""Nograd block: math mode with gradient tracking disabled.
+
+    Inherits all math block features plus:
+    - Disables gradient tracking
+    - Used for inference/evaluation
+
+    Example:
+        nograd{
+            val pred = model(x)
+            accuracy(pred, y)
+        }
+    """
+
+impl NogradBlockDef:
+    fn kind() -> text:
+        "nograd"
+
+    fn parse_payload(payload: text, ctx: BlockContext) -> Result<BlockValue, BlockError>:
+        # Nograd blocks return raw payload - converted to NogradBlock by parser
+        Ok(BlockValue.Raw(payload))
+
+    fn lexer_mode() -> LexerMode:
+        LexerMode.Math
+
+    fn syntax_features() -> SyntaxFeatures:
+        SyntaxFeatures.nograd()
+
+    fn description() -> text:
+        "Computation with gradient tracking disabled"
+
+    fn examples() -> [BlockExample]:
+        [
+            BlockExample(
+                code: "nograd\{ model(test_data) }",
+                description: "Inference without gradients",
+                output: nil
+            )
+        ]
+
+# ============================================================================
+# Shell Block (sh{})
+# ============================================================================
+
+struct ShellBlockDef(BlockDefinition):
+    r"""Shell command block: execute shell commands.
+
+    Features:
+    - Raw text capture (no tokenization)
+    - Supports pipes, redirects, variables
+    - Returns command output as text
+
+    Example:
+        val files = sh{ ls -la }
+        val result = sh{ cat file.txt | grep pattern }
+    """
+
+impl ShellBlockDef:
+    fn kind() -> text:
+        "sh"
+
+    fn parse_payload(payload: text, ctx: BlockContext) -> Result<BlockValue, BlockError>:
+        val trimmed = payload.trim()
+        if trimmed.is_empty():
+            return Err(BlockError.parse("Empty shell command"))
+
+        # Parse shell commands
+        val commands = parse_shell_commands(trimmed)
+        Ok(BlockValue.Shell(commands))
+
+    fn lexer_mode() -> LexerMode:
+        LexerMode.Raw
+
+    fn syntax_features() -> SyntaxFeatures:
+        SyntaxFeatures.default()
+
+    fn description() -> text:
+        "Shell command execution"
+
+    fn examples() -> [BlockExample]:
+        [
+            BlockExample(
+                code: "sh\{ ls -la }",
+                description: "List files",
+                output: nil
+            ),
+            BlockExample(
+                code: "sh\{ cat file.txt | grep pattern | wc -l }",
+                description: "Pipeline with pipes",
+                output: nil
+            ),
+            BlockExample(
+                code: "sh\{ echo \"hello\" > output.txt }",
+                description: "Redirect to file",
+                output: nil
+            )
+        ]
+
+    fn validate(value: BlockValue, ctx: BlockContext) -> [BlockError]:
+        # Check for dangerous commands
+        match value:
+            case Shell(commands):
+                var errors: [BlockError] = []
+                for cmd in commands.commands:
+                    if cmd.program == "rm" and "-rf" in cmd.args:
+                        errors = errors.push(
+                            BlockError.validation("Potentially dangerous: rm -rf")
+                                .with_suggestion("Consider using 'rm -i' for interactive deletion")
+                        )
+                errors
+            case _:
+                []
+
+    fn highlight(payload: text) -> [HighlightToken]:
+        var tokens: [HighlightToken] = []
+        var i = 0
+        var in_string = false
+        var string_char = '"'
+
+        while i < payload.len():
+            val c = payload[i]
+
+            # String handling
+            if c == '"' or c == '\'':
+                if not in_string:
+                    in_string = true
+                    string_char = c
+                    val start = i
+                    i = i + 1
+                    while i < payload.len() and payload[i] != string_char:
+                        i = i + 1
+                    tokens = tokens.push(HighlightToken(
+                        start: start,
+                        end: i + 1,
+                        kind: HighlightKind.String
+                    ))
+                    in_string = false
+                i = i + 1
+                continue
+
+            # Operators
+            if c == '|' or c == '>' or c == '<' or c == '&':
+                tokens = tokens.push(HighlightToken(
+                    start: i,
+                    end: i + 1,
+                    kind: HighlightKind.Operator
+                ))
+                i = i + 1
+                continue
+
+            # Variable
+            if c == '$':
+                val start = i
+                i = i + 1
+                while i < payload.len() and (payload[i].is_alphanumeric() or payload[i] == '_'):
+                    i = i + 1
+                tokens = tokens.push(HighlightToken(
+                    start: start,
+                    end: i,
+                    kind: HighlightKind.Variable
+                ))
+                continue
+
+            i = i + 1
+
+        tokens
+
+# ============================================================================
+# SQL Block (sql{})
+# ============================================================================
+
+struct SqlBlockDef(BlockDefinition):
+    r"""SQL query block: write SQL queries.
+
+    Features:
+    - Raw text capture
+    - SQL syntax highlighting
+    - Parameter placeholders ($1, :name)
+    - Query validation
+
+    Example:
+        val users = sql{ SELECT * FROM users WHERE age > 18 }
+        val result = sql{ INSERT INTO logs (msg) VALUES ($1) }
+    """
+
+impl SqlBlockDef:
+    fn kind() -> text:
+        "sql"
+
+    fn parse_payload(payload: text, ctx: BlockContext) -> Result<BlockValue, BlockError>:
+        val trimmed = payload.trim()
+        if trimmed.is_empty():
+            return Err(BlockError.parse("Empty SQL query"))
+
+        # Parse SQL query
+        val query = parse_sql_query(trimmed)
+        Ok(BlockValue.Sql(query))
+
+    fn lexer_mode() -> LexerMode:
+        LexerMode.Raw
+
+    fn syntax_features() -> SyntaxFeatures:
+        SyntaxFeatures.default()
+
+    fn description() -> text:
+        "SQL query with parameter support"
+
+    fn examples() -> [BlockExample]:
+        [
+            BlockExample(
+                code: "sql\{ SELECT * FROM users }",
+                description: "Simple select",
+                output: nil
+            ),
+            BlockExample(
+                code: "sql\{ SELECT name, age FROM users WHERE id = $1 }",
+                description: "Parameterized query",
+                output: nil
+            ),
+            BlockExample(
+                code: "sql\{\n    INSERT INTO users (name, email)\n    VALUES ($1, $2)\n    RETURNING id\n}",
+                description: "Insert with returning",
+                output: nil
+            )
+        ]
+
+    fn validate(value: BlockValue, ctx: BlockContext) -> [BlockError]:
+        match value:
+            case Sql(query):
+                var errors: [BlockError] = []
+                # Check for SQL injection patterns
+                val raw = query.raw.lower()
+                if "'; --" in raw or "1=1" in raw:
+                    errors = errors.push(
+                        BlockError.validation("Potential SQL injection pattern")
+                            .with_note("Use parameterized queries instead")
+                    )
+                errors
+            case _:
+                []
+
+    fn highlight(payload: text) -> [HighlightToken]:
+        var tokens: [HighlightToken] = []
+        val keywords = sql_keywords()
+
+        # Simple word-based highlighting
+        var i = 0
+        while i < payload.len():
+            # Skip whitespace
+            while i < payload.len() and payload[i].is_whitespace():
+                i = i + 1
+
+            if i >= payload.len():
+                break
+
+            # String literals
+            if payload[i] == '\'':
+                val start = i
+                i = i + 1
+                while i < payload.len() and payload[i] != '\'':
+                    i = i + 1
+                tokens = tokens.push(HighlightToken(
+                    start: start,
+                    end: i + 1,
+                    kind: HighlightKind.String
+                ))
+                i = i + 1
+                continue
+
+            # Parameters ($1, :name)
+            if payload[i] == '$' or payload[i] == ':':
+                val start = i
+                i = i + 1
+                while i < payload.len() and (payload[i].is_alphanumeric() or payload[i] == '_'):
+                    i = i + 1
+                tokens = tokens.push(HighlightToken(
+                    start: start,
+                    end: i,
+                    kind: HighlightKind.Variable
+                ))
+                continue
+
+            # Numbers
+            if payload[i].is_digit():
+                val start = i
+                while i < payload.len() and (payload[i].is_digit() or payload[i] == '.'):
+                    i = i + 1
+                tokens = tokens.push(HighlightToken(
+                    start: start,
+                    end: i,
+                    kind: HighlightKind.Number
+                ))
+                continue
+
+            # Words (check for keywords)
+            if payload[i].is_alphabetic():
+                val start = i
+                while i < payload.len() and (payload[i].is_alphanumeric() or payload[i] == '_'):
+                    i = i + 1
+                val word = payload[start:i].upper()
+                if word in keywords:
+                    tokens = tokens.push(HighlightToken(
+                        start: start,
+                        end: i,
+                        kind: HighlightKind.Keyword
+                    ))
+                continue
+
+            # Operators
+            if payload[i] == '=' or payload[i] == '<' or payload[i] == '>' or payload[i] == '*':
+                tokens = tokens.push(HighlightToken(
+                    start: i,
+                    end: i + 1,
+                    kind: HighlightKind.Operator
+                ))
+
+            i = i + 1
+
+        tokens
+
+    fn completions(payload: text, cursor: i64) -> [Completion]:
+        # Basic SQL completions
+        [
+            Completion(label: "SELECT" + "", kind: CompletionKind.Keyword, detail: Some("Query data" + ""), insert_text: Some("SELECT " + ""), documentation: Some("Select columns from a table" + "")),
+            Completion(label: "FROM" + "", kind: CompletionKind.Keyword, detail: Some("Specify table" + ""), insert_text: Some("FROM " + ""), documentation: nil),
+            Completion(label: "WHERE" + "", kind: CompletionKind.Keyword, detail: Some("Filter results" + ""), insert_text: Some("WHERE " + ""), documentation: nil),
+            Completion(label: "INSERT INTO" + "", kind: CompletionKind.Snippet, detail: Some("Insert data" + ""), insert_text: Some("INSERT INTO $\{1:table} ($\{2:columns}) VALUES ($\{3:values})"), documentation: nil),
+            Completion(label: "UPDATE" + "", kind: CompletionKind.Keyword, detail: Some("Update data" + ""), insert_text: Some("UPDATE " + ""), documentation: nil),
+            Completion(label: "DELETE FROM" + "", kind: CompletionKind.Snippet, detail: Some("Delete data" + ""), insert_text: Some("DELETE FROM $\{1:table} WHERE $\{2:condition}"), documentation: nil)
+        ]
+
+# ============================================================================
+# Regex Block (re{})
+# ============================================================================
+
+struct RegexBlockDef(BlockDefinition):
+    r"""Regular expression block: compile regex patterns.
+
+    Features:
+    - Raw text capture
+    - Compile-time regex validation
+    - Regex syntax highlighting
+
+    Example:
+        val pattern = re{ ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ }
+        val ip = re{ \d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3} }
+    """
+
+impl RegexBlockDef:
+    fn kind() -> text:
+        "re"
+
+    fn parse_payload(payload: text, ctx: BlockContext) -> Result<BlockValue, BlockError>:
+        val trimmed = payload.trim()
+        if trimmed.is_empty():
+            return Err(BlockError.parse("Empty regex pattern"))
+
+        # Validate regex syntax
+        match validate_regex(trimmed):
+            case Ok(_):
+                Ok(BlockValue.Regex(RegexPattern(raw: trimmed, _handle: 0)))
+            case Err(msg):
+                Err(BlockError.parse("Invalid regex: {msg}"))
+
+    fn lexer_mode() -> LexerMode:
+        LexerMode.Raw
+
+    fn syntax_features() -> SyntaxFeatures:
+        SyntaxFeatures.default()
+
+    fn description() -> text:
+        "Compiled regular expression"
+
+    fn examples() -> [BlockExample]:
+        [
+            BlockExample(
+                code: "re\{ [a-z]+ }",
+                description: "Match lowercase letters",
+                output: nil
+            ),
+            BlockExample(
+                code: "re\{ ^\\d\{4}-\\d\{2}-\\d\{2}$ }",
+                description: "Match date format YYYY-MM-DD",
+                output: nil
+            ),
+            BlockExample(
+                code: "re\{ (?P<name>\\w+)@(?P<domain>\\w+\\.\\w+) }",
+                description: "Named capture groups",
+                output: nil
+            )
+        ]
+
+    fn eval_const(value: BlockValue) -> ConstValue?:
+        # Regex can be evaluated at compile time
+        match value:
+            case Regex(pattern):
+                Some(ConstValue.Regex(pattern.raw))
+            case _:
+                nil
+
+    fn result_type(value: BlockValue) -> Type?:
+        Some(Type(name: "Regex", args: []))
+
+    fn highlight(payload: text) -> [HighlightToken]:
+        var tokens: [HighlightToken] = []
+        var i = 0
+
+        while i < payload.len():
+            val c = payload[i]
+
+            # Character classes
+            if c == '[':
+                val start = i
+                i = i + 1
+                while i < payload.len() and payload[i] != ']':
+                    i = i + 1
+                tokens = tokens.push(HighlightToken(
+                    start: start,
+                    end: i + 1,
+                    kind: HighlightKind.String
+                ))
+                i = i + 1
+                continue
+
+            # Groups
+            if c == '(':
+                tokens = tokens.push(HighlightToken(
+                    start: i,
+                    end: i + 1,
+                    kind: HighlightKind.Keyword
+                ))
+                # Check for named group
+                if i + 2 < payload.len() and payload[i+1] == '?' and payload[i+2] == 'P':
+                    val group_start = i
+                    while i < payload.len() and payload[i] != '>':
+                        i = i + 1
+                    tokens = tokens.push(HighlightToken(
+                        start: group_start,
+                        end: i + 1,
+                        kind: HighlightKind.Variable
+                    ))
+                i = i + 1
+                continue
+
+            if c == ')':
+                tokens = tokens.push(HighlightToken(
+                    start: i,
+                    end: i + 1,
+                    kind: HighlightKind.Keyword
+                ))
+                i = i + 1
+                continue
+
+            # Quantifiers and anchors
+            if c == '*' or c == '+' or c == '?' or c == '{' or c == '}' or c == '^' or c == '$':
+                tokens = tokens.push(HighlightToken(
+                    start: i,
+                    end: i + 1,
+                    kind: HighlightKind.Operator
+                ))
+                i = i + 1
+                continue
+
+            # Escape sequences
+            if c == '\\' and i + 1 < payload.len():
+                tokens = tokens.push(HighlightToken(
+                    start: i,
+                    end: i + 2,
+                    kind: HighlightKind.Constant
+                ))
+                i = i + 2
+                continue
+
+            i = i + 1
+
+        tokens
+
+# ============================================================================
+# JSON Block (json{})
+# ============================================================================
+
+struct JsonBlockDef(BlockDefinition):
+    r"""JSON literal block: embed JSON data.
+
+    Features:
+    - Raw text capture
+    - JSON syntax validation
+    - Parsed to native Simple values
+
+    Example:
+        val config = json{
+            "name": "myapp",
+            "version": "1.0.0",
+            "features": ["logging", "metrics"]
+        }
+    """
+
+impl JsonBlockDef:
+    fn kind() -> text:
+        "json"
+
+    fn parse_payload(payload: text, ctx: BlockContext) -> Result<BlockValue, BlockError>:
+        val trimmed = payload.trim()
+        if trimmed.is_empty():
+            return Err(BlockError.parse("Empty JSON"))
+
+        # Parse JSON
+        match parse_json(trimmed):
+            case Ok(value):
+                Ok(BlockValue.Json(value))
+            case Err(msg):
+                Err(BlockError.parse("Invalid JSON: {msg}"))
+
+    fn lexer_mode() -> LexerMode:
+        LexerMode.Raw
+
+    fn syntax_features() -> SyntaxFeatures:
+        SyntaxFeatures.default()
+
+    fn description() -> text:
+        "JSON literal"
+
+    fn examples() -> [BlockExample]:
+        [
+            BlockExample(
+                code: "json\{ \{\"key\": \"value\"} }",
+                description: "Object literal",
+                output: nil
+            ),
+            BlockExample(
+                code: "json\{ [1, 2, 3] }",
+                description: "Array literal",
+                output: nil
+            )
+        ]
+
+    fn eval_const(value: BlockValue) -> ConstValue?:
+        match value:
+            case Json(jv):
+                Some(json_to_const(jv))
+            case _:
+                nil
+
+# ============================================================================
+# Markdown Block (md{})
+# ============================================================================
+
+struct MarkdownBlockDef(BlockDefinition):
+    r"""Markdown block: embed markdown text.
+
+    Features:
+    - Raw text capture
+    - Markdown syntax highlighting
+    - Can be rendered to HTML
+
+    Example:
+        val readme = md{
+            # My Project
+
+            A **simple** project with _markdown_ support.
+
+            - Item 1
+            - Item 2
+        }
+    """
+
+impl MarkdownBlockDef:
+    fn kind() -> text:
+        "md"
+
+    fn parse_payload(payload: text, ctx: BlockContext) -> Result<BlockValue, BlockError>:
+        # Markdown is captured as raw text
+        Ok(BlockValue.Raw(payload))
+
+    fn lexer_mode() -> LexerMode:
+        LexerMode.Raw
+
+    fn syntax_features() -> SyntaxFeatures:
+        SyntaxFeatures.default()
+
+    fn description() -> text:
+        "Markdown text"
+
+    fn examples() -> [BlockExample]:
+        [
+            BlockExample(
+                code: "md\{ # Heading }",
+                description: "Markdown heading",
+                output: nil
+            )
+        ]
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export MathBlockDef, LossBlockDef, NogradBlockDef
+export ShellBlockDef, SqlBlockDef, RegexBlockDef
+export JsonBlockDef, MarkdownBlockDef

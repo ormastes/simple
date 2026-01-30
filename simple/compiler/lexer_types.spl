@@ -1,0 +1,258 @@
+# Lexer Types - Token and Span Definitions
+#
+# This module contains core lexer type definitions:
+# - TokenKind: All token types (keywords, operators, literals, etc.)
+# - Span: Source location tracking
+# - Token: Token with kind and span
+#
+# The lexer implementation is in lexer.spl
+
+enum TokenKind:
+    # Literals
+    IntLit          # 42, 0x2A, 0b101010, 0o52
+    FloatLit        # 3.14, 1e10, 2.5e-3
+    StringLit       # "hello", 'hello', """multiline"""
+    RawStringLit    # r"raw\nstring"
+    BoolLit         # true, false
+    NilLit          # nil
+
+    # Identifiers and Keywords
+    Ident           # foo, bar, _private
+
+    # Keywords - Declarations
+    KwFn            # fn
+    KwVal           # val
+    KwVar           # var
+    KwStruct        # struct
+    KwClass         # class
+    KwEnum          # enum
+    KwTrait         # trait
+    KwImpl          # impl
+    KwType          # type
+    KwMod           # mod
+    KwPub           # pub
+    KwStatic        # static
+    KwMe            # me (mutable self method)
+    KwExtern        # extern
+
+    # Keywords - Control Flow
+    KwIf            # if
+    KwElse          # else
+    KwElif          # elif
+    KwMatch         # match
+    KwCase          # case
+    KwFor           # for
+    KwWhile         # while
+    KwLoop          # loop
+    KwBreak         # break
+    KwContinue      # continue
+    KwReturn        # return
+    KwYield         # yield
+    KwAwait         # await
+    KwAsync         # async
+
+    # Keywords - Expressions
+    KwIn            # in
+    KwIs            # is
+    KwAs            # as
+    KwNot           # not
+    KwAnd           # and
+    KwOr            # or
+    KwXor           # xor (bitwise XOR)
+    KwTry           # try
+    KwCatch         # catch
+    KwThrow         # throw
+    KwWith          # with
+
+    # Keywords - Imports
+    KwImport        # import
+    KwExport        # export
+    KwFrom          # from
+
+    # Keywords - Special
+    KwSelf          # self
+    KwSuper         # super
+    KwNone          # None
+    KwSome          # Some
+    KwOk            # Ok
+    KwErr           # Err
+    KwLoss          # loss (enters math mode)
+    KwNograd        # nograd (enters math mode)
+
+    # Operators - Arithmetic
+    Plus            # +
+    Minus           # -
+    Star            # *
+    Slash           # /
+    Percent         # %
+    StarStar        # **
+
+    # Operators - Comparison
+    Eq              # ==
+    NotEq           # !=
+    Lt              # <
+    Gt              # >
+    LtEq            # <=
+    GtEq            # >=
+
+    # Operators - Assignment
+    Assign          # =
+    PlusEq          # +=
+    MinusEq         # -=
+    StarEq          # *=
+    SlashEq         # /=
+    PercentEq       # %=
+
+    # Operators - Logical (symbols)
+    Ampersand       # &
+    Pipe            # |
+    Caret           # ^
+    Tilde           # ~
+    AmpAmp          # &&
+    PipePipe        # ||
+
+    # Operators - Special
+    Question        # ?
+    QuestionDot     # ?.
+    QuestionQuestion # ??
+    DotQuestion     # .?
+    Bang            # !
+    At              # @
+    Hash            # #
+    Dollar          # $
+    Backslash       # \
+    Transpose       # ' (postfix transpose in m{} only)
+
+    # Pipeline/Composition Operators
+    PipeForward     # |>
+    Compose         # >>
+    ComposeBack     # <<
+    Parallel        # //
+    LayerConnect    # ~>
+
+    # Delimiters
+    LParen          # (
+    RParen          # )
+    LBrace          # {
+    RBrace          # }
+    LBracket        # [
+    RBracket        # ]
+
+    # Punctuation
+    Comma           # ,
+    Colon           # :
+    ColonColon      # ::
+    Semicolon       # ;
+    Dot             # .
+    DotDot          # ..
+    DotDotEq        # ..=
+    DotPlus         # .+ (broadcast add)
+    DotMinus        # .- (broadcast sub)
+    DotStar         # .* (broadcast mul)
+    DotSlash        # ./ (broadcast div)
+    DotCaret        # .^ (broadcast pow)
+    Ellipsis        # ... (axis slicing)
+    Arrow           # ->
+    FatArrow        # =>
+    Underscore      # _
+
+    # Indentation
+    Newline         # End of line
+    Indent          # Increase in indentation
+    Dedent          # Decrease in indentation
+
+    # Special
+    Eof             # End of file
+    Error           # Lexer error
+    ImplicitMul     # Implicit multiplication (m{} only, e.g., 2x, Ax)
+    ArraySuffix     # Suffix after ]: ]f32, ]_f32_gpu, ]f32_tr_gpu
+
+    # Block Tokens (for user-definable blocks)
+    BlockStart      # Block keyword detected (e.g., "m", "loss", "sh", "sql")
+    BlockPayload    # Raw payload text (for Raw mode blocks)
+    BlockEnd        # Closing brace of block
+
+struct Span:
+    """Source location span."""
+    start: i64      # Start offset
+    end: i64        # End offset (exclusive)
+    line: i64       # Line number (1-based)
+    col: i64        # Column number (1-based)
+
+impl Span:
+    static fn new(start: i64, end: i64, line: i64, col: i64) -> Span:
+        Span(start: start, end: end, line: line, col: col)
+
+    static fn empty() -> Span:
+        Span(start: 0, end: 0, line: 0, col: 0)
+
+    fn len() -> i64:
+        self.end - self.start
+
+    fn merge(other: Span) -> Span:
+        val new_start = if self.start < other.start: self.start else: other.start
+        val new_end = if self.end > other.end: self.end else: other.end
+        val new_line = if self.line < other.line: self.line else: other.line
+        val new_col = if self.line <= other.line: self.col else: other.col
+        Span.new(new_start, new_end, new_line, new_col)
+
+struct Token:
+    """A token with its kind, span, and text."""
+    kind: TokenKind
+    span: Span
+    text: text
+
+impl Token:
+    static fn new(kind: TokenKind, span: Span, text: text) -> Token:
+        Token(kind: kind, span: span, text: text)
+
+    static fn eof(pos: i64, line: i64) -> Token:
+        Token(
+            kind: TokenKind.Eof,
+            span: Span.new(pos, pos, line, 0),
+            text: ""
+        )
+
+    fn is_keyword() -> bool:
+        match self.kind:
+            case KwFn | KwVal | KwVar | KwStruct | KwClass | KwEnum | KwTrait
+               | KwImpl | KwType | KwMod | KwPub | KwStatic | KwMe | KwExtern
+               | KwIf | KwElse | KwElif | KwMatch | KwCase | KwFor | KwWhile
+               | KwLoop | KwBreak | KwContinue | KwReturn | KwYield | KwAwait
+               | KwAsync | KwIn | KwIs | KwAs | KwNot | KwAnd | KwOr | KwXor
+               | KwTry | KwCatch | KwThrow | KwWith | KwImport | KwExport | KwFrom
+               | KwSelf | KwSuper | KwNone | KwSome | KwOk | KwErr
+               | KwLoss | KwNograd:
+                true
+            case _:
+                false
+
+    fn is_operator() -> bool:
+        match self.kind:
+            case Plus | Minus | Star | Slash | Percent | StarStar
+               | Eq | NotEq | Lt | Gt | LtEq | GtEq
+               | Assign | PlusEq | MinusEq | StarEq | SlashEq | PercentEq
+               | Ampersand | Pipe | Caret | Tilde | AmpAmp | PipePipe
+               | Question | QuestionDot | QuestionQuestion | DotQuestion
+               | Bang | At | Hash | Dollar | Backslash:
+                true
+            case _:
+                false
+
+    fn is_literal() -> bool:
+        match self.kind:
+            case IntLit | FloatLit | StringLit | RawStringLit | BoolLit | NilLit:
+                true
+            case _:
+                false
+
+# ============================================================================
+# Lexer
+# ============================================================================
+
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export TokenKind, Span, Token
