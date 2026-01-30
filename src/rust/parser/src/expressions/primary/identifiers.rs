@@ -18,6 +18,10 @@ impl<'a> Parser<'a> {
                 self.advance();
                 Ok(Expr::Identifier("self".to_string()))
             }
+            TokenKind::Super => {
+                self.advance();
+                Ok(Expr::Identifier("super".to_string()))
+            }
             TokenKind::Out => {
                 self.advance();
                 Ok(Expr::Identifier("out".to_string()))

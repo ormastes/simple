@@ -32,6 +32,9 @@ fn execute_function_body(
     impl_methods: &ImplMethods,
     wrap_async: bool,
 ) -> Result<Value, CompileError> {
+    // Stack overflow detection: push depth, auto-pop on drop
+    let _depth_guard = crate::interpreter::push_call_depth(&func.name)?;
+
     // Save current CONST_NAMES and IMMUTABLE_VARS, clear for function scope
     // Use std::mem::take to swap+clear in one step (avoids clone allocation)
     let saved_const_names = CONST_NAMES.with(|cell| std::mem::take(&mut *cell.borrow_mut()));

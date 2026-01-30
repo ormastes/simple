@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use super::super::{
     evaluate_expr, evaluate_method_call_with_self_update, exec_function, Control, Enums, ImplMethods,
-    BLANKET_IMPL_METHODS,
+    BLANKET_IMPL_METHODS, TRAIT_IMPLS,
 };
 use crate::interpreter::interpreter_call::{exec_function_with_values, exec_function_with_values_and_self};
 
@@ -278,6 +278,33 @@ fn find_method_and_exec(
                 Some((class, fields)),
             )?));
         }
+    }
+
+    // Check trait implementations - search TRAIT_IMPLS for this specific type
+    let trait_method: Option<FunctionDef> = TRAIT_IMPLS.with(|cell| {
+        let trait_impls = cell.borrow();
+        // Search through all trait implementations for this type
+        for ((trait_name, type_name), methods) in trait_impls.iter() {
+            if type_name == class {
+                if let Some(func) = methods.iter().find(|m| m.name == method_name) {
+                    return Some(func.clone());
+                }
+            }
+        }
+        None
+    });
+
+    if let Some(func) = trait_method {
+        return Ok(Some(exec_function(
+            &func,
+            args,
+            env,
+            functions,
+            classes,
+            enums,
+            impl_methods,
+            Some((class, fields)),
+        )?));
     }
 
     // Check blanket impls - search all registered blanket impls for the method

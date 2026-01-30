@@ -1479,6 +1479,14 @@ pub enum CompileError {
     #[error("execution limit exceeded: {message}")]
     ExecutionLimitExceeded { limit: u64, message: String },
 
+    /// Stack overflow (recursion depth exceeded)
+    #[error("stack overflow: recursion depth {depth} exceeded limit {limit} in function '{function_name}'")]
+    StackOverflow { depth: u64, limit: u64, function_name: String },
+
+    /// Execution timeout exceeded (wall-clock)
+    #[error("timeout: execution exceeded {timeout_secs} second limit")]
+    TimeoutExceeded { timeout_secs: u64 },
+
     // Rich variants with context (new API)
     #[error("io: {message}")]
     IoWithContext { message: String, context: ErrorContext },
@@ -1609,6 +1617,8 @@ impl CompileError {
             Self::InterruptedByUser => "interrupted: execution stopped by user request",
             Self::GhostError(msg) => msg,
             Self::ExecutionLimitExceeded { message, .. } => message,
+            Self::StackOverflow { function_name, .. } => function_name,
+            Self::TimeoutExceeded { .. } => "timeout exceeded",
         }
     }
 

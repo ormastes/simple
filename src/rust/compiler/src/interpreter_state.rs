@@ -92,6 +92,12 @@ pub(crate) static EXECUTION_LIMIT_ENABLED: AtomicBool = AtomicBool::new(true);
 #[cfg(not(debug_assertions))]
 pub(crate) static EXECUTION_LIMIT_ENABLED: AtomicBool = AtomicBool::new(false);
 
+// Stack overflow and timeout atomics are in simple-common for cross-crate access.
+pub(crate) use simple_common::fault_detection::RECURSION_DEPTH;
+pub(crate) use simple_common::fault_detection::MAX_RECURSION_DEPTH;
+pub(crate) use simple_common::fault_detection::STACK_OVERFLOW_DETECTION_ENABLED;
+pub(crate) use simple_common::fault_detection::TIMEOUT_EXCEEDED;
+
 thread_local! {
     pub(crate) static ACTOR_SPAWNER: ThreadSpawner = ThreadSpawner::new();
     pub(crate) static ACTOR_INBOX: RefCell<Option<Arc<Mutex<mpsc::Receiver<Message>>>>> = RefCell::new(None);
@@ -156,6 +162,21 @@ thread_local! {
     /// its methods are stored here. Key is the trait name, value is the list of methods.
     /// These methods apply to any type that doesn't have a concrete impl for the trait.
     pub(crate) static BLANKET_IMPL_METHODS: RefCell<HashMap<String, Vec<simple_parser::ast::FunctionDef>>> = RefCell::new(HashMap::new());
+
+    /// Trait implementations registry.
+    /// Key is (trait_name, type_name), value is the list of methods implementing the trait.
+    /// This enables trait method dispatch for types implementing traits.
+    pub(crate) static TRAIT_IMPLS: RefCell<HashMap<(String, String), Vec<simple_parser::ast::FunctionDef>>> = RefCell::new(HashMap::new());
+
+    /// Trait definitions registry.
+    /// Key is trait name, value is the trait definition.
+    /// This stores trait definitions for block-scoped trait dispatch.
+    pub(crate) static TRAITS: RefCell<HashMap<String, simple_parser::ast::TraitDef>> = RefCell::new(HashMap::new());
+
+    /// Mixin definitions registry.
+    /// Key is mixin name, value is the mixin definition.
+    /// Mixins are stateful traits (traits with fields) that can be composed into classes.
+    pub(crate) static MIXINS: RefCell<HashMap<String, simple_parser::ast::MixinDef>> = RefCell::new(HashMap::new());
 }
 
 //==============================================================================
@@ -346,6 +367,49 @@ pub fn is_execution_limit_enabled() -> bool {
 }
 
 //==============================================================================
+// Stack Overflow Detection
+//==============================================================================
+
+/// RAII guard that decrements recursion depth on drop.
+pub struct RecursionGuard;
+
+impl Drop for RecursionGuard {
+    #[inline]
+    fn drop(&mut self) {
+        RECURSION_DEPTH.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Push call depth and check for stack overflow.
+/// Returns a guard that auto-decrements on drop.
+#[inline]
+pub fn push_call_depth(function_name: &str) -> Result<RecursionGuard, crate::error::CompileError> {
+    if !is_stack_overflow_detection_enabled() {
+        return Ok(RecursionGuard);
+    }
+    let depth = RECURSION_DEPTH.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let limit = MAX_RECURSION_DEPTH.load(std::sync::atomic::Ordering::Relaxed) as usize;
+    if depth >= limit {
+        // Undo the increment since we're about to error
+        RECURSION_DEPTH.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        return Err(crate::error::CompileError::StackOverflow {
+            depth: depth as u64,
+            limit: limit as u64,
+            function_name: function_name.to_string(),
+        });
+    }
+    Ok(RecursionGuard)
+}
+
+// Delegate to simple_common::fault_detection for cross-crate compatibility.
+pub use simple_common::fault_detection::set_stack_overflow_detection_enabled;
+pub use simple_common::fault_detection::is_stack_overflow_detection_enabled;
+pub use simple_common::fault_detection::set_max_recursion_depth;
+pub use simple_common::fault_detection::reset_recursion_depth;
+pub use simple_common::fault_detection::is_timeout_exceeded;
+pub use simple_common::fault_detection::reset_timeout;
+
+//==============================================================================
 // Configuration Management
 //==============================================================================
 
@@ -490,4 +554,17 @@ pub fn clear_interpreter_state() {
 
     // Clear blanket impl methods
     BLANKET_IMPL_METHODS.with(|cell| cell.borrow_mut().clear());
+
+    // Clear trait implementations
+    TRAIT_IMPLS.with(|cell| cell.borrow_mut().clear());
+
+    // Clear trait definitions
+    TRAITS.with(|cell| cell.borrow_mut().clear());
+
+    // Clear mixin definitions
+    MIXINS.with(|cell| cell.borrow_mut().clear());
+
+    // Reset fault detection counters
+    reset_recursion_depth();
+    reset_timeout();
 }

@@ -1,0 +1,187 @@
+"""
+# Fault Detection Specification
+
+**Feature IDs:** #FAULT-001 to #FAULT-010
+**Category:** Runtime | Safety
+**Difficulty:** 3/5
+**Status:** Implemented
+
+## Overview
+
+The Simple runtime includes fault detection for stack overflow, timeout,
+and execution limits. All features are toggleable via CLI flags or FFI calls.
+
+## Syntax
+
+```simple
+extern fn rt_fault_set_stack_overflow_detection(enabled: bool)
+extern fn rt_fault_set_max_recursion_depth(depth: i64)
+extern fn rt_fault_set_timeout(secs: i64)
+extern fn rt_fault_set_execution_limit(limit: i64)
+```
+
+## Key Concepts
+
+| Feature | Default | Purpose |
+|---------|---------|---------|
+| Stack overflow detection | debug=on | Recursion depth check |
+| Max recursion depth | 1000 | Max call depth before error |
+| Timeout | 0 (off) | Wall-clock timeout in seconds |
+| Execution limit | 10000000 | Instruction count limit |
+"""
+
+use std.spec.*
+
+extern fn rt_fault_set_stack_overflow_detection(enabled: bool)
+extern fn rt_fault_set_max_recursion_depth(depth: i64)
+extern fn rt_fault_set_timeout(secs: i64)
+extern fn rt_fault_set_execution_limit(limit: i64)
+
+# ============================================================================
+# Helper functions
+# ============================================================================
+
+fn add_up(n: i64) -> i64:
+    """Iterative sum to avoid deep recursion."""
+    var total = 0
+    for i in 0..n:
+        total = total + 1
+    total
+
+fn shallow_recurse(n: i64) -> i64:
+    """Very shallow recursion (safe for test context)."""
+    if n <= 0:
+        return 0
+    shallow_recurse(n - 1) + 1
+
+# ============================================================================
+# Test Group 1: Stack Overflow Detection Configuration
+# ============================================================================
+
+describe "Fault Detection - Stack Overflow":
+    """
+    ## Stack Overflow Detection
+
+    Tests that stack overflow detection can be configured via FFI
+    and that code within limits succeeds.
+    """
+
+    context "when detection is enabled":
+        it "allows shallow recursion within default limit":
+            rt_fault_set_stack_overflow_detection(true)
+            rt_fault_set_max_recursion_depth(1000)
+            val result = shallow_recurse(5)
+            expect(result).to(eq(5))
+
+        it "allows zero recursion":
+            rt_fault_set_stack_overflow_detection(true)
+            val result = shallow_recurse(0)
+            expect(result).to(eq(0))
+
+        it "allows single recursion step":
+            rt_fault_set_stack_overflow_detection(true)
+            val result = shallow_recurse(1)
+            expect(result).to(eq(1))
+
+    context "when detection is disabled":
+        it "allows code when disabled":
+            rt_fault_set_stack_overflow_detection(false)
+            val result = shallow_recurse(5)
+            expect(result).to(eq(5))
+            # Re-enable for other tests
+            rt_fault_set_stack_overflow_detection(true)
+
+    context "when configuring depth limit":
+        it "accepts small depth limit and succeeds within it":
+            rt_fault_set_max_recursion_depth(100)
+            val result = shallow_recurse(3)
+            expect(result).to(eq(3))
+            # Restore default
+            rt_fault_set_max_recursion_depth(1000)
+
+        it "accepts large depth limit":
+            rt_fault_set_max_recursion_depth(50000)
+            val result = add_up(10)
+            expect(result).to(eq(10))
+            # Restore default
+            rt_fault_set_max_recursion_depth(1000)
+
+# ============================================================================
+# Test Group 2: Timeout Configuration
+# ============================================================================
+
+describe "Fault Detection - Timeout":
+    """
+    ## Timeout Configuration
+
+    Tests that timeout can be configured via FFI.
+    Timeout=0 means disabled.
+    """
+
+    it "can disable timeout":
+        rt_fault_set_timeout(0)
+        val result = add_up(10)
+        expect(result).to(eq(10))
+
+    it "can set a large timeout without affecting fast code":
+        rt_fault_set_timeout(60)
+        val result = add_up(10)
+        expect(result).to(eq(10))
+        # Disable timeout
+        rt_fault_set_timeout(0)
+
+# ============================================================================
+# Test Group 3: Execution Limit Configuration
+# ============================================================================
+
+describe "Fault Detection - Execution Limit":
+    """
+    ## Execution Limit Configuration
+
+    Tests that execution limit (instruction count) can be configured.
+    """
+
+    it "can set execution limit":
+        rt_fault_set_execution_limit(1000000)
+        val result = add_up(10)
+        expect(result).to(eq(10))
+
+    it "can disable execution limit":
+        rt_fault_set_execution_limit(0)
+        val result = add_up(10)
+        expect(result).to(eq(10))
+
+    it "can set large execution limit":
+        rt_fault_set_execution_limit(100000000)
+        val result = add_up(50)
+        expect(result).to(eq(50))
+
+# ============================================================================
+# Test Group 4: Combined Configuration
+# ============================================================================
+
+describe "Fault Detection - Combined":
+    """
+    ## Combined Configuration
+
+    Tests that multiple fault detection features can be configured together.
+    """
+
+    it "configures all features simultaneously":
+        rt_fault_set_stack_overflow_detection(true)
+        rt_fault_set_max_recursion_depth(500)
+        rt_fault_set_timeout(30)
+        rt_fault_set_execution_limit(5000000)
+        val result = add_up(20)
+        expect(result).to(eq(20))
+        # Cleanup
+        rt_fault_set_timeout(0)
+        rt_fault_set_max_recursion_depth(1000)
+
+    it "re-enables detection after disabling":
+        rt_fault_set_stack_overflow_detection(false)
+        val r1 = add_up(10)
+        expect(r1).to(eq(10))
+        rt_fault_set_stack_overflow_detection(true)
+        val r2 = add_up(10)
+        expect(r2).to(eq(10))

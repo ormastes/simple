@@ -10,4 +10,5 @@ pub const TAG_SPECIAL: u64 = 0b011;
 pub const SPECIAL_NIL: u64 = 0;
 pub const SPECIAL_TRUE: u64 = 1;
 pub const SPECIAL_FALSE: u64 = 2;
-// Symbol IDs start at 3
+pub const SPECIAL_ERROR: u64 = 3;
+// Symbol IDs start at 4

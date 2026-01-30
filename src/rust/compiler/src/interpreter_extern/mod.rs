@@ -640,6 +640,12 @@ pub(crate) fn call_extern_function(
         // Explicit run command
         "rt_cli_handle_run" => cli::rt_cli_handle_run(&evaluated),
 
+        // Fault detection configuration
+        "rt_fault_set_stack_overflow_detection" => cli::rt_fault_set_stack_overflow_detection(&evaluated),
+        "rt_fault_set_max_recursion_depth" => cli::rt_fault_set_max_recursion_depth(&evaluated),
+        "rt_fault_set_timeout" => cli::rt_fault_set_timeout(&evaluated),
+        "rt_fault_set_execution_limit" => cli::rt_fault_set_execution_limit(&evaluated),
+
         // SDN operations
         "rt_sdn_version" => sdn::rt_sdn_version(&evaluated),
         "rt_sdn_check" => sdn::rt_sdn_check(&evaluated),
@@ -800,7 +806,7 @@ pub(crate) fn call_extern_function(
         "rt_sandbox_get_fs_mode" => sandbox::rt_sandbox_get_fs_mode_fn(&evaluated),
 
         // ====================================================================
-        // FFI Value Operations (14 functions)
+        // FFI Value Operations (17 functions)
         // ====================================================================
         // Value creation
         "rt_value_int" => ffi_value::rt_value_int_fn(&evaluated),
@@ -821,6 +827,11 @@ pub(crate) fn call_extern_function(
         "rt_value_is_bool" => ffi_value::rt_value_is_bool_fn(&evaluated),
         "rt_value_is_heap" => ffi_value::rt_value_is_heap_fn(&evaluated),
         "rt_value_type_tag" => ffi_value::rt_value_type_tag_fn(&evaluated),
+
+        // Error handling
+        "rt_function_not_found" => ffi_value::rt_function_not_found_fn(&evaluated),
+        "rt_method_not_found" => ffi_value::rt_method_not_found_fn(&evaluated),
+        "rt_is_error" => ffi_value::rt_is_error_fn(&evaluated),
 
         // ====================================================================
         // FFI Array Operations (7 functions)

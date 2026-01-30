@@ -19,7 +19,7 @@ pub(super) struct TraitImplRegistry {
 }
 
 /// Extract type name from a Type AST node
-pub(super) fn get_type_name(ty: &Type) -> String {
+pub(crate) fn get_type_name(ty: &Type) -> String {
     match ty {
         Type::Simple(name) => name.clone(),
         Type::Generic { name, .. } => name.clone(),

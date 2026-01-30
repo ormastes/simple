@@ -54,6 +54,10 @@ pub enum StartupPhase {
     PrefetchWait,
     /// File execution
     FileExecution,
+    /// Stack overflow detection init
+    StackOverflowInit,
+    /// Timeout watchdog init
+    TimeoutInit,
     /// Total startup time
     Total,
 }
@@ -76,6 +80,8 @@ impl StartupPhase {
             Self::SandboxSetup => "Sandbox Setup",
             Self::PrefetchWait => "Prefetch Wait",
             Self::FileExecution => "File Execution",
+            Self::StackOverflowInit => "Stack Overflow Detection Init",
+            Self::TimeoutInit => "Timeout Watchdog Init",
             Self::Total => "Total Startup",
         }
     }

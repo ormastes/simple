@@ -50,12 +50,60 @@ impl fmt::Display for GcLogEvent {
 
 type LogSink = Arc<dyn Fn(GcLogEvent) + Send + Sync>;
 
+/// Tracks heap size after GC collections to detect possible memory leaks.
+/// If heap grows >10% over N consecutive cycles, emits a warning.
+struct LeakDetector {
+    enabled: bool,
+    post_gc_sizes: Vec<usize>,
+    window_size: usize,
+}
+
+impl LeakDetector {
+    fn new() -> Self {
+        let enabled = std::env::var("SIMPLE_LEAK_DETECTION")
+            .map(|v| matches!(v.to_lowercase().as_str(), "1" | "true" | "yes"))
+            .unwrap_or(false);
+        Self {
+            enabled,
+            post_gc_sizes: Vec::new(),
+            window_size: 10,
+        }
+    }
+
+    fn record_post_gc(&mut self, heap_bytes: usize) {
+        if !self.enabled {
+            return;
+        }
+        self.post_gc_sizes.push(heap_bytes);
+        if self.post_gc_sizes.len() >= self.window_size {
+            let first = self.post_gc_sizes[self.post_gc_sizes.len() - self.window_size];
+            let last = heap_bytes;
+            if first > 0 && last > first {
+                let growth = (last - first) as f64 / first as f64;
+                if growth > 0.10 {
+                    tracing::warn!(
+                        first_bytes = first,
+                        last_bytes = last,
+                        growth_pct = format!("{:.1}%", growth * 100.0),
+                        window = self.window_size,
+                        "Possible memory leak: heap grew {:.1}% over {} GC cycles",
+                        growth * 100.0,
+                        self.window_size,
+                    );
+                }
+            }
+        }
+    }
+}
+
 /// Thin wrapper around the Abfall GC with optional structured logging and memory limits.
 pub struct GcRuntime {
     ctx: GcContext,
     log: Option<LogSink>,
     /// Memory tracker for enforcing limits
     memory_tracker: MemoryTracker,
+    /// Leak detector (opt-in via SIMPLE_LEAK_DETECTION=1)
+    leak_detector: std::cell::RefCell<LeakDetector>,
 }
 
 impl Default for GcRuntime {
@@ -82,6 +130,7 @@ impl GcRuntime {
             ctx,
             log,
             memory_tracker: MemoryTracker::with_config(memory_config),
+            leak_detector: std::cell::RefCell::new(LeakDetector::new()),
         }
     }
 
@@ -197,6 +246,9 @@ impl GcRuntime {
         if freed > 0 {
             self.memory_tracker.deallocate(freed);
         }
+
+        // Leak detection: record post-GC heap size
+        self.leak_detector.borrow_mut().record_post_gc(after);
 
         after
     }

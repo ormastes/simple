@@ -71,6 +71,7 @@ pub mod value;
 pub mod value_bridge;
 pub mod verification_checker;
 pub mod weaving;
+pub mod watchdog;
 pub mod web_compiler;
 
 #[cfg(test)]
@@ -99,7 +100,13 @@ pub use interpreter::{
     check_execution_limit, evaluate_module, get_execution_count, get_interpreter_args, is_debug_mode,
     is_execution_limit_enabled, reset_execution_count, set_debug_mode, set_execution_limit,
     set_execution_limit_enabled, set_interpreter_args, set_macro_trace,
+    // Stack overflow detection
+    is_stack_overflow_detection_enabled, set_stack_overflow_detection_enabled,
+    set_max_recursion_depth, reset_recursion_depth,
+    // Timeout detection
+    is_timeout_exceeded, reset_timeout,
 };
+pub use watchdog::{start_watchdog, stop_watchdog};
 pub use ir_export::{export_ast, export_hir, export_mir, ExportResult};
 pub use layout_recorder::{
     clear_recording, export_layout_config, export_layout_sdn, is_recording, merge_with_config, record_function_call,

@@ -730,6 +730,11 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_cli_handle_lock", &[I64], &[I64]),
     // Explicit run command
     RuntimeFuncSpec::new("rt_cli_handle_run", &[I64, I8, I8], &[I64]),
+    // Fault detection configuration
+    RuntimeFuncSpec::new("rt_fault_set_stack_overflow_detection", &[I8], &[]),
+    RuntimeFuncSpec::new("rt_fault_set_max_recursion_depth", &[I64], &[]),
+    RuntimeFuncSpec::new("rt_fault_set_timeout", &[I64], &[]),
+    RuntimeFuncSpec::new("rt_fault_set_execution_limit", &[I64], &[]),
     // Print utilities
     RuntimeFuncSpec::new("rt_cli_print", &[I64], &[]),
     RuntimeFuncSpec::new("rt_cli_println", &[I64], &[]),

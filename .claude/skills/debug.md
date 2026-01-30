@@ -147,6 +147,72 @@ RUST_LOG=debug cargo test -p simple-driver test_name -- --nocapture
 ./target/debug/simple --debug simple/std_lib/test/unit/core/test_spec.spl
 ```
 
+## Fault Detection
+
+### Stack Overflow Detection
+```bash
+# Enabled by default in debug builds, disabled in release
+SIMPLE_STACK_OVERFLOW_DETECTION=1 ./target/debug/simple_old file.spl
+
+# Set custom recursion depth limit (default: 1000)
+SIMPLE_MAX_RECURSION_DEPTH=500 ./target/debug/simple_old file.spl
+```
+- Implemented in `interpreter_state.rs` (AtomicUsize + RAII guard)
+- ~2 atomic ops per function call (Relaxed ordering)
+- Error: `StackOverflow { depth, limit, function_name }`
+
+### Timeout Detection (Wall-Clock)
+```bash
+# Set execution timeout in seconds (0 = disabled, default)
+SIMPLE_TIMEOUT_SECONDS=30 ./target/debug/simple_old file.spl
+
+# Short timeout for testing infinite loops
+SIMPLE_TIMEOUT_SECONDS=1 ./target/debug/simple_old loop_test.spl
+```
+- Watchdog thread checks every 100ms via `watchdog.rs`
+- Zero overhead on fast path (single AtomicBool load, Relaxed)
+- Checked at loop back-edges alongside `check_interrupt!()` and `check_execution_limit!()`
+
+### Crash Detection (catch_unwind)
+- `run_file_with_args` and `run_code` in `cli/basic.rs` wrap execution in `catch_unwind`
+- Panics produce: `fatal: interpreter crashed: <message>` (exit code 101)
+- Panic hook in `cli/init.rs` logs backtrace to stderr and tracing
+
+### Memory Leak Detection
+```bash
+# Enable heap growth heuristic (opt-in)
+SIMPLE_LEAK_DETECTION=1 ./target/debug/simple_old file.spl
+```
+- Tracks post-GC heap size over 10 cycles
+- Warns via `tracing::warn!` if heap grows >10% over window
+- Zero overhead when disabled; runs only in GC collection path
+
+### Execution Limit (existing)
+```bash
+# Set instruction count limit (default: 10M, 0 = disabled)
+SIMPLE_EXECUTION_LIMIT=1000000 ./target/debug/simple_old file.spl
+SIMPLE_EXECUTION_LIMIT_ENABLED=false ./target/debug/simple_old file.spl
+```
+
+### Sanitizer Support
+```bash
+# Address Sanitizer (requires nightly)
+RUSTFLAGS="-Zsanitizer=address" cargo +nightly test -p simple-driver
+
+# Valgrind
+valgrind --leak-check=full ./target/debug/simple_old file.spl
+```
+
+### Env Var Summary
+| Variable | Default | Purpose |
+|---|---|---|
+| `SIMPLE_STACK_OVERFLOW_DETECTION` | debug=on, release=off | Recursion depth check |
+| `SIMPLE_MAX_RECURSION_DEPTH` | 1000 | Max call depth |
+| `SIMPLE_TIMEOUT_SECONDS` | 0 (off) | Wall-clock timeout |
+| `SIMPLE_EXECUTION_LIMIT` | 10000000 | Instruction count limit |
+| `SIMPLE_EXECUTION_LIMIT_ENABLED` | debug=on, release=off | Enable instruction limit |
+| `SIMPLE_LEAK_DETECTION` | false | Heap growth heuristic |
+
 ## Common Issues
 
 ### "Falling back to interpreter"
@@ -156,6 +222,7 @@ RUST_LOG=debug cargo test -p simple-driver test_name -- --nocapture
 ### Memory Issues
 - Enable GC logging: `--gc-log`
 - Check for leaks with `SIMPLE_LOG=simple_runtime::memory=debug`
+- Enable leak detection: `SIMPLE_LEAK_DETECTION=1`
 
 ### Type Errors
 - Export HIR: `--emit-hir` to see inferred types

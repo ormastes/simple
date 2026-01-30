@@ -511,6 +511,142 @@ impl TestRunRecord {
             true
         }
     }
+
+    /// Validate this test run record for integrity violations
+    pub fn validate_record(&self) -> crate::unified_db::IntegrityReport {
+        use crate::unified_db::{IntegrityReport, IntegrityViolation, ViolationType};
+
+        let mut report = IntegrityReport::new(&self.run_id);
+
+        // 1. Check for stale runs (running >2 hours)
+        if self.status == TestRunStatus::Running && self.is_stale(2) {
+            report.add_violation(
+                IntegrityViolation::new(
+                    ViolationType::StaleRunning,
+                    "status",
+                    format!("Run has been 'running' for >2 hours (started: {})", self.start_time)
+                )
+                .with_expected("Completed or Crashed")
+                .with_actual("Running")
+            );
+            report = report.mark_auto_fixable();
+        }
+
+        // 2. Check for dead process
+        if self.status == TestRunStatus::Running && !self.is_process_alive() {
+            report.add_violation(
+                IntegrityViolation::new(
+                    ViolationType::DeadProcess,
+                    "pid",
+                    format!("Process {} is not running but status is 'running'", self.pid)
+                )
+                .with_expected("Running process or Crashed status")
+                .with_actual(format!("Dead process, status={:?}", self.status))
+            );
+            report = report.mark_auto_fixable();
+        }
+
+        // 3. Timestamp consistency
+        if !self.end_time.is_empty() {
+            match (
+                chrono::DateTime::parse_from_rfc3339(&self.start_time),
+                chrono::DateTime::parse_from_rfc3339(&self.end_time)
+            ) {
+                (Ok(start), Ok(end)) => {
+                    if end <= start {
+                        report.add_violation(
+                            IntegrityViolation::new(
+                                ViolationType::TimestampInconsistent,
+                                "end_time",
+                                "End time is before or equal to start time"
+                            )
+                            .with_expected(format!("After {}", self.start_time))
+                            .with_actual(self.end_time.clone())
+                        );
+                    }
+
+                    if start > chrono::Utc::now() {
+                        report.add_violation(
+                            IntegrityViolation::new(
+                                ViolationType::FutureTimestamp,
+                                "start_time",
+                                "Start time is in the future"
+                            )
+                            .with_expected("Past or present")
+                            .with_actual(self.start_time.clone())
+                        );
+                    }
+                }
+                (Err(e), _) => {
+                    report.add_violation(
+                        IntegrityViolation::new(
+                            ViolationType::InvalidValue,
+                            "start_time",
+                            format!("Invalid timestamp format: {}", e)
+                        )
+                        .with_actual(self.start_time.clone())
+                    );
+                }
+                (_, Err(e)) => {
+                    report.add_violation(
+                        IntegrityViolation::new(
+                            ViolationType::InvalidValue,
+                            "end_time",
+                            format!("Invalid timestamp format: {}", e)
+                        )
+                        .with_actual(self.end_time.clone())
+                    );
+                }
+            }
+        }
+
+        // 4. Count consistency
+        let sum = self.passed + self.failed + self.crashed + self.timed_out;
+        if sum > self.test_count {
+            report.add_violation(
+                IntegrityViolation::new(
+                    ViolationType::CountInconsistent,
+                    "test_count",
+                    format!("Sum of results ({}) exceeds total test count ({})", sum, self.test_count)
+                )
+                .with_expected(format!("≥ {}", sum))
+                .with_actual(self.test_count.to_string())
+            );
+        }
+
+        // 5. Status consistency
+        match self.status {
+            TestRunStatus::Completed | TestRunStatus::Crashed |
+            TestRunStatus::TimedOut | TestRunStatus::Interrupted => {
+                if self.end_time.is_empty() {
+                    report.add_violation(
+                        IntegrityViolation::new(
+                            ViolationType::StatusInconsistent,
+                            "end_time",
+                            format!("Status is {:?} but end_time is empty", self.status)
+                        )
+                        .with_expected("Non-empty timestamp")
+                        .with_actual("(empty)")
+                    );
+                }
+            }
+            TestRunStatus::Running => {
+                if !self.end_time.is_empty() {
+                    report.add_violation(
+                        IntegrityViolation::new(
+                            ViolationType::StatusInconsistent,
+                            "end_time",
+                            "Status is Running but end_time is set"
+                        )
+                        .with_expected("(empty)")
+                        .with_actual(self.end_time.clone())
+                    );
+                }
+            }
+        }
+
+        report
+    }
 }
 
 /// Implement Record trait for TestRunRecord
@@ -569,6 +705,10 @@ impl Record for TestRunRecord {
             self.crashed.to_string(),
             self.timed_out.to_string(),
         ]
+    }
+
+    fn validate(&self) -> crate::unified_db::IntegrityReport {
+        self.validate_record()
     }
 }
 
@@ -1733,5 +1873,72 @@ mod tests {
         history.failure_rate_pct = 0.0;
 
         assert!(!detect_flaky_test(&history));
+    }
+
+    #[test]
+    fn test_validate_stale_run() {
+        use crate::unified_db::ViolationType;
+
+        let mut run = TestRunRecord::new_running();
+        run.start_time = chrono::Utc::now()
+            .checked_sub_signed(chrono::Duration::hours(3))
+            .unwrap()
+            .to_rfc3339();
+
+        let report = run.validate_record();
+        assert!(report.has_violations());
+        assert_eq!(report.violations[0].violation_type, ViolationType::StaleRunning);
+        assert!(report.auto_fixable);
+    }
+
+    #[test]
+    fn test_validate_timestamp_inconsistent() {
+        use crate::unified_db::ViolationType;
+
+        let mut run = TestRunRecord::new_running();
+        run.status = TestRunStatus::Completed;
+        run.start_time = "2026-01-30T10:00:00Z".to_string();
+        run.end_time = "2026-01-30T09:00:00Z".to_string();
+
+        let report = run.validate_record();
+        assert!(report.has_violations());
+        assert_eq!(report.violations[0].violation_type, ViolationType::TimestampInconsistent);
+    }
+
+    #[test]
+    fn test_validate_count_overflow() {
+        use crate::unified_db::ViolationType;
+
+        let mut run = TestRunRecord::new_running();
+        run.test_count = 10;
+        run.passed = 8;
+        run.failed = 3;  // 8 + 3 = 11 > 10
+
+        let report = run.validate_record();
+        assert!(report.has_violations());
+        assert_eq!(report.violations[0].violation_type, ViolationType::CountInconsistent);
+    }
+
+    #[test]
+    fn test_validate_valid_run() {
+        let run = TestRunRecord::new_running();
+
+        let report = run.validate_record();
+        assert!(!report.has_violations());
+    }
+
+    #[test]
+    fn test_validate_status_inconsistent_missing_end_time() {
+        use crate::unified_db::ViolationType;
+
+        let mut run = TestRunRecord::new_running();
+        run.status = TestRunStatus::Completed;
+        run.end_time = "".to_string();  // Missing end_time
+
+        let report = run.validate_record();
+        assert!(report.has_violations());
+        let has_status_violation = report.violations.iter()
+            .any(|v| v.violation_type == ViolationType::StatusInconsistent);
+        assert!(has_status_violation);
     }
 }
