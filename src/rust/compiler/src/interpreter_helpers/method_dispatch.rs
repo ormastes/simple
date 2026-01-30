@@ -4,6 +4,7 @@ use crate::error::{codes, CompileError, ErrorContext};
 use crate::value::{Env, OptionVariant, ResultVariant, Value, METHOD_MISSING};
 use simple_parser::ast::{ClassDef, EnumDef, Expr, FunctionDef};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use super::super::{
     evaluate_expr, evaluate_method_call_with_self_update, exec_function, Control, Enums, ImplMethods,
@@ -241,7 +242,7 @@ fn find_method_and_exec(
     method_name: &str,
     args: &[simple_parser::ast::Argument],
     class: &str,
-    fields: &HashMap<String, Value>,
+    fields: &Arc<HashMap<String, Value>>,
     env: &mut Env,
     functions: &mut HashMap<String, FunctionDef>,
     classes: &mut HashMap<String, ClassDef>,
@@ -315,7 +316,7 @@ pub(crate) fn find_and_exec_method<'a>(
     method: &str,
     args: &[simple_parser::ast::Argument],
     class: &str,
-    fields: &HashMap<String, Value>,
+    fields: &Arc<HashMap<String, Value>>,
     env: &mut Env,
     functions: &mut HashMap<String, FunctionDef>,
     classes: &mut HashMap<String, ClassDef>,
