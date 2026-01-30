@@ -8,7 +8,7 @@ use simple_runtime::value::RuntimeValue;
 
 // Import actual FFI functions from runtime
 use simple_runtime::value::{
-    rt_string_new, rt_string_concat, rt_string_len,
+    rt_string_new, rt_string_concat, rt_string_len, rt_string_eq,
 };
 
 // ============================================================================
@@ -71,3 +71,26 @@ pub fn rt_string_len_fn(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Int(len))
 }
 
+/// Check if two strings are equal
+pub fn rt_string_eq_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let a_raw = args.get(0)
+        .ok_or_else(|| CompileError::semantic_with_context(
+            "rt_string_eq expects 2 arguments".to_string(),
+            ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
+        ))?
+        .as_int()?;
+
+    let b_raw = args.get(1)
+        .ok_or_else(|| CompileError::semantic_with_context(
+            "rt_string_eq expects 2 arguments".to_string(),
+            ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
+        ))?
+        .as_int()?;
+
+    let a = RuntimeValue::from_raw(a_raw as u64);
+    let b = RuntimeValue::from_raw(b_raw as u64);
+
+    let result = rt_string_eq(a, b);
+    // rt_string_eq returns i64 (1 for true, 0 for false)
+    Ok(Value::Bool(result != 0))
+}

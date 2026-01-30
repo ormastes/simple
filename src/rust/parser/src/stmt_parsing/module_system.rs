@@ -542,8 +542,53 @@ impl<'a> Parser<'a> {
                     segments.push(self.expect_path_segment()?);
                 }
 
-                // If we get here, we have a module path but no glob or other target
-                // This is an error - export needs a target
+                // We have a dotted path like `export module.Item` or `export module.sub.Item`
+                // Treat last segment as the exported item, rest as module path
+                // Also handle comma-separated: `export module.Item, module.Item2`
+                if segments.len() >= 2 {
+                    let last_item = segments.pop().unwrap();
+                    let module_path = ModulePath::new(segments.clone());
+                    let mut targets = vec![ImportTarget::Single(last_item)];
+
+                    // Check for comma-separated additional exports
+                    while self.check(&TokenKind::Comma) {
+                        self.advance(); // consume ','
+                        // Parse next dotted path or bare identifier
+                        let next_item = self.expect_path_segment()?;
+                        if self.check(&TokenKind::Dot) {
+                            // Skip through module path to get to the item
+                            // (assumes same module prefix for simplicity)
+                            let mut _skip_segs = vec![next_item];
+                            while self.check(&TokenKind::Dot) {
+                                self.advance(); // consume '.'
+                                _skip_segs.push(self.expect_path_segment()?);
+                            }
+                            // Last segment is the item
+                            targets.push(ImportTarget::Single(_skip_segs.pop().unwrap()));
+                        } else {
+                            targets.push(ImportTarget::Single(next_item));
+                        }
+                    }
+
+                    let target = if targets.len() == 1 {
+                        targets.into_iter().next().unwrap()
+                    } else {
+                        ImportTarget::Group(targets)
+                    };
+
+                    return Ok(Node::ExportUseStmt(ExportUseStmt {
+                        span: Span::new(
+                            start_span.start,
+                            self.previous.span.end,
+                            start_span.line,
+                            start_span.column,
+                        ),
+                        path: module_path,
+                        target,
+                    }));
+                }
+
+                // Single segment with no glob — shouldn't happen but error gracefully
                 return Err(ParseError::syntax_error_with_span(
                     "Expected '.*', '{...}', or specific item after module path in export statement".to_string(),
                     self.current.span,

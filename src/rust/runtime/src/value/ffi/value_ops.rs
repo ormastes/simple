@@ -95,6 +95,12 @@ pub extern "C" fn rt_value_is_heap(v: RuntimeValue) -> bool {
     v.is_heap()
 }
 
+/// Get the type tag of a RuntimeValue (FFI-safe)
+#[no_mangle]
+pub extern "C" fn rt_value_type_tag(v: RuntimeValue) -> u8 {
+    v.tag() as u8
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
