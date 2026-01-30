@@ -167,29 +167,41 @@ fn extract_string_array(arr: RuntimeValue) -> Vec<String> {
     result
 }
 
-/// Find the simple_old binary for subprocess calls
-/// Looks in: 1) SIMPLE_OLD_PATH env var, 2) same directory as current exe, 3) PATH
+/// Find the simple runtime binary for subprocess calls
+/// Looks for simple_runtime first (new name), then simple_old (backward compat).
+/// Search order: 1) SIMPLE_RUNTIME_PATH/SIMPLE_OLD_PATH env var, 2) same directory as current exe, 3) dev paths, 4) PATH
 fn find_simple_old() -> Option<std::path::PathBuf> {
-    // 1. Check environment variable
-    if let Ok(path) = std::env::var("SIMPLE_OLD_PATH") {
-        let p = std::path::PathBuf::from(&path);
-        if p.exists() {
-            return Some(p);
+    // 1. Check environment variables (new name first, then legacy)
+    for env_var in ["SIMPLE_RUNTIME_PATH", "SIMPLE_OLD_PATH"] {
+        if let Ok(path) = std::env::var(env_var) {
+            let p = std::path::PathBuf::from(&path);
+            if p.exists() {
+                return Some(p);
+            }
         }
     }
 
-    // 2. Check relative to current executable
+    // 2. Check relative to current executable (new name first, then legacy)
     if let Ok(exe_path) = std::env::current_exe() {
         if let Some(exe_dir) = exe_path.parent() {
-            let simple_old = exe_dir.join("simple_old");
-            if simple_old.exists() {
-                return Some(simple_old);
+            for name in ["simple_runtime", "simple_old"] {
+                let bin = exe_dir.join(name);
+                if bin.exists() {
+                    return Some(bin);
+                }
             }
         }
     }
 
     // 3. Check common development paths
-    let dev_paths = ["target/debug/simple_old", "target/release/simple_old", "./simple_old"];
+    let dev_paths = [
+        "target/debug/simple_runtime",
+        "target/release/simple_runtime",
+        "target/debug/simple_old",
+        "target/release/simple_old",
+        "./simple_runtime",
+        "./simple_old",
+    ];
     for path in dev_paths {
         let p = std::path::PathBuf::from(path);
         if p.exists() {
@@ -197,12 +209,14 @@ fn find_simple_old() -> Option<std::path::PathBuf> {
         }
     }
 
-    // 4. Check PATH using which-style lookup
-    if let Ok(output) = Command::new("which").arg("simple_old").output() {
-        if output.status.success() {
-            let path_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !path_str.is_empty() {
-                return Some(std::path::PathBuf::from(path_str));
+    // 4. Check PATH using which-style lookup (new name first, then legacy)
+    for name in ["simple_runtime", "simple_old"] {
+        if let Ok(output) = Command::new("which").arg(name).output() {
+            if output.status.success() {
+                let path_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !path_str.is_empty() {
+                    return Some(std::path::PathBuf::from(path_str));
+                }
             }
         }
     }

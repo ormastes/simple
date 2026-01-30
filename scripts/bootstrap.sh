@@ -18,7 +18,14 @@ set -e
 cd "$(dirname "$0")/.."
 
 BOOTSTRAP_DIR="target/bootstrap"
-SIMPLE_OLD="./target/debug/simple_old"
+# Find runtime binary (new name first, then legacy)
+if [ -f "./target/debug/simple_runtime" ]; then
+    SIMPLE_OLD="./target/debug/simple_runtime"
+elif [ -f "./target/debug/simple_old" ]; then
+    SIMPLE_OLD="./target/debug/simple_old"
+else
+    SIMPLE_OLD="./target/debug/simple_runtime"
+fi
 
 # Parse arguments
 STAGE=""

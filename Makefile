@@ -41,7 +41,7 @@ test:
 	cargo test --doc --workspace
 	@echo ""
 	@echo "=== Running Simple/SSpec Tests ==="
-	./target/debug/simple test
+	./target/debug/simple_runtime test
 
 # Run Rust tests only (faster, no Simple/SSpec)
 test-rust:
@@ -549,14 +549,14 @@ arch-test-visualize:
 # Validate TODO format (requires TODO scanning to be implemented)
 check-todos:
 	@echo "Validating TODO format..."
-	@./target/debug/simple todo-scan --parallel --validate || (echo "ERROR: Invalid TODO format found" && exit 1)
+	@./target/debug/simple_runtime todo-scan --parallel --validate || (echo "ERROR: Invalid TODO format found" && exit 1)
 	@echo "✓ All TODOs are properly formatted"
 
 # Generate TODO documentation (parallel mode for 7.8x speedup)
 gen-todos:
 	@echo "Updating TODO database..."
-	@./target/debug/simple todo-scan --parallel
-	@./target/debug/simple todo-gen
+	@./target/debug/simple_runtime todo-scan --parallel
+	@./target/debug/simple_runtime todo-gen
 	@echo "✓ Generated doc/TODO.md"
 
 # Generate and show recent TODOs
@@ -574,30 +574,30 @@ todos-p0:
 
 # Show dashboard summary
 dashboard:
-	@./target/debug/simple dashboard status
+	@./target/debug/simple_runtime dashboard status
 
 # Collect fresh metrics
 dashboard-collect:
-	@./target/debug/simple dashboard collect --mode=full
+	@./target/debug/simple_runtime dashboard collect --mode=full
 
 # Create daily snapshot
 dashboard-snapshot:
-	@./target/debug/simple dashboard snapshot
-	@./target/debug/simple dashboard cleanup
+	@./target/debug/simple_runtime dashboard snapshot
+	@./target/debug/simple_runtime dashboard cleanup
 
 # Show trend analysis
 dashboard-trends:
-	@./target/debug/simple dashboard trends --monthly
+	@./target/debug/simple_runtime dashboard trends --monthly
 
 # Check for critical alerts
 dashboard-alerts:
-	@./target/debug/simple dashboard check-alerts
+	@./target/debug/simple_runtime dashboard check-alerts
 
 # ============================================================================
 # Bootstrap (Multi-Stage Self-Compilation)
 # ============================================================================
 #
-# Builds verified bootstrap pipeline: simple_old → simple_new1 → simple_new2 → simple_new3
+# Builds verified bootstrap pipeline: simple_runtime → simple_new1 → simple_new2 → simple_new3
 # Verification: simple_new2 and simple_new3 must be bitwise identical
 #
 # Usage:
@@ -610,7 +610,7 @@ dashboard-alerts:
 
 BOOTSTRAP_DIR := target/bootstrap
 
-.PHONY: bootstrap bootstrap-stage1 bootstrap-stage2 bootstrap-stage3 bootstrap-verify bootstrap-clean
+.PHONY: bootstrap bootstrap-stage1 bootstrap-stage2 bootstrap-stage3 bootstrap-verify bootstrap-clean bootstrap-promote bootstrap-from-stable
 
 bootstrap: bootstrap-clean bootstrap-stage1 bootstrap-stage2 bootstrap-stage3 bootstrap-verify
 	@echo ""
@@ -622,9 +622,9 @@ bootstrap: bootstrap-clean bootstrap-stage1 bootstrap-stage2 bootstrap-stage3 bo
 BOOTSTRAP_STAGE1_NAME ?= simple_new1
 
 bootstrap-stage1:
-	@echo "=== Stage 1: simple_old -> $(BOOTSTRAP_STAGE1_NAME) ==="
+	@echo "=== Stage 1: simple_runtime -> $(BOOTSTRAP_STAGE1_NAME) ==="
 	@mkdir -p $(BOOTSTRAP_DIR)
-	./target/debug/simple_old compile simple/compiler/main.spl -o $(BOOTSTRAP_DIR)/$(BOOTSTRAP_STAGE1_NAME) --native
+	./target/debug/simple_runtime compile simple/compiler/main.spl -o $(BOOTSTRAP_DIR)/$(BOOTSTRAP_STAGE1_NAME) --native
 	@chmod +x $(BOOTSTRAP_DIR)/$(BOOTSTRAP_STAGE1_NAME)
 	@echo "Stage 1 complete: $(BOOTSTRAP_DIR)/$(BOOTSTRAP_STAGE1_NAME)"
 
@@ -660,6 +660,40 @@ bootstrap-verify:
 bootstrap-clean:
 	@echo "Cleaning bootstrap directory..."
 	rm -rf $(BOOTSTRAP_DIR)
+
+bootstrap-promote: bootstrap
+	@echo "Promoting verified compiler as stable..."
+	@mkdir -p target/stable
+	cp $(BOOTSTRAP_DIR)/simple_new2 target/stable/simple
+	@chmod +x target/stable/simple
+	@HASH2=$$(sha256sum $(BOOTSTRAP_DIR)/simple_new2 | cut -d' ' -f1); \
+	HASH3=$$(sha256sum $(BOOTSTRAP_DIR)/simple_new3 | cut -d' ' -f1); \
+	REV=$$(jj log -r @ --no-graph -T 'change_id' 2>/dev/null || echo "unknown"); \
+	DATE=$$(date +%Y-%m-%d); \
+	printf "# Simple Compiler Bootstrap Metadata\n#\n# Updated by make bootstrap-promote.\n\nbootstrap:\n  version: %s\n  stage2_hash: %s\n  stage3_hash: %s\n  verified: true\n  source_revision: %s\n" \
+		"$$DATE" "$$HASH2" "$$HASH3" "$$REV" > bootstrap.sdn
+	@echo "Stable binary: target/stable/simple"
+	@echo "Bootstrap metadata: bootstrap.sdn"
+
+bootstrap-from-stable:
+	@echo "=== Rebuilding from stable compiler ==="
+	@if [ ! -f target/stable/simple ]; then \
+		echo "Error: No stable compiler at target/stable/simple"; \
+		echo "Run 'make bootstrap-promote' first."; \
+		exit 1; \
+	fi
+	@mkdir -p $(BOOTSTRAP_DIR)
+	target/stable/simple -c -o $(BOOTSTRAP_DIR)/simple_from_stable simple/compiler/main.spl
+	@chmod +x $(BOOTSTRAP_DIR)/simple_from_stable
+	@HASH_STABLE=$$(sha256sum target/stable/simple | cut -d' ' -f1); \
+	HASH_REBUILT=$$(sha256sum $(BOOTSTRAP_DIR)/simple_from_stable | cut -d' ' -f1); \
+	echo "  stable hash:  $$HASH_STABLE"; \
+	echo "  rebuilt hash: $$HASH_REBUILT"; \
+	if [ "$$HASH_STABLE" = "$$HASH_REBUILT" ]; then \
+		echo "SUCCESS: Rebuild matches stable binary!"; \
+	else \
+		echo "NOTE: Hashes differ (expected if source changed since promote)."; \
+	fi
 
 # ============================================================================
 # Help
@@ -739,6 +773,8 @@ help:
 	@echo "  make bootstrap-stage3 - Build simple_new3 using simple_new2"
 	@echo "  make bootstrap-verify - Verify simple_new2 == simple_new3"
 	@echo "  make bootstrap-clean  - Clean bootstrap artifacts"
+	@echo "  make bootstrap-promote    - Promote verified compiler as stable"
+	@echo "  make bootstrap-from-stable - Rebuild from stable compiler"
 	@echo ""
 	@echo "Other:"
 	@echo "  make install-tools - Install required tools"
