@@ -82,10 +82,7 @@ impl PrettyPrinter {
         self.output.clear();
         self.indent_level = 0;
 
-        // Print doc comment if present
-        if let Some(ref doc) = module.doc {
-            self.print_doc_comment(doc);
-        }
+        // Module doesn't have a doc field, so skip doc comment
 
         // Print module items with appropriate spacing
         for (i, item) in module.items.iter().enumerate() {
@@ -146,7 +143,7 @@ impl PrettyPrinter {
 
     fn print_function(&mut self, func: &FunctionDef) {
         // Doc comment
-        if let Some(ref doc) = func.doc {
+        if let Some(ref doc) = func.doc_comment {
             self.print_doc_comment(doc);
         }
 
@@ -166,18 +163,22 @@ impl PrettyPrinter {
             self.write("static ");
         }
 
-        // Function keyword
-        self.write("fn ");
+        // Function keyword (or `me` for mutable methods)
+        if func.is_me_method {
+            self.write("me ");
+        } else {
+            self.write("fn ");
+        }
         self.write(&func.name);
 
-        // Type parameters
-        if !func.type_params.is_empty() {
+        // Type parameters (generic_params are Vec<String>)
+        if !func.generic_params.is_empty() {
             self.write("<");
-            for (i, tp) in func.type_params.iter().enumerate() {
+            for (i, param) in func.generic_params.iter().enumerate() {
                 if i > 0 {
                     self.write(", ");
                 }
-                self.print_type_param(tp);
+                self.write(param);
             }
             self.write(">");
         }
@@ -214,7 +215,7 @@ impl PrettyPrinter {
     }
 
     fn print_struct(&mut self, struct_def: &StructDef) {
-        if let Some(ref doc) = struct_def.doc {
+        if let Some(ref doc) = struct_def.doc_comment {
             self.print_doc_comment(doc);
         }
 
@@ -222,14 +223,14 @@ impl PrettyPrinter {
         self.write("struct ");
         self.write(&struct_def.name);
 
-        // Type parameters
-        if !struct_def.type_params.is_empty() {
+        // Type parameters (generic_params are Vec<String>)
+        if !struct_def.generic_params.is_empty() {
             self.write("<");
-            for (i, tp) in struct_def.type_params.iter().enumerate() {
+            for (i, param) in struct_def.generic_params.iter().enumerate() {
                 if i > 0 {
                     self.write(", ");
                 }
-                self.print_type_param(tp);
+                self.write(param);
             }
             self.write(">");
         }
@@ -240,13 +241,13 @@ impl PrettyPrinter {
         // Fields
         self.indent_inc();
         for field in &struct_def.fields {
-            self.print_struct_field(field);
+            self.print_field(field);
         }
         self.indent_dec();
     }
 
     fn print_class(&mut self, class_def: &ClassDef) {
-        if let Some(ref doc) = class_def.doc {
+        if let Some(ref doc) = class_def.doc_comment {
             self.print_doc_comment(doc);
         }
 
@@ -254,14 +255,14 @@ impl PrettyPrinter {
         self.write("class ");
         self.write(&class_def.name);
 
-        // Type parameters
-        if !class_def.type_params.is_empty() {
+        // Type parameters (generic_params are Vec<String>)
+        if !class_def.generic_params.is_empty() {
             self.write("<");
-            for (i, tp) in class_def.type_params.iter().enumerate() {
+            for (i, param) in class_def.generic_params.iter().enumerate() {
                 if i > 0 {
                     self.write(", ");
                 }
-                self.print_type_param(tp);
+                self.write(param);
             }
             self.write(">");
         }
@@ -274,7 +275,7 @@ impl PrettyPrinter {
 
         // Fields first
         for field in &class_def.fields {
-            self.print_struct_field(field);
+            self.print_field(field);
         }
 
         // Methods
@@ -292,7 +293,7 @@ impl PrettyPrinter {
     }
 
     fn print_enum(&mut self, enum_def: &EnumDef) {
-        if let Some(ref doc) = enum_def.doc {
+        if let Some(ref doc) = enum_def.doc_comment {
             self.print_doc_comment(doc);
         }
 
@@ -300,14 +301,14 @@ impl PrettyPrinter {
         self.write("enum ");
         self.write(&enum_def.name);
 
-        // Type parameters
-        if !enum_def.type_params.is_empty() {
+        // Type parameters (generic_params are Vec<String>)
+        if !enum_def.generic_params.is_empty() {
             self.write("<");
-            for (i, tp) in enum_def.type_params.iter().enumerate() {
+            for (i, param) in enum_def.generic_params.iter().enumerate() {
                 if i > 0 {
                     self.write(", ");
                 }
-                self.print_type_param(tp);
+                self.write(param);
             }
             self.write(">");
         }
@@ -324,7 +325,7 @@ impl PrettyPrinter {
     }
 
     fn print_trait(&mut self, trait_def: &TraitDef) {
-        if let Some(ref doc) = trait_def.doc {
+        if let Some(ref doc) = trait_def.doc_comment {
             self.print_doc_comment(doc);
         }
 
@@ -332,14 +333,14 @@ impl PrettyPrinter {
         self.write("trait ");
         self.write(&trait_def.name);
 
-        // Type parameters
-        if !trait_def.type_params.is_empty() {
+        // Type parameters (generic_params are Vec<String>)
+        if !trait_def.generic_params.is_empty() {
             self.write("<");
-            for (i, tp) in trait_def.type_params.iter().enumerate() {
+            for (i, param) in trait_def.generic_params.iter().enumerate() {
                 if i > 0 {
                     self.write(", ");
                 }
-                self.print_type_param(tp);
+                self.write(param);
             }
             self.write(">");
         }
@@ -360,14 +361,14 @@ impl PrettyPrinter {
         self.write_indent();
         self.write("impl ");
 
-        // Type parameters
-        if !impl_block.type_params.is_empty() {
+        // Type parameters (generic_params are Vec<String>)
+        if !impl_block.generic_params.is_empty() {
             self.write("<");
-            for (i, tp) in impl_block.type_params.iter().enumerate() {
+            for (i, param) in impl_block.generic_params.iter().enumerate() {
                 if i > 0 {
                     self.write(", ");
                 }
-                self.print_type_param(tp);
+                self.write(param);
             }
             self.write("> ");
         }
@@ -589,11 +590,11 @@ impl PrettyPrinter {
         self.output.push('\n');
     }
 
-    fn print_struct_field(&mut self, field: &StructField) {
+    fn print_field(&mut self, field: &Field) {
         self.write_indent();
         self.write(&field.name);
         self.write(": ");
-        self.print_type(&field.field_type);
+        self.print_type(&field.ty);
         self.output.push('\n');
     }
 
@@ -622,18 +623,8 @@ impl PrettyPrinter {
         self.output.push('\n');
     }
 
-    fn print_type_param(&mut self, tp: &TypeParameter) {
-        self.write(&tp.name);
-        if !tp.bounds.is_empty() {
-            self.write(": ");
-            for (i, bound) in tp.bounds.iter().enumerate() {
-                if i > 0 {
-                    self.write(" + ");
-                }
-                self.print_type(bound);
-            }
-        }
-    }
+    // Type parameters are now just strings, so this method is not needed
+    // We print them directly in the calling code
 
     fn print_param(&mut self, param: &Parameter) {
         self.write(&param.name);
@@ -650,7 +641,7 @@ impl PrettyPrinter {
     fn print_pattern(&mut self, pattern: &Pattern) {
         match pattern {
             Pattern::Identifier(name, _) => self.write(name),
-            Pattern::Wildcard(_) => self.write("_"),
+            Pattern::Wildcard => self.write("_"),
             Pattern::Literal(expr) => self.print_expr(expr),
             Pattern::Tuple(patterns, _) => {
                 self.write("(");
