@@ -92,9 +92,10 @@ impl Default for NativeBinaryOptions {
             strip: false,
             pie: true, // Default to PIE for security (codegen generates PIC)
             shared: false,
-            // Link system libraries (runtime is linked as static archive directly)
+            // Link system libraries and Simple runtime
             // pthread, dl, m, gcc_s are commonly needed by Rust code on Linux
             // gcc_s provides _Unwind_Resume for exception handling
+            // simple_compiler provides Cranelift FFI and other runtime functions
             #[cfg(target_os = "linux")]
             libraries: vec![
                 "c".to_string(),
@@ -102,6 +103,7 @@ impl Default for NativeBinaryOptions {
                 "dl".to_string(),
                 "m".to_string(),
                 "gcc_s".to_string(), // Unwinding support
+                "simple_compiler".to_string(), // Runtime FFI functions
             ],
             #[cfg(not(target_os = "linux"))]
             libraries: vec!["c".to_string()],
