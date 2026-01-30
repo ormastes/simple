@@ -5,6 +5,11 @@
 
 use simple_sdn.*
 
+# Public exports
+export FileLock
+export atomic_update_file, atomic_read_file, atomic_write_file_locked
+export acquire_lock, release_lock, cleanup_lock_files
+
 # FFI for file operations
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_read_text(path: text) -> text
@@ -42,7 +47,7 @@ impl FileLock:
 #       # Modify content here
 #       content + "new line\n"
 #   )
-pub fn atomic_update_file(
+fn atomic_update_file(
     path: text,
     updater: fn(text) -> text
 ) -> Result<(), text>:
@@ -77,7 +82,7 @@ pub fn atomic_update_file(
 # Atomic read with file locking
 #
 # Ensures consistent reads by acquiring a lock during read.
-pub fn atomic_read_file(path: text) -> Result<text, text>:
+fn atomic_read_file(path: text) -> Result<text, text>:
     # Acquire lock
     val lock_opt = FileLock.acquire(path, 10)
     if not lock_opt.?:
@@ -100,7 +105,7 @@ pub fn atomic_read_file(path: text) -> Result<text, text>:
 # Atomic write with file locking
 #
 # Combines locking with atomic write for maximum safety.
-pub fn atomic_write_file_locked(path: text, content: text) -> Result<(), text>:
+fn atomic_write_file_locked(path: text, content: text) -> Result<(), text>:
     # Acquire lock
     val lock_opt = FileLock.acquire(path, 10)
     if not lock_opt.?:
@@ -122,30 +127,22 @@ pub fn atomic_write_file_locked(path: text, content: text) -> Result<(), text>:
 
 # ===== Public Locking API for Test Compatibility =====
 
-pub fn acquire_lock(path: text, timeout_secs: i64) -> Result<FileLock, text>:
-    """Acquire file lock with timeout (wrapper for FileLock.acquire)"""
+fn acquire_lock(path: text, timeout_secs: i64) -> Result<FileLock, text>:
     match FileLock.acquire(path, timeout_secs):
-        Some(lock) => Ok(lock)
-        None => Err("Failed to acquire lock: timeout after {timeout_secs}s")
+        Some(lock) : Ok(lock)
+        None : Err("Failed to acquire lock: timeout after {timeout_secs}s")
 
-pub fn release_lock(path: text) -> bool:
-    """Release lock file manually"""
+fn release_lock(path: text) -> bool:
     val lock_path = path + ".lock"
     rt_file_unlock(lock_path)
 
-pub fn cleanup_lock_files() -> bool:
-    """Remove stale .lock files from crashed processes"""
-    try:
-        val patterns = ["*.lock", "doc/**/*.lock", "tmp/**/*.lock"]
-        for pattern in patterns:
-            val files = rt_dir_glob(pattern)
-            for file in files:
-                # Check if lock is stale (process not running)
-                # For now, just remove all .lock files (safe on startup)
-                rt_file_remove(file)
-        return true
-    catch:
-        return false
+fn cleanup_lock_files() -> bool:
+    val patterns = ["*.lock", "doc/**/*.lock", "tmp/**/*.lock"]
+    for pattern in patterns:
+        val files = rt_dir_glob(pattern)
+        for file in files:
+            rt_file_remove(file)
+    true
 
 # ===== External FFI for Lock Cleanup =====
 
