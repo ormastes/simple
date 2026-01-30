@@ -655,7 +655,7 @@ impl<'a> Parser<'a> {
                 || self.check(&TokenKind::At)
                 || self.check(&TokenKind::Hash)
                 || self.check(&TokenKind::Static)
-                || (self.check(&TokenKind::Pub) && (self.peek_is(&TokenKind::Fn) || self.peek_is(&TokenKind::Async) || self.peek_is(&TokenKind::Me)))
+                || (self.check(&TokenKind::Pub) && (self.peek_is(&TokenKind::Fn) || self.peek_is(&TokenKind::Async) || self.peek_is(&TokenKind::Me) || self.peek_is(&TokenKind::Static)))
             {
                 let start_span = self.current.span;
 
@@ -686,13 +686,28 @@ impl<'a> Parser<'a> {
                     false
                 };
 
+                // Handle optional `async` keyword after static (for static async methods)
+                let is_async_after_static = if is_static && self.check(&TokenKind::Async) {
+                    self.advance();
+                    true
+                } else {
+                    false
+                };
+
                 // Parse the function (with decorators already parsed)
-                let item = if decorators.is_empty() && !_is_pub {
+                // Only use parse_item() for non-static, non-decorated methods
+                let mut item = if decorators.is_empty() && !_is_pub && !is_static {
                     self.parse_item()?
                 } else {
-                    // Parse function directly with decorators
+                    // Parse function directly with decorators or for static methods
                     self.parse_function_with_decorators(decorators)?
                 };
+                // Add async effect if method is async (either async fn or static async fn)
+                if is_async_after_static {
+                    if let Node::Function(ref mut f) = item {
+                        f.effects.push(crate::ast::Effect::Async);
+                    }
+                }
                 if let Node::Function(mut f) = item {
                     // Set the is_static flag on the function
                     f.is_static = is_static;

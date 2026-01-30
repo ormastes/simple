@@ -372,6 +372,11 @@ impl<'a> Parser<'a> {
                 if is_async {
                     self.advance();
                 }
+                // Handle static methods in trait blocks
+                let is_static = self.check(&TokenKind::Static);
+                if is_static {
+                    self.advance();
+                }
                 // Handle 'me' (mutable method) keyword before fn
                 let is_me = self.check(&TokenKind::Me);
                 if is_me {
@@ -388,6 +393,7 @@ impl<'a> Parser<'a> {
                     self.parse_trait_method()?
                 };
                 method.decorators = decorators;
+                method.is_static = is_static;
                 if is_async {
                     method.effects.push(crate::ast::Effect::Async);
                 }

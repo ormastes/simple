@@ -40,9 +40,14 @@ pub(crate) fn evaluate_call(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
-    // Try built-in functions first
+    // Priority 1: Check extern functions first (before builtins)
     if let Expr::Identifier(name) = callee.as_ref() {
-        // Try built-ins
+        let is_extern = EXTERN_FUNCTIONS.with(|cell| cell.borrow().contains(name));
+        if is_extern {
+            return call_extern_function(name, args, env, functions, classes, enums, impl_methods);
+        }
+
+        // Priority 2: Try built-ins
         if let Some(result) = builtins::eval_builtin(name, args, env, functions, classes, enums, impl_methods)? {
             return Ok(result);
         }
@@ -119,12 +124,6 @@ pub(crate) fn evaluate_call(
         // Check regular functions
         if let Some(func) = functions.get(name).cloned() {
             return core::exec_function(&func, args, env, functions, classes, enums, impl_methods, None);
-        }
-
-        // Check extern functions
-        let is_extern = EXTERN_FUNCTIONS.with(|cell| cell.borrow().contains(name));
-        if is_extern {
-            return call_extern_function(name, args, env, functions, classes, enums, impl_methods);
         }
 
         // Check class constructors (e.g., MyClass() instantiation)
