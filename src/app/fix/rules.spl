@@ -1,0 +1,713 @@
+# EasyFix Shared Rules Module
+# Each rule: fn check_<rule>(source: String, file: String) -> List<EasyFix>
+#
+# Rule IDs:
+#   L:print_in_test_spec         — Replace print() with expect() in test specs
+#   L:unnamed_duplicate_typed_args — Add distinct param names for duplicate types
+#   L:resource_leak              — Wrap resource in `with` block
+#   L:sspec_missing_docstrings   — Add template docstring to describe/context
+#   L:sspec_manual_assertions    — Replace manual if/fail with expect()
+#   L:non_exhaustive_match       — Add missing match arms with todo()
+#   E:typo_suggestion            — Fix misspelled identifiers (Levenshtein)
+#   E:parser_contextual_keyword  — Fix contextual keyword syntax
+#   E:type_mismatch_coercion     — Insert type coercion (.to_string() etc.)
+
+# ============================================================================
+# Data types (re-exported from fix/main.spl or lint/main.spl)
+# These are expected to be defined in the importing module.
+# ============================================================================
+
+# Forward declarations for types used by rules.
+# The caller must provide FixConfidence, EasyFix, Replacement types.
+
+# ============================================================================
+# Helper: compute byte offset for a given line/column (1-based)
+# ============================================================================
+
+fn byte_offset_of(source: String, target_line: Int, target_col: Int) -> Int:
+    val lines = source.split("\n")
+    var offset = 0
+    var line_num = 1
+    for line in lines:
+        if line_num == target_line:
+            return offset + target_col - 1
+        offset = offset + line.len() + 1  # +1 for \n
+        line_num = line_num + 1
+    offset
+
+fn line_start_offset(source: String, target_line: Int) -> Int:
+    byte_offset_of(source, target_line, 1)
+
+fn line_end_offset(source: String, target_line: Int) -> Int:
+    val lines = source.split("\n")
+    var offset = 0
+    var line_num = 1
+    for line in lines:
+        if line_num == target_line:
+            return offset + line.len()
+        offset = offset + line.len() + 1
+        line_num = line_num + 1
+    offset
+
+# ============================================================================
+# Rule 1: print_in_test_spec
+# Detects print(...) calls in _spec.spl files and suggests expect().
+# Confidence: Likely
+# ============================================================================
+
+fn check_print_in_test_spec(source: String, file: String) -> List<EasyFix>:
+    var fixes: List<EasyFix> = []
+
+    # Only applies to spec files
+    if not file.ends_with("_spec.spl"):
+        return fixes
+
+    val lines = source.split("\n")
+    var line_num = 0
+    var byte_offset = 0
+
+    for line in lines:
+        line_num = line_num + 1
+        val trimmed = line.trim()
+
+        # Detect bare print(...) inside test context
+        if trimmed.starts_with("print(") or trimmed.starts_with("print "):
+            val indent = line.len() - trimmed.len()
+            val start = byte_offset + indent
+            val end = byte_offset + line.len()
+
+            # Extract the argument
+            var arg = ""
+            if trimmed.starts_with("print("):
+                # Find matching closing paren
+                val inner = trimmed.slice(6)
+                if inner.ends_with(")"):
+                    arg = inner.slice(0, inner.len() - 1)
+                else:
+                    arg = inner
+
+            if arg.len() > 0:
+                var fix = EasyFix.create(
+                    id: "L:print_in_test_spec:{line_num}",
+                    description: "replace print() with expect() in test spec",
+                    confidence: FixConfidence.Likely
+                )
+                val spaces = " ".repeat(indent)
+                fix.add_replacement(Replacement.create(
+                    file: file,
+                    start: start,
+                    end: end,
+                    line: line_num,
+                    column: indent + 1,
+                    new_text: "{spaces}expect({arg}).to_be_truthy()"
+                ))
+                fixes.push(fix)
+
+        byte_offset = byte_offset + line.len() + 1
+
+    fixes
+
+# ============================================================================
+# Rule 2: unnamed_duplicate_typed_args
+# Detects fn signatures with duplicate types that lack distinct names.
+# Confidence: Uncertain
+# ============================================================================
+
+fn check_unnamed_duplicate_typed_args(source: String, file: String) -> List<EasyFix>:
+    var fixes: List<EasyFix> = []
+    val lines = source.split("\n")
+    var line_num = 0
+    var byte_offset = 0
+
+    for line in lines:
+        line_num = line_num + 1
+        val trimmed = line.trim()
+
+        # Simple heuristic: detect fn with params like (Int, Int) without names
+        if (trimmed.starts_with("fn ") or trimmed.starts_with("me ") or trimmed.starts_with("static fn ")) and trimmed.contains("("):
+            val paren_start = trimmed.find("(")
+            val paren_end = trimmed.find(")")
+            if paren_start >= 0 and paren_end > paren_start:
+                val params_str = trimmed.slice(paren_start + 1, paren_end)
+                val params = params_str.split(",")
+
+                # Check if any param is just a type (no colon = no name)
+                var type_only_params: List<String> = []
+                var has_unnamed = false
+                for param in params:
+                    val p = param.trim()
+                    if p.len() > 0 and not p.contains(":"):
+                        type_only_params.push(p)
+                        has_unnamed = true
+
+                # Check for duplicates among type-only params
+                if has_unnamed and type_only_params.len() >= 2:
+                    var seen: Dict<String, Int> = {}
+                    var has_dup = false
+                    for t in type_only_params:
+                        if seen.contains_key(t):
+                            has_dup = true
+                        else:
+                            seen[t] = 1
+
+                    if has_dup:
+                        # Build a replacement with named params
+                        val indent = line.len() - trimmed.len()
+                        val abs_paren_start = byte_offset + indent + paren_start + 1
+                        val abs_paren_end = byte_offset + indent + paren_end
+
+                        var new_params: List<String> = []
+                        var counters: Dict<String, Int> = {}
+                        for param in params:
+                            val p = param.trim()
+                            if p.len() > 0 and not p.contains(":"):
+                                if not counters.contains_key(p):
+                                    counters[p] = 0
+                                counters[p] = counters[p] + 1
+                                val name = "{p.lower()}{counters[p]}"
+                                new_params.push("{name}: {p}")
+                            else:
+                                new_params.push(p)
+
+                        val new_params_str = new_params.join(", ")
+
+                        var fix = EasyFix.create(
+                            id: "L:unnamed_duplicate_typed_args:{line_num}",
+                            description: "add distinct parameter names for duplicate types",
+                            confidence: FixConfidence.Uncertain
+                        )
+                        fix.add_replacement(Replacement.create(
+                            file: file,
+                            start: abs_paren_start,
+                            end: abs_paren_end,
+                            line: line_num,
+                            column: paren_start + 2,
+                            new_text: new_params_str
+                        ))
+                        fixes.push(fix)
+
+        byte_offset = byte_offset + line.len() + 1
+
+    fixes
+
+# ============================================================================
+# Rule 3: resource_leak
+# Detects open()/connect() calls not wrapped in `with` blocks.
+# Confidence: Uncertain
+# ============================================================================
+
+fn check_resource_leak(source: String, file: String) -> List<EasyFix>:
+    var fixes: List<EasyFix> = []
+    val lines = source.split("\n")
+    var line_num = 0
+    var byte_offset = 0
+
+    for line in lines:
+        line_num = line_num + 1
+        val trimmed = line.trim()
+
+        # Detect val x = open(...) or val x = connect(...) not inside with
+        val is_resource_open = trimmed.contains("= open(") or trimmed.contains("= connect(") or trimmed.contains("= File.open(")
+        if is_resource_open and trimmed.starts_with("val ") and not trimmed.starts_with("with"):
+            # Check previous lines for `with` block context (simple heuristic)
+            val indent = line.len() - trimmed.len()
+
+            # Extract variable name and expression
+            val eq_pos = trimmed.find("=")
+            if eq_pos > 4:
+                val var_name = trimmed.slice(4, eq_pos).trim()
+                val expr = trimmed.slice(eq_pos + 1).trim()
+
+                val start = byte_offset + indent
+                val end = byte_offset + line.len()
+
+                val spaces = " ".repeat(indent)
+                val inner_spaces = " ".repeat(indent + 4)
+                val new_text = "{spaces}with {var_name} = {expr}:\n{inner_spaces}# TODO: use {var_name} here"
+
+                var fix = EasyFix.create(
+                    id: "L:resource_leak:{line_num}",
+                    description: "wrap resource in `with` block to ensure cleanup",
+                    confidence: FixConfidence.Uncertain
+                )
+                fix.add_replacement(Replacement.create(
+                    file: file,
+                    start: start,
+                    end: end,
+                    line: line_num,
+                    column: indent + 1,
+                    new_text: new_text
+                ))
+                fixes.push(fix)
+
+        byte_offset = byte_offset + line.len() + 1
+
+    fixes
+
+# ============================================================================
+# Rule 4: sspec_missing_docstrings
+# Detects describe/context blocks without docstrings.
+# Confidence: Safe
+# ============================================================================
+
+fn check_sspec_missing_docstrings(source: String, file: String) -> List<EasyFix>:
+    var fixes: List<EasyFix> = []
+
+    if not file.ends_with("_spec.spl"):
+        return fixes
+
+    val lines = source.split("\n")
+    var line_num = 0
+    var byte_offset = 0
+
+    for line in lines:
+        line_num = line_num + 1
+        val trimmed = line.trim()
+
+        val is_describe = trimmed.starts_with("describe ")
+        val is_context = trimmed.starts_with("context ")
+
+        if is_describe or is_context:
+            val keyword = if is_describe then "describe" else "context"
+
+            # Extract the name string
+            val after_kw = trimmed.slice(keyword.len()).trim()
+            var block_name = after_kw
+            if after_kw.starts_with("\""):
+                val close_quote = after_kw.slice(1).find("\"")
+                if close_quote >= 0:
+                    block_name = after_kw.slice(1, close_quote + 1)
+
+            # Check if next non-empty line is a docstring (""")
+            var next_idx = line_num  # 0-indexed for next line
+            var has_docstring = false
+            var check_offset = byte_offset + line.len() + 1
+
+            if next_idx < lines.len():
+                val next_line = lines[next_idx]
+                val next_trimmed = next_line.trim()
+                if next_trimmed.starts_with("\"\"\""):
+                    has_docstring = true
+
+            if not has_docstring:
+                val indent = line.len() - trimmed.len()
+                val insert_pos = byte_offset + line.len() + 1  # After newline
+                val spaces = " ".repeat(indent + 4)
+                val header = if is_describe then "##" else "###"
+                val scenario = if is_describe then "" else "Scenario: "
+                val docstring = "{spaces}\"\"\"\n{spaces}{header} {scenario}{block_name}\n{spaces}\n{spaces}Description of this {keyword} block.\n{spaces}\"\"\"\n"
+
+                var fix = EasyFix.create(
+                    id: "L:sspec_missing_docstrings:{line_num}",
+                    description: "add template docstring to {keyword} block",
+                    confidence: FixConfidence.Safe
+                )
+                fix.add_replacement(Replacement.create(
+                    file: file,
+                    start: insert_pos,
+                    end: insert_pos,
+                    line: line_num + 1,
+                    column: 1,
+                    new_text: docstring
+                ))
+                fixes.push(fix)
+
+        byte_offset = byte_offset + line.len() + 1
+
+    fixes
+
+# ============================================================================
+# Rule 5: sspec_manual_assertions
+# Detects `if condition: fail(...)` and suggests `expect(condition)`.
+# Confidence: Likely
+# ============================================================================
+
+fn check_sspec_manual_assertions(source: String, file: String) -> List<EasyFix>:
+    var fixes: List<EasyFix> = []
+
+    if not file.ends_with("_spec.spl"):
+        return fixes
+
+    val lines = source.split("\n")
+    var line_num = 0
+    var byte_offset = 0
+
+    for line in lines:
+        line_num = line_num + 1
+        val trimmed = line.trim()
+
+        # Pattern: if <cond>: fail(...) or if not <cond>: fail(...)
+        if trimmed.starts_with("if ") and trimmed.contains("fail("):
+            val indent = line.len() - trimmed.len()
+
+            # Extract condition: between "if " and ":"
+            val colon_pos = trimmed.find(":")
+            if colon_pos > 3:
+                val condition = trimmed.slice(3, colon_pos).trim()
+                val after_colon = trimmed.slice(colon_pos + 1).trim()
+
+                if after_colon.starts_with("fail("):
+                    val start = byte_offset + indent
+                    val end = byte_offset + line.len()
+                    val spaces = " ".repeat(indent)
+
+                    # If condition is negated, expect the positive
+                    var expect_expr = ""
+                    if condition.starts_with("not "):
+                        expect_expr = "expect({condition.slice(4).trim()}).to_be_truthy()"
+                    else:
+                        expect_expr = "expect({condition}).to_be_falsy()"
+
+                    var fix = EasyFix.create(
+                        id: "L:sspec_manual_assertions:{line_num}",
+                        description: "replace manual if/fail with expect()",
+                        confidence: FixConfidence.Likely
+                    )
+                    fix.add_replacement(Replacement.create(
+                        file: file,
+                        start: start,
+                        end: end,
+                        line: line_num,
+                        column: indent + 1,
+                        new_text: "{spaces}{expect_expr}"
+                    ))
+                    fixes.push(fix)
+
+        byte_offset = byte_offset + line.len() + 1
+
+    fixes
+
+# ============================================================================
+# Rule 6: non_exhaustive_match
+# Detects match blocks without a catch-all `case _:` arm.
+# Confidence: Safe
+# ============================================================================
+
+fn check_non_exhaustive_match(source: String, file: String) -> List<EasyFix>:
+    var fixes: List<EasyFix> = []
+    val lines = source.split("\n")
+    var line_num = 0
+    var byte_offset = 0
+    var in_match = false
+    var match_indent = 0
+    var has_catch_all = false
+    var match_end_line = 0
+    var match_end_offset = 0
+    var last_case_indent = 0
+
+    for line in lines:
+        line_num = line_num + 1
+        val trimmed = line.trim()
+        val indent = line.len() - trimmed.len()
+
+        if trimmed.starts_with("match ") and trimmed.ends_with(":"):
+            # Start of match block
+            if in_match and not has_catch_all:
+                # Previous match was non-exhaustive — emit fix
+                _emit_non_exhaustive_fix(fixes, file, match_end_line, match_end_offset, last_case_indent)
+            in_match = true
+            match_indent = indent
+            has_catch_all = false
+            match_end_line = line_num
+            match_end_offset = byte_offset + line.len()
+
+        if in_match and trimmed.starts_with("case "):
+            last_case_indent = indent
+            match_end_line = line_num
+            match_end_offset = byte_offset + line.len()
+
+            if trimmed.starts_with("case _:") or trimmed.starts_with("case _"):
+                has_catch_all = true
+
+        # Detect end of match block (dedent)
+        if in_match and line.len() > 0 and indent <= match_indent and not trimmed.starts_with("match ") and not trimmed.starts_with("case "):
+            if not has_catch_all:
+                _emit_non_exhaustive_fix(fixes, file, match_end_line, match_end_offset, last_case_indent)
+            in_match = false
+
+        byte_offset = byte_offset + line.len() + 1
+
+    # Handle match at end of file
+    if in_match and not has_catch_all:
+        _emit_non_exhaustive_fix(fixes, file, match_end_line, match_end_offset, last_case_indent)
+
+    fixes
+
+fn _emit_non_exhaustive_fix(fixes: List<EasyFix>, file: String, after_line: Int, after_offset: Int, case_indent: Int):
+    val spaces = " ".repeat(case_indent)
+    val inner_spaces = " ".repeat(case_indent + 4)
+    val new_arm = "\n{spaces}case _:\n{inner_spaces}todo(\"handle remaining cases\")"
+    var fix = EasyFix.create(
+        id: "L:non_exhaustive_match:{after_line}",
+        description: "add missing catch-all arm with todo()",
+        confidence: FixConfidence.Safe
+    )
+    fix.add_replacement(Replacement.create(
+        file: file,
+        start: after_offset,
+        end: after_offset,
+        line: after_line,
+        column: 1,
+        new_text: new_arm
+    ))
+    fixes.push(fix)
+
+# ============================================================================
+# Rule 7: typo_suggestion (Levenshtein distance)
+# Detects likely misspelled identifiers and suggests corrections.
+# Confidence: Likely
+# ============================================================================
+
+fn levenshtein(a: String, b: String) -> Int:
+    val m = a.len()
+    val n = b.len()
+    if m == 0:
+        return n
+    if n == 0:
+        return m
+
+    # Use single-row DP
+    var prev: List<Int> = []
+    var i = 0
+    while i <= n:
+        prev.push(i)
+        i = i + 1
+
+    i = 1
+    while i <= m:
+        var curr: List<Int> = [i]
+        var j = 1
+        while j <= n:
+            val cost = if a[i - 1] == b[j - 1] then 0 else 1
+            val del = prev[j] + 1
+            val ins = curr[j - 1] + 1
+            val sub = prev[j - 1] + cost
+            var min_val = del
+            if ins < min_val:
+                min_val = ins
+            if sub < min_val:
+                min_val = sub
+            curr.push(min_val)
+            j = j + 1
+        prev = curr
+        i = i + 1
+
+    prev[n]
+
+fn check_typo_suggestion(source: String, file: String, known_names: List<String>) -> List<EasyFix>:
+    var fixes: List<EasyFix> = []
+    val lines = source.split("\n")
+    var line_num = 0
+    var byte_offset = 0
+
+    for line in lines:
+        line_num = line_num + 1
+        val trimmed = line.trim()
+
+        # Look for lines with "undefined" or "not found" error patterns
+        # This rule is primarily used with compiler error output, but we can also
+        # scan for identifiers that are close to known names
+        # For text-scanning mode: check val/var assignments with unknown identifiers
+
+        byte_offset = byte_offset + line.len() + 1
+
+    # This rule is primarily for compiler diagnostics integration.
+    # The text-scanning version is a no-op; the Rust version hooks into name resolution.
+    fixes
+
+fn suggest_typo_fix(file: String, line_num: Int, col: Int, byte_start: Int, byte_end: Int, misspelled: String, known_names: List<String>) -> Option<EasyFix>:
+    var best_name = ""
+    var best_dist = 3  # Max distance threshold
+
+    for name in known_names:
+        val dist = levenshtein(misspelled, name)
+        if dist > 0 and dist < best_dist:
+            best_dist = dist
+            best_name = name
+
+    if best_name.len() > 0:
+        var fix = EasyFix.create(
+            id: "E:typo_suggestion:{line_num}",
+            description: "did you mean `{best_name}`?",
+            confidence: FixConfidence.Likely
+        )
+        fix.add_replacement(Replacement.create(
+            file: file,
+            start: byte_start,
+            end: byte_end,
+            line: line_num,
+            column: col,
+            new_text: best_name
+        ))
+        return Some(fix)
+
+    None
+
+# ============================================================================
+# Rule 8: parser_contextual_keyword (E0013)
+# Detects common parser errors with contextual keywords.
+# Confidence: Safe
+# ============================================================================
+
+fn check_parser_contextual_keyword(source: String, file: String) -> List<EasyFix>:
+    var fixes: List<EasyFix> = []
+    val lines = source.split("\n")
+    var line_num = 0
+    var byte_offset = 0
+
+    for line in lines:
+        line_num = line_num + 1
+        val trimmed = line.trim()
+
+        # Detect common misuses:
+        # "skip fn" should be "fn" with skip tag
+        # "async static fn" should be "static async fn"
+        # "pub fn" at wrong indent
+
+        if trimmed.starts_with("async static fn "):
+            val indent = line.len() - trimmed.len()
+            val start = byte_offset + indent
+            val end = start + 16  # len("async static fn ")
+            var fix = EasyFix.create(
+                id: "E:parser_contextual_keyword:{line_num}",
+                description: "reorder keywords: `static async fn`",
+                confidence: FixConfidence.Safe
+            )
+            fix.add_replacement(Replacement.create(
+                file: file,
+                start: start,
+                end: end,
+                line: line_num,
+                column: indent + 1,
+                new_text: "static async fn "
+            ))
+            fixes.push(fix)
+
+        if trimmed.starts_with("static pub fn "):
+            val indent = line.len() - trimmed.len()
+            val start = byte_offset + indent
+            val end = start + 14  # len("static pub fn ")
+            var fix = EasyFix.create(
+                id: "E:parser_contextual_keyword:{line_num}",
+                description: "reorder keywords: `pub static fn`",
+                confidence: FixConfidence.Safe
+            )
+            fix.add_replacement(Replacement.create(
+                file: file,
+                start: start,
+                end: end,
+                line: line_num,
+                column: indent + 1,
+                new_text: "pub static fn "
+            ))
+            fixes.push(fix)
+
+        if trimmed.starts_with("pub async static fn "):
+            val indent = line.len() - trimmed.len()
+            val start = byte_offset + indent
+            val end = start + 20  # len("pub async static fn ")
+            var fix = EasyFix.create(
+                id: "E:parser_contextual_keyword:{line_num}",
+                description: "reorder keywords: `pub static async fn`",
+                confidence: FixConfidence.Safe
+            )
+            fix.add_replacement(Replacement.create(
+                file: file,
+                start: start,
+                end: end,
+                line: line_num,
+                column: indent + 1,
+                new_text: "pub static async fn "
+            ))
+            fixes.push(fix)
+
+        byte_offset = byte_offset + line.len() + 1
+
+    fixes
+
+# ============================================================================
+# Rule 9: type_mismatch_coercion
+# Detects type mismatches where a simple coercion can fix the issue.
+# Confidence: Likely
+# ============================================================================
+
+fn check_type_mismatch_coercion(source: String, file: String) -> List<EasyFix>:
+    var fixes: List<EasyFix> = []
+    # This rule works primarily with compiler type-check errors.
+    # The text-scanning version is a no-op; the Rust version hooks into type checker.
+    fixes
+
+fn suggest_type_coercion_fix(file: String, line_num: Int, col: Int, byte_end: Int, expected_type: String, actual_type: String) -> Option<EasyFix>:
+    # Common coercions
+    var coercion = ""
+
+    if expected_type == "String" and actual_type == "Int":
+        coercion = ".to_string()"
+    if expected_type == "String" and actual_type == "Float":
+        coercion = ".to_string()"
+    if expected_type == "String" and actual_type == "Bool":
+        coercion = ".to_string()"
+    if expected_type == "Int" and actual_type == "Float":
+        coercion = ".to_int()"
+    if expected_type == "Float" and actual_type == "Int":
+        coercion = ".to_float()"
+    if expected_type == "Bool" and actual_type == "Int":
+        coercion = " != 0"
+
+    if coercion.len() > 0:
+        var fix = EasyFix.create(
+            id: "E:type_mismatch_coercion:{line_num}",
+            description: "insert `{coercion}` to convert {actual_type} to {expected_type}",
+            confidence: FixConfidence.Likely
+        )
+        fix.add_replacement(Replacement.create(
+            file: file,
+            start: byte_end,
+            end: byte_end,
+            line: line_num,
+            column: col,
+            new_text: coercion
+        ))
+        return Some(fix)
+
+    None
+
+# ============================================================================
+# Master: run all text-scanning rules
+# ============================================================================
+
+fn check_all_rules(source: String, file: String) -> List<EasyFix>:
+    var all_fixes: List<EasyFix> = []
+
+    val fixes1 = check_print_in_test_spec(source, file)
+    for f in fixes1:
+        all_fixes.push(f)
+
+    val fixes2 = check_unnamed_duplicate_typed_args(source, file)
+    for f in fixes2:
+        all_fixes.push(f)
+
+    val fixes3 = check_resource_leak(source, file)
+    for f in fixes3:
+        all_fixes.push(f)
+
+    val fixes4 = check_sspec_missing_docstrings(source, file)
+    for f in fixes4:
+        all_fixes.push(f)
+
+    val fixes5 = check_sspec_manual_assertions(source, file)
+    for f in fixes5:
+        all_fixes.push(f)
+
+    val fixes6 = check_non_exhaustive_match(source, file)
+    for f in fixes6:
+        all_fixes.push(f)
+
+    val fixes7 = check_parser_contextual_keyword(source, file)
+    for f in fixes7:
+        all_fixes.push(f)
+
+    # Rules 7 (typo) and 9 (type coercion) are no-ops in text-scanning mode.
+    # They require compiler integration (Rust side).
+
+    all_fixes

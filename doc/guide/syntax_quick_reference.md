@@ -552,6 +552,45 @@ with File.open("in.txt") as input, File.create("out.txt") as output:
     output.write(input.read())
 ```
 
+### Empty Statements / No-op
+
+**Both `()` and `pass` are valid and equivalent** - use whichever is clearer in context:
+
+```simple
+# Unit value () - expression-oriented style (Rust-like)
+match value:
+    Some(x):
+        process(x)
+    None:
+        ()  # Do nothing, return unit value
+
+# pass keyword - statement style (Python-like)
+match value:
+    Some(x):
+        process(x)
+    None:
+        pass  # Do nothing
+
+# Both are synonyms - choose based on preference:
+# - () is more consistent with expression-oriented design
+# - pass is more explicit about intent "intentionally doing nothing"
+
+# In match arms (both work identically):
+match result:
+    Ok(value): value
+    Err(_): ()       # Returns unit value
+
+match result:
+    Ok(value): value
+    Err(_): pass     # No-op statement
+```
+
+**Design Note:** Simple supports both for flexibility:
+- **`()`** - Unit value (type is `()`), follows Rust/Scala conventions
+- **`pass`** - No-op statement, familiar to Python developers
+
+They compile to identical code. Use `()` for expression contexts, `pass` for clarity in statement contexts.
+
 ---
 
 ## Operators

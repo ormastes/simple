@@ -307,13 +307,18 @@ pub extern "C" fn rt_cli_run_tests(args: RuntimeValue, gc_log: u8, gc_off: u8) -
 }
 
 #[no_mangle]
-pub extern "C" fn rt_cli_run_lint(_args: RuntimeValue) -> i64 {
-    not_implemented("rt_cli_run_lint")
+pub extern "C" fn rt_cli_run_lint(args: RuntimeValue) -> i64 {
+    delegate_to_simple_old("lint", args)
 }
 
 #[no_mangle]
-pub extern "C" fn rt_cli_run_fmt(_args: RuntimeValue) -> i64 {
-    not_implemented("rt_cli_run_fmt")
+pub extern "C" fn rt_cli_run_fmt(args: RuntimeValue) -> i64 {
+    delegate_to_simple_old("fmt", args)
+}
+
+#[no_mangle]
+pub extern "C" fn rt_cli_run_fix(args: RuntimeValue) -> i64 {
+    delegate_to_simple_old("lint", args)
 }
 
 #[no_mangle]

@@ -35,6 +35,7 @@ Skills located in `.claude/skills/`.
 
 - **LLM-Friendly**: IR export, context packs, lint framework (75% complete)
   - **New Lints**: `print_in_test_spec`, `todo_format`
+  - **EasyFix Rules** (9 auto-fix rules): See `/coding` skill and `src/app/fix/rules.spl`
 - **Pattern Matching Safety**: Exhaustiveness checking (5/5 complete)
 - **Scala-Style Syntax**: `val`/`var` variables, implicit `self` in methods
 - Memory model: Reference capabilities (`mut T`, `iso T`, `T`)
@@ -500,10 +501,57 @@ make test-all      # Run ALL tests: Rust + doc-tests + Simple/SSpec (excludes sk
 cargo test --workspace
 
 # Runtime binary (Rust core)
-./target/debug/simple_old_old script.spl
+./target/debug/simple_old script.spl
 
 # CLI wrapper (Simple implementation)
 ./bin/wrappers/simple script.spl
+```
+
+### Compile and Recompile
+
+```bash
+# Build Rust runtime (required first)
+cargo build                    # Debug build
+cargo build --release          # Release build (optimized)
+
+# Rebuild after Rust changes
+cargo build 2>&1 | head -20   # Build and check for warnings/errors
+
+# Run a Simple script directly
+./target/debug/simple_old script.spl
+
+# Run with CLI wrapper (uses src/app/cli/main.spl)
+./bin/wrappers/simple script.spl
+
+# Run lint on Simple code
+./bin/wrappers/simple lint src/app/fix/rules.spl
+./target/debug/simple_old src/app/lint/main.spl -- src/app/fix/rules.spl
+
+# Run fix with options
+./bin/wrappers/simple fix file.spl --dry-run        # Preview fixes
+./bin/wrappers/simple fix file.spl --fix-all         # Apply all fixes
+./bin/wrappers/simple fix file.spl --fix-interactive  # Prompt per fix
+
+# Run tests
+./target/debug/simple_old test                        # All Simple/SSpec tests
+./target/debug/simple_old test path/to/spec.spl       # Single test file
+./target/debug/simple_old test --list                  # List tests without running
+cargo test --workspace                                 # Rust tests
+cargo test --doc --workspace                           # Doc-tests only
+```
+
+### Fixing Rust Warnings
+
+When `cargo build` shows warnings, fix them before committing:
+
+```bash
+# Check for warnings
+cargo build 2>&1 | grep "warning:"
+
+# Common fixes:
+# - "shared reference to mutable static" → Use OnceLock + AtomicUsize
+# - "unused variable" → Prefix with _ or remove
+# - "dead code" → Remove or add #[allow(dead_code)] with justification
 ```
 
 ### Executable Architecture
