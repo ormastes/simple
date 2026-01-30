@@ -7,91 +7,155 @@
 // - Dyn traits in generic containers
 
 use simple_type::{check, Type, TypeChecker, TypeError};
-use simple_parser::ast::{Expr, ImplBlock, Node, TraitDef, TraitMethod, ClassDef, MethodDef, FunctionParam, Block, AstType};
+use simple_parser::ast::{Expr, ImplBlock, Node, TraitDef, ClassDef, FunctionDef, Parameter, Block, Type as AstType, Visibility, Effect, MacroInvocation, MixinRef, Mutability};
+use simple_parser::Span;
+use std::collections::HashMap;
 
 // Helper to create a simple trait definition
 fn create_logger_trait() -> TraitDef {
     TraitDef {
+        span: Span::new(0, 0, 0, 0),
         name: "Logger".to_string(),
         generic_params: vec![],
-        parent_traits: vec![],
-        methods: vec![TraitMethod {
+        super_traits: vec![],
+        where_clause: vec![],
+        methods: vec![FunctionDef {
+            span: Span::new(0, 0, 0, 0),
             name: "log".to_string(),
-            params: vec![FunctionParam {
+            generic_params: vec![],
+            params: vec![Parameter {
+                span: Span::new(0, 0, 0, 0),
                 name: "msg".to_string(),
                 ty: Some(AstType::Simple("str".to_string())),
                 default: None,
+                mutability: Mutability::Immutable,
+                inject: false,
+                variadic: false,
             }],
             return_type: Some(AstType::Simple("nil".to_string())),
-            body: Block { statements: vec![] },
-            generic_params: vec![],
+            where_clause: vec![],
+            body: Block { span: Span::new(0, 0, 0, 0), statements: vec![] },
+            visibility: Visibility::Private,
+            effects: vec![],
+            decorators: vec![],
             attributes: vec![],
             doc_comment: None,
-            is_async: false,
+            contract: None,
+            is_abstract: false,
+            is_sync: false,
             is_static: false,
-            is_mutable: false,
+            bounds_block: None,
+            is_me_method: false,
+            return_constraint: None,
+            is_generic_template: false,
+            specialization_of: None,
+            type_bindings: HashMap::new(),
         }],
         associated_types: vec![],
-        attributes: vec![],
+        visibility: Visibility::Private,
         doc_comment: None,
+        is_generic_template: false,
+        specialization_of: None,
+        type_bindings: HashMap::new(),
     }
 }
 
 // Helper to create ConsoleLogger class
 fn create_console_logger_class() -> ClassDef {
     ClassDef {
+        span: Span::new(0, 0, 0, 0),
         name: "ConsoleLogger".to_string(),
         generic_params: vec![],
+        where_clause: vec![],
         fields: vec![],
-        methods: vec![MethodDef {
+        methods: vec![FunctionDef {
+            span: Span::new(0, 0, 0, 0),
             name: "log".to_string(),
-            params: vec![FunctionParam {
+            generic_params: vec![],
+            params: vec![Parameter {
+                span: Span::new(0, 0, 0, 0),
                 name: "msg".to_string(),
                 ty: Some(AstType::Simple("str".to_string())),
                 default: None,
+                mutability: Mutability::Immutable,
+                inject: false,
+                variadic: false,
             }],
             return_type: Some(AstType::Simple("nil".to_string())),
-            body: Block { statements: vec![] },
-            generic_params: vec![],
+            where_clause: vec![],
+            body: Block { span: Span::new(0, 0, 0, 0), statements: vec![] },
+            visibility: Visibility::Private,
+            effects: vec![],
+            decorators: vec![],
             attributes: vec![],
             doc_comment: None,
-            is_async: false,
+            contract: None,
+            is_abstract: false,
+            is_sync: false,
             is_static: false,
-            is_mutable: false,
+            bounds_block: None,
+            is_me_method: false,
+            return_constraint: None,
+            is_generic_template: false,
+            specialization_of: None,
+            type_bindings: HashMap::new(),
         }],
         parent: None,
-        mixins: vec![],
+        visibility: Visibility::Private,
+        effects: vec![],
         attributes: vec![],
         doc_comment: None,
+        is_generic_template: false,
+        specialization_of: None,
+        type_bindings: HashMap::new(),
+        invariant: None,
+        macro_invocations: vec![],
+        mixins: vec![],
     }
 }
 
 // Helper to create Logger impl for ConsoleLogger
 fn create_logger_impl() -> ImplBlock {
     ImplBlock {
-        trait_name: Some("Logger".to_string()),
-        target_type: AstType::Simple("ConsoleLogger".to_string()),
+        span: Span::new(0, 0, 0, 0),
+        attributes: vec![],
         generic_params: vec![],
         where_clause: vec![],
-        methods: vec![MethodDef {
+        target_type: AstType::Simple("ConsoleLogger".to_string()),
+        trait_name: Some("Logger".to_string()),
+        associated_types: vec![],
+        methods: vec![FunctionDef {
+            span: Span::new(0, 0, 0, 0),
             name: "log".to_string(),
-            params: vec![FunctionParam {
+            generic_params: vec![],
+            params: vec![Parameter {
+                span: Span::new(0, 0, 0, 0),
                 name: "msg".to_string(),
                 ty: Some(AstType::Simple("str".to_string())),
                 default: None,
+                mutability: Mutability::Immutable,
+                inject: false,
+                variadic: false,
             }],
             return_type: Some(AstType::Simple("nil".to_string())),
-            body: Block { statements: vec![] },
-            generic_params: vec![],
+            where_clause: vec![],
+            body: Block { span: Span::new(0, 0, 0, 0), statements: vec![] },
+            visibility: Visibility::Private,
+            effects: vec![],
+            decorators: vec![],
             attributes: vec![],
             doc_comment: None,
-            is_async: false,
+            contract: None,
+            is_abstract: false,
+            is_sync: false,
             is_static: false,
-            is_mutable: false,
+            bounds_block: None,
+            is_me_method: false,
+            return_constraint: None,
+            is_generic_template: false,
+            specialization_of: None,
+            type_bindings: HashMap::new(),
         }],
-        associated_types: vec![],
-        attributes: vec![],
-        doc_comment: None,
     }
 }
 
@@ -184,7 +248,7 @@ fn test_dyn_trait_coercion_validates_impl() {
 
     // Register trait impl
     let impl_block = create_logger_impl();
-    checker.check_node(&Node::Impl(impl_block)).expect("Impl should register");
+    checker.check_items(&[Node::Impl(impl_block)]).expect("Impl should register");
 
     // Now test coercion check logic
     let concrete_ty = Type::Named("ConsoleLogger".to_string());

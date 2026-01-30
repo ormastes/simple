@@ -25,11 +25,14 @@ impl TypeChecker {
             }
             Expr::Bool(_) => Ok(Type::Bool),
             Expr::Nil => Ok(Type::Nil),
-            Expr::Identifier(name) => self
-                .env
-                .get(name)
-                .cloned()
-                .ok_or_else(|| TypeError::Undefined(format!("undefined identifier: {}", name))),
+            Expr::Identifier(name) => {
+                // Handle FFI calls: @rt_function_name - strip @ prefix for lookup
+                let lookup_name = name.strip_prefix('@').unwrap_or(name);
+                self.env
+                    .get(lookup_name)
+                    .cloned()
+                    .ok_or_else(|| TypeError::Undefined(format!("undefined identifier: {}", name)))
+            }
             Expr::MacroInvocation { name, args } => {
                 for arg in args {
                     let simple_parser::ast::MacroArg::Expr(expr) = arg;

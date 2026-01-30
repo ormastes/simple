@@ -42,6 +42,7 @@ fn make_function(name: &str, is_sync: bool, has_async_effect: bool, body: Vec<No
         contract: None,
         is_abstract: false,
         is_sync,
+        is_static: false,
         bounds_block: None,
         is_me_method: false,
         return_constraint: None,

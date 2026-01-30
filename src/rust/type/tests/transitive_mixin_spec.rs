@@ -57,7 +57,7 @@ fn test_transitive_empty_queue() {
     // Resolving empty mixin list returns empty result
     let checker = TypeChecker::new();
     let result = checker.resolve_transitive_mixins(&[]);
-    assert_eq!(result, vec![], "Empty input should return empty result");
+    assert_eq!(result, Vec::<String>::new(), "Empty input should return empty result");
 }
 
 #[test]
@@ -156,7 +156,7 @@ fn test_transitive_mixin_not_found() {
     // Requesting non-existent mixin should return empty (graceful handling)
     let checker = TypeChecker::new();
     let result = checker.resolve_transitive_mixins(&["NonExistent".to_string()]);
-    assert_eq!(result, vec![], "Non-existent mixin should return empty");
+    assert_eq!(result, Vec::<String>::new(), "Non-existent mixin should return empty");
 }
 
 #[test]
@@ -181,8 +181,10 @@ fn test_transitive_field_resolution_simple() {
 
     // Register composition: type "Document" uses "Base"
     let mixin_ref = simple_parser::MixinRef {
+        span: simple_parser::Span::new(0, 0, 0, 0),
         name: "Base".to_string(),
         type_args: vec![],
+        overrides: vec![],
     };
     checker.compositions.insert("Document".to_string(), vec![mixin_ref]);
 
@@ -201,8 +203,10 @@ fn test_transitive_field_resolution_two_level() {
 
     // Register composition: type "Document" uses "Timestamped"
     let mixin_ref = simple_parser::MixinRef {
+        span: simple_parser::Span::new(0, 0, 0, 0),
         name: "Timestamped".to_string(),
         type_args: vec![],
+        overrides: vec![],
     };
     checker.compositions.insert("Document".to_string(), vec![mixin_ref]);
 
@@ -226,8 +230,10 @@ fn test_transitive_field_resolution_three_level() {
 
     // Register composition: type "Document" uses "Versioned"
     let mixin_ref = simple_parser::MixinRef {
+        span: simple_parser::Span::new(0, 0, 0, 0),
         name: "Versioned".to_string(),
         type_args: vec![],
+        overrides: vec![],
     };
     checker.compositions.insert("Document".to_string(), vec![mixin_ref]);
 
@@ -261,8 +267,10 @@ fn test_transitive_with_generic_mixin() {
 
     // Register composition with type args: Container[i64]
     let mixin_ref = simple_parser::MixinRef {
+        span: simple_parser::Span::new(0, 0, 0, 0),
         name: "Container".to_string(),
         type_args: vec![simple_parser::ast::Type::Simple("i64".to_string())],
+        overrides: vec![],
     };
     checker.compositions.insert("MyType".to_string(), vec![mixin_ref]);
 
