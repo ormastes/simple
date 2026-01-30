@@ -1,0 +1,258 @@
+# Database Persistence Layer
+#
+# Save/load functions for TodoDb, FeatureDb, and TaskDb using atomic operations.
+# Uses SDN table format for serialization.
+
+use db.atomic.*
+use db.records.*
+
+# ===== Save Functions =====
+
+pub fn save_todo_db(path: text, db: TodoDb) -> Result<(), text>:
+    """Save TodoDb to file using atomic write with file locking"""
+    val content = serialize_todo_db(db)
+    atomic_write_file_locked(path, content)
+
+pub fn save_feature_db(path: text, db: FeatureDb) -> Result<(), text>:
+    """Save FeatureDb to file using atomic write with file locking"""
+    val content = serialize_feature_db(db)
+    atomic_write_file_locked(path, content)
+
+pub fn save_task_db(path: text, db: TaskDb) -> Result<(), text>:
+    """Save TaskDb to file using atomic write with file locking"""
+    val content = serialize_task_db(db)
+    atomic_write_file_locked(path, content)
+
+# ===== Load Functions =====
+
+pub fn load_todo_db(path: text) -> Result<TodoDb, text>:
+    """Load TodoDb from file using atomic read"""
+    val content_result = atomic_read_file(path)
+    match content_result:
+        Ok(content) => parse_todo_db(content)
+        Err(e) => Err(e)
+
+pub fn load_feature_db(path: text) -> Result<FeatureDb, text>:
+    """Load FeatureDb from file using atomic read"""
+    val content_result = atomic_read_file(path)
+    match content_result:
+        Ok(content) => parse_feature_db(content)
+        Err(e) => Err(e)
+
+pub fn load_task_db(path: text) -> Result<TaskDb, text>:
+    """Load TaskDb from file using atomic read"""
+    val content_result = atomic_read_file(path)
+    match content_result:
+        Ok(content) => parse_task_db(content)
+        Err(e) => Err(e)
+
+# ===== Serialization Helpers =====
+
+fn serialize_todo_db(db: TodoDb) -> text:
+    """Serialize TodoDb to SDN table format"""
+    var lines = []
+    lines.push("todos |id, keyword, area, priority, description, file, line, issue, blocked, status, valid|")
+
+    for (id, record) in db.records:
+        val issue_str = match record.issue:
+            Some(i) => "\"" + i + "\""
+            None => ""
+        val blocked_str = "[" + record.blocked.join(",") + "]"
+        val desc_escaped = record.description.replace("\"", "\\\"")
+        val row = "    {record.id}, {record.keyword}, {record.area}, {record.priority}, \"{desc_escaped}\", {record.file}, {record.line}, {issue_str}, {blocked_str}, {record.status}, {record.valid}"
+        lines.push(row)
+
+    lines.join("\n")
+
+fn serialize_feature_db(db: FeatureDb) -> text:
+    """Serialize FeatureDb to SDN table format"""
+    var lines = []
+    lines.push("features |id, category, name, description, status, valid|")
+
+    for (id, record) in db.records:
+        val desc_escaped = record.description.replace("\"", "\\\"")
+        val name_escaped = record.name.replace("\"", "\\\"")
+        val row = "    {record.id}, {record.category}, \"{name_escaped}\", \"{desc_escaped}\", {record.status}, {record.valid}"
+        lines.push(row)
+
+    lines.join("\n")
+
+fn serialize_task_db(db: TaskDb) -> text:
+    """Serialize TaskDb to SDN table format"""
+    var lines = []
+    lines.push("tasks |id, name, description, priority, status, valid|")
+
+    for (id, record) in db.records:
+        val desc_escaped = record.description.replace("\"", "\\\"")
+        val name_escaped = record.name.replace("\"", "\\\"")
+        val row = "    {record.id}, \"{name_escaped}\", \"{desc_escaped}\", {record.priority}, {record.status}, {record.valid}"
+        lines.push(row)
+
+    lines.join("\n")
+
+# ===== Parsing Helpers =====
+
+fn parse_todo_db(content: text) -> Result<TodoDb, text>:
+    """Parse SDN table format to TodoDb"""
+    if content.trim() == "":
+        return Ok(TodoDb.new())
+
+    var db = TodoDb.new()
+    var in_table = false
+
+    for line in content.split("\n"):
+        val trimmed = line.trim()
+
+        if trimmed.starts_with("todos |"):
+            in_table = true
+            continue
+
+        if in_table and trimmed != "" and not trimmed.starts_with("#"):
+            val fields = parse_sdn_row(trimmed)
+            if fields.len() >= 11:
+                val record = TodoRecord(
+                    id: fields[0].trim(),
+                    keyword: fields[1].trim(),
+                    area: fields[2].trim(),
+                    priority: fields[3].trim(),
+                    description: fields[4].trim().trim("\"").replace("\\\"", "\""),
+                    file: fields[5].trim(),
+                    line: parse_int_safe(fields[6].trim()),
+                    issue: parse_optional(fields[7].trim()),
+                    blocked: parse_array(fields[8].trim()),
+                    status: fields[9].trim(),
+                    valid: fields[10].trim() == "true"
+                )
+                db.records[record.id] = record
+
+    Ok(db)
+
+fn parse_feature_db(content: text) -> Result<FeatureDb, text>:
+    """Parse SDN table format to FeatureDb"""
+    if content.trim() == "":
+        return Ok(FeatureDb.new())
+
+    var db = FeatureDb.new()
+    var in_table = false
+
+    for line in content.split("\n"):
+        val trimmed = line.trim()
+
+        if trimmed.starts_with("features |"):
+            in_table = true
+            continue
+
+        if in_table and trimmed != "" and not trimmed.starts_with("#"):
+            val fields = parse_sdn_row(trimmed)
+            if fields.len() >= 6:
+                val record = FeatureRecord(
+                    id: fields[0].trim(),
+                    category: fields[1].trim(),
+                    name: fields[2].trim().trim("\"").replace("\\\"", "\""),
+                    description: fields[3].trim().trim("\"").replace("\\\"", "\""),
+                    status: fields[4].trim(),
+                    valid: fields[5].trim() == "true"
+                )
+                db.records[record.id] = record
+
+    Ok(db)
+
+fn parse_task_db(content: text) -> Result<TaskDb, text>:
+    """Parse SDN table format to TaskDb"""
+    if content.trim() == "":
+        return Ok(TaskDb.new())
+
+    var db = TaskDb.new()
+    var in_table = false
+
+    for line in content.split("\n"):
+        val trimmed = line.trim()
+
+        if trimmed.starts_with("tasks |"):
+            in_table = true
+            continue
+
+        if in_table and trimmed != "" and not trimmed.starts_with("#"):
+            val fields = parse_sdn_row(trimmed)
+            if fields.len() >= 6:
+                val record = TaskRecord(
+                    id: fields[0].trim(),
+                    name: fields[1].trim().trim("\"").replace("\\\"", "\""),
+                    description: fields[2].trim().trim("\"").replace("\\\"", "\""),
+                    priority: fields[3].trim(),
+                    status: fields[4].trim(),
+                    valid: fields[5].trim() == "true"
+                )
+                db.records[record.id] = record
+
+    Ok(db)
+
+# ===== Utility Functions =====
+
+fn parse_sdn_row(line: text) -> [text]:
+    """Parse comma-separated row, handling quoted strings"""
+    var fields = []
+    var current = ""
+    var in_quotes = false
+    var i = 0
+
+    while i < line.len():
+        val ch = line[i]
+
+        if ch == "\"" and (i == 0 or line[i-1] != "\\"):
+            in_quotes = not in_quotes
+            current = current + ch
+        elif ch == "," and not in_quotes:
+            fields.push(current)
+            current = ""
+        else:
+            current = current + ch
+
+        i = i + 1
+
+    if current != "":
+        fields.push(current)
+
+    fields
+
+fn parse_int_safe(s: text) -> i64:
+    """Parse integer, return 0 on failure"""
+    try:
+        s.parse_int()
+    catch:
+        0
+
+fn parse_optional(s: text) -> Option<text>:
+    """Parse optional field (empty string or quoted value)"""
+    val trimmed = s.trim().trim("\"")
+    if trimmed == "" or trimmed == "None":
+        None
+    else:
+        Some(trimmed)
+
+fn parse_array(s: text) -> [text]:
+    """Parse array format: [item1,item2,item3]"""
+    val trimmed = s.trim().trim("[").trim("]")
+    if trimmed == "":
+        return []
+
+    trimmed.split(",").map(\x: x.trim())
+
+# ===== Cleanup Functions =====
+
+pub fn cleanup_temp_files() -> bool:
+    """Remove temporary .sdn.tmp files (e.g., after crashes)"""
+    try:
+        val patterns = ["*.sdn.tmp", "doc/**/*.sdn.tmp", "tmp/**/*.sdn.tmp"]
+        for pattern in patterns:
+            val files = rt_dir_glob(pattern)
+            for file in files:
+                rt_file_remove(file)
+        return true
+    catch:
+        return false
+
+# ===== External FFI =====
+
+extern fn rt_dir_glob(pattern: text) -> [text]
+extern fn rt_file_remove(path: text) -> bool
