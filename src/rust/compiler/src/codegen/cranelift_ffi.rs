@@ -275,19 +275,35 @@ unsafe fn rt_cranelift_new_module_impl(name: &str, target: i64) -> i64 {
 /// Returns the module handle on success, 0 on failure.
 #[no_mangle]
 pub unsafe extern "C" fn rt_cranelift_finalize_module(module: i64) -> i64 {
-    let mut modules = JIT_MODULES.lock().unwrap();
-    if let Some(ctx) = modules.get_mut(&module) {
-        ctx.module.finalize_definitions().unwrap();
-        module
-    } else {
-        0
+    // Try JIT modules first
+    {
+        let mut modules = JIT_MODULES.lock().unwrap();
+        if let Some(ctx) = modules.get_mut(&module) {
+            ctx.module.finalize_definitions().unwrap();
+            return module;
+        }
     }
+
+    // For AOT modules, check if exists (no finalize needed - done in emit_object)
+    {
+        let modules = AOT_MODULES.lock().unwrap();
+        if modules.contains_key(&module) {
+            return module;  // AOT module exists, return success (finalization happens in emit_object)
+        }
+    }
+
+    0
 }
 
 /// Free module resources.
 #[no_mangle]
 pub unsafe extern "C" fn rt_cranelift_free_module(module: i64) {
-    JIT_MODULES.lock().unwrap().remove(&module);
+    // Try removing from JIT modules
+    if JIT_MODULES.lock().unwrap().remove(&module).is_some() {
+        return;
+    }
+    // Try removing from AOT modules if not in JIT
+    AOT_MODULES.lock().unwrap().remove(&module);
 }
 
 // ============================================================================
@@ -890,11 +906,11 @@ pub unsafe extern "C" fn rt_cranelift_new_aot_module(name_ptr: i64, name_len: i6
 /// Emit an object file from an AOT module.
 /// Returns true on success, false on failure.
 #[no_mangle]
-pub unsafe extern "C" fn rt_cranelift_emit_object(module: i64, path_ptr: i64, path_len: i64) -> bool {
-    let path = string_from_ptr(path_ptr, path_len);
-    if path.is_empty() {
-        return false;
-    }
+pub unsafe extern "C" fn rt_cranelift_emit_object(module: i64, path: RuntimeValue) -> bool {
+    let path_str = match extract_string(path) {
+        Some(s) => s,
+        None => return false,
+    };
 
     // Try AOT modules first
     let mut aot_modules = AOT_MODULES.lock().unwrap();
@@ -909,7 +925,7 @@ pub unsafe extern "C" fn rt_cranelift_emit_object(module: i64, path_ptr: i64, pa
         }
 
         // Write to file
-        match std::fs::write(&path, bytes) {
+        match std::fs::write(&path_str, bytes) {
             Ok(_) => true,
             Err(_) => false,
         }

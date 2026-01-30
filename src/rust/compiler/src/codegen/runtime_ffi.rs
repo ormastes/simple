@@ -757,7 +757,8 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // =========================================================================
     // Module management
     RuntimeFuncSpec::new("rt_cranelift_module_new", &[I64, I64], &[I64]), // name (RuntimeValue), target -> module_handle
-    RuntimeFuncSpec::new("rt_cranelift_new_module", &[I64, I64, I64], &[I64]), // name_ptr, name_len, target -> module_handle
+    RuntimeFuncSpec::new("rt_cranelift_new_module", &[I64, I64, I64], &[I64]), // name_ptr, name_len, target -> module_handle (JIT)
+    RuntimeFuncSpec::new("rt_cranelift_new_aot_module", &[I64, I64, I64], &[I64]), // name_ptr, name_len, target -> module_handle (AOT)
     RuntimeFuncSpec::new("rt_cranelift_finalize_module", &[I64], &[I64]),      // module -> success
     RuntimeFuncSpec::new("rt_cranelift_free_module", &[I64], &[]),             // module -> ()
     // Signature building
@@ -767,7 +768,8 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // Function building
     RuntimeFuncSpec::new("rt_cranelift_begin_function", &[I64, I64, I64, I64], &[I64]), // module, name_ptr, name_len, sig -> ctx
     RuntimeFuncSpec::new("rt_cranelift_end_function", &[I64], &[I64]),                  // ctx -> func_id
-    RuntimeFuncSpec::new("rt_cranelift_define_function", &[I64, I64, I64], &[I8]), // module, func_id, ctx -> success
+    RuntimeFuncSpec::new("rt_cranelift_define_function", &[I64, I64, I64], &[I8]), // module, func_id, ctx -> success (JIT)
+    RuntimeFuncSpec::new("rt_cranelift_aot_define_function", &[I64, I64, I64, I64], &[I8]), // module, name_ptr, name_len, ctx -> success (AOT)
     // Block management
     RuntimeFuncSpec::new("rt_cranelift_create_block", &[I64], &[I64]), // ctx -> block
     RuntimeFuncSpec::new("rt_cranelift_switch_to_block", &[I64, I64], &[]), // ctx, block -> ()
@@ -831,7 +833,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_cranelift_get_function_ptr", &[I64, I64, I64], &[I64]), // module, name_ptr, name_len -> ptr
     RuntimeFuncSpec::new("rt_cranelift_call_function_ptr", &[I64, I64, I64], &[I64]), // ptr, args_ptr, args_len -> result
     // Object file generation
-    RuntimeFuncSpec::new("rt_cranelift_emit_object", &[I64, I64, I64], &[I8]), // module, path_ptr, path_len -> success
+    RuntimeFuncSpec::new("rt_cranelift_emit_object", &[I64, I64], &[I8]), // module, path (RuntimeValue) -> success
     // =========================================================================
     // Bootstrap Self-Hosting FFI
     // =========================================================================

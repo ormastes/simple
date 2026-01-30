@@ -17,6 +17,7 @@ use codegen.*
 use blocks.resolver.{BlockResolver, ResolvedModule}
 use blocks.registry.{block_registry}
 use type_infer.{HmInferContext, TypeInferError}
+use simple.compiler.smf_writer.{generate_smf_with_templates, Target}
 
 # Helper function to create a Config (avoids static method calls)
 fn create_config() -> Config:
@@ -89,6 +90,29 @@ impl CompileMode:
             case _: nil
 
 # ------------------------------------------------------------------------------
+# Output Format (for AOT compilation)
+# ------------------------------------------------------------------------------
+
+enum OutputFormat:
+    Native      # Emit native executable (default)
+    Smf         # Emit .smf module file
+    Both        # Emit both native executable and .smf
+
+impl OutputFormat:
+    fn to_text() -> text:
+        match self:
+            case OutputFormat.Native: "native"
+            case OutputFormat.Smf: "smf"
+            case OutputFormat.Both: "both"
+            case _: "native"
+
+    static fn from_text(s: text) -> OutputFormat:
+        match s:
+            case "smf": OutputFormat.Smf
+            case "both": OutputFormat.Both
+            case _: OutputFormat.Native
+
+# ------------------------------------------------------------------------------
 # Compilation Options
 # ------------------------------------------------------------------------------
 
@@ -96,6 +120,7 @@ struct CompileOptions:
     mode: CompileMode
     input_files: [text]
     output_file: text?
+    output_format: OutputFormat
     optimize: bool
     debug_info: bool
     verbose: bool
@@ -107,6 +132,7 @@ struct CompileOptions:
             mode: CompileMode.Interpret,
             input_files: [],
             output_file: nil,
+            output_format: OutputFormat.Native,
             optimize: false,
             debug_info: true,
             verbose: false,
@@ -184,6 +210,7 @@ class CompileContext:
     config: Dict<text, text>  # Using dict instead of Config to avoid interpreter issues
     di: DiContainer
     aop: AopWeaver
+    logger: Logger
     sources: [SourceFile]
     modules: Dict<text, Module>
     hir_modules: Dict<text, HirModule>
@@ -213,8 +240,14 @@ class CompileContext:
                 # Check mode uses a no-op backend
                 di.bind_instance("Backend", CheckBackendImpl())
 
+        # Setup logger from env var (SIMPLE_LOG=debug|trace|info|warn|error)
+        val logger = if options.verbose:
+            Logger(level: 10)  # verbose flag forces debug level
+        else:
+            Logger.from_env()
+
         # Setup AOP
-        var aop = AopWeaver(aspects: [], logger: Logger(level: options.log_level))
+        var aop = AopWeaver(aspects: [], logger: logger)
         if options.verbose:
             aop.add_aspect(LogAspect(level: 6, logger: aop.logger))
 
@@ -223,6 +256,7 @@ class CompileContext:
             config: config,
             di: di,
             aop: aop,
+            logger: logger,
             sources: [],
             modules: {},
             hir_modules: {},
@@ -278,59 +312,61 @@ class CompilerDriver:
     # --------------------------------------------------------------------------
 
     me compile() -> CompileResult:
+        val log = self.ctx.logger
+
         # Phase 1: Load source files
-        print "[compile] phase 1: loading sources..."
+        log.debug("phase 1: loading sources...")
         if not self.load_sources_impl():
-            print "[compile] phase 1 FAILED"
+            log.error("phase 1 FAILED")
             return CompileResult.ParseError(self.ctx.errors)
-        print "[compile] phase 1 done, {self.ctx.sources.len()} sources loaded"
+        log.debug("phase 1 done, {self.ctx.sources.len()} sources loaded")
 
         # Phase 2: Parse all sources
-        print "[compile] phase 2: parsing..."
+        log.debug("phase 2: parsing...")
         if not self.parse_all_impl():
-            print "[compile] phase 2 FAILED"
+            log.error("phase 2 FAILED")
             return CompileResult.ParseError(self.ctx.errors)
-        print "[compile] phase 2 done"
+        log.debug("phase 2 done")
 
         # Phase 3: Lower to HIR, resolve methods, and type check (combined loop)
-        print "[compile] phase 3: lowering and checking..."
-        print "[compile] BEFORE phase 3: hir_modules count = {self.ctx.hir_modules.keys().len()}"
+        log.debug("phase 3: lowering and checking...")
+        log.trace("BEFORE phase 3: hir_modules count = {self.ctx.hir_modules.keys().len()}")
         val analyze_ok = self.lower_and_check_impl()
-        print "[compile] AFTER phase 3: self.ctx.hir_modules count = {self.ctx.hir_modules.keys().len()}"
+        log.trace("AFTER phase 3: hir_modules count = {self.ctx.hir_modules.keys().len()}")
         if not analyze_ok:
-            print "[compile] phase 3 FAILED"
+            log.error("phase 3 FAILED")
             # Determine error type from first error
             if self.ctx.errors.len() > 0:
                 val first_error = self.ctx.errors[0]
                 if first_error.contains("Method resolution"):
                     return CompileResult.ResolveError(self.ctx.errors)
             return CompileResult.TypeError(self.ctx.errors)
-        print "[compile] phase 3 done"
+        log.debug("phase 3 done")
 
         # Phase 5: Mode-specific processing
-        print "[compile] phase 5: mode-specific processing..."
+        log.debug("phase 5: mode-specific processing...")
         match self.ctx.options.mode:
             case CompileMode.Check:
-                print "[compile] check mode"
+                log.debug("check mode")
                 return CompileResult.Success(nil)
 
             case CompileMode.Sdn:
-                print "[compile] sdn mode"
+                log.debug("sdn mode")
                 return self.process_sdn()
 
             case CompileMode.Interpret:
-                print "[compile] interpret mode"
+                log.debug("interpret mode")
                 return self.interpret()
 
             case CompileMode.Jit:
-                print "[compile] jit mode"
+                log.debug("jit mode")
                 return self.jit_compile_and_run()
 
             case CompileMode.Aot:
-                print "[compile] aot mode"
+                log.debug("aot mode")
                 return self.aot_compile()
 
-        print "[compile] WARNING: no mode matched, falling through"
+        log.warn("no mode matched, falling through")
         CompileResult.Success(nil)
 
     # --------------------------------------------------------------------------
@@ -338,20 +374,21 @@ class CompilerDriver:
     # --------------------------------------------------------------------------
 
     me load_sources_impl() -> bool:
-        print "[load] input_files count={self.ctx.options.input_files.len()}"
+        val log = self.ctx.logger
+        log.debug("input_files count={self.ctx.options.input_files.len()}")
         var i = 0
         while i < self.ctx.options.input_files.len():
             val path = self.ctx.options.input_files[i]
-            print "[load] loading file: {path}"
+            log.trace("loading file: {path}")
             match SourceFile.load(path):
                 case Ok(source):
-                    print "[load] loaded OK: {source.path}"
+                    log.trace("loaded OK: {source.path}")
                     self.ctx.sources.push(source)
                 case Err(e):
-                    print "[load] error: {e}"
+                    log.error("load error: {e}")
                     self.ctx.add_error(e)
             i = i + 1
-        print "[load] sources stored, count={self.ctx.sources.len()}"
+        log.debug("sources stored, count={self.ctx.sources.len()}")
 
         not self.ctx.has_errors()
 
@@ -360,47 +397,40 @@ class CompilerDriver:
     # --------------------------------------------------------------------------
 
     me parse_all_impl() -> bool:
+        val log = self.ctx.logger
         val sources = self.ctx.sources
-        print "[parse_all] sources count={sources.len()}"
+        log.debug("parsing {sources.len()} sources")
         var src_idx = 0
         while src_idx < sources.len():
             val source = sources[src_idx]
-            val spath = source.path
-            val smod = source.module_name
-            val scontent = source.content
-            print "[parse_all] spath={spath}"
-            print "[parse_all] smod={smod}"
-            print "[parse_all] content_len={scontent.len()}"
+            log.trace("parsing: {source.path} (module={source.module_name}, len={source.content.len()})")
             val module = self.parse_source(source)
-            print "[parse_all] parse_source returned"
-            self.ctx.modules[smod] = module
-            print "[parse_all] stored, total={self.ctx.modules.keys().len()}"
+            self.ctx.modules[source.module_name] = module
+            log.trace("stored module, total={self.ctx.modules.keys().len()}")
             src_idx = src_idx + 1
 
-        print "[parse_all] done, modules={self.ctx.modules.keys().len()}"
+        log.debug("parsing done, modules={self.ctx.modules.keys().len()}")
         not self.ctx.has_errors()
 
     fn parse_source(source: SourceFile) -> Module:
+        val log = self.ctx.logger
+
         # Phase 2a: Outline parsing (TreeSitter)
-        print "[parse] 2a: creating TreeSitter..."
+        log.trace("2a: outline parsing...")
         var ts = TreeSitter.new(source.content)
-        print "[parse] 2a: parsing outline..."
         val outline = ts.parse_outline()
-        print "[parse] 2a: outline done"
 
         # Phase 2b: Block resolution
-        print "[parse] 2b: resolving blocks..."
+        log.trace("2b: resolving blocks...")
         var resolver = create_block_resolver()
         resolver = resolver.with_file(source.path)
         resolver = resolver.with_module(source.module_name)
         val (resolved, block_diagnostics) = resolver.resolve(outline)
-        print "[parse] 2b: blocks resolved"
 
         # Phase 2c: Full parse with resolved blocks
-        print "[parse] 2c: full parse..."
+        log.trace("2c: full parse...")
         var parser = Parser.with_resolved_blocks(source.content, resolved)
         val module = parser.parse()
-        print "[parse] 2c: done"
         module
 
     # --------------------------------------------------------------------------
@@ -412,47 +442,39 @@ class CompilerDriver:
     # performance on large codebases.
 
     me lower_and_check_impl() -> bool:
+        val log = self.ctx.logger
         var lowering = create_hir_lowering()
 
-        print "[phase3] parsed modules count={self.ctx.modules.keys().len()}"
         val module_names = self.ctx.modules.keys()
-        print "[phase3] entering loop over {module_names.len()} modules"
-        print "[phase3] DEBUG: module_names = {module_names}"
+        log.debug("lowering {module_names.len()} modules to HIR")
         for name in module_names:
-            print "[phase3] processing module: {name}"
+            log.trace("processing module: {name}")
             val module = self.ctx.modules[name]
             if module == nil:
-                print "[phase3] ERROR: module is nil for key {name}"
+                log.error("module is nil for key {name}")
                 continue
-            print "[phase3] got module (not nil), lowering to HIR..."
 
             # Step 1: Lower to HIR
             val hir_module = lowering.lower_module(module)
-            print "[phase3] HIR lowered"
+            log.trace("HIR lowered for {name}")
 
             # Step 2: Method resolution (UFCS)
-            print "[phase3] resolving methods..."
             val (resolved_module, resolve_errors) = resolve_methods(hir_module)
-            print "[phase3] methods resolved"
+            log.trace("methods resolved, errors={resolve_errors.len()}")
 
             # Collect method resolution errors
-            print "[phase3] resolve_errors count={resolve_errors.len()}"
             var err_idx = 0
             while err_idx < resolve_errors.len():
                 val err = resolve_errors[err_idx]
                 self.ctx.add_error("Method resolution error in {name}: {err.message}")
                 err_idx = err_idx + 1
 
-            # Step 3: Type checking (HM inference)
-            print "[phase3] skipping type inference for now..."
-            print "[phase3] inference skipped"
-
+            # Step 3: Type checking (HM inference) - skipped for bootstrap
             # Store final module directly (avoids copy-modify-reassign bug in compiled mode)
             self.ctx.hir_modules[name] = resolved_module
-            print "[phase3] stored HIR module '{name}', total now: {self.ctx.hir_modules.keys().len()}"
+            log.trace("stored HIR module '{name}', total={self.ctx.hir_modules.keys().len()}")
 
-        print "[phase3] loop complete. HIR modules keys: {self.ctx.hir_modules.keys()}"
-        print "[phase3] returning with {self.ctx.hir_modules.keys().len()} HIR modules"
+        log.debug("HIR lowering complete: {self.ctx.hir_modules.keys().len()} modules")
         not self.ctx.has_errors()
 
     # --------------------------------------------------------------------------
@@ -590,27 +612,47 @@ class CompilerDriver:
     # --------------------------------------------------------------------------
 
     me aot_compile() -> CompileResult:
+        val log = self.ctx.logger
+
         # Lower to MIR
-        print "[aot] DEBUG: ctx.hir_modules count = {self.ctx.hir_modules.keys().len()}"
-        print "[aot] lowering to MIR..."
+        log.debug("AOT: lowering to MIR ({self.ctx.hir_modules.keys().len()} HIR modules)")
         if not self.lower_to_mir():
-            print "[aot] MIR lowering failed, errors:"
-            var ei = 0
-            while ei < self.ctx.errors.len():
-                print "[aot] error: {self.ctx.errors[ei]}"
-                ei = ei + 1
+            for err in self.ctx.errors:
+                log.error("MIR error: {err}")
             return CompileResult.CodegenError(self.ctx.errors.first() ?? "MIR lowering failed")
-        print "[aot] MIR done, {self.ctx.mir_modules.keys().len()} modules"
+        log.debug("MIR done, {self.ctx.mir_modules.keys().len()} modules")
 
         # Determine output file
         val output = self.ctx.options.output_file ?? "a.out"
-        print "[aot] output={output}"
+
+        # Dispatch based on output format
+        val format = self.ctx.options.output_format
+        match format:
+            case OutputFormat.Smf:
+                return self.compile_to_smf(output)
+            case OutputFormat.Both:
+                # Compile native first, then SMF
+                val native_result = self.compile_to_native(output)
+                if not native_result.is_success():
+                    return native_result
+                val smf_result = self.compile_to_smf("{output}.smf")
+                if not smf_result.is_success():
+                    return smf_result
+                return CompileResult.Success(output)
+            case _:
+                # Native (default)
+                return self.compile_to_native(output)
+
+    me compile_to_native(output: text) -> CompileResult:
+        val log = self.ctx.logger
+        log.debug("AOT native: compiling to {output}")
 
         # AOT compile all modules
         var pipeline = CodegenPipeline.aot(CodegenTarget.Native)
         var compiled_modules: [CompiledModule] = []
 
         for name in self.ctx.mir_modules.keys():
+            log.trace("compiling module: {name}")
             val mir_module = self.ctx.mir_modules[name]
             match pipeline.compile_module(mir_module):
                 case Ok(compiled):
@@ -631,9 +673,47 @@ class CompilerDriver:
         # Link object files into final executable
         match self.link_objects(object_files, output):
             case Ok(_):
+                log.info("Native executable written to {output}")
                 CompileResult.Success(output)
             case Err(e):
                 CompileResult.CodegenError("Linking failed: {e}")
+
+    me compile_to_smf(output: text) -> CompileResult:
+        val log = self.ctx.logger
+        log.debug("AOT SMF: compiling to {output}")
+
+        # AOT compile all modules to get object code
+        var pipeline = CodegenPipeline.aot(CodegenTarget.Native)
+        var all_object_bytes: [u8] = []
+
+        for name in self.ctx.mir_modules.keys():
+            log.trace("compiling module for SMF: {name}")
+            val mir_module = self.ctx.mir_modules[name]
+            match pipeline.compile_module(mir_module):
+                case Ok(compiled):
+                    # Emit to temporary object file, then read bytes
+                    val tmp_path = "{output}.{name}.tmp.o"
+                    match compiled.emit_object(tmp_path):
+                        case Ok(_):
+                            val bytes = rt_file_read_bytes(tmp_path)
+                            if bytes.?:
+                                all_object_bytes = all_object_bytes.concat(bytes.unwrap())
+                            rt_file_delete(tmp_path)
+                        case Err(e):
+                            return CompileResult.CodegenError("Object emit error: {e.message}")
+                case Err(e):
+                    return CompileResult.CodegenError("AOT compile error in {name}: {e.message}")
+
+        # Wrap object code into SMF format
+        val target = Target.host()
+        val smf_bytes = generate_smf_with_templates(all_object_bytes, nil, nil, target)
+
+        # Write SMF file
+        if rt_file_write_bytes(output, smf_bytes):
+            log.info("SMF module written to {output}")
+            CompileResult.Success(output)
+        else:
+            CompileResult.CodegenError("Failed to write SMF file: {output}")
 
     # --------------------------------------------------------------------------
     # Linker Helper
@@ -760,6 +840,9 @@ fn parse_sdn_file(path: text) -> CompileResult:
 # ------------------------------------------------------------------------------
 
 extern fn rt_file_read_text(path: text) -> text?
+extern fn rt_file_read_bytes(path: text) -> [u8]?
+extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
+extern fn rt_file_delete(path: text) -> bool
 extern fn rt_write_file(path: text, content: text) -> bool
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_env_get(name: text) -> text?

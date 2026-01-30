@@ -22,6 +22,11 @@ use parser.parse
 use value.SdnValue
 use serializer.{to_sdn, to_json}
 
+# File I/O (using FFI temporarily until io.fs is fully implemented)
+extern fn rt_file_read_text(path: str) -> str
+extern fn rt_file_write_text(path: str, content: str) -> i64
+extern fn rt_file_exists(path: str) -> bool
+
 # Public exports
 export SdnDocument
 
@@ -31,25 +36,28 @@ class SdnDocument:
     root: SdnValue          # Parsed value tree
     modified: bool          # Track if document has been modified
 
-    fn parse(source: text) -> Result<SdnDocument, SdnError>:
+    static fn parse(source: text) -> Result<SdnDocument, SdnError>:
         """Parse source into an editable document"""
         match parse(source):
             case Ok(root):
                 return Ok(SdnDocument(
                     source: source,
                     root: root,
-                    modified: False
+                    modified: false
                 ))
             case Err(e):
                 return Err(e)
 
-    fn from_file(path: text) -> Result<SdnDocument, SdnError>:
+    static fn from_file(path: text) -> Result<SdnDocument, SdnError>:
         """Load document from file"""
-        match fs.read_to_string(path):
-            case Ok(source):
-                return SdnDocument.parse(source)
-            case Err(e):
-                return Err(SdnError.IoError(message: e.to_string()))
+        if not rt_file_exists(path):
+            return Err(SdnError.IoError("File not found: {path}"))
+
+        val source = rt_file_read_text(path)
+        if source == "":
+            return Err(SdnError.IoError("Failed to read file: {path}"))
+
+        SdnDocument.parse(source)
 
     fn root() -> SdnValue:
         """Get the root value"""
@@ -76,7 +84,7 @@ class SdnDocument:
         val parts = path.split(".")
 
         if parts.len == 0:
-            return Err(SdnError.PathNotFound(path: path))
+            return Err(SdnError.PathNotFound(path))
 
         if parts.len == 1:
             # Direct child of root
@@ -85,10 +93,7 @@ class SdnDocument:
                     dict[parts[0]] = value
                     return Ok(nil)
                 case _:
-                    return Err(SdnError.TypeMismatch(
-                        expected: "dict",
-                        found: self.root.type_name()
-                    ))
+                    return Err(SdnError.TypeMismatch("dict", self.root.type_name()))
 
         # Navigate to parent
         val parent_path = parts[0..parts.len-1].join(".")
@@ -101,12 +106,9 @@ class SdnDocument:
                         dict[key] = value
                         return Ok(nil)
                     case _:
-                        return Err(SdnError.TypeMismatch(
-                            expected: "dict",
-                            found: parent.type_name()
-                        ))
+                        return Err(SdnError.TypeMismatch("dict", parent.type_name()))
             case nil:
-                return Err(SdnError.PathNotFound(path: path))
+                return Err(SdnError.PathNotFound(path))
 
     me delete(path: text) -> Result<Nil, SdnError>:
         """Delete value at path"""
@@ -115,7 +117,7 @@ class SdnDocument:
         val parts = path.split(".")
 
         if parts.len == 0:
-            return Err(SdnError.PathNotFound(path: path))
+            return Err(SdnError.PathNotFound(path))
 
         if parts.len == 1:
             # Direct child of root
@@ -125,9 +127,9 @@ class SdnDocument:
                         dict.remove(parts[0])
                         return Ok(nil)
                     else:
-                        return Err(SdnError.PathNotFound(path: path))
+                        return Err(SdnError.PathNotFound(path))
                 case _:
-                    return Err(SdnError.PathNotFound(path: path))
+                    return Err(SdnError.PathNotFound(path))
 
         # Navigate to parent
         val parent_path = parts[0..parts.len-1].join(".")
@@ -141,11 +143,11 @@ class SdnDocument:
                             dict.remove(key)
                             return Ok(nil)
                         else:
-                            return Err(SdnError.PathNotFound(path: path))
+                            return Err(SdnError.PathNotFound(path))
                     case _:
-                        return Err(SdnError.PathNotFound(path: path))
+                        return Err(SdnError.PathNotFound(path))
             case nil:
-                return Err(SdnError.PathNotFound(path: path))
+                return Err(SdnError.PathNotFound(path))
 
     me push(path: text, value: SdnValue) -> Result<Nil, SdnError>:
         """Push value to array at path"""
@@ -156,12 +158,9 @@ class SdnDocument:
                 if arr.push(value):
                     return Ok(nil)
                 else:
-                    return Err(SdnError.TypeMismatch(
-                        expected: "array",
-                        found: arr.type_name()
-                    ))
+                    return Err(SdnError.TypeMismatch("array", arr.type_name()))
             case nil:
-                return Err(SdnError.PathNotFound(path: path))
+                return Err(SdnError.PathNotFound(path))
 
     fn is_modified() -> bool:
         """Check if document was modified"""
@@ -178,11 +177,11 @@ class SdnDocument:
     fn write_file(path: text) -> Result<Nil, SdnError>:
         """Write document to file"""
         val content = self.to_sdn()
-        match fs.write(path, content):
-            case Ok(_):
-                return Ok(nil)
-            case Err(e):
-                return Err(SdnError.IoError(message: e.to_string()))
+        val result = rt_file_write_text(path, content)
+        if result == 0:
+            Ok(nil)
+        else:
+            Err(SdnError.IoError("Failed to write file: {path}"))
 
     # =========================================================================
     # Helper Methods
@@ -301,10 +300,7 @@ class SdnDocument:
                 self.modified = true
                 return Ok(nil)
             case _:
-                return Err(SdnError.TypeMismatch(
-                    expected: "dict",
-                    found: self.root.type_name()
-                ))
+                return Err(SdnError.TypeMismatch("dict", self.root.type_name()))
 
     fn keys() -> Result<List<text>, SdnError>:
         """Get all keys if root is dict.
@@ -319,10 +315,7 @@ class SdnDocument:
             case SdnValue.Dict(dict):
                 return Ok(dict.keys().collect())
             case _:
-                return Err(SdnError.TypeMismatch(
-                    expected: "dict",
-                    found: self.root.type_name()
-                ))
+                return Err(SdnError.TypeMismatch("dict", self.root.type_name()))
 
     fn len() -> usize:
         """Get length of root collection.
