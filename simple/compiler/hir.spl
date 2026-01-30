@@ -118,6 +118,10 @@ enum MethodResolution:
     # x.method(a, b) -> method(x, a, b)
     FreeFunction(func_id: SymbolId)
 
+    # Static method on a type (no receiver)
+    # Type.method(a, b) - no self parameter
+    StaticMethod(type_id: SymbolId, method_id: SymbolId)
+
     # Not yet resolved (before resolution pass)
     Unresolved
 
@@ -140,6 +144,7 @@ impl MethodResolution:
             case InstanceMethod(_, method_id): Some(method_id)
             case TraitMethod(_, method_id): Some(method_id)
             case FreeFunction(func_id): Some(func_id)
+            case StaticMethod(_, method_id): Some(method_id)
             case Unresolved: nil
 
 struct ScopeId:
@@ -309,6 +314,25 @@ impl SymbolTable:
             if sym.name == qualified_name:
                 match sym.kind:
                     case Method: return Some(sym.id)
+                    case _: pass
+
+        nil
+
+    fn lookup_static_method(type_id: SymbolId, method_name: text) -> SymbolId?:
+        """Look up a static method in a class/struct/enum.
+
+        Static methods are defined with `static fn` and don't have a `self` parameter.
+        """
+        val type_sym = self.get(type_id)
+        if not type_sym.?:
+            return None
+
+        # Static methods are stored as Function symbols with qualified names
+        val qualified_name = "{type_sym.unwrap().name}::{method_name}"
+        for sym in self.symbols.values():
+            if sym.name == qualified_name:
+                match sym.kind:
+                    case Function: return Some(sym.id)  # Static methods
                     case _: pass
 
         nil
@@ -712,6 +736,7 @@ enum HirExprKind:
     # Calls
     Call(callee: HirExpr, args: [HirCallArg], type_args: [HirType])
     MethodCall(receiver: HirExpr, method: text, args: [HirCallArg], resolution: MethodResolution)
+    StaticCall(type_: HirType, method: text, args: [HirCallArg], resolution: MethodResolution)
 
     # Control flow
     If(cond: HirExpr, then_: HirBlock, else_: HirBlock?)

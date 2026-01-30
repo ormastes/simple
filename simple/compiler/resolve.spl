@@ -253,9 +253,14 @@ class MethodResolver:
                 val resolved_receiver = self.resolve_expr(receiver)
                 val resolved_args = self.resolve_call_args(args)
 
+                # Check if this is actually a static method call (Type.method())
+                val is_static = self.is_static_method_call(resolved_receiver)
+
                 # Only resolve if not already resolved
                 val new_resolution = if resolution.is_resolved():
                     resolution
+                elif is_static:
+                    self.resolve_static_method(resolved_receiver, method, resolved_args)
                 else:
                     self.resolve_method(resolved_receiver, method, resolved_args)
 
@@ -681,6 +686,58 @@ class MethodResolver:
                     nil
             case _:
                 nil
+
+    me is_static_method_call(receiver: HirExpr) -> bool:
+        """Check if receiver is a type reference (making this a static method call).
+
+        Static calls: Type.method() where receiver is a class/struct/enum name
+        Instance calls: expr.method() where receiver is a value
+        """
+        match receiver.kind:
+            case Var(symbol):
+                # Check if this symbol is a type (Class, Struct, Enum)
+                val sym = self.symbols.get(symbol)
+                if sym.?:
+                    match sym.unwrap().kind:
+                        case Class | Struct | Enum: true
+                        case _: false
+                else:
+                    false
+            case _:
+                false
+
+    me resolve_static_method(receiver: HirExpr, method: text, args: [HirCallArg]) -> MethodResolution:
+        """Resolve a static method call Type.method()"""
+
+        # Get the type symbol from receiver (must be Var referring to a type)
+        val type_sym_id = match receiver.kind:
+            case Var(symbol): Some(symbol)
+            case _: nil
+
+        if not type_sym_id.?:
+            self.add_error(
+                "internal error: is_static_method_call returned true but receiver is not a type reference",
+                receiver.span
+            )
+            return MethodResolution.Unresolved
+
+        val type_id = type_sym_id.unwrap()
+
+        # Look for static method in the type's definition
+        val method_sym = self.symbols.lookup_static_method(type_id, method)
+
+        if method_sym.?:
+            MethodResolution.StaticMethod(type_id, method_sym.unwrap())
+        else:
+            # No static method found - provide helpful error
+            val type_sym = self.symbols.get(type_id)
+            val type_name = if type_sym.?: type_sym.unwrap().name else "<unknown>"
+
+            self.add_error(
+                "no static method '{method}' found for type '{type_name}'",
+                receiver.span
+            )
+            MethodResolution.Unresolved
 
     # ========================================================================
     # Error Handling
