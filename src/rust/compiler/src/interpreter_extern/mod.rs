@@ -64,6 +64,7 @@ pub mod coverage;
 pub mod cranelift;
 pub mod sandbox;
 pub mod mock_policy;
+pub mod ffi_value;
 
 // Import parent interpreter types
 type Enums = HashMap<String, EnumDef>;
@@ -792,6 +793,28 @@ pub(crate) fn call_extern_function(
         "rt_sandbox_get_memory" => sandbox::rt_sandbox_get_memory_fn(&evaluated),
         "rt_sandbox_get_network_mode" => sandbox::rt_sandbox_get_network_mode_fn(&evaluated),
         "rt_sandbox_get_fs_mode" => sandbox::rt_sandbox_get_fs_mode_fn(&evaluated),
+
+        // ====================================================================
+        // FFI Value Operations (13 functions)
+        // ====================================================================
+        // Value creation
+        "rt_value_int" => ffi_value::rt_value_int_fn(&evaluated),
+        "rt_value_float" => ffi_value::rt_value_float_fn(&evaluated),
+        "rt_value_bool" => ffi_value::rt_value_bool_fn(&evaluated),
+        "rt_value_nil" => ffi_value::rt_value_nil_fn(&evaluated),
+
+        // Value extraction
+        "rt_value_as_int" => ffi_value::rt_value_as_int_fn(&evaluated),
+        "rt_value_as_float" => ffi_value::rt_value_as_float_fn(&evaluated),
+        "rt_value_as_bool" => ffi_value::rt_value_as_bool_fn(&evaluated),
+
+        // Value type checking
+        "rt_value_truthy" => ffi_value::rt_value_truthy_fn(&evaluated),
+        "rt_value_is_nil" => ffi_value::rt_value_is_nil_fn(&evaluated),
+        "rt_value_is_int" => ffi_value::rt_value_is_int_fn(&evaluated),
+        "rt_value_is_float" => ffi_value::rt_value_is_float_fn(&evaluated),
+        "rt_value_is_bool" => ffi_value::rt_value_is_bool_fn(&evaluated),
+        "rt_value_is_heap" => ffi_value::rt_value_is_heap_fn(&evaluated),
 
         // Unknown extern function
         _ => Err(common::unknown_function(name)),
