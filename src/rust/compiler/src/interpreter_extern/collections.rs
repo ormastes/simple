@@ -5,7 +5,7 @@
 
 use crate::error::CompileError;
 use crate::value::Value;
-use std::collections::HashMap as RustHashMap;
+use std::collections::{BTreeMap as RustBTreeMap, HashMap as RustHashMap, HashSet as RustHashSet};
 use std::sync::{Arc, Mutex};
 
 // ============================================================================
@@ -242,4 +242,640 @@ pub fn __rt_hashmap_entries(args: &[Value]) -> Result<Value, CompileError> {
         .collect();
 
     Ok(Value::Array(entries))
+}
+
+// ============================================================================
+// HashSet Implementation
+// ============================================================================
+
+type HashSetHandle = usize;
+
+// Global registry for HashSets
+static mut HASHSET_REGISTRY: Option<Arc<Mutex<RustHashMap<HashSetHandle, RustHashSet<String>>>>> = None;
+static mut NEXT_HASHSET_ID: HashSetHandle = 100000;
+
+fn get_hashset_registry() -> Arc<Mutex<RustHashMap<HashSetHandle, RustHashSet<String>>>> {
+    unsafe {
+        if HASHSET_REGISTRY.is_none() {
+            HASHSET_REGISTRY = Some(Arc::new(Mutex::new(RustHashMap::new())));
+        }
+        HASHSET_REGISTRY.as_ref().unwrap().clone()
+    }
+}
+
+fn alloc_hashset_handle() -> HashSetHandle {
+    unsafe {
+        let id = NEXT_HASHSET_ID;
+        NEXT_HASHSET_ID += 1;
+        id
+    }
+}
+
+/// Create a new HashSet
+pub fn __rt_hashset_new(_args: &[Value]) -> Result<Value, CompileError> {
+    let handle = alloc_hashset_handle();
+    let registry = get_hashset_registry();
+    let mut reg = registry.lock().unwrap();
+    reg.insert(handle, RustHashSet::new());
+    Ok(Value::Int(handle as i64))
+}
+
+/// Insert a value into the HashSet
+/// Returns true if the value was newly inserted, false if it already existed
+pub fn __rt_hashset_insert(args: &[Value]) -> Result<Value, CompileError> {
+    let handle = match args.get(0) {
+        Some(Value::Int(n)) => *n as HashSetHandle,
+        _ => return Err(CompileError::runtime("Invalid HashSet handle".to_string())),
+    };
+
+    let value = match args.get(1) {
+        Some(Value::Str(s)) => s.clone(),
+        Some(Value::Int(n)) => n.to_string(),
+        _ => return Err(CompileError::runtime("HashSet value must be a string or int".to_string())),
+    };
+
+    let registry = get_hashset_registry();
+    let mut reg = registry.lock().unwrap();
+
+    let set = reg.get_mut(&handle).ok_or_else(|| {
+        CompileError::runtime(format!("Invalid HashSet handle: {}", handle))
+    })?;
+
+    Ok(Value::Bool(set.insert(value)))
+}
+
+/// Check if a value exists in the HashSet
+pub fn __rt_hashset_contains(args: &[Value]) -> Result<Value, CompileError> {
+    let handle = match args.get(0) {
+        Some(Value::Int(n)) => *n as HashSetHandle,
+        _ => return Err(CompileError::runtime("Invalid HashSet handle".to_string())),
+    };
+
+    let value = match args.get(1) {
+        Some(Value::Str(s)) => s.clone(),
+        Some(Value::Int(n)) => n.to_string(),
+        _ => return Err(CompileError::runtime("HashSet value must be a string or int".to_string())),
+    };
+
+    let registry = get_hashset_registry();
+    let reg = registry.lock().unwrap();
+
+    let set = reg.get(&handle).ok_or_else(|| {
+        CompileError::runtime(format!("Invalid HashSet handle: {}", handle))
+    })?;
+
+    Ok(Value::Bool(set.contains(&value)))
+}
+
+/// Remove a value from the HashSet
+/// Returns true if the value was present
+pub fn __rt_hashset_remove(args: &[Value]) -> Result<Value, CompileError> {
+    let handle = match args.get(0) {
+        Some(Value::Int(n)) => *n as HashSetHandle,
+        _ => return Err(CompileError::runtime("Invalid HashSet handle".to_string())),
+    };
+
+    let value = match args.get(1) {
+        Some(Value::Str(s)) => s.clone(),
+        Some(Value::Int(n)) => n.to_string(),
+        _ => return Err(CompileError::runtime("HashSet value must be a string or int".to_string())),
+    };
+
+    let registry = get_hashset_registry();
+    let mut reg = registry.lock().unwrap();
+
+    let set = reg.get_mut(&handle).ok_or_else(|| {
+        CompileError::runtime(format!("Invalid HashSet handle: {}", handle))
+    })?;
+
+    Ok(Value::Bool(set.remove(&value)))
+}
+
+/// Get the number of elements in the HashSet
+pub fn __rt_hashset_len(args: &[Value]) -> Result<Value, CompileError> {
+    let handle = match args.get(0) {
+        Some(Value::Int(n)) => *n as HashSetHandle,
+        _ => return Err(CompileError::runtime("Invalid HashSet handle".to_string())),
+    };
+
+    let registry = get_hashset_registry();
+    let reg = registry.lock().unwrap();
+
+    let set = reg.get(&handle).ok_or_else(|| {
+        CompileError::runtime(format!("Invalid HashSet handle: {}", handle))
+    })?;
+
+    Ok(Value::Int(set.len() as i64))
+}
+
+/// Clear all elements from the HashSet
+pub fn __rt_hashset_clear(args: &[Value]) -> Result<Value, CompileError> {
+    let handle = match args.get(0) {
+        Some(Value::Int(n)) => *n as HashSetHandle,
+        _ => return Err(CompileError::runtime("Invalid HashSet handle".to_string())),
+    };
+
+    let registry = get_hashset_registry();
+    let mut reg = registry.lock().unwrap();
+
+    let set = reg.get_mut(&handle).ok_or_else(|| {
+        CompileError::runtime(format!("Invalid HashSet handle: {}", handle))
+    })?;
+
+    set.clear();
+    Ok(Value::Bool(true))
+}
+
+/// Convert HashSet to array
+pub fn __rt_hashset_to_array(args: &[Value]) -> Result<Value, CompileError> {
+    let handle = match args.get(0) {
+        Some(Value::Int(n)) => *n as HashSetHandle,
+        _ => return Err(CompileError::runtime("Invalid HashSet handle".to_string())),
+    };
+
+    let registry = get_hashset_registry();
+    let reg = registry.lock().unwrap();
+
+    let set = reg.get(&handle).ok_or_else(|| {
+        CompileError::runtime(format!("Invalid HashSet handle: {}", handle))
+    })?;
+
+    let array: Vec<Value> = set.iter().map(|s| Value::Str(s.clone())).collect();
+    Ok(Value::Array(array))
+}
+
+/// Union of two HashSets (returns new set with all elements from both)
+pub fn __rt_hashset_union(args: &[Value]) -> Result<Value, CompileError> {
+    let handle1 = match args.get(0) {
+        Some(Value::Int(n)) => *n as HashSetHandle,
+        _ => return Err(CompileError::runtime("Invalid HashSet handle".to_string())),
+    };
+
+    let handle2 = match args.get(1) {
+        Some(Value::Int(n)) => *n as HashSetHandle,
+        _ => return Err(CompileError::runtime("Invalid HashSet handle".to_string())),
+    };
+
+    let registry = get_hashset_registry();
+    let reg = registry.lock().unwrap();
+
+    let set1 = reg.get(&handle1).ok_or_else(|| {
+        CompileError::runtime(format!("Invalid HashSet handle: {}", handle1))
+    })?;
+
+    let set2 = reg.get(&handle2).ok_or_else(|| {
+        CompileError::runtime(format!("Invalid HashSet handle: {}", handle2))
+    })?;
+
+    let result: RustHashSet<String> = set1.union(set2).cloned().collect();
+
+    drop(reg);
+
+    let new_handle = alloc_hashset_handle();
+    let mut reg = registry.lock().unwrap();
+    reg.insert(new_handle, result);
+
+    Ok(Value::Int(new_handle as i64))
+}
+
+/// Intersection of two HashSets (returns new set with common elements)
+pub fn __rt_hashset_intersection(args: &[Value]) -> Result<Value, CompileError> {
+    let handle1 = match args.get(0) {
+        Some(Value::Int(n)) => *n as HashSetHandle,
+        _ => return Err(CompileError::runtime("Invalid HashSet handle".to_string())),
+    };
+
+    let handle2 = match args.get(1) {
+        Some(Value::Int(n)) => *n as HashSetHandle,
+        _ => return Err(CompileError::runtime("Invalid HashSet handle".to_string())),
+    };
+
+    let registry = get_hashset_registry();
+    let reg = registry.lock().unwrap();
+
+    let set1 = reg.get(&handle1).ok_or_else(|| {
+        CompileError::runtime(format!("Invalid HashSet handle: {}", handle1))
+    })?;
+
+    let set2 = reg.get(&handle2).ok_or_else(|| {
+        CompileError::runtime(format!("Invalid HashSet handle: {}", handle2))
+    })?;
+
+    let result: RustHashSet<String> = set1.intersection(set2).cloned().collect();
+
+    drop(reg);
+
+    let new_handle = alloc_hashset_handle();
+    let mut reg = registry.lock().unwrap();
+    reg.insert(new_handle, result);
+
+    Ok(Value::Int(new_handle as i64))
+}
+
+/// Difference of two HashSets (returns new set with elements in first but not second)
+pub fn __rt_hashset_difference(args: &[Value]) -> Result<Value, CompileError> {
+    let handle1 = match args.get(0) {
+        Some(Value::Int(n)) => *n as HashSetHandle,
+        _ => return Err(CompileError::runtime("Invalid HashSet handle".to_string())),
+    };
+
+    let handle2 = match args.get(1) {
+        Some(Value::Int(n)) => *n as HashSetHandle,
+        _ => return Err(CompileError::runtime("Invalid HashSet handle".to_string())),
+    };
+
+    let registry = get_hashset_registry();
+    let reg = registry.lock().unwrap();
+
+    let set1 = reg.get(&handle1).ok_or_else(|| {
+        CompileError::runtime(format!("Invalid HashSet handle: {}", handle1))
+    })?;
+
+    let set2 = reg.get(&handle2).ok_or_else(|| {
+        CompileError::runtime(format!("Invalid HashSet handle: {}", handle2))
+    })?;
+
+    let result: RustHashSet<String> = set1.difference(set2).cloned().collect();
+
+    drop(reg);
+
+    let new_handle = alloc_hashset_handle();
+    let mut reg = registry.lock().unwrap();
+    reg.insert(new_handle, result);
+
+    Ok(Value::Int(new_handle as i64))
+}
+
+/// Symmetric difference of two HashSets (returns new set with elements in either but not both)
+pub fn __rt_hashset_symmetric_difference(args: &[Value]) -> Result<Value, CompileError> {
+    let handle1 = match args.get(0) {
+        Some(Value::Int(n)) => *n as HashSetHandle,
+        _ => return Err(CompileError::runtime("Invalid HashSet handle".to_string())),
+    };
+
+    let handle2 = match args.get(1) {
+        Some(Value::Int(n)) => *n as HashSetHandle,
+        _ => return Err(CompileError::runtime("Invalid HashSet handle".to_string())),
+    };
+
+    let registry = get_hashset_registry();
+    let reg = registry.lock().unwrap();
+
+    let set1 = reg.get(&handle1).ok_or_else(|| {
+        CompileError::runtime(format!("Invalid HashSet handle: {}", handle1))
+    })?;
+
+    let set2 = reg.get(&handle2).ok_or_else(|| {
+        CompileError::runtime(format!("Invalid HashSet handle: {}", handle2))
+    })?;
+
+    let result: RustHashSet<String> = set1.symmetric_difference(set2).cloned().collect();
+
+    drop(reg);
+
+    let new_handle = alloc_hashset_handle();
+    let mut reg = registry.lock().unwrap();
+    reg.insert(new_handle, result);
+
+    Ok(Value::Int(new_handle as i64))
+}
+
+/// Check if this set is a subset of another
+pub fn __rt_hashset_is_subset(args: &[Value]) -> Result<Value, CompileError> {
+    let handle1 = match args.get(0) {
+        Some(Value::Int(n)) => *n as HashSetHandle,
+        _ => return Err(CompileError::runtime("Invalid HashSet handle".to_string())),
+    };
+
+    let handle2 = match args.get(1) {
+        Some(Value::Int(n)) => *n as HashSetHandle,
+        _ => return Err(CompileError::runtime("Invalid HashSet handle".to_string())),
+    };
+
+    let registry = get_hashset_registry();
+    let reg = registry.lock().unwrap();
+
+    let set1 = reg.get(&handle1).ok_or_else(|| {
+        CompileError::runtime(format!("Invalid HashSet handle: {}", handle1))
+    })?;
+
+    let set2 = reg.get(&handle2).ok_or_else(|| {
+        CompileError::runtime(format!("Invalid HashSet handle: {}", handle2))
+    })?;
+
+    Ok(Value::Bool(set1.is_subset(set2)))
+}
+
+/// Check if this set is a superset of another
+pub fn __rt_hashset_is_superset(args: &[Value]) -> Result<Value, CompileError> {
+    let handle1 = match args.get(0) {
+        Some(Value::Int(n)) => *n as HashSetHandle,
+        _ => return Err(CompileError::runtime("Invalid HashSet handle".to_string())),
+    };
+
+    let handle2 = match args.get(1) {
+        Some(Value::Int(n)) => *n as HashSetHandle,
+        _ => return Err(CompileError::runtime("Invalid HashSet handle".to_string())),
+    };
+
+    let registry = get_hashset_registry();
+    let reg = registry.lock().unwrap();
+
+    let set1 = reg.get(&handle1).ok_or_else(|| {
+        CompileError::runtime(format!("Invalid HashSet handle: {}", handle1))
+    })?;
+
+    let set2 = reg.get(&handle2).ok_or_else(|| {
+        CompileError::runtime(format!("Invalid HashSet handle: {}", handle2))
+    })?;
+
+    Ok(Value::Bool(set1.is_superset(set2)))
+}
+
+// ============================================================================
+// BTreeMap Implementation
+// ============================================================================
+
+type BTreeMapHandle = usize;
+
+// Global registry for BTreeMaps
+static mut BTREEMAP_REGISTRY: Option<Arc<Mutex<RustHashMap<BTreeMapHandle, RustBTreeMap<String, Value>>>>> = None;
+static mut NEXT_BTREEMAP_ID: BTreeMapHandle = 200000;
+
+fn get_btreemap_registry() -> Arc<Mutex<RustHashMap<BTreeMapHandle, RustBTreeMap<String, Value>>>> {
+    unsafe {
+        if BTREEMAP_REGISTRY.is_none() {
+            BTREEMAP_REGISTRY = Some(Arc::new(Mutex::new(RustHashMap::new())));
+        }
+        BTREEMAP_REGISTRY.as_ref().unwrap().clone()
+    }
+}
+
+fn alloc_btreemap_handle() -> BTreeMapHandle {
+    unsafe {
+        let id = NEXT_BTREEMAP_ID;
+        NEXT_BTREEMAP_ID += 1;
+        id
+    }
+}
+
+// Helper to convert Value to string for BTreeMap key
+fn value_to_btree_key(value: &Value) -> String {
+    match value {
+        Value::Str(s) => s.clone(),
+        Value::Int(n) => n.to_string(),
+        Value::Float(f) => f.to_string(),
+        Value::Bool(b) => b.to_string(),
+        _ => format!("{:?}", value),
+    }
+}
+
+/// Create a new BTreeMap
+pub fn __rt_btreemap_new(_args: &[Value]) -> Result<Value, CompileError> {
+    let handle = alloc_btreemap_handle();
+    let registry = get_btreemap_registry();
+    let mut reg = registry.lock().unwrap();
+    reg.insert(handle, RustBTreeMap::new());
+    Ok(Value::Int(handle as i64))
+}
+
+/// Insert a key-value pair into the BTreeMap
+/// Returns true if the key was newly inserted, false if it already existed
+pub fn __rt_btreemap_insert(args: &[Value]) -> Result<Value, CompileError> {
+    let handle = match args.get(0) {
+        Some(Value::Int(n)) => *n as BTreeMapHandle,
+        _ => return Err(CompileError::runtime("Invalid BTreeMap handle".to_string())),
+    };
+
+    let key = match args.get(1) {
+        Some(v) => value_to_btree_key(v),
+        _ => return Err(CompileError::runtime("BTreeMap key required".to_string())),
+    };
+
+    let value = match args.get(2) {
+        Some(v) => v.clone(),
+        _ => return Err(CompileError::runtime("BTreeMap value required".to_string())),
+    };
+
+    let registry = get_btreemap_registry();
+    let mut reg = registry.lock().unwrap();
+
+    let map = reg.get_mut(&handle).ok_or_else(|| {
+        CompileError::runtime(format!("Invalid BTreeMap handle: {}", handle))
+    })?;
+
+    let was_new = !map.contains_key(&key);
+    map.insert(key, value);
+    Ok(Value::Bool(was_new))
+}
+
+/// Get a value from the BTreeMap by key
+/// Returns the value if found, nil otherwise
+pub fn __rt_btreemap_get(args: &[Value]) -> Result<Value, CompileError> {
+    let handle = match args.get(0) {
+        Some(Value::Int(n)) => *n as BTreeMapHandle,
+        _ => return Err(CompileError::runtime("Invalid BTreeMap handle".to_string())),
+    };
+
+    let key = match args.get(1) {
+        Some(Value::Str(s)) => s.clone(),
+        _ => return Err(CompileError::runtime("BTreeMap key must be a string".to_string())),
+    };
+
+    let registry = get_btreemap_registry();
+    let reg = registry.lock().unwrap();
+
+    let map = reg.get(&handle).ok_or_else(|| {
+        CompileError::runtime(format!("Invalid BTreeMap handle: {}", handle))
+    })?;
+
+    match map.get(&key) {
+        Some(value) => Ok(value.clone()),
+        None => Ok(Value::Nil),
+    }
+}
+
+/// Check if a key exists in the BTreeMap
+pub fn __rt_btreemap_contains_key(args: &[Value]) -> Result<Value, CompileError> {
+    let handle = match args.get(0) {
+        Some(Value::Int(n)) => *n as BTreeMapHandle,
+        _ => return Err(CompileError::runtime("Invalid BTreeMap handle".to_string())),
+    };
+
+    let key = match args.get(1) {
+        Some(Value::Str(s)) => s.clone(),
+        _ => return Err(CompileError::runtime("BTreeMap key must be a string".to_string())),
+    };
+
+    let registry = get_btreemap_registry();
+    let reg = registry.lock().unwrap();
+
+    let map = reg.get(&handle).ok_or_else(|| {
+        CompileError::runtime(format!("Invalid BTreeMap handle: {}", handle))
+    })?;
+
+    Ok(Value::Bool(map.contains_key(&key)))
+}
+
+/// Remove a key-value pair from the BTreeMap
+/// Returns the value if found, nil otherwise
+pub fn __rt_btreemap_remove(args: &[Value]) -> Result<Value, CompileError> {
+    let handle = match args.get(0) {
+        Some(Value::Int(n)) => *n as BTreeMapHandle,
+        _ => return Err(CompileError::runtime("Invalid BTreeMap handle".to_string())),
+    };
+
+    let key = match args.get(1) {
+        Some(Value::Str(s)) => s.clone(),
+        _ => return Err(CompileError::runtime("BTreeMap key must be a string".to_string())),
+    };
+
+    let registry = get_btreemap_registry();
+    let mut reg = registry.lock().unwrap();
+
+    let map = reg.get_mut(&handle).ok_or_else(|| {
+        CompileError::runtime(format!("Invalid BTreeMap handle: {}", handle))
+    })?;
+
+    match map.remove(&key) {
+        Some(value) => Ok(value),
+        None => Ok(Value::Nil),
+    }
+}
+
+/// Get the number of entries in the BTreeMap
+pub fn __rt_btreemap_len(args: &[Value]) -> Result<Value, CompileError> {
+    let handle = match args.get(0) {
+        Some(Value::Int(n)) => *n as BTreeMapHandle,
+        _ => return Err(CompileError::runtime("Invalid BTreeMap handle".to_string())),
+    };
+
+    let registry = get_btreemap_registry();
+    let reg = registry.lock().unwrap();
+
+    let map = reg.get(&handle).ok_or_else(|| {
+        CompileError::runtime(format!("Invalid BTreeMap handle: {}", handle))
+    })?;
+
+    Ok(Value::Int(map.len() as i64))
+}
+
+/// Clear all entries from the BTreeMap
+pub fn __rt_btreemap_clear(args: &[Value]) -> Result<Value, CompileError> {
+    let handle = match args.get(0) {
+        Some(Value::Int(n)) => *n as BTreeMapHandle,
+        _ => return Err(CompileError::runtime("Invalid BTreeMap handle".to_string())),
+    };
+
+    let registry = get_btreemap_registry();
+    let mut reg = registry.lock().unwrap();
+
+    let map = reg.get_mut(&handle).ok_or_else(|| {
+        CompileError::runtime(format!("Invalid BTreeMap handle: {}", handle))
+    })?;
+
+    map.clear();
+    Ok(Value::Bool(true))
+}
+
+/// Get all keys from the BTreeMap as an array (sorted order)
+pub fn __rt_btreemap_keys(args: &[Value]) -> Result<Value, CompileError> {
+    let handle = match args.get(0) {
+        Some(Value::Int(n)) => *n as BTreeMapHandle,
+        _ => return Err(CompileError::runtime("Invalid BTreeMap handle".to_string())),
+    };
+
+    let registry = get_btreemap_registry();
+    let reg = registry.lock().unwrap();
+
+    let map = reg.get(&handle).ok_or_else(|| {
+        CompileError::runtime(format!("Invalid BTreeMap handle: {}", handle))
+    })?;
+
+    let keys: Vec<Value> = map.keys().map(|k| Value::Str(k.clone())).collect();
+    Ok(Value::Array(keys))
+}
+
+/// Get all values from the BTreeMap as an array (in key-sorted order)
+pub fn __rt_btreemap_values(args: &[Value]) -> Result<Value, CompileError> {
+    let handle = match args.get(0) {
+        Some(Value::Int(n)) => *n as BTreeMapHandle,
+        _ => return Err(CompileError::runtime("Invalid BTreeMap handle".to_string())),
+    };
+
+    let registry = get_btreemap_registry();
+    let reg = registry.lock().unwrap();
+
+    let map = reg.get(&handle).ok_or_else(|| {
+        CompileError::runtime(format!("Invalid BTreeMap handle: {}", handle))
+    })?;
+
+    let values: Vec<Value> = map.values().cloned().collect();
+    Ok(Value::Array(values))
+}
+
+/// Get all entries from the BTreeMap as an array of [key, value] pairs (sorted order)
+pub fn __rt_btreemap_entries(args: &[Value]) -> Result<Value, CompileError> {
+    let handle = match args.get(0) {
+        Some(Value::Int(n)) => *n as BTreeMapHandle,
+        _ => return Err(CompileError::runtime("Invalid BTreeMap handle".to_string())),
+    };
+
+    let registry = get_btreemap_registry();
+    let reg = registry.lock().unwrap();
+
+    let map = reg.get(&handle).ok_or_else(|| {
+        CompileError::runtime(format!("Invalid BTreeMap handle: {}", handle))
+    })?;
+
+    let entries: Vec<Value> = map
+        .iter()
+        .map(|(k, v)| {
+            Value::Array(vec![Value::Str(k.clone()), v.clone()])
+        })
+        .collect();
+
+    Ok(Value::Array(entries))
+}
+
+/// Get the first (smallest) key from the BTreeMap
+/// Returns the key if map is non-empty, nil otherwise
+pub fn __rt_btreemap_first_key(args: &[Value]) -> Result<Value, CompileError> {
+    let handle = match args.get(0) {
+        Some(Value::Int(n)) => *n as BTreeMapHandle,
+        _ => return Err(CompileError::runtime("Invalid BTreeMap handle".to_string())),
+    };
+
+    let registry = get_btreemap_registry();
+    let reg = registry.lock().unwrap();
+
+    let map = reg.get(&handle).ok_or_else(|| {
+        CompileError::runtime(format!("Invalid BTreeMap handle: {}", handle))
+    })?;
+
+    match map.keys().next() {
+        Some(key) => Ok(Value::Str(key.clone())),
+        None => Ok(Value::Nil),
+    }
+}
+
+/// Get the last (largest) key from the BTreeMap
+/// Returns the key if map is non-empty, nil otherwise
+pub fn __rt_btreemap_last_key(args: &[Value]) -> Result<Value, CompileError> {
+    let handle = match args.get(0) {
+        Some(Value::Int(n)) => *n as BTreeMapHandle,
+        _ => return Err(CompileError::runtime("Invalid BTreeMap handle".to_string())),
+    };
+
+    let registry = get_btreemap_registry();
+    let reg = registry.lock().unwrap();
+
+    let map = reg.get(&handle).ok_or_else(|| {
+        CompileError::runtime(format!("Invalid BTreeMap handle: {}", handle))
+    })?;
+
+    match map.keys().next_back() {
+        Some(key) => Ok(Value::Str(key.clone())),
+        None => Ok(Value::Nil),
+    }
 }
