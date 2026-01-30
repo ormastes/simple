@@ -69,6 +69,7 @@ pub mod ffi_array;
 pub mod ffi_dict;
 pub mod ffi_string;
 pub mod collections;
+pub mod lexer_ffi;
 
 // Import parent interpreter types
 type Enums = HashMap<String, EnumDef>;

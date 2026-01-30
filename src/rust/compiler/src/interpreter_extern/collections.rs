@@ -678,8 +678,8 @@ pub fn __rt_btreemap_get(args: &[Value]) -> Result<Value, CompileError> {
     };
 
     let key = match args.get(1) {
-        Some(Value::Str(s)) => s.clone(),
-        _ => return Err(CompileError::runtime("BTreeMap key must be a string".to_string())),
+        Some(v) => value_to_btree_key(v),
+        _ => return Err(CompileError::runtime("BTreeMap key required".to_string())),
     };
 
     let registry = get_btreemap_registry();
@@ -703,8 +703,8 @@ pub fn __rt_btreemap_contains_key(args: &[Value]) -> Result<Value, CompileError>
     };
 
     let key = match args.get(1) {
-        Some(Value::Str(s)) => s.clone(),
-        _ => return Err(CompileError::runtime("BTreeMap key must be a string".to_string())),
+        Some(v) => value_to_btree_key(v),
+        _ => return Err(CompileError::runtime("BTreeMap key required".to_string())),
     };
 
     let registry = get_btreemap_registry();
@@ -726,8 +726,8 @@ pub fn __rt_btreemap_remove(args: &[Value]) -> Result<Value, CompileError> {
     };
 
     let key = match args.get(1) {
-        Some(Value::Str(s)) => s.clone(),
-        _ => return Err(CompileError::runtime("BTreeMap key must be a string".to_string())),
+        Some(v) => value_to_btree_key(v),
+        _ => return Err(CompileError::runtime("BTreeMap key required".to_string())),
     };
 
     let registry = get_btreemap_registry();
