@@ -143,6 +143,25 @@ impl Lowerer {
             });
         }
 
+        // Handle FFI calls: @rt_function_name
+        // The parser creates identifiers with @ prefix for FFI calls
+        // Look up the extern function without the @ prefix
+        if let Some(stripped_name) = name.strip_prefix('@') {
+            if let Some(ty) = self.globals.get(stripped_name).copied() {
+                // Found extern function - return as global reference
+                // The @ prefix is preserved in the name for debugging/tooling
+                return Ok(HirExpr {
+                    kind: HirExprKind::Global(name.to_string()),
+                    ty,
+                });
+            } else {
+                return Err(LowerError::UnknownVariable(format!(
+                    "{} (FFI call to undefined extern function '{}')",
+                    name, stripped_name
+                )));
+            }
+        }
+
         if let Some(idx) = ctx.lookup(name) {
             let ty = ctx.locals[idx].ty;
             Ok(HirExpr {

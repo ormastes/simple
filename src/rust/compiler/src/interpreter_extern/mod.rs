@@ -564,6 +564,33 @@ pub(crate) fn call_extern_function(
         "__rt_hashmap_keys" => collections::__rt_hashmap_keys(&evaluated),
         "__rt_hashmap_values" => collections::__rt_hashmap_values(&evaluated),
         "__rt_hashmap_entries" => collections::__rt_hashmap_entries(&evaluated),
+        // HashSet operations
+        "__rt_hashset_new" => collections::__rt_hashset_new(&evaluated),
+        "__rt_hashset_insert" => collections::__rt_hashset_insert(&evaluated),
+        "__rt_hashset_contains" => collections::__rt_hashset_contains(&evaluated),
+        "__rt_hashset_remove" => collections::__rt_hashset_remove(&evaluated),
+        "__rt_hashset_len" => collections::__rt_hashset_len(&evaluated),
+        "__rt_hashset_clear" => collections::__rt_hashset_clear(&evaluated),
+        "__rt_hashset_to_array" => collections::__rt_hashset_to_array(&evaluated),
+        "__rt_hashset_union" => collections::__rt_hashset_union(&evaluated),
+        "__rt_hashset_intersection" => collections::__rt_hashset_intersection(&evaluated),
+        "__rt_hashset_difference" => collections::__rt_hashset_difference(&evaluated),
+        "__rt_hashset_symmetric_difference" => collections::__rt_hashset_symmetric_difference(&evaluated),
+        "__rt_hashset_is_subset" => collections::__rt_hashset_is_subset(&evaluated),
+        "__rt_hashset_is_superset" => collections::__rt_hashset_is_superset(&evaluated),
+        // BTreeMap operations
+        "__rt_btreemap_new" => collections::__rt_btreemap_new(&evaluated),
+        "__rt_btreemap_insert" => collections::__rt_btreemap_insert(&evaluated),
+        "__rt_btreemap_get" => collections::__rt_btreemap_get(&evaluated),
+        "__rt_btreemap_contains_key" => collections::__rt_btreemap_contains_key(&evaluated),
+        "__rt_btreemap_remove" => collections::__rt_btreemap_remove(&evaluated),
+        "__rt_btreemap_len" => collections::__rt_btreemap_len(&evaluated),
+        "__rt_btreemap_clear" => collections::__rt_btreemap_clear(&evaluated),
+        "__rt_btreemap_keys" => collections::__rt_btreemap_keys(&evaluated),
+        "__rt_btreemap_values" => collections::__rt_btreemap_values(&evaluated),
+        "__rt_btreemap_entries" => collections::__rt_btreemap_entries(&evaluated),
+        "__rt_btreemap_first_key" => collections::__rt_btreemap_first_key(&evaluated),
+        "__rt_btreemap_last_key" => collections::__rt_btreemap_last_key(&evaluated),
 
         // ====================================================================
         // CLI FFI Functions (46 functions - for Simple-based CLI)
