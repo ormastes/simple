@@ -372,6 +372,20 @@ pub fn load_and_merge_module(
     // Also cache the module definitions (classes, functions, enums) for future imports
     cache_module_definitions(&module_path, &module_classes, &module_functions, &module_enums);
 
+    // Merge freshly loaded definitions into caller's scope (same as cache case on line 264)
+    // This ensures static method calls work on imported classes
+    for (name, class_def) in &module_classes {
+        classes.insert(name.clone(), class_def.clone());
+    }
+    for (name, func_def) in &module_functions {
+        if name != "main" {  // Don't add "main" from imported modules
+            functions.insert(name.clone(), func_def.clone());
+        }
+    }
+    for (name, enum_def) in &module_enums {
+        enums.insert(name.clone(), enum_def.clone());
+    }
+
     // Clear partial exports now that full exports are available
     clear_partial_module_exports(&module_path);
 

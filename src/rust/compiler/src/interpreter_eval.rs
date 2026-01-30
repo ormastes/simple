@@ -771,14 +771,53 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                 ) {
                     Ok(value) => {
                         // Unpack module exports into current namespace
-                        // This allows direct access like: import std.spec; ExecutionMode.Variant
-                        if let Value::Dict(exports) = &value {
-                            for (name, export_value) in exports {
-                                env.insert(name.clone(), export_value.clone());
-                                // Also sync to MODULE_GLOBALS
-                                MODULE_GLOBALS.with(|cell| {
-                                    cell.borrow_mut().insert(name.clone(), export_value.clone());
-                                });
+                        // For Group imports, only import specified items
+                        // For Glob imports, import everything
+                        // For Single/Aliased imports, don't unpack (just bind the module)
+                        match &use_stmt.target {
+                            ImportTarget::Group(items) => {
+                                // Group import: use module.{Item1, Item2}
+                                // Only add the specified items to env
+                                if let Value::Dict(exports) = &value {
+                                    for item_target in items {
+                                        let item_name = match item_target {
+                                            ImportTarget::Single(name) => name.clone(),
+                                            ImportTarget::Aliased { name, alias } => {
+                                                // Import with alias: {Item as alias}
+                                                if let Some(export_value) = exports.get(name) {
+                                                    env.insert(alias.clone(), export_value.clone());
+                                                    MODULE_GLOBALS.with(|cell| {
+                                                        cell.borrow_mut().insert(alias.clone(), export_value.clone());
+                                                    });
+                                                }
+                                                continue;
+                                            }
+                                            _ => continue, // Nested groups not supported
+                                        };
+                                        if let Some(export_value) = exports.get(&item_name) {
+                                            env.insert(item_name.clone(), export_value.clone());
+                                            MODULE_GLOBALS.with(|cell| {
+                                                cell.borrow_mut().insert(item_name.clone(), export_value.clone());
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+                            ImportTarget::Glob => {
+                                // Glob import: use module.*
+                                // Add all exports to env
+                                if let Value::Dict(exports) = &value {
+                                    for (name, export_value) in exports {
+                                        env.insert(name.clone(), export_value.clone());
+                                        MODULE_GLOBALS.with(|cell| {
+                                            cell.borrow_mut().insert(name.clone(), export_value.clone());
+                                        });
+                                    }
+                                }
+                            }
+                            ImportTarget::Single(_) | ImportTarget::Aliased { .. } => {
+                                // Single/Aliased import: use module or use module as alias
+                                // Don't unpack - just bind the module dict
                             }
                         }
                         // Also keep the module dict under its name for qualified access
