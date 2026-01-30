@@ -141,6 +141,7 @@ pub enum TokenKind {
     Continue,
     Pass,  // pass (no-op statement, like Python's pass)
     Defer, // defer (deferred execution at scope exit)
+    Skip,  // skip (test skipping, like @Ignore in JUnit)
     Return,
     Match,
     Case,

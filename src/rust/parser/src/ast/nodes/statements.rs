@@ -158,6 +158,13 @@ pub struct PassStmt {
     pub span: Span,
 }
 
+/// Skip statement (no-op, similar to pass, used for test skipping context)
+/// Can mark sections of code to be skipped during execution or test discovery
+#[derive(Debug, Clone, PartialEq)]
+pub struct SkipStmt {
+    pub span: Span,
+}
+
 /// Defer statement - execute at scope exit (LIFO order)
 ///
 /// Deferred statements run when the enclosing scope exits, whether by:
