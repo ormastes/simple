@@ -70,6 +70,7 @@ pub mod ffi_dict;
 pub mod ffi_string;
 pub mod collections;
 pub mod lexer_ffi;
+pub mod i18n;
 
 // Import parent interpreter types
 type Enums = HashMap<String, EnumDef>;
@@ -932,6 +933,16 @@ pub(crate) fn call_extern_function(
         "rt_string_concat" => ffi_string::rt_string_concat_fn(&evaluated),
         "rt_string_len" => ffi_string::rt_string_len_fn(&evaluated),
         "rt_string_eq" => ffi_string::rt_string_eq_fn(&evaluated),
+
+        // ====================================================================
+        // I18n Operations (5 functions)
+        // ====================================================================
+        "rt_i18n_context_new" => i18n::rt_i18n_context_new(env),
+        "rt_i18n_context_insert" => i18n::rt_i18n_context_insert(&evaluated, env),
+        "rt_i18n_context_free" => i18n::rt_i18n_context_free(&evaluated, env),
+        "rt_i18n_get_message" => i18n::rt_i18n_get_message(&evaluated, env),
+        "rt_i18n_severity_name" => i18n::rt_i18n_severity_name(&evaluated, env),
+
         // Unknown extern function
         _ => Err(common::unknown_function(name)),
     }

@@ -1,0 +1,250 @@
+# SSpec Tests for Diagnostic Type
+#
+# Tests core diagnostic creation, builder pattern, and operations.
+
+use sspec.{describe, it, expect}
+use diagnostics.{Diagnostic, Severity, Span, Label}
+
+describe "Diagnostic Creation":
+    it "creates diagnostic with severity and message":
+        val diag = Diagnostic.new(Severity.Error, "test error")
+
+        expect diag.severity == Severity.Error
+        expect diag.message == "test error"
+        expect not diag.code.?
+        expect not diag.span.?
+
+    it "creates diagnostic with all fields empty initially":
+        val diag = Diagnostic.new(Severity.Warning, "test")
+
+        expect diag.labels.is_empty()
+        expect diag.notes.is_empty()
+        expect not diag.help.?
+
+describe "Diagnostic Factory Methods":
+    it "creates error diagnostic":
+        val diag = Diagnostic.error("error message")
+
+        expect diag.severity == Severity.Error
+        expect diag.message == "error message"
+
+    it "creates warning diagnostic":
+        val diag = Diagnostic.warning("warning message")
+
+        expect diag.severity == Severity.Warning
+        expect diag.message == "warning message"
+
+    it "creates note diagnostic":
+        val diag = Diagnostic.note("note message")
+
+        expect diag.severity == Severity.Note
+        expect diag.message == "note message"
+
+    it "creates help diagnostic":
+        val diag = Diagnostic.help_msg("help message")
+
+        expect diag.severity == Severity.Help
+        expect diag.message == "help message"
+
+    it "creates info diagnostic":
+        val diag = Diagnostic.info("info message")
+
+        expect diag.severity == Severity.Info
+        expect diag.message == "info message"
+
+describe "Diagnostic Builder - Code":
+    it "sets error code":
+        val diag = Diagnostic.error("test")
+            .with_code("E0001")
+
+        expect diag.code.?
+        expect diag.code.unwrap() == "E0001"
+
+    it "chains multiple builder methods":
+        val diag = Diagnostic.error("test")
+            .with_code("E0001")
+            .with_code("E0002")  # Overwrites
+
+        expect diag.code.unwrap() == "E0002"
+
+describe "Diagnostic Builder - Span":
+    it "sets primary span":
+        val span = Span.new(10, 20, 5, 3)
+        val diag = Diagnostic.error("test")
+            .with_span(span)
+
+        expect diag.span.?
+        expect diag.span.unwrap() == span
+
+    it "overwrites previous span":
+        val span1 = Span.new(0, 5, 1, 1)
+        val span2 = Span.new(10, 15, 2, 1)
+
+        val diag = Diagnostic.error("test")
+            .with_span(span1)
+            .with_span(span2)
+
+        expect diag.span.unwrap() == span2
+
+describe "Diagnostic Builder - Labels":
+    it "adds single label":
+        val span = Span.new(10, 20, 5, 3)
+        val diag = Diagnostic.error("test")
+            .with_label(span, "unexpected token")
+
+        val labels = diag.labels()
+        expect labels.len() == 1
+        expect labels[0].message == "unexpected token"
+
+    it "adds multiple labels":
+        val span1 = Span.new(0, 5, 1, 1)
+        val span2 = Span.new(10, 15, 2, 1)
+
+        val diag = Diagnostic.error("test")
+            .with_label(span1, "first error")
+            .with_label(span2, "second error")
+
+        val labels = diag.labels()
+        expect labels.len() == 2
+        expect labels[0].message == "first error"
+        expect labels[1].message == "second error"
+
+describe "Diagnostic Builder - Notes":
+    it "adds single note":
+        val diag = Diagnostic.error("test")
+            .with_note("consider this")
+
+        val notes = diag.notes()
+        expect notes.len() == 1
+        expect notes[0] == "consider this"
+
+    it "adds multiple notes":
+        val diag = Diagnostic.error("test")
+            .with_note("first note")
+            .with_note("second note")
+            .with_note("third note")
+
+        val notes = diag.notes()
+        expect notes.len() == 3
+        expect notes[0] == "first note"
+        expect notes[1] == "second note"
+        expect notes[2] == "third note"
+
+describe "Diagnostic Builder - Help":
+    it "sets help message":
+        val diag = Diagnostic.error("test")
+            .with_help("try this")
+
+        expect diag.help.?
+        expect diag.help.unwrap() == "try this"
+
+    it "overwrites previous help":
+        val diag = Diagnostic.error("test")
+            .with_help("first help")
+            .with_help("second help")
+
+        expect diag.help.unwrap() == "second help"
+
+describe "Diagnostic Builder - Full Chain":
+    it "chains all builder methods":
+        val span = Span.new(10, 20, 5, 3)
+        val label_span = Span.new(12, 18, 5, 5)
+
+        val diag = Diagnostic.error("type mismatch")
+            .with_code("E0308")
+            .with_span(span)
+            .with_label(label_span, "expected i32, found bool")
+            .with_note("types must match exactly")
+            .with_help("consider converting the value")
+
+        expect diag.severity == Severity.Error
+        expect diag.message == "type mismatch"
+        expect diag.code.unwrap() == "E0308"
+        expect diag.span.?
+        expect diag.labels.len() == 1
+        expect diag.notes.len() == 1
+        expect diag.help.?
+
+describe "Diagnostic Predicates":
+    it "identifies error diagnostic":
+        val diag = Diagnostic.error("test")
+
+        expect diag.is_error()
+
+    it "identifies non-error diagnostic":
+        val diag = Diagnostic.warning("test")
+
+        expect not diag.is_error()
+
+    it "identifies warning diagnostic":
+        val diag = Diagnostic.warning("test")
+
+        expect diag.is_warning()
+
+    it "identifies non-warning diagnostic":
+        val diag = Diagnostic.error("test")
+
+        expect not diag.is_warning()
+
+describe "Diagnostic Display":
+    it "formats as string without code":
+        val diag = Diagnostic.error("test message")
+
+        val str = diag.to_string()
+
+        expect str == "error: test message"
+
+    it "formats as string with code":
+        val diag = Diagnostic.error("test message")
+            .with_code("E0001")
+
+        val str = diag.to_string()
+
+        expect str == "error[E0001]: test message"
+
+    it "formats with span information":
+        val span = Span.new(10, 20, 5, 3)
+        val diag = Diagnostic.error("test")
+            .with_span(span)
+
+        val str = diag.to_string_with_span()
+
+        expect str.contains("5:3")
+        expect str.contains("error")
+
+describe "Diagnostic Item Count":
+    it "counts diagnostic itself as one item":
+        val diag = Diagnostic.error("test")
+
+        expect diag.item_count() == 1
+
+    it "counts diagnostic with labels":
+        val span = Span.new(0, 5, 1, 1)
+        val diag = Diagnostic.error("test")
+            .with_label(span, "label 1")
+            .with_label(span, "label 2")
+
+        expect diag.item_count() == 3  # 1 + 2 labels
+
+    it "counts diagnostic with notes":
+        val diag = Diagnostic.error("test")
+            .with_note("note 1")
+            .with_note("note 2")
+
+        expect diag.item_count() == 3  # 1 + 2 notes
+
+    it "counts diagnostic with help":
+        val diag = Diagnostic.error("test")
+            .with_help("help message")
+
+        expect diag.item_count() == 2  # 1 + 1 help
+
+    it "counts all items":
+        val span = Span.new(0, 5, 1, 1)
+        val diag = Diagnostic.error("test")
+            .with_label(span, "label")
+            .with_note("note 1")
+            .with_note("note 2")
+            .with_help("help")
+
+        expect diag.item_count() == 5  # 1 + 1 label + 2 notes + 1 help

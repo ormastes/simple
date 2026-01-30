@@ -1,0 +1,155 @@
+# SSpec Tests for TextFormatter
+#
+# Tests ANSI colored terminal output with source snippets.
+
+use sspec.{describe, it, expect}
+use diagnostics.{Diagnostic, Severity, Span, TextFormatter}
+
+describe "TextFormatter Creation":
+    it "creates formatter with default settings":
+        val formatter = TextFormatter.new()
+
+        expect formatter.use_color == true
+
+    it "creates formatter without color":
+        val formatter = TextFormatter.without_color()
+
+        expect formatter.use_color == false
+
+describe "TextFormatter Basic Formatting":
+    it "formats error without code":
+        val diag = Diagnostic.error("test error")
+        val formatter = TextFormatter.new()
+
+        val output = formatter.format(diag, "")
+
+        expect output.contains("error")
+        expect output.contains("test error")
+
+    it "formats error with code":
+        val diag = Diagnostic.error("test error").with_code("E0001")
+        val formatter = TextFormatter.new()
+
+        val output = formatter.format(diag, "")
+
+        expect output.contains("error[E0001]")
+        expect output.contains("test error")
+
+    it "formats warning":
+        val diag = Diagnostic.warning("test warning")
+        val formatter = TextFormatter.new()
+
+        val output = formatter.format(diag, "")
+
+        expect output.contains("warning")
+        expect output.contains("test warning")
+
+describe "TextFormatter with Color":
+    it "includes ANSI color codes":
+        val diag = Diagnostic.error("test")
+        val formatter = TextFormatter.new()
+
+        val output = formatter.format(diag, "")
+
+        # Should contain ANSI escape sequences
+        expect output.contains("\033[")
+
+    it "excludes color codes when disabled":
+        val diag = Diagnostic.error("test")
+        val formatter = TextFormatter.without_color()
+
+        val output = formatter.format(diag, "")
+
+        # Should not contain ANSI escape sequences
+        expect not output.contains("\033[")
+
+describe "TextFormatter Source Snippets":
+    it "includes source line with span":
+        val source = "fn main():\n    let x = foo"
+        val span = Span.new(20, 23, 2, 13)
+        val diag = Diagnostic.error("undefined variable").with_span(span)
+        val formatter = TextFormatter.new()
+
+        val output = formatter.format(diag, source)
+
+        expect output.contains("let x = foo")
+        expect output.contains("2:13")
+
+    it "shows line numbers":
+        val source = "line 1\nline 2\nline 3"
+        val span = Span.new(7, 13, 2, 1)
+        val diag = Diagnostic.error("test").with_span(span)
+        val formatter = TextFormatter.new()
+
+        val output = formatter.format(diag, source)
+
+        expect output.contains(" 2 |")
+
+    it "shows caret underlining":
+        val source = "fn main():\n    let x = foo"
+        val span = Span.new(20, 23, 2, 13)
+        val diag = Diagnostic.error("test").with_span(span)
+        val formatter = TextFormatter.new()
+
+        val output = formatter.format(diag, source)
+
+        # Should have carets or underline indicators
+        expect output.contains("^") or output.contains("~")
+
+describe "TextFormatter Labels":
+    it "formats diagnostic with labels":
+        val source = "let x = 5 + true"
+        val span1 = Span.new(8, 9, 1, 9)
+        val span2 = Span.new(12, 16, 1, 13)
+
+        val diag = Diagnostic.error("type mismatch")
+            .with_label(span1, "expected i32")
+            .with_label(span2, "found bool")
+
+        val formatter = TextFormatter.new()
+        val output = formatter.format(diag, source)
+
+        expect output.contains("expected i32")
+        expect output.contains("found bool")
+
+describe "TextFormatter Notes and Help":
+    it "includes notes in output":
+        val diag = Diagnostic.error("test")
+            .with_note("consider this")
+            .with_note("also this")
+
+        val formatter = TextFormatter.new()
+        val output = formatter.format(diag, "")
+
+        expect output.contains("note:")
+        expect output.contains("consider this")
+        expect output.contains("also this")
+
+    it "includes help in output":
+        val diag = Diagnostic.error("test")
+            .with_help("try this solution")
+
+        val formatter = TextFormatter.new()
+        val output = formatter.format(diag, "")
+
+        expect output.contains("help:")
+        expect output.contains("try this solution")
+
+describe "TextFormatter Multiple Diagnostics":
+    it "formats multiple diagnostics separately":
+        val diags = [
+            Diagnostic.error("error 1"),
+            Diagnostic.warning("warning 1"),
+            Diagnostic.note("note 1")
+        ]
+
+        val formatter = TextFormatter.new()
+
+        # Format each diagnostic separately
+        val output1 = formatter.format(diags[0], "")
+        val output2 = formatter.format(diags[1], "")
+        val output3 = formatter.format(diags[2], "")
+
+        expect output1.contains("error 1")
+        expect output2.contains("warning 1")
+        expect output3.contains("note 1")
