@@ -318,55 +318,19 @@ fn wait_with_timeout(mut child: std::process::Child, timeout: Duration) -> Resul
 
 /// Run a single test file in SMF loader mode.
 ///
-/// Compiles the test file to SMF format, then loads and executes it via the
-/// SMF loader (Settlement). Output is captured and parsed for test results.
-pub fn run_test_file_smf_mode(path: &Path, cache: &BuildCache) -> TestFileResult {
-    let start = Instant::now();
-
-    // Compile to SMF
-    let smf_path = match cache.compile_test_to_smf(path) {
-        Ok(p) => p,
-        Err(e) => {
-            return TestFileResult {
-                path: path.to_path_buf(),
-                passed: 0,
-                failed: 1,
-                skipped: 0,
-                ignored: 0,
-                duration_ms: start.elapsed().as_millis() as u64,
-                error: Some(format!("SMF compilation failed: {}", e)),
-            };
-        }
+/// For test files, we use safe mode (subprocess with "test" command) because
+/// test files require SSpec DSL activation which isn't available when directly
+/// compiling to SMF. The "test" command handles this automatically.
+pub fn run_test_file_smf_mode(path: &Path, _cache: &BuildCache) -> TestFileResult {
+    eprintln!("[DEBUG] run_test_file_smf_mode called for: {}", path.display());
+    // Use safe mode with test command to properly handle SSpec DSL
+    let options = super::types::TestOptions {
+        safe_mode: true,
+        safe_mode_timeout: 120,
+        ..Default::default()
     };
-
-    // Load and execute via Runner's SMF execution
-    let runner = Runner::new();
-    match runner.run_smf(&smf_path) {
-        Ok(exit_code) => {
-            let duration_ms = start.elapsed().as_millis() as u64;
-            // For SMF mode, we rely on exit code since output goes to stdout
-            // In safe mode subprocess variant, output would be captured
-            let (passed, failed) = if exit_code == 0 { (1, 0) } else { (0, 1) };
-            TestFileResult {
-                path: path.to_path_buf(),
-                passed,
-                failed,
-                skipped: 0,
-                ignored: 0,
-                duration_ms,
-                error: None,
-            }
-        }
-        Err(e) => TestFileResult {
-            path: path.to_path_buf(),
-            passed: 0,
-            failed: 1,
-            skipped: 0,
-            ignored: 0,
-            duration_ms: start.elapsed().as_millis() as u64,
-            error: Some(format!("SMF execution failed: {}", e)),
-        },
-    }
+    eprintln!("[DEBUG] Calling run_test_file_safe_mode");
+    run_test_file_safe_mode(path, &options)
 }
 
 /// Run a single test file in native binary mode.

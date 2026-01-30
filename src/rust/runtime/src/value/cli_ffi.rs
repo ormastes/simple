@@ -317,98 +317,98 @@ pub extern "C" fn rt_cli_run_fmt(_args: RuntimeValue) -> i64 {
 }
 
 #[no_mangle]
-pub extern "C" fn rt_cli_run_check(_args: RuntimeValue) -> i64 {
-    not_implemented("rt_cli_run_check")
+pub extern "C" fn rt_cli_run_check(args: RuntimeValue) -> i64 {
+    delegate_to_simple_old("check", args)
 }
 
 #[no_mangle]
-pub extern "C" fn rt_cli_run_verify(_args: RuntimeValue, _gc_log: u8, _gc_off: u8) -> i64 {
-    not_implemented("rt_cli_run_verify")
+pub extern "C" fn rt_cli_run_verify(args: RuntimeValue, _gc_log: u8, _gc_off: u8) -> i64 {
+    delegate_to_simple_old("verify", args)
 }
 
 #[no_mangle]
-pub extern "C" fn rt_cli_run_migrate(_args: RuntimeValue) -> i64 {
-    not_implemented("rt_cli_run_migrate")
+pub extern "C" fn rt_cli_run_migrate(args: RuntimeValue) -> i64 {
+    delegate_to_simple_old("migrate", args)
 }
 
 #[no_mangle]
-pub extern "C" fn rt_cli_run_mcp(_args: RuntimeValue) -> i64 {
-    not_implemented("rt_cli_run_mcp")
+pub extern "C" fn rt_cli_run_mcp(args: RuntimeValue) -> i64 {
+    delegate_to_simple_old("mcp", args)
 }
 
 #[no_mangle]
-pub extern "C" fn rt_cli_run_diff(_args: RuntimeValue) -> i64 {
-    not_implemented("rt_cli_run_diff")
+pub extern "C" fn rt_cli_run_diff(args: RuntimeValue) -> i64 {
+    delegate_to_simple_old("diff", args)
 }
 
 #[no_mangle]
-pub extern "C" fn rt_cli_run_context(_args: RuntimeValue) -> i64 {
-    not_implemented("rt_cli_run_context")
+pub extern "C" fn rt_cli_run_context(args: RuntimeValue) -> i64 {
+    delegate_to_simple_old("context", args)
 }
 
 #[no_mangle]
-pub extern "C" fn rt_cli_run_constr(_args: RuntimeValue) -> i64 {
-    not_implemented("rt_cli_run_constr")
+pub extern "C" fn rt_cli_run_constr(args: RuntimeValue) -> i64 {
+    delegate_to_simple_old("constr", args)
 }
 
 #[no_mangle]
-pub extern "C" fn rt_cli_run_query(_args: RuntimeValue) -> i64 {
-    not_implemented("rt_cli_run_query")
+pub extern "C" fn rt_cli_run_query(args: RuntimeValue) -> i64 {
+    delegate_to_simple_old("query", args)
 }
 
 #[no_mangle]
-pub extern "C" fn rt_cli_run_info(_args: RuntimeValue) -> i64 {
-    not_implemented("rt_cli_run_info")
+pub extern "C" fn rt_cli_run_info(args: RuntimeValue) -> i64 {
+    delegate_to_simple_old("info", args)
 }
 
 #[no_mangle]
-pub extern "C" fn rt_cli_run_spec_coverage(_args: RuntimeValue) -> i64 {
-    not_implemented("rt_cli_run_spec_coverage")
+pub extern "C" fn rt_cli_run_spec_coverage(args: RuntimeValue) -> i64 {
+    delegate_to_simple_old("spec-coverage", args)
 }
 
 #[no_mangle]
-pub extern "C" fn rt_cli_run_replay(_args: RuntimeValue) -> i64 {
-    not_implemented("rt_cli_run_replay")
+pub extern "C" fn rt_cli_run_replay(args: RuntimeValue) -> i64 {
+    delegate_to_simple_old("replay", args)
 }
 
 #[no_mangle]
-pub extern "C" fn rt_cli_run_gen_lean(_args: RuntimeValue) -> i64 {
-    not_implemented("rt_cli_run_gen_lean")
+pub extern "C" fn rt_cli_run_gen_lean(args: RuntimeValue) -> i64 {
+    delegate_to_simple_old("gen-lean", args)
 }
 
 #[no_mangle]
-pub extern "C" fn rt_cli_run_feature_gen(_args: RuntimeValue) -> i64 {
-    not_implemented("rt_cli_run_feature_gen")
+pub extern "C" fn rt_cli_run_feature_gen(args: RuntimeValue) -> i64 {
+    delegate_to_simple_old("feature-gen", args)
 }
 
 #[no_mangle]
-pub extern "C" fn rt_cli_run_task_gen(_args: RuntimeValue) -> i64 {
-    not_implemented("rt_cli_run_task_gen")
+pub extern "C" fn rt_cli_run_task_gen(args: RuntimeValue) -> i64 {
+    delegate_to_simple_old("task-gen", args)
 }
 
 #[no_mangle]
-pub extern "C" fn rt_cli_run_spec_gen(_args: RuntimeValue) -> i64 {
-    not_implemented("rt_cli_run_spec_gen")
+pub extern "C" fn rt_cli_run_spec_gen(args: RuntimeValue) -> i64 {
+    delegate_to_simple_old("spec-gen", args)
 }
 
 #[no_mangle]
-pub extern "C" fn rt_cli_run_sspec_docgen(_args: RuntimeValue) -> i64 {
-    not_implemented("rt_cli_run_sspec_docgen")
+pub extern "C" fn rt_cli_run_sspec_docgen(args: RuntimeValue) -> i64 {
+    delegate_to_simple_old("sspec-docgen", args)
 }
 
 #[no_mangle]
-pub extern "C" fn rt_cli_run_todo_scan(_args: RuntimeValue) -> i64 {
-    not_implemented("rt_cli_run_todo_scan")
+pub extern "C" fn rt_cli_run_todo_scan(args: RuntimeValue) -> i64 {
+    delegate_to_simple_old("todo-scan", args)
 }
 
 #[no_mangle]
-pub extern "C" fn rt_cli_run_todo_gen(_args: RuntimeValue) -> i64 {
-    not_implemented("rt_cli_run_todo_gen")
+pub extern "C" fn rt_cli_run_todo_gen(args: RuntimeValue) -> i64 {
+    delegate_to_simple_old("todo-gen", args)
 }
 
 #[no_mangle]
-pub extern "C" fn rt_cli_run_i18n(_args: RuntimeValue) -> i64 {
-    not_implemented("rt_cli_run_i18n")
+pub extern "C" fn rt_cli_run_i18n(args: RuntimeValue) -> i64 {
+    delegate_to_simple_old("i18n", args)
 }
 
 #[no_mangle]
@@ -464,68 +464,79 @@ pub extern "C" fn rt_cli_handle_linkers() -> i64 {
 }
 
 #[no_mangle]
-pub extern "C" fn rt_cli_handle_web(_args: RuntimeValue) -> i64 {
-    not_implemented("rt_cli_handle_web")
+pub extern "C" fn rt_cli_handle_web(args: RuntimeValue) -> i64 {
+    delegate_to_simple_old("web", args)
 }
 
 #[no_mangle]
-pub extern "C" fn rt_cli_handle_diagram(_args: RuntimeValue) -> i64 {
-    not_implemented("rt_cli_handle_diagram")
+pub extern "C" fn rt_cli_handle_diagram(args: RuntimeValue) -> i64 {
+    delegate_to_simple_old("diagram", args)
 }
 
 #[no_mangle]
-pub extern "C" fn rt_cli_handle_init(_args: RuntimeValue) -> i64 {
-    not_implemented("rt_cli_handle_init")
+pub extern "C" fn rt_cli_handle_init(args: RuntimeValue) -> i64 {
+    delegate_to_simple_old("init", args)
 }
 
 #[no_mangle]
-pub extern "C" fn rt_cli_handle_add(_args: RuntimeValue) -> i64 {
-    not_implemented("rt_cli_handle_add")
+pub extern "C" fn rt_cli_handle_add(args: RuntimeValue) -> i64 {
+    delegate_to_simple_old("add", args)
 }
 
 #[no_mangle]
-pub extern "C" fn rt_cli_handle_remove(_args: RuntimeValue) -> i64 {
-    not_implemented("rt_cli_handle_remove")
+pub extern "C" fn rt_cli_handle_remove(args: RuntimeValue) -> i64 {
+    delegate_to_simple_old("remove", args)
 }
 
 #[no_mangle]
 pub extern "C" fn rt_cli_handle_install() -> i64 {
-    not_implemented("rt_cli_handle_install")
+    let args = rt_array_new(1);
+    rt_array_push(args, rt_string_new("install".as_ptr(), 7));
+    delegate_to_simple_old("install", args)
 }
 
 #[no_mangle]
-pub extern "C" fn rt_cli_handle_update(_args: RuntimeValue) -> i64 {
-    not_implemented("rt_cli_handle_update")
+pub extern "C" fn rt_cli_handle_update(args: RuntimeValue) -> i64 {
+    delegate_to_simple_old("update", args)
 }
 
 #[no_mangle]
 pub extern "C" fn rt_cli_handle_list() -> i64 {
-    not_implemented("rt_cli_handle_list")
+    let args = rt_array_new(1);
+    rt_array_push(args, rt_string_new("list".as_ptr(), 4));
+    delegate_to_simple_old("list", args)
 }
 
 #[no_mangle]
 pub extern "C" fn rt_cli_handle_tree() -> i64 {
-    not_implemented("rt_cli_handle_tree")
+    let args = rt_array_new(1);
+    rt_array_push(args, rt_string_new("tree".as_ptr(), 4));
+    delegate_to_simple_old("tree", args)
 }
 
 #[no_mangle]
-pub extern "C" fn rt_cli_handle_cache(_args: RuntimeValue) -> i64 {
-    not_implemented("rt_cli_handle_cache")
+pub extern "C" fn rt_cli_handle_cache(args: RuntimeValue) -> i64 {
+    delegate_to_simple_old("cache", args)
 }
 
 #[no_mangle]
-pub extern "C" fn rt_cli_handle_env(_args: RuntimeValue) -> i64 {
-    not_implemented("rt_cli_handle_env")
+pub extern "C" fn rt_cli_handle_env(args: RuntimeValue) -> i64 {
+    delegate_to_simple_old("env", args)
 }
 
 #[no_mangle]
-pub extern "C" fn rt_cli_handle_lock(_args: RuntimeValue) -> i64 {
-    not_implemented("rt_cli_handle_lock")
+pub extern "C" fn rt_cli_handle_lock(args: RuntimeValue) -> i64 {
+    delegate_to_simple_old("lock", args)
 }
 
 #[no_mangle]
-pub extern "C" fn rt_cli_handle_run(_args: RuntimeValue, _gc_log: u8, _gc_off: u8) -> i64 {
-    not_implemented("rt_cli_handle_run")
+pub extern "C" fn rt_cli_run_qualify_ignore(args: RuntimeValue) -> i64 {
+    delegate_to_simple_old("qualify-ignore", args)
+}
+
+#[no_mangle]
+pub extern "C" fn rt_cli_handle_run(args: RuntimeValue, _gc_log: u8, _gc_off: u8) -> i64 {
+    delegate_to_simple_old("run", args)
 }
 
 // ============================================================================

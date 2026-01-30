@@ -20,6 +20,7 @@ fn test_parser_error_conversion() {
         notes: vec![],
         help: vec![],
         file: Some("test.spl".to_string()),
+        easy_fix: None,
     };
 
     // Convert to i18n diagnostic

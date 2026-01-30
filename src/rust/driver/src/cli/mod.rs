@@ -13,6 +13,7 @@ pub mod electron;
 pub mod env;
 pub mod gen_lean;
 pub mod help;
+pub mod interactive_fix;
 pub mod i18n;
 pub mod init;
 pub mod llm_tools;

@@ -21,6 +21,41 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+/// A machine-applicable fix for a diagnostic
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EasyFix {
+    /// Unique fix ID (e.g., "L:bare_bool:1", "E0308:1")
+    pub id: String,
+    /// Human-readable description of what the fix does
+    pub description: String,
+    /// The text replacements to apply
+    pub replacements: Vec<Replacement>,
+    /// Confidence: is this fix safe to auto-apply?
+    pub confidence: FixConfidence,
+}
+
+/// A single text replacement within a source file
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Replacement {
+    /// File path this replacement applies to
+    pub file: String,
+    /// The span to replace
+    pub span: Span,
+    /// The new text to insert
+    pub new_text: String,
+}
+
+/// Confidence level for an auto-fix
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum FixConfidence {
+    /// Safe to auto-apply (e.g., syntax migration)
+    Safe,
+    /// Likely correct but should be reviewed
+    Likely,
+    /// May change semantics, needs human review
+    Uncertain,
+}
+
 /// Source location span (line, column, offset)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Span {
@@ -146,6 +181,9 @@ pub struct Diagnostic {
     pub help: Vec<String>,
     /// The file path (optional)
     pub file: Option<String>,
+    /// Machine-applicable fix (optional)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub easy_fix: Option<EasyFix>,
 }
 
 impl Diagnostic {
@@ -159,6 +197,7 @@ impl Diagnostic {
             notes: Vec::new(),
             help: Vec::new(),
             file: None,
+            easy_fix: None,
         }
     }
 
@@ -205,6 +244,12 @@ impl Diagnostic {
     /// Add a help suggestion.
     pub fn with_help(mut self, help: impl Into<String>) -> Self {
         self.help.push(help.into());
+        self
+    }
+
+    /// Set the machine-applicable fix.
+    pub fn with_easy_fix(mut self, fix: EasyFix) -> Self {
+        self.easy_fix = Some(fix);
         self
     }
 

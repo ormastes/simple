@@ -2,6 +2,68 @@
 
 use std::env;
 
+/// Fix mode flags for auto-fix behavior
+#[derive(Debug, Clone, Default)]
+pub struct FixFlags {
+    /// Apply all safe-confidence fixes automatically
+    pub fix: bool,
+    /// Apply all fixes regardless of confidence
+    pub fix_all: bool,
+    /// Apply fixes for warnings only
+    pub fix_warnings: bool,
+    /// Apply fixes for errors only
+    pub fix_errors: bool,
+    /// Apply fixes for info/notes only
+    pub fix_info: bool,
+    /// Apply fix with specific ID prefix
+    pub fix_id: Option<String>,
+    /// Apply fixes for specific error code
+    pub fix_code: Option<String>,
+    /// Apply only the Nth fix (1-based)
+    pub fix_nth: Option<usize>,
+    /// Prompt for each fix interactively
+    pub fix_interactive: bool,
+    /// Show what would be fixed without applying
+    pub fix_dry_run: bool,
+}
+
+impl FixFlags {
+    pub fn parse(args: &[String]) -> Self {
+        let mut flags = Self::default();
+        let mut iter = args.iter().peekable();
+
+        while let Some(arg) = iter.next() {
+            match arg.as_str() {
+                "--fix" => flags.fix = true,
+                "--fix-all" => flags.fix_all = true,
+                "--fix-warnings" => flags.fix_warnings = true,
+                "--fix-errors" => flags.fix_errors = true,
+                "--fix-info" => flags.fix_info = true,
+                "--fix-interactive" => flags.fix_interactive = true,
+                "--fix-dry-run" => flags.fix_dry_run = true,
+                _ => {
+                    if let Some(id) = arg.strip_prefix("--fix-id=") {
+                        flags.fix_id = Some(id.to_string());
+                    } else if let Some(code) = arg.strip_prefix("--fix-code=") {
+                        flags.fix_code = Some(code.to_string());
+                    } else if let Some(n) = arg.strip_prefix("--fix-nth=") {
+                        flags.fix_nth = n.parse().ok();
+                    }
+                }
+            }
+        }
+
+        flags
+    }
+
+    /// Whether any fix mode is active
+    pub fn any_fix_mode(&self) -> bool {
+        self.fix || self.fix_all || self.fix_warnings || self.fix_errors
+            || self.fix_info || self.fix_id.is_some() || self.fix_code.is_some()
+            || self.fix_nth.is_some() || self.fix_interactive
+    }
+}
+
 /// Parse global flags from command-line arguments
 pub struct GlobalFlags {
     pub gc_log: bool,
@@ -9,6 +71,7 @@ pub struct GlobalFlags {
     pub use_notui: bool,
     pub macro_trace: bool,
     pub debug_mode: bool,
+    pub fix_flags: FixFlags,
 }
 
 impl GlobalFlags {
@@ -19,6 +82,7 @@ impl GlobalFlags {
             use_notui: args.iter().any(|a| a == "--notui"),
             macro_trace: args.iter().any(|a| a == "--macro-trace"),
             debug_mode: args.iter().any(|a| a == "--debug"),
+            fix_flags: FixFlags::parse(args),
         }
     }
 
@@ -61,6 +125,16 @@ pub fn filter_internal_flags(args: &[String]) -> Vec<String> {
             || arg == "--debug"
             || arg == "--sandbox"
             || arg == "--no-network"
+            || arg == "--fix"
+            || arg == "--fix-all"
+            || arg == "--fix-warnings"
+            || arg == "--fix-errors"
+            || arg == "--fix-info"
+            || arg == "--fix-interactive"
+            || arg == "--fix-dry-run"
+            || arg.starts_with("--fix-id=")
+            || arg.starts_with("--fix-code=")
+            || arg.starts_with("--fix-nth=")
         {
             continue;
         }

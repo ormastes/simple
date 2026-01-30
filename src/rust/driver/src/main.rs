@@ -32,6 +32,521 @@ use simple_driver::cli::qualify_ignore::{handle_qualify_ignore, parse_qualify_ig
 // Import our new command modules
 use simple_driver::cli::commands::*;
 
+// ---------------------------------------------------------------------------
+// Table-driven command dispatch
+// ---------------------------------------------------------------------------
+
+/// Handler type – covers the different function signatures used by CLI commands.
+enum Handler {
+    /// `fn(&[String]) -> i32`
+    Args(fn(&[String]) -> i32),
+    /// `fn() -> i32`  (no args)
+    NoArgs(fn() -> i32),
+    /// `fn(&[String], bool, bool) -> i32`  (args + gc_log + gc_off)
+    ArgsGc(fn(&[String], bool, bool) -> i32),
+    /// Custom handler that receives everything and returns exit code
+    Custom(fn(&CommandContext) -> i32),
+}
+
+/// Everything a command handler might need.
+struct CommandContext<'a> {
+    args: &'a [String],
+    gc_log: bool,
+    gc_off: bool,
+}
+
+/// One row in the command table.
+struct CommandEntry {
+    /// CLI name (e.g. "compile", "targets")
+    name: &'static str,
+    /// Relative path to the Simple app, e.g. "src/app/compile/main.spl"
+    app_path: &'static str,
+    /// Rust fallback handler
+    rust_handler: Handler,
+    /// Env var that forces Rust handler (e.g. "SIMPLE_COMPILE_RUST")
+    env_override: &'static str,
+    /// Flags that require the Rust handler (empty = none)
+    needs_rust_flags: &'static [&'static str],
+}
+
+/// Execute a command entry: Simple-first with Rust fallback.
+fn dispatch_command(entry: &CommandEntry, ctx: &CommandContext) -> i32 {
+    // 1. Check env var override → Rust
+    if !entry.env_override.is_empty() && std::env::var(entry.env_override).is_ok() {
+        return run_rust_handler(&entry.rust_handler, ctx);
+    }
+
+    // 2. Check if any args require the Rust handler
+    if !entry.needs_rust_flags.is_empty() {
+        let needs_rust = ctx.args[1..].iter().any(|a| {
+            entry.needs_rust_flags.iter().any(|f| a.as_str() == *f || a.starts_with(f))
+        });
+        if needs_rust {
+            return run_rust_handler(&entry.rust_handler, ctx);
+        }
+    }
+
+    // 3. Try Simple app
+    if !entry.app_path.is_empty() {
+        if let Some(code) = dispatch_to_simple_app(entry.app_path, ctx.args, ctx.gc_log, ctx.gc_off) {
+            return code;
+        }
+    }
+
+    // 4. Fallback → Rust
+    run_rust_handler(&entry.rust_handler, ctx)
+}
+
+fn run_rust_handler(handler: &Handler, ctx: &CommandContext) -> i32 {
+    match handler {
+        Handler::Args(f) => f(ctx.args),
+        Handler::NoArgs(f) => f(),
+        Handler::ArgsGc(f) => f(ctx.args, ctx.gc_log, ctx.gc_off),
+        Handler::Custom(f) => f(ctx),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Rust handler wrappers (adapt existing functions to uniform signatures)
+// ---------------------------------------------------------------------------
+
+fn handle_targets_wrapper() -> i32 { handle_targets() }
+fn handle_linkers_wrapper() -> i32 { handle_linkers() }
+fn handle_install_wrapper() -> i32 { handle_install() }
+fn handle_list_wrapper() -> i32 { handle_list() }
+fn handle_tree_wrapper() -> i32 { handle_tree() }
+
+fn handle_check_wrapper(ctx: &CommandContext) -> i32 {
+    handle_check_impl(ctx.args)
+}
+
+fn handle_watch_wrapper(ctx: &CommandContext) -> i32 {
+    if ctx.args.len() < 2 {
+        eprintln!("error: watch requires a source file");
+        eprintln!("Usage: simple watch <file.spl>");
+        return 1;
+    }
+    let path = PathBuf::from(&ctx.args[1]);
+    watch_file(&path)
+}
+
+fn handle_qualify_ignore_wrapper(ctx: &CommandContext) -> i32 {
+    let qi_args = parse_qualify_ignore_args(&ctx.args[1..]);
+    match handle_qualify_ignore(qi_args) {
+        Ok(()) => 0,
+        Err(e) => {
+            eprintln!("error: {}", e);
+            1
+        }
+    }
+}
+
+fn handle_i18n_wrapper(args: &[String]) -> i32 {
+    simple_driver::cli::i18n::run_i18n(args)
+}
+
+fn handle_run_wrapper(args: &[String], gc_log: bool, gc_off: bool) -> i32 {
+    handle_run(args, gc_log, gc_off)
+}
+
+// ---------------------------------------------------------------------------
+// Command table
+// ---------------------------------------------------------------------------
+
+const COMMAND_TABLE: &[CommandEntry] = &[
+    // Compilation commands
+    CommandEntry {
+        name: "compile",
+        app_path: "src/app/compile/main.spl",
+        rust_handler: Handler::Args(handle_compile),
+        env_override: "SIMPLE_COMPILE_RUST",
+        needs_rust_flags: &[],
+    },
+    CommandEntry {
+        name: "targets",
+        app_path: "src/app/targets/main.spl",
+        rust_handler: Handler::NoArgs(handle_targets_wrapper),
+        env_override: "SIMPLE_TARGETS_RUST",
+        needs_rust_flags: &[],
+    },
+    CommandEntry {
+        name: "linkers",
+        app_path: "src/app/linkers/main.spl",
+        rust_handler: Handler::NoArgs(handle_linkers_wrapper),
+        env_override: "SIMPLE_LINKERS_RUST",
+        needs_rust_flags: &[],
+    },
+
+    // Web framework
+    CommandEntry {
+        name: "web",
+        app_path: "src/app/web/main.spl",
+        rust_handler: Handler::Args(handle_web),
+        env_override: "SIMPLE_WEB_RUST",
+        needs_rust_flags: &[],
+    },
+
+    // File watching
+    CommandEntry {
+        name: "watch",
+        app_path: "src/app/watch/main.spl",
+        rust_handler: Handler::Custom(handle_watch_wrapper),
+        env_override: "SIMPLE_WATCH_RUST",
+        needs_rust_flags: &[],
+    },
+
+    // Testing - special: has complex needs_rust_flags
+    CommandEntry {
+        name: "test",
+        app_path: "src/app/test_runner_new/main.spl",
+        rust_handler: Handler::ArgsGc(handle_test_rust),
+        env_override: "SIMPLE_TEST_RUNNER_RUST",
+        needs_rust_flags: &[
+            "--watch", "--parallel", "-p",
+            "--doctest", "--json",
+            "--diagram", "--seq-",
+            "--rust-tests", "--list-runs",
+            "--cleanup-runs", "--prune-runs",
+            "--capture-screenshots", "--full-parallel",
+            "--rust-ignored",
+        ],
+    },
+
+    // Code quality
+    CommandEntry {
+        name: "lint",
+        app_path: "src/app/lint/main.spl",
+        rust_handler: Handler::Args(|a| run_lint(a)),
+        env_override: "SIMPLE_LINT_RUST",
+        needs_rust_flags: &["--json", "--fix"],
+    },
+    CommandEntry {
+        name: "fmt",
+        app_path: "src/app/formatter/main.spl",
+        rust_handler: Handler::Args(|a| run_fmt(a)),
+        env_override: "SIMPLE_FMT_RUST",
+        needs_rust_flags: &["--json"],
+    },
+    CommandEntry {
+        name: "check",
+        app_path: "src/app/check/main.spl",
+        rust_handler: Handler::Custom(handle_check_wrapper),
+        env_override: "SIMPLE_CHECK_RUST",
+        needs_rust_flags: &[],
+    },
+
+    // Localization
+    CommandEntry {
+        name: "i18n",
+        app_path: "src/app/i18n/main.spl",
+        rust_handler: Handler::Args(handle_i18n_wrapper),
+        env_override: "SIMPLE_I18N_RUST",
+        needs_rust_flags: &[],
+    },
+
+    // Migration and tooling
+    CommandEntry {
+        name: "migrate",
+        app_path: "src/app/migrate/main.spl",
+        rust_handler: Handler::Args(|a| run_migrate(a)),
+        env_override: "SIMPLE_MIGRATE_RUST",
+        needs_rust_flags: &[],
+    },
+    CommandEntry {
+        name: "mcp",
+        app_path: "src/app/mcp/main.spl",
+        rust_handler: Handler::Args(|a| run_mcp(a)),
+        env_override: "SIMPLE_MCP_RUST",
+        needs_rust_flags: &[],
+    },
+    CommandEntry {
+        name: "diff",
+        app_path: "src/app/diff/main.spl",
+        rust_handler: Handler::Args(|a| run_diff(a)),
+        env_override: "SIMPLE_DIFF_RUST",
+        needs_rust_flags: &[],
+    },
+    CommandEntry {
+        name: "context",
+        app_path: "src/app/context/main.spl",
+        rust_handler: Handler::Args(|a| run_context(a)),
+        env_override: "SIMPLE_CONTEXT_RUST",
+        needs_rust_flags: &[],
+    },
+    CommandEntry {
+        name: "constr",
+        app_path: "src/app/constr/main.spl",
+        rust_handler: Handler::Args(|a| run_constr(a)),
+        env_override: "SIMPLE_CONSTR_RUST",
+        needs_rust_flags: &[],
+    },
+
+    // Analysis
+    CommandEntry {
+        name: "query",
+        app_path: "src/app/query/main.spl",
+        rust_handler: Handler::Args(|a| run_query(a)),
+        env_override: "SIMPLE_QUERY_RUST",
+        needs_rust_flags: &[],
+    },
+    CommandEntry {
+        name: "info",
+        app_path: "src/app/info/main.spl",
+        rust_handler: Handler::Args(|a| run_info(a)),
+        env_override: "SIMPLE_INFO_RUST",
+        needs_rust_flags: &[],
+    },
+
+    // Auditing
+    CommandEntry {
+        name: "spec-coverage",
+        app_path: "src/app/spec_coverage/main.spl",
+        rust_handler: Handler::Args(|a| run_spec_coverage(a)),
+        env_override: "SIMPLE_SPEC_COVERAGE_RUST",
+        needs_rust_flags: &[],
+    },
+    CommandEntry {
+        name: "replay",
+        app_path: "src/app/replay/main.spl",
+        rust_handler: Handler::Args(|a| run_replay(a)),
+        env_override: "SIMPLE_REPLAY_RUST",
+        needs_rust_flags: &[],
+    },
+
+    // Code generation
+    CommandEntry {
+        name: "gen-lean",
+        app_path: "src/app/gen_lean/main.spl",
+        rust_handler: Handler::Args(|a| run_gen_lean(a)),
+        env_override: "SIMPLE_GEN_LEAN_RUST",
+        needs_rust_flags: &[],
+    },
+    CommandEntry {
+        name: "feature-gen",
+        app_path: "src/app/feature_gen/main.spl",
+        rust_handler: Handler::Args(|a| run_feature_gen(a)),
+        env_override: "SIMPLE_FEATURE_GEN_RUST",
+        needs_rust_flags: &[],
+    },
+    CommandEntry {
+        name: "task-gen",
+        app_path: "src/app/task_gen/main.spl",
+        rust_handler: Handler::Args(|a| run_task_gen(a)),
+        env_override: "SIMPLE_TASK_GEN_RUST",
+        needs_rust_flags: &[],
+    },
+    CommandEntry {
+        name: "spec-gen",
+        app_path: "src/app/spec_gen/main.spl",
+        rust_handler: Handler::Args(|a| run_spec_gen(a)),
+        env_override: "SIMPLE_SPEC_GEN_RUST",
+        needs_rust_flags: &[],
+    },
+    CommandEntry {
+        name: "todo-scan",
+        app_path: "src/app/todo_scan/main.spl",
+        rust_handler: Handler::Args(|a| run_todo_scan(a)),
+        env_override: "SIMPLE_TODO_SCAN_RUST",
+        needs_rust_flags: &[],
+    },
+    CommandEntry {
+        name: "todo-gen",
+        app_path: "src/app/todo_gen/main.spl",
+        rust_handler: Handler::Args(|a| run_todo_gen(a)),
+        env_override: "SIMPLE_TODO_GEN_RUST",
+        needs_rust_flags: &[],
+    },
+    CommandEntry {
+        name: "sspec-docgen",
+        app_path: "src/app/sspec_docgen/main.spl",
+        rust_handler: Handler::Args(|a| run_sspec_docgen_rust(a)),
+        env_override: "SIMPLE_SSPEC_DOCGEN_RUST",
+        needs_rust_flags: &[],
+    },
+
+    // Brief view
+    CommandEntry {
+        name: "brief",
+        app_path: "src/app/brief/main.spl",
+        rust_handler: Handler::ArgsGc(handle_brief),
+        env_override: "SIMPLE_BRIEF_RUST",
+        needs_rust_flags: &[],
+    },
+
+    // Dashboard
+    CommandEntry {
+        name: "dashboard",
+        app_path: "src/app/dashboard/main.spl",
+        rust_handler: Handler::ArgsGc(handle_dashboard),
+        env_override: "SIMPLE_DASHBOARD_RUST",
+        needs_rust_flags: &[],
+    },
+
+    // Verification
+    CommandEntry {
+        name: "verify",
+        app_path: "src/app/verify/main.spl",
+        rust_handler: Handler::ArgsGc(|a, gl, go| run_verify(a, gl, go)),
+        env_override: "SIMPLE_VERIFY_RUST",
+        needs_rust_flags: &[],
+    },
+
+    // Qualified ignore
+    CommandEntry {
+        name: "qualify-ignore",
+        app_path: "src/app/qualify_ignore/main.spl",
+        rust_handler: Handler::Custom(handle_qualify_ignore_wrapper),
+        env_override: "SIMPLE_QUALIFY_IGNORE_RUST",
+        needs_rust_flags: &[],
+    },
+
+    // Diagram
+    CommandEntry {
+        name: "diagram",
+        app_path: "src/app/diagram/main.spl",
+        rust_handler: Handler::Args(handle_diagram),
+        env_override: "SIMPLE_DIAGRAM_RUST",
+        needs_rust_flags: &[],
+    },
+
+    // Package management
+    CommandEntry {
+        name: "init",
+        app_path: "src/app/init/main.spl",
+        rust_handler: Handler::Args(handle_init),
+        env_override: "SIMPLE_INIT_RUST",
+        needs_rust_flags: &[],
+    },
+    CommandEntry {
+        name: "add",
+        app_path: "src/app/add/main.spl",
+        rust_handler: Handler::Args(handle_add),
+        env_override: "SIMPLE_ADD_RUST",
+        needs_rust_flags: &[],
+    },
+    CommandEntry {
+        name: "remove",
+        app_path: "src/app/remove/main.spl",
+        rust_handler: Handler::Args(handle_remove),
+        env_override: "SIMPLE_REMOVE_RUST",
+        needs_rust_flags: &[],
+    },
+    CommandEntry {
+        name: "install",
+        app_path: "src/app/install/main.spl",
+        rust_handler: Handler::NoArgs(handle_install_wrapper),
+        env_override: "SIMPLE_INSTALL_RUST",
+        needs_rust_flags: &[],
+    },
+    CommandEntry {
+        name: "update",
+        app_path: "src/app/update/main.spl",
+        rust_handler: Handler::Args(handle_update),
+        env_override: "SIMPLE_UPDATE_RUST",
+        needs_rust_flags: &[],
+    },
+    CommandEntry {
+        name: "list",
+        app_path: "src/app/list/main.spl",
+        rust_handler: Handler::NoArgs(handle_list_wrapper),
+        env_override: "SIMPLE_LIST_RUST",
+        needs_rust_flags: &[],
+    },
+    CommandEntry {
+        name: "tree",
+        app_path: "src/app/tree/main.spl",
+        rust_handler: Handler::NoArgs(handle_tree_wrapper),
+        env_override: "SIMPLE_TREE_RUST",
+        needs_rust_flags: &[],
+    },
+    CommandEntry {
+        name: "cache",
+        app_path: "src/app/cache/main.spl",
+        rust_handler: Handler::Args(handle_cache),
+        env_override: "SIMPLE_CACHE_RUST",
+        needs_rust_flags: &[],
+    },
+
+    // Environment management
+    CommandEntry {
+        name: "env",
+        app_path: "src/app/env/main.spl",
+        rust_handler: Handler::Args(handle_env),
+        env_override: "SIMPLE_ENV_RUST",
+        needs_rust_flags: &[],
+    },
+
+    // Lock file
+    CommandEntry {
+        name: "lock",
+        app_path: "src/app/lock/main.spl",
+        rust_handler: Handler::Args(handle_lock),
+        env_override: "SIMPLE_LOCK_RUST",
+        needs_rust_flags: &[],
+    },
+
+    // Coverage (app-only)
+    CommandEntry {
+        name: "coverage",
+        app_path: "src/app/coverage/main.spl",
+        rust_handler: Handler::Custom(|_| {
+            eprintln!("error: coverage app not found (install Simple or run from project root)");
+            1
+        }),
+        env_override: "",
+        needs_rust_flags: &[],
+    },
+
+    // Dependency graph (app-only)
+    CommandEntry {
+        name: "depgraph",
+        app_path: "src/app/depgraph/main.spl",
+        rust_handler: Handler::Custom(|_| {
+            eprintln!("error: depgraph app not found (install Simple or run from project root)");
+            1
+        }),
+        env_override: "",
+        needs_rust_flags: &[],
+    },
+
+    // LSP (app-only)
+    CommandEntry {
+        name: "lsp",
+        app_path: "src/app/lsp/main.spl",
+        rust_handler: Handler::Custom(|_| {
+            eprintln!("error: lsp app not found (install Simple or run from project root)");
+            1
+        }),
+        env_override: "",
+        needs_rust_flags: &[],
+    },
+
+    // DAP (app-only)
+    CommandEntry {
+        name: "dap",
+        app_path: "src/app/dap/main.spl",
+        rust_handler: Handler::Custom(|_| {
+            eprintln!("error: dap app not found (install Simple or run from project root)");
+            1
+        }),
+        env_override: "",
+        needs_rust_flags: &[],
+    },
+
+    // Run command
+    CommandEntry {
+        name: "run",
+        app_path: "src/app/run/main.spl",
+        rust_handler: Handler::ArgsGc(handle_run_wrapper),
+        env_override: "SIMPLE_RUN_RUST",
+        needs_rust_flags: &[],
+    },
+];
+
+// ---------------------------------------------------------------------------
+// Main entry point
+// ---------------------------------------------------------------------------
+
 fn main() {
     // Initialize metrics and startup tracking
     let (metrics_enabled, mut metrics) = init_metrics();
@@ -91,9 +606,8 @@ fn main() {
 
     let first = &args[0];
 
-    // Route commands to handlers
+    // Special cases that don't go through the table
     let exit_code = match first.as_str() {
-        // Help and version
         "-h" | "--help" => {
             print_help();
             0
@@ -102,8 +616,6 @@ fn main() {
             print_version();
             0
         }
-
-        // Code execution
         "-c" => {
             if args.len() < 2 {
                 eprintln!("error: -c requires a code argument");
@@ -112,124 +624,28 @@ fn main() {
             run_code(&args[1], global_flags.gc_log, global_flags.gc_off)
         }
 
-        // Compilation commands
-        "compile" => handle_compile(&args),
-        "targets" => handle_targets(),
-        "linkers" => handle_linkers(),
+        // Table-driven dispatch for all named commands
+        cmd => {
+            let ctx = CommandContext {
+                args: &args,
+                gc_log: global_flags.gc_log,
+                gc_off: global_flags.gc_off,
+            };
 
-        // Web framework
-        "web" => handle_web(&args),
-
-        // File watching
-        "watch" => {
-            if args.len() < 2 {
-                eprintln!("error: watch requires a source file");
-                eprintln!("Usage: simple watch <file.spl>");
-                std::process::exit(1);
-            }
-            let path = PathBuf::from(&args[1]);
-            watch_file(&path)
-        }
-
-        // Testing
-        "test" => handle_test(&args, global_flags.gc_log, global_flags.gc_off),
-
-        // Code quality
-        "lint" => handle_lint(&args, global_flags.gc_log, global_flags.gc_off),
-        "fmt" => handle_fmt(&args, global_flags.gc_log, global_flags.gc_off),
-        "check" => handle_check(&args),
-
-        // Localization
-        "i18n" => simple_driver::cli::i18n::run_i18n(&args),
-
-        // Migration and tooling
-        "migrate" => run_migrate(&args),
-        "mcp" => handle_mcp(&args, global_flags.gc_log, global_flags.gc_off),
-        "diff" => run_diff(&args),
-        "context" => handle_context(&args, global_flags.gc_log, global_flags.gc_off),
-        "constr" => run_constr(&args),
-
-        // Analysis
-        "query" => run_query(&args),
-        "info" => run_info(&args),
-
-        // Auditing
-        "spec-coverage" => run_spec_coverage(&args),
-        "replay" => run_replay(&args),
-
-        // Code generation
-        "gen-lean" => run_gen_lean(&args),
-        "feature-gen" => run_feature_gen(&args),
-        "task-gen" => run_task_gen(&args),
-        "spec-gen" => run_spec_gen(&args),
-        "todo-scan" => run_todo_scan(&args),
-        "todo-gen" => run_todo_gen(&args),
-        "sspec-docgen" => handle_sspec_docgen(&args, global_flags.gc_log, global_flags.gc_off),
-
-        // Brief view - LLM-friendly code overview
-        "brief" => handle_brief(&args, global_flags.gc_log, global_flags.gc_off),
-
-        // Dashboard
-        "dashboard" => handle_dashboard_dispatch(&args, global_flags.gc_log, global_flags.gc_off),
-
-        // Verification
-        "verify" => handle_verify(&args, global_flags.gc_log, global_flags.gc_off),
-
-        // Qualified ignore management
-        "qualify-ignore" => {
-            let qi_args = parse_qualify_ignore_args(&args[1..]);
-            match handle_qualify_ignore(qi_args) {
-                Ok(()) => 0,
-                Err(e) => {
-                    eprintln!("error: {}", e);
-                    1
-                }
+            if let Some(entry) = COMMAND_TABLE.iter().find(|e| e.name == cmd) {
+                dispatch_command(entry, &ctx)
+            } else {
+                // Default: assume it's a file to run
+                handle_file_execution(
+                    first,
+                    &args,
+                    global_flags.gc_log,
+                    global_flags.gc_off,
+                    prefetch_handle,
+                    &mut metrics,
+                )
             }
         }
-
-        // Diagram generation
-        "diagram" => handle_diagram(&args),
-
-        // Package management
-        "init" => handle_init(&args),
-        "add" => handle_add(&args),
-        "remove" => handle_remove(&args),
-        "install" => handle_install(),
-        "update" => handle_update(&args),
-        "list" => handle_list(),
-        "tree" => handle_tree(),
-        "cache" => handle_cache(&args),
-
-        // Environment management
-        "env" => handle_env(&args),
-
-        // Lock file management
-        "lock" => handle_lock(&args),
-
-        // Coverage
-        "coverage" => handle_coverage(&args, global_flags.gc_log, global_flags.gc_off),
-
-        // Dependency graph
-        "depgraph" => handle_depgraph(&args, global_flags.gc_log, global_flags.gc_off),
-
-        // LSP server
-        "lsp" => handle_lsp(&args, global_flags.gc_log, global_flags.gc_off),
-
-        // DAP server
-        "dap" => handle_dap(&args, global_flags.gc_log, global_flags.gc_off),
-
-        // Explicit run command
-        "run" => handle_run(&args, global_flags.gc_log, global_flags.gc_off),
-
-        // Default: assume it's a file to run
-        _ => handle_file_execution(
-            first,
-            &args,
-            global_flags.gc_log,
-            global_flags.gc_off,
-            prefetch_handle,
-            &mut metrics,
-        ),
     };
 
     if metrics_enabled {
@@ -288,47 +704,6 @@ fn dispatch_to_simple_app(app_relative_path: &str, args: &[String], gc_log: bool
     Some(run_file_with_args(&app_path, gc_log, gc_off, full_args))
 }
 
-/// Handle test command - dispatch to Simple runner or Rust runner
-fn handle_test(args: &[String], gc_log: bool, gc_off: bool) -> i32 {
-    // Recursion guard - child processes use Rust runner directly
-    if std::env::var("SIMPLE_TEST_RUNNER_RUST").is_ok() {
-        return handle_test_rust(args, gc_log, gc_off);
-    }
-
-    // Features requiring Rust runner (advanced features not yet in Simple runner)
-    let needs_rust = args[1..].iter().any(|a| {
-        a == "--watch" || a == "--parallel" || a == "-p"
-            || a.starts_with("--doctest") || a == "--json"
-            || a.starts_with("--diagram") || a.starts_with("--seq-")
-            || a == "--rust-tests" || a == "--list-runs"
-            || a == "--cleanup-runs" || a.starts_with("--prune-runs")
-            || a == "--capture-screenshots" || a == "--full-parallel"
-            || a == "--rust-ignored"
-    });
-
-    if needs_rust {
-        return handle_test_rust(args, gc_log, gc_off);
-    }
-
-    // Dispatch to Simple runner
-    if let Some(app_path) = resolve_app_path("src/app/test_runner_new/main.spl") {
-        let mut full_args = vec![
-            "simple_old".to_string(),
-            app_path.to_string_lossy().to_string(),
-        ];
-        full_args.extend(args[1..].iter().cloned());
-        if gc_log {
-            full_args.push("--gc-log".to_string());
-        }
-        if gc_off {
-            full_args.push("--gc=off".to_string());
-        }
-        return run_file_with_args(&app_path, gc_log, gc_off, full_args);
-    }
-
-    handle_test_rust(args, gc_log, gc_off)
-}
-
 /// Original Rust test runner implementation (fallback)
 fn handle_test_rust(args: &[String], gc_log: bool, gc_off: bool) -> i32 {
     // Parse test options from remaining args
@@ -367,8 +742,8 @@ fn handle_test_rust(args: &[String], gc_log: bool, gc_off: bool) -> i32 {
     }
 }
 
-/// Handle check command
-fn handle_check(args: &[String]) -> i32 {
+/// Handle check command (impl)
+fn handle_check_impl(args: &[String]) -> i32 {
     if args.len() < 2 {
         eprintln!("error: check requires at least one source file");
         eprintln!("Usage: simple check <file.spl> [options]");
@@ -449,127 +824,6 @@ fn handle_file_execution(
         print_help();
         1
     }
-}
-
-/// Handle fmt command - dispatch to Simple formatter or Rust formatter
-fn handle_fmt(args: &[String], gc_log: bool, gc_off: bool) -> i32 {
-    if std::env::var("SIMPLE_FMT_RUST").is_ok() {
-        return run_fmt(args);
-    }
-    let needs_rust = args[1..].iter().any(|a| a == "--json");
-    if needs_rust {
-        return run_fmt(args);
-    }
-    if let Some(code) = dispatch_to_simple_app("src/app/formatter/main.spl", args, gc_log, gc_off) {
-        return code;
-    }
-    run_fmt(args)
-}
-
-/// Handle lint command - dispatch to Simple linter or Rust linter
-fn handle_lint(args: &[String], gc_log: bool, gc_off: bool) -> i32 {
-    if std::env::var("SIMPLE_LINT_RUST").is_ok() {
-        return run_lint(args);
-    }
-    let needs_rust = args[1..].iter().any(|a| a == "--json" || a == "--fix");
-    if needs_rust {
-        return run_lint(args);
-    }
-    if let Some(code) = dispatch_to_simple_app("src/app/lint/main.spl", args, gc_log, gc_off) {
-        return code;
-    }
-    run_lint(args)
-}
-
-/// Handle sspec-docgen command - dispatch to Simple app or Rust implementation
-fn handle_sspec_docgen(args: &[String], gc_log: bool, gc_off: bool) -> i32 {
-    if std::env::var("SIMPLE_SSPEC_DOCGEN_RUST").is_ok() {
-        return run_sspec_docgen_rust(args);
-    }
-    if let Some(code) = dispatch_to_simple_app("src/app/sspec_docgen/main.spl", args, gc_log, gc_off) {
-        return code;
-    }
-    run_sspec_docgen_rust(args)
-}
-
-/// Handle context command - dispatch to Simple app or Rust implementation
-fn handle_context(args: &[String], gc_log: bool, gc_off: bool) -> i32 {
-    if std::env::var("SIMPLE_CONTEXT_RUST").is_ok() {
-        return run_context(args);
-    }
-    if let Some(code) = dispatch_to_simple_app("src/app/context/main.spl", args, gc_log, gc_off) {
-        return code;
-    }
-    run_context(args)
-}
-
-/// Handle mcp command - dispatch to Simple app or Rust implementation
-fn handle_mcp(args: &[String], gc_log: bool, gc_off: bool) -> i32 {
-    if std::env::var("SIMPLE_MCP_RUST").is_ok() {
-        return run_mcp(args);
-    }
-    if let Some(code) = dispatch_to_simple_app("src/app/mcp/main.spl", args, gc_log, gc_off) {
-        return code;
-    }
-    run_mcp(args)
-}
-
-/// Handle verify command - dispatch to Simple app or Rust implementation
-fn handle_verify(args: &[String], gc_log: bool, gc_off: bool) -> i32 {
-    if std::env::var("SIMPLE_VERIFY_RUST").is_ok() {
-        return run_verify(args, gc_log, gc_off);
-    }
-    if let Some(code) = dispatch_to_simple_app("src/app/verify/main.spl", args, gc_log, gc_off) {
-        return code;
-    }
-    run_verify(args, gc_log, gc_off)
-}
-
-/// Handle dashboard command - dispatch to Simple app or Rust implementation
-fn handle_dashboard_dispatch(args: &[String], gc_log: bool, gc_off: bool) -> i32 {
-    if std::env::var("SIMPLE_DASHBOARD_RUST").is_ok() {
-        return handle_dashboard(args, gc_log, gc_off);
-    }
-    if let Some(code) = dispatch_to_simple_app("src/app/dashboard/main.spl", args, gc_log, gc_off) {
-        return code;
-    }
-    handle_dashboard(args, gc_log, gc_off)
-}
-
-/// Handle coverage command - dispatch to Simple app
-fn handle_coverage(args: &[String], gc_log: bool, gc_off: bool) -> i32 {
-    if let Some(code) = dispatch_to_simple_app("src/app/coverage/main.spl", args, gc_log, gc_off) {
-        return code;
-    }
-    eprintln!("error: coverage app not found (install Simple or run from project root)");
-    1
-}
-
-/// Handle depgraph command - dispatch to Simple app
-fn handle_depgraph(args: &[String], gc_log: bool, gc_off: bool) -> i32 {
-    if let Some(code) = dispatch_to_simple_app("src/app/depgraph/main.spl", args, gc_log, gc_off) {
-        return code;
-    }
-    eprintln!("error: depgraph app not found (install Simple or run from project root)");
-    1
-}
-
-/// Handle lsp command - dispatch to Simple app
-fn handle_lsp(args: &[String], gc_log: bool, gc_off: bool) -> i32 {
-    if let Some(code) = dispatch_to_simple_app("src/app/lsp/main.spl", args, gc_log, gc_off) {
-        return code;
-    }
-    eprintln!("error: lsp app not found (install Simple or run from project root)");
-    1
-}
-
-/// Handle dap command - dispatch to Simple app
-fn handle_dap(args: &[String], gc_log: bool, gc_off: bool) -> i32 {
-    if let Some(code) = dispatch_to_simple_app("src/app/dap/main.spl", args, gc_log, gc_off) {
-        return code;
-    }
-    eprintln!("error: dap app not found (install Simple or run from project root)");
-    1
 }
 
 /// Original Rust sspec-docgen implementation (fallback)
