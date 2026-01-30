@@ -130,6 +130,11 @@ impl<'a> Parser<'a> {
                 | CommonMistake::RustTurbofish
                 | CommonMistake::TsArrowFunction
                 | CommonMistake::PythonElif => ErrorHintLevel::Hint,
+                CommonMistake::MissingCommaInArgs
+                | CommonMistake::MissingColonBeforeBlock
+                | CommonMistake::DictInsteadOfStruct
+                | CommonMistake::MissingIndentAfterColon
+                | CommonMistake::WrongIndentLevel => ErrorHintLevel::Error,
             };
 
             let hint = ErrorHint {

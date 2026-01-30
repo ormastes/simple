@@ -48,10 +48,13 @@ macro_rules! parse_binary_multi {
 
 impl<'a> Parser<'a> {
     // Binary expression parsing with precedence (using macros to reduce duplication)
-    // Precedence (lowest to highest): pipe, or, and, equality, comparison, bitwise_or, bitwise_xor, bitwise_and, shift, term, factor, power
+    // Precedence (lowest to highest): pipe, parallel, or, and, equality, comparison, bitwise_or, bitwise_xor, bitwise_and, shift, term, factor, power
 
     // Pipeline operator |> (lowest precedence - passes value to function)
-    parse_binary_single!(parse_pipe, parse_or, PipeForward, BinOp::PipeForward);
+    parse_binary_single!(parse_pipe, parse_parallel, PipeForward, BinOp::PipeForward);
+
+    // Parallel operator // (executes functions in parallel)
+    parse_binary_single!(parse_parallel, parse_or, Parallel, BinOp::Parallel);
 
     // Logical operators (support both keyword and symbol forms: or/||, and/&&)
     // Also supports suspension variants: and~, or~ (awaits RHS before evaluation)
@@ -255,7 +258,6 @@ impl<'a> Parser<'a> {
         Star => BinOp::Mul,
         Slash => BinOp::Div,
         Percent => BinOp::Mod,
-        DoubleSlash => BinOp::FloorDiv,
     );
 
     pub(crate) fn parse_power(&mut self) -> Result<Expr, ParseError> {

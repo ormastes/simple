@@ -79,20 +79,6 @@ impl BinaryOpSemantics {
                     BinaryOpResult::int(left % right)
                 }
             }
-            BinOp::FloorDiv => {
-                if right == 0 {
-                    BinaryOpResult::error("floor division by zero")
-                } else {
-                    // Python-style floor division
-                    let result = left / right;
-                    let remainder = left % right;
-                    if (remainder != 0) && ((left < 0) != (right < 0)) {
-                        BinaryOpResult::int(result - 1)
-                    } else {
-                        BinaryOpResult::int(result)
-                    }
-                }
-            }
             BinOp::Pow => BinaryOpResult::int(Self::int_pow(left, right)),
 
             // Comparison
@@ -149,7 +135,6 @@ impl BinaryOpSemantics {
             BinOp::Mul => BinaryOpResult::float(left * right),
             BinOp::Div => BinaryOpResult::float(left / right), // Float div allows 0 (produces inf/nan)
             BinOp::Mod => BinaryOpResult::float(left % right),
-            BinOp::FloorDiv => BinaryOpResult::float((left / right).floor()),
             BinOp::Pow => BinaryOpResult::float(left.powf(right)),
 
             // Comparison
@@ -308,26 +293,27 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_floor_div() {
-        // Python-style floor division
-        assert_eq!(
-            BinaryOpSemantics::eval_int_int(&BinOp::FloorDiv, 7, 3),
-            BinaryOpResult::int(2)
-        );
-        assert_eq!(
-            BinaryOpSemantics::eval_int_int(&BinOp::FloorDiv, -7, 3),
-            BinaryOpResult::int(-3)
-        );
-        assert_eq!(
-            BinaryOpSemantics::eval_int_int(&BinOp::FloorDiv, 7, -3),
-            BinaryOpResult::int(-3)
-        );
-        assert_eq!(
-            BinaryOpSemantics::eval_int_int(&BinOp::FloorDiv, -7, -3),
-            BinaryOpResult::int(2)
-        );
-    }
+    // FloorDiv operator removed - use .fdiv() method instead
+    // #[test]
+    // fn test_floor_div() {
+    //     // Python-style floor division
+    //     assert_eq!(
+    //         BinaryOpSemantics::eval_int_int(&BinOp::FloorDiv, 7, 3),
+    //         BinaryOpResult::int(2)
+    //     );
+    //     assert_eq!(
+    //         BinaryOpSemantics::eval_int_int(&BinOp::FloorDiv, -7, 3),
+    //         BinaryOpResult::int(-3)
+    //     );
+    //     assert_eq!(
+    //         BinaryOpSemantics::eval_int_int(&BinOp::FloorDiv, 7, -3),
+    //         BinaryOpResult::int(-3)
+    //     );
+    //     assert_eq!(
+    //         BinaryOpSemantics::eval_int_int(&BinOp::FloorDiv, -7, -3),
+    //         BinaryOpResult::int(2)
+    //     );
+    // }
 
     #[test]
     fn test_int_comparison() {

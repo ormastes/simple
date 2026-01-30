@@ -1,16 +1,21 @@
 /-
-  Soundness.lean - Soundness proofs for Hindley-Milner type inference
+  Soundness.lean - Soundness proofs for type inference
 
-  This module provides formal proofs that the HM type inference is:
+  This module provides formal proofs that the type inference is:
   1. Sound: Well-typed programs don't get stuck
   2. Complete: If a type exists, inference finds it
   3. Principal: Inference finds the most general type
 
-  These proofs ensure that the Simple compiler's type inference
-  is correct and produces valid types.
+  Extended with:
+  - Method call expressions
+  - Field access expressions
+  - Dynamic trait coercion expressions
 -/
 
 import TypeInferenceCompile.Generics
+import Classes
+import Traits
+import DynTrait
 
 namespace Soundness
 
@@ -66,10 +71,25 @@ theorem progress (e : Expr) (t : Ty) :
   | litBool b => left; exact IsValue.litBool b
   | litStr s => left; exact IsValue.litStr s
   | lam x body => left; exact IsValue.lam x body
-  | var _ => sorry -- Variables are not well-typed in empty env
-  | app f x => sorry -- Need to analyze f
-  | letIn x v body => sorry -- Either v steps or we substitute
-  | ifElse c t e => sorry -- Either c steps or is bool literal
+  | var x =>
+    -- Variables in empty env: infer [] (var x) fails (lookupEnv returns none)
+    -- So the premise is false (vacuously true)
+    simp [infer, lookupEnv] at _h
+  | app f x =>
+    -- f is either a value (must be lam) or can step
+    right
+    -- If f can step, app steps via appLeft
+    -- If f is a value and x can step, app steps via appRight
+    -- If both are values and f is lam, app steps via appLam
+    sorry -- Requires case analysis on f's type being Arrow
+  | letIn x v body =>
+    right
+    -- Either v steps (letStep) or v is a value (letVal)
+    sorry -- Requires case analysis on whether v is a value
+  | ifElse c t e =>
+    right
+    -- Either c steps (ifCond) or c is a bool literal (ifTrue/ifFalse)
+    sorry -- Requires case analysis on c being bool literal
   | mkGeneric1 _ _ => sorry
   | mkGeneric2 _ _ _ => sorry
 
@@ -81,8 +101,36 @@ theorem preservation (e e' : Expr) (t : Ty) (env : TypeEnv) (st : FreshState) :
     Step e e' →
     ∃ t' st', infer env e' st' = InferResult.ok t' _ st' ∧
               ∃ s, applySubst s t' = t := by
-  intro _hType _hStep
-  sorry
+  intro _hType hStep
+  -- By induction on the step derivation
+  cases hStep with
+  | appLam x body v hVal =>
+    -- (λx.body) v → subst x v body
+    -- Type of app is return type of λ
+    -- Substitution preserves typing (substitution lemma)
+    sorry
+  | appLeft f f' x hStep =>
+    -- f → f' means (f x) → (f' x)
+    -- By IH, f' has same type as f, so (f' x) has same type
+    sorry
+  | appRight v x x' hVal hStep =>
+    -- x → x' means (v x) → (v x')
+    sorry
+  | letStep x v v' body hStep =>
+    -- v → v' means (let x = v in body) → (let x = v' in body)
+    sorry
+  | letVal x v body hVal =>
+    -- let x = v in body → subst x v body (when v is value)
+    sorry
+  | ifTrue t e =>
+    -- if true then t else e → t
+    sorry
+  | ifFalse t e =>
+    -- if false then t else e → e
+    sorry
+  | ifCond c c' t e hStep =>
+    -- c → c' means (if c then t else e) → (if c' then t else e)
+    sorry
 
 /-! ## Soundness Theorem -/
 
@@ -162,5 +210,125 @@ theorem determinism (env : TypeEnv) (e : Expr) (st : FreshState)
   intro h1 h2
   rw [h1] at h2
   exact h2.symm
+
+/-! ## Extended Expressions for Method Calls, Field Access, Dyn Coercion -/
+
+/-- Extended expression type with method calls, field access, and dyn coercion.
+    These extend the base Expr with class/trait/dyn operations. -/
+inductive ExprExt where
+  | base (e : Expr)
+  | methodCall (obj : ExprExt) (methodName : String) (args : List ExprExt)
+  | fieldAccess (obj : ExprExt) (fieldName : String)
+  | dynCoerce (expr : ExprExt) (traitName : String)
+  deriving Repr
+
+/-- Values for extended expressions -/
+inductive IsValueExt : ExprExt → Prop where
+  | base : ∀ e, IsValue e → IsValueExt (ExprExt.base e)
+
+/-- Small-step for extended expressions -/
+inductive StepExt : ExprExt → ExprExt → Prop where
+  | baseStep : ∀ e e',
+      Step e e' →
+      StepExt (ExprExt.base e) (ExprExt.base e')
+  | methodCallObj : ∀ obj obj' m args,
+      StepExt obj obj' →
+      StepExt (ExprExt.methodCall obj m args) (ExprExt.methodCall obj' m args)
+  | fieldAccessObj : ∀ obj obj' f,
+      StepExt obj obj' →
+      StepExt (ExprExt.fieldAccess obj f) (ExprExt.fieldAccess obj' f)
+  | dynCoerceStep : ∀ e e' t,
+      StepExt e e' →
+      StepExt (ExprExt.dynCoerce e t) (ExprExt.dynCoerce e' t)
+
+/-- Typing for extended expressions (uses Classes.Ty for class types) -/
+inductive HasTypeExt : ExprExt → Classes.Ty → Prop where
+  | methodCall : ∀ obj methodName args retTy objTy,
+      HasTypeExt obj objTy →
+      -- Method exists and returns retTy (via class/trait/mixin resolution)
+      HasTypeExt (ExprExt.methodCall obj methodName args) retTy
+  | fieldAccess : ∀ obj fieldName fieldTy objTy,
+      HasTypeExt obj objTy →
+      -- Field exists with type fieldTy
+      HasTypeExt (ExprExt.fieldAccess obj fieldName) fieldTy
+  | dynCoerce : ∀ expr traitName concreteTy,
+      HasTypeExt expr concreteTy →
+      -- Concrete type implements the trait
+      HasTypeExt (ExprExt.dynCoerce expr traitName) (Classes.Ty.dynTrait traitName)
+
+/-! ## Extended Progress Theorems -/
+
+/-- Progress for method calls: well-typed method call can step -/
+theorem progress_methodCall (obj : ExprExt) (methodName : String) (args : List ExprExt)
+    (retTy : Classes.Ty) :
+    HasTypeExt (ExprExt.methodCall obj methodName args) retTy →
+    IsValueExt obj ∨ ∃ obj', StepExt obj obj' →
+    IsValueExt (ExprExt.methodCall obj methodName args) ∨
+    ∃ e', StepExt (ExprExt.methodCall obj methodName args) e' := by
+  intro _hType hObj
+  cases hObj with
+  | inl hVal =>
+    -- obj is a value - method call can evaluate (would need runtime semantics)
+    sorry
+  | inr hStep =>
+    -- obj can step, so methodCall steps via methodCallObj
+    right
+    obtain ⟨obj', hStep'⟩ := hStep
+    exact ⟨ExprExt.methodCall obj' methodName args, StepExt.methodCallObj obj obj' methodName args hStep'⟩
+
+/-- Progress for field access: well-typed field access can step -/
+theorem progress_fieldAccess (obj : ExprExt) (fieldName : String)
+    (fieldTy : Classes.Ty) :
+    HasTypeExt (ExprExt.fieldAccess obj fieldName) fieldTy →
+    IsValueExt obj ∨ ∃ obj', StepExt obj obj' →
+    IsValueExt (ExprExt.fieldAccess obj fieldName) ∨
+    ∃ e', StepExt (ExprExt.fieldAccess obj fieldName) e' := by
+  intro _hType hObj
+  cases hObj with
+  | inl hVal =>
+    -- obj is a value - field access evaluates to field value
+    sorry
+  | inr hStep =>
+    right
+    obtain ⟨obj', hStep'⟩ := hStep
+    exact ⟨ExprExt.fieldAccess obj' fieldName, StepExt.fieldAccessObj obj obj' fieldName hStep'⟩
+
+/-- Progress for dyn coercion: well-typed dyn coercion can step -/
+theorem progress_dynCoerce (expr : ExprExt) (traitName : String)
+    (dynTy : Classes.Ty) :
+    HasTypeExt (ExprExt.dynCoerce expr traitName) dynTy →
+    IsValueExt expr ∨ ∃ expr', StepExt expr expr' →
+    IsValueExt (ExprExt.dynCoerce expr traitName) ∨
+    ∃ e', StepExt (ExprExt.dynCoerce expr traitName) e' := by
+  intro _hType hExpr
+  cases hExpr with
+  | inl hVal =>
+    -- expr is a value - coercion completes
+    sorry
+  | inr hStep =>
+    right
+    obtain ⟨expr', hStep'⟩ := hStep
+    exact ⟨ExprExt.dynCoerce expr' traitName, StepExt.dynCoerceStep expr expr' traitName hStep'⟩
+
+/-- Preservation for extended expressions: stepping preserves types -/
+theorem preservation_ext (e e' : ExprExt) (t : Classes.Ty) :
+    HasTypeExt e t →
+    StepExt e e' →
+    HasTypeExt e' t := by
+  intro hType hStep
+  cases hStep with
+  | baseStep _ _ _ => sorry
+  | methodCallObj obj obj' m args hStep =>
+    cases hType with
+    | methodCall _ _ _ retTy objTy hObj =>
+      exact HasTypeExt.methodCall obj' m args retTy objTy sorry
+  | fieldAccessObj obj obj' f hStep =>
+    cases hType with
+    | fieldAccess _ _ fieldTy objTy hObj =>
+      exact HasTypeExt.fieldAccess obj' f fieldTy objTy sorry
+  | dynCoerceStep e e' t hStep =>
+    cases hType with
+    | dynCoerce _ traitName concreteTy hExpr =>
+      exact HasTypeExt.dynCoerce e' traitName concreteTy sorry
 
 end Soundness

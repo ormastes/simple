@@ -52,6 +52,13 @@ pub enum CommonMistake {
     ExplicitSelf,        // (self) parameter when implicit
     VerboseReturnType,   // -> Type when type inference works
     SemicolonAfterBlock, // }; instead of }
+
+    // Colon-specific mistakes
+    MissingCommaInArgs,          // func(x: 10 y: 20) → func(x: 10, y: 20)
+    MissingColonBeforeBlock,     // fn foo() \n → fn foo(): \n
+    DictInsteadOfStruct,         // {x: 10} when Point(x: 10) intended
+    MissingIndentAfterColon,     // fn foo(): \n no indent
+    WrongIndentLevel,            // Inconsistent indentation
 }
 
 impl CommonMistake {
@@ -210,6 +217,34 @@ impl CommonMistake {
                  Wrong:  if x > 0: { ... };\n\
                  Right:  if x > 0: { ... }"
                 .to_string(),
+
+            // Colon-specific
+            Self::MissingCommaInArgs => "Missing comma between function arguments.\n\
+                 \n\
+                 Wrong:  func(x: 10 y: 20)\n\
+                 Right:  func(x: 10, y: 20)"
+                .to_string(),
+            Self::MissingColonBeforeBlock => "Missing colon before function or block body.\n\
+                 \n\
+                 Wrong:  fn foo()\n\
+                 Right:  fn foo():"
+                .to_string(),
+            Self::DictInsteadOfStruct => "Use struct literal syntax for struct initialization.\n\
+                 \n\
+                 Dict:    {x: 10, y: 20}\n\
+                 Struct:  Point(x: 10, y: 20)  # or Point { x: 10, y: 20 }"
+                .to_string(),
+            Self::MissingIndentAfterColon => "Missing indentation after colon.\n\
+                 \n\
+                 Wrong:  fn foo():\n\
+                 return 42\n\
+                 Right:  fn foo():\n\
+                     return 42"
+                .to_string(),
+            Self::WrongIndentLevel => "Inconsistent indentation level.\n\
+                 \n\
+                 Use consistent indentation (4 spaces or tabs)."
+                .to_string(),
         }
     }
 
@@ -237,6 +272,11 @@ impl CommonMistake {
             Self::ExplicitSelf => "Remove the 'self' parameter (it's implicit)".to_string(),
             Self::VerboseReturnType => "Consider omitting return type (type inference works)".to_string(),
             Self::CTypeFirst => "Use 'val' or 'var' with type after name".to_string(),
+            Self::MissingCommaInArgs => "Insert missing comma between arguments".to_string(),
+            Self::MissingColonBeforeBlock => "Add ':' before the function body".to_string(),
+            Self::DictInsteadOfStruct => "Use struct literal: Type(field: value) or Type { field: value }".to_string(),
+            Self::MissingIndentAfterColon => "Add indentation after colon".to_string(),
+            Self::WrongIndentLevel => "Fix indentation level".to_string(),
             _ => "See error message for details".to_string(),
         }
     }

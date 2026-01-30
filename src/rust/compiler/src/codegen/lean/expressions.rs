@@ -702,7 +702,6 @@ impl<'a> ExprTranslator<'a> {
             BinOp::Div => "/".to_string(),
             BinOp::Mod => "%".to_string(),
             BinOp::Pow => "^".to_string(),
-            BinOp::FloorDiv => "/".to_string(), // Lean integer division
             BinOp::MatMul => "*".to_string(),   // Matrix multiplication
             BinOp::Eq => "==".to_string(),
             BinOp::NotEq => "!=".to_string(),
@@ -721,6 +720,7 @@ impl<'a> ExprTranslator<'a> {
             BinOp::In => "∈".to_string(),           // Membership
             BinOp::NotIn => "∉".to_string(),        // Not in
             BinOp::PipeForward => "|>".to_string(), // Function application
+            BinOp::Parallel => "//".to_string(),    // Parallel execution
         }
     }
 

@@ -284,7 +284,7 @@ pub enum TokenKind {
     Slash,       // /
     Percent,     // %
     DoubleStar,  // **
-    DoubleSlash, // //
+    Parallel,    // // (parallel execution, was floor division)
 
     Eq,    // ==
     NotEq, // !=

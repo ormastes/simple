@@ -170,9 +170,9 @@ impl<'a> super::Lexer<'a> {
                             ));
                             break;
                         } else {
-                            // Double slash // - return DoubleSlash token
+                            // Parallel operator // - return Parallel token
                             return Some(Token::new(
-                                TokenKind::DoubleSlash,
+                                TokenKind::Parallel,
                                 Span::new(self.current_pos - 2, self.current_pos, self.line, self.column - 2),
                                 "//".to_string(),
                             ));

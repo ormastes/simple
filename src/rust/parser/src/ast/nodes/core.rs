@@ -795,7 +795,6 @@ pub enum BinOp {
     Div,
     Mod,
     Pow,
-    FloorDiv,
     MatMul, // @ operator for matrix multiplication (Simple Math #1930-#1939)
     // Comparison
     Eq,
@@ -821,6 +820,7 @@ pub enum BinOp {
     NotIn,
     // Pipeline
     PipeForward, // |> pipe forward operator
+    Parallel,    // // parallel execution (was floor division - use .fdiv() method)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

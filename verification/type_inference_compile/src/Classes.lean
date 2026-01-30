@@ -24,6 +24,7 @@ inductive Ty where
   | named (name : String)          -- Named type (class name)
   | arrow (params : List Ty) (ret : Ty)  -- Function type
   | generic (name : String) (args : List Ty)  -- Generic type: Class[T, U]
+  | dynTrait (traitName : String)             -- Dynamic trait object: dyn Trait
   deriving BEq, Repr
 
 /-- Size of a type (for termination proofs) -/
@@ -35,6 +36,7 @@ def Ty.size : Ty → Nat
   | named _ => 1
   | arrow params ret => 1 + params.foldl (fun acc t => acc + t.size) 0 + ret.size
   | generic _ args => 1 + args.foldl (fun acc t => acc + t.size) 0
+  | dynTrait _ => 1
 
 /-- Size of a list of types -/
 def Ty.listSize (tys : List Ty) : Nat :=
