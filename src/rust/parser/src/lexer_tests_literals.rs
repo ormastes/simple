@@ -372,3 +372,320 @@ fn test_suspension_keywords() {
     assert_eq!(tokenize("~"), vec![TokenKind::Tilde, TokenKind::Eof]);
 }
 
+
+// === Contextual Keyword Tests ===
+
+#[test]
+fn test_contextual_keyword_skip_as_keyword() {
+    // Branch 1: skip as keyword (NOT followed by '(')
+    // Standalone skip statement
+    assert_eq!(tokenize("skip"), vec![TokenKind::Skip, TokenKind::Eof]);
+
+    // skip followed by newline
+    assert_eq!(
+        tokenize("skip\n"),
+        vec![TokenKind::Skip, TokenKind::Newline, TokenKind::Eof]
+    );
+
+    // skip followed by other tokens
+    assert_eq!(
+        tokenize("skip;"),
+        vec![TokenKind::Skip, TokenKind::Semicolon, TokenKind::Eof]
+    );
+
+    // skip in expression context
+    assert_eq!(
+        tokenize("x = skip"),
+        vec![
+            TokenKind::Identifier {
+                name: "x".to_string(),
+                pattern: NamePattern::Immutable,
+            },
+            TokenKind::Assign,
+            TokenKind::Skip,
+            TokenKind::Eof
+        ]
+    );
+}
+
+#[test]
+fn test_contextual_keyword_skip_as_identifier() {
+    // Branch 2: skip as identifier (followed by '(')
+    // Function call: skip(...)
+    assert_eq!(
+        tokenize("skip(5)"),
+        vec![
+            TokenKind::Identifier {
+                name: "skip".to_string(),
+                pattern: NamePattern::Immutable,
+            },
+            TokenKind::LParen,
+            TokenKind::Integer(5),
+            TokenKind::RParen,
+            TokenKind::Eof
+        ]
+    );
+
+    // Method call: obj.skip(...)
+    assert_eq!(
+        tokenize("obj.skip(10)"),
+        vec![
+            TokenKind::Identifier {
+                name: "obj".to_string(),
+                pattern: NamePattern::Immutable,
+            },
+            TokenKind::Dot,
+            TokenKind::Identifier {
+                name: "skip".to_string(),
+                pattern: NamePattern::Immutable,
+            },
+            TokenKind::LParen,
+            TokenKind::Integer(10),
+            TokenKind::RParen,
+            TokenKind::Eof
+        ]
+    );
+
+    // Function definition: fn skip(...)
+    assert_eq!(
+        tokenize("fn skip(n)"),
+        vec![
+            TokenKind::Fn,
+            TokenKind::Identifier {
+                name: "skip".to_string(),
+                pattern: NamePattern::Immutable,
+            },
+            TokenKind::LParen,
+            TokenKind::Identifier {
+                name: "n".to_string(),
+                pattern: NamePattern::Immutable,
+            },
+            TokenKind::RParen,
+            TokenKind::Eof
+        ]
+    );
+}
+
+#[test]
+fn test_contextual_keyword_static_as_keyword() {
+    // Branch 1: static as keyword (NOT followed by '(')
+    // Static method declaration: static fn ...
+    assert_eq!(
+        tokenize("static fn"),
+        vec![TokenKind::Static, TokenKind::Fn, TokenKind::Eof]
+    );
+
+    // Standalone static
+    assert_eq!(tokenize("static"), vec![TokenKind::Static, TokenKind::Eof]);
+
+    // Static followed by identifier
+    assert_eq!(
+        tokenize("static x"),
+        vec![
+            TokenKind::Static,
+            TokenKind::Identifier {
+                name: "x".to_string(),
+                pattern: NamePattern::Immutable,
+            },
+            TokenKind::Eof
+        ]
+    );
+}
+
+#[test]
+fn test_contextual_keyword_static_as_identifier() {
+    // Branch 2: static as identifier (followed by '(')
+    // Function call: static(...)
+    assert_eq!(
+        tokenize("static()"),
+        vec![
+            TokenKind::Identifier {
+                name: "static".to_string(),
+                pattern: NamePattern::Immutable,
+            },
+            TokenKind::LParen,
+            TokenKind::RParen,
+            TokenKind::Eof
+        ]
+    );
+
+    // Method call: obj.static(...)
+    assert_eq!(
+        tokenize("obj.static(42)"),
+        vec![
+            TokenKind::Identifier {
+                name: "obj".to_string(),
+                pattern: NamePattern::Immutable,
+            },
+            TokenKind::Dot,
+            TokenKind::Identifier {
+                name: "static".to_string(),
+                pattern: NamePattern::Immutable,
+            },
+            TokenKind::LParen,
+            TokenKind::Integer(42),
+            TokenKind::RParen,
+            TokenKind::Eof
+        ]
+    );
+}
+
+#[test]
+fn test_contextual_keyword_default_as_keyword() {
+    // Branch 1: default as keyword (NOT followed by '(')
+    // Match default case: default ->
+    assert_eq!(
+        tokenize("default ->"),
+        vec![TokenKind::Default, TokenKind::Arrow, TokenKind::Eof]
+    );
+
+    // Standalone default
+    assert_eq!(tokenize("default"), vec![TokenKind::Default, TokenKind::Eof]);
+
+    // default followed by colon
+    assert_eq!(
+        tokenize("default:"),
+        vec![TokenKind::Default, TokenKind::Colon, TokenKind::Eof]
+    );
+}
+
+#[test]
+fn test_contextual_keyword_default_as_identifier() {
+    // Branch 2: default as identifier (followed by '(')
+    // Function call: default(...)
+    assert_eq!(
+        tokenize("default()"),
+        vec![
+            TokenKind::Identifier {
+                name: "default".to_string(),
+                pattern: NamePattern::Immutable,
+            },
+            TokenKind::LParen,
+            TokenKind::RParen,
+            TokenKind::Eof
+        ]
+    );
+
+    // Method call with arguments
+    assert_eq!(
+        tokenize("config.default(100)"),
+        vec![
+            TokenKind::Identifier {
+                name: "config".to_string(),
+                pattern: NamePattern::Immutable,
+            },
+            TokenKind::Dot,
+            TokenKind::Identifier {
+                name: "default".to_string(),
+                pattern: NamePattern::Immutable,
+            },
+            TokenKind::LParen,
+            TokenKind::Integer(100),
+            TokenKind::RParen,
+            TokenKind::Eof
+        ]
+    );
+}
+
+#[test]
+fn test_contextual_keywords_edge_cases() {
+    // Test keywords with various whitespace and combinations
+
+    // skip with multiple spaces before (
+    assert_eq!(
+        tokenize("skip (5)"),
+        vec![
+            TokenKind::Skip,
+            TokenKind::LParen,
+            TokenKind::Integer(5),
+            TokenKind::RParen,
+            TokenKind::Eof
+        ]
+    );
+
+    // Keywords as part of longer identifiers (should not trigger contextual logic)
+    assert_eq!(
+        tokenize("skip_all"),
+        vec![
+            TokenKind::Identifier {
+                name: "skip_all".to_string(),
+                pattern: NamePattern::Immutable,
+            },
+            TokenKind::Eof
+        ]
+    );
+
+    assert_eq!(
+        tokenize("static_var"),
+        vec![
+            TokenKind::Identifier {
+                name: "static_var".to_string(),
+                pattern: NamePattern::Immutable,
+            },
+            TokenKind::Eof
+        ]
+    );
+
+    assert_eq!(
+        tokenize("default_value"),
+        vec![
+            TokenKind::Identifier {
+                name: "default_value".to_string(),
+                pattern: NamePattern::Immutable,
+            },
+            TokenKind::Eof
+        ]
+    );
+}
+
+#[test]
+fn test_contextual_keywords_in_complex_expressions() {
+    // Test contextual keywords in realistic code patterns
+
+    // skip() in method chain
+    assert_eq!(
+        tokenize("items.skip(2).take(5)"),
+        vec![
+            TokenKind::Identifier {
+                name: "items".to_string(),
+                pattern: NamePattern::Immutable,
+            },
+            TokenKind::Dot,
+            TokenKind::Identifier {
+                name: "skip".to_string(),
+                pattern: NamePattern::Immutable,
+            },
+            TokenKind::LParen,
+            TokenKind::Integer(2),
+            TokenKind::RParen,
+            TokenKind::Dot,
+            TokenKind::Identifier {
+                name: "take".to_string(),
+                pattern: NamePattern::Immutable,
+            },
+            TokenKind::LParen,
+            TokenKind::Integer(5),
+            TokenKind::RParen,
+            TokenKind::Eof
+        ]
+    );
+
+    // static method call on class
+    assert_eq!(
+        tokenize("MyClass.static()"),
+        vec![
+            TokenKind::Identifier {
+                name: "MyClass".to_string(),
+                pattern: NamePattern::TypeName,
+            },
+            TokenKind::Dot,
+            TokenKind::Identifier {
+                name: "static".to_string(),
+                pattern: NamePattern::Immutable,
+            },
+            TokenKind::LParen,
+            TokenKind::RParen,
+            TokenKind::Eof
+        ]
+    );
+}
