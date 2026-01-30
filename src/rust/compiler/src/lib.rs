@@ -24,6 +24,7 @@ pub mod error;
 pub mod ffi_bridge;
 pub mod error_explanations;
 pub mod formatter;
+pub mod pretty_printer;
 pub mod hir;
 pub mod hydration_manifest;
 pub mod i18n;
@@ -94,6 +95,7 @@ pub use di::{
 };
 pub use error::{codes as error_codes, typo, CompileError, ErrorContext};
 pub use formatter::{FormatConfig, Formatter};
+pub use pretty_printer::{PrettyConfig, PrettyPrinter};
 pub use i18n::{ExtractionResult, I18nExtractor, I18nString, LocaleFile, LocaleGenerator};
 pub use i18n_diagnostics::convert_compiler_error;
 pub use interpreter::{

@@ -1,22 +1,36 @@
-//! Basic code formatter for Simple language.
+//! AST-based code formatter for Simple language.
 //!
-//! Provides simple indentation-based formatting without full AST analysis.
+//! Provides proper formatting by parsing source into AST and pretty-printing it.
 
 use simple_parser::Parser;
+use crate::pretty_printer::{PrettyPrinter, PrettyConfig};
 
 /// Code formatter configuration
 #[derive(Debug, Clone)]
 pub struct FormatConfig {
     pub indent_size: usize,
+    pub max_line_length: usize,
 }
 
 impl Default for FormatConfig {
     fn default() -> Self {
-        Self { indent_size: 4 }
+        Self {
+            indent_size: 4,
+            max_line_length: 100,
+        }
     }
 }
 
-/// Basic code formatter
+impl From<FormatConfig> for PrettyConfig {
+    fn from(config: FormatConfig) -> Self {
+        PrettyConfig {
+            indent_size: config.indent_size,
+            max_line_length: config.max_line_length,
+        }
+    }
+}
+
+/// AST-based code formatter
 pub struct Formatter {
     config: FormatConfig,
 }
@@ -34,24 +48,21 @@ impl Formatter {
         Self { config }
     }
 
-    /// Format a complete module
-    /// For now, this validates the code can be parsed and returns it unchanged
+    /// Format a complete module using AST pretty-printer
     pub fn format_module(&mut self, module: &simple_parser::ast::Module) -> String {
-        // Basic formatting: just ensure consistent indentation
-        // Full AST-based formatting would require matching the exact AST structure
-        // For now, return a placeholder showing the module was processed
-        format!("// Module with {} items\n", module.items.len())
+        let pretty_config = PrettyConfig::from(self.config.clone());
+        let mut printer = PrettyPrinter::new(pretty_config);
+        printer.print_module(module)
     }
 
-    /// Format source code (validates and returns formatted)
+    /// Format source code by parsing and pretty-printing
     pub fn format_source(&mut self, source: &str) -> Result<String, String> {
-        // Validate by parsing
+        // Parse the source
         let mut parser = Parser::new(source);
         match parser.parse() {
-            Ok(_) => {
-                // For now, just return the source unchanged
-                // Full formatting would rebuild from AST
-                Ok(source.to_string())
+            Ok(module) => {
+                // Pretty-print the AST
+                Ok(self.format_module(&module))
             }
             Err(e) => Err(format!("Parse error: {}", e)),
         }
