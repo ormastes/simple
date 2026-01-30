@@ -271,6 +271,12 @@ enum MirInstKind:
     # Intrinsics
     Intrinsic(dest: LocalId?, name: text, args: [MirOperand])
 
+    # Pipeline operators (require runtime function dispatch)
+    PipeForward(dest: LocalId, value: MirOperand, func: MirOperand)
+    Compose(dest: LocalId, f: MirOperand, g: MirOperand, forward: bool)
+    Parallel(dest: LocalId, funcs: [MirOperand])
+    LayerConnect(dest: LocalId, layer1: MirOperand, layer2: MirOperand)
+
     # Debug
     DebugValue(local: LocalId, name: text)
     Nop
@@ -986,11 +992,17 @@ impl MirLowering:
                     self.builder.new_temp(MirType.i64())
 
             case Binary(op, left, right):
-                val left_local = self.lower_expr(left)
-                val right_local = self.lower_expr(right)
-                val mir_op = self.lower_binop(op)
-                val result_type = self.infer_binop_type(op)
-                self.builder.emit_binop(mir_op, mir_operand_copy(left_local), mir_operand_copy(right_local), result_type)
+                # Check if this is a special pipeline operator first
+                val special_result = self.lower_binop_special(op, left, right)
+                if special_result.?:
+                    special_result.unwrap()
+                else:
+                    # Normal binary operation
+                    val left_local = self.lower_expr(left)
+                    val right_local = self.lower_expr(right)
+                    val mir_op = self.lower_binop(op)
+                    val result_type = self.infer_binop_type(op)
+                    self.builder.emit_binop(mir_op, mir_operand_copy(left_local), mir_operand_copy(right_local), result_type)
 
             case Unary(op, operand):
                 val operand_local = self.lower_expr(operand)
@@ -1062,6 +1074,52 @@ impl MirLowering:
             case _:
                 self.error("unsupported MIR expression: {expr.kind}", nil)
                 nil
+
+    me lower_binop_special(op: HirBinOp, left: HirExpr, right: HirExpr) -> LocalId?:
+        """Check if this is a special binary op needing non-BinOp lowering."""
+        match op:
+            case PipeForward:
+                # x |> f  ->  PipeForward(x, f)
+                val value_local = self.lower_expr(left)
+                val func_local = self.lower_expr(right)
+                val dest = self.builder.new_temp(MirType.i64())
+                self.builder.emit(MirInstKind.PipeForward(dest, mir_operand_copy(value_local), mir_operand_copy(func_local)))
+                Some(dest)
+
+            case Compose:
+                # f >> g  ->  Compose(f, g, true)
+                val f_local = self.lower_expr(left)
+                val g_local = self.lower_expr(right)
+                val dest = self.builder.new_temp(MirType.i64())
+                self.builder.emit(MirInstKind.Compose(dest, mir_operand_copy(f_local), mir_operand_copy(g_local), true))
+                Some(dest)
+
+            case ComposeBack:
+                # f << g  ->  Compose(f, g, false)
+                val f_local = self.lower_expr(left)
+                val g_local = self.lower_expr(right)
+                val dest = self.builder.new_temp(MirType.i64())
+                self.builder.emit(MirInstKind.Compose(dest, mir_operand_copy(f_local), mir_operand_copy(g_local), false))
+                Some(dest)
+
+            case Parallel:
+                # f // g  ->  Parallel([f, g])
+                val f_local = self.lower_expr(left)
+                val g_local = self.lower_expr(right)
+                val dest = self.builder.new_temp(MirType.i64())
+                self.builder.emit(MirInstKind.Parallel(dest, [mir_operand_copy(f_local), mir_operand_copy(g_local)]))
+                Some(dest)
+
+            case LayerConnect:
+                # layer1 ~> layer2  ->  LayerConnect(layer1, layer2)
+                val l1_local = self.lower_expr(left)
+                val l2_local = self.lower_expr(right)
+                val dest = self.builder.new_temp(MirType.i64())
+                self.builder.emit(MirInstKind.LayerConnect(dest, mir_operand_copy(l1_local), mir_operand_copy(l2_local)))
+                Some(dest)
+
+            case _:
+                nil  # Not a special op, use normal BinOp
 
     me lower_binop(op: HirBinOp) -> MirBinOp:
         """Convert HIR binary op to MIR binary op."""
