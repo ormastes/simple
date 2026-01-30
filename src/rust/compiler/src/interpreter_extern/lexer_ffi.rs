@@ -1,6 +1,7 @@
-use crate::runtime_value::RuntimeValue;
+// TODO: Re-enable once RuntimeValue FFI API is properly defined
+// use simple_runtime::RuntimeValue;
 use simple_parser::{Lexer, TokenKind, NamePattern, Token};
-use std::collections::HashMap;
+// use std::collections::HashMap;
 
 /// Token representation for FFI
 #[derive(Debug, Clone)]
@@ -14,7 +15,7 @@ pub struct TokenInfo {
 
 impl TokenInfo {
     fn from_token(token: Token) -> Self {
-        let text = token.text;
+        let text = token.lexeme;
         match token.kind {
             TokenKind::Identifier { name, pattern } => {
                 let pattern_str = match pattern {
@@ -188,41 +189,15 @@ pub fn tokenize_source(source: &str) -> Vec<TokenInfo> {
     tokens.into_iter().map(TokenInfo::from_token).collect()
 }
 
-/// FFI function: tokenize source code
-/// Returns RuntimeValue::Array of token dictionaries
+// TODO: Implement FFI function once RuntimeValue API for heap objects is ready
+// Currently commented out because RuntimeValue doesn't have String/Array/Dict constructors
+// Need to use heap allocation API from simple_runtime
+/*
 pub fn simple_lexer_tokenize(args: &[RuntimeValue]) -> RuntimeValue {
-    if args.is_empty() {
-        return RuntimeValue::Nil;
-    }
-
-    let source = match &args[0] {
-        RuntimeValue::String(s) => s.as_str(),
-        _ => return RuntimeValue::Nil,
-    };
-
-    let tokens = tokenize_source(source);
-
-    // Convert to RuntimeValue::Array of RuntimeValue::Dict
-    let token_values: Vec<RuntimeValue> = tokens.into_iter().map(|token| {
-        let mut fields = HashMap::new();
-        fields.insert("kind".to_string(), RuntimeValue::String(token.kind));
-        fields.insert("text".to_string(), RuntimeValue::String(token.text));
-
-        if let Some(name) = token.name {
-            fields.insert("name".to_string(), RuntimeValue::String(name));
-        }
-        if let Some(pattern) = token.pattern {
-            fields.insert("pattern".to_string(), RuntimeValue::String(pattern));
-        }
-        if let Some(value) = token.value {
-            fields.insert("value".to_string(), RuntimeValue::Integer(value));
-        }
-
-        RuntimeValue::Dict(fields)
-    }).collect();
-
-    RuntimeValue::Array(token_values)
+    // Implementation pending: need heap object allocation API
+    RuntimeValue::NIL
 }
+*/
 
 #[cfg(test)]
 mod tests {

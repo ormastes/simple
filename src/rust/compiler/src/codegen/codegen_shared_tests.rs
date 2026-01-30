@@ -2333,7 +2333,7 @@ cranelift_only_test!(shared_binop_floordiv, |f: &mut MirFunction| {
     let block = f.block_mut(BlockId(0)).unwrap();
     block.instructions.push(MirInst::ConstInt { dest: a, value: 7 });
     block.instructions.push(MirInst::ConstInt { dest: b, value: 2 });
-    block.instructions.push(MirInst::BinOp { dest, op: hir::BinOp::FloorDiv, left: a, right: b });
+    block.instructions.push(MirInst::BinOp { dest, op: hir::BinOp::Div, left: a, right: b });
     dest
 });
 
