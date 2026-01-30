@@ -205,6 +205,26 @@ pub fn handle_int_methods(
                 None => return Err(CompileError::Runtime(format!("invalid Unicode code point: {}", n))),
             }
         }
+        "fdiv" => {
+            // Floor division - rounds towards negative infinity
+            let divisor = eval_arg(args, 0, Value::Int(1), env, functions, classes, enums, impl_methods)?
+                .as_int()
+                .unwrap_or(1);
+
+            if divisor == 0 {
+                return Err(CompileError::Runtime("division by zero in fdiv".to_string()));
+            }
+
+            let q = n / divisor;
+            let r = n % divisor;
+
+            // If remainder is non-zero and signs differ, adjust quotient down
+            if r != 0 && ((n < 0) != (divisor < 0)) {
+                Value::Int(q - 1)
+            } else {
+                Value::Int(q)
+            }
+        }
         _ => return Ok(None),
     };
     Ok(Some(result))
@@ -394,6 +414,18 @@ pub fn handle_float_methods(
             }
 
             Value::Array(vec![Value::Int(num), Value::Int(den)])
+        }
+        "fdiv" => {
+            // Floor division for floats - rounds towards negative infinity
+            let divisor = eval_arg(args, 0, Value::Float(1.0), env, functions, classes, enums, impl_methods)?
+                .as_float()
+                .unwrap_or(1.0);
+
+            if divisor == 0.0 {
+                return Err(CompileError::Runtime("division by zero in fdiv".to_string()));
+            }
+
+            Value::Float((f / divisor).floor())
         }
         _ => return Ok(None),
     };

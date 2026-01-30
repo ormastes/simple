@@ -85,3 +85,117 @@ fn test():
         _ => panic!("Expected ContextualSyntaxError, got: {:?}", err),
     }
 }
+
+#[test]
+fn test_missing_comma_in_dict() {
+    let source = r#"
+fn test():
+    val d = {a: 1 b: 2}
+"#;
+
+    let mut parser = Parser::new(source);
+    let result = parser.parse();
+
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    let err_msg = format!("{}", err);
+
+    assert!(err_msg.contains("dict literal"), "Error should mention 'dict literal' context. Got: {}", err_msg);
+    assert!(err_msg.contains("comma"), "Error should mention comma. Got: {}", err_msg);
+}
+
+#[test]
+fn test_missing_comma_in_dict_contextual() {
+    let source = r#"
+fn test():
+    val d = {name: "Alice" age: 30}
+"#;
+
+    let mut parser = Parser::new(source);
+    let result = parser.parse();
+
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+
+    match err {
+        ParseError::ContextualSyntaxError { context, message, suggestion, help, .. } => {
+            assert_eq!(context, "dict literal");
+            assert!(message.contains("comma"));
+            assert!(suggestion.is_some());
+            assert!(help.is_some());
+            let help_text = help.unwrap();
+            assert!(help_text.contains("{a: 1, b: 2}"), "Help should show example. Got: {}", help_text);
+        }
+        _ => panic!("Expected ContextualSyntaxError, got: {:?}", err),
+    }
+}
+
+#[test]
+fn test_missing_comma_in_array() {
+    let source = r#"
+fn test():
+    val arr = [1 2 3]
+"#;
+
+    let mut parser = Parser::new(source);
+    let result = parser.parse();
+
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    let err_msg = format!("{}", err);
+
+    assert!(err_msg.contains("array literal"), "Error should mention 'array literal' context. Got: {}", err_msg);
+    assert!(err_msg.contains("comma"), "Error should mention comma. Got: {}", err_msg);
+}
+
+#[test]
+fn test_missing_comma_in_array_contextual() {
+    let source = r#"
+fn test():
+    val arr = ["a" "b" "c"]
+"#;
+
+    let mut parser = Parser::new(source);
+    let result = parser.parse();
+
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+
+    match err {
+        ParseError::ContextualSyntaxError { context, message, suggestion, help, .. } => {
+            assert_eq!(context, "array literal");
+            assert!(message.contains("comma"));
+            assert!(suggestion.is_some());
+            assert!(help.is_some());
+            let help_text = help.unwrap();
+            assert!(help_text.contains("[1, 2, 3]"), "Help should show example. Got: {}", help_text);
+        }
+        _ => panic!("Expected ContextualSyntaxError, got: {:?}", err),
+    }
+}
+
+#[test]
+fn test_correct_dict_parses() {
+    let source = r#"
+fn test():
+    val d = {a: 1, b: 2, c: 3}
+"#;
+
+    let mut parser = Parser::new(source);
+    let result = parser.parse();
+
+    assert!(result.is_ok(), "Should parse correct dict syntax: {:?}", result.err());
+}
+
+#[test]
+fn test_correct_array_parses() {
+    let source = r#"
+fn test():
+    val arr = [1, 2, 3]
+"#;
+
+    let mut parser = Parser::new(source);
+    let result = parser.parse();
+
+    assert!(result.is_ok(), "Should parse correct array syntax: {:?}", result.err());
+}
