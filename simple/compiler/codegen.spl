@@ -161,6 +161,7 @@ struct Codegen:
     local_values: Dict<i64, i64>    # LocalId -> Cranelift value
     block_map: Dict<i64, i64>       # BlockId -> Cranelift block
     function_map: Dict<text, i64>   # name -> function id
+    symbol_map: Dict<i64, text>     # SymbolId -> function name
     errors: [CodegenError]
 
 """Target architecture."""
@@ -190,6 +191,7 @@ impl Codegen:
             local_values: {},
             block_map: {},
             function_map: {},
+            symbol_map: {},
             errors: []
         )
 
@@ -284,6 +286,7 @@ impl Codegen:
             return false
 
         self.function_map[fn_.name] = func_id
+        self.symbol_map[fn_.symbol.id] = fn_.name
         true
 
     me build_signature(sig: MirSignature) -> i64:
@@ -470,7 +473,17 @@ impl Codegen:
             case Copy(local) | Move(local):
                 self.get_local(local)
             case Const(value, type_):
-                self.compile_const(value, type_)
+                # Check if this is a function pointer (symbol ID encoded as int)
+                match type_.kind:
+                    case FuncPtr(_):
+                        # Extract symbol ID and resolve to function
+                        match value:
+                            case Int(symbol_id):
+                                self.resolve_function_symbol(symbol_id)
+                            case _:
+                                self.compile_const(value, type_)
+                    case _:
+                        self.compile_const(value, type_)
 
     me get_local(local: LocalId) -> i64:
         """Get Cranelift value for a local."""
@@ -526,6 +539,16 @@ impl Codegen:
                 rt_cranelift_bxor(self.current_ctx, operand, one)
             case BitNot:
                 rt_cranelift_bnot(self.current_ctx, operand)
+
+    me resolve_function_symbol(symbol_id: i64) -> i64:
+        """Resolve a function symbol to a Cranelift function ID."""
+        val func_name = self.symbol_map[symbol_id]
+        if func_name.?:
+            val func_id = self.function_map[func_name.unwrap()]
+            func_id ?? 0
+        else:
+            self.error("unresolved function symbol: {symbol_id}", nil)
+            0
 
     me aggregate_type(kind: AggregateKind) -> MirType:
         """Get type for aggregate kind."""
