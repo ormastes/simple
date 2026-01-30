@@ -12,6 +12,7 @@ use crate::error::{codes, typo, CompileError, ErrorContext};
 use crate::value::{Env, Value};
 use simple_parser::ast::{Argument, ClassDef, Expr, FunctionDef};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 // Re-export the with-self-update functions
 pub use special::{exec_function_with_self_return, find_and_exec_method_with_self};
@@ -204,6 +205,7 @@ pub(crate) fn evaluate_method_call(
                         // Create a fields map with just "self" for the enum value
                         let mut enum_fields = HashMap::new();
                         enum_fields.insert("self".to_string(), recv_val.clone());
+                        let enum_fields = Arc::new(enum_fields);
                         let result = exec_function(
                             m,
                             args,
@@ -226,6 +228,7 @@ pub(crate) fn evaluate_method_call(
                         // For enum methods, we pass self as a special context
                         let mut enum_fields = HashMap::new();
                         enum_fields.insert("self".to_string(), recv_val.clone());
+                        let enum_fields = Arc::new(enum_fields);
                         return exec_function(
                             m,
                             args,
