@@ -189,7 +189,7 @@ mod tests {
 
     #[test]
     fn test_i18n_context_creation() {
-        let mut env = Env::new(HashMap::new());
+        let mut env = Env::new();
 
         // Create a new context
         let result = rt_i18n_context_new(&mut env);
@@ -214,7 +214,7 @@ mod tests {
 
     #[test]
     fn test_severity_name() {
-        let mut env = Env::new(HashMap::new());
+        let mut env = Env::new();
 
         let args = vec![Value::Str("error".to_string())];
         let result = rt_i18n_severity_name(&args, &mut env);
