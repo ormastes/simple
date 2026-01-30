@@ -30,17 +30,17 @@
 
 # FFI declarations
 extern fn rt_cli_get_args() -> [str]
-extern fn rt_dir_walk(path: text) -> List<text>
-extern fn rt_path_basename(path: text) -> text
-extern fn rt_process_run(cmd: text, args: List<text>) -> (text, text, i32)
-extern fn rt_process_run_timeout(cmd: text, args: List<text>, timeout_ms: i64) -> (text, text, i32)
-extern fn rt_file_exists(path: text) -> bool
-extern fn rt_file_read_text(path: text) -> text
-extern fn rt_file_write_text(path: text, content: text) -> bool
-extern fn rt_file_append_text(path: text, content: text) -> bool
+extern fn rt_dir_walk(path: str) -> List<str>
+extern fn rt_path_basename(path: str) -> str
+extern fn rt_process_run(cmd: str, args: List<str>) -> (str, str, i32)
+extern fn rt_process_run_timeout(cmd: str, args: List<str>, timeout_ms: i64) -> (str, str, i32)
+extern fn rt_file_exists(path: str) -> bool
+extern fn rt_file_read_text(path: str) -> str
+extern fn rt_file_write_text(path: str, content: str) -> bool
+extern fn rt_file_append_text(path: str, content: str) -> bool
 extern fn rt_time_now_unix_micros() -> i64
-extern fn rt_env_set(key: text, value: text) -> bool
-extern fn rt_env_get(key: text) -> text
+extern fn rt_env_set(key: str, value: str) -> bool
+extern fn rt_env_get(key: str) -> str
 
 # =========================================================================
 # Types
@@ -62,9 +62,9 @@ enum OutputFormat:
     Doc
 
 struct TestOptions:
-    path: text
+    path: str
     level: TestLevel
-    tag: text
+    tag: str
     fail_fast: bool
     mode: TestExecutionMode
     timeout: i64
@@ -86,12 +86,12 @@ struct TestOptions:
     planned_only: bool
 
 struct TestFileResult:
-    path: text
+    path: str
     passed: i64
     failed: i64
     skipped: i64
     duration_ms: i64
-    error: text
+    error: str
     timed_out: bool
 
 impl TestFileResult:
@@ -111,24 +111,24 @@ impl TestRunResult:
         self.total_failed == 0 and self.total_timed_out == 0
 
 struct SkipFeatureInfo:
-    file_path: text
-    title: text
-    feature_ids: text
-    category: text
-    status: text
+    file_path: str
+    title: str
+    feature_ids: str
+    category: str
+    status: str
 
 # =========================================================================
 # Argument Parsing
 # =========================================================================
 
-fn parse_mode_str(m: text) -> TestExecutionMode:
+fn parse_mode_str(m: str) -> TestExecutionMode:
     if m == "native" or m == "binary":
         return TestExecutionMode.Native
     if m == "smf" or m == "loader":
         return TestExecutionMode.Smf
     TestExecutionMode.Interpreter
 
-fn parse_test_args(args: List<text>) -> TestOptions:
+fn parse_test_args(args: List<str>) -> TestOptions:
     var path = ""
     var level = TestLevel.All
     var tag = ""
@@ -255,7 +255,7 @@ fn parse_test_args(args: List<text>) -> TestOptions:
 # ANSI Stripping
 # =========================================================================
 
-fn strip_ansi(s: text) -> text:
+fn strip_ansi(s: str) -> str:
     # ANSI codes like ESC[32m contain digits but are separated from content
     # by the 'm' terminator, so extract_number_before won't pick them up
     # because it scans backwards from keyword and stops at non-digit chars.
@@ -267,13 +267,13 @@ fn strip_ansi(s: text) -> text:
 # Discovery
 # =========================================================================
 
-fn is_test_file(path: text) -> bool:
+fn is_test_file(path: str) -> bool:
     val name = rt_path_basename(path)
     if not name.ends_with(".spl"):
         return false
     name.contains("_spec.") or name.contains("_test.")
 
-fn matches_level(path: text, level: TestLevel) -> bool:
+fn matches_level(path: str, level: TestLevel) -> bool:
     match level:
         case TestLevel.All:
             true
@@ -284,36 +284,36 @@ fn matches_level(path: text, level: TestLevel) -> bool:
         case TestLevel.System:
             path.contains("/system/")
 
-fn read_file_content(file_path: text) -> text:
+fn read_file_content(file_path: str) -> str:
     val result = rt_file_read_text(file_path)
     result ?? ""
 
-fn file_has_slow_test(file_path: text) -> bool:
+fn file_has_slow_test(file_path: str) -> bool:
     val content = read_file_content(file_path)
     content.contains("slow_it ")
 
-fn file_has_skip_tag(file_path: text) -> bool:
+fn file_has_skip_tag(file_path: str) -> bool:
     val content = read_file_content(file_path)
     content.contains("tag: \"skip\"") or content.contains("tag: 'skip'")
 
-fn file_has_ignored_test(file_path: text) -> bool:
+fn file_has_ignored_test(file_path: str) -> bool:
     val content = read_file_content(file_path)
     content.contains("slow_it ") or content.contains("tag: \"skip\"") or content.contains("tag: 'skip'")
 
-fn file_has_tag(file_path: text, tag: text) -> bool:
+fn file_has_tag(file_path: str, tag: str) -> bool:
     if tag == "":
         return true
     val content = read_file_content(file_path)
     content.contains("tag: \"{tag}\"") or content.contains("tag: '{tag}'")
 
-fn discover_test_files(base_path: text, options: TestOptions) -> List<text>:
+fn discover_test_files(base_path: str, options: TestOptions) -> List<str>:
     # If path is a single file, use it directly
     if base_path.ends_with(".spl"):
         if rt_file_exists(base_path) and is_test_file(base_path):
             return [base_path]
         return []
     val all_files = rt_dir_walk(base_path)
-    var test_files: List<text> = []
+    var test_files: List<str> = []
     for f in all_files:
         if not is_test_file(f):
             continue
@@ -343,7 +343,7 @@ fn discover_test_files(base_path: text, options: TestOptions) -> List<text>:
 # Deterministic Shuffle (hash-based, matches Rust runner)
 # =========================================================================
 
-fn simple_hash(s: text, seed: i64) -> i64:
+fn simple_hash(s: str, seed: i64) -> i64:
     # Simple hash using small multipliers to avoid overflow
     var hash = seed * 31 + 7
     var i = 0
@@ -368,7 +368,7 @@ fn simple_hash(s: text, seed: i64) -> i64:
         i = i + 1
     hash
 
-fn shuffle_files(files: List<text>, seed: i64) -> List<text>:
+fn shuffle_files(files: List<str>, seed: i64) -> List<str>:
     # Compute hashes for each file
     var hashes: List<i64> = []
     for f in files:
@@ -396,7 +396,7 @@ fn shuffle_files(files: List<text>, seed: i64) -> List<text>:
             idx[min_pos] = tmp
         ii = ii + 1
 
-    var result: List<text> = []
+    var result: List<str> = []
     var k = 0
     while k < n:
         result.push(files[idx[k]])
@@ -407,7 +407,7 @@ fn shuffle_files(files: List<text>, seed: i64) -> List<text>:
 # Skip Features
 # =========================================================================
 
-fn extract_skip_feature_info(file_path: text) -> SkipFeatureInfo:
+fn extract_skip_feature_info(file_path: str) -> SkipFeatureInfo:
     val content = read_file_content(file_path)
     val lines = content.split("\n")
     var title = ""
@@ -434,7 +434,7 @@ fn extract_skip_feature_info(file_path: text) -> SkipFeatureInfo:
         status: status
     )
 
-fn print_skip_features(files: List<text>, planned_only: bool):
+fn print_skip_features(files: List<str>, planned_only: bool):
     var features: List<SkipFeatureInfo> = []
     for f in files:
         val info = extract_skip_feature_info(f)
@@ -470,7 +470,7 @@ fn print_skip_features(files: List<text>, planned_only: bool):
 # Discovery Summary / List Mode
 # =========================================================================
 
-fn print_discovery_summary(files: List<text>, options: TestOptions):
+fn print_discovery_summary(files: List<str>, options: TestOptions):
     if options.list_skip_features:
         print_skip_features(files, options.planned_only)
         return
@@ -478,7 +478,7 @@ fn print_discovery_summary(files: List<text>, options: TestOptions):
     print "Discovered {files.len()} test file(s)"
     for f in files:
         if options.show_tags:
-            var tags: List<text> = []
+            var tags: List<str> = []
             if file_has_slow_test(f):
                 tags.push("slow")
             if file_has_skip_tag(f):
@@ -495,14 +495,14 @@ fn print_discovery_summary(files: List<text>, options: TestOptions):
 # Execution
 # =========================================================================
 
-fn find_simple_new_binary() -> text:
+fn find_simple_new_binary() -> str:
     if rt_file_exists("./target/bootstrap/simple_new1_"):
         return "./target/bootstrap/simple_new1_"
     if rt_file_exists("./target/bootstrap/simple_new1"):
         return "./target/bootstrap/simple_new1"
     ""
 
-fn find_runtime_lib_dir() -> text:
+fn find_runtime_lib_dir() -> str:
     val env_path = rt_env_get("SIMPLE_RUNTIME_PATH")
     if env_path != "" and env_path != nil:
         return env_path
@@ -512,14 +512,14 @@ fn find_runtime_lib_dir() -> text:
         return "target/release"
     "target/debug"
 
-fn find_simple_binary() -> text:
+fn find_simple_binary() -> str:
     if rt_file_exists("./target/debug/simple_old"):
         return "./target/debug/simple_old"
     if rt_file_exists("./target/release/simple_old"):
         return "./target/release/simple_old"
     "./target/debug/simple_old"
 
-fn parse_test_output(output: text) -> (i64, i64, i64):
+fn parse_test_output(output: str) -> (i64, i64, i64):
     var total_passed = 0
     var total_failed = 0
     var total_skipped = 0
@@ -545,7 +545,7 @@ fn parse_test_output(output: text) -> (i64, i64, i64):
                 total_skipped = total_skipped + skip_count
     (total_passed, total_failed, total_skipped)
 
-fn extract_number_before(s: text, keyword: text) -> i64:
+fn extract_number_before(s: str, keyword: str) -> i64:
     val idx_opt = s.index_of(keyword)
     val idx = idx_opt ?? -1
     if idx < 0:
@@ -572,15 +572,15 @@ fn extract_number_before(s: text, keyword: text) -> i64:
     val num_str = s[start:end + 1]
     to_int(num_str)
 
-fn build_child_args(file_path: text, options: TestOptions) -> List<text>:
-    var args: List<text> = [file_path]
+fn build_child_args(file_path: str, options: TestOptions) -> List<str>:
+    var args: List<str> = [file_path]
     if options.gc_log:
         args.push("--gc-log")
     if options.gc_off:
         args.push("--gc=off")
     args
 
-fn make_result_from_output(file_path: text, stdout: text, stderr: text, exit_code: i32, duration_ms: i64, timeout_secs: i64) -> TestFileResult:
+fn make_result_from_output(file_path: str, stdout: str, stderr: str, exit_code: i32, duration_ms: i64, timeout_secs: i64) -> TestFileResult:
     # Check for timeout
     if exit_code == -1:
         return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, duration_ms: duration_ms, error: "TIMEOUT after {timeout_secs}s", timed_out: true)
@@ -600,7 +600,7 @@ fn make_result_from_output(file_path: text, stdout: text, stderr: text, exit_cod
 
     TestFileResult(path: file_path, passed: passed, failed: failed, skipped: skipped, duration_ms: duration_ms, error: error, timed_out: false)
 
-fn run_test_file_interpreter(file_path: text, options: TestOptions) -> TestFileResult:
+fn run_test_file_interpreter(file_path: str, options: TestOptions) -> TestFileResult:
     val binary = find_simple_binary()
     val child_args = build_child_args(file_path, options)
     val timeout_ms = options.timeout * 1000
@@ -610,7 +610,7 @@ fn run_test_file_interpreter(file_path: text, options: TestOptions) -> TestFileR
     val duration_ms = (end - start) / 1000
     make_result_from_output(file_path, stdout, stderr, exit_code, duration_ms, options.timeout)
 
-fn run_test_file_smf(file_path: text, options: TestOptions) -> TestFileResult:
+fn run_test_file_smf(file_path: str, options: TestOptions) -> TestFileResult:
     val binary = find_simple_binary()
     val smf_path = file_path.replace(".spl", ".smf")
     val start = rt_time_now_unix_micros()
@@ -627,7 +627,7 @@ fn run_test_file_smf(file_path: text, options: TestOptions) -> TestFileResult:
 
     # Run SMF binary with timeout
     val timeout_ms = options.timeout * 1000
-    var run_args: List<text> = [smf_path]
+    var run_args: List<str> = [smf_path]
     if options.gc_log:
         run_args.push("--gc-log")
     if options.gc_off:
@@ -642,7 +642,7 @@ fn run_test_file_smf(file_path: text, options: TestOptions) -> TestFileResult:
 
     make_result_from_output(file_path, stdout, stderr, exit_code, duration_ms, options.timeout)
 
-fn run_test_file_native_old(file_path: text, options: TestOptions) -> TestFileResult:
+fn run_test_file_native_old(file_path: str, options: TestOptions) -> TestFileResult:
     val binary = find_simple_binary()
     val bin_path = file_path.replace(".spl", "")
     val start = rt_time_now_unix_micros()
@@ -669,7 +669,7 @@ fn run_test_file_native_old(file_path: text, options: TestOptions) -> TestFileRe
 
     make_result_from_output(file_path, stdout, stderr, exit_code, duration_ms, options.timeout)
 
-fn preprocess_sspec_file(file_path: text) -> text:
+fn preprocess_sspec_file(file_path: str) -> str:
     """Wrap SSpec file content in fn main() for native compilation.
     Returns path to temporary wrapped file, or original path if not SSpec."""
     if not file_path.ends_with("_spec.spl"):
@@ -759,7 +759,7 @@ fn preprocess_sspec_file(file_path: text) -> text:
     rt_file_write_text(tmp_path, wrapped)
     tmp_path
 
-fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult:
+fn run_test_file_native(file_path: str, options: TestOptions) -> TestFileResult:
     val binary = find_simple_binary()
     val bin_path = file_path.replace(".spl", "") + "_native"
     val start = rt_time_now_unix_micros()
@@ -891,15 +891,15 @@ fn write_test_db_run(result: TestRunResult, start_time: i64, end_time: i64):
 # Atomic file update for test database
 # Uses file locking + atomic write (same pattern as Rust unified_db)
 fn atomic_update_file_test_db(
-    path: text,
+    path: str,
     run_id: i64,
-    start_time: text,
-    end_time: text,
+    start_time: str,
+    end_time: str,
     test_count: i64,
     passed: i64,
     failed: i64,
     timed_out: i64
-) -> Result<(), text>:
+) -> Result<(), str>:
     # Acquire lock
     val lock_path_result = acquire_file_lock(path, 10)
     if lock_path_result.is_err():
@@ -941,14 +941,14 @@ fn atomic_update_file_test_db(
         return Err("Failed to write file")
 
 # Acquire file lock with timeout
-fn acquire_file_lock(path: text, timeout_secs: i64) -> Result<text, text>:
+fn acquire_file_lock(path: str, timeout_secs: i64) -> Result<str, str>:
     try:
         val lock_path = rt_file_lock(path, timeout_secs)
         return Ok(lock_path)
     catch e:
         return Err(e.to_string())
 
-fn micros_to_iso(micros: i64) -> text:
+fn micros_to_iso(micros: i64) -> str:
     # Simple approximation - just use the unix timestamp
     val secs = micros / 1000000
     "{secs}"
@@ -1027,7 +1027,7 @@ fn run_tests(options: TestOptions) -> TestRunResult:
         total_duration_ms: total_duration_ms
     )
 
-fn mode_to_str(mode: TestExecutionMode) -> text:
+fn mode_to_str(mode: TestExecutionMode) -> str:
     match mode:
         case TestExecutionMode.Interpreter:
             "interpreter"
@@ -1036,7 +1036,7 @@ fn mode_to_str(mode: TestExecutionMode) -> text:
         case TestExecutionMode.Native:
             "native"
 
-fn run_single_test(file_path: text, options: TestOptions) -> TestFileResult:
+fn run_single_test(file_path: str, options: TestOptions) -> TestFileResult:
     match options.mode:
         case TestExecutionMode.Interpreter:
             run_test_file_interpreter(file_path, options)
@@ -1056,7 +1056,7 @@ fn main() -> i64:
     val all_args = rt_cli_get_args()
 
     # Skip binary name, possible "test" command, and possible main.spl path
-    var args: List<text> = []
+    var args: List<str> = []
     var start_idx = 1
     # When dispatched via CLI: args are [binary, "test", ...flags]
     # When run directly: args are [binary, "main.spl", ...flags]

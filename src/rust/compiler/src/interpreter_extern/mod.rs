@@ -551,6 +551,21 @@ pub(crate) fn call_extern_function(
         "rt_path_join" => file_io::rt_path_join(&evaluated),
 
         // ====================================================================
+        // Collections FFI Operations (HashMap, HashSet, BTree)
+        // ====================================================================
+        // HashMap operations
+        "__rt_hashmap_new" => collections::__rt_hashmap_new(&evaluated),
+        "__rt_hashmap_insert" => collections::__rt_hashmap_insert(&evaluated),
+        "__rt_hashmap_get" => collections::__rt_hashmap_get(&evaluated),
+        "__rt_hashmap_contains_key" => collections::__rt_hashmap_contains_key(&evaluated),
+        "__rt_hashmap_remove" => collections::__rt_hashmap_remove(&evaluated),
+        "__rt_hashmap_len" => collections::__rt_hashmap_len(&evaluated),
+        "__rt_hashmap_clear" => collections::__rt_hashmap_clear(&evaluated),
+        "__rt_hashmap_keys" => collections::__rt_hashmap_keys(&evaluated),
+        "__rt_hashmap_values" => collections::__rt_hashmap_values(&evaluated),
+        "__rt_hashmap_entries" => collections::__rt_hashmap_entries(&evaluated),
+
+        // ====================================================================
         // CLI FFI Functions (46 functions - for Simple-based CLI)
         // ====================================================================
         // Basic CLI operations
