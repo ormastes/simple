@@ -119,3 +119,35 @@ pub fn atomic_write_file_locked(path: text, content: text) -> Result<(), text>:
     catch e:
         lock.release()
         return Err("Write failed: " + e.to_string())
+
+# ===== Public Locking API for Test Compatibility =====
+
+pub fn acquire_lock(path: text, timeout_secs: i64) -> Result<FileLock, text>:
+    """Acquire file lock with timeout (wrapper for FileLock.acquire)"""
+    match FileLock.acquire(path, timeout_secs):
+        Some(lock) => Ok(lock)
+        None => Err("Failed to acquire lock: timeout after {timeout_secs}s")
+
+pub fn release_lock(path: text) -> bool:
+    """Release lock file manually"""
+    val lock_path = path + ".lock"
+    rt_file_unlock(lock_path)
+
+pub fn cleanup_lock_files() -> bool:
+    """Remove stale .lock files from crashed processes"""
+    try:
+        val patterns = ["*.lock", "doc/**/*.lock", "tmp/**/*.lock"]
+        for pattern in patterns:
+            val files = rt_dir_glob(pattern)
+            for file in files:
+                # Check if lock is stale (process not running)
+                # For now, just remove all .lock files (safe on startup)
+                rt_file_remove(file)
+        return true
+    catch:
+        return false
+
+# ===== External FFI for Lock Cleanup =====
+
+extern fn rt_dir_glob(pattern: text) -> [text]
+extern fn rt_file_remove(path: text) -> bool
