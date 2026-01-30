@@ -23,6 +23,8 @@ lean_lib Traits
 
 lean_lib ClassTraitIntegration
 
+lean_lib DynTrait
+
 lean_lib Mixins
 
 lean_lib MixinsTest
@@ -34,6 +36,8 @@ lean_lib StaticPolymorphism
 lean_lib StaticPolymorphismTest
 
 lean_lib UnificationDecidability
+
+lean_lib Soundness
 
 -- Auto-generated modules (from Simple auto_gen)
 lean_lib Generated_Types

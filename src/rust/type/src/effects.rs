@@ -844,6 +844,7 @@ mod tests {
             is_generic_template: false,
             specialization_of: None,
             type_bindings: HashMap::new(),
+            is_static: false,
         };
 
         let env = HashMap::new();
@@ -877,6 +878,7 @@ mod tests {
             is_generic_template: false,
             specialization_of: None,
             type_bindings: HashMap::new(),
+            is_static: false,
         };
 
         let env = HashMap::new();
@@ -911,6 +913,7 @@ mod tests {
             return_constraint: None,
             is_generic_template: false,
             specialization_of: None,
+            is_static: false,
             type_bindings: HashMap::new(),
         };
 
@@ -945,6 +948,7 @@ mod tests {
             bounds_block: None,
             return_constraint: None,
             is_generic_template: false,
+            is_static: false,
             specialization_of: None,
             type_bindings: HashMap::new(),
         };
@@ -980,6 +984,7 @@ mod tests {
             is_me_method: false,
             bounds_block: None,
             return_constraint: None,
+            is_static: false,
             is_generic_template: false,
             specialization_of: None,
             type_bindings: HashMap::new(),
@@ -1088,6 +1093,7 @@ mod tests {
             is_sync: true, // Marked as sync but contains suspension
             bounds_block: None,
             is_me_method: false,
+            is_static: false,
             return_constraint: None,
             is_generic_template: false,
             specialization_of: None,
@@ -1182,6 +1188,7 @@ mod tests {
             is_generic_template: false,
             specialization_of: None,
             type_bindings: HashMap::new(),
+            is_static: false,
         }
     }
 
@@ -1214,6 +1221,7 @@ mod tests {
             is_generic_template: false,
             specialization_of: None,
             type_bindings: HashMap::new(),
+            is_static: false,
         }
     }
 
@@ -1243,6 +1251,7 @@ mod tests {
             is_generic_template: false,
             specialization_of: None,
             type_bindings: HashMap::new(),
+            is_static: false,
         }
     }
 
@@ -1326,6 +1335,7 @@ mod tests {
             is_abstract: false,
             is_sync: true,
             is_me_method: false,
+            is_static: false,
             bounds_block: None,
             return_constraint: None,
             is_generic_template: false,

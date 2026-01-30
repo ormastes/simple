@@ -60,6 +60,13 @@ impl<'a> Parser<'a> {
                     | CommonMistake::RustTurbofish
                     | CommonMistake::TsArrowFunction
                     | CommonMistake::PythonElif => ErrorHintLevel::Hint,
+
+                    // Colon-specific mistakes
+                    CommonMistake::MissingCommaInArgs
+                    | CommonMistake::MissingColonBeforeBlock
+                    | CommonMistake::DictInsteadOfStruct
+                    | CommonMistake::MissingIndentAfterColon
+                    | CommonMistake::WrongIndentLevel => ErrorHintLevel::Error,
                 };
 
                 let hint = ErrorHint {
@@ -354,6 +361,36 @@ impl<'a> Parser<'a> {
                 format!("{:?}", kind),
                 format!("{:?}", self.current.kind),
                 self.current.span,
+            ))
+        }
+    }
+
+    /// Expect a token with contextual error message
+    pub(crate) fn expect_with_context(
+        &mut self,
+        kind: &TokenKind,
+        context: &str,
+        suggestion: Option<String>,
+    ) -> Result<(), ParseError> {
+        if self.check(kind) {
+            self.advance();
+            Ok(())
+        } else {
+            // Check for common mistakes
+            let help = if matches!(kind, TokenKind::Comma) && matches!(self.current.kind, TokenKind::Colon) {
+                Some("Missing comma between arguments with named parameters".to_string())
+            } else if matches!(kind, TokenKind::Colon) && matches!(self.current.kind, TokenKind::Newline | TokenKind::Indent) {
+                Some("Missing colon before block body".to_string())
+            } else {
+                None
+            };
+
+            Err(ParseError::contextual_error_with_help(
+                context,
+                format!("expected {:?}, found {:?}", kind, self.current.kind),
+                self.current.span,
+                suggestion,
+                help.unwrap_or_else(|| format!("expected {:?} in {}", kind, context)),
             ))
         }
     }

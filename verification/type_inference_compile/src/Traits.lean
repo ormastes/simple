@@ -109,6 +109,9 @@ def unifyFuel (fuel : Nat) (ty1 ty2 : Ty) : Bool :=
         n1 == n2 &&
         a1.length == a2.length &&
         unifyListFuel fuel' a1 a2
+    | Ty.dynTrait n1, Ty.dynTrait n2 => n1 == n2
+    | Ty.dynTrait _, _ => false
+    | _, Ty.dynTrait _ => false
     | _, _ => false
 
 -- Check if two types unify (simplified unification)
@@ -314,7 +317,13 @@ theorem unifyFuel_symmetric (fuel : Nat) (ty1 ty2 : Ty) :
         simp only [beq_comm]
         have h_list := unifyListFuel_symmetric fuel' a1 a2 ih
         rw [h_list]
+      | dynTrait _ => simp [unifyFuel]
       | _ => simp
+    | dynTrait n1 =>
+      cases ty2 with
+      | var _ => simp
+      | dynTrait n2 => simp only [beq_comm]
+      | _ => simp [unifyFuel]
 
 -- Helper: unifyDefaultFuel is symmetric
 theorem unifyDefaultFuel_symmetric (ty1 ty2 : Ty) :

@@ -1,0 +1,247 @@
+# Contextual Error Messages - Usage Guide
+# This demonstrates how to use the enhanced error system
+
+## Example 1: Detecting Missing Commas in Function Arguments
+
+fn parse_function_call(parser: Parser) -> Result<Expr, ParseError>:
+    """
+    Parse a function call with enhanced error messages.
+
+    Detects common mistakes:
+    - Missing comma between arguments: func(a: 1 b: 2)
+    - Missing colon before block: fn foo() \n body
+    """
+
+    parser.expect(TokenKind.LParen)
+    val args = []
+
+    while not parser.check(TokenKind.RParen):
+        # Parse argument name (if present)
+        val arg_name = None
+        if parser.is_identifier():
+            val name = parser.current.lexeme
+            val next = parser.peek()
+
+            # Check for named argument syntax: name: value
+            if next.kind == TokenKind.Colon or next.kind == TokenKind.Assign:
+                arg_name = name
+                parser.advance()  # consume name
+                parser.expect(next.kind)  # consume ':' or '='
+
+        # Parse argument value
+        val value = parser.parse_expression()
+        args.push(Argument(name: arg_name, value: value))
+
+        # Check for comma or end of args
+        if not parser.check(TokenKind.RParen):
+            # Enhanced error detection: check if next token is an identifier
+            # followed by ':' or '=' (missing comma before named argument)
+            if parser.is_identifier():
+                val next = parser.peek()
+                if next.kind == TokenKind.Colon or next.kind == TokenKind.Assign:
+                    # This is a missing comma!
+                    return Err(ParseError.contextual_error_with_help(
+                        context: "function arguments",
+                        message: "expected comma before argument '{parser.current.lexeme}', found identifier",
+                        span: parser.current.span,
+                        suggestion: "Insert comma before '{parser.current.lexeme}'",
+                        help: "Missing comma between function arguments. Use: func(a: 1, b: 2)"
+                    ))
+
+            # Expect comma with context
+            parser.expect_with_context(
+                kind: TokenKind.Comma,
+                context: "function arguments",
+                suggestion: "Insert comma between arguments"
+            )
+
+    parser.expect(TokenKind.RParen)
+    Ok(Expr.Call(args: args))
+
+
+## Example 2: Using expect_with_context Helper
+
+fn parse_dict_literal(parser: Parser) -> Result<Expr, ParseError>:
+    """
+    Parse dict literal with contextual error messages.
+
+    Good: {key: value, key2: value2}
+    Bad:  {key value}  # missing colon
+    Bad:  {key: value key2: value2}  # missing comma
+    """
+
+    parser.expect(TokenKind.LBrace)
+    val pairs = []
+
+    while not parser.check(TokenKind.RBrace):
+        val key = parser.parse_expression()
+
+        # Use contextual error for missing colon
+        parser.expect_with_context(
+            kind: TokenKind.Colon,
+            context: "dict literal",
+            suggestion: "Insert colon after the key"
+        )
+
+        val value = parser.parse_expression()
+        pairs.push((key, value))
+
+        if not parser.check(TokenKind.RBrace):
+            # Use contextual error for missing comma
+            parser.expect_with_context(
+                kind: TokenKind.Comma,
+                context: "dict literal",
+                suggestion: "Insert comma after the value"
+            )
+
+    parser.expect(TokenKind.RBrace)
+    Ok(Expr.Dict(pairs: pairs))
+
+
+## Example 3: Custom Contextual Error Messages
+
+fn parse_function_def(parser: Parser) -> Result<Stmt, ParseError>:
+    """
+    Parse function definition with detection of missing colon before body.
+
+    Good: fn foo(): body
+    Bad:  fn foo() body  # missing colon
+    """
+
+    parser.expect(TokenKind.Fn)
+    val name = parser.expect_identifier()
+    val params = parser.parse_parameters()
+
+    # Check for missing colon before newline/indent
+    if parser.check(TokenKind.Newline) or parser.check(TokenKind.Indent):
+        return Err(ParseError.contextual_error_with_help(
+            context: "function definition",
+            message: "expected colon before function body",
+            span: parser.current.span,
+            suggestion: "Insert ':' at the end of this line",
+            help: "Function definitions require a colon before the body: fn name():"
+        ))
+
+    parser.expect_with_context(
+        kind: TokenKind.Colon,
+        context: "function definition",
+        suggestion: "Add ':' before function body"
+    )
+
+    val body = parser.parse_block()
+    Ok(Stmt.Function(name: name, params: params, body: body))
+
+
+## Example 4: Error Message Patterns
+
+class ContextualErrorBuilder:
+    """
+    Builder pattern for creating contextual error messages.
+
+    Usage:
+        ContextualErrorBuilder()
+            .context("function arguments")
+            .message("expected comma before argument 'b'")
+            .suggestion("Insert comma before 'b'")
+            .help("Use: func(a: 1, b: 2)")
+            .build()
+    """
+
+    context_: text
+    message_: text
+    span_: Span
+    suggestion_: Option<text>
+    help_: Option<text>
+
+    fn context(ctx: text) -> Self:
+        self.context_ = ctx
+        self
+
+    fn message(msg: text) -> Self:
+        self.message_ = msg
+        self
+
+    fn at_span(span: Span) -> Self:
+        self.span_ = span
+        self
+
+    fn suggestion(sugg: text) -> Self:
+        self.suggestion_ = Some(sugg)
+        self
+
+    fn help(help_text: text) -> Self:
+        self.help_ = Some(help_text)
+        self
+
+    fn build() -> ParseError:
+        ParseError.ContextualSyntaxError(
+            context: self.context_,
+            message: self.message_,
+            span: self.span_,
+            suggestion: self.suggestion_,
+            help: self.help_,
+            parse_context: None
+        )
+
+
+## Example 5: Testing Contextual Errors
+
+feature "Contextual Error Messages":
+
+    scenario "Missing comma in function arguments":
+        given:
+            val source = "func(a: 1 b: 2)"
+            val parser = Parser(source: source)
+
+        when:
+            val result = parser.parse_expression()
+
+        then:
+            result.is_err().should_be_true()
+            val err = result.err()
+            err.context.should_equal("function arguments")
+            err.message.should_contain("expected comma before argument 'b'")
+            err.suggestion.should_contain("Insert comma before 'b'")
+
+    scenario "Missing colon before function body":
+        given:
+            val source = "fn foo()\n    return 42"
+            val parser = Parser(source: source)
+
+        when:
+            val result = parser.parse_function()
+
+        then:
+            result.is_err().should_be_true()
+            val err = result.err()
+            err.context.should_equal("function definition")
+            err.message.should_contain("expected colon before function body")
+            err.help.should_contain("fn name():")
+
+
+## Best Practices
+
+# 1. Always provide context
+parser.expect_with_context(TokenKind.Comma, "function arguments")  # Good
+parser.expect(TokenKind.Comma)  # Less helpful
+
+# 2. Use specific context strings
+"function arguments"     # Good - specific
+"parsing"                # Bad - too vague
+"dict literal"           # Good - specific
+"expression"             # OK - generic but useful
+
+# 3. Provide actionable suggestions
+"Insert comma before 'b'"                          # Good - specific
+"Add a comma"                                      # OK - less specific
+"Syntax error"                                     # Bad - not actionable
+
+# 4. Include examples in help text
+"Missing comma. Use: func(a: 1, b: 2)"           # Good
+"Missing comma between arguments"                 # OK
+"Syntax error"                                    # Bad
+
+# 5. Detect common patterns proactively
+if is_identifier() and peek().kind == Colon:
+    # This is likely a missing comma before named arg
+    return contextual_error(...)

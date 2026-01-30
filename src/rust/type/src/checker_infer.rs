@@ -62,7 +62,6 @@ impl TypeChecker {
                     | BinOp::Div
                     | BinOp::Mod
                     | BinOp::Pow
-                    | BinOp::FloorDiv
                     | BinOp::MatMul => { // Simple Math #1930-#1939: matrix multiplication
                         // Unify operands to ensure they're compatible
                         let _ = self.unify(&left_ty, &right_ty);
@@ -107,6 +106,11 @@ impl TypeChecker {
                             // Otherwise return a fresh type variable
                             Ok(self.fresh_var())
                         }
+                    }
+                    // Parallel operator (// ): executes both sides in parallel
+                    // Result type is typically a tuple of both results
+                    BinOp::Parallel => {
+                        Ok(Type::Tuple(vec![left_ty, right_ty]))
                     }
                 }
             }

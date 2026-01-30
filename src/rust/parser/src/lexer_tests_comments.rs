@@ -117,7 +117,7 @@ fn test_double_slash_still_floor_div() {
         tokenize("10 // 3"),
         vec![
             TokenKind::Integer(10),
-            TokenKind::DoubleSlash,
+            TokenKind::Parallel,
             TokenKind::Integer(3),
             TokenKind::Eof,
         ]

@@ -182,6 +182,15 @@ impl TypeChecker {
                 }
             }
 
+            // DynTrait types unify only with same trait name
+            (Type::DynTrait(n1), Type::DynTrait(n2)) if n1 == n2 => Ok(()),
+            (Type::DynTrait(_), _) | (_, Type::DynTrait(_)) => {
+                Err(TypeError::Mismatch {
+                    expected: t1.clone(),
+                    found: t2.clone(),
+                })
+            }
+
             // Mismatch
             _ => Err(TypeError::Mismatch {
                 expected: t1.clone(),
@@ -390,6 +399,8 @@ impl TypeChecker {
             (Type::DependentKeys { .. }, Type::ConstKeySet { .. })
             | (Type::ConstKeySet { .. }, Type::DependentKeys { .. }) => true,
             (Type::DependentKeys { source: s1 }, Type::DependentKeys { source: s2 }) => s1 == s2,
+            // DynTrait types are compatible only with same trait name
+            (Type::DynTrait(n1), Type::DynTrait(n2)) => n1 == n2,
             _ => false,
         }
     }

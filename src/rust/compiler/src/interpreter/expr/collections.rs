@@ -344,15 +344,8 @@ pub(super) fn eval_collection_expr(
                 }
                 Value::Dict(map) => {
                     let key = idx_val.to_key_string();
-                    map.get(&key).cloned().ok_or_else(|| {
-                        let ctx = ErrorContext::new()
-                            .with_code(codes::INDEX_OUT_OF_BOUNDS)
-                            .with_help("ensure the key exists in the dictionary before accessing it");
-                        CompileError::semantic_with_context(
-                            format!("index out of bounds: dict key not found: {}", key),
-                            ctx,
-                        )
-                    })
+                    // Return nil for missing keys instead of erroring
+                    Ok(map.get(&key).cloned().unwrap_or(Value::Nil))
                 }
                 Value::Str(s) => {
                     // E1043 - Invalid Index Type

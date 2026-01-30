@@ -585,6 +585,7 @@ pub struct MixinInfo {
     pub fields: Vec<(String, Type)>,
     pub methods: Vec<(String, FunctionType)>,
     pub required_traits: Vec<String>,
+    pub required_mixins: Vec<String>,
     pub required_methods: Vec<RequiredMethodSig>,
 }
 
@@ -632,6 +633,7 @@ impl MixinInfo {
             fields,
             methods,
             required_traits: self.required_traits.clone(),
+            required_mixins: self.required_mixins.clone(),
             required_methods,
         })
     }
@@ -687,11 +689,11 @@ pub struct TypeChecker {
     /// Reference ID counter for capability tracking
     next_ref_id: usize,
     /// Trait implementation registry for coherence checks
-    trait_impls: HashMap<String, TraitImplRegistry>,
+    pub trait_impls: HashMap<String, TraitImplRegistry>,
     /// Mixin definitions for composition (Feature #2200)
-    mixins: HashMap<String, MixinInfo>,
+    pub mixins: HashMap<String, MixinInfo>,
     /// Mixin compositions: type -> mixins it includes (Feature #2201)
-    compositions: HashMap<String, Vec<simple_parser::MixinRef>>,
+    pub compositions: HashMap<String, Vec<simple_parser::MixinRef>>,
     /// Interface binding registry: trait name -> implementation type (for static dispatch)
     /// When a binding exists, trait references resolve to the bound implementation type
     /// and dispatch is static (monomorphized). Without binding, dispatch is dynamic (vtable).
@@ -709,6 +711,12 @@ include!("macro_checker.rs");
 include!("mixin_checker.rs");
 include!("dispatch_checker.rs");
 include!("checker_infer.rs");
+
+// Unit tests for new features
+#[cfg(test)]
+mod dyn_trait_tests;
+#[cfg(test)]
+mod transitive_mixin_tests;
 
 /// Check a list of AST nodes for type errors
 pub fn check(items: &[Node]) -> Result<(), TypeError> {
@@ -741,6 +749,7 @@ mod mixin_type_tests {
             fields: vec![("value".to_string(), Type::TypeParam("T".to_string()))],
             methods: vec![],
             required_traits: vec![],
+            required_mixins: vec![],
             required_methods: vec![],
         };
 
@@ -764,6 +773,7 @@ mod mixin_type_tests {
             )],
             methods: vec![],
             required_traits: vec![],
+            required_mixins: vec![],
             required_methods: vec![],
         };
 
@@ -787,6 +797,7 @@ mod mixin_type_tests {
                 },
             )],
             required_traits: vec![],
+            required_mixins: vec![],
             required_methods: vec![],
         };
 
@@ -808,6 +819,7 @@ mod mixin_type_tests {
             ],
             methods: vec![],
             required_traits: vec![],
+            required_mixins: vec![],
             required_methods: vec![],
         };
 
@@ -828,6 +840,7 @@ mod mixin_type_tests {
             fields: vec![],
             methods: vec![],
             required_traits: vec![],
+            required_mixins: vec![],
             required_methods: vec![],
         };
 

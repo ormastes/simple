@@ -11,12 +11,15 @@
 
 import Classes
 import Traits
+import DynTrait
+import Mixins
 
 -- Combined environment with both classes and traits
 structure TypeEnv where
   classes : ClassEnv
   traits : TraitEnv
   impls : ImplRegistry
+  mixins : MixinEnv := []
 
 -- Check if a class implements a trait
 def classImplementsTrait (env : TypeEnv) (className traitName : String) : Bool :=
@@ -27,6 +30,7 @@ def classImplementsTrait (env : TypeEnv) (className traitName : String) : Bool :
 inductive MethodSource where
   | classMethod (className : String) (method : MethodDef)
   | traitMethod (traitName : String) (method : TraitMethod)
+  | mixinMethod (mixinName : String) (method : MethodDef)
   deriving Repr
 
 -- Find the source of a method for a class
@@ -49,7 +53,16 @@ def resolveMethodSource (env : TypeEnv) (className methodName : String) : Option
                 )
             | none => none
           )
-          traitMethod
+          match traitMethod with
+          | some src => some src
+          | none =>
+              -- Check mixin-provided methods (lowest priority)
+              let mixinMethod := env.mixins.findSome? (fun (mixinName, mixin) =>
+                mixin.methods.find? (fun m => m.name == methodName) |>.map (fun m =>
+                  MethodSource.mixinMethod mixinName m
+                )
+              )
+              mixinMethod
   | none => none
 
 -- Type inference for method call with class-trait integration
@@ -69,7 +82,16 @@ def inferIntegratedMethodCall (env : TypeEnv) (objTy : Ty) (methodName : String)
             some method.ret
           else
             none
+      | some (MethodSource.mixinMethod _ method) =>
+          -- Mixin-provided method (lowest priority)
+          if method.params == argTys then
+            some method.ret
+          else
+            none
       | none => none
+  | Ty.dynTrait traitName =>
+      -- Dynamic trait dispatch
+      inferDynMethodCall env.traits traitName methodName argTys
   | _ => none
 
 -- Check coherence for class-trait implementations
@@ -305,3 +327,52 @@ theorem tyConversion_roundtrip (ty : Ty) :
 -- Note: genericBounds_sound removed - the statement had no preconditions and was incorrect.
 -- A proper soundness theorem would require preconditions about the bounds being
 -- derivable from the class definition and the type arguments satisfying them.
+
+--==============================================================================
+-- Mixin-Trait-DynTrait Integration Theorems
+--==============================================================================
+
+/-- Mixin methods are found by resolveMethodSource after application.
+    If a mixin provides a method and no class/trait method shadows it,
+    resolveMethodSource finds it. -/
+theorem mixin_method_in_resolution (env : TypeEnv) (className methodName : String)
+    (cls : ClassDef) (mixinName : String) (mixinMethod : MethodDef)
+    (h_class : lookupClass env.classes className = some cls)
+    (h_no_class_method : lookupMethod cls methodName = none)
+    (h_no_trait_method : (env.impls.filter (fun impl =>
+        impl.for_type == Ty.named className)).findSome? (fun impl =>
+        match lookupTrait env.traits impl.trait_name with
+        | some trait => lookupTraitMethod trait methodName |>.map (fun m =>
+            MethodSource.traitMethod impl.trait_name m)
+        | none => none) = none)
+    (h_mixin : (mixinName, { name := mixinName, type_params := [], required_traits := [],
+        required_mixins := [], fields := [], methods := [mixinMethod],
+        required_methods := [] : MixinDef }) ∈ env.mixins)
+    (h_method_name : mixinMethod.name = methodName) :
+    ∃ src, resolveMethodSource env className methodName = some src := by
+  unfold resolveMethodSource
+  simp only [h_class, h_no_class_method, h_no_trait_method]
+  -- The mixin method should be found by findSome? on env.mixins
+  sorry -- Requires showing findSome? finds the mixin entry
+
+/-- Dyn trait method resolution is sound: returns correct type for well-typed dispatch -/
+theorem dyn_method_resolution_sound (env : TypeEnv)
+    (traitName methodName : String) (argTys : List Ty) (retTy : Ty) :
+    inferDynMethodCall env.traits traitName methodName argTys = some retTy →
+    inferIntegratedMethodCall env (Ty.dynTrait traitName) methodName argTys = some retTy := by
+  intro h
+  unfold inferIntegratedMethodCall
+  exact h
+
+/-- Mixin trait requirement propagation: if mixin M requires trait T,
+    and mixin N requires mixin M, then any class using N must implement T. -/
+theorem mixin_trait_propagation (traitEnv : TraitEnv) (registry : ImplRegistry)
+    (mixinM mixinN : MixinDef) (targetType : Ty) :
+    mixinM.name ∈ mixinN.required_mixins →
+    "T" ∈ mixinM.required_traits →
+    checkMixinTraitRequirements traitEnv registry mixinM targetType = true →
+    implementsTrait registry targetType "T" = true := by
+  intro _h_req_mixin h_req_trait h_check
+  unfold checkMixinTraitRequirements at h_check
+  rw [List.all_eq_true] at h_check
+  exact h_check "T" h_req_trait

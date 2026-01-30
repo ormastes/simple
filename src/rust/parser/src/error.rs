@@ -108,6 +108,22 @@ pub enum ParseError {
         message: String,
         context: Option<ParseContext>,
     },
+
+    #[error("{context}: {message}")]
+    ContextualSyntaxError {
+        /// Context where error occurred (e.g., "dict literal", "function arguments", "struct initialization")
+        context: String,
+        /// Error message
+        message: String,
+        /// Span of the error
+        span: Span,
+        /// Optional suggestion for fixing
+        suggestion: Option<String>,
+        /// Optional help text
+        help: Option<String>,
+        /// Parser context (for debugging)
+        parse_context: Option<ParseContext>,
+    },
 }
 
 impl ParseError {
@@ -177,6 +193,54 @@ impl ParseError {
             expected: expected.into(),
             span,
             context: Some(context),
+        }
+    }
+
+    pub fn contextual_error(
+        context: impl Into<String>,
+        message: impl Into<String>,
+        span: Span,
+    ) -> Self {
+        Self::ContextualSyntaxError {
+            context: context.into(),
+            message: message.into(),
+            span,
+            suggestion: None,
+            help: None,
+            parse_context: None,
+        }
+    }
+
+    pub fn contextual_error_with_suggestion(
+        context: impl Into<String>,
+        message: impl Into<String>,
+        span: Span,
+        suggestion: impl Into<String>,
+    ) -> Self {
+        Self::ContextualSyntaxError {
+            context: context.into(),
+            message: message.into(),
+            span,
+            suggestion: Some(suggestion.into()),
+            help: None,
+            parse_context: None,
+        }
+    }
+
+    pub fn contextual_error_with_help(
+        context: impl Into<String>,
+        message: impl Into<String>,
+        span: Span,
+        suggestion: Option<String>,
+        help: impl Into<String>,
+    ) -> Self {
+        Self::ContextualSyntaxError {
+            context: context.into(),
+            message: message.into(),
+            span,
+            suggestion,
+            help: Some(help.into()),
+            parse_context: None,
         }
     }
 
@@ -250,6 +314,21 @@ impl ParseError {
                 message,
                 context: Some(context),
             },
+            Self::ContextualSyntaxError {
+                context: ctx,
+                message,
+                span,
+                suggestion,
+                help,
+                parse_context: _,
+            } => Self::ContextualSyntaxError {
+                context: ctx,
+                message,
+                span,
+                suggestion,
+                help,
+                parse_context: Some(context),
+            },
         }
     }
 
@@ -263,6 +342,7 @@ impl ParseError {
             ParseError::InvalidType { span, .. } => Some(*span),
             ParseError::UnclosedString { span, .. } => *span,
             ParseError::UnterminatedBlockComment { span, .. } => *span,
+            ParseError::ContextualSyntaxError { span, .. } => Some(*span),
             _ => None,
         }
     }
@@ -282,6 +362,7 @@ impl ParseError {
             ParseError::MissingToken { context, .. } => context.as_ref(),
             ParseError::InvalidPattern { context, .. } => context.as_ref(),
             ParseError::InvalidType { context, .. } => context.as_ref(),
+            ParseError::ContextualSyntaxError { parse_context, .. } => parse_context.as_ref(),
         }
     }
 
@@ -399,6 +480,26 @@ impl ParseError {
                     .with_code("E0012")
                     .with_parser_label(*span, "invalid type here");
                 add_context(diag, context.as_ref())
+            }
+            ParseError::ContextualSyntaxError {
+                context: ctx,
+                message,
+                span,
+                suggestion,
+                help,
+                parse_context,
+            } => {
+                let mut diag = Diagnostic::error(format!("{}: {}", ctx, message))
+                    .with_code("E0013")
+                    .with_parser_label(*span, message.clone());
+
+                if let Some(ref sugg) = suggestion {
+                    diag = diag.with_note(format!("Suggestion: {}", sugg));
+                }
+                if let Some(ref h) = help {
+                    diag = diag.with_help(h.clone());
+                }
+                add_context(diag, parse_context.as_ref())
             }
         }
     }

@@ -68,42 +68,65 @@ impl TypeChecker {
         Ok(merged)
     }
 
-    /// Get all fields for a type including mixin fields (Feature #2201)
+    /// Resolve all transitively required mixins via BFS (Feature #2201)
+    /// Returns the full list of mixin names including transitive dependencies.
+    pub fn resolve_transitive_mixins(&self, initial_names: &[String]) -> Vec<String> {
+        let mut seen = std::collections::HashSet::new();
+        let mut result = Vec::new();
+        let mut queue: std::collections::VecDeque<String> = initial_names.iter().cloned().collect();
+
+        while let Some(name) = queue.pop_front() {
+            if !seen.insert(name.clone()) {
+                continue;
+            }
+            // Only add to result if mixin exists
+            if let Some(mixin_info) = self.mixins.get(&name) {
+                result.push(name.clone());
+                // Add transitive dependencies
+                for dep in &mixin_info.required_mixins {
+                    if !seen.contains(dep) {
+                        queue.push_back(dep.clone());
+                    }
+                }
+            }
+        }
+        result
+    }
+
+    /// Get all fields for a type including mixin fields with transitive resolution (Feature #2201)
     pub fn get_all_fields(&mut self, type_name: &str) -> Vec<(String, Type)> {
         // Check if type has mixin compositions
         if let Some(mixin_refs) = self.compositions.get(type_name).cloned() {
             let mut all_fields = Vec::new();
 
-            // Add mixin fields
-            for mixin_ref in &mixin_refs {
-                if let Some(mixin_info) = self.mixins.get(&mixin_ref.name).cloned() {
-                    // Instantiate if generic
-                    if !mixin_ref.type_args.is_empty() {
-                        // Convert AST types to Type
-                        let type_args: Vec<Type> = mixin_ref
-                            .type_args
-                            .iter()
-                            .map(|ast_ty| self.ast_type_to_type(ast_ty))
-                            .collect();
+            // Resolve transitive mixin dependencies
+            let direct_names: Vec<String> = mixin_refs.iter().map(|r| r.name.clone()).collect();
+            let all_mixin_names = self.resolve_transitive_mixins(&direct_names);
 
-                        if let Ok(instantiated) = mixin_info.instantiate(&type_args) {
-                            all_fields.extend(instantiated.fields);
+            // Collect fields from all resolved mixins
+            for mixin_name in &all_mixin_names {
+                // Try to find a MixinRef with type args for this mixin
+                let mixin_ref = mixin_refs.iter().find(|r| &r.name == mixin_name);
+
+                if let Some(mixin_info) = self.mixins.get(mixin_name).cloned() {
+                    if let Some(ref mr) = mixin_ref {
+                        if !mr.type_args.is_empty() {
+                            let type_args: Vec<Type> = mr
+                                .type_args
+                                .iter()
+                                .map(|ast_ty| self.ast_type_to_type(ast_ty))
+                                .collect();
+
+                            if let Ok(instantiated) = mixin_info.instantiate(&type_args) {
+                                all_fields.extend(instantiated.fields);
+                            }
+                            continue;
                         }
-                    } else {
-                        all_fields.extend(mixin_info.fields.clone());
                     }
+                    all_fields.extend(mixin_info.fields.clone());
                 }
             }
 
-            // Add class/struct own fields once registration is implemented
-            // Would need to:
-            // 1. Add struct_fields: HashMap<String, Vec<(String, Type)>> to store struct's own fields
-            // 2. Populate it during struct/class registration in type checker
-            // 3. Append struct's fields after mixin fields here:
-            //    if let Some(own_fields) = self.struct_fields.get(type_name) {
-            //        all_fields.extend(own_fields.clone());
-            //    }
-            // This ensures correct field resolution order: mixin fields first, own fields last
             all_fields
         } else {
             Vec::new()

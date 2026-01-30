@@ -311,8 +311,8 @@ impl<'a> Lexer<'a> {
                         self.advance(); // consume third '/'
                         return self.read_doc_line_comment(start_pos, start_line, start_column);
                     } else {
-                        // Floor division //
-                        TokenKind::DoubleSlash
+                        // Parallel operator //
+                        TokenKind::Parallel
                     }
                 } else if self.check('=') {
                     self.advance();

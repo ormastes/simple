@@ -387,24 +387,6 @@ pub(super) fn eval_op_expr(
                         }
                     }
                 }
-                BinOp::FloorDiv => {
-                    let r = right_val.as_int()?;
-                    if r == 0 {
-                        // E3001 - Division By Zero
-                        let ctx = ErrorContext::new()
-                            .with_code(codes::DIVISION_BY_ZERO)
-                            .with_help("cannot perform floor division by zero")
-                            .with_note("check that the divisor is not zero before division");
-                        Err(CompileError::semantic_with_context(
-                            "floor division by zero".to_string(),
-                            ctx,
-                        ))
-                    } else {
-                        let l = left_val.as_int()?;
-                        // Floor division: always round towards negative infinity
-                        Ok(Value::Int(l.div_euclid(r)))
-                    }
-                }
                 BinOp::BitAnd => Ok(Value::Int(left_val.as_int()? & right_val.as_int()?)),
                 BinOp::BitOr => Ok(Value::Int(left_val.as_int()? | right_val.as_int()?)),
                 BinOp::BitXor => Ok(Value::Int(left_val.as_int()? ^ right_val.as_int()?)),
@@ -440,12 +422,50 @@ pub(super) fn eval_op_expr(
                     result
                 }
                 BinOp::MatMul => {
-                    // Matrix multiplication (@) - for now, treat as element-wise multiply for numbers
-                    // or defer to a matrix library for actual matrix operations
-                    if use_float {
-                        Ok(Value::Float(left_val.as_float()? * right_val.as_float()?))
-                    } else {
-                        Ok(Value::Int(left_val.as_int()? * right_val.as_int()?))
+                    // Matrix multiplication (@) - Simple Math #1930-#1939
+                    match (&left_val, &right_val) {
+                        // Scalar @ Scalar - backward compatibility
+                        (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a * b)),
+                        (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a * b)),
+                        (Value::Int(a), Value::Float(b)) => Ok(Value::Float(*a as f64 * b)),
+                        (Value::Float(a), Value::Int(b)) => Ok(Value::Float(a * *b as f64)),
+
+                        // Array @ Array - proper matrix multiplication
+                        (Value::Array(a), Value::Array(b)) => {
+                            if a.is_empty() || b.is_empty() {
+                                let ctx = ErrorContext::new()
+                                    .with_code(codes::INVALID_OPERATION)
+                                    .with_help("matrix multiplication requires non-empty arrays");
+                                return Err(CompileError::semantic_with_context(
+                                    "matrix multiplication requires non-empty arrays",
+                                    ctx,
+                                ));
+                            }
+
+                            let is_a_2d = matches!(a.get(0), Some(Value::Array(_)));
+                            let is_b_2d = matches!(b.get(0), Some(Value::Array(_)));
+
+                            match (is_a_2d, is_b_2d) {
+                                (false, false) => matmul_dot_product_1d(a, b),
+                                (true, true) => matmul_matrix_multiply_2d(a, b),
+                                (true, false) => matmul_matrix_vector(a, b),
+                                (false, true) => matmul_vector_matrix(a, b),
+                            }
+                        }
+
+                        _ => {
+                            let ctx = ErrorContext::new()
+                                .with_code(codes::TYPE_MISMATCH)
+                                .with_help("matrix multiplication requires arrays or scalars");
+                            Err(CompileError::semantic_with_context(
+                                format!(
+                                    "@ operator requires numeric or array types, got {} @ {}",
+                                    left_val.type_name(),
+                                    right_val.type_name()
+                                ),
+                                ctx,
+                            ))
+                        }
                     }
                 }
                 BinOp::PipeForward => {
@@ -472,6 +492,63 @@ pub(super) fn eval_op_expr(
                                 .with_help("pipe forward operator |> requires a function on the right side");
                             Err(CompileError::semantic_with_context(
                                 format!("cannot pipe to non-function: {}", right_val.type_name()),
+                                ctx,
+                            ))
+                        }
+                    }
+                }
+                BinOp::Parallel => {
+                    // Parallel execution: f // g
+                    // For now, execute sequentially (true parallelism requires async runtime)
+                    // Returns array of results from concurrent execution
+                    match (&left_val, &right_val) {
+                        (Value::Function { .. }, Value::Function { .. }) => {
+                            // Execute both functions (sequentially for now)
+                            // TODO: Integrate with async runtime for true parallelism
+                            let mut results = Vec::new();
+
+                            // Execute left function
+                            if let Value::Function { def, captured_env, .. } = left_val {
+                                let mut captured_env_clone = captured_env.clone();
+                                let left_result = super::super::exec_function_with_values(
+                                    &def,
+                                    &[],
+                                    &mut captured_env_clone,
+                                    functions,
+                                    classes,
+                                    enums,
+                                    impl_methods,
+                                )?;
+                                results.push(left_result);
+                            }
+
+                            // Execute right function
+                            if let Value::Function { def, captured_env, .. } = right_val {
+                                let mut captured_env_clone = captured_env.clone();
+                                let right_result = super::super::exec_function_with_values(
+                                    &def,
+                                    &[],
+                                    &mut captured_env_clone,
+                                    functions,
+                                    classes,
+                                    enums,
+                                    impl_methods,
+                                )?;
+                                results.push(right_result);
+                            }
+
+                            Ok(Value::Array(results))
+                        }
+                        _ => {
+                            let ctx = ErrorContext::new()
+                                .with_code(codes::TYPE_MISMATCH)
+                                .with_help("// operator requires function operands for parallel execution");
+                            Err(CompileError::semantic_with_context(
+                                format!(
+                                    "// operator requires functions, got {} // {}",
+                                    left_val.type_name(),
+                                    right_val.type_name()
+                                ),
                                 ctx,
                             ))
                         }
@@ -650,4 +727,359 @@ pub(super) fn eval_op_expr(
         }
         _ => Ok(None),
     }
+}
+
+//==============================================================================
+// Matrix Multiplication Helper Functions (Simple Math #1930-#1939)
+//==============================================================================
+
+/// Compute dot product of two 1D arrays
+fn matmul_dot_product_1d(a: &[Value], b: &[Value]) -> Result<Value, CompileError> {
+    if a.len() != b.len() {
+        let ctx = ErrorContext::new()
+            .with_code(codes::INVALID_OPERATION)
+            .with_help(format!(
+                "dot product requires equal length arrays: {} != {}",
+                a.len(),
+                b.len()
+            ));
+        return Err(CompileError::semantic_with_context(
+            format!("dimension mismatch for dot product: {} != {}", a.len(), b.len()),
+            ctx,
+        ));
+    }
+
+    let mut sum = Value::Int(0);
+    let mut is_float = false;
+
+    for (ai, bi) in a.iter().zip(b.iter()) {
+        // Check if we need float mode
+        if matches!(ai, Value::Float(_)) || matches!(bi, Value::Float(_)) {
+            is_float = true;
+        }
+
+        let prod = match (ai, bi) {
+            (Value::Int(x), Value::Int(y)) => Value::Int(x * y),
+            (Value::Float(x), Value::Float(y)) => Value::Float(x * y),
+            (Value::Int(x), Value::Float(y)) => Value::Float(*x as f64 * y),
+            (Value::Float(x), Value::Int(y)) => Value::Float(x * *y as f64),
+            _ => {
+                let ctx = ErrorContext::new()
+                    .with_code(codes::TYPE_MISMATCH)
+                    .with_help("dot product requires numeric array elements");
+                return Err(CompileError::semantic_with_context(
+                    format!("cannot multiply {} and {}", ai.type_name(), bi.type_name()),
+                    ctx,
+                ));
+            }
+        };
+
+        sum = match (sum, prod) {
+            (Value::Int(s), Value::Int(p)) => Value::Int(s + p),
+            (Value::Float(s), Value::Float(p)) => Value::Float(s + p),
+            (Value::Int(s), Value::Float(p)) => Value::Float(s as f64 + p),
+            (Value::Float(s), Value::Int(p)) => Value::Float(s + p as f64),
+            _ => unreachable!(),
+        };
+    }
+
+    // Convert to float if needed
+    if is_float && matches!(sum, Value::Int(_)) {
+        sum = Value::Float(sum.as_int()? as f64);
+    }
+
+    Ok(sum)
+}
+
+/// Multiply two 2D matrices
+fn matmul_matrix_multiply_2d(a: &[Value], b: &[Value]) -> Result<Value, CompileError> {
+    // Extract dimensions
+    let m = a.len();
+    let n = match &a[0] {
+        Value::Array(row) => row.len(),
+        _ => {
+            let ctx = ErrorContext::new()
+                .with_code(codes::TYPE_MISMATCH)
+                .with_help("matrix multiplication requires 2D arrays (array of arrays)");
+            return Err(CompileError::semantic_with_context(
+                "first operand is not a 2D matrix",
+                ctx,
+            ));
+        }
+    };
+
+    let p = b.len();
+    let q = match &b[0] {
+        Value::Array(row) => row.len(),
+        _ => {
+            let ctx = ErrorContext::new()
+                .with_code(codes::TYPE_MISMATCH)
+                .with_help("matrix multiplication requires 2D arrays (array of arrays)");
+            return Err(CompileError::semantic_with_context(
+                "second operand is not a 2D matrix",
+                ctx,
+            ));
+        }
+    };
+
+    if n != p {
+        let ctx = ErrorContext::new()
+            .with_code(codes::INVALID_OPERATION)
+            .with_help("inner dimensions must match: A(m,n) @ B(n,q) = C(m,q)");
+        return Err(CompileError::semantic_with_context(
+            format!("incompatible matrix dimensions: ({}, {}) @ ({}, {})", m, n, p, q),
+            ctx,
+        ));
+    }
+
+    let mut result = Vec::with_capacity(m);
+    for i in 0..m {
+        let a_row = match &a[i] {
+            Value::Array(row) => row,
+            _ => {
+                let ctx = ErrorContext::new()
+                    .with_code(codes::TYPE_MISMATCH)
+                    .with_help("matrix must have uniform rows");
+                return Err(CompileError::semantic_with_context(
+                    "matrix row is not an array",
+                    ctx,
+                ));
+            }
+        };
+        let mut row = Vec::with_capacity(q);
+
+        for j in 0..q {
+            let mut sum = Value::Int(0);
+            let mut is_float = false;
+
+            for k in 0..n {
+                let a_ik = &a_row[k];
+                let b_row = match &b[k] {
+                    Value::Array(row) => row,
+                    _ => {
+                        let ctx = ErrorContext::new()
+                            .with_code(codes::TYPE_MISMATCH)
+                            .with_help("matrix must have uniform rows");
+                        return Err(CompileError::semantic_with_context(
+                            "matrix row is not an array",
+                            ctx,
+                        ));
+                    }
+                };
+                let b_kj = &b_row[j];
+
+                // Check if we need float mode
+                if matches!(a_ik, Value::Float(_)) || matches!(b_kj, Value::Float(_)) {
+                    is_float = true;
+                }
+
+                let prod = match (a_ik, b_kj) {
+                    (Value::Int(x), Value::Int(y)) => Value::Int(x * y),
+                    (Value::Float(x), Value::Float(y)) => Value::Float(x * y),
+                    (Value::Int(x), Value::Float(y)) => Value::Float(*x as f64 * y),
+                    (Value::Float(x), Value::Int(y)) => Value::Float(x * *y as f64),
+                    _ => {
+                        let ctx = ErrorContext::new()
+                            .with_code(codes::TYPE_MISMATCH)
+                            .with_help("matrix multiplication requires numeric elements");
+                        return Err(CompileError::semantic_with_context(
+                            format!("cannot multiply {} and {}", a_ik.type_name(), b_kj.type_name()),
+                            ctx,
+                        ));
+                    }
+                };
+
+                sum = match (sum, prod) {
+                    (Value::Int(s), Value::Int(p)) => Value::Int(s + p),
+                    (Value::Float(s), Value::Float(p)) => Value::Float(s + p),
+                    (Value::Int(s), Value::Float(p)) => Value::Float(s as f64 + p),
+                    (Value::Float(s), Value::Int(p)) => Value::Float(s + p as f64),
+                    _ => unreachable!(),
+                };
+            }
+
+            // Convert to float if needed
+            if is_float && matches!(sum, Value::Int(_)) {
+                sum = Value::Float(sum.as_int()? as f64);
+            }
+
+            row.push(sum);
+        }
+        result.push(Value::Array(row));
+    }
+
+    Ok(Value::Array(result))
+}
+
+/// Multiply 2D matrix by 1D vector
+fn matmul_matrix_vector(a: &[Value], b: &[Value]) -> Result<Value, CompileError> {
+    let m = a.len();
+    let n = match &a[0] {
+        Value::Array(row) => row.len(),
+        _ => {
+            let ctx = ErrorContext::new()
+                .with_code(codes::TYPE_MISMATCH)
+                .with_help("matrix-vector multiplication requires 2D matrix");
+            return Err(CompileError::semantic_with_context(
+                "first operand is not a 2D matrix",
+                ctx,
+            ));
+        }
+    };
+
+    if n != b.len() {
+        let ctx = ErrorContext::new()
+            .with_code(codes::INVALID_OPERATION)
+            .with_help(format!("matrix columns ({}) must match vector length ({})", n, b.len()));
+        return Err(CompileError::semantic_with_context(
+            format!("incompatible dimensions: ({}, {}) @ {}", m, n, b.len()),
+            ctx,
+        ));
+    }
+
+    let mut result = Vec::with_capacity(m);
+    for i in 0..m {
+        let a_row = match &a[i] {
+            Value::Array(row) => row,
+            _ => {
+                let ctx = ErrorContext::new()
+                    .with_code(codes::TYPE_MISMATCH)
+                    .with_help("matrix must have uniform rows");
+                return Err(CompileError::semantic_with_context(
+                    "matrix row is not an array",
+                    ctx,
+                ));
+            }
+        };
+        let mut sum = Value::Int(0);
+        let mut is_float = false;
+
+        for k in 0..n {
+            let a_ik = &a_row[k];
+            let b_k = &b[k];
+
+            if matches!(a_ik, Value::Float(_)) || matches!(b_k, Value::Float(_)) {
+                is_float = true;
+            }
+
+            let prod = match (a_ik, b_k) {
+                (Value::Int(x), Value::Int(y)) => Value::Int(x * y),
+                (Value::Float(x), Value::Float(y)) => Value::Float(x * y),
+                (Value::Int(x), Value::Float(y)) => Value::Float(*x as f64 * y),
+                (Value::Float(x), Value::Int(y)) => Value::Float(x * *y as f64),
+                _ => {
+                    let ctx = ErrorContext::new()
+                        .with_code(codes::TYPE_MISMATCH)
+                        .with_help("matrix-vector multiplication requires numeric elements");
+                    return Err(CompileError::semantic_with_context(
+                        format!("cannot multiply {} and {}", a_ik.type_name(), b_k.type_name()),
+                        ctx,
+                    ));
+                }
+            };
+
+            sum = match (sum, prod) {
+                (Value::Int(s), Value::Int(p)) => Value::Int(s + p),
+                (Value::Float(s), Value::Float(p)) => Value::Float(s + p),
+                (Value::Int(s), Value::Float(p)) => Value::Float(s as f64 + p),
+                (Value::Float(s), Value::Int(p)) => Value::Float(s + p as f64),
+                _ => unreachable!(),
+            };
+        }
+
+        if is_float && matches!(sum, Value::Int(_)) {
+            sum = Value::Float(sum.as_int()? as f64);
+        }
+
+        result.push(sum);
+    }
+
+    Ok(Value::Array(result))
+}
+
+/// Multiply 1D vector by 2D matrix
+fn matmul_vector_matrix(a: &[Value], b: &[Value]) -> Result<Value, CompileError> {
+    let m = a.len();
+    let p = b.len();
+    let q = match &b[0] {
+        Value::Array(row) => row.len(),
+        _ => {
+            let ctx = ErrorContext::new()
+                .with_code(codes::TYPE_MISMATCH)
+                .with_help("vector-matrix multiplication requires 2D matrix");
+            return Err(CompileError::semantic_with_context(
+                "second operand is not a 2D matrix",
+                ctx,
+            ));
+        }
+    };
+
+    if m != p {
+        let ctx = ErrorContext::new()
+            .with_code(codes::INVALID_OPERATION)
+            .with_help(format!("vector length ({}) must match matrix rows ({})", m, p));
+        return Err(CompileError::semantic_with_context(
+            format!("incompatible dimensions: {} @ ({}, {})", m, p, q),
+            ctx,
+        ));
+    }
+
+    let mut result = Vec::with_capacity(q);
+    for j in 0..q {
+        let mut sum = Value::Int(0);
+        let mut is_float = false;
+
+        for k in 0..m {
+            let a_k = &a[k];
+            let b_row = match &b[k] {
+                Value::Array(row) => row,
+                _ => {
+                    let ctx = ErrorContext::new()
+                        .with_code(codes::TYPE_MISMATCH)
+                        .with_help("matrix must have uniform rows");
+                    return Err(CompileError::semantic_with_context(
+                        "matrix row is not an array",
+                        ctx,
+                    ));
+                }
+            };
+            let b_kj = &b_row[j];
+
+            if matches!(a_k, Value::Float(_)) || matches!(b_kj, Value::Float(_)) {
+                is_float = true;
+            }
+
+            let prod = match (a_k, b_kj) {
+                (Value::Int(x), Value::Int(y)) => Value::Int(x * y),
+                (Value::Float(x), Value::Float(y)) => Value::Float(x * y),
+                (Value::Int(x), Value::Float(y)) => Value::Float(*x as f64 * y),
+                (Value::Float(x), Value::Int(y)) => Value::Float(x * *y as f64),
+                _ => {
+                    let ctx = ErrorContext::new()
+                        .with_code(codes::TYPE_MISMATCH)
+                        .with_help("vector-matrix multiplication requires numeric elements");
+                    return Err(CompileError::semantic_with_context(
+                        format!("cannot multiply {} and {}", a_k.type_name(), b_kj.type_name()),
+                        ctx,
+                    ));
+                }
+            };
+
+            sum = match (sum, prod) {
+                (Value::Int(s), Value::Int(p)) => Value::Int(s + p),
+                (Value::Float(s), Value::Float(p)) => Value::Float(s + p),
+                (Value::Int(s), Value::Float(p)) => Value::Float(s as f64 + p),
+                (Value::Float(s), Value::Int(p)) => Value::Float(s + p as f64),
+                _ => unreachable!(),
+            };
+        }
+
+        if is_float && matches!(sum, Value::Int(_)) {
+            sum = Value::Float(sum.as_int()? as f64);
+        }
+
+        result.push(sum);
+    }
+
+    Ok(Value::Array(result))
 }

@@ -8,7 +8,7 @@ fn test_arithmetic_operators() {
     assert_eq!(tokenize("/"), vec![TokenKind::Slash, TokenKind::Eof]);
     assert_eq!(tokenize("%"), vec![TokenKind::Percent, TokenKind::Eof]);
     assert_eq!(tokenize("**"), vec![TokenKind::DoubleStar, TokenKind::Eof]);
-    assert_eq!(tokenize("//"), vec![TokenKind::DoubleSlash, TokenKind::Eof]);
+    assert_eq!(tokenize("//"), vec![TokenKind::Parallel, TokenKind::Eof]);
 }
 
 #[test]

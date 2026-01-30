@@ -435,7 +435,12 @@ pub(super) fn exec_block_closure(
             }
             Node::Function(f) => {
                 // Handle function definitions inside block closures (like in `it` blocks)
-                // The function is added to the local environment with the current scope captured
+                // Register in both local_env and functions map for recursive calls to work
+
+                // Add to functions map so recursive calls can find it
+                functions.insert(f.name.clone(), f.clone());
+
+                // Also add to local_env as a Function value with captured environment
                 local_env.insert(
                     f.name.clone(),
                     Value::Function {
@@ -1034,6 +1039,24 @@ fn exec_block_closure_mut(
                 if !static_stmt.mutability.is_mutable() {
                     CONST_NAMES.with(|cell| cell.borrow_mut().insert(static_stmt.name.clone()));
                 }
+                last_value = Value::Nil;
+            }
+            Node::Function(f) => {
+                // Handle function definitions inside mutable block closures
+                // Register in both local_env and functions map for recursive calls to work
+
+                // Add to functions map so recursive calls can find it
+                functions.insert(f.name.clone(), f.clone());
+
+                // Also add to local_env as a Function value with captured environment
+                local_env.insert(
+                    f.name.clone(),
+                    Value::Function {
+                        name: f.name.clone(),
+                        def: Box::new(f.clone()),
+                        captured_env: local_env.clone(), // Capture current scope
+                    },
+                );
                 last_value = Value::Nil;
             }
             _ => {

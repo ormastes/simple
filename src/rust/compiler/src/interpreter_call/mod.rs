@@ -233,7 +233,38 @@ pub(crate) fn evaluate_call(
 
             // Check for enum variant constructor: EnumName.Variant(args)
             // This handles calls like Result.Ok(42), Option.Some(x), etc.
+
+            // Try global enums first
             if let Some(enum_def) = enums.get(module_name) {
+                if enum_def.variants.iter().any(|v| &v.name == field) {
+                    let payload = if args.is_empty() {
+                        None
+                    } else if args.len() == 1 {
+                        Some(Box::new(evaluate_expr(
+                            &args[0].value,
+                            env,
+                            functions,
+                            classes,
+                            enums,
+                            impl_methods,
+                        )?))
+                    } else {
+                        let mut values = Vec::new();
+                        for arg in args {
+                            values.push(evaluate_expr(&arg.value, env, functions, classes, enums, impl_methods)?);
+                        }
+                        Some(Box::new(Value::Tuple(values)))
+                    };
+                    return Ok(Value::Enum {
+                        enum_name: module_name.clone(),
+                        variant: field.clone(),
+                        payload,
+                    });
+                }
+            }
+
+            // Try block-scoped enums (defined in test blocks)
+            if let Some(enum_def) = crate::interpreter::BLOCK_SCOPED_ENUMS.with(|cell| cell.borrow().get(module_name).cloned()) {
                 if enum_def.variants.iter().any(|v| &v.name == field) {
                     let payload = if args.is_empty() {
                         None

@@ -301,6 +301,24 @@ impl TypeChecker {
                         let expected_ty = self.ast_type_to_type(ast_ty);
                         // Validate dict keys against ConstKeySet if applicable
                         self.validate_dict_const_keys(expr, &expected_ty)?;
+                        // Check dyn Trait coercion: if target is dyn Trait, verify source implements trait
+                        if let Type::DynTrait(ref trait_name) = expected_ty {
+                            let source_type_name = match &inferred_ty {
+                                Type::Named(name) => Some(name.clone()),
+                                _ => None,
+                            };
+                            if let Some(ref src_name) = source_type_name {
+                                let implements = self.trait_impls
+                                    .get(trait_name)
+                                    .map_or(false, |r| r.specific_impls.contains(src_name) || r.blanket_impl);
+                                if !implements {
+                                    return Err(TypeError::Other(format!(
+                                        "type `{}` does not implement trait `{}` (required for dyn coercion)",
+                                        src_name, trait_name
+                                    )));
+                                }
+                            }
+                        }
                         // Unify inferred type with expected type
                         let _ = self.unify(&inferred_ty, &expected_ty);
                     }
@@ -472,16 +490,15 @@ impl TypeChecker {
                     .collect();
 
                 // Store MixinInfo
+                let required_mixins: Vec<String> = mixin.required_mixins.clone();
+
                 let info = MixinInfo {
                     name: mixin.name.clone(),
                     type_params: mixin.generic_params.clone(),
                     fields,
                     methods,
                     required_traits: mixin.required_traits.clone(),
-                    // Required methods populated in Phase 2 Step 6 (not yet implemented)
-                    // Would extract method signatures from mixin's requires clause:
-                    // mixin Comparable requires fn compare(other: Self) -> i32
-                    // Stored as RequiredMethodSig for validation during composition
+                    required_mixins,
                     required_methods: vec![],
                 };
                 self.mixins.insert(mixin.name.clone(), info);
