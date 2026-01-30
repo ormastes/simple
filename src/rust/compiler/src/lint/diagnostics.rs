@@ -1,6 +1,7 @@
 //! Lint diagnostic messages and formatting.
 
 use super::types::{LintLevel, LintName};
+use simple_common::diagnostic::EasyFix;
 use simple_parser::token::Span;
 
 /// A lint diagnostic message
@@ -11,6 +12,7 @@ pub struct LintDiagnostic {
     pub span: Span,
     pub message: String,
     pub suggestion: Option<String>,
+    pub easy_fix: Option<EasyFix>,
 }
 
 impl LintDiagnostic {
@@ -21,11 +23,17 @@ impl LintDiagnostic {
             span,
             message,
             suggestion: None,
+            easy_fix: None,
         }
     }
 
     pub fn with_suggestion(mut self, suggestion: String) -> Self {
         self.suggestion = Some(suggestion);
+        self
+    }
+
+    pub fn with_easy_fix(mut self, easy_fix: EasyFix) -> Self {
+        self.easy_fix = Some(easy_fix);
         self
     }
 
@@ -85,6 +93,10 @@ impl LintDiagnostic {
 
         if let Some(ref suggestion) = self.suggestion {
             diag = diag.with_help(suggestion);
+        }
+
+        if let Some(ref easy_fix) = self.easy_fix {
+            diag = diag.with_easy_fix(easy_fix.clone());
         }
 
         diag

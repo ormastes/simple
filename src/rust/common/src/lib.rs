@@ -187,7 +187,9 @@ pub mod target;
 pub use target::{PointerSize, Target, TargetArch, TargetConfig, TargetOS, TargetParseError};
 
 pub mod diagnostic;
-pub use diagnostic::{Diagnostic, Label, Severity, Span};
+pub use diagnostic::{Diagnostic, EasyFix, FixConfidence, Label, Replacement, Severity, Span};
+
+pub mod fix_applicator;
 
 pub mod protocol;
 pub use protocol::{read_message, write_message, TransportError};

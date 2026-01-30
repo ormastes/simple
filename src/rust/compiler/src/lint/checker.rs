@@ -6,6 +6,7 @@ use super::config::LintConfig;
 use super::diagnostics::LintDiagnostic;
 use super::rules::{is_bare_bool, is_primitive_type};
 use super::types::{LintLevel, LintName};
+use simple_common::diagnostic::{EasyFix, FixConfidence, Replacement};
 use simple_parser::ast::{Argument, ClassDef, EnumDef, Expr, FunctionDef, Node, StructDef, TraitDef, Type};
 use simple_parser::token::Span;
 use std::collections::HashMap;
@@ -136,6 +137,18 @@ impl LintChecker {
 
     /// Emit a lint diagnostic if not allowed
     fn emit(&mut self, lint: LintName, span: Span, message: String, suggestion: Option<String>) {
+        self.emit_with_fix(lint, span, message, suggestion, None);
+    }
+
+    /// Emit a lint diagnostic with an optional machine-applicable fix
+    fn emit_with_fix(
+        &mut self,
+        lint: LintName,
+        span: Span,
+        message: String,
+        suggestion: Option<String>,
+        easy_fix: Option<simple_common::diagnostic::EasyFix>,
+    ) {
         let level = self.config.get_level(lint);
         if level == LintLevel::Allow {
             return;
@@ -144,6 +157,9 @@ impl LintChecker {
         let mut diagnostic = LintDiagnostic::new(lint, level, span, message);
         if let Some(s) = suggestion {
             diagnostic = diagnostic.with_suggestion(s);
+        }
+        if let Some(fix) = easy_fix {
+            diagnostic = diagnostic.with_easy_fix(fix);
         }
         self.diagnostics.push(diagnostic);
     }
@@ -742,8 +758,34 @@ impl LintChecker {
                     );
                 }
             } else {
-                // Doesn't match format
-                self.emit(
+                // Doesn't match format — build an EasyFix that inserts [runtime][P2] placeholder
+                let file_path = source_file.display().to_string();
+                let keyword_end_pos = if comment.starts_with("TODO:") {
+                    // Find the position right after "TODO: " in the line
+                    line.find("TODO:").map(|p| line_start + p + 5)
+                } else {
+                    line.find("FIXME:").map(|p| line_start + p + 6)
+                };
+                let easy_fix = keyword_end_pos.map(|pos| {
+                    // Insert after the colon+space: "TODO: " -> "TODO: [runtime][P2] "
+                    let insert_pos = if source.as_bytes().get(pos) == Some(&b' ') {
+                        pos + 1
+                    } else {
+                        pos
+                    };
+                    EasyFix {
+                        id: format!("L:todo_format:{}", line_num),
+                        description: "add [area][priority] format to TODO comment".to_string(),
+                        replacements: vec![Replacement {
+                            file: file_path.clone(),
+                            span: simple_common::diagnostic::Span::new(insert_pos, insert_pos, line_num, insert_pos - line_start + 1),
+                            new_text: "[runtime][P2] ".to_string(),
+                        }],
+                        confidence: FixConfidence::Uncertain,
+                    }
+                });
+
+                self.emit_with_fix(
                     LintName::TodoFormat,
                     Span::new(todo_start, todo_end, line_num, todo_col),
                     "TODO/FIXME missing [area][priority] format".to_string(),
@@ -751,6 +793,7 @@ impl LintChecker {
                         "use format: TODO: [area][P0-P3] description (e.g., TODO: [runtime][P1] implement feature)"
                             .to_string(),
                     ),
+                    easy_fix,
                 );
             }
 

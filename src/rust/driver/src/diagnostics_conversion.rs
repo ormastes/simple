@@ -323,6 +323,7 @@ mod tests {
             notes: vec![],
             help: vec![],
             file: None,
+            easy_fix: None,
         };
 
         let i18n_diag = convert_parser_diagnostic(parser_diag);
@@ -341,6 +342,7 @@ mod tests {
             notes: vec![],
             help: vec![],
             file: None,
+            easy_fix: None,
         };
 
         let i18n_diag = convert_parser_diagnostic(parser_diag);
