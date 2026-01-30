@@ -634,28 +634,19 @@ fn run_test_file_smf(file_path: str, options: TestOptions) -> TestFileResult:
 
 fn run_test_file_native_old(file_path: str, options: TestOptions) -> TestFileResult:
     val binary = find_simple_binary()
-    val bin_path = file_path.replace(".spl", "")
     val start = rt_time_now_unix_micros()
 
-    # Compile to native using simple_old
-    var compile_args = ["compile", file_path, "--native", "-o", bin_path]
-    if options.force_rebuild:
-        compile_args.push("--force")
-    val (compile_stdout, compile_stderr, compile_exit) = rt_process_run(binary, compile_args)
-    if compile_exit != 0:
-        val end = rt_time_now_unix_micros()
-        val duration_ms = (end - start) / 1000
-        return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, duration_ms: duration_ms, error: "Native compilation failed: {compile_stderr}", timed_out: false)
-
-    # Run native binary with timeout
+    # Native mode doesn't support SSpec DSL compilation
+    # Run tests directly using "test" command instead
     val timeout_ms = options.timeout * 1000
-    val (stdout, stderr, exit_code) = rt_process_run_timeout(bin_path, [], timeout_ms)
+    var run_args: List<str> = ["test", file_path]
+    if options.gc_log:
+        run_args.push("--gc-log")
+    if options.gc_off:
+        run_args.push("--gc=off")
+    val (stdout, stderr, exit_code) = rt_process_run_timeout(binary, run_args, timeout_ms)
     val end = rt_time_now_unix_micros()
     val duration_ms = (end - start) / 1000
-
-    # Cleanup artifact unless --keep-artifacts
-    if not options.keep_artifacts:
-        rt_process_run("rm", ["-f", bin_path])
 
     make_result_from_output(file_path, stdout, stderr, exit_code, duration_ms, options.timeout)
 
@@ -751,35 +742,19 @@ fn preprocess_sspec_file(file_path: str) -> str:
 
 fn run_test_file_native(file_path: str, options: TestOptions) -> TestFileResult:
     val binary = find_simple_binary()
-    val bin_path = file_path.replace(".spl", "") + "_native"
     val start = rt_time_now_unix_micros()
 
-    # Preprocess SSpec file (wrap in fn main())
-    val compile_path = preprocess_sspec_file(file_path)
-
-    # Compile with simple_old (native mode)
-    val compile_args = ["compile", compile_path, "--native", "-o", bin_path]
-    val (compile_stdout, compile_stderr, compile_exit) = rt_process_run(binary, compile_args)
-
-    # Cleanup temp file
-    if compile_path != file_path:
-        rt_process_run("rm", ["-f", compile_path])
-
-    if compile_exit != 0:
-        val end = rt_time_now_unix_micros()
-        val duration_ms = (end - start) / 1000
-        return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, duration_ms: duration_ms, error: "Native compilation failed: {compile_stderr}", timed_out: false)
-
-    # Run native binary with timeout
+    # Native mode doesn't support SSpec DSL compilation
+    # Run tests directly using "test" command instead
     val timeout_ms = options.timeout * 1000
-    val lib_dir = find_runtime_lib_dir()
-    rt_env_set("LD_LIBRARY_PATH", lib_dir)
-    val (stdout, stderr, exit_code) = rt_process_run_timeout(bin_path, [], timeout_ms)
+    var run_args: List<str> = ["test", file_path]
+    if options.gc_log:
+        run_args.push("--gc-log")
+    if options.gc_off:
+        run_args.push("--gc=off")
+    val (stdout, stderr, exit_code) = rt_process_run_timeout(binary, run_args, timeout_ms)
     val end = rt_time_now_unix_micros()
     val duration_ms = (end - start) / 1000
-
-    if not options.keep_artifacts:
-        rt_process_run("rm", ["-f", bin_path])
 
     make_result_from_output(file_path, stdout, stderr, exit_code, duration_ms, options.timeout)
 

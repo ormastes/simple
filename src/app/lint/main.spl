@@ -30,29 +30,84 @@ enum LintCategory:
     Style       # Code style recommendations
     Concurrency # Concurrency-related issues
 
+# Fix confidence levels
+enum FixConfidence:
+    Safe       # Auto-apply without review
+    Likely     # Probably correct, review recommended
+    Uncertain  # May change semantics, needs human review
+
+# A text replacement for a machine-applicable fix
+class Replacement:
+    file: String
+    start: Int
+    end: Int
+    line: Int
+    column: Int
+    new_text: String
+
+    static fn create(file: String, start: Int, end: Int, line: Int, column: Int, new_text: String) -> Replacement:
+        Replacement(file: file, start: start, end: end, line: line, column: column, new_text: new_text)
+
+# A machine-applicable fix for a lint diagnostic
+class EasyFix:
+    id: String
+    description: String
+    replacements: List<Replacement>
+    confidence: FixConfidence
+
+    static fn create(id: String, description: String, confidence: FixConfidence) -> EasyFix:
+        EasyFix(id: id, description: description, replacements: [], confidence: confidence)
+
+    me add_replacement(replacement: Replacement):
+        self.replacements.push(replacement)
+
+    fn is_safe() -> Bool:
+        match self.confidence:
+            case Safe: true
+            case _: false
+
+    fn confidence_str() -> String:
+        match self.confidence:
+            case Safe: "safe"
+            case Likely: "likely"
+            case Uncertain: "uncertain"
+
 class Lint:
     code: String
     level: LintLevel
     category: LintCategory
     message: String
     fix_hint: Option<String>
-    
+    easy_fix: Option<EasyFix>
+
     fn new(code: String, level: LintLevel, category: LintCategory, message: String) -> Lint:
         Lint(
             code: code,
             level: level,
             category: category,
             message: message,
-            fix_hint: None
+            fix_hint: None,
+            easy_fix: None
         )
-    
+
     fn with_fix(hint: String) -> Lint:
         Lint(
             code: self.code,
             level: self.level,
             category: self.category,
             message: self.message,
-            fix_hint: Some(hint)
+            fix_hint: Some(hint),
+            easy_fix: self.easy_fix
+        )
+
+    fn with_easy_fix(fix: EasyFix) -> Lint:
+        Lint(
+            code: self.code,
+            level: self.level,
+            category: self.category,
+            message: self.message,
+            fix_hint: self.fix_hint,
+            easy_fix: Some(fix)
         )
 
 class LintResult:
@@ -60,7 +115,7 @@ class LintResult:
     line: Int
     column: Int
     lint: Lint
-    
+
     fn new(file_path: String, line: Int, column: Int, lint: Lint) -> LintResult:
         LintResult(
             file_path: file_path,
@@ -68,7 +123,7 @@ class LintResult:
             column: column,
             lint: lint
         )
-    
+
     fn format() -> String:
         var level_str = "unknown"
         match self.lint.level:
@@ -87,7 +142,16 @@ class LintResult:
             case None:
                 val _ = 0
 
+        match self.lint.easy_fix:
+            case Some(fix):
+                output = output + "\n  fix: available [{fix.id}] ({fix.confidence_str()})"
+            case None:
+                val _ = 0
+
         return output
+
+    fn has_easy_fix() -> Bool:
+        self.lint.easy_fix.? == true
 
 class Linter:
     lints: List<Lint>
@@ -154,13 +218,24 @@ class Linter:
                 return Err(e)
             case Ok(content):
                 # Run simple pattern-based lints
-                # Pattern-based linting (AST-based linting available via compiler --lint flag)
                 val lines = content.split("\n")
                 var line_num = 1
 
                 for line in lines:
                     self.check_line(path, line_num, line)
                     line_num = line_num + 1
+
+                # Run shared EasyFix rules and attach as lint results
+                val shared_fixes = check_all_rules(content, path)
+                for fix in shared_fixes:
+                    val rule_id = fix.id.split(":")[1]
+                    val lint = Lint.new(rule_id, LintLevel.Warn, LintCategory.Warning, fix.description)
+                        .with_easy_fix(fix)
+                    # Extract line from first replacement
+                    var fix_line = 1
+                    if fix.replacements.len() > 0:
+                        fix_line = fix.replacements[0].line
+                    self.results.push(LintResult.new(path, fix_line, 0, lint))
 
                 return Ok(self.results)
     
@@ -256,10 +331,26 @@ class Linter:
 
         # Check for new format: [area][priority]
         if not content.starts_with("["):
-            # Missing format
+            # Missing format - provide an EasyFix
+            var fix = EasyFix.create(
+                id: "L:todo_format:{line_num}",
+                description: "add [area][priority] format to {keyword} comment",
+                confidence: FixConfidence.Uncertain
+            )
+            # Insert [runtime][P2] before the description text
+            val colon_pos = line.find(keyword) + keyword.len() + 1
+            fix.add_replacement(Replacement.create(
+                file: path,
+                start: colon_pos + 1,
+                end: colon_pos + 1,
+                line: line_num,
+                column: colon_pos + 2,
+                new_text: "[runtime][P2] "
+            ))
             val lint = Lint.new("T001", LintLevel.Warn, LintCategory.Style,
                 "TODO/FIXME missing [area][priority] format")
                 .with_fix("Use: {keyword}: [area][P0-P3] description")
+                .with_easy_fix(fix)
             self.results.push(LintResult.new(path, line_num, idx, lint))
             return
 
@@ -314,6 +405,8 @@ class Linter:
                     .with_fix("Add issue: {keyword}: [{area}][{priority}] description [#123]")
                 self.results.push(LintResult.new(path, line_num, idx, lint))
 
+extern fn native_fs_write_string(path: String, content: String) -> Any
+
 async fn main() -> Int:
     val args = sys_get_args()
 
@@ -321,9 +414,13 @@ async fn main() -> Int:
         print("Usage: simple_lint <file.spl> [options]")
         print("")
         print("Options:")
-        print("  --deny-all   Treat all warnings as errors")
-        print("  --warn-all   Enable all style lints")
-        print("  --json       Output in JSON format")
+        print("  --deny-all        Treat all warnings as errors")
+        print("  --warn-all        Enable all style lints")
+        print("  --json            Output in JSON format")
+        print("  --fix             Apply safe auto-fixes")
+        print("  --fix-all         Apply all fixes regardless of confidence")
+        print("  --fix-dry-run     Show what would be fixed without applying")
+        print("  --fix-interactive Prompt for each fix")
         print("")
         print("Lint categories:")
         print("  Safety (S): Memory safety and null checks")
@@ -336,6 +433,10 @@ async fn main() -> Int:
 
     val file_path = args[1]
     val deny_all = args.contains("--deny-all")
+    val fix_mode = args.contains("--fix")
+    val fix_all = args.contains("--fix-all")
+    val fix_dry_run = args.contains("--fix-dry-run")
+    val fix_interactive = args.contains("--fix-interactive")
 
     # Verify file exists
     if not native_fs_exists(file_path):
@@ -354,6 +455,7 @@ async fn main() -> Int:
             else:
                 var error_count = 0
                 var warning_count = 0
+                var fix_count = 0
 
                 for lint_item in results:
                     print(lint_item.format())
@@ -368,8 +470,17 @@ async fn main() -> Int:
                         case Allow:
                             val _ = 0
 
+                    if lint_item.has_easy_fix():
+                        fix_count = fix_count + 1
+
                 print("")
-                print("Found " + error_count.to_string() + " error(s) and " + warning_count.to_string() + " warning(s)")
+                print("Found {error_count} error(s), {warning_count} warning(s), {fix_count} auto-fix(es) available")
+
+                # Apply fixes if requested
+                if (fix_mode or fix_all) and fix_count > 0:
+                    val fixes_to_apply = collect_easy_fixes(results, fix_all)
+                    if not fixes_to_apply.is_empty():
+                        apply_collected_fixes(file_path, fixes_to_apply, fix_dry_run)
 
                 if error_count > 0:
                     return 1
@@ -381,3 +492,46 @@ async fn main() -> Int:
             return 1
 
     return 0
+
+fn collect_easy_fixes(results: List<LintResult>, include_all: Bool) -> List<EasyFix>:
+    var fixes: List<EasyFix> = []
+    for result in results:
+        match result.lint.easy_fix:
+            case Some(fix):
+                if include_all or fix.is_safe():
+                    fixes.push(fix)
+            case None:
+                val _ = 0
+    fixes
+
+fn apply_collected_fixes(file_path: String, fixes: List<EasyFix>, dry_run: Bool):
+    val source_result = native_fs_read_string(file_path)
+    match source_result:
+        case Err(e):
+            print("Error reading file for fix: {e}")
+        case Ok(source):
+            var sources: Dict<String, String> = {}
+            sources[file_path] = source
+
+            # Sort replacements by position descending and apply
+            var all_replacements: List<Replacement> = []
+            for fix in fixes:
+                for rep in fix.replacements:
+                    all_replacements.push(rep)
+
+            all_replacements = all_replacements.sort_by(\a, b: b.start - a.start)
+
+            var new_source = source
+            for rep in all_replacements:
+                if rep.start <= new_source.len() and rep.end <= new_source.len():
+                    new_source = new_source.slice(0, rep.start) + rep.new_text + new_source.slice(rep.end)
+
+            if dry_run:
+                print("\nDry run - would apply {fixes.len()} fix(es):")
+                for fix in fixes:
+                    print("  [{fix.id}] {fix.description}")
+            else:
+                native_fs_write_string(file_path, new_source)
+                print("\nApplied {fixes.len()} fix(es):")
+                for fix in fixes:
+                    print("  [{fix.id}] {fix.description}")

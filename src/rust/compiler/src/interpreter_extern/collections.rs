@@ -6,7 +6,8 @@
 use crate::error::CompileError;
 use crate::value::Value;
 use std::collections::{BTreeMap as RustBTreeMap, BTreeSet as RustBTreeSet, HashMap as RustHashMap, HashSet as RustHashSet};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 // ============================================================================
 // HashMap Implementation
@@ -15,25 +16,15 @@ use std::sync::{Arc, Mutex};
 type HashMapHandle = usize;
 
 // Global registry for HashMaps
-// SAFETY: This is accessed only through synchronized methods
-static mut HASHMAP_REGISTRY: Option<Arc<Mutex<RustHashMap<HashMapHandle, RustHashMap<String, Value>>>>> = None;
-static mut NEXT_HASHMAP_ID: HashMapHandle = 1;
+static HASHMAP_REGISTRY: OnceLock<Arc<Mutex<RustHashMap<HashMapHandle, RustHashMap<String, Value>>>>> = OnceLock::new();
+static NEXT_HASHMAP_ID: AtomicUsize = AtomicUsize::new(1);
 
 fn get_hashmap_registry() -> Arc<Mutex<RustHashMap<HashMapHandle, RustHashMap<String, Value>>>> {
-    unsafe {
-        if HASHMAP_REGISTRY.is_none() {
-            HASHMAP_REGISTRY = Some(Arc::new(Mutex::new(RustHashMap::new())));
-        }
-        HASHMAP_REGISTRY.as_ref().unwrap().clone()
-    }
+    HASHMAP_REGISTRY.get_or_init(|| Arc::new(Mutex::new(RustHashMap::new()))).clone()
 }
 
 fn alloc_hashmap_handle() -> HashMapHandle {
-    unsafe {
-        let id = NEXT_HASHMAP_ID;
-        NEXT_HASHMAP_ID += 1;
-        id
-    }
+    NEXT_HASHMAP_ID.fetch_add(1, Ordering::Relaxed)
 }
 
 /// Create a new HashMap
@@ -251,24 +242,15 @@ pub fn __rt_hashmap_entries(args: &[Value]) -> Result<Value, CompileError> {
 type HashSetHandle = usize;
 
 // Global registry for HashSets
-static mut HASHSET_REGISTRY: Option<Arc<Mutex<RustHashMap<HashSetHandle, RustHashSet<String>>>>> = None;
-static mut NEXT_HASHSET_ID: HashSetHandle = 100000;
+static HASHSET_REGISTRY: OnceLock<Arc<Mutex<RustHashMap<HashSetHandle, RustHashSet<String>>>>> = OnceLock::new();
+static NEXT_HASHSET_ID: AtomicUsize = AtomicUsize::new(100000);
 
 fn get_hashset_registry() -> Arc<Mutex<RustHashMap<HashSetHandle, RustHashSet<String>>>> {
-    unsafe {
-        if HASHSET_REGISTRY.is_none() {
-            HASHSET_REGISTRY = Some(Arc::new(Mutex::new(RustHashMap::new())));
-        }
-        HASHSET_REGISTRY.as_ref().unwrap().clone()
-    }
+    HASHSET_REGISTRY.get_or_init(|| Arc::new(Mutex::new(RustHashMap::new()))).clone()
 }
 
 fn alloc_hashset_handle() -> HashSetHandle {
-    unsafe {
-        let id = NEXT_HASHSET_ID;
-        NEXT_HASHSET_ID += 1;
-        id
-    }
+    NEXT_HASHSET_ID.fetch_add(1, Ordering::Relaxed)
 }
 
 /// Create a new HashSet
@@ -599,24 +581,15 @@ pub fn __rt_hashset_is_superset(args: &[Value]) -> Result<Value, CompileError> {
 type BTreeMapHandle = usize;
 
 // Global registry for BTreeMaps
-static mut BTREEMAP_REGISTRY: Option<Arc<Mutex<RustHashMap<BTreeMapHandle, RustBTreeMap<String, Value>>>>> = None;
-static mut NEXT_BTREEMAP_ID: BTreeMapHandle = 200000;
+static BTREEMAP_REGISTRY: OnceLock<Arc<Mutex<RustHashMap<BTreeMapHandle, RustBTreeMap<String, Value>>>>> = OnceLock::new();
+static NEXT_BTREEMAP_ID: AtomicUsize = AtomicUsize::new(200000);
 
 fn get_btreemap_registry() -> Arc<Mutex<RustHashMap<BTreeMapHandle, RustBTreeMap<String, Value>>>> {
-    unsafe {
-        if BTREEMAP_REGISTRY.is_none() {
-            BTREEMAP_REGISTRY = Some(Arc::new(Mutex::new(RustHashMap::new())));
-        }
-        BTREEMAP_REGISTRY.as_ref().unwrap().clone()
-    }
+    BTREEMAP_REGISTRY.get_or_init(|| Arc::new(Mutex::new(RustHashMap::new()))).clone()
 }
 
 fn alloc_btreemap_handle() -> BTreeMapHandle {
-    unsafe {
-        let id = NEXT_BTREEMAP_ID;
-        NEXT_BTREEMAP_ID += 1;
-        id
-    }
+    NEXT_BTREEMAP_ID.fetch_add(1, Ordering::Relaxed)
 }
 
 // Helper to convert Value to string for BTreeMap key
@@ -887,24 +860,15 @@ pub fn __rt_btreemap_last_key(args: &[Value]) -> Result<Value, CompileError> {
 type BTreeSetHandle = usize;
 
 // Global registry for BTreeSets
-static mut BTREESET_REGISTRY: Option<Arc<Mutex<RustHashMap<BTreeSetHandle, RustBTreeSet<String>>>>> = None;
-static mut NEXT_BTREESET_ID: BTreeSetHandle = 300000;
+static BTREESET_REGISTRY: OnceLock<Arc<Mutex<RustHashMap<BTreeSetHandle, RustBTreeSet<String>>>>> = OnceLock::new();
+static NEXT_BTREESET_ID: AtomicUsize = AtomicUsize::new(300000);
 
 fn get_btreeset_registry() -> Arc<Mutex<RustHashMap<BTreeSetHandle, RustBTreeSet<String>>>> {
-    unsafe {
-        if BTREESET_REGISTRY.is_none() {
-            BTREESET_REGISTRY = Some(Arc::new(Mutex::new(RustHashMap::new())));
-        }
-        BTREESET_REGISTRY.as_ref().unwrap().clone()
-    }
+    BTREESET_REGISTRY.get_or_init(|| Arc::new(Mutex::new(RustHashMap::new()))).clone()
 }
 
 fn alloc_btreeset_handle() -> BTreeSetHandle {
-    unsafe {
-        let id = NEXT_BTREESET_ID;
-        NEXT_BTREESET_ID += 1;
-        id
-    }
+    NEXT_BTREESET_ID.fetch_add(1, Ordering::Relaxed)
 }
 
 /// Create a new BTreeSet

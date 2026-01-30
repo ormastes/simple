@@ -221,6 +221,13 @@ const COMMAND_TABLE: &[CommandEntry] = &[
         needs_rust_flags: &["--json", "--fix"],
     },
     CommandEntry {
+        name: "fix",
+        app_path: "src/app/fix/main.spl",
+        rust_handler: Handler::Args(|a| run_lint(a)),
+        env_override: "SIMPLE_FIX_RUST",
+        needs_rust_flags: &["--fix", "--fix-all", "--fix-dry-run", "--fix-interactive"],
+    },
+    CommandEntry {
         name: "fmt",
         app_path: "src/app/formatter/main.spl",
         rust_handler: Handler::Args(|a| run_fmt(a)),

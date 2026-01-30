@@ -372,6 +372,47 @@ File in `simple/bug_report.md`:
 **Reproduction:** ...
 ```
 
+## Compile and Fix Workflow
+
+```bash
+# Build Rust runtime
+cargo build                    # Debug build
+cargo build --release          # Release (optimized)
+
+# Check for warnings — fix all before committing
+cargo build 2>&1 | grep "warning:"
+
+# Common Rust warning fixes:
+# "shared reference to mutable static" → Use OnceLock + AtomicUsize
+# "unused variable" → Prefix with _ or remove
+# "dead code" → Remove or add #[allow(dead_code)]
+
+# Run Simple lint with auto-fix
+./bin/wrappers/simple lint file.spl --fix          # Safe fixes only
+./bin/wrappers/simple lint file.spl --fix-all      # All fixes
+./bin/wrappers/simple lint file.spl --fix-dry-run  # Preview only
+
+# Standalone fix tool
+./bin/wrappers/simple fix file.spl --dry-run
+./bin/wrappers/simple fix file.spl --fix-interactive
+```
+
+## EasyFix Rules
+
+9 auto-fix rules in `src/app/fix/rules.spl` (Simple) and `src/rust/common/src/easy_fix_rules.rs` (Rust):
+
+| Rule | Fix | Confidence |
+|------|-----|------------|
+| `print_in_test_spec` | `print()` → `expect()` in specs | Likely |
+| `unnamed_duplicate_typed_args` | Add distinct param names | Uncertain |
+| `resource_leak` | Wrap in `with` block | Uncertain |
+| `sspec_missing_docstrings` | Add template docstring | Safe |
+| `sspec_manual_assertions` | `if/fail` → `expect()` | Likely |
+| `non_exhaustive_match` | Add `case _: todo()` | Safe |
+| `typo_suggestion` | Levenshtein-based correction | Likely |
+| `parser_contextual_keyword` | Reorder keywords | Safe |
+| `type_mismatch_coercion` | Insert `.to_string()` etc. | Likely |
+
 ## See Also
 
 - **`doc/guide/common_mistakes.md`** - Complete guide for transitioning from other languages
@@ -381,3 +422,5 @@ File in `simple/bug_report.md`:
 - `doc/spec/types.md` - Type system
 - `doc/spec/functions.md` - Functions, pattern matching
 - `doc/research/api_design_index.md` - API guidelines
+- **`src/app/fix/rules.spl`** - Shared EasyFix rule definitions (Simple)
+- **`simple/std_lib/test/features/easy_fix_rules_spec.spl`** - EasyFix rules SSpec tests

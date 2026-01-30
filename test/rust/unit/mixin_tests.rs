@@ -141,6 +141,7 @@ mod mixin_type_tests {
             ],
             methods: vec![],
             required_traits: vec![],
+            required_mixins: vec![],
             required_methods: vec![],
         };
 
@@ -157,6 +158,7 @@ mod mixin_type_tests {
             fields: vec![],
             methods: vec![],
             required_traits: vec![],
+            required_mixins: vec![],
             required_methods: vec![],
         };
 
@@ -173,6 +175,7 @@ mod mixin_type_tests {
             fields: vec![("value".to_string(), Type::TypeParam("T".to_string()))],
             methods: vec![],
             required_traits: vec![],
+            required_mixins: vec![],
             required_methods: vec![],
         };
 

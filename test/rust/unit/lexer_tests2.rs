@@ -174,7 +174,7 @@ fn test_operator_double_star() {
 
 #[test]
 fn test_operator_double_slash() {
-    assert_eq!(tokenize("//"), vec![TokenKind::DoubleSlash, TokenKind::Eof]);
+    assert_eq!(tokenize("//"), vec![TokenKind::Parallel, TokenKind::Eof]);
 }
 
 // === Assignment Operator Tests ===

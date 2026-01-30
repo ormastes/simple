@@ -191,6 +191,8 @@ pub use diagnostic::{Diagnostic, EasyFix, FixConfidence, Label, Replacement, Sev
 
 pub mod fix_applicator;
 
+pub mod easy_fix_rules;
+
 pub mod protocol;
 pub use protocol::{read_message, write_message, TransportError};
 
