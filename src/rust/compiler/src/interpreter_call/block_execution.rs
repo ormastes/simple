@@ -5,7 +5,7 @@ use super::bdd::{BDD_AFTER_EACH, BDD_BEFORE_EACH, BDD_CONTEXT_DEFS, BDD_INDENT};
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::interpreter::{
     evaluate_expr, exec_with, pattern_matches, BLOCK_SCOPED_ENUMS, CONST_NAMES, EXTERN_FUNCTIONS,
-    MACRO_DEFINITION_ORDER, MODULE_GLOBALS, USER_MACROS,
+    IMMUTABLE_VARS, MACRO_DEFINITION_ORDER, MODULE_GLOBALS, USER_MACROS,
 };
 use crate::value::*;
 use simple_parser::ast::{ClassDef, EnumDef, Expr, FunctionDef, Node};
@@ -79,10 +79,12 @@ pub(super) fn exec_block_closure(
 ) -> Result<Value, CompileError> {
     use super::bdd::exec_block_value;
 
-    // Save current CONST_NAMES and clear for block closure scope
-    // This prevents const names from caller leaking into the block
+    // Save current CONST_NAMES and IMMUTABLE_VARS, clear for block closure scope
+    // This prevents const/immutable names from caller leaking into the block
     let saved_const_names = CONST_NAMES.with(|cell| cell.borrow().clone());
     CONST_NAMES.with(|cell| cell.borrow_mut().clear());
+    let saved_immutable_vars = IMMUTABLE_VARS.with(|cell| cell.borrow().clone());
+    IMMUTABLE_VARS.with(|cell| cell.borrow_mut().clear());
 
     // Diagram tracing for block closure execution
     if diagram_ffi::is_diagram_enabled() {
@@ -418,8 +420,9 @@ pub(super) fn exec_block_closure(
                 use crate::interpreter::Control;
                 match exec_with(with_stmt, &mut local_env, functions, classes, enums, impl_methods)? {
                     Control::Return(val) => {
-                        // Restore CONST_NAMES before returning
+                        // Restore CONST_NAMES and IMMUTABLE_VARS before returning
                         CONST_NAMES.with(|cell| *cell.borrow_mut() = saved_const_names);
+                        IMMUTABLE_VARS.with(|cell| *cell.borrow_mut() = saved_immutable_vars);
                         return Ok(val);
                     }
                     _ => last_value = Value::Nil,
@@ -495,8 +498,9 @@ pub(super) fn exec_block_closure(
         }
     }
 
-    // Restore CONST_NAMES before returning
+    // Restore CONST_NAMES and IMMUTABLE_VARS before returning
     CONST_NAMES.with(|cell| *cell.borrow_mut() = saved_const_names);
+    IMMUTABLE_VARS.with(|cell| *cell.borrow_mut() = saved_immutable_vars);
     Ok(last_value)
 }
 
