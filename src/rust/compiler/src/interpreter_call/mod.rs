@@ -7,7 +7,7 @@ mod core;
 mod mock;
 
 // Re-export public items
-pub use bdd::clear_bdd_state;
+pub use bdd::{clear_bdd_state, get_ignored_tests};
 pub use core::clear_class_instantiation_state;
 pub(crate) use bdd::{
     exec_block_value, BDD_AFTER_EACH, BDD_BEFORE_EACH, BDD_CONTEXT_DEFS, BDD_COUNTS, BDD_EXPECT_FAILED,

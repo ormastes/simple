@@ -475,6 +475,11 @@ if let Value::Str(ref s) = recv_val {
                 ));
             }
         }
+        "ptr" => {
+            // Return raw pointer to string's bytes as i64 (for FFI/codegen)
+            let ptr = s.as_ptr() as i64;
+            return Ok(Value::Int(ptr));
+        }
         _ => {}
     }
 }
