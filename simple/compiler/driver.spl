@@ -40,15 +40,13 @@ fn create_symbol_table() -> SymbolTable:
         next_symbol_id: 0,
         next_scope_id: 1
     )
-    # Create root scope
-    var scopes = table.scopes
-    scopes[0] = Scope(
+    # Create root scope (direct mutation avoids copy-modify-reassign bug)
+    table.scopes[0] = Scope(
         id: ScopeId(id: 0),
         parent: nil,
         kind: ScopeKind.Module,
         symbols: {}
     )
-    table.scopes = scopes
     table
 
 # Helper function to create HirLowering (avoids static method calls)
@@ -341,7 +339,6 @@ class CompilerDriver:
 
     me load_sources_impl() -> bool:
         print "[load] input_files count={self.ctx.options.input_files.len()}"
-        var sources = self.ctx.sources
         var i = 0
         while i < self.ctx.options.input_files.len():
             val path = self.ctx.options.input_files[i]
@@ -349,12 +346,11 @@ class CompilerDriver:
             match SourceFile.load(path):
                 case Ok(source):
                     print "[load] loaded OK: {source.path}"
-                    sources.push(source)
+                    self.ctx.sources.push(source)
                 case Err(e):
                     print "[load] error: {e}"
                     self.ctx.add_error(e)
             i = i + 1
-        self.ctx.sources = sources
         print "[load] sources stored, count={self.ctx.sources.len()}"
 
         not self.ctx.has_errors()
@@ -366,7 +362,6 @@ class CompilerDriver:
     me parse_all_impl() -> bool:
         val sources = self.ctx.sources
         print "[parse_all] sources count={sources.len()}"
-        var modules = self.ctx.modules
         var src_idx = 0
         while src_idx < sources.len():
             val source = sources[src_idx]
@@ -378,10 +373,9 @@ class CompilerDriver:
             print "[parse_all] content_len={scontent.len()}"
             val module = self.parse_source(source)
             print "[parse_all] parse_source returned"
-            modules[smod] = module
-            print "[parse_all] stored, total={modules.keys().len()}"
+            self.ctx.modules[smod] = module
+            print "[parse_all] stored, total={self.ctx.modules.keys().len()}"
             src_idx = src_idx + 1
-        self.ctx.modules = modules
 
         print "[parse_all] done, modules={self.ctx.modules.keys().len()}"
         not self.ctx.has_errors()
@@ -419,7 +413,6 @@ class CompilerDriver:
 
     me lower_and_check_impl() -> bool:
         var lowering = create_hir_lowering()
-        var hir_modules = self.ctx.hir_modules
 
         print "[phase3] parsed modules count={self.ctx.modules.keys().len()}"
         val module_names = self.ctx.modules.keys()
@@ -454,11 +447,10 @@ class CompilerDriver:
             print "[phase3] skipping type inference for now..."
             print "[phase3] inference skipped"
 
-            # Store final module in local dict
-            hir_modules[name] = resolved_module
-            print "[phase3] stored HIR module '{name}', total now: {hir_modules.keys().len()}"
+            # Store final module directly (avoids copy-modify-reassign bug in compiled mode)
+            self.ctx.hir_modules[name] = resolved_module
+            print "[phase3] stored HIR module '{name}', total now: {self.ctx.hir_modules.keys().len()}"
 
-        self.ctx.hir_modules = hir_modules
         print "[phase3] loop complete. HIR modules keys: {self.ctx.hir_modules.keys()}"
         print "[phase3] returning with {self.ctx.hir_modules.keys().len()} HIR modules"
         not self.ctx.has_errors()
@@ -475,9 +467,7 @@ class CompilerDriver:
         for name in module_names:
             val module = ctx.modules[name]
             val hir_module = lowering.lower_module(module)
-            var hir_modules = ctx.hir_modules
-            hir_modules[name] = hir_module
-            ctx.hir_modules = hir_modules
+            ctx.hir_modules[name] = hir_module
         (ctx, ctx.errors.len() == 0)
 
     # --------------------------------------------------------------------------
@@ -491,16 +481,12 @@ class CompilerDriver:
             val hir_module = ctx.hir_modules[name]
             val (resolved_module, resolve_errors) = resolve_methods(hir_module)
 
-            # Update the module with resolved method calls
-            var hir_modules = ctx.hir_modules
-            hir_modules[name] = resolved_module
-            ctx.hir_modules = hir_modules
+            # Update the module with resolved method calls (direct mutation)
+            ctx.hir_modules[name] = resolved_module
 
             # Collect errors
             for err in resolve_errors:
-                var errors = ctx.errors
-                errors.push("Method resolution error in {name}: {err.message}")
-                ctx.errors = errors
+                ctx.errors.push("Method resolution error in {name}: {err.message}")
 
         (ctx, ctx.errors.len() == 0)
 
@@ -686,14 +672,10 @@ class CompilerDriver:
         for name in hir_keys:
             val hir_module = self.ctx.hir_modules[name]
             var mir_module = lowering.lower_module(hir_module)
-            # Ensure module name is set (workaround for nested field mutation)
+            # Ensure module name is set
             mir_module.name = name
-            # Copy-modify-reassign for self.ctx.mir_modules
-            var ctx = self.ctx
-            var mir_modules = ctx.mir_modules
-            mir_modules[name] = mir_module
-            ctx.mir_modules = mir_modules
-            self.ctx = ctx
+            # Direct mutation (avoids copy-modify-reassign bug in compiled mode)
+            self.ctx.mir_modules[name] = mir_module
 
         not self.ctx.has_errors()
 
@@ -718,9 +700,18 @@ fn find_runtime_lib_dir() -> text:
 # ------------------------------------------------------------------------------
 
 fn find_simple_old_binary() -> text:
+    # Check env vars (new name first, then legacy)
+    val runtime_path = rt_env_get("SIMPLE_RUNTIME_PATH")
+    if runtime_path.? and runtime_path != "":
+        return runtime_path
     val env_path = rt_env_get("SIMPLE_OLD_PATH")
     if env_path.? and env_path != "":
         return env_path
+    # Check dev paths (new name first, then legacy)
+    if rt_file_exists("./target/debug/simple_runtime"):
+        return "./target/debug/simple_runtime"
+    if rt_file_exists("./target/release/simple_runtime"):
+        return "./target/release/simple_runtime"
     if rt_file_exists("./target/debug/simple_old"):
         return "./target/debug/simple_old"
     if rt_file_exists("./target/release/simple_old"):
