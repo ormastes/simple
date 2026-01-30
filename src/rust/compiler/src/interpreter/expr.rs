@@ -467,7 +467,17 @@ pub(crate) fn evaluate_expr(
             if let Some(unwrapped) = try_unwrap_option_or_result(&val) {
                 // Access the field on the unwrapped value
                 let field_val = get_field_value(&unwrapped, field)?;
-                // Wrap result in Some
+
+                // Flatten nested Options: if field_val is already an Option, return it directly
+                // This prevents Some(Some(x)) and gives us just Some(x)
+                if let Value::Enum { enum_name, variant, payload } = &field_val {
+                    if enum_name == "Option" && (variant == "Some" || variant == "None") {
+                        // Field is already an Option, return it as-is (flattening behavior)
+                        return Ok(field_val);
+                    }
+                }
+
+                // Wrap non-Option result in Some
                 Ok(Value::Enum {
                     enum_name: "Option".to_string(),
                     variant: "Some".to_string(),
