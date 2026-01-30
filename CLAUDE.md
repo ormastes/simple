@@ -86,6 +86,21 @@ fn explicit_return(x):
     return x * x              # Use only when needed for clarity
 ```
 
+**Empty statements (both `()` and `pass` are synonyms):**
+```simple
+# Unit value () - expression style (preferred)
+match value:
+    Some(x): process(x)
+    None: ()                  # Do nothing, return unit value
+
+# pass keyword - statement style (Python-familiar)
+match value:
+    Some(x): process(x)
+    None: pass                # Do nothing, no-op statement
+
+# Both compile to identical code - use whichever is clearer
+```
+
 **Collection methods:**
 ```simple
 items.map(\x: x * 2)          # Transform each element
