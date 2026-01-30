@@ -25,11 +25,11 @@ impl FileLock:
     # Creates a lock file at `path.lock` and waits up to timeout_secs.
     # Returns FileLock on success, None on timeout.
     static fn acquire(path: text, timeout_secs: i64) -> Option<FileLock>:
-        try:
-            val lock_path = rt_file_lock(path, timeout_secs)
-            return Some(FileLock { lock_path: lock_path, released: false })
-        catch e:
-            return None
+        val lock_path = rt_file_lock(path, timeout_secs)
+        if lock_path == "":
+            nil
+        else:
+            Some(FileLock(lock_path: lock_path, released: false))
 
     # Release the lock manually (also happens on drop)
     me release():
@@ -55,26 +55,22 @@ fn atomic_update_file(
 
     var lock = lock_opt.unwrap()
 
-    try:
-        # Read existing content (empty if file doesn't exist)
-        var content = ""
-        if rt_file_exists(path):
-            content = rt_file_read_text(path)
+    # Read existing content (empty if file doesn't exist)
+    var content = ""
+    if rt_file_exists(path):
+        content = rt_file_read_text(path)
 
-        # Apply update function
-        val new_content = updater(content)
+    # Apply update function
+    val new_content = updater(content)
 
-        # Atomically write back
-        val success = rt_file_atomic_write(path, new_content)
-        if not success:
-            lock.release()
-            return Err("Failed to write file: " + path)
-
+    # Atomically write back
+    val success = rt_file_atomic_write(path, new_content)
+    if not success:
         lock.release()
-        return Ok(())
-    catch e:
-        lock.release()
-        return Err("Update failed: " + e.to_string())
+        return Err("Failed to write file: " + path)
+
+    lock.release()
+    Ok(())
 
 # Atomic read with file locking
 #
@@ -87,17 +83,13 @@ fn atomic_read_file(path: text) -> Result<text, text>:
 
     var lock = lock_opt.unwrap()
 
-    try:
-        if not rt_file_exists(path):
-            lock.release()
-            return Ok("")
+    if not rt_file_exists(path):
+        lock.release()
+        return Ok("")
 
-        val content = rt_file_read_text(path)
-        lock.release()
-        return Ok(content)
-    catch e:
-        lock.release()
-        return Err("Read failed: " + e.to_string())
+    val content = rt_file_read_text(path)
+    lock.release()
+    Ok(content)
 
 # Atomic write with file locking
 #
@@ -110,17 +102,13 @@ fn atomic_write_file_locked(path: text, content: text) -> Result<(), text>:
 
     var lock = lock_opt.unwrap()
 
-    try:
-        val success = rt_file_atomic_write(path, content)
-        if not success:
-            lock.release()
-            return Err("Failed to write file: " + path)
+    val success = rt_file_atomic_write(path, content)
+    if not success:
+        lock.release()
+        return Err("Failed to write file: " + path)
 
-        lock.release()
-        return Ok(())
-    catch e:
-        lock.release()
-        return Err("Write failed: " + e.to_string())
+    lock.release()
+    Ok(())
 
 # ===== Public Locking API for Test Compatibility =====
 
