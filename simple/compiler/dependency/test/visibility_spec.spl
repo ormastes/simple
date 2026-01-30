@@ -1,0 +1,446 @@
+"""
+Feature: Visibility and Export Rules
+Category: Dependency Tracker
+Status: In Progress
+"""
+
+# Tests for visibility and export rules algorithm
+#
+# These tests validate the 7 Lean theorems from:
+# verification/visibility_export/src/VisibilityExport.lean
+#
+# Theorems:
+# 1. private_stays_private: A private symbol cannot become public
+# 2. private_module_restricts: A symbol in a private module cannot become public
+# 3. must_be_exported: A symbol must be explicitly exported to be visible externally
+# 4. meet_comm: Visibility meet is commutative
+# 5. meet_assoc: Visibility meet is associative
+# 6. any_private_means_private: If any ancestor is private, result is private
+# 7. all_public_means_public: All public ancestors means public result
+
+use sspec.{describe, it, expect}
+use compiler.dependency.visibility.{
+    Visibility, SymbolId, Symbol, ModDecl,
+    DirManifest, ModuleContents,
+    effective_visibility, visibility_meet, ancestor_visibility
+}
+
+describe "Visibility":
+    """
+    Visibility enum (Public or Private).
+    """
+    context "predicates":
+        it "Public is_public returns true":
+            val v = Visibility.Public
+            expect v.is_public()
+
+        it "Public is_private returns false":
+            val v = Visibility.Public
+            expect not v.is_private()
+
+        it "Private is_public returns false":
+            val v = Visibility.Private
+            expect not v.is_public()
+
+        it "Private is_private returns true":
+            val v = Visibility.Private
+            expect v.is_private()
+
+    context "to_string":
+        it "Public converts to string":
+            val v = Visibility.Public
+            expect v.to_string() == "Public"
+
+        it "Private converts to string":
+            val v = Visibility.Private
+            expect v.to_string() == "Private"
+
+describe "SymbolId":
+    """
+    Unique identifier for symbols.
+    """
+    context "construction":
+        it "creates symbol ID from name":
+            val id = SymbolId.new("foo")
+            expect id.name() == "foo"
+
+    context "equality":
+        it "symbol IDs with same name are equal":
+            val id1 = SymbolId.new("foo")
+            val id2 = SymbolId.new("foo")
+            expect id1.equals(id2)
+
+        it "symbol IDs with different names are not equal":
+            val id1 = SymbolId.new("foo")
+            val id2 = SymbolId.new("bar")
+            expect not id1.equals(id2)
+
+describe "Symbol":
+    """
+    Symbol with visibility.
+    """
+    context "construction":
+        it "creates symbol with explicit visibility":
+            val sym = Symbol.new("foo", Visibility.Public)
+            expect sym.id().name() == "foo"
+            expect sym.visibility().is_public()
+
+        it "creates public symbol":
+            val sym = Symbol.public("bar")
+            expect sym.visibility().is_public()
+
+        it "creates private symbol":
+            val sym = Symbol.private("baz")
+            expect sym.visibility().is_private()
+
+describe "ModDecl":
+    """
+    Module declaration in __init__.spl.
+    """
+    context "construction":
+        it "creates module declaration":
+            val decl = ModDecl.new("mymod", true)
+            expect decl.name() == "mymod"
+            expect decl.is_pub()
+
+        it "creates public module declaration":
+            val decl = ModDecl.public("pubmod")
+            expect decl.is_pub()
+
+        it "creates private module declaration":
+            val decl = ModDecl.private("privmod")
+            expect not decl.is_pub()
+
+describe "DirManifest":
+    """
+    Directory manifest (__init__.spl).
+    """
+    context "construction":
+        it "creates empty manifest":
+            val manifest = DirManifest.new("mydir")
+            expect manifest.name == "mydir"
+            expect manifest.children.len() == 0
+            expect manifest.exports.len() == 0
+
+    context "child module checks":
+        it "finds public child module":
+            var manifest = DirManifest.new("test")
+            manifest.add_child(ModDecl.public("mymod"))
+
+            expect manifest.is_child_public("mymod")
+
+        it "returns false for private child module":
+            var manifest = DirManifest.new("test")
+            manifest.add_child(ModDecl.private("mymod"))
+
+            expect not manifest.is_child_public("mymod")
+
+        it "returns false for non-existent module":
+            val manifest = DirManifest.new("test")
+            expect not manifest.is_child_public("nonexistent")
+
+    context "export checks":
+        it "finds exported symbol":
+            var manifest = DirManifest.new("test")
+            val sym = SymbolId.new("foo")
+            manifest.add_export(sym)
+
+            expect manifest.is_exported(sym)
+
+        it "returns false for non-exported symbol":
+            val manifest = DirManifest.new("test")
+            val sym = SymbolId.new("bar")
+
+            expect not manifest.is_exported(sym)
+
+describe "ModuleContents":
+    """
+    Module contents (symbols defined in a module file).
+    """
+    context "construction":
+        it "creates empty module contents":
+            val mc = ModuleContents.new()
+            expect mc.symbols.len() == 0
+
+    context "symbol visibility":
+        it "finds symbol visibility":
+            var mc = ModuleContents.new()
+            mc.add_symbol(Symbol.public("foo"))
+
+            val sym = SymbolId.new("foo")
+            match mc.symbol_visibility(sym):
+                case Some(vis):
+                    expect vis.is_public()
+                case nil:
+                    fail("Expected Some(visibility)")
+
+        it "returns None for non-existent symbol":
+            val mc = ModuleContents.new()
+            val sym = SymbolId.new("nonexistent")
+
+            match mc.symbol_visibility(sym):
+                case Some(_):
+                    fail("Expected None")
+                case nil:
+                    pass
+
+describe "Visibility Meet":
+    """
+    Visibility meet operation (intersection).
+    """
+    context "basic operations":
+        it "Public meet Public is Public":
+            val result = visibility_meet(Visibility.Public, Visibility.Public)
+            expect result.is_public()
+
+        it "Public meet Private is Private":
+            val result = visibility_meet(Visibility.Public, Visibility.Private)
+            expect result.is_private()
+
+        it "Private meet Public is Private":
+            val result = visibility_meet(Visibility.Private, Visibility.Public)
+            expect result.is_private()
+
+        it "Private meet Private is Private":
+            val result = visibility_meet(Visibility.Private, Visibility.Private)
+            expect result.is_private()
+
+describe "Ancestor Visibility":
+    """
+    Ancestor visibility through a path.
+    """
+    context "empty path":
+        it "empty path is Public":
+            val path: List<Visibility> = []
+            val result = ancestor_visibility(path)
+            expect result.is_public()
+
+    context "single visibility":
+        it "single Public is Public":
+            val path = [Visibility.Public]
+            val result = ancestor_visibility(path)
+            expect result.is_public()
+
+        it "single Private is Private":
+            val path = [Visibility.Private]
+            val result = ancestor_visibility(path)
+            expect result.is_private()
+
+    context "multiple visibilities":
+        it "all Public is Public":
+            val path = [Visibility.Public, Visibility.Public, Visibility.Public]
+            val result = ancestor_visibility(path)
+            expect result.is_public()
+
+        it "any Private is Private":
+            val path = [Visibility.Public, Visibility.Private, Visibility.Public]
+            val result = ancestor_visibility(path)
+            expect result.is_private()
+
+describe "Effective Visibility":
+    """
+    Effective visibility algorithm.
+    """
+    context "basic cases":
+        it "private symbol stays private":
+            val manifest = DirManifest.new("test")
+            var mc = ModuleContents.new()
+            mc.add_symbol(Symbol.private("foo"))
+            val sym = SymbolId.new("foo")
+
+            val result = effective_visibility(manifest, "any_module", mc, sym)
+            expect result.is_private()
+
+        it "non-existent symbol is private":
+            val manifest = DirManifest.new("test")
+            val mc = ModuleContents.new()
+            val sym = SymbolId.new("nonexistent")
+
+            val result = effective_visibility(manifest, "any_module", mc, sym)
+            expect result.is_private()
+
+    context "fully public symbol":
+        it "public symbol in public module with export is public":
+            var manifest = DirManifest.new("test")
+            manifest.add_child(ModDecl.public("mymodule"))
+            val sym = SymbolId.new("foo")
+            manifest.add_export(sym)
+
+            var mc = ModuleContents.new()
+            mc.add_symbol(Symbol.public("foo"))
+
+            val result = effective_visibility(manifest, "mymodule", mc, sym)
+            expect result.is_public()
+
+    context "missing requirements":
+        it "public symbol in private module is private":
+            var manifest = DirManifest.new("test")
+            manifest.add_child(ModDecl.private("mymodule"))
+            val sym = SymbolId.new("foo")
+            manifest.add_export(sym)
+
+            var mc = ModuleContents.new()
+            mc.add_symbol(Symbol.public("foo"))
+
+            val result = effective_visibility(manifest, "mymodule", mc, sym)
+            expect result.is_private()
+
+        it "public symbol not in export list is private":
+            var manifest = DirManifest.new("test")
+            manifest.add_child(ModDecl.public("mymodule"))
+            # NOT adding export for "foo"
+
+            var mc = ModuleContents.new()
+            mc.add_symbol(Symbol.public("foo"))
+            val sym = SymbolId.new("foo")
+
+            val result = effective_visibility(manifest, "mymodule", mc, sym)
+            expect result.is_private()
+
+describe "Lean Theorem 1: private_stays_private":
+    """
+    A private symbol cannot become public regardless of directory settings.
+    """
+    it "private symbol is always private":
+        var manifest = DirManifest.new("test")
+        manifest.add_child(ModDecl.public("mymodule"))
+        val sym = SymbolId.new("foo")
+        manifest.add_export(sym)
+
+        var mc = ModuleContents.new()
+        mc.add_symbol(Symbol.private("foo"))  # Private symbol
+
+        val result = effective_visibility(manifest, "mymodule", mc, sym)
+        expect result.is_private()
+
+describe "Lean Theorem 2: private_module_restricts":
+    """
+    A symbol in a private module cannot become public.
+    """
+    it "public symbol in private module is private":
+        var manifest = DirManifest.new("test")
+        manifest.add_child(ModDecl.private("mymodule"))  # Private module
+        val sym = SymbolId.new("foo")
+        manifest.add_export(sym)
+
+        var mc = ModuleContents.new()
+        mc.add_symbol(Symbol.public("foo"))
+
+        val result = effective_visibility(manifest, "mymodule", mc, sym)
+        expect result.is_private()
+
+describe "Lean Theorem 3: must_be_exported":
+    """
+    A symbol must be explicitly exported to be visible externally.
+    """
+    it "public symbol not in export list is private":
+        var manifest = DirManifest.new("test")
+        manifest.add_child(ModDecl.public("mymodule"))
+        # NOT adding export for "foo"
+
+        var mc = ModuleContents.new()
+        mc.add_symbol(Symbol.public("foo"))
+        val sym = SymbolId.new("foo")
+
+        val result = effective_visibility(manifest, "mymodule", mc, sym)
+        expect result.is_private()
+
+describe "Lean Theorem 4: meet_comm":
+    """
+    Visibility meet is commutative.
+    """
+    it "Public meet Public is commutative":
+        val result1 = visibility_meet(Visibility.Public, Visibility.Public)
+        val result2 = visibility_meet(Visibility.Public, Visibility.Public)
+        expect result1.is_public()
+        expect result2.is_public()
+
+    it "Public meet Private is commutative":
+        val result1 = visibility_meet(Visibility.Public, Visibility.Private)
+        val result2 = visibility_meet(Visibility.Private, Visibility.Public)
+        expect result1.is_private()
+        expect result2.is_private()
+
+    it "Private meet Public is commutative":
+        val result1 = visibility_meet(Visibility.Private, Visibility.Public)
+        val result2 = visibility_meet(Visibility.Public, Visibility.Private)
+        expect result1.is_private()
+        expect result2.is_private()
+
+    it "Private meet Private is commutative":
+        val result1 = visibility_meet(Visibility.Private, Visibility.Private)
+        val result2 = visibility_meet(Visibility.Private, Visibility.Private)
+        expect result1.is_private()
+        expect result2.is_private()
+
+describe "Lean Theorem 5: meet_assoc":
+    """
+    Visibility meet is associative.
+    """
+    it "all Public is associative":
+        val result1 = visibility_meet(visibility_meet(Visibility.Public, Visibility.Public), Visibility.Public)
+        val result2 = visibility_meet(Visibility.Public, visibility_meet(Visibility.Public, Visibility.Public))
+        expect result1.is_public()
+        expect result2.is_public()
+
+    it "one Private is associative (left)":
+        val result1 = visibility_meet(visibility_meet(Visibility.Private, Visibility.Public), Visibility.Public)
+        val result2 = visibility_meet(Visibility.Private, visibility_meet(Visibility.Public, Visibility.Public))
+        expect result1.is_private()
+        expect result2.is_private()
+
+    it "one Private is associative (middle)":
+        val result1 = visibility_meet(visibility_meet(Visibility.Public, Visibility.Private), Visibility.Public)
+        val result2 = visibility_meet(Visibility.Public, visibility_meet(Visibility.Private, Visibility.Public))
+        expect result1.is_private()
+        expect result2.is_private()
+
+    it "one Private is associative (right)":
+        val result1 = visibility_meet(visibility_meet(Visibility.Public, Visibility.Public), Visibility.Private)
+        val result2 = visibility_meet(Visibility.Public, visibility_meet(Visibility.Public, Visibility.Private))
+        expect result1.is_private()
+        expect result2.is_private()
+
+    it "all Private is associative":
+        val result1 = visibility_meet(visibility_meet(Visibility.Private, Visibility.Private), Visibility.Private)
+        val result2 = visibility_meet(Visibility.Private, visibility_meet(Visibility.Private, Visibility.Private))
+        expect result1.is_private()
+        expect result2.is_private()
+
+describe "Lean Theorem 6: any_private_means_private":
+    """
+    If any ancestor is private, result is private.
+    """
+    it "path with one private is private":
+        val path = [Visibility.Public, Visibility.Private, Visibility.Public]
+        val result = ancestor_visibility(path)
+        expect result.is_private()
+
+    it "path with private at start is private":
+        val path = [Visibility.Private, Visibility.Public, Visibility.Public]
+        val result = ancestor_visibility(path)
+        expect result.is_private()
+
+    it "path with private at end is private":
+        val path = [Visibility.Public, Visibility.Public, Visibility.Private]
+        val result = ancestor_visibility(path)
+        expect result.is_private()
+
+describe "Lean Theorem 7: all_public_means_public":
+    """
+    All public ancestors means public result.
+    """
+    it "path with all public is public":
+        val path = [Visibility.Public, Visibility.Public, Visibility.Public]
+        val result = ancestor_visibility(path)
+        expect result.is_public()
+
+    it "single public is public":
+        val path = [Visibility.Public]
+        val result = ancestor_visibility(path)
+        expect result.is_public()
+
+    it "empty path is public":
+        val path: List<Visibility> = []
+        val result = ancestor_visibility(path)
+        expect result.is_public()
