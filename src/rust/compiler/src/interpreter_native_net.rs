@@ -22,6 +22,7 @@ use super::interpreter_native_io::extract_bytes;
 //==============================================================================
 
 use std::sync::atomic::{AtomicI64 as NetAtomicI64, Ordering as NetOrdering};
+use std::sync::Arc;
 
 static NEXT_SOCKET_HANDLE_ID: NetAtomicI64 = NetAtomicI64::new(1000); // Start at 1000 to avoid conflicts
 
@@ -724,7 +725,7 @@ pub fn native_http_send_interp(args: &[Value]) -> Result<Value, CompileError> {
 
             Ok(net_ok(Value::Object {
                 class: "HttpResponse".to_string(),
-                fields,
+                fields: Arc::new(fields),
             }))
         }
         Err(e) => {

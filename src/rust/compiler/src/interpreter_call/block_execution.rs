@@ -11,6 +11,7 @@ use crate::value::*;
 use simple_parser::ast::{ClassDef, EnumDef, Expr, FunctionDef, Node};
 use simple_runtime::value::diagram_ffi;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 type Enums = HashMap<String, EnumDef>;
 type ImplMethods = HashMap<String, Vec<FunctionDef>>;
@@ -165,8 +166,9 @@ pub(super) fn exec_block_closure(
                     if let simple_parser::ast::Expr::Identifier(obj_name) = receiver.as_ref() {
                         if let Some(obj_val) = local_env.get(obj_name).cloned() {
                             match obj_val {
-                                Value::Object { class, mut fields } => {
-                                    fields.insert(field.clone(), val);
+                                Value::Object { class, fields } => {
+                                    let mut fields = fields;
+                                    Arc::make_mut(&mut fields).insert(field.clone(), val);
                                     local_env.insert(obj_name.clone(), Value::Object { class, fields });
                                 }
                                 _ => {}
@@ -575,8 +577,9 @@ fn exec_block_closure_mut(
                     if let simple_parser::ast::Expr::Identifier(obj_name) = receiver.as_ref() {
                         if let Some(obj_val) = local_env.get(obj_name).cloned() {
                             match obj_val {
-                                Value::Object { class, mut fields } => {
-                                    fields.insert(field.clone(), val);
+                                Value::Object { class, fields } => {
+                                    let mut fields = fields;
+                                    Arc::make_mut(&mut fields).insert(field.clone(), val);
                                     local_env.insert(obj_name.clone(), Value::Object { class, fields });
                                 }
                                 _ => {}

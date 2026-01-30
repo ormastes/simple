@@ -189,3 +189,24 @@ pub use diagnostic::{Diagnostic, Label, Severity, Span};
 
 pub mod protocol;
 pub use protocol::{read_message, write_message, TransportError};
+
+pub mod safety;
+pub use safety::{
+    // Arithmetic operations
+    safe_add, safe_sub, safe_mul, safe_div,
+    ArithmeticError,
+    // Type conversions
+    to_usize, to_i64, to_u64, to_i32, to_u32,
+    ConversionError,
+    // Array indexing
+    safe_index, safe_index_mut, safe_index_signed, safe_index_mut_signed,
+    IndexError,
+    // Mutex operations
+    safe_lock, try_lock,
+    // String operations
+    safe_char_at, safe_substring, safe_str_from_bytes,
+    StringError,
+};
+
+#[macro_use]
+pub mod safety_macros;

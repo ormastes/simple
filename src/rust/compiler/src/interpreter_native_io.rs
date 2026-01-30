@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{self, ErrorKind, Read, Seek, SeekFrom, Write};
 use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::Arc;
 
 // Re-export helpers from native_io_helpers module
 pub(crate) use super::native_io_helpers::{
@@ -213,7 +214,7 @@ pub fn native_fs_read_dir(args: &[Value]) -> Result<Value, CompileError> {
 
             Ok(io_ok(Value::Object {
                 class: "DirEntries".to_string(),
-                fields: result_fields,
+                fields: Arc::new(result_fields),
             }))
         }
         Err(e) => Ok(io_err(e)),

@@ -21,7 +21,7 @@ pub(crate) fn create_range_object(start: i64, end: i64, bound: RangeBound) -> Va
     fields.insert("inclusive".into(), Value::Bool(bound.is_inclusive()));
     Value::Object {
         class: BUILTIN_RANGE.into(),
-        fields,
+        fields: Arc::new(fields),
     }
 }
 
@@ -39,7 +39,7 @@ pub(crate) fn create_range_object_opt(start: Option<i64>, end: Option<i64>, boun
     fields.insert("inclusive".into(), Value::Bool(bound.is_inclusive()));
     Value::Object {
         class: BUILTIN_RANGE.into(),
-        fields,
+        fields: Arc::new(fields),
     }
 }
 

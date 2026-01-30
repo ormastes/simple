@@ -282,18 +282,14 @@ class CompilerDriver:
     me compile() -> CompileResult:
         # Phase 1: Load source files
         print "[compile] phase 1: loading sources..."
-        val (new_ctx1, load_ok) = self.load_sources_impl()
-        self.ctx = new_ctx1
-        if not load_ok:
+        if not self.load_sources_impl():
             print "[compile] phase 1 FAILED"
             return CompileResult.ParseError(self.ctx.errors)
         print "[compile] phase 1 done, {self.ctx.sources.len()} sources loaded"
 
         # Phase 2: Parse all sources
         print "[compile] phase 2: parsing..."
-        val (new_ctx2, parse_ok) = self.parse_all_impl()
-        self.ctx = new_ctx2
-        if not parse_ok:
+        if not self.parse_all_impl():
             print "[compile] phase 2 FAILED"
             return CompileResult.ParseError(self.ctx.errors)
         print "[compile] phase 2 done"
@@ -301,10 +297,8 @@ class CompilerDriver:
         # Phase 3: Lower to HIR, resolve methods, and type check (combined loop)
         print "[compile] phase 3: lowering and checking..."
         print "[compile] BEFORE phase 3: hir_modules count = {self.ctx.hir_modules.keys().len()}"
-        val (new_ctx3, analyze_ok) = self.lower_and_check_impl()
-        print "[compile] AFTER phase 3: new_ctx3.hir_modules count = {new_ctx3.hir_modules.keys().len()}"
-        self.ctx = new_ctx3
-        print "[compile] AFTER assignment: self.ctx.hir_modules count = {self.ctx.hir_modules.keys().len()}"
+        val analyze_ok = self.lower_and_check_impl()
+        print "[compile] AFTER phase 3: self.ctx.hir_modules count = {self.ctx.hir_modules.keys().len()}"
         if not analyze_ok:
             print "[compile] phase 3 FAILED"
             # Determine error type from first error
@@ -345,38 +339,37 @@ class CompilerDriver:
     # Phase 1: Load sources
     # --------------------------------------------------------------------------
 
-    fn load_sources_impl() -> (CompileContext, bool):
-        var ctx = self.ctx
-        print "[load] input_files count={ctx.options.input_files.len()}"
+    me load_sources_impl() -> bool:
+        print "[load] input_files count={self.ctx.options.input_files.len()}"
+        var sources = self.ctx.sources
         var i = 0
-        while i < ctx.options.input_files.len():
-            val path = ctx.options.input_files[i]
+        while i < self.ctx.options.input_files.len():
+            val path = self.ctx.options.input_files[i]
             print "[load] loading file: {path}"
             match SourceFile.load(path):
                 case Ok(source):
                     print "[load] loaded OK: {source.path}"
-                    var sources = ctx.sources
                     sources.push(source)
-                    ctx.sources = sources
                 case Err(e):
                     print "[load] error: {e}"
-                    var errors = ctx.errors
-                    errors.push(e)
-                    ctx.errors = errors
+                    self.ctx.add_error(e)
             i = i + 1
+        self.ctx.sources = sources
+        print "[load] sources stored, count={self.ctx.sources.len()}"
 
-        (ctx, ctx.errors.len() == 0)
+        not self.ctx.has_errors()
 
     # --------------------------------------------------------------------------
     # Phase 2: Parse
     # --------------------------------------------------------------------------
 
-    fn parse_all_impl() -> (CompileContext, bool):
-        var ctx = self.ctx
-        print "[parse_all] sources count={ctx.sources.len()}"
+    me parse_all_impl() -> bool:
+        val sources = self.ctx.sources
+        print "[parse_all] sources count={sources.len()}"
+        var modules = self.ctx.modules
         var src_idx = 0
-        while src_idx < ctx.sources.len():
-            val source = ctx.sources[src_idx]
+        while src_idx < sources.len():
+            val source = sources[src_idx]
             val spath = source.path
             val smod = source.module_name
             val scontent = source.content
@@ -385,14 +378,13 @@ class CompilerDriver:
             print "[parse_all] content_len={scontent.len()}"
             val module = self.parse_source(source)
             print "[parse_all] parse_source returned"
-            var modules = ctx.modules
             modules[smod] = module
-            ctx.modules = modules
-            print "[parse_all] stored, total={ctx.modules.keys().len()}"
+            print "[parse_all] stored, total={modules.keys().len()}"
             src_idx = src_idx + 1
+        self.ctx.modules = modules
 
-        print "[parse_all] done, modules={ctx.modules.keys().len()}"
-        (ctx, ctx.errors.len() == 0)
+        print "[parse_all] done, modules={self.ctx.modules.keys().len()}"
+        not self.ctx.has_errors()
 
     fn parse_source(source: SourceFile) -> Module:
         # Phase 2a: Outline parsing (TreeSitter)
@@ -425,17 +417,17 @@ class CompilerDriver:
     # phases in a single loop, avoiding redundant iterations and improving
     # performance on large codebases.
 
-    fn lower_and_check_impl() -> (CompileContext, bool):
+    me lower_and_check_impl() -> bool:
         var lowering = create_hir_lowering()
-        var ctx = self.ctx
+        var hir_modules = self.ctx.hir_modules
 
-        print "[phase3] parsed modules count={ctx.modules.keys().len()}"
-        val module_names = ctx.modules.keys()
+        print "[phase3] parsed modules count={self.ctx.modules.keys().len()}"
+        val module_names = self.ctx.modules.keys()
         print "[phase3] entering loop over {module_names.len()} modules"
         print "[phase3] DEBUG: module_names = {module_names}"
         for name in module_names:
             print "[phase3] processing module: {name}"
-            val module = ctx.modules[name]
+            val module = self.ctx.modules[name]
             if module == nil:
                 print "[phase3] ERROR: module is nil for key {name}"
                 continue
@@ -455,28 +447,21 @@ class CompilerDriver:
             var err_idx = 0
             while err_idx < resolve_errors.len():
                 val err = resolve_errors[err_idx]
-                var errors = ctx.errors
-                errors.push("Method resolution error in {name}: {err.message}")
-                ctx.errors = errors
+                self.ctx.add_error("Method resolution error in {name}: {err.message}")
                 err_idx = err_idx + 1
 
             # Step 3: Type checking (HM inference)
             print "[phase3] skipping type inference for now..."
-            # var infer_ctx = HmInferContext.with_builtins()
-            # infer_ctx.infer_module(resolved_module)
             print "[phase3] inference skipped"
 
-            # Type errors skipped (inference disabled)
-
-            # Store final module
-            var hir_modules = ctx.hir_modules
+            # Store final module in local dict
             hir_modules[name] = resolved_module
-            ctx.hir_modules = hir_modules
-            print "[phase3] stored HIR module '{name}', total now: {ctx.hir_modules.keys().len()}"
+            print "[phase3] stored HIR module '{name}', total now: {hir_modules.keys().len()}"
 
-        print "[phase3] loop complete. HIR modules keys: {ctx.hir_modules.keys()}"
-        print "[phase3] returning ctx with {ctx.hir_modules.keys().len()} HIR modules"
-        (ctx, ctx.errors.len() == 0)
+        self.ctx.hir_modules = hir_modules
+        print "[phase3] loop complete. HIR modules keys: {self.ctx.hir_modules.keys()}"
+        print "[phase3] returning with {self.ctx.hir_modules.keys().len()} HIR modules"
+        not self.ctx.has_errors()
 
     # --------------------------------------------------------------------------
     # Phase 3a: Lower to HIR (standalone, kept for compatibility)

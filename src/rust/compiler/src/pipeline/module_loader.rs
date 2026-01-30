@@ -351,7 +351,7 @@ pub fn load_module_with_imports_validated(
 
     let source = fs::read_to_string(&path).map_err(|e| CompileError::Io(format!("Cannot read {:?}: {e}", path)))?;
     let mut parser = simple_parser::Parser::new(&source);
-    let module = parser.parse().map_err(|e| CompileError::Parse(format!("{e}")))?;
+    let module = parser.parse().map_err(|e| CompileError::Parse(format!("in {:?}: {e}", path)))?;
 
     // Display error hints (warnings, etc.) from parser
     display_parser_hints(&parser, &source, &path);

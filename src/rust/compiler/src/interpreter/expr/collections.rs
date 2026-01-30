@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use simple_parser::ast::Expr;
 
@@ -53,7 +54,7 @@ pub(super) fn eval_collection_expr(
             let class_name = name.rsplit('.').next().unwrap_or(name).to_string();
             Ok(Some(Value::Object {
                 class: class_name,
-                fields: map,
+                fields: Arc::new(map),
             }))
         }
         Expr::Path(segments) => {
@@ -364,24 +365,47 @@ pub(super) fn eval_collection_expr(
                             ctx,
                         )
                     })?;
-                    let len = s.chars().count() as i64;
-                    // Support negative indexing
-                    let idx = if raw_idx < 0 {
-                        (len + raw_idx) as usize
+                    // Fast path: if string is ASCII-only, use byte indexing O(1)
+                    // instead of chars().nth() which is O(n)
+                    if s.is_ascii() {
+                        let len = s.len() as i64;
+                        let idx = if raw_idx < 0 {
+                            (len + raw_idx) as usize
+                        } else {
+                            raw_idx as usize
+                        };
+                        if idx < s.len() {
+                            Ok(Value::Str(String::from(s.as_bytes()[idx] as char)))
+                        } else {
+                            let ctx = ErrorContext::new()
+                                .with_code(codes::INDEX_OUT_OF_BOUNDS)
+                                .with_help(format!("string has {} character(s)", len))
+                                .with_note("ensure the index is within bounds");
+                            Err(CompileError::semantic_with_context(
+                                format!("string index out of bounds: index is {} but length is {}", raw_idx, len),
+                                ctx,
+                            ))
+                        }
                     } else {
-                        raw_idx as usize
-                    };
-                    s.chars().nth(idx).map(|c| Value::Str(c.to_string())).ok_or_else(|| {
-                        // E3002 - Index Out Of Bounds
-                        let ctx = ErrorContext::new()
-                            .with_code(codes::INDEX_OUT_OF_BOUNDS)
-                            .with_help(format!("string has {} character(s)", len))
-                            .with_note("ensure the index is within bounds");
-                        CompileError::semantic_with_context(
-                            format!("string index out of bounds: index is {} but length is {}", raw_idx, len),
-                            ctx,
-                        )
-                    })
+                        let len = s.chars().count() as i64;
+                        // Support negative indexing
+                        let idx = if raw_idx < 0 {
+                            (len + raw_idx) as usize
+                        } else {
+                            raw_idx as usize
+                        };
+                        s.chars().nth(idx).map(|c| Value::Str(c.to_string())).ok_or_else(|| {
+                            // E3002 - Index Out Of Bounds
+                            let ctx = ErrorContext::new()
+                                .with_code(codes::INDEX_OUT_OF_BOUNDS)
+                                .with_help(format!("string has {} character(s)", len))
+                                .with_note("ensure the index is within bounds");
+                            CompileError::semantic_with_context(
+                                format!("string index out of bounds: index is {} but length is {}", raw_idx, len),
+                                ctx,
+                            )
+                        })
+                    }
                 }
                 Value::Object { fields, .. } => {
                     let key = idx_val.to_key_string();

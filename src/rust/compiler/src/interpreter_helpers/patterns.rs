@@ -4,6 +4,7 @@ use crate::error::{codes, CompileError, ErrorContext};
 use crate::value::{Env, Value};
 use simple_parser::ast::{ClassDef, EnumDef, Expr, FunctionDef, Pattern};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use super::super::{
     evaluate_expr, evaluate_method_call_with_self_update, find_and_exec_method_with_self, Enums, ImplMethods,
@@ -224,7 +225,7 @@ pub(crate) fn handle_method_call_with_self_update(
                                     impl_methods,
                                 )? {
                                     // Update the field in parent with the mutated nested object
-                                    fields.insert(field.clone(), updated_field);
+                                    Arc::make_mut(&mut fields).insert(field.clone(), updated_field);
 
                                     // Create updated parent
                                     let updated_parent = Value::Object {

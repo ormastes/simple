@@ -3,6 +3,7 @@
 use crate::value::*;
 use simple_parser::ast::{Effect, FunctionDef};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// Wrap a value in a Promise (Resolved state) for async function returns.
 /// Creates a Promise object with state = PromiseState.Resolved(value).
@@ -27,7 +28,7 @@ pub(crate) fn wrap_in_promise(value: Value) -> Value {
 
     Value::Object {
         class: "Promise".to_string(),
-        fields,
+        fields: Arc::new(fields),
     }
 }
 

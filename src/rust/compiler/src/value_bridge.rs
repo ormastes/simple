@@ -7,6 +7,7 @@
 
 use std::collections::HashMap;
 use std::ffi::{c_char, CStr, CString};
+use std::sync::Arc;
 
 use crate::value::Value;
 
@@ -510,7 +511,7 @@ impl BridgeValue {
                 };
                 Value::Object {
                     class,
-                    fields: HashMap::new(),
+                    fields: Arc::new(HashMap::new()),
                 }
             }
             bridge_tags::ENUM => {

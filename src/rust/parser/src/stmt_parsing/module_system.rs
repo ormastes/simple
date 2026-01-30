@@ -494,14 +494,64 @@ impl<'a> Parser<'a> {
                 target: ImportTarget::Group(targets),
             }))
         } else {
-            // Two styles:
-            // 1. export X, Y, Z from module (with 'from')
-            // 2. export X, Y, Z (bare export, no 'from')
+            // Multiple styles:
+            // 1. export module.* (re-export glob from submodule)
+            // 2. export X, Y, Z from module (with 'from')
+            // 3. export X, Y, Z (bare export, no 'from')
 
-            // Parse list of identifiers
+            // Parse first identifier
             // Use expect_path_segment to allow keywords like 'let', 'mock' in exports
-            let mut items = Vec::new();
-            items.push(self.expect_path_segment()?);
+            let first_item = self.expect_path_segment()?;
+
+            // Check for dot (module path continuation)
+            if self.check(&TokenKind::Dot) {
+                // This is export module.* or export module.path.*
+                // Parse as module path
+                let mut segments = vec![first_item];
+
+                while self.check(&TokenKind::Dot) {
+                    self.advance(); // consume '.'
+
+                    // Check for glob: module.*
+                    if self.check(&TokenKind::Star) {
+                        self.advance(); // consume '*'
+
+                        // Warn against glob exports (but allow them - they're useful for re-exporting submodules)
+                        let warning = ErrorHint {
+                            level: ErrorHintLevel::Warning,
+                            message: "Consider explicit exports to avoid exposing internal APIs".to_string(),
+                            span: start_span,
+                            suggestion: Some("Use 'export {A, B, C}' or 'export {A, B} from module' for better control".to_string()),
+                            help: Some("Glob exports (export module.*) are acceptable for submodule re-exports in __init__.spl files".to_string()),
+                        };
+                        self.error_hints.push(warning);
+
+                        return Ok(Node::ExportUseStmt(ExportUseStmt {
+                            span: Span::new(
+                                start_span.start,
+                                self.previous.span.end,
+                                start_span.line,
+                                start_span.column,
+                            ),
+                            path: ModulePath::new(segments),
+                            target: ImportTarget::Glob,
+                        }));
+                    }
+
+                    // Otherwise continue parsing path
+                    segments.push(self.expect_path_segment()?);
+                }
+
+                // If we get here, we have a module path but no glob or other target
+                // This is an error - export needs a target
+                return Err(ParseError::syntax_error_with_span(
+                    "Expected '.*', '{...}', or specific item after module path in export statement".to_string(),
+                    self.current.span,
+                ));
+            }
+
+            // Not a module path - parse as identifier list
+            let mut items = vec![first_item];
 
             while self.check(&TokenKind::Comma) {
                 self.advance(); // consume ','
@@ -510,7 +560,7 @@ impl<'a> Parser<'a> {
 
             // Check if 'from' keyword is present
             if self.check(&TokenKind::From) {
-                // Style 1: export X, Y from module
+                // Style 2: export X, Y from module
                 self.advance(); // consume 'from'
 
                 // Parse module path
@@ -530,7 +580,7 @@ impl<'a> Parser<'a> {
                     target: ImportTarget::Group(targets),
                 }))
             } else {
-                // Style 2: bare export (export X, Y, Z)
+                // Style 3: bare export (export X, Y, Z)
                 // Create export use statement with empty path
                 // This marks the symbols for export without importing them
                 let targets: Vec<ImportTarget> = items.into_iter().map(|name| ImportTarget::Single(name)).collect();
