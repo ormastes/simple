@@ -1,28 +1,28 @@
 # Test Results
 
-**Generated:** 2026-01-30 09:37:30
-**Total Tests:** 152
-**Status:** ⚠️ 5 FAILED
+**Generated:** 2026-01-30 09:45:50
+**Total Tests:** 180
+**Status:** ⚠️ 2 FAILED
 
 ## Summary
 
 | Status | Count | Percentage |
 |--------|-------|-----------|
-| ✅ Passed | 147 | 96.7% |
-| ❌ Failed | 5 | 3.3% |
+| ✅ Passed | 178 | 98.9% |
+| ❌ Failed | 2 | 1.1% |
 | ⏭️ Skipped | 0 | 0.0% |
 | 🔕 Ignored | 0 | 0.0% |
 | 🔐 Qualified Ignore | 0 | 0.0% |
 
 ---
 
-## ❌ Failed Tests (5)
+## ❌ Failed Tests (2)
 
 ### 🔴 minimal_spec
 
 **File:** `test/system/features/database_synchronization/minimal_spec.spl`
 **Category:** System
-**Failed:** 2026-01-30T09:33:02.394842346+00:00
+**Failed:** 2026-01-30T09:44:36.810182616+00:00
 **Flaky:** No (100.0% failure rate)
 
 **Error:**
@@ -37,58 +37,13 @@ Location: test/system/features/database_synchronization/minimal_spec.spl
 
 **File:** `test/system/features/fault_detection/fault_detection_spec.spl`
 **Category:** System
-**Failed:** 2026-01-30T09:33:02.394882905+00:00
+**Failed:** 2026-01-30T09:43:29.664968334+00:00
 **Flaky:** No (100.0% failure rate)
 
 **Error:**
 ```
 compile failed: semantic: function `args` not found
 Location: test/system/features/fault_detection/fault_detection_spec.spl
-```
-
----
-
-### 🔴 parser_default_keyword_spec
-
-**File:** `test/system/features/parser/parser_default_keyword_spec.spl`
-**Category:** System
-**Failed:** 2026-01-30T09:33:02.394970133+00:00
-**Flaky:** No (100.0% failure rate)
-
-**Error:**
-```
-parse error: Unexpected token: expected Colon, found Assign
-Location: test/system/features/parser/parser_default_keyword_spec.spl
-```
-
----
-
-### 🔴 parser_skip_keyword_spec
-
-**File:** `test/system/features/parser/parser_skip_keyword_spec.spl`
-**Category:** System
-**Failed:** 2026-01-30T09:37:30.199094394+00:00
-**Flaky:** No (100.0% failure rate)
-
-**Error:**
-```
-parse error: Unexpected token: expected expression, found Colon
-Location: test/system/features/parser/parser_skip_keyword_spec.spl
-```
-
----
-
-### 🔴 parser_static_keyword_spec
-
-**File:** `test/system/features/parser/parser_static_keyword_spec.spl`
-**Category:** System
-**Failed:** 2026-01-30T09:33:02.395019699+00:00
-**Flaky:** No (100.0% failure rate)
-
-**Error:**
-```
-parse error: Unexpected token: expected identifier, found Static
-Location: test/system/features/parser/parser_static_keyword_spec.spl
 ```
 
 ---
@@ -101,16 +56,15 @@ Location: test/system/features/parser/parser_static_keyword_spec.spl
 
 ## 🎯 Action Items
 
-### Priority 1: Fix Failing Tests (5)
+### Priority 1: Fix Failing Tests (2)
 
 1. **minimal_spec** - compile failed: parse: in "/home/ormastes/dev/pub/simple/src/lib/std/src/db/atomic.spl": Unexpected token: expected expression, found Indent
 2. **fault_detection_spec** - compile failed: semantic: function `args` not found
-3. **parser_default_keyword_spec** - parse error: Unexpected token: expected Colon, found Assign
-4. **parser_skip_keyword_spec** - parse error: Unexpected token: expected expression, found Colon
-5. **parser_static_keyword_spec** - parse error: Unexpected token: expected identifier, found Static
 
-### Priority 3: Stabilize Flaky Tests (1)
+### Priority 3: Stabilize Flaky Tests (3)
 
 Tests with intermittent failures:
+- parser_skip_keyword_spec (55.6% failure rate)
 - string_helpers_spec (83.3% failure rate)
+- parser_default_keyword_spec (20.0% failure rate)
 
