@@ -451,6 +451,7 @@ impl<'a> Parser<'a> {
             TokenKind::Break => self.parse_break(),
             TokenKind::Continue => self.parse_continue(),
             TokenKind::Pass => self.parse_pass(),
+            TokenKind::Skip => self.parse_skip(),
             TokenKind::Defer => self.parse_defer(),
             TokenKind::Assert => self.parse_assert(),
             TokenKind::Assume => self.parse_assume(),

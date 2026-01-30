@@ -238,6 +238,7 @@ impl TypeChecker {
                 | Node::With(_)
                 | Node::Expression(_)
                 | Node::Pass(_)
+                | Node::Skip(_)
                 | Node::Guard(_)
                 | Node::Defer(_)
                 | Node::ClassAlias(_)
