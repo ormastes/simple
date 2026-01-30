@@ -107,7 +107,17 @@ impl<'a> super::Lexer<'a> {
             "continue" => TokenKind::Continue,
             "pass" => TokenKind::Pass,
             "defer" => TokenKind::Defer,
-            "skip" => TokenKind::Skip,
+            "skip" => {
+                // Contextual keyword: only treat as keyword if NOT followed by '('
+                // This allows: fn skip(...) and obj.skip(...)
+                // while keeping: skip (statement) and skip: (label)
+                if self.check('(') {
+                    let pattern = NamePattern::detect(&name);
+                    TokenKind::Identifier { name, pattern }  // Method/function name
+                } else {
+                    TokenKind::Skip  // Statement keyword
+                }
+            }
             "return" => TokenKind::Return,
             "match" => TokenKind::Match,
             "case" => TokenKind::Case,
@@ -178,7 +188,8 @@ impl<'a> super::Lexer<'a> {
                 // This allows: fn static(...) and obj.static(...)
                 // while keeping: static fn method() (static method declaration)
                 if self.check('(') {
-                    TokenKind::Ident(name)  // Method/function name
+                    let pattern = NamePattern::detect(&name);
+                    TokenKind::Identifier { name, pattern }  // Method/function name
                 } else {
                     TokenKind::Static  // Keyword for static declarations
                 }
@@ -249,7 +260,8 @@ impl<'a> super::Lexer<'a> {
                 // This allows: fn default(...) and obj.default(...)
                 // while keeping: default -> ... (match default case)
                 if self.check('(') {
-                    TokenKind::Ident(name)  // Method/function name
+                    let pattern = NamePattern::detect(&name);
+                    TokenKind::Identifier { name, pattern }  // Method/function name
                 } else {
                     TokenKind::Default  // Keyword for match default
                 }
