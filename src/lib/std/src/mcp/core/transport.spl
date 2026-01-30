@@ -11,13 +11,13 @@ use std.mcp.core.error_handler.*
 # Transport interface
 pub trait Transport:
     # Read a JSON-RPC message
-    fn read_message() -> Option<JsonRpcRequest>
+    me read_message() -> Option<JsonRpcRequest>
 
     # Write a JSON-RPC response
-    fn write_response(response: JsonRpcResponse)
+    me write_response(response: JsonRpcResponse)
 
     # Write an error response
-    fn write_error(id: i64, code: i64, message: text)
+    me write_error(id: i64, code: i64, message: text)
 
     # Check if transport is still alive
     fn is_alive() -> bool
@@ -34,23 +34,18 @@ pub class StdioTransport:
     pub validator: InputValidator
     pub error_count: i64
 
-    pub fn new() -> StdioTransport:
-        return StdioTransport:
-            alive: true
-            buffer: ""
-            debug_mode: false
-            validator: InputValidator.default()
-            error_count: 0
+    static fn new() -> StdioTransport:
+        return StdioTransport(alive: true, buffer: "", debug_mode: false, validator: InputValidator.default(), error_count: 0)
 
-    pub fn enable_debug(self):
+    pub me enable_debug():
         self.debug_mode = true
 
     # Read a line from stdin (blocking)
     fn read_line() -> Result<text, text>:
         # Use extern function for stdin reading
-        line = ""
+        var line = ""
         while true:
-            ch = stdin_read_char()
+            val ch = stdin_read_char()
             if ch == "":
                 if line == "":
                     return Err("EOF")
@@ -65,10 +60,10 @@ pub class StdioTransport:
 
     # Read exactly n bytes from stdin
     fn read_exact(n: i64) -> Result<text, text>:
-        result = ""
-        remaining = n
+        var result = ""
+        var remaining = n
         while remaining > 0:
-            ch = stdin_read_char()
+            val ch = stdin_read_char()
             if ch == "":
                 return Err("EOF while reading body")
             result = result + ch
@@ -88,25 +83,25 @@ pub class StdioTransport:
             stderr_flush()
 
     # Log error
-    fn log_error(msg: text):
+    me log_error(msg: text):
         log_error("StdioTransport: " + msg)
         self.error_count = self.error_count + 1
 
     # Parse Content-Length header
-    fn parse_content_length(header: text) -> Option<i64>:
+    me parse_content_length(header: text) -> Option<i64>:
         # Header format: "Content-Length: <number>"
         if not header.starts_with("Content-Length:"):
-            return None
+            return nil
 
         # Extract the number part
-        value_part = header.substring(15, header.len()).trim()
+        val value_part = header.substring(15, header.len()).trim()
 
         # Parse as integer
-        length = 0
+        var length = 0
         for i in 0..value_part.len():
-            ch = value_part.char_at(i)
+            val ch = value_part.char_at(i)
             if ch >= "0" and ch <= "9":
-                digit = ch.ord() - "0".ord()
+                val digit = ch.ord() - "0".ord()
                 length = length * 10 + digit
             else:
                 break
@@ -117,7 +112,7 @@ pub class StdioTransport:
                 return Some(length)
             case Err(error):
                 self.log_error("Invalid content length: {error.message}")
-                return None
+                return nil
 
     # Parse JSON into JsonRpcRequest (with validation)
     fn parse_request(json_str: text) -> Result<JsonRpcRequest, text>:
@@ -132,11 +127,11 @@ pub class StdioTransport:
         match json.parse(json_str):
             case Ok(JsonValue.Object(obj)):
                 # Extract fields
-                id = 0
-                method = ""
-                params = {}
+                var id = 0
+                var method = ""
+                var params = {}
 
-                if obj.has_key("id"):
+                if obj.contains_key("id"):
                     match obj.get("id"):
                         case JsonValue.Integer(i):
                             id = i
@@ -146,7 +141,7 @@ pub class StdioTransport:
                         case _:
                             pass
 
-                if obj.has_key("method"):
+                if obj.contains_key("method"):
                     match obj.get("method"):
                         case JsonValue.text(m):
                             method = m
@@ -155,7 +150,7 @@ pub class StdioTransport:
                 else:
                     return Err("missing method field")
 
-                if obj.has_key("params"):
+                if obj.contains_key("params"):
                     match obj.get("params"):
                         case JsonValue.Object(p):
                             params = json_object_to_dict(p)
@@ -171,23 +166,23 @@ pub class StdioTransport:
 
     # Serialize response to JSON
     fn serialize_response(response: JsonRpcResponse) -> text:
-        builder = JsonBuilder.new()
+        val builder = JsonBuilder.new()
         builder.set_string("jsonrpc", "2.0")
         builder.set_int("id", response.id)
 
         # Serialize result based on type
-        result_json = any_to_json(response.result)
+        val result_json = any_to_json(response.result)
         builder.set("result", result_json)
 
         return json.stringify(builder.build())
 
     # Serialize error response to JSON
     fn serialize_error(id: i64, code: i64, message: text) -> text:
-        error_obj = JsonBuilder.new()
+        val error_obj = JsonBuilder.new()
         error_obj.set_int("code", code)
         error_obj.set_string("message", message)
 
-        builder = JsonBuilder.new()
+        val builder = JsonBuilder.new()
         builder.set_string("jsonrpc", "2.0")
         builder.set_int("id", id)
         builder.set("error", error_obj.build())
@@ -195,11 +190,11 @@ pub class StdioTransport:
         return json.stringify(builder.build())
 
 impl Transport for StdioTransport:
-    fn read_message() -> Option<JsonRpcRequest>:
+    me read_message() -> Option<JsonRpcRequest>:
         self.log_debug("Waiting for message...")
 
         # Read headers until empty line
-        content_length = 0
+        var content_length = 0
 
         while true:
             match self.read_line():
@@ -213,18 +208,18 @@ impl Transport for StdioTransport:
                         case Some(len):
                             content_length = len
                             self.log_debug("Content-Length: " + len.to_string())
-                        case None:
+                        case nil:
                             # Ignore other headers
                             pass
 
                 case Err(e):
                     self.log_debug("Read error: " + e)
                     self.alive = false
-                    return None
+                    return nil
 
         if content_length == 0:
             self.log_debug("No content length specified")
-            return None
+            return nil
 
         # Read body
         match self.read_exact(content_length):
@@ -236,33 +231,36 @@ impl Transport for StdioTransport:
                         return Some(request)
                     case Err(e):
                         self.log_debug("Parse error: " + e)
-                        return None
+                        return nil
 
             case Err(e):
                 self.log_debug("Body read error: " + e)
                 self.alive = false
-                return None
+                return nil
 
-    fn write_response(response: JsonRpcResponse):
-        body = self.serialize_response(response)
+    me write_response(response: JsonRpcResponse):
+        val body = self.serialize_response(response)
         self.log_debug("Sending: " + body)
 
         # Write with Content-Length header
-        header = "Content-Length: " + body.len().to_string() + "\r\n\r\n"
+        val header = "Content-Length: " + body.len().to_string() + "\r\n\r\n"
         self.write_stdout(header + body)
 
-    fn write_error(id: i64, code: i64, message: text):
-        body = self.serialize_error(id, code, message)
+    me write_error(id: i64, code: i64, message: text):
+        val body = self.serialize_error(id, code, message)
         self.log_debug("Sending error: " + body)
 
-        header = "Content-Length: " + body.len().to_string() + "\r\n\r\n"
+        val header = "Content-Length: " + body.len().to_string() + "\r\n\r\n"
         self.write_stdout(header + body)
 
     fn is_alive() -> bool:
         return self.alive
 
-# TCP FFI imports
-use net.tcp.{monoio_tcp_connect, monoio_tcp_read, monoio_tcp_write, monoio_tcp_close}
+# TCP FFI declarations (declared directly to avoid importing net.tcp which uses async fn)
+extern fn monoio_tcp_connect(host: text, port: i64) -> i64
+extern fn monoio_tcp_read(handle: i64, max_len: i64) -> text
+extern fn monoio_tcp_write(handle: i64, data: text) -> i64
+extern fn monoio_tcp_close(handle: i64)
 
 # TCP transport for MCP over network
 pub class TcpTransport:
@@ -273,16 +271,10 @@ pub class TcpTransport:
     pub buffer: text
     pub debug_mode: bool
 
-    pub fn new(host: text, port: i64) -> TcpTransport:
-        return TcpTransport:
-            host: host
-            port: port
-            alive: false
-            stream_handle: -1
-            buffer: ""
-            debug_mode: false
+    static fn new(host: text, port: i64) -> TcpTransport:
+        return TcpTransport(host: host, port: port, alive: false, stream_handle: -1, buffer: "", debug_mode: false)
 
-    pub fn connect() -> Result<(), text>:
+    pub me connect() -> Result<(), text>:
         """Connect to the MCP server."""
         val addr = "{self.host}:{self.port}"
         val handle = monoio_tcp_connect(addr)
@@ -292,7 +284,7 @@ pub class TcpTransport:
         self.alive = true
         Ok(())
 
-    pub fn enable_debug():
+    pub me enable_debug():
         self.debug_mode = true
 
     fn log_debug(msg: text):
@@ -347,7 +339,7 @@ pub class TcpTransport:
     fn parse_content_length(header: text) -> Option<i64>:
         """Parse Content-Length header."""
         if not header.starts_with("Content-Length:"):
-            return None
+            return nil
 
         val value_part = header.substring(15, header.len()).trim()
         var length: i64 = 0
@@ -362,10 +354,10 @@ pub class TcpTransport:
         Some(length)
 
 impl Transport for TcpTransport:
-    fn read_message() -> Option<JsonRpcRequest>:
+    me read_message() -> Option<JsonRpcRequest>:
         """Read MCP-framed message from TCP stream."""
         if not self.alive:
-            return None
+            return nil
 
         # Read Content-Length header
         match self.read_line():
@@ -378,7 +370,7 @@ impl Transport for TcpTransport:
                                 pass
                             case Err(_):
                                 self.alive = false
-                                return None
+                                return nil
 
                         # Read body
                         match self.read_exact(length):
@@ -389,17 +381,17 @@ impl Transport for TcpTransport:
                                     case Ok(JsonValue.Object(obj)):
                                         return parse_json_rpc_request(obj)
                                     case _:
-                                        return None
+                                        return nil
                             case Err(_):
                                 self.alive = false
-                                return None
-                    case None:
-                        return None
+                                return nil
+                    case nil:
+                        return nil
             case Err(_):
                 self.alive = false
-                return None
+                return nil
 
-    fn write_response(response: JsonRpcResponse):
+    me write_response(response: JsonRpcResponse):
         """Write MCP-framed response to TCP stream."""
         if not self.alive:
             return
@@ -415,7 +407,7 @@ impl Transport for TcpTransport:
         if written < 0:
             self.alive = false
 
-    fn write_error(id: i64, code: i64, message: text):
+    me write_error(id: i64, code: i64, message: text):
         """Write MCP-framed error response to TCP stream."""
         if not self.alive:
             return
@@ -445,9 +437,9 @@ impl Transport for TcpTransport:
 
 # Helper to parse JSON-RPC request from object
 fn parse_json_rpc_request(obj: Dict<text, JsonValue>) -> Option<JsonRpcRequest>:
-    var id: i64 = 0
+    var id = 0
     var method = ""
-    var params: Dict<text, Any> = {}
+    var params = {}
 
     match obj.get("id"):
         case Some(JsonValue.Integer(i)):
@@ -459,7 +451,7 @@ fn parse_json_rpc_request(obj: Dict<text, JsonValue>) -> Option<JsonRpcRequest>:
         case Some(JsonValue.text(m)):
             method = m
         case _:
-            return None
+            return nil
 
     match obj.get("params"):
         case Some(JsonValue.Object(p)):
@@ -476,39 +468,35 @@ pub class MockTransport:
     pub errors: List<Dict<text, Any>>
     pub current_index: i64
 
-    pub fn new(requests: List<JsonRpcRequest>) -> MockTransport:
-        return MockTransport:
-            requests: requests
-            responses: []
-            errors: []
-            current_index: 0
+    static fn new(requests: List<JsonRpcRequest>) -> MockTransport:
+        return MockTransport(requests: requests, responses: [], errors: [], current_index: 0)
 
-    pub fn add_request(self, request: JsonRpcRequest):
+    pub me add_request(request: JsonRpcRequest):
         self.requests.append(request)
 
     # Add request from JSON string (for easy testing)
-    pub fn add_json_request(self, json_str: text) -> Result<(), text>:
+    pub me add_json_request(json_str: text) -> Result<(), text>:
         match json.parse(json_str):
             case Ok(JsonValue.Object(obj)):
-                id = 0
-                method = ""
-                params = {}
+                var id = 0
+                var method = ""
+                var params = {}
 
-                if obj.has_key("id"):
+                if obj.contains_key("id"):
                     match obj.get("id"):
                         case JsonValue.Integer(i):
                             id = i
                         case _:
                             pass
 
-                if obj.has_key("method"):
+                if obj.contains_key("method"):
                     match obj.get("method"):
                         case JsonValue.text(m):
                             method = m
                         case _:
                             return Err("method must be string")
 
-                if obj.has_key("params"):
+                if obj.contains_key("params"):
                     match obj.get("params"):
                         case JsonValue.Object(p):
                             params = json_object_to_dict(p)
@@ -521,22 +509,22 @@ pub class MockTransport:
             case _:
                 return Err("invalid JSON")
 
-    pub fn get_responses(self) -> List<JsonRpcResponse>:
+    pub fn get_responses() -> List<JsonRpcResponse>:
         return self.responses
 
 impl Transport for MockTransport:
-    fn read_message() -> Option<JsonRpcRequest>:
+    me read_message() -> Option<JsonRpcRequest>:
         if self.current_index < self.requests.len():
-            request = self.requests[self.current_index]
+            val request = self.requests[self.current_index]
             self.current_index = self.current_index + 1
             return Some(request)
         else:
-            return None
+            return nil
 
-    fn write_response(response: JsonRpcResponse):
+    me write_response(response: JsonRpcResponse):
         self.responses.append(response)
 
-    fn write_error(id: i64, code: i64, message: text):
+    me write_error(id: i64, code: i64, message: text):
         self.errors.append({
             "id": id,
             "code": code,
@@ -548,7 +536,7 @@ impl Transport for MockTransport:
 
 # Helper: Convert JsonValue object to Dict<text, Any>
 fn json_object_to_dict(obj: Dict<text, JsonValue>) -> Dict<text, Any>:
-    result = {}
+    var result = {}
     for key in obj.keys():
         result.set(key, json_value_to_any(obj.get(key)))
     return result
@@ -557,7 +545,7 @@ fn json_object_to_dict(obj: Dict<text, JsonValue>) -> Dict<text, Any>:
 fn json_value_to_any(value: JsonValue) -> Any:
     match value:
         case JsonValue.Null:
-            return None
+            return nil
         case JsonValue.bool(b):
             return b
         case JsonValue.Integer(i):
@@ -567,7 +555,7 @@ fn json_value_to_any(value: JsonValue) -> Any:
         case JsonValue.text(s):
             return s
         case JsonValue.Array(arr):
-            result = []
+            var result = []
             for item in arr:
                 result.append(json_value_to_any(item))
             return result
@@ -576,35 +564,11 @@ fn json_value_to_any(value: JsonValue) -> Any:
 
 # Helper: Convert Any to JsonValue
 fn any_to_json(value: Any) -> JsonValue:
-    if value == None:
+    if value == nil:
         return JsonValue.Null
 
-    # Try to match common types
-    # Note: This is a simplified implementation
-    # In a full implementation, we'd use type reflection
-
-    match value:
-        case v if v is bool:
-            return JsonValue.bool(v as bool)
-        case v if v is i64:
-            return JsonValue.Integer(v as i64)
-        case v if v is f64:
-            return JsonValue.Number(v as f64)
-        case v if v is text:
-            return JsonValue.text(v as text)
-        case v if v is List:
-            arr = []
-            for item in v as List<Any>:
-                arr.append(any_to_json(item))
-            return JsonValue.Array(arr)
-        case v if v is Dict:
-            obj = {}
-            for key in (v as Dict<text, Any>).keys():
-                obj.set(key, any_to_json((v as Dict<text, Any>).get(key)))
-            return JsonValue.Object(obj)
-        case _:
-            # Fallback: convert to string
-            return JsonValue.text(value.to_string())
+    # Simplified conversion - use string interpolation which works on all types
+    return JsonValue.text("{value}")
 
 # Extern functions for stdio operations
 extern fn stdin_read_char() -> text

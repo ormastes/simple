@@ -9,6 +9,7 @@ use simple_parser::ast::{Argument, ClassDef, EnumDef, FunctionDef, SelfMode};
 use simple_runtime::value::diagram_ffi;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 type Enums = HashMap<String, EnumDef>;
 type ImplMethods = HashMap<String, Vec<FunctionDef>>;
@@ -85,7 +86,7 @@ pub(crate) fn instantiate_class(
         if should_call_new && !already_in_new {
             let self_val = Value::Object {
                 class: class_name.to_string(),
-                fields: fields.clone(),
+                fields: Arc::new(fields.clone()),
             };
 
             let mut local_env = env.clone();
@@ -140,7 +141,7 @@ pub(crate) fn instantiate_class(
                 Ok(crate::interpreter::Control::Return(v)) => Ok(v),
                 Ok(_) => Ok(local_env.get("self").cloned().unwrap_or(Value::Object {
                     class: class_name.to_string(),
-                    fields,
+                    fields: Arc::new(fields),
                 })),
                 Err(CompileError::TryError(val)) => Ok(val),
                 Err(e) => Err(e),
@@ -158,7 +159,7 @@ pub(crate) fn instantiate_class(
         // Create the object with default field values first
         let self_val = Value::Object {
             class: class_name.to_string(),
-            fields: fields.clone(),
+            fields: Arc::new(fields.clone()),
         };
 
         // Set up local environment for __init__
@@ -197,7 +198,7 @@ pub(crate) fn instantiate_class(
         // Return the modified self from local_env
         return Ok(local_env.get(METHOD_SELF).cloned().unwrap_or(Value::Object {
             class: class_name.to_string(),
-            fields,
+            fields: Arc::new(fields),
         }));
     }
 
@@ -260,7 +261,7 @@ pub(crate) fn instantiate_class(
 
     Ok(Value::Object {
         class: class_name.to_string(),
-        fields,
+        fields: Arc::new(fields),
     })
 }
 

@@ -255,7 +255,7 @@ impl Clone for Value {
             },
             Value::Object { class, fields } => Value::Object {
                 class: class.clone(),
-                fields: fields.clone(),
+                fields: Arc::clone(fields),
             },
             Value::Enum {
                 enum_name,

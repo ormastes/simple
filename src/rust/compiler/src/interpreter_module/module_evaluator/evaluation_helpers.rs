@@ -8,7 +8,7 @@ use std::path::Path;
 
 use tracing::{trace, warn};
 
-use simple_parser::ast::{ClassDef, Expr, ImportTarget, Node, Pattern};
+use simple_parser::ast::{ClassDef, Expr, ImportTarget, Node, Pattern, Visibility};
 
 use crate::error::CompileError;
 use crate::value::{Env, Value};
@@ -421,22 +421,30 @@ pub(super) fn export_functions(
         );
     }
 
-    // Second pass: Export functions with filtered environment captured
+    // Second pass: Export public functions with filtered environment captured
+    // Only export functions marked as 'pub' - others need explicit export statements
     trace!(
         functions = local_functions.len(),
         env_size = filtered_env.len(),
-        "Second pass: exporting functions"
+        "Second pass: exporting public functions"
     );
+    let mut exported_count = 0;
     for (name, f) in local_functions {
         let func_with_env = Value::Function {
             name: name.clone(),
             def: Box::new(f.clone()),
             captured_env: filtered_env.clone(),
         };
-        exports.insert(name.clone(), func_with_env.clone());
-        env.insert(name.clone(), func_with_env);
+        // Always add to env (for internal module use)
+        env.insert(name.clone(), func_with_env.clone());
+
+        // Only add to exports if public (or will be added by process_bare_exports if explicitly exported)
+        if f.visibility.is_public() {
+            exports.insert(name.clone(), func_with_env);
+            exported_count += 1;
+        }
     }
-    trace!(exports = exports.len(), "Finished exporting functions");
+    trace!(total_functions = local_functions.len(), exported = exported_count, "Finished exporting public functions");
 }
 
 /// Process bare export statements

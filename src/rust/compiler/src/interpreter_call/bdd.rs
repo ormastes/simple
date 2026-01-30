@@ -8,6 +8,7 @@ use crate::value::*;
 use simple_parser::ast::{Argument, BinOp, ClassDef, EnumDef, Expr, FunctionDef, UnaryOp};
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 type Enums = HashMap<String, EnumDef>;
 type ImplMethods = HashMap<String, Vec<FunctionDef>>;
@@ -84,7 +85,7 @@ fn create_example_group(description: String, parent: Option<Value>) -> Value {
 
     Value::Object {
         class: "ExampleGroup".to_string(),
-        fields,
+        fields: Arc::new(fields),
     }
 }
 
@@ -114,7 +115,7 @@ fn create_example(description: String, block: Value) -> Value {
 
     Value::Object {
         class: "Example".to_string(),
-        fields,
+        fields: Arc::new(fields),
     }
 }
 
@@ -124,7 +125,7 @@ fn add_example_to_current_group(example: Value) {
         let mut stack = cell.borrow_mut();
         if let Some(group) = stack.last_mut() {
             if let Value::Object { fields, .. } = group {
-                if let Some(Value::Array(examples)) = fields.get_mut("test_examples") {
+                if let Some(Value::Array(examples)) = Arc::make_mut(fields).get_mut("test_examples") {
                     examples.push(example);
                 }
             }
@@ -138,7 +139,7 @@ fn add_child_to_current_group(child: &Value) {
         let mut stack = cell.borrow_mut();
         if let Some(group) = stack.last_mut() {
             if let Value::Object { fields, .. } = group {
-                if let Some(Value::Array(children)) = fields.get_mut("children") {
+                if let Some(Value::Array(children)) = Arc::make_mut(fields).get_mut("children") {
                     children.push(child.clone());
                 }
             }
@@ -152,7 +153,7 @@ fn add_hook_to_current_group(hook: Value) {
         let mut stack = cell.borrow_mut();
         if let Some(group) = stack.last_mut() {
             if let Value::Object { fields, .. } = group {
-                if let Some(Value::Array(hooks)) = fields.get_mut("hooks") {
+                if let Some(Value::Array(hooks)) = Arc::make_mut(fields).get_mut("hooks") {
                     hooks.push(hook);
                 }
             }
@@ -166,7 +167,7 @@ fn update_last_child_in_current_group(updated_child: &Value) {
         let mut stack = cell.borrow_mut();
         if let Some(group) = stack.last_mut() {
             if let Value::Object { fields, .. } = group {
-                if let Some(Value::Array(children)) = fields.get_mut("children") {
+                if let Some(Value::Array(children)) = Arc::make_mut(fields).get_mut("children") {
                     if !children.is_empty() {
                         let last_idx = children.len() - 1;
                         children[last_idx] = updated_child.clone();
@@ -1028,7 +1029,7 @@ pub(super) fn eval_bdd_builtin(
                             // Call close() method
                             let mut local_env = env.clone();
                             local_env.insert("self".to_string(), resource_value.clone());
-                            for (k, v) in fields {
+                            for (k, v) in fields.iter() {
                                 local_env.insert(k.clone(), v.clone());
                             }
                             let _ = crate::interpreter::exec_block(
@@ -1059,7 +1060,7 @@ pub(super) fn eval_bdd_builtin(
                             if let Some(method) = class_def.methods.iter().find(|m| m.name == "close") {
                                 let mut local_env = env.clone();
                                 local_env.insert("self".to_string(), resource_value.clone());
-                                for (k, v) in fields {
+                                for (k, v) in fields.iter() {
                                     local_env.insert(k.clone(), v.clone());
                                 }
                                 let _ = crate::interpreter::exec_block(

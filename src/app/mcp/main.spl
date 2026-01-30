@@ -14,6 +14,13 @@ extern fn sys_get_args() -> List<String>
 extern fn sys_exit(code: Int)
 extern fn native_fs_read_string(path: String) -> String
 
+struct ShellResult:
+    exit_code: Int
+    stdout: String?
+    stderr: String?
+
+extern fn rt_shell(command: String) -> ShellResult
+
 # Brace helpers (avoid f-string interpolation issues)
 fn LB() -> String:
     123 as char
@@ -301,19 +308,25 @@ fn make_error_response(id: String, code: Int, message: String) -> String:
 # --- Tool implementations ---
 
 fn read_file_safe(path: String) -> String:
-    val content = unwrap_str(native_fs_read_string(path))
+    val content = native_fs_read_string(path)
     if content == "":
         return "Error: could not read file: " + path
     content
 
 fn list_spl_files(dir: String) -> String:
-    "Simple files in " + dir + ":\\n(directory listing requires fs_read_dir FFI)"
+    val result = rt_shell("find " + dir + " -name '*.spl' -type f | sort")
+    if result.exit_code == 0:
+        return result.stdout ?? "No .spl files found"
+    "Error listing files in " + dir
 
 fn search_files(query: String) -> String:
-    "Search for '" + query + "' requires filesystem iteration FFI"
+    val result = rt_shell("grep -rn '" + query + "' --include='*.spl' . 2>/dev/null | head -50")
+    if result.exit_code == 0:
+        return result.stdout ?? "No matches found"
+    "No matches found for: " + query
 
 fn get_file_info(path: String) -> String:
-    val content = unwrap_str(native_fs_read_string(path))
+    val content = native_fs_read_string(path)
     if content == "":
         return "Error: could not read file: " + path
     val lines = content.split("\n")
@@ -390,7 +403,7 @@ fn handle_read(args: List<String>):
         print("Usage: simple mcp read <file.spl>")
         sys_exit(1)
     val file_path = args[2]
-    val content = unwrap_str(native_fs_read_string(file_path))
+    val content = native_fs_read_string(file_path)
     if content == "":
         print("Error reading file: " + file_path)
         sys_exit(1)
@@ -403,7 +416,7 @@ fn handle_expand(args: List<String>):
         sys_exit(1)
     val file_path = args[2]
     val symbol_name = args[3]
-    val content = unwrap_str(native_fs_read_string(file_path))
+    val content = native_fs_read_string(file_path)
     if content == "":
         print("Error reading file: " + file_path)
         sys_exit(1)
@@ -433,7 +446,7 @@ fn handle_json(args: List<String>):
         print("Usage: simple mcp json <file.spl>")
         sys_exit(1)
     val file_path = args[2]
-    val content = unwrap_str(native_fs_read_string(file_path))
+    val content = native_fs_read_string(file_path)
     if content == "":
         print("Error reading file: " + file_path)
         sys_exit(1)
@@ -446,7 +459,7 @@ fn handle_json(args: List<String>):
 
 fn handle_default_read(args: List<String>):
     val file_path = args[1]
-    val content = unwrap_str(native_fs_read_string(file_path))
+    val content = native_fs_read_string(file_path)
     if content == "":
         print("Error reading file: " + file_path)
         sys_exit(1)

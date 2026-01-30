@@ -10,6 +10,7 @@ use crate::value::*;
 use simple_parser::ast::{Argument, ClassDef, EnumDef, FunctionDef, SelfMode, Type};
 use simple_runtime::value::diagram_ffi;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 type Enums = HashMap<String, EnumDef>;
 type ImplMethods = HashMap<String, Vec<FunctionDef>>;
@@ -93,7 +94,7 @@ pub(crate) fn exec_function(
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
-    self_ctx: Option<(&str, &HashMap<String, Value>)>,
+    self_ctx: Option<(&str, &Arc<HashMap<String, Value>>)>,
 ) -> Result<Value, CompileError> {
     with_effect_check!(func, {
         exec_function_inner(func, args, outer_env, functions, classes, enums, impl_methods, self_ctx)
@@ -140,7 +141,7 @@ pub(crate) fn exec_function_with_values_and_self(
                     "self".into(),
                     Value::Object {
                         class: class_name.to_string(),
-                        fields: fields.clone(),
+                        fields: Arc::new(fields.clone()),
                     },
                 );
             }
@@ -222,7 +223,7 @@ fn exec_function_inner(
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
-    self_ctx: Option<(&str, &HashMap<String, Value>)>,
+    self_ctx: Option<(&str, &Arc<HashMap<String, Value>>)>,
 ) -> Result<Value, CompileError> {
     // Layout recording for 4KB page locality optimization
     crate::layout_recorder::record_function_call(&func.name);
@@ -252,12 +253,12 @@ fn exec_function_inner(
             let self_val = fields.get("self").unwrap().clone();
             local_env.insert("self".into(), self_val);
         } else {
-            // For class methods, self is an Object
+            // For class methods, self is an Object — Arc::clone is O(1)
             local_env.insert(
                 "self".into(),
                 Value::Object {
                     class: class_name.to_string(),
-                    fields: fields.clone(),
+                    fields: Arc::clone(fields),
                 },
             );
         }

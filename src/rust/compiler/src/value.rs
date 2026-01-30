@@ -521,7 +521,7 @@ pub enum Value {
     },
     Object {
         class: String,
-        fields: HashMap<String, Value>,
+        fields: Arc<HashMap<String, Value>>,
     },
     Enum {
         enum_name: String,

@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use simple_parser::ast::{Argument, Expr};
 
@@ -59,7 +60,8 @@ pub(super) fn eval_call_expr(
                 if let Expr::Identifier(var_name) = outer_receiver.as_ref() {
                     // Evaluate the outer receiver to get its current value
                     let outer_val = evaluate_expr(outer_receiver, env, functions, classes, enums, impl_methods)?;
-                    if let Value::Object { class, mut fields } = outer_val {
+                    if let Value::Object { class, fields } = outer_val {
+                        let mut fields = fields;
                         // Get the field value (the inner object)
                         if let Some(field_val) = fields.get(field).cloned() {
                             if let Value::Object {
@@ -80,7 +82,7 @@ pub(super) fn eval_call_expr(
                                     impl_methods,
                                 )? {
                                     // Update the field with the new inner object
-                                    fields.insert(field.clone(), updated_inner);
+                                    Arc::make_mut(&mut fields).insert(field.clone(), updated_inner);
                                     // Update the outer object in env
                                     env.insert(var_name.clone(), Value::Object { class, fields });
                                     return Ok(Some(result));

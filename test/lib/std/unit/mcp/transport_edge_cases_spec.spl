@@ -7,12 +7,16 @@ Status: Complete
 Tests for edge cases, error conditions, and crash prevention in transport layer.
 """
 
-use std.mcp.core.transport
-use std.mcp.core.protocol
+use std.mcp.core.transport.*
+use std.mcp.core.protocol.*
+use std.mcp.core.error_handler.*
+
+# Error code constants (re-declared for test access)
+val ERROR_VALIDATION: i64 = -32002
 
 describe "StdioTransport - negative content length":
     it "rejects negative content length in header":
-        val transport = StdioTransport.new()
+        var transport = StdioTransport.new()
 
         # Try to parse invalid header with negative length
         val result = transport.parse_content_length("Content-Length: -100")
@@ -21,7 +25,7 @@ describe "StdioTransport - negative content length":
 
 describe "StdioTransport - excessive content length":
     it "rejects content length exceeding limit":
-        val transport = StdioTransport.new()
+        var transport = StdioTransport.new()
 
         # Try to parse header with excessive length (>10MB)
         val result = transport.parse_content_length("Content-Length: 20000000")
@@ -29,7 +33,7 @@ describe "StdioTransport - excessive content length":
         expect(result.is_none())
 
     it "accepts content length at exact limit":
-        val transport = StdioTransport.new()
+        var transport = StdioTransport.new()
 
         val result = transport.parse_content_length("Content-Length: 10000000")
 
@@ -37,7 +41,7 @@ describe "StdioTransport - excessive content length":
 
 describe "StdioTransport - malformed content length":
     it "handles non-numeric content length":
-        val transport = StdioTransport.new()
+        var transport = StdioTransport.new()
 
         val result = transport.parse_content_length("Content-Length: abc")
 
@@ -45,7 +49,7 @@ describe "StdioTransport - malformed content length":
         expect(result.is_none() or result.unwrap() == 0)
 
     it "handles content length with trailing garbage":
-        val transport = StdioTransport.new()
+        var transport = StdioTransport.new()
 
         val result = transport.parse_content_length("Content-Length: 123abc")
 
@@ -57,7 +61,7 @@ describe "StdioTransport - malformed content length":
                 fail("Should parse partial number")
 
     it "handles content length with spaces":
-        val transport = StdioTransport.new()
+        var transport = StdioTransport.new()
 
         val result = transport.parse_content_length("Content-Length:  456  ")
 
@@ -69,14 +73,14 @@ describe "StdioTransport - malformed content length":
 
 describe "StdioTransport - malformed JSON":
     it "rejects invalid JSON":
-        val transport = StdioTransport.new()
+        var transport = StdioTransport.new()
 
-        val result = transport.parse_request("{invalid json}")
+        val result = transport.parse_request(r"{invalid json}")
 
         expect(result.err.?)
 
     it "rejects JSON with missing method":
-        val transport = StdioTransport.new()
+        var transport = StdioTransport.new()
 
         val result = transport.parse_request("{\"id\": 1, \"params\": {}}")
 
@@ -88,14 +92,14 @@ describe "StdioTransport - malformed JSON":
                 fail("Expected error")
 
     it "handles JSON with invalid method type":
-        val transport = StdioTransport.new()
+        var transport = StdioTransport.new()
 
         val result = transport.parse_request("{\"id\": 1, \"method\": 123}")
 
         expect(result.err.?)
 
     it "handles non-object JSON":
-        val transport = StdioTransport.new()
+        var transport = StdioTransport.new()
 
         val result = transport.parse_request("[1, 2, 3]")
 
@@ -108,7 +112,7 @@ describe "StdioTransport - malformed JSON":
 
 describe "StdioTransport - ID handling":
     it "handles integer ID":
-        val transport = StdioTransport.new()
+        var transport = StdioTransport.new()
 
         val result = transport.parse_request("{\"id\": 42, \"method\": \"test\"}")
 
@@ -119,7 +123,7 @@ describe "StdioTransport - ID handling":
                 fail("Should parse integer ID")
 
     it "handles string ID as zero":
-        val transport = StdioTransport.new()
+        var transport = StdioTransport.new()
 
         val result = transport.parse_request("{\"id\": \"abc\", \"method\": \"test\"}")
 
@@ -130,7 +134,7 @@ describe "StdioTransport - ID handling":
                 fail("Should accept string ID")
 
     it "handles missing ID":
-        val transport = StdioTransport.new()
+        var transport = StdioTransport.new()
 
         val result = transport.parse_request("{\"method\": \"test\"}")
 
@@ -142,7 +146,7 @@ describe "StdioTransport - ID handling":
 
 describe "StdioTransport - params handling":
     it "handles missing params":
-        val transport = StdioTransport.new()
+        var transport = StdioTransport.new()
 
         val result = transport.parse_request("{\"id\": 1, \"method\": \"test\"}")
 
@@ -153,7 +157,7 @@ describe "StdioTransport - params handling":
                 fail("Should accept missing params")
 
     it "handles empty params object":
-        val transport = StdioTransport.new()
+        var transport = StdioTransport.new()
 
         val result = transport.parse_request("{\"id\": 1, \"method\": \"test\", \"params\": {}}")
 
@@ -164,7 +168,7 @@ describe "StdioTransport - params handling":
                 fail("Should accept empty params")
 
     it "handles non-object params":
-        val transport = StdioTransport.new()
+        var transport = StdioTransport.new()
 
         val result = transport.parse_request("{\"id\": 1, \"method\": \"test\", \"params\": \"invalid\"}")
 
@@ -177,7 +181,7 @@ describe "StdioTransport - params handling":
 
 describe "MockTransport - out of bounds":
     it "returns None when no requests available":
-        val transport = MockTransport.new([])
+        var transport = MockTransport.new([])
 
         val result = transport.read_message()
 
@@ -185,17 +189,17 @@ describe "MockTransport - out of bounds":
 
     it "returns None after all requests consumed":
         val req = JsonRpcRequest(id: 1, method: "test", params: {})
-        val transport = MockTransport.new([req])
+        var transport = MockTransport.new([req])
 
         # First read succeeds
         expect(transport.read_message().?)
 
         # Second read returns None
-        expect(transport.read_message().is_none())
+        expect(not transport.read_message().?)
 
 describe "MockTransport - add_json_request":
     it "parses and adds valid JSON request":
-        val transport = MockTransport.new([])
+        var transport = MockTransport.new([])
 
         val result = transport.add_json_request("{\"id\": 1, \"method\": \"ping\"}")
 
@@ -203,14 +207,14 @@ describe "MockTransport - add_json_request":
         expect(transport.requests.len() == 1)
 
     it "rejects invalid JSON":
-        val transport = MockTransport.new([])
+        var transport = MockTransport.new([])
 
-        val result = transport.add_json_request("{invalid}")
+        val result = transport.add_json_request(r"{invalid}")
 
         expect(result.err.?)
 
     it "rejects non-object JSON":
-        val transport = MockTransport.new([])
+        var transport = MockTransport.new([])
 
         val result = transport.add_json_request("\"string\"")
 
@@ -218,21 +222,21 @@ describe "MockTransport - add_json_request":
 
 describe "Transport - alive status":
     it "StdioTransport starts alive":
-        val transport = StdioTransport.new()
+        var transport = StdioTransport.new()
         expect(transport.is_alive())
 
     it "MockTransport is alive when requests remain":
         val req = JsonRpcRequest(id: 1, method: "test", params: {})
-        val transport = MockTransport.new([req])
+        var transport = MockTransport.new([req])
         expect(transport.is_alive())
 
     it "MockTransport is not alive when requests exhausted":
-        val transport = MockTransport.new([])
+        var transport = MockTransport.new([])
         expect(not transport.is_alive())
 
 describe "Error tracking":
     it "tracks error count in StdioTransport":
-        val transport = StdioTransport.new()
+        var transport = StdioTransport.new()
 
         # Initial error count is zero
         expect(transport.error_count == 0)
@@ -245,7 +249,7 @@ describe "Error tracking":
 
 describe "Debug mode":
     it "can enable debug mode":
-        val transport = StdioTransport.new()
+        var transport = StdioTransport.new()
         expect(not transport.debug_mode)
 
         transport.enable_debug()
@@ -253,7 +257,7 @@ describe "Debug mode":
 
 describe "Response serialization":
     it "serializes response with result":
-        val transport = StdioTransport.new()
+        var transport = StdioTransport.new()
         val response = JsonRpcResponse(id: 1, result: {"status": "ok"})
 
         val json = transport.serialize_response(response)
@@ -263,7 +267,7 @@ describe "Response serialization":
         expect(json.contains("\"result\""))
 
     it "serializes error response":
-        val transport = StdioTransport.new()
+        var transport = StdioTransport.new()
 
         val json = transport.serialize_error(1, -32600, "Invalid request")
 
@@ -275,7 +279,7 @@ describe "Response serialization":
 
 describe "Content-Length header format":
     it "parses standard header":
-        val transport = StdioTransport.new()
+        var transport = StdioTransport.new()
 
         val result = transport.parse_content_length("Content-Length: 123")
 
@@ -286,14 +290,14 @@ describe "Content-Length header format":
                 fail("Should parse standard header")
 
     it "rejects header without colon":
-        val transport = StdioTransport.new()
+        var transport = StdioTransport.new()
 
         val result = transport.parse_content_length("Content-Length 123")
 
         expect(result.is_none())
 
     it "rejects completely wrong header":
-        val transport = StdioTransport.new()
+        var transport = StdioTransport.new()
 
         val result = transport.parse_content_length("X-Custom-Header: 123")
 
@@ -301,7 +305,7 @@ describe "Content-Length header format":
 
 describe "Zero-length content":
     it "accepts zero content length":
-        val transport = StdioTransport.new()
+        var transport = StdioTransport.new()
 
         val result = transport.parse_content_length("Content-Length: 0")
 
@@ -313,7 +317,7 @@ describe "Zero-length content":
 
 describe "Large valid requests":
     it "accepts request at size limit":
-        val transport = StdioTransport.new()
+        var transport = StdioTransport.new()
 
         # Just under 1MB string limit
         val large_json = "{\"id\": 1, \"method\": \"test\", \"params\": {}}"
@@ -323,7 +327,7 @@ describe "Large valid requests":
 
 describe "Validator integration":
     it "uses validator for content length":
-        val transport = StdioTransport.new()
+        var transport = StdioTransport.new()
 
         # This should fail validation (>10MB)
         val result = transport.parse_content_length("Content-Length: 50000000")
@@ -331,7 +335,7 @@ describe "Validator integration":
         expect(result.is_none())
 
     it "uses validator for JSON parsing":
-        val transport = StdioTransport.new()
+        var transport = StdioTransport.new()
 
         # Valid JSON but let's check it validates
         val result = transport.parse_request("{\"id\": 1, \"method\": \"test\"}")

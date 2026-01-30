@@ -7,6 +7,7 @@ use crate::interpreter::{bind_args, exec_block_fn, Control, Enums, ImplMethods, 
 use crate::value::{Env, OptionVariant, ResultVariant, SpecialEnumType, Value};
 use simple_parser::ast::{Argument, ClassDef, FunctionDef};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// Extract result from exec_block_fn return value
 macro_rules! extract_block_result {
@@ -25,7 +26,7 @@ pub fn find_and_exec_method_with_self(
     method: &str,
     args: &[Argument],
     class: &str,
-    fields: &HashMap<String, Value>,
+    fields: &Arc<HashMap<String, Value>>,
     env: &mut Env,
     functions: &mut HashMap<String, FunctionDef>,
     classes: &mut HashMap<String, ClassDef>,
@@ -79,16 +80,16 @@ pub fn exec_function_with_self_return(
     enums: &Enums,
     impl_methods: &ImplMethods,
     class_name: &str,
-    fields: &HashMap<String, Value>,
+    fields: &Arc<HashMap<String, Value>>,
 ) -> Result<(Value, Value), CompileError> {
     let mut local_env = Env::new();
 
-    // Set up self
+    // Set up self — Arc::clone is O(1), no deep copy
     local_env.insert(
         "self".into(),
         Value::Object {
             class: class_name.to_string(),
-            fields: fields.clone(),
+            fields: Arc::clone(fields),
         },
     );
 
@@ -138,7 +139,7 @@ pub fn exec_function_with_self_return(
     // Get the potentially modified self
     let updated_self = local_env.get("self").cloned().unwrap_or_else(|| Value::Object {
         class: class_name.to_string(),
-        fields: fields.clone(),
+        fields: Arc::clone(fields),
     });
 
     // DEBUG: Check if updated_self is correct type

@@ -218,7 +218,7 @@
     fn test_value_truthy_object() {
         assert!(Value::Object {
             class: "Test".into(),
-            fields: HashMap::new()
+            fields: Arc::new(HashMap::new())
         }.truthy());
     }
 
@@ -293,7 +293,7 @@
         assert_eq!(Value::Nil.type_name(), "nil");
         assert_eq!(Value::Object {
             class: "Test".into(),
-            fields: HashMap::new()
+            fields: Arc::new(HashMap::new())
         }.type_name(), "object");
         assert_eq!(Value::Enum {
             enum_name: "Option".into(),
@@ -368,7 +368,7 @@
     fn test_value_matches_type_object() {
         let obj = Value::Object {
             class: "Person".into(),
-            fields: HashMap::new()
+            fields: Arc::new(HashMap::new())
         };
         assert!(obj.matches_type("Person"));
         assert!(!obj.matches_type("Car"));
@@ -451,7 +451,7 @@
     fn test_value_clone_object() {
         let v = Value::Object {
             class: "Test".into(),
-            fields: HashMap::new()
+            fields: Arc::new(HashMap::new())
         };
         assert_eq!(v.clone(), v);
     }

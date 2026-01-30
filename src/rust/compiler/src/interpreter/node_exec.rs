@@ -1,6 +1,7 @@
 // Node execution logic - statement and expression evaluation
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use simple_parser::ast::{AssignOp, BinOp, ClassDef, Expr, FunctionDef, Node, Type};
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::value::{Env, Value};
@@ -447,8 +448,9 @@ fn exec_assignment(
         if let Expr::Identifier(obj_name) = receiver.as_ref() {
             if let Some(obj_val) = env.get(obj_name).cloned() {
                 match obj_val {
-                    Value::Object { class, mut fields } => {
-                        fields.insert(field.clone(), value);
+                    Value::Object { class, fields } => {
+                        let mut fields = fields;
+                        Arc::make_mut(&mut fields).insert(field.clone(), value);
                         env.insert(obj_name.clone(), Value::Object { class, fields });
                     }
                     _ => {
@@ -495,18 +497,20 @@ fn exec_assignment(
             if let Expr::Identifier(obj_name) = inner_receiver.as_ref() {
                 if let Some(obj_val) = env.get(obj_name).cloned() {
                     match obj_val {
-                        Value::Object { class, mut fields } => {
+                        Value::Object { class, fields } => {
+                            let mut fields = fields;
                             // Get the inner object
                             if let Some(inner_val) = fields.get(inner_field).cloned() {
                                 match inner_val {
                                     Value::Object {
                                         class: inner_class,
-                                        fields: mut inner_fields,
+                                        fields: inner_fields,
                                     } => {
                                         // Set the field on the inner object
-                                        inner_fields.insert(field.clone(), value);
+                                        let mut inner_fields = inner_fields;
+                                        Arc::make_mut(&mut inner_fields).insert(field.clone(), value);
                                         // Update the inner object in the outer object
-                                        fields.insert(
+                                        Arc::make_mut(&mut fields).insert(
                                             inner_field.clone(),
                                             Value::Object {
                                                 class: inner_class,
@@ -701,7 +705,8 @@ fn exec_assignment(
             if let Expr::Identifier(obj_name) = obj_expr.as_ref() {
                 if let Some(obj_val) = env.get(obj_name).cloned() {
                     match obj_val {
-                        Value::Object { class, mut fields } => {
+                        Value::Object { class, fields } => {
+                            let mut fields = fields;
                             if let Some(container) = fields.get(field_name).cloned() {
                                 let new_container = match container {
                                     Value::Array(mut arr) => {
@@ -755,7 +760,7 @@ fn exec_assignment(
                                         ));
                                     }
                                 };
-                                fields.insert(field_name.clone(), new_container);
+                                Arc::make_mut(&mut fields).insert(field_name.clone(), new_container);
                                 env.insert(obj_name.clone(), Value::Object { class, fields });
                                 Ok(Control::Next)
                             } else {
@@ -844,12 +849,12 @@ fn exec_assignment(
                                                 ));
                                             }
                                         };
-                                        inner_fields.insert(field_name.clone(), new_container);
+                                        Arc::make_mut(&mut inner_fields).insert(field_name.clone(), new_container);
                                         let new_inner_obj = Value::Object {
                                             class: inner_class,
                                             fields: inner_fields,
                                         };
-                                        root_fields.insert(inner_field_name.clone(), new_inner_obj);
+                                        Arc::make_mut(&mut root_fields).insert(inner_field_name.clone(), new_inner_obj);
                                         env.insert(
                                             root_name.clone(),
                                             Value::Object {
@@ -1033,7 +1038,8 @@ fn exec_augmented_assignment(
         if let Expr::Identifier(obj_name) = receiver.as_ref() {
             if let Some(obj_val) = env.get(obj_name).cloned() {
                 match obj_val {
-                    Value::Object { class, mut fields } => {
+                    Value::Object { class, fields } => {
+                        let mut fields = fields;
                         // Evaluate the RHS
                         let mut rhs_value = evaluate_expr(&assign.value, env, functions, classes, enums, impl_methods)?;
 
@@ -1067,7 +1073,7 @@ fn exec_augmented_assignment(
                             rhs_value
                         };
 
-                        fields.insert(field.clone(), new_value);
+                        Arc::make_mut(&mut fields).insert(field.clone(), new_value);
                         env.insert(obj_name.clone(), Value::Object { class, fields });
                         Ok(Control::Next)
                     }
@@ -1101,14 +1107,16 @@ fn exec_augmented_assignment(
             if let Expr::Identifier(obj_name) = inner_receiver.as_ref() {
                 if let Some(obj_val) = env.get(obj_name).cloned() {
                     match obj_val {
-                        Value::Object { class, mut fields } => {
+                        Value::Object { class, fields } => {
+                            let mut fields = fields;
                             // Get the inner object
                             if let Some(inner_val) = fields.get(inner_field).cloned() {
                                 match inner_val {
                                     Value::Object {
                                         class: inner_class,
-                                        fields: mut inner_fields,
+                                        fields: inner_fields,
                                     } => {
+                                        let mut inner_fields = inner_fields;
                                         // Evaluate the RHS
                                         let mut rhs_value =
                                             evaluate_expr(&assign.value, env, functions, classes, enums, impl_methods)?;
@@ -1149,9 +1157,9 @@ fn exec_augmented_assignment(
                                         };
 
                                         // Set the field on the inner object
-                                        inner_fields.insert(field.clone(), new_value);
+                                        Arc::make_mut(&mut inner_fields).insert(field.clone(), new_value);
                                         // Update the inner object in the outer object
-                                        fields.insert(
+                                        Arc::make_mut(&mut fields).insert(
                                             inner_field.clone(),
                                             Value::Object {
                                                 class: inner_class,

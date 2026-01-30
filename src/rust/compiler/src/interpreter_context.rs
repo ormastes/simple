@@ -29,7 +29,7 @@ pub(super) fn dispatch_context_method(
             method,
             args,
             class.as_str(),
-            fields,
+            &fields,
             env,
             functions,
             classes,

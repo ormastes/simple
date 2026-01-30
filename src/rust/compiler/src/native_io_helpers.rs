@@ -6,6 +6,7 @@
 //! - Value extraction utilities for function arguments
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::io::{self, ErrorKind};
 
 use crate::error::{codes, CompileError, ErrorContext};
@@ -219,7 +220,7 @@ pub fn create_file_metadata(meta: &std::fs::Metadata) -> Value {
 
     Value::Object {
         class: "FileMetadata".to_string(),
-        fields,
+        fields: Arc::new(fields),
     }
 }
 
@@ -254,6 +255,6 @@ pub fn create_dir_entry(entry: &std::fs::DirEntry) -> Value {
 
     Value::Object {
         class: "DirEntry".to_string(),
-        fields,
+        fields: Arc::new(fields),
     }
 }

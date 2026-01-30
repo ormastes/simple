@@ -7,6 +7,7 @@
 //! - Main function discovery and execution
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use simple_parser::ast::{ClassDef, EnumDef, Expr, FunctionDef, ImportTarget, Node, UnitDef};
 
@@ -455,7 +456,7 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                     a.name.clone(),
                     Value::Object {
                         class: a.name.clone(),
-                        fields: HashMap::new(),
+                        fields: Arc::new(HashMap::new()),
                     },
                 );
             }
