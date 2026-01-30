@@ -312,19 +312,39 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                 // Exit class scope
                 exit_class_scope();
 
-                // Inject mixin fields and methods into class
+                // Inject mixin fields and methods into class (with transitive resolution)
                 let mut mixin_fields = Vec::new();
                 let mut mixin_methods = Vec::new();
                 if !c.mixins.is_empty() {
                     let existing_method_names: std::collections::HashSet<_> =
                         c.methods.iter().map(|m| m.name.clone()).collect();
+                    let mut seen_field_names: std::collections::HashSet<String> =
+                        c.fields.iter().map(|f| f.name.clone()).collect();
+                    let mut seen_method_names = existing_method_names;
                     MIXINS.with(|cell| {
                         let mixins_registry = cell.borrow();
-                        for mixin_ref in &c.mixins {
-                            if let Some(mixin_def) = mixins_registry.get(&mixin_ref.name) {
-                                mixin_fields.extend(mixin_def.fields.clone());
+                        // Transitive resolution: BFS through mixin dependencies
+                        let mut seen_mixins = std::collections::HashSet::new();
+                        let mut queue: std::collections::VecDeque<String> =
+                            c.mixins.iter().map(|m| m.name.clone()).collect();
+                        while let Some(mixin_name) = queue.pop_front() {
+                            if !seen_mixins.insert(mixin_name.clone()) {
+                                continue; // Diamond dedup
+                            }
+                            if let Some(mixin_def) = mixins_registry.get(&mixin_name) {
+                                // Queue transitive dependencies
+                                for req in &mixin_def.required_mixins {
+                                    queue.push_back(req.clone());
+                                }
+                                // Collect fields (dedup by name)
+                                for field in &mixin_def.fields {
+                                    if seen_field_names.insert(field.name.clone()) {
+                                        mixin_fields.push(field.clone());
+                                    }
+                                }
+                                // Collect methods (skip if already defined)
                                 for method in &mixin_def.methods {
-                                    if !existing_method_names.contains(&method.name) {
+                                    if seen_method_names.insert(method.name.clone()) {
                                         mixin_methods.push(method.clone());
                                     }
                                 }

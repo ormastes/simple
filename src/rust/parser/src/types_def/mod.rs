@@ -188,7 +188,15 @@ impl<'a> Parser<'a> {
         };
 
         let _where_clause = self.parse_where_clause()?;
-        let (fields, methods, _invariant, _macro_invocations, _mixins, doc_comment) = self.parse_class_body()?;
+        let (fields, methods, _invariant, _macro_invocations, inner_mixins, doc_comment) = self.parse_class_body()?;
+
+        // Merge `use` declarations from mixin body into required_mixins
+        let mut all_required_mixins = required_mixins;
+        for mref in &inner_mixins {
+            if !all_required_mixins.contains(&mref.name) {
+                all_required_mixins.push(mref.name.clone());
+            }
+        }
 
         // Parse required methods (methods without bodies)
         let required_methods = methods
@@ -209,7 +217,7 @@ impl<'a> Parser<'a> {
             name,
             generic_params,
             required_traits,
-            required_mixins,
+            required_mixins: all_required_mixins,
             fields,
             methods,
             required_methods,
