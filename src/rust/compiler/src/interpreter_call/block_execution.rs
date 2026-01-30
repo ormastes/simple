@@ -16,6 +16,37 @@ use std::sync::Arc;
 type Enums = HashMap<String, EnumDef>;
 type ImplMethods = HashMap<String, Vec<FunctionDef>>;
 
+/// Inject mixin fields and methods into a ClassDef.
+/// Returns a new ClassDef with mixin fields prepended and mixin methods appended.
+fn inject_mixins(class_def: &ClassDef) -> ClassDef {
+    if class_def.mixins.is_empty() {
+        return class_def.clone();
+    }
+    let mut updated = class_def.clone();
+    let existing_method_names: std::collections::HashSet<_> =
+        class_def.methods.iter().map(|m| m.name.clone()).collect();
+    let mut mixin_fields = Vec::new();
+    let mut mixin_methods = Vec::new();
+    MIXINS.with(|cell| {
+        let registry = cell.borrow();
+        for mixin_ref in &class_def.mixins {
+            if let Some(mixin_def) = registry.get(&mixin_ref.name) {
+                mixin_fields.extend(mixin_def.fields.clone());
+                for method in &mixin_def.methods {
+                    if !existing_method_names.contains(&method.name) {
+                        mixin_methods.push(method.clone());
+                    }
+                }
+            }
+        }
+    });
+    if !mixin_fields.is_empty() {
+        updated.fields.splice(0..0, mixin_fields);
+    }
+    updated.methods.extend(mixin_methods);
+    updated
+}
+
 fn get_iterator_values(iterable: &Value) -> Result<Vec<Value>, CompileError> {
     match iterable {
         Value::Array(arr) => Ok(arr.clone()),
@@ -397,13 +428,13 @@ pub(super) fn exec_block_closure(
             }
             Node::Class(class_def) => {
                 // Handle class definitions inside block closures (like in `it` blocks)
-                // The class is added to the classes map for the duration of this block
-                classes.insert(class_def.name.clone(), class_def.clone());
-                // Also add to local env as Constructor so it can be called like MyClass()
+                // Inject mixin fields/methods before registration
+                let final_class = inject_mixins(class_def);
+                classes.insert(final_class.name.clone(), final_class.clone());
                 local_env.insert(
-                    class_def.name.clone(),
+                    final_class.name.clone(),
                     Value::Constructor {
-                        class_name: class_def.name.clone(),
+                        class_name: final_class.name.clone(),
                     },
                 );
                 last_value = Value::Nil;
@@ -482,12 +513,12 @@ pub(super) fn exec_block_closure(
                 last_value = Value::Nil;
             }
             Node::Class(c) => {
-                // Handle class definitions inside block closures (e.g., in `it` blocks)
-                classes.insert(c.name.clone(), c.clone());
+                let final_class = inject_mixins(c);
+                classes.insert(final_class.name.clone(), final_class.clone());
                 local_env.insert(
-                    c.name.clone(),
+                    final_class.name.clone(),
                     Value::Constructor {
-                        class_name: c.name.clone(),
+                        class_name: final_class.name.clone(),
                     },
                 );
                 last_value = Value::Nil;
@@ -869,11 +900,12 @@ fn exec_block_closure_mut(
                 last_value = Value::Nil;
             }
             Node::Class(c) => {
-                classes.insert(c.name.clone(), c.clone());
+                let final_class = inject_mixins(c);
+                classes.insert(final_class.name.clone(), final_class.clone());
                 local_env.insert(
-                    c.name.clone(),
+                    final_class.name.clone(),
                     Value::Constructor {
-                        class_name: c.name.clone(),
+                        class_name: final_class.name.clone(),
                     },
                 );
                 last_value = Value::Nil;

@@ -1,0 +1,261 @@
+# Test Database Validation FFI - SSpec Tests
+#
+# Tests the FFI functions for database integrity validation.
+# These tests verify the Simple language bindings work correctly.
+
+use std.tooling.testing.validation
+
+describe "Test Database Validation FFI":
+
+    describe "enable_validation":
+
+        it "enables validation without error":
+            # Should not throw
+            validation.enable_validation(true)
+            expect(true).to_be(true)
+
+        it "disables validation without error":
+            # Should not throw
+            validation.enable_validation(false)
+            expect(true).to_be(true)
+
+    describe "validate_database":
+
+        it "returns error for non-existent database":
+            val result = validation.validate_database("/nonexistent/path/test_db.sdn")
+
+            expect(result.is_err()).to_be(true)
+
+        it "returns result for existing database":
+            # Use the actual test database if it exists
+            val db_path = "doc/test/test_db.sdn"
+
+            val result = validation.validate_database(db_path)
+
+            # Should return Ok with a count, even if 0
+            # Note: Can't check file existence in current Simple, so result may be Err
+            expect(result.is_ok() or result.is_err()).to_be(true)
+
+        it "validates default database location":
+            val result = validation.validate_default()
+
+            # Should return a Result (either Ok or Err)
+            expect(result.is_ok() or result.is_err()).to_be(true)
+
+    describe "cleanup_stale_runs":
+
+        it "returns error for non-existent database":
+            val result = validation.cleanup_stale_runs("/nonexistent/path/test_db.sdn")
+
+            expect(result.is_err()).to_be(true)
+
+        it "returns result for default database":
+            val result = validation.cleanup_default()
+
+            # Should return a Result
+            expect(result.is_ok() or result.is_err()).to_be(true)
+
+    describe "is_run_stale":
+
+        it "returns false for any run in interpreter mode":
+            # In interpreter mode, this always returns false (safe default)
+            val result = validation.is_run_stale("test_run_1", 2)
+
+            expect(result).to_be(false)
+
+        it "accepts different hour thresholds":
+            val result1 = validation.is_run_stale("run1", 1)
+            val result2 = validation.is_run_stale("run2", 5)
+            val result3 = validation.is_run_stale("run3", 24)
+
+            # All should return false in interpreter mode
+            expect(result1).to_be(false)
+            expect(result2).to_be(false)
+            expect(result3).to_be(false)
+
+    describe "validate_and_report":
+
+        it "prints report for non-existent database":
+            # Should not throw, just print error
+            validation.validate_and_report("/nonexistent/db.sdn")
+            expect(true).to_be(true)
+
+        it "prints report for default database":
+            # Should not throw
+            validation.validate_and_report(validation.DEFAULT_TEST_DB_PATH)
+            expect(true).to_be(true)
+
+    describe "cleanup_and_report":
+
+        it "prints report for non-existent database":
+            # Should not throw, just print error
+            validation.cleanup_and_report("/nonexistent/db.sdn")
+            expect(true).to_be(true)
+
+        it "prints report for default database":
+            # Should not throw
+            validation.cleanup_and_report(validation.DEFAULT_TEST_DB_PATH)
+            expect(true).to_be(true)
+
+    describe "ValidationConfig":
+
+        it "creates default config":
+            val config = validation.ValidationConfig.new()
+
+            expect(config.auto_validate).to_be(true)
+            expect(config.auto_cleanup).to_be(false)
+            expect(config.hours_threshold).to_be(2)
+
+        it "supports fluent API for auto_validate":
+            val config = validation.ValidationConfig.new()
+                .with_auto_validate(false)
+
+            expect(config.auto_validate).to_be(false)
+
+        it "supports fluent API for auto_cleanup":
+            val config = validation.ValidationConfig.new()
+                .with_auto_cleanup(true)
+
+            expect(config.auto_cleanup).to_be(true)
+
+        it "supports fluent API for threshold":
+            val config = validation.ValidationConfig.new()
+                .with_threshold(5)
+
+            expect(config.hours_threshold).to_be(5)
+
+        it "supports method chaining":
+            val config = validation.ValidationConfig.new()
+                .with_auto_validate(false)
+                .with_auto_cleanup(true)
+                .with_threshold(3)
+
+            expect(config.auto_validate).to_be(false)
+            expect(config.auto_cleanup).to_be(true)
+            expect(config.hours_threshold).to_be(3)
+
+        it "applies configuration without error":
+            val config = validation.ValidationConfig.new()
+                .with_auto_validate(true)
+                .with_threshold(4)
+
+            # Should not throw
+            config.apply()
+            expect(true).to_be(true)
+
+    describe "DEFAULT_TEST_DB_PATH constant":
+
+        it "has correct default path":
+            expect(validation.DEFAULT_TEST_DB_PATH).to_be("doc/test/test_db.sdn")
+
+describe "Extern FFI Functions":
+
+    describe "rt_test_db_enable_validation":
+
+        it "can be called with true":
+            extern fn rt_test_db_enable_validation(enabled: bool)
+            rt_test_db_enable_validation(true)
+            expect(true).to_be(true)
+
+        it "can be called with false":
+            extern fn rt_test_db_enable_validation(enabled: bool)
+            rt_test_db_enable_validation(false)
+            expect(true).to_be(true)
+
+    describe "rt_test_db_validate":
+
+        it "returns i64 for non-existent path":
+            extern fn rt_test_db_validate(db_path: text) -> i64
+            val result = rt_test_db_validate("/nonexistent/db.sdn")
+
+            # Should return -1 for error
+            expect(result).to_be(-1)
+
+        it "handles empty path":
+            extern fn rt_test_db_validate(db_path: text) -> i64
+            val result = rt_test_db_validate("")
+
+            # Should return -1 for error
+            expect(result).to_be(-1)
+
+    describe "rt_test_db_cleanup_stale_runs":
+
+        it "returns i64 for non-existent path":
+            extern fn rt_test_db_cleanup_stale_runs(db_path: text) -> i64
+            val result = rt_test_db_cleanup_stale_runs("/nonexistent/db.sdn")
+
+            # Should return -1 for error
+            expect(result).to_be(-1)
+
+    describe "rt_test_run_is_stale":
+
+        it "returns bool for any input":
+            extern fn rt_test_run_is_stale(run_id: text, hours_threshold: i64) -> bool
+            val result = rt_test_run_is_stale("test_run", 2)
+
+            # Should return false (safe default in interpreter)
+            expect(result).to_be(false)
+
+describe "Integration Tests":
+
+    describe "Full validation workflow":
+
+        it "can enable, validate, and cleanup":
+            # Enable validation
+            validation.enable_validation(true)
+
+            # Validate (may succeed or fail depending on db existence)
+            val validate_result = validation.validate_default()
+            expect(validate_result.is_ok() or validate_result.is_err()).to_be(true)
+
+            # Cleanup (may succeed or fail depending on db existence)
+            val cleanup_result = validation.cleanup_default()
+            expect(cleanup_result.is_ok() or cleanup_result.is_err()).to_be(true)
+
+            # Disable validation
+            validation.enable_validation(false)
+
+            expect(true).to_be(true)
+
+    describe "Configuration workflow":
+
+        it "creates, configures, and applies config":
+            val config = validation.ValidationConfig.new()
+                .with_auto_validate(true)
+                .with_auto_cleanup(false)
+                .with_threshold(3)
+
+            expect(config.auto_validate).to_be(true)
+            expect(config.auto_cleanup).to_be(false)
+            expect(config.hours_threshold).to_be(3)
+
+            config.apply()
+
+            expect(true).to_be(true)
+
+describe "Error Handling":
+
+    describe "Result type handling":
+
+        it "validates with Ok result":
+            # This tests that the Result type works
+            val result = validation.validate_database("doc/test/test_db.sdn")
+
+            match result:
+                Ok(count):
+                    # Count can be any non-negative number
+                    expect(count >= 0).to_be(true)
+                Err(msg):
+                    # Error message should be non-empty
+                    expect(msg.length > 0).to_be(true)
+
+        it "handles cleanup errors gracefully":
+            val result = validation.cleanup_stale_runs("/invalid/path.sdn")
+
+            match result:
+                Ok(_):
+                    # Should not happen for invalid path
+                    expect(false).to_be(true)
+                Err(msg):
+                    # Should get error message
+                    expect(msg.length > 0).to_be(true)

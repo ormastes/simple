@@ -176,7 +176,9 @@ impl Parser<'_> {
             } else {
                 false
             };
-            let expr = self.parse_expression()?;
+            let mut expr = self.parse_expression()?;
+            // Support no-paren calls in assignment: val x = double 5
+            expr = self.parse_with_no_paren_calls(expr)?;
             // Consume matching dedent if we consumed an indent
             if consumed_indent {
                 // Skip newlines before dedent
@@ -201,7 +203,9 @@ impl Parser<'_> {
             } else {
                 false
             };
-            let expr = self.parse_expression()?;
+            let mut expr = self.parse_expression()?;
+            // Support no-paren calls in suspend assignment: val x ~= double 5
+            expr = self.parse_with_no_paren_calls(expr)?;
             // Consume matching dedent if we consumed an indent
             if consumed_indent {
                 // Skip newlines before dedent

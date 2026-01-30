@@ -104,8 +104,139 @@ pub fn rt_cli_run_repl(_args: &[Value]) -> Result<Value, CompileError> {
 }
 
 /// Run tests
-pub fn rt_cli_run_tests(_args: &[Value]) -> Result<Value, CompileError> {
-    interpreter_not_supported("rt_cli_run_tests")
+pub fn rt_cli_run_tests(args: &[Value]) -> Result<Value, CompileError> {
+    // Extract arguments
+    let mut cmd_args = Vec::new();
+    if !args.is_empty() {
+        match &args[0] {
+            Value::Array(arr) => {
+                for val in arr {
+                    if let Value::Str(s) = val {
+                        cmd_args.push(s.clone());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Get GC flags
+    let gc_log = if args.len() > 1 {
+        matches!(&args[1], Value::Bool(true) | Value::Int(1))
+    } else {
+        false
+    };
+    let gc_off = if args.len() > 2 {
+        matches!(&args[2], Value::Bool(true) | Value::Int(1))
+    } else {
+        false
+    };
+
+    // Execute test runner
+    use std::process::Command;
+    let mut cmd = Command::new(std::env::current_exe().unwrap_or_else(|_| "simple_old".into()));
+    cmd.arg("test");
+
+    for arg in &cmd_args {
+        cmd.arg(arg);
+    }
+
+    if gc_log {
+        cmd.arg("--gc-log");
+    }
+    if gc_off {
+        cmd.arg("--gc-off");
+    }
+
+    cmd.env("SIMPLE_TEST_RUNNER_RUST", "1");
+
+    match cmd.status() {
+        Ok(status) => Ok(Value::Int(status.code().unwrap_or(1) as i64)),
+        Err(e) => {
+            eprintln!("Failed to run tests: {}", e);
+            Ok(Value::Int(1))
+        }
+    }
+}
+
+/// Validate test database
+pub fn rt_test_db_validate(args: &[Value]) -> Result<Value, CompileError> {
+    let path = match args.first() {
+        Some(Value::Str(s)) => s.clone(),
+        _ => return Ok(Value::Int(-1)),
+    };
+
+    use std::process::Command;
+    let mut cmd = Command::new(std::env::current_exe().unwrap_or_else(|_| "simple_old".into()));
+    cmd.arg("test");
+    cmd.arg("--validate-db");
+    cmd.arg(&path);
+    cmd.env("SIMPLE_TEST_DEBUG", "basic");
+
+    match cmd.output() {
+        Ok(output) => {
+            if output.status.success() {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                for line in stdout.lines() {
+                    if line.starts_with("VIOLATIONS:") {
+                        if let Some(count_str) = line.split(':').nth(1) {
+                            if let Ok(count) = count_str.trim().parse::<i64>() {
+                                return Ok(Value::Int(count));
+                            }
+                        }
+                    }
+                }
+                Ok(Value::Int(0))
+            } else {
+                Ok(Value::Int(-1))
+            }
+        }
+        Err(_) => Ok(Value::Int(-1)),
+    }
+}
+
+/// Enable database validation
+pub fn rt_test_db_enable_validation(args: &[Value]) -> Result<Value, CompileError> {
+    let enabled = match args.first() {
+        Some(Value::Bool(b)) => *b,
+        Some(Value::Int(i)) => *i != 0,
+        _ => false,
+    };
+
+    if enabled {
+        std::env::set_var("SIMPLE_TEST_DEBUG", "basic");
+    } else {
+        std::env::remove_var("SIMPLE_TEST_DEBUG");
+    }
+
+    Ok(Value::Nil)
+}
+
+/// Check if test run is stale
+pub fn rt_test_run_is_stale(_args: &[Value]) -> Result<Value, CompileError> {
+    // Requires database access - not available in interpreter mode
+    Ok(Value::Bool(false))
+}
+
+/// Cleanup stale test runs
+pub fn rt_test_db_cleanup_stale_runs(args: &[Value]) -> Result<Value, CompileError> {
+    let path = match args.first() {
+        Some(Value::Str(s)) => s.clone(),
+        _ => return Ok(Value::Int(-1)),
+    };
+
+    use std::process::Command;
+    let mut cmd = Command::new(std::env::current_exe().unwrap_or_else(|_| "simple_old".into()));
+    cmd.arg("test");
+    cmd.arg("--cleanup-runs");
+    cmd.arg("--db-path");
+    cmd.arg(&path);
+    cmd.env("SIMPLE_TEST_AUTO_CLEANUP", "1");
+
+    match cmd.status() {
+        Ok(status) => Ok(Value::Int(if status.success() { 0 } else { -1 })),
+        Err(_) => Ok(Value::Int(-1)),
+    }
 }
 
 /// Run linter
