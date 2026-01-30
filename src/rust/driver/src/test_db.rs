@@ -1664,6 +1664,16 @@ pub fn generate_test_result_docs(db: &TestDb, output_dir: &Path) -> Result<(), S
     Ok(())
 }
 
+/// Check if a test record needs qualification (ignored but not yet qualified)
+pub fn needs_qualification(record: &TestRecord) -> bool {
+    record.status == TestStatus::Ignored && record.qualified_by.is_none()
+}
+
+/// Count the number of unqualified ignored tests in the database
+pub fn count_unqualified_ignores(db: &TestDb) -> usize {
+    db.records.values().filter(|r| needs_qualification(r)).count()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

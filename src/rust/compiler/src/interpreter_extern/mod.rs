@@ -65,6 +65,9 @@ pub mod cranelift;
 pub mod sandbox;
 pub mod mock_policy;
 pub mod ffi_value;
+pub mod ffi_array;
+pub mod ffi_dict;
+pub mod ffi_string;
 
 // Import parent interpreter types
 type Enums = HashMap<String, EnumDef>;
@@ -429,10 +432,12 @@ pub(crate) fn call_extern_function(
         "rt_channel_is_closed" => concurrency::rt_channel_is_closed(&evaluated),
 
         // ====================================================================
-        // Runtime Config Operations (2 functions)
+        // Runtime Config Operations (4 functions)
         // ====================================================================
         "rt_set_macro_trace" => system::rt_set_macro_trace(&evaluated),
         "rt_set_debug_mode" => system::rt_set_debug_mode(&evaluated),
+        "rt_is_macro_trace_enabled" => system::rt_is_macro_trace_enabled(&evaluated),
+        "rt_is_debug_mode_enabled" => system::rt_is_debug_mode_enabled(&evaluated),
 
         // ====================================================================
         // Ratatui TUI Functions (8 functions)
@@ -816,6 +821,34 @@ pub(crate) fn call_extern_function(
         "rt_value_is_bool" => ffi_value::rt_value_is_bool_fn(&evaluated),
         "rt_value_is_heap" => ffi_value::rt_value_is_heap_fn(&evaluated),
 
+        // ====================================================================
+        // FFI Array Operations (7 functions)
+        // ====================================================================
+        "rt_array_new" => ffi_array::rt_array_new_fn(&evaluated),
+        "rt_array_push" => ffi_array::rt_array_push_fn(&evaluated),
+        "rt_array_get" => ffi_array::rt_array_get_fn(&evaluated),
+        "rt_array_set" => ffi_array::rt_array_set_fn(&evaluated),
+        "rt_array_pop" => ffi_array::rt_array_pop_fn(&evaluated),
+        "rt_array_clear" => ffi_array::rt_array_clear_fn(&evaluated),
+        "rt_array_len" => ffi_array::rt_array_len_fn(&evaluated),
+
+        // ====================================================================
+        // FFI Dictionary Operations (7 functions)
+        // ====================================================================
+        "rt_dict_new" => ffi_dict::rt_dict_new_fn(&evaluated),
+        "rt_dict_set" => ffi_dict::rt_dict_set_fn(&evaluated),
+        "rt_dict_get" => ffi_dict::rt_dict_get_fn(&evaluated),
+        "rt_dict_len" => ffi_dict::rt_dict_len_fn(&evaluated),
+        "rt_dict_clear" => ffi_dict::rt_dict_clear_fn(&evaluated),
+        "rt_dict_keys" => ffi_dict::rt_dict_keys_fn(&evaluated),
+        "rt_dict_values" => ffi_dict::rt_dict_values_fn(&evaluated),
+
+        // ====================================================================
+        // FFI String Operations (4 functions)
+        // ====================================================================
+        "rt_string_new" => ffi_string::rt_string_new_fn(&evaluated),
+        "rt_string_concat" => ffi_string::rt_string_concat_fn(&evaluated),
+        "rt_string_len" => ffi_string::rt_string_len_fn(&evaluated),
         // Unknown extern function
         _ => Err(common::unknown_function(name)),
     }

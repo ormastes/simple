@@ -324,6 +324,11 @@ pub fn run_tests(options: TestOptions) -> TestRunResult {
         }
     }
 
+    // Prompt for qualification of unqualified ignored tests
+    if !list_mode && !quiet {
+        prompt_for_ignored_qualifications();
+    }
+
     result
 }
 
@@ -357,6 +362,99 @@ fn create_runner(options: &TestOptions) -> Runner {
         Runner::new_with_gc_logging()
     } else {
         Runner::new()
+    }
+}
+
+/// Prompt the user to qualify any unqualified ignored tests from this run.
+/// Disabled by setting SIMPLE_QUALIFY_INTERACTIVE=0.
+fn prompt_for_ignored_qualifications() {
+    // Check if interactive qualification is disabled
+    if std::env::var("SIMPLE_QUALIFY_INTERACTIVE").as_deref() == Ok("0") {
+        return;
+    }
+
+    // Get ignored tests from BDD framework
+    let ignored_tests = simple_compiler::interpreter::get_ignored_tests();
+    if ignored_tests.is_empty() {
+        return;
+    }
+
+    // Load test database to find unqualified ones
+    let db_path = PathBuf::from("doc/test/test_db.sdn");
+    let db = match crate::test_db::load_test_db(&db_path) {
+        Ok(db) => db,
+        Err(_) => return,
+    };
+
+    // Find which ignored tests lack qualification
+    let unqualified: Vec<&String> = ignored_tests
+        .iter()
+        .filter(|name| {
+            db.records
+                .values()
+                .any(|r| &r.test_name == *name && crate::test_db::needs_qualification(r))
+        })
+        .collect();
+
+    if unqualified.is_empty() {
+        return;
+    }
+
+    println!();
+    println!("\x1b[33m⚠ {} ignored test(s) lack qualification:\x1b[0m", unqualified.len());
+    for (i, name) in unqualified.iter().enumerate() {
+        println!("  {}. {}", i + 1, name);
+    }
+    println!();
+    print!("Qualify now? [y/N] ");
+    std::io::Write::flush(&mut std::io::stdout()).ok();
+
+    let mut input = String::new();
+    if std::io::stdin().read_line(&mut input).is_err() {
+        return;
+    }
+
+    if !input.trim().eq_ignore_ascii_case("y") {
+        return;
+    }
+
+    // Ask for reason
+    print!("Reason for ignoring: ");
+    std::io::Write::flush(&mut std::io::stdout()).ok();
+
+    let mut reason = String::new();
+    if std::io::stdin().read_line(&mut reason).is_err() || reason.trim().is_empty() {
+        println!("No reason provided, skipping qualification.");
+        return;
+    }
+
+    // Collect test IDs to qualify
+    let test_ids: Vec<String> = unqualified
+        .iter()
+        .filter_map(|name| {
+            db.records
+                .values()
+                .find(|r| &r.test_name == *name && crate::test_db::needs_qualification(r))
+                .map(|r| r.test_id.clone())
+        })
+        .collect();
+
+    if test_ids.is_empty() {
+        return;
+    }
+
+    // Use existing qualify_ignore infrastructure
+    use crate::cli::qualify_ignore::{QualifyIgnoreArgs, handle_qualify_ignore};
+    let args = QualifyIgnoreArgs {
+        test_ids,
+        reason: Some(reason.trim().to_string()),
+        db_path: Some(db_path),
+        ..Default::default()
+    };
+
+    match handle_qualify_ignore(args) {
+        Ok(()) => println!("\x1b[32m✓ Tests qualified successfully.\x1b[0m"),
+        Err(e) => println!("\x1b[31m✗ Qualification failed: {}\x1b[0m", e),
     }
 }
 

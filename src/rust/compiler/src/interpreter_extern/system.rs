@@ -12,6 +12,10 @@ use simple_runtime::value::{
     rt_process_run as ffi_process_run,
     rt_process_run_timeout as ffi_process_run_timeout,
 };
+use simple_runtime::value::ffi::config::{
+    rt_is_debug_mode_enabled as ffi_is_debug_mode_enabled,
+    rt_is_macro_trace_enabled as ffi_is_macro_trace_enabled,
+};
 
 /// Get command-line arguments
 ///
@@ -240,6 +244,26 @@ pub fn rt_set_debug_mode(args: &[Value]) -> Result<Value, CompileError> {
     };
     ffi_set_debug_mode(enabled);
     Ok(Value::Nil)
+}
+
+/// Check if macro trace is enabled
+///
+/// Callable from Simple as: `rt_is_macro_trace_enabled()`
+///
+/// # Returns
+/// * Bool - true if macro trace is enabled
+pub fn rt_is_macro_trace_enabled(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Bool(ffi_is_macro_trace_enabled()))
+}
+
+/// Check if debug mode is enabled
+///
+/// Callable from Simple as: `rt_is_debug_mode_enabled()`
+///
+/// # Returns
+/// * Bool - true if debug mode is enabled
+pub fn rt_is_debug_mode_enabled(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Bool(ffi_is_debug_mode_enabled()))
 }
 
 /// Run a command and capture output

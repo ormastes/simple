@@ -588,8 +588,9 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                 {
                     return val.as_int().map(|v| v as i32);
                 }
-                // Sync mutable module-level variables to MODULE_GLOBALS for function access
-                if let_stmt.mutability.is_mutable() {
+                // Sync module-level variables to MODULE_GLOBALS for function/method access
+                // Both mutable (var) and immutable (val) need to be accessible
+                {
                     if let Some(name) = get_pattern_name(&let_stmt.pattern) {
                         if let Some(value) = env.get(&name) {
                             MODULE_GLOBALS.with(|cell| {

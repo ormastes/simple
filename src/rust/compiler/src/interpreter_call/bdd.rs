@@ -58,6 +58,9 @@ thread_local! {
     // Maps stack_depth -> flattened hooks for that depth
     static BDD_BEFORE_EACH_CACHE: RefCell<HashMap<usize, Vec<Value>>> = RefCell::new(HashMap::new());
     static BDD_AFTER_EACH_CACHE: RefCell<HashMap<usize, Vec<Value>>> = RefCell::new(HashMap::new());
+
+    // Track ignored/skipped test names for qualified ignore prompting
+    pub(crate) static BDD_IGNORED_TESTS: RefCell<Vec<String>> = RefCell::new(Vec::new());
 }
 
 /// Create an ExampleGroup Value object
@@ -623,6 +626,9 @@ pub(super) fn eval_bdd_builtin(
             let indent_str = "  ".repeat(indent);
 
             println!("{}\x1b[33m○ {} (skipped)\x1b[0m", indent_str, name_str);
+
+            // Track skipped test for qualified ignore prompting
+            BDD_IGNORED_TESTS.with(|cell| cell.borrow_mut().push(name_str.clone()));
 
             BDD_COUNTS.with(|cell| cell.borrow_mut().0 += 1);
 
@@ -1314,8 +1320,16 @@ pub fn clear_bdd_state() {
     BDD_RESOURCE_VALUES.with(|cell| cell.borrow_mut().clear());
     BDD_GROUP_STACK.with(|cell| cell.borrow_mut().clear());
 
+    // Clear ignored tests tracking
+    BDD_IGNORED_TESTS.with(|cell| cell.borrow_mut().clear());
+
     // Clear global registries
     BDD_REGISTRY_GROUPS.with(|cell: &BddGroupsCell| cell.borrow_mut().clear());
     BDD_REGISTRY_CONTEXTS.with(|cell: &BddContextsCell| cell.borrow_mut().clear());
     BDD_REGISTRY_SHARED.with(|cell: &BddSharedCell| cell.borrow_mut().clear());
+}
+
+/// Get the list of ignored/skipped test names from the current run
+pub fn get_ignored_tests() -> Vec<String> {
+    BDD_IGNORED_TESTS.with(|cell| cell.borrow().clone())
 }
