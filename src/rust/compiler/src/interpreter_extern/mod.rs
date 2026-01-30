@@ -800,7 +800,7 @@ pub(crate) fn call_extern_function(
         "rt_sandbox_get_fs_mode" => sandbox::rt_sandbox_get_fs_mode_fn(&evaluated),
 
         // ====================================================================
-        // FFI Value Operations (13 functions)
+        // FFI Value Operations (14 functions)
         // ====================================================================
         // Value creation
         "rt_value_int" => ffi_value::rt_value_int_fn(&evaluated),
@@ -820,6 +820,7 @@ pub(crate) fn call_extern_function(
         "rt_value_is_float" => ffi_value::rt_value_is_float_fn(&evaluated),
         "rt_value_is_bool" => ffi_value::rt_value_is_bool_fn(&evaluated),
         "rt_value_is_heap" => ffi_value::rt_value_is_heap_fn(&evaluated),
+        "rt_value_type_tag" => ffi_value::rt_value_type_tag_fn(&evaluated),
 
         // ====================================================================
         // FFI Array Operations (7 functions)
@@ -849,6 +850,7 @@ pub(crate) fn call_extern_function(
         "rt_string_new" => ffi_string::rt_string_new_fn(&evaluated),
         "rt_string_concat" => ffi_string::rt_string_concat_fn(&evaluated),
         "rt_string_len" => ffi_string::rt_string_len_fn(&evaluated),
+        "rt_string_eq" => ffi_string::rt_string_eq_fn(&evaluated),
         // Unknown extern function
         _ => Err(common::unknown_function(name)),
     }

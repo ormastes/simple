@@ -598,6 +598,11 @@ pub fn handle_array_methods(
             let value = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
             Value::Array(vec![value; arr.len()])
         }
+        "ptr" => {
+            // Return raw pointer to array's data as i64 (for FFI/codegen)
+            let ptr = arr.as_ptr() as i64;
+            Value::Int(ptr)
+        }
         _ => return Ok(None),
     };
     Ok(Some(result))

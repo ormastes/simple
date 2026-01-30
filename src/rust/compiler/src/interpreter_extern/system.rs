@@ -180,7 +180,8 @@ pub fn rt_env_all(_args: &[Value]) -> Result<Value, CompileError> {
 pub fn rt_env_home(_args: &[Value]) -> Result<Value, CompileError> {
     unsafe {
         let result = ffi_env_home();
-        Ok(runtime_to_value(result))
+        // Return raw RuntimeValue as i64 for FFI interop
+        Ok(Value::Int(result.to_raw() as i64))
     }
 }
 
@@ -193,7 +194,8 @@ pub fn rt_env_home(_args: &[Value]) -> Result<Value, CompileError> {
 pub fn rt_env_temp(_args: &[Value]) -> Result<Value, CompileError> {
     unsafe {
         let result = ffi_env_temp();
-        Ok(runtime_to_value(result))
+        // Return raw RuntimeValue as i64 for FFI interop
+        Ok(Value::Int(result.to_raw() as i64))
     }
 }
 

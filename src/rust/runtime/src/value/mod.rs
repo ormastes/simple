@@ -101,7 +101,7 @@ pub use channels::RuntimeChannel;
 pub use collections::{
     rt_array_clear, rt_array_get, rt_array_len, rt_array_new, rt_array_pop, rt_array_push, rt_array_set, rt_contains,
     rt_cstring_to_text, rt_index_get, rt_index_set, rt_slice, rt_string_concat, rt_string_data, rt_string_ends_with,
-    rt_string_len, rt_string_new, rt_string_starts_with, rt_tuple_get, rt_tuple_len, rt_tuple_new, rt_tuple_set,
+    rt_string_eq, rt_string_len, rt_string_new, rt_string_starts_with, rt_tuple_get, rt_tuple_len, rt_tuple_new, rt_tuple_set,
 };
 
 // Re-export dict FFI functions

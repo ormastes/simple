@@ -87,7 +87,13 @@ pub fn rt_cranelift_new_module(args: &[Value]) -> Result<Value, CompileError> {
     let name_ptr = value_to_i64(&args[0]);
     let name_len = value_to_i64(&args[1]);
     let target = value_to_i64(&args[2]);
+    eprintln!("[cranelift] new_module: name_ptr={}, name_len={}, target={}", name_ptr, name_len, target);
+    if name_ptr != 0 && name_len > 0 {
+        let name_str = unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(name_ptr as *const u8, name_len as usize)) };
+        eprintln!("[cranelift] new_module: name_str={:?}", name_str);
+    }
     let handle = unsafe { cranelift_ffi::rt_cranelift_new_module(name_ptr, name_len, target) };
+    eprintln!("[cranelift] new_module: handle={}", handle);
     Ok(Value::Int(handle))
 }
 

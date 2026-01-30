@@ -13,6 +13,7 @@ use simple_runtime::value::ffi::value_ops::{
     rt_value_as_int, rt_value_as_float, rt_value_as_bool,
     rt_value_truthy, rt_value_is_nil, rt_value_is_int,
     rt_value_is_float, rt_value_is_bool, rt_value_is_heap,
+    rt_value_type_tag,
 };
 
 // ============================================================================
@@ -189,4 +190,17 @@ pub fn rt_value_is_heap_fn(args: &[Value]) -> Result<Value, CompileError> {
 
     let rv = RuntimeValue::from_raw(raw as u64);
     Ok(Value::Bool(rt_value_is_heap(rv)))
+}
+
+/// Get type tag from RuntimeValue
+pub fn rt_value_type_tag_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let raw = args.first()
+        .ok_or_else(|| CompileError::semantic_with_context(
+            "rt_value_type_tag expects 1 argument".to_string(),
+            ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
+        ))?
+        .as_int()?;
+
+    let rv = RuntimeValue::from_raw(raw as u64);
+    Ok(Value::Int(rt_value_type_tag(rv) as i64))
 }
