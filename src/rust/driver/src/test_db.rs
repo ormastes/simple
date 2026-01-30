@@ -547,56 +547,60 @@ impl TestRunRecord {
         }
 
         // 3. Timestamp consistency
-        if !self.end_time.is_empty() {
-            match (
-                chrono::DateTime::parse_from_rfc3339(&self.start_time),
-                chrono::DateTime::parse_from_rfc3339(&self.end_time)
-            ) {
-                (Ok(start), Ok(end)) => {
-                    if end <= start {
-                        report.add_violation(
-                            IntegrityViolation::new(
-                                ViolationType::TimestampInconsistent,
-                                "end_time",
-                                "End time is before or equal to start time"
-                            )
-                            .with_expected(format!("After {}", self.start_time))
-                            .with_actual(self.end_time.clone())
-                        );
-                    }
-
-                    if start > chrono::Utc::now() {
-                        report.add_violation(
-                            IntegrityViolation::new(
-                                ViolationType::FutureTimestamp,
-                                "start_time",
-                                "Start time is in the future"
-                            )
-                            .with_expected("Past or present")
-                            .with_actual(self.start_time.clone())
-                        );
-                    }
-                }
-                (Err(e), _) => {
+        // Always validate start_time
+        match chrono::DateTime::parse_from_rfc3339(&self.start_time) {
+            Ok(start) => {
+                // Check for future timestamp
+                if start > chrono::Utc::now() {
                     report.add_violation(
                         IntegrityViolation::new(
-                            ViolationType::InvalidValue,
+                            ViolationType::FutureTimestamp,
                             "start_time",
-                            format!("Invalid timestamp format: {}", e)
+                            "Start time is in the future"
                         )
+                        .with_expected("Past or present")
                         .with_actual(self.start_time.clone())
                     );
                 }
-                (_, Err(e)) => {
-                    report.add_violation(
-                        IntegrityViolation::new(
-                            ViolationType::InvalidValue,
-                            "end_time",
-                            format!("Invalid timestamp format: {}", e)
-                        )
-                        .with_actual(self.end_time.clone())
-                    );
+
+                // If there's an end_time, validate consistency
+                if !self.end_time.is_empty() {
+                    match chrono::DateTime::parse_from_rfc3339(&self.end_time) {
+                        Ok(end) => {
+                            if end <= start {
+                                report.add_violation(
+                                    IntegrityViolation::new(
+                                        ViolationType::TimestampInconsistent,
+                                        "end_time",
+                                        "End time is before or equal to start time"
+                                    )
+                                    .with_expected(format!("After {}", self.start_time))
+                                    .with_actual(self.end_time.clone())
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            report.add_violation(
+                                IntegrityViolation::new(
+                                    ViolationType::InvalidValue,
+                                    "end_time",
+                                    format!("Invalid timestamp format: {}", e)
+                                )
+                                .with_actual(self.end_time.clone())
+                            );
+                        }
+                    }
                 }
+            }
+            Err(e) => {
+                report.add_violation(
+                    IntegrityViolation::new(
+                        ViolationType::InvalidValue,
+                        "start_time",
+                        format!("Invalid timestamp format: {}", e)
+                    )
+                    .with_actual(self.start_time.clone())
+                );
             }
         }
 
@@ -1897,8 +1901,9 @@ mod tests {
 
         let mut run = TestRunRecord::new_running();
         run.status = TestRunStatus::Completed;
-        run.start_time = "2026-01-30T10:00:00Z".to_string();
-        run.end_time = "2026-01-30T09:00:00Z".to_string();
+        // Use dates definitely in the past
+        run.start_time = "2024-01-30T10:00:00Z".to_string();
+        run.end_time = "2024-01-30T09:00:00Z".to_string();  // Before start_time
 
         let report = run.validate_record();
         assert!(report.has_violations());
