@@ -1,7 +1,7 @@
-// TODO: Re-enable once RuntimeValue FFI API is properly defined
-// use simple_runtime::RuntimeValue;
+use crate::error::{codes, CompileError, ErrorContext};
+use crate::value::Value;
 use simple_parser::{Lexer, TokenKind, NamePattern, Token};
-// use std::collections::HashMap;
+use std::collections::HashMap;
 
 /// Token representation for FFI
 #[derive(Debug, Clone)]
@@ -40,21 +40,6 @@ impl TokenInfo {
                 pattern: None,
                 value: Some(n),
             },
-            TokenKind::Float(f) => TokenInfo {
-                kind: "Float".to_string(),
-                text,
-                name: None,
-                pattern: None,
-                value: None,
-            },
-            TokenKind::Bool(b) => TokenInfo {
-                kind: "Bool".to_string(),
-                text,
-                name: None,
-                pattern: None,
-                value: Some(if b { 1 } else { 0 }),
-            },
-            // Keywords
             TokenKind::Skip => TokenInfo {
                 kind: "Skip".to_string(),
                 text,
@@ -83,7 +68,6 @@ impl TokenInfo {
                 pattern: None,
                 value: None,
             },
-            // Delimiters
             TokenKind::LParen => TokenInfo {
                 kind: "LParen".to_string(),
                 text,
@@ -98,35 +82,6 @@ impl TokenInfo {
                 pattern: None,
                 value: None,
             },
-            TokenKind::LBrace => TokenInfo {
-                kind: "LBrace".to_string(),
-                text,
-                name: None,
-                pattern: None,
-                value: None,
-            },
-            TokenKind::RBrace => TokenInfo {
-                kind: "RBrace".to_string(),
-                text,
-                name: None,
-                pattern: None,
-                value: None,
-            },
-            TokenKind::LBracket => TokenInfo {
-                kind: "LBracket".to_string(),
-                text,
-                name: None,
-                pattern: None,
-                value: None,
-            },
-            TokenKind::RBracket => TokenInfo {
-                kind: "RBracket".to_string(),
-                text,
-                name: None,
-                pattern: None,
-                value: None,
-            },
-            // Operators
             TokenKind::Dot => TokenInfo {
                 kind: "Dot".to_string(),
                 text,
@@ -136,13 +91,6 @@ impl TokenInfo {
             },
             TokenKind::Arrow => TokenInfo {
                 kind: "Arrow".to_string(),
-                text,
-                name: None,
-                pattern: None,
-                value: None,
-            },
-            TokenKind::Colon => TokenInfo {
-                kind: "Colon".to_string(),
                 text,
                 name: None,
                 pattern: None,
@@ -169,7 +117,6 @@ impl TokenInfo {
                 pattern: None,
                 value: None,
             },
-            // For any other tokens, use debug representation
             _ => TokenInfo {
                 kind: format!("{:?}", token.kind),
                 text,
@@ -189,15 +136,55 @@ pub fn tokenize_source(source: &str) -> Vec<TokenInfo> {
     tokens.into_iter().map(TokenInfo::from_token).collect()
 }
 
-// TODO: Implement FFI function once RuntimeValue API for heap objects is ready
-// Currently commented out because RuntimeValue doesn't have String/Array/Dict constructors
-// Need to use heap allocation API from simple_runtime
-/*
-pub fn simple_lexer_tokenize(args: &[RuntimeValue]) -> RuntimeValue {
-    // Implementation pending: need heap object allocation API
-    RuntimeValue::NIL
+/// FFI function: tokenize source code
+/// Returns Value::Array of token dictionaries
+pub fn simple_lexer_tokenize(args: &[Value]) -> Result<Value, CompileError> {
+    let source = args.first().ok_or_else(|| {
+        let ctx = ErrorContext::new()
+            .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+            .with_help("lexer_tokenize expects exactly 1 argument (source: str)");
+        CompileError::semantic_with_context("lexer_tokenize expects 1 argument", ctx)
+    })?;
+
+    let source_str = match source {
+        Value::Str(s) => s.as_str(),
+        _ => {
+            let ctx = ErrorContext::new()
+                .with_code(codes::TYPE_MISMATCH)
+                .with_help("lexer_tokenize expects a string argument");
+            return Err(CompileError::semantic_with_context(
+                "lexer_tokenize expects a string",
+                ctx,
+            ));
+        }
+    };
+
+    let tokens = tokenize_source(source_str);
+
+    // Convert to Value::Array of Value::Dict
+    let token_values: Vec<Value> = tokens
+        .into_iter()
+        .map(|token| {
+            let mut fields = HashMap::new();
+            fields.insert("kind".to_string(), Value::Str(token.kind));
+            fields.insert("text".to_string(), Value::Str(token.text));
+
+            if let Some(name) = token.name {
+                fields.insert("name".to_string(), Value::Str(name));
+            }
+            if let Some(pattern) = token.pattern {
+                fields.insert("pattern".to_string(), Value::Str(pattern));
+            }
+            if let Some(value) = token.value {
+                fields.insert("value".to_string(), Value::Int(value));
+            }
+
+            Value::Dict(fields)
+        })
+        .collect();
+
+    Ok(Value::Array(token_values))
 }
-*/
 
 #[cfg(test)]
 mod tests {

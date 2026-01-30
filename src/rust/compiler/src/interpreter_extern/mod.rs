@@ -385,6 +385,11 @@ pub(crate) fn call_extern_function(
         "sys_exit" => system::sys_exit(&evaluated),
 
         // ====================================================================
+        // Lexer Operations (1 function)
+        // ====================================================================
+        "lexer_tokenize" => lexer_ffi::simple_lexer_tokenize(&evaluated),
+
+        // ====================================================================
         // Environment Operations (8 functions)
         // ====================================================================
         "rt_env_set" => system::rt_env_set(&evaluated),
