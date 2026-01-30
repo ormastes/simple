@@ -29,8 +29,9 @@ use super::{
     validate_unit_type, with_effect_context, Dimension, ExternFunctions, ImplMethods, Macros, TraitImplRegistry,
     TraitImpls, Traits, UnitArithmeticRules, UnitFamilies, UnitFamilyInfo, Units, BASE_UNIT_DIMENSIONS, BDD_AFTER_EACH,
     BDD_BEFORE_EACH, BDD_CONTEXT_DEFS, BDD_COUNTS, BDD_INDENT, BDD_LAZY_VALUES, BDD_SHARED_EXAMPLES,
-    BLANKET_IMPL_METHODS, COMPOUND_UNIT_DIMENSIONS, CONST_NAMES, EXTERN_FUNCTIONS, MACRO_DEFINITION_ORDER,
-    MODULE_GLOBALS, SI_BASE_UNITS, UNIT_FAMILY_ARITHMETIC, UNIT_FAMILY_CONVERSIONS, UNIT_SUFFIX_TO_FAMILY, USER_MACROS,
+    BLANKET_IMPL_METHODS, COMPOUND_UNIT_DIMENSIONS, CONST_NAMES, EXTERN_FUNCTIONS, MACRO_DEFINITION_ORDER, MIXINS,
+    TRAIT_IMPLS, MODULE_GLOBALS, SI_BASE_UNITS, UNIT_FAMILY_ARITHMETIC, UNIT_FAMILY_CONVERSIONS, UNIT_SUFFIX_TO_FAMILY,
+    USER_MACROS,
 };
 
 type Enums = HashMap<String, EnumDef>;
@@ -182,8 +183,9 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                     for decorator in f.decorators.iter().rev() {
                         // Skip compiler-directive decorators that aren't evaluated at runtime
                         // @extern is a codegen directive, not a runtime decorator
+                        // @deprecated is handled at compile time via HIR lowering
                         if let Expr::Identifier(name) = &decorator.name {
-                            if name == "extern" {
+                            if name == "extern" || name == "deprecated" {
                                 continue;
                             }
                         }
@@ -310,12 +312,38 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                 // Exit class scope
                 exit_class_scope();
 
-                // Create class with additional fields if any were introduced
-                let final_class = if additional_fields.is_empty() {
+                // Inject mixin fields and methods into class
+                let mut mixin_fields = Vec::new();
+                let mut mixin_methods = Vec::new();
+                if !c.mixins.is_empty() {
+                    let existing_method_names: std::collections::HashSet<_> =
+                        c.methods.iter().map(|m| m.name.clone()).collect();
+                    MIXINS.with(|cell| {
+                        let mixins_registry = cell.borrow();
+                        for mixin_ref in &c.mixins {
+                            if let Some(mixin_def) = mixins_registry.get(&mixin_ref.name) {
+                                mixin_fields.extend(mixin_def.fields.clone());
+                                for method in &mixin_def.methods {
+                                    if !existing_method_names.contains(&method.name) {
+                                        mixin_methods.push(method.clone());
+                                    }
+                                }
+                            }
+                        }
+                    });
+                }
+
+                // Create class with additional fields/methods from macros and mixins
+                let has_additions = !additional_fields.is_empty() || !mixin_fields.is_empty() || !mixin_methods.is_empty();
+                let final_class = if !has_additions {
                     c.clone()
                 } else {
                     let mut updated = c.clone();
-                    updated.fields.extend(additional_fields);
+                    // Prepend mixin fields before class fields
+                    let mut all_extra_fields = mixin_fields;
+                    all_extra_fields.extend(additional_fields);
+                    updated.fields.splice(0..0, all_extra_fields);
+                    updated.methods.extend(mixin_methods);
                     updated
                 };
 
@@ -389,7 +417,12 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                             }
 
                             // Store the trait implementation with combined methods
-                            trait_impls.insert((trait_name.clone(), type_name.clone()), combined_methods);
+                            trait_impls.insert((trait_name.clone(), type_name.clone()), combined_methods.clone());
+
+                            // Also store in thread-local registry for method dispatch
+                            TRAIT_IMPLS.with(|cell| {
+                                cell.borrow_mut().insert((trait_name.clone(), type_name.clone()), combined_methods);
+                            });
                         }
                         // Note: If trait not found, it might be defined in another module
                         // For now, we silently allow this for forward compatibility
@@ -426,6 +459,12 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                 // Register trait definition for use in impl checking
                 traits.insert(t.name.clone(), t.clone());
                 env.insert(t.name.clone(), Value::Nil);
+            }
+            Node::Mixin(mixin_def) => {
+                // Register mixin definition in thread-local registry
+                MIXINS.with(|cell| {
+                    cell.borrow_mut().insert(mixin_def.name.clone(), mixin_def.clone());
+                });
             }
             Node::Actor(a) => {
                 // Register actor as a class-like type for instantiation
@@ -993,7 +1032,6 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
             | Node::DiBinding(_)
             | Node::ArchitectureRule(_)
             | Node::MockDecl(_)
-            | Node::Mixin(_)
             | Node::LeanBlock(_)
             | Node::Assume(_)
             | Node::Admit(_)
@@ -1003,7 +1041,8 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
             | Node::FunctionAlias(_)
             | Node::Pass(_)
             | Node::Guard(_)
-            | Node::Defer(_) => {
+            | Node::Defer(_)
+            | Node::Mixin(_) => {
                 // Module system is handled by the module resolver
                 // HandlePool is processed at compile time for allocation
                 // Bitfield is processed at compile time for bit-level field access

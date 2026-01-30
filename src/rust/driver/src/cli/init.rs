@@ -175,6 +175,44 @@ pub fn cleanup_stale_db_files(metrics: &mut StartupMetrics) {
     metrics.record(crate::StartupPhase::DbCleanup, cleanup_start.elapsed());
 }
 
+/// Initialize stack overflow detection from environment variables
+///
+/// Reads SIMPLE_STACK_OVERFLOW_DETECTION to enable/disable (default: on in debug, off in release)
+/// Reads SIMPLE_MAX_RECURSION_DEPTH to set the limit (default: 1000)
+pub fn init_stack_overflow_detection(metrics: &mut StartupMetrics) {
+    let start = std::time::Instant::now();
+
+    if let Ok(val) = std::env::var("SIMPLE_STACK_OVERFLOW_DETECTION") {
+        let enabled = matches!(val.to_lowercase().as_str(), "1" | "true" | "yes");
+        simple_compiler::set_stack_overflow_detection_enabled(enabled);
+    }
+
+    if let Ok(val) = std::env::var("SIMPLE_MAX_RECURSION_DEPTH") {
+        if let Ok(limit) = val.parse::<u64>() {
+            simple_compiler::set_max_recursion_depth(limit);
+        }
+    }
+
+    metrics.record(crate::StartupPhase::StackOverflowInit, start.elapsed());
+}
+
+/// Initialize timeout watchdog from environment variables
+///
+/// Reads SIMPLE_TIMEOUT_SECONDS to set wall-clock timeout (0 = disabled, default: 0)
+pub fn init_timeout_watchdog(metrics: &mut StartupMetrics) {
+    let start = std::time::Instant::now();
+
+    if let Ok(val) = std::env::var("SIMPLE_TIMEOUT_SECONDS") {
+        if let Ok(secs) = val.parse::<u64>() {
+            if secs > 0 {
+                simple_compiler::start_watchdog(secs);
+            }
+        }
+    }
+
+    metrics.record(crate::StartupPhase::TimeoutInit, start.elapsed());
+}
+
 /// Run all initialization phases in sequence
 pub fn init_runtime(metrics: &mut StartupMetrics) {
     init_logging(metrics);
@@ -183,4 +221,6 @@ pub fn init_runtime(metrics: &mut StartupMetrics) {
     init_panic_hook(metrics);
     init_signal_handlers(metrics);
     init_execution_limit(metrics);
+    init_stack_overflow_detection(metrics);
+    init_timeout_watchdog(metrics);
 }

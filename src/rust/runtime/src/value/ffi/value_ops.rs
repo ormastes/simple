@@ -101,6 +101,13 @@ pub extern "C" fn rt_value_type_tag(v: RuntimeValue) -> u8 {
     v.tag() as u8
 }
 
+/// Check if a RuntimeValue is an error (FFI-safe)
+#[no_mangle]
+pub extern "C" fn rt_is_error(v: RuntimeValue) -> bool {
+    use crate::value::tags;
+    v.tag() == tags::TAG_SPECIAL && v.payload() == tags::SPECIAL_ERROR
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

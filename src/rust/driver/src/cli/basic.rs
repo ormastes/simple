@@ -22,42 +22,77 @@ pub fn run_file(path: &PathBuf, gc_log: bool, gc_off: bool) -> i32 {
 
 /// Run a source file (.spl) with command-line arguments
 pub fn run_file_with_args(path: &PathBuf, gc_log: bool, gc_off: bool, args: Vec<String>) -> i32 {
-    let runner = create_runner(gc_log, gc_off);
-    // Use interpreted mode with args for spl files
-    let extension = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-    let result = if matches!(extension, "spl" | "simple" | "sscript" | "") {
-        runner.run_file_interpreted_with_args(path, args)
-    } else {
-        runner.run_file(path)
-    };
+    let path = path.clone();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        let runner = create_runner(gc_log, gc_off);
+        let extension = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        let result = if matches!(extension, "spl" | "simple" | "sscript" | "") {
+            runner.run_file_interpreted_with_args(&path, args)
+        } else {
+            runner.run_file(&path)
+        };
+        match result {
+            Ok(code) => code,
+            Err(e) => {
+                eprintln!("error: {}", e);
+                1
+            }
+        }
+    }));
     match result {
         Ok(code) => code,
-        Err(e) => {
-            eprintln!("error: {}", e);
-            1
+        Err(panic_info) => {
+            let msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
+                s.to_string()
+            } else if let Some(s) = panic_info.downcast_ref::<String>() {
+                s.clone()
+            } else {
+                "unknown internal error".to_string()
+            };
+            eprintln!("fatal: interpreter crashed: {}", msg);
+            eprintln!("This is a bug in the Simple compiler. Please report it.");
+            101
         }
     }
 }
 
 /// Run code from a string
 pub fn run_code(code: &str, gc_log: bool, gc_off: bool) -> i32 {
-    let runner = create_runner(gc_log, gc_off);
+    let code = code.to_string();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        let runner = create_runner(gc_log, gc_off);
 
-    // Wrap expression in main if not already a full program
-    let full_code = if code.contains("main") || code.contains("fn ") || code.contains("let ") {
-        code.to_string()
-    } else {
-        format!("main = {}", code)
-    };
+        // Wrap expression in main if not already a full program
+        let full_code = if code.contains("main") || code.contains("fn ") || code.contains("let ") {
+            code
+        } else {
+            format!("main = {}", code)
+        };
 
-    match runner.run_source_in_memory(&full_code) {
-        Ok(exit_code) => {
-            println!("{}", exit_code);
-            exit_code
+        match runner.run_source_in_memory(&full_code) {
+            Ok(exit_code) => {
+                println!("{}", exit_code);
+                exit_code
+            }
+            Err(e) => {
+                eprintln!("error: {}", e);
+                1
+            }
         }
-        Err(e) => {
-            eprintln!("error: {}", e);
-            1
+    }));
+    match result {
+        Ok(code) => code,
+        Err(panic_info) => {
+            let msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
+                s.to_string()
+            } else if let Some(s) = panic_info.downcast_ref::<String>() {
+                s.clone()
+            } else {
+                "unknown internal error".to_string()
+            };
+            eprintln!("fatal: interpreter crashed: {}", msg);
+            eprintln!("This is a bug in the Simple compiler. Please report it.");
+            101
         }
     }
 }

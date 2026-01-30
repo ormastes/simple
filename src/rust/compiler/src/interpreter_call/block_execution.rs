@@ -4,8 +4,8 @@ use super::super::interpreter_helpers::{bind_pattern_value, handle_method_call_w
 use super::bdd::{BDD_AFTER_EACH, BDD_BEFORE_EACH, BDD_CONTEXT_DEFS, BDD_INDENT};
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::interpreter::{
-    evaluate_expr, exec_with, pattern_matches, BLOCK_SCOPED_ENUMS, CONST_NAMES, EXTERN_FUNCTIONS,
-    IMMUTABLE_VARS, MACRO_DEFINITION_ORDER, MODULE_GLOBALS, USER_MACROS,
+    evaluate_expr, exec_with, get_type_name, pattern_matches, BLOCK_SCOPED_ENUMS, CONST_NAMES, EXTERN_FUNCTIONS,
+    IMMUTABLE_VARS, MACRO_DEFINITION_ORDER, MIXINS, MODULE_GLOBALS, TRAIT_IMPLS, TRAITS, USER_MACROS,
 };
 use crate::value::*;
 use simple_parser::ast::{ClassDef, EnumDef, Expr, FunctionDef, Node};
@@ -492,6 +492,112 @@ pub(super) fn exec_block_closure(
                 );
                 last_value = Value::Nil;
             }
+            Node::Trait(trait_def) => {
+                // Handle trait definitions inside block closures (e.g., in `it` blocks)
+                // Register the trait definition in TRAITS thread-local
+                TRAITS.with(|cell| {
+                    cell.borrow_mut().insert(trait_def.name.clone(), trait_def.clone());
+                });
+                last_value = Value::Nil;
+            }
+            Node::Mixin(mixin_def) => {
+                MIXINS.with(|cell| {
+                    cell.borrow_mut().insert(mixin_def.name.clone(), mixin_def.clone());
+                });
+                last_value = Value::Nil;
+            }
+            Node::Impl(impl_block) => {
+                // Handle impl blocks inside block closures (e.g., in `it` blocks)
+                // Register the impl methods so they can be found during method dispatch
+                let type_name = get_type_name(&impl_block.target_type);
+
+                // If this is a trait implementation, merge with default trait methods
+                if let Some(ref trait_name) = impl_block.trait_name {
+                    // Look up the trait definition
+                    let trait_def_opt = TRAITS.with(|cell| cell.borrow().get(trait_name).cloned());
+
+                    if let Some(trait_def) = trait_def_opt {
+                        // Build combined methods: impl methods + default trait methods
+                        let mut combined_methods = impl_block.methods.clone();
+                        let impl_method_names: std::collections::HashSet<_> =
+                            impl_block.methods.iter().map(|m| m.name.clone()).collect();
+
+                        for trait_method in &trait_def.methods {
+                            // Add default implementations that weren't overridden
+                            if !trait_method.is_abstract && !impl_method_names.contains(&trait_method.name) {
+                                combined_methods.push(trait_method.clone());
+                            }
+                        }
+
+                        // Register in TRAIT_IMPLS with combined methods
+                        TRAIT_IMPLS.with(|cell| {
+                            cell.borrow_mut().insert(
+                                (trait_name.clone(), type_name.clone()),
+                                combined_methods.clone(),
+                            );
+                        });
+
+                        // Merge impl methods into ClassDef (mirrors interpreter_eval.rs:358-359)
+                        if let Some(class_def) = classes.get_mut(&type_name) {
+                            class_def.methods.extend(combined_methods);
+                        }
+                    } else {
+                        // Trait not found - just register the impl methods
+                        TRAIT_IMPLS.with(|cell| {
+                            cell.borrow_mut().insert(
+                                (trait_name.clone(), type_name.clone()),
+                                impl_block.methods.clone(),
+                            );
+                        });
+
+                        // Merge impl methods into ClassDef
+                        if let Some(class_def) = classes.get_mut(&type_name) {
+                            class_def.methods.extend(impl_block.methods.clone());
+                        }
+                    }
+                } else {
+                    // Non-trait impl block - merge methods into ClassDef
+                    if let Some(class_def) = classes.get_mut(&type_name) {
+                        class_def.methods.extend(impl_block.methods.clone());
+                    }
+                }
+
+                last_value = Value::Nil;
+            }
+            Node::Const(const_stmt) => {
+                // Evaluate const value
+                let value = evaluate_expr(
+                    &const_stmt.value,
+                    &mut local_env,
+                    functions,
+                    classes,
+                    enums,
+                    impl_methods,
+                )?;
+                // Insert into local environment
+                local_env.insert(const_stmt.name.clone(), value);
+                // Register as const name
+                CONST_NAMES.with(|cell| cell.borrow_mut().insert(const_stmt.name.clone()));
+                last_value = Value::Nil;
+            }
+            Node::Static(static_stmt) => {
+                // Evaluate static value
+                let value = evaluate_expr(
+                    &static_stmt.value,
+                    &mut local_env,
+                    functions,
+                    classes,
+                    enums,
+                    impl_methods,
+                )?;
+                // Insert into local environment
+                local_env.insert(static_stmt.name.clone(), value);
+                // Register as const if immutable
+                if !static_stmt.mutability.is_mutable() {
+                    CONST_NAMES.with(|cell| cell.borrow_mut().insert(static_stmt.name.clone()));
+                }
+                last_value = Value::Nil;
+            }
             _ => {
                 last_value = Value::Nil;
             }
@@ -770,6 +876,112 @@ fn exec_block_closure_mut(
                         class_name: c.name.clone(),
                     },
                 );
+                last_value = Value::Nil;
+            }
+            Node::Trait(trait_def) => {
+                // Handle trait definitions inside block closures (e.g., in `it` blocks)
+                // Register the trait definition in TRAITS thread-local
+                TRAITS.with(|cell| {
+                    cell.borrow_mut().insert(trait_def.name.clone(), trait_def.clone());
+                });
+                last_value = Value::Nil;
+            }
+            Node::Mixin(mixin_def) => {
+                MIXINS.with(|cell| {
+                    cell.borrow_mut().insert(mixin_def.name.clone(), mixin_def.clone());
+                });
+                last_value = Value::Nil;
+            }
+            Node::Impl(impl_block) => {
+                // Handle impl blocks inside block closures (e.g., in `it` blocks)
+                // Register the impl methods so they can be found during method dispatch
+                let type_name = get_type_name(&impl_block.target_type);
+
+                // If this is a trait implementation, merge with default trait methods
+                if let Some(ref trait_name) = impl_block.trait_name {
+                    // Look up the trait definition
+                    let trait_def_opt = TRAITS.with(|cell| cell.borrow().get(trait_name).cloned());
+
+                    if let Some(trait_def) = trait_def_opt {
+                        // Build combined methods: impl methods + default trait methods
+                        let mut combined_methods = impl_block.methods.clone();
+                        let impl_method_names: std::collections::HashSet<_> =
+                            impl_block.methods.iter().map(|m| m.name.clone()).collect();
+
+                        for trait_method in &trait_def.methods {
+                            // Add default implementations that weren't overridden
+                            if !trait_method.is_abstract && !impl_method_names.contains(&trait_method.name) {
+                                combined_methods.push(trait_method.clone());
+                            }
+                        }
+
+                        // Register in TRAIT_IMPLS with combined methods
+                        TRAIT_IMPLS.with(|cell| {
+                            cell.borrow_mut().insert(
+                                (trait_name.clone(), type_name.clone()),
+                                combined_methods.clone(),
+                            );
+                        });
+
+                        // Merge impl methods into ClassDef (mirrors interpreter_eval.rs:358-359)
+                        if let Some(class_def) = classes.get_mut(&type_name) {
+                            class_def.methods.extend(combined_methods);
+                        }
+                    } else {
+                        // Trait not found - just register the impl methods
+                        TRAIT_IMPLS.with(|cell| {
+                            cell.borrow_mut().insert(
+                                (trait_name.clone(), type_name.clone()),
+                                impl_block.methods.clone(),
+                            );
+                        });
+
+                        // Merge impl methods into ClassDef
+                        if let Some(class_def) = classes.get_mut(&type_name) {
+                            class_def.methods.extend(impl_block.methods.clone());
+                        }
+                    }
+                } else {
+                    // Non-trait impl block - merge methods into ClassDef
+                    if let Some(class_def) = classes.get_mut(&type_name) {
+                        class_def.methods.extend(impl_block.methods.clone());
+                    }
+                }
+
+                last_value = Value::Nil;
+            }
+            Node::Const(const_stmt) => {
+                // Evaluate const value
+                let value = evaluate_expr(
+                    &const_stmt.value,
+                    local_env,
+                    functions,
+                    classes,
+                    enums,
+                    impl_methods,
+                )?;
+                // Insert into environment
+                local_env.insert(const_stmt.name.clone(), value);
+                // Register as const name
+                CONST_NAMES.with(|cell| cell.borrow_mut().insert(const_stmt.name.clone()));
+                last_value = Value::Nil;
+            }
+            Node::Static(static_stmt) => {
+                // Evaluate static value
+                let value = evaluate_expr(
+                    &static_stmt.value,
+                    local_env,
+                    functions,
+                    classes,
+                    enums,
+                    impl_methods,
+                )?;
+                // Insert into environment
+                local_env.insert(static_stmt.name.clone(), value);
+                // Register as const if immutable
+                if !static_stmt.mutability.is_mutable() {
+                    CONST_NAMES.with(|cell| cell.borrow_mut().insert(static_stmt.name.clone()));
+                }
                 last_value = Value::Nil;
             }
             _ => {

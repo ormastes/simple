@@ -13,6 +13,158 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+/// Severity level for integrity violations
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Severity {
+    Info,
+    Warning,
+    Error,
+    Critical,
+}
+
+/// Type of integrity violation
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ViolationType {
+    StaleRunning,
+    DeadProcess,
+    TimestampInconsistent,
+    FutureTimestamp,
+    CountInconsistent,
+    StatusInconsistent,
+    MissingField,
+    InvalidValue,
+}
+
+/// Single integrity violation
+#[derive(Debug, Clone)]
+pub struct IntegrityViolation {
+    pub violation_type: ViolationType,
+    pub field: String,
+    pub message: String,
+    pub expected: Option<String>,
+    pub actual: Option<String>,
+}
+
+impl IntegrityViolation {
+    pub fn new(violation_type: ViolationType, field: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            violation_type,
+            field: field.into(),
+            message: message.into(),
+            expected: None,
+            actual: None,
+        }
+    }
+
+    pub fn with_expected(mut self, expected: impl Into<String>) -> Self {
+        self.expected = Some(expected.into());
+        self
+    }
+
+    pub fn with_actual(mut self, actual: impl Into<String>) -> Self {
+        self.actual = Some(actual.into());
+        self
+    }
+
+    pub fn severity(&self) -> Severity {
+        match self.violation_type {
+            ViolationType::StaleRunning => Severity::Warning,
+            ViolationType::DeadProcess => Severity::Error,
+            ViolationType::TimestampInconsistent => Severity::Error,
+            ViolationType::FutureTimestamp => Severity::Critical,
+            ViolationType::CountInconsistent => Severity::Error,
+            ViolationType::StatusInconsistent => Severity::Warning,
+            ViolationType::MissingField => Severity::Error,
+            ViolationType::InvalidValue => Severity::Critical,
+        }
+    }
+
+    pub fn to_message(&self) -> String {
+        let severity = match self.severity() {
+            Severity::Info => "INFO",
+            Severity::Warning => "WARN",
+            Severity::Error => "ERROR",
+            Severity::Critical => "CRITICAL",
+        };
+
+        let mut msg = format!("  • [{}] {}: {}", severity, self.field, self.message);
+        if let Some(expected) = &self.expected {
+            msg.push_str(&format!("\n    Expected: {}", expected));
+        }
+        if let Some(actual) = &self.actual {
+            msg.push_str(&format!("\n    Actual: {}", actual));
+        }
+        msg
+    }
+}
+
+/// Integrity validation result for a record
+#[derive(Debug, Clone)]
+pub struct IntegrityReport {
+    pub record_id: String,
+    pub violations: Vec<IntegrityViolation>,
+    pub auto_fixable: bool,
+}
+
+impl IntegrityReport {
+    pub fn new(record_id: impl Into<String>) -> Self {
+        Self {
+            record_id: record_id.into(),
+            violations: Vec::new(),
+            auto_fixable: false,
+        }
+    }
+
+    pub fn add_violation(&mut self, violation: IntegrityViolation) {
+        self.violations.push(violation);
+    }
+
+    pub fn has_violations(&self) -> bool {
+        !self.violations.is_empty()
+    }
+
+    pub fn max_severity(&self) -> Severity {
+        self.violations
+            .iter()
+            .map(|v| v.severity())
+            .max()
+            .unwrap_or(Severity::Info)
+    }
+
+    pub fn mark_auto_fixable(mut self) -> Self {
+        self.auto_fixable = true;
+        self
+    }
+
+    pub fn to_report(&self) -> String {
+        let severity = self.max_severity();
+        let severity_str = match severity {
+            Severity::Info => "Info",
+            Severity::Warning => "Warning",
+            Severity::Error => "Error",
+            Severity::Critical => "Critical",
+        };
+
+        let mut report = format!(
+            "Record {}: {} violation(s) [{}]\n",
+            self.record_id,
+            self.violations.len(),
+            severity_str
+        );
+
+        for violation in &self.violations {
+            report.push_str(&violation.to_message());
+            report.push('\n');
+        }
+
+        if self.auto_fixable {
+            report.push_str("  [Auto-fixable: Run with SIMPLE_TEST_AUTO_CLEANUP=1]\n");
+        }
+
+        report
+    }
+}
+
 /// Trait for database records
 ///
 /// Implement this trait to make a type usable with the generic Database<T>.
@@ -31,6 +183,12 @@ pub trait Record: Clone {
 
     /// Serialize a record to an SDN table row
     fn to_sdn_row(&self) -> Vec<String>;
+
+    /// Validate this record for integrity violations
+    /// Default implementation returns no violations
+    fn validate(&self) -> IntegrityReport {
+        IntegrityReport::new(self.id())
+    }
 }
 
 /// Generic database for any Record type
@@ -174,6 +332,9 @@ impl<T: Record> Database<T> {
             }
         }
 
+        // Validate on load
+        db.validate_on_load();
+
         Ok(db)
     }
 
@@ -277,6 +438,70 @@ impl<T: Record> Database<T> {
     /// Check if database is empty
     pub fn is_empty(&self) -> bool {
         self.records.is_empty()
+    }
+
+    /// Validate all records in database (debug mode only)
+    pub fn validate_all(&self) -> Vec<IntegrityReport> {
+        // Check if debug mode is enabled via environment variable
+        let debug_enabled = std::env::var("SIMPLE_TEST_DEBUG")
+            .map(|v| !v.is_empty() && v != "0" && v.to_lowercase() != "false")
+            .unwrap_or(false);
+
+        // Only validate in debug mode
+        if !debug_enabled {
+            return Vec::new();
+        }
+
+        let mut reports = Vec::new();
+        for record in self.records.values() {
+            let report = record.validate();
+            if report.has_violations() {
+                reports.push(report);
+            }
+        }
+        reports
+    }
+
+    /// Validate and log violations (called during load)
+    fn validate_on_load(&self) {
+        let reports = self.validate_all();
+        if reports.is_empty() {
+            return;
+        }
+
+        // Count severities
+        let mut critical = 0;
+        let mut errors = 0;
+        let mut warnings = 0;
+        let mut auto_fixable = 0;
+
+        for report in &reports {
+            match report.max_severity() {
+                Severity::Critical => critical += 1,
+                Severity::Error => errors += 1,
+                Severity::Warning => warnings += 1,
+                _ => {}
+            }
+            if report.auto_fixable {
+                auto_fixable += 1;
+            }
+        }
+
+        // Log comprehensive report
+        eprintln!("\n=== DATA INTEGRITY VALIDATION REPORT ===");
+        eprintln!("Found {} record(s) with integrity violations\n", reports.len());
+
+        for report in &reports {
+            eprintln!("{}", report.to_report());
+        }
+
+        eprintln!("=== SUMMARY ===");
+        eprintln!("Critical: {} | Errors: {} | Warnings: {}", critical, errors, warnings);
+        if auto_fixable > 0 {
+            eprintln!("\n{} violation(s) are auto-fixable.", auto_fixable);
+            eprintln!("To auto-cleanup: SIMPLE_TEST_AUTO_CLEANUP=1 simple test --cleanup-runs");
+        }
+        eprintln!("========================================\n");
     }
 }
 

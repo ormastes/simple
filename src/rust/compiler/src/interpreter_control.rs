@@ -38,6 +38,15 @@ macro_rules! check_execution_limit {
         crate::interpreter::check_execution_limit()?;
     };
 }
+
+/// Check if the watchdog timeout has been exceeded.
+macro_rules! check_timeout {
+    () => {
+        if crate::interpreter::is_timeout_exceeded() {
+            return Err(CompileError::TimeoutExceeded { timeout_secs: 0 });
+        }
+    };
+}
 use crate::value::{Env, Value, ATTR_STRONG, BUILTIN_ARRAY, BUILTIN_RANGE};
 use simple_parser::ast::{
     ClassDef, ContextStmt, Expr, ForStmt, FunctionDef, IfStmt, LoopStmt, MatchStmt, WhileStmt, WithStmt,
@@ -155,6 +164,7 @@ pub(super) fn exec_while(
         loop {
             check_interrupt!();
             check_execution_limit!();
+            check_timeout!();
             let value = evaluate_expr(&while_stmt.condition, env, functions, classes, enums, impl_methods)?;
             let mut bindings = HashMap::new();
             if !pattern_matches(pattern, &value, &mut bindings, enums)? {
@@ -180,6 +190,7 @@ pub(super) fn exec_while(
     loop {
         check_interrupt!();
         check_execution_limit!();
+        check_timeout!();
         let cond_val = evaluate_expr(&while_stmt.condition, env, functions, classes, enums, impl_methods)?;
         let cond_val = if while_stmt.is_suspend {
             await_value(cond_val)?
@@ -222,6 +233,7 @@ pub(super) fn exec_loop(
     loop {
         check_interrupt!();
         check_execution_limit!();
+        check_timeout!();
         let ctrl = exec_block(&loop_stmt.body, env, functions, classes, enums, impl_methods)?;
         if matches!(ctrl, Control::Continue) {
             continue;
@@ -504,6 +516,7 @@ pub(super) fn exec_for(
     for (index, item) in items.into_iter().enumerate() {
         check_interrupt!();
         check_execution_limit!();
+        check_timeout!();
 
         // For for~ (is_suspend), await each item if it's a Promise
         let item = if for_stmt.is_suspend { await_value(item)? } else { item };

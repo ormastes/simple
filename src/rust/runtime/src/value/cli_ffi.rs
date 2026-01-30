@@ -556,3 +556,33 @@ pub extern "C" fn rt_write_file(path: RuntimeValue, content: RuntimeValue) -> bo
 
     std::fs::write(&path_str, &content_str).is_ok()
 }
+
+// =========================================================================
+// Fault Detection Configuration FFI (C ABI for compiled mode)
+// =========================================================================
+
+/// Set stack overflow detection enabled/disabled
+#[no_mangle]
+pub extern "C" fn rt_fault_set_stack_overflow_detection(enabled: u8) {
+    simple_common::fault_detection::set_stack_overflow_detection_enabled(enabled != 0);
+}
+
+/// Set max recursion depth
+#[no_mangle]
+pub extern "C" fn rt_fault_set_max_recursion_depth(depth: i64) {
+    simple_common::fault_detection::set_max_recursion_depth(depth as u64);
+}
+
+/// Set execution timeout in seconds (0 = disable)
+#[no_mangle]
+pub extern "C" fn rt_fault_set_timeout(secs: i64) {
+    // Timeout requires a watchdog thread which is in the compiler crate.
+    // In compiled mode, set the env var so the driver can pick it up on next init.
+    std::env::set_var("SIMPLE_TIMEOUT_SECONDS", secs.to_string());
+}
+
+/// Set execution limit (0 = disable)
+#[no_mangle]
+pub extern "C" fn rt_fault_set_execution_limit(limit: i64) {
+    std::env::set_var("SIMPLE_EXECUTION_LIMIT", limit.to_string());
+}

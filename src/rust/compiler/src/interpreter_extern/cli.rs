@@ -308,3 +308,56 @@ pub fn rt_cli_handle_lock(_args: &[Value]) -> Result<Value, CompileError> {
 pub fn rt_cli_handle_run(_args: &[Value]) -> Result<Value, CompileError> {
     interpreter_not_supported("rt_cli_handle_run")
 }
+
+// =========================================================================
+// Fault Detection Configuration FFI
+// =========================================================================
+
+/// Set stack overflow detection enabled/disabled
+pub fn rt_fault_set_stack_overflow_detection(args: &[Value]) -> Result<Value, CompileError> {
+    let enabled = match args.first() {
+        Some(Value::Bool(b)) => *b,
+        _ => true,
+    };
+    crate::interpreter::set_stack_overflow_detection_enabled(enabled);
+    Ok(Value::Nil)
+}
+
+/// Set max recursion depth
+pub fn rt_fault_set_max_recursion_depth(args: &[Value]) -> Result<Value, CompileError> {
+    let depth = match args.first() {
+        Some(Value::Int(n)) => *n as u64,
+        _ => 1000,
+    };
+    crate::interpreter::set_max_recursion_depth(depth);
+    Ok(Value::Nil)
+}
+
+/// Set execution timeout (starts watchdog thread)
+pub fn rt_fault_set_timeout(args: &[Value]) -> Result<Value, CompileError> {
+    let secs = match args.first() {
+        Some(Value::Int(n)) => *n as u64,
+        _ => 0,
+    };
+    if secs > 0 {
+        crate::watchdog::start_watchdog(secs);
+    } else {
+        crate::watchdog::stop_watchdog();
+    }
+    Ok(Value::Nil)
+}
+
+/// Set execution limit
+pub fn rt_fault_set_execution_limit(args: &[Value]) -> Result<Value, CompileError> {
+    let limit = match args.first() {
+        Some(Value::Int(n)) => *n as u64,
+        _ => 0,
+    };
+    crate::interpreter::set_execution_limit(limit);
+    if limit == 0 {
+        crate::interpreter::set_execution_limit_enabled(false);
+    } else {
+        crate::interpreter::set_execution_limit_enabled(true);
+    }
+    Ok(Value::Nil)
+}

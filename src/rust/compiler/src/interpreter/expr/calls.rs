@@ -92,6 +92,12 @@ pub(super) fn eval_call_expr(
                     }
                 }
                 // Fall through to regular method call if nested update doesn't apply
+                // Debug: log when we fall through for self.field.method() patterns
+                if let Expr::Identifier(vn) = outer_receiver.as_ref() {
+                    if vn == "self" {
+                        eprintln!("[DEBUG NESTED METHOD] self.{}.{}() fell through to non-mutating path", field, method);
+                    }
+                }
                 Ok(Some(evaluate_method_call(
                     receiver,
                     method,

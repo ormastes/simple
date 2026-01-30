@@ -4,7 +4,7 @@
 // - Basic operations: len, char_count, is_empty, chars, bytes
 // - Searching: contains, starts_with, ends_with, find, index_of, rfind, find_all
 // - Case conversion: to_upper, to_lower, capitalize, swapcase, title
-// - Trimming: trim, strip, trim_start, trim_end, chomp
+// - Trimming: trim, strip, trim_start, trim_end, trim_start_matches, trim_end_matches, chomp
 // - Prefix/Suffix: removeprefix, removesuffix
 // - Manipulation: reversed, sorted, take, drop, append, prepend, push, pop, clear, squeeze
 // - Slicing: split, split_lines, slice, substring, substr, replace, partition, rpartition
@@ -92,6 +92,16 @@ if let Value::Str(ref s) = recv_val {
         "trim" | "trimmed" | "strip" => return Ok(Value::Str(s.trim().to_string())),
         "trim_start" | "trim_left" => return Ok(Value::Str(s.trim_start().to_string())),
         "trim_end" | "trim_right" => return Ok(Value::Str(s.trim_end().to_string())),
+        "trim_start_matches" => {
+            // Repeatedly remove prefix until it no longer matches
+            let prefix = eval_arg(args, 0, Value::Str(String::new()), env, functions, classes, enums, impl_methods)?.to_key_string();
+            return Ok(Value::Str(s.trim_start_matches(&*prefix).to_string()));
+        }
+        "trim_end_matches" => {
+            // Repeatedly remove suffix until it no longer matches
+            let suffix = eval_arg(args, 0, Value::Str(String::new()), env, functions, classes, enums, impl_methods)?.to_key_string();
+            return Ok(Value::Str(s.trim_end_matches(&*suffix).to_string()));
+        }
         "removeprefix" | "remove_prefix" => {
             // Remove prefix if present
             let prefix = eval_arg(args, 0, Value::Str(String::new()), env, functions, classes, enums, impl_methods)?.to_key_string();
@@ -477,7 +487,18 @@ if let Value::Str(ref s) = recv_val {
         }
         "ptr" => {
             // Return raw pointer to string's bytes as i64 (for FFI/codegen)
-            let ptr = s.as_ptr() as i64;
+            // We must pin the string so the pointer remains valid after this Value is dropped.
+            // Use a thread-local cache to keep strings alive.
+            use std::cell::RefCell;
+            thread_local! {
+                static PINNED_STRINGS: RefCell<Vec<String>> = RefCell::new(Vec::new());
+            }
+            let cloned = s.to_string();
+            let ptr = PINNED_STRINGS.with(|cell| {
+                let mut cache = cell.borrow_mut();
+                cache.push(cloned);
+                cache.last().unwrap().as_ptr() as i64
+            });
             return Ok(Value::Int(ptr));
         }
         _ => {}

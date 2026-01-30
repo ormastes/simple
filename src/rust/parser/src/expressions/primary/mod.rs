@@ -37,6 +37,7 @@ impl<'a> Parser<'a> {
             TokenKind::Result
             | TokenKind::Identifier { .. }
             | TokenKind::Self_
+            | TokenKind::Super
             | TokenKind::Out
             | TokenKind::OutErr
             | TokenKind::Type

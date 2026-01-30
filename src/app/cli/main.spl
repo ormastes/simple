@@ -82,6 +82,13 @@ fn print_help():
     print "  --gc-log       Enable verbose GC logging"
     print "  --gc-off       Disable garbage collection"
     print ""
+    print "Fault Detection:"
+    print "  --stack-overflow-detection     Enable recursion depth check"
+    print "  --no-stack-overflow-detection  Disable recursion depth check"
+    print "  --max-recursion-depth=N        Set max call depth (default: 1000)"
+    print "  --timeout=N                    Set wall-clock timeout in seconds"
+    print "  --execution-limit=N            Set instruction count limit"
+    print ""
     print "Examples:"
     print "  simple                      # Start REPL"
     print "  simple hello.spl            # Run source"
@@ -224,32 +231,92 @@ extern fn rt_cli_handle_lock(args: [str]) -> i64
 # Explicit run command
 extern fn rt_cli_handle_run(args: [str], gc_log: bool, gc_off: bool) -> i64
 
+# Fault detection configuration
+extern fn rt_fault_set_stack_overflow_detection(enabled: bool)
+extern fn rt_fault_set_max_recursion_depth(depth: i64)
+extern fn rt_fault_set_timeout(secs: i64)
+extern fn rt_fault_set_execution_limit(limit: i64)
+
 # Global flags struct
 struct GlobalFlags:
     gc_log: bool
     gc_off: bool
     use_notui: bool
+    max_recursion_depth: i64
+    timeout_secs: i64
+    execution_limit: i64
+    stack_overflow_detection: bool
 
 fn parse_global_flags(args: [str]) -> GlobalFlags:
     var gc_log = false
     var gc_off = false
     var use_notui = false
+    var max_recursion_depth = 0
+    var timeout_secs = 0
+    var execution_limit = 0
+    var stack_overflow_detection = false
+    var has_stack_overflow_flag = false
 
-    for arg in args:
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
         if arg == "--gc-log":
             gc_log = true
         elif arg == "--gc-off":
             gc_off = true
         elif arg == "--notui":
             use_notui = true
+        elif arg == "--stack-overflow-detection":
+            stack_overflow_detection = true
+            has_stack_overflow_flag = true
+        elif arg == "--no-stack-overflow-detection":
+            stack_overflow_detection = false
+            has_stack_overflow_flag = true
+        elif arg.starts_with("--max-recursion-depth="):
+            val val_str = arg[21:]
+            max_recursion_depth = val_str.to_int()
+        elif arg == "--max-recursion-depth" and i + 1 < args.len():
+            i = i + 1
+            max_recursion_depth = args[i].to_int()
+        elif arg.starts_with("--timeout="):
+            val val_str = arg[10:]
+            timeout_secs = val_str.to_int()
+        elif arg == "--timeout" and i + 1 < args.len():
+            i = i + 1
+            timeout_secs = args[i].to_int()
+        elif arg.starts_with("--execution-limit="):
+            val val_str = arg[18:]
+            execution_limit = val_str.to_int()
+        elif arg == "--execution-limit" and i + 1 < args.len():
+            i = i + 1
+            execution_limit = args[i].to_int()
+        i = i + 1
 
-    GlobalFlags(gc_log: gc_log, gc_off: gc_off, use_notui: use_notui)
+    GlobalFlags(gc_log: gc_log, gc_off: gc_off, use_notui: use_notui,
+        max_recursion_depth: max_recursion_depth, timeout_secs: timeout_secs,
+        execution_limit: execution_limit, stack_overflow_detection: stack_overflow_detection)
+
+fn apply_fault_detection(flags: GlobalFlags):
+    if flags.max_recursion_depth > 0:
+        rt_fault_set_max_recursion_depth(flags.max_recursion_depth)
+        rt_fault_set_stack_overflow_detection(true)
+    if flags.stack_overflow_detection:
+        rt_fault_set_stack_overflow_detection(true)
+    if flags.timeout_secs > 0:
+        rt_fault_set_timeout(flags.timeout_secs)
+    if flags.execution_limit > 0:
+        rt_fault_set_execution_limit(flags.execution_limit)
 
 fn filter_internal_flags(args: [str]) -> [str]:
     var result = []
+    var skip_next = false
     for arg in args:
-        if not arg.starts_with("--gc") and arg != "--notui" and arg != "--lang":
-            if not arg.starts_with("--lang="):
+        if skip_next:
+            skip_next = false
+        elif arg == "--max-recursion-depth" or arg == "--timeout" or arg == "--execution-limit":
+            skip_next = true
+        elif not arg.starts_with("--gc") and arg != "--notui" and arg != "--lang" and arg != "--stack-overflow-detection" and arg != "--no-stack-overflow-detection":
+            if not arg.starts_with("--lang=") and not arg.starts_with("--max-recursion-depth=") and not arg.starts_with("--timeout=") and not arg.starts_with("--execution-limit="):
                 result.push(arg)
     result
 
@@ -266,6 +333,7 @@ fn main() -> i64:
         i = i + 1
 
     val flags = parse_global_flags(args)
+    apply_fault_detection(flags)
     val filtered_args = filter_internal_flags(args)
 
     if filtered_args.len() == 0:

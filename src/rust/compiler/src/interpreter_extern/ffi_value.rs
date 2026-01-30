@@ -13,8 +13,10 @@ use simple_runtime::value::ffi::value_ops::{
     rt_value_as_int, rt_value_as_float, rt_value_as_bool,
     rt_value_truthy, rt_value_is_nil, rt_value_is_int,
     rt_value_is_float, rt_value_is_bool, rt_value_is_heap,
-    rt_value_type_tag,
+    rt_value_type_tag, rt_is_error,
 };
+// Error handling functions from top-level exports
+use simple_runtime::value::{rt_function_not_found, rt_method_not_found};
 
 // ============================================================================
 // Value Creation Functions
@@ -203,4 +205,67 @@ pub fn rt_value_type_tag_fn(args: &[Value]) -> Result<Value, CompileError> {
 
     let rv = RuntimeValue::from_raw(raw as u64);
     Ok(Value::Int(rt_value_type_tag(rv) as i64))
+}
+
+// ============================================================================
+// Error Handling Functions
+// ============================================================================
+
+/// Create error value for function not found
+pub fn rt_function_not_found_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let name = match args.first() {
+        Some(Value::Str(s)) => s.as_str(),
+        _ => return Err(CompileError::semantic_with_context(
+            "rt_function_not_found expects string argument".to_string(),
+            ErrorContext::new().with_code(codes::TYPE_MISMATCH),
+        )),
+    };
+
+    let bytes = name.as_bytes();
+    let rv = unsafe { rt_function_not_found(bytes.as_ptr(), bytes.len() as u64) };
+    Ok(Value::Int(rv.to_raw() as i64))
+}
+
+/// Create error value for method not found
+pub fn rt_method_not_found_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let type_name = match args.get(0) {
+        Some(Value::Str(s)) => s.as_str(),
+        _ => return Err(CompileError::semantic_with_context(
+            "rt_method_not_found expects string arguments".to_string(),
+            ErrorContext::new().with_code(codes::TYPE_MISMATCH),
+        )),
+    };
+
+    let method = match args.get(1) {
+        Some(Value::Str(s)) => s.as_str(),
+        _ => return Err(CompileError::semantic_with_context(
+            "rt_method_not_found expects string arguments".to_string(),
+            ErrorContext::new().with_code(codes::TYPE_MISMATCH),
+        )),
+    };
+
+    let type_bytes = type_name.as_bytes();
+    let method_bytes = method.as_bytes();
+    let rv = unsafe {
+        rt_method_not_found(
+            type_bytes.as_ptr(),
+            type_bytes.len() as u64,
+            method_bytes.as_ptr(),
+            method_bytes.len() as u64,
+        )
+    };
+    Ok(Value::Int(rv.to_raw() as i64))
+}
+
+/// Check if value is an error
+pub fn rt_is_error_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let raw = args.first()
+        .ok_or_else(|| CompileError::semantic_with_context(
+            "rt_is_error expects 1 argument".to_string(),
+            ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
+        ))?
+        .as_int()?;
+
+    let rv = RuntimeValue::from_raw(raw as u64);
+    Ok(Value::Bool(rt_is_error(rv)))
 }

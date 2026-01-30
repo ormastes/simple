@@ -33,14 +33,19 @@ pub use interpreter_state::{
     init_signal_handlers, is_debug_mode, is_execution_limit_enabled, is_interrupted, reset_execution_count,
     reset_interrupt, set_current_file, set_debug_mode, set_execution_limit, set_execution_limit_enabled,
     set_interpreter_args,
+    // Stack overflow detection
+    is_stack_overflow_detection_enabled, push_call_depth, set_max_recursion_depth,
+    set_stack_overflow_detection_enabled, reset_recursion_depth, RecursionGuard,
+    // Timeout detection
+    is_timeout_exceeded, reset_timeout,
 };
 pub(crate) use interpreter_state::{
     ACTOR_INBOX, ACTOR_OUTBOX, ACTOR_SPAWNER, AOP_CONFIG, BASE_UNIT_DIMENSIONS, BDD_REGISTRY_CONTEXTS,
     BDD_REGISTRY_GROUPS, BDD_REGISTRY_SHARED, BLANKET_IMPL_METHODS, BLOCK_SCOPED_ENUMS, COMPOUND_UNIT_DIMENSIONS,
     CONST_NAMES, CONTEXT_OBJECT, CONTEXT_VAR_NAME, CURRENT_FILE, DI_CONFIG, DI_SINGLETONS, EXECUTION_MODE,
     EXTERN_FUNCTIONS, GENERATOR_YIELDS, IMMUTABLE_VARS, IN_IMMUTABLE_FN_METHOD, INTERFACE_BINDINGS, INTERPRETER_ARGS,
-    INTERRUPT_REQUESTED, MACRO_DEFINITION_ORDER, MODULE_GLOBALS, MOVED_VARS, SI_BASE_UNITS, UNIT_FAMILY_ARITHMETIC,
-    UNIT_FAMILY_CONVERSIONS, UNIT_SUFFIX_TO_FAMILY, USER_MACROS,
+    INTERRUPT_REQUESTED, MACRO_DEFINITION_ORDER, MODULE_GLOBALS, MOVED_VARS, SI_BASE_UNITS, TIMEOUT_EXCEEDED,
+    TRAIT_IMPLS, TRAITS, MIXINS, UNIT_FAMILY_ARITHMETIC, UNIT_FAMILY_CONVERSIONS, UNIT_SUFFIX_TO_FAMILY, USER_MACROS,
 };
 
 // Core types and utilities
@@ -138,7 +143,8 @@ use interpreter_module::{
 // Type-related utilities
 #[path = "../interpreter_types.rs"]
 mod interpreter_types;
-use interpreter_types::{get_type_name, register_trait_impl, TraitImplRegistry};
+use interpreter_types::{register_trait_impl, TraitImplRegistry};
+pub(crate) use interpreter_types::get_type_name;
 
 // Core module evaluation logic
 #[path = "../interpreter_eval.rs"]

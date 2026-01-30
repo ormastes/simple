@@ -41,7 +41,8 @@ pub unsafe extern "C" fn rt_function_not_found(name_ptr: *const u8, name_len: u6
             eprintln!("Runtime error: Function not found (invalid UTF-8 name)");
         }
     }
-    RuntimeValue::NIL
+    use crate::value::tags;
+    RuntimeValue::from_special(tags::SPECIAL_ERROR)
 }
 
 /// Called when a method is not found at runtime.
@@ -83,7 +84,8 @@ pub unsafe extern "C" fn rt_method_not_found(
         "Runtime error: Method '{}' not found on type '{}'",
         method_name, type_name
     );
-    RuntimeValue::NIL
+    use crate::value::tags;
+    RuntimeValue::from_special(tags::SPECIAL_ERROR)
 }
 
 #[cfg(test)]
