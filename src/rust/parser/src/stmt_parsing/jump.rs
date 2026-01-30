@@ -81,4 +81,18 @@ impl<'a> Parser<'a> {
             ),
         }))
     }
+
+    pub(crate) fn parse_skip(&mut self) -> Result<Node, ParseError> {
+        let start_span = self.current.span;
+        self.expect(&TokenKind::Skip)?;
+
+        Ok(Node::Skip(SkipStmt {
+            span: Span::new(
+                start_span.start,
+                self.previous.span.end,
+                start_span.line,
+                start_span.column,
+            ),
+        }))
+    }
 }
