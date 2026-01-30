@@ -48,7 +48,7 @@ use std::collections::HashMap;
 // Import parent interpreter types and functions
 use super::{
     await_value, evaluate_expr, exec_block, exec_block_fn, Control, Enums, ImplMethods, BDD_CONTEXT_DEFS, BDD_INDENT,
-    BDD_LAZY_VALUES, CONST_NAMES, CONTEXT_OBJECT, CONTEXT_VAR_NAME,
+    BDD_LAZY_VALUES, CONST_NAMES, CONTEXT_OBJECT, CONTEXT_VAR_NAME, IMMUTABLE_VARS,
 };
 
 // Import helpers for pattern binding
@@ -394,10 +394,12 @@ fn exec_method_body(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
-    // Save current CONST_NAMES and clear for method scope
-    // This prevents const names from caller leaking into callee
+    // Save current CONST_NAMES and IMMUTABLE_VARS, clear for method scope
+    // This prevents const/immutable names from caller leaking into callee
     let saved_const_names = CONST_NAMES.with(|cell| cell.borrow().clone());
     CONST_NAMES.with(|cell| cell.borrow_mut().clear());
+    let saved_immutable_vars = IMMUTABLE_VARS.with(|cell| cell.borrow().clone());
+    IMMUTABLE_VARS.with(|cell| cell.borrow_mut().clear());
 
     let mut local_env = env.clone();
     local_env.insert("self".to_string(), receiver.clone());
@@ -413,8 +415,9 @@ fn exec_method_body(
     // Use exec_block_fn to handle implicit returns properly
     let result = exec_block_fn(&method.body, &mut local_env, functions, classes, enums, impl_methods);
 
-    // ALWAYS restore CONST_NAMES before returning to avoid leaking to caller
+    // ALWAYS restore CONST_NAMES and IMMUTABLE_VARS before returning to avoid leaking to caller
     CONST_NAMES.with(|cell| *cell.borrow_mut() = saved_const_names);
+    IMMUTABLE_VARS.with(|cell| *cell.borrow_mut() = saved_immutable_vars);
 
     let (control, implicit_val) = result?;
     // Return explicit return value if present, otherwise implicit value, otherwise Nil

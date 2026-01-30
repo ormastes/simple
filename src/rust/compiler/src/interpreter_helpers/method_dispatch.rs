@@ -342,7 +342,7 @@ pub(crate) fn try_method_missing<'a>(
     method: &str,
     args: &[simple_parser::ast::Argument],
     class: &str,
-    fields: &HashMap<String, Value>,
+    fields: &Arc<HashMap<String, Value>>,
     env: &mut Env,
     functions: &mut HashMap<String, FunctionDef>,
     classes: &mut HashMap<String, ClassDef>,
