@@ -86,6 +86,15 @@ impl<'a> Parser<'a> {
         let start_span = self.current.span;
         self.expect(&TokenKind::Skip)?;
 
+        // Check for block form (skip:) vs standalone (skip)
+        let body = if self.check(&TokenKind::Colon) {
+            self.advance(); // consume ':'
+            let block = self.parse_block()?;
+            SkipBody::Block(block)
+        } else {
+            SkipBody::Standalone
+        };
+
         Ok(Node::Skip(SkipStmt {
             span: Span::new(
                 start_span.start,
@@ -93,6 +102,7 @@ impl<'a> Parser<'a> {
                 start_span.line,
                 start_span.column,
             ),
+            body,
         }))
     }
 }

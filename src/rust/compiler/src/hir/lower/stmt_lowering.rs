@@ -1,4 +1,4 @@
-use simple_parser::{self as ast, ast::ContractClause, ast::Expr, ast::MatchStmt, ast::Mutability, ast::Pattern, Node};
+use simple_parser::{self as ast, ast::ContractClause, ast::Expr, ast::MatchStmt, ast::Mutability, ast::Pattern, ast::SkipBody, Node};
 
 use super::super::lifetime::{ReferenceOrigin, ScopeKind};
 use super::super::types::*;
@@ -410,9 +410,19 @@ impl Lowerer {
                 Ok(vec![])
             }
 
-            Node::Skip(_) => {
-                // Skip is a no-op statement, returns empty statement list
-                Ok(vec![])
+            Node::Skip(skip_stmt) => {
+                // Skip can be standalone (no-op) or block form (for test framework)
+                match &skip_stmt.body {
+                    SkipBody::Standalone => {
+                        // Standalone skip is a no-op
+                        Ok(vec![])
+                    }
+                    SkipBody::Block(block) => {
+                        // Block form: lower the block contents
+                        // This is used by the test framework to mark skipped test bodies
+                        self.lower_block(block, ctx)
+                    }
+                }
             }
 
             Node::Function(f) => {

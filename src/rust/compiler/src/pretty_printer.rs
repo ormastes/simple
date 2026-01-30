@@ -117,7 +117,17 @@ impl PrettyPrinter {
             Node::Break(b) => self.print_break(b),
             Node::Continue(c) => self.print_continue(c),
             Node::Pass(_) => self.write_line("pass"),
-            Node::Skip(_) => self.write_line("skip"),
+            Node::Skip(skip_stmt) => match &skip_stmt.body {
+                SkipBody::Standalone => self.write_line("skip"),
+                SkipBody::Block(block) => {
+                    self.write_line("skip:");
+                    self.indent_level += 1;
+                    for stmt in &block.statements {
+                        self.print_node(stmt);
+                    }
+                    self.indent_level -= 1;
+                }
+            },
             Node::Expression(e) => {
                 self.write_indent();
                 self.print_expr(e);

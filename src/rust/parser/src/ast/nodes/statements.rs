@@ -163,6 +163,16 @@ pub struct PassStmt {
 #[derive(Debug, Clone, PartialEq)]
 pub struct SkipStmt {
     pub span: Span,
+    pub body: SkipBody,
+}
+
+/// Body of a skip statement
+#[derive(Debug, Clone, PartialEq)]
+pub enum SkipBody {
+    /// Standalone statement: `skip`
+    Standalone,
+    /// Block of statements: `skip: body`
+    Block(Block),
 }
 
 /// Defer statement - execute at scope exit (LIFO order)

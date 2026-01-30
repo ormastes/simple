@@ -597,6 +597,22 @@ pub(crate) fn call_extern_function(
         "__rt_btreemap_entries" => collections::__rt_btreemap_entries(&evaluated),
         "__rt_btreemap_first_key" => collections::__rt_btreemap_first_key(&evaluated),
         "__rt_btreemap_last_key" => collections::__rt_btreemap_last_key(&evaluated),
+        // BTreeSet operations
+        "__rt_btreeset_new" => collections::__rt_btreeset_new(&evaluated),
+        "__rt_btreeset_insert" => collections::__rt_btreeset_insert(&evaluated),
+        "__rt_btreeset_contains" => collections::__rt_btreeset_contains(&evaluated),
+        "__rt_btreeset_remove" => collections::__rt_btreeset_remove(&evaluated),
+        "__rt_btreeset_len" => collections::__rt_btreeset_len(&evaluated),
+        "__rt_btreeset_clear" => collections::__rt_btreeset_clear(&evaluated),
+        "__rt_btreeset_to_array" => collections::__rt_btreeset_to_array(&evaluated),
+        "__rt_btreeset_first" => collections::__rt_btreeset_first(&evaluated),
+        "__rt_btreeset_last" => collections::__rt_btreeset_last(&evaluated),
+        "__rt_btreeset_union" => collections::__rt_btreeset_union(&evaluated),
+        "__rt_btreeset_intersection" => collections::__rt_btreeset_intersection(&evaluated),
+        "__rt_btreeset_difference" => collections::__rt_btreeset_difference(&evaluated),
+        "__rt_btreeset_symmetric_difference" => collections::__rt_btreeset_symmetric_difference(&evaluated),
+        "__rt_btreeset_is_subset" => collections::__rt_btreeset_is_subset(&evaluated),
+        "__rt_btreeset_is_superset" => collections::__rt_btreeset_is_superset(&evaluated),
 
         // ====================================================================
         // CLI FFI Functions (46 functions - for Simple-based CLI)
