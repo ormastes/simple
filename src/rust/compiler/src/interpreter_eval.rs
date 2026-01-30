@@ -1060,6 +1060,7 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
             | Node::ClassAlias(_)
             | Node::FunctionAlias(_)
             | Node::Pass(_)
+            | Node::Skip(_)
             | Node::Guard(_)
             | Node::Defer(_)
             | Node::Mixin(_) => {

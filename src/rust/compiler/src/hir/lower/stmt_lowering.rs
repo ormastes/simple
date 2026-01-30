@@ -410,6 +410,11 @@ impl Lowerer {
                 Ok(vec![])
             }
 
+            Node::Skip(_) => {
+                // Skip is a no-op statement, returns empty statement list
+                Ok(vec![])
+            }
+
             Node::Function(f) => {
                 // Nested function definition in statement position
                 // For now, skip with a warning - nested functions are not yet supported in native compilation
