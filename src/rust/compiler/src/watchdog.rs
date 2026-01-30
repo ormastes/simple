@@ -62,3 +62,51 @@ pub fn stop_watchdog() {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use simple_common::fault_detection;
+
+    #[test]
+    fn test_watchdog_start_stop() {
+        fault_detection::reset_timeout();
+        assert!(!fault_detection::is_timeout_exceeded());
+        // Start with large timeout, stop immediately
+        start_watchdog(60);
+        assert!(!fault_detection::is_timeout_exceeded());
+        stop_watchdog();
+        assert!(!fault_detection::is_timeout_exceeded());
+    }
+
+    #[test]
+    fn test_watchdog_triggers_timeout() {
+        fault_detection::reset_timeout();
+        // 1-second timeout
+        start_watchdog(1);
+        // Wait for it to fire
+        std::thread::sleep(Duration::from_millis(1500));
+        assert!(fault_detection::is_timeout_exceeded());
+        stop_watchdog();
+        fault_detection::reset_timeout();
+    }
+
+    #[test]
+    fn test_watchdog_does_not_fire_before_deadline() {
+        fault_detection::reset_timeout();
+        start_watchdog(60);
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(!fault_detection::is_timeout_exceeded());
+        stop_watchdog();
+    }
+
+    #[test]
+    fn test_watchdog_restart() {
+        fault_detection::reset_timeout();
+        start_watchdog(60);
+        // Restart with new timeout
+        start_watchdog(60);
+        assert!(!fault_detection::is_timeout_exceeded());
+        stop_watchdog();
+    }
+}

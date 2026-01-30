@@ -364,6 +364,49 @@ pub(crate) fn evaluate_call(
             } else if classes.contains_key(method_name) {
                 return core::instantiate_class(method_name, args, env, functions, classes, enums, impl_methods);
             }
+
+            // Special handling for built-in Option and Result types
+            if type_name == "Option" && (method_name == "Some" || method_name == "None") {
+                let payload = if method_name == "Some" {
+                    if args.is_empty() {
+                        return Err(CompileError::semantic("Option.Some requires one argument"));
+                    }
+                    Some(Box::new(evaluate_expr(
+                        &args[0].value,
+                        env,
+                        functions,
+                        classes,
+                        enums,
+                        impl_methods,
+                    )?))
+                } else {
+                    None
+                };
+                return Ok(Value::Enum {
+                    enum_name: "Option".to_string(),
+                    variant: method_name.clone(),
+                    payload,
+                });
+            }
+
+            if type_name == "Result" && (method_name == "Ok" || method_name == "Err") {
+                if args.is_empty() {
+                    return Err(CompileError::semantic(&format!("Result.{} requires one argument", method_name)));
+                }
+                let payload = Some(Box::new(evaluate_expr(
+                    &args[0].value,
+                    env,
+                    functions,
+                    classes,
+                    enums,
+                    impl_methods,
+                )?));
+                return Ok(Value::Enum {
+                    enum_name: "Result".to_string(),
+                    variant: method_name.clone(),
+                    payload,
+                });
+            }
         }
         let ctx = ErrorContext::new()
             .with_code(codes::INVALID_OPERATION)
