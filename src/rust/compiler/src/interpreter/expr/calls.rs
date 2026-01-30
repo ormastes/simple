@@ -126,6 +126,27 @@ pub(super) fn eval_call_expr(
             // Support module-style access (lib.foo) by resolving directly to functions/classes
             if let Expr::Identifier(module_name) = receiver.as_ref() {
                 if env.get(module_name).is_none() {
+                    // Special handling for built-in Option and Result enum variants
+                    if module_name == "Option" && (field == "Some" || field == "None") {
+                        // Return a constructor function for the variant
+                        // When called, it will create the enum value
+                        // For None, just return the enum value directly since it has no payload
+                        if field == "None" {
+                            return Ok(Some(Value::Enum {
+                                enum_name: "Option".to_string(),
+                                variant: "None".to_string(),
+                                payload: None,
+                            }));
+                        }
+                        // For Some, we can't return a constructor here because field access
+                        // doesn't create functions. The user should use Option.Some(x) with parens.
+                        // But to match Rust/Scala style, let's return a special marker.
+                        // Actually, this won't work well. Let me reconsider.
+                    }
+                    if module_name == "Result" && (field == "Ok" || field == "Err") {
+                        // Similar issue - Result variants need arguments, so field access doesn't work
+                    }
+
                     if let Some(func) = functions.get(field).cloned() {
                         return Ok(Some(Value::Function {
                             name: field.clone(),

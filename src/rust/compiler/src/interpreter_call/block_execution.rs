@@ -27,13 +27,33 @@ fn inject_mixins(class_def: &ClassDef) -> ClassDef {
         class_def.methods.iter().map(|m| m.name.clone()).collect();
     let mut mixin_fields = Vec::new();
     let mut mixin_methods = Vec::new();
+    let mut seen_field_names: std::collections::HashSet<String> =
+        class_def.fields.iter().map(|f| f.name.clone()).collect();
+    let mut seen_method_names = existing_method_names;
     MIXINS.with(|cell| {
         let registry = cell.borrow();
-        for mixin_ref in &class_def.mixins {
-            if let Some(mixin_def) = registry.get(&mixin_ref.name) {
-                mixin_fields.extend(mixin_def.fields.clone());
+        // Transitive resolution: BFS through mixin dependencies
+        let mut seen_mixins = std::collections::HashSet::new();
+        let mut queue: std::collections::VecDeque<String> =
+            class_def.mixins.iter().map(|m| m.name.clone()).collect();
+        while let Some(mixin_name) = queue.pop_front() {
+            if !seen_mixins.insert(mixin_name.clone()) {
+                continue; // Diamond dedup
+            }
+            if let Some(mixin_def) = registry.get(&mixin_name) {
+                // Queue transitive dependencies
+                for req in &mixin_def.required_mixins {
+                    queue.push_back(req.clone());
+                }
+                // Collect fields (dedup by name)
+                for field in &mixin_def.fields {
+                    if seen_field_names.insert(field.name.clone()) {
+                        mixin_fields.push(field.clone());
+                    }
+                }
+                // Collect methods (skip if class or earlier mixin defines same name)
                 for method in &mixin_def.methods {
-                    if !existing_method_names.contains(&method.name) {
+                    if seen_method_names.insert(method.name.clone()) {
                         mixin_methods.push(method.clone());
                     }
                 }
