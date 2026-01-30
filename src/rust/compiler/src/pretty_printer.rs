@@ -204,10 +204,10 @@ impl PrettyPrinter {
 
         // Body
         self.indent_inc();
-        if func.body.is_empty() {
+        if func.body.statements.is_empty() {
             self.write_line("pass");
         } else {
-            for node in &func.body {
+            for node in &func.body.statements {
                 self.print_node(node);
             }
         }
@@ -373,11 +373,11 @@ impl PrettyPrinter {
             self.write("> ");
         }
 
-        self.print_type(&impl_block.type_name);
+        self.print_type(&impl_block.target_type);
 
         if let Some(ref trait_name) = impl_block.trait_name {
             self.write(" for ");
-            self.print_type(trait_name);
+            self.write(trait_name);
         }
 
         self.write(":");
@@ -394,10 +394,15 @@ impl PrettyPrinter {
 
     fn print_let(&mut self, let_stmt: &LetStmt) {
         self.write_indent();
-        self.write(if let_stmt.is_mutable { "var " } else { "val " });
-        self.write(&let_stmt.name);
+        self.write(match let_stmt.mutability {
+            Mutability::Mutable => "var ",
+            Mutability::Immutable => "val ",
+        });
 
-        if let Some(ref type_ann) = let_stmt.type_annotation {
+        // Print pattern (for now, just handle simple identifier patterns)
+        self.print_pattern(&let_stmt.pattern);
+
+        if let Some(ref type_ann) = let_stmt.ty {
             self.write(": ");
             self.print_type(type_ann);
         }
@@ -415,7 +420,7 @@ impl PrettyPrinter {
         self.write("const ");
         self.write(&const_stmt.name);
 
-        if let Some(ref type_ann) = const_stmt.type_annotation {
+        if let Some(ref type_ann) = const_stmt.ty {
             self.write(": ");
             self.print_type(type_ann);
         }
@@ -450,23 +455,27 @@ impl PrettyPrinter {
         self.write(":");
         self.output.push('\n');
 
-        // Then branch
+        // Then block
         self.indent_inc();
-        if if_stmt.then_branch.is_empty() {
+        if if_stmt.then_block.statements.is_empty() {
             self.write_line("pass");
         } else {
-            for node in &if_stmt.then_branch {
+            for node in &if_stmt.then_block.statements {
                 self.print_node(node);
             }
         }
         self.indent_dec();
 
-        // Else branch
-        if !if_stmt.else_branch.is_empty() {
+        // Else block
+        if let Some(ref else_block) = if_stmt.else_block {
             self.write_line("else:");
             self.indent_inc();
-            for node in &if_stmt.else_branch {
-                self.print_node(node);
+            if else_block.statements.is_empty() {
+                self.write_line("pass");
+            } else {
+                for node in &else_block.statements {
+                    self.print_node(node);
+                }
             }
             self.indent_dec();
         }
@@ -475,7 +484,7 @@ impl PrettyPrinter {
     fn print_match(&mut self, match_stmt: &MatchStmt) {
         self.write_indent();
         self.write("match ");
-        self.print_expr(&match_stmt.value);
+        self.print_expr(&match_stmt.subject);
         self.write(":");
         self.output.push('\n');
 
@@ -500,10 +509,10 @@ impl PrettyPrinter {
         self.output.push('\n');
 
         self.indent_inc();
-        if arm.body.is_empty() {
+        if arm.body.statements.is_empty() {
             self.write_line("pass");
         } else {
-            for node in &arm.body {
+            for node in &arm.body.statements {
                 self.print_node(node);
             }
         }
@@ -513,17 +522,17 @@ impl PrettyPrinter {
     fn print_for(&mut self, for_stmt: &ForStmt) {
         self.write_indent();
         self.write("for ");
-        self.write(&for_stmt.variable);
+        self.print_pattern(&for_stmt.pattern);
         self.write(" in ");
         self.print_expr(&for_stmt.iterable);
         self.write(":");
         self.output.push('\n');
 
         self.indent_inc();
-        if for_stmt.body.is_empty() {
+        if for_stmt.body.statements.is_empty() {
             self.write_line("pass");
         } else {
-            for node in &for_stmt.body {
+            for node in &for_stmt.body.statements {
                 self.print_node(node);
             }
         }
@@ -538,10 +547,10 @@ impl PrettyPrinter {
         self.output.push('\n');
 
         self.indent_inc();
-        if while_stmt.body.is_empty() {
+        if while_stmt.body.statements.is_empty() {
             self.write_line("pass");
         } else {
-            for node in &while_stmt.body {
+            for node in &while_stmt.body.statements {
                 self.print_node(node);
             }
         }
@@ -552,10 +561,10 @@ impl PrettyPrinter {
         self.write_line("loop:");
 
         self.indent_inc();
-        if loop_stmt.body.is_empty() {
+        if loop_stmt.body.statements.is_empty() {
             self.write_line("pass");
         } else {
-            for node in &loop_stmt.body {
+            for node in &loop_stmt.body.statements {
                 self.print_node(node);
             }
         }
