@@ -171,6 +171,13 @@ impl NativeLinker {
             cmd.arg("-L").arg(path);
         }
 
+        // Add rpath for runtime library loading
+        // This ensures the binary can find shared libraries like libsimple_compiler.so
+        // Use linker-native syntax (--rpath) not gcc syntax (-Wl,-rpath)
+        for path in &options.library_paths {
+            cmd.arg(format!("--rpath={}", path.display()));
+        }
+
         // Add extra flags
         for flag in &options.extra_flags {
             cmd.arg(flag);
