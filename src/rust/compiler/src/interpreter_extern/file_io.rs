@@ -120,6 +120,46 @@ pub fn rt_file_write_text(args: &[Value]) -> Result<Value, CompileError> {
     }
 }
 
+/// Atomically write text to file (write to temp, then rename)
+///
+/// This provides atomic writes by:
+/// 1. Writing content to a temporary file (.tmp suffix)
+/// 2. Atomically renaming the temp file to the target path
+///
+/// This ensures that readers never see partial writes, and the operation
+/// is all-or-nothing. On POSIX systems, rename is atomic.
+///
+/// Note: This does NOT provide file locking. For concurrent access,
+/// use a higher-level API with locking (e.g., Database<T>).
+pub fn rt_file_atomic_write(args: &[Value]) -> Result<Value, CompileError> {
+    let path = extract_path(args, 0)?;
+    let content = extract_content(args, 1)?;
+
+    // Create parent directories if needed
+    if let Some(parent) = Path::new(&path).parent() {
+        if let Err(_) = fs::create_dir_all(parent) {
+            return Ok(Value::Bool(false));
+        }
+    }
+
+    // Write to temporary file
+    let temp_path = format!("{}.tmp", path);
+    match fs::write(&temp_path, &content) {
+        Ok(_) => {
+            // Atomically rename temp to target
+            match fs::rename(&temp_path, &path) {
+                Ok(_) => Ok(Value::Bool(true)),
+                Err(_) => {
+                    // Cleanup temp file on failure
+                    let _ = fs::remove_file(&temp_path);
+                    Ok(Value::Bool(false))
+                }
+            }
+        }
+        Err(_) => Ok(Value::Bool(false)),
+    }
+}
+
 /// Copy file
 pub fn rt_file_copy(args: &[Value]) -> Result<Value, CompileError> {
     let src = extract_path(args, 0)?;

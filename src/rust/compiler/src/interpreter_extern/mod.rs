@@ -515,6 +515,7 @@ pub(crate) fn call_extern_function(
         "rt_file_canonicalize" => file_io::rt_file_canonicalize(&evaluated),
         "rt_file_read_text" => file_io::rt_file_read_text(&evaluated),
         "rt_file_write_text" => file_io::rt_file_write_text(&evaluated),
+        "rt_file_atomic_write" => file_io::rt_file_atomic_write(&evaluated),
         "rt_file_copy" => file_io::rt_file_copy(&evaluated),
         "rt_file_remove" => file_io::rt_file_remove(&evaluated),
         "rt_file_rename" => file_io::rt_file_rename(&evaluated),
