@@ -371,12 +371,17 @@ pub fn is_execution_limit_enabled() -> bool {
 //==============================================================================
 
 /// RAII guard that decrements recursion depth on drop.
-pub struct RecursionGuard;
+/// RAII guard that decrements recursion depth on drop (only if it incremented).
+pub struct RecursionGuard {
+    active: bool,
+}
 
 impl Drop for RecursionGuard {
     #[inline]
     fn drop(&mut self) {
-        RECURSION_DEPTH.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        if self.active {
+            RECURSION_DEPTH.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        }
     }
 }
 
@@ -385,7 +390,7 @@ impl Drop for RecursionGuard {
 #[inline]
 pub fn push_call_depth(function_name: &str) -> Result<RecursionGuard, crate::error::CompileError> {
     if !is_stack_overflow_detection_enabled() {
-        return Ok(RecursionGuard);
+        return Ok(RecursionGuard { active: false });
     }
     let depth = RECURSION_DEPTH.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let limit = MAX_RECURSION_DEPTH.load(std::sync::atomic::Ordering::Relaxed) as usize;
@@ -398,7 +403,7 @@ pub fn push_call_depth(function_name: &str) -> Result<RecursionGuard, crate::err
             function_name: function_name.to_string(),
         });
     }
-    Ok(RecursionGuard)
+    Ok(RecursionGuard { active: true })
 }
 
 // Delegate to simple_common::fault_detection for cross-crate compatibility.
@@ -567,4 +572,119 @@ pub fn clear_interpreter_state() {
     // Reset fault detection counters
     reset_recursion_depth();
     reset_timeout();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::Ordering;
+
+    fn setup() {
+        reset_recursion_depth();
+        reset_timeout();
+        set_stack_overflow_detection_enabled(true);
+        set_max_recursion_depth(1000);
+    }
+
+    #[test]
+    fn test_recursion_guard_increments_and_decrements() {
+        setup();
+        assert_eq!(RECURSION_DEPTH.load(Ordering::Relaxed), 0);
+        {
+            let _guard = push_call_depth("test_fn").unwrap();
+            assert_eq!(RECURSION_DEPTH.load(Ordering::Relaxed), 1);
+        }
+        // Guard dropped, depth back to 0
+        assert_eq!(RECURSION_DEPTH.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn test_recursion_guard_nested() {
+        setup();
+        {
+            let _g1 = push_call_depth("outer").unwrap();
+            assert_eq!(RECURSION_DEPTH.load(Ordering::Relaxed), 1);
+            {
+                let _g2 = push_call_depth("inner").unwrap();
+                assert_eq!(RECURSION_DEPTH.load(Ordering::Relaxed), 2);
+            }
+            assert_eq!(RECURSION_DEPTH.load(Ordering::Relaxed), 1);
+        }
+        assert_eq!(RECURSION_DEPTH.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn test_recursion_guard_disabled_no_underflow() {
+        setup();
+        set_stack_overflow_detection_enabled(false);
+        assert_eq!(RECURSION_DEPTH.load(Ordering::Relaxed), 0);
+        {
+            let _guard = push_call_depth("test_fn").unwrap();
+            // When disabled, depth should NOT be incremented
+            assert_eq!(RECURSION_DEPTH.load(Ordering::Relaxed), 0);
+        }
+        // Guard dropped with active=false, no decrement, still 0
+        assert_eq!(RECURSION_DEPTH.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn test_recursion_guard_overflow_detected() {
+        setup();
+        set_max_recursion_depth(2);
+        let _g1 = push_call_depth("f1").unwrap();
+        let _g2 = push_call_depth("f2").unwrap();
+        // Third call should fail
+        let result = push_call_depth("f3");
+        assert!(result.is_err());
+        // Depth should be 2 (the two successful guards)
+        assert_eq!(RECURSION_DEPTH.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn test_recursion_guard_overflow_does_not_corrupt_counter() {
+        setup();
+        set_max_recursion_depth(1);
+        {
+            let _g1 = push_call_depth("f1").unwrap();
+            // This should fail
+            let result = push_call_depth("f2");
+            assert!(result.is_err());
+            // Depth should be 1 (only the successful guard)
+            assert_eq!(RECURSION_DEPTH.load(Ordering::Relaxed), 1);
+        }
+        // After g1 drops, back to 0
+        assert_eq!(RECURSION_DEPTH.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn test_toggle_detection_preserves_counter() {
+        setup();
+        {
+            let _g1 = push_call_depth("f1").unwrap();
+            assert_eq!(RECURSION_DEPTH.load(Ordering::Relaxed), 1);
+            // Disable while guard is alive
+            set_stack_overflow_detection_enabled(false);
+            {
+                let _g2 = push_call_depth("f2").unwrap();
+                // Disabled, so no increment
+                assert_eq!(RECURSION_DEPTH.load(Ordering::Relaxed), 1);
+            }
+            // g2 dropped (active=false), no decrement
+            assert_eq!(RECURSION_DEPTH.load(Ordering::Relaxed), 1);
+            // Re-enable
+            set_stack_overflow_detection_enabled(true);
+        }
+        // g1 dropped (active=true), decrements
+        assert_eq!(RECURSION_DEPTH.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn test_timeout_flag() {
+        setup();
+        assert!(!is_timeout_exceeded());
+        TIMEOUT_EXCEEDED.store(true, Ordering::SeqCst);
+        assert!(is_timeout_exceeded());
+        reset_timeout();
+        assert!(!is_timeout_exceeded());
+    }
 }

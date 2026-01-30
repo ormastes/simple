@@ -154,6 +154,19 @@ fn extract_string(val: RuntimeValue) -> Option<String> {
     }
 }
 
+/// Helper: extract array of strings from RuntimeValue
+fn extract_string_array(arr: RuntimeValue) -> Vec<String> {
+    let len = rt_array_len(arr);
+    let mut result = Vec::new();
+    for i in 0..len {
+        let val = rt_array_get(arr, i);
+        if let Some(s) = extract_string(val) {
+            result.push(s);
+        }
+    }
+    result
+}
+
 /// Find the simple_old binary for subprocess calls
 /// Looks in: 1) SIMPLE_OLD_PATH env var, 2) same directory as current exe, 3) PATH
 fn find_simple_old() -> Option<std::path::PathBuf> {
@@ -255,8 +268,42 @@ pub extern "C" fn rt_cli_run_repl(_gc_log: u8, _gc_off: u8) -> i64 {
 }
 
 #[no_mangle]
-pub extern "C" fn rt_cli_run_tests(_args: RuntimeValue, _gc_log: u8, _gc_off: u8) -> i64 {
-    not_implemented("rt_cli_run_tests")
+pub extern "C" fn rt_cli_run_tests(args: RuntimeValue, gc_log: u8, gc_off: u8) -> i64 {
+    // Extract args array to Vec<String>
+    let arg_strings = extract_string_array(args);
+
+    // Call the test runner from simple-driver
+    // Note: This requires linking against simple-driver
+    // For now, we'll exec the binary to avoid circular dependencies
+    use std::process::Command;
+
+    let mut cmd = Command::new(std::env::current_exe().unwrap());
+    cmd.arg("test");
+
+    // Add all arguments
+    for arg in &arg_strings {
+        cmd.arg(arg);
+    }
+
+    // Add GC flags
+    if gc_log != 0 {
+        cmd.arg("--gc-log");
+    }
+    if gc_off != 0 {
+        cmd.arg("--gc-off");
+    }
+
+    // Set environment variable to use Rust runner (avoid recursion)
+    cmd.env("SIMPLE_TEST_RUNNER_RUST", "1");
+
+    // Execute and return exit code
+    match cmd.status() {
+        Ok(status) => status.code().unwrap_or(1) as i64,
+        Err(e) => {
+            eprintln!("Failed to run tests: {}", e);
+            1
+        }
+    }
 }
 
 #[no_mangle]
@@ -585,4 +632,95 @@ pub extern "C" fn rt_fault_set_timeout(secs: i64) {
 #[no_mangle]
 pub extern "C" fn rt_fault_set_execution_limit(limit: i64) {
     std::env::set_var("SIMPLE_EXECUTION_LIMIT", limit.to_string());
+}
+
+// =========================================================================
+// Test Database Integrity Validation FFI
+// =========================================================================
+
+/// Validate test database and return number of violations found
+/// Returns -1 on error, >= 0 for violation count
+#[no_mangle]
+pub extern "C" fn rt_test_db_validate(db_path: RuntimeValue) -> i64 {
+    let path_str = match extract_string(db_path) {
+        Some(s) => s,
+        None => return -1,
+    };
+
+    // This requires simple-driver which has the Database implementation
+    // For now, we'll delegate to simple_old
+    let mut cmd = Command::new(std::env::current_exe().unwrap_or_else(|_| "simple_old".into()));
+    cmd.arg("test");
+    cmd.arg("--validate-db");
+    cmd.arg(&path_str);
+    cmd.env("SIMPLE_TEST_DEBUG", "basic");
+
+    match cmd.output() {
+        Ok(output) => {
+            if output.status.success() {
+                // Parse violation count from stdout
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                for line in stdout.lines() {
+                    if line.starts_with("VIOLATIONS:") {
+                        if let Some(count_str) = line.split(':').nth(1) {
+                            if let Ok(count) = count_str.trim().parse::<i64>() {
+                                return count;
+                            }
+                        }
+                    }
+                }
+                0 // No violations marker found, assume success
+            } else {
+                -1
+            }
+        }
+        Err(_) => -1,
+    }
+}
+
+/// Enable debug mode for database validation
+#[no_mangle]
+pub extern "C" fn rt_test_db_enable_validation(enabled: u8) {
+    if enabled != 0 {
+        std::env::set_var("SIMPLE_TEST_DEBUG", "basic");
+    } else {
+        std::env::remove_var("SIMPLE_TEST_DEBUG");
+    }
+}
+
+/// Check if a test run is stale (running > hours_threshold)
+#[no_mangle]
+pub extern "C" fn rt_test_run_is_stale(run_id: RuntimeValue, hours_threshold: i64) -> u8 {
+    // This would need access to the test database
+    // For now, return 0 (not stale) as a safe default
+    // Full implementation requires linking against simple-driver
+    0
+}
+
+/// Cleanup stale test runs in database
+/// Returns number of runs cleaned up, or -1 on error
+#[no_mangle]
+pub extern "C" fn rt_test_db_cleanup_stale_runs(db_path: RuntimeValue) -> i64 {
+    let path_str = match extract_string(db_path) {
+        Some(s) => s,
+        None => return -1,
+    };
+
+    let mut cmd = Command::new(std::env::current_exe().unwrap_or_else(|_| "simple_old".into()));
+    cmd.arg("test");
+    cmd.arg("--cleanup-runs");
+    cmd.arg("--db-path");
+    cmd.arg(&path_str);
+    cmd.env("SIMPLE_TEST_AUTO_CLEANUP", "1");
+
+    match cmd.status() {
+        Ok(status) => {
+            if status.success() {
+                0 // Success, but we don't have the count without parsing output
+            } else {
+                -1
+            }
+        }
+        Err(_) => -1,
+    }
 }

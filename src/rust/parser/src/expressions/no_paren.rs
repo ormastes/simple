@@ -26,7 +26,9 @@ impl<'a> Parser<'a> {
         if let Some(op) = assign_op {
             let span = self.current.span;
             self.advance();
-            let value = self.parse_expression()?;
+            let mut value = self.parse_expression()?;
+            // Support no-paren calls in assignment: x = double 5
+            value = self.parse_with_no_paren_calls(value)?;
             Ok(Node::Assignment(AssignmentStmt {
                 span,
                 target: expr,
@@ -46,7 +48,7 @@ impl<'a> Parser<'a> {
     }
 
     /// Parse no-paren calls on an expression
-    fn parse_with_no_paren_calls(&mut self, expr: Expr) -> Result<Expr, ParseError> {
+    pub(crate) fn parse_with_no_paren_calls(&mut self, expr: Expr) -> Result<Expr, ParseError> {
         // Check for colon-block on plain identifier FIRST
         // e.g., `given:` or `describe:` without arguments
         // This must come before can_start_argument() check because colon is in that list

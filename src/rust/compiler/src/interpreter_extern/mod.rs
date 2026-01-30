@@ -567,6 +567,10 @@ pub(crate) fn call_extern_function(
 
         // Testing
         "rt_cli_run_tests" => cli::rt_cli_run_tests(&evaluated),
+        "rt_test_db_validate" => cli::rt_test_db_validate(&evaluated),
+        "rt_test_db_enable_validation" => cli::rt_test_db_enable_validation(&evaluated),
+        "rt_test_run_is_stale" => cli::rt_test_run_is_stale(&evaluated),
+        "rt_test_db_cleanup_stale_runs" => cli::rt_test_db_cleanup_stale_runs(&evaluated),
 
         // Code quality
         "rt_cli_run_lint" => cli::rt_cli_run_lint(&evaluated),
