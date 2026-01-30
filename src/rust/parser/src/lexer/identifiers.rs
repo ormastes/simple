@@ -173,7 +173,16 @@ impl<'a> super::Lexer<'a> {
             "yield" => TokenKind::Yield,
             "move" => TokenKind::Move,
             "const" => TokenKind::Const,
-            "static" => TokenKind::Static,
+            "static" => {
+                // Contextual keyword: only treat as keyword if NOT followed by '('
+                // This allows: fn static(...) and obj.static(...)
+                // while keeping: static fn method() (static method declaration)
+                if self.check('(') {
+                    TokenKind::Ident(name)  // Method/function name
+                } else {
+                    TokenKind::Static  // Keyword for static declarations
+                }
+            }
             "type" => TokenKind::Type,
             "unit" => TokenKind::Unit,
             "extern" => TokenKind::Extern,
@@ -235,7 +244,16 @@ impl<'a> super::Lexer<'a> {
             "tensor" => TokenKind::Tensor,
             "slice" => TokenKind::Slice,
             "flat" => TokenKind::Flat,
-            "default" => TokenKind::Default,
+            "default" => {
+                // Contextual keyword: only treat as keyword if NOT followed by '('
+                // This allows: fn default(...) and obj.default(...)
+                // while keeping: default -> ... (match default case)
+                if self.check('(') {
+                    TokenKind::Ident(name)  // Method/function name
+                } else {
+                    TokenKind::Default  // Keyword for match default
+                }
+            }
             "_" => TokenKind::Underscore,
             // AOP keywords
             "on" => TokenKind::On,
