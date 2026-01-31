@@ -5,13 +5,13 @@
 
 use compilation_context.{CompilationContext, ConcreteType, InstantiationMode}
 use backend_types.CompiledUnit
-use monomorphize/note_sdn.{InstantiationEntry, InstantiationStatus}
+use monomorphize.note_sdn.{InstantiationEntry, InstantiationStatus}
 
 # ============================================================================
 # Name Mangling
 # ============================================================================
 
-fn mangle(template_name: text, type_args: [ConcreteType]) -> text:
+fn mangle(template_name, type_args):
     """Mangle a template name with concrete type arguments."""
     if type_args.is_empty():
         return template_name
@@ -28,7 +28,7 @@ class TemplateInstantiator:
     in_progress: Set<text>
     cache: Dict<text, CompiledUnit>
 
-    me instantiate(template_name: text, type_args: [ConcreteType]) -> Result<CompiledUnit, text>:
+    me instantiate(template_name, type_args):
         val key = mangle(template_name, type_args)
 
         # 1. Cache check
@@ -42,32 +42,35 @@ class TemplateInstantiator:
         self.in_progress = self.in_progress.insert(key)
 
         # 3. Load template from context
-        val template = self.context.load_template(template_name)?
+        val load_result = self.context.load_template(template_name)
+        if load_result.is_err():
+            self.in_progress = self.in_progress.remove(key)
+            return load_result
+
+        val tmpl = load_result.unwrap()
 
         # 4. Compile through full pipeline (context handles AOP/DI/contracts)
-        val unit = self.context.compile_template(template, type_args)?
+        val compile_result = self.context.compile_template(tmpl, type_args)
+        if compile_result.is_err():
+            self.in_progress = self.in_progress.remove(key)
+            return compile_result
+
+        val unit = compile_result.unwrap()
 
         # 5. Record metadata
-        self.context.record_instantiation(InstantiationEntry(
-            template_name: template_name,
-            type_args: type_args.map(\t: t.to_string()).join(","),
-            mangled_name: key,
-            from_file: "instantiator",
-            from_loc: "instantiator:0:0",
-            to_obj: "output",
-            status: InstantiationStatus.Compiled
-        ))
+        val inst_entry = InstantiationEntry { template_name: template_name, type_args: type_args.map(\t: t.to_string()).join(","), mangled_name: key, from_file: "instantiator", from_loc: "instantiator:0:0", to_obj: "output", status: InstantiationStatus.Compiled }
+        self.context.record_instantiation(inst_entry)
 
         # 6. Cache
         self.cache[key] = unit
         self.in_progress = self.in_progress.remove(key)
         Ok(unit)
 
-    fn is_cached(template_name: text, type_args: [ConcreteType]) -> bool:
+    fn is_cached(template_name, type_args):
         val key = mangle(template_name, type_args)
         self.cache.contains_key(key)
 
-    fn cache_size() -> i32:
+    fn cache_size():
         self.cache.len()
 
 # ============================================================================

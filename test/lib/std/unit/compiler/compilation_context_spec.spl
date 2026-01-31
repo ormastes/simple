@@ -1,0 +1,322 @@
+"""
+# Unified CompilationContext Specification
+
+**Feature IDs:** #CC-001 to #CC-030
+**Category:** Infrastructure
+**Difficulty:** 4/5
+**Status:** In Progress
+
+## Overview
+
+The CompilationContext trait provides a unified compilation interface for
+compiler, JIT loader, and linker. All three paths use it to ensure
+AOP/DI/contracts are applied consistently.
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| CompilationContext | Trait: load_template, compile_template, record_instantiation |
+| TemplateInstantiator | Shared cache + cycle detection, delegates to context |
+| InstantiationMode | When instantiation occurs: CompileTime, LinkTime, JitTime |
+| ContractMode | How much checking: Off, Boundary, All |
+| GenericTemplate | Template AST data with type parameters |
+| ConcreteType | Concrete type used for instantiation |
+
+## Behavior
+
+- All three contexts implement the same trait
+- TemplateInstantiator caches compiled units by mangled name
+- Cycle detection prevents infinite recursion
+- Each context uses its own template source (AST cache, SMF, objects)
+- Pipeline: monomorphize -> HIR -> MIR -> AOP -> codegen
+"""
+
+use compiler.compilation_context
+use compiler.instantiation
+use compiler.backend_types
+
+# ============================================================================
+# Test Group 1: InstantiationMode Enum
+# ============================================================================
+
+describe "InstantiationMode":
+    """
+    ## InstantiationMode Enum
+
+    Tracks when instantiation occurs in the compilation pipeline.
+    """
+
+    it "converts CompileTime to string":
+        expect InstantiationMode.CompileTime.to_string() == "compile_time"
+
+    it "converts LinkTime to string":
+        expect InstantiationMode.LinkTime.to_string() == "link_time"
+
+    it "converts JitTime to string":
+        expect InstantiationMode.JitTime.to_string() == "jit_time"
+
+
+# ============================================================================
+# Test Group 2: ContractMode Enum
+# ============================================================================
+
+describe "ContractMode":
+    """
+    ## ContractMode Enum
+
+    Controls how much contract checking to apply during compilation.
+    """
+
+    it "converts Off to string":
+        expect ContractMode.Off.to_string() == "off"
+
+    it "converts Boundary to string":
+        expect ContractMode.Boundary.to_string() == "boundary"
+
+    it "converts All to string":
+        expect ContractMode.All.to_string() == "all"
+
+
+# ============================================================================
+# Test Group 3: GenericTemplate
+# ============================================================================
+
+describe "GenericTemplate":
+    """
+    ## GenericTemplate Struct
+
+    Represents a generic template loaded from AST cache or SMF.
+    """
+
+    it "creates template with name and type params":
+        val tmpl = GenericTemplate { name: "List", type_params: ["T"], ast_data: nil }
+        expect tmpl.name == "List"
+        expect tmpl.type_params.len() == 1
+        expect tmpl.type_params[0] == "T"
+
+    it "creates template with multiple type params":
+        val tmpl = GenericTemplate { name: "Map", type_params: ["K", "V"], ast_data: nil }
+        expect tmpl.name == "Map"
+        expect tmpl.type_params.len() == 2
+
+    it "creates template with no type params":
+        val tmpl = GenericTemplate { name: "Point", type_params: [], ast_data: nil }
+        expect tmpl.type_params.is_empty()
+
+
+# ============================================================================
+# Test Group 4: ConcreteType
+# ============================================================================
+
+describe "ConcreteType":
+    """
+    ## ConcreteType Struct
+
+    Represents a concrete type used for template instantiation.
+    """
+
+    it "converts to string":
+        val ct = ConcreteType { name: "Int" }
+        expect ct.to_string() == "Int"
+
+    it "supports complex type names":
+        val ct = ConcreteType { name: "List<String>" }
+        expect ct.to_string() == "List<String>"
+
+
+# ============================================================================
+# Test Group 5: TypeRegistry
+# ============================================================================
+
+describe "TypeRegistry":
+    """
+    ## TypeRegistry Struct
+
+    Registry of known types used during compilation.
+    """
+
+    it "creates empty registry":
+        val reg = TypeRegistry.empty()
+        expect reg.types.is_empty()
+
+
+# ============================================================================
+# Test Group 6: Name Mangling
+# ============================================================================
+
+describe "mangle":
+    """
+    ## Name Mangling
+
+    Combines template name with concrete type args into a unique symbol name.
+    """
+
+    it "returns template name with no type args":
+        val result = mangle("List", [])
+        expect result == "List"
+
+    it "mangles with single type arg":
+        val args = [ConcreteType { name: "Int" }]
+        val result = mangle("List", args)
+        expect result == "List$Int"
+
+    it "mangles with multiple type args":
+        val args = [ConcreteType { name: "String" }, ConcreteType { name: "Int" }]
+        val result = mangle("Map", args)
+        expect result == "Map$String,Int"
+
+    it "produces unique names for different type args":
+        val args1 = [ConcreteType { name: "Int" }]
+        val args2 = [ConcreteType { name: "String" }]
+        val name1 = mangle("List", args1)
+        val name2 = mangle("List", args2)
+        expect name1 != name2
+
+
+# ============================================================================
+# Test Group 7: TemplateInstantiator Cache
+# ============================================================================
+
+describe "TemplateInstantiator":
+    """
+    ## TemplateInstantiator
+
+    Shared instantiation logic with caching and cycle detection.
+    Delegates compilation to the CompilationContext.
+    """
+
+    context "cache behavior":
+        """
+        ### Scenario: Caching Compiled Units
+
+        Instantiator should cache results to avoid recompilation.
+        """
+
+        it "starts with empty cache":
+            val ctx = make_test_context({})
+            val inst = TemplateInstantiator { context: ctx, in_progress: {}, cache: {} }
+            expect inst.cache_size() == 0
+
+        it "reports not cached for unknown template":
+            val ctx = make_test_context({})
+            val inst = TemplateInstantiator { context: ctx, in_progress: {}, cache: {} }
+            expect not inst.is_cached("Unknown", [])
+
+        it "caches after successful instantiation":
+            val tmpl = GenericTemplate { name: "Simple", type_params: [], ast_data: nil }
+            val templates = {"Simple": tmpl}
+            val ctx = make_test_context(templates)
+            var inst = TemplateInstantiator { context: ctx, in_progress: {}, cache: {} }
+
+            val result = inst.instantiate("Simple", [])
+            expect result.is_ok()
+            expect inst.cache_size() == 1
+            expect inst.is_cached("Simple", [])
+
+        it "returns cached result on second call":
+            val tmpl = GenericTemplate { name: "Pair", type_params: ["A", "B"], ast_data: nil }
+            val templates = {"Pair": tmpl}
+            val ctx = make_test_context(templates)
+            var inst = TemplateInstantiator { context: ctx, in_progress: {}, cache: {} }
+
+            val args = [ConcreteType { name: "Int" }, ConcreteType { name: "String" }]
+            val result1 = inst.instantiate("Pair", args)
+            val result2 = inst.instantiate("Pair", args)
+            expect result1.is_ok()
+            expect result2.is_ok()
+            expect inst.cache_size() == 1
+
+    context "error handling":
+        """
+        ### Scenario: Error Conditions
+
+        Instantiator should report errors for missing templates and cycles.
+        """
+
+        it "returns error for missing template":
+            val ctx = make_test_context({})
+            var inst = TemplateInstantiator { context: ctx, in_progress: {}, cache: {} }
+
+            val result = inst.instantiate("NonExistent", [])
+            expect result.is_err()
+
+        it "detects circular dependency":
+            val ctx = make_test_context({})
+            var in_progress = {}
+            in_progress = in_progress.insert("Recursive")
+            var inst = TemplateInstantiator { context: ctx, in_progress: in_progress, cache: {} }
+
+            val result = inst.instantiate("Recursive", [])
+            expect result.is_err()
+            val err_msg = result.unwrap_err()
+            expect err_msg.contains("Circular dependency")
+
+    context "different type arguments":
+        """
+        ### Scenario: Multiple Instantiations of Same Template
+
+        Same template with different type args should produce separate cache entries.
+        """
+
+        it "caches separately for different type args":
+            val tmpl = GenericTemplate { name: "Box", type_params: ["T"], ast_data: nil }
+            val templates = {"Box": tmpl}
+            val ctx = make_test_context(templates)
+            var inst = TemplateInstantiator { context: ctx, in_progress: {}, cache: {} }
+
+            val result1 = inst.instantiate("Box", [ConcreteType { name: "Int" }])
+            val result2 = inst.instantiate("Box", [ConcreteType { name: "String" }])
+            expect result1.is_ok()
+            expect result2.is_ok()
+            expect inst.cache_size() == 2
+            expect inst.is_cached("Box", [ConcreteType { name: "Int" }])
+            expect inst.is_cached("Box", [ConcreteType { name: "String" }])
+
+
+# ============================================================================
+# Helper: Test CompilationContext Implementation
+# ============================================================================
+
+class TestCompilationContext(CompilationContext):
+    """Minimal CompilationContext for testing."""
+    templates: Dict<text, GenericTemplate>
+    recorded: [InstantiationEntry]
+
+    fn load_template(name: text):
+        if self.templates.contains_key(name):
+            Ok(self.templates[name])
+        else:
+            Err("Template not found: {name}")
+
+    fn has_template(name: text):
+        self.templates.contains_key(name)
+
+    fn type_registry():
+        TypeRegistry.empty()
+
+    fn contract_mode():
+        ContractMode.All
+
+    fn di_container():
+        nil
+
+    fn aop_weaver():
+        nil
+
+    fn coverage_enabled():
+        false
+
+    fn compile_template(tmpl, type_args):
+        val args_str = type_args.map(\t: t.to_string()).join(",")
+        val mangled = if args_str.is_empty(): tmpl.name else: "{tmpl.name}${args_str}"
+        Ok(CompiledUnit { name: mangled, code: [], symbols: {}, entry_point: nil, relocations: [] })
+
+    fn instantiation_mode():
+        InstantiationMode.CompileTime
+
+    me record_instantiation(entry):
+        self.recorded = self.recorded.push(entry)
+
+fn make_test_context(templates):
+    TestCompilationContext { templates: templates, recorded: [] }

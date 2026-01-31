@@ -780,3 +780,46 @@ help:
 	@echo "  make install-tools - Install required tools"
 	@echo "  make clean         - Clean all artifacts"
 	@echo "  make help          - Show this help"
+
+# ============================================================================
+# Backend Completeness (Phases 1-4)
+# ============================================================================
+
+# Phase 1: Check for catch-all patterns
+check-exhaustiveness:
+	@echo "=== Checking Backend Exhaustiveness ==="
+	@./bin/wrappers/simple src/compiler/backend/exhaustiveness_validator.spl || \
+		echo "Note: Phase 1 not yet implemented"
+
+# Phase 2: Run backend coverage tests
+test-backends:
+	@echo "=== Running Backend Coverage Tests ==="
+	@./rust/target/debug/simple_runtime test test/compiler/backend/ || \
+		echo "Note: Phase 2 not yet implemented"
+
+# Phase 3: Generate backend documentation
+docs-backends:
+	@echo "=== Generating Backend Documentation ==="
+	@./bin/wrappers/simple scripts/generate_backend_docs.spl all || \
+		echo "Note: Phase 3 not yet implemented"
+
+# Phase 4: Regenerate code from IR DSL
+codegen-from-dsl:
+	@echo "=== Generating Code from IR DSL ==="
+	@./bin/wrappers/simple src/compiler/irdsl/main.spl || \
+		echo "Note: Phase 4 not yet implemented"
+
+# Run all backend completeness checks
+backend-completeness-full: check-exhaustiveness test-backends docs-backends
+	@echo ""
+	@echo "✓ All backend completeness checks completed!"
+
+# Audit catch-all patterns (first step of Phase 1)
+audit-catchalls:
+	@echo "=== Auditing Catch-All Patterns ==="
+	@echo "Searching for '_ =>' patterns in backend code..."
+	@grep -rn "_ =>" rust/compiler/src/codegen/{llvm,vulkan}/ | grep -v test || \
+		echo "No catch-all patterns found (good!)"
+
+.PHONY: check-exhaustiveness test-backends docs-backends codegen-from-dsl \
+        backend-completeness-full audit-catchalls

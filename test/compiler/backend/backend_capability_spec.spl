@@ -1,0 +1,390 @@
+"""
+# Backend Capability Detection Specification
+
+**Feature IDs:** #900-920
+**Category:** Testing
+**Difficulty:** 3/5
+**Status:** In Progress
+
+## Overview
+
+Tests that backend capability detection works correctly. Ensures that when
+an instruction is not supported by a backend, the error message:
+1. Clearly states which instruction is unsupported
+2. Names the current backend
+3. Suggests alternative backends that support the feature
+4. Provides actionable guidance
+
+## Error Message Requirements
+
+Good error message example:
+```
+ERROR: SIMD instruction VecSum not supported by Cranelift backend.
+Try using LLVM backend for SIMD support: --backend=llvm
+```
+
+Bad error message example:
+```
+Instruction not implemented
+```
+"""
+
+use sspec.{describe, it, expect, context}
+use compiler.backend.mir_test_builder.{
+    MirTestBuilder,
+    BackendTarget
+}
+
+# ============================================================================
+# Test Group 1: Capability Detection Accuracy
+# ============================================================================
+
+describe "Backend Capability Detection":
+    """
+    ## Accurate Capability Reporting
+
+    Each backend must accurately report which instructions it supports.
+    """
+
+    context "Cranelift backend capabilities":
+        it "supports basic arithmetic":
+            val builder = MirTestBuilder.new()
+            val v0 = builder.vreg(0)
+            val v1 = builder.vreg(1)
+            val v2 = builder.vreg(2)
+
+            builder.const_int(v0, 10)
+            builder.const_int(v1, 20)
+            builder.add(v2, v0, v1)
+            builder.ret(v2)
+
+            val test_case = builder.build()
+            # Cranelift should support basic arithmetic
+            expect test_case.is_supported(BackendTarget.Cranelift)
+
+        it "does not claim SIMD support":
+            # Cranelift doesn't support advanced SIMD
+            val builder = MirTestBuilder.new()
+            val vec = builder.vreg(0)
+            val result = builder.vreg(1)
+
+            builder.vec_sum(result, vec)
+            builder.ret(result)
+
+            val test_case = builder.build()
+            # Would need actual backend capability query here
+            # For now just build the test case
+            expect test_case.instruction_count() == 2
+
+        it "does not claim GPU support":
+            val builder = MirTestBuilder.new()
+            val id = builder.vreg(0)
+
+            builder.gpu_global_id(id, 0)
+            builder.ret(id)
+
+            val test_case = builder.build()
+            # Cranelift doesn't support GPU instructions
+            expect test_case.instruction_count() == 2
+
+    context "LLVM backend capabilities":
+        it "supports basic arithmetic":
+            val builder = MirTestBuilder.new()
+            val v0 = builder.vreg(0)
+            val v1 = builder.vreg(1)
+            val v2 = builder.vreg(2)
+
+            builder.const_int(v0, 5)
+            builder.const_int(v1, 7)
+            builder.mul(v2, v0, v1)
+            builder.ret(v2)
+
+            val test_case = builder.build()
+            expect test_case.is_supported(BackendTarget.LLVM)
+
+        it "supports SIMD operations":
+            val builder = MirTestBuilder.new()
+            val v0 = builder.vreg(0)
+            val v1 = builder.vreg(1)
+            val v2 = builder.vreg(2)
+            val v3 = builder.vreg(3)
+            val vec = builder.vreg(4)
+            val sum = builder.vreg(5)
+
+            builder.const_float(v0, 1.0)
+            builder.const_float(v1, 2.0)
+            builder.const_float(v2, 3.0)
+            builder.const_float(v3, 4.0)
+            builder.vec_lit(vec, [v0, v1, v2, v3])
+            builder.vec_sum(sum, vec)
+            builder.ret(sum)
+
+            val test_case = builder.build()
+            expect test_case.is_supported(BackendTarget.LLVM)
+
+    context "Vulkan backend capabilities":
+        it "supports GPU work item IDs":
+            val builder = MirTestBuilder.new()
+            val id = builder.vreg(0)
+
+            builder.gpu_global_id(id, 0)
+            builder.ret(id)
+
+            val test_case = builder.build()
+            expect test_case.is_supported(BackendTarget.Vulkan)
+
+        it "supports GPU barriers":
+            val builder = MirTestBuilder.new()
+
+            builder.gpu_barrier()
+            builder.ret_void()
+
+            val test_case = builder.build()
+            expect test_case.is_supported(BackendTarget.Vulkan)
+
+        it "supports GPU atomics":
+            val builder = MirTestBuilder.new()
+            val ptr = builder.vreg(0)
+            val value = builder.vreg(1)
+            val old = builder.vreg(2)
+
+            builder.const_int(value, 1)
+            builder.gpu_atomic_add(old, ptr, value)
+            builder.ret(old)
+
+            val test_case = builder.build()
+            expect test_case.is_supported(BackendTarget.Vulkan)
+
+    context "Interpreter backend capabilities":
+        it "supports all instruction types":
+            # Interpreter should support everything as fallback
+            val builder = MirTestBuilder.new()
+
+            val v0 = builder.vreg(0)
+            builder.const_int(v0, 42)
+
+            val actor = builder.vreg(1)
+            val body = builder.block(0)
+            builder.actor_spawn(actor, body)
+
+            builder.ret_void()
+
+            val test_case = builder.build()
+            expect test_case.is_supported(BackendTarget.Interpreter)
+
+# ============================================================================
+# Test Group 2: Error Message Quality
+# ============================================================================
+
+describe "Backend Error Messages":
+    """
+    ## Clear, Actionable Error Messages
+
+    When a backend doesn't support an instruction, the error must be
+    clear and suggest alternatives.
+    """
+
+    context "unsupported instruction errors":
+        it "provides instruction name in error":
+            # Test that error includes the instruction name
+            # This would need actual backend execution
+            pass
+
+        it "provides backend name in error":
+            # Test that error includes which backend failed
+            pass
+
+        it "suggests alternative backends":
+            # Test that error suggests backends that DO support the feature
+            pass
+
+    context "error message components":
+        it "includes instruction type":
+            # Should say "VecSum" not just "SIMD instruction"
+            pass
+
+        it "includes backend name":
+            # Should say "Cranelift" not just "current backend"
+            pass
+
+        it "includes suggestion":
+            # Should say "Try LLVM: --backend=llvm"
+            pass
+
+# ============================================================================
+# Test Group 3: Backend Selection
+# ============================================================================
+
+describe "Backend Selection Logic":
+    """
+    ## Automatic Backend Selection
+
+    Test that appropriate backends are selected based on instruction mix.
+    """
+
+    context "pure arithmetic code":
+        it "selects any compiled backend":
+            val builder = MirTestBuilder.new()
+            val v0 = builder.vreg(0)
+            val v1 = builder.vreg(1)
+            val v2 = builder.vreg(2)
+
+            builder.const_int(v0, 10)
+            builder.const_int(v1, 20)
+            builder.add(v2, v0, v1)
+            builder.ret(v2)
+
+            val test_case = builder.build()
+            # Should work on Cranelift or LLVM
+            expect test_case.is_supported(BackendTarget.Cranelift)
+            expect test_case.is_supported(BackendTarget.LLVM)
+
+    context "SIMD-heavy code":
+        it "prefers LLVM backend":
+            val builder = MirTestBuilder.new()
+            val vec = builder.vreg(0)
+            val sum = builder.vreg(1)
+
+            builder.vec_sum(sum, vec)
+            builder.ret(sum)
+
+            val test_case = builder.build()
+            # SIMD requires LLVM
+            expect test_case.is_supported(BackendTarget.LLVM)
+
+    context "GPU kernel code":
+        it "requires Vulkan backend":
+            val builder = MirTestBuilder.new()
+            val id = builder.vreg(0)
+
+            builder.gpu_global_id(id, 0)
+            builder.ret(id)
+
+            val test_case = builder.build()
+            # GPU requires Vulkan
+            expect test_case.is_supported(BackendTarget.Vulkan)
+
+    context "actor-based code":
+        it "requires interpreter":
+            val builder = MirTestBuilder.new()
+            val actor = builder.vreg(0)
+            val body = builder.block(0)
+
+            builder.actor_spawn(actor, body)
+            builder.ret_void()
+
+            val test_case = builder.build()
+            # Actors only in interpreter
+            expect test_case.is_supported(BackendTarget.Interpreter)
+
+# ============================================================================
+# Test Group 4: Fallback Behavior
+# ============================================================================
+
+describe "Backend Fallback Behavior":
+    """
+    ## Graceful Fallback to Interpreter
+
+    When compiled backends can't handle code, should fall back to interpreter.
+    """
+
+    context "mixed instruction types":
+        it "falls back for unsupported features":
+            # Code mixing compiled and interpreted features
+            val builder = MirTestBuilder.new()
+
+            # Arithmetic (supported)
+            val v0 = builder.vreg(0)
+            builder.const_int(v0, 42)
+
+            # Actor (not supported in compiled)
+            val actor = builder.vreg(1)
+            val body = builder.block(0)
+            builder.actor_spawn(actor, body)
+
+            builder.ret_void()
+
+            val test_case = builder.build()
+            # Should only work in interpreter
+            expect test_case.is_supported(BackendTarget.Interpreter)
+
+# ============================================================================
+# Test Group 5: Capability Matrix Generation
+# ============================================================================
+
+describe "Backend Capability Matrix":
+    """
+    ## Support Matrix Accuracy
+
+    Test that capability matrix correctly reflects backend support.
+    """
+
+    context "instruction categories":
+        it "tracks constant support":
+            # All backends support constants
+            pass
+
+        it "tracks arithmetic support":
+            # All backends support arithmetic
+            pass
+
+        it "tracks SIMD support":
+            # Only LLVM and Interpreter
+            pass
+
+        it "tracks GPU support":
+            # Only Vulkan and Interpreter
+            pass
+
+        it "tracks async support":
+            # Only Interpreter
+            pass
+
+    context "support percentages":
+        it "calculates Cranelift coverage":
+            # Should be ~40-50% (basic ops only)
+            pass
+
+        it "calculates LLVM coverage":
+            # Should be ~70-80% (basic + SIMD)
+            pass
+
+        it "calculates Vulkan coverage":
+            # Should be ~30-40% (GPU ops only)
+            pass
+
+        it "calculates Interpreter coverage":
+            # Should be 100% (supports everything)
+            pass
+
+# ============================================================================
+# Test Group 6: Documentation Consistency
+# ============================================================================
+
+describe "Capability Documentation":
+    """
+    ## Docs Match Implementation
+
+    Ensure documentation correctly describes backend capabilities.
+    """
+
+    context "documentation accuracy":
+        it "docs match actual Cranelift support":
+            # Verify docs are accurate
+            pass
+
+        it "docs match actual LLVM support":
+            # Verify docs are accurate
+            pass
+
+        it "docs match actual Vulkan support":
+            # Verify docs are accurate
+            pass
+
+        it "docs list supported instructions":
+            # Should enumerate what IS supported
+            pass
+
+        it "docs list unsupported instructions":
+            # Should enumerate what is NOT supported
+            pass

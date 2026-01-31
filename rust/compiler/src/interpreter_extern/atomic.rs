@@ -5,6 +5,8 @@
 
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::value::Value;
+use crate::concurrent_providers::ConcurrentBackend;
+use crate::interpreter::interpreter_state::get_concurrent_registry;
 
 // ============================================================================
 // Atomic Bool Operations
@@ -694,6 +696,13 @@ pub fn rt_atomic_fetch_or_fn(args: &[Value]) -> Result<Value, CompileError> {
 
 /// Create new mutex (returns heap object)
 pub fn rt_mutex_new_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let registry = get_concurrent_registry();
+    if registry.backend() != ConcurrentBackend::PureStd {
+        let initial = args.first().ok_or_else(|| {
+            CompileError::runtime("rt_mutex_new expects 1 argument".to_string())
+        })?;
+        return registry.lock.mutex_new(initial.clone());
+    }
     let initial = args.first().ok_or_else(|| {
         let ctx = ErrorContext::new()
             .with_code(codes::ARGUMENT_COUNT_MISMATCH)
@@ -709,6 +718,13 @@ pub fn rt_mutex_new_fn(args: &[Value]) -> Result<Value, CompileError> {
 
 /// Lock mutex and return protected value
 pub fn rt_mutex_lock_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let registry = get_concurrent_registry();
+    if registry.backend() != ConcurrentBackend::PureStd {
+        let mutex_val = args.first().ok_or_else(|| {
+            CompileError::runtime("rt_mutex_lock expects 1 argument".to_string())
+        })?;
+        return registry.lock.mutex_lock(mutex_val);
+    }
     let mutex_val = args.first().ok_or_else(|| {
         let ctx = ErrorContext::new()
             .with_code(codes::ARGUMENT_COUNT_MISMATCH)
@@ -724,6 +740,13 @@ pub fn rt_mutex_lock_fn(args: &[Value]) -> Result<Value, CompileError> {
 
 /// Try to lock mutex without blocking
 pub fn rt_mutex_try_lock_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let registry = get_concurrent_registry();
+    if registry.backend() != ConcurrentBackend::PureStd {
+        let mutex_val = args.first().ok_or_else(|| {
+            CompileError::runtime("rt_mutex_try_lock expects 1 argument".to_string())
+        })?;
+        return registry.lock.mutex_try_lock(mutex_val);
+    }
     let mutex_val = args.first().ok_or_else(|| {
         let ctx = ErrorContext::new()
             .with_code(codes::ARGUMENT_COUNT_MISMATCH)
@@ -739,6 +762,13 @@ pub fn rt_mutex_try_lock_fn(args: &[Value]) -> Result<Value, CompileError> {
 
 /// Unlock mutex with new value
 pub fn rt_mutex_unlock_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let registry = get_concurrent_registry();
+    if registry.backend() != ConcurrentBackend::PureStd {
+        if args.len() != 2 {
+            return Err(CompileError::runtime("rt_mutex_unlock expects 2 arguments".to_string()));
+        }
+        return registry.lock.mutex_unlock(&args[0], args[1].clone());
+    }
     if args.len() != 2 {
         let ctx = ErrorContext::new()
             .with_code(codes::ARGUMENT_COUNT_MISMATCH)
@@ -758,6 +788,13 @@ pub fn rt_mutex_unlock_fn(args: &[Value]) -> Result<Value, CompileError> {
 
 /// Create new rwlock (returns heap object)
 pub fn rt_rwlock_new_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let registry = get_concurrent_registry();
+    if registry.backend() != ConcurrentBackend::PureStd {
+        let initial = args.first().ok_or_else(|| {
+            CompileError::runtime("rt_rwlock_new expects 1 argument".to_string())
+        })?;
+        return registry.lock.rwlock_new(initial.clone());
+    }
     let initial = args.first().ok_or_else(|| {
         let ctx = ErrorContext::new()
             .with_code(codes::ARGUMENT_COUNT_MISMATCH)
@@ -773,6 +810,13 @@ pub fn rt_rwlock_new_fn(args: &[Value]) -> Result<Value, CompileError> {
 
 /// Acquire read lock and return protected value
 pub fn rt_rwlock_read_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let registry = get_concurrent_registry();
+    if registry.backend() != ConcurrentBackend::PureStd {
+        let rwlock_val = args.first().ok_or_else(|| {
+            CompileError::runtime("rt_rwlock_read expects 1 argument".to_string())
+        })?;
+        return registry.lock.rwlock_read(rwlock_val);
+    }
     let rwlock_val = args.first().ok_or_else(|| {
         let ctx = ErrorContext::new()
             .with_code(codes::ARGUMENT_COUNT_MISMATCH)
@@ -788,6 +832,13 @@ pub fn rt_rwlock_read_fn(args: &[Value]) -> Result<Value, CompileError> {
 
 /// Acquire write lock and return protected value
 pub fn rt_rwlock_write_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let registry = get_concurrent_registry();
+    if registry.backend() != ConcurrentBackend::PureStd {
+        let rwlock_val = args.first().ok_or_else(|| {
+            CompileError::runtime("rt_rwlock_write expects 1 argument".to_string())
+        })?;
+        return registry.lock.rwlock_write(rwlock_val);
+    }
     let rwlock_val = args.first().ok_or_else(|| {
         let ctx = ErrorContext::new()
             .with_code(codes::ARGUMENT_COUNT_MISMATCH)
@@ -803,6 +854,13 @@ pub fn rt_rwlock_write_fn(args: &[Value]) -> Result<Value, CompileError> {
 
 /// Try to acquire read lock without blocking
 pub fn rt_rwlock_try_read_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let registry = get_concurrent_registry();
+    if registry.backend() != ConcurrentBackend::PureStd {
+        let rwlock_val = args.first().ok_or_else(|| {
+            CompileError::runtime("rt_rwlock_try_read expects 1 argument".to_string())
+        })?;
+        return registry.lock.rwlock_try_read(rwlock_val);
+    }
     let rwlock_val = args.first().ok_or_else(|| {
         let ctx = ErrorContext::new()
             .with_code(codes::ARGUMENT_COUNT_MISMATCH)
@@ -818,6 +876,13 @@ pub fn rt_rwlock_try_read_fn(args: &[Value]) -> Result<Value, CompileError> {
 
 /// Try to acquire write lock without blocking
 pub fn rt_rwlock_try_write_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let registry = get_concurrent_registry();
+    if registry.backend() != ConcurrentBackend::PureStd {
+        let rwlock_val = args.first().ok_or_else(|| {
+            CompileError::runtime("rt_rwlock_try_write expects 1 argument".to_string())
+        })?;
+        return registry.lock.rwlock_try_write(rwlock_val);
+    }
     let rwlock_val = args.first().ok_or_else(|| {
         let ctx = ErrorContext::new()
             .with_code(codes::ARGUMENT_COUNT_MISMATCH)
@@ -833,6 +898,13 @@ pub fn rt_rwlock_try_write_fn(args: &[Value]) -> Result<Value, CompileError> {
 
 /// Release write lock and update protected value
 pub fn rt_rwlock_set_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let registry = get_concurrent_registry();
+    if registry.backend() != ConcurrentBackend::PureStd {
+        if args.len() != 2 {
+            return Err(CompileError::runtime("rt_rwlock_set expects 2 arguments".to_string()));
+        }
+        return registry.lock.rwlock_set(&args[0], args[1].clone());
+    }
     if args.len() != 2 {
         let ctx = ErrorContext::new()
             .with_code(codes::ARGUMENT_COUNT_MISMATCH)

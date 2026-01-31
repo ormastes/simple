@@ -2085,4 +2085,70 @@ mod tests {
 
 ---
 
+---
+
+## Implementation Status
+
+The "Native Rust crates" approach was chosen and implemented as a DI-based concurrent provider system.
+
+### Architecture: ConcurrentProviderRegistry
+
+A dependency-injection registry (`ConcurrentProviderRegistry`) holds `Arc<dyn Provider>` trait objects, selected at startup via `ConcurrentBackend`:
+
+| Backend | Selection | Behavior |
+|---------|-----------|----------|
+| `PureStd` (default) | `--concurrent-backend=std` | All std library implementations (no behavior change from before) |
+| `Native` | `--concurrent-backend=native` | Optimized crate implementations |
+
+### Native Rust Crates Used
+
+| Provider Trait | PureStd Implementation | Native Implementation | Crate |
+|---------------|----------------------|----------------------|-------|
+| `MapProvider` | `StdMapProvider` (HashMap, HashSet, BTreeMap, BTreeSet) | `NativeMapProvider` | dashmap (sharded locks) |
+| `ConcurrentMapProvider` | `StdConcurrentMapProvider` (RwLock-wrapped HashMap) | `NativeConcurrentMapProvider` | dashmap (lock-free reads) |
+| `ChannelProvider` | `StdChannelProvider` (mpsc) | `NativeChannelProvider` | crossbeam (MPMC) |
+| `ThreadProvider` | `StdThreadProvider` (std::thread) | `NativeThreadProvider` | std::thread |
+| `LockProvider` | `StdLockProvider` (std::sync::Mutex/RwLock) | `NativeLockProvider` | parking_lot (faster mutex/rwlock) |
+| `ParallelIterProvider` | `StdParallelIterProvider` (sequential fallback) | `NativeParallelIterProvider` | rayon (work-stealing) |
+
+### Files
+
+| File | Purpose |
+|------|---------|
+| `rust/compiler/src/concurrent_providers/mod.rs` | Provider traits + `ConcurrentBackend` enum |
+| `rust/compiler/src/concurrent_providers/registry.rs` | `ConcurrentProviderRegistry` (DI container) |
+| `rust/compiler/src/concurrent_providers/std_impl.rs` | PureStd provider implementations |
+| `rust/compiler/src/concurrent_providers/native_impl.rs` | Native provider implementations |
+| `rust/compiler/src/interpreter_extern/collections.rs` | 40 FFI functions wired to dispatch through registry |
+| `rust/compiler/src/interpreter_extern/concurrency.rs` | 12 FFI functions wired (channel + thread) |
+| `rust/compiler/src/interpreter_extern/atomic.rs` | 10 FFI functions wired (mutex + rwlock) |
+
+### Dispatch Pattern
+
+Each FFI function checks the backend at entry and delegates accordingly:
+
+```rust
+pub fn __rt_hashmap_new(_args: &[Value]) -> Result<Value, CompileError> {
+    let registry = get_concurrent_registry();
+    if registry.backend() != ConcurrentBackend::PureStd {
+        return registry.map.hashmap_new().map(|h| Value::Int(h));
+    }
+    // existing PureStd code unchanged...
+}
+```
+
+### Test Coverage
+
+| Test Suite | Count | File |
+|-----------|-------|------|
+| SSpec (Simple language, end-to-end) | 90 | `test/lib/std/unit/concurrency/concurrent_providers_spec.spl` |
+| Rust integration (native providers) | 44 | `rust/compiler/tests/concurrent_providers_test.rs` |
+
+### Not Yet Implemented
+
+- `flurry` (epoch-based lock-free HashMap) — could replace dashmap for `ConcurrentMapProvider` if bounded latency is needed
+- `mimalloc` global allocator — can be enabled independently via `#[global_allocator]`
+- C++ FFI path (TBB, moodycamel, libcuckoo, libcds) — kept as reference in this doc, not implemented
+- Thread spawn dispatch for `rt_thread_spawn_isolated*` — complex closure/context handling prevents simple delegation
+
 **Previous:** [Part 3 - Usage & Rust Considerations](high_performance_concurrent_runtime_part3.md)
