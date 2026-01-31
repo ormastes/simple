@@ -1,0 +1,174 @@
+# Tensor Dimension Inference Model
+# Provides compile-time dimension tracking with range constraints.
+# Dimensions can be inferred through operations like matmul, reshape, etc.
+
+# ============================================================================
+# Dimension Representation
+# ============================================================================
+
+# Dimension variable for inference (like type variables)
+class DimVar:
+    id: i32
+    name: Option<text>  # Optional name: "batch", "seq_len", etc.
+    bound: Option<Dim>
+
+    fn new(id: i32) -> DimVar:
+        DimVar(id: id, name: nil, bound: nil)
+
+    fn named(id: i32, name: text) -> DimVar:
+        DimVar(id: id, name: Some(name), bound: nil)
+
+    me set_bound(dim: Dim):
+        self.bound = Some(dim)
+
+    fn is_bound() -> bool:
+        self.bound.is_some()
+
+# Dimension: can be literal, variable, or dynamic
+enum Dim:
+    # Fixed dimension size
+    Literal(value: i32)
+    # Dimension variable (for inference)
+    Var(variable: DimVar)
+    # Named dimension with optional range constraint
+    Named(name: text, range: Option<(i32, i32)>)
+    # Dynamic dimension (unknown at compile time, checked at runtime)
+    Dynamic
+    # Broadcast dimension (can be 1 or match)
+    Broadcast
+
+    fn to_string() -> text:
+        match self:
+            case Literal(v): "{v}"
+            case Var(v):
+                match v.name:
+                    case Some(n): "?{n}"
+                    case nil: "?{v.id}"
+            case Named(n, range):
+                match range:
+                    case Some((lo, hi)): "{n}: {lo}..{hi}"
+                    case nil: "{n}"
+            case Dynamic: "?"
+            case Broadcast: "#"
+
+    fn is_concrete() -> bool:
+        match self:
+            case Literal(_): true
+            case Named(_, nil): true
+            case _: false
+
+    fn get_value() -> Option<i32>:
+        match self:
+            case Literal(v): Some(v)
+            case _: nil
+
+    fn get_range() -> Option<(i32, i32)>:
+        match self:
+            case Literal(v): Some((v, v))
+            case Named(_, range): range
+            case _: nil
+
+    fn is_literal() -> bool:
+        """Check if this is Literal dimension.
+        Returns: true for Literal
+        Example: Dim.Literal(value: 10).is_literal()  # → True
+        """
+        match self:
+            case Literal(_): true
+            case _: false
+
+    fn is_var() -> bool:
+        """Check if this is Var dimension.
+        Returns: true for Var
+        Example: Dim.Var(variable: v).is_var()  # → True
+        """
+        match self:
+            case Var(_): true
+            case _: false
+
+    fn is_named() -> bool:
+        """Check if this is Named dimension.
+        Returns: true for Named
+        Example: Dim.Named(name: "batch", range: nil).is_named()  # → True
+        """
+        match self:
+            case Named(_, _): true
+            case _: false
+
+    fn is_dynamic() -> bool:
+        """Check if this is Dynamic dimension.
+        Returns: true for Dynamic
+        Example: Dim.Dynamic.is_dynamic()  # → True
+        """
+        match self:
+            case Dynamic: true
+            case _: false
+
+    fn is_broadcast() -> bool:
+        """Check if this is Broadcast dimension.
+        Returns: true for Broadcast
+        Example: Dim.Broadcast.is_broadcast()  # → True
+        """
+        match self:
+            case Broadcast: true
+            case _: false
+
+    fn is_inferred() -> bool:
+        """Check if dimension requires inference (Var or Dynamic).
+        Returns: true for Var or Dynamic
+        Example: Dim.Var(variable: v).is_inferred()  # → True
+        """
+        match self:
+            case Var(_): true
+            case Dynamic: true
+            case _: false
+
+    fn has_range() -> bool:
+        """Check if dimension has range constraints.
+        Returns: true if Named with range or Literal
+        Example: Dim.Named(name: "batch", range: Some((1, 64))).has_range()  # → True
+        """
+        self.get_range().is_some()
+
+    fn description() -> text:
+        """Get human-readable description of the dimension kind.
+        Returns: descriptive explanation
+        Example: Dim.Literal(value: 10).description()  # → "Fixed dimension size: 10"
+        """
+        match self:
+            case Literal(v): "Fixed dimension size: {v}"
+            case Var(v):
+                match v.name:
+                    case Some(n): "Dimension variable: {n} (id={v.id})"
+                    case nil: "Dimension variable: id={v.id}"
+            case Named(n, range):
+                match range:
+                    case Some((lo, hi)): "Named dimension: {n} in range [{lo}, {hi}]"
+                    case nil: "Named dimension: {n}"
+            case Dynamic: "Dynamic dimension (runtime-determined)"
+            case Broadcast: "Broadcast dimension (flexible)"
+
+    fn summary() -> text:
+        """Get comprehensive summary of the dimension.
+        Returns: summary with type, representation, and properties
+        Example: Dim.Named(name: "batch", range: Some((1, 64))).summary()
+                # → "Dim: batch: 1..64 (Named dimension: batch in range [1, 64], has range, inferred=false)"
+        """
+        val dim_repr = self.to_string()
+        val desc = self.description()
+        var props = []
+
+        if self.is_concrete():
+            props.push("concrete")
+        if self.has_range():
+            props.push("has range")
+        if self.is_inferred():
+            props.push("inferred=true")
+        else:
+            props.push("inferred=false")
+
+        val props_str = if props.len() > 0: ", " + props.join(", ") else: ""
+
+        "Dim: {dim_repr} ({desc}{props_str})"
+
+# Dimension constraint for verification

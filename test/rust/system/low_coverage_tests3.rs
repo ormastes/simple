@@ -85,7 +85,7 @@ fn test_token_kind_operators() {
     let _ = TokenKind::Or;
     let _ = TokenKind::Not;
     let _ = TokenKind::DoubleStar; // **
-    let _ = TokenKind::DoubleSlash; // //
+    let _ = TokenKind::Parallel; // //
 }
 
 #[test]
