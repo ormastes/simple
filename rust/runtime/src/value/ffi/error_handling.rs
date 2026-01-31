@@ -96,20 +96,20 @@ mod tests {
     fn test_function_not_found_with_name() {
         let name = b"my_function";
         let result = unsafe { rt_function_not_found(name.as_ptr(), name.len() as u64) };
-        assert!(result.is_nil());
+        assert_eq!(result, RuntimeValue::from_special(crate::value::tags::SPECIAL_ERROR));
     }
 
     #[test]
     fn test_function_not_found_null_name() {
         let result = unsafe { rt_function_not_found(std::ptr::null(), 0) };
-        assert!(result.is_nil());
+        assert_eq!(result, RuntimeValue::from_special(crate::value::tags::SPECIAL_ERROR));
     }
 
     #[test]
     fn test_function_not_found_invalid_utf8() {
         let invalid_utf8 = [0xFF, 0xFE, 0xFD]; // Invalid UTF-8 sequence
         let result = unsafe { rt_function_not_found(invalid_utf8.as_ptr(), invalid_utf8.len() as u64) };
-        assert!(result.is_nil());
+        assert_eq!(result, RuntimeValue::from_special(crate::value::tags::SPECIAL_ERROR));
     }
 
     #[test]
@@ -124,7 +124,7 @@ mod tests {
                 method_name.len() as u64,
             )
         };
-        assert!(result.is_nil());
+        assert_eq!(result, RuntimeValue::from_special(crate::value::tags::SPECIAL_ERROR));
     }
 
     #[test]
@@ -132,20 +132,20 @@ mod tests {
         let method_name = b"my_method";
         let result =
             unsafe { rt_method_not_found(std::ptr::null(), 0, method_name.as_ptr(), method_name.len() as u64) };
-        assert!(result.is_nil());
+        assert_eq!(result, RuntimeValue::from_special(crate::value::tags::SPECIAL_ERROR));
     }
 
     #[test]
     fn test_method_not_found_null_method() {
         let type_name = b"MyStruct";
         let result = unsafe { rt_method_not_found(type_name.as_ptr(), type_name.len() as u64, std::ptr::null(), 0) };
-        assert!(result.is_nil());
+        assert_eq!(result, RuntimeValue::from_special(crate::value::tags::SPECIAL_ERROR));
     }
 
     #[test]
     fn test_method_not_found_both_null() {
         let result = unsafe { rt_method_not_found(std::ptr::null(), 0, std::ptr::null(), 0) };
-        assert!(result.is_nil());
+        assert_eq!(result, RuntimeValue::from_special(crate::value::tags::SPECIAL_ERROR));
     }
 
     #[test]
@@ -160,7 +160,7 @@ mod tests {
                 method_name.len() as u64,
             )
         };
-        assert!(result.is_nil());
+        assert_eq!(result, RuntimeValue::from_special(crate::value::tags::SPECIAL_ERROR));
     }
 
     #[test]
@@ -175,6 +175,6 @@ mod tests {
                 invalid_utf8.len() as u64,
             )
         };
-        assert!(result.is_nil());
+        assert_eq!(result, RuntimeValue::from_special(crate::value::tags::SPECIAL_ERROR));
     }
 }

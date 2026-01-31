@@ -527,6 +527,76 @@ pub(super) fn eval_builtin(
                 .unwrap_or(4);
             Ok(Some(Value::ThreadPool(ThreadPoolValue::new(workers))))
         }
+        // Type conversion functions
+        "i64" | "int" => {
+            let val = eval_arg(args, 0, Value::Int(0), env, functions, classes, enums, impl_methods)?;
+            match val {
+                Value::Int(n) => Ok(Some(Value::Int(n))),
+                Value::Float(f) => Ok(Some(Value::Int(f as i64))),
+                Value::Str(s) => {
+                    s.parse::<i64>()
+                        .map(Value::Int)
+                        .map(Some)
+                        .or_else(|_| {
+                            let ctx = ErrorContext::new()
+                                .with_code(codes::TYPE_MISMATCH)
+                                .with_help("string must contain a valid integer");
+                            Err(CompileError::semantic_with_context(
+                                format!("cannot parse '{}' as i64", s),
+                                ctx,
+                            ))
+                        })
+                }
+                Value::Bool(b) => Ok(Some(Value::Int(if b { 1 } else { 0 }))),
+                _ => {
+                    let ctx = ErrorContext::new()
+                        .with_code(codes::TYPE_MISMATCH)
+                        .with_help("i64() requires an int, float, string, or bool");
+                    Err(CompileError::semantic_with_context(
+                        "cannot convert value to i64".to_string(),
+                        ctx,
+                    ))
+                }
+            }
+        }
+        "f64" | "float" => {
+            let val = eval_arg(args, 0, Value::Float(0.0), env, functions, classes, enums, impl_methods)?;
+            match val {
+                Value::Float(f) => Ok(Some(Value::Float(f))),
+                Value::Int(n) => Ok(Some(Value::Float(n as f64))),
+                Value::Str(s) => {
+                    s.parse::<f64>()
+                        .map(Value::Float)
+                        .map(Some)
+                        .or_else(|_| {
+                            let ctx = ErrorContext::new()
+                                .with_code(codes::TYPE_MISMATCH)
+                                .with_help("string must contain a valid float");
+                            Err(CompileError::semantic_with_context(
+                                format!("cannot parse '{}' as f64", s),
+                                ctx,
+                            ))
+                        })
+                }
+                _ => {
+                    let ctx = ErrorContext::new()
+                        .with_code(codes::TYPE_MISMATCH)
+                        .with_help("f64() requires a float, int, or string");
+                    Err(CompileError::semantic_with_context(
+                        "cannot convert value to f64".to_string(),
+                        ctx,
+                    ))
+                }
+            }
+        }
+        "str" | "string" => {
+            let val = eval_arg(args, 0, Value::Str("".to_string()), env, functions, classes, enums, impl_methods)?;
+            Ok(Some(Value::Str(val.to_display_string())))
+        }
+        "bool" => {
+            let val = eval_arg(args, 0, Value::Bool(false), env, functions, classes, enums, impl_methods)?;
+            Ok(Some(Value::Bool(val.truthy())))
+        }
         _ => Ok(None),
     }
 }

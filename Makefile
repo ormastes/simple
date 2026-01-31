@@ -22,7 +22,8 @@
         arch-test arch-test-visualize \
         check-todos gen-todos todos todos-p0 \
         dashboard dashboard-collect dashboard-snapshot dashboard-trends dashboard-alerts \
-        bootstrap bootstrap-stage1 bootstrap-stage2 bootstrap-stage3 bootstrap-verify bootstrap-clean
+        bootstrap bootstrap-stage1 bootstrap-stage2 bootstrap-stage3 bootstrap-verify bootstrap-clean \
+        package-bootstrap package-full package-all install install-user install-system uninstall
 
 # Default target
 all: check
@@ -776,6 +777,15 @@ help:
 	@echo "  make bootstrap-promote    - Promote verified compiler as stable"
 	@echo "  make bootstrap-from-stable - Rebuild from stable compiler"
 	@echo ""
+	@echo "Package Management:"
+	@echo "  make package-bootstrap - Build bootstrap package (runtime-only, ~25-50MB)"
+	@echo "  make package-full      - Build full package (complete source)"
+	@echo "  make package-all       - Build both packages"
+	@echo "  make install           - Install bootstrap package to ~/.local"
+	@echo "  make install-system    - Install system-wide to /usr/local (requires root)"
+	@echo "  make uninstall         - Uninstall from ~/.local"
+	@echo "  make verify-package    - Verify package integrity"
+	@echo ""
 	@echo "Other:"
 	@echo "  make install-tools - Install required tools"
 	@echo "  make clean         - Clean all artifacts"
@@ -823,3 +833,57 @@ audit-catchalls:
 
 .PHONY: check-exhaustiveness test-backends docs-backends codegen-from-dsl \
         backend-completeness-full audit-catchalls
+
+# ============================================================================
+# Package Management
+# ============================================================================
+
+# Build bootstrap package (minimal runtime-only installation)
+package-bootstrap:
+	@echo "=== Building Bootstrap Package ==="
+	./script/build-bootstrap.sh
+
+# Build full package (complete source distribution)
+package-full:
+	@echo "=== Building Full Package ==="
+	./script/build-full.sh
+
+# Build all packages
+package-all: package-bootstrap package-full
+
+# Install bootstrap package (user-local)
+install: install-user
+
+install-user:
+	@if [ ! -f simple-bootstrap-*.spk ]; then \
+		echo "Error: No bootstrap package found. Run 'make package-bootstrap' first."; \
+		exit 1; \
+	fi
+	@PKG=$$(ls -t simple-bootstrap-*.spk | head -1); \
+	echo "Installing $$PKG to ~/.local"; \
+	./rust/target/release-opt/simple_runtime src/app/package/main.spl install "$$PKG" --prefix=~/.local
+
+# Install bootstrap package (system-wide, requires root)
+install-system:
+	@if [ ! -f simple-bootstrap-*.spk ]; then \
+		echo "Error: No bootstrap package found. Run 'make package-bootstrap' first."; \
+		exit 1; \
+	fi
+	@PKG=$$(ls -t simple-bootstrap-*.spk | head -1); \
+	echo "Installing $$PKG to /usr/local (requires root)"; \
+	sudo ./rust/target/release-opt/simple_runtime src/app/package/main.spl install "$$PKG" --system
+
+# Uninstall package
+uninstall:
+	@echo "Uninstalling Simple from ~/.local"
+	./rust/target/release-opt/simple_runtime src/app/package/main.spl uninstall --prefix=~/.local
+
+# Verify package integrity
+verify-package:
+	@if [ ! -f simple-bootstrap-*.spk ]; then \
+		echo "Error: No bootstrap package found."; \
+		exit 1; \
+	fi
+	@PKG=$$(ls -t simple-bootstrap-*.spk | head -1); \
+	echo "Verifying $$PKG"; \
+	./rust/target/release-opt/simple_runtime src/app/package/main.spl verify "$$PKG"

@@ -1,0 +1,85 @@
+# Package Upgrade Logic
+# Upgrades an installed package to a new version
+
+import std.fs
+
+class PackageUpgrade:
+    static fn run(args: [text]):
+        if args.is_empty():
+            print "Error: No package file specified"
+            print "Usage: simple package upgrade <package.spk> [options]"
+            return
+
+        val package_path = args[0]
+        val install_args = args[1:]
+
+        if not fs.exists(package_path):
+            print "Error: Package file not found: {package_path}"
+            return
+
+        val paths = PackagePaths.from_args(install_args)
+
+        # Check if package is currently installed
+        if not fs.exists(paths.manifest_path()):
+            print "No existing installation found. Installing fresh..."
+            PackageInstall.run(args)
+            return
+
+        # Read current manifest
+        val current = PackageManifest.from_file(paths.manifest_path())
+
+        print "Current installation: {current.name} v{current.version}"
+        print ""
+
+        # Extract new package to check version
+        val tmp_dir = "/tmp/simple-upgrade-check"
+        fs.create_dir_all(tmp_dir)
+
+        val tar_cmd = "tar -xzf {package_path} -C {tmp_dir} manifest.sdn"
+        process.run(tar_cmd)
+
+        val new_manifest_path = tmp_dir + "/manifest.sdn"
+        if not fs.exists(new_manifest_path):
+            print "Error: Invalid package - missing manifest"
+            fs.remove_dir_all(tmp_dir)
+            return
+
+        val new = PackageManifest.from_file(new_manifest_path)
+
+        print "Upgrading to: {new.name} v{new.version}"
+        print ""
+
+        # Check version compatibility
+        if new.version == current.version:
+            print "Warning: Same version ({new.version})"
+            print "Proceeding with reinstallation..."
+            print ""
+
+        # Backup config directory (if not system install)
+        var config_backup = ""
+        if not paths.is_system and fs.exists(paths.config_dir()):
+            config_backup = "/tmp/simple-config-backup-{process.pid()}"
+            print "Backing up configuration to {config_backup}"
+            fs.copy_dir(paths.config_dir(), config_backup)
+
+        # Uninstall current version (keep config)
+        print "Removing old version..."
+        PackageUninstall.run(install_args)  # Don't pass --purge
+
+        # Install new version
+        print ""
+        print "Installing new version..."
+        PackageInstall.run(args)
+
+        # Restore config if we backed it up
+        if config_backup != "":
+            print "Restoring configuration..."
+            if fs.exists(config_backup):
+                fs.copy_dir(config_backup, paths.config_dir())
+                fs.remove_dir_all(config_backup)
+
+        print ""
+        print "Upgrade complete: v{current.version} → v{new.version}"
+
+        # Cleanup
+        fs.remove_dir_all(tmp_dir)

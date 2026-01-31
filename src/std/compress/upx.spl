@@ -1,0 +1,145 @@
+# UPX Compression Library
+#
+# Provides UPX (Ultimate Packer for eXecutables) compression for binary files.
+# Requires UPX to be installed on the system.
+#
+# Usage:
+#   import compress.upx
+#
+#   # Compress a binary
+#   upx.compress("myapp", level: "best")
+#
+#   # Compress to different file
+#   upx.compress("myapp", "myapp.compressed", level: "ultra-brute")
+#
+#   # Decompress
+#   upx.decompress("myapp.compressed", "myapp.restored")
+#
+#   # Check if compressed
+#   if upx.is_compressed("myapp"):
+#       print "Binary is UPX-compressed"
+
+## Check if UPX is available on the system
+##
+## Returns: true if UPX is installed, false otherwise
+fn is_available() -> bool:
+    extern fn upx_is_available() -> i32
+    upx_is_available() == 1
+
+## Compress a binary file using UPX
+##
+## Arguments:
+##   input: Path to input binary file
+##   output: Optional path to output file (if None, compresses in-place)
+##   level: Compression level - "fast", "best" (default), or "ultra-brute"
+##
+## Returns: Result<text, text> - Ok(output_path) or Err(error_message)
+##
+## Examples:
+##   # Compress in-place with best compression
+##   upx.compress("myapp", level: "best")
+##
+##   # Compress to different file with maximum compression
+##   upx.compress("myapp", "myapp.upx", level: "ultra-brute")
+##
+##   # Fast compression
+##   upx.compress("myapp", level: "fast")
+fn compress(input: text, output: text? = None, level: text = "best") -> Result<text, text>:
+    extern fn upx_compress_file(input: text, output: text, level: i32) -> i32
+
+    if not is_available():
+        return Err("UPX is not installed. Install with: sudo apt-get install upx")
+
+    # Map level string to integer
+    val level_code = match level:
+        "fast": 1
+        "best": 2
+        "ultra-brute": 3
+        "ultrabrute": 3  # Alternative spelling
+        _:
+            return Err("Invalid compression level. Use 'fast', 'best', or 'ultra-brute'")
+
+    # Determine output path
+    val actual_output = match output:
+        Some(out): out
+        None: input  # In-place compression
+
+    # Call FFI function
+    val result = upx_compress_file(input, actual_output, level_code)
+
+    if result == 0:
+        Ok(actual_output)
+    else:
+        Err("UPX compression failed. Check that the file exists and is a valid executable.")
+
+## Decompress a UPX-compressed file
+##
+## Arguments:
+##   input: Path to compressed binary file
+##   output: Path to output file
+##
+## Returns: Result<text, text> - Ok(output_path) or Err(error_message)
+##
+## Example:
+##   upx.decompress("myapp.upx", "myapp.restored")
+fn decompress(input: text, output: text) -> Result<text, text>:
+    extern fn upx_decompress_file(input: text, output: text) -> i32
+
+    if not is_available():
+        return Err("UPX is not installed")
+
+    val result = upx_decompress_file(input, output)
+
+    if result == 0:
+        Ok(output)
+    else:
+        Err("UPX decompression failed. Check that the file is UPX-compressed.")
+
+## Check if a file is UPX-compressed
+##
+## Arguments:
+##   file: Path to file to check
+##
+## Returns: true if file is UPX-compressed, false otherwise
+##
+## Example:
+##   if upx.is_compressed("myapp"):
+##       print "File is compressed"
+fn is_compressed(file: text) -> bool:
+    extern fn upx_is_compressed(file: text) -> i32
+    upx_is_compressed(file) == 1
+
+## Get compression ratio of a file
+##
+## Arguments:
+##   file: Path to compressed file
+##
+## Returns: Compression ratio (original_size / compressed_size) or 1.0 if not compressed
+##
+## Example:
+##   val ratio = upx.get_ratio("myapp.upx")
+##   print "Compression ratio: {ratio}x"
+fn get_ratio(file: text) -> f64:
+    extern fn upx_get_ratio(file: text) -> f64
+    val ratio = upx_get_ratio(file)
+    if ratio < 0.0:
+        1.0  # Return 1.0 on error (no compression)
+    else:
+        ratio
+
+## Get compression percentage
+##
+## Arguments:
+##   file: Path to compressed file
+##
+## Returns: Compression percentage (0-100) or 0 if not compressed
+##
+## Example:
+##   val pct = upx.get_compression_pct("myapp.upx")
+##   print "Reduced by {pct}%"
+fn get_compression_pct(file: text) -> f64:
+    val ratio = get_ratio(file)
+    if ratio <= 1.0:
+        0.0
+    else:
+        (1.0 - (1.0 / ratio)) * 100.0

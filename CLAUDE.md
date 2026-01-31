@@ -526,8 +526,9 @@ cd rust && cargo test --workspace
 
 ```bash
 # Build Rust runtime (required first)
-cd rust && cargo build                    # Debug build
-cd rust && cargo build --release          # Release build (optimized)
+cd rust && cargo build                    # Debug build (423 MB, fast)
+cd rust && cargo build --release          # Release build (40 MB, optimized)
+cd rust && cargo build --profile bootstrap -p simple-driver  # Bootstrap build (9.3 MB, minimal size)
 
 # Rebuild after Rust changes
 cd rust && cargo build 2>&1 | head -20   # Build and check for warnings/errors
@@ -568,6 +569,52 @@ cd rust && cargo build 2>&1 | grep "warning:"
 # - "unused variable" → Prefix with _ or remove
 # - "dead code" → Remove or add #[allow(dead_code)] with justification
 ```
+
+### Binary Size Optimization
+
+**Bootstrap Profile (Recommended for Releases):**
+
+The bootstrap profile produces the smallest possible binary (9.3 MB, 76.8% reduction from standard release):
+
+```bash
+# Build with bootstrap profile
+cd rust && cargo build --profile bootstrap -p simple-driver
+
+# Binary location
+./target/bootstrap/simple_runtime  # 9.3 MB
+
+# Optional: Compress with UPX (requires: sudo apt-get install upx)
+upx --best --lzma target/bootstrap/simple_runtime  # → ~4.5 MB (88.8% total reduction)
+```
+
+**Build Profile Comparison:**
+
+| Profile | Size | Use Case |
+|---------|------|----------|
+| Debug | 423 MB | Development (fast builds, debuggable) |
+| Release | 40 MB | Standard optimized build |
+| Bootstrap | 9.3 MB | Minimal size (distribution) |
+| Bootstrap + UPX | ~4.5 MB | Maximum compression (distribution) |
+
+**UPX Compression Library:**
+
+Simple programs can compress executables using the `compress.upx` module:
+
+```simple
+import compress.upx
+
+# Compress binary
+upx.compress("myapp", level: "best")
+
+# Check compression
+if upx.is_compressed("myapp"):
+    val ratio = upx.get_ratio("myapp")
+    print "Compressed {ratio}x"
+```
+
+**Documentation:**
+- Implementation: `doc/report/upx_library_implementation_2026-01-31.md`
+- Completion: `doc/report/binary_size_reduction_completion_2026-01-31.md`
 
 ### Executable Architecture
 

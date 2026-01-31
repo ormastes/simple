@@ -37,6 +37,23 @@ pub fn _current_time_unix(_args: &[Value]) -> Result<Value, CompileError> {
     }
 }
 
+/// Get current time in milliseconds since Unix epoch
+///
+/// Callable from Simple as: `rt_current_time_ms()`
+///
+/// # Arguments
+/// * `args` - Evaluated arguments (none expected)
+///
+/// # Returns
+/// * i64 representing milliseconds since Unix epoch
+pub fn rt_current_time_ms(_args: &[Value]) -> Result<Value, CompileError> {
+    unsafe {
+        let time_seconds = simple_runtime::value::rt_time_now_seconds();
+        let time_ms = (time_seconds * 1000.0) as i64;
+        Ok(Value::Int(time_ms))
+    }
+}
+
 // ============================================================================
 // Progress Timing Functions
 // ============================================================================

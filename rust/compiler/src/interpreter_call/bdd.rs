@@ -1091,6 +1091,11 @@ pub(super) fn eval_bdd_builtin(
         // BDD Matchers
         "be_true" => Ok(Some(Value::Matcher(MatcherValue::BeTrue))),
         "be_false" => Ok(Some(Value::Matcher(MatcherValue::BeFalse))),
+        "contain" | "include" => {
+            let needle = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
+            let needle_str = needle.to_display_string();
+            Ok(Some(Value::Matcher(MatcherValue::Contains(needle_str))))
+        }
         "eq" => {
             let expected = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
             Ok(Some(Value::Matcher(MatcherValue::Exact(Box::new(expected)))))

@@ -109,6 +109,9 @@ pub mod random;
 // Phase 15: Resource registry for leak detection
 pub mod resource_registry;
 
+// Phase 16: Package management operations
+pub mod package;
+
 // Re-export all public FFI functions for backward compatibility
 // Phase 1
 pub use equality::*;
@@ -164,3 +167,6 @@ pub use random::*;
 
 // Phase 15
 pub use resource_registry::*;
+
+// Phase 16
+pub use package::*;

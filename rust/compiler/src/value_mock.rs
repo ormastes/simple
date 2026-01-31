@@ -247,10 +247,24 @@ impl MatcherValue {
                 _ => false,
             }
             MatcherValue::Contains(s) => {
-                if let super::Value::Str(v) = value {
-                    v.contains(s)
-                } else {
-                    false
+                match value {
+                    super::Value::Str(v) => v.contains(s),
+                    super::Value::Array(arr) => {
+                        // Check if array contains element (with type conversion)
+                        arr.iter().any(|item| {
+                            match item {
+                                // Direct string match
+                                super::Value::Str(item_str) => item_str == s,
+                                // Convert numbers to string for comparison
+                                super::Value::Int(n) => n.to_string() == *s,
+                                super::Value::Float(f) => f.to_string() == *s,
+                                // Convert booleans
+                                super::Value::Bool(b) => b.to_string() == *s,
+                                _ => false,
+                            }
+                        })
+                    }
+                    _ => false,
                 }
             }
             MatcherValue::StartsWith(s) => {

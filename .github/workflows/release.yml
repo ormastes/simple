@@ -1,0 +1,285 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'  # Trigger on version tags like v0.3.0
+  workflow_dispatch:  # Allow manual trigger
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-bootstrap:
+    name: Build Bootstrap Package
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux-x86_64
+            target: x86_64-unknown-linux-gnu
+          - os: macos-latest
+            platform: darwin-arm64
+            target: aarch64-apple-darwin
+          - os: macos-13  # Intel Mac
+            platform: darwin-x86_64
+            target: x86_64-apple-darwin
+          - os: windows-latest
+            platform: windows-x86_64
+            target: x86_64-pc-windows-msvc
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          target: ${{ matrix.target }}
+
+      - name: Install dependencies (Ubuntu)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential
+
+      - name: Build optimized runtime
+        run: |
+          cd rust
+          cargo build --profile release-opt --target ${{ matrix.target }}
+
+      - name: Build bootstrap package (Linux/macOS)
+        if: runner.os != 'Windows'
+        run: |
+          chmod +x script/build-bootstrap.sh
+          ./script/build-bootstrap.sh
+        env:
+          TARGET: ${{ matrix.target }}
+
+      - name: Build bootstrap package (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          # Windows-specific build logic
+          VERSION=$(grep '^version = ' rust/driver/Cargo.toml | head -1 | cut -d'"' -f2)
+          PLATFORM="${{ matrix.platform }}"
+          OUTPUT="simple-bootstrap-${VERSION}-${PLATFORM}.spk"
+
+          # Create package structure
+          mkdir -p pkg/bin pkg/lib/simple/{stdlib,app}
+
+          # Copy runtime
+          cp rust/target/${{ matrix.target }}/release-opt/simple_runtime.exe pkg/bin/
+
+          # Copy apps
+          cp -r src/app/{cli,run,compile,check,repl} pkg/lib/simple/app/
+
+          # Generate manifest
+          cat > pkg/manifest.sdn <<EOF
+          package:
+            name: simple-bootstrap
+            version: ${VERSION}
+            type: bootstrap
+            platform: ${PLATFORM}
+          EOF
+
+          # Create archive
+          tar -czf "${OUTPUT}" -C pkg .
+
+          echo "Package created: ${OUTPUT}"
+
+      - name: Calculate checksums
+        run: |
+          PKG=$(ls simple-bootstrap-*.spk | head -1)
+          sha256sum "${PKG}" > "${PKG}.sha256"
+          cat "${PKG}.sha256"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bootstrap-${{ matrix.platform }}
+          path: |
+            simple-bootstrap-*.spk
+            simple-bootstrap-*.spk.sha256
+          retention-days: 7
+
+  build-full:
+    name: Build Full Package
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+
+      - name: Build optimized runtime
+        run: |
+          cd rust
+          cargo build --profile release-opt
+
+      - name: Build full package
+        run: |
+          chmod +x script/build-full.sh
+          ./script/build-full.sh --with-binary
+
+      - name: Calculate checksums
+        run: |
+          PKG=$(ls simple-full-*.tar.gz | head -1)
+          sha256sum "${PKG}" > "${PKG}.sha256"
+          cat "${PKG}.sha256"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: full-package
+          path: |
+            simple-full-*.tar.gz
+            simple-full-*.tar.gz.sha256
+          retention-days: 7
+
+  create-release:
+    name: Create GitHub Release
+    needs: [build-bootstrap, build-full]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Prepare release assets
+        run: |
+          mkdir -p release
+          find artifacts -name '*.spk' -exec cp {} release/ \;
+          find artifacts -name '*.sha256' -exec cp {} release/ \;
+          find artifacts -name '*.tar.gz' -exec cp {} release/ \;
+          ls -lh release/
+
+      - name: Extract version
+        id: version
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/v}
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "Version: ${VERSION}"
+
+      - name: Generate release notes
+        run: |
+          cat > release-notes.md <<EOF
+          # Simple Language v${{ steps.version.outputs.version }}
+
+          ## Downloads
+
+          ### Bootstrap Packages (Runtime Only)
+
+          Choose the package for your platform:
+
+          - **Linux x86_64**: \`simple-bootstrap-${{ steps.version.outputs.version }}-linux-x86_64.spk\`
+          - **macOS ARM64** (Apple Silicon): \`simple-bootstrap-${{ steps.version.outputs.version }}-darwin-arm64.spk\`
+          - **macOS x86_64** (Intel): \`simple-bootstrap-${{ steps.version.outputs.version }}-darwin-x86_64.spk\`
+          - **Windows x86_64**: \`simple-bootstrap-${{ steps.version.outputs.version }}-windows-x86_64.spk\`
+
+          ### Full Package (Development)
+
+          - **Source + Binaries**: \`simple-full-${{ steps.version.outputs.version }}.tar.gz\`
+
+          ## Installation
+
+          ### Quick Install (Linux/macOS)
+
+          \`\`\`bash
+          curl -fsSL https://raw.githubusercontent.com/simple-lang/simple/main/script/install.sh | sh
+          \`\`\`
+
+          ### Manual Install
+
+          \`\`\`bash
+          # Download the bootstrap package for your platform
+          # Extract it
+          tar -xzf simple-bootstrap-VERSION-PLATFORM.spk -C ~/.local
+
+          # Add to PATH
+          export PATH="\$HOME/.local/bin:\$PATH"
+
+          # Verify installation
+          simple --version
+          \`\`\`
+
+          ## Verification
+
+          All packages include SHA256 checksums. Verify before installing:
+
+          \`\`\`bash
+          sha256sum -c simple-bootstrap-VERSION-PLATFORM.spk.sha256
+          \`\`\`
+
+          ## What's New
+
+          See [CHANGELOG.md](CHANGELOG.md) for details.
+
+          ## Package Sizes
+
+          - Bootstrap packages: ~6-10 MB (compressed)
+          - Full package: ~200-300 MB (with source)
+          EOF
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: release/*
+          body_path: release-notes.md
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  test-installation:
+    name: Test Installation
+    needs: build-bootstrap
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Download bootstrap artifact
+        uses: actions/download-artifact@v4
+        with:
+          pattern: bootstrap-*
+          merge-multiple: true
+
+      - name: Test installation (Linux/macOS)
+        if: runner.os != 'Windows'
+        run: |
+          # Find the package for this platform
+          PKG=$(ls simple-bootstrap-*.spk | head -1)
+
+          # Extract to test location
+          mkdir -p test-install
+          tar -xzf "${PKG}" -C test-install
+
+          # Verify runtime works
+          test-install/bin/simple_runtime --version
+
+      - name: Test installation (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          PKG=$(ls simple-bootstrap-*.spk | head -1)
+          mkdir -p test-install
+          tar -xzf "${PKG}" -C test-install
+          test-install/bin/simple_runtime.exe --version

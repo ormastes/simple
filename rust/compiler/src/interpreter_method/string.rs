@@ -408,8 +408,11 @@ if let Value::Str(ref s) = recv_val {
         "is_numeric" => {
             return Ok(Value::Bool(!s.is_empty() && s.chars().all(|c| c.is_ascii_digit())));
         }
-        "is_alpha" => {
+        "is_alpha" | "is_alphabetic" => {
             return Ok(Value::Bool(!s.is_empty() && s.chars().all(|c| c.is_alphabetic())));
+        }
+        "is_digit" => {
+            return Ok(Value::Bool(!s.is_empty() && s.chars().all(|c| c.is_ascii_digit())));
         }
         "is_alphanumeric" => {
             return Ok(Value::Bool(!s.is_empty() && s.chars().all(|c| c.is_alphanumeric())));
