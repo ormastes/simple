@@ -531,4 +531,82 @@ auto import router.route
         // Empty manifest with no capabilities (inherits parent)
         assert!(manifest.capabilities.is_empty());
     }
+
+    // =========================================================================
+    // is_bypass field tests
+    // =========================================================================
+
+    #[test]
+    fn test_manifest_is_bypass_default_false() {
+        let manifest = DirectoryManifest::default();
+        assert!(!manifest.is_bypass, "default manifest should not be bypass");
+    }
+
+    #[test]
+    fn test_manifest_bypass_parsed_from_init() {
+        use std::fs;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let src = dir.path().join("src");
+        let lib = src.join("lib");
+        fs::create_dir_all(&lib).unwrap();
+
+        // __init__.spl with #[bypass] on the directory header mod
+        fs::write(
+            lib.join("__init__.spl"),
+            "#[bypass]\nmod lib\n",
+        )
+        .unwrap();
+
+        let mut resolver = ModuleResolver::new(dir.path().to_path_buf(), src);
+        let manifest = resolver.load_manifest(&lib).unwrap();
+
+        assert!(manifest.is_bypass, "manifest should have is_bypass = true");
+    }
+
+    #[test]
+    fn test_manifest_no_bypass_without_attribute() {
+        use std::fs;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let src = dir.path().join("src");
+        let pkg = src.join("pkg");
+        fs::create_dir_all(&pkg).unwrap();
+
+        fs::write(
+            pkg.join("__init__.spl"),
+            "mod pkg\npub mod router\nexport use router.Router\n",
+        )
+        .unwrap();
+
+        let mut resolver = ModuleResolver::new(dir.path().to_path_buf(), src);
+        let manifest = resolver.load_manifest(&pkg).unwrap();
+
+        assert!(!manifest.is_bypass, "manifest without #[bypass] should not be bypass");
+    }
+
+    #[test]
+    fn test_manifest_bypass_with_child_modules() {
+        use std::fs;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let src = dir.path().join("src");
+        let lib = src.join("lib");
+        fs::create_dir_all(&lib).unwrap();
+
+        // bypass directory with child modules declared
+        fs::write(
+            lib.join("__init__.spl"),
+            "#[bypass]\nmod lib\npub mod http\npub mod db\n",
+        )
+        .unwrap();
+
+        let mut resolver = ModuleResolver::new(dir.path().to_path_buf(), src);
+        let manifest = resolver.load_manifest(&lib).unwrap();
+
+        assert!(manifest.is_bypass);
+        assert_eq!(manifest.child_modules.len(), 2);
+        assert_eq!(manifest.child_modules[0].name, "http");
+        assert_eq!(manifest.child_modules[1].name, "db");
+    }
 }
