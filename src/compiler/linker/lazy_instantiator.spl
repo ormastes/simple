@@ -6,6 +6,9 @@
 # Phase 4: Link-Time Lazy Instantiation
 
 use ../monomorphize/note_sdn.*
+use ../compilation_context.{GenericTemplate, ConcreteType}
+use ../instantiation.{TemplateInstantiator, mangle}
+use linker_context.LinkerCompilationContext
 
 # ============================================================================
 # Result Types
@@ -153,10 +156,10 @@ impl LazyInstantiator:
         result
 
     me do_instantiate(entry: PossibleInstantiationEntry, source_path: text) -> LazyInstantiationResult:
-        """Perform the actual instantiation."""
-        # Create instantiation entry
+        """Perform the actual instantiation through unified CompilationContext pipeline."""
+        # Create instantiation entry for metadata tracking
         val inst_entry = InstantiationEntry(
-            template: entry.template,
+            template_name: entry.template_name,
             type_args: entry.type_args,
             mangled_name: entry.mangled_name,
             from_file: source_path,
@@ -176,15 +179,39 @@ impl LazyInstantiator:
         )
         self.output_metadata = self.output_metadata.add_dependency(dep)
 
-        # TODO: Generate actual code
-        val placeholder_code: [u8] = []
-        self.instantiated[entry.mangled_name] = placeholder_code
-
-        LazyInstantiationResult.Success(
-            code: placeholder_code,
-            symbol: entry.mangled_name,
-            metadata: self.output_metadata
+        # Build linker compilation context from input metadata
+        # TODO: Load actual templates from input SMF TemplateCode sections
+        var object_templates: Dict<text, GenericTemplate> = {}
+        object_templates[entry.template_name] = GenericTemplate(
+            name: entry.template_name,
+            type_params: entry.type_args.split(",").map(\s: s.trim()),
+            ast_data: nil
         )
+
+        val linker_ctx = LinkerCompilationContext.from_objects(object_templates, nil, nil)
+        var instantiator = TemplateInstantiator(
+            context: linker_ctx,
+            in_progress: {},
+            cache: {}
+        )
+
+        # Parse type args from the entry
+        val type_args = entry.type_args.split(",").map(\s: ConcreteType(name: s.trim()))
+
+        # Compile through unified pipeline
+        match instantiator.instantiate(entry.template_name, type_args):
+            case Ok(unit):
+                val compiled_code = unit.code
+                self.instantiated[entry.mangled_name] = compiled_code
+
+                LazyInstantiationResult.Success(
+                    code: compiled_code,
+                    symbol: entry.mangled_name,
+                    metadata: self.output_metadata
+                )
+
+            case Err(msg):
+                LazyInstantiationResult.Error(msg)
 
     fn get_instantiable_missing(missing_symbols: [text]) -> [text]:
         """Get all missing symbols that could be instantiated."""

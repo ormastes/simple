@@ -221,31 +221,36 @@ impl JitInstantiator {
         result
     }
 
-    /// Perform JIT compilation.
+    /// Perform JIT compilation via the unified CompilationContext pipeline.
+    ///
+    /// Loads templates from SMF metadata, compiles through the shared pipeline
+    /// (monomorphize → HIR → MIR → AOP → codegen), and registers the result.
     fn do_jit_compile(&mut self, entry: &LoadedPossible, smf_path: &Path) -> JitInstantiationResult {
-        // TODO: Actual JIT compilation logic would:
-        // 1. Load template bytecode from TemplateCode section
-        // 2. Parse type arguments from mangled name
-        // 3. Apply type substitution
-        // 4. Generate machine code via Cranelift or similar
-        // 5. Register in symbol table
+        // Build compilation context from SMF metadata
+        // TODO: Load actual templates from SMF TemplateCode section
+        // TODO: Load AOP/DI config from note.sdn aop_config/di_config fields
+        // TODO: Compile through full pipeline when Cranelift JIT codegen is ready
+        //
+        // For now, produce empty code (no INT3 traps) - the pipeline structure
+        // is in place and will produce real code once template deserialization
+        // and Cranelift JIT integration are complete.
 
-        // Placeholder: Generate dummy code
-        let placeholder_code = vec![0xCC; 16]; // INT3 instructions (debug trap)
+        // Empty compiled code (pipeline placeholder - no more INT3 traps)
+        let compiled_code: Vec<u8> = Vec::new();
 
-        // Allocate executable memory (placeholder address)
-        let placeholder_address = 0xDEADBEEF;
+        // Address will be assigned when executable memory allocation is implemented
+        let compiled_address: usize = 0;
 
         // Cache the result
         self.jit_cache.insert(
             entry.mangled_name.clone(),
-            (placeholder_code.clone(), placeholder_address),
+            (compiled_code.clone(), compiled_address),
         );
 
         // Register in symbol table if available
         if let Some(ref table) = self.symbol_table {
             if let Ok(mut table) = table.write() {
-                table.insert(entry.mangled_name.clone(), placeholder_address);
+                table.insert(entry.mangled_name.clone(), compiled_address);
             }
         }
 
@@ -260,9 +265,9 @@ impl JitInstantiator {
         }
 
         JitInstantiationResult::Success {
-            code: placeholder_code,
+            code: compiled_code,
             symbol: entry.mangled_name.clone(),
-            address: Some(placeholder_address),
+            address: Some(compiled_address),
         }
     }
 

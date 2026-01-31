@@ -6,6 +6,9 @@
 # Phase 5: Load-Time JIT Instantiation
 
 use ../monomorphize/note_loader.*
+use ../compilation_context.{GenericTemplate, ConcreteType}
+use ../instantiation.{TemplateInstantiator, mangle}
+use jit_context.JitCompilationContext
 
 # ============================================================================
 # Result Types
@@ -156,38 +159,55 @@ impl JitInstantiator:
         result
 
     me do_jit_compile(entry: LoadedPossible, smf_path: text) -> JitInstantiationResult:
-        """Perform JIT compilation."""
-        # TODO: Actual JIT compilation logic would:
-        # 1. Load template bytecode from TemplateCode section
-        # 2. Parse type arguments from mangled name
-        # 3. Apply type substitution
-        # 4. Generate machine code
-        # 5. Register in symbol table
+        """Perform JIT compilation through unified CompilationContext pipeline."""
+        # Build JIT compilation context from loaded SMF metadata
+        # TODO: Load actual templates from SMF TemplateCode section
+        var smf_templates: Dict<text, GenericTemplate> = {}
+        smf_templates[entry.template] = GenericTemplate(
+            name: entry.template,
+            type_params: entry.type_args.split(",").map(\s: s.trim()),
+            ast_data: nil
+        )
 
-        # Placeholder: Generate dummy code
-        val placeholder_code: [u8] = [0xCC, 0xCC, 0xCC, 0xCC]  # INT3 instructions
-        val placeholder_address: i64 = 0xDEADBEEF
+        val jit_ctx = JitCompilationContext.from_smf(smf_templates, nil, nil)
+        var instantiator = TemplateInstantiator(
+            context: jit_ctx,
+            in_progress: {},
+            cache: {}
+        )
 
-        # Cache the result
-        self.jit_cache[entry.mangled_name] = (placeholder_code, placeholder_address)
+        # Parse type args from the entry
+        val type_args = entry.type_args.split(",").map(\s: ConcreteType(name: s.trim()))
 
-        # Register in symbol table
-        self.symbol_table[entry.mangled_name] = placeholder_address
+        # Compile through unified pipeline
+        match instantiator.instantiate(entry.template, type_args):
+            case Ok(unit):
+                val compiled_code = unit.code
+                val address: i64 = 0  # TODO: Allocate executable memory and get real address
 
-        # Update SMF file if configured
-        if self.config.update_smf:
-            val update_result = self.update_smf_note_sdn(smf_path, entry)
-            if update_result.is_err():
-                return JitInstantiationResult.UpdateFailed(
+                # Cache the result
+                self.jit_cache[entry.mangled_name] = (compiled_code, address)
+
+                # Register in symbol table
+                self.symbol_table[entry.mangled_name] = address
+
+                # Update SMF file if configured
+                if self.config.update_smf:
+                    val update_result = self.update_smf_note_sdn(smf_path, entry)
+                    if update_result.is_err():
+                        return JitInstantiationResult.UpdateFailed(
+                            symbol: entry.mangled_name,
+                            error: update_result.unwrap_err()
+                        )
+
+                JitInstantiationResult.Success(
+                    code: compiled_code,
                     symbol: entry.mangled_name,
-                    error: update_result.unwrap_err()
+                    address: Some(address)
                 )
 
-        JitInstantiationResult.Success(
-            code: placeholder_code,
-            symbol: entry.mangled_name,
-            address: Some(placeholder_address)
-        )
+            case Err(msg):
+                JitInstantiationResult.CompilationError(msg)
 
     me update_smf_note_sdn(smf_path: text, entry: LoadedPossible) -> Result<(), text>:
         """Update note.sdn in SMF file after JIT compilation."""

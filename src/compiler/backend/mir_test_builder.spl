@@ -1,0 +1,506 @@
+"""
+# MIR Test Builder
+
+Builder pattern for constructing MIR test cases with comprehensive instruction coverage.
+
+**Category:** Testing Infrastructure
+**Status:** In Progress
+
+## Overview
+
+Provides a fluent builder API for constructing MIR (Mid-level Intermediate Representation)
+test cases to validate backend code generation.
+
+## Usage
+
+```simple
+val builder = MirTestBuilder.new()
+builder.const_int(v0, 42)
+builder.const_int(v1, 10)
+builder.add(v2, v0, v1)
+builder.ret(v2)
+val test_case = builder.build()
+```
+"""
+
+# Represents a virtual register ID
+struct VReg:
+    id: i32
+
+# Represents a basic block ID
+struct BlockId:
+    id: i32
+
+# MIR instruction representation for testing
+enum MirTestInst:
+    # Constants
+    ConstInt(VReg, i64)
+    ConstFloat(VReg, f64)
+    ConstBool(VReg, bool)
+    ConstString(VReg, text)
+
+    # Arithmetic
+    Add(VReg, VReg, VReg)
+    Sub(VReg, VReg, VReg)
+    Mul(VReg, VReg, VReg)
+    Div(VReg, VReg, VReg)
+    Mod(VReg, VReg, VReg)
+    Neg(VReg, VReg)
+
+    # Comparison
+    Eq(VReg, VReg, VReg)
+    Ne(VReg, VReg, VReg)
+    Lt(VReg, VReg, VReg)
+    Le(VReg, VReg, VReg)
+    Gt(VReg, VReg, VReg)
+    Ge(VReg, VReg, VReg)
+
+    # Memory
+    Load(VReg, VReg)
+    Store(VReg, VReg)
+    Copy(VReg, VReg)
+
+    # Control flow
+    Jump(BlockId)
+    Branch(VReg, BlockId, BlockId)
+    Ret(VReg)
+    RetVoid
+
+    # Collections
+    ArrayLit(VReg, [VReg])
+    TupleLit(VReg, [VReg])
+    DictLit(VReg, [VReg], [VReg])
+    IndexGet(VReg, VReg, VReg)
+    IndexSet(VReg, VReg, VReg)
+
+    # SIMD
+    VecLit(VReg, [VReg])
+    VecSum(VReg, VReg)
+    VecProduct(VReg, VReg)
+    VecMin(VReg, VReg)
+    VecMax(VReg, VReg)
+    VecExtract(VReg, VReg, VReg)
+    VecShuffle(VReg, VReg, VReg)
+    VecBlend(VReg, VReg, VReg, VReg)
+    VecSelect(VReg, VReg, VReg, VReg)
+    VecLoad(VReg, VReg, VReg)
+    VecStore(VReg, VReg, VReg)
+    VecGather(VReg, VReg, VReg)
+    VecScatter(VReg, VReg, VReg)
+    VecFma(VReg, VReg, VReg, VReg)
+    VecRecip(VReg, VReg)
+    VecSqrt(VReg, VReg)
+    VecAbs(VReg, VReg)
+    VecFloor(VReg, VReg)
+    VecCeil(VReg, VReg)
+    VecRound(VReg, VReg)
+
+    # GPU
+    GpuGlobalId(VReg, i32)
+    GpuLocalId(VReg, i32)
+    GpuGroupId(VReg, i32)
+    GpuBarrier
+    GpuMemFence
+    GpuAtomicAdd(VReg, VReg, VReg)
+    GpuAtomicCmpXchg(VReg, VReg, VReg, VReg)
+    GpuSharedAlloc(VReg, i32)
+
+    # Pointers
+    PointerNew(VReg, VReg)
+    PointerRef(VReg, VReg)
+    PointerDeref(VReg, VReg)
+
+    # Objects/Methods
+    StructInit(VReg, [VReg])
+    FieldGet(VReg, VReg, i32)
+    FieldSet(VReg, i32, VReg)
+    MethodCallStatic(VReg?, VReg, text, [VReg])
+    MethodCallVirtual(VReg?, VReg, i32, [VReg])
+
+    # Pattern matching
+    EnumDiscriminant(VReg, VReg)
+    EnumPayload(VReg, VReg)
+    EnumUnit(VReg, text, text)
+    EnumWith(VReg, text, text, VReg)
+    UnionDiscriminant(VReg, VReg)
+    UnionPayload(VReg, VReg, i32)
+    UnionWrap(VReg, VReg, i32)
+
+    # Async/Concurrency
+    FutureCreate(VReg, BlockId)
+    Await(VReg, VReg)
+    ActorSpawn(VReg, BlockId)
+    ActorSend(VReg, VReg)
+    ActorRecv(VReg)
+    ActorJoin(VReg, VReg)
+    ActorReply(VReg)
+    GeneratorCreate(VReg, BlockId)
+    Yield(VReg)
+    GeneratorNext(VReg, VReg)
+
+    # Error handling
+    TryUnwrap(VReg, VReg, BlockId, VReg)
+    OptionSome(VReg, VReg)
+    OptionNone(VReg)
+    ResultOk(VReg, VReg)
+    ResultErr(VReg, VReg)
+
+    # Closures
+    ClosureCreate(VReg, text, [VReg])
+    IndirectCall(VReg?, VReg, [VReg])
+
+    # Parallel
+    ParMap(VReg, VReg, VReg)
+    ParReduce(VReg, VReg, VReg, VReg)
+    ParFilter(VReg, VReg, VReg)
+    ParForEach(VReg, VReg)
+
+    # Contracts
+    ContractCheck(VReg, text, text, text?)
+    ContractOldCapture(VReg, VReg)
+
+    # Coverage
+    DecisionProbe(i32, VReg, text, i32, i32)
+    ConditionProbe(i32, i32, VReg, text, i32, i32)
+    PathProbe(i32, i32)
+
+    # Units
+    UnitBoundCheck(VReg, text, i64, i64)
+    UnitWiden(VReg, VReg, i32, i32, bool)
+    UnitNarrow(VReg, VReg, i32, i32, bool)
+    UnitSaturate(VReg, VReg, i64, i64)
+
+    # Boxing
+    BoxInt(VReg, VReg)
+    BoxFloat(VReg, VReg)
+    UnboxInt(VReg, VReg)
+    UnboxFloat(VReg, VReg)
+
+# Backend target for test execution
+enum BackendTarget:
+    Cranelift
+    LLVM
+    Vulkan
+    Interpreter
+
+# Test case with instructions and metadata
+class MirTestCase:
+    name: text
+    instructions: [MirTestInst]
+    expected_result: text?
+    supported_backends: [BackendTarget]
+
+    fn get_name() -> text:
+        self.name
+
+    fn get_instructions() -> [MirTestInst]:
+        self.instructions
+
+    fn is_supported(backend: BackendTarget) -> bool:
+        self.supported_backends.contains(backend)
+
+    fn instruction_count() -> i32:
+        self.instructions.len()
+
+# Builder for constructing MIR test cases
+class MirTestBuilder:
+    instructions: [MirTestInst]
+    name: text
+    next_vreg: i32
+    next_block: i32
+    expected_result: text?
+    supported_backends: [BackendTarget]
+
+    static fn new() -> MirTestBuilder:
+        MirTestBuilder(
+            instructions: [],
+            name: "test",
+            next_vreg: 0,
+            next_block: 0,
+            expected_result: (),
+            supported_backends: [
+                BackendTarget.Cranelift,
+                BackendTarget.LLVM,
+                BackendTarget.Vulkan,
+                BackendTarget.Interpreter
+            ]
+        )
+
+    me set_name(n: text):
+        self.name = n
+
+    me expect_result(result: text):
+        self.expected_result = result
+
+    me only_backends(backends: [BackendTarget]):
+        self.supported_backends = backends
+
+    fn vreg(id: i32) -> VReg:
+        VReg(id: id)
+
+    me next_reg() -> VReg:
+        val reg = VReg(id: self.next_vreg)
+        self.next_vreg = self.next_vreg + 1
+        reg
+
+    me block(id: i32) -> BlockId:
+        BlockId(id: id)
+
+    me next_block_id() -> BlockId:
+        val block = BlockId(id: self.next_block)
+        self.next_block = self.next_block + 1
+        block
+
+    # =========================================================================
+    # Constant instructions
+    # =========================================================================
+
+    me const_int(dest: VReg, value: i64):
+        self.instructions.push(MirTestInst.ConstInt(dest, value))
+
+    me const_float(dest: VReg, value: f64):
+        self.instructions.push(MirTestInst.ConstFloat(dest, value))
+
+    me const_bool(dest: VReg, value: bool):
+        self.instructions.push(MirTestInst.ConstBool(dest, value))
+
+    me const_string(dest: VReg, value: text):
+        self.instructions.push(MirTestInst.ConstString(dest, value))
+
+    # =========================================================================
+    # Arithmetic instructions
+    # =========================================================================
+
+    me add(dest: VReg, left: VReg, right: VReg):
+        self.instructions.push(MirTestInst.Add(dest, left, right))
+
+    me sub(dest: VReg, left: VReg, right: VReg):
+        self.instructions.push(MirTestInst.Sub(dest, left, right))
+
+    me mul(dest: VReg, left: VReg, right: VReg):
+        self.instructions.push(MirTestInst.Mul(dest, left, right))
+
+    me div(dest: VReg, left: VReg, right: VReg):
+        self.instructions.push(MirTestInst.Div(dest, left, right))
+
+    me mod_(dest: VReg, left: VReg, right: VReg):
+        self.instructions.push(MirTestInst.Mod(dest, left, right))
+
+    me neg(dest: VReg, source: VReg):
+        self.instructions.push(MirTestInst.Neg(dest, source))
+
+    # =========================================================================
+    # Comparison instructions
+    # =========================================================================
+
+    me eq(dest: VReg, left: VReg, right: VReg):
+        self.instructions.push(MirTestInst.Eq(dest, left, right))
+
+    me ne(dest: VReg, left: VReg, right: VReg):
+        self.instructions.push(MirTestInst.Ne(dest, left, right))
+
+    me lt(dest: VReg, left: VReg, right: VReg):
+        self.instructions.push(MirTestInst.Lt(dest, left, right))
+
+    me le(dest: VReg, left: VReg, right: VReg):
+        self.instructions.push(MirTestInst.Le(dest, left, right))
+
+    me gt(dest: VReg, left: VReg, right: VReg):
+        self.instructions.push(MirTestInst.Gt(dest, left, right))
+
+    me ge(dest: VReg, left: VReg, right: VReg):
+        self.instructions.push(MirTestInst.Ge(dest, left, right))
+
+    # =========================================================================
+    # Memory instructions
+    # =========================================================================
+
+    me load(dest: VReg, addr: VReg):
+        self.instructions.push(MirTestInst.Load(dest, addr))
+
+    me store(addr: VReg, value: VReg):
+        self.instructions.push(MirTestInst.Store(addr, value))
+
+    me copy(dest: VReg, src: VReg):
+        self.instructions.push(MirTestInst.Copy(dest, src))
+
+    # =========================================================================
+    # Control flow instructions
+    # =========================================================================
+
+    me jump(target: BlockId):
+        self.instructions.push(MirTestInst.Jump(target))
+
+    me branch(cond: VReg, if_true: BlockId, if_false: BlockId):
+        self.instructions.push(MirTestInst.Branch(cond, if_true, if_false))
+
+    me ret(value: VReg):
+        self.instructions.push(MirTestInst.Ret(value))
+
+    me ret_void():
+        self.instructions.push(MirTestInst.RetVoid)
+
+    # =========================================================================
+    # Collection instructions
+    # =========================================================================
+
+    me array_lit(dest: VReg, elements: [VReg]):
+        self.instructions.push(MirTestInst.ArrayLit(dest, elements))
+
+    me tuple_lit(dest: VReg, elements: [VReg]):
+        self.instructions.push(MirTestInst.TupleLit(dest, elements))
+
+    me dict_lit(dest: VReg, keys: [VReg], values: [VReg]):
+        self.instructions.push(MirTestInst.DictLit(dest, keys, values))
+
+    me index_get(dest: VReg, collection: VReg, index: VReg):
+        self.instructions.push(MirTestInst.IndexGet(dest, collection, index))
+
+    me index_set(collection: VReg, index: VReg, value: VReg):
+        self.instructions.push(MirTestInst.IndexSet(collection, index, value))
+
+    # =========================================================================
+    # SIMD instructions
+    # =========================================================================
+
+    me vec_lit(dest: VReg, elements: [VReg]):
+        self.instructions.push(MirTestInst.VecLit(dest, elements))
+
+    me vec_sum(dest: VReg, source: VReg):
+        self.instructions.push(MirTestInst.VecSum(dest, source))
+
+    me vec_product(dest: VReg, source: VReg):
+        self.instructions.push(MirTestInst.VecProduct(dest, source))
+
+    me vec_extract(dest: VReg, vector: VReg, index: VReg):
+        self.instructions.push(MirTestInst.VecExtract(dest, vector, index))
+
+    me vec_fma(dest: VReg, a: VReg, b: VReg, c: VReg):
+        self.instructions.push(MirTestInst.VecFma(dest, a, b, c))
+
+    me vec_sqrt(dest: VReg, source: VReg):
+        self.instructions.push(MirTestInst.VecSqrt(dest, source))
+
+    # =========================================================================
+    # GPU instructions
+    # =========================================================================
+
+    me gpu_global_id(dest: VReg, dim: i32):
+        self.instructions.push(MirTestInst.GpuGlobalId(dest, dim))
+
+    me gpu_barrier():
+        self.instructions.push(MirTestInst.GpuBarrier)
+
+    me gpu_atomic_add(dest: VReg, ptr: VReg, value: VReg):
+        self.instructions.push(MirTestInst.GpuAtomicAdd(dest, ptr, value))
+
+    # =========================================================================
+    # Async/Actor instructions
+    # =========================================================================
+
+    me actor_spawn(dest: VReg, body: BlockId):
+        self.instructions.push(MirTestInst.ActorSpawn(dest, body))
+
+    me actor_send(actor: VReg, message: VReg):
+        self.instructions.push(MirTestInst.ActorSend(actor, message))
+
+    me actor_recv(dest: VReg):
+        self.instructions.push(MirTestInst.ActorRecv(dest))
+
+    # =========================================================================
+    # Error handling instructions
+    # =========================================================================
+
+    me option_some(dest: VReg, value: VReg):
+        self.instructions.push(MirTestInst.OptionSome(dest, value))
+
+    me option_none(dest: VReg):
+        self.instructions.push(MirTestInst.OptionNone(dest))
+
+    me result_ok(dest: VReg, value: VReg):
+        self.instructions.push(MirTestInst.ResultOk(dest, value))
+
+    me result_err(dest: VReg, value: VReg):
+        self.instructions.push(MirTestInst.ResultErr(dest, value))
+
+    # =========================================================================
+    # Build the test case
+    # =========================================================================
+
+    fn build() -> MirTestCase:
+        MirTestCase(
+            name: self.name,
+            instructions: self.instructions,
+            expected_result: self.expected_result,
+            supported_backends: self.supported_backends
+        )
+
+# ============================================================================
+# Helper: Create common test patterns
+# ============================================================================
+
+fn simple_arithmetic_test() -> MirTestCase:
+    """Create a test case for simple arithmetic: (42 + 10) * 2"""
+    val builder = MirTestBuilder.new()
+    builder.set_name("simple_arithmetic")
+
+    val v0 = builder.vreg(0)
+    val v1 = builder.vreg(1)
+    val v2 = builder.vreg(2)
+    val v3 = builder.vreg(3)
+
+    builder.const_int(v0, 42)
+    builder.const_int(v1, 10)
+    builder.add(v2, v0, v1)
+    builder.const_int(v3, 2)
+    builder.mul(v2, v2, v3)
+    builder.ret(v2)
+    builder.expect_result("104")
+
+    builder.build()
+
+fn simd_reduction_test() -> MirTestCase:
+    """Create a test case for SIMD reduction"""
+    val builder = MirTestBuilder.new()
+    builder.set_name("simd_reduction")
+
+    val v0 = builder.vreg(0)
+    val v1 = builder.vreg(1)
+    val v2 = builder.vreg(2)
+    val v3 = builder.vreg(3)
+    val v4 = builder.vreg(4)
+
+    builder.const_float(v0, 1.0)
+    builder.const_float(v1, 2.0)
+    builder.const_float(v2, 3.0)
+    builder.const_float(v3, 4.0)
+    builder.vec_lit(v4, [v0, v1, v2, v3])
+
+    val result = builder.next_reg()
+    builder.vec_sum(result, v4)
+    builder.ret(result)
+    builder.expect_result("10.0")
+
+    # SIMD only supported in some backends
+    builder.only_backends([BackendTarget.LLVM, BackendTarget.Interpreter])
+
+    builder.build()
+
+fn actor_message_test() -> MirTestCase:
+    """Create a test case for actor message passing"""
+    val builder = MirTestBuilder.new()
+    builder.set_name("actor_message")
+
+    val body = builder.next_block_id()
+    val actor = builder.next_reg()
+    val msg = builder.next_reg()
+
+    builder.const_int(msg, 42)
+    builder.actor_spawn(actor, body)
+    builder.actor_send(actor, msg)
+    builder.ret_void()
+
+    # Actors only in interpreter for now
+    builder.only_backends([BackendTarget.Interpreter])
+
+    builder.build()

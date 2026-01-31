@@ -1010,3 +1010,73 @@ Only these components remain in Rust permanently:
 | hir-core types | Shared between Rust FFI and Simple |
 
 Everything else should eventually be Simple.
+
+---
+
+## Unified CompilationContext Architecture
+
+All three compilation paths (compiler, JIT loader, linker) share a unified `CompilationContext` trait that ensures AOP, DI, contracts, and codegen are applied consistently.
+
+### Architecture Diagram
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    CompilationContext (trait)                     │
+│                                                                  │
+│  load_template()     compile_template()     record_instantiation │
+│  has_template()      contract_mode()        instantiation_mode() │
+│  type_registry()     di_container()         coverage_enabled()   │
+│                      aop_weaver()                                │
+└──────────┬───────────────────┬──────────────────┬───────────────┘
+           │                   │                  │
+    ┌──────▼──────┐    ┌──────▼──────┐    ┌──────▼──────┐
+    │  Compiler   │    │    JIT      │    │   Linker    │
+    │  Context    │    │  Context    │    │  Context    │
+    │             │    │             │    │             │
+    │ AST cache   │    │ SMF temps   │    │ Object SMFs │
+    │ All contract│    │ Boundary    │    │ All contract│
+    └──────┬──────┘    └──────┬──────┘    └──────┬──────┘
+           │                   │                  │
+           └───────────┬───────┘──────────────────┘
+                       │
+              ┌────────▼────────┐
+              │ Template        │
+              │ Instantiator    │
+              │                 │
+              │ • Cache         │
+              │ • Cycle detect  │
+              │ • Delegates to  │
+              │   context       │
+              └────────┬────────┘
+                       │
+              ┌────────▼────────┐
+              │ Shared Pipeline │
+              │ (pipeline_fn)   │
+              │                 │
+              │ monomorphize    │
+              │ → HIR lowering  │
+              │ → MIR lowering  │
+              │ → AOP weaving   │
+              │ → codegen       │
+              └─────────────────┘
+```
+
+### Key Files
+
+| File | Purpose |
+|------|---------|
+| `src/compiler/compilation_context.spl` | `CompilationContext` trait, enums |
+| `src/compiler/instantiation.spl` | `TemplateInstantiator` with cache/cycle detection |
+| `src/compiler/pipeline_fn.spl` | Shared pipeline: monomorphize → HIR → MIR → codegen |
+| `src/compiler/pipeline/compiler_context.spl` | Compiler context (AST cache) |
+| `src/compiler/loader/jit_context.spl` | JIT context (SMF templates) |
+| `src/compiler/linker/linker_context.spl` | Linker context (object file templates) |
+| `rust/compiler/src/compilation_context.rs` | Rust-side trait mirror |
+
+### AOP/DI Config in SMF
+
+For JIT to reconstruct AOP/DI config at load time, these are stored in the note.sdn section:
+- `aop_config`: Serialized AOP weaver configuration
+- `di_config`: Serialized DI container bindings
+
+This enables the JIT context to create proper `AopWeaver` and `DiContainer` instances from the SMF metadata.
