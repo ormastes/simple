@@ -1,6 +1,6 @@
 # Actual Codebase Status - What's Already in Simple
 
-**Date:** 2026-01-30
+**Date:** 2026-01-31 (updated)
 **Version:** 0.3.0
 
 ---
@@ -31,29 +31,44 @@
 
 | Module | Lines | What It Does | Status |
 |--------|-------|--------------|--------|
-| **parser.spl** | 2,337 | Full AST parser | ✅ Complete |
-| **hir.spl** | 2,050 | High-level IR | ✅ Complete |
-| **type_infer.spl** | 1,624 | HM type inference | ✅ Complete |
-| **treesitter.spl** | 1,510 | Tree-sitter wrapper | ✅ Complete |
-| **lexer.spl** | 1,491 | Tokenizer | ✅ Complete |
-| **mir.spl** | 1,435 | Mid-level IR | ✅ Complete |
-| **backend.spl** | 1,120 | Backend abstraction | ✅ Complete |
-| **dim_constraints.spl** | 1,016 | ML dimension checking | ✅ Complete |
-| **driver.spl** | 774 | Compilation orchestration | ✅ Complete |
-| **resolve.spl** | 729 | Name/method resolution | ✅ Complete |
-| **codegen.spl** | 701 | Code generation | ✅ Complete |
-| **loader/** | 692 | Module loading | ✅ Complete |
-| **smf_writer.spl** | 527 | Binary writer | ✅ Complete |
+| **parser.spl** | 1,809 | Full AST parser | ✅ Complete |
+| **hir_lowering.spl** | 1,148 | HIR lowering passes | ✅ Complete |
+| **type_infer.spl** | 1,478 | HM type inference | ✅ Complete |
+| **treesitter.spl** | 1,333 | Tree-sitter wrapper | ✅ Complete |
+| **lexer.spl** | 1,250 | Tokenizer | ✅ Complete |
+| **backend.spl** | 842 | Backend abstraction | ✅ Complete |
+| **mir_lowering.spl** | 778 | MIR lowering | ✅ Complete |
+| **codegen.spl** | 758 | Code generation | ✅ Complete |
+| **mir_data.spl** | 748 | MIR data structures | ✅ Complete |
+| **resolve.spl** | 786 | Name/method resolution | ✅ Complete |
+| **dim_constraints.spl** | 637 | ML dimension checking | ✅ Complete |
+| **driver.spl** | 591 | Compilation orchestration | ✅ Complete |
+| **hir_types.spl** | 560 | HIR type definitions | ✅ Complete |
+| **smf_writer.spl** | 556 | Binary writer | ✅ Complete |
+| **main.spl** | 461 | Compiler entry point | ✅ Complete |
+| **hir_definitions.spl** | 399 | HIR definitions | ✅ Complete |
 | **build_native.spl** | 321 | Native tooling | ✅ Complete |
+| **config.spl** | 221 | Configuration | ✅ Complete |
+| **hir.spl** | 29 | HIR re-exports | ✅ Complete |
+| **mir.spl** | 22 | MIR re-exports | ✅ Complete |
+
+**Note:** `hir.spl` and `mir.spl` are re-export modules. Real logic is in
+`hir_types.spl` + `hir_definitions.spl` + `hir_lowering.spl` (2,107 lines total)
+and `mir_data.spl` + `mir_lowering.spl` (1,526 lines total).
 
 **Additional compiler infrastructure:**
-- aop.spl, di.spl, config.spl, init.spl, etc.
+- aop.spl (30), di.spl (37), ffi.spl (41), init.spl
+- blocks/ (builtin blocks, registry, resolver, context, value, modes)
+- monomorphize/ (deferred, partition, tracker, metadata, hot_reload, cycle_detector, note_loader, note_sdn)
+- linker/ (link, mold, smf_reader, obj_taker, lazy_instantiator)
+- loader/ (module_loader, jit_instantiator)
+- dependency/ (graph, resolution, visibility, symbol, macro_import)
 
-**Total compiler: ~18,000 lines**
+**Total compiler: ~27,423 lines (excluding tests)**
 
 ---
 
-### 2. Developer Tools & Apps (src/app/ - 37,861 lines)
+### 2. Developer Tools & Apps (src/app/ - 38,029 lines)
 
 **60+ APPS ALREADY IN SIMPLE:**
 

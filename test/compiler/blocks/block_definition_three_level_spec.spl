@@ -1,0 +1,60 @@
+import std.spec
+
+describe "BlockDefinition Three-Level Interface":
+    context "default implementations (backward compat)":
+        it "parse_full delegates to parse_payload":
+            val block = ShellBlockDef()
+            val ctx = BlockContext.test("ls -la")
+            val pre_lex = PreLexInfo.empty()
+            val result = block.parse_full("ls -la", pre_lex, ctx)
+            expect(result.ok.?).to(be_true())
+
+        it "lex returns empty by default":
+            val block = SqlBlockDef()
+            val pre_lex = PreLexInfo.empty()
+            val ctx = BlockContext.test("SELECT 1")
+            val tokens = block.lex("SELECT 1", pre_lex, ctx)
+            expect(tokens.ok.?).to(be_true())
+            expect(tokens.unwrap().len()).to(eq(0))
+
+        it "treesitter_outline returns opaque by default":
+            val block = JsonBlockDef()
+            val pre_lex = PreLexInfo.empty()
+            val info = block.treesitter_outline("{}", pre_lex)
+            expect(info.is_opaque).to(be_true())
+            expect(info.kind).to(eq("json"))
+
+        it "skip_policy defaults to Skippable":
+            val block = ShellBlockDef()
+            expect(block.skip_policy()).to(eq(BlockSkipPolicy.Skippable))
+
+    context "math block (reference implementation)":
+        it "lex produces tokens":
+            val block = MathBlockDef()
+            val pre_lex = PreLexInfo.empty()
+            val ctx = BlockContext.test("x^2 + y")
+            val tokens = block.lex("x^2 + y", pre_lex, ctx)
+            expect(tokens.ok.?).to(be_true())
+            expect(tokens.unwrap().len()).to(be_gt(0))
+
+        it "treesitter_outline extracts identifiers":
+            val block = MathBlockDef()
+            val pre_lex = PreLexInfo.empty()
+            val info = block.treesitter_outline("x^2 + y^2", pre_lex)
+            expect(info.identifiers).to(contain("x"))
+            expect(info.identifiers).to(contain("y"))
+            expect(info.is_opaque).to(be_false())
+
+        it "skip_policy is OutlineRequired":
+            val block = MathBlockDef()
+            expect(block.skip_policy()).to(eq(BlockSkipPolicy.OutlineRequired))
+
+        it "parse_full uses pre_lex info":
+            val block = MathBlockDef()
+            val pre_lex = PreLexInfo(
+                string_spans: [], comment_spans: [],
+                escape_positions: [], brace_pairs: []
+            )
+            val ctx = BlockContext.test("x^2")
+            val result = block.parse_full("x^2", pre_lex, ctx)
+            expect(result.ok.?).to(be_true())

@@ -1,0 +1,98 @@
+import std.spec
+
+describe "PreLexInfo - Per-DSL Conflict Scenarios":
+    """Tests from the research doc: broken examples that Tier 1+2 must fix."""
+
+    context "Shell blocks":
+        it "handles } inside double-quoted string":
+            val result = parse_block("sh", "echo \"}\" done")
+            expect(result.ok.?).to(be_true())
+
+        it "handles } inside single-quoted string":
+            val result = parse_block("sh", "echo '}' done")
+            expect(result.ok.?).to(be_true())
+
+        it "handles } inside # comment":
+            val result = parse_block("sh", "echo hello # close }\necho world")
+            expect(result.ok.?).to(be_true())
+
+        it "handles variable expansion ${VAR}":
+            val result = parse_block("sh", "echo ${VAR:-default}")
+            expect(result.ok.?).to(be_true())
+
+    context "SQL blocks":
+        it "handles } inside single-quoted string literal":
+            val result = parse_block("sql", "SELECT * FROM t WHERE col = '}'")
+            expect(result.ok.?).to(be_true())
+
+        it "handles } inside -- comment":
+            val result = parse_block("sql", "SELECT * -- filter }\nFROM t")
+            expect(result.ok.?).to(be_true())
+
+    context "Regex blocks":
+        it "handles quantifier {3}":
+            val result = parse_block("re", "\\d{3}")
+            expect(result.ok.?).to(be_true())
+
+        it "handles } in character class":
+            val result = parse_block("re", "[}]")
+            expect(result.ok.?).to(be_true())
+
+    context "JSON blocks":
+        it "handles nested objects":
+            val result = parse_block("json", "{\"a\": {\"b\": 1}}")
+            expect(result.ok.?).to(be_true())
+
+        it "handles } inside string values":
+            val result = parse_block("json", "{\"key\": \"value}\"}")
+            expect(result.ok.?).to(be_true())
+
+    context "Math blocks":
+        it "handles set notation {1,2,3}":
+            val result = parse_block("m", "S = {1,2,3}")
+            expect(result.ok.?).to(be_true())
+
+    context "escape hatch with # delimiter":
+        it "sh#{ handles unbalanced } }#":
+            val result = parse_block_escaped("sh", 1, "echo }")
+            expect(result.ok.?).to(be_true())
+
+        it "sql##{ handles }# inside }##":
+            val result = parse_block_escaped("sql", 2, "SELECT '}#'")
+            expect(result.ok.?).to(be_true())
+
+describe "PreLexInfo - Pre-lex Sharing Verification":
+    """Verify that pre-lex info is correctly passed through the pipeline."""
+
+    it "pre_lex_info reaches parse_full":
+        val source = "val x = sh{ echo \"hello\" }"
+        val tokens = lex(source)
+        val block_token = tokens.find(\t: t.kind == CustomBlock)
+        expect(block_token.?).to(be_true())
+        expect(block_token.unwrap().pre_lex_info.string_spans.len()).to(eq(1))
+
+    it "resolver passes pre_lex_info to parse_full":
+        val registry = BlockRegistry.default()
+        val resolver = BlockResolver(registry: registry)
+        val outline = BlockOutline(
+            kind: "sh",
+            payload: "echo \"test\"",
+            pre_lex_info: Some(PreLexInfo(
+                string_spans: [TextSpan(start: 5, end: 11)],
+                comment_spans: [], escape_positions: [], brace_pairs: []
+            )),
+            payload_span: Span.empty(),
+            span: Span.empty(),
+            parent_context: nil,
+            outline_info: nil
+        )
+        val (resolved, diagnostics) = resolver.resolve(
+            OutlineModule(
+                name: "", imports: [], exports: [],
+                functions: [], classes: [], structs: [],
+                enums: [], traits: [], impls: [],
+                type_aliases: [], constants: [],
+                inline_blocks: [outline], errors: []
+            )
+        )
+        expect(resolved.blocks.len()).to(eq(1))

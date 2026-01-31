@@ -1,0 +1,302 @@
+# Generic construct partitioning
+#
+# Separates generic templates from specialized instances, enabling:
+# - Template storage in .smf files
+# - Deferred monomorphization
+# - Metadata tracking for specializations
+
+use src/compiler/ast (
+    Module,
+    FunctionDef,
+    StructDef,
+    ClassDef,
+    EnumDef,
+    TraitDef,
+    Node
+)
+use src/compiler/monomorphize/metadata (
+    MonomorphizationMetadata,
+    GenericFunctionMeta,
+    GenericStructMeta,
+    GenericClassMeta,
+    GenericEnumMeta,
+    GenericTraitMeta,
+    SpecializationEntry,
+    ConcreteType,
+    SpecializationKey
+)
+
+# Collection of all generic templates
+struct GenericTemplates:
+    functions: [FunctionDef]
+    structs: [StructDef]
+    classes: [ClassDef]
+    enums: [EnumDef]
+    traits: [TraitDef]
+
+impl GenericTemplates:
+    static fn empty() -> GenericTemplates:
+        GenericTemplates(
+            functions: [],
+            structs: [],
+            classes: [],
+            enums: [],
+            traits: []
+        )
+
+    fn is_empty() -> bool:
+        self.functions.is_empty() &&
+        self.structs.is_empty() &&
+        self.classes.is_empty() &&
+        self.enums.is_empty() &&
+        self.traits.is_empty()
+
+    fn count() -> i32:
+        self.functions.len() +
+        self.structs.len() +
+        self.classes.len() +
+        self.enums.len() +
+        self.traits.len()
+
+# Collection of specialized instances
+struct SpecializedInstances:
+    functions: [FunctionDef]
+    structs: [StructDef]
+    classes: [ClassDef]
+    enums: [EnumDef]
+    traits: [TraitDef]
+
+impl SpecializedInstances:
+    static fn empty() -> SpecializedInstances:
+        SpecializedInstances(
+            functions: [],
+            structs: [],
+            classes: [],
+            enums: [],
+            traits: []
+        )
+
+    fn count() -> i32:
+        self.functions.len() +
+        self.structs.len() +
+        self.classes.len() +
+        self.enums.len() +
+        self.traits.len()
+
+# Partition module into templates and specialized instances
+fn partition_generic_constructs(
+    module: Module
+) -> (GenericTemplates, SpecializedInstances, MonomorphizationMetadata):
+    """Separate generic templates from specialized instances.
+
+    Returns:
+    - GenericTemplates: Original generic definitions
+    - SpecializedInstances: Concrete specializations
+    - MonomorphizationMetadata: Specialization tracking
+    """
+
+    var templates = GenericTemplates.empty()
+    var specialized = SpecializedInstances.empty()
+
+    # Partition module items
+    for item in module.items:
+        match item:
+            Node.Function(f):
+                if f.is_generic_template:
+                    templates.functions = templates.functions.push(f)
+                else:
+                    specialized.functions = specialized.functions.push(f)
+
+            Node.Struct(s):
+                if s.is_generic_template:
+                    templates.structs = templates.structs.push(s)
+                else:
+                    specialized.structs = specialized.structs.push(s)
+
+            Node.Class(c):
+                if c.is_generic_template:
+                    templates.classes = templates.classes.push(c)
+                else:
+                    specialized.classes = specialized.classes.push(c)
+
+            Node.Enum(e):
+                if e.is_generic_template:
+                    templates.enums = templates.enums.push(e)
+                else:
+                    specialized.enums = specialized.enums.push(e)
+
+            Node.Trait(t):
+                if t.is_generic_template:
+                    templates.traits = templates.traits.push(t)
+                else:
+                    specialized.traits = specialized.traits.push(t)
+
+            _:
+                # Non-generic items (imports, exports, etc.) - ignore
+                pass
+
+    # Build metadata tracking
+    val metadata = build_monomorphization_metadata(templates, specialized)
+
+    (templates, specialized, metadata)
+
+# Build metadata from templates and specialized instances
+fn build_monomorphization_metadata(
+    templates: GenericTemplates,
+    specialized: SpecializedInstances
+) -> MonomorphizationMetadata:
+    """Create monomorphization metadata tracking all specializations."""
+
+    var functions: Dict<text, GenericFunctionMeta> = {}
+    var structs: Dict<text, GenericStructMeta> = {}
+    var classes: Dict<text, GenericClassMeta> = {}
+    var enums: Dict<text, GenericEnumMeta> = {}
+    var traits: Dict<text, GenericTraitMeta> = {}
+
+    # Process function templates
+    for func in templates.functions:
+        val meta = GenericFunctionMeta(
+            base_name: func.name,
+            generic_params: func.generic_params,
+            specializations: []
+        )
+        functions[func.name] = meta
+
+    # Add function specializations
+    for func in specialized.functions:
+        if func.specialization_of.?:
+            val base_name = func.specialization_of.unwrap()
+            if functions.contains_key(base_name):
+                val entry = create_function_specialization_entry(func)
+                var meta = functions[base_name]
+                meta.specializations = meta.specializations.push(entry)
+                functions[base_name] = meta
+
+    # Process struct templates
+    for struct_def in templates.structs:
+        val meta = GenericStructMeta(
+            base_name: struct_def.name,
+            generic_params: struct_def.generic_params,
+            specializations: []
+        )
+        structs[struct_def.name] = meta
+
+    # Add struct specializations
+    for struct_def in specialized.structs:
+        if struct_def.specialization_of.?:
+            val base_name = struct_def.specialization_of.unwrap()
+            if structs.contains_key(base_name):
+                val entry = create_struct_specialization_entry(struct_def)
+                var meta = structs[base_name]
+                meta.specializations = meta.specializations.push(entry)
+                structs[base_name] = meta
+
+    # Process class templates
+    for class_def in templates.classes:
+        val meta = GenericClassMeta(
+            base_name: class_def.name,
+            generic_params: class_def.generic_params,
+            specializations: []
+        )
+        classes[class_def.name] = meta
+
+    # Add class specializations
+    for class_def in specialized.classes:
+        if class_def.specialization_of.?:
+            val base_name = class_def.specialization_of.unwrap()
+            if classes.contains_key(base_name):
+                val entry = create_class_specialization_entry(class_def)
+                var meta = classes[base_name]
+                meta.specializations = meta.specializations.push(entry)
+                classes[base_name] = meta
+
+    # Process enum templates
+    for enum_def in templates.enums:
+        val meta = GenericEnumMeta(
+            base_name: enum_def.name,
+            generic_params: enum_def.generic_params,
+            specializations: []
+        )
+        enums[enum_def.name] = meta
+
+    # Add enum specializations
+    for enum_def in specialized.enums:
+        if enum_def.specialization_of.?:
+            val base_name = enum_def.specialization_of.unwrap()
+            if enums.contains_key(base_name):
+                val entry = create_enum_specialization_entry(enum_def)
+                var meta = enums[base_name]
+                meta.specializations = meta.specializations.push(entry)
+                enums[base_name] = meta
+
+    # Process trait templates
+    for trait_def in templates.traits:
+        val meta = GenericTraitMeta(
+            base_name: trait_def.name,
+            generic_params: trait_def.generic_params,
+            impl_specializations: []
+        )
+        traits[trait_def.name] = meta
+
+    MonomorphizationMetadata(
+        functions: functions,
+        structs: structs,
+        classes: classes,
+        enums: enums,
+        traits: traits
+    )
+
+# Helper: Create specialization entry from function
+fn create_function_specialization_entry(func: FunctionDef) -> SpecializationEntry:
+    val type_args = extract_type_args_from_bindings(func.type_bindings)
+
+    SpecializationEntry(
+        type_args: type_args,
+        mangled_name: func.name,
+        bindings: func.type_bindings
+    )
+
+# Helper: Create specialization entry from struct
+fn create_struct_specialization_entry(struct_def: StructDef) -> SpecializationEntry:
+    val type_args = extract_type_args_from_bindings(struct_def.type_bindings)
+
+    SpecializationEntry(
+        type_args: type_args,
+        mangled_name: struct_def.name,
+        bindings: struct_def.type_bindings
+    )
+
+# Helper: Create specialization entry from class
+fn create_class_specialization_entry(class_def: ClassDef) -> SpecializationEntry:
+    val type_args = extract_type_args_from_bindings(class_def.type_bindings)
+
+    SpecializationEntry(
+        type_args: type_args,
+        mangled_name: class_def.name,
+        bindings: class_def.type_bindings
+    )
+
+# Helper: Create specialization entry from enum
+fn create_enum_specialization_entry(enum_def: EnumDef) -> SpecializationEntry:
+    val type_args = extract_type_args_from_bindings(enum_def.type_bindings)
+
+    SpecializationEntry(
+        type_args: type_args,
+        mangled_name: enum_def.name,
+        bindings: enum_def.type_bindings
+    )
+
+# Helper: Extract type args from type bindings dict
+fn extract_type_args_from_bindings(bindings: Dict<text, HirType>) -> [ConcreteType]:
+    # TODO: Convert HirType to ConcreteType properly
+    # For now, return empty array
+    []
+
+# Helper: Check if definition is a template
+fn is_template(generic_params: [text]) -> bool:
+    not generic_params.is_empty()
+
+# Helper: Get specialization key for a definition
+fn get_specialization_key(name: text, type_bindings: Dict<text, HirType>) -> SpecializationKey:
+    val type_args = extract_type_args_from_bindings(type_bindings)
+    SpecializationKey(name: name, type_args: type_args)

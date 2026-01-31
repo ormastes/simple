@@ -169,7 +169,7 @@ Enforced by `simple/app/lint/main.spl`:
 
 Run linter:
 ```bash
-./target/debug/simple simple/app/lint/main.spl <file.spl>
+./rust/target/debug/simple simple/app/lint/main.spl <file.spl>
 ```
 
 ### Skipping TODO Checks
@@ -218,10 +218,10 @@ Documentation with example TODOs...
 **Files already using skip_todo:**
 
 Rust/Simple code:
-- `src/rust/driver/src/todo_parser.rs`
-- `src/rust/compiler/src/lint/checker.rs`
-- `src/rust/compiler/src/lint/types.rs`
-- `src/rust/compiler/src/lint/mod.rs`
+- `rust/driver/src/todo_parser.rs`
+- `rust/compiler/src/lint/checker.rs`
+- `rust/compiler/src/lint/types.rs`
+- `rust/compiler/src/lint/mod.rs`
 - `src/lib/std/src/tooling/todo_parser.spl`
 - `src/lib/std/src/tooling/dashboard/collectors/todo_collector.spl`
 - `scripts/simple/migrate_todo.spl`
@@ -290,13 +290,13 @@ simple todo-gen    # Only generate docs
 
 ```bash
 # Dry run (preview changes)
-./target/debug/simple scripts/simple/migrate_todo.spl src/compiler/ --dry-run
+./rust/target/debug/simple scripts/simple/migrate_todo.spl src/compiler/ --dry-run
 
 # Migrate with verbose output
-./target/debug/simple scripts/simple/migrate_todo.spl src/runtime/ --verbose
+./rust/target/debug/simple scripts/simple/migrate_todo.spl src/runtime/ --verbose
 
 # Migrate single file
-./target/debug/simple scripts/simple/migrate_todo.spl src/compiler/src/mock.rs
+./rust/target/debug/simple scripts/simple/migrate_todo.spl src/compiler/src/mock.rs
 ```
 
 **Manual conversion:**

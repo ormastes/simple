@@ -89,7 +89,7 @@ fn main():
     return 0
 ```
 
-Run: `./target/debug/simple scripts/my_tool.spl arg1 arg2`
+Run: `./rust/target/debug/simple scripts/my_tool.spl arg1 arg2`
 
 ## Coding Standards
 
@@ -376,11 +376,11 @@ File in `simple/bug_report.md`:
 
 ```bash
 # Build Rust runtime
-cargo build                    # Debug build
-cargo build --release          # Release (optimized)
+cd rust && cargo build                    # Debug build
+cd rust && cargo build --release          # Release (optimized)
 
 # Check for warnings — fix all before committing
-cargo build 2>&1 | grep "warning:"
+cd rust && cargo build 2>&1 | grep "warning:"
 
 # Common Rust warning fixes:
 # "shared reference to mutable static" → Use OnceLock + AtomicUsize
@@ -399,7 +399,7 @@ cargo build 2>&1 | grep "warning:"
 
 ## EasyFix Rules
 
-9 auto-fix rules in `src/app/fix/rules.spl` (Simple) and `src/rust/common/src/easy_fix_rules.rs` (Rust):
+9 auto-fix rules in `src/app/fix/rules.spl` (Simple) and `rust/common/src/easy_fix_rules.rs` (Rust):
 
 | Rule | Fix | Confidence |
 |------|-----|------------|
@@ -423,4 +423,4 @@ cargo build 2>&1 | grep "warning:"
 - `doc/spec/functions.md` - Functions, pattern matching
 - `doc/research/api_design_index.md` - API guidelines
 - **`src/app/fix/rules.spl`** - Shared EasyFix rule definitions (Simple)
-- **`simple/std_lib/test/features/easy_fix_rules_spec.spl`** - EasyFix rules SSpec tests
+- **`src/std/test/features/easy_fix_rules_spec.spl`** - EasyFix rules SSpec tests

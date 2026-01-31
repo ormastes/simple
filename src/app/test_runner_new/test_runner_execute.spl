@@ -27,11 +27,11 @@ fn find_runtime_lib_dir() -> text:
     "target/debug"
 
 fn find_simple_binary() -> text:
-    if rt_file_exists("./target/debug/simple_old"):
-        return "./target/debug/simple_old"
-    if rt_file_exists("./target/release/simple_old"):
-        return "./target/release/simple_old"
-    "./target/debug/simple_old"
+    if rt_file_exists("./target/debug/simple_runtime"):
+        return "./target/debug/simple_runtime"
+    if rt_file_exists("./target/release/simple_runtime"):
+        return "./target/release/simple_runtime"
+    "./target/debug/simple_runtime"
 
 fn parse_test_output(output: text) -> (i64, i64, i64):
     var total_passed = 0
@@ -131,11 +131,24 @@ fn run_test_file_smf(file_path: text, options: TestOptions) -> TestFileResult:
     val binary = find_simple_binary()
     val smf_path = file_path.replace(".spl", ".smf")
     val start = rt_time_now_unix_micros()
-
-    # SMF mode doesn't support SSpec DSL compilation
-    # Run tests directly using "test" command instead
     val timeout_ms = options.timeout * 1000
-    var run_args: List<text> = ["test", file_path]
+
+    # Check if pre-compiled .smf bytecode exists
+    if rt_file_exists(smf_path):
+        # Run pre-compiled SMF bytecode directly (no "test" command to avoid recursion)
+        var run_args: List<text> = [smf_path]
+        if options.gc_log:
+            run_args.push("--gc-log")
+        if options.gc_off:
+            run_args.push("--gc=off")
+        val (stdout, stderr, exit_code) = rt_process_run_timeout(binary, run_args, timeout_ms)
+        val end = rt_time_now_unix_micros()
+        val duration_ms = (end - start) / 1000
+        return make_result_from_output(file_path, stdout, stderr, exit_code, duration_ms, options.timeout)
+
+    # No .smf file found - run .spl source directly (interpreter fallback)
+    # Use file_path directly instead of "test" command to avoid infinite recursion
+    var run_args: List<text> = [file_path]
     if options.gc_log:
         run_args.push("--gc-log")
     if options.gc_off:
@@ -149,11 +162,10 @@ fn run_test_file_smf(file_path: text, options: TestOptions) -> TestFileResult:
 fn run_test_file_native_old(file_path: text, options: TestOptions) -> TestFileResult:
     val binary = find_simple_binary()
     val start = rt_time_now_unix_micros()
-
-    # Native mode doesn't support SSpec DSL compilation
-    # Run tests directly using "test" command instead
     val timeout_ms = options.timeout * 1000
-    var run_args: List<text> = ["test", file_path]
+
+    # Run file directly instead of "test" command to avoid infinite recursion
+    var run_args: List<text> = [file_path]
     if options.gc_log:
         run_args.push("--gc-log")
     if options.gc_off:

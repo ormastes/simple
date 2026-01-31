@@ -5,23 +5,23 @@
 ### Enable Tracing
 ```bash
 # Set log level
-SIMPLE_LOG=debug ./target/debug/simple file.spl
-RUST_LOG=debug ./target/debug/simple file.spl
+SIMPLE_LOG=debug ./rust/target/debug/simple file.spl
+RUST_LOG=debug ./rust/target/debug/simple file.spl
 
 # Specific module
-SIMPLE_LOG=simple_compiler::interpreter=trace ./target/debug/simple file.spl
+SIMPLE_LOG=simple_compiler::interpreter=trace ./rust/target/debug/simple file.spl
 
 # Multiple modules
-SIMPLE_LOG=simple_compiler=debug,simple_runtime=trace ./target/debug/simple file.spl
+SIMPLE_LOG=simple_compiler=debug,simple_runtime=trace ./rust/target/debug/simple file.spl
 ```
 
 ### GC Logging
 ```bash
 # Enable GC debug output
-./target/debug/simple --gc-log file.spl
+./rust/target/debug/simple --gc-log file.spl
 
 # See allocation/collection events
-SIMPLE_LOG=simple_runtime::memory::gc=debug ./target/debug/simple file.spl
+SIMPLE_LOG=simple_runtime::memory::gc=debug ./rust/target/debug/simple file.spl
 ```
 
 ## Interpreter Debugging
@@ -73,16 +73,16 @@ eprintln!("Is heap: {}", rv.is_heap_object());
 ### IR Export
 ```bash
 # Export AST
-./target/debug/simple --emit-ast=ast.json file.spl
+./rust/target/debug/simple --emit-ast=ast.json file.spl
 
 # Export HIR (type-checked)
-./target/debug/simple --emit-hir=hir.json file.spl
+./rust/target/debug/simple --emit-hir=hir.json file.spl
 
 # Export MIR (lowered)
-./target/debug/simple --emit-mir=mir.json file.spl
+./rust/target/debug/simple --emit-mir=mir.json file.spl
 
 # All to stdout
-./target/debug/simple --emit-ast --emit-hir --emit-mir file.spl
+./rust/target/debug/simple --emit-ast --emit-hir --emit-mir file.spl
 ```
 
 ### Compilability Analysis
@@ -98,7 +98,7 @@ Check why code falls back to interpreter:
 ### Cranelift Debug
 ```bash
 # Enable Cranelift IR dumps
-CRANELIFT_DEBUG=1 ./target/debug/simple --compile file.spl
+CRANELIFT_DEBUG=1 ./rust/target/debug/simple --compile file.spl
 ```
 
 ## Runtime Debugging
@@ -132,7 +132,7 @@ if let Some(header) = rv.as_heap_header() {
 
 ### Run Single Test with Output
 ```bash
-cargo test -p simple-driver test_name -- --nocapture
+cd rust && cargo test -p simple-driver test_name -- --nocapture
 
 # With logging
 RUST_LOG=debug cargo test -p simple-driver test_name -- --nocapture
@@ -141,10 +141,10 @@ RUST_LOG=debug cargo test -p simple-driver test_name -- --nocapture
 ### Debug Simple Test
 ```bash
 # Run with verbose output
-./target/debug/simple --verbose simple/std_lib/test/unit/core/test_spec.spl
+./rust/target/debug/simple --verbose src/std/test/unit/core/test_spec.spl
 
 # Step through (if DAP available)
-./target/debug/simple --debug simple/std_lib/test/unit/core/test_spec.spl
+./rust/target/debug/simple --debug src/std/test/unit/core/test_spec.spl
 ```
 
 ## Fault Detection
@@ -152,10 +152,10 @@ RUST_LOG=debug cargo test -p simple-driver test_name -- --nocapture
 ### Stack Overflow Detection
 ```bash
 # Enabled by default in debug builds, disabled in release
-SIMPLE_STACK_OVERFLOW_DETECTION=1 ./target/debug/simple_old file.spl
+SIMPLE_STACK_OVERFLOW_DETECTION=1 ./rust/target/debug/simple_old file.spl
 
 # Set custom recursion depth limit (default: 1000)
-SIMPLE_MAX_RECURSION_DEPTH=500 ./target/debug/simple_old file.spl
+SIMPLE_MAX_RECURSION_DEPTH=500 ./rust/target/debug/simple_old file.spl
 ```
 - Implemented in `interpreter_state.rs` (AtomicUsize + RAII guard)
 - ~2 atomic ops per function call (Relaxed ordering)
@@ -164,10 +164,10 @@ SIMPLE_MAX_RECURSION_DEPTH=500 ./target/debug/simple_old file.spl
 ### Timeout Detection (Wall-Clock)
 ```bash
 # Set execution timeout in seconds (0 = disabled, default)
-SIMPLE_TIMEOUT_SECONDS=30 ./target/debug/simple_old file.spl
+SIMPLE_TIMEOUT_SECONDS=30 ./rust/target/debug/simple_old file.spl
 
 # Short timeout for testing infinite loops
-SIMPLE_TIMEOUT_SECONDS=1 ./target/debug/simple_old loop_test.spl
+SIMPLE_TIMEOUT_SECONDS=1 ./rust/target/debug/simple_old loop_test.spl
 ```
 - Watchdog thread checks every 100ms via `watchdog.rs`
 - Zero overhead on fast path (single AtomicBool load, Relaxed)
@@ -181,7 +181,7 @@ SIMPLE_TIMEOUT_SECONDS=1 ./target/debug/simple_old loop_test.spl
 ### Memory Leak Detection
 ```bash
 # Enable heap growth heuristic (opt-in)
-SIMPLE_LEAK_DETECTION=1 ./target/debug/simple_old file.spl
+SIMPLE_LEAK_DETECTION=1 ./rust/target/debug/simple_old file.spl
 ```
 - Tracks post-GC heap size over 10 cycles
 - Warns via `tracing::warn!` if heap grows >10% over window
@@ -190,8 +190,8 @@ SIMPLE_LEAK_DETECTION=1 ./target/debug/simple_old file.spl
 ### Execution Limit (existing)
 ```bash
 # Set instruction count limit (default: 10M, 0 = disabled)
-SIMPLE_EXECUTION_LIMIT=1000000 ./target/debug/simple_old file.spl
-SIMPLE_EXECUTION_LIMIT_ENABLED=false ./target/debug/simple_old file.spl
+SIMPLE_EXECUTION_LIMIT=1000000 ./rust/target/debug/simple_old file.spl
+SIMPLE_EXECUTION_LIMIT_ENABLED=false ./rust/target/debug/simple_old file.spl
 ```
 
 ### Sanitizer Support
@@ -200,7 +200,7 @@ SIMPLE_EXECUTION_LIMIT_ENABLED=false ./target/debug/simple_old file.spl
 RUSTFLAGS="-Zsanitizer=address" cargo +nightly test -p simple-driver
 
 # Valgrind
-valgrind --leak-check=full ./target/debug/simple_old file.spl
+valgrind --leak-check=full ./rust/target/debug/simple_old file.spl
 ```
 
 ### Env Var Summary
@@ -256,11 +256,11 @@ RUST_BACKTRACE=full cargo test -p simple-driver test_name
 ### Start MCP Server
 ```bash
 # Start MCP server for interactive debugging
-./target/debug/simple_old src/app/mcp/main.spl server --debug
+./rust/target/debug/simple_old src/app/mcp/main.spl server --debug
 
 # CLI mode - read/analyze files
-./target/debug/simple_old src/app/mcp/main.spl read simple/compiler/driver.spl
-./target/debug/simple_old src/app/mcp/main.spl json simple/compiler/driver.spl
+./rust/target/debug/simple_old src/app/mcp/main.spl read src/compiler/driver.spl
+./rust/target/debug/simple_old src/app/mcp/main.spl json src/compiler/driver.spl
 ```
 
 ### MCP Tools Available
@@ -282,7 +282,7 @@ RUST_BACKTRACE=full cargo test -p simple-driver test_name
 ./scripts/bootstrap.sh --verify
 
 # Extended multi-generation test
-./target/debug/simple_old scripts/bootstrap_extended.spl --generations=5
+./rust/target/debug/simple_old scripts/bootstrap_extended.spl --generations=5
 ```
 
 ### Debug Instrumentation Points
@@ -324,13 +324,13 @@ RUST_BACKTRACE=full cargo test -p simple-driver test_name
 
 **Test Dictionary Semantics:**
 ```bash
-./target/debug/simple_old scripts/test_dict_semantics.spl
+./rust/target/debug/simple_old scripts/test_dict_semantics.spl
 # Should show: "ALL TESTS PASSED"
 ```
 
 **MCP Debug Script:**
 ```bash
-./target/debug/simple_old scripts/mcp_debug_bootstrap.spl
+./rust/target/debug/simple_old scripts/mcp_debug_bootstrap.spl
 # Auto-detects common bug patterns
 ```
 

@@ -1,0 +1,556 @@
+# Extended SMF writer with template section support (v1.1)
+#
+# This module extends the basic SMF builder to include:
+# - TemplateCode sections (serialized generic definitions)
+# - TemplateMeta sections (monomorphization metadata)
+# - ⭐ Trailer-based header design (like ZIP format)
+# - Compression support (default: 0 = no compression)
+# - Executable SMF support (stub fields)
+#
+# v1.1 Design: Header written at EOF-128 (trailer), not at offset 0.
+# This enables directly executable SMF files (prepend shebang/stub).
+#
+# Enables .smf files to store both native code AND templates for deferred instantiation.
+
+use src/compiler/monomorphize/partition (GenericTemplates)
+use src/compiler/monomorphize/metadata (MonomorphizationMetadata)
+use src/compiler/monomorphize/note_sdn (NoteSdnMetadata)
+use src/compiler/ast (FunctionDef, StructDef, ClassDef, EnumDef, TraitDef)
+
+# Target platform information
+struct Target:
+    os: text        # "linux", "windows", "macos"
+    arch: text      # "x86_64", "aarch64", "riscv64"
+
+impl Target:
+    static fn host() -> Target:
+        # TODO: Detect host platform
+        Target(os: "linux", arch: "x86_64")
+
+    static fn x86_64_unknown_linux_gnu() -> Target:
+        Target(os: "linux", arch: "x86_64")
+
+    static fn aarch64_unknown_linux_gnu() -> Target:
+        Target(os: "linux", arch: "aarch64")
+
+# SMF build options - groups common parameters
+struct SmfBuildOptions:
+    templates: GenericTemplates?
+    metadata: MonomorphizationMetadata?
+    note_sdn: NoteSdnMetadata?
+    target: Target
+
+impl SmfBuildOptions:
+    static fn create(target: Target) -> SmfBuildOptions:
+        SmfBuildOptions(
+            templates: None,
+            metadata: None,
+            note_sdn: None,
+            target: target
+        )
+
+    fn has_any_sections() -> bool:
+        self.templates.? or self.metadata.? or self.note_sdn.?
+
+# Generate SMF from object code with optional template sections
+#
+# If templates and metadata are provided, adds TemplateCode and TemplateMeta sections
+# to enable deferred monomorphization.
+fn generate_smf_with_templates(
+    object_code: [u8],
+    templates: GenericTemplates?,
+    metadata: MonomorphizationMetadata?,
+    target: Target
+) -> [u8]:
+    val options = SmfBuildOptions(
+        templates: templates,
+        metadata: metadata,
+        note_sdn: None,
+        target: target
+    )
+    generate_smf_with_options(object_code, options)
+
+# Generate SMF from object code with all optional sections
+#
+# Includes templates, metadata, and note.sdn for full instantiation tracking.
+fn generate_smf_with_all_sections(
+    object_code: [u8],
+    templates: GenericTemplates?,
+    metadata: MonomorphizationMetadata?,
+    note_sdn: NoteSdnMetadata?,
+    target: Target
+) -> [u8]:
+    val options = SmfBuildOptions(
+        templates: templates,
+        metadata: metadata,
+        note_sdn: note_sdn,
+        target: target
+    )
+    generate_smf_with_options(object_code, options)
+
+# Generate SMF from object code with build options
+fn generate_smf_with_options(object_code: [u8], options: SmfBuildOptions) -> [u8]:
+    val code_bytes = extract_code_from_object(object_code)
+
+    # If no templates, use simple builder
+    if not options.has_any_sections():
+        return build_smf_with_code_for_target(code_bytes, options.target)
+
+    # Build SMF with template sections
+    build_smf_with_templates_internal(code_bytes, options)
+
+# Build an SMF module with code and optional template sections
+# ⭐ v1.1: Uses TRAILER-BASED HEADER (like ZIP format)
+fn build_smf_with_templates_internal(code_bytes: [u8], options: SmfBuildOptions) -> [u8]:
+    var buf: [u8] = []
+
+    # ⭐ NEW: No stub in this implementation (stub_size = 0)
+    # Future: Add optional stub support for executable SMF
+    val stub_size = 0
+    val smf_data_offset = 0
+
+    # 1. Write sections FIRST (before header)
+
+    # Serialize templates if present
+    val template_bytes = if options.templates.?:
+        serialize_templates(options.templates.unwrap())
+    else:
+        []
+
+    val metadata_bytes = if options.metadata.?:
+        serialize_metadata(options.metadata.unwrap())
+    else:
+        []
+
+    val note_sdn_bytes = if options.note_sdn.?:
+        serialize_note_sdn(options.note_sdn.unwrap())
+    else:
+        []
+
+    val has_templates = not template_bytes.is_empty()
+    val has_metadata = not metadata_bytes.is_empty()
+    val has_note_sdn = not note_sdn_bytes.is_empty()
+
+    # Calculate section count
+    var section_count = 1  # Code section
+    if has_templates:
+        section_count = section_count + 1
+    if has_metadata:
+        section_count = section_count + 1
+    if has_note_sdn:
+        section_count = section_count + 1  # note.sdn section
+
+    # Calculate offsets (sections come FIRST now, not after header)
+    val header_size = 128  # SmfHeader::SIZE (written at END)
+    val section_entry_size = 64  # SmfSection size
+    val code_offset = 0  # ⭐ Code starts at offset 0 (no header at start)
+    val template_offset = code_offset + code_bytes.len()
+    val metadata_offset = template_offset + template_bytes.len()
+    val note_sdn_offset = metadata_offset + metadata_bytes.len()
+    val section_table_offset = note_sdn_offset + note_sdn_bytes.len()
+    val section_table_size = section_count * section_entry_size
+    val symbol_table_offset = section_table_offset + section_table_size
+    val string_table_offset = symbol_table_offset + 72  # One symbol
+    val header_offset = string_table_offset + 5  # "main\0"
+
+    # Write code section
+    buf = buf.concat(code_bytes)
+
+    # Write template section
+    if has_templates:
+        buf = buf.concat(template_bytes)
+
+    # Write metadata section
+    if has_metadata:
+        buf = buf.concat(metadata_bytes)
+
+    # Write note.sdn section
+    if has_note_sdn:
+        buf = buf.concat(note_sdn_bytes)
+
+    # 2. Write section table
+
+    # Code section
+    buf = buf.concat(build_section_entry(
+        section_type: 1,  # SectionType::Code
+        flags: 0x05,  # READ | EXEC
+        offset: code_offset,
+        size: code_bytes.len(),
+        name: "code"
+    ))
+
+    # Template code section
+    if has_templates:
+        buf = buf.concat(build_section_entry(
+            section_type: 12,  # SectionType::TemplateCode
+            flags: 0x01,  # READ
+            offset: template_offset,
+            size: template_bytes.len(),
+            name: "template_code"
+        ))
+
+    # Template metadata section
+    if has_metadata:
+        buf = buf.concat(build_section_entry(
+            section_type: 13,  # SectionType::TemplateMeta
+            flags: 0x01,  # READ
+            offset: metadata_offset,
+            size: metadata_bytes.len(),
+            name: "template_meta"
+        ))
+
+    # note.sdn section (zero-size trick: size=0 in section table)
+    if has_note_sdn:
+        buf = buf.concat(build_section_entry(
+            section_type: 13,  # SectionType::TemplateMeta (reuse)
+            flags: 0x01,  # READ
+            offset: note_sdn_offset,
+            size: 0,  # ⭐ Zero-size trick: actual size determined by scanning for terminator
+            name: "note.sdn"
+        ))
+
+    # 3. Write symbol table
+    buf = buf.concat(build_symbol_entry("main", 0, code_bytes.len()))
+
+    # 4. Write string table
+    buf = buf.concat("main\0".to_bytes())
+
+    # 5. Write HEADER at END (TRAILER) ⭐ v1.1 design
+    # This enables executable SMF files (prepend shebang/stub)
+
+    # Magic "SMF\0"
+    buf = buf.concat([0x53, 0x4D, 0x46, 0x00])
+
+    # Version (major: 1, minor: 1)
+    buf = buf.concat([1, 1])  # ⭐ Changed to v1.1
+
+    # Platform
+    val platform_code = platform_to_code(options.target.os)
+    buf = buf.push(platform_code)
+
+    # Architecture
+    val arch_code = arch_to_code(options.target.arch)
+    buf = buf.push(arch_code)
+
+    # Flags (executable)
+    buf = buf.concat(u32_to_bytes(0x01))  # SMF_FLAG_EXECUTABLE
+
+    # ⭐ NEW: Compression fields (default: no compression)
+    buf = buf.push(0)  # compression: 0 = none
+    buf = buf.push(0)  # compression_level: 0 = default
+    buf = buf.concat([0, 0])  # reserved_compression
+
+    # Section count
+    buf = buf.concat(u32_to_bytes(section_count))
+
+    # Section table offset
+    buf = buf.concat(u64_to_bytes(section_table_offset))
+
+    # Symbol table offset
+    buf = buf.concat(u64_to_bytes(symbol_table_offset))
+
+    # Symbol count and exported count
+    buf = buf.concat(u32_to_bytes(1))  # symbol_count
+    buf = buf.concat(u32_to_bytes(1))  # exported_count
+
+    # Entry point
+    buf = buf.concat(u64_to_bytes(0))
+
+    # ⭐ NEW: Stub fields (for executable SMF)
+    buf = buf.concat(u32_to_bytes(stub_size))  # stub_size: 0 (no stub)
+    buf = buf.concat(u32_to_bytes(smf_data_offset))  # smf_data_offset: 0
+
+    # Module hash, source hash
+    buf = buf.concat(u64_to_bytes(0))  # module_hash
+    buf = buf.concat(u64_to_bytes(0))  # source_hash
+
+    # App type, window dimensions, prefetch
+    buf = buf.push(0)  # app_type: CLI
+    buf = buf.concat([0, 0])  # window_width: 0
+    buf = buf.concat([0, 0])  # window_height: 0
+    buf = buf.push(0)  # prefetch_hint: 0
+    buf = buf.push(0)  # prefetch_file_count: 0
+
+    # Reserved (pad to 128 bytes total header size)
+    val current_header_size = (buf.len() - header_offset)
+    val padding_needed = header_size - current_header_size
+    for i in 0..padding_needed:
+        buf = buf.push(0)
+
+    buf
+
+# Build a section table entry
+fn build_section_entry(
+    section_type: i32,
+    flags: i32,
+    offset: i32,
+    size: i32,
+    name: text
+) -> [u8]:
+    var buf: [u8] = []
+
+    # Section type (u8)
+    buf = buf.push(section_type.to_u8())
+
+    # Padding (3 bytes)
+    buf = buf.concat([0, 0, 0])
+
+    # Flags (u32)
+    buf = buf.concat(u32_to_bytes(flags))
+
+    # Offset (u64)
+    buf = buf.concat(u64_to_bytes(offset))
+
+    # Size (u64)
+    buf = buf.concat(u64_to_bytes(size))
+
+    # Virtual size (u64)
+    buf = buf.concat(u64_to_bytes(size))
+
+    # Alignment (u32)
+    buf = buf.concat(u32_to_bytes(16))
+
+    # Name (16 bytes)
+    var name_bytes = name.to_bytes()
+    if name_bytes.len() > 16:
+        name_bytes = name_bytes[0:16]
+    buf = buf.concat(name_bytes)
+    while buf.len() % 64 != 0:
+        buf = buf.push(0)
+
+    buf
+
+# Build a symbol table entry
+fn build_symbol_entry(name: text, value: i32, size: i32) -> [u8]:
+    var buf: [u8] = []
+
+    # Name offset (u32)
+    buf = buf.concat(u32_to_bytes(0))
+
+    # Name hash (u64)
+    buf = buf.concat(u64_to_bytes(hash_name(name)))
+
+    # Symbol type (u8) - Function
+    buf = buf.push(1)
+
+    # Binding (u8) - Global
+    buf = buf.push(1)
+
+    # Visibility (u8)
+    buf = buf.push(0)
+
+    # Flags (u8)
+    buf = buf.push(0)
+
+    # Value (u64)
+    buf = buf.concat(u64_to_bytes(value))
+
+    # Size (u64)
+    buf = buf.concat(u64_to_bytes(size))
+
+    # Type ID (u32)
+    buf = buf.concat(u32_to_bytes(0))
+
+    # Version (u32)
+    buf = buf.concat(u32_to_bytes(0))
+
+    # Template param count (u8)
+    buf = buf.push(0)
+
+    # Reserved (3 bytes)
+    buf = buf.concat([0, 0, 0])
+
+    # Template offset (u64)
+    buf = buf.concat(u64_to_bytes(0))
+
+    buf
+
+# Serialize generic templates to bytes
+#
+# Binary format:
+# - Header: magic (u32), version (u16), template_count (u32)
+# - For each template: kind (u8), serialized AST node
+fn serialize_templates(templates: GenericTemplates) -> [u8]:
+    var buf: [u8] = []
+
+    # Header
+    buf = buf.concat([0x47, 0x54, 0x50, 0x4C])  # "GTPL" magic
+    buf = buf.concat([0x01, 0x00])  # version 1
+
+    val total_count = templates.functions.len() +
+        templates.structs.len() +
+        templates.classes.len() +
+        templates.enums.len() +
+        templates.traits.len()
+
+    buf = buf.concat(u32_to_bytes(total_count))
+
+    # TODO: Implement actual AST serialization (Phase 3)
+    # For now, just write placeholders
+
+    # Functions
+    for func in templates.functions:
+        buf = buf.push(0)  # kind = Function
+        buf = buf.concat(serialize_function_placeholder(func))
+
+    # Structs
+    for struct_def in templates.structs:
+        buf = buf.push(1)  # kind = Struct
+        buf = buf.concat(serialize_struct_placeholder(struct_def))
+
+    # Classes
+    for class_def in templates.classes:
+        buf = buf.push(2)  # kind = Class
+        buf = buf.concat(serialize_class_placeholder(class_def))
+
+    # Enums
+    for enum_def in templates.enums:
+        buf = buf.push(3)  # kind = Enum
+        buf = buf.concat(serialize_enum_placeholder(enum_def))
+
+    # Traits
+    for trait_def in templates.traits:
+        buf = buf.push(4)  # kind = Trait
+        buf = buf.concat(serialize_trait_placeholder(trait_def))
+
+    buf
+
+# Serialize monomorphization metadata to bytes
+fn serialize_metadata(metadata: MonomorphizationMetadata) -> [u8]:
+    var buf: [u8] = []
+
+    # Header
+    buf = buf.concat([0x4D, 0x45, 0x54, 0x41])  # "META" magic
+    buf = buf.concat([0x01, 0x00])  # version 1
+
+    # Count of each category
+    buf = buf.concat(u32_to_bytes(metadata.functions.len()))
+    buf = buf.concat(u32_to_bytes(metadata.structs.len()))
+    buf = buf.concat(u32_to_bytes(metadata.enums.len()))
+    buf = buf.concat(u32_to_bytes(metadata.traits.len()))
+
+    # TODO: Implement full metadata serialization (Phase 3)
+
+    buf
+
+# Serialize note.sdn metadata to SDN format with terminator
+#
+# The terminator `\n# END_NOTE\n` allows dynamic size calculation at load time.
+fn serialize_note_sdn(note_sdn: NoteSdnMetadata) -> [u8]:
+    val sdn_content = note_sdn.to_sdn()
+    sdn_content.to_bytes()
+
+# Placeholder serialization functions (Phase 3 TODO)
+
+fn serialize_function_placeholder(func: FunctionDef) -> [u8]:
+    var buf: [u8] = []
+
+    val name_bytes = func.name.to_bytes()
+    buf = buf.concat(u32_to_bytes(name_bytes.len()))
+    buf = buf.concat(name_bytes)
+
+    buf = buf.push(func.generic_params.len().to_u8())
+
+    buf
+
+fn serialize_struct_placeholder(struct_def: StructDef) -> [u8]:
+    var buf: [u8] = []
+
+    val name_bytes = struct_def.name.to_bytes()
+    buf = buf.concat(u32_to_bytes(name_bytes.len()))
+    buf = buf.concat(name_bytes)
+
+    buf = buf.push(struct_def.generic_params.len().to_u8())
+
+    buf
+
+fn serialize_class_placeholder(class_def: ClassDef) -> [u8]:
+    var buf: [u8] = []
+
+    val name_bytes = class_def.name.to_bytes()
+    buf = buf.concat(u32_to_bytes(name_bytes.len()))
+    buf = buf.concat(name_bytes)
+
+    buf = buf.push(class_def.generic_params.len().to_u8())
+
+    buf
+
+fn serialize_enum_placeholder(enum_def: EnumDef) -> [u8]:
+    var buf: [u8] = []
+
+    val name_bytes = enum_def.name.to_bytes()
+    buf = buf.concat(u32_to_bytes(name_bytes.len()))
+    buf = buf.concat(name_bytes)
+
+    buf = buf.push(enum_def.generic_params.len().to_u8())
+
+    buf
+
+fn serialize_trait_placeholder(trait_def: TraitDef) -> [u8]:
+    var buf: [u8] = []
+
+    val name_bytes = trait_def.name.to_bytes()
+    buf = buf.concat(u32_to_bytes(name_bytes.len()))
+    buf = buf.concat(name_bytes)
+
+    buf = buf.push(trait_def.generic_params.len().to_u8())
+
+    buf
+
+# Build an SMF module with the given code bytes for a specific target architecture
+fn build_smf_with_code_for_target(code_bytes: [u8], target: Target) -> [u8]:
+    # Delegate to simple SMF builder
+    # TODO: Call existing smf_builder if it exists
+    build_smf_with_templates_internal(code_bytes, None, None, None, target)
+
+# Helper to convert code bytes to a minimal object format
+fn code_bytes_to_object(code: [u8]) -> [u8]:
+    # For now, just return the code as-is
+    code
+
+# Extract code section from object file
+fn extract_code_from_object(object_code: [u8]) -> [u8]:
+    # TODO: Proper ELF/object parsing
+    # For now, return as-is
+    object_code
+
+# Binary format helpers
+
+fn u32_to_bytes(value: i32) -> [u8]:
+    [
+        (value & 0xFF).to_u8(),
+        ((value >> 8) & 0xFF).to_u8(),
+        ((value >> 16) & 0xFF).to_u8(),
+        ((value >> 24) & 0xFF).to_u8()
+    ]
+
+fn u64_to_bytes(value: i32) -> [u8]:
+    [
+        (value & 0xFF).to_u8(),
+        ((value >> 8) & 0xFF).to_u8(),
+        ((value >> 16) & 0xFF).to_u8(),
+        ((value >> 24) & 0xFF).to_u8(),
+        0, 0, 0, 0  # High 32 bits (assume value fits in 32 bits for now)
+    ]
+
+fn platform_to_code(os: text) -> u8:
+    match os:
+        "linux": 1
+        "windows": 2
+        "macos": 3
+        _: 0
+
+fn arch_to_code(arch: text) -> u8:
+    match arch:
+        "x86_64": 1
+        "aarch64": 2
+        "riscv64": 3
+        _: 0
+
+fn hash_name(name: text) -> i32:
+    # Simple FNV-1a hash
+    var hash = 2166136261
+    for byte in name.to_bytes():
+        hash = hash.xor(byte.to_i32())
+        hash = hash * 16777619
+    hash

@@ -35,37 +35,37 @@ all: check
 # Excludes: skip, slow/long-run (#[ignore]), and explicitly ignored tests
 test:
 	@echo "=== Running Rust Tests ==="
-	cargo test --workspace
+	cd rust && cargo test --workspace
 	@echo ""
 	@echo "=== Running Rust Doc-Tests ==="
-	cargo test --doc --workspace
+	cd rust && cargo test --doc --workspace
 	@echo ""
 	@echo "=== Running Simple/SSpec Tests ==="
-	./target/debug/simple_runtime test
+	./rust/target/debug/simple_runtime test
 
 # Run Rust tests only (faster, no Simple/SSpec)
 test-rust:
-	cargo test --workspace
+	cd rust && cargo test --workspace
 
 test-verbose:
-	cargo test --workspace -- --nocapture
+	cd rust && cargo test --workspace -- --nocapture
 
 # Test by level (per test.md policy)
 # Unit tests: all workspace tests (631+ tests)
 test-unit:
-	cargo test --workspace
+	cd rust && cargo test --workspace
 
 # Integration tests: tests/ crate integration level
 test-integration:
-	cargo test -p simple-tests --test integration
+	cd rust && cargo test -p simple-tests --test integration
 
 # System tests: tests/ crate system level
 test-system:
-	cargo test -p simple-tests --test system
+	cd rust && cargo test -p simple-tests --test system
 
 # Environment tests: tests/ crate environment level
 test-environment:
-	cargo test -p simple-tests --test environment
+	cd rust && cargo test -p simple-tests --test environment
 
 # ============================================================================
 # Full Test Mode with Automatic Coverage
@@ -150,36 +150,36 @@ test-full-check: test-full
 #   - System: public class/struct touch (separate) - 100% threshold
 # ============================================================================
 
-COVERAGE_DIR := target/coverage
+COVERAGE_DIR := rust/target/coverage
 STACK_ENV := RUST_MIN_STACK=33554432
-REAL_SIMPLE_BIN := $(shell pwd)/target/debug/simple
+REAL_SIMPLE_BIN := $(shell pwd)/rust/target/debug/simple
 
 coverage: coverage-html
 	@echo "Coverage report: $(COVERAGE_DIR)/html/index.html"
 
 coverage-html:
 	@mkdir -p $(COVERAGE_DIR)
-	cargo llvm-cov --workspace --html --output-dir $(COVERAGE_DIR)/html
+	cd rust && cargo llvm-cov --workspace --html --output-dir $(COVERAGE_DIR)/html
 
 coverage-lcov:
 	@mkdir -p $(COVERAGE_DIR)
-	cargo llvm-cov --workspace --lcov --output-path $(COVERAGE_DIR)/lcov.info
+	cd rust && cargo llvm-cov --workspace --lcov --output-path $(COVERAGE_DIR)/lcov.info
 
 coverage-json:
 	@mkdir -p $(COVERAGE_DIR)
-	cargo llvm-cov --workspace --json --output-path $(COVERAGE_DIR)/coverage.json
+	cd rust && cargo llvm-cov --workspace --json --output-path $(COVERAGE_DIR)/coverage.json
 
 coverage-summary:
-	cargo llvm-cov --workspace
+	cd rust && cargo llvm-cov --workspace
 
 # Coverage by test level (per test.md policy)
 # Unit: Branch/Condition coverage (all workspace tests)
 coverage-unit:
 	@mkdir -p $(COVERAGE_DIR)/unit
 	@echo "=== UNIT TEST COVERAGE (Branch/Condition) ==="
-	cargo llvm-cov --workspace --branch \
+	cd rust && cargo llvm-cov --workspace --branch \
 		--json --output-path=$(COVERAGE_DIR)/unit/coverage.json
-	cargo llvm-cov --workspace --branch \
+	cd rust && cargo llvm-cov --workspace --branch \
 		--html --output-dir=$(COVERAGE_DIR)/unit/html
 	@echo "Unit coverage report: $(COVERAGE_DIR)/unit/html/index.html"
 
@@ -187,7 +187,7 @@ coverage-unit:
 coverage-integration:
 	@mkdir -p $(COVERAGE_DIR)/integration
 	@echo "=== INTEGRATION TEST COVERAGE (Public Function Touch) ==="
-	cargo llvm-cov -p simple-tests --test integration \
+	cd rust && cargo llvm-cov -p simple-tests --test integration \
 		--json --output-path=$(COVERAGE_DIR)/integration/coverage.json
 	@echo "Analyzing public function touch..."
 	@if [ -f public_api.yml ]; then \
@@ -201,34 +201,34 @@ coverage-integration:
 
 # System: Public class/struct touch
 coverage-system:
-	@cargo build -p simple-driver --bin simple
+	@cd rust && cargo build -p simple-driver --bin simple
 	@mkdir -p $(COVERAGE_DIR)/system
 	@echo "=== SYSTEM TEST COVERAGE (Public Class/Struct Touch) ==="
-	$(STACK_ENV) CARGO_BIN_EXE_simple=$(REAL_SIMPLE_BIN) cargo llvm-cov -p simple-tests --test system \
+	cd rust && $(STACK_ENV) CARGO_BIN_EXE_simple=$(REAL_SIMPLE_BIN) cargo llvm-cov -p simple-tests --test system \
 		--json --output-path=$(COVERAGE_DIR)/system/coverage.json
 	@echo "Analyzing public class/struct touch..."
 	@if [ -f public_api.yml ]; then \
-		$(STACK_ENV) cargo run -p simple_mock_helper --bin smh_coverage -- \
+		cd rust && $(STACK_ENV) cargo run -p simple_mock_helper --bin smh_coverage -- \
 			--coverage $(COVERAGE_DIR)/system/coverage.json \
 			--api public_api.yml --type class-struct-touch 2>/dev/null || \
-			$(STACK_ENV) CARGO_BIN_EXE_simple=$(REAL_SIMPLE_BIN) cargo llvm-cov -p simple-tests --test system; \
+			cd rust && $(STACK_ENV) CARGO_BIN_EXE_simple=$(REAL_SIMPLE_BIN) cargo llvm-cov -p simple-tests --test system; \
 	else \
-		$(STACK_ENV) CARGO_BIN_EXE_simple=$(REAL_SIMPLE_BIN) cargo llvm-cov -p simple-tests --test system; \
+		cd rust && $(STACK_ENV) CARGO_BIN_EXE_simple=$(REAL_SIMPLE_BIN) cargo llvm-cov -p simple-tests --test system; \
 	fi
 
 # Environment: Branch/Condition coverage (merged with unit)
 coverage-environment:
 	@mkdir -p $(COVERAGE_DIR)/environment
 	@echo "=== ENVIRONMENT TEST COVERAGE (Branch/Condition) ==="
-	cargo llvm-cov -p simple-tests --test environment --branch \
+	cd rust && cargo llvm-cov -p simple-tests --test environment --branch \
 		--json --output-path=$(COVERAGE_DIR)/environment/coverage.json
-	cargo llvm-cov -p simple-tests --test environment --branch
+	cd rust && cargo llvm-cov -p simple-tests --test environment --branch
 
 # Service: Interface class + External library touch
 coverage-service:
 	@mkdir -p $(COVERAGE_DIR)/service
 	@echo "=== SERVICE TEST COVERAGE (Interface + External Lib Touch) ==="
-	cargo llvm-cov --workspace \
+	cd rust && cargo llvm-cov --workspace \
 		--json --output-path=$(COVERAGE_DIR)/service/coverage.json
 	@echo "Analyzing interface and external library touch..."
 	@if [ -f public_api.yml ]; then \
@@ -245,9 +245,9 @@ coverage-service:
 coverage-merged:
 	@mkdir -p $(COVERAGE_DIR)/merged
 	@echo "=== MERGED COVERAGE (Unit + Environment) ==="
-	cargo llvm-cov --workspace --branch \
+	cd rust && cargo llvm-cov --workspace --branch \
 		--json --output-path=$(COVERAGE_DIR)/merged/coverage.json
-	cargo llvm-cov --workspace --branch \
+	cd rust && cargo llvm-cov --workspace --branch \
 		--html --output-dir=$(COVERAGE_DIR)/merged/html
 	@echo "Merged coverage report: $(COVERAGE_DIR)/merged/html/index.html"
 
@@ -278,7 +278,7 @@ coverage-extended: coverage-json
 coverage-extended-system:
 	@mkdir -p $(COVERAGE_DIR)/extended
 	@echo "=== EXTENDED SYSTEM COVERAGE ==="
-	cargo llvm-cov -p simple-tests --test system \
+	cd rust && cargo llvm-cov -p simple-tests --test system \
 		--json --output-path=$(COVERAGE_DIR)/system_raw.json
 	@if [ -f public_api.yml ]; then \
 		cargo run -p simple_mock_helper --bin coverage_gen -- generate \
@@ -291,7 +291,7 @@ coverage-extended-system:
 coverage-extended-integration:
 	@mkdir -p $(COVERAGE_DIR)/extended
 	@echo "=== EXTENDED INTEGRATION COVERAGE ==="
-	cargo llvm-cov -p simple-tests --test integration \
+	cd rust && cargo llvm-cov -p simple-tests --test integration \
 		--json --output-path=$(COVERAGE_DIR)/integration_raw.json
 	@if [ -f public_api.yml ]; then \
 		cargo run -p simple_mock_helper --bin coverage_gen -- generate \
@@ -304,7 +304,7 @@ coverage-extended-integration:
 coverage-extended-service:
 	@mkdir -p $(COVERAGE_DIR)/extended
 	@echo "=== EXTENDED SERVICE COVERAGE ==="
-	cargo llvm-cov --workspace \
+	cd rust && cargo llvm-cov --workspace \
 		--json --output-path=$(COVERAGE_DIR)/service_raw.json
 	@if [ -f public_api.yml ]; then \
 		cargo run -p simple_mock_helper --bin coverage_gen -- generate \
@@ -347,8 +347,8 @@ coverage-check: coverage-check-unit coverage-check-integration coverage-check-sy
 
 coverage-check-unit:
 	@echo "Checking unit test coverage (branch/condition)..."
-	cargo llvm-cov --workspace --branch --fail-under-lines 100
-	cargo llvm-cov --workspace --branch --fail-under-branches 100
+	cd rust && cargo llvm-cov --workspace --branch --fail-under-lines 100
+	cd rust && cargo llvm-cov --workspace --branch --fail-under-branches 100
 
 coverage-check-integration:
 	@echo "Checking integration public function touch..."
@@ -385,7 +385,7 @@ coverage-check-service:
 # Install: npm install -g jscpd
 # ============================================================================
 
-DUPLICATION_DIR := target/duplication
+DUPLICATION_DIR := rust/target/duplication
 
 duplication:
 	@mkdir -p $(DUPLICATION_DIR)
@@ -422,16 +422,16 @@ duplication-simple:
 # ============================================================================
 
 lint:
-	cargo clippy --workspace --all-targets -- -D warnings
+	cd rust && cargo clippy --workspace --all-targets -- -D warnings
 
 lint-fix:
-	cargo clippy --workspace --all-targets --fix --allow-dirty
+	cd rust && cargo clippy --workspace --all-targets --fix --allow-dirty
 
 fmt:
-	cargo fmt --all
+	cd rust && cargo fmt --all
 
 fmt-check:
-	cargo fmt --all -- --check
+	cd rust && cargo fmt --all -- --check
 
 # ============================================================================
 # Combined Checks
@@ -449,50 +449,50 @@ check-full: fmt-check lint test coverage-summary duplication
 
 # Check for unused dependencies (requires cargo-udeps, nightly)
 unused-deps:
-	cargo +nightly udeps --workspace
+	cd rust && cargo +nightly udeps --workspace
 
 # Check for outdated dependencies
 outdated:
-	cargo outdated --workspace
+	cd rust && cargo outdated --workspace
 
 # Security audit
 audit:
-	cargo audit
+	cd rust && cargo audit
 
 # ============================================================================
 # Build
 # ============================================================================
 
 build:
-	cargo build --workspace
+	cd rust && cargo build --workspace
 
 build-release:
-	cargo build --workspace --release
+	cd rust && cargo build --workspace --release
 
 # Link binaries (cross-platform)
 link-bins:
 ifeq ($(OS),Windows_NT)
-	@powershell -ExecutionPolicy Bypass -File scripts/link-bins.ps1
+	@powershell -ExecutionPolicy Bypass -File script/link-bins.ps1
 else
-	@bash scripts/link-bins.sh
+	@bash script/link-bins.sh
 endif
 
 # Platform-specific link targets
 link-bins-linux:
-	@bash scripts/link-bins.sh
+	@bash script/link-bins.sh
 
 link-bins-mac:
-	@bash scripts/link-bins.sh
+	@bash script/link-bins.sh
 
 link-bins-windows:
-	@powershell -ExecutionPolicy Bypass -File scripts/link-bins.ps1
+	@powershell -ExecutionPolicy Bypass -File script/link-bins.ps1
 
 # ============================================================================
 # Cleanup
 # ============================================================================
 
 clean:
-	cargo clean
+	cd rust && cargo clean
 	rm -rf $(COVERAGE_DIR) $(DUPLICATION_DIR)
 
 clean-coverage:
@@ -507,9 +507,9 @@ clean-duplication:
 
 install-tools:
 	@echo "Installing development tools..."
-	cargo install cargo-llvm-cov
-	cargo install cargo-audit
-	cargo install cargo-outdated
+	cd rust && cargo install cargo-llvm-cov
+	cd rust && cargo install cargo-audit
+	cd rust && cargo install cargo-outdated
 	@echo ""
 	@echo "Optional (requires npm):"
 	@echo "  npm install -g jscpd"
@@ -524,20 +524,20 @@ install-tools:
 # Run architecture tests (validates layer dependencies)
 arch-test:
 	@echo "=== ARCHITECTURE TESTS ==="
-	cargo test -p arch_test --all-targets
+	cd rust && cargo test -p arch_test --all-targets
 	@echo ""
 	@echo "Architecture tests passed!"
 
 # Generate dependency graph visualization (DOT format)
 arch-test-visualize:
 	@echo "=== ARCHITECTURE VISUALIZATION ==="
-	@mkdir -p target/arch
+	@mkdir -p rust/target/arch
 	@echo "Generating DOT graph..."
 	@if cargo run -p arch_test --example visualize 2>/dev/null; then \
-		echo "DOT graph: target/arch/layers.dot"; \
-		echo "Mermaid graph: target/arch/layers.mmd"; \
+		echo "DOT graph: rust/target/arch/layers.dot"; \
+		echo "Mermaid graph: rust/target/arch/layers.mmd"; \
 		echo ""; \
-		echo "To render DOT: dot -Tpng target/arch/layers.dot -o target/arch/layers.png"; \
+		echo "To render DOT: dot -Tpng rust/target/arch/layers.dot -o rust/target/arch/layers.png"; \
 	else \
 		echo "Note: Run 'cargo test -p arch_test' to verify architecture"; \
 	fi
@@ -549,14 +549,14 @@ arch-test-visualize:
 # Validate TODO format (requires TODO scanning to be implemented)
 check-todos:
 	@echo "Validating TODO format..."
-	@./target/debug/simple_runtime todo-scan --parallel --validate || (echo "ERROR: Invalid TODO format found" && exit 1)
+	@./rust/target/debug/simple_runtime todo-scan --parallel --validate || (echo "ERROR: Invalid TODO format found" && exit 1)
 	@echo "✓ All TODOs are properly formatted"
 
 # Generate TODO documentation (parallel mode for 7.8x speedup)
 gen-todos:
 	@echo "Updating TODO database..."
-	@./target/debug/simple_runtime todo-scan --parallel
-	@./target/debug/simple_runtime todo-gen
+	@./rust/target/debug/simple_runtime todo-scan --parallel
+	@./rust/target/debug/simple_runtime todo-gen
 	@echo "✓ Generated doc/TODO.md"
 
 # Generate and show recent TODOs
@@ -574,24 +574,24 @@ todos-p0:
 
 # Show dashboard summary
 dashboard:
-	@./target/debug/simple_runtime dashboard status
+	@./rust/target/debug/simple_runtime dashboard status
 
 # Collect fresh metrics
 dashboard-collect:
-	@./target/debug/simple_runtime dashboard collect --mode=full
+	@./rust/target/debug/simple_runtime dashboard collect --mode=full
 
 # Create daily snapshot
 dashboard-snapshot:
-	@./target/debug/simple_runtime dashboard snapshot
-	@./target/debug/simple_runtime dashboard cleanup
+	@./rust/target/debug/simple_runtime dashboard snapshot
+	@./rust/target/debug/simple_runtime dashboard cleanup
 
 # Show trend analysis
 dashboard-trends:
-	@./target/debug/simple_runtime dashboard trends --monthly
+	@./rust/target/debug/simple_runtime dashboard trends --monthly
 
 # Check for critical alerts
 dashboard-alerts:
-	@./target/debug/simple_runtime dashboard check-alerts
+	@./rust/target/debug/simple_runtime dashboard check-alerts
 
 # ============================================================================
 # Bootstrap (Multi-Stage Self-Compilation)
@@ -608,7 +608,7 @@ dashboard-alerts:
 #   make bootstrap-verify    - Verify simple_new2 == simple_new3
 #   make bootstrap-clean     - Clean bootstrap artifacts
 
-BOOTSTRAP_DIR := target/bootstrap
+BOOTSTRAP_DIR := rust/target/bootstrap
 
 .PHONY: bootstrap bootstrap-stage1 bootstrap-stage2 bootstrap-stage3 bootstrap-verify bootstrap-clean bootstrap-promote bootstrap-from-stable
 
@@ -624,7 +624,7 @@ BOOTSTRAP_STAGE1_NAME ?= simple_new1
 bootstrap-stage1:
 	@echo "=== Stage 1: simple_runtime (Rust) -> $(BOOTSTRAP_STAGE1_NAME) ==="
 	@mkdir -p $(BOOTSTRAP_DIR)
-	SIMPLE_COMPILE_RUST=1 ./target/debug/simple_runtime compile simple/compiler/main.spl -o $(BOOTSTRAP_DIR)/$(BOOTSTRAP_STAGE1_NAME) --native
+	SIMPLE_COMPILE_RUST=1 ./rust/target/debug/simple_runtime compile simple/compiler/main.spl -o $(BOOTSTRAP_DIR)/$(BOOTSTRAP_STAGE1_NAME) --native
 	@chmod +x $(BOOTSTRAP_DIR)/$(BOOTSTRAP_STAGE1_NAME)
 	@echo "Stage 1 complete: $(BOOTSTRAP_DIR)/$(BOOTSTRAP_STAGE1_NAME)"
 
@@ -663,29 +663,29 @@ bootstrap-clean:
 
 bootstrap-promote: bootstrap
 	@echo "Promoting verified compiler as stable..."
-	@mkdir -p target/stable
-	cp $(BOOTSTRAP_DIR)/simple_new2 target/stable/simple
-	@chmod +x target/stable/simple
+	@mkdir -p rust/target/stable
+	cp $(BOOTSTRAP_DIR)/simple_new2 rust/target/stable/simple
+	@chmod +x rust/target/stable/simple
 	@HASH2=$$(sha256sum $(BOOTSTRAP_DIR)/simple_new2 | cut -d' ' -f1); \
 	HASH3=$$(sha256sum $(BOOTSTRAP_DIR)/simple_new3 | cut -d' ' -f1); \
 	REV=$$(jj log -r @ --no-graph -T 'change_id' 2>/dev/null || echo "unknown"); \
 	DATE=$$(date +%Y-%m-%d); \
 	printf "# Simple Compiler Bootstrap Metadata\n#\n# Updated by make bootstrap-promote.\n\nbootstrap:\n  version: %s\n  stage2_hash: %s\n  stage3_hash: %s\n  verified: true\n  source_revision: %s\n" \
 		"$$DATE" "$$HASH2" "$$HASH3" "$$REV" > bootstrap.sdn
-	@echo "Stable binary: target/stable/simple"
+	@echo "Stable binary: rust/target/stable/simple"
 	@echo "Bootstrap metadata: bootstrap.sdn"
 
 bootstrap-from-stable:
 	@echo "=== Rebuilding from stable compiler ==="
-	@if [ ! -f target/stable/simple ]; then \
-		echo "Error: No stable compiler at target/stable/simple"; \
+	@if [ ! -f rust/target/stable/simple ]; then \
+		echo "Error: No stable compiler at rust/target/stable/simple"; \
 		echo "Run 'make bootstrap-promote' first."; \
 		exit 1; \
 	fi
 	@mkdir -p $(BOOTSTRAP_DIR)
-	target/stable/simple -c -o $(BOOTSTRAP_DIR)/simple_from_stable simple/compiler/main.spl
+	rust/target/stable/simple -c -o $(BOOTSTRAP_DIR)/simple_from_stable simple/compiler/main.spl
 	@chmod +x $(BOOTSTRAP_DIR)/simple_from_stable
-	@HASH_STABLE=$$(sha256sum target/stable/simple | cut -d' ' -f1); \
+	@HASH_STABLE=$$(sha256sum rust/target/stable/simple | cut -d' ' -f1); \
 	HASH_REBUILT=$$(sha256sum $(BOOTSTRAP_DIR)/simple_from_stable | cut -d' ' -f1); \
 	echo "  stable hash:  $$HASH_STABLE"; \
 	echo "  rebuilt hash: $$HASH_REBUILT"; \

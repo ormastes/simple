@@ -349,7 +349,7 @@ cd verification/type_inference_compile && lake build
 
 - [ ] Run `make arch-test` - no new violations
 - [ ] Run `simple gen-lean compare` - if verification affected
-- [ ] Run `cargo test --workspace` - all tests pass
+- [ ] Run `cd rust && cargo test --workspace` - all tests pass
 - [ ] Update Lean proofs if needed (`lake build`)
 
 ## See Also
