@@ -485,3 +485,150 @@ fn test_vm_stack_overflow() {
     let result = vm.execute();
     assert!(matches!(result, Err(VmError::StackOverflow)));
 }
+
+#[test]
+fn test_vm_bytecode_call() {
+    // Test CALL instruction: define two functions, call one from another
+    // func 0: fn double(x) { x + x }
+    // func 1: fn main() { double(21) }
+
+    let mut double_enc = InstructionEncoder::new();
+    // Load param x (local 0) to slot 0
+    double_enc.emit_opcode(LOAD);
+    double_enc.emit_u16(0);
+    double_enc.emit_u16(0);
+    // Push x twice, add
+    double_enc.emit_opcode(PUSH);
+    double_enc.emit_u16(0);
+    double_enc.emit_opcode(PUSH);
+    double_enc.emit_u16(0);
+    double_enc.emit_opcode(ADD_I64);
+    double_enc.emit_opcode(POP);
+    double_enc.emit_u16(1);
+    double_enc.emit_opcode(RET);
+    double_enc.emit_u16(1);
+    let double_code = double_enc.finish();
+    let double_len = double_code.len();
+
+    let mut main_enc = InstructionEncoder::new();
+    // CONST_I64 s0, 21
+    main_enc.emit_opcode(CONST_I64);
+    main_enc.emit_u16(0);
+    main_enc.emit_i64(21);
+    // PUSH s0
+    main_enc.emit_opcode(PUSH);
+    main_enc.emit_u16(0);
+    // CALL func_idx=0, argc=1
+    main_enc.emit_opcode(CALL);
+    main_enc.emit_u32(0); // function index
+    main_enc.emit_u16(1); // 1 argument
+    // Pop result to s1
+    main_enc.emit_opcode(POP);
+    main_enc.emit_u16(1);
+    // RET s1
+    main_enc.emit_opcode(RET);
+    main_enc.emit_u16(1);
+    let main_code = main_enc.finish();
+    let main_len = main_code.len();
+
+    // Concatenate: [double_code][main_code]
+    let mut all_code = double_code;
+    let main_offset = all_code.len();
+    all_code.extend_from_slice(&main_code);
+
+    let double_meta = FunctionMetadata {
+        name: "double".to_string(),
+        code_offset: 0,
+        code_length: double_len,
+        param_count: 1,
+        local_count: 2,
+    };
+
+    let main_meta = FunctionMetadata {
+        name: "main".to_string(),
+        code_offset: main_offset,
+        code_length: main_len,
+        param_count: 0,
+        local_count: 2,
+    };
+
+    let mut vm = BytecodeVM::new();
+    vm.load_bytecode(&all_code);
+    vm.set_functions(vec![double_meta, main_meta]);
+
+    let result = vm.call_function(1, &[]).expect("Execution failed");
+    assert_eq!(result.as_int(), 42);
+}
+
+#[test]
+fn test_vm_ffi_call() {
+    // Test CALL_FFI: call an FFI function that adds 100
+    fn add_100(args: &[RuntimeValue]) -> super::vm::VmResult<RuntimeValue> {
+        let x = args[0].as_int();
+        Ok(RuntimeValue::from_int(x + 100))
+    }
+
+    let mut encoder = InstructionEncoder::new();
+    encoder.emit_opcode(CONST_I64);
+    encoder.emit_u16(0);
+    encoder.emit_i64(42);
+    encoder.emit_opcode(PUSH);
+    encoder.emit_u16(0);
+    encoder.emit_opcode(CALL_FFI);
+    encoder.emit_u16(0); // ffi index 0
+    encoder.emit_u16(1); // 1 arg
+    encoder.emit_opcode(POP);
+    encoder.emit_u16(1);
+    encoder.emit_opcode(RET);
+    encoder.emit_u16(1);
+
+    let code = encoder.finish();
+    let mut vm = BytecodeVM::new();
+    vm.load_bytecode(&code);
+    vm.set_ffi_table(vec![add_100]);
+
+    let result = vm.execute().expect("Execution failed");
+    assert_eq!(result.as_int(), 142);
+}
+
+#[test]
+fn test_vm_is_some() {
+    // Test IS_SOME: check if a value is non-nil
+    let mut encoder = InstructionEncoder::new();
+
+    // Test with non-nil value
+    encoder.emit_opcode(CONST_I64);
+    encoder.emit_u16(0);
+    encoder.emit_i64(42);
+    encoder.emit_opcode(IS_SOME);
+    encoder.emit_u16(1); // dest
+    encoder.emit_u16(0); // source
+    encoder.emit_opcode(RET);
+    encoder.emit_u16(1);
+
+    let code = encoder.finish();
+    let mut vm = BytecodeVM::new();
+    vm.load_bytecode(&code);
+    let result = vm.execute().expect("Execution failed");
+    assert_eq!(result.as_bool(), true);
+}
+
+#[test]
+fn test_vm_is_some_nil() {
+    // Test IS_SOME with nil value
+    let mut encoder = InstructionEncoder::new();
+
+    encoder.emit_opcode(CONST_NONE);
+    encoder.emit_u16(0);
+    encoder.emit_opcode(IS_SOME);
+    encoder.emit_u16(1);
+    encoder.emit_u16(0);
+    encoder.emit_opcode(RET);
+    encoder.emit_u16(1);
+
+    let code = encoder.finish();
+    let mut vm = BytecodeVM::new();
+    vm.load_bytecode(&code);
+    let result = vm.execute().expect("Execution failed");
+    assert_eq!(result.as_bool(), false);
+}

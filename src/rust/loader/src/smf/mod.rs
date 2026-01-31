@@ -1,3 +1,5 @@
+pub mod bytecode_loader;
+pub mod bytecode_writer;
 pub mod header;
 pub mod jit_instantiator;
 pub mod note_loader;
@@ -6,6 +8,8 @@ pub mod section;
 pub mod settlement;
 pub mod symbol;
 
+pub use bytecode_loader::*;
+pub use bytecode_writer::*;
 pub use header::*;
 pub use jit_instantiator::*;
 pub use note_loader::*;

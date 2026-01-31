@@ -715,6 +715,258 @@ impl BytecodeVM {
                     self.set_local(local_idx, value)?;
                 }
 
+                LOAD_STRING => {
+                    let dest = self.read_u16()?;
+                    let const_idx = self.read_u32()?;
+                    let value = *self
+                        .constants
+                        .get(const_idx as usize)
+                        .ok_or(VmError::InvalidConstantIndex(const_idx))?;
+                    self.set_stack(dest, value)?;
+                }
+
+                // =============================================================
+                // Function Calls
+                // =============================================================
+                CALL => {
+                    let func_idx = self.read_u32()?;
+                    let argc = self.read_u16()?;
+
+                    let func = self
+                        .functions
+                        .get(func_idx as usize)
+                        .ok_or(VmError::InvalidFunctionIndex(func_idx))?
+                        .clone();
+
+                    // Pop arguments from eval stack
+                    let mut args = Vec::with_capacity(argc as usize);
+                    for _ in 0..argc {
+                        args.push(self.pop()?);
+                    }
+                    args.reverse(); // Args were pushed L→R, popped R→L
+
+                    // Set up locals for new frame
+                    let frame_pointer = self.locals.len();
+                    self.locals.resize(
+                        frame_pointer + func.local_count as usize,
+                        RuntimeValue::NIL,
+                    );
+                    for (i, arg) in args.iter().enumerate() {
+                        self.locals[frame_pointer + i] = *arg;
+                    }
+
+                    // Push call frame
+                    if self.call_stack.len() >= MAX_CALL_DEPTH {
+                        return Err(VmError::CallStackOverflow);
+                    }
+                    self.call_stack.push(CallFrame {
+                        function_index: func_idx,
+                        return_address: self.ip,
+                        frame_pointer,
+                        local_count: func.local_count,
+                    });
+
+                    // Jump to function
+                    self.ip = func.code_offset;
+                }
+
+                CALL_FFI => {
+                    let ffi_idx = self.read_u16()?;
+                    let argc = self.read_u16()?;
+
+                    // Pop arguments from eval stack
+                    let mut args = Vec::with_capacity(argc as usize);
+                    for _ in 0..argc {
+                        args.push(self.pop()?);
+                    }
+                    args.reverse();
+
+                    let ffi_fn = self
+                        .ffi_table
+                        .get(ffi_idx as usize)
+                        .ok_or(VmError::InvalidFfiIndex(ffi_idx))?;
+
+                    let result = ffi_fn(&args)?;
+                    self.push(result)?;
+                }
+
+                CALL_RUNTIME => {
+                    let rt_idx = self.read_u16()?;
+                    let argc = self.read_u16()?;
+
+                    // Same as CALL_FFI for now
+                    let mut args = Vec::with_capacity(argc as usize);
+                    for _ in 0..argc {
+                        args.push(self.pop()?);
+                    }
+                    args.reverse();
+
+                    let ffi_fn = self
+                        .ffi_table
+                        .get(rt_idx as usize)
+                        .ok_or(VmError::InvalidFfiIndex(rt_idx))?;
+
+                    let result = ffi_fn(&args)?;
+                    self.push(result)?;
+                }
+
+                CALL_INDIRECT => {
+                    let argc = self.read_u16()?;
+                    // Pop function pointer from stack
+                    let _func_ptr = self.pop()?;
+                    // Pop arguments
+                    let mut _args = Vec::with_capacity(argc as usize);
+                    for _ in 0..argc {
+                        _args.push(self.pop()?);
+                    }
+                    // TODO: Implement indirect call via closure/function pointer
+                    self.push(RuntimeValue::NIL)?;
+                }
+
+                // =============================================================
+                // Collections
+                // =============================================================
+                ARRAY_LIT => {
+                    let dest = self.read_u16()?;
+                    let count = self.read_u16()?;
+                    let _type_hint = self.read_u16()?;
+
+                    let mut elements = Vec::with_capacity(count as usize);
+                    for _ in 0..count {
+                        elements.push(self.pop()?);
+                    }
+                    elements.reverse();
+
+                    let arr = crate::value::rt_array_new(count as u64);
+                    for (i, elem) in elements.iter().enumerate() {
+                        crate::value::rt_array_set(arr, i as i64, *elem);
+                    }
+                    self.set_stack(dest, arr)?;
+                }
+
+                DICT_LIT => {
+                    let dest = self.read_u16()?;
+                    let count = self.read_u16()?;
+
+                    let mut pairs = Vec::with_capacity(count as usize * 2);
+                    for _ in 0..count * 2 {
+                        pairs.push(self.pop()?);
+                    }
+                    pairs.reverse();
+
+                    let dict = crate::value::rt_dict_new(count as u64);
+                    for i in 0..count as usize {
+                        let key = pairs[i * 2];
+                        let val = pairs[i * 2 + 1];
+                        crate::value::rt_dict_set(dict, key, val);
+                    }
+                    self.set_stack(dest, dict)?;
+                }
+
+                TUPLE_LIT => {
+                    let dest = self.read_u16()?;
+                    let count = self.read_u16()?;
+
+                    let mut elements = Vec::with_capacity(count as usize);
+                    for _ in 0..count {
+                        elements.push(self.pop()?);
+                    }
+                    elements.reverse();
+
+                    let tuple = crate::value::rt_tuple_new(count as u64);
+                    for (i, elem) in elements.iter().enumerate() {
+                        crate::value::rt_tuple_set(tuple, i as u64, *elem);
+                    }
+                    self.set_stack(dest, tuple)?;
+                }
+
+                INDEX_GET => {
+                    let dest = self.read_u16()?;
+                    let container = self.read_u16()?;
+                    let index = self.read_u16()?;
+                    let coll = self.get_stack(container)?;
+                    let idx = self.get_stack(index)?;
+                    let result = crate::value::rt_index_get(coll, idx);
+                    self.set_stack(dest, result)?;
+                }
+
+                INDEX_SET => {
+                    let container = self.read_u16()?;
+                    let index = self.read_u16()?;
+                    let value = self.read_u16()?;
+                    let coll = self.get_stack(container)?;
+                    let idx = self.get_stack(index)?;
+                    let val = self.get_stack(value)?;
+                    crate::value::rt_index_set(coll, idx, val);
+                }
+
+                LEN => {
+                    let dest = self.read_u16()?;
+                    let container = self.read_u16()?;
+                    let coll = self.get_stack(container)?;
+                    let len = crate::value::rt_array_len(coll);
+                    self.set_stack(dest, RuntimeValue::from_int(len))?;
+                }
+
+                APPEND => {
+                    let container = self.read_u16()?;
+                    let value = self.read_u16()?;
+                    let coll = self.get_stack(container)?;
+                    let val = self.get_stack(value)?;
+                    crate::value::rt_array_push(coll, val);
+                }
+
+                // =============================================================
+                // Pattern Matching
+                // =============================================================
+                ENUM_MATCH => {
+                    let dest = self.read_u16()?;
+                    let enum_val = self.read_u16()?;
+                    let discriminant = self.read_u16()?;
+                    let val = self.get_stack(enum_val)?;
+                    let disc = crate::value::rt_enum_discriminant(val);
+                    let matches = disc == discriminant as i64;
+                    self.set_stack(dest, RuntimeValue::from_bool(matches))?;
+                }
+
+                ENUM_PAYLOAD => {
+                    let dest = self.read_u16()?;
+                    let enum_val = self.read_u16()?;
+                    let _field_idx = self.read_u16()?;
+                    let val = self.get_stack(enum_val)?;
+                    let payload = crate::value::rt_enum_payload(val);
+                    self.set_stack(dest, payload)?;
+                }
+
+                ENUM_NEW => {
+                    let dest = self.read_u16()?;
+                    let discriminant = self.read_u16()?;
+                    let field_count = self.read_u16()?;
+
+                    let mut fields = Vec::with_capacity(field_count as usize);
+                    for _ in 0..field_count {
+                        fields.push(self.pop()?);
+                    }
+                    fields.reverse();
+
+                    let payload = if fields.is_empty() {
+                        RuntimeValue::NIL
+                    } else {
+                        fields[0]
+                    };
+
+                    // rt_enum_new takes (enum_id: u32, discriminant: u32, payload: RuntimeValue)
+                    let enum_val = crate::value::rt_enum_new(0, discriminant as u32, payload);
+                    self.set_stack(dest, enum_val)?;
+                }
+
+                IS_SOME => {
+                    let dest = self.read_u16()?;
+                    let opt = self.read_u16()?;
+                    let val = self.get_stack(opt)?;
+                    self.set_stack(dest, RuntimeValue::from_bool(!val.is_nil()))?;
+                }
+
                 // =============================================================
                 // Unknown Opcode
                 // =============================================================
