@@ -16,7 +16,7 @@ fn check_coverage_enabled() -> bool {
 }
 
 /// Helper to get the global coverage collector
-fn get_coverage() -> Option<std::sync::Arc<std::sync::Mutex<coverage::CoverageCollector>>> {
+fn get_coverage() -> Option<&'static std::sync::Mutex<coverage::CoverageCollector>> {
     coverage::get_global_coverage()
 }
 

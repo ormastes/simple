@@ -202,7 +202,7 @@ fn read_string_at(data: &[u8], offset: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::super::smf::bytecode_writer::{BytecodeFunction, SmfBytecodeWriter};
+    use crate::loader::smf::bytecode_writer::{BytecodeFunction, SmfBytecodeWriter};
     use std::io::Cursor;
 
     #[test]

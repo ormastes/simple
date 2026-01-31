@@ -434,9 +434,14 @@ impl TypeChecker {
                 // Check all trait methods
                 for method in &trait_def.methods {
                     let old_env = self.env.clone();
+                    // Add self to environment for trait methods
+                    let self_ty = self.fresh_var();
+                    self.env.insert("self".to_string(), self_ty);
                     for param in &method.params {
-                        let ty = self.fresh_var();
-                        self.env.insert(param.name.clone(), ty);
+                        if param.name != "self" {
+                            let ty = self.fresh_var();
+                            self.env.insert(param.name.clone(), ty);
+                        }
                     }
                     self.check_block_with_macro_rules(&method.body)?;
                     self.env = old_env;

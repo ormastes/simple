@@ -21,16 +21,7 @@ pub fn save_coverage_data(quiet: bool) {
         return;
     }
 
-    let path = get_coverage_output_path();
-    println!("Coverage data saved to: {}", path.display());
-
-    // Print coverage stats
-    if let Some(cov) = get_global_coverage() {
-        let cov = cov.lock().unwrap();
-        let stats = cov.stats();
-        println!("  Lines executed: {}", stats.total_lines);
-        println!("  Files covered: {}", stats.total_files);
-        println!("  Functions called: {}", stats.total_functions);
-        println!("  FFI calls: {}", stats.total_ffi_calls);
+    if let Some(path) = get_coverage_output_path() {
+        println!("Coverage data saved to: {}", path);
     }
 }

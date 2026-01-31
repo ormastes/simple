@@ -260,12 +260,12 @@ pub fn validate_test_config() -> TestCheckResult {
 #[macro_export]
 macro_rules! init_unit_tests {
     () => {
-        $crate::test_check::init_test_level($crate::test_check::TestLevel::Unit);
-        $crate::mock_policy::init_mocks_for_only(&["*"]);
+        $crate::mock_helper::test_check::init_test_level($crate::mock_helper::test_check::TestLevel::Unit);
+        $crate::mock_helper::mock_policy::init_mocks_for_only(&["*"]);
     };
     ($name:expr) => {
-        $crate::test_check::init_test_level_named($crate::test_check::TestLevel::Unit, $name);
-        $crate::mock_policy::init_mocks_for_only(&["*"]);
+        $crate::mock_helper::test_check::init_test_level_named($crate::mock_helper::test_check::TestLevel::Unit, $name);
+        $crate::mock_helper::mock_policy::init_mocks_for_only(&["*"]);
     };
 }
 
@@ -275,16 +275,16 @@ macro_rules! init_unit_tests {
 #[macro_export]
 macro_rules! init_integration_tests {
     () => {
-        $crate::test_check::init_test_level($crate::test_check::TestLevel::Integration);
-        $crate::mock_policy::init_mocks_for_only_default();
+        $crate::mock_helper::test_check::init_test_level($crate::mock_helper::test_check::TestLevel::Integration);
+        $crate::mock_helper::mock_policy::init_mocks_for_only_default();
     };
     ($name:expr) => {
-        $crate::test_check::init_test_level_named($crate::test_check::TestLevel::Integration, $name);
-        $crate::mock_policy::init_mocks_for_only_default();
+        $crate::mock_helper::test_check::init_test_level_named($crate::mock_helper::test_check::TestLevel::Integration, $name);
+        $crate::mock_helper::mock_policy::init_mocks_for_only_default();
     };
     (patterns: $patterns:expr) => {
-        $crate::test_check::init_test_level($crate::test_check::TestLevel::Integration);
-        $crate::mock_policy::init_mocks_for_only($patterns);
+        $crate::mock_helper::test_check::init_test_level($crate::mock_helper::test_check::TestLevel::Integration);
+        $crate::mock_helper::mock_policy::init_mocks_for_only($patterns);
     };
 }
 
@@ -294,12 +294,12 @@ macro_rules! init_integration_tests {
 #[macro_export]
 macro_rules! init_system_tests {
     () => {
-        $crate::test_check::init_test_level($crate::test_check::TestLevel::System);
-        $crate::mock_policy::init_mocks_for_system();
+        $crate::mock_helper::test_check::init_test_level($crate::mock_helper::test_check::TestLevel::System);
+        $crate::mock_helper::mock_policy::init_mocks_for_system();
     };
     ($name:expr) => {
-        $crate::test_check::init_test_level_named($crate::test_check::TestLevel::System, $name);
-        $crate::mock_policy::init_mocks_for_system();
+        $crate::mock_helper::test_check::init_test_level_named($crate::mock_helper::test_check::TestLevel::System, $name);
+        $crate::mock_helper::mock_policy::init_mocks_for_system();
     };
 }
 
@@ -310,16 +310,16 @@ macro_rules! init_system_tests {
 #[macro_export]
 macro_rules! init_env_tests {
     () => {
-        $crate::test_check::init_test_level($crate::test_check::TestLevel::Environment);
-        $crate::mock_policy::init_mocks_for_only($crate::mock_policy::DEFAULT_ENV_PATTERNS);
+        $crate::mock_helper::test_check::init_test_level($crate::mock_helper::test_check::TestLevel::Environment);
+        $crate::mock_helper::mock_policy::init_mocks_for_only($crate::mock_helper::mock_policy::DEFAULT_ENV_PATTERNS);
     };
     ($name:expr) => {
-        $crate::test_check::init_test_level_named($crate::test_check::TestLevel::Environment, $name);
-        $crate::mock_policy::init_mocks_for_only($crate::mock_policy::DEFAULT_ENV_PATTERNS);
+        $crate::mock_helper::test_check::init_test_level_named($crate::mock_helper::test_check::TestLevel::Environment, $name);
+        $crate::mock_helper::mock_policy::init_mocks_for_only($crate::mock_helper::mock_policy::DEFAULT_ENV_PATTERNS);
     };
     (patterns: $patterns:expr) => {
-        $crate::test_check::init_test_level($crate::test_check::TestLevel::Environment);
-        $crate::mock_policy::init_mocks_for_only($patterns);
+        $crate::mock_helper::test_check::init_test_level($crate::mock_helper::test_check::TestLevel::Environment);
+        $crate::mock_helper::mock_policy::init_mocks_for_only($patterns);
     };
 }
 
@@ -332,7 +332,7 @@ pub(crate) fn reset_test_level_for_tests() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::mock_policy::reset_policy_for_tests;
+    use crate::mock_helper::mock_policy::reset_policy_for_tests;
 
     fn reset() {
         reset_test_level_for_tests();
@@ -402,8 +402,8 @@ mod tests {
         let result = validate_test_config();
         result.clone().expect_pass();
         assert_eq!(result.level, Some(TestLevel::Unit));
-        assert!(crate::mock_policy::are_mocks_enabled());
-        assert_eq!(crate::mock_policy::get_allowed_patterns(), Some(vec!["*"]));
+        assert!(crate::mock_helper::mock_policy::are_mocks_enabled());
+        assert_eq!(crate::mock_helper::mock_policy::get_allowed_patterns(), Some(vec!["*"]));
         assert_eq!(get_test_level_name().as_deref(), Some("unit_resettable"));
     }
 
@@ -414,8 +414,8 @@ mod tests {
         let result = validate_test_config();
         result.clone().expect_pass();
         assert_eq!(result.level, Some(TestLevel::System));
-        assert!(!crate::mock_policy::are_mocks_enabled());
-        assert!(crate::mock_policy::is_policy_initialized());
+        assert!(!crate::mock_helper::mock_policy::are_mocks_enabled());
+        assert!(crate::mock_helper::mock_policy::is_policy_initialized());
         assert_eq!(get_test_level_name().as_deref(), Some("system_resettable"));
     }
 }

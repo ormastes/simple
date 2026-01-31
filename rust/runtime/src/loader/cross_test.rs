@@ -420,7 +420,7 @@ impl Default for CiConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::smf::Platform;
+    use crate::loader::smf::Platform;
 
     #[test]
     fn test_target_fixture_host() {
@@ -445,7 +445,7 @@ mod tests {
 
     #[test]
     fn test_target_fixture_mock_headers() {
-        use super::smf::header::SMF_MAGIC;
+        use crate::loader::smf::header::SMF_MAGIC;
 
         let fixture = TargetFixture::x86_64_linux();
 
