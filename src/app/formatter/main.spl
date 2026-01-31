@@ -344,150 +344,85 @@ class Formatter:
 
         return result
 
-    fn break_function_signature(line: String, indent_str: String, continuation_str: String) -> List<String>:
-        # Break function signature at parameter list
-        if not line.contains("(") or not line.contains(")"):
+    fn remove_trailing_comma(lines: List<String>) -> List<String>:
+        """Remove trailing comma from last line in a list."""
+        if lines.len() > 1:
+            val last_idx = lines.len() - 1
+            val last_line = lines[last_idx]
+            if last_line.ends_with(","):
+                var result = lines
+                result[last_idx] = last_line.substring(0, last_line.len() - 1)
+                return result
+        lines
+
+    fn break_delimited_content(
+        line: String,
+        indent_str: String,
+        continuation_str: String,
+        open_delim: String,
+        close_delim: String,
+        skip_empty: bool
+    ) -> List<String>:
+        """Generic helper to break content within delimiters across multiple lines."""
+        if not line.contains(open_delim):
             return [indent_str + line]
 
-        val paren_start_opt = line.index_of("(")
-        val paren_end_opt = line.index_of(")")
+        val delim_start_opt = line.index_of(open_delim)
+        val delim_end_opt = line.index_of(close_delim)
 
-        match paren_start_opt:
+        match delim_start_opt:
             case None:
                 return [indent_str + line]
-            case Some(paren_start):
-                match paren_end_opt:
+            case Some(delim_start):
+                match delim_end_opt:
                     case None:
                         return [indent_str + line]
-                    case Some(paren_end):
-                        val before_params = line.substring(0, paren_start + 1)
-                        val params_str = line.substring(paren_start + 1, paren_end)
-                        val after_params = line.substring(paren_end, line.len())
-
-                        # Check if parameters fit on one line
-                        val params_line = indent_str + before_params + params_str + after_params
-                        if params_line.len() <= self.config.max_line_length:
-                            return [params_line]
-
-                        # Break parameters across multiple lines
-                        var result = []
-                        result.push(indent_str + before_params)
-
-                        val params = params_str.split(",")
-                        for param in params:
-                            result.push(continuation_str + param.trim() + ",")
-
-                        # Remove trailing comma from last parameter
-                        if result.len() > 1:
-                            val last_idx = result.len() - 1
-                            val last_line = result[last_idx]
-                            if last_line.ends_with(","):
-                                val new_last = last_line.substring(0, last_line.len() - 1)
-                                result[last_idx] = new_last
-
-                        result.push(indent_str + after_params)
-                        return result
-
-    fn break_function_call(line: String, indent_str: String, continuation_str: String) -> List<String>:
-        # Break long function calls across multiple lines
-        if not line.contains("("):
-            return [indent_str + line]
-
-        val paren_start_opt = line.index_of("(")
-        val paren_end_opt = line.index_of(")")
-
-        match paren_start_opt:
-            case None:
-                return [indent_str + line]
-            case Some(paren_start):
-                match paren_end_opt:
-                    case None:
-                        return [indent_str + line]
-                    case Some(paren_end):
-                        if paren_end < paren_start:
+                    case Some(delim_end):
+                        if delim_end < delim_start:
                             return [indent_str + line]
 
-                        val before_args = line.substring(0, paren_start + 1)
-                        val args_str = line.substring(paren_start + 1, paren_end)
-                        val after_args = line.substring(paren_end, line.len())
+                        val before = line.substring(0, delim_start + 1)
+                        val content = line.substring(delim_start + 1, delim_end)
+                        val after = line.substring(delim_end, line.len())
 
                         # Check if it fits on one line
-                        val one_line = indent_str + before_args + args_str + after_args
-                        if one_line.len() <= self.config.max_line_length:
-                            return [one_line]
-
-                        # Break arguments
-                        var result = []
-                        result.push(indent_str + before_args)
-
-                        val args = args_str.split(",")
-                        for arg in args:
-                            val trimmed = arg.trim()
-                            if not trimmed.is_empty():
-                                result.push(continuation_str + trimmed + ",")
-
-                        # Remove trailing comma
-                        if result.len() > 1:
-                            val last_idx = result.len() - 1
-                            val last_line = result[last_idx]
-                            if last_line.ends_with(","):
-                                val new_last = last_line.substring(0, last_line.len() - 1)
-                                result[last_idx] = new_last
-
-                        result.push(indent_str + after_args)
-                        return result
-
-    fn break_collection(line: String, indent_str: String, continuation_str: String) -> List<String>:
-        # Break collections (lists, dicts, arrays) across multiple lines
-        var open_bracket = "["
-        var close_bracket = "]"
-        if line.contains(r"{"):
-            open_bracket = r"{"
-            close_bracket = r"}"
-
-        val bracket_start_opt = line.index_of(open_bracket)
-        val bracket_end_opt = line.index_of(close_bracket)
-
-        match bracket_start_opt:
-            case None:
-                return [indent_str + line]
-            case Some(bracket_start):
-                match bracket_end_opt:
-                    case None:
-                        return [indent_str + line]
-                    case Some(bracket_end):
-                        if bracket_end < bracket_start:
-                            return [indent_str + line]
-
-                        val before = line.substring(0, bracket_start + 1)
-                        val content = line.substring(bracket_start + 1, bracket_end)
-                        val after = line.substring(bracket_end, line.len())
-
-                        # Check if it fits
                         val one_line = indent_str + before + content + after
                         if one_line.len() <= self.config.max_line_length:
                             return [one_line]
 
-                        # Break items
+                        # Break items across multiple lines
                         var result = []
                         result.push(indent_str + before)
 
                         val items = content.split(",")
                         for item in items:
                             val trimmed = item.trim()
-                            if not trimmed.is_empty():
+                            if skip_empty and trimmed.is_empty():
+                                pass
+                            else:
                                 result.push(continuation_str + trimmed + ",")
 
-                        # Remove trailing comma
-                        if result.len() > 1:
-                            val last_idx = result.len() - 1
-                            val last_line = result[last_idx]
-                            if last_line.ends_with(","):
-                                val new_last = last_line.substring(0, last_line.len() - 1)
-                                result[last_idx] = new_last
-
-                        result.push(indent_str + close_bracket + after)
+                        # Remove trailing comma from last item
+                        result = self.remove_trailing_comma(result)
+                        result.push(indent_str + after)
                         return result
+
+    fn break_function_signature(line: String, indent_str: String, continuation_str: String) -> List<String>:
+        """Break function signature at parameter list."""
+        self.break_delimited_content(line, indent_str, continuation_str, "(", ")", false)
+
+    fn break_function_call(line: String, indent_str: String, continuation_str: String) -> List<String>:
+        """Break long function calls across multiple lines."""
+        self.break_delimited_content(line, indent_str, continuation_str, "(", ")", true)
+
+    fn break_collection(line: String, indent_str: String, continuation_str: String) -> List<String>:
+        """Break collections (lists, dicts, arrays) across multiple lines."""
+        var open_delim = "["
+        var close_delim = "]"
+        if line.contains(r"{"):
+            open_delim = r"{"
+            close_delim = r"}"
+        self.break_delimited_content(line, indent_str, continuation_str, open_delim, close_delim, true)
 
     fn break_at_operators(line: String, indent_str: String, continuation_str: String) -> List<String>:
         # Default line breaking: break at logical operators

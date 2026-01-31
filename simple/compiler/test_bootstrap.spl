@@ -3,16 +3,14 @@
 # This tests the Cranelift FFI infrastructure by creating a simple
 # function and executing it via JIT.
 
+use compiler.ffi (rt_exec, rt_file_hash)
+
 # FFI declarations for Cranelift (RuntimeValue versions)
 extern fn rt_cranelift_module_new(name: text, target: i64) -> i64
 extern fn rt_cranelift_finalize_module(module: i64) -> i64
 extern fn rt_cranelift_free_module(module: i64)
 extern fn rt_cranelift_new_signature(call_conv: i64) -> i64
 extern fn rt_cranelift_sig_set_return(sig: i64, type_: i64)
-
-# Bootstrap test FFI
-extern fn rt_exec(cmd: text) -> i32
-extern fn rt_file_hash(path: text) -> text
 
 fn test_create_module() -> bool:
     # Type constants
@@ -59,36 +57,40 @@ fn test_file_hash_ffi() -> bool:
     print "Hash of /bin/sh: {hash}"
     hash.len() > 0
 
+struct TestRunner:
+    """Helper for running tests and tracking results."""
+    passed: i64
+    failed: i64
+
+    static fn create() -> TestRunner:
+        TestRunner(passed: 0, failed: 0)
+
+    me run_test(name: text, test_fn: fn() -> bool):
+        """Run a test and update counters."""
+        print name
+        if test_fn():
+            self.passed = self.passed + 1
+        else:
+            self.failed = self.failed + 1
+
+    fn total_failed() -> i64:
+        self.failed
+
 fn main() -> i32:
     print "=== Bootstrap FFI Test ==="
     print ""
 
-    var passed = 0
-    var failed = 0
+    var runner = TestRunner.create()
 
-    print "Test 1: Create module..."
-    if test_create_module():
-        passed = passed + 1
-    else:
-        failed = failed + 1
+    runner.run_test("Test 1: Create module...", test_create_module)
+    print ""
+    runner.run_test("Test 2: rt_exec FFI...", test_exec_ffi)
+    print ""
+    runner.run_test("Test 3: rt_file_hash FFI...", test_file_hash_ffi)
 
     print ""
-    print "Test 2: rt_exec FFI..."
-    if test_exec_ffi():
-        passed = passed + 1
-    else:
-        failed = failed + 1
+    print "=== Results: {runner.passed} passed, {runner.failed} failed ==="
 
-    print ""
-    print "Test 3: rt_file_hash FFI..."
-    if test_file_hash_ffi():
-        passed = passed + 1
-    else:
-        failed = failed + 1
-
-    print ""
-    print "=== Results: {passed} passed, {failed} failed ==="
-
-    if failed > 0:
+    if runner.total_failed() > 0:
         return 1
     0

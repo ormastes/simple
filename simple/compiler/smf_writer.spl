@@ -33,6 +33,25 @@ impl Target:
     static fn aarch64_unknown_linux_gnu() -> Target:
         Target(os: "linux", arch: "aarch64")
 
+# SMF build options - groups common parameters
+struct SmfBuildOptions:
+    templates: GenericTemplates?
+    metadata: MonomorphizationMetadata?
+    note_sdn: NoteSdnMetadata?
+    target: Target
+
+impl SmfBuildOptions:
+    static fn create(target: Target) -> SmfBuildOptions:
+        SmfBuildOptions(
+            templates: None,
+            metadata: None,
+            note_sdn: None,
+            target: target
+        )
+
+    fn has_any_sections() -> bool:
+        self.templates.? or self.metadata.? or self.note_sdn.?
+
 # Generate SMF from object code with optional template sections
 #
 # If templates and metadata are provided, adds TemplateCode and TemplateMeta sections
@@ -43,7 +62,13 @@ fn generate_smf_with_templates(
     metadata: MonomorphizationMetadata?,
     target: Target
 ) -> [u8]:
-    generate_smf_with_all_sections(object_code, templates, metadata, None, target)
+    val options = SmfBuildOptions(
+        templates: templates,
+        metadata: metadata,
+        note_sdn: None,
+        target: target
+    )
+    generate_smf_with_options(object_code, options)
 
 # Generate SMF from object code with all optional sections
 #
@@ -55,24 +80,28 @@ fn generate_smf_with_all_sections(
     note_sdn: NoteSdnMetadata?,
     target: Target
 ) -> [u8]:
+    val options = SmfBuildOptions(
+        templates: templates,
+        metadata: metadata,
+        note_sdn: note_sdn,
+        target: target
+    )
+    generate_smf_with_options(object_code, options)
+
+# Generate SMF from object code with build options
+fn generate_smf_with_options(object_code: [u8], options: SmfBuildOptions) -> [u8]:
     val code_bytes = extract_code_from_object(object_code)
 
     # If no templates, use simple builder
-    if not templates.? and not metadata.? and not note_sdn.?:
-        return build_smf_with_code_for_target(code_bytes, target)
+    if not options.has_any_sections():
+        return build_smf_with_code_for_target(code_bytes, options.target)
 
     # Build SMF with template sections
-    build_smf_with_templates_internal(code_bytes, templates, metadata, note_sdn, target)
+    build_smf_with_templates_internal(code_bytes, options)
 
 # Build an SMF module with code and optional template sections
 # ⭐ v1.1: Uses TRAILER-BASED HEADER (like ZIP format)
-fn build_smf_with_templates_internal(
-    code_bytes: [u8],
-    templates: GenericTemplates?,
-    metadata: MonomorphizationMetadata?,
-    note_sdn: NoteSdnMetadata?,
-    target: Target
-) -> [u8]:
+fn build_smf_with_templates_internal(code_bytes: [u8], options: SmfBuildOptions) -> [u8]:
     var buf: [u8] = []
 
     # ⭐ NEW: No stub in this implementation (stub_size = 0)
@@ -83,18 +112,18 @@ fn build_smf_with_templates_internal(
     # 1. Write sections FIRST (before header)
 
     # Serialize templates if present
-    val template_bytes = if templates.?:
-        serialize_templates(templates.unwrap())
+    val template_bytes = if options.templates.?:
+        serialize_templates(options.templates.unwrap())
     else:
         []
 
-    val metadata_bytes = if metadata.?:
-        serialize_metadata(metadata.unwrap())
+    val metadata_bytes = if options.metadata.?:
+        serialize_metadata(options.metadata.unwrap())
     else:
         []
 
-    val note_sdn_bytes = if note_sdn.?:
-        serialize_note_sdn(note_sdn.unwrap())
+    val note_sdn_bytes = if options.note_sdn.?:
+        serialize_note_sdn(options.note_sdn.unwrap())
     else:
         []
 
@@ -196,11 +225,11 @@ fn build_smf_with_templates_internal(
     buf = buf.concat([1, 1])  # ⭐ Changed to v1.1
 
     # Platform
-    val platform_code = platform_to_code(target.os)
+    val platform_code = platform_to_code(options.target.os)
     buf = buf.push(platform_code)
 
     # Architecture
-    val arch_code = arch_to_code(target.arch)
+    val arch_code = arch_to_code(options.target.arch)
     buf = buf.push(arch_code)
 
     # Flags (executable)
