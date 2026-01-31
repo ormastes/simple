@@ -492,4 +492,73 @@ fn test():
         assert!(!dup_warnings.is_empty());
         assert!(dup_warnings[0].message.contains("y"));
     }
+
+    #[test]
+    fn test_export_outside_init_regular_file() {
+        let code = r#"
+pub struct Router:
+    path: str
+
+export use Router
+"#;
+        let module = parse_code(code);
+        let mut checker = LintChecker::new().with_source_file(Some(std::path::PathBuf::from("src/http/router.spl")));
+        checker.check_module(&module.items);
+        let diagnostics = checker.take_diagnostics();
+
+        // Should error: export in regular file
+        assert!(diagnostics.iter().any(|d| d.lint == LintName::ExportOutsideInit));
+        assert!(diagnostics.iter().any(|d| d.is_error()));
+    }
+
+    #[test]
+    fn test_export_allowed_in_init() {
+        let code = r#"
+pub mod router
+
+export use router.Router
+"#;
+        let module = parse_code(code);
+        let mut checker = LintChecker::new().with_source_file(Some(std::path::PathBuf::from("src/http/__init__.spl")));
+        checker.check_module(&module.items);
+        let diagnostics = checker.take_diagnostics();
+
+        // Should NOT error: export in __init__.spl is allowed
+        assert!(diagnostics.iter().all(|d| d.lint != LintName::ExportOutsideInit));
+    }
+
+    #[test]
+    fn test_export_glob_outside_init() {
+        let code = r#"
+pub struct Client:
+    url: str
+
+export use Client.*
+"#;
+        let module = parse_code(code);
+        let mut checker = LintChecker::new().with_source_file(Some(std::path::PathBuf::from("src/client.spl")));
+        checker.check_module(&module.items);
+        let diagnostics = checker.take_diagnostics();
+
+        // Should error: export in regular file
+        assert!(diagnostics.iter().any(|d| d.lint == LintName::ExportOutsideInit));
+    }
+
+    #[test]
+    fn test_no_export_no_error() {
+        let code = r#"
+pub struct Router:
+    path: str
+
+pub fn create_router() -> Router:
+    Router(path: "/")
+"#;
+        let module = parse_code(code);
+        let mut checker = LintChecker::new().with_source_file(Some(std::path::PathBuf::from("src/http/router.spl")));
+        checker.check_module(&module.items);
+        let diagnostics = checker.take_diagnostics();
+
+        // Should NOT error: no export statements
+        assert!(diagnostics.iter().all(|d| d.lint != LintName::ExportOutsideInit));
+    }
 }

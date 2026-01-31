@@ -53,6 +53,8 @@ pub enum LintName {
     WildcardMatch,
     /// Not all enum/option variants explicitly listed in match
     NonExhaustiveMatch,
+    /// Export statement outside __init__.spl
+    ExportOutsideInit,
 }
 
 impl LintName {
@@ -71,6 +73,7 @@ impl LintName {
             LintName::ResourceLeak => "resource_leak",
             LintName::WildcardMatch => "wildcard_match",
             LintName::NonExhaustiveMatch => "non_exhaustive_match",
+            LintName::ExportOutsideInit => "export_outside_init",
         }
     }
 
@@ -89,6 +92,7 @@ impl LintName {
             "resource_leak" => Some(LintName::ResourceLeak),
             "wildcard_match" => Some(LintName::WildcardMatch),
             "non_exhaustive_match" => Some(LintName::NonExhaustiveMatch),
+            "export_outside_init" => Some(LintName::ExportOutsideInit),
             _ => None,
         }
     }
@@ -109,6 +113,7 @@ impl LintName {
             LintName::ResourceLeak => LintLevel::Warn,
             LintName::WildcardMatch => LintLevel::Allow,
             LintName::NonExhaustiveMatch => LintLevel::Warn,
+            LintName::ExportOutsideInit => LintLevel::Deny,
         }
     }
 
@@ -504,6 +509,63 @@ Or in simple.sdn:
 "#.to_string(),
             LintName::WildcardMatch => "Lint: wildcard_match\nLevel: allow\n\nWarns about wildcard catch-all patterns in match expressions.".to_string(),
             LintName::NonExhaustiveMatch => "Lint: non_exhaustive_match\nLevel: warn\n\nWarns when match expressions may not cover all variants.".to_string(),
+            LintName::ExportOutsideInit => r#"Lint: export_outside_init
+Level: deny (error)
+
+=== What it checks ===
+
+This lint ensures that `export` statements only appear in `__init__.spl` files.
+Regular `.spl` files are not allowed to use `export` statements.
+
+=== Why it matters ===
+
+The `__init__.spl` file is the single source of truth for a directory's public API.
+Allowing exports in regular files would bypass this control and create confusion
+about what symbols are actually exported from a module.
+
+All exports must go through the directory manifest (__init__.spl) to maintain
+a clear, centralized declaration of the public interface.
+
+=== Examples ===
+
+Triggers the lint (ERROR):
+    # In src/sys/http/router.spl
+    pub struct Router:
+        # ...
+
+    export Router    # ❌ ERROR: export not allowed here
+
+Does not trigger:
+    # In src/sys/http/__init__.spl
+    pub mod router
+
+    export use router.Router    # ✅ OK: export in __init__.spl
+
+=== How to fix ===
+
+Move all `export` statements to the directory's `__init__.spl`:
+
+1. Remove the export from the regular file:
+    # router.spl
+    pub struct Router:    # Just use 'pub', no export
+        # ...
+
+2. Add the export to __init__.spl:
+    # __init__.spl
+    pub mod router
+    export use router.Router
+
+=== Rationale ===
+
+Directory structure controls visibility:
+- Regular files: Define items with `pub` (visible within directory)
+- __init__.spl: Controls what gets exported to external modules
+- This ensures __init__.spl is the gatekeeper for all exports
+
+=== How to suppress ===
+
+This lint cannot be suppressed. All exports must be in __init__.spl files.
+"#.to_string(),
         }
     }
 
@@ -522,6 +584,7 @@ Or in simple.sdn:
             LintName::ResourceLeak,
             LintName::WildcardMatch,
             LintName::NonExhaustiveMatch,
+            LintName::ExportOutsideInit,
         ]
     }
 }
