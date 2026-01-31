@@ -1,0 +1,181 @@
+# Tests for macro auto-import algorithm validating 6 Lean theorems
+
+use sspec.{describe, it, expect}
+use compiler.dependency.macro_import.{
+    SymKind, MacroSymbol, AutoImport,
+    MacroExports, MacroDirManifest,
+    is_auto_imported, auto_imported_macros,
+    glob_import, explicit_import, combine_exports
+}
+
+# Helper function to create test exports
+fn make_exports() -> MacroExports:
+    var exports = MacroExports.new()
+    exports.add_non_macro(MacroSymbol.value_sym("mod", "foo"))
+    exports.add_non_macro(MacroSymbol.value_sym("mod", "bar"))
+    exports.add_macro(MacroSymbol.macro_sym("mod", "my_macro"))
+    exports.add_macro(MacroSymbol.macro_sym("mod", "other_macro"))
+    exports
+
+describe "Lean Theorem 1: glob_doesnt_leak_macros_wf":
+    it "macro not in auto-import is excluded from glob":
+        val exports = make_exports()
+        expect exports.is_well_formed()
+
+        var manifest = MacroDirManifest.new("test")
+        manifest.add_auto_import(AutoImport.new("mod", "my_macro"))
+
+        val result = glob_import(manifest, exports)
+
+        # other_macro should NOT be in result
+        var found_other = false
+        for sym in result:
+            val sym_name = sym.get_name()
+            if sym_name == "other_macro":
+                found_other = true
+
+        expect not found_other
+
+        # my_macro SHOULD be in result
+        var found_my = false
+        for sym in result:
+            val sym_name = sym.get_name()
+            if sym_name == "my_macro":
+                found_my = true
+
+        expect found_my
+
+describe "Lean Theorem 2: nonmacros_always_globbed":
+    it "all non-macros present in glob result":
+        val exports = make_exports()
+        val manifest = MacroDirManifest.new("test")
+
+        val result = glob_import(manifest, exports)
+
+        var found_foo = false
+        var found_bar = false
+        for sym in result:
+            val sym_name = sym.get_name()
+            if sym_name == "foo":
+                found_foo = true
+            if sym_name == "bar":
+                found_bar = true
+
+        expect found_foo
+        expect found_bar
+
+describe "Lean Theorem 3: auto_imported_in_glob":
+    it "auto-imported macro is in glob result":
+        val exports = make_exports()
+        var manifest = MacroDirManifest.new("test")
+        manifest.add_auto_import(AutoImport.new("mod", "my_macro"))
+
+        val result = glob_import(manifest, exports)
+
+        var found = false
+        for sym in result:
+            val sym_name = sym.get_name()
+            if sym_name == "my_macro":
+                val sym_kind = sym.get_kind()
+                expect sym_kind.is_macro()
+                found = true
+
+        expect found
+
+describe "Lean Theorem 4: glob_subset":
+    it "all glob symbols come from exports":
+        val exports = make_exports()
+        var manifest = MacroDirManifest.new("test")
+        manifest.add_auto_import(AutoImport.new("mod", "my_macro"))
+
+        val result = glob_import(manifest, exports)
+
+        for sym in result:
+            var in_non_macros = false
+            for non_macro in exports.non_macros:
+                if sym.equals(non_macro):
+                    in_non_macros = true
+
+            var in_macros = false
+            for macro in exports.macros:
+                if sym.equals(macro):
+                    in_macros = true
+
+            expect in_non_macros or in_macros
+
+describe "Lean Theorem 5: empty_auto_import_no_macros":
+    it "empty auto-import yields no macros in glob":
+        val exports = make_exports()
+        val manifest = MacroDirManifest.new("test")
+
+        val auto_macros = auto_imported_macros(manifest, exports)
+        expect auto_macros.len() == 0
+
+        val result = glob_import(manifest, exports)
+
+        for sym in result:
+            val sym_kind = sym.get_kind()
+            expect not sym_kind.is_macro()
+
+describe "Lean Theorem 6: autoImported_combine":
+    it "combined auto-imports equals sum of individual":
+        var e1 = MacroExports.new()
+        e1.add_macro(MacroSymbol.macro_sym("mod1", "macro1"))
+
+        var e2 = MacroExports.new()
+        e2.add_macro(MacroSymbol.macro_sym("mod2", "macro2"))
+
+        val combined = combine_exports(e1, e2)
+
+        var manifest = MacroDirManifest.new("test")
+        manifest.add_auto_import(AutoImport.new("mod1", "macro1"))
+        manifest.add_auto_import(AutoImport.new("mod2", "macro2"))
+
+        val auto1 = auto_imported_macros(manifest, e1)
+        val auto2 = auto_imported_macros(manifest, e2)
+        val auto_combined = auto_imported_macros(manifest, combined)
+
+        expect auto_combined.len() == auto1.len() + auto2.len()
+
+describe "Basic functionality tests":
+    it "is_auto_imported finds macro in list":
+        var manifest = MacroDirManifest.new("test")
+        manifest.add_auto_import(AutoImport.new("mod", "my_macro"))
+
+        val sym = MacroSymbol.macro_sym("mod", "my_macro")
+        expect is_auto_imported(manifest, sym)
+
+    it "is_auto_imported returns false for non-macro":
+        var manifest = MacroDirManifest.new("test")
+        manifest.add_auto_import(AutoImport.new("mod", "foo"))
+
+        val sym = MacroSymbol.value_sym("mod", "foo")
+        expect not is_auto_imported(manifest, sym)
+
+    it "explicit_import finds non-macro":
+        val exports = make_exports()
+        match explicit_import(exports, "foo"):
+            case Some(sym):
+                val sym_name = sym.get_name()
+                expect sym_name == "foo"
+            case nil:
+                fail("Expected Some(symbol)")
+
+    it "explicit_import finds macro":
+        val exports = make_exports()
+        match explicit_import(exports, "my_macro"):
+            case Some(sym):
+                val sym_name = sym.get_name()
+                val sym_kind = sym.get_kind()
+                expect sym_name == "my_macro"
+                expect sym_kind.is_macro()
+            case nil:
+                fail("Expected Some(symbol)")
+
+    it "explicit_import returns None for non-existent":
+        val exports = make_exports()
+        match explicit_import(exports, "nonexistent"):
+            case Some(_):
+                fail("Expected None")
+            case nil:
+                pass
