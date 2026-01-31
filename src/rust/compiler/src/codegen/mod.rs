@@ -1,5 +1,6 @@
 pub mod backend_trait;
 pub mod buffer_pool;
+pub mod bytecode;
 pub mod common_backend;
 mod cranelift;
 pub mod cranelift_emitter;
