@@ -107,8 +107,8 @@ cat src/lib.rs
 |---------|----------|
 | Rust source | `src/*/src/*.rs` |
 | Rust tests | `src/*/tests/*.rs` |
-| Simple source | `simple/std_lib/src/**/*.spl` |
-| Simple tests | `simple/std_lib/test/**/*_spec.spl` |
+| Simple source | `src/std/src/**/*.spl` |
+| Simple tests | `src/std/test/**/*_spec.spl` |
 | Specs | `doc/spec/*.md` |
 | Status | `doc/status/*.md` |
 

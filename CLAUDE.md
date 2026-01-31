@@ -39,7 +39,7 @@ Skills located in `.claude/skills/`.
 - **Pattern Matching Safety**: Exhaustiveness checking (5/5 complete)
 - **Scala-Style Syntax**: `val`/`var` variables, implicit `self` in methods
 - Memory model: Reference capabilities (`mut T`, `iso T`, `T`)
-- Formatter/linter: `simple/app/`
+- Formatter/linter: `src/app/`
 - AOP & Unified Predicates: 19/51 features, 611 tests
 
 ---
@@ -405,7 +405,7 @@ See `/coding` skill for full details.
 - ❌ **NEVER use YAML** for Simple configs - use SDN format instead
 - ℹ️ **Rust tooling**: `Cargo.toml` is acceptable (Rust standard, not Simple config)
 - 📖 **SDN Parser**: Use `simple_sdn::parse()` from `simple_sdn` crate
-- 📊 **Examples**: `doc/todo/todo_db.sdn`, `doc/feature/feature_db.sdn`, `simple/simple.sdn`
+- 📊 **Examples**: `doc/todo/todo_db.sdn`, `doc/feature/feature_db.sdn`, `simple.sdn`
 
 **Good Example (SDN manifest):**
 ```sdn
@@ -436,7 +436,7 @@ version = "1.0.0"
 ```
 
 **Migration Status:**
-- ✅ SDN parser implemented in `src/rust/sdn/`
+- ✅ SDN parser implemented in `rust/sdn/`
 - ✅ Package manifest supports both `.sdn` (preferred) and `.toml` (legacy)
 - ✅ Data tracking files use SDN exclusively
 - 🔄 Existing `.toml` manifests will be migrated to `.sdn` over time
@@ -449,10 +449,10 @@ version = "1.0.0"
 
 ## Documentation
 
-**Bug Reports:** `simple/bug_report.md`
-**Improvement Requests:** `simple/improve_request.md`
+**Bug Reports:** `doc/bug_report.md`
+**Improvement Requests:** `doc/improve_request.md`
 **Job Reports:** `doc/report/` (completion reports, session summaries)
-**Feature Specs:** `simple/std_lib/test/features/` - **Executable SSpec tests (see `/doc` skill)**
+**Feature Specs:** `src/std/test/features/` - **Executable SSpec tests (see `/doc` skill)**
 **Research:** `doc/research/` (investigation, design exploration)
 **Guides:** `doc/guide/` (user-facing tutorials)
 
@@ -513,10 +513,10 @@ simple bug-gen
 make check         # fmt + lint + test (before commit)
 make check-full    # + coverage + duplication
 make test-all      # Run ALL tests: Rust + doc-tests + Simple/SSpec (excludes skip/slow/ignore)
-cargo test --workspace
+cd rust && cargo test --workspace
 
 # Runtime binary (Rust core)
-./target/debug/simple_runtime script.spl
+./rust/target/debug/simple_runtime script.spl
 
 # CLI wrapper (Simple implementation)
 ./bin/wrappers/simple script.spl
@@ -526,21 +526,21 @@ cargo test --workspace
 
 ```bash
 # Build Rust runtime (required first)
-cargo build                    # Debug build
-cargo build --release          # Release build (optimized)
+cd rust && cargo build                    # Debug build
+cd rust && cargo build --release          # Release build (optimized)
 
 # Rebuild after Rust changes
-cargo build 2>&1 | head -20   # Build and check for warnings/errors
+cd rust && cargo build 2>&1 | head -20   # Build and check for warnings/errors
 
 # Run a Simple script directly
-./target/debug/simple_runtime script.spl
+./rust/target/debug/simple_runtime script.spl
 
 # Run with CLI wrapper (uses src/app/cli/main.spl)
 ./bin/wrappers/simple script.spl
 
 # Run lint on Simple code
 ./bin/wrappers/simple lint src/app/fix/rules.spl
-./target/debug/simple_runtime src/app/lint/main.spl -- src/app/fix/rules.spl
+./rust/target/debug/simple_runtime src/app/lint/main.spl -- src/app/fix/rules.spl
 
 # Run fix with options
 ./bin/wrappers/simple fix file.spl --dry-run        # Preview fixes
@@ -548,11 +548,11 @@ cargo build 2>&1 | head -20   # Build and check for warnings/errors
 ./bin/wrappers/simple fix file.spl --fix-interactive  # Prompt per fix
 
 # Run tests
-./target/debug/simple_runtime test                        # All Simple/SSpec tests
-./target/debug/simple_runtime test path/to/spec.spl       # Single test file
-./target/debug/simple_runtime test --list                  # List tests without running
-cargo test --workspace                                 # Rust tests
-cargo test --doc --workspace                           # Doc-tests only
+./rust/target/debug/simple_runtime test                        # All Simple/SSpec tests
+./rust/target/debug/simple_runtime test path/to/spec.spl       # Single test file
+./rust/target/debug/simple_runtime test --list                  # List tests without running
+cd rust && cargo test --workspace                               # Rust tests
+cd rust && cargo test --doc --workspace                         # Doc-tests only
 ```
 
 ### Fixing Rust Warnings
@@ -561,7 +561,7 @@ When `cargo build` shows warnings, fix them before committing:
 
 ```bash
 # Check for warnings
-cargo build 2>&1 | grep "warning:"
+cd rust && cargo build 2>&1 | grep "warning:"
 
 # Common fixes:
 # - "shared reference to mutable static" → Use OnceLock + AtomicUsize
@@ -573,8 +573,8 @@ cargo build 2>&1 | grep "warning:"
 
 | Binary | Location | Language | Purpose |
 |--------|----------|----------|---------|
-| `simple_runtime` | `target/debug/simple_runtime` | Rust | Core runtime (bootstraps Simple code) |
-| `simple_stub_old` | `target/debug/simple_stub_old` | Rust | Settlement loader stub |
+| `simple_runtime` | `rust/target/debug/simple_runtime` | Rust | Core runtime (bootstraps Simple code) |
+| `simple_stub_old` | `rust/target/debug/simple_stub_old` | Rust | Settlement loader stub |
 | `simple` | `bin/wrappers/simple` | Shell+Simple | Default CLI → `src/app/cli/main.spl` (via `simple_runtime`) |
 | `simple_runtime` | `bin/wrappers/simple_runtime` | Shell | Direct passthrough to Rust runtime binary |
 | `simple_stub` | `bin/wrappers/simple_stub` | Shell+Simple | Stub wrapper → `src/app/stub/main.spl` |
@@ -599,54 +599,54 @@ cargo build 2>&1 | grep "warning:"
 
 ```bash
 # List all tests without running
-./target/debug/simple_runtime test --list
+./rust/target/debug/simple_runtime test --list
 
 # List tests with tags displayed
-./target/debug/simple_runtime test --list --show-tags
+./rust/target/debug/simple_runtime test --list --show-tags
 
 # List only ignored tests (at Rust level)
-./target/debug/simple_runtime test --list-ignored
+./rust/target/debug/simple_runtime test --list-ignored
 
 # Count tests by type
-./target/debug/simple_runtime test --list | wc -l              # Total tests
-./target/debug/simple_runtime test --list-ignored | wc -l     # Ignored tests
+./rust/target/debug/simple_runtime test --list | wc -l              # Total tests
+./rust/target/debug/simple_runtime test --list-ignored | wc -l     # Ignored tests
 ```
 
 ### Running Specific Test Types
 
 ```bash
 # Run all tests (excludes slow tests by default)
-./target/debug/simple_runtime test
+./rust/target/debug/simple_runtime test
 
 # Run only slow tests
-./target/debug/simple_runtime test --only-slow
+./rust/target/debug/simple_runtime test --only-slow
 
 # Run only skipped tests (usually fail - they're unimplemented)
-./target/debug/simple_runtime test --only-skipped
+./rust/target/debug/simple_runtime test --only-skipped
 
 # Run tests matching a pattern
-./target/debug/simple_runtime test pattern_here
+./rust/target/debug/simple_runtime test pattern_here
 
 # Run tests from specific file
-./target/debug/simple_runtime test path/to/test_spec.spl
+./rust/target/debug/simple_runtime test path/to/test_spec.spl
 
 # Run with tag filtering (AND logic)
-./target/debug/simple_runtime test --tag=integration --tag=database
+./rust/target/debug/simple_runtime test --tag=integration --tag=database
 ```
 
 ### Doc-Tests (Rust)
 
 ```bash
 # Run all doc-tests (workspace-wide)
-cargo test --doc --workspace
+cd rust && cargo test --doc --workspace
 
 # Run doc-tests for specific crate
-cargo test --doc -p simple-driver
-cargo test --doc -p arch_test
-cargo test --doc -p simple-compiler
+cd rust && cargo test --doc -p simple-driver
+cd rust && cargo test --doc -p arch_test
+cd rust && cargo test --doc -p simple-compiler
 
 # Count total ignored doc-tests
-cargo test --doc --workspace 2>&1 | grep " ... ignored$" | wc -l
+cd rust && cargo test --doc --workspace 2>&1 | grep " ... ignored$" | wc -l
 ```
 
 ### Test Markers Explained
@@ -677,18 +677,18 @@ cargo test --doc --workspace 2>&1 | grep " ... ignored$" | wc -l
 
 ```bash
 # Development workflow
-./target/debug/simple_runtime test                    # Quick feedback (excludes slow)
-./target/debug/simple_runtime test --only-slow        # Before commit (run slow tests)
-cargo test --doc --workspace                  # Verify doc examples
+./rust/target/debug/simple_runtime test                    # Quick feedback (excludes slow)
+./rust/target/debug/simple_runtime test --only-slow        # Before commit (run slow tests)
+cd rust && cargo test --doc --workspace        # Verify doc examples
 
 # Investigation
-./target/debug/simple_runtime test --list --show-tags           # See all tests with tags
-./target/debug/simple_runtime test --only-skipped --list        # See unimplemented features
-cargo test --doc -p simple-driver 2>&1 | grep ignored   # Check ignored doc-tests
+./rust/target/debug/simple_runtime test --list --show-tags           # See all tests with tags
+./rust/target/debug/simple_runtime test --only-skipped --list        # See unimplemented features
+cd rust && cargo test --doc -p simple-driver 2>&1 | grep ignored   # Check ignored doc-tests
 
 # Targeted testing
-./target/debug/simple_runtime test my_feature         # Run tests matching "my_feature"
-./target/debug/simple_runtime test --tag=integration  # Run integration tests only
+./rust/target/debug/simple_runtime test my_feature         # Run tests matching "my_feature"
+./rust/target/debug/simple_runtime test --tag=integration  # Run integration tests only
 ```
 
 ### Test Statistics
@@ -714,16 +714,16 @@ Test runs are automatically tracked in `doc/test/test_db.sdn` (in the `test_runs
 
 ```bash
 # List all test runs
-./target/debug/simple_runtime test --list-runs
+./rust/target/debug/simple_runtime test --list-runs
 
 # Cleanup stale runs (marks as crashed if running > 2 hours or process dead)
-./target/debug/simple_runtime test --cleanup-runs
+./rust/target/debug/simple_runtime test --cleanup-runs
 
 # Keep only 50 most recent runs
-./target/debug/simple_runtime test --prune-runs=50
+./rust/target/debug/simple_runtime test --prune-runs=50
 
 # List only running tests
-./target/debug/simple_runtime test --list-runs --runs-status=running
+./rust/target/debug/simple_runtime test --list-runs --runs-status=running
 ```
 
 **Run Record Fields:**
@@ -738,8 +738,10 @@ Test runs are automatically tracked in `doc/test/test_db.sdn` (in the `test_runs
 ## Lean 4 Verification
 
 ```bash
-./target/debug/simple_runtime --gen-lean module.spl --verify memory|types|effects|all
+./rust/target/debug/simple_runtime --gen-lean module.spl --verify memory|types|effects|all
 ```
+
+> **Note:** Cargo workspace is at `rust/Cargo.toml`. Run all `cargo` commands from the `rust/` directory.
 
 Projects in `verification/`: borrow checker, GC safety, effects, SC-DRF.
 

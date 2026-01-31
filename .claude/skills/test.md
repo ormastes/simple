@@ -21,21 +21,21 @@
 
 ### Rust Tests
 ```bash
-cargo test --workspace              # All tests
-cargo test -p simple-driver         # Specific crate
-cargo test -p simple-driver runner  # Pattern match
+cd rust && cargo test --workspace              # All tests
+cd rust && cargo test -p simple-driver         # Specific crate
+cd rust && cargo test -p simple-driver runner  # Pattern match
 make test                           # Via Makefile
 ```
 
 ### Simple (.spl) Tests
 ```bash
 # Via cargo (auto-discovered)
-cargo test -p simple-driver simple_stdlib
-cargo test -p simple-driver simple_stdlib_unit
-cargo test -p simple-driver simple_stdlib_system
+cd rust && cargo test -p simple-driver simple_stdlib
+cd rust && cargo test -p simple-driver simple_stdlib_unit
+cd rust && cargo test -p simple-driver simple_stdlib_system
 
 # Direct interpreter
-./target/debug/simple simple/std_lib/test/unit/core/arithmetic_spec.spl
+./rust/target/debug/simple src/std/test/unit/core/arithmetic_spec.spl
 ```
 
 ## Writing Rust Tests
@@ -60,7 +60,7 @@ mod tests {
 
 ## Writing Simple BDD Tests
 
-Tests go in `simple/std_lib/test/{unit|system|integration}/`
+Tests go in `src/std/test/{unit|system|integration}/`
 
 **CRITICAL: Use docstring markdown, NOT println() for test documentation!**
 

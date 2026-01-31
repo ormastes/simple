@@ -530,6 +530,139 @@ This document describes the target architecture where **most logic is implemente
 
 ---
 
+## AOP Weaving: Which Layer?
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    AOP WEAVING PIPELINE                                 │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  Source Code                                                            │
+│       │                                                                 │
+│       ▼                                                                 │
+│  ┌─────────────┐                                                        │
+│  │   PARSER    │  Parses `pc { ... }` blocks into AopAdvice AST nodes  │
+│  │             │  (rust/parser/src/ast/aop.rs)                          │
+│  └──────┬──────┘                                                        │
+│         │                                                               │
+│         ▼                                                               │
+│  ┌─────────────┐                                                        │
+│  │     HIR     │  lower_aop_constructs() collects pointcut/advice      │
+│  │  LOWERING   │  into unified predicates                               │
+│  │             │  (rust/compiler/src/hir/lower/module_lowering/         │
+│  │             │   module_pass.rs:207)                                   │
+│  └──────┬──────┘                                                        │
+│         │                                                               │
+│         ▼                                                               │
+│  ┌─────────────┐                                                        │
+│  │  PREDICATE  │  Unified predicate system matches join points         │
+│  │   MATCHING  │  (rust/compiler/src/predicate.rs:92)                  │
+│  └──────┬──────┘                                                        │
+│         │                                                               │
+│         ▼                                                               │
+│  ╔═════════════╗  ◄── WEAVING HAPPENS HERE (MIR level)                 │
+│  ║  MIR WEAVER ║  insert_advice_calls() splices before/after/around    │
+│  ║             ║  calls directly into MIR instruction blocks            │
+│  ║             ║  (rust/compiler/src/weaving/weaver.rs:107)            │
+│  ╚══════╤══════╝                                                        │
+│         │                                                               │
+│         ▼                                                               │
+│    Woven MIR → Codegen / Interpreter                                    │
+│                                                                         │
+│  KEY: Weaving is at the MIR level, NOT AST or HIR.                     │
+│  AST only parses the `pc{}` syntax. HIR collects predicates.           │
+│  MIR is where advice calls are physically inserted into code.          │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Contracts: Which Layer?
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    CONTRACT ASSERTION PIPELINE                          │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  HIR TYPES    HirContract { pre, post, invariant }                     │
+│               (rust/compiler/src/hir/types/contracts.rs)               │
+│                    │                                                    │
+│                    ▼                                                    │
+│  HIR LOWERING lower_contract() transforms contract AST → HIR          │
+│               (rust/compiler/src/hir/lower/module_lowering/            │
+│                contract.rs:141)                                         │
+│                    │                                                    │
+│                    ▼                                                    │
+│  MIR EMISSION emit_entry_contracts() / emit_exit_contracts()           │
+│               Emits ContractCheck + ContractOldCapture instructions    │
+│               (rust/compiler/src/mir/lower/lowering_contracts.rs)      │
+│               (rust/compiler/src/mir/inst_enum.rs:646)                 │
+│                    │                                                    │
+│                    ▼                                                    │
+│  RUNTIME FFI  simple_contract_check() raises on violation              │
+│               (rust/runtime/src/value/ffi/contracts.rs:69)             │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## DI vs AOP: Separate Systems
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    DI AND AOP RELATIONSHIP                              │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  DI and AOP are SEPARATE systems that coordinate, not overlap:         │
+│                                                                         │
+│  ┌─────────────────────────────────────────────────────────────────┐   │
+│  │  DI (Dependency Injection)                                       │   │
+│  │  • Binds interfaces to implementations (Backend trait → impl)   │   │
+│  │  • Profile-based: dev/test/prod/sdn select different bindings   │   │
+│  │  • Operates at OBJECT CONSTRUCTION time                          │   │
+│  │  • Does NOT use AOP internally                                   │   │
+│  │  • Does NOT modify code — only selects which code to run         │   │
+│  └─────────────────────────────────────────────────────────────────┘   │
+│                                                                         │
+│  ┌─────────────────────────────────────────────────────────────────┐   │
+│  │  AOP (Aspect-Oriented Programming)                               │   │
+│  │  • Weaves cross-cutting concerns (logging, tracing, contracts)  │   │
+│  │  • Operates at MIR COMPILATION time (modifies instruction flow) │   │
+│  │  • Uses unified predicates to match join points                  │   │
+│  │  • DI-injected logger is USED BY AOP (DI provides the logger,  │   │
+│  │    AOP decides where to call it)                                 │   │
+│  └─────────────────────────────────────────────────────────────────┘   │
+│                                                                         │
+│  Coordination flow:                                                    │
+│    config.spl → di.spl (binds Logger impl) → aop.spl (uses Logger)   │
+│                                                                         │
+│  DI does NOT use AOP. AOP uses DI-provided services.                   │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Current Implementation: Rust (Target: Simple)
+
+The AOP/contract/DI pipeline is currently implemented in **Rust**, as part of the
+compiler crate. The target architecture (described in this document) envisions
+rewriting these as Simple modules (`aop.spl`, `di.spl`, `config.spl`), but the
+current working implementation lives in:
+
+| Component | Current (Rust) | Target (Simple) |
+|-----------|---------------|-----------------|
+| AOP Weaver | `rust/compiler/src/weaving/weaver.rs` | `aop.spl` |
+| Predicates | `rust/compiler/src/predicate.rs` | Part of `aop.spl` |
+| Contracts | `rust/compiler/src/hir/types/contracts.rs` | Part of `hir.spl` |
+| Contract MIR | `rust/compiler/src/mir/lower/lowering_contracts.rs` | Part of `mir.spl` |
+| DI Container | Design only (profile-based binding) | `di.spl` |
+| Config | `simple.sdn` loading via Rust SDN crate | `config.spl` |
+
+---
+
 ## Summary: Key Architecture Points
 
 ```
@@ -551,11 +684,16 @@ This document describes the target architecture where **most logic is implemente
 │     │ → Codegen      │ → Execute      │ → NO-OP        │               │
 │     └────────────────┴────────────────┴────────────────┘               │
 │                                                                         │
-│  4. CONFIG → DI → AOP                                                   │
+│  4. CONFIG → DI → AOP (separate systems, coordinated)                   │
 │     Config loads settings, DI binds implementations,                    │
-│     AOP weaves logging/tracing                                          │
+│     AOP weaves cross-cutting concerns at MIR level                     │
+│     DI does NOT use AOP; AOP uses DI-provided services                 │
 │                                                                         │
-│  5. SDN SAFETY                                                          │
+│  5. AOP WEAVING AT MIR LEVEL                                            │
+│     Parse pc{} → HIR predicates → MIR advice insertion                 │
+│     Contracts also emit MIR instructions (ContractCheck)               │
+│                                                                         │
+│  6. SDN SAFETY                                                          │
 │     SdnBackend blocks all code execution paths                         │
 │     Only literal data values allowed                                    │
 │                                                                         │
@@ -689,34 +827,41 @@ This document describes the target architecture where **most logic is implemente
 
 ## Migration Plan: Rust → Simple
 
-### Phase A: Self-Hosting Preparation
+### Migration Status (Updated 2026-01-31)
 
-| Component | Current | Target | Priority |
-|-----------|---------|--------|----------|
-| Lexer | Rust (parser/) | Simple (lexer.spl) | P1 |
-| Parser | Rust (parser/) | Simple (parser.spl) | P1 |
-| AST | Rust (parser/ast/) | Simple (ast.spl) | P1 |
-| Type Checker | Rust (compiler/) | Simple (type_checker.spl) | P2 |
-| HIR | Rust (compiler/hir/) | Simple (hir.spl) | P2 |
-| Interpreter | Rust (compiler/) | Simple (interpreter.spl) | P2 |
+**All phases complete.** Simple compiler pipeline is self-hosted.
 
-### Phase B: Compiler in Simple
+| Component | Simple File(s) | Lines | Status |
+|-----------|---------------|-------|--------|
+| Lexer | `lexer.spl` | 1,250 | ✅ Done |
+| Parser | `parser.spl` | 1,809 | ✅ Done |
+| TreeSitter | `treesitter.spl` | 1,333 | ✅ Done |
+| Type Inference | `type_infer.spl` | 1,478 | ✅ Done |
+| HIR | `hir_types.spl` + `hir_definitions.spl` + `hir_lowering.spl` | 2,107 | ✅ Done |
+| MIR | `mir_data.spl` + `mir_lowering.spl` | 1,526 | ✅ Done |
+| Backend | `backend.spl` | 842 | ✅ Done |
+| Codegen | `codegen.spl` | 758 | ✅ Done |
+| Resolve | `resolve.spl` | 786 | ✅ Done |
+| Driver | `driver.spl` | 591 | ✅ Done |
+| Interpreter | `src/app/interpreter/` (65 files) | ~8,000 | ✅ Done |
+| CLI | `src/app/cli/main.spl` | 552 | ✅ Done |
+| Formatter | `src/app/formatter/` | - | ✅ Done |
+| Linter/Fix | `src/app/lint/` + `src/app/fix/` | - | ✅ Done |
+| Test Runner | `src/app/test_runner_new/` (8 files) | - | ✅ Done |
+| LSP | `src/app/lsp/` | - | 🔄 In Progress |
+| DAP | `src/app/dap/` | - | 🔄 In Progress |
 
-| Component | Current | Target | Priority |
-|-----------|---------|--------|----------|
-| MIR | Rust (compiler/mir/) | Simple (mir.spl) | P3 |
-| Codegen | Rust (compiler/) | Simple (codegen.spl) + FFI | P3 |
-| Optimizer | Rust | Simple (optimizer.spl) | P4 |
+**Note:** `hir.spl` (29 lines) and `mir.spl` (22 lines) are re-export modules.
+Actual logic is in the split files listed above.
 
-### Phase C: Tools in Simple (Mostly Done)
+**Additional compiler modules:**
+- `blocks/` - Custom grammar blocks (builtin, registry, resolver)
+- `monomorphize/` - Generic monomorphization (deferred, partition, tracker, cycle_detector)
+- `linker/` - Linking (link, mold, smf_reader, obj_taker)
+- `loader/` - Module loading (module_loader, jit_instantiator)
+- `dependency/` - Dependency analysis (graph, resolution, visibility, symbol)
 
-| Component | Current | Status |
-|-----------|---------|--------|
-| CLI | Simple (cli/main.spl) | ✅ Done |
-| SDN Tool | Simple (sdn/main.spl) | ✅ Done |
-| Formatter | Simple (app/formatter/) | ✅ Done |
-| Linter | Simple (app/linter/) | ✅ Done |
-| Test Runner | Simple | ✅ Done |
+**Total compiler: ~27,423 lines. Total apps: ~38,029 lines.**
 
 ---
 
@@ -757,16 +902,18 @@ net.connect(host, port)      →    rt_tcp_connect(host, port)
 
 ---
 
-## Line Count Targets
+## Line Count Comparison (Rust vs Simple - Actual)
 
-| Component | Current (Rust) | Target (Simple) | Reduction |
-|-----------|----------------|-----------------|-----------|
-| Lexer | ~2,000 lines | ~500 lines | 75% |
-| Parser | ~8,000 lines | ~2,000 lines | 75% |
-| Type Checker | ~5,000 lines | ~1,500 lines | 70% |
-| HIR | ~3,000 lines | ~1,000 lines | 67% |
-| Interpreter | ~4,000 lines | ~1,200 lines | 70% |
-| MIR | ~6,000 lines | ~2,000 lines | 67% |
+| Component | Rust (src/rust/) | Simple (simple/compiler/) | Ratio |
+|-----------|-----------------|--------------------------|-------|
+| Lexer | ~2,000 | 1,250 | 63% |
+| Parser | ~8,000 (AST: 950) | 1,809 | 23% |
+| TreeSitter | N/A | 1,333 | New |
+| Type Inference | ~5,000 | 1,478 | 30% |
+| HIR | ~3,000 (types: 501) | 2,107 (3 files) | 70% |
+| MIR | ~6,000 (inst: 869) | 1,526 (2 files) | 25% |
+| Interpreter | ~10,000 | ~8,000 (65 files) | 80% |
+| Codegen | ~5,000 (Cranelift) | 758 (+ FFI calls) | 15% |
 | **Total Compiler** | **~28,000** | **~8,200** | **71%** |
 
 **Note**: Simple code is more concise due to:

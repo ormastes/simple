@@ -13,7 +13,7 @@ describe "Calculator":
             expect 2 + 2 == 4
 ```
 
-Run: `simple test` or `cargo test -p simple-driver simple_stdlib`
+Run: `simple test` or `cd rust && cargo test -p simple-driver simple_stdlib`
 
 ## Complete Workflow: Test → Documentation
 
@@ -85,10 +85,10 @@ describe "MyFeature":
 
 ```bash
 # Run your spec
-cargo test -p simple-driver simple_stdlib_system_my_feature
+cd rust && cargo test -p simple-driver simple_stdlib_system_my_feature
 
 # Or run directly
-./target/debug/simple simple/test/system/features/my_feature/my_feature_spec.spl
+./rust/target/debug/simple simple/test/system/features/my_feature/my_feature_spec.spl
 ```
 
 ### 5. Generate Documentation
@@ -138,7 +138,7 @@ The generator:
 
 ### Location
 ```
-simple/std_lib/test/
+src/std/test/
   unit/           # Fast, isolated (branch/condition coverage)
   integration/    # Public function touch (100%)
   system/         # Public type touch (100%)
@@ -442,17 +442,17 @@ The generator creates an index with:
 
 ```bash
 # All stdlib tests
-cargo test -p simple-driver simple_stdlib
+cd rust && cargo test -p simple-driver simple_stdlib
 
 # By layer
-cargo test -p simple-driver simple_stdlib_unit
-cargo test -p simple-driver simple_stdlib_system
+cd rust && cargo test -p simple-driver simple_stdlib_unit
+cd rust && cargo test -p simple-driver simple_stdlib_system
 
 # Specific test
-cargo test -p simple-driver simple_stdlib_unit_core_string_spec
+cd rust && cargo test -p simple-driver simple_stdlib_unit_core_string_spec
 
 # Direct interpreter
-./target/debug/simple simple/std_lib/test/unit/core/arithmetic_spec.spl
+./rust/target/debug/simple src/std/test/unit/core/arithmetic_spec.spl
 
 # With options
 simple test --tag slow

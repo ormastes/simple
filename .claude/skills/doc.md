@@ -9,7 +9,7 @@ Documentation in Simple follows a "specification as code" philosophy - executabl
 | Research | `doc/research/` | Markdown | Investigation, analysis, design exploration |
 | Design | `doc/design/` | Markdown | Architecture decisions, system design |
 | Guides | `doc/guide/` | Markdown | User-facing tutorials, how-to guides |
-| Specifications | `simple/std_lib/test/features/` | SSpec (`.spl`) | Executable feature specs that generate docs |
+| Specifications | `src/std/test/features/` | SSpec (`.spl`) | Executable feature specs that generate docs |
 | API Docs | Generated | Markdown | Auto-generated from SSpec tests |
 | Reports | `doc/report/` | Markdown | Session summaries, completion reports |
 
@@ -17,7 +17,7 @@ Documentation in Simple follows a "specification as code" philosophy - executabl
 
 ### Specifications MUST be SSpec
 - ❌ **NEVER write spec.md files** - write `*_spec.spl` instead
-- ✅ Specifications are executable tests in `simple/std_lib/test/features/`
+- ✅ Specifications are executable tests in `src/std/test/features/`
 - ✅ Use SSpec framework to generate documentation from tests
 - ✅ See `/sspec` skill for test writing guidelines
 
@@ -44,7 +44,7 @@ doc/
 └── spec/              # NON-executable specs only
     └── tooling/       # Tooling-specific (not feature specs)
 
-simple/std_lib/test/features/  # EXECUTABLE feature specs
+src/std/test/features/  # EXECUTABLE feature specs
 ├── ml/
 │   ├── config_system_spec.spl
 │   ├── experiment_tracking_spec.spl
@@ -505,7 +505,7 @@ Location: `doc/design/`
 ### 3. Specification Phase
 Write executable SSpec feature specification.
 
-Location: `simple/std_lib/test/features/*/`
+Location: `src/std/test/features/*/`
 
 ### 4. Implementation Phase
 Implement code with inline documentation.
@@ -520,7 +520,7 @@ Run doc generator to create API docs from SSpec.
 
 ```bash
 # Generate documentation from specs
-./target/debug/simple simple/std_lib/test/features/generate_docs.spl
+./rust/target/debug/simple src/std/test/features/generate_docs.spl
 ```
 
 ## Common Pitfalls
@@ -554,7 +554,7 @@ Include setup, usage, and cleanup in examples.
 ### Doc Generation
 ```bash
 # Generate docs from SSpec tests
-./target/debug/simple simple/std_lib/test/features/generate_docs.spl
+./rust/target/debug/simple src/std/test/features/generate_docs.spl
 
 # Outputs to: doc/spec/generated/
 ```
@@ -574,7 +574,7 @@ make lint-docs
 ## Examples from Codebase
 
 ### Good: Executable Specification
-`simple/std_lib/test/features/data_structures/tensor_dimensions_spec.spl`
+`src/std/test/features/data_structures/tensor_dimensions_spec.spl`
 - Executable test with metadata
 - Generates documentation
 - Includes code examples

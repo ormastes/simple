@@ -1,0 +1,639 @@
+# Deferred monomorphization - instantiate generic templates on demand
+#
+# This module enables:
+# 1. Loading generic templates from .smf files
+# 2. Instantiating specialized versions with concrete type arguments
+# 3. Caching specializations to avoid redundant work
+# 4. Supporting both link-time and JIT-time instantiation
+
+use src/compiler/monomorphize/metadata (
+    MonomorphizationMetadata,
+    ConcreteType,
+    SpecializationKey,
+    GenericFunctionMeta,
+    GenericStructMeta,
+    GenericClassMeta,
+    GenericEnumMeta,
+    GenericTraitMeta
+)
+use src/compiler/hir (HirType, HirModule)
+use src/compiler/ast (
+    FunctionDef,
+    StructDef,
+    ClassDef,
+    EnumDef,
+    TraitDef,
+    GenericParam,
+    Type,
+    WhereClause
+)
+use src/compiler/monomorphize/engine (Monomorphizer)
+use src/compiler/error (CompileError)
+
+# Instantiation timing mode
+enum InstantiationMode:
+    LinkTime    # Instantiate during native binary linking
+    JitTime     # Instantiate during .smf loader execution
+
+# Generic template wrapper
+enum GenericTemplate:
+    Function(FunctionDef)
+    Struct(StructDef)
+    Class(ClassDef)
+    Enum(EnumDef)
+    Trait(TraitDef)
+
+impl GenericTemplate:
+    # Get the name of this template
+    fn name() -> text:
+        match self:
+            GenericTemplate.Function(f): f.name
+            GenericTemplate.Struct(s): s.name
+            GenericTemplate.Class(c): c.name
+            GenericTemplate.Enum(e): e.name
+            GenericTemplate.Trait(t): t.name
+
+    # Get the generic parameters of this template
+    fn generic_params() -> [text]:
+        match self:
+            GenericTemplate.Function(f): f.generic_params
+            GenericTemplate.Struct(s): s.generic_params
+            GenericTemplate.Class(c): c.generic_params
+            GenericTemplate.Enum(e): e.generic_params
+            GenericTemplate.Trait(t): t.generic_params
+
+    # Check if this is a function template
+    fn is_function() -> bool:
+        match self:
+            GenericTemplate.Function(_): true
+            _: false
+
+    # Get as function, or error if not a function
+    fn as_function() -> FunctionDef:
+        match self:
+            GenericTemplate.Function(f): f
+            _: throw CompileError.new("{self.name()} is not a function template")
+
+    # Get as struct, or error if not a struct
+    fn as_struct() -> StructDef:
+        match self:
+            GenericTemplate.Struct(s): s
+            _: throw CompileError.new("{self.name()} is not a struct template")
+
+    # Get as class, or error if not a class
+    fn as_class() -> ClassDef:
+        match self:
+            GenericTemplate.Class(c): c
+            _: throw CompileError.new("{self.name()} is not a class template")
+
+    # Get as enum, or error if not an enum
+    fn as_enum() -> EnumDef:
+        match self:
+            GenericTemplate.Enum(e): e
+            _: throw CompileError.new("{self.name()} is not an enum template")
+
+# Compiled code wrapper
+enum CompiledCode:
+    Function(FunctionDef)
+    Struct(StructDef)
+    Class(ClassDef)
+    Enum(EnumDef)
+    Trait(TraitDef)
+
+impl CompiledCode:
+    # Get as function
+    fn as_function() -> FunctionDef:
+        match self:
+            CompiledCode.Function(f): f
+            _: throw CompileError.new("Not a function")
+
+    # Get as struct
+    fn as_struct() -> StructDef:
+        match self:
+            CompiledCode.Struct(s): s
+            _: throw CompileError.new("Not a struct")
+
+    # Get as class
+    fn as_class() -> ClassDef:
+        match self:
+            CompiledCode.Class(c): c
+            _: throw CompileError.new("Not a class")
+
+    # Get as enum
+    fn as_enum() -> EnumDef:
+        match self:
+            CompiledCode.Enum(e): e
+            _: throw CompileError.new("Not an enum")
+
+# Main deferred monomorphization engine
+class DeferredMonomorphizer:
+    template_cache: Dict<text, GenericTemplate>
+    specialization_cache: Dict<SpecializationKey, CompiledCode>
+    metadata: MonomorphizationMetadata
+    mode: InstantiationMode
+    mono: Monomorphizer?
+
+    # Create new deferred monomorphizer
+    static fn new(mode: InstantiationMode) -> DeferredMonomorphizer:
+        DeferredMonomorphizer(
+            template_cache: {},
+            specialization_cache: {},
+            metadata: MonomorphizationMetadata.empty(),
+            mode: mode,
+            mono: None
+        )
+
+    # Load templates from .smf file
+    me load_templates_from_smf(smf_path: text):
+        # TODO: Implement full SMF loading in Phase 3
+        # For now, this is a placeholder that reads the binary format
+
+        # Read SMF file
+        val smf_data = read_file_bytes(smf_path)
+
+        # Parse SMF sections
+        val template_section = extract_section(smf_data, "TemplateCode")
+        val metadata_section = extract_section(smf_data, "TemplateMeta")
+
+        # Deserialize templates
+        if template_section.?:
+            self.deserialize_templates(template_section)
+
+        # Deserialize metadata
+        if metadata_section.?:
+            self.metadata = deserialize_metadata(metadata_section)
+
+    # Deserialize templates from binary format
+    me deserialize_templates(data: [u8]):
+        # TODO: Full implementation in Phase 3
+        # Binary format:
+        # - Header: magic (u32), version (u16), template_count (u32)
+        # - For each template: kind (u8), serialized AST node
+
+        var offset = 0
+
+        # Read header
+        val magic = read_u32(data, offset)
+        offset = offset + 4
+
+        if magic != 0x4C54504E:  # "GTPL" magic
+            throw CompileError.new("Invalid template section magic")
+
+        val version = read_u16(data, offset)
+        offset = offset + 2
+
+        val template_count = read_u32(data, offset)
+        offset = offset + 4
+
+        # Read templates
+        for _ in 0..template_count:
+            val kind = data[offset]
+            offset = offset + 1
+
+            match kind:
+                0:  # Function
+                    val (func, new_offset) = deserialize_function_placeholder(data, offset)
+                    self.template_cache[func.name] = GenericTemplate.Function(func)
+                    offset = new_offset
+
+                1:  # Struct
+                    val (struct_def, new_offset) = deserialize_struct_placeholder(data, offset)
+                    self.template_cache[struct_def.name] = GenericTemplate.Struct(struct_def)
+                    offset = new_offset
+
+                2:  # Class
+                    val (class_def, new_offset) = deserialize_class_placeholder(data, offset)
+                    self.template_cache[class_def.name] = GenericTemplate.Class(class_def)
+                    offset = new_offset
+
+                3:  # Enum
+                    val (enum_def, new_offset) = deserialize_enum_placeholder(data, offset)
+                    self.template_cache[enum_def.name] = GenericTemplate.Enum(enum_def)
+                    offset = new_offset
+
+                4:  # Trait
+                    val (trait_def, new_offset) = deserialize_trait_placeholder(data, offset)
+                    self.template_cache[trait_def.name] = GenericTemplate.Trait(trait_def)
+                    offset = new_offset
+
+                _:
+                    throw CompileError.new("Unknown template kind: {kind}")
+
+    # Instantiate a function template with concrete type arguments
+    me instantiate_function(name: text, type_args: [ConcreteType]) -> FunctionDef:
+        val key = SpecializationKey.new(name, type_args)
+
+        # Check cache first
+        if self.specialization_cache.contains_key(key):
+            match self.specialization_cache[key]:
+                CompiledCode.Function(f): return f
+                _: throw CompileError.new("Cached specialization is not a function")
+
+        # Get template
+        if not self.template_cache.contains_key(name):
+            throw CompileError.new("No template found for function: {name}")
+
+        val template = match self.template_cache[name]:
+            GenericTemplate.Function(f): f
+            _: throw CompileError.new("Template is not a function: {name}")
+
+        # Verify type argument count
+        if template.generic_params.len() != type_args.len():
+            throw CompileError.new(
+                "Wrong number of type arguments for {name}: expected {template.generic_params.len()}, got {type_args.len()}"
+            )
+
+        # Create type bindings
+        val bindings = create_type_bindings(template.generic_params, type_args)
+
+        # Get or create monomorphizer
+        if not self.mono.?:
+            self.mono = Some(Monomorphizer.new())
+
+        # Specialize using monomorphizer
+        val specialized = self.mono?.specialize_function_with_key(key) ??
+            throw CompileError.new("Monomorphizer not initialized")
+
+        # Cache result
+        self.specialization_cache[key] = CompiledCode.Function(specialized)
+
+        specialized
+
+    # Instantiate a struct template with concrete type arguments
+    me instantiate_struct(name: text, type_args: [ConcreteType]) -> StructDef:
+        val key = SpecializationKey.new(name, type_args)
+
+        # Check cache
+        if self.specialization_cache.contains_key(key):
+            match self.specialization_cache[key]:
+                CompiledCode.Struct(s): return s
+                _: throw CompileError.new("Cached specialization is not a struct")
+
+        # Get template
+        if not self.template_cache.contains_key(name):
+            throw CompileError.new("No template found for struct: {name}")
+
+        val template = match self.template_cache[name]:
+            GenericTemplate.Struct(s): s
+            _: throw CompileError.new("Template is not a struct: {name}")
+
+        # Verify type arguments
+        if template.generic_params.len() != type_args.len():
+            throw CompileError.new(
+                "Wrong number of type arguments for {name}: expected {template.generic_params.len()}, got {type_args.len()}"
+            )
+
+        # Create bindings and specialize
+        val bindings = create_type_bindings(template.generic_params, type_args)
+
+        if not self.mono.?:
+            self.mono = Some(Monomorphizer.new())
+
+        val specialized = self.mono?.specialize_struct_with_key(key) ??
+            throw CompileError.new("Monomorphizer not initialized")
+
+        # Cache result
+        self.specialization_cache[key] = CompiledCode.Struct(specialized)
+
+        specialized
+
+    # Instantiate a class template with concrete type arguments
+    me instantiate_class(name: text, type_args: [ConcreteType]) -> ClassDef:
+        val key = SpecializationKey.new(name, type_args)
+
+        # Check cache
+        if self.specialization_cache.contains_key(key):
+            match self.specialization_cache[key]:
+                CompiledCode.Class(c): return c
+                _: throw CompileError.new("Cached specialization is not a class")
+
+        # Get template
+        if not self.template_cache.contains_key(name):
+            throw CompileError.new("No template found for class: {name}")
+
+        val template = match self.template_cache[name]:
+            GenericTemplate.Class(c): c
+            _: throw CompileError.new("Template is not a class: {name}")
+
+        # Verify type arguments
+        if template.generic_params.len() != type_args.len():
+            throw CompileError.new(
+                "Wrong number of type arguments for {name}: expected {template.generic_params.len()}, got {type_args.len()}"
+            )
+
+        # Specialize
+        if not self.mono.?:
+            self.mono = Some(Monomorphizer.new())
+
+        val specialized = self.mono?.specialize_class_with_key(key) ??
+            throw CompileError.new("Monomorphizer not initialized")
+
+        # Cache result
+        self.specialization_cache[key] = CompiledCode.Class(specialized)
+
+        specialized
+
+    # Instantiate an enum template with concrete type arguments
+    me instantiate_enum(name: text, type_args: [ConcreteType]) -> EnumDef:
+        val key = SpecializationKey.new(name, type_args)
+
+        # Check cache
+        if self.specialization_cache.contains_key(key):
+            match self.specialization_cache[key]:
+                CompiledCode.Enum(e): return e
+                _: throw CompileError.new("Cached specialization is not an enum")
+
+        # Get template
+        if not self.template_cache.contains_key(name):
+            throw CompileError.new("No template found for enum: {name}")
+
+        val template = match self.template_cache[name]:
+            GenericTemplate.Enum(e): e
+            _: throw CompileError.new("Template is not an enum: {name}")
+
+        # Verify type arguments
+        if template.generic_params.len() != type_args.len():
+            throw CompileError.new(
+                "Wrong number of type arguments for {name}: expected {template.generic_params.len()}, got {type_args.len()}"
+            )
+
+        # Specialize
+        if not self.mono.?:
+            self.mono = Some(Monomorphizer.new())
+
+        val specialized = self.mono?.specialize_enum_with_key(key) ??
+            throw CompileError.new("Monomorphizer not initialized")
+
+        # Cache result
+        self.specialization_cache[key] = CompiledCode.Enum(specialized)
+
+        specialized
+
+    # Get cached template by name
+    fn get_template(name: text) -> GenericTemplate?:
+        if self.template_cache.contains_key(name):
+            Some(self.template_cache[name])
+        else:
+            None
+
+    # Get cached specialization by key
+    fn get_specialization(key: SpecializationKey) -> CompiledCode?:
+        if self.specialization_cache.contains_key(key):
+            Some(self.specialization_cache[key])
+        else:
+            None
+
+    # Clear all caches
+    me clear_caches():
+        self.template_cache.clear()
+        self.specialization_cache.clear()
+
+    # Get statistics
+    fn get_stats() -> DeferredMonoStats:
+        DeferredMonoStats(
+            template_count: self.template_cache.len(),
+            specialization_count: self.specialization_cache.len(),
+            mode: self.mode
+        )
+
+    # Get instantiation mode
+    fn mode() -> InstantiationMode:
+        self.mode
+
+    # Get all loaded template names
+    fn template_names() -> [text]:
+        self.template_cache.keys().to_list()
+
+    # Get the number of cached specializations
+    fn specialization_count() -> i32:
+        self.specialization_cache.len()
+
+    # Clear the specialization cache
+    me clear_cache():
+        self.specialization_cache.clear()
+
+    # Get metadata for debugging/inspection
+    fn metadata() -> MonomorphizationMetadata:
+        self.metadata
+
+# Statistics for deferred monomorphization
+struct DeferredMonoStats:
+    template_count: i32
+    specialization_count: i32
+    mode: InstantiationMode
+
+# Helper: Create type bindings from generic params and concrete types
+fn create_type_bindings(
+    generic_params: [text],
+    type_args: [ConcreteType]
+) -> Dict<text, HirType>:
+    var bindings = {}
+
+    for i in 0..generic_params.len():
+        val param = generic_params[i]
+        val concrete = type_args[i]
+
+        # Convert ConcreteType to HirType
+        val hir_type = concrete_to_hir_type(concrete)
+        bindings[param] = hir_type
+
+    bindings
+
+# Helper: Convert ConcreteType to HirType
+fn concrete_to_hir_type(concrete: ConcreteType) -> HirType:
+    match concrete:
+        ConcreteType.Named(name):
+            HirType.Named(name)
+
+        ConcreteType.Int:
+            HirType.Int
+
+        ConcreteType.Float:
+            HirType.Float
+
+        ConcreteType.Bool:
+            HirType.Bool
+
+        ConcreteType.String:
+            HirType.String
+
+        ConcreteType.Unit:
+            HirType.Unit
+
+        ConcreteType.Generic(name, args):
+            # Recursively convert type arguments
+            val hir_args = args.map(\arg: concrete_to_hir_type(arg))
+            HirType.Generic(name, hir_args)
+
+        ConcreteType.Array(elem):
+            HirType.Array(concrete_to_hir_type(elem))
+
+        ConcreteType.Tuple(elems):
+            val hir_elems = elems.map(\e: concrete_to_hir_type(e))
+            HirType.Tuple(hir_elems)
+
+        ConcreteType.Function(params, ret):
+            val hir_params = params.map(\p: concrete_to_hir_type(p))
+            val hir_ret = concrete_to_hir_type(ret)
+            HirType.Function(hir_params, hir_ret)
+
+        ConcreteType.Reference(inner, is_mut):
+            HirType.Reference(concrete_to_hir_type(inner), is_mut)
+
+        ConcreteType.Pointer(inner, kind):
+            # TODO: Add pointer kind to HirType
+            HirType.Pointer(concrete_to_hir_type(inner))
+
+# Placeholder deserialization functions (Phase 3 TODO)
+
+fn deserialize_function_placeholder(data: [u8], offset: i32) -> (FunctionDef, i32):
+    # TODO: Implement full deserialization in Phase 3
+    # For now, return minimal placeholder
+
+    val name_len = read_u32(data, offset)
+    var new_offset = offset + 4
+
+    val name = read_string(data, new_offset, name_len)
+    new_offset = new_offset + name_len
+
+    val generic_param_count = data[new_offset]
+    new_offset = new_offset + 1
+
+    val func = FunctionDef(
+        name: name,
+        generic_params: [],  # TODO: Deserialize params
+        params: [],
+        return_type: None,
+        body: None,
+        is_generic_template: true,
+        specialization_of: None,
+        type_bindings: {},
+        attributes: [],
+        where_clause: None,
+        effects: [],
+        contracts: None
+    )
+
+    (func, new_offset)
+
+fn deserialize_struct_placeholder(data: [u8], offset: i32) -> (StructDef, i32):
+    # TODO: Implement full deserialization
+
+    val name_len = read_u32(data, offset)
+    var new_offset = offset + 4
+
+    val name = read_string(data, new_offset, name_len)
+    new_offset = new_offset + name_len
+
+    val struct_def = StructDef(
+        name: name,
+        generic_params: [],
+        fields: [],
+        is_generic_template: true,
+        specialization_of: None,
+        type_bindings: {},
+        where_clause: None,
+        attributes: [],
+        invariant: None
+    )
+
+    (struct_def, new_offset)
+
+fn deserialize_class_placeholder(data: [u8], offset: i32) -> (ClassDef, i32):
+    # TODO: Implement full deserialization
+
+    val name_len = read_u32(data, offset)
+    var new_offset = offset + 4
+
+    val name = read_string(data, new_offset, name_len)
+    new_offset = new_offset + name_len
+
+    val class_def = ClassDef(
+        name: name,
+        generic_params: [],
+        fields: [],
+        methods: [],
+        is_generic_template: true,
+        specialization_of: None,
+        type_bindings: {},
+        where_clause: None,
+        attributes: [],
+        parent: None,
+        mixins: [],
+        invariant: None,
+        effects: [],
+        macro_invocations: []
+    )
+
+    (class_def, new_offset)
+
+fn deserialize_enum_placeholder(data: [u8], offset: i32) -> (EnumDef, i32):
+    # TODO: Implement full deserialization
+
+    val name_len = read_u32(data, offset)
+    var new_offset = offset + 4
+
+    val name = read_string(data, new_offset, name_len)
+    new_offset = new_offset + name_len
+
+    val enum_def = EnumDef(
+        name: name,
+        generic_params: [],
+        variants: [],
+        is_generic_template: true,
+        specialization_of: None,
+        type_bindings: {},
+        where_clause: None,
+        attributes: []
+    )
+
+    (enum_def, new_offset)
+
+fn deserialize_trait_placeholder(data: [u8], offset: i32) -> (TraitDef, i32):
+    # TODO: Implement full deserialization
+
+    val name_len = read_u32(data, offset)
+    var new_offset = offset + 4
+
+    val name = read_string(data, new_offset, name_len)
+    new_offset = new_offset + name_len
+
+    val trait_def = TraitDef(
+        name: name,
+        generic_params: [],
+        methods: [],
+        super_traits: [],
+        associated_types: [],
+        where_clause: None,
+        is_generic_template: true,
+        specialization_of: None,
+        type_bindings: {}
+    )
+
+    (trait_def, new_offset)
+
+fn deserialize_metadata(data: [u8]) -> MonomorphizationMetadata:
+    # TODO: Implement full metadata deserialization
+    MonomorphizationMetadata.empty()
+
+# Binary format helper functions
+
+fn read_u32(data: [u8], offset: i32) -> i32:
+    # TODO: Proper little-endian deserialization
+    0
+
+fn read_u16(data: [u8], offset: i32) -> i32:
+    # TODO: Proper little-endian deserialization
+    0
+
+fn read_string(data: [u8], offset: i32, len: i32) -> text:
+    # TODO: Proper UTF-8 string deserialization
+    ""
+
+fn read_file_bytes(path: text) -> [u8]:
+    # TODO: File I/O
+    []
+
+fn extract_section(smf_data: [u8], section_name: text) -> [u8]?:
+    # TODO: SMF section extraction
+    None

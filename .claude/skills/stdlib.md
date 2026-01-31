@@ -3,7 +3,7 @@
 ## Directory Structure
 
 ```
-simple/std_lib/
+src/std/
 ├── src/                    # Source modules
 │   ├── __init__.spl        # Root manifest
 │   ├── core/               # GC + mutable (default)
@@ -143,16 +143,16 @@ describe "MyType":
 ### Run Tests
 ```bash
 # All stdlib tests
-cargo test -p simple-driver simple_stdlib
+cd rust && cargo test -p simple-driver simple_stdlib
 
 # Unit tests only
-cargo test -p simple-driver simple_stdlib_unit
+cd rust && cargo test -p simple-driver simple_stdlib_unit
 
 # Specific module
-cargo test -p simple-driver simple_stdlib_unit_mymodule
+cd rust && cargo test -p simple-driver simple_stdlib_unit_mymodule
 
 # Direct run
-./target/debug/simple simple/std_lib/test/unit/mymodule/mytype_spec.spl
+./rust/target/debug/simple src/std/test/unit/mymodule/mytype_spec.spl
 ```
 
 ## Contracts
@@ -242,7 +242,7 @@ File in `simple/improve_request.md`:
 
 ## See Also
 
-- `simple/std_lib/README.md` - Full stdlib docs
+- `src/std/README.md` - Full stdlib docs
 - `doc/spec/stdlib.md` - Stdlib specification
 - `doc/spec/testing/testing_bdd_framework.md` - BDD framework
 - `.claude/skills/test.md` - Test writing skill

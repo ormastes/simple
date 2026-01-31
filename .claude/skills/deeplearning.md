@@ -13,7 +13,7 @@ Use this skill when working with deep learning tasks in Simple:
 
 ### 1. Configuration System (`config`)
 
-**Location**: `simple/std_lib/src/config/__init__.spl`
+**Location**: `src/std/src/config/__init__.spl`
 
 **Usage**:
 ```simple
@@ -50,7 +50,7 @@ training:
 
 ### 2. Experiment Tracking (`ml.tracking`)
 
-**Location**: `simple/std_lib/src/ml/tracking/__init__.spl`
+**Location**: `src/std/src/ml/tracking/__init__.spl`
 
 **Usage**:
 ```simple
@@ -89,7 +89,7 @@ run.finish()
 
 ### 3. Training Engine (`ml.engine`)
 
-**Location**: `simple/std_lib/src/ml/engine/__init__.spl`
+**Location**: `src/std/src/ml/engine/__init__.spl`
 
 **Usage**:
 ```simple
@@ -491,10 +491,10 @@ fn update_lr(engine: Engine):
 
 - **Deep Learning Guide**: `simple/doc/guide/deeplearning.md`
 - **Example Project**: `simple/example/medgemma_korean/`
-- **Config System**: `simple/std_lib/src/config/`
-- **Tracking System**: `simple/std_lib/src/ml/tracking/`
-- **Engine System**: `simple/std_lib/src/ml/engine/`
-- **BDD Specs**: `simple/std_lib/test/features/ml/`
+- **Config System**: `src/std/src/config/`
+- **Tracking System**: `src/std/src/ml/tracking/`
+- **Engine System**: `src/std/src/ml/engine/`
+- **BDD Specs**: `src/std/test/features/ml/`
 
 ---
 
@@ -984,7 +984,7 @@ val encoder: Layer<[batch, 784], [batch, 64]> =
 - **Design Document**: `doc/design/pipeline_operators_design.md`
 - **Error Guide**: `doc/guide/dimension_errors_guide.md`
 - **Syntax Reference**: `doc/guide/syntax_quick_reference.md`
-- **Test Specs**: `simple/compiler/test/dim_constraints_spec.spl`
+- **Test Specs**: `src/compiler/test/dim_constraints_spec.spl`
 
 ---
 
