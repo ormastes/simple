@@ -560,4 +560,81 @@ See [Standard Library Specification](../spec/stdlib.md) for complete details.
 
 ---
 
-If you want this split into two Markdown files, or you want a formal EBNF grammar, tell me and I'll generate it.
+---
+
+## 11. Access Control and `__init__.spl` Boundaries
+
+### 11.1 Overview
+
+The `__init__.spl` file acts as an **access control boundary** for its directory. When present, it is the sole gatekeeper — external code can only access symbols that `__init__.spl` explicitly exports.
+
+### 11.2 Rules
+
+| Rule | Description | v0.x Level | v1.0 Level |
+|------|-------------|------------|------------|
+| **Rule 1** | `__init__.spl` is the boundary wall — only exported symbols are accessible from outside | Warn | Deny |
+| **Rule 2** | No `__init__.spl` = freely accessible — all public files importable directly | — | — |
+| **Rule 3** | `export use` only allowed in `__init__.spl` files | Deny | Deny |
+| **Rule 4** | `#[bypass]` makes a directory transparent (must contain no `.spl` code files) | Warn | Deny |
+| **Rule 5** | Root source directory without `__init__.spl` emits a suggestion warning | Warn | Warn |
+| **Rule 6** | Only `__init__.spl` can export child symbols; files cannot export from parent/siblings | Warn | Deny |
+
+### 11.3 Examples
+
+**Boundary enforcement (Rule 1):**
+
+```
+src/
+  pkg/
+    __init__.spl      # exports Router only
+    router.spl        # defines Router (pub)
+    internal.spl      # defines Helper (pub, but not exported)
+```
+
+```simple
+# ✅ OK: Router is exported by pkg/__init__.spl
+use crate.pkg.Router
+
+# ❌ VIOLATION: bypasses __init__.spl boundary
+use crate.pkg.internal.Helper
+```
+
+**Bypass directory (Rule 4):**
+
+```
+lib/
+  __init__.spl        # contains: #[bypass]
+  http/
+    __init__.spl      # exports HttpClient
+  db/
+    __init__.spl      # exports DbPool
+```
+
+```simple
+# ✅ OK: lib is bypass, so http/ and db/ are directly accessible
+use crate.lib.http.HttpClient
+use crate.lib.db.DbPool
+```
+
+`#[bypass]` directories must contain **only subdirectories** — no `.spl` code files (other than `__init__.spl` itself).
+
+### 11.4 Lint Configuration
+
+Configure in `simple.sdn`:
+
+```sdn
+[lints]
+export_outside_init = "deny"        # Rule 3 (default: deny)
+init_boundary_violation = "warn"    # Rule 1 (default: warn, deny in v1.0)
+bypass_with_code_files = "warn"     # Rule 4 (default: warn, deny in v1.0)
+```
+
+### 11.5 Access Policy Model
+
+Each directory has one of three access policies:
+
+- **Open**: No `__init__.spl` — all public files freely accessible
+- **Boundary**: `__init__.spl` present — only exported symbols accessible
+- **Bypass**: `__init__.spl` with `#[bypass]` — directory is transparent (pass-through)
+
+The formal model is implemented in `simple/compiler/dependency/visibility.spl` with Lean theorem correspondence.

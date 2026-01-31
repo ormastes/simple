@@ -211,6 +211,73 @@ impl ImportGraph:
 
         false
 
+    # Check for circular dependencies using DFS
+    # Returns None if no cycles, Some(error) with the cycle path if found
+    fn check_cycles() -> Option<CyclicDependencyError>:
+        # Track visit state: 0 = unvisited, 1 = in current path, 2 = fully visited
+        var state: Dict<text, i64> = {}
+        var path: List<text> = []
+
+        # Try DFS from each module
+        for module in self.edges.keys():
+            val cycle = self.dfs_find_cycle(module, state, path)
+            match cycle:
+                case Some(cycle_path):
+                    return Some(CyclicDependencyError.new(cycle_path))
+                case nil:
+                    ()
+
+        nil
+
+    # DFS helper to find cycles
+    # Returns Some(cycle_path) if a cycle is found, None otherwise
+    fn dfs_find_cycle(node: text, state: Dict<text, i64>, path: List<text>) -> Option<List<text>>:
+        # Check current state
+        if state.contains_key(node):
+            val node_state = state[node]
+            if node_state == 2:
+                # Already fully visited
+                return nil
+            if node_state == 1:
+                # Found cycle - extract the cycle from path
+                var cycle_start = -1
+                var i = 0
+                for p in path:
+                    if p == node:
+                        cycle_start = i
+                    i = i + 1
+
+                if cycle_start >= 0:
+                    var cycle: List<text> = []
+                    var j = cycle_start
+                    while j < path.len():
+                        cycle.push(path[j])
+                        j = j + 1
+                    cycle.push(node)  # Complete the cycle
+                    return Some(cycle)
+
+                return nil
+
+        # Mark as in current path
+        state[node] = 1
+        path.push(node)
+
+        # Visit all neighbors
+        if self.edges.contains_key(node):
+            val imports = self.edges[node]
+            for imported in imports:
+                val result = self.dfs_find_cycle(imported, state, path)
+                match result:
+                    case Some(cycle_path):
+                        return Some(cycle_path)
+                    case nil:
+                        ()
+
+        # Backtrack
+        path.pop()
+        state[node] = 2  # Mark as fully visited
+        nil
+
 # Public exports
 export ImportKind
 export ImportEdge
