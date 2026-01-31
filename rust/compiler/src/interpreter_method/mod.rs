@@ -62,11 +62,155 @@ pub(crate) fn evaluate_method_call(
                 return instantiate_class(class_name, args, env, functions, classes, enums, impl_methods);
             }
         }
+        // Handle typed dict objects (from ClassName.new()) - look up methods from impl/class
+        if let Some(Value::Str(type_name)) = module_dict.get("__type__") {
+            // Try impl_methods for this type
+            if let Some(methods) = impl_methods.get(type_name.as_str()) {
+                if let Some(func) = methods.iter().find(|m| m.name == method) {
+                    // Set up self as the dict
+                    env.insert("self".to_string(), recv_val.clone());
+                    for (k, v) in module_dict {
+                        env.insert(k.clone(), v.clone());
+                    }
+                    let result = super::exec_function(func, args, env, functions, classes, enums, impl_methods, None);
+                    return result;
+                }
+            }
+            // Try class methods
+            if let Some(class_def) = classes.get(type_name.as_str()).cloned() {
+                if let Some(func) = class_def.methods.iter().find(|m| m.name == method) {
+                    env.insert("self".to_string(), recv_val.clone());
+                    for (k, v) in module_dict {
+                        env.insert(k.clone(), v.clone());
+                    }
+                    let result = super::exec_function(func, args, env, functions, classes, enums, impl_methods, None);
+                    return result;
+                }
+            }
+        }
     }
 
-    // BDD assertion methods: to(matcher) and not_to(matcher)
-    // These work on any value type and are used with matchers like eq(5), gt(3), etc.
+    // BDD assertion shortcut methods: to_equal, to_be, to_contain, etc.
+    // These combine expect(val).to(matcher) into expect(val).to_equal(expected)
+    use crate::value::MatcherValue;
     match method {
+        "to_equal" | "to_be" => {
+            let expected = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
+            let matched = recv_val == expected;
+            use crate::interpreter::interpreter_call::{BDD_EXPECT_FAILED, BDD_FAILURE_MSG};
+            if !matched {
+                BDD_EXPECT_FAILED.with(|cell: &std::cell::RefCell<bool>| *cell.borrow_mut() = true);
+                let failure_msg = format!(
+                    "expected {} to equal {}",
+                    recv_val.to_display_string(),
+                    expected.to_display_string()
+                );
+                BDD_FAILURE_MSG
+                    .with(|cell: &std::cell::RefCell<Option<String>>| *cell.borrow_mut() = Some(failure_msg));
+            }
+            return Ok(Value::Bool(matched));
+        }
+        "to_contain" | "to_include" => {
+            let needle = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
+            let matched = match &recv_val {
+                Value::Str(s) => {
+                    if let Value::Str(n) = &needle { s.contains(n.as_str()) } else { false }
+                }
+                Value::Array(arr) => arr.contains(&needle),
+                _ => false,
+            };
+            use crate::interpreter::interpreter_call::{BDD_EXPECT_FAILED, BDD_FAILURE_MSG};
+            if !matched {
+                BDD_EXPECT_FAILED.with(|cell: &std::cell::RefCell<bool>| *cell.borrow_mut() = true);
+                let failure_msg = format!(
+                    "expected {} to contain {}",
+                    recv_val.to_display_string(),
+                    needle.to_display_string()
+                );
+                BDD_FAILURE_MSG
+                    .with(|cell: &std::cell::RefCell<Option<String>>| *cell.borrow_mut() = Some(failure_msg));
+            }
+            return Ok(Value::Bool(matched));
+        }
+        "to_be_truthy" => {
+            let matched = recv_val.truthy();
+            use crate::interpreter::interpreter_call::{BDD_EXPECT_FAILED, BDD_FAILURE_MSG};
+            if !matched {
+                BDD_EXPECT_FAILED.with(|cell: &std::cell::RefCell<bool>| *cell.borrow_mut() = true);
+                let failure_msg = format!("expected {} to be truthy", recv_val.to_display_string());
+                BDD_FAILURE_MSG
+                    .with(|cell: &std::cell::RefCell<Option<String>>| *cell.borrow_mut() = Some(failure_msg));
+            }
+            return Ok(Value::Bool(matched));
+        }
+        "to_be_falsy" => {
+            let matched = !recv_val.truthy();
+            use crate::interpreter::interpreter_call::{BDD_EXPECT_FAILED, BDD_FAILURE_MSG};
+            if !matched {
+                BDD_EXPECT_FAILED.with(|cell: &std::cell::RefCell<bool>| *cell.borrow_mut() = true);
+                let failure_msg = format!("expected {} to be falsy", recv_val.to_display_string());
+                BDD_FAILURE_MSG
+                    .with(|cell: &std::cell::RefCell<Option<String>>| *cell.borrow_mut() = Some(failure_msg));
+            }
+            return Ok(Value::Bool(matched));
+        }
+        "to_be_nil" | "to_be_none" => {
+            let matched = recv_val == Value::Nil;
+            use crate::interpreter::interpreter_call::{BDD_EXPECT_FAILED, BDD_FAILURE_MSG};
+            if !matched {
+                BDD_EXPECT_FAILED.with(|cell: &std::cell::RefCell<bool>| *cell.borrow_mut() = true);
+                let failure_msg = format!("expected {} to be nil", recv_val.to_display_string());
+                BDD_FAILURE_MSG
+                    .with(|cell: &std::cell::RefCell<Option<String>>| *cell.borrow_mut() = Some(failure_msg));
+            }
+            return Ok(Value::Bool(matched));
+        }
+        "to_be_greater_than" => {
+            let expected = eval_arg(args, 0, Value::Int(0), env, functions, classes, enums, impl_methods)?;
+            let matched = match (&recv_val, &expected) {
+                (Value::Int(a), Value::Int(b)) => a > b,
+                (Value::Float(a), Value::Float(b)) => a > b,
+                (Value::Int(a), Value::Float(b)) => (*a as f64) > *b,
+                (Value::Float(a), Value::Int(b)) => *a > (*b as f64),
+                _ => false,
+            };
+            use crate::interpreter::interpreter_call::{BDD_EXPECT_FAILED, BDD_FAILURE_MSG};
+            if !matched {
+                BDD_EXPECT_FAILED.with(|cell: &std::cell::RefCell<bool>| *cell.borrow_mut() = true);
+                let failure_msg = format!(
+                    "expected {} to be greater than {}",
+                    recv_val.to_display_string(),
+                    expected.to_display_string()
+                );
+                BDD_FAILURE_MSG
+                    .with(|cell: &std::cell::RefCell<Option<String>>| *cell.borrow_mut() = Some(failure_msg));
+            }
+            return Ok(Value::Bool(matched));
+        }
+        "to_be_less_than" => {
+            let expected = eval_arg(args, 0, Value::Int(0), env, functions, classes, enums, impl_methods)?;
+            let matched = match (&recv_val, &expected) {
+                (Value::Int(a), Value::Int(b)) => a < b,
+                (Value::Float(a), Value::Float(b)) => a < b,
+                (Value::Int(a), Value::Float(b)) => (*a as f64) < *b,
+                (Value::Float(a), Value::Int(b)) => *a < (*b as f64),
+                _ => false,
+            };
+            use crate::interpreter::interpreter_call::{BDD_EXPECT_FAILED, BDD_FAILURE_MSG};
+            if !matched {
+                BDD_EXPECT_FAILED.with(|cell: &std::cell::RefCell<bool>| *cell.borrow_mut() = true);
+                let failure_msg = format!(
+                    "expected {} to be less than {}",
+                    recv_val.to_display_string(),
+                    expected.to_display_string()
+                );
+                BDD_FAILURE_MSG
+                    .with(|cell: &std::cell::RefCell<Option<String>>| *cell.borrow_mut() = Some(failure_msg));
+            }
+            return Ok(Value::Bool(matched));
+        }
+        // BDD assertion methods: to(matcher) and not_to(matcher)
+        // These work on any value type and are used with matchers like eq(5), gt(3), etc.
         "to" | "not_to" => {
             let matcher = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
             let matched = match &matcher {

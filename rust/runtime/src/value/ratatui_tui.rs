@@ -52,6 +52,13 @@ enum RatatuiObject {
     TextBuffer(Arc<Mutex<TextBuffer>>),
 }
 
+/// Stub type when ratatui-tui feature is disabled
+#[cfg(not(feature = "ratatui-tui"))]
+#[derive(Clone)]
+enum RatatuiObject {
+    Stub,
+}
+
 /// Simple text buffer for managing text input
 #[cfg(feature = "ratatui-tui")]
 #[derive(Clone)]
@@ -598,6 +605,7 @@ pub extern "C" fn ratatui_read_event_timeout(_timeout_ms: u64) -> TuiEvent {
 ///
 /// # Arguments
 /// * `handle` - Handle to the object
+#[cfg(feature = "ratatui-tui")]
 #[no_mangle]
 pub extern "C" fn ratatui_object_destroy(handle: u64) {
     let mut registry = HANDLE_REGISTRY.lock().unwrap();
@@ -607,11 +615,25 @@ pub extern "C" fn ratatui_object_destroy(handle: u64) {
 }
 
 /// Clear all ratatui handles (for test cleanup)
+#[cfg(feature = "ratatui-tui")]
 pub fn clear_ratatui_registry() {
     let mut registry = HANDLE_REGISTRY.lock().unwrap();
     if let Some(ref mut map) = *registry {
         map.clear();
     }
+}
+
+/// Stub for ratatui_object_destroy when feature is disabled
+#[cfg(not(feature = "ratatui-tui"))]
+#[no_mangle]
+pub extern "C" fn ratatui_object_destroy(_handle: u64) {
+    // No-op when ratatui is disabled
+}
+
+/// Stub for clear_ratatui_registry when feature is disabled
+#[cfg(not(feature = "ratatui-tui"))]
+pub fn clear_ratatui_registry() {
+    // No-op when ratatui is disabled
 }
 
 #[cfg(test)]

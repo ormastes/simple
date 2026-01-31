@@ -445,6 +445,40 @@ pub(crate) fn evaluate_call(
                     payload,
                 });
             }
+
+            // Handle ClassName.new() as direct construction (returns empty dict with __type__)
+            if method_name == "new" {
+                // Handle special builtin types that need proper Value constructors
+                match type_name.as_str() {
+                    "HashMap" => {
+                        return Ok(Value::Dict(std::collections::HashMap::new()));
+                    }
+                    "HashSet" => {
+                        return Ok(Value::Array(Vec::new())); // HashSet represented as Array in Simple
+                    }
+                    "Device" => {
+                        // Default to CPU device
+                        return Ok(Value::Enum {
+                            enum_name: "Device".to_string(),
+                            variant: "CPU".to_string(),
+                            payload: None,
+                        });
+                    }
+                    _ => {
+                        // Generic case: return typed dict
+                        let mut fields = std::collections::HashMap::new();
+                        fields.insert("__type__".to_string(), Value::Str(type_name.to_string()));
+                        // Evaluate and add any named arguments as fields
+                        for arg in args {
+                            let val = evaluate_expr(&arg.value, env, functions, classes, enums, impl_methods)?;
+                            if let Some(name) = &arg.name {
+                                fields.insert(name.clone(), val);
+                            }
+                        }
+                        return Ok(Value::Dict(fields));
+                    }
+                }
+            }
         }
         let ctx = ErrorContext::new()
             .with_code(codes::INVALID_OPERATION)

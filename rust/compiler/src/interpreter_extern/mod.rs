@@ -53,6 +53,7 @@ pub mod file_io;
 pub mod terminal;
 pub mod atomic;
 pub mod concurrency;
+#[cfg(feature = "tui")]
 pub mod tui;
 pub mod repl;
 pub mod gpu;
@@ -72,6 +73,7 @@ pub mod collections;
 pub mod lexer_ffi;
 pub mod i18n;
 pub mod native_ffi;
+pub mod package;
 
 // Import parent interpreter types
 type Enums = HashMap<String, EnumDef>;
@@ -180,10 +182,11 @@ pub(crate) fn call_extern_function(
         "rt_math_is_finite" => math::rt_math_is_finite_fn(&evaluated),
 
         // ====================================================================
-        // Time Operations (2 functions)
+        // Time Operations (3 functions)
         // ====================================================================
         "rt_time_now_seconds" => time::rt_time_now_seconds(&evaluated),
         "_current_time_unix" => time::_current_time_unix(&evaluated),
+        "rt_current_time_ms" => time::rt_current_time_ms(&evaluated),
 
         // ====================================================================
         // DateTime Operations (11 functions)
@@ -458,15 +461,23 @@ pub(crate) fn call_extern_function(
         "rt_is_debug_mode_enabled" => system::rt_is_debug_mode_enabled(&evaluated),
 
         // ====================================================================
-        // Ratatui TUI Functions (8 functions)
+        // Ratatui TUI Functions (8 functions) - Requires 'tui' feature
         // ====================================================================
+        #[cfg(feature = "tui")]
         "ratatui_terminal_new" => tui::ratatui_terminal_new_fn(&evaluated),
+        #[cfg(feature = "tui")]
         "ratatui_terminal_cleanup" => tui::ratatui_terminal_cleanup_fn(&evaluated),
+        #[cfg(feature = "tui")]
         "ratatui_terminal_clear" => tui::ratatui_terminal_clear_fn(&evaluated),
+        #[cfg(feature = "tui")]
         "ratatui_textbuffer_new" => tui::ratatui_textbuffer_new_fn(&evaluated),
+        #[cfg(feature = "tui")]
         "ratatui_textbuffer_insert_char" => tui::ratatui_textbuffer_insert_char_fn(&evaluated),
+        #[cfg(feature = "tui")]
         "ratatui_textbuffer_backspace" => tui::ratatui_textbuffer_backspace_fn(&evaluated),
+        #[cfg(feature = "tui")]
         "ratatui_textbuffer_newline" => tui::ratatui_textbuffer_newline_fn(&evaluated),
+        #[cfg(feature = "tui")]
         "ratatui_object_destroy" => tui::ratatui_object_destroy_fn(&evaluated),
 
         // ====================================================================
@@ -527,7 +538,7 @@ pub(crate) fn call_extern_function(
         // File I/O FFI Operations (rt_* functions)
         // ====================================================================
         // File metadata
-        "rt_file_exists" => file_io::rt_file_exists(&evaluated),
+        "rt_file_exists" | "rt_file_exists_str" => file_io::rt_file_exists(&evaluated),
         "rt_file_stat" => file_io::rt_file_stat(&evaluated),
         // File operations
         "rt_file_canonicalize" => file_io::rt_file_canonicalize(&evaluated),
@@ -960,6 +971,21 @@ pub(crate) fn call_extern_function(
         // ====================================================================
         "rt_compile_to_native" => native_ffi::rt_compile_to_native(&evaluated),
         "rt_execute_native" => native_ffi::rt_execute_native(&evaluated),
+
+        // ====================================================================
+        // Package Management Operations (11 functions)
+        // ====================================================================
+        "rt_package_sha256" => package::sha256(&evaluated),
+        "rt_package_create_tarball" => package::create_tarball(&evaluated),
+        "rt_package_extract_tarball" => package::extract_tarball(&evaluated),
+        "rt_package_file_size" => package::file_size(&evaluated),
+        "rt_package_copy_file" => package::copy_file(&evaluated),
+        "rt_package_mkdir_all" => package::mkdir_all(&evaluated),
+        "rt_package_remove_dir_all" => package::remove_dir_all(&evaluated),
+        "rt_package_create_symlink" => package::create_symlink(&evaluated),
+        "rt_package_chmod" => package::chmod(&evaluated),
+        "rt_package_exists" => package::exists(&evaluated),
+        "rt_package_is_dir" => package::is_dir(&evaluated),
 
         _ => Err(common::unknown_function(name)),
     }

@@ -12,6 +12,7 @@ pub mod loader;
 pub mod aop;
 pub mod async_runtime;
 pub mod bytecode;
+pub mod compress;
 pub mod concurrency;
 pub mod concurrent;
 pub mod coverage;

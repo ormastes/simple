@@ -92,14 +92,10 @@ mod tests {
     fn test_sqrt_function() {
         let handler = MathBlock;
         let result = handler.evaluate("sqrt(16)").unwrap();
-        if let Value::Block { result: Some(r), .. } = result {
-            if let Value::Float(f) = *r {
-                assert!((f - 4.0).abs() < 0.001);
-            } else {
-                panic!("expected float");
-            }
+        if let Value::Float(f) = result {
+            assert!((f - 4.0).abs() < 0.001);
         } else {
-            panic!("expected block with result");
+            panic!("expected float, got {:?}", result);
         }
     }
 
@@ -107,14 +103,10 @@ mod tests {
     fn test_frac_function() {
         let handler = MathBlock;
         let result = handler.evaluate("frac(1, 2)").unwrap();
-        if let Value::Block { result: Some(r), .. } = result {
-            if let Value::Float(f) = *r {
-                assert!((f - 0.5).abs() < 0.001);
-            } else {
-                panic!("expected float");
-            }
+        if let Value::Float(f) = result {
+            assert!((f - 0.5).abs() < 0.001);
         } else {
-            panic!("expected block with result");
+            panic!("expected float, got {:?}", result);
         }
     }
 
@@ -123,14 +115,10 @@ mod tests {
         let handler = MathBlock;
         // Should work but emit warning
         let result = handler.evaluate("\\frac{1}{2}").unwrap();
-        if let Value::Block { result: Some(r), .. } = result {
-            if let Value::Float(f) = *r {
-                assert!((f - 0.5).abs() < 0.001);
-            } else {
-                panic!("expected float");
-            }
+        if let Value::Float(f) = result {
+            assert!((f - 0.5).abs() < 0.001);
         } else {
-            panic!("expected block with result");
+            panic!("expected float, got {:?}", result);
         }
     }
 
@@ -138,14 +126,10 @@ mod tests {
     fn test_latex_compat_sqrt() {
         let handler = MathBlock;
         let result = handler.evaluate("\\sqrt{16}").unwrap();
-        if let Value::Block { result: Some(r), .. } = result {
-            if let Value::Float(f) = *r {
-                assert!((f - 4.0).abs() < 0.001);
-            } else {
-                panic!("expected float");
-            }
+        if let Value::Float(f) = result {
+            assert!((f - 4.0).abs() < 0.001);
         } else {
-            panic!("expected block with result");
+            panic!("expected float, got {:?}", result);
         }
     }
 
@@ -153,25 +137,17 @@ mod tests {
     fn test_implicit_multiplication() {
         let handler = MathBlock;
         let result = handler.evaluate("2 * 3").unwrap();
-        if let Value::Block { result: Some(r), .. } = result {
-            assert_eq!(*r, Value::Int(6));
-        } else {
-            panic!("expected block with result");
-        }
+        assert_eq!(result, Value::Int(6));
     }
 
     #[test]
     fn test_power_operator() {
         let handler = MathBlock;
         let result = handler.evaluate("2^3").unwrap();
-        if let Value::Block { result: Some(r), .. } = result {
-            if let Value::Float(f) = *r {
-                assert!((f - 8.0).abs() < 0.001);
-            } else {
-                panic!("expected float");
-            }
+        if let Value::Float(f) = result {
+            assert!((f - 8.0).abs() < 0.001);
         } else {
-            panic!("expected block with result");
+            panic!("expected float, got {:?}", result);
         }
     }
 

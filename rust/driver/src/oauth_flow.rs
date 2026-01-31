@@ -168,12 +168,12 @@ fn load_client_id_from_config(provider: &str) -> Result<String, String> {
 /// 6. Stores the token for future use
 pub fn device_code_flow(provider: OAuthProvider) -> Result<DeviceFlowResult, String> {
     let config = load_oauth_config(provider)?;
-    let client = reqwest::blocking::Client::new();
+    let agent = ureq::Agent::new();
 
     // Step 1: Request device code
     println!("Requesting device code from {}...", config.provider);
 
-    let device_code_response = request_device_code(&client, &config)?;
+    let device_code_response = request_device_code(&agent, &config)?;
 
     // Step 2: Display instructions
     println!();
@@ -198,7 +198,7 @@ pub fn device_code_flow(provider: OAuthProvider) -> Result<DeviceFlowResult, Str
     let deadline = Instant::now() + Duration::from_secs(device_code_response.expires_in);
 
     let token_response = poll_for_token(
-        &client,
+        &agent,
         &config,
         &device_code_response.device_code,
         poll_interval,
@@ -208,7 +208,7 @@ pub fn device_code_flow(provider: OAuthProvider) -> Result<DeviceFlowResult, Str
     println!("Authentication successful!");
 
     // Step 4: Get user info
-    let user_info = get_user_info(&client, &token_response.access_token, &config)?;
+    let user_info = get_user_info(&agent, &token_response.access_token, &config)?;
 
     let email = user_info.email.ok_or("OAuth response did not include email")?;
     println!("Authenticated as: {}", email);
@@ -241,31 +241,30 @@ pub fn device_code_flow(provider: OAuthProvider) -> Result<DeviceFlowResult, Str
 }
 
 /// Request a device code from the OAuth provider
-fn request_device_code(client: &reqwest::blocking::Client, config: &OAuthConfig) -> Result<DeviceCodeResponse, String> {
+fn request_device_code(agent: &ureq::Agent, config: &OAuthConfig) -> Result<DeviceCodeResponse, String> {
     let scope = config.scopes.join(" ");
 
     let params = [("client_id", config.client_id.as_str()), ("scope", &scope)];
 
-    let response = client
+    let response = agent
         .post(&config.device_auth_endpoint)
-        .form(&params)
-        .send()
+        .send_form(&params)
         .map_err(|e| format!("Failed to request device code: {}", e))?;
 
-    if !response.status().is_success() {
+    if response.status() != 200 {
         let status = response.status();
-        let body = response.text().unwrap_or_default();
+        let body = response.into_string().unwrap_or_default();
         return Err(format!("Device code request failed ({}): {}", status, body));
     }
 
     response
-        .json::<DeviceCodeResponse>()
+        .into_json::<DeviceCodeResponse>()
         .map_err(|e| format!("Failed to parse device code response: {}", e))
 }
 
 /// Poll for the access token
 fn poll_for_token(
-    client: &reqwest::blocking::Client,
+    agent: &ureq::Agent,
     config: &OAuthConfig,
     device_code: &str,
     interval: Duration,
@@ -289,21 +288,20 @@ fn poll_for_token(
             ("grant_type", grant_type),
         ];
 
-        let response = client
+        let response = agent
             .post(&config.token_endpoint)
-            .form(&params)
-            .send()
+            .send_form(&params)
             .map_err(|e| format!("Failed to poll for token: {}", e))?;
 
-        if response.status().is_success() {
+        if response.status() == 200 {
             return response
-                .json::<TokenResponse>()
+                .into_json::<TokenResponse>()
                 .map_err(|e| format!("Failed to parse token response: {}", e));
         }
 
         // Check for pending/slow_down errors
         let error_response: TokenErrorResponse = response
-            .json()
+            .into_json()
             .map_err(|e| format!("Failed to parse error response: {}", e))?;
 
         match error_response.error.as_str() {
@@ -335,7 +333,7 @@ fn poll_for_token(
 
 /// Get user info from userinfo endpoint or ID token
 fn get_user_info(
-    client: &reqwest::blocking::Client,
+    agent: &ureq::Agent,
     access_token: &str,
     config: &OAuthConfig,
 ) -> Result<UserInfo, String> {
@@ -344,27 +342,27 @@ fn get_user_info(
         OAuthProvider::Microsoft => "https://graph.microsoft.com/oidc/userinfo",
     };
 
-    let response = client
+    let response = agent
         .get(userinfo_endpoint)
-        .bearer_auth(access_token)
-        .send()
+        .set("Authorization", &format!("Bearer {}", access_token))
+        .call()
         .map_err(|e| format!("Failed to get user info: {}", e))?;
 
-    if !response.status().is_success() {
+    if response.status() != 200 {
         let status = response.status();
-        let body = response.text().unwrap_or_default();
+        let body = response.into_string().unwrap_or_default();
         return Err(format!("User info request failed ({}): {}", status, body));
     }
 
     response
-        .json::<UserInfo>()
+        .into_json::<UserInfo>()
         .map_err(|e| format!("Failed to parse user info: {}", e))
 }
 
 /// Refresh an expired access token
 pub fn refresh_access_token(provider: OAuthProvider, refresh_token: &str) -> Result<TokenResponse, String> {
     let config = load_oauth_config(provider)?;
-    let client = reqwest::blocking::Client::new();
+    let agent = ureq::Agent::new();
 
     let params = [
         ("client_id", config.client_id.as_str()),
@@ -372,20 +370,19 @@ pub fn refresh_access_token(provider: OAuthProvider, refresh_token: &str) -> Res
         ("grant_type", "refresh_token"),
     ];
 
-    let response = client
+    let response = agent
         .post(&config.token_endpoint)
-        .form(&params)
-        .send()
+        .send_form(&params)
         .map_err(|e| format!("Failed to refresh token: {}", e))?;
 
-    if !response.status().is_success() {
+    if response.status() != 200 {
         let status = response.status();
-        let body = response.text().unwrap_or_default();
+        let body = response.into_string().unwrap_or_default();
         return Err(format!("Token refresh failed ({}): {}", status, body));
     }
 
     response
-        .json::<TokenResponse>()
+        .into_json::<TokenResponse>()
         .map_err(|e| format!("Failed to parse refresh response: {}", e))
 }
 

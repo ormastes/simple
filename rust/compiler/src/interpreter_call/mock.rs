@@ -70,6 +70,14 @@ pub(super) fn eval_mock_builtin(
             let n = eval_arg_int(args, 0, 0, env, functions, classes, enums, impl_methods, "mock matcher")?;
             Ok(Some(Value::Matcher(crate::value::MatcherValue::LessThan(n))))
         }
+        "be_gte" => {
+            let n = eval_arg_int(args, 0, 0, env, functions, classes, enums, impl_methods, "mock matcher")?;
+            Ok(Some(Value::Matcher(crate::value::MatcherValue::GreaterOrEqual(n))))
+        }
+        "be_lte" => {
+            let n = eval_arg_int(args, 0, 0, env, functions, classes, enums, impl_methods, "mock matcher")?;
+            Ok(Some(Value::Matcher(crate::value::MatcherValue::LessOrEqual(n))))
+        }
         "be_nil" => Ok(Some(Value::Matcher(crate::value::MatcherValue::Exact(Box::new(
             Value::Nil,
         ))))),

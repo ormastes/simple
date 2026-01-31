@@ -139,6 +139,166 @@ pub(crate) fn call_method_on_value(
             "last" => {
                 return Ok(arr.last().map(|v| Value::some(v.clone())).unwrap_or_else(Value::none));
             }
+            "contains" | "includes" => {
+                if let Some(needle) = _args.first() {
+                    return Ok(Value::Bool(arr.contains(needle)));
+                }
+                return Ok(Value::Bool(false));
+            }
+            "join" => {
+                let sep = _args.first().and_then(|v| match v { Value::Str(s) => Some(s.as_str()), _ => None }).unwrap_or(",");
+                let joined: String = arr.iter().map(|v| v.to_display_string()).collect::<Vec<_>>().join(sep);
+                return Ok(Value::Str(joined));
+            }
+            "reverse" | "reversed" => {
+                let mut rev = arr.clone();
+                rev.reverse();
+                return Ok(Value::Array(rev));
+            }
+            "map" => {
+                if let Some(func_val) = _args.first() {
+                    if let Value::Function { def, captured_env, .. } = func_val {
+                        let mut result = Vec::new();
+                        for item in arr {
+                            let mut call_env = captured_env.clone();
+                            let val = exec_function_with_values(
+                                def,
+                                &[item.clone()],
+                                &mut call_env,
+                                _functions,
+                                _classes,
+                                _enums,
+                                _impl_methods,
+                            )?;
+                            result.push(val);
+                        }
+                        return Ok(Value::Array(result));
+                    }
+                }
+                return Ok(Value::Array(arr.clone()));
+            }
+            "filter" => {
+                if let Some(func_val) = _args.first() {
+                    if let Value::Function { def, captured_env, .. } = func_val {
+                        let mut result = Vec::new();
+                        for item in arr {
+                            let mut call_env = captured_env.clone();
+                            let val = exec_function_with_values(
+                                def,
+                                &[item.clone()],
+                                &mut call_env,
+                                _functions,
+                                _classes,
+                                _enums,
+                                _impl_methods,
+                            )?;
+                            if val.truthy() {
+                                result.push(item.clone());
+                            }
+                        }
+                        return Ok(Value::Array(result));
+                    }
+                }
+                return Ok(Value::Array(arr.clone()));
+            }
+            "flat_map" | "flatmap" => {
+                if let Some(func_val) = _args.first() {
+                    if let Value::Function { def, captured_env, .. } = func_val {
+                        let mut result = Vec::new();
+                        for item in arr {
+                            let mut call_env = captured_env.clone();
+                            let val = exec_function_with_values(
+                                def,
+                                &[item.clone()],
+                                &mut call_env,
+                                _functions,
+                                _classes,
+                                _enums,
+                                _impl_methods,
+                            )?;
+                            if let Value::Array(inner) = val {
+                                result.extend(inner);
+                            } else {
+                                result.push(val);
+                            }
+                        }
+                        return Ok(Value::Array(result));
+                    }
+                }
+                return Ok(Value::Array(arr.clone()));
+            }
+            "sort" | "sorted" => {
+                let mut sorted = arr.clone();
+                sorted.sort_by(|a, b| {
+                    match (a, b) {
+                        (Value::Int(x), Value::Int(y)) => x.cmp(y),
+                        (Value::Float(x), Value::Float(y)) => x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
+                        (Value::Str(x), Value::Str(y)) => x.cmp(y),
+                        _ => std::cmp::Ordering::Equal,
+                    }
+                });
+                return Ok(Value::Array(sorted));
+            }
+            "sum" => {
+                let mut total = 0i64;
+                let mut is_float = false;
+                let mut ftotal = 0.0f64;
+                for item in arr {
+                    match item {
+                        Value::Int(n) => { total += n; ftotal += *n as f64; }
+                        Value::Float(f) => { is_float = true; ftotal += f; }
+                        _ => {}
+                    }
+                }
+                return Ok(if is_float { Value::Float(ftotal) } else { Value::Int(total) });
+            }
+            "any" => {
+                if let Some(func_val) = _args.first() {
+                    if let Value::Function { def, captured_env, .. } = func_val {
+                        for item in arr {
+                            let mut call_env = captured_env.clone();
+                            let val = exec_function_with_values(def, &[item.clone()], &mut call_env, _functions, _classes, _enums, _impl_methods)?;
+                            if val.truthy() { return Ok(Value::Bool(true)); }
+                        }
+                        return Ok(Value::Bool(false));
+                    }
+                }
+                return Ok(Value::Bool(!arr.is_empty()));
+            }
+            "all" => {
+                if let Some(func_val) = _args.first() {
+                    if let Value::Function { def, captured_env, .. } = func_val {
+                        for item in arr {
+                            let mut call_env = captured_env.clone();
+                            let val = exec_function_with_values(def, &[item.clone()], &mut call_env, _functions, _classes, _enums, _impl_methods)?;
+                            if !val.truthy() { return Ok(Value::Bool(false)); }
+                        }
+                        return Ok(Value::Bool(true));
+                    }
+                }
+                return Ok(Value::Bool(true));
+            }
+            "enumerate" => {
+                let result: Vec<Value> = arr.iter().enumerate()
+                    .map(|(i, v)| Value::Tuple(vec![Value::Int(i as i64), v.clone()]))
+                    .collect();
+                return Ok(Value::Array(result));
+            }
+            "zip" => {
+                if let Some(Value::Array(other)) = _args.first() {
+                    let result: Vec<Value> = arr.iter().zip(other.iter())
+                        .map(|(a, b)| Value::Tuple(vec![a.clone(), b.clone()]))
+                        .collect();
+                    return Ok(Value::Array(result));
+                }
+                return Ok(Value::Array(arr.clone()));
+            }
+            "unwrap_or" => {
+                if let Some(default) = _args.first() {
+                    if arr.is_empty() { return Ok(default.clone()); }
+                }
+                return Ok(Value::Array(arr.clone()));
+            }
             _ => {}
         },
 

@@ -15,6 +15,7 @@ use crate::auth_db::{
     add_authorized_email, authenticate_password, is_password_set, load_auth_config, remove_authorized_email,
     set_password, OAuthProvider,
 };
+#[cfg(feature = "oauth")]
 use crate::oauth_flow::device_code_flow;
 use crate::signature::{
     has_qualified_ignores, load_signature_from_db, save_signature_to_db, sign_qualified_ignores, verify_signature,
@@ -56,7 +57,9 @@ pub struct QualifyIgnoreArgs {
 pub enum AuthProvider {
     #[default]
     Password,
+    #[cfg(feature = "oauth")]
     Google,
+    #[cfg(feature = "oauth")]
     Microsoft,
 }
 
@@ -107,8 +110,15 @@ pub fn parse_qualify_ignore_args(args: &[String]) -> QualifyIgnoreArgs {
                 if i + 1 < args.len() {
                     i += 1;
                     result.provider = match args[i].to_lowercase().as_str() {
+                        #[cfg(feature = "oauth")]
                         "google" => AuthProvider::Google,
+                        #[cfg(feature = "oauth")]
                         "microsoft" => AuthProvider::Microsoft,
+                        #[cfg(not(feature = "oauth"))]
+                        "google" | "microsoft" => {
+                            eprintln!("Error: OAuth providers require the 'oauth' feature. Rebuild with --features oauth");
+                            AuthProvider::Password
+                        }
                         _ => AuthProvider::Password,
                     };
                 }
@@ -213,7 +223,10 @@ fn print_help() {
     println!("  <test-id>...             Qualify specific test(s)");
     println!();
     println!("Options:");
+    #[cfg(feature = "oauth")]
     println!("  --provider, -p <type>    Auth provider: password, google, microsoft");
+    #[cfg(not(feature = "oauth"))]
+    println!("  --provider, -p <type>    Auth provider: password (rebuild with --features oauth for OAuth)");
     println!("  --reason, -r <text>      Reason for qualification");
     println!("  --db <path>              Path to test database");
     println!();
@@ -221,10 +234,13 @@ fn print_help() {
     println!("  --status                 Show qualification status");
     println!("  --verify                 Verify signature integrity");
     println!();
-    println!("OAuth Configuration:");
-    println!("  For Google: Set SIMPLE_GOOGLE_CLIENT_ID or add to ~/.simple/oauth.sdn");
-    println!("  For Microsoft: Set SIMPLE_MICROSOFT_CLIENT_ID or add to ~/.simple/oauth.sdn");
-    println!();
+    #[cfg(feature = "oauth")]
+    {
+        println!("OAuth Configuration:");
+        println!("  For Google: Set SIMPLE_GOOGLE_CLIENT_ID or add to ~/.simple/oauth.sdn");
+        println!("  For Microsoft: Set SIMPLE_MICROSOFT_CLIENT_ID or add to ~/.simple/oauth.sdn");
+        println!();
+    }
     println!("Examples:");
     println!("  simple qualify-ignore --set-password      # Set up password auth");
     println!("  simple qualify-ignore --all -r \"CI flaky\" # Qualify all ignored tests");
@@ -396,10 +412,12 @@ fn authenticate(args: &QualifyIgnoreArgs) -> Result<String, String> {
 
             authenticate_password(&password)
         }
+        #[cfg(feature = "oauth")]
         AuthProvider::Google => {
             let result = device_code_flow(OAuthProvider::Google)?;
             Ok(result.email)
         }
+        #[cfg(feature = "oauth")]
         AuthProvider::Microsoft => {
             let result = device_code_flow(OAuthProvider::Microsoft)?;
             Ok(result.email)

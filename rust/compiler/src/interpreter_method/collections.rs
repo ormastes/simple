@@ -126,6 +126,21 @@ pub fn handle_array_methods(
                 impl_methods,
             )?));
         }
+        "merge" | "concat" => {
+            let other = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
+            match other {
+                Value::Array(other_arr) => {
+                    let mut result = arr.to_vec();
+                    result.extend_from_slice(&other_arr);
+                    Value::Array(result)
+                }
+                _ => {
+                    return Err(CompileError::semantic(
+                        "merge expects an array argument".to_string(),
+                    ));
+                }
+            }
+        }
         "reduce" | "fold" => {
             let init = eval_arg(args, 0, Value::Int(0), env, functions, classes, enums, impl_methods)?;
             let func = eval_arg(args, 1, Value::Nil, env, functions, classes, enums, impl_methods)?;
