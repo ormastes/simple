@@ -50,31 +50,6 @@ mod compiler_lower_error_extended_tests {
 }
 
 // ============================================================================
-// Pkg Cache Extended Types
-// ============================================================================
-mod pkg_cache_extended_tests {
-    use simple_pkg::Cache;
-
-    #[test]
-    fn test_cache_new() {
-        let cache = Cache::new();
-        let _ = cache;
-    }
-}
-
-// ============================================================================
-// Pkg Linker Extended Types
-// ============================================================================
-mod pkg_linker_extended_tests {
-    use simple_pkg::Linker;
-
-    #[test]
-    fn test_linker_size() {
-        let _ = std::mem::size_of::<Linker>();
-    }
-}
-
-// ============================================================================
 // Loader Cross Compile Types
 // ============================================================================
 mod loader_cross_compile_tests {

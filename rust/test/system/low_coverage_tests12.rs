@@ -393,43 +393,6 @@ mod loader_extended_tests {
 }
 
 // ============================================================================
-// Package Manager Extended Tests
-// ============================================================================
-mod pkg_extended_tests {
-    use simple_pkg::{Version, VersionReq};
-
-    #[test]
-    fn test_version_new() {
-        let v = Version::new(1, 2, 3);
-        assert_eq!(v.major(), 1);
-        assert_eq!(v.minor(), 2);
-        assert_eq!(v.patch(), 3);
-    }
-
-    #[test]
-    fn test_version_parse() {
-        let v = Version::parse("1.2.3");
-        assert!(v.is_ok());
-        let v = v.unwrap();
-        assert_eq!(v.major(), 1);
-    }
-
-    #[test]
-    fn test_version_req_any() {
-        let req = VersionReq::any();
-        let v = Version::new(1, 0, 0);
-        assert!(req.matches(&v));
-    }
-
-    #[test]
-    fn test_version_display() {
-        let v = Version::new(1, 2, 3);
-        let s = format!("{}", v);
-        assert_eq!(s, "1.2.3");
-    }
-}
-
-// ============================================================================
 // Common Types Extended Tests
 // ============================================================================
 mod common_extended_tests {
@@ -513,31 +476,3 @@ mod type_checker_tests {
 
 // ============================================================================
 // Dependency Tracker Tests
-// ============================================================================
-mod dep_tracker_tests {
-    use simple_dependency_tracker::{ImportGraph, SymbolKind};
-
-    #[test]
-    fn test_import_graph_new() {
-        let graph = ImportGraph::new();
-        let _ = graph;
-    }
-
-    #[test]
-    fn test_symbol_kind_function() {
-        let kind = SymbolKind::Function;
-        let _ = format!("{:?}", kind);
-    }
-
-    #[test]
-    fn test_symbol_kind_module() {
-        let kind = SymbolKind::Module;
-        let _ = format!("{:?}", kind);
-    }
-
-    #[test]
-    fn test_symbol_kind_type() {
-        let kind = SymbolKind::Type;
-        let _ = format!("{:?}", kind);
-    }
-}

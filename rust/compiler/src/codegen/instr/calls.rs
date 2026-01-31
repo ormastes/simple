@@ -13,6 +13,65 @@ use super::core::compile_builtin_io_call;
 use super::helpers::get_vreg_or_default;
 use super::{InstrContext, InstrResult};
 
+/// Check if a function name is a profiler function (to avoid recursive instrumentation)
+fn is_profiler_function(name: &str) -> bool {
+    name.starts_with("rt_profiler_")
+}
+
+/// Create a null-terminated C string constant in module data and return a pointer value.
+fn create_cstring_constant<M: Module>(
+    ctx: &mut InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    text: &str,
+) -> InstrResult<cranelift_codegen::ir::Value> {
+    let mut bytes = text.as_bytes().to_vec();
+    bytes.push(0); // null terminator
+    let data_id = ctx
+        .module
+        .declare_anonymous_data(true, false)
+        .map_err(|e| e.to_string())?;
+    let mut data_desc = cranelift_module::DataDescription::new();
+    data_desc.define(bytes.into_boxed_slice());
+    ctx.module.define_data(data_id, &data_desc).map_err(|e| e.to_string())?;
+
+    let global_val = ctx.module.declare_data_in_func(data_id, builder.func);
+    let ptr = builder.ins().global_value(types::I64, global_val);
+    Ok(ptr)
+}
+
+/// Emit profiler call/return instrumentation around a function call.
+/// Only emits if profiling is active at codegen time (zero overhead when off).
+fn emit_profiler_call<M: Module>(
+    ctx: &mut InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    func_name: &str,
+) -> InstrResult<()> {
+    if !crate::runtime_profile::is_profiling_active() {
+        return Ok(());
+    }
+    if let Some(&record_call_id) = ctx.runtime_funcs.get("rt_profiler_record_call") {
+        let name_ptr = create_cstring_constant(ctx, builder, func_name)?;
+        let record_call_ref = ctx.module.declare_func_in_func(record_call_id, builder.func);
+        let adapted = adapt_args_to_signature(builder, record_call_ref, vec![name_ptr]);
+        builder.ins().call(record_call_ref, &adapted);
+    }
+    Ok(())
+}
+
+fn emit_profiler_return<M: Module>(
+    ctx: &mut InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+) -> InstrResult<()> {
+    if !crate::runtime_profile::is_profiling_active() {
+        return Ok(());
+    }
+    if let Some(&record_return_id) = ctx.runtime_funcs.get("rt_profiler_record_return") {
+        let record_return_ref = ctx.module.declare_func_in_func(record_return_id, builder.func);
+        builder.ins().call(record_return_ref, &[]);
+    }
+    Ok(())
+}
+
 /// Get the return type for a runtime FFI function.
 /// Returns None if the function is not found or has no return value.
 fn get_runtime_return_type(func_name: &str) -> Option<types::Type> {
@@ -192,10 +251,16 @@ pub fn compile_call<M: Module>(
         }
     } else if let Some(&callee_id) = ctx.func_ids.get(func_name) {
         // User-defined function
+        if !is_profiler_function(func_name) {
+            emit_profiler_call(ctx, builder, func_name)?;
+        }
         let callee_ref = ctx.module.declare_func_in_func(callee_id, builder.func);
         let arg_vals: Vec<_> = args.iter().map(|a| get_vreg_or_default(ctx, builder, a)).collect();
         let arg_vals = adapt_args_to_signature(builder, callee_ref, arg_vals);
         let call = builder.ins().call(callee_ref, &arg_vals);
+        if !is_profiler_function(func_name) {
+            emit_profiler_return(ctx, builder)?;
+        }
         if let Some(d) = dest {
             let results = builder.inst_results(call);
             if !results.is_empty() {
@@ -204,6 +269,9 @@ pub fn compile_call<M: Module>(
         }
     } else if let Some(&runtime_id) = ctx.runtime_funcs.get(func_name) {
         // Runtime FFI function
+        if !is_profiler_function(func_name) {
+            emit_profiler_call(ctx, builder, func_name)?;
+        }
         let runtime_ref = ctx.module.declare_func_in_func(runtime_id, builder.func);
 
         // Check if this function needs RuntimeValue tagging for certain arguments
@@ -256,6 +324,9 @@ pub fn compile_call<M: Module>(
                 };
                 ctx.vreg_values.insert(*d, final_result);
             }
+        }
+        if !is_profiler_function(func_name) {
+            emit_profiler_return(ctx, builder)?;
         }
     } else {
         eprintln!("[WARN compile_call] Function '{}' not found in func_ids ({} entries) or runtime_funcs ({} entries)",

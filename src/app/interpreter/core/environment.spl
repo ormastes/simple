@@ -9,6 +9,7 @@
 
 from value import {Value}
 from symbol import {SymbolId, intern, resolve, GLOBAL_INTERNER}
+from ..collections.persistent_dict import {PersistentDict}
 
 export Environment, Scope, Binding, EnvironmentWithInterner
 
@@ -32,42 +33,52 @@ impl Binding:
 # ============================================================================
 
 struct Scope:
-    """A single scope (lexical block)."""
-    bindings: Dict<i64, Binding>    # SymbolId.id -> Binding (was: Dict<String, Binding>)
+    """A single scope (lexical block).
+
+    Uses PersistentDict for bindings, enabling O(1) scope snapshots
+    via structural sharing. Push/pop scope only copies the modified path
+    (~7 nodes) rather than the entire bindings map.
+    """
+    bindings: PersistentDict<i64, Binding>  # SymbolId.id -> Binding (HAMT, structural sharing)
     parent: Option<&Scope>
 
 impl Scope:
     static fn new() -> Scope:
         """Create a new empty scope."""
         Scope(
-            bindings: {},
+            bindings: PersistentDict.new(),
             parent: None
         )
 
     static fn with_parent(parent: &Scope) -> Scope:
         """Create a new scope with a parent."""
         Scope(
-            bindings: {},
+            bindings: PersistentDict.new(),
             parent: Some(parent)
         )
 
-    me define(name: SymbolId, value: Value, mutable: bool):
-        """Define a variable in this scope."""
-        self.bindings[name.id] = Binding {
+    fn define(name: SymbolId, value: Value, mutable: bool) -> Scope:
+        """Define a variable in this scope. Returns new scope (persistent)."""
+        val new_bindings = self.bindings.set(name.id, Binding(
             name: name,
             value: value,
             mutable: mutable
-        }
+        ))
+        Scope(
+            bindings: new_bindings,
+            parent: self.parent
+        )
 
-    me define_str(name: text, value: Value, mutable: bool):
+    fn define_str(name: text, value: Value, mutable: bool) -> Scope:
         """Define a variable by string name (auto-interns)."""
         val sym = intern(name)
         self.define(sym, value, mutable)
 
     fn get(name: SymbolId) -> Binding?:
         """Look up a binding by SymbolId."""
-        if self.bindings[name.id].?:
-            return Some(self.bindings[name.id])
+        val found = self.bindings.get(name.id)
+        if found.?:
+            return found
         if self.parent.?:
             return self.parent.unwrap().get(name)
         None
@@ -84,25 +95,29 @@ impl Scope:
         else:
             None
 
-    me set(name: SymbolId, value: Value) -> Result<(), text>:
-        """Set a variable's value."""
-        if self.bindings[name.id].?:
-            val current_binding = self.bindings[name.id]
+    fn set(name: SymbolId, value: Value) -> Result<Scope, text>:
+        """Set a variable's value. Returns new scope (persistent)."""
+        val found = self.bindings.get(name.id)
+        if found.?:
+            val current_binding = found.unwrap()
             if not current_binding.mutable:
                 val name_str = resolve(name) ?? "<unknown>"
                 return Err("Cannot assign to immutable variable: {name_str}")
-            self.bindings[name.id] = Binding {
+            val new_bindings = self.bindings.set(name.id, Binding(
                 name: current_binding.name,
                 value: value,
                 mutable: current_binding.mutable
-            }
-            return Ok(())
+            ))
+            return Ok(Scope(
+                bindings: new_bindings,
+                parent: self.parent
+            ))
         if self.parent.?:
             return self.parent.unwrap().set(name, value)
         val name_str = resolve(name) ?? "<unknown>"
         Err("Undefined variable: {name_str}")
 
-    me set_str(name: text, value: Value) -> Result<(), text>:
+    fn set_str(name: text, value: Value) -> Result<Scope, text>:
         """Set a variable's value by string name."""
         val sym = GLOBAL_INTERNER.get_or_none(name)
         if sym.?:
@@ -132,23 +147,26 @@ impl Environment:
     # ------------------------------------------------------------------------
 
     me push_scope():
-        """Enter a new scope."""
+        """Enter a new scope.
+
+        With PersistentDict, the parent scope's bindings are shared
+        (not copied). Only new/modified bindings allocate new nodes.
+        """
         val parent = self.current_scope()
         self.scopes = self.scopes.push(Scope.with_parent(parent))
 
     me pop_scope():
-        """Exit current scope."""
+        """Exit current scope.
+
+        The popped scope's bindings are reclaimed if no other references.
+        Shared nodes with parent scope persist (structural sharing).
+        """
         if self.scopes.len() > 1:
             self.scopes = self.scopes[0:self.scopes.len() - 1]
 
     fn current_scope() -> &Scope:
-        """Get current scope (immutable)."""
+        """Get current scope."""
         &self.scopes[self.scopes.len() - 1]
-
-    me current_scope_mut() -> &Scope:
-        """Get current scope (mutable)."""
-        val idx = self.scopes.len() - 1
-        &self.scopes[idx]
 
     # ------------------------------------------------------------------------
     # Variable operations (SymbolId)
@@ -156,11 +174,13 @@ impl Environment:
 
     me define(name: SymbolId, value: Value):
         """Define a mutable variable in current scope."""
-        self.current_scope_mut().define(name, value, true)
+        val idx = self.scopes.len() - 1
+        self.scopes[idx] = self.scopes[idx].define(name, value, true)
 
     me define_const(name: SymbolId, value: Value):
         """Define an immutable variable in current scope."""
-        self.current_scope_mut().define(name, value, false)
+        val idx = self.scopes.len() - 1
+        self.scopes[idx] = self.scopes[idx].define(name, value, false)
 
     fn get(name: SymbolId) -> Value?:
         """Get a variable's value by SymbolId."""
@@ -172,11 +192,17 @@ impl Environment:
 
     me set(name: SymbolId, value: Value) -> Result<(), text>:
         """Set a variable's value."""
-        self.current_scope_mut().set(name, value)
+        val idx = self.scopes.len() - 1
+        match self.scopes[idx].set(name, value):
+            case Ok(new_scope):
+                self.scopes[idx] = new_scope
+                Ok(())
+            case Err(msg):
+                Err(msg)
 
     me define_global(name: SymbolId, value: Value):
         """Define a global variable."""
-        self.globals.define(name, value, true)
+        self.globals = self.globals.define(name, value, true)
 
     # ------------------------------------------------------------------------
     # Variable operations (String - convenience wrappers)

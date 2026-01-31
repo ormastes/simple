@@ -534,59 +534,6 @@ fn test_project_context_lint_config() {
     // Should have default lint config
     let _ = ctx.lint_config;
 }
-
-// =============================================================================
-// Package Commands Coverage (pkg/src/commands/*.rs - 0%)
-// =============================================================================
-
-// Note: Package commands require more complex setup with filesystem
-// These tests cover the types that can be tested in isolation
-
-use simple_pkg::{Cache as PackageCache, Linker as PackageLinker};
-
-#[test]
-fn test_package_cache_at() {
-    let dir = tempdir().expect("tempdir");
-    let cache = PackageCache::at(dir.path().to_path_buf());
-    assert_eq!(cache.root(), dir.path());
-}
-
-#[test]
-fn test_package_cache_new() {
-    // Cache::new() uses system cache directory, may or may not exist
-    let result = PackageCache::new();
-    // Just test that it returns a result (either Ok or Err)
-    let _ = result;
-}
-
-#[test]
-fn test_package_cache_default() {
-    let cache = PackageCache::default();
-    let _ = cache.root();
-}
-
-#[test]
-fn test_package_cache_methods() {
-    let dir = tempdir().expect("tempdir");
-    let cache = PackageCache::at(dir.path().to_path_buf());
-
-    // Test various path methods
-    let _ = cache.git_dir();
-    let _ = cache.registry_dir();
-    let _ = cache.packages_dir();
-    let _ = cache.git_repo_path("https://example.com/repo");
-    let _ = cache.package_path("test", "1.0.0");
-    assert!(!cache.has_git_repo("https://example.com/fake"));
-    assert!(!cache.has_package("fake", "1.0.0"));
-}
-
-#[test]
-fn test_package_linker_new() {
-    let dir = tempdir().expect("tempdir");
-    let linker = PackageLinker::new(dir.path());
-    let _ = linker;
-}
-
 // =============================================================================
 // Target/Cross-test Coverage (loader/src/cross_test.rs - 0%)
 // =============================================================================

@@ -30,7 +30,6 @@ pub mod pretty_printer;
 pub mod hir;
 pub mod hydration_manifest;
 pub mod i18n;
-pub mod i18n_diagnostics;
 pub mod import_loader;
 pub mod incremental;
 pub mod interpreter;
@@ -99,7 +98,6 @@ pub use error::{codes as error_codes, typo, CompileError, ErrorContext};
 pub use formatter::{FormatConfig, Formatter};
 pub use pretty_printer::{PrettyConfig, PrettyPrinter};
 pub use i18n::{ExtractionResult, I18nExtractor, I18nString, LocaleFile, LocaleGenerator};
-pub use i18n_diagnostics::convert_compiler_error;
 pub use interpreter::{
     check_execution_limit, evaluate_module, get_execution_count, get_interpreter_args, is_debug_mode,
     is_execution_limit_enabled, reset_execution_count, set_debug_mode, set_execution_limit,

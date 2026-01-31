@@ -299,53 +299,6 @@ mod loader_startup_tests {
 }
 
 // ============================================================================
-// Package Error Types
-// ============================================================================
-mod pkg_error_tests {
-    use simple_pkg::{PkgError, PkgResult};
-
-    #[test]
-    fn test_pkg_error_size() {
-        // Test that PkgError type exists
-        let _ = std::mem::size_of::<PkgError>();
-    }
-
-    #[test]
-    fn test_pkg_result_type() {
-        // Test that PkgResult type alias works
-        let result: PkgResult<i32> = Ok(42);
-        assert_eq!(result.unwrap(), 42);
-    }
-}
-
-// ============================================================================
-// Package Cache Types
-// ============================================================================
-mod pkg_cache_tests {
-    use simple_pkg::Cache;
-
-    #[test]
-    fn test_cache_new() {
-        let cache = Cache::new();
-        let _ = cache;
-    }
-}
-
-// ============================================================================
-// Package Linker Types
-// ============================================================================
-mod pkg_linker_tests {
-    use simple_pkg::Linker;
-    use std::path::Path;
-
-    #[test]
-    fn test_linker_new() {
-        let linker = Linker::new(Path::new("/tmp/test_project"));
-        let _ = linker;
-    }
-}
-
-// ============================================================================
 // Compiler ClassName Methods
 // ============================================================================
 mod compiler_classname_tests {

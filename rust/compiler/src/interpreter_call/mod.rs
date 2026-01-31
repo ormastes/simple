@@ -22,6 +22,7 @@ use crate::error::{codes, CompileError, ErrorContext};
 use crate::interpreter::{
     call_extern_function, dispatch_context_method, evaluate_expr, BUILTIN_CHANNEL, CONTEXT_OBJECT, EXTERN_FUNCTIONS,
 };
+use crate::runtime_profile;
 use crate::value::*;
 use simple_parser::ast::{Argument, ClassDef, EnumDef, Expr, FunctionDef};
 use std::collections::HashMap;
@@ -44,7 +45,14 @@ pub(crate) fn evaluate_call(
     if let Expr::Identifier(name) = callee.as_ref() {
         let is_extern = EXTERN_FUNCTIONS.with(|cell| cell.borrow().contains(name));
         if is_extern {
-            return call_extern_function(name, args, env, functions, classes, enums, impl_methods);
+            if runtime_profile::is_profiling_active() {
+                runtime_profile::record_full_call(name, None, vec![], runtime_profile::CallType::Ffi);
+            }
+            let result = call_extern_function(name, args, env, functions, classes, enums, impl_methods);
+            if runtime_profile::is_profiling_active() {
+                runtime_profile::record_full_return(None);
+            }
+            return result;
         }
 
         // Priority 2: Try built-ins

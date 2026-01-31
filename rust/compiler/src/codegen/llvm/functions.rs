@@ -390,8 +390,147 @@ impl LlvmBackend {
                 vreg_map.insert(*dest, result);
             }
 
-            _ => {
-                // Other instructions not yet implemented
+            // =====================================================================
+            // Unsupported instruction categories
+            // =====================================================================
+
+            // SIMD instructions (not yet implemented in LLVM backend)
+            MirInst::VecLit { .. }
+            | MirInst::VecSum { .. }
+            | MirInst::VecProduct { .. }
+            | MirInst::VecMin { .. }
+            | MirInst::VecMax { .. }
+            | MirInst::VecAll { .. }
+            | MirInst::VecAny { .. }
+            | MirInst::VecExtract { .. }
+            | MirInst::VecWith { .. }
+            | MirInst::VecSqrt { .. }
+            | MirInst::VecAbs { .. }
+            | MirInst::VecFloor { .. }
+            | MirInst::VecCeil { .. }
+            | MirInst::VecRound { .. }
+            | MirInst::VecShuffle { .. }
+            | MirInst::VecBlend { .. }
+            | MirInst::VecSelect { .. }
+            | MirInst::VecLoad { .. }
+            | MirInst::VecStore { .. }
+            | MirInst::VecGather { .. }
+            | MirInst::VecScatter { .. }
+            | MirInst::VecFma { .. }
+            | MirInst::VecRecip { .. }
+            | MirInst::VecMaskedLoad { .. }
+            | MirInst::VecMaskedStore { .. }
+            | MirInst::VecMinVec { .. }
+            | MirInst::VecMaxVec { .. }
+            | MirInst::VecClamp { .. } => {
+                // SIMD instructions not yet supported by LLVM backend
+                // These will be implemented in a future update
+            }
+
+            // Pointer instructions (not yet implemented)
+            MirInst::PointerNew { .. }
+            | MirInst::PointerRef { .. }
+            | MirInst::PointerDeref { .. } => {
+                // Pointer operations not yet implemented
+            }
+
+            // Memory safety instructions (not yet implemented)
+            MirInst::Drop { .. } | MirInst::EndScope { .. } => {
+                // Drop and scope tracking not yet implemented
+            }
+
+            // Pattern matching instructions (not yet implemented)
+            MirInst::PatternTest { .. }
+            | MirInst::PatternBind { .. }
+            | MirInst::EnumDiscriminant { .. }
+            | MirInst::EnumPayload { .. }
+            | MirInst::EnumUnit { .. }
+            | MirInst::EnumWith { .. }
+            | MirInst::UnionDiscriminant { .. }
+            | MirInst::UnionPayload { .. }
+            | MirInst::UnionWrap { .. } => {
+                // Pattern matching not yet implemented
+            }
+
+            // Async/Actor instructions (interpreter-only)
+            MirInst::FutureCreate { .. }
+            | MirInst::Await { .. }
+            | MirInst::ActorSpawn { .. }
+            | MirInst::ActorSend { .. }
+            | MirInst::ActorRecv { .. }
+            | MirInst::ActorJoin { .. }
+            | MirInst::ActorReply { .. }
+            | MirInst::GeneratorCreate { .. }
+            | MirInst::Yield { .. }
+            | MirInst::GeneratorNext { .. } => {
+                // Async/actor operations only supported in interpreter
+            }
+
+            // Error handling instructions (not yet implemented)
+            MirInst::TryUnwrap { .. }
+            | MirInst::OptionSome { .. }
+            | MirInst::OptionNone { .. }
+            | MirInst::ResultOk { .. }
+            | MirInst::ResultErr { .. } => {
+                // Error handling not yet implemented
+            }
+
+            // Contract instructions (not yet implemented)
+            MirInst::ContractCheck { .. } | MirInst::ContractOldCapture { .. } => {
+                // Contract checking not yet implemented
+            }
+
+            // Coverage instrumentation (not yet implemented)
+            MirInst::DecisionProbe { .. }
+            | MirInst::ConditionProbe { .. }
+            | MirInst::PathProbe { .. } => {
+                // Coverage instrumentation not yet implemented
+            }
+
+            // Unit type instructions (not yet implemented)
+            MirInst::UnitBoundCheck { .. }
+            | MirInst::UnitWiden { .. }
+            | MirInst::UnitNarrow { .. }
+            | MirInst::UnitSaturate { .. } => {
+                // Unit type operations not yet implemented
+            }
+
+            // Parallel iterator instructions (not yet implemented)
+            MirInst::ParMap { .. }
+            | MirInst::ParReduce { .. }
+            | MirInst::ParFilter { .. }
+            | MirInst::ParForEach { .. } => {
+                // Parallel iterators not yet implemented
+            }
+
+            // Boxing instructions (not yet implemented)
+            MirInst::BoxInt { .. }
+            | MirInst::BoxFloat { .. }
+            | MirInst::UnboxInt { .. }
+            | MirInst::UnboxFloat { .. } => {
+                // Value boxing not yet implemented
+            }
+
+            // Other collection instructions (not yet implemented)
+            MirInst::Spread { .. } | MirInst::FStringFormat { .. } => {
+                // Spread and format string not yet implemented
+            }
+
+            // Method call instructions (not yet implemented)
+            MirInst::MethodCallStatic { .. }
+            | MirInst::MethodCallVirtual { .. }
+            | MirInst::BuiltinMethod { .. }
+            | MirInst::ExternMethodCall { .. } => {
+                // Method calls not yet implemented
+            }
+
+            // Advanced memory instructions (not yet implemented)
+            MirInst::GlobalLoad { .. }
+            | MirInst::GlobalStore { .. }
+            | MirInst::GetElementPtr { .. }
+            | MirInst::Wait { .. }
+            | MirInst::NeighborLoad { .. } => {
+                // Advanced memory operations not yet implemented
             }
         }
 

@@ -95,27 +95,6 @@ mod driver_test_framework_tests {
 }
 
 // ============================================================================
-// Package Manager Tests
-// ============================================================================
-mod pkg_extended_tests {
-    use simple_pkg::{Version, VersionReq};
-
-    #[test]
-    fn test_version_comparison() {
-        let v1 = Version::new(1, 0, 0);
-        let v2 = Version::new(2, 0, 0);
-        assert!(v1 < v2);
-    }
-
-    #[test]
-    fn test_version_req_any() {
-        let req = VersionReq::any();
-        let v = Version::new(1, 2, 3);
-        assert!(req.matches(&v));
-    }
-}
-
-// ============================================================================
 // Common Handle Types Tests
 // ============================================================================
 mod common_handle_tests {
@@ -195,25 +174,6 @@ mod loader_module_tests {
 
 // ============================================================================
 // Dependency Tracker Tests
-// ============================================================================
-mod dep_tracker_extended_tests {
-    use simple_dependency_tracker::{ImportGraph, SymbolKind};
-
-    #[test]
-    fn test_import_graph_new() {
-        let graph = ImportGraph::new();
-        let _ = format!("{:?}", graph);
-    }
-
-    #[test]
-    fn test_symbol_kind_variants() {
-        let kinds = [SymbolKind::Function, SymbolKind::Module, SymbolKind::Type];
-        for k in kinds {
-            let _ = format!("{:?}", k);
-        }
-    }
-}
-
 // ============================================================================
 // Driver Run Result Tests
 // ============================================================================

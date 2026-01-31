@@ -1,0 +1,332 @@
+# Map Correctness - Comprehensive SSpec Tests
+# Verifies Map behavior before and after hash optimization
+
+use std.map.*
+use std.hash.*
+use sspec.*
+
+describe "Map correctness":
+    describe "Basic operations":
+        it "creates empty map":
+            val map = Map<text, i32>.new()
+            assert map.is_empty()
+            assert map.len() == 0
+
+        it "inserts and retrieves single entry":
+            var map = Map.new()
+            map.insert("key", 42)
+
+            assert not map.is_empty()
+            assert map.len() == 1
+            assert map.get("key") == Some(42)
+
+        it "updates existing key":
+            var map = Map.new()
+            map.insert("key", 1)
+            map.insert("key", 2)
+
+            assert map.len() == 1
+            assert map.get("key") == Some(2)
+
+        it "retrieves None for missing key":
+            val map = Map<text, i32>.new()
+            assert map.get("missing") == None
+
+        it "has() returns correct values":
+            var map = Map.new()
+            map.insert("exists", 1)
+
+            assert map.has("exists")
+            assert not map.has("missing")
+
+    describe "Multiple entries":
+        it "handles multiple distinct keys":
+            var map = Map.new()
+            for i in 0..100:
+                map.insert("key_{i}", i)
+
+            assert map.len() == 100
+
+            for i in 0..100:
+                assert map.get("key_{i}") == Some(i)
+
+        it "maintains all entries after updates":
+            var map = Map.new()
+            for i in 0..50:
+                map.insert("key_{i}", i)
+
+            # Update some entries
+            for i in 0..25:
+                map.insert("key_{i}", i * 2)
+
+            # Check all entries
+            for i in 0..25:
+                assert map.get("key_{i}") == Some(i * 2)
+            for i in 25..50:
+                assert map.get("key_{i}") == Some(i)
+
+    describe "Removal":
+        it "removes existing key":
+            var map = Map.new()
+            map.insert("key", 42)
+
+            val removed = map.remove("key")
+            assert removed == Some(42)
+            assert map.len() == 0
+            assert map.get("key") == None
+
+        it "remove returns None for missing key":
+            var map = Map<text, i32>.new()
+            assert map.remove("missing") == None
+
+        it "maintains other entries after removal":
+            var map = Map.new()
+            for i in 0..10:
+                map.insert("key_{i}", i)
+
+            map.remove("key_5")
+
+            assert map.len() == 9
+            for i in 0..10:
+                if i == 5:
+                    assert map.get("key_{i}") == None
+                else:
+                    assert map.get("key_{i}") == Some(i)
+
+    describe "Clear":
+        it "clears all entries":
+            var map = Map.new()
+            for i in 0..100:
+                map.insert("key_{i}", i)
+
+            map.clear()
+
+            assert map.is_empty()
+            assert map.len() == 0
+            for i in 0..100:
+                assert map.get("key_{i}") == None
+
+    describe "Keys, values, entries":
+        it "returns all keys":
+            var map = Map.new()
+            map.insert("a", 1)
+            map.insert("b", 2)
+            map.insert("c", 3)
+
+            val keys = map.keys()
+            assert keys.len() == 3
+            assert keys.contains("a")
+            assert keys.contains("b")
+            assert keys.contains("c")
+
+        it "returns all values":
+            var map = Map.new()
+            map.insert("a", 1)
+            map.insert("b", 2)
+
+            val values = map.values()
+            assert values.len() == 2
+            assert values.contains(1)
+            assert values.contains(2)
+
+        it "returns all entries":
+            var map = Map.new()
+            map.insert("a", 1)
+            map.insert("b", 2)
+
+            val entries = map.entries()
+            assert entries.len() == 2
+            assert entries.contains(("a", 1))
+            assert entries.contains(("b", 2))
+
+    describe "Rehashing":
+        it "rehashes when load factor exceeded":
+            var map = Map.new()
+            val initial_capacity = map.capacity
+
+            # Insert enough to trigger rehash (>75% load)
+            val count = (initial_capacity * 3 / 4) + 1
+            for i in 0..count:
+                map.insert("key_{i}", i)
+
+            # Capacity should have doubled
+            assert map.capacity == initial_capacity * 2
+
+            # All entries should still be retrievable
+            for i in 0..count:
+                assert map.get("key_{i}") == Some(i)
+
+        it "maintains correctness through multiple rehashes":
+            var map = Map.new()
+
+            # Insert many entries to trigger multiple rehashes
+            for i in 0..1000:
+                map.insert("key_{i}", i)
+
+            assert map.len() == 1000
+
+            # Verify all entries
+            for i in 0..1000:
+                assert map.get("key_{i}") == Some(i)
+
+    describe "Hash distribution":
+        it "distributes entries across buckets":
+            var map = Map.new()
+
+            # Insert 1000 entries
+            for i in 0..1000:
+                map.insert("key_{i}", i)
+
+            # Check bucket distribution
+            var empty_buckets = 0
+            var max_bucket_size = 0
+
+            for bucket in map.buckets:
+                if bucket.is_empty():
+                    empty_buckets = empty_buckets + 1
+                else:
+                    max_bucket_size = max(max_bucket_size, bucket.len())
+
+            # With good hashing:
+            # - Most buckets should be used (< 50% empty)
+            # - No bucket should be very large (< 5% of all entries)
+            assert empty_buckets < map.capacity / 2
+            assert max_bucket_size < 50
+
+    describe "Edge cases":
+        it "handles empty string key":
+            var map = Map.new()
+            map.insert("", 42)
+            assert map.get("") == Some(42)
+
+        it "handles long string keys":
+            var map = Map.new()
+            val long_key = "x" * 1000
+            map.insert(long_key, 1)
+            assert map.get(long_key) == Some(1)
+
+        it "handles special characters in keys":
+            var map = Map.new()
+            map.insert("key\nwith\nnewlines", 1)
+            map.insert("key\twith\ttabs", 2)
+            map.insert("key\"with\"quotes", 3)
+
+            assert map.get("key\nwith\nnewlines") == Some(1)
+            assert map.get("key\twith\ttabs") == Some(2)
+            assert map.get("key\"with\"quotes") == Some(3)
+
+        it "handles unicode keys":
+            var map = Map.new()
+            map.insert("héllo", 1)
+            map.insert("世界", 2)
+            map.insert("🚀", 3)
+
+            assert map.get("héllo") == Some(1)
+            assert map.get("世界") == Some(2)
+            assert map.get("🚀") == Some(3)
+
+    describe "Functional operations":
+        it "filters entries":
+            var map = Map.new()
+            for i in 0..10:
+                map.insert("key_{i}", i)
+
+            val filtered = map.filter(\k, v: v % 2 == 0)
+
+            assert filtered.len() == 5
+            for i in 0..10:
+                if i % 2 == 0:
+                    assert filtered.get("key_{i}") == Some(i)
+                else:
+                    assert filtered.get("key_{i}") == None
+
+        it "maps values":
+            var map = Map.new()
+            map.insert("a", 1)
+            map.insert("b", 2)
+
+            val doubled = map.map_values(\v: v * 2)
+
+            assert doubled.get("a") == Some(2)
+            assert doubled.get("b") == Some(4)
+
+        it "for_each iterates all entries":
+            var map = Map.new()
+            map.insert("a", 1)
+            map.insert("b", 2)
+            map.insert("c", 3)
+
+            var sum = 0
+            map.for_each(\k, v: sum = sum + v)
+
+            assert sum == 6
+
+        it "merges maps":
+            var map1 = Map.new()
+            map1.insert("a", 1)
+            map1.insert("b", 2)
+
+            var map2 = Map.new()
+            map2.insert("b", 20)
+            map2.insert("c", 3)
+
+            map1.merge(map2)
+
+            assert map1.len() == 3
+            assert map1.get("a") == Some(1)
+            assert map1.get("b") == Some(20)  # Overwritten
+            assert map1.get("c") == Some(3)
+
+    describe "Performance regression tests":
+        it "inserts 10000 entries in reasonable time":
+            var map = Map.new()
+
+            val start = time.now()
+            for i in 0..10000:
+                map.insert("key_{i}", i)
+            val elapsed = time.now() - start
+
+            # Should complete in < 100ms (would be seconds if O(n))
+            assert elapsed < 100.ms
+            assert map.len() == 10000
+
+        it "retrieves 10000 entries efficiently":
+            var map = Map.new()
+            for i in 0..10000:
+                map.insert("key_{i}", i)
+
+            val start = time.now()
+            for i in 0..10000:
+                val _ = map.get("key_{i}")
+            val elapsed = time.now() - start
+
+            # Should complete in < 50ms
+            assert elapsed < 50.ms
+
+        it "handles high load factor":
+            # Create map with many entries
+            var map = Map.with_capacity(16)
+
+            # Insert way more than capacity
+            for i in 0..1000:
+                map.insert("key_{i}", i)
+
+            # Should still work correctly
+            assert map.len() == 1000
+            for i in 0..1000:
+                assert map.get("key_{i}") == Some(i)
+
+    describe "Clone":
+        it "creates independent copy":
+            var map1 = Map.new()
+            map1.insert("a", 1)
+
+            val map2 = map1.clone()
+
+            map1.insert("b", 2)
+            map2.insert("c", 3)
+
+            assert map1.has("b")
+            assert not map1.has("c")
+            assert map2.has("c")
+            assert not map2.has("b")

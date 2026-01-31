@@ -1,11 +1,27 @@
 //! I18n (Internationalization) extern functions
 //!
 //! Provides FFI bindings to the i18n system for Simple code.
+//! Note: The Rust i18n crate has been removed. These functions now use
+//! a simple HashMap-based context and return messages as-is (no localization).
 
 use crate::error::CompileError;
 use crate::value::{Env, Value};
-use simple_i18n::{I18n, MessageContext};
 use std::collections::HashMap;
+
+/// Simple replacement for MessageContext (previously from simple_i18n crate)
+struct MessageContext {
+    values: HashMap<String, String>,
+}
+
+impl MessageContext {
+    fn new() -> Self {
+        Self { values: HashMap::new() }
+    }
+
+    fn insert(&mut self, key: &str, value: &str) {
+        self.values.insert(key.to_string(), value.to_string());
+    }
+}
 
 /// Create a new empty message context
 ///
@@ -104,7 +120,7 @@ pub fn rt_i18n_context_free(args: &[Value], _env: &mut Env) -> Result<Value, Com
 /// - id: String - Message ID (e.g., "E0001")
 /// - ctx_handle: i64 - Opaque pointer to MessageContext
 ///
-/// Returns the interpolated message string.
+/// Returns the message ID as-is (no localization after i18n crate removal).
 pub fn rt_i18n_get_message(
     args: &[Value],
     _env: &mut Env,
@@ -133,26 +149,8 @@ pub fn rt_i18n_get_message(
         }
     };
 
-    let ctx_handle = match &args[2] {
-        Value::Int(h) => *h,
-        _ => {
-            return Err(CompileError::runtime(
-                "rt_i18n_get_message: third argument must be an Int (ctx_handle)".to_string(),
-            ))
-        }
-    };
-
-    // Get the global i18n instance
-    let i18n = I18n::global();
-
-    // Safety: The handle must be a valid MessageContext pointer
-    let message = unsafe {
-        let ctx = &*(ctx_handle as *const MessageContext);
-        let msg = i18n.get_message_safe(&domain, &id, ctx);
-        msg.message
-    };
-
-    Ok(Value::Str(message))
+    // Return the message ID as the message (no i18n lookup)
+    Ok(Value::Str(format!("{}.{}", domain, id)))
 }
 
 /// Get a localized severity name
@@ -160,7 +158,7 @@ pub fn rt_i18n_get_message(
 /// Arguments:
 /// - severity: String - Severity level ("error", "warning", "note", "help", "info")
 ///
-/// Returns the localized severity name.
+/// Returns the severity name as-is (no localization after i18n crate removal).
 pub fn rt_i18n_severity_name(args: &[Value], _env: &mut Env) -> Result<Value, CompileError> {
     if args.len() != 1 {
         return Err(CompileError::runtime(
@@ -177,10 +175,7 @@ pub fn rt_i18n_severity_name(args: &[Value], _env: &mut Env) -> Result<Value, Co
         }
     };
 
-    let i18n = I18n::global();
-    let localized = i18n.severity_name(&severity);
-
-    Ok(Value::Str(localized))
+    Ok(Value::Str(severity))
 }
 
 #[cfg(test)]
@@ -221,8 +216,7 @@ mod tests {
 
         assert!(result.is_ok());
         if let Ok(Value::Str(s)) = result {
-            // Should return either "error" (English) or localized version
-            assert!(!s.is_empty());
+            assert_eq!(s, "error");
         }
     }
 }
