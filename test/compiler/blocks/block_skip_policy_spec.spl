@@ -1,32 +1,293 @@
+"""
+Feature: Block Skip Policy and TreeSitter Fast Mode
+Feature ID: #1092
+Category: Compiler
+Status: In Progress
+Priority: P1
+
+## Overview
+
+BlockSkipPolicy controls whether TreeSitter can skip blocks in fast mode.
+Three levels:
+- **Skippable**: TreeSitter stores opaque outline (default for most blocks)
+- **OutlineRequired**: TreeSitter must call treesitter_outline()
+- **AlwaysFull**: TreeSitter always calls treesitter_outline()
+
+When fast_mode is false, treesitter_outline is called for all blocks.
+
+## Concepts
+
+- **fast_mode**: Boolean on TreeSitter that enables IDE-speed parsing
+- **apply_outline_policy()**: Dispatches based on skip_policy and fast_mode
+- **BlockOutline.outline_info**: Filled by TreeSitter after policy dispatch
+"""
+
 import std.spec
+use blocks.modes.{PreLexInfo, BlockSkipPolicy, BlockOutlineInfo}
+use blocks.builtin_blocks_defs.{MathBlockDef, ShellBlockDef, SqlBlockDef, JsonBlockDef, MarkdownBlockDef}
+use treesitter.{TreeSitter}
+use treesitter_types.{BlockOutline, OutlineModule}
+use blocks.modes.{Span}
 
-describe "BlockSkipPolicy - TreeSitter Integration":
-    context "fast_mode = true":
-        it "skips Skippable blocks entirely":
-            val ts = TreeSitter.with_fast_mode(true)
-            val source = "val x = sh{ echo hello }"
-            val ts2 = ts.with_source(source)
-            val outline = ts2.parse_outline()
-            val block = outline.inline_blocks[0]
-            expect(block.outline_info.?).to(be_true())
-            expect(block.outline_info.unwrap().is_opaque).to(be_true())
+# ============================================================================
+# BlockSkipPolicy per block type
+# ============================================================================
 
-        it "runs treesitter_outline for OutlineRequired blocks":
+describe "BlockSkipPolicy assignment":
+    it "MathBlockDef is OutlineRequired":
+        expect(MathBlockDef().skip_policy()).to(eq(BlockSkipPolicy.OutlineRequired))
+
+    it "ShellBlockDef is Skippable":
+        expect(ShellBlockDef().skip_policy()).to(eq(BlockSkipPolicy.Skippable))
+
+    it "SqlBlockDef is Skippable":
+        expect(SqlBlockDef().skip_policy()).to(eq(BlockSkipPolicy.Skippable))
+
+    it "JsonBlockDef is Skippable":
+        expect(JsonBlockDef().skip_policy()).to(eq(BlockSkipPolicy.Skippable))
+
+    it "MarkdownBlockDef is Skippable":
+        expect(MarkdownBlockDef().skip_policy()).to(eq(BlockSkipPolicy.Skippable))
+
+# ============================================================================
+# TreeSitter fast_mode construction
+# ============================================================================
+
+describe "TreeSitter fast_mode construction":
+    it "new() creates non-fast-mode parser":
+        val ts = TreeSitter.new("")
+        expect(ts.fast_mode).to(be_false())
+
+    it "with_fast_mode(true) creates fast-mode parser":
+        val ts = TreeSitter.with_fast_mode(true)
+        expect(ts.fast_mode).to(be_true())
+        expect(ts.registry.?).to(be_true())
+
+    it "with_fast_mode(false) creates non-fast-mode parser with registry":
+        val ts = TreeSitter.with_fast_mode(false)
+        expect(ts.fast_mode).to(be_false())
+        expect(ts.registry.?).to(be_true())
+
+# ============================================================================
+# apply_outline_policy() behavior
+# ============================================================================
+
+describe "TreeSitter.apply_outline_policy()":
+    context "fast_mode = true, Skippable block":
+        it "returns opaque outline for shell block":
             val ts = TreeSitter.with_fast_mode(true)
-            val source = "val x = m{ x^2 + y^2 }"
-            val ts2 = ts.with_source(source)
-            val outline = ts2.parse_outline()
-            val block = outline.inline_blocks[0]
-            expect(block.outline_info.?).to(be_true())
-            expect(block.outline_info.unwrap().is_opaque).to(be_false())
-            expect(block.outline_info.unwrap().identifiers).to(contain("x"))
+            val block = BlockOutline(
+                kind: "sh",
+                payload: "ls -la",
+                payload_span: Span.empty(),
+                span: Span.empty(),
+                parent_context: nil,
+                pre_lex_info: nil,
+                outline_info: nil
+            )
+            val result = ts.apply_outline_policy(block)
+            expect(result.outline_info.?).to(be_true())
+            expect(result.outline_info.unwrap().is_opaque).to(be_true())
+            expect(result.outline_info.unwrap().kind).to(eq("sh"))
+
+        it "returns opaque outline for sql block":
+            val ts = TreeSitter.with_fast_mode(true)
+            val block = BlockOutline(
+                kind: "sql",
+                payload: "SELECT 1",
+                payload_span: Span.empty(),
+                span: Span.empty(),
+                parent_context: nil,
+                pre_lex_info: nil,
+                outline_info: nil
+            )
+            val result = ts.apply_outline_policy(block)
+            expect(result.outline_info.?).to(be_true())
+            expect(result.outline_info.unwrap().is_opaque).to(be_true())
+
+        it "returns opaque outline for json block":
+            val ts = TreeSitter.with_fast_mode(true)
+            val block = BlockOutline(
+                kind: "json",
+                payload: "{}",
+                payload_span: Span.empty(),
+                span: Span.empty(),
+                parent_context: nil,
+                pre_lex_info: nil,
+                outline_info: nil
+            )
+            val result = ts.apply_outline_policy(block)
+            expect(result.outline_info.unwrap().is_opaque).to(be_true())
+
+    context "fast_mode = true, OutlineRequired block":
+        it "calls treesitter_outline for math block":
+            val ts = TreeSitter.with_fast_mode(true)
+            val block = BlockOutline(
+                kind: "m",
+                payload: "x^2 + y",
+                payload_span: Span.empty(),
+                span: Span.empty(),
+                parent_context: nil,
+                pre_lex_info: nil,
+                outline_info: nil
+            )
+            val result = ts.apply_outline_policy(block)
+            expect(result.outline_info.?).to(be_true())
+            val info = result.outline_info.unwrap()
+            expect(info.is_opaque).to(be_false())
+            expect(info.identifiers).to(include("x"))
+            expect(info.identifiers).to(include("y"))
+            expect(info.kind).to(eq("m"))
+
+        it "extracts identifiers from complex math":
+            val ts = TreeSitter.with_fast_mode(true)
+            val block = BlockOutline(
+                kind: "m",
+                payload: "sin(alpha) + cos(beta) * gamma",
+                payload_span: Span.empty(),
+                span: Span.empty(),
+                parent_context: nil,
+                pre_lex_info: nil,
+                outline_info: nil
+            )
+            val result = ts.apply_outline_policy(block)
+            val info = result.outline_info.unwrap()
+            expect(info.identifiers).to(include("sin"))
+            expect(info.identifiers).to(include("alpha"))
+            expect(info.identifiers).to(include("cos"))
+            expect(info.identifiers).to(include("beta"))
+            expect(info.identifiers).to(include("gamma"))
 
     context "fast_mode = false":
-        it "runs treesitter_outline for all blocks":
+        it "calls treesitter_outline for Skippable blocks":
             val ts = TreeSitter.with_fast_mode(false)
-            val source = "val x = sql{ SELECT name FROM users }"
-            val ts2 = ts.with_source(source)
-            val outline = ts2.parse_outline()
-            val block = outline.inline_blocks[0]
-            # SQL block uses default treesitter_outline which returns opaque
-            expect(block.outline_info.?).to(be_true())
+            val block = BlockOutline(
+                kind: "sh",
+                payload: "ls -la",
+                payload_span: Span.empty(),
+                span: Span.empty(),
+                parent_context: nil,
+                pre_lex_info: nil,
+                outline_info: nil
+            )
+            val result = ts.apply_outline_policy(block)
+            # Shell default treesitter_outline returns opaque, but it IS called
+            expect(result.outline_info.?).to(be_true())
+
+        it "calls treesitter_outline for OutlineRequired blocks":
+            val ts = TreeSitter.with_fast_mode(false)
+            val block = BlockOutline(
+                kind: "m",
+                payload: "a + b",
+                payload_span: Span.empty(),
+                span: Span.empty(),
+                parent_context: nil,
+                pre_lex_info: nil,
+                outline_info: nil
+            )
+            val result = ts.apply_outline_policy(block)
+            expect(result.outline_info.?).to(be_true())
+            val info = result.outline_info.unwrap()
+            expect(info.is_opaque).to(be_false())
+            expect(info.identifiers).to(include("a"))
+            expect(info.identifiers).to(include("b"))
+
+    context "unknown block kind":
+        it "returns block unchanged when no handler found":
+            val ts = TreeSitter.with_fast_mode(true)
+            val block = BlockOutline(
+                kind: "unknown_block_xyz",
+                payload: "whatever",
+                payload_span: Span.empty(),
+                span: Span.empty(),
+                parent_context: nil,
+                pre_lex_info: nil,
+                outline_info: nil
+            )
+            val result = ts.apply_outline_policy(block)
+            # No handler found, outline_info stays nil
+            expect(result.outline_info).to(be_nil())
+
+    context "no registry":
+        it "returns block unchanged when registry is nil":
+            val ts = TreeSitter.new("")
+            # Default TreeSitter has nil registry
+            val block = BlockOutline(
+                kind: "m",
+                payload: "x + y",
+                payload_span: Span.empty(),
+                span: Span.empty(),
+                parent_context: nil,
+                pre_lex_info: nil,
+                outline_info: nil
+            )
+            val result = ts.apply_outline_policy(block)
+            expect(result.outline_info).to(be_nil())
+
+# ============================================================================
+# Pre-lex info propagation through policy
+# ============================================================================
+
+describe "apply_outline_policy with pre_lex_info":
+    it "uses pre_lex_info from BlockOutline":
+        val ts = TreeSitter.with_fast_mode(true)
+        val pre_lex = PreLexInfo(
+            string_spans: [],
+            comment_spans: [],
+            escape_positions: [],
+            brace_pairs: []
+        )
+        val block = BlockOutline(
+            kind: "m",
+            payload: "x + y",
+            payload_span: Span.empty(),
+            span: Span.empty(),
+            parent_context: nil,
+            pre_lex_info: Some(pre_lex),
+            outline_info: nil
+        )
+        val result = ts.apply_outline_policy(block)
+        expect(result.outline_info.?).to(be_true())
+        # Math block outline uses pre_lex to filter identifiers
+        val info = result.outline_info.unwrap()
+        expect(info.identifiers).to(include("x"))
+        expect(info.identifiers).to(include("y"))
+
+    it "falls back to empty PreLexInfo when none provided":
+        val ts = TreeSitter.with_fast_mode(true)
+        val block = BlockOutline(
+            kind: "m",
+            payload: "a * b",
+            payload_span: Span.empty(),
+            span: Span.empty(),
+            parent_context: nil,
+            pre_lex_info: nil,
+            outline_info: nil
+        )
+        val result = ts.apply_outline_policy(block)
+        expect(result.outline_info.?).to(be_true())
+        val info = result.outline_info.unwrap()
+        expect(info.identifiers).to(include("a"))
+        expect(info.identifiers).to(include("b"))
+
+    it "respects string spans in pre_lex_info for outline":
+        val ts = TreeSitter.with_fast_mode(false)
+        val pre_lex = PreLexInfo(
+            string_spans: [blocks.modes.TextSpan(start: 0, end: 8)],
+            comment_spans: [],
+            escape_positions: [], brace_pairs: []
+        )
+        val block = BlockOutline(
+            kind: "m",
+            payload: "hidden_x + visible_y",
+            payload_span: Span.empty(),
+            span: Span.empty(),
+            parent_context: nil,
+            pre_lex_info: Some(pre_lex),
+            outline_info: nil
+        )
+        val result = ts.apply_outline_policy(block)
+        val info = result.outline_info.unwrap()
+        # "hidden_x" spans [0,8) which is inside string_spans, should be skipped
+        expect(info.identifiers).not_to(include("hidden_x"))
+        expect(info.identifiers).to(include("visible_y"))

@@ -675,7 +675,101 @@ fn is_loss_block(expr: Expr) -> bool:
 
 ---
 
-## 10. Open Questions
+## 10. Three-Level Block Interface (Implemented 2026-01-31)
+
+**Status: Implemented** - Feature #1092
+
+The BlockDefinition trait now exposes 3 levels of processing, with backward-compatible defaults:
+
+### 10.1 New Methods on BlockDefinition
+
+```simple
+trait BlockDefinition:
+    # Existing: kind(), parse_payload(), lexer_mode(), syntax_features(), ...
+
+    # NEW Level 1: Sub-lexing
+    fn lex(payload: text, pre_lex: PreLexInfo, ctx: BlockContext) -> Result<[BlockToken], BlockError>:
+        Ok([])  # Default: no sub-lexing
+
+    # NEW Level 2: Fast outline for IDE
+    fn treesitter_outline(payload: text, pre_lex: PreLexInfo) -> BlockOutlineInfo:
+        BlockOutlineInfo.opaque(self.kind())  # Default: opaque
+
+    # NEW Level 3: Full parse using pre-lex info
+    fn parse_full(payload: text, pre_lex: PreLexInfo, ctx: BlockContext) -> Result<BlockValue, BlockError>:
+        self.parse_payload(payload, ctx)  # Default: delegates to parse_payload
+
+    # NEW: Skip policy for TreeSitter fast mode
+    fn skip_policy() -> BlockSkipPolicy:
+        BlockSkipPolicy.Skippable  # Default: can skip in fast mode
+```
+
+### 10.2 New Data Types (in `blocks/modes.spl`)
+
+| Type | Purpose |
+|------|---------|
+| `TextSpan` | Byte range (start, end) within payload |
+| `PreLexInfo` | Pre-scan data: string_spans, comment_spans, escape_positions, brace_pairs |
+| `BlockSkipPolicy` | Enum: Skippable, OutlineRequired, AlwaysFull |
+| `BlockOutlineInfo` | Structural summary: kind, identifiers, external_refs, structure_kind, is_opaque |
+| `BlockToken` | Sub-lexer output token |
+| `BlockTokenKind` | Keyword, Identifier, Number, StringLit, Operator, Punctuation, Comment, Whitespace, Error |
+
+### 10.3 PreLexInfo Sharing
+
+The Rust lexer (`rust/parser/src/lexer/identifiers.rs`) now performs Tier 1+2 tracking during `scan_custom_block_payload()`:
+- **Tier 1**: String spans (double/single-quoted), escape positions
+- **Tier 2**: Comment spans (`#`, `--`, `/* */`), brace pair tracking
+
+This `PreLexInfo` is stored in `TokenKind::CustomBlock` and propagated through:
+1. `BlockOutline.pre_lex_info` (treesitter_types.spl)
+2. `BlockContext.pre_lex_info` (context.spl)
+3. `BlockResolver` passes it to `handler.parse_full()`
+
+### 10.4 TreeSitter Fast Mode
+
+`TreeSitter` now has `fast_mode: bool` and `apply_outline_policy()`:
+- **fast_mode=true + Skippable**: Store opaque outline, skip treesitter_outline()
+- **fast_mode=true + OutlineRequired**: Call treesitter_outline()
+- **fast_mode=false**: Call treesitter_outline() for all blocks
+
+### 10.5 Reference Implementation: MathBlockDef
+
+MathBlockDef implements all 3 levels:
+- `lex()`: Tokenizes into Identifier, Number, Operator, Punctuation, Whitespace
+- `treesitter_outline()`: Extracts unique identifiers, skipping protected regions
+- `parse_full()`: Lexes then parses tokens
+- `skip_policy()`: Returns `OutlineRequired`
+
+### 10.6 Test Coverage
+
+5 intensive SSpec test files in `test/compiler/blocks/`:
+
+| File | Tests | Coverage |
+|------|-------|---------|
+| `pre_lex_info_spec.spl` | ~60 | TextSpan, PreLexInfo predicates, edge cases |
+| `block_definition_three_level_spec.spl` | ~70 | 3-level defaults, MathBlockDef all levels |
+| `block_skip_policy_spec.spl` | ~20 | Policy per block, fast_mode, apply_outline_policy |
+| `pre_lex_per_dsl_spec.spl` | ~35 | Per-DSL conflicts (sh/sql/re/json/m/md) |
+| `block_outline_info_spec.spl` | ~40 | Outline extraction, opaque fallback |
+
+### 10.7 Files Changed
+
+| File | Change |
+|------|--------|
+| `src/compiler/blocks/modes.spl` | Added PreLexInfo, BlockOutlineInfo, BlockToken, BlockSkipPolicy, TextSpan |
+| `src/compiler/blocks/definition.spl` | Added lex, treesitter_outline, parse_full, skip_policy |
+| `src/compiler/blocks/context.spl` | Added pre_lex_info field |
+| `src/compiler/blocks/resolver.spl` | Uses parse_full, passes PreLexInfo |
+| `src/compiler/blocks/builtin_blocks_defs.spl` | MathBlockDef reference implementation |
+| `src/compiler/treesitter.spl` | Added fast_mode, apply_outline_policy |
+| `src/compiler/treesitter_types.spl` | Added pre_lex_info, outline_info to BlockOutline |
+| `rust/parser/src/lexer/identifiers.rs` | Tier 1+2 tracking in scan_custom_block_payload |
+| `rust/parser/src/token.rs` | Added PreLexInfo to CustomBlock variant |
+
+---
+
+## 11. Open Questions
 
 1. **Block Nesting**: Should blocks be allowed to nest (e.g., `md{ ${graph{...}} }`)?
 2. **Interpolation**: How to handle `${expr}` inside raw blocks?
@@ -685,7 +779,7 @@ fn is_loss_block(expr: Expr) -> bool:
 
 ---
 
-## 11. References
+## 12. References
 
 - `doc/design/custom_blocks_proposal.md` - Original proposal
 - `doc/design/math_block_design.md` - Math block reference

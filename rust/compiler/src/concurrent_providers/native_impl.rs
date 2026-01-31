@@ -660,12 +660,13 @@ impl LockProvider for NativeLockProvider {
         let id = Self::value_to_id(mutex)?;
         let mtx = {
             let ref_guard = self.mutexes.get(&id).ok_or_else(|| CompileError::runtime(format!("Mutex {} not found", id)))?;
-            Arc::clone(&ref_guard)
+            ref_guard.value().clone()
         };
-        match mtx.try_lock() {
+        let result = match mtx.try_lock() {
             Some(guard) => Ok(guard.clone()),
             None => Ok(Value::Nil),
-        }
+        };
+        result
     }
 
     fn mutex_unlock(&self, mutex: &Value, new_value: Value) -> Result<Value, CompileError> {
@@ -700,24 +701,26 @@ impl LockProvider for NativeLockProvider {
         let id = Self::value_to_id(rwlock)?;
         let rw = {
             let ref_guard = self.rwlocks.get(&id).ok_or_else(|| CompileError::runtime(format!("RwLock {} not found", id)))?;
-            Arc::clone(&ref_guard)
+            ref_guard.value().clone()
         };
-        match rw.try_read() {
+        let result = match rw.try_read() {
             Some(guard) => Ok(guard.clone()),
             None => Ok(Value::Nil),
-        }
+        };
+        result
     }
 
     fn rwlock_try_write(&self, rwlock: &Value) -> Result<Value, CompileError> {
         let id = Self::value_to_id(rwlock)?;
         let rw = {
             let ref_guard = self.rwlocks.get(&id).ok_or_else(|| CompileError::runtime(format!("RwLock {} not found", id)))?;
-            Arc::clone(&ref_guard)
+            ref_guard.value().clone()
         };
-        match rw.try_write() {
+        let result = match rw.try_write() {
             Some(guard) => Ok(guard.clone()),
             None => Ok(Value::Nil),
-        }
+        };
+        result
     }
 
     fn rwlock_set(&self, rwlock: &Value, new_value: Value) -> Result<Value, CompileError> {

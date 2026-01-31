@@ -1,0 +1,83 @@
+# JIT Compilation Context
+#
+# CompilationContext implementation for load-time JIT instantiation.
+# Templates come from SMF TemplateCode sections.
+
+use ../compilation_context.{CompilationContext, InstantiationMode, ContractMode, GenericTemplate, ConcreteType, TypeRegistry}
+use ../backend_types.CompiledUnit
+use ../di.DiContainer
+use ../aop.AopWeaver
+use ../pipeline_fn.compile_specialized_template
+use ../monomorphize/note_sdn.InstantiationEntry
+
+# ============================================================================
+# JitCompilationContext
+# ============================================================================
+
+class JitCompilationContext(CompilationContext):
+    """JIT loads templates from SMF TemplateCode sections."""
+    smf_templates: Dict<text, GenericTemplate>
+    smf_aop_config: AopWeaver?
+    smf_di_config: DiContainer?
+    type_reg: TypeRegistry
+    recorded: [InstantiationEntry]
+
+    fn load_template(name: text) -> Result<GenericTemplate, text>:
+        if self.smf_templates.contains_key(name):
+            Ok(self.smf_templates[name])
+        else:
+            Err("Template not in SMF: {name}")
+
+    fn has_template(name: text) -> bool:
+        self.smf_templates.contains_key(name)
+
+    fn type_registry() -> TypeRegistry:
+        self.type_reg
+
+    fn contract_mode() -> ContractMode:
+        # JIT uses lighter contracts (boundary only)
+        ContractMode.Boundary
+
+    fn di_container() -> DiContainer?:
+        self.smf_di_config
+
+    fn aop_weaver() -> AopWeaver?:
+        self.smf_aop_config
+
+    fn coverage_enabled() -> bool:
+        false
+
+    fn compile_template(template: GenericTemplate, type_args: [ConcreteType]) -> Result<CompiledUnit, text>:
+        compile_specialized_template(
+            template, type_args,
+            ContractMode.Boundary,
+            self.smf_di_config,
+            self.smf_aop_config,
+            false
+        )
+
+    fn instantiation_mode() -> InstantiationMode:
+        InstantiationMode.JitTime
+
+    me record_instantiation(entry: InstantiationEntry):
+        self.recorded = self.recorded.push(entry)
+
+impl JitCompilationContext:
+    static fn from_smf(
+        templates: Dict<text, GenericTemplate>,
+        aop: AopWeaver?,
+        di: DiContainer?
+    ) -> JitCompilationContext:
+        JitCompilationContext(
+            smf_templates: templates,
+            smf_aop_config: aop,
+            smf_di_config: di,
+            type_reg: TypeRegistry.empty(),
+            recorded: []
+        )
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export JitCompilationContext
