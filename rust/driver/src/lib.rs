@@ -15,6 +15,7 @@ pub mod interpreter;
 pub mod jj;
 pub mod jj_state;
 pub mod lazy_init;
+pub mod log;
 pub mod oauth_flow;
 pub mod prefetch;
 pub mod repl_runner_ffi;

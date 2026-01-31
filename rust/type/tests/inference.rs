@@ -269,7 +269,7 @@ fn infers_context_block() {
     check(&items).expect("type check ok");
 }
 
-// Bitwise operators: use & | ^ instead of band bor bxor (if supported)
+// Bitwise operators: use & | xor instead of band bor bxor (if supported)
 // These may not be parsed as operators in this language - skip for now
 // #[test]
 // fn infers_bitwise_operators() {

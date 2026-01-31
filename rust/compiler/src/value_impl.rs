@@ -238,8 +238,8 @@ impl Value {
     /// Get the abstract value kind from hir-core.
     ///
     /// This provides a unified type abstraction shared with the runtime.
-    pub fn value_kind(&self) -> simple_hir_core::ValueKind {
-        use simple_hir_core::ValueKind;
+    pub fn value_kind(&self) -> simple_runtime::hir_core::ValueKind {
+        use simple_runtime::hir_core::ValueKind;
         match self {
             Value::Int(_) => ValueKind::Int,
             Value::Float(_) => ValueKind::Float,

@@ -337,7 +337,6 @@ pub enum TokenKind {
     DoubleAmp,   // &&
     AndSuspend,  // and~ (suspending boolean AND)
     OrSuspend,   // or~ (suspending boolean OR)
-    Caret,       // ^
     Tilde,       // ~
     ShiftLeft,   // <<
     ShiftRight,  // >>

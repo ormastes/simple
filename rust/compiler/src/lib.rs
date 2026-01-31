@@ -6,6 +6,7 @@
 #![allow(internal_features)]
 #![cfg_attr(not(target_env = "msvc"), feature(linkage))]
 
+pub mod mock_helper;
 pub mod aop_config;
 pub mod api_surface;
 pub mod arch_rules;

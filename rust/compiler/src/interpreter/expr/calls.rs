@@ -55,49 +55,46 @@ pub(super) fn eval_call_expr(
                 field,
             } = receiver.as_ref()
             {
-                // Handle nested field access like self.lexer.next_token()
-                // where self.lexer needs to be updated
+                // Handle nested field access like self.instructions.push()
+                // where self.instructions needs to be updated after a mutating method call
                 if let Expr::Identifier(var_name) = outer_receiver.as_ref() {
                     // Evaluate the outer receiver to get its current value
                     let outer_val = evaluate_expr(outer_receiver, env, functions, classes, enums, impl_methods)?;
                     if let Value::Object { class, fields } = outer_val {
                         let mut fields = fields;
-                        // Get the field value (the inner object)
+                        // Get the field value (can be Object, Array, Dict, String, etc.)
                         if let Some(field_val) = fields.get(field).cloned() {
-                            if let Value::Object {
-                                class: inner_class,
-                                fields: inner_fields,
-                            } = field_val
-                            {
-                                // Call method with self-update on the inner object
-                                if let Some((result, updated_inner)) = super::super::find_and_exec_method_with_self(
-                                    method,
-                                    args,
-                                    &inner_class,
-                                    &inner_fields,
-                                    env,
-                                    functions,
-                                    classes,
-                                    enums,
-                                    impl_methods,
-                                )? {
-                                    // Update the field with the new inner object
-                                    Arc::make_mut(&mut fields).insert(field.clone(), updated_inner);
-                                    // Update the outer object in env
-                                    env.insert(var_name.clone(), Value::Object { class, fields });
-                                    return Ok(Some(result));
-                                }
+                            // Store field value in a temporary variable so we can call method on it
+                            let temp_var = format!("__nested_field_{}__", field);
+                            env.insert(temp_var.clone(), field_val.clone());
+
+                            // Call method with self-update tracking
+                            let temp_receiver = Box::new(Expr::Identifier(temp_var.clone()));
+                            let (result, updated_field) = super::super::evaluate_method_call_with_self_update(
+                                &temp_receiver,
+                                method,
+                                args,
+                                env,
+                                functions,
+                                classes,
+                                enums,
+                                impl_methods,
+                            )?;
+
+                            // Clean up temporary variable
+                            env.remove(&temp_var);
+
+                            // If the field was updated by a mutating method, update it in the outer object
+                            if let Some(new_field_val) = updated_field {
+                                Arc::make_mut(&mut fields).insert(field.clone(), new_field_val);
+                                env.insert(var_name.clone(), Value::Object { class, fields });
                             }
+
+                            return Ok(Some(result));
                         }
                     }
                 }
                 // Fall through to regular method call if nested update doesn't apply
-                // Debug: log when we fall through for self.field.method() patterns
-                if let Expr::Identifier(vn) = outer_receiver.as_ref() {
-                    if vn == "self" {
-                        eprintln!("[DEBUG NESTED METHOD] self.{}.{}() fell through to non-mutating path", field, method);
-                    }
-                }
                 Ok(Some(evaluate_method_call(
                     receiver,
                     method,

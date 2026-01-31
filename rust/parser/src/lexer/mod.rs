@@ -212,7 +212,7 @@ impl<'a> Lexer<'a> {
                 }
                 TokenKind::Backslash
             }
-            '^' => TokenKind::Caret,
+            '^' => TokenKind::Error("'^' is not allowed outside math blocks. Use 'xor' for bitwise XOR, '**' for power, or m{} for math expressions".to_string()),
             '~' => {
                 // Check for compound suspension operators: ~+=, ~-=, ~*=, ~/=
                 if self.check('+') {

@@ -7,6 +7,8 @@
 #![allow(improper_ctypes_definitions)]
 #![allow(dead_code)]
 
+pub mod hir_core;
+pub mod loader;
 pub mod aop;
 pub mod async_runtime;
 pub mod bytecode;

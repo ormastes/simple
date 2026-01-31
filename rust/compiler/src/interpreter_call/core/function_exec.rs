@@ -41,15 +41,15 @@ fn execute_function_body(
     let saved_immutable_vars = IMMUTABLE_VARS.with(|cell| std::mem::take(&mut *cell.borrow_mut()));
 
     // Check if this is an immutable fn method (has self but not is_me_method)
-    // Save and set IN_IMMUTABLE_FN_METHOD flag to detect self mutation errors
-    let saved_in_immutable_fn = IN_IMMUTABLE_FN_METHOD.with(|cell| *cell.borrow());
+    // Save and set IN_IMMUTABLE_FN_METHOD flag in single borrow
     let is_method_with_self = local_env.contains_key("self") || bound_args.contains_key("self");
     let is_immutable_fn_method = is_method_with_self && !func.is_me_method;
-    // Set the flag based on the current function's mutability:
-    // - true if this is an immutable fn method with self
-    // - false if this is a me method or not a method at all
-    // Always set the flag to avoid leaking state from caller to callee
-    IN_IMMUTABLE_FN_METHOD.with(|cell| *cell.borrow_mut() = is_immutable_fn_method);
+    let saved_in_immutable_fn = IN_IMMUTABLE_FN_METHOD.with(|cell| {
+        let mut flag = cell.borrow_mut();
+        let saved = *flag;
+        *flag = is_immutable_fn_method;
+        saved
+    });
 
     // Insert bound arguments into environment
     for (name, val) in bound_args {

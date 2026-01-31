@@ -12,9 +12,8 @@ use crate::mir::instructions::{MirInst, VReg};
 impl<'a> MirLowerer<'a> {
     pub(super) fn lower_expr(&mut self, expr: &HirExpr) -> MirLowerResult<VReg> {
         let expr_ty = expr.ty;
-        let expr_kind = expr.kind.clone();
 
-        match &expr_kind {
+        match &expr.kind {
             HirExprKind::Integer(n) => {
                 let n = *n;
                 self.with_func(|func, current_block| {

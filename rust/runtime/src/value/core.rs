@@ -1,6 +1,6 @@
 //! Core RuntimeValue type and operations.
 
-use simple_hir_core::ValueKind;
+use crate::hir_core::ValueKind;
 
 use super::heap::{HeapHeader, HeapObjectType};
 use super::tags;

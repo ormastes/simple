@@ -1,6 +1,6 @@
 //! Heap object types and header structure.
 
-use simple_hir_core::ValueKind;
+use crate::hir_core::ValueKind;
 
 /// Heap object type tags
 #[repr(u8)]

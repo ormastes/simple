@@ -5,11 +5,11 @@
 
 use crate::error::CompileError;
 use crate::value::Value;
-use simple_mock_helper::api_scanner::{scan_directory, write_yaml};
-use simple_mock_helper::coverage::{
+use crate::mock_helper::api_scanner::{scan_directory, write_yaml};
+use crate::mock_helper::coverage::{
     compute_class_coverage, load_llvm_cov_export, load_public_api_spec, print_class_coverage_table, LlvmCovExport,
 };
-use simple_mock_helper::coverage_extended::{
+use crate::mock_helper::coverage_extended::{
     print_coverage_summary, CoverageAnalyzer, CoverageType, ExtendedCoverageReport,
 };
 use std::collections::HashMap;
