@@ -436,6 +436,7 @@ fn create_test_function(name: &str, generic_params: Vec<String>) -> FunctionDef 
         is_abstract: false,
         is_sync: false,
         bounds_block: None,
+        is_static: false,
         is_me_method: false,
         return_constraint: None,
         is_generic_template: false,
