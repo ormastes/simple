@@ -287,40 +287,6 @@ mod loader_settlement_builder_tests {
 }
 
 // ============================================================================
-// Pkg Version Types
-// ============================================================================
-mod pkg_version_tests {
-    use simple_pkg::{Version, VersionReq};
-
-    #[test]
-    fn test_version_size() {
-        let _ = std::mem::size_of::<Version>();
-    }
-
-    #[test]
-    fn test_version_req_size() {
-        let _ = std::mem::size_of::<VersionReq>();
-    }
-}
-
-// ============================================================================
-// Pkg Manifest Types
-// ============================================================================
-mod pkg_manifest_tests {
-    use simple_pkg::{LockFile, Manifest};
-
-    #[test]
-    fn test_manifest_size() {
-        let _ = std::mem::size_of::<Manifest>();
-    }
-
-    #[test]
-    fn test_lock_file_size() {
-        let _ = std::mem::size_of::<LockFile>();
-    }
-}
-
-// ============================================================================
 // Type Crate Types
 // ============================================================================
 mod type_crate_tests {

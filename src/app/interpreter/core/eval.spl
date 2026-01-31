@@ -7,6 +7,8 @@ from symbol import {intern, init_common_symbols}
 from value import {Value, RuntimeValue}
 from ..expr import {eval_expr}
 from ..control import {eval_control}
+from ..lazy import {Lazy}
+from ..collections.persistent_dict import {PersistentDict}
 
 export Interpreter, eval_statement, eval_expression
 
@@ -14,6 +16,7 @@ export Interpreter, eval_statement, eval_expression
 struct Interpreter:
     env: Environment
     debug: bool
+    module_cache: PersistentDict<text, Lazy<Value>>  # Lazy module cache: path -> deferred module
 
 impl Interpreter:
     static fn new() -> Interpreter:
@@ -21,15 +24,36 @@ impl Interpreter:
         init_common_symbols()
         Interpreter(
             env: Environment.new(),
-            debug: false
+            debug: false,
+            module_cache: PersistentDict.new()
         )
 
     static fn with_debug(debug: bool) -> Interpreter:
         init_common_symbols()
         Interpreter(
             env: Environment.new(),
-            debug: debug
+            debug: debug,
+            module_cache: PersistentDict.new()
         )
+
+    fn get_or_load_module(path: text, loader: fn() -> Value) -> Result<Value, InterpreterError>:
+        """Get a cached module or lazily load it on first access.
+
+        Uses Lazy to defer module evaluation until first use.
+        Subsequent accesses return the cached result.
+        """
+        val cached = self.module_cache.get(path)
+        if cached.?:
+            val lazy_mod = cached.unwrap()
+            match lazy_mod.force():
+                case Ok(v): return Ok(v)
+                case Err(e): return Err(InterpreterError.IoError(e.message()))
+        # Create lazy value for this module and cache it
+        val lazy_mod = Lazy.of(loader)
+        self.module_cache = self.module_cache.set(path, lazy_mod)
+        match lazy_mod.force():
+            case Ok(v): Ok(v)
+            case Err(e): Err(InterpreterError.IoError(e.message()))
 
     # Evaluate a statement
     fn eval_stmt(stmt: &Statement) -> Result<Value, InterpreterError>:

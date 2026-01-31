@@ -228,6 +228,19 @@ pub fn parse_test_args(args: &[String]) -> TestOptions {
                     options.cpu_check_interval = args[i].parse().unwrap_or(5);
                 }
             }
+            // Runtime profiling
+            "--profile" => options.profile = true,
+            "--profile-mode" => {
+                i += 1;
+                if i < args.len() {
+                    options.profile = true;
+                    options.profile_mode = Some(args[i].clone());
+                }
+            }
+            arg if arg.starts_with("--profile-mode=") => {
+                options.profile = true;
+                options.profile_mode = Some(arg.trim_start_matches("--profile-mode=").to_string());
+            }
             // Rust test tracking
             "--rust-tests" => options.rust_tests = true,
             "--rust-ignored" => {

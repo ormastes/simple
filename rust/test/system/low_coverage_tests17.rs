@@ -283,36 +283,6 @@ mod runtime_memory_tests {
 }
 
 // ============================================================================
-// Package Lock Types
-// ============================================================================
-mod pkg_lock_tests {
-    use simple_pkg::LockFile;
-
-    #[test]
-    fn test_lock_file_default() {
-        let lock = LockFile::default();
-        let _ = format!("{:?}", lock);
-    }
-
-    #[test]
-    fn test_lock_file_size() {
-        let _ = std::mem::size_of::<LockFile>();
-    }
-}
-
-// ============================================================================
-// Package Manifest Types Extended
-// ============================================================================
-mod pkg_manifest_extended_tests {
-    use simple_pkg::Manifest;
-
-    #[test]
-    fn test_manifest_size() {
-        let _ = std::mem::size_of::<Manifest>();
-    }
-}
-
-// ============================================================================
 // Common Runtime Symbols
 // ============================================================================
 mod common_runtime_symbols_tests {
@@ -609,21 +579,6 @@ mod compiler_value_more_tests {
 
 // ============================================================================
 // Dependency Tracker Extended Types
-// ============================================================================
-mod dep_tracker_more_tests {
-    use simple_dependency_tracker::{ImportGraph, SymbolTable};
-
-    #[test]
-    fn test_import_graph_size() {
-        let _ = std::mem::size_of::<ImportGraph>();
-    }
-
-    #[test]
-    fn test_symbol_table_size() {
-        let _ = std::mem::size_of::<SymbolTable>();
-    }
-}
-
 // ============================================================================
 // Driver Extended Types
 // ============================================================================

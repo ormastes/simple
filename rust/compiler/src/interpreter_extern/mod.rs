@@ -71,6 +71,7 @@ pub mod ffi_string;
 pub mod collections;
 pub mod lexer_ffi;
 pub mod i18n;
+pub mod native_ffi;
 
 // Import parent interpreter types
 type Enums = HashMap<String, EnumDef>;
@@ -419,7 +420,14 @@ pub(crate) fn call_extern_function(
         "rt_thread_available_parallelism" => concurrency::rt_thread_available_parallelism(&evaluated),
         "rt_thread_sleep" => concurrency::rt_thread_sleep(&evaluated),
         "rt_thread_yield" => concurrency::rt_thread_yield(&evaluated),
-        "rt_thread_spawn_isolated" => concurrency::rt_thread_spawn_isolated(&evaluated),
+        "rt_thread_spawn_isolated" => concurrency::rt_thread_spawn_isolated_with_context(
+            &evaluated,
+            env,
+            functions,
+            classes,
+            enums,
+            impl_methods,
+        ),
         "rt_thread_spawn_isolated2" => concurrency::rt_thread_spawn_isolated2_with_context(
             &evaluated,
             env,
@@ -438,6 +446,8 @@ pub(crate) fn call_extern_function(
         "rt_channel_recv" => concurrency::rt_channel_recv(&evaluated),
         "rt_channel_close" => concurrency::rt_channel_close(&evaluated),
         "rt_channel_is_closed" => concurrency::rt_channel_is_closed(&evaluated),
+        "rt_set_concurrent_backend" => concurrency::rt_set_concurrent_backend(&evaluated),
+        "rt_get_concurrent_backend" => concurrency::rt_get_concurrent_backend(&evaluated),
 
         // ====================================================================
         // Runtime Config Operations (4 functions)
@@ -532,6 +542,7 @@ pub(crate) fn call_extern_function(
         "rt_file_read_bytes" => file_io::rt_file_read_bytes(&evaluated),
         "rt_file_write_bytes" => file_io::rt_file_write_bytes(&evaluated),
         "rt_file_move" => file_io::rt_file_move(&evaluated),
+        "rt_file_delete" => native_ffi::rt_file_delete(&evaluated),
         // Directory operations
         "rt_dir_create" => file_io::rt_dir_create(&evaluated),
         "rt_dir_list" => file_io::rt_dir_list(&evaluated),
@@ -944,6 +955,12 @@ pub(crate) fn call_extern_function(
         "rt_i18n_severity_name" => i18n::rt_i18n_severity_name(&evaluated, env),
 
         // Unknown extern function
+        // ====================================================================
+        // Native Compilation & Execution (3 functions)
+        // ====================================================================
+        "rt_compile_to_native" => native_ffi::rt_compile_to_native(&evaluated),
+        "rt_execute_native" => native_ffi::rt_execute_native(&evaluated),
+
         _ => Err(common::unknown_function(name)),
     }
 }

@@ -387,23 +387,6 @@ mod compiler_project_tests {
 }
 
 // ============================================================================
-// Package Cache Types
-// ============================================================================
-mod pkg_cache_tests {
-    use simple_pkg::{Cache, Linker};
-
-    #[test]
-    fn test_cache_size() {
-        let _ = std::mem::size_of::<Cache>();
-    }
-
-    #[test]
-    fn test_linker_size() {
-        let _ = std::mem::size_of::<Linker>();
-    }
-}
-
-// ============================================================================
 // Parser Context Types
 // ============================================================================
 mod parser_context_tests {

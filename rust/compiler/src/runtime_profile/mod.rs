@@ -51,7 +51,7 @@ pub use diagram::{
 };
 pub use feedback::LayoutFeedback;
 pub use profiler::{
-    collect_global_metrics, generate_global_feedback, global_profiler, record_call, start_profiling, stop_profiling,
-    RuntimeProfiler,
+    collect_global_metrics, generate_global_feedback, global_profiler, is_profiling_active, record_call,
+    record_full_call, record_full_return, start_profiling, stop_profiling, RuntimeProfiler,
 };
 pub use stats::{FunctionStats, RuntimeMetrics};

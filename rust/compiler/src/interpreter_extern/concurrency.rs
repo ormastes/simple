@@ -4,8 +4,9 @@
 // Channel operations for thread communication
 
 use crate::concurrent_providers::ConcurrentBackend;
+use crate::concurrent_providers::registry::ConcurrentProviderRegistry;
 use crate::error::CompileError;
-use crate::interpreter::interpreter_state::get_concurrent_registry;
+use crate::interpreter::interpreter_state::{get_concurrent_registry, set_concurrent_registry};
 use crate::value::{Env, Value};
 use simple_parser::ast::{ClassDef, EnumDef, Expr, FunctionDef};
 use std::sync::mpsc::{channel, Sender, Receiver};
@@ -93,28 +94,34 @@ pub fn rt_thread_yield(_args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Nil)
 }
 
-/// Spawn isolated thread (simplified version - just returns a dummy handle for now)
-pub fn rt_thread_spawn_isolated(args: &[Value]) -> Result<Value, CompileError> {
-    // For now, return a dummy handle ID
-    // Full implementation would need closure support in interpreter
-    let mut next_id = NEXT_HANDLE_ID.lock().unwrap();
-    let handle_id = *next_id;
-    *next_id += 1;
-
-    // Just return the handle ID - actual thread spawning would require
-    // evaluating the closure argument which needs more interpreter integration
-    Ok(Value::Int(handle_id))
-}
-
-/// Spawn isolated thread with 2 arguments (basic version without context)
+/// Spawn isolated thread with closure execution
 ///
-/// This version does not execute closures - use rt_thread_spawn_isolated2_with_context instead.
-pub fn rt_thread_spawn_isolated2(args: &[Value]) -> Result<Value, CompileError> {
-    if args.len() != 3 {
+/// Accepts a closure and optional arguments. Executes the closure with full
+/// interpreter context. In PureStd mode, runs synchronously. In Native mode,
+/// could be extended to spawn real OS threads.
+pub fn rt_thread_spawn_isolated_with_context(
+    args: &[Value],
+    _env: &mut Env,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Result<Value, CompileError> {
+    if args.is_empty() {
         return Err(CompileError::Runtime(
-            "rt_thread_spawn_isolated2 expects 3 arguments (closure, data1, data2)".to_string(),
+            "rt_thread_spawn_isolated expects at least 1 argument (closure, ...args)".to_string(),
         ));
     }
+
+    // Extract the closure
+    let (params, body, captured_env) = match &args[0] {
+        Value::Lambda { params, body, env } => (params.clone(), body.clone(), env.clone()),
+        _ => {
+            return Err(CompileError::Runtime(
+                "rt_thread_spawn_isolated expects first argument to be a closure".to_string(),
+            ))
+        }
+    };
 
     // Generate handle ID
     let mut next_id = NEXT_HANDLE_ID.lock().unwrap();
@@ -122,9 +129,37 @@ pub fn rt_thread_spawn_isolated2(args: &[Value]) -> Result<Value, CompileError> 
     *next_id += 1;
     drop(next_id);
 
-    // Without context, we can only store nil as result
-    THREAD_RESULTS.lock().unwrap().insert(handle_id, Value::Nil);
+    // Execute the closure with bound parameters
+    let mut local_env = captured_env.clone();
 
+    // Bind any additional args to params
+    for (i, param) in params.iter().enumerate() {
+        if let Some(arg) = args.get(i + 1) {
+            local_env.insert(param.clone(), arg.clone());
+        }
+    }
+
+    // Evaluate the body expression
+    let body_value =
+        evaluate_expr(&body, &mut local_env, functions, classes, enums, impl_methods)
+            .unwrap_or(Value::Nil);
+
+    // If it's a BlockClosure, execute it; otherwise use the value directly
+    let result = match &body_value {
+        Value::BlockClosure { .. } => exec_block_value(
+            body_value.clone(),
+            &mut local_env,
+            functions,
+            classes,
+            enums,
+            impl_methods,
+        )
+        .unwrap_or(Value::Nil),
+        _ => body_value,
+    };
+
+    // Store the result
+    THREAD_RESULTS.lock().unwrap().insert(handle_id, result);
     Ok(Value::Int(handle_id))
 }
 
@@ -509,4 +544,43 @@ pub fn rt_channel_is_closed(args: &[Value]) -> Result<Value, CompileError> {
     let is_closed = !channels.contains_key(&channel_id);
 
     Ok(Value::Int(if is_closed { 1 } else { 0 }))
+}
+
+// ============================================================================
+// Backend Configuration
+// ============================================================================
+
+/// Set the concurrent backend ("pure_std" or "native")
+///
+/// Switches the concurrent provider registry to use the specified backend.
+/// This affects all subsequent concurrent operations (maps, channels, threads, etc.).
+pub fn rt_set_concurrent_backend(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 1 {
+        return Err(CompileError::Runtime(
+            "rt_set_concurrent_backend expects 1 argument (backend_name: text)".to_string(),
+        ));
+    }
+
+    let name = match &args[0] {
+        Value::Str(s) => s.clone(),
+        _ => {
+            return Err(CompileError::Runtime(
+                "rt_set_concurrent_backend expects a string argument".to_string(),
+            ))
+        }
+    };
+
+    let backend = ConcurrentBackend::parse(&name).map_err(|e| CompileError::Runtime(e))?;
+    set_concurrent_registry(ConcurrentProviderRegistry::new(backend));
+    Ok(Value::Nil)
+}
+
+/// Get the current concurrent backend name
+pub fn rt_get_concurrent_backend(_args: &[Value]) -> Result<Value, CompileError> {
+    let registry = get_concurrent_registry();
+    let name = match registry.backend() {
+        ConcurrentBackend::PureStd => "pure_std",
+        ConcurrentBackend::Native => "native",
+    };
+    Ok(Value::Str(name.to_string()))
 }

@@ -28,6 +28,7 @@ pub mod log_ffi;
 mod contracts;
 mod core;
 pub mod diagram_ffi;
+pub mod profiler_ffi;
 mod dict;
 // FFI object-based system
 pub mod ffi_example;

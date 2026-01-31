@@ -243,6 +243,21 @@ fn exec_function_inner(
         }
     }
 
+    // Runtime profiler hooks
+    if crate::runtime_profile::is_profiling_active() {
+        let call_type = if self_ctx.is_some() {
+            crate::runtime_profile::CallType::Method
+        } else {
+            crate::runtime_profile::CallType::Direct
+        };
+        crate::runtime_profile::record_full_call(
+            &func.name,
+            self_ctx.map(|(c, _)| c),
+            vec![],
+            call_type,
+        );
+    }
+
     // Coverage tracking - enabled via SIMPLE_COVERAGE env var
     if let Some(cov) = crate::coverage::get_global_coverage() {
         cov.lock().unwrap().record_function_call(&func.name);
@@ -286,7 +301,7 @@ fn exec_function_inner(
     // Record function return for layout call graph tracking
     crate::layout_recorder::record_function_return();
 
-    execute_function_body(
+    let result = execute_function_body(
         func,
         bound,
         &mut local_env,
@@ -295,7 +310,14 @@ fn exec_function_inner(
         enums,
         impl_methods,
         true,
-    )
+    );
+
+    // Runtime profiler return hook
+    if crate::runtime_profile::is_profiling_active() {
+        crate::runtime_profile::record_full_return(None);
+    }
+
+    result
 }
 
 fn exec_function_with_values_inner(
@@ -313,6 +335,16 @@ fn exec_function_with_values_inner(
     // Diagram tracing for call flow profiling
     if diagram_ffi::is_diagram_enabled() {
         diagram_ffi::trace_call(&func.name);
+    }
+
+    // Runtime profiler hooks
+    if crate::runtime_profile::is_profiling_active() {
+        crate::runtime_profile::record_full_call(
+            &func.name,
+            None,
+            vec![],
+            crate::runtime_profile::CallType::Direct,
+        );
     }
 
     // Coverage tracking - enabled via SIMPLE_COVERAGE env var
@@ -336,7 +368,7 @@ fn exec_function_with_values_inner(
     // Record function return for layout call graph tracking
     crate::layout_recorder::record_function_return();
 
-    execute_function_body(
+    let result = execute_function_body(
         func,
         bound,
         &mut local_env,
@@ -345,5 +377,12 @@ fn exec_function_with_values_inner(
         enums,
         impl_methods,
         true,
-    )
+    );
+
+    // Runtime profiler return hook
+    if crate::runtime_profile::is_profiling_active() {
+        crate::runtime_profile::record_full_return(None);
+    }
+
+    result
 }

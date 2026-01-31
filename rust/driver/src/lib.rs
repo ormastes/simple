@@ -6,7 +6,6 @@ pub use simple_runtime::value::cli_ffi;
 pub mod compile_options;
 pub mod db_lock;
 pub mod dependency_cache;
-pub mod diagnostics_conversion;
 pub mod doctest;
 pub mod early_startup;
 pub mod exec_core;
@@ -33,7 +32,6 @@ pub mod unified_db;
 pub mod watcher;
 
 pub use compile_options::{CompileOptions, CompileProfiler};
-pub use diagnostics_conversion::convert_parser_diagnostic;
 pub use early_startup::{parse_early_args, AppType, EarlyConfig, WindowHints};
 pub use gpu_init::{
     display_loading_indicator, start_gpu_init, GpuContext, GpuInitHandle, GpuInitPhase, GpuInitState, StartupEvent,

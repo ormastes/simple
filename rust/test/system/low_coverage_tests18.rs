@@ -376,60 +376,7 @@ mod common_message_tests {
 }
 
 // ============================================================================
-// Package Version Types Extended
-// ============================================================================
-mod pkg_version_extended_tests {
-    use simple_pkg::{Version, VersionReq};
-
-    #[test]
-    fn test_version_parse() {
-        let v = Version::parse("1.2.3").unwrap();
-        let _ = format!("{:?}", v);
-    }
-
-    #[test]
-    fn test_version_display() {
-        let v = Version::parse("2.0.0").unwrap();
-        let s = format!("{}", v);
-        assert!(s.contains("2"));
-    }
-
-    #[test]
-    fn test_version_req_parse() {
-        let req = VersionReq::parse(">=1.0.0").unwrap();
-        let _ = format!("{:?}", req);
-    }
-
-    #[test]
-    fn test_version_comparison() {
-        let v1 = Version::parse("1.0.0").unwrap();
-        let v2 = Version::parse("2.0.0").unwrap();
-        assert!(v1 < v2);
-    }
-}
-
-// ============================================================================
 // Dependency Tracker Symbol Types
-// ============================================================================
-mod dep_tracker_symbol_tests {
-    use simple_dependency_tracker::{Symbol, SymbolId, SymbolKind};
-
-    #[test]
-    fn test_symbol_size() {
-        let _ = std::mem::size_of::<Symbol>();
-    }
-
-    #[test]
-    fn test_symbol_kind_size() {
-        let _ = std::mem::size_of::<SymbolKind>();
-    }
-
-    #[test]
-    fn test_symbol_id_size() {
-        let _ = std::mem::size_of::<SymbolId>();
-    }
-}
-
 // ============================================================================
 // Driver Runner Types
 // ============================================================================

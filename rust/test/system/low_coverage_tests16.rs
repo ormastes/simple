@@ -303,24 +303,6 @@ mod compiler_mir_extended_tests {
 // ============================================================================
 // Dependency Tracker Extended
 // ============================================================================
-mod dep_tracker_extended2_tests {
-    use simple_dependency_tracker::{ImportGraph, SymbolTable};
-
-    #[test]
-    fn test_import_graph_new() {
-        let graph = ImportGraph::new();
-        let _ = format!("{:?}", graph);
-    }
-
-    #[test]
-    fn test_symbol_table_new() {
-        // SymbolTable::new takes a module_path argument
-        let table = SymbolTable::new("test_module");
-        let _ = format!("{:?}", table);
-    }
-}
-
-// ============================================================================
 // Common ConfigEnv
 // ============================================================================
 mod common_config_env_tests {

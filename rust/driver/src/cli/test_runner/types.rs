@@ -197,6 +197,10 @@ pub struct TestOptions {
     pub full_parallel: bool,
     /// Seconds between resource usage checks
     pub cpu_check_interval: u64,
+    /// Enable runtime profiling
+    pub profile: bool,
+    /// Profile mode (statistics, sequence, combined)
+    pub profile_mode: Option<String>,
     /// Include Rust test results in database
     pub rust_tests: bool,
     /// Only track ignored Rust tests (skip running all)
@@ -262,6 +266,8 @@ impl Default for TestOptions {
             throttled_threads: 1,
             full_parallel: false,
             cpu_check_interval: 5,
+            profile: false,
+            profile_mode: None,
             rust_tests: false,
             rust_ignored_only: false,
 

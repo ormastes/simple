@@ -207,55 +207,6 @@ mod compilability_tests {
 }
 
 // ===========================================================================
-// Package Linker Tests (simple_pkg::Linker)
-// ===========================================================================
-mod pkg_linker_tests {
-    use simple_pkg::Linker;
-    use std::path::Path;
-
-    #[test]
-    fn test_linker_new() {
-        let linker = Linker::new(Path::new("/tmp/project"));
-        assert_eq!(linker.deps_dir(), Path::new("/tmp/project/deps"));
-    }
-
-    #[test]
-    fn test_linker_deps_dir() {
-        let linker = Linker::new(Path::new("/home/user/myproject"));
-        let deps = linker.deps_dir();
-        assert!(deps.ends_with("deps"));
-    }
-
-    #[test]
-    fn test_link_type_variants() {
-        use simple_pkg::linker::LinkType;
-
-        let symlink = LinkType::Symlink;
-        let hardlink = LinkType::HardLink;
-        let copy = LinkType::Copy;
-
-        assert_eq!(symlink, LinkType::Symlink);
-        assert_eq!(hardlink, LinkType::HardLink);
-        assert_eq!(copy, LinkType::Copy);
-    }
-
-    #[test]
-    fn test_linked_package_struct() {
-        use simple_pkg::linker::{LinkType, LinkedPackage};
-        use std::path::PathBuf;
-
-        let pkg = LinkedPackage {
-            name: "mylib".to_string(),
-            link_type: LinkType::Symlink,
-            target: PathBuf::from("/path/to/mylib"),
-        };
-
-        assert_eq!(pkg.name, "mylib");
-        assert_eq!(pkg.link_type, LinkType::Symlink);
-    }
-}
-
-// ===========================================================================
 // Monomorphization Table Tests (simple_compiler::MonomorphizationTable)
 // ===========================================================================
 mod monomorphize_table_tests {

@@ -945,6 +945,10 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_bdd_it_start_rv", &[I64], &[]),        // name as RuntimeValue string
     RuntimeFuncSpec::new("rt_bdd_expect_eq_rv", &[I64, I64], &[]),  // actual, expected as RuntimeValues
     RuntimeFuncSpec::new("rt_bdd_expect_truthy_rv", &[I64], &[]),   // value as RuntimeValue
+    // Runtime profiler FFI
+    RuntimeFuncSpec::new("rt_profiler_record_call", &[I64], &[]),    // name_ptr (C string)
+    RuntimeFuncSpec::new("rt_profiler_record_return", &[], &[]),
+    RuntimeFuncSpec::new("rt_profiler_is_active", &[], &[I32]),
 ];
 
 #[cfg(test)]

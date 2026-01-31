@@ -151,10 +151,245 @@ impl SpirvModule {
                 self.lower_get_element_ptr(*dest, *base, *index)?;
             }
 
-            _ => {
-                // Other instructions not yet implemented
+            // =====================================================================
+            // Unsupported instruction categories (Vulkan/SPIR-V backend)
+            // =====================================================================
+
+            // High-level constants (not lowered to SPIR-V yet)
+            MirInst::ConstString { .. } | MirInst::ConstSymbol { .. } => {
                 return Err(CompileError::Codegen(format!(
-                    "SPIR-V lowering not implemented for instruction: {:?}",
+                    "String/symbol constants not supported in GPU kernels: {:?}",
+                    inst
+                )));
+            }
+
+            // Unary operations (not yet implemented)
+            MirInst::UnaryOp { .. } | MirInst::Cast { .. } => {
+                return Err(CompileError::Codegen(format!(
+                    "Unary operations and casts not yet implemented in SPIR-V backend: {:?}",
+                    inst
+                )));
+            }
+
+            // Collection instructions (not suitable for GPU)
+            MirInst::ArrayLit { .. }
+            | MirInst::TupleLit { .. }
+            | MirInst::DictLit { .. }
+            | MirInst::IndexGet { .. }
+            | MirInst::IndexSet { .. }
+            | MirInst::SliceOp { .. }
+            | MirInst::Spread { .. } => {
+                return Err(CompileError::Codegen(format!(
+                    "Collection operations not supported in GPU kernels: {:?}",
+                    inst
+                )));
+            }
+
+            // Function calls (not yet supported)
+            MirInst::Call { .. }
+            | MirInst::IndirectCall { .. }
+            | MirInst::InterpCall { .. }
+            | MirInst::InterpEval { .. } => {
+                return Err(CompileError::Codegen(format!(
+                    "Function calls not yet supported in SPIR-V backend: {:?}",
+                    inst
+                )));
+            }
+
+            // Object/struct operations (not yet implemented)
+            MirInst::StructInit { .. }
+            | MirInst::FieldGet { .. }
+            | MirInst::FieldSet { .. }
+            | MirInst::ClosureCreate { .. } => {
+                return Err(CompileError::Codegen(format!(
+                    "Struct/object operations not yet implemented in SPIR-V backend: {:?}",
+                    inst
+                )));
+            }
+
+            // GPU instructions not yet implemented
+            MirInst::GpuGlobalSize { .. }
+            | MirInst::GpuLocalSize { .. }
+            | MirInst::GpuNumGroups { .. }
+            | MirInst::GpuMemFence { .. }
+            | MirInst::GpuAtomicCmpXchg { .. }
+            | MirInst::GpuSharedAlloc { .. }
+            | MirInst::NeighborLoad { .. } => {
+                return Err(CompileError::Codegen(format!(
+                    "GPU instruction not yet implemented in SPIR-V backend: {:?}. Coming soon!",
+                    inst
+                )));
+            }
+
+            // SIMD instructions (CPU-only, not for GPU)
+            MirInst::VecLit { .. }
+            | MirInst::VecSum { .. }
+            | MirInst::VecProduct { .. }
+            | MirInst::VecMin { .. }
+            | MirInst::VecMax { .. }
+            | MirInst::VecAll { .. }
+            | MirInst::VecAny { .. }
+            | MirInst::VecExtract { .. }
+            | MirInst::VecWith { .. }
+            | MirInst::VecSqrt { .. }
+            | MirInst::VecAbs { .. }
+            | MirInst::VecFloor { .. }
+            | MirInst::VecCeil { .. }
+            | MirInst::VecRound { .. }
+            | MirInst::VecShuffle { .. }
+            | MirInst::VecBlend { .. }
+            | MirInst::VecSelect { .. }
+            | MirInst::VecLoad { .. }
+            | MirInst::VecStore { .. }
+            | MirInst::VecGather { .. }
+            | MirInst::VecScatter { .. }
+            | MirInst::VecFma { .. }
+            | MirInst::VecRecip { .. }
+            | MirInst::VecMaskedLoad { .. }
+            | MirInst::VecMaskedStore { .. }
+            | MirInst::VecMinVec { .. }
+            | MirInst::VecMaxVec { .. }
+            | MirInst::VecClamp { .. } => {
+                return Err(CompileError::Codegen(format!(
+                    "SIMD instructions are CPU-only, not for GPU kernels: {:?}. Use GPU-native vector types instead.",
+                    inst
+                )));
+            }
+
+            // Pointer instructions (not yet implemented)
+            MirInst::PointerNew { .. }
+            | MirInst::PointerRef { .. }
+            | MirInst::PointerDeref { .. } => {
+                return Err(CompileError::Codegen(format!(
+                    "Pointer operations not yet implemented in SPIR-V: {:?}",
+                    inst
+                )));
+            }
+
+            // Memory safety (not applicable to GPU)
+            MirInst::Drop { .. }
+            | MirInst::EndScope { .. }
+            | MirInst::GcAlloc { .. }
+            | MirInst::Wait { .. } => {
+                return Err(CompileError::Codegen(format!(
+                    "Memory management not applicable to GPU kernels: {:?}",
+                    inst
+                )));
+            }
+
+            // Pattern matching (not yet implemented)
+            MirInst::PatternTest { .. }
+            | MirInst::PatternBind { .. }
+            | MirInst::EnumDiscriminant { .. }
+            | MirInst::EnumPayload { .. }
+            | MirInst::EnumUnit { .. }
+            | MirInst::EnumWith { .. }
+            | MirInst::UnionDiscriminant { .. }
+            | MirInst::UnionPayload { .. }
+            | MirInst::UnionWrap { .. } => {
+                return Err(CompileError::Codegen(format!(
+                    "Pattern matching not supported in GPU kernels: {:?}",
+                    inst
+                )));
+            }
+
+            // Async/concurrency (not applicable to GPU)
+            MirInst::FutureCreate { .. }
+            | MirInst::Await { .. }
+            | MirInst::ActorSpawn { .. }
+            | MirInst::ActorSend { .. }
+            | MirInst::ActorRecv { .. }
+            | MirInst::ActorJoin { .. }
+            | MirInst::ActorReply { .. }
+            | MirInst::GeneratorCreate { .. }
+            | MirInst::Yield { .. }
+            | MirInst::GeneratorNext { .. } => {
+                return Err(CompileError::Codegen(format!(
+                    "Async/actor operations not supported in GPU kernels: {:?}",
+                    inst
+                )));
+            }
+
+            // Error handling (not yet implemented)
+            MirInst::TryUnwrap { .. }
+            | MirInst::OptionSome { .. }
+            | MirInst::OptionNone { .. }
+            | MirInst::ResultOk { .. }
+            | MirInst::ResultErr { .. } => {
+                return Err(CompileError::Codegen(format!(
+                    "Error handling not yet implemented in SPIR-V: {:?}",
+                    inst
+                )));
+            }
+
+            // Contracts and coverage (not applicable to GPU)
+            MirInst::ContractCheck { .. }
+            | MirInst::ContractOldCapture { .. }
+            | MirInst::DecisionProbe { .. }
+            | MirInst::ConditionProbe { .. }
+            | MirInst::PathProbe { .. } => {
+                return Err(CompileError::Codegen(format!(
+                    "Contract/coverage instrumentation not supported in GPU kernels: {:?}",
+                    inst
+                )));
+            }
+
+            // Unit types (not yet implemented)
+            MirInst::UnitBoundCheck { .. }
+            | MirInst::UnitWiden { .. }
+            | MirInst::UnitNarrow { .. }
+            | MirInst::UnitSaturate { .. } => {
+                return Err(CompileError::Codegen(format!(
+                    "Unit type operations not yet implemented in SPIR-V: {:?}",
+                    inst
+                )));
+            }
+
+            // Parallel iterators (CPU-only)
+            MirInst::ParMap { .. }
+            | MirInst::ParReduce { .. }
+            | MirInst::ParFilter { .. }
+            | MirInst::ParForEach { .. } => {
+                return Err(CompileError::Codegen(format!(
+                    "Parallel iterators are CPU-only, use GPU work groups instead: {:?}",
+                    inst
+                )));
+            }
+
+            // Boxing (not applicable to GPU)
+            MirInst::BoxInt { .. }
+            | MirInst::BoxFloat { .. }
+            | MirInst::UnboxInt { .. }
+            | MirInst::UnboxFloat { .. } => {
+                return Err(CompileError::Codegen(format!(
+                    "Value boxing not applicable to GPU kernels: {:?}",
+                    inst
+                )));
+            }
+
+            // Other operations (not yet implemented)
+            MirInst::FStringFormat { .. } => {
+                return Err(CompileError::Codegen(format!(
+                    "String formatting not supported in GPU kernels: {:?}",
+                    inst
+                )));
+            }
+
+            // Method calls (not yet implemented)
+            MirInst::MethodCallStatic { .. }
+            | MirInst::MethodCallVirtual { .. }
+            | MirInst::BuiltinMethod { .. }
+            | MirInst::ExternMethodCall { .. } => {
+                return Err(CompileError::Codegen(format!(
+                    "Method calls not yet implemented in SPIR-V: {:?}",
+                    inst
+                )));
+            }
+
+            // Global memory operations (not yet implemented)
+            MirInst::GlobalLoad { .. } | MirInst::GlobalStore { .. } => {
+                return Err(CompileError::Codegen(format!(
+                    "Global memory operations not yet implemented in SPIR-V: {:?}",
                     inst
                 )));
             }

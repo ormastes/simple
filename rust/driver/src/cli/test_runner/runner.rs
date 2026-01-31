@@ -167,6 +167,7 @@ pub fn run_tests(options: TestOptions) -> TestRunResult {
 
     // Initialize for test execution
     initialize_diagrams(&options, quiet);
+    initialize_profiling(&options, quiet);
     initialize_coverage(quiet);
 
     // Skip runner creation in safe mode (each subprocess creates its own)
@@ -287,6 +288,7 @@ pub fn run_tests(options: TestOptions) -> TestRunResult {
     // Post-processing (skip in list mode)
     if !list_mode {
         generate_diagrams_if_enabled(&options, &result, quiet);
+        finalize_profiling(&options, quiet);
         save_coverage_data(quiet);
     }
 
@@ -341,6 +343,54 @@ fn initialize_diagrams(options: &TestOptions, quiet: bool) {
         if !quiet {
             println!("Call flow diagram recording enabled");
         }
+    }
+}
+
+/// Initialize runtime profiling if enabled
+fn initialize_profiling(options: &TestOptions, quiet: bool) {
+    if !options.profile {
+        return;
+    }
+
+    use simple_compiler::runtime_profile::{ProfileConfig, ProfileMode};
+
+    let mode = match options.profile_mode.as_deref() {
+        Some("statistics") | Some("stats") => ProfileMode::Statistics,
+        Some("sequence") | Some("seq") => ProfileMode::Sequence,
+        Some("combined") | None => ProfileMode::Combined,
+        Some(other) => {
+            eprintln!("Warning: Unknown profile mode '{}', using combined", other);
+            ProfileMode::Combined
+        }
+    };
+
+    // Initialize the global profiler with the chosen mode
+    // Note: global_profiler() is initialized with default config on first access;
+    // we start it here which activates profiling
+    let _config = ProfileConfig::default().with_mode(mode);
+    // The global profiler uses default config; start it to activate
+    simple_compiler::runtime_profile::start_profiling();
+
+    // Enable runtime FFI profiling for Cranelift-compiled code
+    simple_runtime::value::profiler_ffi::enable_profiling();
+
+    // Register callbacks so runtime FFI can delegate to compiler profiler
+    simple_runtime::value::profiler_ffi::register_profiler_callbacks(
+        |name| {
+            simple_compiler::runtime_profile::record_full_call(
+                name,
+                None,
+                vec![],
+                simple_compiler::runtime_profile::CallType::Direct,
+            );
+        },
+        || {
+            simple_compiler::runtime_profile::record_full_return(None);
+        },
+    );
+
+    if !quiet {
+        println!("Runtime profiling enabled (mode: {:?})", mode);
     }
 }
 
@@ -736,6 +786,41 @@ fn generate_diagrams_if_enabled(options: &TestOptions, result: &TestRunResult, q
                 println!("───────────────────────────────────────────────────────────────");
             }
         }
+    }
+}
+
+/// Finalize profiling: stop, collect metrics, and print summary
+fn finalize_profiling(options: &TestOptions, quiet: bool) {
+    if !options.profile {
+        return;
+    }
+
+    simple_compiler::runtime_profile::stop_profiling();
+    simple_runtime::value::profiler_ffi::disable_profiling();
+
+    let metrics = simple_compiler::runtime_profile::collect_global_metrics();
+
+    if !quiet {
+        println!("───────────────────────────────────────────────────────────────");
+        println!("Runtime Profile Summary");
+        println!("───────────────────────────────────────────────────────────────");
+        println!("  Duration:         {:.3}s", metrics.duration.as_secs_f64());
+        println!("  Total calls:      {}", metrics.total_calls);
+        println!("  Unique functions:  {}", metrics.unique_functions);
+        println!("  Hot functions:     {}", metrics.hot_functions);
+        println!("  Cold functions:    {}", metrics.cold_functions);
+        println!("  Startup functions: {}", metrics.startup_functions);
+
+        // Print top 10 hottest functions
+        if !metrics.function_stats.is_empty() {
+            println!();
+            println!("  Top functions by call count:");
+            for (i, stat) in metrics.function_stats.iter().take(10).enumerate() {
+                println!("    {}. {} ({} calls, phase: {:?})",
+                    i + 1, stat.name, stat.call_count, stat.inferred_phase);
+            }
+        }
+        println!("───────────────────────────────────────────────────────────────");
     }
 }
 

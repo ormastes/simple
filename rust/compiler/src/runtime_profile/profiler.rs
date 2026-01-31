@@ -664,10 +664,33 @@ pub fn stop_profiling() {
     global_profiler().stop();
 }
 
+/// Check if profiling is currently active (convenience for call sites)
+#[inline]
+pub fn is_profiling_active() -> bool {
+    global_profiler().is_active() && global_profiler().is_enabled()
+}
+
 /// Record a function call to the global profiler
 #[inline]
 pub fn record_call(function_name: &str) {
     global_profiler().record_call(function_name);
+}
+
+/// Record a full call event (statistics + sequence) to the global profiler
+#[inline]
+pub fn record_full_call(
+    function_name: &str,
+    class_name: Option<&str>,
+    arguments: Vec<String>,
+    call_type: CallType,
+) {
+    global_profiler().record_full_call(function_name, class_name, arguments, call_type);
+}
+
+/// Record a return event to the global profiler
+#[inline]
+pub fn record_full_return(return_value: Option<String>) {
+    global_profiler().record_full_return(return_value);
 }
 
 /// Collect metrics from the global profiler
