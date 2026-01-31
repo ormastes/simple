@@ -545,6 +545,42 @@ export use Client.*
     }
 
     #[test]
+    fn test_init_boundary_violation_lint_name() {
+        assert_eq!(LintName::from_str("init_boundary_violation"), Some(LintName::InitBoundaryViolation));
+        assert_eq!(LintName::InitBoundaryViolation.as_str(), "init_boundary_violation");
+        assert_eq!(LintName::InitBoundaryViolation.default_level(), LintLevel::Warn);
+    }
+
+    #[test]
+    fn test_bypass_with_code_files_lint_name() {
+        assert_eq!(LintName::from_str("bypass_with_code_files"), Some(LintName::BypassWithCodeFiles));
+        assert_eq!(LintName::BypassWithCodeFiles.as_str(), "bypass_with_code_files");
+        assert_eq!(LintName::BypassWithCodeFiles.default_level(), LintLevel::Warn);
+    }
+
+    #[test]
+    fn test_bypass_validity_not_triggered_for_regular_files() {
+        let code = r#"
+pub struct Helper:
+    name: str
+"#;
+        let module = parse_code(code);
+        let mut checker = LintChecker::new().with_source_file(Some(std::path::PathBuf::from("src/lib/helper.spl")));
+        checker.check_module(&module.items);
+        let diagnostics = checker.take_diagnostics();
+
+        // Should NOT trigger: not an __init__.spl file
+        assert!(diagnostics.iter().all(|d| d.lint != LintName::BypassWithCodeFiles));
+    }
+
+    #[test]
+    fn test_all_lints_includes_new_lints() {
+        let all = LintName::all_lints();
+        assert!(all.contains(&LintName::InitBoundaryViolation));
+        assert!(all.contains(&LintName::BypassWithCodeFiles));
+    }
+
+    #[test]
     fn test_no_export_no_error() {
         let code = r#"
 pub struct Router:

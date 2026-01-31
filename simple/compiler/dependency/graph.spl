@@ -1,0 +1,218 @@
+# Import Graph - Dependency tracking and graph algorithms
+#
+# This module provides import graph construction for tracking module dependencies.
+# Graph algorithms (cycle detection, topological sort) will be added in later tasks.
+#
+# Corresponds to Rust: src/rust/dependency_tracker/src/graph.rs
+
+# The kind of import
+enum ImportKind:
+    UseImport        # Regular `use` import
+    CommonUse        # `common use` directory prelude
+    ExportUse        # `export use` re-export
+    TypeUse          # Type-only import (`use type`) - doesn't create runtime dependency
+
+impl ImportKind:
+    # Check if this is a type-only import
+    fn is_type_use() -> bool:
+        match self:
+            case ImportKind.TypeUse:
+                true
+            case ImportKind.UseImport:
+                false
+            case ImportKind.CommonUse:
+                false
+            case ImportKind.ExportUse:
+                false
+
+    # String representation
+    fn to_string() -> text:
+        match self:
+            case ImportKind.UseImport:
+                "Use"
+            case ImportKind.CommonUse:
+                "CommonUse"
+            case ImportKind.ExportUse:
+                "ExportUse"
+            case ImportKind.TypeUse:
+                "TypeUse"
+
+# An edge in the import graph
+struct ImportEdge:
+    from: text        # The importing module
+    to: text          # The imported module
+    kind: ImportKind  # The kind of import
+
+impl ImportEdge:
+    # Create a new import edge
+    static fn new(from: text, to: text, kind: ImportKind) -> ImportEdge:
+        ImportEdge(from: from, to: to, kind: kind)
+
+    # Get the source module
+    fn get_from() -> text:
+        self.from
+
+    # Get the target module
+    fn get_to() -> text:
+        self.to
+
+    # Get the import kind
+    fn get_kind() -> ImportKind:
+        self.kind
+
+    # Check equality
+    fn equals(other: ImportEdge) -> bool:
+        if self.from != other.from:
+            return false
+        if self.to != other.to:
+            return false
+        val self_kind_str = self.kind.to_string()
+        val other_kind_str = other.kind.to_string()
+        self_kind_str == other_kind_str
+
+# Circular dependency error
+struct CyclicDependencyError:
+    cycle: List<text>  # The cycle path (module names)
+
+impl CyclicDependencyError:
+    # Create a new cyclic dependency error
+    static fn new(cycle: List<text>) -> CyclicDependencyError:
+        CyclicDependencyError(cycle: cycle)
+
+    # Get the cycle path
+    fn get_cycle() -> List<text>:
+        self.cycle
+
+    # Format as error message
+    fn to_string() -> text:
+        "Circular dependency detected: {self.cycle.join(\" -> \")}"
+
+# An import graph tracking module dependencies
+#
+# Uses an adjacency list representation:
+# - edges: HashMap<text, HashSet<text>> - module -> set of imported modules
+# - detailed_edges: List<ImportEdge> - all edges with import kind information
+struct ImportGraph:
+    edges: Dict<text, List<text>>     # Adjacency list for cycle detection
+    detailed_edges: List<ImportEdge>  # All edges with kind info
+
+impl ImportGraph:
+    # Create a new empty import graph
+    static fn new() -> ImportGraph:
+        ImportGraph(edges: {}, detailed_edges: [])
+
+    # Add a module to the graph (even if it has no imports)
+    me add_module(module: text):
+        if not self.edges.contains_key(module):
+            self.edges[module] = []
+
+    # Add an import edge
+    #
+    # Type-only imports (ImportKind::TypeUse) are excluded from cycle detection
+    # but are still tracked in detailed_edges for analysis.
+    me add_import(from: text, to: text, kind: ImportKind):
+        # Only add to cycle detection graph if NOT a TypeUse import
+        val is_type = kind.is_type_use()
+        if not is_type:
+            # Ensure from module exists in edges
+            if not self.edges.contains_key(from):
+                self.edges[from] = []
+
+            # Add to to the from module's import list (if not already there)
+            val from_imports = self.edges[from]
+            var found = false
+            for imported in from_imports:
+                if imported == to:
+                    found = true
+
+            if not found:
+                self.edges[from].push(to)
+
+            # Ensure target module exists (even if it has no imports)
+            if not self.edges.contains_key(to):
+                self.edges[to] = []
+
+        # Always store detailed edge for analysis/tooling
+        self.detailed_edges.push(ImportEdge(from: from, to: to, kind: kind))
+
+    # Add a `use` import edge
+    me add_use(from: text, to: text):
+        self.add_import(from, to, ImportKind.UseImport)
+
+    # Add a type-only import edge (`use type`)
+    # Type-only imports don't create runtime dependencies and are excluded
+    # from circular dependency detection.
+    me add_type_use(from: text, to: text):
+        self.add_import(from, to, ImportKind.TypeUse)
+
+    # Add a `common use` import edge
+    me add_common_use(from: text, to: text):
+        self.add_import(from, to, ImportKind.CommonUse)
+
+    # Add an `export use` import edge
+    me add_export_use(from: text, to: text):
+        self.add_import(from, to, ImportKind.ExportUse)
+
+    # Get all modules that a module imports
+    fn imports_of(module: text) -> List<text>:
+        if self.edges.contains_key(module):
+            self.edges[module]
+        else:
+            []
+
+    # Get all modules that import a given module (reverse dependencies)
+    fn imported_by(module: text) -> List<text>:
+        var result: List<text> = []
+        for key in self.edges.keys():
+            val imports = self.edges[key]
+
+            var found = false
+            for imported in imports:
+                if imported == module:
+                    found = true
+
+            if found:
+                result.push(key)
+
+        result
+
+    # Get all modules in the graph
+    fn modules() -> List<text>:
+        var result: List<text> = []
+        for key in self.edges.keys():
+            result.push(key)
+        result
+
+    # Get all detailed edges
+    fn all_edges() -> List<ImportEdge>:
+        self.detailed_edges
+
+    # Get the number of modules in the graph
+    fn module_count() -> i64:
+        self.edges.len()
+
+    # Get the number of edges in the graph (detailed edges)
+    fn edge_count() -> i64:
+        self.detailed_edges.len()
+
+    # Check if a module exists in the graph
+    fn has_module(module: text) -> bool:
+        self.edges.contains_key(module)
+
+    # Check if an import exists (in cycle detection graph)
+    fn has_import(from: text, to: text) -> bool:
+        if not self.edges.contains_key(from):
+            return false
+
+        val imports = self.edges[from]
+        for imported in imports:
+            if imported == to:
+                return true
+
+        false
+
+# Public exports
+export ImportKind
+export ImportEdge
+export CyclicDependencyError
+export ImportGraph

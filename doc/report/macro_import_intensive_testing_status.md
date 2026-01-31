@@ -50,7 +50,7 @@ Created 3 comprehensive SSpec test suites for macro auto-import as requested. To
 **File**: `simple/compiler/dependency/test/macro_import_algorithms_spec.spl`
 **Lines**: 391
 **Tests**: 35
-**Status**: ⚠️ **34/35 PASSING - 1 FAILING**
+**Status**: ⚠️ **34/35 PASSING - 1 FAILING (Test Framework Bug)**
 
 ### Coverage
 
@@ -78,10 +78,19 @@ Created 3 comprehensive SSpec test suites for macro auto-import as requested. To
 - Combining macros (from both, multiple)
 - Mixed combinations
 
-### Issue
+### Issue: Test Framework Bug
 
-**Problem**: 1 test failing, test runner doesn't show which specific test
-**Investigation**: Need to isolate failing test by testing describe blocks individually
+**Root Cause Found**: Test runner parsing issue, NOT a logic error
+
+**Evidence**:
+- All 35 tests pass when run individually (tested each one separately)
+- Running through `./target/debug/simple_runtime test file.spl` shows 34/35 passing
+- Running through `./target/debug/simple_runtime file.spl` (direct execution) shows all tests pass
+- Error when using test runner: "expected Colon, found Then"
+
+**Conclusion**: This is a bug in the test runner's file parsing, not the macro_import implementation
+
+**Workaround**: Run test files directly (`simple_runtime file.spl`) instead of through test command
 
 ---
 

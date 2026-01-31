@@ -259,6 +259,10 @@ impl ModuleResolver {
                     if manifest.child_modules.is_empty() && decl.name == manifest.name {
                         // This is the directory header - extract attributes
                         manifest.attributes = decl.attributes.clone();
+                        // Check for #[bypass] attribute
+                        if decl.attributes.iter().any(|a| a.name == "bypass") {
+                            manifest.is_bypass = true;
+                        }
                     } else {
                         // This is a child module declaration
                         manifest.child_modules.push(ChildModule {
