@@ -458,7 +458,7 @@ pub extern "C" fn rt_context_stats(_path: RuntimeValue, _target: RuntimeValue) -
 
 #[no_mangle]
 pub extern "C" fn rt_settlement_main() -> i64 {
-    simple_loader::settlement_main() as i64
+    crate::loader::startup::settlement_main() as i64
 }
 
 #[no_mangle]

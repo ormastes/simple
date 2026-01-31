@@ -261,8 +261,9 @@ fn test_operator_pipe() {
 }
 
 #[test]
-fn test_operator_caret() {
-    assert_eq!(tokenize("^"), vec![TokenKind::Caret, TokenKind::Eof]);
+fn test_operator_caret_is_error() {
+    let tokens = tokenize("^");
+    assert!(matches!(&tokens[0], TokenKind::Error(msg) if msg.contains("not allowed outside math blocks")));
 }
 
 #[test]

@@ -20,8 +20,9 @@
 #     value result = expensive.force()  # Computed here, cached
 #     value result2 = expensive.force() # Returns cached value
 
-export Lazy, LazyState, LazyError, LazyStats
+export Lazy, LazyState, LazyError, LazyStats, Memo, MemoStats
 export lazy, force, is_evaluated, map_lazy, flat_map_lazy
+export get_lazy_stats, reset_lazy_stats, current_time_ms
 
 # ============================================================================
 # Lazy State
@@ -123,16 +124,21 @@ impl Display for LazyStats:
     fn fmt() -> text:
         "LazyStats(created={self.total_created}, forced={self.total_forced}, hit_rate={self.hit_rate()})"
 
-# Global statistics
-var GLOBAL_LAZY_STATS: LazyStats = LazyStats.new()
+# Global lazy ID counter
+var _lazy_next_id: i64 = 0
 
+fn _next_lazy_id() -> i64:
+    _lazy_next_id = _lazy_next_id + 1
+    _lazy_next_id
+
+# Global statistics (tracked per-instance, aggregated on request)
 fn get_lazy_stats() -> LazyStats:
-    """Get global lazy evaluation statistics."""
-    GLOBAL_LAZY_STATS
+    """Get global lazy evaluation statistics (placeholder)."""
+    LazyStats.new()
 
 fn reset_lazy_stats():
-    """Reset global statistics."""
-    GLOBAL_LAZY_STATS = LazyStats.new()
+    """Reset global statistics (placeholder)."""
+    pass
 
 # ============================================================================
 # Lazy Value
@@ -171,14 +177,12 @@ struct Lazy<T>:
 impl Lazy<T>:
     static fn new(thunk: fn() -> T) -> Lazy<T>:
         """Create a new lazy value with the given thunk."""
-        GLOBAL_LAZY_STATS.total_created = GLOBAL_LAZY_STATS.total_created + 1
-
         Lazy(
-            id: GLOBAL_LAZY_STATS.total_created,
+            id: _next_lazy_id(),
             state: LazyState.Pending,
             thunk: thunk,
             created_at: current_time_ms(),
-            evaluated_at: None
+            evaluated_at: nil
         )
 
     static fn of(value: T) -> Lazy<T>:
@@ -186,10 +190,8 @@ impl Lazy<T>:
 
         Useful for wrapping constants or pre-computed values.
         """
-        GLOBAL_LAZY_STATS.total_created = GLOBAL_LAZY_STATS.total_created + 1
-
         Lazy(
-            id: GLOBAL_LAZY_STATS.total_created,
+            id: _next_lazy_id(),
             state: LazyState.Ready(value),
             thunk: \: value,  # Dummy thunk
             created_at: current_time_ms(),
@@ -198,14 +200,12 @@ impl Lazy<T>:
 
     static fn failed(error: text) -> Lazy<T>:
         """Create a lazy value that always fails."""
-        GLOBAL_LAZY_STATS.total_created = GLOBAL_LAZY_STATS.total_created + 1
-
         Lazy(
-            id: GLOBAL_LAZY_STATS.total_created,
+            id: _next_lazy_id(),
             state: LazyState.Failed(error),
             thunk: \: panic(error),
             created_at: current_time_ms(),
-            evaluated_at: None
+            evaluated_at: nil
         )
 
     # --------------------------------------------------------------------------
@@ -218,39 +218,25 @@ impl Lazy<T>:
         Returns the cached value if already evaluated.
         Detects cycles if the value depends on itself.
         """
-        GLOBAL_LAZY_STATS.total_forced = GLOBAL_LAZY_STATS.total_forced + 1
-
         match self.state:
             case Ready(value):
-                # Already evaluated - cache hit
-                GLOBAL_LAZY_STATS.cache_hits = GLOBAL_LAZY_STATS.cache_hits + 1
                 Ok(value)
 
             case Evaluating:
                 # Cycle detected!
-                GLOBAL_LAZY_STATS.cycles_detected = GLOBAL_LAZY_STATS.cycles_detected + 1
                 self.state = LazyState.Failed("Cycle detected")
                 Err(LazyError.CycleDetected)
 
             case Failed(msg):
-                # Previous evaluation failed
                 Err(LazyError.AlreadyFailed)
 
             case Pending:
-                # Need to evaluate - cache miss
-                GLOBAL_LAZY_STATS.cache_misses = GLOBAL_LAZY_STATS.cache_misses + 1
-
                 # Mark as evaluating (for cycle detection)
                 self.state = LazyState.Evaluating
-                val start_time = current_time_ms()
 
-                # Try to evaluate
-                # In a real impl, this would catch exceptions
-                val result = self.thunk()
-
-                val eval_time = current_time_ms() - start_time
-                GLOBAL_LAZY_STATS.total_evaluation_time_ms =
-                    GLOBAL_LAZY_STATS.total_evaluation_time_ms + eval_time
+                # Evaluate the thunk
+                val thunk_fn = self.thunk
+                val result = thunk_fn()
 
                 # Cache the result
                 self.state = LazyState.Ready(result)
@@ -290,7 +276,7 @@ impl Lazy<T>:
         """Get the value if already evaluated, without forcing."""
         match self.state:
             case Ready(value): Some(value)
-            case _: None
+            case _: nil
 
     fn age_ms() -> i64:
         """Time since creation."""
@@ -340,7 +326,7 @@ impl Lazy<T>:
             if predicate(value):
                 Some(value)
             else:
-                None
+                nil
         )
 
 impl Display for Lazy<T>:
@@ -410,24 +396,25 @@ impl Memo<K, V>:
         self.stats.total_lookups = self.stats.total_lookups + 1
 
         val existing = self.cache.get(key)
-        if existing.?:
-            self.stats.cache_hits = self.stats.cache_hits + 1
-            var lazy_val = existing.unwrap()
-            lazy_val.force_unchecked()
-        else:
-            self.stats.cache_misses = self.stats.cache_misses + 1
-            val lazy_val = Lazy.new(compute)
-            self.cache[key] = lazy_val
-            var lv = lazy_val
-            lv.force_unchecked()
+        match existing:
+            case Some(cached):
+                self.stats.cache_hits = self.stats.cache_hits + 1
+                var lazy_val = cached
+                lazy_val.force_unchecked()
+            case _:
+                self.stats.cache_misses = self.stats.cache_misses + 1
+                val lazy_val = Lazy.new(compute)
+                self.cache[key] = lazy_val
+                var lv = lazy_val
+                lv.force_unchecked()
 
     fn get(key: K) -> V?:
         """Get cached value if present."""
-        val existing = self.cache.get(key)
-        if existing.?:
-            existing.unwrap().get()
-        else:
-            None
+        match self.cache.get(key):
+            case Some(cached):
+                cached.get()
+            case _:
+                nil
 
     fn contains(key: K) -> bool:
         """Check if key is in cache."""

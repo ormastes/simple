@@ -129,7 +129,7 @@ fn parse_compound_unit_basic() {
 #[test]
 fn parse_compound_unit_with_power() {
     // Compound unit with exponent
-    let items = parse("unit acceleration = length / time^2");
+    let items = parse("unit acceleration = length / time**2");
     if let Node::CompoundUnit(cu) = &items[0] {
         assert_eq!(cu.name, "acceleration");
         if let UnitExpr::Div(left, right) = &cu.expr {
@@ -177,11 +177,11 @@ fn parse_compound_unit_multiplication() {
 
 #[test]
 fn parse_compound_unit_complex() {
-    // Complex compound unit: force = mass * length / time^2
-    let items = parse("unit force = mass * length / time^2");
+    // Complex compound unit: force = mass * length / time**2
+    let items = parse("unit force = mass * length / time**2");
     if let Node::CompoundUnit(cu) = &items[0] {
         assert_eq!(cu.name, "force");
-        // Should parse as (mass * length) / time^2
+        // Should parse as (mass * length) / time**2
         if let UnitExpr::Div(left, right) = &cu.expr {
             assert!(matches!(left.as_ref(), UnitExpr::Mul(_, _)));
             assert!(matches!(right.as_ref(), UnitExpr::Pow(_, 2)));

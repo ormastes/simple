@@ -1,10 +1,15 @@
 use std::cell::RefCell;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use simple_parser::ast::Block;
 
 use crate::macro_contracts::MacroContractResult;
 
 use crate::error::CompileError;
+
+/// Fast atomic counter for pending tail injections.
+/// Allows exit_block_scope to skip the expensive borrow when no injections exist.
+static PENDING_INJECTION_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 /// Maximum depth for recursive macro expansion (prevents stack overflow)
 const MAX_MACRO_EXPANSION_DEPTH: usize = 128;
@@ -121,6 +126,11 @@ pub(crate) fn exit_block_scope() -> Vec<Block> {
         depth
     });
 
+    // Fast path: skip expensive borrow if no pending injections exist
+    if PENDING_INJECTION_COUNT.load(Ordering::Relaxed) == 0 {
+        return Vec::new();
+    }
+
     // Collect and remove all pending injections at this depth
     let result = PENDING_TAIL_INJECTIONS.with(|cell| {
         let mut pending = cell.borrow_mut();
@@ -133,6 +143,7 @@ pub(crate) fn exit_block_scope() -> Vec<Block> {
                 true // Keep in pending
             }
         });
+        PENDING_INJECTION_COUNT.fetch_sub(result.len(), Ordering::Relaxed);
         result
     });
 
@@ -156,6 +167,7 @@ pub(crate) fn queue_tail_injection(block: Block) {
     PENDING_TAIL_INJECTIONS.with(|cell| {
         cell.borrow_mut().push((current_depth, block));
     });
+    PENDING_INJECTION_COUNT.fetch_add(1, Ordering::Relaxed);
 }
 
 /// Cache a pre-processed contract result for a macro (definition-time optimization)

@@ -26,18 +26,18 @@ pub fn init_logging(metrics: &mut StartupMetrics) {
             .ok()
             .or_else(|| std::env::var("RUST_LOG").ok());
 
-        if let Err(e) = simple_log::init_dual(log_dir.as_deref(), log_filter.as_deref()) {
+        if let Err(e) = crate::log::init_dual(log_dir.as_deref(), log_filter.as_deref()) {
             eprintln!("warning: failed to initialize file logging: {}", e);
-            simple_log::init(); // Fallback to stdout only
+            crate::log::init(); // Fallback to stdout only
         }
 
         // Cleanup old logs (keep 7 days) - non-fatal if it fails
-        let _ = simple_log::cleanup_old_logs(std::path::Path::new(".simple/logs"), 7);
+        let _ = crate::log::cleanup_old_logs(std::path::Path::new(".simple/logs"), 7);
     }
 
     // In release mode, use simple stdout-only logging
     #[cfg(not(debug_assertions))]
-    simple_log::init();
+    crate::log::init();
 
     metrics.record(crate::StartupPhase::LoggingInit, log_start.elapsed());
 }

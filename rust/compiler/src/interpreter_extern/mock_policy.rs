@@ -1,6 +1,6 @@
 //! Mock policy FFI for the Simple interpreter
 //!
-//! This module provides FFI wrappers for mock policy functions from simple_mock_helper.
+//! This module provides FFI wrappers for mock policy functions from crate::mock_helper.
 //! These allow Simple code to configure and check mock policies at runtime.
 
 use crate::error::CompileError;
@@ -10,7 +10,7 @@ use crate::value::Value;
 ///
 /// Callable from Simple as: `__mock_policy_init_all()`
 pub fn mock_policy_init_all(_args: &[Value]) -> Result<Value, CompileError> {
-    simple_mock_helper::mock_policy::init_mocks_for_only(&["*"]);
+    crate::mock_helper::mock_policy::init_mocks_for_only(&["*"]);
     Ok(Value::Nil)
 }
 
@@ -18,7 +18,7 @@ pub fn mock_policy_init_all(_args: &[Value]) -> Result<Value, CompileError> {
 ///
 /// Callable from Simple as: `__mock_policy_init_hal_only()`
 pub fn mock_policy_init_hal_only(_args: &[Value]) -> Result<Value, CompileError> {
-    simple_mock_helper::mock_policy::init_mocks_for_only_default();
+    crate::mock_helper::mock_policy::init_mocks_for_only_default();
     Ok(Value::Nil)
 }
 
@@ -26,7 +26,7 @@ pub fn mock_policy_init_hal_only(_args: &[Value]) -> Result<Value, CompileError>
 ///
 /// Callable from Simple as: `__mock_policy_disable()`
 pub fn mock_policy_disable(_args: &[Value]) -> Result<Value, CompileError> {
-    simple_mock_helper::mock_policy::init_mocks_for_system();
+    crate::mock_helper::mock_policy::init_mocks_for_system();
     Ok(Value::Nil)
 }
 
@@ -56,7 +56,7 @@ pub fn mock_policy_init_patterns(args: &[Value]) -> Result<Value, CompileError> 
                 .collect();
 
             let static_slice: &'static [&'static str] = Box::leak(static_patterns.into_boxed_slice());
-            simple_mock_helper::mock_policy::init_mocks_for_only(static_slice);
+            crate::mock_helper::mock_policy::init_mocks_for_only(static_slice);
             Ok(Value::Nil)
         }
         _ => Err(CompileError::runtime(
@@ -85,7 +85,7 @@ pub fn mock_policy_check(args: &[Value]) -> Result<Value, CompileError> {
         }
     };
 
-    simple_mock_helper::mock_policy::check_mock_use_from(&module_path);
+    crate::mock_helper::mock_policy::check_mock_use_from(&module_path);
     Ok(Value::Nil)
 }
 
@@ -109,7 +109,7 @@ pub fn mock_policy_try_check(args: &[Value]) -> Result<Value, CompileError> {
         }
     };
 
-    use simple_mock_helper::mock_policy::{try_check_mock_use_from, MockCheckResult};
+    use crate::mock_helper::mock_policy::{try_check_mock_use_from, MockCheckResult};
 
     let result = try_check_mock_use_from(&module_path);
     let result_str = match result {
@@ -128,7 +128,7 @@ pub fn mock_policy_try_check(args: &[Value]) -> Result<Value, CompileError> {
 /// Callable from Simple as: `__mock_policy_get_mode()`
 pub fn mock_policy_get_mode(_args: &[Value]) -> Result<Value, CompileError> {
     // Check if we can use mocks by trying with a wildcard path
-    use simple_mock_helper::mock_policy::{try_check_mock_use_from, MockCheckResult};
+    use crate::mock_helper::mock_policy::{try_check_mock_use_from, MockCheckResult};
 
     let result = try_check_mock_use_from("*");
 

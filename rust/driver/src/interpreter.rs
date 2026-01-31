@@ -9,8 +9,8 @@ use std::process::Command;
 use std::sync::Arc;
 use tempfile::TempDir;
 
-use simple_loader::memory::PlatformAllocator;
-use simple_loader::{create_executable, Settlement, SettlementConfig};
+use simple_runtime::loader::memory::PlatformAllocator;
+use simple_runtime::loader::{create_executable, Settlement, SettlementConfig};
 use simple_parser::error_recovery::ErrorHintLevel;
 use simple_parser::Parser;
 use simple_runtime::gc::GcRuntime;
@@ -270,7 +270,7 @@ impl Interpreter {
         let smf_bytes = self.runner.compile_to_memory(code)?;
 
         // Load the module
-        let loader = simple_loader::ModuleLoader::new();
+        let loader = simple_runtime::loader::ModuleLoader::new();
         let module = loader
             .load_from_memory(&smf_bytes)
             .map_err(|e| format!("load module: {e}"))?;

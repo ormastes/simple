@@ -175,7 +175,6 @@ mod casting;
 mod units;
 
 /// Evaluate a constant expression at compile time
-#[instrument(skip(env, functions, classes, enums, impl_methods))]
 pub(crate) fn evaluate_expr(
     expr: &Expr,
     env: &mut Env,

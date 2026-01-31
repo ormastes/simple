@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use simple_common::gc::GcAllocator;
 use simple_common::target::Target;
-use simple_loader::smf::{
+use simple_runtime::loader::smf::{
     hash_name, Arch, SectionType, SmfHeader, SmfSection, SmfSymbol, SymbolBinding, SymbolType, SECTION_FLAG_EXEC,
     SECTION_FLAG_READ, SMF_FLAG_EXECUTABLE, SMF_MAGIC,
 };
@@ -63,7 +63,7 @@ fn build_smf_with_code_for_target(code_bytes: &[u8], entry_offset: u64, gc: Opti
         magic: *SMF_MAGIC,
         version_major: 0,
         version_minor: 1,
-        platform: simple_loader::smf::Platform::from_target_os(target.os) as u8,
+        platform: simple_runtime::loader::smf::Platform::from_target_os(target.os) as u8,
         arch: Arch::from_target_arch(target.arch) as u8,
         flags: SMF_FLAG_EXECUTABLE,
         compression: 0, // No compression

@@ -135,7 +135,7 @@ tensor_scalar_op!(rt_torch_mul_scalar, |t: &Tensor, s| t * s);
 /// Divide by scalar: tensor / scalar
 tensor_scalar_op!(rt_torch_div_scalar, |t: &Tensor, s| t / s);
 
-/// Power: tensor ^ exponent
+/// Power: tensor ** exponent
 tensor_scalar_op!(rt_torch_pow, |t: &Tensor, exp| t.pow_tensor_scalar(exp));
 
 // ============================================================================

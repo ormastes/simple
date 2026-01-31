@@ -55,7 +55,12 @@ pub(crate) fn evaluate_call(
             return result;
         }
 
-        // Priority 2: Try built-ins
+        // Priority 2: Check regular functions early (fast path for user-defined calls)
+        if let Some(func) = functions.get(name).cloned() {
+            return core::exec_function(&func, args, env, functions, classes, enums, impl_methods, None);
+        }
+
+        // Priority 3: Try built-ins
         if let Some(result) = builtins::eval_builtin(name, args, env, functions, classes, enums, impl_methods)? {
             return Ok(result);
         }
@@ -127,11 +132,6 @@ pub(crate) fn evaluate_call(
                 }
                 _ => {}
             }
-        }
-
-        // Check regular functions
-        if let Some(func) = functions.get(name).cloned() {
-            return core::exec_function(&func, args, env, functions, classes, enums, impl_methods, None);
         }
 
         // Check class constructors (e.g., MyClass() instantiation)

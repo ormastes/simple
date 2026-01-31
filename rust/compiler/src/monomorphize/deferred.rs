@@ -177,7 +177,7 @@ impl DeferredMonomorphizer {
             std::fs::read(smf_path).map_err(|e| CompileError::Io(format!("Failed to read SMF file: {}", e)))?;
 
         // Parse SMF header and sections
-        // TODO: Implement proper SMF parsing with simple_loader
+        // TODO: Implement proper SMF parsing with simple_runtime::loader
         // For now, we'll assume templates are not in SMF yet and return early
         // This will be implemented when full serialization is complete
         tracing::warn!("SMF template loading not yet fully implemented - returning empty");

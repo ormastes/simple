@@ -285,6 +285,10 @@ pub fn has_effect(effect: Effect) -> bool {
 /// - @async functions can call any function (no restrictions on callee)
 /// - Functions without effects can call anything (unrestricted)
 pub fn check_call_compatibility(callee_name: &str, callee_effects: &[Effect]) -> Result<(), CompileError> {
+    // Fast path: most functions have no effects on either side
+    if callee_effects.is_empty() {
+        return Ok(());
+    }
     CURRENT_EFFECTS.with(|cell| {
         let caller_effects = cell.borrow();
 

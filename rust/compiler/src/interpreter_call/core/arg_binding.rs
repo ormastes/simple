@@ -14,6 +14,10 @@ type ImplMethods = HashMap<String, Vec<FunctionDef>>;
 
 const METHOD_SELF: &str = "self";
 
+/// Static empty map to avoid allocation on every `bind_args` call.
+static EMPTY_INJECTED: std::sync::LazyLock<HashMap<String, Value>> =
+    std::sync::LazyLock::new(HashMap::new);
+
 pub(crate) fn bind_args(
     params: &[Parameter],
     args: &[Argument],
@@ -33,7 +37,7 @@ pub(crate) fn bind_args(
         enums,
         impl_methods,
         self_mode,
-        &HashMap::new(),
+        &EMPTY_INJECTED,
     )
 }
 

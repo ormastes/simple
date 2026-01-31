@@ -2,8 +2,8 @@
 ///
 /// Provides bridge from Simple interpreter to LLVM native code generation.
 
-use crate::compile_error::CompileError;
-use crate::runtime_value::RuntimeValue;
+use crate::error::CompileError;
+use crate::value::Value as Value;
 use std::path::Path;
 use std::process::Command;
 use std::time::Instant;
@@ -13,7 +13,7 @@ use std::time::Instant;
 /// Callable from Simple as: `rt_compile_to_native(source_path, output_path)`
 ///
 /// Returns: (success: bool, error_message: text)
-pub fn rt_compile_to_native(args: &[RuntimeValue]) -> Result<RuntimeValue, CompileError> {
+pub fn rt_compile_to_native(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() != 2 {
         return Err(CompileError::runtime(
             "rt_compile_to_native requires 2 arguments (source_path, output_path)",
@@ -21,21 +21,21 @@ pub fn rt_compile_to_native(args: &[RuntimeValue]) -> Result<RuntimeValue, Compi
     }
 
     let source_path = match &args[0] {
-        RuntimeValue::String(s) => s.as_str(),
+        Value::Str(s) => s.as_str(),
         _ => return Err(CompileError::runtime("source_path must be a string")),
     };
 
     let output_path = match &args[1] {
-        RuntimeValue::String(s) => s.as_str(),
+        Value::Str(s) => s.as_str(),
         _ => return Err(CompileError::runtime("output_path must be a string")),
     };
 
     // Check if source file exists
     if !Path::new(source_path).exists() {
         let error_msg = format!("Source file not found: {}", source_path);
-        return Ok(RuntimeValue::tuple(vec![
-            RuntimeValue::Bool(false),
-            RuntimeValue::String(error_msg.into()),
+        return Ok(Value::Tuple(vec![
+            Value::Bool(false),
+            Value::Str(error_msg.into()),
         ]));
     }
 
@@ -48,9 +48,9 @@ pub fn rt_compile_to_native(args: &[RuntimeValue]) -> Result<RuntimeValue, Compi
     // 4. Link to create executable
 
     let error_msg = "Native compilation not yet implemented - LLVM backend in progress";
-    Ok(RuntimeValue::tuple(vec![
-        RuntimeValue::Bool(false),
-        RuntimeValue::String(error_msg.into()),
+    Ok(Value::Tuple(vec![
+        Value::Bool(false),
+        Value::Str(error_msg.into()),
     ]))
 }
 
@@ -59,7 +59,7 @@ pub fn rt_compile_to_native(args: &[RuntimeValue]) -> Result<RuntimeValue, Compi
 /// Callable from Simple as: `rt_execute_native(binary_path, args, timeout_ms)`
 ///
 /// Returns: (stdout: text, stderr: text, exit_code: i32)
-pub fn rt_execute_native(args: &[RuntimeValue]) -> Result<RuntimeValue, CompileError> {
+pub fn rt_execute_native(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() != 3 {
         return Err(CompileError::runtime(
             "rt_execute_native requires 3 arguments (binary_path, args, timeout_ms)",
@@ -67,16 +67,16 @@ pub fn rt_execute_native(args: &[RuntimeValue]) -> Result<RuntimeValue, CompileE
     }
 
     let binary_path = match &args[0] {
-        RuntimeValue::String(s) => s.as_str(),
+        Value::Str(s) => s.as_str(),
         _ => return Err(CompileError::runtime("binary_path must be a string")),
     };
 
     let cmd_args = match &args[1] {
-        RuntimeValue::Array(arr) => {
+        Value::Array(arr) => {
             let mut args_vec = Vec::new();
             for arg in arr.iter() {
                 match arg {
-                    RuntimeValue::String(s) => args_vec.push(s.to_string()),
+                    Value::Str(s) => args_vec.push(s.to_string()),
                     _ => {
                         return Err(CompileError::runtime(
                             "all arguments must be strings",
@@ -90,16 +90,16 @@ pub fn rt_execute_native(args: &[RuntimeValue]) -> Result<RuntimeValue, CompileE
     };
 
     let timeout_ms = match &args[2] {
-        RuntimeValue::I64(ms) => *ms as u64,
+        Value::Int(ms) => *ms as u64,
         _ => return Err(CompileError::runtime("timeout_ms must be an integer")),
     };
 
     // Check if binary exists
     if !Path::new(binary_path).exists() {
-        return Ok(RuntimeValue::tuple(vec![
-            RuntimeValue::String("".into()),
-            RuntimeValue::String(format!("Binary not found: {}", binary_path).into()),
-            RuntimeValue::I64(127), // Command not found
+        return Ok(Value::Tuple(vec![
+            Value::Str("".into()),
+            Value::Str(format!("Binary not found: {}", binary_path).into()),
+            Value::Int(127), // Command not found
         ]));
     }
 
@@ -111,10 +111,10 @@ pub fn rt_execute_native(args: &[RuntimeValue]) -> Result<RuntimeValue, CompileE
     {
         Ok(output) => output,
         Err(e) => {
-            return Ok(RuntimeValue::tuple(vec![
-                RuntimeValue::String("".into()),
-                RuntimeValue::String(format!("Execution error: {}", e).into()),
-                RuntimeValue::I64(-1),
+            return Ok(Value::Tuple(vec![
+                Value::Str("".into()),
+                Value::Str(format!("Execution error: {}", e).into()),
+                Value::Int(-1),
             ]));
         }
     };
@@ -123,10 +123,10 @@ pub fn rt_execute_native(args: &[RuntimeValue]) -> Result<RuntimeValue, CompileE
 
     // Check if execution exceeded timeout
     if duration_ms > timeout_ms as i64 {
-        return Ok(RuntimeValue::tuple(vec![
-            RuntimeValue::String("".into()),
-            RuntimeValue::String("Execution timed out".into()),
-            RuntimeValue::I64(124), // Timeout exit code
+        return Ok(Value::Tuple(vec![
+            Value::Str("".into()),
+            Value::Str("Execution timed out".into()),
+            Value::Int(124), // Timeout exit code
         ]));
     }
 
@@ -134,10 +134,10 @@ pub fn rt_execute_native(args: &[RuntimeValue]) -> Result<RuntimeValue, CompileE
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
     let exit_code = output.status.code().unwrap_or(-1) as i64;
 
-    Ok(RuntimeValue::tuple(vec![
-        RuntimeValue::String(stdout.into()),
-        RuntimeValue::String(stderr.into()),
-        RuntimeValue::I64(exit_code),
+    Ok(Value::Tuple(vec![
+        Value::Str(stdout.into()),
+        Value::Str(stderr.into()),
+        Value::Int(exit_code),
     ]))
 }
 
@@ -146,7 +146,7 @@ pub fn rt_execute_native(args: &[RuntimeValue]) -> Result<RuntimeValue, CompileE
 /// Callable from Simple as: `rt_file_delete(path)`
 ///
 /// Returns: bool (true if deleted successfully)
-pub fn rt_file_delete(args: &[RuntimeValue]) -> Result<RuntimeValue, CompileError> {
+pub fn rt_file_delete(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() != 1 {
         return Err(CompileError::runtime(
             "rt_file_delete requires 1 argument (path)",
@@ -154,13 +154,13 @@ pub fn rt_file_delete(args: &[RuntimeValue]) -> Result<RuntimeValue, CompileErro
     }
 
     let path = match &args[0] {
-        RuntimeValue::String(s) => s.as_str(),
+        Value::Str(s) => s.as_str(),
         _ => return Err(CompileError::runtime("path must be a string")),
     };
 
     match std::fs::remove_file(path) {
-        Ok(()) => Ok(RuntimeValue::Bool(true)),
-        Err(_) => Ok(RuntimeValue::Bool(false)),
+        Ok(()) => Ok(Value::Bool(true)),
+        Err(_) => Ok(Value::Bool(false)),
     }
 }
 
@@ -171,17 +171,17 @@ mod tests {
     #[test]
     fn test_compile_to_native_not_implemented() {
         let args = vec![
-            RuntimeValue::String("test.spl".into()),
-            RuntimeValue::String("test.out".into()),
+            Value::Str("test.spl".into()),
+            Value::Str("test.out".into()),
         ];
         let result = rt_compile_to_native(&args).unwrap();
 
         match result {
-            RuntimeValue::Tuple(values) => {
+            Value::Tuple(values) => {
                 assert_eq!(values.len(), 2);
-                assert_eq!(values[0], RuntimeValue::Bool(false));
+                assert_eq!(values[0], Value::Bool(false));
                 match &values[1] {
-                    RuntimeValue::String(s) => {
+                    Value::Str(s) => {
                         assert!(s.contains("not yet implemented"));
                     }
                     _ => panic!("Expected error message"),
@@ -193,8 +193,8 @@ mod tests {
 
     #[test]
     fn test_file_delete_nonexistent() {
-        let args = vec![RuntimeValue::String("/tmp/nonexistent_file_xyz123".into())];
+        let args = vec![Value::Str("/tmp/nonexistent_file_xyz123".into())];
         let result = rt_file_delete(&args).unwrap();
-        assert_eq!(result, RuntimeValue::Bool(false));
+        assert_eq!(result, Value::Bool(false));
     }
 }

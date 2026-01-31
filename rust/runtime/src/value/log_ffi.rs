@@ -3,7 +3,7 @@
 //! These functions provide logging functionality with levels 0-10.
 //! Uses LogLevel from simple-hir-core for shared type definitions.
 
-use simple_hir_core::LogLevel;
+use crate::hir_core::LogLevel;
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 

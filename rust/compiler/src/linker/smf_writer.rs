@@ -5,7 +5,7 @@ use thiserror::Error;
 use crate::mir::MirModule;
 
 // Re-export SMF types from loader (single source of truth)
-pub use simple_loader::smf::{
+pub use simple_runtime::loader::smf::{
     RelocationType, SectionType, SymbolBinding, SymbolType, SECTION_FLAG_EXEC, SECTION_FLAG_READ, SECTION_FLAG_WRITE,
     SMF_FLAG_EXECUTABLE, SMF_MAGIC,
 };

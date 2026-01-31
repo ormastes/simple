@@ -587,7 +587,7 @@ impl Parser<'_> {
         }))
     }
 
-    /// Parse unit expression for compound units: length / time, mass * acceleration, time^2
+    /// Parse unit expression for compound units: length / time, mass * acceleration, time**2
     fn parse_unit_expr(&mut self) -> Result<UnitExpr, ParseError> {
         let mut left = self.parse_unit_term()?;
 
@@ -606,13 +606,13 @@ impl Parser<'_> {
         Ok(left)
     }
 
-    /// Parse a unit term: identifier or identifier^exponent
+    /// Parse a unit term: identifier or identifier**exponent
     fn parse_unit_term(&mut self) -> Result<UnitExpr, ParseError> {
         let name = self.expect_identifier()?;
         let base = UnitExpr::Base(name);
 
-        // Check for power: time^2
-        if self.check(&TokenKind::Caret) {
+        // Check for power: time**2
+        if self.check(&TokenKind::DoubleStar) {
             self.advance();
             // Parse integer exponent (can be negative)
             let negative = if self.check(&TokenKind::Minus) {
@@ -634,7 +634,7 @@ impl Parser<'_> {
                 }
                 _ => {
                     return Err(ParseError::syntax_error_with_span(
-                        "Expected integer exponent after '^'",
+                        "Expected integer exponent after '**'",
                         self.current.span,
                     ));
                 }
