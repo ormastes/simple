@@ -94,8 +94,8 @@ impl ExtendedCoverageReport {
 
 #[cfg(test)]
 mod tests {
-    use super::super::coverage::{parse_llvm_cov_export, parse_public_api_spec};
-    use super::CoverageAnalyzer;
+    use crate::mock_helper::coverage::{parse_llvm_cov_export, parse_public_api_spec};
+    use crate::mock_helper::CoverageAnalyzer;
 
     fn create_test_analyzer() -> CoverageAnalyzer {
         let cov_json = r#"{

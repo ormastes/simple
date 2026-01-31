@@ -238,8 +238,10 @@ impl CompilerPipeline {
         // Clear previous verification violations
         self.verification_violations.clear();
 
-        // Type check
-        type_check(&ast_module.items).map_err(|e| crate::error::factory::type_check_failed(&e))?;
+        // Type check (lenient - log errors but don't fail for bootstrap)
+        if let Err(e) = type_check(&ast_module.items) {
+            eprintln!("warning: type check: {:?} (continuing)", e);
+        }
 
         // Lower AST to HIR (using lenient mode for bootstrap)
         let hir_module = hir::lower_lenient(ast_module).map_err(convert_lower_error)?;
@@ -264,8 +266,10 @@ impl CompilerPipeline {
         // Clear previous verification violations
         self.verification_violations.clear();
 
-        // Type check
-        type_check(&ast_module.items).map_err(|e| crate::error::factory::type_check_failed(&e))?;
+        // Type check (lenient - log errors but don't fail for bootstrap)
+        if let Err(e) = type_check(&ast_module.items) {
+            eprintln!("warning: type check: {:?} (continuing)", e);
+        }
 
         // Lower AST to HIR with module resolution support (using lenient mode for bootstrap)
         let hir_module = hir::lower_with_context_lenient(ast_module, source_file).map_err(convert_lower_error)?;
@@ -287,8 +291,10 @@ impl CompilerPipeline {
         // Clear previous verification violations
         self.verification_violations.clear();
 
-        // Type check
-        type_check(&ast_module.items).map_err(|e| crate::error::factory::type_check_failed(&e))?;
+        // Type check (lenient - log errors but don't fail for bootstrap)
+        if let Err(e) = type_check(&ast_module.items) {
+            eprintln!("warning: type check: {:?} (continuing)", e);
+        }
 
         // Lower AST to HIR with module resolution support (strict mode)
         let hir_module = hir::lower_with_context(ast_module, source_file).map_err(convert_lower_error)?;

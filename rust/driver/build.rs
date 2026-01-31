@@ -68,8 +68,9 @@ fn generate_test_file(test_root: &Path, dest_path: &Path, prefix: &str) {
     generated.push_str("        if let Err(e) = save_global_coverage() {\n");
     generated.push_str("            eprintln!(\"Warning: Failed to save coverage: {}\", e);\n");
     generated.push_str("        } else {\n");
-    generated.push_str("            let path = get_coverage_output_path();\n");
-    generated.push_str("            eprintln!(\"Coverage data saved to: {}\", path.display());\n");
+    generated.push_str("            if let Some(path) = get_coverage_output_path() {\n");
+    generated.push_str("                eprintln!(\"Coverage data saved to: {}\", path);\n");
+    generated.push_str("            }\n");
     generated.push_str("        }\n");
     generated.push_str("    }\n");
     generated.push_str("}\n");

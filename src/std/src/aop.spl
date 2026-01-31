@@ -1,49 +1,35 @@
-# AOP Module - Aspect-Oriented Programming for Logging and Cross-Cutting Concerns
-#
-# Provides declarative logging aspects that wrap functions with before/after/error logging.
-# Integrates with LogConfig and DI container for configuration-based enabling.
+# AOP Module - Aspect-Oriented Programming (Stub)
 
-use di.Container, di.get_container
-use config.LogConfig, config.AopConfig
-
-# ============================================================================
-# Core AOP Types
-# ============================================================================
+use config.AopConfig
 
 enum AdviceKind:
-    """When the advice executes."""
-    Before      # Before function execution
-    After       # After successful execution
-    AfterError  # After error (exception/result error)
-    Around      # Wraps entire execution
+    Before
+    After
+    AfterError
+    Around
 
 enum JoinPoint:
-    """Where the advice applies."""
     FunctionCall(name: text)
     MethodCall(class_name: text, method_name: text)
     ModuleLoad(module_name: text)
     All
 
 struct Pointcut:
-    """Defines where aspects apply."""
     kind: JoinPoint
-    pattern: text?       # Optional regex pattern for matching
+    pattern: text?
 
 struct Advice:
-    """Action to take at join point."""
     kind: AdviceKind
     handler: fn(AdviceContext) -> Result<(), text>
 
 struct Aspect:
-    """Combines pointcut with advice."""
     name: text
     pointcut: Pointcut
     advice: Advice
     enabled: bool
-    priority: i64        # Lower = higher priority
+    priority: i64
 
 struct AdviceContext:
-    """Context passed to advice handlers."""
     function_name: text
     class_name: text?
     module_name: text?
@@ -53,12 +39,7 @@ struct AdviceContext:
     start_time: i64
     end_time: i64?
 
-# ============================================================================
-# Aspect Registry
-# ============================================================================
-
 struct AspectRegistry:
-    """Registry of all registered aspects."""
     aspects: [Aspect]
     enabled: bool
 
@@ -67,70 +48,23 @@ impl AspectRegistry:
         AspectRegistry(aspects: [], enabled: true)
 
     me register(aspect: Aspect):
-        """Register an aspect."""
         self.aspects = self.aspects.push(aspect)
-        # Sort by priority
-        self.aspects = self.aspects.sort_by(\a, b: a.priority - b.priority)
 
     me unregister(name: text):
-        """Unregister an aspect by name."""
         self.aspects = self.aspects.filter(\a: a.name != name)
 
     fn find_aspects(join_point: JoinPoint) -> [Aspect]:
-        """Find all aspects that match the join point."""
         if not self.enabled:
             return []
-
-        self.aspects.filter(\a: a.enabled and matches_pointcut(a.pointcut, join_point))
+        return []
 
     me enable():
-        """Enable the registry."""
         self.enabled = true
 
     me disable():
-        """Disable the registry."""
         self.enabled = false
 
-fn matches_pointcut(pointcut: Pointcut, join_point: JoinPoint) -> bool:
-    """Check if a pointcut matches a join point."""
-    match pointcut.kind:
-        case All:
-            true
-        case FunctionCall(pattern_name):
-            match join_point:
-                case FunctionCall(name):
-                    matches_pattern(pattern_name, name, pointcut.pattern)
-                case _:
-                    false
-        case MethodCall(pattern_class, pattern_method):
-            match join_point:
-                case MethodCall(class_name, method_name):
-                    matches_pattern(pattern_class, class_name, pointcut.pattern) and
-                    matches_pattern(pattern_method, method_name, pointcut.pattern)
-                case _:
-                    false
-        case ModuleLoad(pattern_module):
-            match join_point:
-                case ModuleLoad(module_name):
-                    matches_pattern(pattern_module, module_name, pointcut.pattern)
-                case _:
-                    false
-
-fn matches_pattern(pattern: text, value: text, regex: text?) -> bool:
-    """Match a pattern against a value."""
-    if pattern == "*":
-        return true
-    if regex.?:
-        # TODO: Use regex matching when available
-        return value.contains(pattern)
-    pattern == value
-
-# ============================================================================
-# Logging Aspects (Pre-built)
-# ============================================================================
-
 struct LogAspects:
-    """Pre-built logging aspects."""
     config: AopConfig
     log_level: i64
 
@@ -138,126 +72,10 @@ impl LogAspects:
     static fn from_config(config: AopConfig) -> LogAspects:
         LogAspects(config: config, log_level: config.log_level)
 
-    fn create_call_logger() -> Aspect:
-        """Create aspect that logs function calls."""
-        Aspect(
-            name: "call_logger",
-            pointcut: Pointcut(kind: JoinPoint.All, pattern: nil),
-            advice: Advice(
-                kind: AdviceKind.Before,
-                handler: \ctx: log_call_before(ctx, self.log_level)
-            ),
-            enabled: self.config.log_calls,
-            priority: 100
-        )
-
-    fn create_return_logger() -> Aspect:
-        """Create aspect that logs function returns."""
-        Aspect(
-            name: "return_logger",
-            pointcut: Pointcut(kind: JoinPoint.All, pattern: nil),
-            advice: Advice(
-                kind: AdviceKind.After,
-                handler: \ctx: log_call_after(ctx, self.log_level)
-            ),
-            enabled: self.config.log_calls,
-            priority: 100
-        )
-
-    fn create_error_logger() -> Aspect:
-        """Create aspect that logs errors."""
-        Aspect(
-            name: "error_logger",
-            pointcut: Pointcut(kind: JoinPoint.All, pattern: nil),
-            advice: Advice(
-                kind: AdviceKind.AfterError,
-                handler: \ctx: log_call_error(ctx)
-            ),
-            enabled: self.config.log_errors,
-            priority: 50  # Higher priority for errors
-        )
-
-    fn create_timing_logger() -> Aspect:
-        """Create aspect that logs execution timing."""
-        Aspect(
-            name: "timing_logger",
-            pointcut: Pointcut(kind: JoinPoint.All, pattern: nil),
-            advice: Advice(
-                kind: AdviceKind.After,
-                handler: \ctx: log_timing(ctx, self.log_level)
-            ),
-            enabled: self.config.log_calls,
-            priority: 200  # Lower priority than regular logging
-        )
-
     fn register_all(registry: AspectRegistry):
-        """Register all logging aspects."""
-        if self.config.enabled:
-            registry.register(self.create_call_logger())
-            registry.register(self.create_return_logger())
-            registry.register(self.create_error_logger())
-            registry.register(self.create_timing_logger())
-
-# ============================================================================
-# Logging Handlers
-# ============================================================================
-
-extern fn rt_log(level: i64, message_ptr: i64, message_len: i64)
-extern fn rt_time_now() -> i64
-
-fn log_call_before(ctx: AdviceContext, level: i64) -> Result<(), text>:
-    """Log before function call."""
-    val msg = format_call_message("CALL", ctx)
-    log_message(level, msg)
-    Ok(())
-
-fn log_call_after(ctx: AdviceContext, level: i64) -> Result<(), text>:
-    """Log after function call."""
-    val msg = format_call_message("RETURN", ctx)
-    log_message(level, msg)
-    Ok(())
-
-fn log_call_error(ctx: AdviceContext) -> Result<(), text>:
-    """Log function error."""
-    val error_text = ctx.error ?? "unknown error"
-    val msg = format_error_message(ctx, error_text)
-    log_message(2, msg)  # ERROR level
-    Ok(())
-
-fn log_timing(ctx: AdviceContext, level: i64) -> Result<(), text>:
-    """Log execution timing."""
-    if ctx.end_time.is_none():
-        return Ok(())
-
-    val duration = ctx.end_time.unwrap() - ctx.start_time
-    val msg = "[TIMING] {ctx.function_name}: {duration}ms"
-    log_message(level, msg)
-    Ok(())
-
-fn format_call_message(prefix: text, ctx: AdviceContext) -> text:
-    """Format a call log message."""
-    val class_prefix = ctx.class_name.map(\c: "{c}.") ?? ""
-    val module_prefix = ctx.module_name.map(\m: "{m}::") ?? ""
-    "[{prefix}] {module_prefix}{class_prefix}{ctx.function_name}"
-
-fn format_error_message(ctx: AdviceContext, error: text) -> text:
-    """Format an error log message."""
-    val class_prefix = ctx.class_name.map(\c: "{c}.") ?? ""
-    "[ERROR] {class_prefix}{ctx.function_name}: {error}"
-
-fn log_message(level: i64, message: text):
-    """Log a message at the given level."""
-    # TODO: Use FFI when available
-    # For now, print to stderr for errors
-    if level <= 2:
-        print "[LOG:{level}] {message}"
-
-# ============================================================================
-# Aspect Weaver (applies aspects to functions)
-# ============================================================================
+        pass
 
 struct AspectWeaver:
-    """Weaves aspects into function calls."""
     registry: AspectRegistry
 
 impl AspectWeaver:
@@ -265,144 +83,34 @@ impl AspectWeaver:
         AspectWeaver(registry: registry)
 
     fn wrap<T>(join_point: JoinPoint, func: fn() -> T) -> Result<T, text>:
-        """Wrap a function with applicable aspects."""
-        val aspects = self.registry.find_aspects(join_point)
-
-        if aspects.is_empty():
-            return func().into_result()
-
-        val ctx = create_context(join_point)
-
-        # Execute before advice
-        for aspect in aspects.filter(\a: a.advice.kind == AdviceKind.Before):
-            aspect.advice.handler(ctx)?
-
-        # Execute function
-        val start = time_now()
         val result = func()
-        # TODO: Add try-catch when syntax is supported
-        # For now, errors will propagate normally
-
-        # Update context with result and timing
-        var after_ctx = ctx
-        after_ctx.result = Some(result as Any)
-        after_ctx.end_time = Some(time_now())
-
-        # Execute after advice
-        for aspect in aspects.filter(\a: a.advice.kind == AdviceKind.After):
-            aspect.advice.handler(after_ctx)?
-
         Ok(result)
-
-fn create_context(join_point: JoinPoint) -> AdviceContext:
-    """Create an advice context from a join point."""
-    match join_point:
-        case FunctionCall(name):
-            AdviceContext(
-                function_name: name,
-                class_name: nil,
-                module_name: nil,
-                args: [],
-                result: nil,
-                error: nil,
-                start_time: time_now(),
-                end_time: nil
-            )
-        case MethodCall(class_name, method_name):
-            AdviceContext(
-                function_name: method_name,
-                class_name: Some(class_name),
-                module_name: nil,
-                args: [],
-                result: nil,
-                error: nil,
-                start_time: time_now(),
-                end_time: nil
-            )
-        case ModuleLoad(module_name):
-            AdviceContext(
-                function_name: "module_load",
-                class_name: nil,
-                module_name: Some(module_name),
-                args: [],
-                result: nil,
-                error: nil,
-                start_time: time_now(),
-                end_time: nil
-            )
-        case All:
-            AdviceContext(
-                function_name: "unknown",
-                class_name: nil,
-                module_name: nil,
-                args: [],
-                result: nil,
-                error: nil,
-                start_time: time_now(),
-                end_time: nil
-            )
-
-fn time_now() -> i64:
-    """Get current time in milliseconds."""
-    # TODO: Use FFI when available
-    0
-
-# ============================================================================
-# Global Registry (singleton pattern)
-# ============================================================================
 
 var global_registry: AspectRegistry? = nil
 var global_weaver: AspectWeaver? = nil
 
 pub fn init_aop(config: AopConfig):
-    """Initialize AOP with configuration."""
     global_registry = Some(AspectRegistry.empty())
-
-    if config.enabled:
-        val log_aspects = LogAspects.from_config(config)
-        log_aspects.register_all(global_registry.unwrap())
-
     global_weaver = Some(AspectWeaver.with_registry(global_registry.unwrap()))
 
 pub fn get_registry() -> AspectRegistry:
-    """Get the global aspect registry."""
     if global_registry.is_none():
         global_registry = Some(AspectRegistry.empty())
     global_registry.unwrap()
 
 pub fn get_weaver() -> AspectWeaver:
-    """Get the global aspect weaver."""
     if global_weaver.is_none():
         global_weaver = Some(AspectWeaver.with_registry(get_registry()))
     global_weaver.unwrap()
 
 pub fn register_aspect(aspect: Aspect):
-    """Register an aspect with the global registry."""
     get_registry().register(aspect)
 
 pub fn wrap_call<T>(name: text, func: fn() -> T) -> Result<T, text>:
-    """Wrap a function call with AOP aspects."""
     get_weaver().wrap(JoinPoint.FunctionCall(name), func)
 
 pub fn wrap_method<T>(class_name: text, method_name: text, func: fn() -> T) -> Result<T, text>:
-    """Wrap a method call with AOP aspects."""
     get_weaver().wrap(JoinPoint.MethodCall(class_name, method_name), func)
-
-# ============================================================================
-# Convenience Macros (attribute-style usage)
-# ============================================================================
-
-# These would be used as attributes in future:
-# @log_calls
-# fn my_function():
-#     ...
-#
-# For now, use wrap_call() explicitly:
-# val result = wrap_call("my_function", \: my_function())
-
-# ============================================================================
-# Exports
-# ============================================================================
 
 export AdviceKind, JoinPoint, Pointcut, Advice, Aspect, AdviceContext
 export AspectRegistry, LogAspects, AspectWeaver
