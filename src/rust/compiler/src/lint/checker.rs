@@ -182,6 +182,9 @@ impl LintChecker {
 
             // Check TODO format
             self.check_todo_format(&source_file);
+
+            // Check for exports outside __init__.spl
+            self.check_export_outside_init(items, &source_file);
         }
 
         // Run AST-based lints
@@ -291,6 +294,62 @@ impl LintChecker {
             Node::Trait(t) => self.check_trait(t),
             _ => {}
         }
+    }
+
+    /// Check for export statements outside of __init__.spl files
+    fn check_export_outside_init(&mut self, items: &[Node], source_file: &std::path::Path) {
+        // Check if this is an __init__.spl file
+        let filename = source_file
+            .file_name()
+            .and_then(|f| f.to_str())
+            .unwrap_or("");
+
+        if filename == "__init__.spl" {
+            return; // Exports are allowed in __init__.spl
+        }
+
+        // Scan for ExportUseStmt nodes
+        fn check_for_exports(checker: &mut LintChecker, items: &[Node], source_file: &std::path::Path) {
+            for node in items {
+                match node {
+                    Node::ExportUseStmt(export_stmt) => {
+                        let file_display = source_file.display().to_string();
+                        let suggestion = if let Some(parent) = source_file.parent() {
+                            let init_path = parent.join("__init__.spl");
+                            format!(
+                                "move this export to {} (the directory manifest)",
+                                init_path.display()
+                            )
+                        } else {
+                            "move this export to the directory's __init__.spl file".to_string()
+                        };
+
+                        checker.emit(
+                            LintName::ExportOutsideInit,
+                            export_stmt.span,
+                            format!(
+                                "export statement not allowed in regular .spl files (found in {})",
+                                file_display
+                            ),
+                            Some(suggestion),
+                        );
+                    }
+                    // Recursively check inline modules
+                    Node::ModDecl(mod_decl) => {
+                        if let Some(ref body) = mod_decl.body {
+                            check_for_exports(checker, body, source_file);
+                        }
+                    }
+                    // Check impl blocks
+                    Node::Impl(impl_block) => {
+                        // impl blocks don't contain top-level exports, but check for completeness
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        check_for_exports(self, items, source_file);
     }
 
     /// Check a function definition
