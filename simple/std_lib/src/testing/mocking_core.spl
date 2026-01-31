@@ -1,0 +1,825 @@
+# ============================================================================
+# Mock Library - Core Features
+# ============================================================================
+#
+# Core mocking functionality including:
+# - Call tracking and recording
+# - Mock functions and verification
+# - Expectations and matchers
+# - Call analysis and spies
+# - Mock builders and registry
+# - Policies and behaviors
+# - Fluent API and protocol mocks
+#
+# Workarounds:
+# 1. Nested field mutation requires copy-modify-assign pattern (see record_call)
+# 2. Array indexing: Use i64 parameter + direct index (not `as usize`)
+#    - Integer literals default to i64
+#    - `i64 as usize` cast is NOT supported
+#    - Interpreter handles i64 indexing directly
+#    Example:
+#      fn get_item(index: i64):        # Accept i64 for literals
+#          self.items[index]           # Direct index, no cast needed
+#
+# ============================================================================
+# Call Tracking
+# ============================================================================
+
+struct CallRecord:
+    args: List<text>
+    timestamp: i64
+    call_number: i32
+
+# ============================================================================
+# Mock Function Tracker
+# ============================================================================
+
+class MockFunction:
+    name: text
+    calls: List<CallRecord>
+    return_values: List<text>
+    return_index: i32
+    should_panic: bool
+    panic_message: text
+    expectations: List<Expectation>
+
+    static fn new(name: text) -> MockFunction:
+        MockFunction(
+            name: name,
+            calls: [],
+            return_values: [],
+            return_index: 0,
+            should_panic: false,
+            panic_message: "",
+            expectations: []
+        )
+
+    me record_call(args: List<text>):
+        val record = CallRecord(
+            args: args,
+            timestamp: 0,
+            call_number: self.calls.len() as i32
+        )
+        # Workaround: nested field mutation requires copy-modify-assign
+        var calls = self.calls
+        calls.append(record)
+        self.calls = calls
+
+    me set_return_values(values: List<text>):
+        self.return_values = values
+        self.return_index = 0
+
+    me set_panic(message: text):
+        self.should_panic = true
+        self.panic_message = message
+
+    fn next_return_value() -> Option<text>:
+        if self.return_index >= self.return_values.len() as i32:
+            return nil
+        val value = self.return_values[self.return_index as usize]
+        self.return_index = self.return_index + 1
+        Some(value)
+
+    fn call_count() -> i32:
+        self.calls.len() as i32
+
+    fn was_called() -> bool:
+        self.calls.len() > 0
+
+    fn was_called_with(expected_args: List<text>) -> bool:
+        for call in self.calls:
+            if call.args.len() == expected_args.len():
+                var matches = true
+                for i in 0..call.args.len():
+                    if call.args[i] != expected_args[i]:
+                        matches = false
+                        break
+                if matches:
+                    return true
+        false
+
+    fn was_called_n_times(times: i32) -> bool:
+        self.call_count() == times
+
+    # Workaround: Use i64 param + direct indexing (i64 as usize not supported)
+    fn get_call(index: i64) -> Option<CallRecord>:
+        if index >= 0 and index < self.calls.len() as i64:
+            Some(self.calls[index])
+        else:
+            nil
+
+    fn get_last_call() -> Option<CallRecord>:
+        if self.calls.len() > 0:
+            Some(self.calls[self.calls.len() - 1])
+        else:
+            nil
+
+    me reset():
+        self.calls = []
+        self.return_values = []
+        self.return_index = 0
+        self.should_panic = false
+        self.panic_message = ""
+        self.expectations = []
+
+    fn verify() -> VerificationResult:
+        for expectation in self.expectations:
+            # Check call count if expected_times > 0
+            if expectation.expected_times > 0:
+                if not self.was_called_n_times(expectation.expected_times):
+                    val msg = "Expected '{self.name}' to be called {expectation.expected_times} times, but was called {self.call_count()} times"
+                    return VerificationResult.failure(msg)
+
+            # Check arguments if specified (single check, no duplication)
+            match expectation.expected_args:
+                Some(args):
+                    if not self.was_called_with(args):
+                        val msg = "Expected '{self.name}' to be called with {args}, but was not"
+                        return VerificationResult.failure(msg)
+                nil: true
+
+        VerificationResult.success()
+
+    me expect_call(times: i32):
+        self.expectations.append(Expectation(
+            method_name: self.name,
+            expected_times: times,
+            expected_args: nil
+        ))
+
+    me expect_call_with(args: List<text>):
+        self.expectations.append(Expectation(
+            method_name: self.name,
+            expected_times: 0,
+            expected_args: Some(args)
+        ))
+
+    fn summary() -> text:
+        if self.calls.len() == 0:
+            return "Mock '{self.name}': not called"
+        var result = "Mock '{self.name}': called {self.call_count()} time(s)\n"
+        for call in self.calls:
+            result = result + "  {call.args}\n"
+        result
+
+# ============================================================================
+# Verification System
+# ============================================================================
+
+struct Expectation:
+    method_name: text
+    expected_times: i32
+    expected_args: Option<List<text>>
+
+class VerificationResult:
+    passed: bool
+    error_message: text
+
+    static fn success() -> VerificationResult:
+        VerificationResult(passed: true, error_message: "")
+
+    static fn failure(message: text) -> VerificationResult:
+        VerificationResult(passed: false, error_message: message)
+
+    fn is_ok() -> bool:
+        self.passed
+
+    fn is_err() -> bool:
+        not self.passed
+
+    fn unwrap_err() -> text:
+        self.error_message
+
+class Matcher:
+    matches_fn: fn(text) -> bool
+
+    static fn any() -> Matcher:
+        Matcher(matches_fn: \arg: true)
+
+    static fn eq(value: text) -> Matcher:
+        Matcher(matches_fn: \arg: arg == value)
+
+    static fn gt(n: i32) -> Matcher:
+        Matcher(matches_fn: \arg:
+            match arg.parse_i32():
+                Some(v): v > n
+                nil: false
+        )
+
+    static fn lt(n: i32) -> Matcher:
+        Matcher(matches_fn: \arg:
+            match arg.parse_i32():
+                Some(v): v < n
+                nil: false
+        )
+
+    static fn gte(n: i32) -> Matcher:
+        Matcher(matches_fn: \arg:
+            match arg.parse_i32():
+                Some(v): v >= n
+                nil: false
+        )
+
+    static fn lte(n: i32) -> Matcher:
+        Matcher(matches_fn: \arg:
+            match arg.parse_i32():
+                Some(v): v <= n
+                nil: false
+        )
+
+    static fn contains(substring: text) -> Matcher:
+        Matcher(matches_fn: \arg: arg.contains(substring))
+
+    static fn starts_with(prefix: text) -> Matcher:
+        Matcher(matches_fn: \arg: arg.starts_with(prefix))
+
+    static fn ends_with(suffix: text) -> Matcher:
+        Matcher(matches_fn: \arg: arg.ends_with(suffix))
+
+    static fn and_matcher(m1: Matcher, m2: Matcher) -> Matcher:
+        Matcher(matches_fn: \arg: m1.matches(arg) and m2.matches(arg))
+
+    static fn or_matcher(m1: Matcher, m2: Matcher) -> Matcher:
+        Matcher(matches_fn: \arg: m1.matches(arg) or m2.matches(arg))
+
+    static fn not_matcher(m: Matcher) -> Matcher:
+        Matcher(matches_fn: \arg: not m.matches(arg))
+
+    static fn predicate(fn_pred: fn(text) -> bool) -> Matcher:
+        Matcher(matches_fn: fn_pred)
+
+    fn matches(arg: text) -> bool:
+        val fn_ref = self.matches_fn
+        fn_ref(arg)
+
+# ============================================================================
+# Phase 3: Advanced Features
+# ============================================================================
+
+class CallAnalyzer:
+    mockfn: MockFunction
+
+    static fn new(mockfn: MockFunction) -> CallAnalyzer:
+        CallAnalyzer(mockfn: mockfn)
+
+    fn count_calls_with(args: List<text>) -> i32:
+        var count = 0
+        for call in self.mockfn.calls:
+            if call.args.len() == args.len():
+                var matches = true
+                for i in 0..call.args.len():
+                    if call.args[i] != args[i]:
+                        matches = false
+                        break
+                if matches:
+                    count = count + 1
+        count
+
+    fn get_calls_matching(matcher_fn: fn(CallRecord) -> bool) -> List<CallRecord>:
+        var result = []
+        for call in self.mockfn.calls:
+            if matcher_fn(call):
+                result.append(call)
+        result
+
+    fn get_first_call() -> Option<CallRecord>:
+        if self.mockfn.calls.len() == 0:
+            return nil
+        Some(self.mockfn.calls[0])
+
+    fn get_calls_between(start_idx: i32, end_idx: i32) -> List<CallRecord>:
+        var result = []
+        for i in start_idx..end_idx:
+            if i >= 0 and i < self.mockfn.calls.len() as i32:
+                result.append(self.mockfn.calls[i as usize])
+        result
+
+struct ReturnValue:
+    value: text
+    times: i32
+
+class SequentialReturns:
+    returns: List<ReturnValue>
+    current_idx: i32
+    times_used: i32
+
+    static fn new() -> SequentialReturns:
+        SequentialReturns(returns: [], current_idx: 0, times_used: 0)
+
+    me add_return(value: text, times: i32):
+        self.returns.append(ReturnValue(value: value, times: times))
+
+    me add_return_once(value: text):
+        self.add_return(value, 1)
+
+    me next_value() -> Option<text>:
+        if self.current_idx >= self.returns.len() as i32:
+            return nil
+        val current = self.returns[self.current_idx as usize]
+        self.times_used = self.times_used + 1
+        if self.times_used >= current.times:
+            self.current_idx = self.current_idx + 1
+            self.times_used = 0
+        Some(current.value)
+
+    me reset():
+        self.current_idx = 0
+        self.times_used = 0
+
+class Spy:
+    name: text
+    calls: List<CallRecord>
+    call_count_value: i32
+
+    static fn new(name: text) -> Spy:
+        Spy(
+            name: name,
+            calls: [],
+            call_count_value: 0
+        )
+
+    me record_call(method: text, args: List<text>):
+        val full_args = [method].merge(args)
+        val record = CallRecord(
+            args: full_args,
+            timestamp: 0,
+            call_number: self.calls.len() as i32
+        )
+        self.calls.append(record)
+        self.call_count_value = self.call_count_value + 1
+
+    fn get_calls(method: text) -> List<CallRecord>:
+        var result = []
+        for call in self.calls:
+            if call.args.len() > 0 and call.args[0] == method:
+                result.append(call)
+        result
+
+    fn method_called(method: text) -> bool:
+        for call in self.calls:
+            if call.args.len() > 0 and call.args[0] == method:
+                return true
+        false
+
+    fn method_call_count(method: text) -> i32:
+        var count = 0
+        for call in self.calls:
+            if call.args.len() > 0 and call.args[0] == method:
+                count = count + 1
+        count
+
+    fn total_calls() -> i32:
+        self.call_count_value
+
+    fn summary() -> text:
+        var result = "Spy '{self.name}': {self.total_calls()} call(s)\n"
+        for call in self.calls:
+            result = result + "  {call.args}\n"
+        result
+
+# ============================================================================
+# Mock Builder
+# ============================================================================
+
+struct MockBuilder:
+    name: text
+
+    static fn new(name: text) -> MockBuilder:
+        MockBuilder(name: name)
+
+    fn returns(values: List<text>) -> MockFunction:
+        val result = MockFunction.new(self.name)
+        result.set_return_values(values)
+        result
+
+    fn panics(message: text) -> MockFunction:
+        val result = MockFunction.new(self.name)
+        result.set_panic(message)
+        result
+
+    fn build() -> MockFunction:
+        MockFunction.new(self.name)
+
+# ============================================================================
+# Mock Registry
+# ============================================================================
+
+struct RegistryEntry:
+    key: text
+    mockfn: MockFunction
+
+class MockRegistry:
+    entries: List<RegistryEntry>
+
+    static fn new() -> MockRegistry:
+        MockRegistry(entries: [])
+
+    me register(key: text, mockfn: MockFunction):
+        self.entries.append(RegistryEntry(key: key, mockfn: mockfn))
+
+    fn get(key: text) -> Option<MockFunction>:
+        for entry in self.entries:
+            if entry.key == key:
+                return Some(entry.mockfn)
+        nil
+
+    me reset_all():
+        for entry in self.entries:
+            entry.mockfn.reset()
+
+    fn verify_all() -> bool:
+        true
+
+    fn summary() -> text:
+        var result = "Mock Registry:\n"
+        for entry in self.entries:
+            result = result + "  " + entry.mockfn.summary() + "\n"
+        result
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+pub fn create_mock(name: text) -> MockFunction:
+    MockFunction.new(name)
+
+pub fn verify_called(mockfn: MockFunction, times: i32) -> bool:
+    mockfn.was_called_n_times(times)
+
+pub fn verify_called_with(mockfn: MockFunction, args: List<text>) -> bool:
+    mockfn.was_called_with(args)
+
+# ============================================================================
+# Mock Policy System
+# ============================================================================
+
+class MockPolicy:
+    mode: text
+    hal_patterns: List<text>
+
+    static fn new() -> MockPolicy:
+        MockPolicy(
+            mode: "all",
+            hal_patterns: ["hal", "hardware", "drivers", "io"]
+        )
+
+    me set_mode(newmode: text):
+        self.mode = newmode
+
+    fn is_enabled() -> bool:
+        self.mode != "disabled"
+
+    fn is_allowed_in(layer: text) -> bool:
+        match self.mode:
+            "disabled": false
+            "all": true
+            "hal_only": self.matches_hal(layer)
+            _: false
+
+    fn matches_hal(layer: text) -> bool:
+        for pattern in self.hal_patterns:
+            if layer.contains(pattern):
+                return true
+        false
+
+val _global_mock_policy = MockPolicy.new()
+
+pub fn mock_policy_init(mode: text):
+    _global_mock_policy.set_mode(mode)
+
+pub fn mock_policy_is_enabled() -> bool:
+    _global_mock_policy.is_enabled()
+
+pub fn mock_policy_allow_in_layer(layer: text) -> bool:
+    _global_mock_policy.is_allowed_in(layer)
+
+pub fn mock_policy_disable():
+    _global_mock_policy.set_mode("disabled")
+
+pub fn mock_policy_reset():
+    _global_mock_policy.set_mode("all")
+
+# ============================================================================
+# Phase 4: Advanced Patterns (Workarounds without trait objects)
+# ============================================================================
+
+struct ConditionalReturn:
+    condition: fn(List<text>) -> bool
+    value: text
+
+class ConditionalReturns:
+    conditions: List<ConditionalReturn>
+    default_value: text
+
+    static fn new() -> ConditionalReturns:
+        ConditionalReturns(conditions: [], default_value: "")
+
+    me add_condition(condition: fn(List<text>) -> bool, value: text):
+        self.conditions.append(ConditionalReturn(condition: condition, value: value))
+
+    me set_default(value: text):
+        self.default_value = value
+
+    fn evaluate(args: List<text>) -> text:
+        for cond_return in self.conditions:
+            if cond_return.condition(args):
+                return cond_return.value
+        self.default_value
+
+struct CallChain:
+    parent_id: i32
+    call_record: CallRecord
+    child_ids: List<i32>
+
+class CallChainTracker:
+    chains: List<CallChain>
+    next_id: i32
+
+    static fn new() -> CallChainTracker:
+        CallChainTracker(chains: [], next_id: 0)
+
+    me start_chain(parent_id: i32, call: CallRecord) -> i32:
+        val id = self.next_id
+        self.next_id = self.next_id + 1
+        self.chains.append(CallChain(
+            parent_id: parent_id,
+            call_record: call,
+            child_ids: []
+        ))
+        id
+
+    me add_child(parent_id: i32, child_id: i32):
+        for chain in self.chains:
+            if chain.parent_id == parent_id:
+                chain.child_ids.append(child_id)
+
+    fn get_chain(id: i32) -> Option<CallChain>:
+        for chain in self.chains:
+            if chain.parent_id == id:
+                return Some(chain)
+        nil
+
+    fn get_all_chains() -> List<CallChain>:
+        self.chains
+
+struct BehaviorState:
+    state_name: text
+    return_value: text
+    next_state: Option<text>
+
+class BehaviorSequence:
+    states: List<BehaviorState>
+    current_state: text
+
+    static fn new(initial: text) -> BehaviorSequence:
+        BehaviorSequence(states: [], current_state: initial)
+
+    me add_state(name: text, return_value: text, next_state: Option<text>):
+        self.states.append(BehaviorState(
+            state_name: name,
+            return_value: return_value,
+            next_state: next_state
+        ))
+
+    fn transition() -> Option<text>:
+        for state in self.states:
+            if state.state_name == self.current_state:
+                match state.next_state:
+                    Some(next): self.current_state = next
+                    nil: true
+                return Some(state.return_value)
+        nil
+
+    fn get_current_state() -> text:
+        self.current_state
+
+    me reset_to(state: text):
+        self.current_state = state
+
+class MockSnapshot:
+    timestamp: i64
+    call_count: i32
+    last_args: List<text>
+    expectations_met: bool
+
+    static fn from_mock(mockfn: MockFunction) -> MockSnapshot:
+        var last_args = []
+        match mockfn.get_last_call():
+            Some(call): last_args = call.args
+            nil: true
+        MockSnapshot(
+            timestamp: 0,
+            call_count: mockfn.call_count(),
+            last_args: last_args,
+            expectations_met: mockfn.verify().is_ok()
+        )
+
+    fn summary() -> text:
+        "Snapshot: {self.call_count} calls, expectations_met={self.expectations_met}"
+
+class MockComposition:
+    mocks: List<MockFunction>
+
+    static fn new() -> MockComposition:
+        MockComposition(mocks: [])
+
+    me add_mock(mockfn: MockFunction):
+        self.mocks.append(mockfn)
+
+    fn verify_all() -> bool:
+        for mockfn in self.mocks:
+            val result = mockfn.verify()
+            if result.is_err():
+                return false
+        true
+
+    fn get_total_calls() -> i32:
+        var total = 0
+        for mockfn in self.mocks:
+            total = total + mockfn.call_count()
+        total
+
+    fn reset_all():
+        for mockfn in self.mocks:
+            mockfn.reset()
+
+    fn summary() -> text:
+        var result = "MockComposition: {self.mocks.len()} mocks, {self.get_total_calls()} total calls\n"
+        for mockfn in self.mocks:
+            result = result + "  " + mockfn.summary() + "\n"
+        result
+
+# ============================================================================
+# Phase 5: Trait-Based Mocking (Using Generics Workaround)
+# ============================================================================
+
+struct MethodSignature:
+    method_name: text
+    arg_types: List<text>
+    return_type: text
+
+class FluentExpectation:
+    mockfn: MockFunction
+    when_args: Option<List<text>>
+
+    static fn new(mockfn: MockFunction) -> FluentExpectation:
+        FluentExpectation(mockfn: mockfn, when_args: nil)
+
+    me when_called_with(args: List<text>) -> FluentExpectation:
+        self.when_args = Some(args)
+        self
+
+    me returns(value: text):
+        match self.when_args:
+            Some(args):
+                var existing_values = []
+                for call in self.mockfn.calls:
+                    if call.args.len() == args.len():
+                        var matches = true
+                        for i in 0..call.args.len():
+                            if call.args[i] != args[i]:
+                                matches = false
+                                break
+                        if matches:
+                            return
+                self.mockfn.set_return_values([value])
+            nil:
+                self.mockfn.set_return_values([value])
+
+class WhenBuilder:
+    mockfn: MockFunction
+    condition: fn(List<text>) -> bool
+
+    static fn new(mockfn: MockFunction) -> WhenBuilder:
+        WhenBuilder(
+            mockfn: mockfn,
+            condition: \args: true
+        )
+
+    me when(predicate: fn(List<text>) -> bool) -> WhenBuilder:
+        self.condition = predicate
+        self
+
+    me returns(value: text):
+        val cond_returns = ConditionalReturns.new()
+        cond_returns.add_condition(self.condition, value)
+        cond_returns.set_default("")
+
+struct MethodCall:
+    method_name: text
+    arguments: List<text>
+    return_value: text
+    call_time: i64
+
+class ProtocolMock:
+    method_mocks: List<MethodCall>
+    recorded_calls: List<MethodCall>
+
+    static fn new() -> ProtocolMock:
+        ProtocolMock(method_mocks: [], recorded_calls: [])
+
+    me mock_method(name: text, args: List<text>, return_value: text):
+        self.method_mocks.append(MethodCall(
+            method_name: name,
+            arguments: args,
+            return_value: return_value,
+            call_time: 0
+        ))
+
+    me record_method_call(name: text, args: List<text>) -> text:
+        for method_mock in self.method_mocks:
+            if method_mock.method_name == name:
+                if method_mock.arguments.len() == args.len():
+                    var matches = true
+                    for i in 0..method_mock.arguments.len():
+                        if method_mock.arguments[i] != args[i]:
+                            matches = false
+                            break
+                    if matches:
+                        self.recorded_calls.append(MethodCall(
+                            method_name: name,
+                            arguments: args,
+                            return_value: method_mock.return_value,
+                            call_time: 0
+                        ))
+                        return method_mock.return_value
+        ""
+
+    fn verify_method_called(name: text) -> bool:
+        for call in self.recorded_calls:
+            if call.method_name == name:
+                return true
+        false
+
+    fn get_method_calls(name: text) -> List<MethodCall>:
+        var result = []
+        for call in self.recorded_calls:
+            if call.method_name == name:
+                result.append(call)
+        result
+
+    fn reset():
+        self.method_mocks = []
+        self.recorded_calls = []
+
+class AutoMock:
+    name: text
+    properties: List<text>
+    methods: List<MethodCall>
+
+    static fn new(name: text) -> AutoMock:
+        AutoMock(name: name, properties: [], methods: [])
+
+    me add_property(prop_name: text):
+        self.properties.append(prop_name)
+
+    me setup_method(method_name: text, args: List<text>, return_value: text):
+        self.methods.append(MethodCall(
+            method_name: method_name,
+            arguments: args,
+            return_value: return_value,
+            call_time: 0
+        ))
+
+    fn call_method(method_name: text, args: List<text>) -> text:
+        for method in self.methods:
+            if method.method_name == method_name:
+                if method.arguments.len() == args.len():
+                    var matches = true
+                    for i in 0..method.arguments.len():
+                        if method.arguments[i] != args[i]:
+                            matches = false
+                            break
+                    if matches:
+                        return method.return_value
+        ""
+
+    fn get_properties() -> List<text>:
+        self.properties
+
+    fn get_methods() -> List<MethodCall>:
+        self.methods
+
+    fn summary() -> text:
+        var result = "AutoMock '{self.name}':\n"
+        result = result + "  Properties: {self.properties.len()}\n"
+        result = result + "  Methods: {self.methods.len()}\n"
+        result
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export CallRecord
+export MockFunction, Expectation, VerificationResult, Matcher
+export CallAnalyzer, ReturnValue, SequentialReturns, Spy
+export MockBuilder, RegistryEntry, MockRegistry
+export create_mock, verify_called, verify_called_with
+export MockPolicy, mock_policy_init, mock_policy_is_enabled
+export mock_policy_allow_in_layer, mock_policy_disable, mock_policy_reset
+export ConditionalReturn, ConditionalReturns
+export CallChain, CallChainTracker
+export BehaviorState, BehaviorSequence
+export MockSnapshot, MockComposition
+export MethodSignature, FluentExpectation, WhenBuilder
+export MethodCall, ProtocolMock, AutoMock
