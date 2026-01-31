@@ -1,0 +1,182 @@
+"""
+Feature: Access Policy and __init__.spl Boundary Enforcement
+Category: Dependency Tracker
+Status: In Progress
+"""
+
+# Tests for access policy rules (Rules 1-4 from design)
+#
+# Rule 1: __init__.spl is the boundary wall
+# Rule 2: No __init__.spl = freely accessible
+# Rule 3: Export only in __init__.spl (enforced by ExportOutsideInit lint)
+# Rule 4: #[bypass] attribute for container directories
+
+use sspec.{describe, it, expect}
+use compiler.dependency.visibility.{
+    Visibility, SymbolId, Symbol, ModDecl,
+    DirManifest, ModuleContents,
+    effective_visibility, visibility_meet, ancestor_visibility,
+    AccessPolicy, effective_access_policy, check_access
+}
+
+describe "AccessPolicy":
+    """
+    Access control policy for directories.
+    """
+    context "enum values":
+        it "Open is open":
+            val policy = AccessPolicy.Open
+            expect policy.is_open()
+            expect not policy.is_boundary()
+            expect not policy.is_bypass()
+
+        it "Boundary is boundary":
+            val policy = AccessPolicy.Boundary
+            expect not policy.is_open()
+            expect policy.is_boundary()
+            expect not policy.is_bypass()
+
+        it "Bypass is bypass":
+            val policy = AccessPolicy.Bypass
+            expect not policy.is_open()
+            expect not policy.is_boundary()
+            expect policy.is_bypass()
+
+    context "to_string":
+        it "Open converts to string":
+            expect AccessPolicy.Open.to_string() == "Open"
+
+        it "Boundary converts to string":
+            expect AccessPolicy.Boundary.to_string() == "Boundary"
+
+        it "Bypass converts to string":
+            expect AccessPolicy.Bypass.to_string() == "Bypass"
+
+describe "effective_access_policy":
+    """
+    Determines access policy based on directory structure.
+    """
+    context "Rule 2: No __init__.spl = freely accessible":
+        it "returns Open when no __init__.spl":
+            val policy = effective_access_policy(false, false)
+            expect policy.is_open()
+
+        it "returns Open regardless of bypass flag when no __init__.spl":
+            val policy = effective_access_policy(false, true)
+            expect policy.is_open()
+
+    context "Rule 1: __init__.spl is the boundary wall":
+        it "returns Boundary when __init__.spl exists without bypass":
+            val policy = effective_access_policy(true, false)
+            expect policy.is_boundary()
+
+    context "Rule 4: #[bypass] attribute":
+        it "returns Bypass when __init__.spl has bypass":
+            val policy = effective_access_policy(true, true)
+            expect policy.is_bypass()
+
+describe "check_access":
+    """
+    Checks if access through a boundary is allowed.
+    """
+    context "Open policy":
+        it "allows any symbol access":
+            val manifest = DirManifest.new("test")
+            val sym = SymbolId.new("anything")
+            expect check_access(manifest, AccessPolicy.Open, sym)
+
+    context "Bypass policy":
+        it "allows any symbol access (transparent)":
+            val manifest = DirManifest.new("test")
+            val sym = SymbolId.new("anything")
+            expect check_access(manifest, AccessPolicy.Bypass, sym)
+
+    context "Boundary policy":
+        it "allows access to exported symbols":
+            var manifest = DirManifest.new("test")
+            val sym = SymbolId.new("PublicApi")
+            manifest.add_export(sym)
+
+            expect check_access(manifest, AccessPolicy.Boundary, sym)
+
+        it "denies access to non-exported symbols":
+            val manifest = DirManifest.new("test")
+            val sym = SymbolId.new("InternalHelper")
+
+            expect not check_access(manifest, AccessPolicy.Boundary, sym)
+
+describe "Rule 1: __init__.spl boundary enforcement":
+    """
+    When a directory has __init__.spl, only exported symbols are accessible.
+    """
+    it "exported symbol through boundary is accessible":
+        var manifest = DirManifest.new("pkg")
+        manifest.add_child(ModDecl.pub_decl("router"))
+        val sym = SymbolId.new("Router")
+        manifest.add_export(sym)
+
+        var mc = ModuleContents.new()
+        mc.add_symbol(Symbol.pub_symbol("Router"))
+
+        # Symbol is public, module is public, and it's exported
+        val vis = effective_visibility(manifest, "router", mc, sym)
+        expect vis.is_public()
+
+        # Access through boundary is allowed
+        val policy = effective_access_policy(true, false)
+        expect check_access(manifest, policy, sym)
+
+    it "non-exported symbol through boundary is blocked":
+        var manifest = DirManifest.new("pkg")
+        manifest.add_child(ModDecl.pub_decl("internal"))
+        # NOT exporting InternalHelper
+
+        val sym = SymbolId.new("InternalHelper")
+        val policy = effective_access_policy(true, false)
+        expect not check_access(manifest, policy, sym)
+
+describe "Rule 4: bypass directory validation":
+    """
+    Bypass directories are transparent and must only contain subdirectories.
+    """
+    it "bypass directory allows pass-through access":
+        val manifest = DirManifest.new("lib")
+        val sym = SymbolId.new("anything")
+        val policy = effective_access_policy(true, true)
+        expect check_access(manifest, policy, sym)
+
+    it "bypass directory ignores export list":
+        var manifest = DirManifest.new("lib")
+        # Even without exports, bypass allows access
+        val sym = SymbolId.new("SomeType")
+        val policy = effective_access_policy(true, true)
+        expect check_access(manifest, policy, sym)
+
+describe "Rule 6: bloodline restriction (model level)":
+    """
+    Symbols must flow upward through exports only.
+    A module's symbol is only externally visible if all three conditions are met.
+    """
+    it "public symbol in public module without export is private":
+        var manifest = DirManifest.new("pkg")
+        manifest.add_child(ModDecl.pub_decl("mymod"))
+        # NOT adding export
+
+        var mc = ModuleContents.new()
+        mc.add_symbol(Symbol.pub_symbol("Helper"))
+        val sym = SymbolId.new("Helper")
+
+        val vis = effective_visibility(manifest, "mymod", mc, sym)
+        expect vis.is_private()
+
+    it "public symbol in private module with export is private":
+        var manifest = DirManifest.new("pkg")
+        manifest.add_child(ModDecl.priv_decl("mymod"))
+        val sym = SymbolId.new("Helper")
+        manifest.add_export(sym)
+
+        var mc = ModuleContents.new()
+        mc.add_symbol(Symbol.pub_symbol("Helper"))
+
+        val vis = effective_visibility(manifest, "mymod", mc, sym)
+        expect vis.is_private()

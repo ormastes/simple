@@ -55,6 +55,10 @@ pub enum LintName {
     NonExhaustiveMatch,
     /// Export statement outside __init__.spl
     ExportOutsideInit,
+    /// Import bypasses an __init__.spl boundary without using exports
+    InitBoundaryViolation,
+    /// #[bypass] attribute on a directory that contains .spl files
+    BypassWithCodeFiles,
 }
 
 impl LintName {
@@ -74,6 +78,8 @@ impl LintName {
             LintName::WildcardMatch => "wildcard_match",
             LintName::NonExhaustiveMatch => "non_exhaustive_match",
             LintName::ExportOutsideInit => "export_outside_init",
+            LintName::InitBoundaryViolation => "init_boundary_violation",
+            LintName::BypassWithCodeFiles => "bypass_with_code_files",
         }
     }
 
@@ -93,6 +99,8 @@ impl LintName {
             "wildcard_match" => Some(LintName::WildcardMatch),
             "non_exhaustive_match" => Some(LintName::NonExhaustiveMatch),
             "export_outside_init" => Some(LintName::ExportOutsideInit),
+            "init_boundary_violation" => Some(LintName::InitBoundaryViolation),
+            "bypass_with_code_files" => Some(LintName::BypassWithCodeFiles),
             _ => None,
         }
     }
@@ -114,6 +122,8 @@ impl LintName {
             LintName::WildcardMatch => LintLevel::Allow,
             LintName::NonExhaustiveMatch => LintLevel::Warn,
             LintName::ExportOutsideInit => LintLevel::Deny,
+            LintName::InitBoundaryViolation => LintLevel::Warn,
+            LintName::BypassWithCodeFiles => LintLevel::Warn,
         }
     }
 
@@ -509,6 +519,80 @@ Or in simple.sdn:
 "#.to_string(),
             LintName::WildcardMatch => "Lint: wildcard_match\nLevel: allow\n\nWarns about wildcard catch-all patterns in match expressions.".to_string(),
             LintName::NonExhaustiveMatch => "Lint: non_exhaustive_match\nLevel: warn\n\nWarns when match expressions may not cover all variants.".to_string(),
+            LintName::InitBoundaryViolation => r#"Lint: init_boundary_violation
+Level: warn (default, will become deny in v1.0)
+
+=== What it checks ===
+
+This lint warns when an import path bypasses an __init__.spl boundary. When a
+directory contains __init__.spl, only symbols exported by that __init__.spl are
+accessible from outside. Importing directly into child modules is not allowed.
+
+=== Why it matters ===
+
+The __init__.spl file is the access control boundary for a directory. It defines
+the public API. Allowing imports that bypass this boundary breaks encapsulation
+and makes refactoring unsafe — internal modules could be moved or renamed without
+external code noticing.
+
+=== Examples ===
+
+Triggers the lint:
+    # If src/pkg/__init__.spl exists but doesn't export InternalHelper:
+    use crate.pkg.internal_module.InternalHelper  # ❌ bypasses boundary
+
+Does not trigger:
+    # Using exported symbols:
+    use crate.pkg.PublicApi  # ✅ exported by __init__.spl
+
+    # Directories without __init__.spl are freely accessible:
+    use crate.utils.helper.Helper  # ✅ no boundary
+
+=== How to suppress ===
+
+    #[allow(init_boundary_violation)]
+    use crate.pkg.internal.Helper
+
+Or in simple.sdn:
+    [lints]
+    init_boundary_violation = "allow"
+"#.to_string(),
+            LintName::BypassWithCodeFiles => r#"Lint: bypass_with_code_files
+Level: warn (default, will become deny in v1.0)
+
+=== What it checks ===
+
+This lint warns when a directory's __init__.spl has the #[bypass] attribute but
+the directory contains .spl code files (other than __init__.spl itself).
+
+=== Why it matters ===
+
+The #[bypass] attribute makes a directory transparent for access control — it acts
+as if no __init__.spl exists. This is only valid for pure organizational directories
+that contain only subdirectories, not code files. Having code files in a bypass
+directory creates ambiguity about whether those files are accessible or not.
+
+=== Examples ===
+
+Triggers the lint:
+    # lib/__init__.spl has #[bypass]
+    # lib/helper.spl exists  ← ❌ code file in bypass directory
+
+Does not trigger:
+    # lib/__init__.spl has #[bypass]
+    # lib/http/ and lib/db/ exist (only subdirectories)  ← ✅
+
+=== How to fix ===
+
+Either:
+1. Remove the #[bypass] attribute and properly export symbols
+2. Move .spl files into subdirectories
+
+=== How to suppress ===
+
+    [lints]
+    bypass_with_code_files = "allow"
+"#.to_string(),
             LintName::ExportOutsideInit => r#"Lint: export_outside_init
 Level: deny (error)
 
@@ -585,6 +669,8 @@ This lint cannot be suppressed. All exports must be in __init__.spl files.
             LintName::WildcardMatch,
             LintName::NonExhaustiveMatch,
             LintName::ExportOutsideInit,
+            LintName::InitBoundaryViolation,
+            LintName::BypassWithCodeFiles,
         ]
     }
 }

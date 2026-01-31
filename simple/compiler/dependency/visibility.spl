@@ -246,6 +246,88 @@ fn ancestor_visibility(path: List<Visibility>) -> Visibility:
         result = visibility_meet(result, v)
     result
 
+# Access policy for a directory
+#
+# Determines how external code can access contents of a directory:
+# - Open: No __init__.spl present; all public files are freely accessible
+# - Boundary: __init__.spl present; only exported symbols are accessible
+# - Bypass: __init__.spl with #[bypass]; directory is transparent (pass-through)
+enum AccessPolicy:
+    Open
+    Boundary
+    Bypass
+
+impl AccessPolicy:
+    fn to_string() -> text:
+        match self:
+            case AccessPolicy.Open:
+                "Open"
+            case AccessPolicy.Boundary:
+                "Boundary"
+            case AccessPolicy.Bypass:
+                "Bypass"
+
+    fn is_open() -> bool:
+        match self:
+            case AccessPolicy.Open:
+                true
+            case AccessPolicy.Boundary:
+                false
+            case AccessPolicy.Bypass:
+                false
+
+    fn is_boundary() -> bool:
+        match self:
+            case AccessPolicy.Open:
+                false
+            case AccessPolicy.Boundary:
+                true
+            case AccessPolicy.Bypass:
+                false
+
+    fn is_bypass() -> bool:
+        match self:
+            case AccessPolicy.Open:
+                false
+            case AccessPolicy.Boundary:
+                false
+            case AccessPolicy.Bypass:
+                true
+
+# Determine the access policy for a directory
+#
+# Rules:
+# - No __init__.spl → Open (freely accessible)
+# - __init__.spl with #[bypass] → Bypass (transparent)
+# - __init__.spl without #[bypass] → Boundary (exports only)
+fn effective_access_policy(has_init: bool, is_bypass: bool) -> AccessPolicy:
+    if not has_init:
+        AccessPolicy.Open
+    elif is_bypass:
+        AccessPolicy.Bypass
+    else:
+        AccessPolicy.Boundary
+
+# Check if access to a symbol through a path is allowed
+#
+# When traversing from root to a target symbol, each directory along the path
+# is checked. If a directory has Boundary policy, the symbol must be exported
+# by that directory's __init__.spl. Open and Bypass directories allow pass-through.
+#
+# Returns true if access is allowed.
+fn check_access(
+    manifest: DirManifest,
+    policy: AccessPolicy,
+    sym: SymbolId
+) -> bool:
+    match policy:
+        case AccessPolicy.Open:
+            true
+        case AccessPolicy.Bypass:
+            true
+        case AccessPolicy.Boundary:
+            manifest.is_exported(sym)
+
 # Public exports
 export Visibility
 export SymbolId
@@ -256,3 +338,6 @@ export ModuleContents
 export effective_visibility
 export visibility_meet
 export ancestor_visibility
+export AccessPolicy
+export effective_access_policy
+export check_access

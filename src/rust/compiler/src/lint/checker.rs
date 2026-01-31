@@ -10,6 +10,7 @@ use simple_common::diagnostic::{EasyFix, FixConfidence, Replacement};
 use simple_parser::ast::{Argument, ClassDef, EnumDef, Expr, FunctionDef, Node, StructDef, TraitDef, Type};
 use simple_parser::token::Span;
 use std::collections::HashMap;
+use std::path::Path;
 
 /// Parameter info for duplicate typed args checking
 #[derive(Clone, Debug)]
@@ -185,6 +186,12 @@ impl LintChecker {
 
             // Check for exports outside __init__.spl
             self.check_export_outside_init(items, &source_file);
+
+            // Check for imports bypassing __init__.spl boundaries
+            self.check_init_boundary(items, &source_file);
+
+            // Check for bypass directories with code files
+            self.check_bypass_validity(items, &source_file);
         }
 
         // Run AST-based lints
@@ -1622,6 +1629,190 @@ impl LintChecker {
                 }
                 _ => {}
             }
+        }
+    }
+
+    /// Check if an import path bypasses an __init__.spl boundary.
+    ///
+    /// When resolving `use crate.pkg.internal.Symbol`, if `pkg/` contains
+    /// `__init__.spl`, the import must use symbols exported by that __init__.spl.
+    /// Reaching through to `pkg/internal/Symbol` directly is a boundary violation.
+    ///
+    /// This method checks UseStmt nodes against a provided source root to detect
+    /// violations. Directories without __init__.spl are freely accessible.
+    pub fn check_init_boundary(&mut self, items: &[Node], source_file: &Path) {
+        // Determine the source root by walking up from source_file
+        // We check each UseStmt's module path segments against the filesystem
+        let source_root = self.find_source_root(source_file);
+
+        fn check_use_stmts(checker: &mut LintChecker, items: &[Node], source_root: &Path) {
+            for node in items {
+                match node {
+                    Node::UseStmt(use_stmt) => {
+                        // Only check crate-rooted imports (first segment is "crate")
+                        let segments = &use_stmt.path.segments;
+                        if segments.first().map(|s| s.as_str()) == Some("crate") {
+                            let segments = &segments[1..]; // Skip "crate" prefix
+                            // Walk the path segments, checking for __init__.spl boundaries
+                            let mut current_dir = source_root.to_path_buf();
+                            for (i, segment) in segments.iter().enumerate() {
+                                let next_dir = current_dir.join(segment);
+                                let init_file = next_dir.join("__init__.spl");
+
+                                if next_dir.is_dir() && init_file.exists() {
+                                    // This directory has an __init__.spl boundary
+                                    // Check if the import tries to go deeper
+                                    if i + 1 < segments.len() {
+                                        // Check if __init__.spl has bypass attribute
+                                        if checker.dir_has_bypass(&init_file) {
+                                            // Bypass directory — transparent, continue checking
+                                            current_dir = next_dir;
+                                            continue;
+                                        }
+
+                                        // The remaining segments go past the boundary
+                                        let remaining: Vec<&str> = segments[i + 1..].iter().map(|s| s.as_str()).collect();
+                                        let full_path = segments.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(".");
+
+                                        checker.emit(
+                                            LintName::InitBoundaryViolation,
+                                            use_stmt.span,
+                                            format!(
+                                                "import `crate.{}` bypasses __init__.spl boundary at `{}/`",
+                                                full_path,
+                                                segment
+                                            ),
+                                            Some(format!(
+                                                "only symbols exported by `{}` are accessible; \
+                                                 add `export use {}` to that file, or import from the boundary directly",
+                                                init_file.display(),
+                                                remaining.join(".")
+                                            )),
+                                        );
+                                        break; // Only report once per import
+                                    }
+                                }
+                                current_dir = next_dir;
+                            }
+                        }
+                    }
+                    // Recursively check inline modules
+                    Node::ModDecl(mod_decl) => {
+                        if let Some(ref body) = mod_decl.body {
+                            check_use_stmts(checker, body, source_root);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        if let Some(root) = source_root {
+            check_use_stmts(self, items, &root);
+        }
+    }
+
+    /// Check if a bypass directory incorrectly contains .spl code files.
+    ///
+    /// When __init__.spl has `#[bypass]`, the directory must contain only
+    /// subdirectories, not .spl code files.
+    pub fn check_bypass_validity(&mut self, items: &[Node], source_file: &Path) {
+        // Only check __init__.spl files
+        let filename = source_file
+            .file_name()
+            .and_then(|f| f.to_str())
+            .unwrap_or("");
+
+        if filename != "__init__.spl" {
+            return;
+        }
+
+        // Check if this __init__.spl has a #[bypass] attribute
+        let has_bypass = items.iter().any(|node| {
+            if let Node::ModDecl(decl) = node {
+                decl.attributes.iter().any(|attr| attr.name == "bypass")
+            } else {
+                false
+            }
+        });
+
+        // Also check top-level attributes (file-level #[bypass])
+        let has_file_bypass = if let Ok(source) = std::fs::read_to_string(source_file) {
+            source.lines().take(20).any(|line| {
+                let trimmed = line.trim();
+                trimmed == "#[bypass]" || trimmed.starts_with("#[bypass]")
+            })
+        } else {
+            false
+        };
+
+        if !has_bypass && !has_file_bypass {
+            return;
+        }
+
+        // Check if the directory contains any .spl files other than __init__.spl
+        if let Some(dir) = source_file.parent() {
+            if let Ok(entries) = std::fs::read_dir(dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_file() {
+                        if let Some(ext) = path.extension() {
+                            if ext == "spl" {
+                                let fname = path.file_name().and_then(|f| f.to_str()).unwrap_or("");
+                                if fname != "__init__.spl" {
+                                    self.emit(
+                                        LintName::BypassWithCodeFiles,
+                                        Span::new(0, 0, 1, 1),
+                                        format!(
+                                            "#[bypass] directory `{}` contains code file `{}`",
+                                            dir.display(),
+                                            fname
+                                        ),
+                                        Some(
+                                            "bypass directories must contain only subdirectories; \
+                                             move .spl files into subdirectories or remove #[bypass]"
+                                                .to_string(),
+                                        ),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Find the source root directory by walking up from the source file.
+    /// Returns None if unable to determine.
+    fn find_source_root(&self, source_file: &Path) -> Option<std::path::PathBuf> {
+        // Walk up directories looking for simple.sdn or simple.toml
+        let mut current = source_file.parent()?;
+        for _ in 0..20 {
+            let sdn = current.join("simple.sdn");
+            let toml = current.join("simple.toml");
+            if sdn.exists() || toml.exists() {
+                // Found project root, source root is typically "src" under it
+                let src_dir = current.join("src");
+                if src_dir.exists() {
+                    return Some(src_dir);
+                }
+                return Some(current.to_path_buf());
+            }
+            current = current.parent()?;
+        }
+        None
+    }
+
+    /// Check if an __init__.spl file has a #[bypass] attribute.
+    fn dir_has_bypass(&self, init_file: &Path) -> bool {
+        if let Ok(source) = std::fs::read_to_string(init_file) {
+            source.lines().take(30).any(|line| {
+                let trimmed = line.trim();
+                trimmed == "#[bypass]" || trimmed.starts_with("#[bypass]")
+            })
+        } else {
+            false
         }
     }
 }

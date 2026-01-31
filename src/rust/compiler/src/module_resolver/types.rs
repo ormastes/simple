@@ -34,6 +34,10 @@ pub struct DirectoryManifest {
     /// Required capabilities (from `requires [pure, io, ...]`)
     /// Empty means unrestricted (all effects allowed)
     pub capabilities: Vec<Capability>,
+    /// Whether this directory has the #[bypass] attribute.
+    /// Bypass directories are transparent for access control — they act as if
+    /// no __init__.spl exists. Only valid for directories with no .spl code files.
+    pub is_bypass: bool,
 }
 
 /// A child module declaration from __init__.spl
