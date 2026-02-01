@@ -3,13 +3,23 @@
 // This module provides FFI functions that allow the Simple build system
 // to invoke cargo commands and get results back.
 
-use simple_runtime::value::RuntimeValue;
+use simple_runtime::value::{rt_dict_new, rt_dict_set, rt_string_new, RuntimeValue};
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::process::Command;
 
+/// Helper: Create a RuntimeValue string from a Rust String
+fn string_to_runtime(s: String) -> RuntimeValue {
+    rt_string_new(s.as_ptr(), s.len() as u64)
+}
+
+/// Helper: Create a RuntimeValue string from a &str
+fn str_to_runtime(s: &str) -> RuntimeValue {
+    rt_string_new(s.as_ptr(), s.len() as u64)
+}
+
 /// Build with cargo
-/// Returns BuildResult as RuntimeValue with fields:
+/// Returns a dict with fields:
 /// - success: bool
 /// - exit_code: i64
 /// - stdout: text
@@ -92,7 +102,14 @@ pub extern "C" fn rt_cargo_build(
 }
 
 /// Run tests with cargo
-/// Returns TestResult as RuntimeValue
+/// Returns a dict with fields:
+/// - success: bool
+/// - exit_code: i64
+/// - stdout: text
+/// - stderr: text
+/// - tests_run: i64
+/// - tests_passed: i64
+/// - tests_failed: i64
 #[no_mangle]
 pub extern "C" fn rt_cargo_test(
     package: *const c_char,
@@ -217,6 +234,7 @@ pub extern "C" fn rt_cargo_check() -> RuntimeValue {
 
 // Helper functions
 
+/// Create a BuildResult dict
 fn create_build_result(
     success: bool,
     exit_code: i64,
@@ -224,33 +242,42 @@ fn create_build_result(
     stderr: String,
     duration_ms: i64,
 ) -> RuntimeValue {
-    let mut fields = std::collections::HashMap::new();
-    fields.insert(
-        "success".to_string(),
+    let dict = rt_dict_new(8);
+
+    rt_dict_set(
+        dict,
+        str_to_runtime("success"),
         RuntimeValue::from_bool(success),
     );
-    fields.insert(
-        "exit_code".to_string(),
-        RuntimeValue::from_int(exit_code as i64),
+
+    rt_dict_set(
+        dict,
+        str_to_runtime("exit_code"),
+        RuntimeValue::from_int(exit_code),
     );
-    fields.insert(
-        "stdout".to_string(),
-        RuntimeValue::String(stdout.into()),
+
+    rt_dict_set(
+        dict,
+        str_to_runtime("stdout"),
+        string_to_runtime(stdout),
     );
-    fields.insert(
-        "stderr".to_string(),
-        RuntimeValue::String(stderr.into()),
+
+    rt_dict_set(
+        dict,
+        str_to_runtime("stderr"),
+        string_to_runtime(stderr),
     );
-    fields.insert(
-        "duration_ms".to_string(),
-        RuntimeValue::Integer(duration_ms),
+
+    rt_dict_set(
+        dict,
+        str_to_runtime("duration_ms"),
+        RuntimeValue::from_int(duration_ms),
     );
-    RuntimeValue::Struct {
-        type_name: "BuildResult".to_string(),
-        fields,
-    }
+
+    dict
 }
 
+/// Create a TestResult dict
 fn create_test_result(
     success: bool,
     exit_code: i64,
@@ -260,41 +287,54 @@ fn create_test_result(
     tests_passed: i64,
     tests_failed: i64,
 ) -> RuntimeValue {
-    let mut fields = std::collections::HashMap::new();
-    fields.insert(
-        "success".to_string(),
+    let dict = rt_dict_new(8);
+
+    rt_dict_set(
+        dict,
+        str_to_runtime("success"),
         RuntimeValue::from_bool(success),
     );
-    fields.insert(
-        "exit_code".to_string(),
-        RuntimeValue::from_int(exit_code as i64),
+
+    rt_dict_set(
+        dict,
+        str_to_runtime("exit_code"),
+        RuntimeValue::from_int(exit_code),
     );
-    fields.insert(
-        "stdout".to_string(),
-        RuntimeValue::String(stdout.into()),
+
+    rt_dict_set(
+        dict,
+        str_to_runtime("stdout"),
+        string_to_runtime(stdout),
     );
-    fields.insert(
-        "stderr".to_string(),
-        RuntimeValue::String(stderr.into()),
+
+    rt_dict_set(
+        dict,
+        str_to_runtime("stderr"),
+        string_to_runtime(stderr),
     );
-    fields.insert(
-        "tests_run".to_string(),
-        RuntimeValue::Integer(tests_run),
+
+    rt_dict_set(
+        dict,
+        str_to_runtime("tests_run"),
+        RuntimeValue::from_int(tests_run),
     );
-    fields.insert(
-        "tests_passed".to_string(),
-        RuntimeValue::Integer(tests_passed),
+
+    rt_dict_set(
+        dict,
+        str_to_runtime("tests_passed"),
+        RuntimeValue::from_int(tests_passed),
     );
-    fields.insert(
-        "tests_failed".to_string(),
-        RuntimeValue::Integer(tests_failed),
+
+    rt_dict_set(
+        dict,
+        str_to_runtime("tests_failed"),
+        RuntimeValue::from_int(tests_failed),
     );
-    RuntimeValue::Struct {
-        type_name: "TestResult".to_string(),
-        fields,
-    }
+
+    dict
 }
 
+/// Parse test output to extract test counts
 fn parse_test_output(stdout: &str) -> (i64, i64, i64) {
     // Simple parser for "test result: ok. X passed; Y failed; Z ignored; ..."
     let mut tests_run = 0;

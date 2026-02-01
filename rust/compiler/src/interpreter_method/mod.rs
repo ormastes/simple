@@ -292,6 +292,13 @@ pub(crate) fn evaluate_method_call(
                 return Ok(result);
             }
         }
+        Value::FixedSizeArray { size, data } => {
+            if let Some(result) =
+                collections::handle_fixed_size_array_methods(*size, data, method, args, env, functions, classes, enums, impl_methods)?
+            {
+                return Ok(result);
+            }
+        }
         Value::Tuple(tup) => {
             if let Some(result) =
                 collections::handle_tuple_methods(tup, method, args, env, functions, classes, enums, impl_methods)?
