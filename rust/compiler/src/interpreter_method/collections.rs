@@ -751,6 +751,39 @@ pub fn handle_frozen_array_methods(
     handle_array_methods(arr.as_ref(), method, args, env, functions, classes, enums, impl_methods)
 }
 
+/// Handle FixedSizeArray methods (no size-changing operations)
+pub fn handle_fixed_size_array_methods(
+    size: usize,
+    data: &[Value],
+    method: &str,
+    args: &[Argument],
+    env: &mut Env,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Result<Option<Value>, CompileError> {
+    // Reject size-changing methods on fixed-size arrays
+    match method {
+        "push" | "append" | "pop" | "insert" | "remove" | "clear" | "extend" | "concat" => {
+            let ctx = ErrorContext::new()
+                .with_code(codes::INVALID_OPERATION)
+                .with_help(format!(
+                    "Fixed-size arrays have a fixed length of {}. Cannot change size with {}().",
+                    size, method
+                ));
+            return Err(CompileError::semantic_with_context(
+                format!("Cannot call {}() on fixed-size array [T; {}]", method, size),
+                ctx,
+            ));
+        }
+        _ => {}
+    }
+
+    // Allow all read-only and non-size-changing operations
+    handle_array_methods(data, method, args, env, functions, classes, enums, impl_methods)
+}
+
 /// Handle FrozenDict methods (read-only operations only)
 pub fn handle_frozen_dict_methods(
     map: &std::sync::Arc<HashMap<String, Value>>,

@@ -502,6 +502,9 @@ pub enum Value {
     Array(Vec<Value>),
     /// Immutable frozen array (created via freeze(), copy-on-freeze semantics)
     FrozenArray(Arc<Vec<Value>>),
+    /// Fixed-size array with runtime size checking ([T; N] syntax)
+    /// Rejects size-changing operations (push, pop, insert, remove, clear)
+    FixedSizeArray { size: usize, data: Vec<Value> },
     Tuple(Vec<Value>),
     /// Mutable dict (default for dict literals)
     Dict(HashMap<String, Value>),
@@ -642,6 +645,19 @@ impl Value {
     /// Create a new frozen (immutable) dict value
     pub fn frozen_dict(map: HashMap<String, Value>) -> Self {
         Value::FrozenDict(Arc::new(map))
+    }
+
+    /// Create a new fixed-size array with runtime size checking
+    /// Returns error if data length doesn't match expected size
+    pub fn fixed_size_array(size: usize, data: Vec<Value>) -> Result<Self, String> {
+        if data.len() != size {
+            return Err(format!(
+                "Fixed-size array size mismatch: expected {}, got {}",
+                size,
+                data.len()
+            ));
+        }
+        Ok(Value::FixedSizeArray { size, data })
     }
 }
 
