@@ -456,6 +456,12 @@ pub(crate) fn evaluate_call(
                     "HashSet" => {
                         return Ok(Value::Array(Vec::new())); // HashSet represented as Array in Simple
                     }
+                    "BTreeMap" => {
+                        return Ok(Value::Dict(std::collections::HashMap::new()));
+                    }
+                    "BTreeSet" => {
+                        return Ok(Value::Array(Vec::new()));
+                    }
                     "Device" => {
                         // Default to CPU device
                         return Ok(Value::Enum {
