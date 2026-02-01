@@ -1,9 +1,17 @@
 # Physics Engine Integration Implementation Plan
 
 **Created:** 2025-12-26
-**Status:** Planning
+**Updated:** 2026-02-01
+**Status:** In Progress
 **Priority:** High
 **Target Engines:** Isaac Lab/Gym → Genesis
+
+## Recent Updates (2026-02-01)
+
+- **Shared math module:** Physics core types (`Vector2`, `Vector3`, `Matrix3`, `Matrix4`, `Quaternion`) now re-exported from unified `math` module as aliases to `Vec2d`, `Vec3d`, `Mat3d`, `Mat4d`, `Quatd`
+- **Column-major matrices:** Math module uses column-major storage (GPU/Vulkan standard)
+- **Tensor bridge:** `math/tensor_bridge.spl` provides conversion between math types and PyTorch tensors (placeholder until torch imports resolved)
+- **Design doc:** See `doc/design/unified_math_design.md`
 
 ## Overview
 

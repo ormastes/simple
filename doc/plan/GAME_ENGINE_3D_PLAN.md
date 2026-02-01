@@ -1,9 +1,18 @@
 # 3D Game Engine Integration Implementation Plan
 
 **Created:** 2025-12-26
-**Status:** Planning
+**Updated:** 2026-02-01
+**Status:** In Progress
 **Priority:** High
 **Target Engines:** Godot 4.3+ → Unreal 5.4+
+
+## Recent Updates (2026-02-01)
+
+- **Math module created:** Unified `math` module (`rust/lib/std/src/math/`) with Vec2/3/4, Mat3/4, Quat, Transform, Color types in f32+f64 variants
+- **Game engine re-enabled:** `game_engine.disabled/` renamed to `game_engine/`
+- **FFI adapters removed:** `GodotNodeAdapter`, `UnrealActorAdapter`, `GodotComponentAdapter`, `UnrealComponentAdapter`, `GodotRigidBodyAdapter`, `UnrealRigidBodyAdapter` removed; trait-only interfaces remain
+- **Math types integrated:** `scene_node.spl` uses `math.Transformd`, `actor_model.spl` uses `math.Vec3`, `physics.spl` uses `math.Vec3`
+- **Design doc:** See `doc/design/unified_math_design.md`
 
 ## Overview
 

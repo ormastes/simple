@@ -10,7 +10,7 @@
 # - Actor lifecycle management
 # - Integration with engine update loops
 
-use sys.ffi
+use math
 
 mod actor_model
 
@@ -18,13 +18,13 @@ mod actor_model
 # Standard messages for game actors
 pub enum GameMessage:
     Update(f32)                    # Delta time
-    Spawn((f32, f32, f32))        # Position
+    Spawn(math.Vec3)              # Position
     Despawn
-    SetPosition((f32, f32, f32))
+    SetPosition(math.Vec3)
     GetPosition
     Damage(i32)
     Heal(i32)
-    Custom(text, ffi.VoidPtr)   # Custom message type + data
+    Custom(text, text)            # Custom message type + data
 
 impl GameMessage:
     # =========================================================================
@@ -91,9 +91,9 @@ impl GameMessage:
         """Convert message to string representation."""
         match self:
             case Update(delta): "Update({delta})"
-            case Spawn(pos): "Spawn({pos.0}, {pos.1}, {pos.2})"
+            case Spawn(pos): "Spawn({pos.x}, {pos.y}, {pos.z})"
             case Despawn: "Despawn"
-            case SetPosition(pos): "SetPosition({pos.0}, {pos.1}, {pos.2})"
+            case SetPosition(pos): "SetPosition({pos.x}, {pos.y}, {pos.z})"
             case GetPosition: "GetPosition"
             case Damage(amount): "Damage({amount})"
             case Heal(amount): "Heal({amount})"
@@ -112,11 +112,7 @@ impl GameMessage:
             case Custom(_, _): "Custom game message"
 
     pub fn summary(self) -> text:
-        """Get comprehensive summary of the game message.
-        Returns: summary with message type, description, and category
-        Example: GameMessage.Update(0.016).summary()
-                # → "GameMessage: Update(0.016) (Frame update with delta time, lifecycle)"
-        """
+        """Get comprehensive summary of the game message."""
         val msg_str = self.to_string()
         val desc = self.description()
         var category = "other"
@@ -155,134 +151,65 @@ pub trait GameEntity:
 # Simple actor wrapper for game entities
 pub struct EntityActor:
     entity_id: i32
-    position: (f32, f32, f32)
+    position: math.Vec3
     health: i32
     max_health: i32
     alive: bool
-    engine_object_ptr: ffi.VoidPtr  # Godot Node or Unreal AActor
 
 impl EntityActor:
-    pub fn new(entity_id: i32, engine_object_ptr: ffi.VoidPtr) -> EntityActor:
+    pub static fn create(entity_id: i32) -> EntityActor:
         return EntityActor(
             entity_id: entity_id,
-            position: (0.0, 0.0, 0.0),
+            position: math.Vec3.zero(),
             health: 100,
             max_health: 100,
             alive: true,
-            engine_object_ptr: engine_object_ptr,
         )
 
     # =========================================================================
     # Helper Methods
     # =========================================================================
 
-    pub fn get_position(self) -> (f32, f32, f32):
-        """Get entity position.
-
-        Returns:
-            Position tuple (x, y, z)
-
-        Example:
-            actor.get_position()  # → (0.0, 0.0, 0.0)
-        """
+    pub fn get_position(self) -> math.Vec3:
+        """Get entity position."""
         return self.position
 
     pub fn get_health(self) -> i32:
-        """Get current health.
-
-        Returns:
-            Current health value
-
-        Example:
-            actor.get_health()  # → 100
-        """
+        """Get current health."""
         return self.health
 
     pub fn get_max_health(self) -> i32:
-        """Get maximum health.
-
-        Returns:
-            Maximum health value
-
-        Example:
-            actor.get_max_health()  # → 100
-        """
+        """Get maximum health."""
         return self.max_health
 
     pub fn health_percentage(self) -> f32:
-        """Get health as percentage.
-
-        Returns:
-            Health percentage (0.0 to 1.0)
-
-        Example:
-            actor.health_percentage()  # → 1.0
-        """
+        """Get health as percentage (0.0 to 1.0)."""
         if self.max_health == 0:
             return 0.0
         return self.health as f32 / self.max_health as f32
 
     pub fn is_full_health(self) -> bool:
-        """Check if at full health.
-
-        Returns:
-            true if health equals max_health
-
-        Example:
-            actor.is_full_health()  # → true
-        """
+        """Check if at full health."""
         return self.health >= self.max_health
 
     pub fn is_dead(self) -> bool:
-        """Check if entity is dead.
-
-        Returns:
-            true if not alive
-
-        Example:
-            actor.is_dead()  # → false
-        """
+        """Check if entity is dead."""
         return not self.alive
 
-    pub fn has_engine_object(self) -> bool:
-        """Check if has valid engine object pointer.
-
-        Returns:
-            true if pointer is not null
-
-        Example:
-            actor.has_engine_object()  # → true
-        """
-        return not ffi.is_null_ptr(self.engine_object_ptr)
-
     pub fn summary(self) -> text:
-        """Get entity actor summary.
-
-        Returns:
-            Human-readable summary
-
-        Example:
-            actor.summary()
-            # → "EntityActor #1: alive, pos=(0.0, 0.0, 0.0), health=100/100 (100%)"
-        """
-        val (x, y, z) = self.position
+        """Get entity actor summary."""
         val status = if self.alive { "alive" } else { "dead" }
         val health_pct = (self.health_percentage() * 100.0) as i32
-        return "EntityActor #{self.entity_id}: {status}, pos=({x}, {y}, {z}), health={self.health}/{self.max_health} ({health_pct}%)"
+        return "EntityActor #{self.entity_id}: {status}, pos=({self.position.x}, {self.position.y}, {self.position.z}), health={self.health}/{self.max_health} ({health_pct}%)"
 
 impl GameEntity for EntityActor:
     me on_spawn():
         self.alive = true
-        # Sync with engine
-        sync_entity_to_engine(self.engine_object_ptr, self.position)
 
     me on_despawn():
         self.alive = false
-        # Notify engine
-        despawn_engine_object(self.engine_object_ptr)
 
     me on_update(delta: f32):
-        # Update logic here
         pass
 
     me handle_message(message: GameMessage) -> Option<GameMessage>:
@@ -290,9 +217,8 @@ impl GameEntity for EntityActor:
             self.on_update(delta)
             return None
 
-        elif message is GameMessage.SetPosition((x, y, z)):
-            self.position = (x, y, z)
-            sync_entity_to_engine(self.engine_object_ptr, self.position)
+        elif message is GameMessage.SetPosition(pos):
+            self.position = pos
             return None
 
         elif message is GameMessage.GetPosition:
@@ -333,7 +259,7 @@ pub struct EntityManager:
     next_id: i32
 
 impl EntityManager:
-    pub fn new() -> EntityManager:
+    pub static fn create() -> EntityManager:
         return EntityManager(
             entities: [],
             next_id: 1,
@@ -344,85 +270,39 @@ impl EntityManager:
     # =========================================================================
 
     pub fn entity_count(self) -> usize:
-        """Get number of entities.
-
-        Returns:
-            Entity count
-
-        Example:
-            manager.entity_count()  # → 5
-        """
+        """Get number of entities."""
         return self.entities.len()
 
     pub fn has_entities(self) -> bool:
-        """Check if has any entities.
-
-        Returns:
-            true if entity count > 0
-
-        Example:
-            manager.has_entities()  # → true
-        """
+        """Check if has any entities."""
         return self.entities.len() > 0
 
     pub fn is_empty(self) -> bool:
-        """Check if manager is empty.
-
-        Returns:
-            true if no entities
-
-        Example:
-            manager.is_empty()  # → false
-        """
+        """Check if manager is empty."""
         return self.entities.len() == 0
 
     pub fn has_entity(self, entity_id: i32) -> bool:
-        """Check if entity with ID exists.
-
-        Args:
-            entity_id: Entity ID to check
-
-        Returns:
-            true if entity exists
-
-        Example:
-            manager.has_entity(5)  # → true
-        """
+        """Check if entity with ID exists."""
         for (id, _) in self.entities:
             if id == entity_id:
                 return true
         return false
 
     pub fn get_next_id(self) -> i32:
-        """Get next entity ID that will be assigned.
-
-        Returns:
-            Next entity ID
-
-        Example:
-            manager.get_next_id()  # → 6
-        """
+        """Get next entity ID that will be assigned."""
         return self.next_id
 
     pub fn summary(self) -> text:
-        """Get entity manager summary.
-
-        Returns:
-            Human-readable summary
-
-        Example:
-            manager.summary()
-            # → "EntityManager: 5 entities, next_id=6"
-        """
+        """Get entity manager summary."""
         val count = self.entity_count()
         return "EntityManager: {count} entities, next_id={self.next_id}"
 
     # Spawn new entity
-    pub fn spawn_entity(mut self, engine_object_ptr: ffi.VoidPtr) -> i32:
+    pub fn spawn_entity(mut self) -> i32:
         val entity_id = self.next_id
         self.next_id = self.next_id + 1
 
-        var entity = EntityActor.new(entity_id, engine_object_ptr)
+        var entity = EntityActor.create(entity_id)
         entity.on_spawn()
 
         self.entities.push((entity_id, entity))
@@ -465,7 +345,7 @@ var ENTITY_MANAGER: Option<EntityManager> = None
 # Get global entity manager
 pub fn get_entity_manager() -> EntityManager:
     if ENTITY_MANAGER.is_none():
-        ENTITY_MANAGER = Some(EntityManager.new())
+        ENTITY_MANAGER = Some(EntityManager.create())
 
     return ENTITY_MANAGER.unwrap()
 
@@ -473,9 +353,9 @@ pub fn get_entity_manager() -> EntityManager:
 # Utility functions
 
 # Spawn entity
-pub fn spawn_game_entity(engine_object_ptr: ffi.VoidPtr) -> i32:
+pub fn spawn_game_entity() -> i32:
     var manager = get_entity_manager()
-    return manager.spawn_entity(engine_object_ptr)
+    return manager.spawn_entity()
 
 # Despawn entity
 pub fn despawn_game_entity(entity_id: i32):
@@ -491,53 +371,3 @@ pub fn send_entity_message(entity_id: i32, message: GameMessage) -> Option<GameM
 pub fn update_game_entities(delta: f32):
     var manager = get_entity_manager()
     manager.update_all(delta)
-
-
-# Engine synchronization (internal)
-fn sync_entity_to_engine(engine_object_ptr: ffi.VoidPtr, position: (f32, f32, f32)):
-    val (x, y, z) = position
-    # Detect engine type and sync accordingly
-    if is_godot_object(engine_object_ptr):
-        godot_set_position(engine_object_ptr, x, y, z)
-    else:
-        unreal_set_position(engine_object_ptr, x, y, z)
-
-fn despawn_engine_object(engine_object_ptr: ffi.VoidPtr):
-    if is_godot_object(engine_object_ptr):
-        godot_queue_free(engine_object_ptr)
-    else:
-        unreal_destroy_actor(engine_object_ptr)
-
-fn is_godot_object(object_ptr: ffi.VoidPtr) -> bool:
-    # Stub - would check object type
-    return false
-
-
-# FFI declarations
-extern "C":
-    fn godot_set_position(node: ffi.VoidPtr, x: f32, y: f32, z: f32)
-    fn godot_queue_free(node: ffi.VoidPtr)
-    fn unreal_set_position(actor: ffi.VoidPtr, x: f32, y: f32, z: f32)
-    fn unreal_destroy_actor(actor: ffi.VoidPtr)
-
-
-# Example usage:
-#
-# # Spawn game entity
-# val entity_id = spawn_game_entity(godot_node_ptr)
-#
-# # Send messages
-# send_entity_message(entity_id, GameMessage.SetPosition((10.0, 0.0, 5.0)))
-# send_entity_message(entity_id, GameMessage.Damage(25))
-#
-# # Update all entities (call from game loop)
-# update_game_entities(0.016)  # 60 FPS
-#
-# # Check entity position
-# val response = send_entity_message(entity_id, GameMessage.GetPosition)
-# if response.is_some():
-#     if response.unwrap() is GameMessage.SetPosition((x, y, z)):
-#         print("Entity at {x}, {y}, {z}")
-#
-# # Despawn entity
-# despawn_game_entity(entity_id)

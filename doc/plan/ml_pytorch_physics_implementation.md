@@ -1,7 +1,13 @@
 # ML/PyTorch and Physics Engine Implementation Plan
 
 **Date:** 2025-12-27
-**Status:** Planning
+**Updated:** 2026-02-01
+**Status:** In Progress
+
+## Recent Updates (2026-02-01)
+
+- **Tensor bridge implemented:** `math/tensor_bridge.spl` provides conversion between math types (Vec3, Mat4, etc.) and tensors. Currently placeholder implementations until torch imports are resolved.
+- **Physics uses shared math:** `physics/core` re-exports from `math` module; `physics/gpu_batch.spl` uses `core.Vector3` (now `math.Vec3d`).
 
 ## Overview
 

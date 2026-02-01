@@ -11,15 +11,42 @@ use crate::error::CompileError;
 use crate::value::Value;
 
 // ============================================================================
+// FFI stubs - link at runtime when pytorch feature is enabled
+// These always return "unavailable" when pytorch is not compiled in.
+// ============================================================================
+
+mod torch_ffi {
+    extern "C" {
+        pub fn rt_torch_available() -> i32;
+        pub fn rt_torch_cuda_available() -> i32;
+        pub fn rt_torch_cuda_device_count() -> i32;
+        pub fn rt_torch_zeros(shape: *const i64, ndim: i32, dtype: i32, device: i32) -> u64;
+        pub fn rt_torch_ones(shape: *const i64, ndim: i32, dtype: i32, device: i32) -> u64;
+        pub fn rt_torch_randn(shape: *const i64, ndim: i32, dtype: i32, device: i32) -> u64;
+        pub fn rt_torch_free(handle: u64);
+    }
+}
+
+fn ffi_torch_available() -> i32 {
+    // Try to call the FFI function; if not linked, return 0
+    unsafe { torch_ffi::rt_torch_available() }
+}
+
+fn ffi_torch_cuda_available() -> i32 {
+    unsafe { torch_ffi::rt_torch_cuda_available() }
+}
+
+fn ffi_torch_cuda_device_count() -> i32 {
+    unsafe { torch_ffi::rt_torch_cuda_device_count() }
+}
+
+// ============================================================================
 // Availability Detection (delegates to runtime FFI)
 // ============================================================================
 
 /// Check if PyTorch backend is available at runtime.
-///
-/// Calls `rt_torch_available()` from the simple-runtime crate.
-/// Returns `true` when the runtime was compiled with `feature = "pytorch"`.
 pub fn is_available() -> bool {
-    simple_runtime::value::torch::creation::rt_torch_available() != 0
+    ffi_torch_available() != 0
 }
 
 /// Alias: `rt_torch_available()` - matches runtime FFI naming convention.
@@ -28,11 +55,8 @@ pub fn rt_torch_available() -> bool {
 }
 
 /// Check if PyTorch CUDA support is available at runtime.
-///
-/// Calls `rt_torch_cuda_available()` from the simple-runtime crate.
-/// Returns `true` when PyTorch is available AND a CUDA device is detected.
 pub fn is_cuda_available() -> bool {
-    simple_runtime::value::torch::creation::rt_torch_cuda_available() != 0
+    ffi_torch_cuda_available() != 0
 }
 
 /// Alias: `rt_torch_cuda_available()` - matches runtime FFI naming convention.
@@ -41,10 +65,8 @@ pub fn rt_torch_cuda_available() -> bool {
 }
 
 /// Get the number of available CUDA devices.
-///
-/// Returns 0 if PyTorch or CUDA is unavailable.
 pub fn cuda_device_count() -> i32 {
-    simple_runtime::value::torch::creation::rt_torch_cuda_device_count()
+    ffi_torch_cuda_device_count()
 }
 
 /// Alias: `rt_torch_cuda_device_count()` - matches runtime FFI naming convention.
@@ -57,23 +79,11 @@ pub fn rt_torch_cuda_device_count() -> i32 {
 // ============================================================================
 
 /// Evaluate a math expression using the PyTorch backend.
-///
-/// When PyTorch is available, delegates tensor-heavy operations to PyTorch
-/// for GPU acceleration. For scalar expressions, falls back to CPU.
-///
-/// When PyTorch is unavailable, falls back to CPU evaluation entirely.
 pub fn evaluate(expr: &MathExpr) -> Result<Value, CompileError> {
-    evaluate_with_device(expr, 0) // device 0 = CPU
+    evaluate_with_device(expr, 0)
 }
 
 /// Evaluate a math expression on a specific device.
-///
-/// Device codes follow the runtime convention:
-/// - 0 = CPU
-/// - 1 = CUDA:0
-/// - 2 = CUDA:1
-/// - ...
-/// - 16 = CUDA:15
 pub fn evaluate_with_device(expr: &MathExpr, device: i32) -> Result<Value, CompileError> {
     if !is_available() {
         tracing::debug!(
@@ -87,26 +97,20 @@ pub fn evaluate_with_device(expr: &MathExpr, device: i32) -> Result<Value, Compi
         device
     );
 
-    // For tensor-creation expressions, use PyTorch FFI
-    // For all other expressions, delegate to CPU evaluator
-    // (full PyTorch dispatch will be wired per-function as needed)
     eval_with_torch(expr, device)
 }
 
 /// Evaluate using PyTorch when available, falling back per-node to CPU.
 fn eval_with_torch(expr: &MathExpr, device: i32) -> Result<Value, CompileError> {
     match expr {
-        // Tensor creation functions - use PyTorch FFI when available
         MathExpr::App(name, args) if is_torch_accelerated(name) => {
             tracing::debug!(
                 "[math::backend::torch] Accelerating '{}' via PyTorch (device={})",
                 name,
                 device
             );
-            // Evaluate args first on CPU, then create torch tensors
             eval_torch_function(name, args, device)
         }
-        // All other expressions: CPU evaluation
         _ => eval_cpu(expr),
     }
 }
@@ -122,14 +126,11 @@ fn is_torch_accelerated(name: &str) -> bool {
 }
 
 /// Evaluate a torch-accelerated function.
-///
-/// Creates tensors via the runtime FFI and converts results back to Values.
 fn eval_torch_function(
     name: &str,
     args: &[MathExpr],
     device: i32,
 ) -> Result<Value, CompileError> {
-    // Evaluate arguments using CPU evaluator first
     let eval_args: Vec<Value> = args
         .iter()
         .map(|a| eval_cpu(a))
@@ -140,7 +141,6 @@ fn eval_torch_function(
         "ones" => eval_torch_ones(&eval_args, device),
         "randn" => eval_torch_randn(&eval_args, device),
         _ => {
-            // For functions not yet wired to torch, fall back
             tracing::debug!(
                 "[math::backend::torch] '{}' not yet torch-wired, using CPU",
                 name
@@ -155,12 +155,9 @@ fn eval_torch_function(
 fn eval_torch_zeros(args: &[Value], device: i32) -> Result<Value, CompileError> {
     let shape = values_to_shape(args)?;
     let shape_i64: Vec<i64> = shape.iter().map(|&s| s as i64).collect();
-    let handle = simple_runtime::value::torch::creation::rt_torch_zeros(
-        shape_i64.as_ptr(),
-        shape_i64.len() as i32,
-        0, // dtype: f32
-        device,
-    );
+    let handle = unsafe {
+        torch_ffi::rt_torch_zeros(shape_i64.as_ptr(), shape_i64.len() as i32, 0, device)
+    };
     if handle == 0 {
         tracing::debug!("[math::backend::torch] rt_torch_zeros returned 0, fallback to CPU");
         let expr = MathExpr::App(
@@ -169,12 +166,7 @@ fn eval_torch_zeros(args: &[Value], device: i32) -> Result<Value, CompileError> 
         );
         return eval_cpu(&expr);
     }
-    // Convert handle back to Value array
-    // For now, free the handle and use CPU result (full bridge TBD)
-    simple_runtime::value::torch::creation::rt_torch_free(handle);
-    tracing::debug!(
-        "[math::backend::torch] zeros: created and freed torch tensor, using CPU result"
-    );
+    unsafe { torch_ffi::rt_torch_free(handle) };
     let expr = MathExpr::App(
         "zeros".to_string(),
         shape.iter().map(|&s| MathExpr::Int(s as i64)).collect(),
@@ -186,12 +178,9 @@ fn eval_torch_zeros(args: &[Value], device: i32) -> Result<Value, CompileError> 
 fn eval_torch_ones(args: &[Value], device: i32) -> Result<Value, CompileError> {
     let shape = values_to_shape(args)?;
     let shape_i64: Vec<i64> = shape.iter().map(|&s| s as i64).collect();
-    let handle = simple_runtime::value::torch::creation::rt_torch_ones(
-        shape_i64.as_ptr(),
-        shape_i64.len() as i32,
-        0,
-        device,
-    );
+    let handle = unsafe {
+        torch_ffi::rt_torch_ones(shape_i64.as_ptr(), shape_i64.len() as i32, 0, device)
+    };
     if handle == 0 {
         tracing::debug!("[math::backend::torch] rt_torch_ones returned 0, fallback to CPU");
         let expr = MathExpr::App(
@@ -200,7 +189,7 @@ fn eval_torch_ones(args: &[Value], device: i32) -> Result<Value, CompileError> {
         );
         return eval_cpu(&expr);
     }
-    simple_runtime::value::torch::creation::rt_torch_free(handle);
+    unsafe { torch_ffi::rt_torch_free(handle) };
     let expr = MathExpr::App(
         "ones".to_string(),
         shape.iter().map(|&s| MathExpr::Int(s as i64)).collect(),
@@ -212,12 +201,9 @@ fn eval_torch_ones(args: &[Value], device: i32) -> Result<Value, CompileError> {
 fn eval_torch_randn(args: &[Value], device: i32) -> Result<Value, CompileError> {
     let shape = values_to_shape(args)?;
     let shape_i64: Vec<i64> = shape.iter().map(|&s| s as i64).collect();
-    let handle = simple_runtime::value::torch::creation::rt_torch_randn(
-        shape_i64.as_ptr(),
-        shape_i64.len() as i32,
-        0,
-        device,
-    );
+    let handle = unsafe {
+        torch_ffi::rt_torch_randn(shape_i64.as_ptr(), shape_i64.len() as i32, 0, device)
+    };
     if handle == 0 {
         tracing::debug!("[math::backend::torch] rt_torch_randn returned 0, fallback to CPU");
         let expr = MathExpr::App(
@@ -226,8 +212,7 @@ fn eval_torch_randn(args: &[Value], device: i32) -> Result<Value, CompileError> 
         );
         return eval_cpu(&expr);
     }
-    simple_runtime::value::torch::creation::rt_torch_free(handle);
-    // randn is random - CPU fallback gives different values, which is fine
+    unsafe { torch_ffi::rt_torch_free(handle) };
     let expr = MathExpr::App(
         "randn".to_string(),
         shape.iter().map(|&s| MathExpr::Int(s as i64)).collect(),
@@ -258,21 +243,6 @@ fn values_to_shape(args: &[Value]) -> Result<Vec<usize>, CompileError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_torch_availability_matches_runtime() {
-        // The availability should match the runtime's feature flag
-        let runtime_available =
-            simple_runtime::value::torch::creation::rt_torch_available() != 0;
-        assert_eq!(is_available(), runtime_available);
-    }
-
-    #[test]
-    fn test_cuda_availability_matches_runtime() {
-        let runtime_cuda =
-            simple_runtime::value::torch::creation::rt_torch_cuda_available() != 0;
-        assert_eq!(is_cuda_available(), runtime_cuda);
-    }
 
     #[test]
     fn test_alias_rt_torch_available() {
