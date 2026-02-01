@@ -174,7 +174,7 @@ macro_rules! read_to_array {
             Ok(n) => {
                 buf.truncate(n);
                 let arr: Vec<Value> = buf.into_iter().map(|b| Value::Int(b as i64)).collect();
-                Ok(net_ok(Value::Array(vec![
+                Ok(net_ok(Value::array(vec![
                     Value::Int(arr.len() as i64),
                     Value::Array(arr),
                 ])))
@@ -198,7 +198,7 @@ macro_rules! read_from_to_array {
             Ok((n, addr)) => {
                 buf.truncate(n);
                 let arr: Vec<Value> = buf.into_iter().map(|b| Value::Int(b as i64)).collect();
-                Ok(net_ok(Value::Array(vec![
+                Ok(net_ok(Value::array(vec![
                     Value::Int(arr.len() as i64),
                     Value::Str(addr.to_string()),
                     Value::Array(arr),
@@ -389,7 +389,7 @@ pub fn native_tcp_accept_interp(args: &[Value]) -> Result<Value, CompileError> {
         Ok((stream, peer_addr)) => {
             let stream_handle = allocate_socket(SocketHandle::TcpStream(stream));
             // Return tuple (stream_handle, peer_addr_string)
-            Ok(net_ok(Value::Array(vec![
+            Ok(net_ok(Value::array(vec![
                 Value::Int(stream_handle),
                 Value::Str(peer_addr.to_string()),
             ])))
@@ -427,7 +427,7 @@ pub fn native_tcp_connect_timeout_interp(args: &[Value]) -> Result<Value, Compil
     net_result!(TcpStream::connect_timeout(&addr, timeout).map(|stream| {
         let local_addr = stream.local_addr().map(|a| a.to_string()).unwrap_or_default();
         let handle = allocate_socket(SocketHandle::TcpStream(stream));
-        Value::Array(vec![Value::Int(handle), Value::Str(local_addr)])
+        Value::array(vec![Value::Int(handle), Value::Str(local_addr)])
     }))
 }
 

@@ -210,7 +210,7 @@ fn json_to_sdn(json: &serde_json::Value) -> SdnValue {
             }
         }
         serde_json::Value::String(s) => SdnValue::String(s.clone()),
-        serde_json::Value::Array(arr) => SdnValue::Array(arr.iter().map(json_to_sdn).collect()),
+        serde_json::Value::Array(arr) => SdnValue::array(arr.iter().map(json_to_sdn).collect()),
         serde_json::Value::Object(obj) => {
             let mut dict = indexmap::IndexMap::new();
             for (k, v) in obj {

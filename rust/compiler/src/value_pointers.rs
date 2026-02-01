@@ -232,7 +232,7 @@ impl Clone for Value {
             Value::Bool(b) => Value::Bool(*b),
             Value::Str(s) => Value::Str(s.clone()),
             Value::Symbol(s) => Value::Symbol(s.clone()),
-            Value::Array(a) => Value::Array(a.clone()),
+            Value::Array(a) => Value::array(a.clone()),
             Value::Tuple(t) => Value::Tuple(t.clone()),
             Value::Dict(d) => Value::Dict(d.clone()),
             Value::Lambda { params, body, env } => Value::Lambda {
@@ -315,6 +315,8 @@ impl Clone for Value {
                 payload: payload.clone(),
                 result: result.clone(),
             },
+            Value::FrozenArray(arr) => Value::FrozenArray(Arc::clone(arr)),
+            Value::FrozenDict(dict) => Value::FrozenDict(Arc::clone(dict)),
             Value::Nil => Value::Nil,
         }
     }

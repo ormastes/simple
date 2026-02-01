@@ -67,7 +67,7 @@ fn parse_regex(payload: &str) -> Result<Value, CompileError> {
     result.insert("pattern".to_string(), Value::Str(pattern.clone()));
     result.insert(
         "flags".to_string(),
-        Value::Dict({
+        Value::dict({
             let mut flags_map = HashMap::new();
             flags_map.insert("case_insensitive".to_string(), Value::Bool(flags.case_insensitive));
             flags_map.insert("multiline".to_string(), Value::Bool(flags.multiline));
@@ -79,7 +79,7 @@ fn parse_regex(payload: &str) -> Result<Value, CompileError> {
     );
     result.insert(
         "capture_groups".to_string(),
-        Value::Array(capture_groups.into_iter().map(Value::Str).collect()),
+        Value::array(capture_groups.into_iter().map(Value::Str).collect()),
     );
 
     Ok(Value::Dict(result))

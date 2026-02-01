@@ -1,11 +1,12 @@
 //! UPX (Ultimate Packer for eXecutables) compression wrapper
 //!
 //! Provides Rust API and FFI bindings for UPX compression/decompression.
-//! UPX must be installed on the system for this module to work.
+//! UPX is auto-downloaded if not found in system PATH.
 
+use crate::compress::upx_download::{ensure_upx_available, find_upx_binary};
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Compression level for UPX
@@ -36,12 +37,17 @@ impl CompressionLevel {
     }
 }
 
-/// Check if UPX is installed on the system
+/// Check if UPX is installed on the system or can be auto-downloaded
 pub fn is_upx_available() -> bool {
-    Command::new("upx")
-        .arg("--version")
-        .output()
-        .is_ok()
+    find_upx_binary().is_some() || ensure_upx_available().is_ok()
+}
+
+/// Get path to UPX binary (system or auto-downloaded)
+///
+/// This ensures UPX is available and returns the path to it.
+/// Will auto-download if not found in PATH or cache.
+fn get_upx_path() -> Result<PathBuf, String> {
+    ensure_upx_available()
 }
 
 /// Compress a file using UPX
@@ -58,9 +64,8 @@ pub fn compress_file(
     output: Option<&str>,
     level: CompressionLevel,
 ) -> Result<String, String> {
-    if !is_upx_available() {
-        return Err("UPX is not installed. Install with: sudo apt-get install upx".to_string());
-    }
+    // Get UPX path (auto-download if needed)
+    let upx_path = get_upx_path()?;
 
     if !Path::new(input).exists() {
         return Err(format!("Input file not found: {}", input));
@@ -75,15 +80,15 @@ pub fn compress_file(
     }
 
     // Run UPX compression
-    let output = Command::new("upx")
+    let cmd_output = Command::new(&upx_path)
         .arg(level.as_args())
         .arg("--lzma")  // Use LZMA compression (better ratio)
         .arg(output_path)
         .output()
         .map_err(|e| format!("Failed to run UPX: {}", e))?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+    if !cmd_output.status.success() {
+        let stderr = String::from_utf8_lossy(&cmd_output.stderr);
         return Err(format!("UPX compression failed: {}", stderr));
     }
 
@@ -99,9 +104,8 @@ pub fn compress_file(
 /// # Returns
 /// Ok(output_path) on success, Err(message) on failure
 pub fn decompress_file(input: &str, output: &str) -> Result<String, String> {
-    if !is_upx_available() {
-        return Err("UPX is not installed".to_string());
-    }
+    // Get UPX path (auto-download if needed)
+    let upx_path = get_upx_path()?;
 
     if !Path::new(input).exists() {
         return Err(format!("Input file not found: {}", input));
@@ -112,7 +116,7 @@ pub fn decompress_file(input: &str, output: &str) -> Result<String, String> {
         .map_err(|e| format!("Failed to copy file: {}", e))?;
 
     // Run UPX decompression
-    let cmd_output = Command::new("upx")
+    let cmd_output = Command::new(&upx_path)
         .arg("-d")  // Decompress
         .arg(output)
         .output()
@@ -134,18 +138,21 @@ pub fn decompress_file(input: &str, output: &str) -> Result<String, String> {
 /// # Returns
 /// Ok(true) if compressed, Ok(false) if not, Err on failure
 pub fn is_compressed(file: &str) -> Result<bool, String> {
+    // Get UPX path (auto-download if needed)
+    let upx_path = get_upx_path()?;
+
     if !Path::new(file).exists() {
         return Err(format!("File not found: {}", file));
     }
 
     // Run UPX test (returns success if compressed)
-    let output = Command::new("upx")
+    let cmd_output = Command::new(&upx_path)
         .arg("-t")  // Test
         .arg(file)
         .output()
         .map_err(|e| format!("Failed to run UPX: {}", e))?;
 
-    Ok(output.status.success())
+    Ok(cmd_output.status.success())
 }
 
 /// Get compression ratio of a file (original_size / compressed_size)
@@ -156,18 +163,21 @@ pub fn get_compression_ratio(file: &str) -> Result<f64, String> {
         return Ok(1.0);  // Not compressed
     }
 
+    // Get UPX path (auto-download if needed)
+    let upx_path = get_upx_path()?;
+
     // Run UPX list to get info
-    let output = Command::new("upx")
+    let cmd_output = Command::new(&upx_path)
         .arg("-l")  // List info
         .arg(file)
         .output()
         .map_err(|e| format!("Failed to run UPX: {}", e))?;
 
-    if !output.status.success() {
+    if !cmd_output.status.success() {
         return Err("Failed to get UPX info".to_string());
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = String::from_utf8_lossy(&cmd_output.stdout);
 
     // Parse output to find ratio (format: "xxx -> yyy   ratio")
     for line in stdout.lines() {
@@ -320,6 +330,55 @@ pub extern "C" fn upx_is_available() -> i32 {
     } else {
         0
     }
+}
+
+/// FFI: Ensure UPX is available (auto-download if needed)
+///
+/// # Safety
+/// - Returns 0 on success, -1 on failure
+#[no_mangle]
+pub extern "C" fn upx_ensure_available() -> i32 {
+    match ensure_upx_available() {
+        Ok(_) => 0,
+        Err(_) => -1,
+    }
+}
+
+/// FFI: Get path to UPX binary
+///
+/// # Safety
+/// - `buffer` must be a valid pointer to a writable char array
+/// - `buffer_size` must be the actual size of the buffer
+/// - Returns length of path on success, -1 on failure
+#[no_mangle]
+pub unsafe extern "C" fn upx_get_path(buffer: *mut c_char, buffer_size: usize) -> i32 {
+    if buffer.is_null() {
+        return -1;
+    }
+
+    let path = match get_upx_path() {
+        Ok(p) => p,
+        Err(_) => return -1,
+    };
+
+    let path_str = match path.to_str() {
+        Some(s) => s,
+        None => return -1,
+    };
+
+    let c_string = match CString::new(path_str) {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
+
+    let bytes = c_string.as_bytes_with_nul();
+    if bytes.len() > buffer_size {
+        return -1; // Buffer too small
+    }
+
+    std::ptr::copy_nonoverlapping(bytes.as_ptr() as *const c_char, buffer, bytes.len());
+
+    (bytes.len() - 1) as i32 // Return length without null terminator
 }
 
 #[cfg(test)]

@@ -498,7 +498,7 @@ pub(super) fn eval_builtin(
             })?;
             let val = evaluate_expr(&gen_arg.value, env, functions, classes, enums, impl_methods)?;
             if let Value::Generator(gen) = val {
-                return Ok(Some(Value::Array(gen.collect_remaining())));
+                return Ok(Some(Value::array(gen.collect_remaining())));
             }
             if let Value::Array(arr) = val {
                 return Ok(Some(Value::Array(arr)));

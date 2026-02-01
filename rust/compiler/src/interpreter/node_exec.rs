@@ -632,7 +632,7 @@ fn exec_assignment(
         if let Expr::Identifier(container_name) = receiver.as_ref() {
             if let Some(container) = env.get(container_name).cloned() {
                 let new_container = match container {
-                    Value::Array(mut arr) => {
+                    Value::array(mut arr) => {
                         let idx = index_val.as_int()? as usize;
                         if idx < arr.len() {
                             arr[idx] = value;
@@ -709,7 +709,7 @@ fn exec_assignment(
                             let mut fields = fields;
                             if let Some(container) = fields.get(field_name).cloned() {
                                 let new_container = match container {
-                                    Value::Array(mut arr) => {
+                                    Value::array(mut arr) => {
                                         let idx = index_val.as_int()? as usize;
                                         if idx < arr.len() {
                                             arr[idx] = value;
@@ -818,7 +818,7 @@ fn exec_assignment(
                                     let inner_class = i_class;
                                     if let Some(container) = inner_fields.get(field_name).cloned() {
                                         let new_container = match container {
-                                            Value::Array(mut arr) => {
+                                            Value::array(mut arr) => {
                                                 let idx = index_val.as_int()? as usize;
                                                 if idx < arr.len() {
                                                     arr[idx] = value;

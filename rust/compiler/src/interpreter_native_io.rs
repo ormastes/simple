@@ -477,7 +477,7 @@ pub fn native_get_term_size(args: &[Value]) -> Result<Value, CompileError> {
         }
 
         // Return as tuple (rows, cols)
-        Ok(Value::Array(vec![
+        Ok(Value::array(vec![
             Value::Int(winsize.ws_row as i64),
             Value::Int(winsize.ws_col as i64),
         ]))
@@ -487,7 +487,7 @@ pub fn native_get_term_size(args: &[Value]) -> Result<Value, CompileError> {
 #[cfg(not(unix))]
 pub fn native_get_term_size(_args: &[Value]) -> Result<Value, CompileError> {
     // Default size for non-Unix
-    Ok(Value::Array(vec![Value::Int(24), Value::Int(80)]))
+    Ok(Value::array(vec![Value::Int(24), Value::Int(80)]))
 }
 
 pub fn native_term_write(args: &[Value]) -> Result<Value, CompileError> {

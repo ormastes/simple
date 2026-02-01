@@ -49,7 +49,7 @@ pub fn handle_array_methods(
             let other = eval_arg(
                 args,
                 0,
-                Value::Array(vec![]),
+                Value::array(vec![]),
                 env,
                 functions,
                 classes,
@@ -102,7 +102,7 @@ pub fn handle_array_methods(
                 .unwrap_or(arr.len());
             let end = end.min(arr.len());
             let start = start.min(end);
-            Value::Array(arr[start..end].to_vec())
+            Value::array(arr[start..end].to_vec())
         }
         "map" => {
             let func = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
@@ -256,7 +256,7 @@ pub fn handle_array_methods(
             let other = eval_arg(
                 args,
                 0,
-                Value::Array(vec![]),
+                Value::array(vec![]),
                 env,
                 functions,
                 classes,
@@ -291,7 +291,7 @@ pub fn handle_array_methods(
                 }
                 Value::Array(result)
             } else {
-                Value::Array(vec![])
+                Value::array(vec![])
             }
         }
         "flatten" => {
@@ -307,11 +307,11 @@ pub fn handle_array_methods(
         }
         "take" => {
             let n = eval_arg_usize(args, 0, arr.len(), env, functions, classes, enums, impl_methods)?;
-            Value::Array(arr.iter().take(n).cloned().collect())
+            Value::array(arr.iter().take(n).cloned().collect())
         }
         "skip" | "drop" => {
             let n = eval_arg_usize(args, 0, 0, env, functions, classes, enums, impl_methods)?;
-            Value::Array(arr.iter().skip(n).cloned().collect())
+            Value::array(arr.iter().skip(n).cloned().collect())
         }
         "take_while" => {
             let func = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
@@ -366,7 +366,7 @@ pub fn handle_array_methods(
         }
         "chunk" | "chunks" => {
             let size = eval_arg_usize(args, 0, 1, env, functions, classes, enums, impl_methods)?.max(1);
-            let result: Vec<Value> = arr.chunks(size).map(|chunk| Value::Array(chunk.to_vec())).collect();
+            let result: Vec<Value> = arr.chunks(size).map(|chunk| Value::array(chunk.to_vec())).collect();
             Value::Array(result)
         }
         "uniq" | "unique" | "distinct" => {
@@ -477,7 +477,7 @@ pub fn handle_array_methods(
         "rotate" => {
             // Rotate array elements by n positions (left if positive, right if negative)
             if arr.is_empty() {
-                return Ok(Some(Value::Array(vec![])));
+                return Ok(Some(Value::array(vec![])));
             }
             let n = eval_arg(args, 0, Value::Int(1), env, functions, classes, enums, impl_methods)?
                 .as_int()
@@ -528,7 +528,7 @@ pub fn handle_array_methods(
         "transpose" => {
             // Transpose 2D array (array of arrays)
             if arr.is_empty() {
-                return Ok(Some(Value::Array(vec![])));
+                return Ok(Some(Value::array(vec![])));
             }
 
             // Check if all elements are arrays
@@ -547,7 +547,7 @@ pub fn handle_array_methods(
                 })?;
 
             if inner_arrays.is_empty() {
-                return Ok(Some(Value::Array(vec![])));
+                return Ok(Some(Value::array(vec![])));
             }
 
             // Find max length
@@ -561,7 +561,7 @@ pub fn handle_array_methods(
                 }
             }
 
-            Value::Array(result.into_iter().map(Value::Array).collect())
+            Value::array(result.into_iter().map(Value::Array).collect())
         }
         "fetch" => {
             // Get element at index with default value if out of bounds
@@ -571,7 +571,7 @@ pub fn handle_array_methods(
         }
         "clear" => {
             // Return empty array (functional style - original is not modified)
-            Value::Array(vec![])
+            Value::array(vec![])
         }
         "sorted" => {
             // Alias for sort - returns a new sorted array
@@ -592,7 +592,7 @@ pub fn handle_array_methods(
         }
         "copy" | "clone" => {
             // Return a shallow copy of the array
-            Value::Array(arr.to_vec())
+            Value::array(arr.to_vec())
         }
         "all_truthy" => {
             // Check if all elements are truthy (without a predicate function)
@@ -611,7 +611,7 @@ pub fn handle_array_methods(
         "fill" => {
             // Fill array with a value (returns new array of same length)
             let value = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
-            Value::Array(vec![value; arr.len()])
+            Value::array(vec![value; arr.len()])
         }
         "ptr" => {
             // Return raw pointer to array's data as i64 (for FFI/codegen)
@@ -643,7 +643,7 @@ pub fn handle_tuple_methods(
         }
         "first" => tup.first().cloned().unwrap_or(Value::Nil),
         "last" => tup.last().cloned().unwrap_or(Value::Nil),
-        "to_array" => Value::Array(tup.to_vec()),
+        "to_array" => Value::array(tup.to_vec()),
         "has" | "contains" => {
             let needle = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
             Value::Bool(tup.contains(&needle))

@@ -235,7 +235,7 @@ pub(super) fn exec_block_closure(
                     if let simple_parser::ast::Expr::Identifier(container_name) = receiver.as_ref() {
                         if let Some(container) = local_env.get(container_name).cloned() {
                             let new_container = match container {
-                                Value::Array(mut arr) => {
+                                Value::array(mut arr) => {
                                     let idx = index_val.as_int()? as usize;
                                     if idx < arr.len() {
                                         arr[idx] = val;
@@ -782,7 +782,7 @@ fn exec_block_closure_mut(
                     if let simple_parser::ast::Expr::Identifier(container_name) = receiver.as_ref() {
                         if let Some(container) = local_env.get(container_name).cloned() {
                             let new_container = match container {
-                                Value::Array(mut arr) => {
+                                Value::array(mut arr) => {
                                     let idx = index_val.as_int()? as usize;
                                     if idx < arr.len() {
                                         arr[idx] = val;
