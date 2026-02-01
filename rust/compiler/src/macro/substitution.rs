@@ -166,6 +166,7 @@ fn substitute_node_templates(node: &Node, const_bindings: &HashMap<String, Strin
                     body: substitute_block_templates(&arm.body, const_bindings),
                 })
                 .collect(),
+            is_suspend: stmt.is_suspend,
         }),
         Node::For(stmt) => Node::For(ForStmt {
             span: stmt.span,

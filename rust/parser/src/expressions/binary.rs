@@ -364,7 +364,7 @@ impl<'a> Parser<'a> {
                 {
                     Ok(Expr::Yield(None))
                 } else {
-                    let operand = self.parse_unary()?;
+                    let operand = self.parse_expression()?;
                     Ok(Expr::Yield(Some(Box::new(operand))))
                 }
             }

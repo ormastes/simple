@@ -214,7 +214,7 @@ pub(crate) fn pattern_matches(
                         Ok(false)
                     }
                 }
-                Expr::Nil => Ok(matches!(value, Value::Nil)),
+                Expr::Nil => Ok(matches!(value, Value::Nil) || matches!(value, Value::Enum { ref variant, .. } if variant == "None")),
                 _ => Ok(false),
             }
         }

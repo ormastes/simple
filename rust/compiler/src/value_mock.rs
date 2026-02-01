@@ -338,6 +338,22 @@ fn values_equal(a: &super::Value, b: &super::Value) -> bool {
         (super::Value::Array(x), super::Value::Array(y)) => {
             x.len() == y.len() && x.iter().zip(y.iter()).all(|(a, b)| values_equal(a, b))
         }
+        (super::Value::Enum { enum_name: en1, variant: v1, payload: p1 },
+         super::Value::Enum { enum_name: en2, variant: v2, payload: p2 }) => {
+            en1 == en2 && v1 == v2 && match (p1, p2) {
+                (Some(a), Some(b)) => values_equal(a, b),
+                (None, None) => true,
+                _ => false,
+            }
+        }
+        (super::Value::Dict(x), super::Value::Dict(y)) => {
+            x.len() == y.len() && x.iter().all(|(k, v)| {
+                y.get(k).map_or(false, |yv| values_equal(v, yv))
+            })
+        }
+        (super::Value::Tuple(x), super::Value::Tuple(y)) => {
+            x.len() == y.len() && x.iter().zip(y.iter()).all(|(a, b)| values_equal(a, b))
+        }
         _ => false,
     }
 }

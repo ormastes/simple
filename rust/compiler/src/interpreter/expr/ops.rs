@@ -13,6 +13,37 @@ use crate::value::{
 use super::super::{await_value, check_unit_binary_op, check_unit_unary_op, ClassDef, Enums, Env, FunctionDef, ImplMethods};
 use super::super::core_types::get_identifier_name;
 use super::super::interpreter_state::{CONST_NAMES, IMMUTABLE_VARS};
+use std::sync::Arc;
+
+/// Try to dispatch a binary operator to a dunder method on an Object value.
+/// Returns None if the left value is not an Object or doesn't have the method.
+fn try_dunder_binop(
+    dunder_name: &str,
+    left: &Value,
+    right: &Value,
+    env: &mut Env,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Option<Result<Value, CompileError>> {
+    if let Value::Object { class, fields } = left {
+        let method = classes.get(class.as_str())
+            .and_then(|cd| cd.methods.iter().find(|m| m.name == dunder_name).cloned())
+            .or_else(|| impl_methods.get(class.as_str())
+                .and_then(|ms| ms.iter().find(|m| m.name == dunder_name).cloned()));
+        if let Some(method) = method {
+            let self_ctx = Some((class.as_str(), fields));
+            return Some(super::super::interpreter_call::exec_function_with_values_and_self(
+                &method,
+                &[right.clone()],
+                env, functions, classes, enums, impl_methods,
+                self_ctx,
+            ));
+        }
+    }
+    None
+}
 use super::super::coverage_helpers::record_condition_coverage;
 
 /// Check if a variable name refers to an immutable binding
@@ -124,6 +155,22 @@ pub(super) fn eval_op_expr(
                     record_condition_coverage("<source>", 0, 1, 1, right_result);
 
                     return Ok(Some(Value::Bool(right_result)));
+                }
+                BinOp::And => {
+                    let left_val = evaluate_expr(left, env, functions, classes, enums, impl_methods)?;
+                    if !left_val.truthy() {
+                        return Ok(Some(Value::Bool(false)));
+                    }
+                    let right_val = evaluate_expr(right, env, functions, classes, enums, impl_methods)?;
+                    return Ok(Some(Value::Bool(right_val.truthy())));
+                }
+                BinOp::Or => {
+                    let left_val = evaluate_expr(left, env, functions, classes, enums, impl_methods)?;
+                    if left_val.truthy() {
+                        return Ok(Some(Value::Bool(true)));
+                    }
+                    let right_val = evaluate_expr(right, env, functions, classes, enums, impl_methods)?;
+                    return Ok(Some(Value::Bool(right_val.truthy())));
                 }
                 _ => {} // Fall through to normal handling
             }
@@ -244,7 +291,13 @@ pub(super) fn eval_op_expr(
                         Ok(Value::Array(result))
                     }
                     _ if use_float => Ok(Value::Float(left_val.as_float()? + right_val.as_float()?)),
-                    _ => Ok(Value::Int(left_val.as_int()? + right_val.as_int()?)),
+                    _ => {
+                        if let Some(result) = try_dunder_binop("__add__", &left_val, &right_val, env, functions, classes, enums, impl_methods) {
+                            result
+                        } else {
+                            Ok(Value::Int(left_val.as_int()? + right_val.as_int()?))
+                        }
+                    }
                 },
                 BinOp::Sub => {
                     if use_float {
@@ -271,7 +324,13 @@ pub(super) fn eval_op_expr(
                             }
                         }
                         _ if use_float => Ok(Value::Float(left_val.as_float()? * right_val.as_float()?)),
-                        _ => Ok(Value::Int(left_val.as_int()? * right_val.as_int()?)),
+                        _ => {
+                            if let Some(result) = try_dunder_binop("__mul__", &left_val, &right_val, env, functions, classes, enums, impl_methods) {
+                                result
+                            } else {
+                                Ok(Value::Int(left_val.as_int()? * right_val.as_int()?))
+                            }
+                        }
                     }
                 }
                 BinOp::Div => {
@@ -459,17 +518,21 @@ pub(super) fn eval_op_expr(
                         }
 
                         _ => {
-                            let ctx = ErrorContext::new()
-                                .with_code(codes::TYPE_MISMATCH)
-                                .with_help("matrix multiplication requires arrays or scalars");
-                            Err(CompileError::semantic_with_context(
-                                format!(
-                                    "@ operator requires numeric or array types, got {} @ {}",
-                                    left_val.type_name(),
-                                    right_val.type_name()
-                                ),
-                                ctx,
-                            ))
+                            if let Some(result) = try_dunder_binop("__matmul__", &left_val, &right_val, env, functions, classes, enums, impl_methods) {
+                                result
+                            } else {
+                                let ctx = ErrorContext::new()
+                                    .with_code(codes::TYPE_MISMATCH)
+                                    .with_help("matrix multiplication requires arrays or scalars");
+                                Err(CompileError::semantic_with_context(
+                                    format!(
+                                        "@ operator requires numeric or array types, got {} @ {}",
+                                        left_val.type_name(),
+                                        right_val.type_name()
+                                    ),
+                                    ctx,
+                                ))
+                            }
                         }
                     }
                 }

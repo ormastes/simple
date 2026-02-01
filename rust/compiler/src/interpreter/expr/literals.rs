@@ -145,7 +145,9 @@ pub(super) fn eval_literal_expr(
                     FStringPart::Literal(lit) => out.push_str(&lit),
                     FStringPart::Expr(e) => {
                         let v = evaluate_expr(&e, env, functions, classes, enums, impl_methods)?;
-                        out.push_str(&v.to_display_string());
+                        let display = try_call_fmt_method(&v, env, functions, classes, enums, impl_methods)
+                            .unwrap_or_else(|| v.to_display_string());
+                        out.push_str(&display);
                     }
                 }
             }
@@ -287,4 +289,52 @@ pub(super) fn eval_literal_expr(
         }
         _ => Ok(None),
     }
+}
+
+/// Try calling the `fmt()` method on a value if it's an Object with that method.
+/// Returns Some(string) if fmt() exists and returns a string, None otherwise.
+fn try_call_fmt_method(
+    value: &Value,
+    env: &mut Env,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Option<String> {
+    use super::super::interpreter_control::call_method_if_exists;
+    if let Value::Object { .. } = value {
+        if let Ok(Some(result)) = call_method_if_exists(
+            value, "fmt", &[], env, functions, classes, enums, impl_methods,
+        ) {
+            if let Value::Str(s) = result {
+                return Some(s);
+            }
+            return Some(result.to_display_string());
+        }
+    }
+    None
+}
+
+/// Try calling the `debug_fmt()` method on a value if it's an Object with that method.
+/// Returns Some(string) if debug_fmt() exists, None otherwise.
+pub(crate) fn try_call_debug_fmt_method(
+    value: &Value,
+    env: &mut Env,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Option<String> {
+    use super::super::interpreter_control::call_method_if_exists;
+    if let Value::Object { .. } = value {
+        if let Ok(Some(result)) = call_method_if_exists(
+            value, "debug_fmt", &[], env, functions, classes, enums, impl_methods,
+        ) {
+            if let Value::Str(s) = result {
+                return Some(s);
+            }
+            return Some(result.to_display_string());
+        }
+    }
+    None
 }

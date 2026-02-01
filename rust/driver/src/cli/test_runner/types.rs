@@ -280,6 +280,15 @@ impl Default for TestOptions {
     }
 }
 
+/// Individual test case result (one per `it`/`skip`/`slow_it` block)
+#[derive(Debug)]
+pub struct IndividualTestResult {
+    pub name: String,
+    pub group: String,
+    pub passed: bool,
+    pub skipped: bool,
+}
+
 /// Test result for a single file
 #[derive(Debug)]
 pub struct TestFileResult {
@@ -290,6 +299,7 @@ pub struct TestFileResult {
     pub ignored: usize,
     pub duration_ms: u64,
     pub error: Option<String>,
+    pub individual_results: Vec<IndividualTestResult>,
 }
 
 /// Overall test run result

@@ -77,6 +77,10 @@ impl<'a> super::Lexer<'a> {
                     self.advance(); // consume '~'
                     return TokenKind::ForSuspend;
                 }
+                "match" => {
+                    self.advance(); // consume '~'
+                    return TokenKind::MatchSuspend;
+                }
                 "and" => {
                     self.advance(); // consume '~'
                     return TokenKind::AndSuspend;
@@ -129,6 +133,8 @@ impl<'a> super::Lexer<'a> {
             "impl" => TokenKind::Impl,
             "mixin" => TokenKind::Mixin,
             "actor" => TokenKind::Actor,
+            "kernel" => TokenKind::Kernel,
+            "gen" => TokenKind::Gen,
             "extends" => TokenKind::Extends,
             "pub" => TokenKind::Pub,
             "priv" => TokenKind::Priv,
@@ -200,6 +206,9 @@ impl<'a> super::Lexer<'a> {
             "extern" => TokenKind::Extern,
             "context" => TokenKind::Context,
             "with" => TokenKind::With,
+            "by" => TokenKind::By,
+            "into" => TokenKind::Into,
+            "onto" => TokenKind::Onto,
             "ghost" => TokenKind::Ghost,
             "macro" => TokenKind::Macro,
             "vec" => TokenKind::Vec,

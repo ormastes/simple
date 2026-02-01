@@ -25,4 +25,4 @@ mod path_resolution;
 pub use module_evaluator::evaluate_module_exports;
 pub use module_loader::{get_import_alias, load_and_merge_module};
 pub use module_merger::merge_module_definitions;
-pub use path_resolution::resolve_module_path;
+pub use path_resolution::{resolve_module_path, clear_path_resolution_cache};

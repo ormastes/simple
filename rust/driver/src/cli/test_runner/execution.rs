@@ -7,7 +7,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use crate::runner::Runner;
-use super::types::{TestFileResult, TestExecutionMode};
+use super::types::{IndividualTestResult, TestFileResult, TestExecutionMode};
 use super::build_cache::BuildCache;
 
 /// Parse test output to extract pass/fail counts
@@ -38,6 +38,58 @@ pub fn parse_test_output(output: &str) -> (usize, usize) {
     }
 
     (total_passed, total_failed)
+}
+
+/// Parse individual test results from BDD output (✓/✗/○ lines)
+pub fn parse_individual_results(output: &str) -> Vec<IndividualTestResult> {
+    let mut results = Vec::new();
+    let mut current_group = Vec::<String>::new();
+
+    for line in output.lines() {
+        let clean = strip_ansi_codes(line);
+        let trimmed = clean.trim();
+
+        if trimmed.starts_with("✓ ") {
+            let name = trimmed[4..].to_string(); // "✓ " is 4 bytes (UTF-8)
+            results.push(IndividualTestResult {
+                name,
+                group: current_group.join(" > "),
+                passed: true,
+                skipped: false,
+            });
+        } else if trimmed.starts_with("✗ ") {
+            let name = trimmed[5..].to_string(); // "✗ " is 5 bytes
+            results.push(IndividualTestResult {
+                name,
+                group: current_group.join(" > "),
+                passed: false,
+                skipped: false,
+            });
+        } else if trimmed.starts_with("○ ") {
+            let name = trimmed[5..].trim_end_matches(" (skipped)").to_string(); // "○ " is 5 bytes
+            results.push(IndividualTestResult {
+                name,
+                group: current_group.join(" > "),
+                passed: true,
+                skipped: true,
+            });
+        } else if !trimmed.is_empty()
+            && !trimmed.contains("examples")
+            && !trimmed.contains("failure")
+            && !trimmed.starts_with("running")
+            && !trimmed.starts_with("[")
+        {
+            // This is likely a describe/context group header
+            // Use indentation to determine nesting level
+            let indent_level = (clean.len() - clean.trim_start().len()) / 2;
+            current_group.truncate(indent_level);
+            if current_group.len() == indent_level {
+                current_group.push(trimmed.to_string());
+            }
+        }
+    }
+
+    results
 }
 
 /// Strip ANSI escape codes from a string
@@ -83,22 +135,39 @@ pub fn run_test_file(runner: &Runner, path: &Path) -> TestFileResult {
         Ok(exit_code) => {
             let duration_ms = start.elapsed().as_millis() as u64;
 
-            // Capture output (we need to re-run with output capture)
-            // For now, use exit code to determine pass/fail
-            let (passed, failed) = if exit_code == 0 {
-                (1, 0) // At least one test passed
+            // Collect individual test results from the BDD framework
+            let bdd_results = simple_compiler::interpreter::get_test_results();
+            let individual_results: Vec<IndividualTestResult> = bdd_results
+                .iter()
+                .map(|(group, name, passed, skipped)| IndividualTestResult {
+                    name: name.clone(),
+                    group: group.clone(),
+                    passed: *passed,
+                    skipped: *skipped,
+                })
+                .collect();
+
+            // Derive counts from individual results if available, otherwise fall back to exit code
+            let (passed, failed, skipped) = if !individual_results.is_empty() {
+                let p = individual_results.iter().filter(|r| r.passed && !r.skipped).count();
+                let f = individual_results.iter().filter(|r| !r.passed).count();
+                let s = individual_results.iter().filter(|r| r.skipped).count();
+                (p, f, s)
+            } else if exit_code == 0 {
+                (1, 0, 0)
             } else {
-                (0, 1) // At least one test failed
+                (0, 1, 0)
             };
 
             TestFileResult {
                 path: path.to_path_buf(),
                 passed,
                 failed,
-                skipped: 0,
+                skipped,
                 ignored: 0,
                 duration_ms,
                 error: None,
+                individual_results,
             }
         }
         Err(e) => {
@@ -112,6 +181,7 @@ pub fn run_test_file(runner: &Runner, path: &Path) -> TestFileResult {
                 ignored: 0,
                 duration_ms,
                 error: Some(error_msg),
+                individual_results: vec![],
             }
         }
     }
@@ -165,6 +235,7 @@ pub fn run_test_file_safe_mode(path: &Path, options: &super::types::TestOptions)
                 ignored: 0,
                 duration_ms: start.elapsed().as_millis() as u64,
                 error: Some(format!("Failed to spawn process: {}", e)),
+                individual_results: vec![],
             };
         }
     };
@@ -180,25 +251,30 @@ pub fn run_test_file_safe_mode(path: &Path, options: &super::types::TestOptions)
             // Combine stdout and stderr for output parsing
             let combined_output = format!("{}\n{}", stdout, stderr);
 
-            // Parse the output to extract test counts
-            let (passed, failed) = parse_test_output(&combined_output);
+            // Parse individual test results from BDD output
+            let individual_results = parse_individual_results(&combined_output);
 
-            // If parsing didn't find anything, fall back to exit code
-            let (passed, failed) = if passed == 0 && failed == 0 {
-                if exit_code == 0 {
-                    (1, 0)
-                } else {
-                    (0, 1)
-                }
+            // Derive counts from individual results if available
+            let (passed, failed, skipped) = if !individual_results.is_empty() {
+                let p = individual_results.iter().filter(|r| r.passed && !r.skipped).count();
+                let f = individual_results.iter().filter(|r| !r.passed).count();
+                let s = individual_results.iter().filter(|r| r.skipped).count();
+                (p, f, s)
             } else {
-                (passed, failed)
+                // Fall back to summary line parsing
+                let (p, f) = parse_test_output(&combined_output);
+                if p == 0 && f == 0 {
+                    if exit_code == 0 { (1, 0, 0) } else { (0, 1, 0) }
+                } else {
+                    (p, f, 0)
+                }
             };
 
             TestFileResult {
                 path: path.to_path_buf(),
                 passed,
                 failed,
-                skipped: 0,
+                skipped,
                 ignored: 0,
                 duration_ms,
                 error: if exit_code != 0 && failed == 0 {
@@ -206,6 +282,7 @@ pub fn run_test_file_safe_mode(path: &Path, options: &super::types::TestOptions)
                 } else {
                     None
                 },
+                individual_results,
             }
         }
         Err(e) => TestFileResult {
@@ -216,6 +293,7 @@ pub fn run_test_file_safe_mode(path: &Path, options: &super::types::TestOptions)
             ignored: 0,
             duration_ms,
             error: Some(e),
+            individual_results: vec![],
         },
     }
 }

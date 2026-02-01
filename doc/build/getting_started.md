@@ -5,7 +5,7 @@
 ## Prerequisites
 
 - Rust toolchain (for building the Simple runtime)
-- Simple runtime (`cargo build` in `rust/` directory)
+- Simple runtime (see Installation)
 - Optional: cargo-llvm-cov (for coverage)
 
 ## Installation
@@ -15,8 +15,9 @@
 git clone https://github.com/simple-lang/simple.git
 cd simple
 
-# 2. Build the Simple runtime
+# 2. Build the Simple runtime (first-time setup)
 cd rust && cargo build
+# After initial build, use: simple build
 
 # 3. Add bin/wrappers to PATH (optional)
 export PATH="$PWD/bin/wrappers:$PATH"
@@ -237,8 +238,8 @@ simple build watch
 
 **Solution:**
 ```bash
-cd rust && cargo build
-# Runtime will be at rust/target/debug/simple_runtime
+simple build
+# Or for first-time setup: cd rust && cargo build
 ```
 
 ### "cargo-llvm-cov not found"

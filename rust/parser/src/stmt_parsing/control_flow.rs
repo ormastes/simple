@@ -500,6 +500,44 @@ impl<'a> Parser<'a> {
             ),
             subject,
             arms,
+            is_suspend: false,
+        }))
+    }
+
+    pub(crate) fn parse_match_suspend(&mut self) -> Result<Node, ParseError> {
+        let start_span = self.current.span;
+        self.expect(&TokenKind::MatchSuspend)?;
+
+        let subject = self.parse_expression()?;
+        self.expect(&TokenKind::Colon)?;
+        self.expect(&TokenKind::Newline)?;
+        self.expect(&TokenKind::Indent)?;
+
+        let mut arms = Vec::new();
+        while !self.check(&TokenKind::Dedent) && !self.is_at_end() {
+            while self.check(&TokenKind::Newline) {
+                self.advance();
+            }
+            if self.check(&TokenKind::Dedent) {
+                break;
+            }
+            arms.push(self.parse_match_arm()?);
+        }
+
+        if self.check(&TokenKind::Dedent) {
+            self.advance();
+        }
+
+        Ok(Node::Match(MatchStmt {
+            span: Span::new(
+                start_span.start,
+                self.previous.span.end,
+                start_span.line,
+                start_span.column,
+            ),
+            subject,
+            arms,
+            is_suspend: true,
         }))
     }
 

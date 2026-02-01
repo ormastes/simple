@@ -131,8 +131,9 @@ build:
 ### 1. Install Simple Build System
 
 ```bash
-# Build the Simple runtime (if not already built)
+# Build the Simple runtime (first-time setup)
 cd rust && cargo build
+# After initial build, use: simple build
 ```
 
 ### 2. Test Simple Build Commands
@@ -227,8 +228,9 @@ simple build --metrics --output=metrics.json
 ### Simple Build Command Not Found
 
 ```bash
-# Ensure Simple runtime is built
+# Ensure Simple runtime is built (first-time setup)
 cd rust && cargo build
+# After initial build, use: simple build
 
 # Ensure bin/wrappers/simple is executable
 chmod +x bin/wrappers/simple

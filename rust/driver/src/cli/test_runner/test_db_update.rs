@@ -64,38 +64,80 @@ pub fn update_test_database(
         }
     };
 
-    // Update each test result
+    // Update each test result - per individual test case when available
     for (test_path, result) in test_files.iter().zip(results.iter()) {
-        let test_id = test_path.to_str().unwrap_or("unknown").to_string();
-
-        let test_name = test_path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("unknown")
-            .to_string();
-
         let test_file = test_path.to_str().unwrap_or("unknown").to_string();
-
         let category = categorize_test(test_path);
-        let (status, failure) = convert_result_to_db(result);
-        let duration_ms = result.duration_ms as f64;
+        let duration_per_test = if !result.individual_results.is_empty() {
+            result.duration_ms as f64 / result.individual_results.len() as f64
+        } else {
+            result.duration_ms as f64
+        };
 
-        debug_log!(DebugLevel::Trace, "TestDB", "  Test: {}", test_id);
-        debug_log!(DebugLevel::Trace, "TestDB", "    Status: {:?}", status);
-        debug_log!(DebugLevel::Trace, "TestDB", "    Duration: {}ms", duration_ms);
-        debug_log!(DebugLevel::Trace, "TestDB", "    Category: {}", category);
+        if !result.individual_results.is_empty() {
+            // Emit one row per individual test case
+            for ind in &result.individual_results {
+                let test_id = format!("{}::{}::{}", test_file, ind.group, ind.name);
+                let test_name = ind.name.clone();
 
-        test_db::update_test_result(
-            &mut test_db,
-            &test_id,
-            &test_name,
-            &test_file,
-            &category,
-            status,
-            duration_ms,
-            failure,
-            all_tests_run,
-        );
+                let (status, failure) = if ind.skipped {
+                    (TestStatus::Skipped, None)
+                } else if ind.passed {
+                    (TestStatus::Passed, None)
+                } else {
+                    let failure = TestFailure {
+                        error_message: format!("Test '{}' failed", ind.name),
+                        assertion_failed: None,
+                        location: Some(test_file.clone()),
+                        stack_trace: None,
+                    };
+                    (TestStatus::Failed, Some(failure))
+                };
+
+                debug_log!(DebugLevel::Trace, "TestDB", "  Test: {}", test_id);
+                debug_log!(DebugLevel::Trace, "TestDB", "    Status: {:?}", status);
+
+                test_db::update_test_result(
+                    &mut test_db,
+                    &test_id,
+                    &test_name,
+                    &test_file,
+                    &category,
+                    status,
+                    duration_per_test,
+                    failure,
+                    all_tests_run,
+                );
+            }
+        } else {
+            // Fall back to per-file row (compile errors, etc.)
+            let test_id = test_file.clone();
+            let test_name = test_path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("unknown")
+                .to_string();
+
+            let (status, failure) = convert_result_to_db(result);
+            let duration_ms = result.duration_ms as f64;
+
+            debug_log!(DebugLevel::Trace, "TestDB", "  Test: {}", test_id);
+            debug_log!(DebugLevel::Trace, "TestDB", "    Status: {:?}", status);
+            debug_log!(DebugLevel::Trace, "TestDB", "    Duration: {}ms", duration_ms);
+            debug_log!(DebugLevel::Trace, "TestDB", "    Category: {}", category);
+
+            test_db::update_test_result(
+                &mut test_db,
+                &test_id,
+                &test_name,
+                &test_file,
+                &category,
+                status,
+                duration_ms,
+                failure,
+                all_tests_run,
+            );
+        }
     }
 
     debug_log!(

@@ -268,6 +268,30 @@ pub(super) fn eval_collection_expr(
                                 .unwrap_or_default();
                             Ok(Value::Str(sliced))
                         }
+                        Value::Object { ref class, ref fields, .. } => {
+                            // Try __getitem__ for slice on Objects
+                            let getitem_method = classes.get(class.as_str())
+                                .and_then(|cd| cd.methods.iter().find(|m| m.name == "__getitem__").cloned())
+                                .or_else(|| impl_methods.get(class.as_str())
+                                    .and_then(|ms| ms.iter().find(|m| m.name == "__getitem__").cloned()));
+                            if let Some(method) = getitem_method {
+                                let self_ctx = Some((class.as_str(), fields));
+                                super::super::interpreter_call::exec_function_with_values_and_self(
+                                    &method,
+                                    &[idx_val.clone()],
+                                    env, functions, classes, enums, impl_methods,
+                                    self_ctx,
+                                )
+                            } else {
+                                let ctx = ErrorContext::new()
+                                    .with_code(codes::INVALID_OPERATION)
+                                    .with_help("slicing is only supported on arrays, tuples, strings, and objects with __getitem__");
+                                Err(CompileError::semantic_with_context(
+                                    format!("invalid operation: cannot slice value of type {}", recv_val.type_name()),
+                                    ctx,
+                                ))
+                            }
+                        }
                         _ => {
                             let ctx = ErrorContext::new()
                                 .with_code(codes::INVALID_OPERATION)
@@ -465,17 +489,32 @@ pub(super) fn eval_collection_expr(
                         })
                     }
                 }
-                Value::Object { fields, .. } => {
-                    let key = idx_val.to_key_string();
-                    fields.get(&key).cloned().ok_or_else(|| {
-                        let ctx = ErrorContext::new()
-                            .with_code(codes::INDEX_OUT_OF_BOUNDS)
-                            .with_help("ensure the field exists in the object before accessing it");
-                        CompileError::semantic_with_context(
-                            format!("index out of bounds: field not found: {}", key),
-                            ctx,
+                Value::Object { ref class, ref fields, .. } => {
+                    // Try __getitem__ method first (operator overloading)
+                    let getitem_method = classes.get(class.as_str())
+                        .and_then(|cd| cd.methods.iter().find(|m| m.name == "__getitem__").cloned())
+                        .or_else(|| impl_methods.get(class.as_str())
+                            .and_then(|ms| ms.iter().find(|m| m.name == "__getitem__").cloned()));
+                    if let Some(method) = getitem_method {
+                        let self_ctx = Some((class.as_str(), fields));
+                        super::super::interpreter_call::exec_function_with_values_and_self(
+                            &method,
+                            &[idx_val.clone()],
+                            env, functions, classes, enums, impl_methods,
+                            self_ctx,
                         )
-                    })
+                    } else {
+                        let key = idx_val.to_key_string();
+                        fields.get(&key).cloned().ok_or_else(|| {
+                            let ctx = ErrorContext::new()
+                                .with_code(codes::INDEX_OUT_OF_BOUNDS)
+                                .with_help("ensure the field exists in the object before accessing it");
+                            CompileError::semantic_with_context(
+                                format!("index out of bounds: field not found: {}", key),
+                                ctx,
+                            )
+                        })
+                    }
                 }
                 _ => {
                     let ctx = ErrorContext::new()
@@ -585,6 +624,42 @@ pub(super) fn eval_collection_expr(
                 Value::Array(arr) => arr.len() as i64,
                 Value::Str(s) => s.len() as i64,
                 Value::Tuple(t) => t.len() as i64,
+                Value::Object { ref class, ref fields, .. } => {
+                    // Try __getslice__ method for slicing
+                    let getslice_method = classes.get(class.as_str())
+                        .and_then(|cd| cd.methods.iter().find(|m| m.name == "__getslice__").cloned())
+                        .or_else(|| impl_methods.get(class.as_str())
+                            .and_then(|ms| ms.iter().find(|m| m.name == "__getslice__").cloned()));
+                    if let Some(method) = getslice_method {
+                        let start_val = if let Some(s) = start {
+                            evaluate_expr(s, env, functions, classes, enums, impl_methods)?
+                        } else {
+                            Value::Int(0)
+                        };
+                        let end_val = if let Some(e) = end {
+                            evaluate_expr(e, env, functions, classes, enums, impl_methods)?
+                        } else {
+                            Value::Int(-1)
+                        };
+                        let self_ctx = Some((class.as_str(), fields));
+                        return Ok(Some(super::super::interpreter_call::exec_function_with_values_and_self(
+                            &method,
+                            &[start_val, end_val],
+                            env, functions, classes, enums, impl_methods,
+                            self_ctx,
+                        )?));
+                    }
+                    let ctx = ErrorContext::new()
+                        .with_code(codes::INVALID_OPERATION)
+                        .with_help("slicing requires __getslice__ method on object");
+                    return Err(CompileError::semantic_with_context(
+                        format!(
+                            "invalid operation: cannot slice value of type {} with step",
+                            recv_val.type_name()
+                        ),
+                        ctx,
+                    ));
+                }
                 _ => {
                     let ctx = ErrorContext::new()
                         .with_code(codes::INVALID_OPERATION)

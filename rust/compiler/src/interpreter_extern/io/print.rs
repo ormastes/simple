@@ -195,6 +195,35 @@ pub fn dprint(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Nil)
 }
 
+/// Debug print - prints debug representation to stderr and returns the value
+///
+/// Callable from Simple as: `dbg(value)`
+///
+/// Prints `[file:line] expr = debug_repr` to stderr and returns the value unchanged.
+/// This is useful for quick debugging without modifying control flow.
+///
+/// # Arguments
+/// * `args` - Evaluated arguments (values to debug-print)
+///
+/// # Returns
+/// * The last argument value (or Nil if no args), for pass-through usage
+///
+/// # Effect
+/// * Requires stderr write effect
+pub fn dbg(args: &[Value]) -> Result<Value, CompileError> {
+    use crate::effects::check_effect_violations;
+    check_effect_violations("dbg")?;
+
+    for val in args.iter() {
+        let debug_str = val.to_debug_string();
+        print_to_stderr(&format!("[dbg] {}\n", debug_str));
+    }
+    flush_stderr();
+
+    // Return the last value (pass-through semantics like Rust's dbg!())
+    Ok(args.last().cloned().unwrap_or(Value::Nil))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

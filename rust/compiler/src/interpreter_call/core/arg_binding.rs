@@ -148,6 +148,30 @@ pub(crate) fn bind_args_with_injected(
                         ctx,
                     ));
                 }
+                // Validate call-site label on named argument
+                if let Some(label) = &arg.label {
+                    if let Some(p) = param {
+                        if let Some(expected) = &p.call_site_label {
+                            if label != expected {
+                                let ctx = ErrorContext::new()
+                                    .with_code(codes::TYPE_MISMATCH)
+                                    .with_help(format!("parameter '{}' expects label '{}', not '{}'", name, expected, label));
+                                return Err(CompileError::semantic_with_context(
+                                    format!("call-site label mismatch: expected '{}' but got '{}'", expected, label),
+                                    ctx,
+                                ));
+                            }
+                        } else {
+                            let ctx = ErrorContext::new()
+                                .with_code(codes::TYPE_MISMATCH)
+                                .with_help(format!("parameter '{}' does not declare a call-site label", name));
+                            return Err(CompileError::semantic_with_context(
+                                format!("unexpected call-site label '{}' on argument '{}'", label, name),
+                                ctx,
+                            ));
+                        }
+                    }
+                }
                 let val = wrap_trait_object!(val, param.and_then(|p| p.ty.as_ref()));
                 validate_unit!(&val, param.and_then(|p| p.ty.as_ref()), format!("parameter '{}'", name));
                 bound.insert(name.clone(), val);
@@ -179,6 +203,28 @@ pub(crate) fn bind_args_with_injected(
                         ));
                     }
                     let param = params_to_bind[positional_idx];
+                    // Validate call-site label on positional argument
+                    if let Some(label) = &arg.label {
+                        if let Some(expected) = &param.call_site_label {
+                            if label != expected {
+                                let ctx = ErrorContext::new()
+                                    .with_code(codes::TYPE_MISMATCH)
+                                    .with_help(format!("parameter '{}' expects label '{}', not '{}'", param.name, expected, label));
+                                return Err(CompileError::semantic_with_context(
+                                    format!("call-site label mismatch: expected '{}' but got '{}'", expected, label),
+                                    ctx,
+                                ));
+                            }
+                        } else {
+                            let ctx = ErrorContext::new()
+                                .with_code(codes::TYPE_MISMATCH)
+                                .with_help(format!("parameter '{}' does not declare a call-site label", param.name));
+                            return Err(CompileError::semantic_with_context(
+                                format!("unexpected call-site label '{}' on argument for parameter '{}'", label, param.name),
+                                ctx,
+                            ));
+                        }
+                    }
                     let val = wrap_trait_object!(val, param.ty.as_ref());
                     validate_unit!(&val, param.ty.as_ref(), format!("parameter '{}'", param.name));
                     bound.insert(param.name.clone(), val);

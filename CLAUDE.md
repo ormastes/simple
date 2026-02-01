@@ -552,7 +552,7 @@ simple build --help
 make check         # fmt + lint + test (before commit) → use: simple build check
 make check-full    # + coverage + duplication → use: simple build check --full
 make test-all      # Run ALL tests → use: simple build test
-cd rust && cargo test --workspace
+simple build rust test
 
 # Runtime binary (Rust core)
 ./rust/target/debug/simple_runtime script.spl
@@ -564,44 +564,50 @@ cd rust && cargo test --workspace
 ### Compile and Recompile
 
 ```bash
-# Build Rust runtime (required first)
-cd rust && cargo build                    # Debug build (423 MB, fast)
-cd rust && cargo build --release          # Release build (40 MB, optimized)
-cd rust && cargo build --profile bootstrap -p simple-driver  # Bootstrap build (9.3 MB, minimal size)
+# First-time setup (bootstrap the runtime)
+cd rust && cargo build                    # One-time: build the Rust runtime
 
-# Rebuild after Rust changes
-cd rust && cargo build 2>&1 | head -20   # Build and check for warnings/errors
+# After initial setup, use simple build for everything:
+simple build                              # Debug build
+simple build --release                    # Release build
+simple build --bootstrap                  # Bootstrap build (9.3 MB, minimal size)
 
 # Run a Simple script directly
 ./rust/target/debug/simple_runtime script.spl
 
-# Run with CLI wrapper (uses src/app/cli/main.spl)
+# Run with CLI wrapper
 ./bin/wrappers/simple script.spl
+
+# Rust subproject commands
+simple build rust test                    # All Rust workspace tests
+simple build rust test --doc              # Rust doc-tests only
+simple build rust test -p simple-driver   # Single crate tests
+simple build rust lint                    # Run clippy
+simple build rust fmt                     # Run rustfmt
+simple build rust check                   # Check without building
+simple build rust clean                   # Clean Rust artifacts
+
+# Run Simple/SSpec tests
+simple test                               # All Simple/SSpec tests
+simple test path/to/spec.spl             # Single test file
+simple test --list                        # List tests without running
 
 # Run lint on Simple code
 ./bin/wrappers/simple lint src/app/fix/rules.spl
-./rust/target/debug/simple_runtime src/app/lint/main.spl -- src/app/fix/rules.spl
 
 # Run fix with options
 ./bin/wrappers/simple fix file.spl --dry-run        # Preview fixes
 ./bin/wrappers/simple fix file.spl --fix-all         # Apply all fixes
 ./bin/wrappers/simple fix file.spl --fix-interactive  # Prompt per fix
-
-# Run tests
-./rust/target/debug/simple_runtime test                        # All Simple/SSpec tests
-./rust/target/debug/simple_runtime test path/to/spec.spl       # Single test file
-./rust/target/debug/simple_runtime test --list                  # List tests without running
-cd rust && cargo test --workspace                               # Rust tests
-cd rust && cargo test --doc --workspace                         # Doc-tests only
 ```
 
 ### Fixing Rust Warnings
 
-When `cargo build` shows warnings, fix them before committing:
+When building shows warnings, fix them before committing:
 
 ```bash
 # Check for warnings
-cd rust && cargo build 2>&1 | grep "warning:"
+simple build rust lint
 
 # Common fixes:
 # - "shared reference to mutable static" → Use OnceLock + AtomicUsize
@@ -617,13 +623,13 @@ The bootstrap profile produces the smallest possible binary (9.3 MB, 76.8% reduc
 
 ```bash
 # Build with bootstrap profile
-cd rust && cargo build --profile bootstrap -p simple-driver
+simple build --bootstrap
 
 # Binary location
-./target/bootstrap/simple_runtime  # 9.3 MB
+./rust/target/bootstrap/simple_runtime  # 9.3 MB
 
 # Optional: Compress with UPX (requires: sudo apt-get install upx)
-upx --best --lzma target/bootstrap/simple_runtime  # → ~4.5 MB (88.8% total reduction)
+upx --best --lzma ./rust/target/bootstrap/simple_runtime  # → ~4.5 MB (88.8% total reduction)
 ```
 
 **Build Profile Comparison:**
@@ -724,15 +730,15 @@ if upx.is_compressed("myapp"):
 
 ```bash
 # Run all doc-tests (workspace-wide)
-cd rust && cargo test --doc --workspace
+simple build rust test --doc
 
 # Run doc-tests for specific crate
-cd rust && cargo test --doc -p simple-driver
-cd rust && cargo test --doc -p arch_test
-cd rust && cargo test --doc -p simple-compiler
+simple build rust test --doc -p simple-driver
+simple build rust test --doc -p arch_test
+simple build rust test --doc -p simple-compiler
 
 # Count total ignored doc-tests
-cd rust && cargo test --doc --workspace 2>&1 | grep " ... ignored$" | wc -l
+simple build rust test --doc 2>&1 | grep " ... ignored$" | wc -l
 ```
 
 ### Test Markers Explained
@@ -765,12 +771,12 @@ cd rust && cargo test --doc --workspace 2>&1 | grep " ... ignored$" | wc -l
 # Development workflow
 ./rust/target/debug/simple_runtime test                    # Quick feedback (excludes slow)
 ./rust/target/debug/simple_runtime test --only-slow        # Before commit (run slow tests)
-cd rust && cargo test --doc --workspace        # Verify doc examples
+simple build rust test --doc        # Verify doc examples
 
 # Investigation
 ./rust/target/debug/simple_runtime test --list --show-tags           # See all tests with tags
 ./rust/target/debug/simple_runtime test --only-skipped --list        # See unimplemented features
-cd rust && cargo test --doc -p simple-driver 2>&1 | grep ignored   # Check ignored doc-tests
+simple build rust test --doc -p simple-driver 2>&1 | grep ignored   # Check ignored doc-tests
 
 # Targeted testing
 ./rust/target/debug/simple_runtime test my_feature         # Run tests matching "my_feature"
@@ -827,7 +833,7 @@ Test runs are automatically tracked in `doc/test/test_db.sdn` (in the `test_runs
 ./rust/target/debug/simple_runtime --gen-lean module.spl --verify memory|types|effects|all
 ```
 
-> **Note:** Cargo workspace is at `rust/Cargo.toml`. Run all `cargo` commands from the `rust/` directory.
+> **Note:** Use `simple build rust <cmd>` instead of direct cargo commands. Cargo workspace is at `rust/Cargo.toml`.
 
 Projects in `verification/`: borrow checker, GC safety, effects, SC-DRF.
 

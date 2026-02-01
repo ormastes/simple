@@ -440,7 +440,7 @@ fn exec_method_body(
 }
 
 /// Helper to call a method if it exists on an object
-fn call_method_if_exists(
+pub(crate) fn call_method_if_exists(
     receiver: &Value,
     method_name: &str,
     args: &[Value],

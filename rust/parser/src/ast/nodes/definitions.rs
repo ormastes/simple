@@ -46,6 +46,9 @@ pub struct FunctionDef {
     /// Whether this is a mutable method (uses `me` keyword instead of `fn`)
     /// Mutable methods can modify self and the changes persist
     pub is_me_method: bool,
+    /// Whether this is a generator function (uses `gen` keyword)
+    /// Generator functions collect yield values and return a Generator
+    pub is_generator: bool,
     /// Return type constraint for dependent function types (VER-011)
     /// Syntax: `fn f(x: T) -> U where result.len() == x.len():`
     /// The predicate can reference `result` and function parameters

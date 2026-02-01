@@ -71,9 +71,18 @@ fn inject_mixins(class_def: &ClassDef) -> ClassDef {
 fn get_iterator_values(iterable: &Value) -> Result<Vec<Value>, CompileError> {
     match iterable {
         Value::Array(arr) => Ok(arr.clone()),
+        Value::FrozenArray(arr) => Ok(arr.as_ref().clone()),
+        Value::FixedSizeArray { data, .. } => Ok(data.clone()),
         Value::Tuple(t) => Ok(t.clone()),
         Value::Str(s) => Ok(s.chars().map(|c| Value::Str(c.to_string())).collect()),
         Value::Generator(gen) => Ok(gen.collect_remaining()),
+        Value::FrozenDict(map) => {
+            let entries: Vec<Value> = map
+                .iter()
+                .map(|(k, v)| Value::Tuple(vec![Value::Str(k.clone()), v.clone()]))
+                .collect();
+            Ok(entries)
+        }
         Value::Dict(map) => {
             // Iterate over dict returns (key, value) tuples
             let entries: Vec<Value> = map

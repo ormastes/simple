@@ -74,6 +74,24 @@ pub(super) fn call_value_with_args(
             let result = exec_block(&def.body, &mut local_env, functions, classes, enums, impl_methods);
             control_to_value(result)
         }
+        Value::Object { ref class, ref fields } => {
+            // Support __call__ protocol
+            let mut env_clone = _env.clone();
+            if let Some(result) = super::interpreter_control::call_method_if_exists(
+                callee,
+                "__call__",
+                &args,
+                &mut env_clone,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )? {
+                Ok(result)
+            } else {
+                Err(crate::error::factory::not_callable(callee.type_name()))
+            }
+        }
         _ => Err(crate::error::factory::not_callable(callee.type_name())),
     }
 }
@@ -416,10 +434,12 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
 
                             for trait_method in &trait_def.methods {
                                 // Only require implementation of abstract methods
-                                // Note: method may exist in another impl block, so we warn via tracing
-                                // instead of returning an error
                                 if trait_method.is_abstract && !impl_method_names.contains(&trait_method.name) {
-                                    tracing::debug!("type `{}` missing method `{}` from trait `{}`", type_name, trait_method.name, trait_name);
+                                    return Err(crate::error::factory::missing_trait_method(
+                                        &type_name,
+                                        &trait_method.name,
+                                        trait_name,
+                                    ));
                                 }
                             }
 
@@ -875,8 +895,7 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                                 }
                             }
                             ImportTarget::Single(_) | ImportTarget::Aliased { .. } => {
-                                // Single/Aliased import: use module or use module as alias
-                                // Don't unpack - just bind the module dict
+                                // Single/Aliased: bind module dict only, do NOT unpack
                             }
                         }
                         // Also keep the module dict under its name for qualified access

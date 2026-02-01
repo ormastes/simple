@@ -29,16 +29,15 @@ extern fn rt_pool_free(pool: i64)
 extern fn rt_pool_available(pool: i64) -> i64
 extern fn rt_pool_capacity(pool: i64) -> i64
 
+# Allocator trait - interface for custom allocators.
 #
-Allocator trait - interface for custom allocators.
-
-Implement this trait to create custom allocation strategies.
-
-```sdoctest
->>> trait Allocator:
-...     fn alloc(self, size: i64) -> i64
-...     fn dealloc(self, ptr: i64)
-```
+# Implement this trait to create custom allocation strategies.
+#
+# ```sdoctest
+# >>> trait Allocator:
+# ...     fn alloc(self, size: i64) -> i64
+# ...     fn dealloc(self, ptr: i64)
+# ```
 
 trait Allocator:
     # Allocate memory of the given size. Returns a pointer (as i64) to the allocated memory.
@@ -51,70 +50,55 @@ trait Allocator:
     fn supports_dealloc(self) -> bool:
         return true
 
+# Arena allocator for batch allocations.
 #
-Arena allocator for batch allocations.
-
-Allocates memory linearly from a pre-allocated buffer.
-All allocations are freed at once via reset().
-Ideal for temporary allocations with known lifetime.
-
-```sdoctest
->>> val arena = Arena.new(1024)
->>> val p1 = arena.alloc_raw(64)
->>> val p2 = arena.alloc_raw(128)
->>> arena.used()  # Returns bytes used
-192
->>> arena.reset()
->>> arena.used()
-0
-```
+# Allocates memory linearly from a pre-allocated buffer.
+# All allocations are freed at once via reset().
+# Ideal for temporary allocations with known lifetime.
+#
+# ```sdoctest
+# >>> val arena = Arena.new(1024)
+# >>> val p1 = arena.alloc_raw(64)
+# >>> val p2 = arena.alloc_raw(128)
+# >>> arena.used()  # Returns bytes used
+# 192
+# >>> arena.reset()
+# >>> arena.used()
+# 0
+# ```
 
 struct Arena:
     _handle: i64
     _capacity: i64
 
-    #
-    Create a new arena with the given capacity in bytes.
-    
+    # Create a new arena with the given capacity in bytes.
     fn new(capacity: i64) -> Arena:
         val handle = rt_arena_new(capacity)
         return Arena(_handle: handle, _capacity: capacity)
 
-    #
-    Allocate raw bytes from the arena.
-    Returns 0 if the arena is full.
-    
+    # Allocate raw bytes from the arena.
+    # Returns 0 if the arena is full.
     fn alloc_raw(self, size: i64) -> i64:
         return rt_arena_alloc(self._handle, size)
 
-    #
-    Reset the arena, freeing all allocations.
-    Does not release the underlying memory.
-    
+    # Reset the arena, freeing all allocations.
+    # Does not release the underlying memory.
     fn reset(self):
         rt_arena_reset(self._handle)
 
-    #
-    Get the number of bytes currently used.
-    
+    # Get the number of bytes currently used.
     fn used(self) -> i64:
         return rt_arena_used(self._handle)
 
-    #
-    Get the total capacity in bytes.
-    
+    # Get the total capacity in bytes.
     fn capacity(self) -> i64:
         return rt_arena_capacity(self._handle)
 
-    #
-    Check if the arena has space for the given size.
-    
+    # Check if the arena has space for the given size.
     fn has_space(self, size: i64) -> bool:
         return self.used() + size <= self.capacity()
 
-    #
-    Free the arena and release underlying memory.
-    
+    # Free the arena and release underlying memory.
     fn free(self):
         rt_arena_free(self._handle)
 
@@ -183,58 +167,45 @@ struct Arena:
         val util_pct = self.utilization() * 100.0
         return "Arena: {used_bytes}/{total_bytes} bytes ({util_pct:.1}% used)"
 
+# Typed arena for allocating objects of a specific type.
 #
-Typed arena for allocating objects of a specific type.
-
-```sdoctest
->>> struct Node:
-...     value: i64
-...     next: i64
->>> val arena = TypedArena<Node>.new(100)
->>> val node = arena.alloc(Node(value: 42, next: 0))
-```
+# ```sdoctest
+# >>> struct Node:
+# ...     value: i64
+# ...     next: i64
+# >>> val arena = TypedArena<Node>.new(100)
+# >>> val node = arena.alloc(Node(value: 42, next: 0))
+# ```
 
 struct TypedArena<T>:
     _arena: Arena
     _object_size: i64
 
-    #
-    Create a new typed arena with capacity for N objects.
-    
+    # Create a new typed arena with capacity for N objects.
     fn new(capacity: i64) -> TypedArena<T>:
         val object_size = 64  # Placeholder - would use sizeof(T)
         val arena = Arena.new(capacity * object_size)
         return TypedArena(_arena: arena, _object_size: object_size)
 
-    #
-    Allocate a new object in the arena.
-    
+    # Allocate a new object in the arena.
     fn alloc(self, value: T) -> T:
         val ptr = self._arena.alloc_raw(self._object_size)
         # In real impl, would copy value to ptr
         return value
 
-    #
-    Reset the arena, invalidating all allocated objects.
-    
+    # Reset the arena, invalidating all allocated objects.
     fn reset(self):
         self._arena.reset()
 
-    #
-    Get the number of objects allocated.
-    
+    # Get the number of objects allocated.
     fn count(self) -> i64:
         return self._arena.used() / self._object_size
 
-    #
-    Get the maximum number of objects.
-    
+    # Get the maximum number of objects.
     fn capacity(self) -> i64:
         return self._arena.capacity() / self._object_size
 
-    #
-    Free the arena.
-    
+    # Free the arena.
     fn free(self):
         self._arena.free()
 
@@ -309,30 +280,26 @@ struct TypedArena<T>:
         val obj_size = self._object_size
         return "TypedArena: {count}/{total} objects ({util_pct:.1}%), {obj_size} bytes each"
 
+# Object pool for reusing fixed-size allocations.
 #
-Object pool for reusing fixed-size allocations.
-
-Maintains a pool of pre-allocated objects that can be
-acquired and released for reuse.
-
-```sdoctest
->>> val pool = Pool.new(64, 100)  # 100 objects of 64 bytes
->>> val buf = pool.acquire()
->>> pool.release(buf)
-```
+# Maintains a pool of pre-allocated objects that can be
+# acquired and released for reuse.
+#
+# ```sdoctest
+# >>> val pool = Pool.new(64, 100)  # 100 objects of 64 bytes
+# >>> val buf = pool.acquire()
+# >>> pool.release(buf)
+# ```
 
 struct Pool:
     _handle: i64
     _object_size: i64
     _capacity: i64
 
-    #
-    Create a new pool with objects of the given size.
-
-    Arguments:
-    - object_size: Size of each object in bytes
-    - capacity: Maximum number of objects in the pool
-    
+    # Create a new pool with objects of the given size.
+    # Arguments:
+    # - object_size: Size of each object in bytes
+    # - capacity: Maximum number of objects in the pool
     fn new(object_size: i64, capacity: i64) -> Pool:
         val handle = rt_pool_new(object_size, capacity)
         return Pool(
@@ -341,40 +308,28 @@ struct Pool:
             _capacity: capacity
         )
 
-    #
-    Acquire an object from the pool.
-    Returns 0 if the pool is exhausted.
-    
+    # Acquire an object from the pool.
+    # Returns 0 if the pool is exhausted.
     fn acquire(self) -> i64:
         return rt_pool_acquire(self._handle)
 
-    #
-    Release an object back to the pool for reuse.
-    
+    # Release an object back to the pool for reuse.
     fn release(self, ptr: i64):
         rt_pool_release(self._handle, ptr)
 
-    #
-    Get the number of available objects.
-    
+    # Get the number of available objects.
     fn available(self) -> i64:
         return rt_pool_available(self._handle)
 
-    #
-    Get the total capacity.
-    
+    # Get the total capacity.
     fn capacity(self) -> i64:
         return rt_pool_capacity(self._handle)
 
-    #
-    Check if the pool has available objects.
-    
+    # Check if the pool has available objects.
     fn has_available(self) -> bool:
         return self.available() > 0
 
-    #
-    Free the pool and all objects.
-    
+    # Free the pool and all objects.
     fn free(self):
         rt_pool_free(self._handle)
 
@@ -450,35 +405,30 @@ struct Pool:
         val obj_size = self._object_size
         return "Pool: {in_use_count}/{total_count} objects in use ({util_pct:.1}%), {obj_size} bytes each"
 
+# Typed object pool for reusing objects of a specific type.
 #
-Typed object pool for reusing objects of a specific type.
-
-```sdoctest
->>> struct Buffer:
-...     data: [u8]
-...     size: i64
->>> val pool = TypedPool<Buffer>.new(100)
->>> val buf = pool.acquire()
->>> buf.size = 1024
->>> pool.release(buf)
-```
+# ```sdoctest
+# >>> struct Buffer:
+# ...     data: [u8]
+# ...     size: i64
+# >>> val pool = TypedPool<Buffer>.new(100)
+# >>> val buf = pool.acquire()
+# >>> buf.size = 1024
+# >>> pool.release(buf)
+# ```
 
 struct TypedPool<T>:
     _pool: Pool
     _object_size: i64
 
-    #
-    Create a new typed pool with capacity for N objects.
-    
+    # Create a new typed pool with capacity for N objects.
     fn new(capacity: i64) -> TypedPool<T>:
         val object_size = 64  # Placeholder - would use sizeof(T)
         val pool = Pool.new(object_size, capacity)
         return TypedPool(_pool: pool, _object_size: object_size)
 
-    #
-    Acquire an object from the pool.
-    Returns None if the pool is exhausted.
-    
+    # Acquire an object from the pool.
+    # Returns None if the pool is exhausted.
     fn acquire(self) -> Option<T>:
         val ptr = self._pool.acquire()
         if ptr == 0:
@@ -486,28 +436,20 @@ struct TypedPool<T>:
         # In real impl, would read object from ptr
         return Option.None  # Placeholder
 
-    #
-    Release an object back to the pool.
-    
+    # Release an object back to the pool.
     fn release(obj: T):
         # In real impl, would get ptr from obj and release
         pass
 
-    #
-    Get the number of available objects.
-    
+    # Get the number of available objects.
     fn available(self) -> i64:
         return self._pool.available()
 
-    #
-    Get the total capacity.
-    
+    # Get the total capacity.
     fn capacity(self) -> i64:
         return self._pool.capacity()
 
-    #
-    Free the pool.
-    
+    # Free the pool.
     fn free(self):
         self._pool.free()
 
@@ -585,19 +527,18 @@ struct TypedPool<T>:
         val obj_size = self._object_size
         return "TypedPool: {in_use_count}/{total_count} objects in use ({util_pct:.1}%), {obj_size} bytes each"
 
+# Bump allocator - simple linear allocator.
 #
-Bump allocator - simple linear allocator.
-
-Even simpler than Arena - just bumps a pointer forward.
-No metadata overhead, but no reset capability.
-
-```sdoctest
->>> val bump = BumpAllocator.new(4096)
->>> val p1 = bump.alloc(100)
->>> val p2 = bump.alloc(200)
->>> bump.remaining()
-3796
-```
+# Even simpler than Arena - just bumps a pointer forward.
+# No metadata overhead, but no reset capability.
+#
+# ```sdoctest
+# >>> val bump = BumpAllocator.new(4096)
+# >>> val p1 = bump.alloc(100)
+# >>> val p2 = bump.alloc(200)
+# >>> bump.remaining()
+# 3796
+# ```
 
 struct BumpAllocator:
     _buffer: i64
@@ -681,10 +622,9 @@ struct BumpAllocator:
         val util_pct = self.utilization() * 100.0
         return "BumpAllocator: {used_bytes}/{total_bytes} bytes used ({util_pct:.1}%)"
 
+# Allocator configuration for classes.
 #
-Allocator configuration for classes.
-
-Use with @allocator decorator to specify custom allocation.
+# Use with @allocator decorator to specify custom allocation.
 
 struct AllocatorConfig:
     allocator_type: str

@@ -94,6 +94,8 @@ pub struct MatchStmt {
     pub span: Span,
     pub subject: Expr,
     pub arms: Vec<MatchArm>,
+    /// Suspension match statement (match~) for explicit suspension points in async-by-default
+    pub is_suspend: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]

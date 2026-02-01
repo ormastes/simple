@@ -375,12 +375,12 @@ File in `simple/bug_report.md`:
 ## Compile and Fix Workflow
 
 ```bash
-# Build Rust runtime
-cd rust && cargo build                    # Debug build
-cd rust && cargo build --release          # Release (optimized)
+# Build project
+simple build                              # Debug build
+simple build --release                    # Release (optimized)
 
 # Check for warnings — fix all before committing
-cd rust && cargo build 2>&1 | grep "warning:"
+simple build rust lint
 
 # Common Rust warning fixes:
 # "shared reference to mutable static" → Use OnceLock + AtomicUsize

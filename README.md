@@ -34,20 +34,21 @@ A statically typed programming language with Python-like syntax, modern safety f
 # Build from source (using Simple's self-hosting build system)
 simple build --release
 
-# Or using cargo directly
-cargo build --release
+# Or bootstrap from source (first-time)
+cd rust && cargo build --release
 
 # Binary location
-./target/release/simple
+./rust/target/release/simple_runtime
 
 # (Optional) Add to PATH
-export PATH="$PWD/target/release:$PATH"
+export PATH="$PWD/bin/wrappers:$PATH"
 ```
 
 ### Build with GPU Support
 
 ```bash
-cargo build --release --features vulkan
+simple build --release --features=vulkan
+# Or: cd rust && cargo build --release --features vulkan
 ```
 
 ### Your First Program
@@ -838,19 +839,19 @@ simple/
 
 ```bash
 # Debug build
-cargo build
+simple build
 
 # Release build
-cargo build --release
+simple build --release
 
 # With GPU support
-cargo build --release --features vulkan
+simple build --release --features=vulkan
 
-# Run all tests
-cargo test --workspace
+# Run all Rust tests
+simple build rust test
 
 # Run stdlib tests
-cargo test -p simple-driver simple_stdlib
+simple build rust test -p simple-driver simple_stdlib
 ```
 
 ### Testing
@@ -858,20 +859,17 @@ cargo test -p simple-driver simple_stdlib
 Simple uses a comprehensive test strategy with multiple levels:
 
 ```bash
-# Unit tests (631+ tests)
-make test-unit
+# All tests (Rust + Simple)
+simple build test
 
-# Integration tests
-make test-it
+# Rust tests only
+simple build rust test
 
-# System tests
-make test-system
-
-# All tests
-make test
+# Rust doc-tests
+simple build rust test --doc
 
 # Coverage reports
-make coverage
+simple build coverage
 ```
 
 See [doc/guides/test.md](doc/guides/test.md) for complete testing documentation.
@@ -880,19 +878,16 @@ See [doc/guides/test.md](doc/guides/test.md) for complete testing documentation.
 
 ```bash
 # Check before commit (fmt + lint + test)
-make check
+simple build check
 
 # Full check (includes coverage + duplication)
-make check-full
+simple build check --full
 
 # Format code
-make fmt
+simple build fmt
 
 # Lint
-make lint
-
-# Detect code duplication
-make duplication
+simple build lint
 ```
 
 ---

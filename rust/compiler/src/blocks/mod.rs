@@ -34,6 +34,7 @@
 
 mod math;
 mod regex;
+pub mod render_mode;
 mod shell;
 mod sql;
 
@@ -55,6 +56,41 @@ pub trait BlockHandler {
 
     /// Get the block kind name
     fn kind(&self) -> &'static str;
+
+    /// Get a display string for the block payload (Unicode-rendered)
+    fn display_string(&self, payload: &str) -> String {
+        format!("{}{{{}}}", self.kind(), payload)
+    }
+}
+
+/// Get a display string for a custom block, respecting the current render mode.
+///
+/// - `Plain`: ASCII-only (raw payload)
+/// - `Unicode`: Unicode-rendered (default, e.g., `x² + α`)
+/// - `Rich`: Structured JSON metadata for editor plugins
+pub fn display_block(kind: &str, payload: &str) -> String {
+    use render_mode::{current_render_mode, RenderMode};
+
+    match current_render_mode() {
+        RenderMode::Plain => format!("{}{{{}}}", kind, payload),
+        RenderMode::Unicode => match kind {
+            "m" => MathBlock.display_string(payload),
+            "sh" => ShellBlock.display_string(payload),
+            "sql" => SqlBlock.display_string(payload),
+            "re" => RegexBlock.display_string(payload),
+            _ => format!("{}{{{}}}", kind, payload),
+        },
+        RenderMode::Rich => {
+            let unicode = match kind {
+                "m" => MathBlock.display_string(payload),
+                _ => format!("{}{{{}}}", kind, payload),
+            };
+            format!(
+                r#"{{"type": "{}", "source": {:?}, "unicode": {:?}}}"#,
+                kind, payload, unicode,
+            )
+        }
+    }
 }
 
 /// Evaluate a custom block based on its kind

@@ -132,10 +132,10 @@ if let Some(header) = rv.as_heap_header() {
 
 ### Run Single Test with Output
 ```bash
-cd rust && cargo test -p simple-driver test_name -- --nocapture
+simple build rust test -p simple-driver test_name -- --nocapture
 
 # With logging
-RUST_LOG=debug cargo test -p simple-driver test_name -- --nocapture
+RUST_LOG=debug simple build rust test -p simple-driver test_name -- --nocapture
 ```
 
 ### Debug Simple Test
@@ -197,7 +197,7 @@ SIMPLE_EXECUTION_LIMIT_ENABLED=false ./rust/target/debug/simple_old file.spl
 ### Sanitizer Support
 ```bash
 # Address Sanitizer (requires nightly)
-RUSTFLAGS="-Zsanitizer=address" cargo +nightly test -p simple-driver
+RUSTFLAGS="-Zsanitizer=address" simple build rust test -p simple-driver
 
 # Valgrind
 valgrind --leak-check=full ./rust/target/debug/simple_old file.spl
@@ -247,8 +247,8 @@ fn debug_specific_case() {
 
 ### Panic Location
 ```bash
-RUST_BACKTRACE=1 cargo test -p simple-driver test_name
-RUST_BACKTRACE=full cargo test -p simple-driver test_name
+RUST_BACKTRACE=1 simple build rust test -p simple-driver test_name
+RUST_BACKTRACE=full simple build rust test -p simple-driver test_name
 ```
 
 ## MCP-Based Debugging (NEW)
@@ -374,7 +374,7 @@ cat doc/bug/bug_db.sdn
 5. **Apply Fix & Test:**
    ```bash
    # After fixing
-   cargo build
+   simple build
    ./scripts/bootstrap.sh --verify
    ```
 

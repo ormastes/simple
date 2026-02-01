@@ -121,7 +121,7 @@ pub(crate) use interpreter_helpers::{
 mod interpreter_call;
 pub(crate) use interpreter_call::IN_NEW_METHOD;
 pub(crate) use interpreter_call::exec_block_value;
-pub use interpreter_call::{clear_bdd_state, clear_class_instantiation_state, get_ignored_tests};
+pub use interpreter_call::{clear_bdd_state, clear_class_instantiation_state, get_ignored_tests, get_test_results};
 use interpreter_call::{
     bind_args, bind_args_with_injected, evaluate_call, exec_function, exec_function_with_captured_env,
     exec_function_with_values, exec_lambda, instantiate_class, BDD_AFTER_EACH, BDD_BEFORE_EACH, BDD_CONTEXT_DEFS,

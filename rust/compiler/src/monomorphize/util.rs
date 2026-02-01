@@ -217,6 +217,7 @@ mod tests {
             is_abstract: false,
             is_sync: false,
             is_me_method: false,
+            is_generator: false,
             is_generic_template: true,
             is_static: false,
             specialization_of: None,

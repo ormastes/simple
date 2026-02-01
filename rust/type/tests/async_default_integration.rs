@@ -45,6 +45,7 @@ fn make_function(name: &str, is_sync: bool, has_async_effect: bool, body: Vec<No
         is_static: false,
         bounds_block: None,
         is_me_method: false,
+        is_generator: false,
         return_constraint: None,
         is_generic_template: false,
         specialization_of: None,

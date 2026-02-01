@@ -193,7 +193,84 @@ impl Value {
             Value::Borrow(b) => format!("&{}", b.inner().to_display_string()),
             Value::BorrowMut(b) => format!("&mut {}", b.inner().to_display_string()),
             Value::NativeFunction(native) => format!("<native:{}>", native.name),
-            other => format!("{other:?}"),
+            Value::Object { class, fields } => {
+                let parts: Vec<String> = fields
+                    .iter()
+                    .map(|(k, v)| format!("{}: {}", k, v.to_display_string()))
+                    .collect();
+                format!("{}({})", class, parts.join(", "))
+            }
+            Value::Enum { enum_name, variant, payload } => {
+                if let Some(val) = payload {
+                    format!("{}::{}({})", enum_name, variant, val.to_display_string())
+                } else {
+                    format!("{}::{}", enum_name, variant)
+                }
+            }
+            Value::Block { kind, payload, result } => {
+                if let Some(res) = result {
+                    res.to_display_string()
+                } else {
+                    crate::blocks::display_block(kind, payload)
+                }
+            }
+            Value::Lambda { .. } => "<lambda>".into(),
+            Value::BlockClosure { .. } => "<block_closure>".into(),
+            Value::Function { name, .. } => format!("<fn:{}>", name),
+            Value::Constructor { class_name } => format!("<constructor:{}>", class_name),
+            Value::EnumType { enum_name } => format!("<enum:{}>", enum_name),
+            Value::EnumVariantConstructor { .. } => "<enum_variant_constructor>".into(),
+            Value::TraitType { .. } => "<trait_type>".into(),
+            Value::TraitObject { .. } => "<trait_object>".into(),
+            Value::Union { inner, .. } => inner.to_display_string(),
+            Value::Actor(_) => "<actor>".into(),
+            Value::Future(_) => "<future>".into(),
+            Value::Generator(_) => "<generator>".into(),
+            Value::Channel(_) => "<channel>".into(),
+            Value::ThreadPool(_) => "<thread_pool>".into(),
+            Value::Mock(_) => "<mock>".into(),
+            Value::Matcher(_) => "<matcher>".into(),
+        }
+    }
+
+    /// Convert to debug string with type information (for dbg() and debug_fmt())
+    pub fn to_debug_string(&self) -> String {
+        match self {
+            Value::Str(s) => format!("{:?}", s),
+            Value::Int(i) => format!("{}i64", i),
+            Value::Float(f) => format!("{}f64", f),
+            Value::Bool(b) => format!("{}", b),
+            Value::Symbol(s) => format!(":{}", s),
+            Value::Nil => "nil".into(),
+            Value::Object { class, fields } => {
+                let parts: Vec<String> = fields
+                    .iter()
+                    .map(|(k, v)| format!("{}: {}", k, v.to_debug_string()))
+                    .collect();
+                format!("{}({})", class, parts.join(", "))
+            }
+            Value::Enum { enum_name, variant, payload } => {
+                if let Some(val) = payload {
+                    format!("{}::{}({})", enum_name, variant, val.to_debug_string())
+                } else {
+                    format!("{}::{}", enum_name, variant)
+                }
+            }
+            Value::Block { kind, payload, .. } => {
+                format!("Block({}, {:?})", kind, payload)
+            }
+            Value::Array(items) => {
+                let parts: Vec<String> = items.iter().map(|v| v.to_debug_string()).collect();
+                format!("[{}]", parts.join(", "))
+            }
+            Value::Dict(map) => {
+                let parts: Vec<String> = map
+                    .iter()
+                    .map(|(k, v)| format!("{}: {}", k, v.to_debug_string()))
+                    .collect();
+                format!("{{{}}}", parts.join(", "))
+            }
+            _ => format!("{} = {}", self.type_name(), self.to_display_string()),
         }
     }
 

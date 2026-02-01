@@ -288,8 +288,8 @@ assert!(result.is_ok());
 ### Running Architecture Tests
 
 ```bash
-make arch-test              # Run architecture tests
-make arch-test-visualize    # Generate DOT/Mermaid graphs
+simple build rust test arch              # Run architecture tests
+simple build rust test arch --visualize  # Generate DOT/Mermaid graphs
 ```
 
 ### Circular Dependency Prevention
@@ -317,11 +317,11 @@ make arch-test-visualize    # Generate DOT/Mermaid graphs
 ### Detecting Cycles
 
 ```bash
-# Rust crate cycles
+# Rust crate cycles (diagnostic query)
 cargo tree --edges features
 
 # Simple module cycles (via arch_test)
-make arch-test
+simple build rust test arch
 
 # Lean project dependencies
 cd verification/type_inference_compile && lake build
@@ -341,15 +341,15 @@ cd verification/type_inference_compile && lake build
 ### Before Implementing
 
 - [ ] Read relevant feature spec (`doc/features/`)
-- [ ] Check existing architecture (`make arch-test`)
+- [ ] Check existing architecture (`simple build rust test arch`)
 - [ ] Identify affected verification projects
 - [ ] Draw dependency impact diagram
 
 ### After Implementing
 
-- [ ] Run `make arch-test` - no new violations
+- [ ] Run `simple build rust test arch` - no new violations
 - [ ] Run `simple gen-lean compare` - if verification affected
-- [ ] Run `cd rust && cargo test --workspace` - all tests pass
+- [ ] Run `simple build rust test` - all tests pass
 - [ ] Update Lean proofs if needed (`lake build`)
 
 ## See Also

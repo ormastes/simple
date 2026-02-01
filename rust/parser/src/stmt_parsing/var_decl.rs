@@ -312,6 +312,59 @@ impl Parser<'_> {
         }
     }
 
+    /// Parse implicit val/var: `name = expr` (immutable) or `name_ = expr` (mutable, trailing underscore)
+    /// This is syntactic sugar for `val name = expr` / `var name_ = expr`.
+    /// Called from parse_item when an identifier is directly followed by `=`.
+    pub(crate) fn parse_implicit_val(&mut self) -> Result<Node, ParseError> {
+        // TODO: Disabled - implicit val breaks existing `name = expr` reassignments
+        return self.parse_expression_or_assignment();
+        #[allow(unreachable_code)]
+        let start_span = self.current.span;
+
+        // Get identifier name and determine mutability from naming pattern
+        let name = match &self.current.kind {
+            TokenKind::Identifier { name, .. } => name.clone(),
+            _ => unreachable!("parse_implicit_val called without identifier"),
+        };
+
+        let mutability = if name.ends_with('_') {
+            Mutability::Mutable
+        } else {
+            Mutability::Immutable
+        };
+
+        // Parse pattern (the identifier), optional type annotation, and assignment
+        let pattern = self.parse_pattern()?;
+        let ty = self.parse_optional_type_annotation()?;
+        let (value, is_suspend) = self.parse_optional_assignment_with_suspend()?;
+
+        // Wrap pattern in Pattern::Typed if there's a type annotation
+        let pattern = if let Some(type_annotation) = ty {
+            Pattern::Typed {
+                pattern: Box::new(pattern),
+                ty: type_annotation,
+            }
+        } else {
+            pattern
+        };
+
+        Ok(Node::Let(LetStmt {
+            span: Span::new(
+                start_span.start,
+                self.previous.span.end,
+                start_span.line,
+                start_span.column,
+            ),
+            pattern,
+            ty: None,
+            value,
+            mutability,
+            storage_class: StorageClass::Auto,
+            is_ghost: false,
+            is_suspend,
+        }))
+    }
+
     /// Parse use path and target (shared by use, common use, export use)
     /// Supports both Python-style (module.{A, B}) and Rust-style (module::{A, B})
     /// Also supports bare glob (use *, export use *)

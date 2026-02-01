@@ -4,7 +4,7 @@ use super::arg_binding::{bind_args, bind_args_with_values};
 use super::async_support::{is_async_function, wrap_in_promise};
 use super::macros::*;
 use crate::error::CompileError;
-use crate::interpreter::{exec_block_fn, Control, CONST_NAMES, IMMUTABLE_VARS, IN_IMMUTABLE_FN_METHOD};
+use crate::interpreter::{exec_block_fn, Control, CONST_NAMES, IMMUTABLE_VARS, IN_IMMUTABLE_FN_METHOD, GENERATOR_YIELDS};
 use crate::interpreter_unit::{is_unit_type, validate_unit_type};
 use crate::value::*;
 use simple_parser::ast::{Argument, ClassDef, EnumDef, FunctionDef, SelfMode, Type};
@@ -56,6 +56,11 @@ fn execute_function_body(
         local_env.insert(name, val);
     }
 
+    // Generator function support: set up GENERATOR_YIELDS before execution
+    if func.is_generator {
+        GENERATOR_YIELDS.with(|cell| *cell.borrow_mut() = Some(Vec::new()));
+    }
+
     // Execute function body - handle result manually to ensure flag restoration
     let exec_result = exec_block_fn(&func.body, local_env, functions, classes, enums, impl_methods);
 
@@ -63,6 +68,13 @@ fn execute_function_body(
     IN_IMMUTABLE_FN_METHOD.with(|cell| *cell.borrow_mut() = saved_in_immutable_fn);
     CONST_NAMES.with(|cell| *cell.borrow_mut() = saved_const_names);
     IMMUTABLE_VARS.with(|cell| *cell.borrow_mut() = saved_immutable_vars);
+
+    // Generator function: collect yields and return GeneratorValue
+    if func.is_generator {
+        let yields = GENERATOR_YIELDS.with(|cell| cell.borrow_mut().take().unwrap_or_default());
+        let gen = GeneratorValue::new_with_values(yields);
+        return Ok(Value::Generator(gen));
+    }
 
     // Now extract result, potentially returning error
     let result = match exec_result {

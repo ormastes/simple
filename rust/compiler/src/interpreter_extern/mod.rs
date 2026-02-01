@@ -75,6 +75,7 @@ pub mod lexer_ffi;
 pub mod i18n;
 pub mod native_ffi;
 pub mod package;
+pub mod regex;
 
 // Import parent interpreter types
 type Enums = HashMap<String, EnumDef>;
@@ -85,6 +86,32 @@ use super::{evaluate_expr, is_debug_mode};
 
 // Import diagram tracing
 use simple_runtime::value::diagram_ffi;
+
+/// Resolve fmt() methods on Object values for print functions.
+/// Converts Objects with fmt() methods to their string representation.
+fn resolve_fmt_for_print(
+    values: &[Value],
+    env: &mut Env,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Vec<Value> {
+    use super::interpreter_control::call_method_if_exists;
+    values
+        .iter()
+        .map(|v| {
+            if let Value::Object { .. } = v {
+                if let Ok(Some(result)) = call_method_if_exists(
+                    v, "fmt", &[], env, functions, classes, enums, impl_methods,
+                ) {
+                    return result;
+                }
+            }
+            v.clone()
+        })
+        .collect()
+}
 
 /// Central extern function dispatcher
 ///
@@ -128,13 +155,43 @@ pub(crate) fn call_extern_function(
         // ====================================================================
         // I/O Operations (7 print + 2 input + 4 MCP stdio = 13 functions)
         // ====================================================================
-        "print" => io::print::print(&evaluated),
-        "print_raw" => io::print::print_raw(&evaluated),
+        "print" => {
+            let resolved = resolve_fmt_for_print(&evaluated, env, functions, classes, enums, impl_methods);
+            io::print::print(&resolved)
+        }
+        "print_raw" => {
+            let resolved = resolve_fmt_for_print(&evaluated, env, functions, classes, enums, impl_methods);
+            io::print::print_raw(&resolved)
+        }
         "println" => io::print::println(&evaluated),
-        "eprint" => io::print::eprint(&evaluated),
-        "eprint_raw" => io::print::eprint_raw(&evaluated),
+        "eprint" => {
+            let resolved = resolve_fmt_for_print(&evaluated, env, functions, classes, enums, impl_methods);
+            io::print::eprint(&resolved)
+        }
+        "eprint_raw" => {
+            let resolved = resolve_fmt_for_print(&evaluated, env, functions, classes, enums, impl_methods);
+            io::print::eprint_raw(&resolved)
+        }
         "eprintln" => io::print::eprintln(&evaluated),
         "dprint" => io::print::dprint(&evaluated),
+        "dbg" => {
+            // Try debug_fmt() on Objects before falling back to to_debug_string()
+            use super::interpreter_control::call_method_if_exists;
+            let resolved: Vec<Value> = evaluated
+                .iter()
+                .map(|v| {
+                    if let Value::Object { .. } = v {
+                        if let Ok(Some(result)) = call_method_if_exists(
+                            v, "debug_fmt", &[], env, functions, classes, enums, impl_methods,
+                        ) {
+                            return result;
+                        }
+                    }
+                    v.clone()
+                })
+                .collect();
+            io::print::dbg(&resolved)
+        }
         "input" => io::input::input(&evaluated),
         "stdin_read_char" => io::input::stdin_read_char(&evaluated),
         "stdout_write" => io::stdout_write(&evaluated),
@@ -745,8 +802,11 @@ pub(crate) fn call_extern_function(
         // ====================================================================
         "rt_cargo_build" => cargo::rt_cargo_build(&evaluated),
         "rt_cargo_test" => cargo::rt_cargo_test(&evaluated),
+        "rt_cargo_test_doc" => cargo::rt_cargo_test_doc(&evaluated),
         "rt_cargo_clean" => cargo::rt_cargo_clean(&evaluated),
         "rt_cargo_check" => cargo::rt_cargo_check(&evaluated),
+        "rt_cargo_lint" => cargo::rt_cargo_lint(&evaluated),
+        "rt_cargo_fmt" => cargo::rt_cargo_fmt(&evaluated),
 
         // SDN operations
         "rt_sdn_version" => sdn::rt_sdn_version(&evaluated),
@@ -995,6 +1055,18 @@ pub(crate) fn call_extern_function(
         "rt_package_chmod" => package::chmod(&evaluated),
         "rt_package_exists" => package::exists(&evaluated),
         "rt_package_is_dir" => package::is_dir(&evaluated),
+
+        // ====================================================================
+        // Regex Operations (8 functions)
+        // ====================================================================
+        "ffi_regex_is_match" => regex::is_match(&evaluated),
+        "ffi_regex_find" => regex::find(&evaluated),
+        "ffi_regex_find_all" => regex::find_all(&evaluated),
+        "ffi_regex_captures" => regex::captures(&evaluated),
+        "ffi_regex_replace" => regex::replace(&evaluated),
+        "ffi_regex_replace_all" => regex::replace_all(&evaluated),
+        "ffi_regex_split" => regex::split(&evaluated),
+        "ffi_regex_split_n" => regex::split_n(&evaluated),
 
         _ => Err(common::unknown_function(name)),
     }

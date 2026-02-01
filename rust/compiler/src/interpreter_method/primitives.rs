@@ -25,7 +25,7 @@ pub fn handle_int_methods(
         "is_zero" => Value::Bool(n == 0),
         "is_even" => Value::Bool(n % 2 == 0),
         "is_odd" => Value::Bool(n % 2 != 0),
-        "to_float" => Value::Float(n as f64),
+        "to_float" | "to_f64" => Value::Float(n as f64),
         "to_string" => Value::Str(n.to_string()),
         "clamp" => {
             let min = eval_arg(

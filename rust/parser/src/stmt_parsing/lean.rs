@@ -272,9 +272,10 @@ impl<'a> Parser<'a> {
 
     /// Parse optional justification: `by: "reason"`
     fn parse_calc_justification(&mut self) -> Result<Option<String>, ParseError> {
-        // Check for "by" identifier followed by colon
-        if let TokenKind::Identifier { name, .. } = &self.current.kind {
-            if name == "by" {
+        // Check for "by" keyword or identifier followed by colon
+        let is_by = matches!(&self.current.kind, TokenKind::By)
+            || matches!(&self.current.kind, TokenKind::Identifier { name, .. } if name == "by");
+        if is_by {
                 self.advance(); // consume "by"
                 self.expect(&TokenKind::Colon)?;
 
@@ -308,7 +309,6 @@ impl<'a> Parser<'a> {
                         ));
                     }
                 }
-            }
         }
         Ok(None)
     }
