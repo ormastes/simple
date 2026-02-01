@@ -64,37 +64,51 @@ copy_from(src_path to, to: dest_path)
 
 ## Comma-Required vs Comma-Optional
 
-### Question
+### Decision: Comma-required is mandatory. Comma-optional is rejected.
 
-Is `copy_from(a to b)` (comma-optional) viable, or is it too complex to parse?
+`copy_from(a to, b)` — accepted.
+`copy_from(a to b)` — **rejected, problematic.**
 
-### Answer: Comma-optional is too complex
+### Why Comma-Optional Fails
 
-**Comma-optional breaks LL(1) parsing:**
+**1. Ambiguity with keywords as identifiers**
+
+Simple allows `to`/`from` as identifiers in expression position. Without commas, the parser cannot distinguish labels from variables:
+
+```simple
+val to = "dest.txt"
+copy_from(to to to)  # Completely ambiguous — which 'to' is label, variable, argument?
+```
+
+**2. Breaks LL(1) parsing**
 
 ```simple
 copy_from(a to b to c)
 ```
 
 Ambiguous interpretations:
-1. Two args: `(a to, b to c)` - labels on first and... what?
-2. Two args: `(a to b, to c)` - where do args split?
-3. Three args: `(a, to, b to c)` - `to` as variable?
+1. Two args: `(a to, b to c)` — labels on first and... what?
+2. Two args: `(a to b, to c)` — where do args split?
+3. Three args: `(a, to, b to c)` — `to` as variable?
 
 The parser cannot decide without unbounded lookahead and backtracking.
 
-**Performance impact:**
+**3. Performance**
+
 - Comma-required: O(n) linear, LL(1), no backtracking
 - Comma-optional: O(n^2) to exponential worst case with backtracking
 
-**`to` and `from` are usable as identifiers** in Simple (keywords allowed as identifiers in expression position), which makes comma-optional even worse:
+**4. No precedent without delimiters**
 
-```simple
-val to = "dest.txt"
-copy_from(to to to)  # Completely ambiguous without commas
-```
+Even Objective-C (which skips commas) uses colons as delimiters: `[obj copyFrom:a to:b]`. Without *some* delimiter between arguments, parsing is fundamentally ambiguous.
 
-**Conclusion:** Comma-required (`copy_from(a to, b)`) is the only viable option. Swift and Kotlin also require commas between arguments.
+**5. All mainstream languages require commas**
+
+Swift, Kotlin, Python — all require commas between arguments. The one-character cost buys unambiguous, fast, maintainable parsing.
+
+### Conclusion
+
+Comma-required (`copy_from(a to, b)`) is the only viable option. The comma costs one character but keeps parsing simple, fast, and unambiguous. Comma-optional is not "just OK" — it is genuinely problematic and is rejected.
 
 ## Comparison with Other Languages
 

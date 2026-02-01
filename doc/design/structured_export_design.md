@@ -58,16 +58,55 @@ structured_export:
         create_mock, verify_called
 ```
 
-### Nested Modules
+### Path Scope: Relative to Current Module
+
+**All paths in `structured_export` are relative to the current `__init__.spl`'s module.** They reference direct child modules, not the project root or package name.
 
 ```simple
+# src/std/src/testing/__init__.spl
+# 'mocking_core' and 'assertions' are direct child modules of 'testing'
+structured_export:
+    mocking_core:
+        MockFunction
+        Expectation
+    assertions:
+        expect, assert_eq
+```
+
+Desugars to:
+```simple
+export use mocking_core.MockFunction
+export use mocking_core.Expectation
+export use assertions.expect
+export use assertions.assert_eq
+```
+
+**Not** `export use testing.mocking_core.MockFunction` — `testing` is the current module itself, not a child.
+
+### Nesting for Parent Re-exports
+
+Deeper nesting only applies when a **parent** `__init__.spl` re-exports from a child package:
+
+```simple
+# src/std/src/__init__.spl (parent of testing)
+# Here 'testing' IS a child module, so it appears in the tree
 structured_export:
     testing:
         mocking_core:
             MockFunction
+    collections:
+        list, map, set
 ```
 
-Desugars to `export use testing.mocking_core.MockFunction`.
+Desugars to:
+```simple
+export use testing.mocking_core.MockFunction
+export use collections.list
+export use collections.map
+export use collections.set
+```
+
+**Rule of thumb:** each `__init__.spl` only references its own direct children. Don't repeat the current module's own name in the tree.
 
 ### Mixed with Regular Exports
 
