@@ -121,7 +121,7 @@ impl LintName {
             LintName::ResourceLeak => LintLevel::Warn,
             LintName::WildcardMatch => LintLevel::Allow,
             LintName::NonExhaustiveMatch => LintLevel::Warn,
-            LintName::ExportOutsideInit => LintLevel::Deny,
+            LintName::ExportOutsideInit => LintLevel::Warn,
             LintName::InitBoundaryViolation => LintLevel::Warn,
             LintName::BypassWithCodeFiles => LintLevel::Warn,
         }
