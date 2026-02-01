@@ -7,6 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+#### Self-Hosting Build System (2026-02-01)
+- **Complete build system written in Simple** (~11,000 lines total)
+  - 8 phases fully implemented: Foundation, Testing, Coverage, Quality, Bootstrap, Package, Migration, Advanced
+  - 4,440 lines of implementation across 14 modules
+  - 2,370 lines of SSpec tests (290+ comprehensive tests)
+  - 2,000+ lines of documentation
+- **Build Commands** (`simple build`):
+  - `simple build` - Debug/release/bootstrap builds
+  - `simple build test` - Unified test orchestration (Rust + doc-tests + Simple)
+  - `simple build coverage` - Coverage analysis with cargo-llvm-cov (4 levels, 4 formats)
+  - `simple build lint` - Clippy integration with auto-fix
+  - `simple build fmt` - Rustfmt integration
+  - `simple build check` - Combined quality checks (lint + fmt + test)
+  - `simple build bootstrap` - 3-stage bootstrap pipeline with SHA256 verification
+  - `simple build package` - Package creation (bootstrap + full)
+  - `simple build watch` - Watch mode with auto-rebuild
+  - `simple build incremental` - Incremental builds with caching
+  - `simple build metrics` - Build performance metrics
+  - `simple build clean` - Clean build artifacts
+- **Implementation** (`src/app/build/`):
+  - `main.spl` - CLI entry point
+  - `cargo.spl` - Cargo FFI integration
+  - `test.spl` - Test orchestration (parallel/serial, filtering)
+  - `coverage.spl` - Coverage workflows
+  - `quality.spl` - Lint, format, check commands
+  - `bootstrap.spl` - 3-stage bootstrap pipeline
+  - `package.spl` - Package creation
+  - `metrics.spl`, `watch.spl`, `incremental.spl` - Advanced features
+- **Type-Safe Configuration**:
+  - `BuildConfig`, `TestConfig`, `CoverageConfig` types
+  - Compile-time validation
+  - Profile support (Debug, Release, Bootstrap)
+- **Makefile Migration**:
+  - Deprecation warnings on all make targets
+  - Full backward compatibility maintained
+  - Migration guide: `doc/build/migration_guide.md`
+- **Documentation**:
+  - Getting started: `doc/build/getting_started.md`
+  - Phase completion reports (8 files)
+  - Final summary: `doc/report/build_system_final_summary_2026-02-01.md`
+- **FFI Integration**:
+  - Uses existing `ffi/` infrastructure (env_process, file_io, time, hash)
+  - No new FFI modules required
+
 ## [0.3.0] - 2026-01-31
 
 ### Added
