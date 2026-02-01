@@ -11,6 +11,7 @@
 #   E:typo_suggestion            — Fix misspelled identifiers (Levenshtein)
 #   E:parser_contextual_keyword  — Fix contextual keyword syntax
 #   E:type_mismatch_coercion     — Insert type coercion (.to_string() etc.)
+#   L:deprecated_if_let          — Replace `if let` with `if val`
 
 # ============================================================================
 # Data types (re-exported from fix/main.spl or lint/main.spl)
@@ -672,6 +673,43 @@ fn suggest_type_coercion_fix(file: String, line_num: Int, col: Int, byte_end: In
     None
 
 # ============================================================================
+# Rule 10: deprecated_if_let
+# Detects `if let`, `while let`, `elif let` and replaces `let` with `val`.
+# Confidence: Safe
+# ============================================================================
+
+fn check_deprecated_if_let(source: String, file: String) -> List<EasyFix>:
+    for_each_line(source, \ctx:
+        var line_fixes: [EasyFix] = []
+
+        for keyword in ["if let ", "while let ", "elif let "]:
+            val idx = ctx.trimmed.find(keyword)
+            if idx.? :
+                val pos = idx.unwrap()
+                # Calculate byte position of "let" within the keyword match
+                val keyword_prefix_len = keyword.len() - 4  # length before "let "
+                val let_start = ctx.byte_offset + ctx.indent + pos + keyword_prefix_len
+                val let_end = let_start + 3  # "let" is 3 chars
+
+                var fix = EasyFix.create(
+                    id: "L:deprecated_if_let:{ctx.line_num}",
+                    description: "replace deprecated `let` with `val` in pattern binding",
+                    confidence: FixConfidence.Safe
+                )
+                fix.add_replacement(Replacement.create(
+                    file: file,
+                    start: let_start,
+                    end: let_end,
+                    line: ctx.line_num,
+                    column: ctx.indent + pos + keyword_prefix_len + 1,
+                    new_text: "val"
+                ))
+                line_fixes.push(fix)
+
+        line_fixes
+    )
+
+# ============================================================================
 # Master: run all text-scanning rules
 # ============================================================================
 
@@ -704,6 +742,10 @@ fn check_all_rules(source: String, file: String) -> List<EasyFix>:
 
     val fixes7 = check_parser_contextual_keyword(source, file)
     for f in fixes7:
+        all_fixes.push(f)
+
+    val fixes8 = check_deprecated_if_let(source, file)
+    for f in fixes8:
         all_fixes.push(f)
 
     # Rules 7 (typo) and 9 (type coercion) are no-ops in text-scanning mode.

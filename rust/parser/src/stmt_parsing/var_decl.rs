@@ -289,8 +289,20 @@ impl Parser<'_> {
     /// Parse optional let-pattern syntax: `let PATTERN =`
     /// Used by if-let and while-let constructs
     pub(crate) fn parse_optional_let_pattern(&mut self) -> Result<(Option<Pattern>, Expr), ParseError> {
-        if self.check(&TokenKind::Let) || self.check(&TokenKind::Val) {
-            self.advance(); // consume let or val
+        if self.check(&TokenKind::Let) || self.check(&TokenKind::Val) || self.check(&TokenKind::Var) {
+            // Emit deprecation warning for `if let` / `while let`
+            if self.check(&TokenKind::Let) {
+                use crate::error_recovery::{ErrorHint, ErrorHintLevel};
+                let warning = ErrorHint {
+                    level: ErrorHintLevel::Warning,
+                    message: "Deprecated: `if let` syntax".to_string(),
+                    span: self.current.span,
+                    suggestion: Some("Replace `if let` with `if val` (or `if var` for mutable binding)".to_string()),
+                    help: None,
+                };
+                self.error_hints.push(warning);
+            }
+            self.advance(); // consume let, val, or var
             let pattern = self.parse_pattern()?;
             self.expect(&TokenKind::Assign)?;
             let expr = self.parse_expression()?;

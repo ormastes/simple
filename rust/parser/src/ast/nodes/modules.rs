@@ -117,6 +117,36 @@ pub struct AutoImportStmt {
     pub macro_name: String,
 }
 
+/// A single entry in a structured_export block
+#[derive(Debug, Clone, PartialEq)]
+pub enum StructuredExportEntry {
+    /// Re-export a single item: `ItemName`
+    Single(String),
+    /// Re-export with alias: `ItemName as Alias`
+    Aliased { name: String, alias: String },
+    /// Re-export from a module: `module.{Item1, Item2}`
+    FromModule {
+        path: ModulePath,
+        items: Vec<ImportTarget>,
+    },
+    /// Glob re-export: `module.*`
+    Glob(ModulePath),
+}
+
+/// A structured_export block
+///
+/// ```simple
+/// structured_export:
+///     math.{sin, cos, tan}
+///     util.{format, parse}
+///     MyClass
+/// ```
+#[derive(Debug, Clone, PartialEq)]
+pub struct StructuredExportBlock {
+    pub span: Span,
+    pub entries: Vec<StructuredExportEntry>,
+}
+
 /// Module capability requirements statement.
 ///
 /// Declared in `__init__.spl` to restrict what effects functions in this

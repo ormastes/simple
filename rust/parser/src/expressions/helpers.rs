@@ -317,7 +317,18 @@ impl<'a> Parser<'a> {
             let arg_end = self.previous.span;
             let arg_span = Span::new(arg_start.start, arg_end.end, arg_start.line, arg_start.column);
 
-            args.push(Argument::with_span(name, value, arg_span));
+            // Check for call-site label keyword after value (e.g., `src to,`)
+            let label = if self.check(&TokenKind::To) {
+                self.advance();
+                Some("to".to_string())
+            } else if self.check(&TokenKind::From) {
+                self.advance();
+                Some("from".to_string())
+            } else {
+                None
+            };
+
+            args.push(Argument { name, value, span: arg_span, label });
 
             // Skip newlines, indent, dedent after argument (for multi-line argument lists)
             while self.check(&TokenKind::Newline) || self.check(&TokenKind::Indent) || self.check(&TokenKind::Dedent) {

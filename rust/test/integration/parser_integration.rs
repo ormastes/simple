@@ -383,7 +383,7 @@ fn test_expr_unary() {
 fn test_expr_call() {
     let expr = Expr::Call {
         callee: Box::new(Expr::Identifier("print".to_string())),
-        args: vec![Argument { name: None, value: Expr::String("hello".to_string()) }],
+        args: vec![Argument { name: None, value: Expr::String("hello".to_string()), span: Span::new(0,0,0,0), label: None }],
     };
     match expr {
         Expr::Call { args, .. } => assert_eq!(args.len(), 1),
@@ -722,6 +722,8 @@ fn test_argument_positional() {
     let arg = Argument {
         name: None,
         value: Expr::Integer(42),
+        span: Span::new(0, 0, 0, 0),
+        label: None,
     };
     assert!(arg.name.is_none());
 }
@@ -731,6 +733,8 @@ fn test_argument_named() {
     let arg = Argument {
         name: Some("x".to_string()),
         value: Expr::Integer(42),
+        span: Span::new(0, 0, 0, 0),
+        label: None,
     };
     assert_eq!(arg.name, Some("x".to_string()));
 }

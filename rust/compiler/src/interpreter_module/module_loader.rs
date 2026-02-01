@@ -259,6 +259,8 @@ pub fn load_and_merge_module(
 
     // Check cache first - if we've already loaded this module, return cached exports
     if let Some(cached_exports) = get_cached_module_exports(&module_path) {
+        if let Value::Dict(d) = &cached_exports {
+        }
         // Merge cached definitions (classes, functions, enums) into caller's HashMaps
         // This ensures that static method calls work on imported classes
         merge_cached_module_definitions(&module_path, classes, functions, enums);
@@ -307,7 +309,6 @@ pub fn load_and_merge_module(
         }
     };
 
-    trace!(path = ?module_path, bytes = source.len(), "Parsing module");
     let mut parser = simple_parser::Parser::new(&source);
     let module = match parser.parse() {
         Ok(m) => m,

@@ -46,6 +46,7 @@ pub enum Node {
     MultiUse(MultiUse),
     CommonUseStmt(CommonUseStmt),
     ExportUseStmt(ExportUseStmt),
+    StructuredExportStmt(StructuredExportBlock),
     AutoImportStmt(AutoImportStmt),
     RequiresCapabilities(RequiresCapabilitiesStmt),
 
@@ -290,6 +291,8 @@ pub struct Parameter {
     pub inject: bool,
     /// Variadic parameter flag (e.g., items: T...)
     pub variadic: bool,
+    /// Call-site label (e.g., `to` in `move(to dest)`)
+    pub call_site_label: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -756,6 +759,8 @@ pub struct Argument {
     pub name: Option<String>, // for named arguments
     pub value: Expr,
     pub span: Span,
+    /// Call-site label (e.g., `to` in `move(to: dest)`)
+    pub label: Option<String>,
 }
 
 impl Argument {
@@ -765,12 +770,13 @@ impl Argument {
             name,
             value,
             span: Span::new(0, 0, 0, 0),
+            label: None,
         }
     }
 
     /// Create an argument with an explicit span
     pub fn with_span(name: Option<String>, value: Expr, span: Span) -> Self {
-        Argument { name, value, span }
+        Argument { name, value, span, label: None }
     }
 }
 

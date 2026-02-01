@@ -144,6 +144,17 @@ impl ModuleResolver {
             });
         }
 
+        // Try .ssh file (Simple shell scripts)
+        let ssh_path = current.join(format!("{}.ssh", last));
+        if ssh_path.exists() && ssh_path.is_file() {
+            return Ok(ResolvedModule {
+                path: ssh_path,
+                module_path: original_path.clone(),
+                is_directory: false,
+                manifest: None,
+            });
+        }
+
         // E1034 - Unresolved Import
         let ctx = ErrorContext::new()
             .with_code(codes::UNRESOLVED_IMPORT)

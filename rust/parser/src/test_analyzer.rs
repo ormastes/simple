@@ -397,6 +397,7 @@ mod tests {
                 name: None,
                 value: Expr::String(description.to_string()),
                 span: Span::new(0, 0, 0, 0),
+                label: None,
             }],
         })
     }
@@ -409,11 +410,13 @@ mod tests {
                     name: None,
                     value: Expr::String(description.to_string()),
                     span: Span::new(0, 0, 0, 0),
+                    label: None,
                 },
                 Argument {
                     name: None,
                     value: Expr::DoBlock(body),
                     span: Span::new(0, 0, 0, 0),
+                    label: None,
                 },
             ],
         })

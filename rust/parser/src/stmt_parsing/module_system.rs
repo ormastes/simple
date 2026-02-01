@@ -723,4 +723,71 @@ impl<'a> Parser<'a> {
             capabilities,
         }))
     }
+
+    /// Parse structured_export block:
+    /// ```simple
+    /// structured_export:
+    ///     math.{sin, cos, tan}
+    ///     util.format
+    ///     MyClass
+    /// ```
+    /// Desugars to multiple ExportUseStmt nodes.
+    pub(crate) fn parse_structured_export(&mut self) -> Result<Node, ParseError> {
+        let start_span = self.current.span;
+        self.expect(&TokenKind::StructuredExport)?;
+
+        // Expect colon then indented block
+        self.expect(&TokenKind::Colon)?;
+        self.expect(&TokenKind::Newline)?;
+        self.expect(&TokenKind::Indent)?;
+
+        let mut entries = Vec::new();
+
+        while !self.check(&TokenKind::Dedent) && !self.is_at_end() {
+            // Skip empty lines
+            while self.check(&TokenKind::Newline) {
+                self.advance();
+            }
+            if self.check(&TokenKind::Dedent) || self.is_at_end() {
+                break;
+            }
+
+            // Parse a module path + optional target
+            let (path, target) = self.parse_use_path_and_target()?;
+
+            // Desugar to ExportUseStmt and push to pending_statements
+            let export = Node::ExportUseStmt(ExportUseStmt {
+                span: Span::new(
+                    start_span.start,
+                    self.previous.span.end,
+                    start_span.line,
+                    start_span.column,
+                ),
+                path,
+                target,
+            });
+            entries.push(export);
+
+            // Consume newline after entry
+            if self.check(&TokenKind::Newline) {
+                self.advance();
+            }
+        }
+
+        if self.check(&TokenKind::Dedent) {
+            self.advance();
+        }
+
+        // Return the first entry, push rest to pending_statements
+        if entries.is_empty() {
+            // Empty structured_export block - return a pass node
+            Ok(Node::Pass(PassStmt { span: start_span }))
+        } else {
+            // Push all but first to pending_statements for draining
+            for entry in entries.drain(1..) {
+                self.pending_statements.push(entry);
+            }
+            Ok(entries.into_iter().next().unwrap())
+        }
+    }
 }

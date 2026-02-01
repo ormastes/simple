@@ -13,6 +13,88 @@ use std::path::PathBuf;
 
 use crate::error::CompileError;
 
+/// Compiler backend for a file extension
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompilerBackend {
+    /// Full interpreter pipeline
+    Interpreted,
+    /// Cranelift JIT compilation
+    Cranelift,
+}
+
+/// File mode determines auto-imports and default behavior
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileMode {
+    /// Standard Simple code
+    Standard,
+    /// Shell scripting mode (auto-imports std.shell.*)
+    Shell,
+    /// Data notation (SDN)
+    Data,
+}
+
+/// Configuration for a file extension
+#[derive(Debug, Clone)]
+pub struct ExtensionConfig {
+    /// File extension (without dot)
+    pub extension: &'static str,
+    /// Compiler backend
+    pub backend: CompilerBackend,
+    /// File mode
+    pub mode: FileMode,
+    /// Description
+    pub description: &'static str,
+}
+
+/// Known extension configurations
+pub static EXTENSION_CONFIGS: &[ExtensionConfig] = &[
+    ExtensionConfig {
+        extension: "spl",
+        backend: CompilerBackend::Interpreted,
+        mode: FileMode::Standard,
+        description: "Simple language source",
+    },
+    ExtensionConfig {
+        extension: "simple",
+        backend: CompilerBackend::Interpreted,
+        mode: FileMode::Standard,
+        description: "Simple language source (alt extension)",
+    },
+    ExtensionConfig {
+        extension: "sscript",
+        backend: CompilerBackend::Interpreted,
+        mode: FileMode::Standard,
+        description: "Simple script",
+    },
+    ExtensionConfig {
+        extension: "ssh",
+        backend: CompilerBackend::Interpreted,
+        mode: FileMode::Shell,
+        description: "Simple shell script",
+    },
+    ExtensionConfig {
+        extension: "sdn",
+        backend: CompilerBackend::Interpreted,
+        mode: FileMode::Data,
+        description: "Simple data notation",
+    },
+];
+
+/// Look up extension config by extension string
+pub fn get_extension_config(ext: &str) -> Option<&'static ExtensionConfig> {
+    EXTENSION_CONFIGS.iter().find(|c| c.extension == ext)
+}
+
+/// Get the file mode for an extension
+pub fn get_file_mode(ext: &str) -> FileMode {
+    get_extension_config(ext).map(|c| c.mode).unwrap_or(FileMode::Standard)
+}
+
+/// Get the compiler backend for an extension
+pub fn get_compiler_backend(ext: &str) -> CompilerBackend {
+    get_extension_config(ext).map(|c| c.backend).unwrap_or(CompilerBackend::Interpreted)
+}
+
 /// Result type for module resolution operations
 pub type ResolveResult<T> = Result<T, CompileError>;
 
