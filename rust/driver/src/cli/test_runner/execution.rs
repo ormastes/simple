@@ -131,6 +131,10 @@ pub fn run_test_file_with_options(runner: &Runner, path: &Path, options: &super:
 pub fn run_test_file(runner: &Runner, path: &Path) -> TestFileResult {
     let start = Instant::now();
 
+    // Clear BDD state before each file to prevent test result accumulation
+    // across files (imported specs would otherwise duplicate into this file's results)
+    simple_compiler::interpreter::clear_bdd_state();
+
     match runner.run_file(path) {
         Ok(exit_code) => {
             let duration_ms = start.elapsed().as_millis() as u64;
@@ -304,9 +308,13 @@ pub fn run_test_file_safe_mode(path: &Path, options: &super::types::TestOptions)
 fn find_simple_binary() -> PathBuf {
     // Try to find the binary in common locations
     let candidates = vec![
-        PathBuf::from("./target/debug/simple_old"),
-        PathBuf::from("./target/release/simple_old"),
-        PathBuf::from("simple_old"), // In PATH
+        PathBuf::from("./bin/wrappers/simple"),           // Wrapper script (preferred)
+        PathBuf::from("./rust/target/debug/simple_runtime"), // Direct runtime (debug)
+        PathBuf::from("./rust/target/release/simple_runtime"), // Direct runtime (release)
+        PathBuf::from("./target/debug/simple_old"),       // Legacy (old)
+        PathBuf::from("./target/release/simple_old"),     // Legacy (old)
+        PathBuf::from("simple"),                          // In PATH
+        PathBuf::from("simple_old"),                      // Legacy in PATH
     ];
 
     for candidate in candidates {
@@ -317,7 +325,8 @@ fn find_simple_binary() -> PathBuf {
 
     // If we're running as the simple binary, use the current executable
     if let Ok(exe) = std::env::current_exe() {
-        if exe.file_name().and_then(|n| n.to_str()) == Some("simple_old") {
+        let filename = exe.file_name().and_then(|n| n.to_str());
+        if filename == Some("simple") || filename == Some("simple_runtime") || filename == Some("simple_old") {
             return exe;
         }
     }

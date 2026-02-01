@@ -100,6 +100,7 @@ pub struct CoherenceChecker {
 struct ImplRegistryEntry {
     target_type: Type,
     trait_name: Option<String>,
+    trait_type_params: Vec<Type>,
     generic_params: Vec<String>,
     is_blanket: bool,
     is_default: bool, // #[default] attribute for specialization (#1150)
@@ -207,6 +208,13 @@ impl CoherenceChecker {
                     continue;
                 }
 
+                // If trait type params differ (e.g., Add<&str> vs Add<text>), not overlapping
+                if !impl_block.trait_type_params.is_empty() || !existing.trait_type_params.is_empty() {
+                    if impl_block.trait_type_params != existing.trait_type_params {
+                        continue;
+                    }
+                }
+
                 if self.types_could_unify(
                     &new_type_name,
                     &existing_type_name,
@@ -235,7 +243,7 @@ impl CoherenceChecker {
             for existing in existing_impls {
                 let existing_target = self.extract_type_name(&existing.target_type);
 
-                if existing_target == target_type {
+                if existing_target == target_type && existing.trait_type_params == impl_block.trait_type_params {
                     for assoc_type in &impl_block.associated_types {
                         if let Some(existing_type) = existing.associated_types.get(&assoc_type.name) {
                             if existing_type != &assoc_type.ty {
@@ -308,6 +316,7 @@ impl CoherenceChecker {
             let entry = ImplRegistryEntry {
                 target_type: impl_block.target_type.clone(),
                 trait_name: Some(trait_name.clone()),
+                trait_type_params: impl_block.trait_type_params.clone(),
                 generic_params: impl_block.generic_params.clone(),
                 is_blanket: !impl_block.generic_params.is_empty(),
                 is_default,
@@ -327,7 +336,7 @@ impl CoherenceChecker {
             Type::Simple(name) => name.clone(),
             Type::Generic { name, .. } => name.clone(),
             Type::Array { .. } => "Array".to_string(),
-            Type::Tuple(_) => "Tuple".to_string(),
+            Type::Tuple(elements) => format!("Tuple{}", elements.len()),
             Type::Function { .. } => "Function".to_string(),
             Type::Optional(_) => "Option".to_string(),
             Type::Pointer { .. } => "Pointer".to_string(),

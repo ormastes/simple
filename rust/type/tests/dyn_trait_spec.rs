@@ -127,6 +127,7 @@ fn create_logger_impl() -> ImplBlock {
         where_clause: vec![],
         target_type: AstType::Simple("ConsoleLogger".to_string()),
         trait_name: Some("Logger".to_string()),
+        trait_type_params: vec![],
         associated_types: vec![],
         methods: vec![FunctionDef {
             span: Span::new(0, 0, 0, 0),

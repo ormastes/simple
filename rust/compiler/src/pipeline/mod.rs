@@ -418,6 +418,7 @@ main = 0
             where_clause: vec![],
             target_type: Type::Simple("String".to_string()),
             trait_name: Some("Display".to_string()),
+            trait_type_params: vec![],
             associated_types: vec![],
             methods: vec![],
         };

@@ -25,6 +25,7 @@ pub mod runner;
 pub mod signature;
 pub mod simple_test;
 pub mod startup_metrics;
+pub mod string_interner;
 pub mod task_db;
 pub mod test_db;
 pub mod test_stats;

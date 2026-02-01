@@ -315,6 +315,11 @@ impl LintChecker {
             return; // Exports are allowed in __init__.spl
         }
 
+        // Exports are allowed in test/spec files (they re-export test utilities)
+        if filename.ends_with("_spec.spl") || filename.ends_with("_test.spl") {
+            return;
+        }
+
         // Scan for ExportUseStmt nodes
         fn check_for_exports(checker: &mut LintChecker, items: &[Node], source_file: &std::path::Path) {
             for node in items {

@@ -62,6 +62,15 @@ impl FileLock {
             match fs::OpenOptions::new().write(true).create_new(true).open(&lock_path) {
                 Ok(_) => return Ok(FileLock { lock_path }),
                 Err(ref e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                    // Check for stale lock (older than 60s = likely crashed process)
+                    if let Ok(metadata) = fs::metadata(&lock_path) {
+                        if let Ok(modified) = metadata.modified() {
+                            if modified.elapsed().map_or(false, |age| age > Duration::from_secs(60)) {
+                                let _ = fs::remove_file(&lock_path);
+                                continue; // Retry immediately after removing stale lock
+                            }
+                        }
+                    }
                     if Instant::now() > deadline {
                         return Err(LockError::Timeout);
                     }
@@ -69,7 +78,7 @@ impl FileLock {
                     let elapsed = deadline.saturating_duration_since(Instant::now());
                     let elapsed_ms = (timeout_secs * 1000).saturating_sub(elapsed.as_millis() as u64);
                     let backoff_power = (elapsed_ms / 500).min(4) as u32; // Cap at 2^4 = 16
-                    let wait_ms = 10u64 * 2u64.saturating_pow(backoff_power).min(500);
+                    let wait_ms = (10u64 * 2u64.saturating_pow(backoff_power)).min(500);
                     thread::sleep(Duration::from_millis(wait_ms));
                 }
                 Err(e) => return Err(LockError::IoError(e)),

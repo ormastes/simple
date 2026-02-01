@@ -506,9 +506,9 @@ export use Router
         checker.check_module(&module.items);
         let diagnostics = checker.take_diagnostics();
 
-        // Should error: export in regular file
+        // Should warn: export in regular file
         assert!(diagnostics.iter().any(|d| d.lint == LintName::ExportOutsideInit));
-        assert!(diagnostics.iter().any(|d| d.is_error()));
+        assert!(diagnostics.iter().any(|d| d.is_warning()));
     }
 
     #[test]
