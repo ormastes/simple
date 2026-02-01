@@ -1,0 +1,69 @@
+# Build Orchestrator
+#
+# Orchestrates build operations with proper sequencing
+
+use app.build.types (BuildConfig, BuildResult, BuildProfile)
+use app.build.cargo (Cargo, print_build_result)
+
+# Orchestrate a build
+fn orchestrate_build(config: BuildConfig) -> BuildResult:
+    if config.verbose:
+        print "Building with profile: {profile_to_string(config.profile)}"
+        print "Workspace root: {config.workspace_root}"
+        if config.features.len() > 0:
+            print "Features: {config.features}"
+
+    # Execute build
+    val result = Cargo.build(config)
+
+    # Print result
+    print_build_result(result)
+
+    result
+
+# Orchestrate tests
+fn orchestrate_test(config: BuildConfig) -> i64:
+    if config.verbose:
+        print "Running tests..."
+
+    # First ensure we have a debug build
+    if config.verbose:
+        print "Ensuring debug build exists..."
+
+    var build_config = config
+    build_config.profile = BuildProfile.Debug
+
+    val build_result = Cargo.build(build_config)
+    if not build_result.success:
+        print "Build failed, cannot run tests"
+        return 1
+
+    # Run tests
+    val test_result = Cargo.test_workspace()
+
+    if test_result.success:
+        print "All tests passed: {test_result.tests_passed}/{test_result.tests_run}"
+        return 0
+    else:
+        print "Tests failed: {test_result.tests_failed}/{test_result.tests_run}"
+        return 1
+
+# Clean build artifacts
+fn orchestrate_clean(verbose: bool) -> i64:
+    if verbose:
+        print "Cleaning build artifacts..."
+
+    val exit_code = Cargo.clean()
+
+    if exit_code == 0:
+        print "Clean complete"
+    else:
+        print "Clean failed"
+
+    exit_code
+
+fn profile_to_string(profile: BuildProfile) -> text:
+    match profile:
+        case BuildProfile.Debug: "debug"
+        case BuildProfile.Release: "release"
+        case BuildProfile.Bootstrap: "bootstrap"

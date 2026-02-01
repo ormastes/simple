@@ -31,7 +31,7 @@ pub(crate) fn call_method_on_value(
             "len" | "length" => return Ok(Value::Int(s.chars().count() as i64)),
             "is_empty" => return Ok(Value::Bool(s.is_empty())),
             "to_string" => return Ok(Value::Str(s.clone())),
-            "chars" => return Ok(Value::Array(s.chars().map(|c| Value::Str(c.to_string())).collect())),
+            "chars" => return Ok(Value::array(s.chars().map(|c| Value::Str(c.to_string())).collect())),
             "trim" | "strip" => return Ok(Value::Str(s.trim().to_string())),
             "to_upper" | "upper" | "uppercase" => return Ok(Value::Str(s.to_uppercase())),
             "to_lower" | "lower" | "lowercase" => return Ok(Value::Str(s.to_lowercase())),
@@ -175,7 +175,7 @@ pub(crate) fn call_method_on_value(
                         return Ok(Value::Array(result));
                     }
                 }
-                return Ok(Value::Array(arr.clone()));
+                return Ok(Value::array(arr.clone()));
             }
             "filter" => {
                 if let Some(func_val) = _args.first() {
@@ -199,7 +199,7 @@ pub(crate) fn call_method_on_value(
                         return Ok(Value::Array(result));
                     }
                 }
-                return Ok(Value::Array(arr.clone()));
+                return Ok(Value::array(arr.clone()));
             }
             "flat_map" | "flatmap" => {
                 if let Some(func_val) = _args.first() {
@@ -225,7 +225,7 @@ pub(crate) fn call_method_on_value(
                         return Ok(Value::Array(result));
                     }
                 }
-                return Ok(Value::Array(arr.clone()));
+                return Ok(Value::array(arr.clone()));
             }
             "sort" | "sorted" => {
                 let mut sorted = arr.clone();
@@ -291,13 +291,13 @@ pub(crate) fn call_method_on_value(
                         .collect();
                     return Ok(Value::Array(result));
                 }
-                return Ok(Value::Array(arr.clone()));
+                return Ok(Value::array(arr.clone()));
             }
             "unwrap_or" => {
                 if let Some(default) = _args.first() {
                     if arr.is_empty() { return Ok(default.clone()); }
                 }
-                return Ok(Value::Array(arr.clone()));
+                return Ok(Value::array(arr.clone()));
             }
             _ => {}
         },

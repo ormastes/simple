@@ -326,7 +326,7 @@ pub fn __rt_hashmap_entries(args: &[Value]) -> Result<Value, CompileError> {
     let entries: Vec<Value> = map
         .iter()
         .map(|(k, v)| {
-            Value::Array(vec![Value::Str(k.clone()), v.clone()])
+            Value::array(vec![Value::Str(k.clone()), v.clone()])
         })
         .collect();
 
@@ -1137,7 +1137,7 @@ pub fn __rt_btreemap_entries(args: &[Value]) -> Result<Value, CompileError> {
     let entries: Vec<Value> = map
         .iter()
         .map(|(k, v)| {
-            Value::Array(vec![Value::Str(k.clone()), v.clone()])
+            Value::array(vec![Value::Str(k.clone()), v.clone()])
         })
         .collect();
 

@@ -558,6 +558,39 @@ pub extern "C" fn rt_cli_handle_run(args: RuntimeValue, _gc_log: u8, _gc_off: u8
     delegate_to_simple_old("run", args)
 }
 
+#[no_mangle]
+pub extern "C" fn rt_cli_handle_build(args: RuntimeValue) -> i64 {
+    // Load and execute the Simple build system
+    // src/app/build/main.spl::main(args)
+    use std::process::Command;
+
+    let simple_runtime = std::env::current_exe().unwrap();
+    let mut cmd = Command::new(&simple_runtime);
+    cmd.arg("src/app/build/main.spl");
+
+    // Add arguments from the array
+    let args_len = rt_array_len(args);
+    for i in 0..args_len {
+        let arg_val = rt_array_get(args, i);
+        if let Some(arg_str) = extract_string(arg_val) {
+            cmd.arg(arg_str);
+        }
+    }
+
+    // Inherit stdio for interactive output
+    cmd.stdin(Stdio::inherit());
+    cmd.stdout(Stdio::inherit());
+    cmd.stderr(Stdio::inherit());
+
+    match cmd.status() {
+        Ok(status) => status.code().unwrap_or(1) as i64,
+        Err(e) => {
+            eprintln!("error: failed to execute build system: {}", e);
+            1
+        }
+    }
+}
+
 // ============================================================================
 // Self-Hosting Compiler FFI Functions
 // ============================================================================

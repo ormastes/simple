@@ -566,7 +566,7 @@ pub(super) fn eval_collection_expr(
             }
 
             let result = match recv_val {
-                Value::Array(arr) => Ok(Value::Array(slice_collection(&arr, start_idx, end_idx, step_val))),
+                Value::Array(arr) => Ok(Value::array(slice_collection(&arr, start_idx, end_idx, step_val))),
                 Value::Str(s) => {
                     let chars: Vec<char> = s.chars().collect();
                     let sliced = slice_collection(&chars, start_idx, end_idx, step_val);

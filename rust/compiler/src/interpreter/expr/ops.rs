@@ -442,8 +442,8 @@ pub(super) fn eval_op_expr(
                                 ));
                             }
 
-                            let is_a_2d = matches!(a.get(0), Some(Value::Array(_)));
-                            let is_b_2d = matches!(b.get(0), Some(Value::Array(_)));
+                            let is_a_2d = is_2d_array(&a);
+                            let is_b_2d = is_2d_array(&b);
 
                             match (is_a_2d, is_b_2d) {
                                 (false, false) => matmul_dot_product_1d(a, b),

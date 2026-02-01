@@ -277,6 +277,8 @@ impl Value {
             Value::TraitType { .. } => ValueKind::TraitType,
             Value::Block { .. } => ValueKind::Block,
             Value::Nil => ValueKind::Nil,
+            Value::FrozenArray(_) => ValueKind::Array,
+            Value::FrozenDict(_) => ValueKind::Dict,
         }
     }
 

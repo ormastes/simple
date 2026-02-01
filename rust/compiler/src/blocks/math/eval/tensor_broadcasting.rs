@@ -20,13 +20,13 @@ pub fn tensor_to_value(tensor: &Tensor) -> Value {
 
     if tensor.shape.len() == 1 {
         // 1D tensor -> simple array
-        return Value::Array(tensor.data.iter().map(|&x| Value::Float(x)).collect());
+        return Value::array(tensor.data.iter().map(|&x| Value::Float(x)).collect());
     }
 
     // Multi-dimensional: build nested arrays
     fn build_nested(data: &[f64], shape: &[usize], offset: usize) -> Value {
         if shape.len() == 1 {
-            Value::Array(
+            Value::array(
                 data[offset..offset + shape[0]]
                     .iter()
                     .map(|&x| Value::Float(x))
@@ -34,7 +34,7 @@ pub fn tensor_to_value(tensor: &Tensor) -> Value {
             )
         } else {
             let inner_size: usize = shape[1..].iter().product();
-            Value::Array(
+            Value::array(
                 (0..shape[0])
                     .map(|i| build_nested(data, &shape[1..], offset + i * inner_size))
                     .collect(),

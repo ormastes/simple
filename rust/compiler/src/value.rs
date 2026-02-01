@@ -498,9 +498,17 @@ pub enum Value {
     Bool(bool),
     Str(String),
     Symbol(String),
-    Array(Vec<Value>),
+    /// Mutable array with interior mutability (default for array literals)
+    /// Uses Arc<RwLock<_>> for thread-safety in concurrent contexts
+    Array(Arc<RwLock<Vec<Value>>>),
+    /// Immutable frozen array (created via freeze())
+    FrozenArray(Arc<Vec<Value>>),
     Tuple(Vec<Value>),
-    Dict(HashMap<String, Value>),
+    /// Mutable dict with interior mutability (default for dict literals)
+    /// Uses Arc<RwLock<_>> for thread-safety in concurrent contexts
+    Dict(Arc<RwLock<HashMap<String, Value>>>),
+    /// Immutable frozen dict (created via freeze())
+    FrozenDict(Arc<HashMap<String, Value>>),
     Lambda {
         params: Vec<String>,
         body: Box<Expr>,
@@ -614,6 +622,28 @@ impl Clone for NativeFunction {
             name: self.name.clone(),
             func: Arc::clone(&self.func),
         }
+    }
+}
+
+impl Value {
+    /// Create a new mutable array value (default for array literals)
+    pub fn array(vec: Vec<Value>) -> Self {
+        Value::Array(Arc::new(RwLock::new(vec)))
+    }
+
+    /// Create a new frozen (immutable) array value
+    pub fn frozen_array(vec: Vec<Value>) -> Self {
+        Value::FrozenArray(Arc::new(vec))
+    }
+
+    /// Create a new mutable dict value (default for dict literals)
+    pub fn dict(map: HashMap<String, Value>) -> Self {
+        Value::Dict(Arc::new(RwLock::new(map)))
+    }
+
+    /// Create a new frozen (immutable) dict value
+    pub fn frozen_dict(map: HashMap<String, Value>) -> Self {
+        Value::FrozenDict(Arc::new(map))
     }
 }
 

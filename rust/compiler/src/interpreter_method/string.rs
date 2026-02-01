@@ -209,7 +209,7 @@ if let Value::Str(ref s) = recv_val {
             // Split into [before, separator, after] at first occurrence
             let sep = eval_arg(args, 0, Value::Str(String::new()), env, functions, classes, enums, impl_methods)?.to_key_string();
             if sep.is_empty() {
-                return Ok(Value::Array(vec![
+                return Ok(Value::array(vec![
                     Value::Str(s.clone()),
                     Value::Str(String::new()),
                     Value::Str(String::new()),
@@ -219,14 +219,14 @@ if let Value::Str(ref s) = recv_val {
                 Some(idx) => {
                     let before = &s[..idx];
                     let after = &s[idx + sep.len()..];
-                    return Ok(Value::Array(vec![
+                    return Ok(Value::array(vec![
                         Value::Str(before.to_string()),
                         Value::Str(sep),
                         Value::Str(after.to_string()),
                     ]));
                 }
                 None => {
-                    return Ok(Value::Array(vec![
+                    return Ok(Value::array(vec![
                         Value::Str(s.clone()),
                         Value::Str(String::new()),
                         Value::Str(String::new()),
@@ -238,7 +238,7 @@ if let Value::Str(ref s) = recv_val {
             // Split into [before, separator, after] at last occurrence
             let sep = eval_arg(args, 0, Value::Str(String::new()), env, functions, classes, enums, impl_methods)?.to_key_string();
             if sep.is_empty() {
-                return Ok(Value::Array(vec![
+                return Ok(Value::array(vec![
                     Value::Str(String::new()),
                     Value::Str(String::new()),
                     Value::Str(s.clone()),
@@ -248,14 +248,14 @@ if let Value::Str(ref s) = recv_val {
                 Some(idx) => {
                     let before = &s[..idx];
                     let after = &s[idx + sep.len()..];
-                    return Ok(Value::Array(vec![
+                    return Ok(Value::array(vec![
                         Value::Str(before.to_string()),
                         Value::Str(sep),
                         Value::Str(after.to_string()),
                     ]));
                 }
                 None => {
-                    return Ok(Value::Array(vec![
+                    return Ok(Value::array(vec![
                         Value::Str(String::new()),
                         Value::Str(String::new()),
                         Value::Str(s.clone()),
@@ -440,7 +440,7 @@ if let Value::Str(ref s) = recv_val {
             // find_all(needle) - Return all indices where needle is found
             let needle = eval_arg(args, 0, Value::Str(String::new()), env, functions, classes, enums, impl_methods)?.to_key_string();
             if needle.is_empty() {
-                return Ok(Value::Array(vec![]));
+                return Ok(Value::array(vec![]));
             }
             let indices: Vec<Value> = s.match_indices(&needle)
                 .map(|(idx, _)| Value::Int(idx as i64))
@@ -450,7 +450,7 @@ if let Value::Str(ref s) = recv_val {
         "join" => {
             // join(array) - Join array elements with this string as delimiter
             // Example: ",".join(["a", "b", "c"]) -> "a,b,c"
-            let arr_val = eval_arg(args, 0, Value::Array(vec![]), env, functions, classes, enums, impl_methods)?;
+            let arr_val = eval_arg(args, 0, Value::array(vec![]), env, functions, classes, enums, impl_methods)?;
             if let Value::Array(arr) = arr_val {
                 let parts: Vec<String> = arr.iter().map(|v| v.to_display_string()).collect();
                 return Ok(Value::Str(parts.join(s)));
