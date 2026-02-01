@@ -22,7 +22,7 @@ pub fn handle_array_methods(
     impl_methods: &ImplMethods,
 ) -> Result<Option<Value>, CompileError> {
     let result = match method {
-        "len" => Value::Int(arr.len() as i64),
+        "len" | "length" => Value::Int(arr.len() as i64),
         "is_empty" => Value::Bool(arr.is_empty()),
         "first" => arr.first().cloned().unwrap_or(Value::Nil),
         "last" => arr.last().cloned().unwrap_or(Value::Nil),
@@ -635,7 +635,7 @@ pub fn handle_tuple_methods(
     impl_methods: &ImplMethods,
 ) -> Result<Option<Value>, CompileError> {
     let result = match method {
-        "len" => Value::Int(tup.len() as i64),
+        "len" | "length" => Value::Int(tup.len() as i64),
         "is_empty" => Value::Bool(tup.is_empty()),
         "get" => {
             let idx = eval_arg_usize(args, 0, 0, env, functions, classes, enums, impl_methods)?;
@@ -825,7 +825,7 @@ pub fn handle_dict_methods(
     impl_methods: &ImplMethods,
 ) -> Result<Option<Value>, CompileError> {
     let result = match method {
-        "len" => Value::Int(map.len() as i64),
+        "len" | "length" => Value::Int(map.len() as i64),
         "is_empty" => Value::Bool(map.is_empty()),
         "has" | "contains_key" | "contains" => {
             let key = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?.to_key_string();

@@ -4,6 +4,14 @@
 
 use app.build.config (parse_build_args)
 use app.build.orchestrator (orchestrate_build, orchestrate_test, orchestrate_clean)
+use app.build.test (TestOrchestrator, TestConfig, default_test_config)
+use app.build.coverage (Coverage, CoverageConfig, default_coverage_config)
+use app.build.quality (Lint, Format, Check, LintConfig, FormatConfig, CheckConfig, default_lint_config, default_format_config, default_check_config)
+use app.build.bootstrap_simple (Bootstrap, default_bootstrap_config)
+use app.build.package (Package, default_bootstrap_config as default_package_bootstrap_config, default_full_config)
+use app.build.metrics (MetricsTracker, print_metrics)
+use app.build.watch (WatchOrchestrator, default_watch_config, print_watch_result)
+use app.build.incremental (IncrementalBuild, default_incremental_config, print_incremental_result)
 
 fn print_help():
     print "Simple Build System"
@@ -12,7 +20,17 @@ fn print_help():
     print "  simple build [options]          Build the project"
     print "  simple build test               Run tests"
     print "  simple build clean              Clean build artifacts"
-    print "  simple build check              Check without building"
+    print "  simple build check              Run all quality checks"
+    print "  simple build coverage           Generate coverage report"
+    print "  simple build lint               Run linter"
+    print "  simple build fmt                Format code"
+    print "  simple build bootstrap          Run bootstrap pipeline"
+    print "  simple build package            Create packages"
+    print ""
+    print "Advanced Features:"
+    print "  simple build watch              Watch mode (auto-rebuild on changes)"
+    print "  simple build incremental        Incremental build (only rebuild changed)"
+    print "  simple build metrics            Show build metrics"
     print ""
     print "Options:"
     print "  --profile=<profile>             Build profile: debug, release, bootstrap"
@@ -20,13 +38,22 @@ fn print_help():
     print "  --bootstrap                     Build with bootstrap profile"
     print "  --features=<features>           Comma-separated feature flags"
     print "  --verbose, -v                   Verbose output"
+    print "  --metrics                       Show build metrics"
+    print "  --incremental                   Use incremental builds"
     print "  --help, -h                      Show this help"
     print ""
     print "Examples:"
     print "  simple build                    # Build with debug profile"
     print "  simple build --release          # Build with release profile"
     print "  simple build --bootstrap        # Build with bootstrap profile (minimal size)"
+    print "  simple build --metrics          # Build and show metrics"
     print "  simple build test               # Run all tests"
+    print "  simple build coverage           # Generate coverage report"
+    print "  simple build lint               # Run clippy linter"
+    print "  simple build fmt                # Format code"
+    print "  simple build check              # Run all checks"
+    print "  simple build watch              # Watch and auto-rebuild"
+    print "  simple build incremental        # Incremental build"
     print "  simple build clean              # Clean build artifacts"
 
 fn main(args: [text]) -> i64:
@@ -38,11 +65,80 @@ fn main(args: [text]) -> i64:
                 print_help()
                 return 0
             case "test":
-                val config = parse_build_args(args[1:])
-                return orchestrate_test(config)
+                val test_config = default_test_config()
+                val result = TestOrchestrator.run(test_config)
+                if result.all_passed():
+                    return 0
+                else:
+                    return 1
             case "clean":
                 val config = parse_build_args(args[1:])
                 return orchestrate_clean(config.verbose)
+            case "coverage":
+                val cov_config = default_coverage_config()
+                val result = Coverage.run(cov_config)
+                if result.success:
+                    return 0
+                else:
+                    return 1
+            case "lint":
+                val lint_config = default_lint_config()
+                val result = Lint.run(lint_config)
+                if result.success:
+                    return 0
+                else:
+                    return 1
+            case "fmt":
+                val fmt_config = default_format_config()
+                val result = Format.run(fmt_config)
+                if result.success:
+                    return 0
+                else:
+                    return 1
+            case "check":
+                val check_config = default_check_config()
+                val result = Check.run(check_config)
+                if result.overall_success:
+                    return 0
+                else:
+                    return 1
+            case "bootstrap":
+                val bootstrap_config = default_bootstrap_config()
+                val result = Bootstrap.run(bootstrap_config)
+                if result.overall_success:
+                    return 0
+                else:
+                    return 1
+            case "package" | "package-bootstrap":
+                val result = Package.bootstrap()
+                if result.success:
+                    return 0
+                else:
+                    return 1
+            case "package-full":
+                val result = Package.full()
+                if result.success:
+                    return 0
+                else:
+                    return 1
+            case "watch":
+                val watch_config = default_watch_config()
+                val result = WatchOrchestrator.start(watch_config)
+                print_watch_result(result)
+                return 0
+            case "incremental":
+                val incremental_config = default_incremental_config()
+                val result = IncrementalBuild.quick()
+                print_incremental_result(result)
+                if result.success:
+                    return 0
+                else:
+                    return 1
+            case "metrics":
+                # Show metrics from last build
+                print "Build metrics:"
+                print "(Note: Metrics tracking not yet fully implemented)"
+                return 0
             case _:
                 # Treat as build options
                 ()
