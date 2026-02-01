@@ -1,0 +1,310 @@
+# Package Integration
+#
+# Integrates the build system with package creation.
+# Creates distributable packages from build artifacts.
+
+use app.build.types (BuildProfile)
+use app.build.cargo (Cargo, BuildConfig)
+use app.build.bootstrap_simple (Bootstrap)
+
+# Package type
+enum PackageType:
+    Bootstrap    # Minimal runtime + core libs (~10 MB)
+    Full         # Complete source distribution (~50 MB)
+    Custom       # User-defined package contents
+
+# Package configuration
+struct PackageConfig:
+    package_type: PackageType
+    version: text
+    platform: text
+    output_path: text
+    include_sources: bool
+    include_tests: bool
+    compress: bool
+
+# Package result
+struct PackageResult:
+    success: bool
+    package_path: text
+    package_size: i64
+    checksum: text
+    build_duration_ms: i64
+
+impl PackageResult:
+    fn summary() -> text:
+        if self.success:
+            "✓ Package created: {self.package_path} ({self.package_size} bytes)"
+        else:
+            "✗ Package creation failed"
+
+# FFI for file operations
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_size(path: text) -> i64
+extern fn rt_file_copy(src: text, dst: text) -> bool
+extern fn rt_dir_create(path: text) -> bool
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_file_hash_sha256(path: text) -> text
+
+# Package class
+class Package:
+    # Create a package with configuration
+    static fn create(config: PackageConfig) -> PackageResult:
+        print "Creating {config.package_type} package..."
+        print "Version: {config.version}"
+        print "Platform: {config.platform}"
+
+        match config.package_type:
+            case PackageType.Bootstrap:
+                create_bootstrap_package(config)
+            case PackageType.Full:
+                create_full_package(config)
+            case PackageType.Custom:
+                create_custom_package(config)
+
+    # Quick bootstrap package
+    static fn bootstrap() -> PackageResult:
+        val config = default_bootstrap_config()
+        Package.create(config)
+
+    # Quick full package
+    static fn full() -> PackageResult:
+        val config = default_full_config()
+        Package.create(config)
+
+# Create bootstrap package (minimal distribution)
+fn create_bootstrap_package(config: PackageConfig) -> PackageResult:
+    val start_time = current_time_ms()
+
+    # Step 1: Build with bootstrap profile
+    print "\nStep 1: Building runtime (bootstrap profile)..."
+    val build_config = BuildConfig(
+        profile: BuildProfile.Bootstrap,
+        features: [],
+        workspace_root: "rust",
+        target_dir: "rust/target",
+        jobs: 4,
+        verbose: false
+    )
+
+    val build_result = Cargo.build(build_config)
+
+    if not build_result.success:
+        return PackageResult(
+            success: false,
+            package_path: "",
+            package_size: 0,
+            checksum: "",
+            build_duration_ms: current_time_ms() - start_time
+        )
+
+    print "✓ Build complete"
+
+    # Step 2: Create package directory structure
+    print "\nStep 2: Creating package structure..."
+    val pkg_dir = "package_tmp"
+    rt_dir_create(pkg_dir)
+    rt_dir_create("{pkg_dir}/bin")
+    rt_dir_create("{pkg_dir}/lib")
+    rt_dir_create("{pkg_dir}/lib/simple")
+
+    # Step 3: Copy runtime binary
+    print "\nStep 3: Copying runtime binary..."
+    val runtime_src = "rust/target/bootstrap/simple_runtime"
+    val runtime_dst = "{pkg_dir}/bin/simple_runtime"
+
+    if not rt_file_copy(runtime_src, runtime_dst):
+        print "✗ Failed to copy runtime binary"
+        return PackageResult(
+            success: false,
+            package_path: "",
+            package_size: 0,
+            checksum: "",
+            build_duration_ms: current_time_ms() - start_time
+        )
+
+    print "✓ Runtime binary copied"
+
+    # Step 4: Copy essential libraries
+    print "\nStep 4: Copying standard library..."
+    copy_stdlib(pkg_dir)
+
+    # Step 5: Create package archive
+    print "\nStep 5: Creating archive..."
+    val package_name = "simple-bootstrap-{config.version}-{config.platform}.tar.gz"
+    val output_path = if config.output_path.len() > 0:
+        config.output_path
+    else:
+        package_name
+
+    val (stdout, stderr, exit_code) = rt_process_run("tar", [
+        "-czf", output_path,
+        "-C", pkg_dir,
+        "."
+    ])
+
+    if exit_code != 0:
+        print "✗ Failed to create archive"
+        return PackageResult(
+            success: false,
+            package_path: "",
+            package_size: 0,
+            checksum: "",
+            build_duration_ms: current_time_ms() - start_time
+        )
+
+    # Step 6: Calculate checksum
+    val package_size = rt_file_size(output_path)
+    val checksum = rt_file_hash_sha256(output_path)
+
+    # Cleanup temporary directory
+    cleanup_package_dir(pkg_dir)
+
+    print "✓ Package created successfully"
+
+    PackageResult(
+        success: true,
+        package_path: output_path,
+        package_size: package_size,
+        checksum: checksum,
+        build_duration_ms: current_time_ms() - start_time
+    )
+
+# Create full package (source distribution)
+fn create_full_package(config: PackageConfig) -> PackageResult:
+    val start_time = current_time_ms()
+
+    print "\nCreating full source package..."
+
+    val package_name = "simple-full-{config.version}.tar.gz"
+    val output_path = if config.output_path.len() > 0:
+        config.output_path
+    else:
+        package_name
+
+    # Create tarball of entire source tree
+    var args = ["-czf", output_path]
+
+    # Exclude patterns
+    args = args.merge(["--exclude=.git"])
+    args = args.merge(["--exclude=rust/target"])
+    args = args.merge(["--exclude=*.pyc"])
+    args = args.merge(["--exclude=__pycache__"])
+    args = args.merge(["--exclude=.DS_Store"])
+    args = args.merge(["--exclude=package_tmp"])
+
+    # Include sources
+    args = args.merge(["."])
+
+    val (stdout, stderr, exit_code) = rt_process_run("tar", args)
+
+    if exit_code != 0:
+        print "✗ Failed to create archive"
+        return PackageResult(
+            success: false,
+            package_path: "",
+            package_size: 0,
+            checksum: "",
+            build_duration_ms: current_time_ms() - start_time
+        )
+
+    val package_size = rt_file_size(output_path)
+    val checksum = rt_file_hash_sha256(output_path)
+
+    print "✓ Package created successfully"
+
+    PackageResult(
+        success: true,
+        package_path: output_path,
+        package_size: package_size,
+        checksum: checksum,
+        build_duration_ms: current_time_ms() - start_time
+    )
+
+# Create custom package
+fn create_custom_package(config: PackageConfig) -> PackageResult:
+    # TODO: Implement custom package with user-defined contents
+    print "Custom packages not yet implemented"
+
+    PackageResult(
+        success: false,
+        package_path: "",
+        package_size: 0,
+        checksum: "",
+        build_duration_ms: 0
+    )
+
+# Copy standard library files
+fn copy_stdlib(pkg_dir: text):
+    # TODO: Implement stdlib copy
+    # For now, just create the directory
+    rt_dir_create("{pkg_dir}/lib/simple/std")
+    print "  (stdlib copy placeholder)"
+
+# Cleanup package temporary directory
+fn cleanup_package_dir(pkg_dir: text):
+    # TODO: Implement directory cleanup
+    # For now, just print
+    print "  (cleanup placeholder for: {pkg_dir})"
+
+# Helper: Current time in milliseconds
+fn current_time_ms() -> i64:
+    # TODO: Use proper time FFI
+    0
+
+# Helper: Detect platform
+fn detect_platform() -> text:
+    # Simple platform detection
+    # TODO: Use proper platform detection
+    "linux-x64"
+
+# Print package result
+fn print_package_result(result: PackageResult):
+    print "\n=========================================="
+    print "Package Creation Result"
+    print "=========================================="
+    print ""
+    print result.summary()
+
+    if result.success:
+        print ""
+        print "Package details:"
+        print "  Path: {result.package_path}"
+        print "  Size: {result.package_size} bytes"
+        print "  Checksum: {result.checksum}"
+        print "  Duration: {result.build_duration_ms}ms"
+        print ""
+        print "Installation:"
+        print "  tar -xzf {result.package_path}"
+        print "  cd simple-*"
+        print "  ./bin/simple_runtime --version"
+
+# Default configurations
+fn default_bootstrap_config() -> PackageConfig:
+    PackageConfig(
+        package_type: PackageType.Bootstrap,
+        version: "0.3.0",
+        platform: detect_platform(),
+        output_path: "",
+        include_sources: false,
+        include_tests: false,
+        compress: true
+    )
+
+fn default_full_config() -> PackageConfig:
+    PackageConfig(
+        package_type: PackageType.Full,
+        version: "0.3.0",
+        platform: detect_platform(),
+        output_path: "",
+        include_sources: true,
+        include_tests: true,
+        compress: true
+    )
+
+# Helper: Package type to string
+fn package_type_to_string(pkg_type: PackageType) -> text:
+    match pkg_type:
+        case PackageType.Bootstrap: "bootstrap"
+        case PackageType.Full: "full"
+        case PackageType.Custom: "custom"

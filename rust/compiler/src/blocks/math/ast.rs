@@ -178,6 +178,21 @@ pub fn normalize_function_name(name: &str) -> &str {
 }
 
 impl MathExpr {
+    /// Convert expression to MathML format
+    pub fn to_mathml(&self) -> String {
+        super::rendering::mathml::to_mathml(self)
+    }
+
+    /// Convert expression to Unicode text representation
+    pub fn to_text(&self) -> String {
+        super::rendering::unicode_text::to_text(self)
+    }
+
+    /// Convert expression to Lean4 syntax
+    pub fn to_lean(&self) -> String {
+        super::rendering::lean::to_lean(self)
+    }
+
     /// Convert expression to LaTeX format
     pub fn to_latex(&self) -> String {
         match self {

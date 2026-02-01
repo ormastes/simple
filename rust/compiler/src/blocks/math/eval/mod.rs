@@ -71,11 +71,39 @@ impl MathValue {
     }
 }
 
-/// Evaluate math expression to a Value
+/// Evaluate math expression to a Value (CPU backend, default)
 pub fn evaluate(expr: &MathExpr) -> Result<Value, CompileError> {
     let mut env = HashMap::new();
     let result = eval_with_env(expr, &mut env)?;
     Ok(result.to_value())
+}
+
+/// Evaluate math expression with a specific backend.
+///
+/// Performs complexity analysis, selects backend (or uses preferred),
+/// logs the decision, and dispatches to the appropriate evaluator.
+pub fn evaluate_with_backend(
+    expr: &MathExpr,
+    preferred: super::backend::MathBackend,
+) -> Result<Value, CompileError> {
+    use super::backend::MathBackend;
+    use super::backend::auto_select::{analyze_complexity, select_backend};
+
+    let complexity = analyze_complexity(expr);
+    let selection = select_backend(&complexity, preferred);
+
+    tracing::debug!(
+        "[math::eval] Dispatching to backend: {} (score: {:.1}, reason: {})",
+        selection.backend,
+        selection.score,
+        selection.reason
+    );
+
+    match selection.backend {
+        MathBackend::CPU | MathBackend::Auto => evaluate(expr),
+        MathBackend::Torch => super::backend::torch_eval::evaluate(expr),
+        MathBackend::CUDA => super::backend::cuda_eval::evaluate(expr),
+    }
 }
 
 /// Evaluate with variable environment

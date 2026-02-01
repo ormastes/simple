@@ -1131,6 +1131,11 @@ pub mod factory {
         CompileError::Semantic(format!("index {} out of bounds for tensor of length {}", index, length))
     }
 
+    /// Error when a tensor shape argument is invalid.
+    pub fn invalid_tensor_shape() -> CompileError {
+        CompileError::Semantic("invalid tensor shape: dimensions must be positive integers".to_string())
+    }
+
     // ============================================
     // Conversion/Parse Errors
     // ============================================

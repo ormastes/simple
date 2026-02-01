@@ -1,13 +1,35 @@
 # Simple Language Project - Development Commands
 #
-# Usage:
-#   make test        - Run ALL tests (Rust + doc-tests + Simple/SSpec)
-#   make test-rust   - Run Rust tests only
-#   make coverage    - Generate test coverage report
-#   make duplication - Check for code duplication
-#   make lint        - Run clippy lints
-#   make check       - Run all checks (lint, test, duplication)
-#   make clean       - Clean build artifacts
+# ⚠️  DEPRECATION NOTICE
+# ======================
+# This Makefile is being phased out in favor of the Simple build system.
+# Please migrate to using:
+#
+#   simple build [command]
+#
+# Makefile commands still work but will show deprecation warnings.
+# See doc/build/migration_guide.md for migration instructions.
+#
+# Common migrations:
+#   make test        →  simple build test
+#   make coverage    →  simple build coverage
+#   make lint        →  simple build lint
+#   make fmt         →  simple build fmt
+#   make check       →  simple build check
+#   make build       →  simple build
+#   make clean       →  simple build clean
+
+# Deprecation warning helper
+define DEPRECATION_WARNING
+	@echo ""
+	@echo "⚠️  DEPRECATION WARNING"
+	@echo "======================="
+	@echo "This Makefile target is deprecated. Please use:"
+	@echo "  simple build $(1)"
+	@echo ""
+	@echo "Continuing with legacy Makefile execution..."
+	@echo ""
+endef
 
 .PHONY: all test test-rust test-verbose test-unit test-integration test-system test-environment \
         test-full test-full-quick test-full-coverage test-full-extended test-full-check \
@@ -35,6 +57,7 @@ all: check
 # Run ALL tests: Rust tests + Rust doc-tests + Simple/SSpec tests
 # Excludes: skip, slow/long-run (#[ignore]), and explicitly ignored tests
 test:
+	$(call DEPRECATION_WARNING,test)
 	@echo "=== Running Rust Tests ==="
 	cd rust && cargo test --workspace
 	@echo ""
@@ -46,6 +69,7 @@ test:
 
 # Run Rust tests only (faster, no Simple/SSpec)
 test-rust:
+	$(call DEPRECATION_WARNING,test-rust)
 	cd rust && cargo test --workspace
 
 test-verbose:
@@ -156,9 +180,11 @@ STACK_ENV := RUST_MIN_STACK=33554432
 REAL_SIMPLE_BIN := $(shell pwd)/rust/target/debug/simple
 
 coverage: coverage-html
+	$(call DEPRECATION_WARNING,coverage)
 	@echo "Coverage report: $(COVERAGE_DIR)/html/index.html"
 
 coverage-html:
+	$(call DEPRECATION_WARNING,coverage)
 	@mkdir -p $(COVERAGE_DIR)
 	cd rust && cargo llvm-cov --workspace --html --output-dir $(COVERAGE_DIR)/html
 
@@ -423,15 +449,19 @@ duplication-simple:
 # ============================================================================
 
 lint:
+	$(call DEPRECATION_WARNING,lint)
 	cd rust && cargo clippy --workspace --all-targets -- -D warnings
 
 lint-fix:
+	$(call DEPRECATION_WARNING,lint --fix)
 	cd rust && cargo clippy --workspace --all-targets --fix --allow-dirty
 
 fmt:
+	$(call DEPRECATION_WARNING,fmt)
 	cd rust && cargo fmt --all
 
 fmt-check:
+	$(call DEPRECATION_WARNING,fmt --check)
 	cd rust && cargo fmt --all -- --check
 
 # ============================================================================
@@ -439,9 +469,11 @@ fmt-check:
 # ============================================================================
 
 check: fmt-check lint test
+	$(call DEPRECATION_WARNING,check)
 	@echo "All checks passed!"
 
 check-full: fmt-check lint test coverage-summary duplication
+	$(call DEPRECATION_WARNING,check --full)
 	@echo "Full check complete!"
 
 # ============================================================================
@@ -465,9 +497,11 @@ audit:
 # ============================================================================
 
 build:
+	$(call DEPRECATION_WARNING,build)
 	cd rust && cargo build --workspace
 
 build-release:
+	$(call DEPRECATION_WARNING,build --release)
 	cd rust && cargo build --workspace --release
 
 # Link binaries (cross-platform)
@@ -493,6 +527,7 @@ link-bins-windows:
 # ============================================================================
 
 clean:
+	$(call DEPRECATION_WARNING,clean)
 	cd rust && cargo clean
 	rm -rf $(COVERAGE_DIR) $(DUPLICATION_DIR)
 
