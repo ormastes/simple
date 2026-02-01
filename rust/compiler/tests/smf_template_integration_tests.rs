@@ -373,6 +373,7 @@ fn create_test_function(name: &str, generic_params: Vec<String>) -> simple_parse
         is_static: false,
         is_me_method: false,
         return_constraint: None,
+        is_generator: false,
     }
 }
 

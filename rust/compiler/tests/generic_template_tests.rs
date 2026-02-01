@@ -438,6 +438,7 @@ fn create_test_function(name: &str, generic_params: Vec<String>) -> FunctionDef 
         bounds_block: None,
         is_static: false,
         is_me_method: false,
+        is_generator: false,
         return_constraint: None,
         is_generic_template: false,
         specialization_of: None,

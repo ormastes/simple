@@ -1,0 +1,156 @@
+# Registry Index
+# Parse and query the sparse package index
+
+use app.package.registry.types (PackageInfo, VersionEntry, VersionDependency, IndexEntry, SearchResult)
+use app.package.registry.config (default_config, index_entry_url, listing_url, index_path_for, RegistryConfig)
+
+extern fn rt_process_run(cmd: text, args: [text]) -> i64
+extern fn rt_process_output(cmd: text, args: [text]) -> text
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_dir_create(path: text, recursive: bool) -> bool
+
+# Fetch and parse an index entry for a package
+fn fetch_index_entry(config: RegistryConfig, name: text) -> IndexEntry:
+    val url = index_entry_url(config, name)
+    val cache_path = "{config.cache_dir}/index/{index_path_for(name)}"
+
+    # Try cache first
+    if rt_file_exists(cache_path):
+        val content = rt_file_read_text(cache_path)
+        return parse_index_entry(content)
+
+    # Fetch from remote
+    val content = rt_process_output("curl", ["-sL", url])
+    if content == "":
+        return IndexEntry(
+            package: PackageInfo(name: name, description: "", homepage: "", license: "", repository: ""),
+            versions: [],
+            dependencies: []
+        )
+
+    # Cache the result
+    val dir = cache_path[:cache_path.rfind("/")]
+    rt_dir_create(dir, true)
+    rt_file_write_text(cache_path, content)
+
+    parse_index_entry(content)
+
+# Parse SDN index entry content into an IndexEntry
+fn parse_index_entry(content: text) -> IndexEntry:
+    val lines = content.split("\n")
+    var name = ""
+    var description = ""
+    var homepage = ""
+    var license = ""
+    var repository = ""
+    var versions = []
+    var deps = []
+    var section = ""
+
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed == "" or trimmed.starts_with("#"):
+            pass
+        elif trimmed.starts_with("package:"):
+            section = "package"
+        elif trimmed.starts_with("versions "):
+            section = "versions"
+        elif trimmed.starts_with("dependencies "):
+            section = "dependencies"
+        elif section == "package":
+            if trimmed.starts_with("name:"):
+                name = trimmed[5:].trim()
+            elif trimmed.starts_with("description:"):
+                description = trimmed[12:].trim()
+            elif trimmed.starts_with("homepage:"):
+                homepage = trimmed[9:].trim()
+            elif trimmed.starts_with("license:"):
+                license = trimmed[8:].trim()
+            elif trimmed.starts_with("repository:"):
+                repository = trimmed[11:].trim()
+        elif section == "versions" and trimmed.contains(","):
+            val parts = trimmed.split(",")
+            if parts.len() >= 4:
+                val ver = parts[0].trim()
+                val checksum = parts[1].trim()
+                val oci_ref = parts[2].trim()
+                val yanked = parts[3].trim() == "true"
+                val pub_at = if parts.len() >= 5: parts[4].trim() else: ""
+                versions.push(VersionEntry(
+                    version: ver,
+                    checksum: checksum,
+                    oci_ref: oci_ref,
+                    yanked: yanked,
+                    published_at: pub_at
+                ))
+        elif section == "dependencies" and trimmed.contains(","):
+            val parts = trimmed.split(",")
+            if parts.len() >= 3:
+                deps.push(VersionDependency(
+                    version: parts[0].trim(),
+                    name: parts[1].trim(),
+                    constraint: parts[2].trim()
+                ))
+
+    IndexEntry(
+        package: PackageInfo(name: name, description: description, homepage: homepage, license: license, repository: repository),
+        versions: versions,
+        dependencies: deps
+    )
+
+# Get latest non-yanked version for a package
+fn latest_version(entry: IndexEntry) -> text:
+    var latest = ""
+    for ver in entry.versions:
+        if not ver.yanked:
+            latest = ver.version
+    latest
+
+# Get dependencies for a specific version
+fn deps_for_version(entry: IndexEntry, version: text) -> [VersionDependency]:
+    var result = []
+    for dep in entry.dependencies:
+        if dep.version == version:
+            result.push(dep)
+    result
+
+# Find a specific version entry
+fn find_version(entry: IndexEntry, version: text) -> VersionEntry:
+    for ver in entry.versions:
+        if ver.version == version:
+            return ver
+    VersionEntry(version: "", checksum: "", oci_ref: "", yanked: false, published_at: "")
+
+# Search packages by name/description
+fn search_packages(config: RegistryConfig, query: text, limit: i64) -> [SearchResult]:
+    val url = listing_url(config)
+    val content = rt_process_output("curl", ["-sL", url])
+    if content == "":
+        return []
+
+    val lines = content.split("\n")
+    var results = []
+    var in_table = false
+    val query_lower = query.lower()
+
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.starts_with("packages "):
+            in_table = true
+        elif in_table and trimmed.contains(","):
+            val parts = trimmed.split(",")
+            if parts.len() >= 3:
+                val name = parts[0].trim()
+                val desc = parts[1].trim()
+                val ver = parts[2].trim()
+                if name.lower().contains(query_lower) or desc.lower().contains(query_lower):
+                    results.push(SearchResult(name: name, description: desc, latest_version: ver))
+                    if results.len() >= limit:
+                        return results
+    results
+
+# Clear the local index cache
+fn clear_cache(config: RegistryConfig) -> bool:
+    rt_process_run("rm", ["-rf", "{config.cache_dir}/index"]) == 0

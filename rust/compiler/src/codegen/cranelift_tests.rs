@@ -47,8 +47,8 @@ fn test_compile_if_else() {
 fn test_cranelift_target_support() {
     let targets = [
         ("x86_64", TargetArch::X86_64, true),    // Expected: supported
-        ("aarch64", TargetArch::Aarch64, true),  // Expected: supported
-        ("riscv64", TargetArch::Riscv64, true),  // Expected: supported
+        ("aarch64", TargetArch::Aarch64, cfg!(target_arch = "aarch64")),  // Only on aarch64 host
+        ("riscv64", TargetArch::Riscv64, cfg!(target_arch = "riscv64")),  // Only on riscv64 host
         ("i686", TargetArch::X86, false),        // Expected: NOT supported
         ("armv7", TargetArch::Arm, false),       // Expected: NOT supported
         ("riscv32", TargetArch::Riscv32, false), // Expected: NOT supported

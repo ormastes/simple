@@ -243,6 +243,7 @@ pub fn parse_test_args(args: &[String]) -> TestOptions {
             }
             // Rust test tracking
             "--rust-tests" => options.rust_tests = true,
+            "--no-rust-tests" => options.rust_tests = false,
             "--rust-ignored" => {
                 options.rust_tests = true;
                 options.rust_ignored_only = true;
