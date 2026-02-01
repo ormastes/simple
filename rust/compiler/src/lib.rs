@@ -3,9 +3,8 @@
 //! This crate provides the main compilation pipeline for the Simple language,
 //! including interpretation, type checking, and code generation.
 
-#![allow(internal_features)]
-#![cfg_attr(not(target_env = "msvc"), feature(linkage))]
 
+pub mod repl_runner;
 pub mod mock_helper;
 pub mod aop_config;
 pub mod api_surface;

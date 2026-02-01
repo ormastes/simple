@@ -1,9 +1,10 @@
 //! REPL execution FFI - bridges Simple REPL to Rust Runner
 //!
-//! This module provides FFI functions that allow the Simple REPL to execute
+//! This module provides functions that allow the Simple REPL to execute
 //! code using the Rust Runner infrastructure.
 //!
 //! Uses thread-local storage to avoid Send/Sync requirements on Runner.
+//! Registers implementations via simple_compiler's register_repl_runner().
 
 use crate::doctest::{append_to_prelude, build_source, is_definition_like};
 use crate::runner::Runner;
@@ -17,9 +18,20 @@ thread_local! {
     static REPL_PRELUDE: RefCell<String> = RefCell::new(String::new());
 }
 
+/// Register the driver's REPL runner implementations with the compiler.
+/// Call this early in the driver's initialization.
+pub fn register() {
+    simple_compiler::repl_runner::register_repl_runner(
+        driver_repl_runner_init,
+        driver_repl_runner_cleanup,
+        driver_repl_runner_execute,
+        driver_repl_runner_clear_prelude,
+        driver_repl_runner_get_prelude,
+    );
+}
+
 /// Initialize REPL runner (must be called from the same thread that will execute code)
-#[no_mangle]
-pub extern "C" fn simple_repl_runner_init() -> bool {
+fn driver_repl_runner_init() -> bool {
     let runner = Runner::new();
     REPL_RUNNER.with(|r| {
         *r.borrow_mut() = Some(runner);
@@ -28,8 +40,7 @@ pub extern "C" fn simple_repl_runner_init() -> bool {
 }
 
 /// Cleanup REPL runner
-#[no_mangle]
-pub extern "C" fn simple_repl_runner_cleanup() {
+fn driver_repl_runner_cleanup() {
     REPL_RUNNER.with(|r| {
         *r.borrow_mut() = None;
     });
@@ -41,8 +52,7 @@ pub extern "C" fn simple_repl_runner_cleanup() {
 /// Execute code in REPL context
 /// Returns 0 for success, 1 for error
 /// Output is written to result_buffer
-#[no_mangle]
-pub extern "C" fn simple_repl_runner_execute(
+fn driver_repl_runner_execute(
     code_ptr: *const u8,
     code_len: usize,
     result_buffer: *mut u8,
@@ -107,8 +117,7 @@ pub extern "C" fn simple_repl_runner_execute(
 }
 
 /// Clear the REPL prelude
-#[no_mangle]
-pub extern "C" fn simple_repl_runner_clear_prelude() -> bool {
+fn driver_repl_runner_clear_prelude() -> bool {
     REPL_PRELUDE.with(|p| {
         p.borrow_mut().clear();
     });
@@ -116,8 +125,7 @@ pub extern "C" fn simple_repl_runner_clear_prelude() -> bool {
 }
 
 /// Get the current prelude
-#[no_mangle]
-pub extern "C" fn simple_repl_runner_get_prelude(buffer: *mut u8, capacity: usize) -> usize {
+fn driver_repl_runner_get_prelude(buffer: *mut u8, capacity: usize) -> usize {
     REPL_PRELUDE.with(|p| {
         let prelude = p.borrow();
         write_output(buffer, capacity, &prelude)
@@ -145,44 +153,52 @@ fn write_error(buffer: *mut u8, capacity: usize, error: &str) {
 mod tests {
     use super::*;
 
+    fn init() {
+        register();
+    }
+
     #[test]
     fn test_runner_init_cleanup() {
-        assert!(simple_repl_runner_init());
-        simple_repl_runner_cleanup();
+        init();
+        assert!(driver_repl_runner_init());
+        driver_repl_runner_cleanup();
     }
 
     #[test]
     fn test_runner_execute_simple() {
-        assert!(simple_repl_runner_init());
+        init();
+        assert!(driver_repl_runner_init());
 
         let code = "1 + 1";
         let mut result = vec![0u8; 1024];
 
-        let ret = simple_repl_runner_execute(code.as_ptr(), code.len(), result.as_mut_ptr(), result.len());
+        let ret = driver_repl_runner_execute(code.as_ptr(), code.len(), result.as_mut_ptr(), result.len());
 
         // Should succeed or fail with error message
         assert!(ret == 0 || ret == 1);
 
-        simple_repl_runner_cleanup();
+        driver_repl_runner_cleanup();
     }
 
     #[test]
     fn test_runner_clear_prelude() {
-        assert!(simple_repl_runner_init());
-        assert!(simple_repl_runner_clear_prelude());
-        simple_repl_runner_cleanup();
+        init();
+        assert!(driver_repl_runner_init());
+        assert!(driver_repl_runner_clear_prelude());
+        driver_repl_runner_cleanup();
     }
 
     #[test]
     fn test_runner_get_prelude() {
-        assert!(simple_repl_runner_init());
+        init();
+        assert!(driver_repl_runner_init());
 
         let mut buffer = vec![0u8; 1024];
-        let len = simple_repl_runner_get_prelude(buffer.as_mut_ptr(), buffer.len());
+        let len = driver_repl_runner_get_prelude(buffer.as_mut_ptr(), buffer.len());
 
         // Should return empty prelude initially
         assert_eq!(len, 0);
 
-        simple_repl_runner_cleanup();
+        driver_repl_runner_cleanup();
     }
 }

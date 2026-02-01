@@ -1,83 +1,102 @@
 //! REPL runner extern functions
 //!
 //! Functions for interacting with the Simple REPL runner.
-//! Uses weak linkage so integration tests can link without the driver.
+//! Uses function pointers so the driver can register its implementations at runtime.
+//! Default stubs return safe no-op values.
 
 use crate::error::CompileError;
 use crate::value::Value;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::OnceLock;
 
-// REPL runner FFI functions - defined in driver crate (repl_runner_ffi.rs)
-// Default stubs with weak linkage — overridden by driver's strong symbols at link time.
-// This allows integration tests and other binaries to link without the driver.
+// Function pointer types for REPL runner operations
+type InitFn = fn() -> bool;
+type CleanupFn = fn();
+type ExecuteFn = fn(*const u8, usize, *mut u8, usize) -> i32;
+type ClearPreludeFn = fn() -> bool;
+type GetPreludeFn = fn(*mut u8, usize) -> usize;
 
-#[cfg(not(target_env = "msvc"))]
+// Default stub implementations
+fn default_init() -> bool { false }
+fn default_cleanup() {}
+fn default_execute(_: *const u8, _: usize, _: *mut u8, _: usize) -> i32 { 1 }
+fn default_clear_prelude() -> bool { true }
+fn default_get_prelude(_: *mut u8, _: usize) -> usize { 0 }
+
+struct ReplRunner {
+    init: InitFn,
+    cleanup: CleanupFn,
+    execute: ExecuteFn,
+    clear_prelude: ClearPreludeFn,
+    get_prelude: GetPreludeFn,
+}
+
+static REPL_RUNNER: OnceLock<ReplRunner> = OnceLock::new();
+static REGISTERED: AtomicBool = AtomicBool::new(false);
+
+fn runner() -> &'static ReplRunner {
+    REPL_RUNNER.get_or_init(|| ReplRunner {
+        init: default_init,
+        cleanup: default_cleanup,
+        execute: default_execute,
+        clear_prelude: default_clear_prelude,
+        get_prelude: default_get_prelude,
+    })
+}
+
+/// Register REPL runner implementations from the driver crate.
+/// Must be called before any REPL operations.
+pub fn register_repl_runner(
+    init: InitFn,
+    cleanup: CleanupFn,
+    execute: ExecuteFn,
+    clear_prelude: ClearPreludeFn,
+    get_prelude: GetPreludeFn,
+) {
+    let _ = REPL_RUNNER.set(ReplRunner {
+        init,
+        cleanup,
+        execute,
+        clear_prelude,
+        get_prelude,
+    });
+    REGISTERED.store(true, Ordering::Release);
+}
+
+/// Check if a real REPL runner has been registered
+pub fn is_repl_runner_registered() -> bool {
+    REGISTERED.load(Ordering::Acquire)
+}
+
+// Public C-compatible wrappers for the driver's FFI tests
 #[no_mangle]
-#[linkage = "weak"]
 pub extern "C" fn simple_repl_runner_init() -> bool {
-    false
+    (runner().init)()
 }
 
-#[cfg(not(target_env = "msvc"))]
 #[no_mangle]
-#[linkage = "weak"]
-pub extern "C" fn simple_repl_runner_cleanup() {}
+pub extern "C" fn simple_repl_runner_cleanup() {
+    (runner().cleanup)()
+}
 
-#[cfg(not(target_env = "msvc"))]
 #[no_mangle]
-#[linkage = "weak"]
 pub extern "C" fn simple_repl_runner_execute(
-    _code_ptr: *const u8,
-    _code_len: usize,
-    _result_buffer: *mut u8,
-    _result_capacity: usize,
+    code_ptr: *const u8,
+    code_len: usize,
+    result_buffer: *mut u8,
+    result_capacity: usize,
 ) -> i32 {
-    1
+    (runner().execute)(code_ptr, code_len, result_buffer, result_capacity)
 }
 
-#[cfg(not(target_env = "msvc"))]
 #[no_mangle]
-#[linkage = "weak"]
 pub extern "C" fn simple_repl_runner_clear_prelude() -> bool {
-    true
+    (runner().clear_prelude)()
 }
 
-#[cfg(not(target_env = "msvc"))]
 #[no_mangle]
-#[linkage = "weak"]
-pub extern "C" fn simple_repl_runner_get_prelude(_buffer: *mut u8, _capacity: usize) -> usize {
-    0
-}
-
-// On MSVC, weak linkage is not supported — use cfg(test) stubs + extern block
-#[cfg(target_env = "msvc")]
-#[cfg(test)]
-#[no_mangle]
-pub extern "C" fn simple_repl_runner_init() -> bool { false }
-#[cfg(target_env = "msvc")]
-#[cfg(test)]
-#[no_mangle]
-pub extern "C" fn simple_repl_runner_cleanup() {}
-#[cfg(target_env = "msvc")]
-#[cfg(test)]
-#[no_mangle]
-pub extern "C" fn simple_repl_runner_execute(_: *const u8, _: usize, _: *mut u8, _: usize) -> i32 { 1 }
-#[cfg(target_env = "msvc")]
-#[cfg(test)]
-#[no_mangle]
-pub extern "C" fn simple_repl_runner_clear_prelude() -> bool { true }
-#[cfg(target_env = "msvc")]
-#[cfg(test)]
-#[no_mangle]
-pub extern "C" fn simple_repl_runner_get_prelude(_: *mut u8, _: usize) -> usize { 0 }
-
-#[cfg(target_env = "msvc")]
-#[cfg(not(test))]
-extern "C" {
-    fn simple_repl_runner_init() -> bool;
-    fn simple_repl_runner_cleanup();
-    fn simple_repl_runner_execute(code_ptr: *const u8, code_len: usize, result_buffer: *mut u8, result_capacity: usize) -> i32;
-    fn simple_repl_runner_clear_prelude() -> bool;
-    fn simple_repl_runner_get_prelude(buffer: *mut u8, capacity: usize) -> usize;
+pub extern "C" fn simple_repl_runner_get_prelude(buffer: *mut u8, capacity: usize) -> usize {
+    (runner().get_prelude)(buffer, capacity)
 }
 
 /// Initialize REPL runner
