@@ -1,6 +1,6 @@
 pub mod auth_db;
 pub mod bug_db;
-pub mod cargo_ffi;
+// pub mod cargo_ffi;  // TODO: Update for new RuntimeValue API
 pub mod cli;
 // CLI FFI functions are in simple_runtime::value::cli_ffi
 pub use simple_runtime::value::cli_ffi;

@@ -227,11 +227,11 @@ fn create_build_result(
     let mut fields = std::collections::HashMap::new();
     fields.insert(
         "success".to_string(),
-        RuntimeValue::Boolean(success),
+        RuntimeValue::from_bool(success),
     );
     fields.insert(
         "exit_code".to_string(),
-        RuntimeValue::Integer(exit_code),
+        RuntimeValue::from_int(exit_code as i64),
     );
     fields.insert(
         "stdout".to_string(),
@@ -263,11 +263,11 @@ fn create_test_result(
     let mut fields = std::collections::HashMap::new();
     fields.insert(
         "success".to_string(),
-        RuntimeValue::Boolean(success),
+        RuntimeValue::from_bool(success),
     );
     fields.insert(
         "exit_code".to_string(),
-        RuntimeValue::Integer(exit_code),
+        RuntimeValue::from_int(exit_code as i64),
     );
     fields.insert(
         "stdout".to_string(),

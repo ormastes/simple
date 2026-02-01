@@ -24,7 +24,7 @@ pub(crate) fn wrap_in_promise(value: Value) -> Value {
             payload: Some(Box::new(value)),
         },
     );
-    fields.insert("callbacks".to_string(), Value::array(vec![]));
+    fields.insert("callbacks".to_string(), Value::Array(vec![]));
 
     Value::Object {
         class: "Promise".to_string(),

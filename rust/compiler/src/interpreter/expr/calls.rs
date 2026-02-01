@@ -429,7 +429,7 @@ pub(super) fn eval_call_expr(
                 },
                 // Array property access (e.g., arr.len, arr.is_empty)
                 // Also supports no-paren method calls (e.g., arr.first, arr.last, arr.reverse)
-                Value::array(ref arr) => match field.as_str() {
+                Value::Array(ref arr) => match field.as_str() {
                     "len" => Ok(Value::Int(arr.len() as i64)),
                     "is_empty" => Ok(Value::Bool(arr.is_empty())),
                     _ => {

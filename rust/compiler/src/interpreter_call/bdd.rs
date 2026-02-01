@@ -82,9 +82,9 @@ fn create_example_group(description: String, parent: Option<Value>) -> Value {
             },
         },
     );
-    fields.insert("children".to_string(), Value::array(Vec::new()));
-    fields.insert("test_examples".to_string(), Value::array(Vec::new()));
-    fields.insert("hooks".to_string(), Value::array(Vec::new()));
+    fields.insert("children".to_string(), Value::Array(Vec::new()));
+    fields.insert("test_examples".to_string(), Value::Array(Vec::new()));
+    fields.insert("hooks".to_string(), Value::Array(Vec::new()));
 
     Value::Object {
         class: "ExampleGroup".to_string(),
@@ -98,7 +98,7 @@ fn create_example(description: String, block: Value) -> Value {
     fields.insert("description".to_string(), Value::Str(description));
     fields.insert("block".to_string(), block);
     fields.insert("is_skipped".to_string(), Value::Bool(false));
-    fields.insert("tags".to_string(), Value::array(Vec::new()));
+    fields.insert("tags".to_string(), Value::Array(Vec::new()));
     fields.insert(
         "timeout_seconds".to_string(),
         Value::Enum {

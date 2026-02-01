@@ -79,10 +79,10 @@ fn parse_regex(payload: &str) -> Result<Value, CompileError> {
     );
     result.insert(
         "capture_groups".to_string(),
-        Value::array(capture_groups.into_iter().map(Value::Str).collect()),
+        Value::Array(capture_groups.into_iter().map(Value::Str).collect()),
     );
 
-    Ok(Value::Dict(result))
+    Ok(Value::dict(result))
 }
 
 /// Extract flags from regex literal (e.g., /pattern/imsx)

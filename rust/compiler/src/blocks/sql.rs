@@ -86,14 +86,14 @@ fn parse_sql_query(payload: &str) -> Result<Value, CompileError> {
     result.insert("raw_query".to_string(), Value::Str(payload.to_string()));
     result.insert(
         "positional_params".to_string(),
-        Value::array(positional_params.into_iter().map(Value::Str).collect()),
+        Value::Array(positional_params.into_iter().map(Value::Str).collect()),
     );
     result.insert(
         "named_params".to_string(),
-        Value::array(named_params.into_iter().map(Value::Str).collect()),
+        Value::Array(named_params.into_iter().map(Value::Str).collect()),
     );
 
-    Ok(Value::Dict(result))
+    Ok(Value::dict(result))
 }
 
 /// Detect the type of SQL query

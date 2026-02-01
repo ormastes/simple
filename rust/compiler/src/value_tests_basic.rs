@@ -191,8 +191,8 @@
 
     #[test]
     fn test_value_truthy_array() {
-        assert!(Value::array(vec![Value::Int(1)]).truthy());
-        assert!(!Value::array(vec![]).truthy());
+        assert!(Value::Array(vec![Value::Int(1)]).truthy());
+        assert!(!Value::Array(vec![]).truthy());
     }
 
     #[test]
@@ -262,7 +262,7 @@
 
     #[test]
     fn test_value_to_display_string_array() {
-        let arr = Value::array(vec![Value::Int(1), Value::Int(2)]);
+        let arr = Value::Array(vec![Value::Int(1), Value::Int(2)]);
         assert_eq!(arr.to_display_string(), "[1, 2]");
     }
 
@@ -287,7 +287,7 @@
         assert_eq!(Value::Bool(true).type_name(), "bool");
         assert_eq!(Value::Str("".into()).type_name(), "str");
         assert_eq!(Value::Symbol("".into()).type_name(), "symbol");
-        assert_eq!(Value::array(vec![]).type_name(), "array");
+        assert_eq!(Value::Array(vec![]).type_name(), "array");
         assert_eq!(Value::Tuple(vec![]).type_name(), "tuple");
         assert_eq!(Value::Dict(HashMap::new()).type_name(), "dict");
         assert_eq!(Value::Nil.type_name(), "nil");
@@ -348,8 +348,8 @@
 
     #[test]
     fn test_value_matches_type_array() {
-        assert!(Value::array(vec![]).matches_type("array"));
-        assert!(Value::array(vec![]).matches_type("Array"));
+        assert!(Value::Array(vec![]).matches_type("array"));
+        assert!(Value::Array(vec![]).matches_type("Array"));
     }
 
     #[test]
@@ -429,7 +429,7 @@
 
     #[test]
     fn test_value_clone_array() {
-        let v = Value::array(vec![Value::Int(1), Value::Int(2)]);
+        let v = Value::Array(vec![Value::Int(1), Value::Int(2)]);
         assert_eq!(v.clone(), v);
     }
 

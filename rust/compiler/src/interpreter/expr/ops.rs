@@ -20,6 +20,11 @@ fn is_variable_immutable(name: &str) -> bool {
     CONST_NAMES.with(|cell| cell.borrow().contains(name)) || IMMUTABLE_VARS.with(|cell| cell.borrow().contains(name))
 }
 
+/// Check if an array is 2D (array of arrays)
+fn is_2d_array(arr: &[Value]) -> bool {
+    !arr.is_empty() && arr.iter().all(|v| matches!(v, Value::Array(_) | Value::FrozenArray(_)))
+}
+
 /// Check if a value is a pointer type (can be dereferenced)
 fn is_pointer_type(val: &Value) -> bool {
     matches!(

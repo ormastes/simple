@@ -174,7 +174,7 @@ pub fn handle_int_methods(
             }
 
             if n == 0 {
-                Value::array(vec![Value::Int(0)])
+                Value::Array(vec![Value::Int(0)])
             } else {
                 let mut digits = Vec::new();
                 let mut num = n;
@@ -413,7 +413,7 @@ pub fn handle_float_methods(
                 den /= g;
             }
 
-            Value::array(vec![Value::Int(num), Value::Int(den)])
+            Value::Array(vec![Value::Int(num), Value::Int(den)])
         }
         "fdiv" => {
             // Floor division for floats - rounds towards negative infinity

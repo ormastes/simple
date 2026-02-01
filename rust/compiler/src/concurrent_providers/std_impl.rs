@@ -77,7 +77,7 @@ impl MapProvider for StdMapProvider {
     fn hashmap_keys(&self, handle: Handle) -> Result<Vec<Value>, CompileError> {
         use crate::interpreter::interpreter_extern::collections::__rt_hashmap_keys;
         match __rt_hashmap_keys(&[Value::Int(handle)])? {
-            Value::Array(v) => Ok(v.read().unwrap().clone()),
+            Value::Array(v) => Ok(v.clone()),
             _ => Ok(vec![]),
         }
     }
@@ -85,7 +85,7 @@ impl MapProvider for StdMapProvider {
     fn hashmap_values(&self, handle: Handle) -> Result<Vec<Value>, CompileError> {
         use crate::interpreter::interpreter_extern::collections::__rt_hashmap_values;
         match __rt_hashmap_values(&[Value::Int(handle)])? {
-            Value::Array(v) => Ok(v.read().unwrap().clone()),
+            Value::Array(v) => Ok(v.clone()),
             _ => Ok(vec![]),
         }
     }
@@ -93,7 +93,7 @@ impl MapProvider for StdMapProvider {
     fn hashmap_entries(&self, handle: Handle) -> Result<Vec<Value>, CompileError> {
         use crate::interpreter::interpreter_extern::collections::__rt_hashmap_entries;
         match __rt_hashmap_entries(&[Value::Int(handle)])? {
-            Value::Array(v) => Ok(v.read().unwrap().clone()),
+            Value::Array(v) => Ok(v.clone()),
             _ => Ok(vec![]),
         }
     }
@@ -148,7 +148,7 @@ impl MapProvider for StdMapProvider {
     fn hashset_to_array(&self, handle: Handle) -> Result<Vec<Value>, CompileError> {
         use crate::interpreter::interpreter_extern::collections::__rt_hashset_to_array;
         match __rt_hashset_to_array(&[Value::Int(handle)])? {
-            Value::Array(v) => Ok(v.read().unwrap().clone()),
+            Value::Array(v) => Ok(v.clone()),
             _ => Ok(vec![]),
         }
     }
@@ -250,7 +250,7 @@ impl MapProvider for StdMapProvider {
     fn btreemap_keys(&self, handle: Handle) -> Result<Vec<Value>, CompileError> {
         use crate::interpreter::interpreter_extern::collections::__rt_btreemap_keys;
         match __rt_btreemap_keys(&[Value::Int(handle)])? {
-            Value::Array(v) => Ok(v.read().unwrap().clone()),
+            Value::Array(v) => Ok(v.clone()),
             _ => Ok(vec![]),
         }
     }
@@ -258,7 +258,7 @@ impl MapProvider for StdMapProvider {
     fn btreemap_values(&self, handle: Handle) -> Result<Vec<Value>, CompileError> {
         use crate::interpreter::interpreter_extern::collections::__rt_btreemap_values;
         match __rt_btreemap_values(&[Value::Int(handle)])? {
-            Value::Array(v) => Ok(v.read().unwrap().clone()),
+            Value::Array(v) => Ok(v.clone()),
             _ => Ok(vec![]),
         }
     }
@@ -266,7 +266,7 @@ impl MapProvider for StdMapProvider {
     fn btreemap_entries(&self, handle: Handle) -> Result<Vec<Value>, CompileError> {
         use crate::interpreter::interpreter_extern::collections::__rt_btreemap_entries;
         match __rt_btreemap_entries(&[Value::Int(handle)])? {
-            Value::Array(v) => Ok(v.read().unwrap().clone()),
+            Value::Array(v) => Ok(v.clone()),
             _ => Ok(vec![]),
         }
     }
@@ -331,7 +331,7 @@ impl MapProvider for StdMapProvider {
     fn btreeset_to_array(&self, handle: Handle) -> Result<Vec<Value>, CompileError> {
         use crate::interpreter::interpreter_extern::collections::__rt_btreeset_to_array;
         match __rt_btreeset_to_array(&[Value::Int(handle)])? {
-            Value::Array(v) => Ok(v.read().unwrap().clone()),
+            Value::Array(v) => Ok(v.clone()),
             _ => Ok(vec![]),
         }
     }

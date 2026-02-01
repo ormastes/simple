@@ -69,7 +69,7 @@ impl std::fmt::Debug for BridgeValue {
             bridge_tags::BOOL => write!(f, "BridgeValue::Bool({})", self.payload != 0),
             bridge_tags::STRING => write!(f, "BridgeValue::String(...)"),
             bridge_tags::SYMBOL => write!(f, "BridgeValue::Symbol(...)"),
-            bridge_tags::ARRAY => write!(f, "BridgeValue::array(len={})", self.payload),
+            bridge_tags::ARRAY => write!(f, "BridgeValue::Array(len={})", self.payload),
             bridge_tags::TUPLE => write!(f, "BridgeValue::Tuple(len={})", self.payload),
             bridge_tags::DICT => write!(f, "BridgeValue::Dict(len={})", self.payload),
             bridge_tags::OBJECT => write!(f, "BridgeValue::Object(...)"),
@@ -275,8 +275,9 @@ impl From<&Value> for BridgeValue {
             Value::Str(s) => BridgeValue::string(s),
             Value::Symbol(s) => BridgeValue::symbol(s),
             Value::Array(items) => Self::from_vec_with_tag(items, bridge_tags::ARRAY),
+            Value::FrozenArray(items) => Self::from_vec_with_tag(items, bridge_tags::ARRAY),
             Value::Tuple(items) => Self::from_vec_with_tag(items, bridge_tags::TUPLE),
-            Value::Dict(_) => {
+            Value::Dict(_) | Value::FrozenDict(_) => {
                 // For now, store dict as a serialized form
                 // Full implementation would need proper serialization
                 BridgeValue {

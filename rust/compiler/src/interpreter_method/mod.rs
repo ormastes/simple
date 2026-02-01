@@ -285,6 +285,13 @@ pub(crate) fn evaluate_method_call(
                 return Ok(result);
             }
         }
+        Value::FrozenArray(arc_arr) => {
+            if let Some(result) =
+                collections::handle_frozen_array_methods(&arc_arr, method, args, env, functions, classes, enums, impl_methods)?
+            {
+                return Ok(result);
+            }
+        }
         Value::Tuple(tup) => {
             if let Some(result) =
                 collections::handle_tuple_methods(tup, method, args, env, functions, classes, enums, impl_methods)?
@@ -295,6 +302,13 @@ pub(crate) fn evaluate_method_call(
         Value::Dict(map) => {
             if let Some(result) =
                 collections::handle_dict_methods(map, method, args, env, functions, classes, enums, impl_methods)?
+            {
+                return Ok(result);
+            }
+        }
+        Value::FrozenDict(arc_map) => {
+            if let Some(result) =
+                collections::handle_frozen_dict_methods(&arc_map, method, args, env, functions, classes, enums, impl_methods)?
             {
                 return Ok(result);
             }

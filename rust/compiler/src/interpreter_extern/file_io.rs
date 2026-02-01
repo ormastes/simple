@@ -342,7 +342,7 @@ pub fn rt_file_find(args: &[Value]) -> Result<Value, CompileError> {
                 .collect();
             Ok(Value::Array(matches))
         }
-        Err(_) => Ok(Value::array(vec![])),
+        Err(_) => Ok(Value::Array(vec![])),
     }
 }
 

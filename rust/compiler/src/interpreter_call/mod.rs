@@ -454,7 +454,7 @@ pub(crate) fn evaluate_call(
                         return Ok(Value::Dict(std::collections::HashMap::new()));
                     }
                     "HashSet" => {
-                        return Ok(Value::array(Vec::new())); // HashSet represented as Array in Simple
+                        return Ok(Value::Array(Vec::new())); // HashSet represented as Array in Simple
                     }
                     "Device" => {
                         // Default to CPU device
