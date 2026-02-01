@@ -33,6 +33,12 @@ Skills located in `.claude/skills/`.
 
 ## Key Features
 
+- **Self-Hosting Build System**: Complete build system written in Simple (100% complete)
+  - 8 phases: Foundation, Testing, Coverage, Quality, Bootstrap, Package, Migration, Advanced
+  - 4,440 lines of implementation, 2,370 lines of tests (290+ SSpec tests)
+  - Commands: `build`, `test`, `coverage`, `lint`, `fmt`, `check`, `bootstrap`, `package`
+  - Replaces Makefile with type-safe Simple code
+  - See: `doc/build/getting_started.md`, `src/app/build/`
 - **LLM-Friendly**: IR export, context packs, lint framework (75% complete)
   - **New Lints**: `print_in_test_spec`, `todo_format`
   - **EasyFix Rules** (9 auto-fix rules): See `/coding` skill and `src/app/fix/rules.spl`
@@ -509,10 +515,36 @@ simple bug-gen
 
 ## Quick Commands
 
+### Build System (Simple - Recommended)
+
 ```bash
-make check         # fmt + lint + test (before commit)
-make check-full    # + coverage + duplication
-make test-all      # Run ALL tests: Rust + doc-tests + Simple/SSpec (excludes skip/slow/ignore)
+# Self-hosting build system written in Simple
+simple build                    # Debug build
+simple build --release          # Release build (40 MB)
+simple build --bootstrap        # Bootstrap build (9.3 MB minimal)
+
+simple build test               # Run all tests
+simple build coverage           # Generate coverage reports
+simple build lint               # Run clippy linter
+simple build fmt                # Format code
+simple build check              # All quality checks (lint + fmt + test)
+
+simple build clean              # Clean build artifacts
+simple build bootstrap          # 3-stage bootstrap pipeline
+simple build package            # Create distribution packages
+simple build watch              # Watch mode (auto-rebuild)
+simple build metrics            # Show build metrics
+
+# See full options
+simple build --help
+```
+
+### Legacy (Makefile - Deprecated)
+
+```bash
+make check         # fmt + lint + test (before commit) → use: simple build check
+make check-full    # + coverage + duplication → use: simple build check --full
+make test-all      # Run ALL tests → use: simple build test
 cd rust && cargo test --workspace
 
 # Runtime binary (Rust core)

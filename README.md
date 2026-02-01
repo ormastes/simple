@@ -8,6 +8,7 @@ A statically typed programming language with Python-like syntax, modern safety f
 
 ## Key Features
 
+- **Self-Hosting Build System** - Complete build system written in Simple itself
 - **Python-like syntax** - Indentation-based blocks, clean readable code
 - **Static typing with inference** - Type safety without verbosity (Hindley-Milner)
 - **Unit types** - Type-safe postfix literals (`10_cm`, `200_kmph`, `42_uid`)
@@ -30,7 +31,10 @@ A statically typed programming language with Python-like syntax, modern safety f
 ### Installation
 
 ```bash
-# Build from source
+# Build from source (using Simple's self-hosting build system)
+simple build --release
+
+# Or using cargo directly
 cargo build --release
 
 # Binary location
@@ -73,6 +77,18 @@ Usage:
   simple -c "code"            Run code string
   simple compile <src> [-o <out>]  Compile to SMF
   simple watch <file.spl>     Watch and auto-recompile
+
+Build System (Self-Hosting):
+  simple build                Build the project (debug)
+  simple build --release      Release build (optimized)
+  simple build --bootstrap    Bootstrap build (minimal 9.3MB)
+  simple build test           Run all tests
+  simple build coverage       Generate coverage reports
+  simple build lint           Run linter (clippy)
+  simple build fmt            Format code (rustfmt)
+  simple build check          Run all quality checks
+  simple build clean          Clean build artifacts
+  simple build --help         Show all build options
 
 Options:
   -h, --help     Show help
