@@ -10,20 +10,19 @@ use crate::value::Value;
 // We use weak linkage to allow the driver to override these stubs at link time.
 // When running tests without the driver, these stubs return safe defaults.
 
-#[cfg(not(target_env = "msvc"))]
-#[linkage = "weak"]
+// REPL runner stubs - only compiled during tests (the real implementations
+// live in driver/src/repl_runner_ffi.rs and are linked into the final binary).
+#[cfg(test)]
 #[no_mangle]
 pub extern "C" fn simple_repl_runner_init() -> bool {
     false
 }
 
-#[cfg(not(target_env = "msvc"))]
-#[linkage = "weak"]
+#[cfg(test)]
 #[no_mangle]
 pub extern "C" fn simple_repl_runner_cleanup() {}
 
-#[cfg(not(target_env = "msvc"))]
-#[linkage = "weak"]
+#[cfg(test)]
 #[no_mangle]
 pub extern "C" fn simple_repl_runner_execute(
     _code_ptr: *const u8,
@@ -34,22 +33,21 @@ pub extern "C" fn simple_repl_runner_execute(
     1
 }
 
-#[cfg(not(target_env = "msvc"))]
-#[linkage = "weak"]
+#[cfg(test)]
 #[no_mangle]
 pub extern "C" fn simple_repl_runner_clear_prelude() -> bool {
     true
 }
 
-#[cfg(not(target_env = "msvc"))]
-#[linkage = "weak"]
+#[cfg(test)]
 #[no_mangle]
 pub extern "C" fn simple_repl_runner_get_prelude(_buffer: *mut u8, _capacity: usize) -> usize {
     0
 }
 
-// MSVC doesn't support weak linkage, so we use extern declarations and handle missing symbols at runtime
-#[cfg(target_env = "msvc")]
+// In non-test builds, these symbols are provided by the driver crate at link time.
+// In test builds, the stubs above provide them.
+#[cfg(not(test))]
 extern "C" {
     fn simple_repl_runner_init() -> bool;
     fn simple_repl_runner_cleanup();

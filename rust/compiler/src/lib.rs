@@ -4,7 +4,8 @@
 //! including interpretation, type checking, and code generation.
 
 #![allow(internal_features)]
-#![cfg_attr(not(target_env = "msvc"), feature(linkage))]
+// FIXME: feature(linkage) requires nightly Rust - disabled for stable builds
+// #![cfg_attr(not(target_env = "msvc"), feature(linkage))]
 
 pub mod mock_helper;
 pub mod aop_config;

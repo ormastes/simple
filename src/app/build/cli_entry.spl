@@ -1,0 +1,111 @@
+# Build System CLI Entry Point
+#
+# Simple wrapper to avoid module import issues in the main CLI
+
+use app.build.main (print_help)
+use app.build.config (parse_build_args)
+use app.build.orchestrator (orchestrate_build, orchestrate_test, orchestrate_clean)
+use app.build.test (TestOrchestrator, default_test_config)
+use app.build.coverage (Coverage, default_coverage_config)
+use app.build.quality (Lint, Format, Check, default_lint_config, default_format_config, default_check_config)
+use app.build.bootstrap_simple (Bootstrap, default_bootstrap_config)
+use app.build.package (Package)
+use app.build.watch (WatchOrchestrator, default_watch_config, print_watch_result)
+use app.build.incremental (IncrementalBuild, default_incremental_config, print_incremental_result)
+
+fn handle_build(args: [text]) -> i64:
+    # Check for subcommands
+    if args.len() > 0:
+        val cmd = args[0]
+        match cmd:
+            case "--help" | "-h":
+                print_help()
+                return 0
+            case "test":
+                val test_config = default_test_config()
+                val result = TestOrchestrator.run(test_config)
+                if result.all_passed():
+                    return 0
+                else:
+                    return 1
+            case "clean":
+                val config = parse_build_args(args[1:])
+                return orchestrate_clean(config.verbose)
+            case "coverage":
+                val cov_config = default_coverage_config()
+                val result = Coverage.run(cov_config)
+                if result.success:
+                    return 0
+                else:
+                    return 1
+            case "lint":
+                val lint_config = default_lint_config()
+                val result = Lint.run(lint_config)
+                if result.success:
+                    return 0
+                else:
+                    return 1
+            case "fmt":
+                val fmt_config = default_format_config()
+                val result = Format.run(fmt_config)
+                if result.success:
+                    return 0
+                else:
+                    return 1
+            case "check":
+                val check_config = default_check_config()
+                val result = Check.run(check_config)
+                if result.overall_success:
+                    return 0
+                else:
+                    return 1
+            case "bootstrap":
+                val bootstrap_config = default_bootstrap_config()
+                val result = Bootstrap.run(bootstrap_config)
+                if result.overall_success:
+                    return 0
+                else:
+                    return 1
+            case "package" | "package-bootstrap":
+                val result = Package.bootstrap()
+                if result.success:
+                    return 0
+                else:
+                    return 1
+            case "package-full":
+                val result = Package.full()
+                if result.success:
+                    return 0
+                else:
+                    return 1
+            case "watch":
+                val watch_config = default_watch_config()
+                val result = WatchOrchestrator.start(watch_config)
+                print_watch_result(result)
+                return 0
+            case "incremental":
+                val incremental_config = default_incremental_config()
+                val result = IncrementalBuild.quick()
+                print_incremental_result(result)
+                if result.success:
+                    return 0
+                else:
+                    return 1
+            case "metrics":
+                print "Build metrics:"
+                print "(Note: Metrics tracking not yet fully implemented)"
+                return 0
+            case _:
+                # Treat as build options
+                ()
+
+    # Parse configuration
+    val config = parse_build_args(args)
+
+    # Execute build
+    val result = orchestrate_build(config)
+
+    if result.success:
+        return 0
+    else:
+        return result.exit_code
