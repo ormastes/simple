@@ -349,14 +349,22 @@ pub fn load_and_merge_module(
     let mut exports: HashMap<String, Value> = HashMap::new();
     for (name, value) in module_exports {
         match value {
-            Value::Function { name: fn_name, def, .. } => {
-                // Re-create function with filtered env (excludes function values to avoid cycles)
+            Value::Function { name: fn_name, def, captured_env: existing_env } => {
+                // Merge: start with the function's existing captured_env (from its defining module),
+                // then overlay with this module's filtered_env. This preserves variables from
+                // sub-modules (e.g., group_stack from dsl.spl when re-exported via __init__.spl).
+                let mut merged_env = existing_env;
+                for (k, v) in filtered_env.iter() {
+                    if !matches!(v, Value::Function { .. }) {
+                        merged_env.entry(k.clone()).or_insert_with(|| v.clone());
+                    }
+                }
                 exports.insert(
                     name,
                     Value::Function {
                         name: fn_name,
                         def,
-                        captured_env: filtered_env.clone(),
+                        captured_env: merged_env,
                     },
                 );
             }

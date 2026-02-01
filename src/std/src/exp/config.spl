@@ -1,0 +1,438 @@
+# Experiment Config - SDN-based config composition
+#
+# Supports:
+#   - Loading from SDN files
+#   - CLI override grammar: key=value, key.nested=value
+#   - Config composition: model=resnet selects configs/model/resnet.sdn
+#   - Interpolation: ${env:VAR}, ${config:path}
+#   - Immutable snapshot + hash once run starts
+
+extern fn rt_file_read_text(path: str) -> str
+extern fn rt_file_exists(path: str) -> bool
+extern fn rt_env_get(key: str) -> str
+extern fn rt_package_sha256(path: str) -> str
+
+# ============================================================================
+# Config Value Types
+# ============================================================================
+
+enum ConfigValue:
+    """A value in the config tree."""
+    Str(text)
+    Int(i64)
+    Float(f64)
+    Bool(bool)
+    List([ConfigValue])
+    Map(Dict<text, ConfigValue>)
+    Null
+
+impl ConfigValue:
+    fn as_text() -> text?:
+        """Get value as text if it is a string."""
+        match self:
+            case Str(s): Some(s)
+            case Int(n): Some("{n}")
+            case Float(f): Some("{f}")
+            case Bool(b): Some("{b}")
+            case _: nil
+
+    fn as_int() -> i64?:
+        """Get value as integer if possible."""
+        match self:
+            case Int(n): Some(n)
+            case _: nil
+
+    fn as_float() -> f64?:
+        """Get value as float if possible."""
+        match self:
+            case Float(f): Some(f)
+            case Int(n): Some(n as f64)
+            case _: nil
+
+    fn as_bool() -> bool?:
+        """Get value as bool if possible."""
+        match self:
+            case Bool(b): Some(b)
+            case _: nil
+
+# ============================================================================
+# Experiment Config
+# ============================================================================
+
+struct ExpConfig:
+    """Immutable experiment configuration snapshot."""
+    values: Dict<text, ConfigValue>
+    source_files: [text]
+    overrides: Dict<text, text>
+
+impl ExpConfig:
+    static fn empty() -> ExpConfig:
+        """Create empty config."""
+        ExpConfig(values: {}, source_files: [], overrides: {})
+
+    fn get(key: text) -> ConfigValue?:
+        """Get a config value by dot-separated key path."""
+        val parts = key.split(".")
+        var current = ConfigValue.Map(self.values)
+        for part in parts:
+            match current:
+                case Map(m):
+                    if m.contains_key(part):
+                        current = m[part]
+                    else:
+                        return nil
+                case _: return nil
+        Some(current)
+
+    fn get_text(key: text) -> text?:
+        """Get a config value as text."""
+        val v = self.get(key)
+        if v.?:
+            v.unwrap().as_text()
+        else:
+            nil
+
+    fn get_int(key: text) -> i64?:
+        """Get a config value as integer."""
+        val v = self.get(key)
+        if v.?:
+            v.unwrap().as_int()
+        else:
+            nil
+
+    fn get_float(key: text) -> f64?:
+        """Get a config value as float."""
+        val v = self.get(key)
+        if v.?:
+            v.unwrap().as_float()
+        else:
+            nil
+
+    fn get_bool(key: text) -> bool?:
+        """Get a config value as bool."""
+        val v = self.get(key)
+        if v.?:
+            v.unwrap().as_bool()
+        else:
+            nil
+
+    fn hash() -> text:
+        """Compute SHA256 hash of config for deterministic run IDs."""
+        val serialized = serialize_config(self.values)
+        sha256_hex(serialized)
+
+    fn with_override(key: text, value: text) -> ExpConfig:
+        """Return new config with a single override applied."""
+        var new_values = self.values
+        val parts = key.split(".")
+        set_nested(new_values, parts, parse_config_value(value))
+        var new_overrides = self.overrides
+        new_overrides[key] = value
+        ExpConfig(values: new_values, source_files: self.source_files, overrides: new_overrides)
+
+    fn to_sdn() -> text:
+        """Serialize config to SDN format."""
+        serialize_config(self.values)
+
+# ============================================================================
+# Config Loading
+# ============================================================================
+
+pub fn load_exp_config(base_dir: text, cli_overrides: [text]) -> Result<ExpConfig, text>:
+    """Load experiment config with composition and overrides.
+
+    Priority (highest last):
+    1. Base config: base_dir/config.sdn
+    2. Composition configs: key=value selects base_dir/configs/key/value.sdn
+    3. CLI overrides: key=value, key.nested=value
+    """
+    var config = ExpConfig.empty()
+    var source_files: [text] = []
+
+    # Load base config
+    val base_path = "{base_dir}/config.sdn"
+    if file_exists(base_path):
+        val base_result = load_sdn_config(base_path)
+        if base_result.is_err():
+            return Err(base_result.unwrap_err())
+        config = base_result.unwrap()
+        source_files = [base_path]
+
+    # Process CLI overrides: split into composition selects and value overrides
+    var overrides: Dict<text, text> = {}
+    for arg in cli_overrides:
+        val eq_idx = arg.index_of("=")
+        if eq_idx < 0:
+            continue
+        val key = arg[:eq_idx].trim()
+        val value = arg[eq_idx + 1:].trim()
+
+        # Check if this is a composition select (e.g., model=resnet)
+        val comp_path = "{base_dir}/configs/{key}/{value}.sdn"
+        if not key.contains(".") and file_exists(comp_path):
+            val comp_result = load_sdn_config(comp_path)
+            if comp_result.is_ok():
+                config = merge_configs(config, comp_result.unwrap())
+                source_files = source_files.merge([comp_path])
+        else:
+            overrides[key] = value
+
+    # Apply value overrides
+    for key in overrides.keys():
+        config = config.with_override(key, overrides[key])
+
+    # Apply interpolation
+    config = resolve_interpolation(config)
+
+    Ok(ExpConfig(
+        values: config.values,
+        source_files: source_files,
+        overrides: overrides
+    ))
+
+pub fn load_sdn_config(path: text) -> Result<ExpConfig, text>:
+    """Load a single SDN config file."""
+    if not file_exists(path):
+        return Err("Config file not found: {path}")
+
+    val content = file_read(path)
+    val parsed = parse_sdn(content)
+    if parsed.is_err():
+        return Err("Failed to parse {path}: {parsed.unwrap_err()}")
+
+    val values = sdn_to_config_values(parsed.unwrap())
+    Ok(ExpConfig(values: values, source_files: [path], overrides: {}))
+
+# ============================================================================
+# Config Merging
+# ============================================================================
+
+pub fn merge_configs(base: ExpConfig, overlay: ExpConfig) -> ExpConfig:
+    """Deep merge overlay config onto base. Overlay values win."""
+    val merged = deep_merge(base.values, overlay.values)
+    val files = base.source_files.merge(overlay.source_files)
+    var overrides = base.overrides
+    for key in overlay.overrides.keys():
+        overrides[key] = overlay.overrides[key]
+    ExpConfig(values: merged, source_files: files, overrides: overrides)
+
+fn deep_merge(base: Dict<text, ConfigValue>, overlay: Dict<text, ConfigValue>) -> Dict<text, ConfigValue>:
+    """Deep merge two config dicts."""
+    var result = base
+    for key in overlay.keys():
+        if result.contains_key(key):
+            match (result[key], overlay[key]):
+                case (Map(b), Map(o)): result[key] = ConfigValue.Map(deep_merge(b, o))
+                case _: result[key] = overlay[key]
+        else:
+            result[key] = overlay[key]
+    result
+
+# ============================================================================
+# Interpolation
+# ============================================================================
+
+fn resolve_interpolation(config: ExpConfig) -> ExpConfig:
+    """Resolve ${env:VAR} and ${config:path} interpolation."""
+    val resolved = resolve_values(config.values, config.values)
+    ExpConfig(values: resolved, source_files: config.source_files, overrides: config.overrides)
+
+fn resolve_values(values: Dict<text, ConfigValue>, root: Dict<text, ConfigValue>) -> Dict<text, ConfigValue>:
+    """Recursively resolve interpolation in values."""
+    var result = values
+    for key in result.keys():
+        result[key] = resolve_value(result[key], root)
+    result
+
+fn resolve_value(value: ConfigValue, root: Dict<text, ConfigValue>) -> ConfigValue:
+    """Resolve interpolation in a single value."""
+    match value:
+        case Str(s): ConfigValue.Str(interpolate_string(s, root))
+        case Map(m): ConfigValue.Map(resolve_values(m, root))
+        case List(items):
+            val resolved = items.map(\item: resolve_value(item, root))
+            ConfigValue.List(resolved)
+        case _: value
+
+fn interpolate_string(s: text, root: Dict<text, ConfigValue>) -> text:
+    """Replace env and config interpolation in a string."""
+    var result = s
+    val env_prefix = r"${env:"
+    val config_prefix = r"${config:"
+    val close_brace = r"}"
+
+    # Resolve env interpolation
+    var start = result.index_of(env_prefix)
+    while start >= 0:
+        val end = result.index_of(close_brace, start)
+        if end < 0:
+            break
+        val var_name = result[start + 6:end]
+        val env_val = env_get(var_name) ?? ""
+        result = result[:start] + env_val + result[end + 1:]
+        start = result.index_of(env_prefix)
+
+    # Resolve config interpolation
+    start = result.index_of(config_prefix)
+    while start >= 0:
+        val end = result.index_of(close_brace, start)
+        if end < 0:
+            break
+        val config_path = result[start + 9:end]
+        val config_val = lookup_path(root, config_path.split("."))
+        val text_val = match config_val:
+            case Some(Str(sv)): sv
+            case Some(Int(n)): "{n}"
+            case Some(Float(f)): "{f}"
+            case Some(Bool(b)): "{b}"
+            case _: ""
+        result = result[:start] + text_val + result[end + 1:]
+        start = result.index_of(config_prefix)
+
+    result
+
+fn lookup_path(values: Dict<text, ConfigValue>, parts: [text]) -> ConfigValue?:
+    """Look up a value by path parts."""
+    if parts.is_empty():
+        return nil
+    var current = ConfigValue.Map(values)
+    for part in parts:
+        match current:
+            case Map(m):
+                if m.contains_key(part):
+                    current = m[part]
+                else:
+                    return nil
+            case _: return nil
+    Some(current)
+
+# ============================================================================
+# CLI Override Parsing
+# ============================================================================
+
+pub fn parse_cli_overrides(args: [text]) -> [text]:
+    """Extract key=value overrides from CLI args."""
+    args.filter(\arg: arg.contains("=") and not arg.starts_with("--"))
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn set_nested(values: mut Dict<text, ConfigValue>, parts: [text], value: ConfigValue):
+    """Set a value at a nested path."""
+    if parts.len() == 1:
+        values[parts[0]] = value
+        return
+    if not values.contains_key(parts[0]):
+        values[parts[0]] = ConfigValue.Map({})
+    match values[parts[0]]:
+        case Map(m):
+            var inner = m
+            set_nested(inner, parts[1:], value)
+            values[parts[0]] = ConfigValue.Map(inner)
+        case _:
+            var inner: Dict<text, ConfigValue> = {}
+            set_nested(inner, parts[1:], value)
+            values[parts[0]] = ConfigValue.Map(inner)
+
+fn parse_config_value(s: text) -> ConfigValue:
+    """Parse a string into a ConfigValue."""
+    if s == "true":
+        return ConfigValue.Bool(true)
+    if s == "false":
+        return ConfigValue.Bool(false)
+    if s == "null" or s == "nil":
+        return ConfigValue.Null
+    # Try integer
+    val as_int = try_parse_int(s)
+    if as_int.?:
+        return ConfigValue.Int(as_int.unwrap())
+    # Try float
+    val as_float = try_parse_float(s)
+    if as_float.?:
+        return ConfigValue.Float(as_float.unwrap())
+    ConfigValue.Str(s)
+
+fn serialize_config(values: Dict<text, ConfigValue>) -> text:
+    """Serialize config values to SDN string."""
+    var lines: [text] = []
+    for key in values.keys():
+        lines = lines.merge([serialize_kv(key, values[key], 0)])
+    lines.join("\n")
+
+fn serialize_kv(key: text, value: ConfigValue, indent: i64) -> text:
+    """Serialize a key-value pair."""
+    val prefix = " ".repeat(indent * 2)
+    match value:
+        case Str(s): "{prefix}{key}: \"{s}\""
+        case Int(n): "{prefix}{key}: {n}"
+        case Float(f): "{prefix}{key}: {f}"
+        case Bool(b): "{prefix}{key}: {b}"
+        case Null: "{prefix}{key}: null"
+        case List(items):
+            val item_strs = items.map(\item: serialize_value(item))
+            "{prefix}{key}: [{item_strs.join(\", \")}]"
+        case Map(m):
+            var sub_lines: [text] = ["{prefix}{key}:"]
+            for k in m.keys():
+                sub_lines = sub_lines.merge([serialize_kv(k, m[k], indent + 1)])
+            sub_lines.join("\n")
+
+fn serialize_value(value: ConfigValue) -> text:
+    """Serialize a single value."""
+    match value:
+        case Str(s): "\"{s}\""
+        case Int(n): "{n}"
+        case Float(f): "{f}"
+        case Bool(b): "{b}"
+        case Null: "null"
+        case _: "<complex>"
+
+fn sdn_to_config_values(sdn: SdnValue) -> Dict<text, ConfigValue>:
+    """Convert parsed SDN data to ConfigValue dict."""
+    var result: Dict<text, ConfigValue> = {}
+    for key in sdn.keys():
+        result[key] = sdn_value_to_config(sdn[key])
+    result
+
+fn sdn_value_to_config(sdn: SdnValue) -> ConfigValue:
+    """Convert a single SDN value to ConfigValue."""
+    # TODO: Implement based on SdnValue type inspection
+    ConfigValue.Null
+
+fn file_exists(path: text) -> bool:
+    rt_file_exists(path)
+
+fn file_read(path: text) -> text:
+    rt_file_read_text(path)
+
+fn parse_sdn(content: text) -> Result<SdnValue, text>:
+    # TODO: Use rt_sdn_parse
+    Ok(SdnValue.empty())
+
+fn env_get(key: text) -> text?:
+    val result = rt_env_get(key)
+    if result == "":
+        nil
+    else:
+        Some(result)
+
+fn sha256_hex(data: text) -> text:
+    # TODO: Use proper FFI when available
+    # Simple hash placeholder using string operations
+    "{data.len()}"
+
+fn try_parse_int(s: text) -> i64?:
+    # TODO: Implement
+    nil
+
+fn try_parse_float(s: text) -> f64?:
+    # TODO: Implement
+    nil
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export ConfigValue, ExpConfig
+export load_exp_config, load_sdn_config, merge_configs, parse_cli_overrides

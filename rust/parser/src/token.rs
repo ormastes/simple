@@ -173,6 +173,7 @@ pub enum TokenKind {
     IfSuspend,    // if~ (suspension if statement)
     WhileSuspend, // while~ (suspension while loop)
     ForSuspend,   // for~ (suspension for loop)
+    MatchSuspend, // match~ (suspension match statement)
     Struct,
     Class,
     Enum,
@@ -219,6 +220,9 @@ pub enum TokenKind {
     Extern,
     Context,
     With,  // with (for context managers)
+    By,    // by (call-site label for scaled-by, multiplied-by, etc.)
+    Into,  // into (call-site label for conversion direction)
+    Onto,  // onto (call-site label for target placement)
     Ghost, // ghost (verification-only code, erased at runtime)
     Macro,
     Bang,    // ! (for macro invocations)
@@ -226,6 +230,8 @@ pub enum TokenKind {
     Shared,  // shared (for GPU shared memory)
     Gpu,     // gpu (for GPU intrinsics namespace)
     Bounds,  // bounds (for @simd kernel bounds: clause)
+    Kernel,  // kernel (GPU kernel function declaration)
+    Gen,     // gen (generator function declaration)
     Dyn,     // dyn (for dynamic trait objects)
     Repr,    // repr (for unit representation constraints)
     Literal, // literal (for literal fn definitions)

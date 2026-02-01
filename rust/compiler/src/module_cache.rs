@@ -12,6 +12,11 @@ use tracing::trace;
 use crate::value::Value;
 use simple_parser::ast::{ClassDef, EnumDef, FunctionDef};
 
+// Thread-local cache for normalize_path_key to avoid repeated canonicalize() syscalls
+thread_local! {
+    static PATH_KEY_CACHE: RefCell<HashMap<PathBuf, PathBuf>> = RefCell::new(HashMap::new());
+}
+
 /// Maximum depth for recursive module loading to prevent infinite loops
 pub const MAX_MODULE_DEPTH: usize = 50;
 
@@ -43,11 +48,30 @@ pub fn clear_module_cache() {
     MODULES_LOADING.with(|loading| loading.borrow_mut().clear());
     MODULE_LOAD_DEPTH.with(|depth| *depth.borrow_mut() = 0);
     PARTIAL_MODULE_EXPORTS_CACHE.with(|cache| cache.borrow_mut().clear());
+    PATH_KEY_CACHE.with(|cache| cache.borrow_mut().clear());
+    // Also clear path resolution cache
+    super::interpreter_module::clear_path_resolution_cache();
 }
 
 /// Normalize a path to a consistent key for caching/tracking.
 /// Uses canonicalize if the file exists, otherwise normalizes the path string.
+/// Results are cached to avoid repeated filesystem syscalls.
 pub fn normalize_path_key(path: &Path) -> PathBuf {
+    let path_buf = path.to_path_buf();
+    if let Some(cached) = PATH_KEY_CACHE.with(|cache| cache.borrow().get(&path_buf).cloned()) {
+        return cached;
+    }
+
+    let result = normalize_path_key_uncached(path);
+
+    PATH_KEY_CACHE.with(|cache| {
+        cache.borrow_mut().insert(path_buf, result.clone());
+    });
+
+    result
+}
+
+fn normalize_path_key_uncached(path: &Path) -> PathBuf {
     // First try to canonicalize (works if file exists)
     if let Ok(canonical) = path.canonicalize() {
         return canonical;

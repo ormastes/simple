@@ -470,8 +470,20 @@ pub fn handle_array_methods(
             Value::Dict(result)
         }
         "compact" => {
-            // Remove all nil values from array
-            let result: Vec<Value> = arr.iter().filter(|v| !matches!(v, Value::Nil)).cloned().collect();
+            // Remove nil/None values from array, unwrap Some values
+            let result: Vec<Value> = arr.iter().filter_map(|v| {
+                match v {
+                    Value::Nil => None,
+                    Value::Enum { ref enum_name, ref variant, ref payload } if enum_name == "Option" => {
+                        if variant == "Some" {
+                            payload.as_ref().map(|p| p.as_ref().clone())
+                        } else {
+                            None // Option::None
+                        }
+                    }
+                    other => Some(other.clone()),
+                }
+            }).collect();
             Value::Array(result)
         }
         "rotate" => {
@@ -921,11 +933,22 @@ pub fn handle_dict_methods(
             )?));
         }
         "compact" => {
-            // Remove all entries with nil values
+            // Remove nil/None entries, unwrap Some values
             let result: HashMap<String, Value> = map
                 .iter()
-                .filter(|(_, v)| !matches!(v, Value::Nil))
-                .map(|(k, v)| (k.clone(), v.clone()))
+                .filter_map(|(k, v)| {
+                    match v {
+                        Value::Nil => None,
+                        Value::Enum { ref enum_name, ref variant, ref payload } if enum_name == "Option" => {
+                            if variant == "Some" {
+                                payload.as_ref().map(|p| (k.clone(), p.as_ref().clone()))
+                            } else {
+                                None
+                            }
+                        }
+                        other => Some((k.clone(), other.clone())),
+                    }
+                })
                 .collect();
             Value::Dict(result)
         }

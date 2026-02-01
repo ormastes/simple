@@ -1,0 +1,305 @@
+# Experiment Sweep - Hyperparameter optimization (Optuna-like)
+#
+# Components:
+#   Study   - Manages a collection of trials
+#   Trial   - A single hyperparameter evaluation
+#   Sampler - Suggests hyperparameter values
+#   Pruner  - Decides whether to prune unpromising trials
+
+use std.exp.config
+use std.exp.run
+use std.exp.storage
+
+extern fn rt_random_uniform(min: f64, max: f64) -> f64
+extern fn rt_random_randint(min: i64, max: i64) -> i64
+extern fn rt_time_now_unix_micros() -> i64
+
+# ============================================================================
+# Trial Status
+# ============================================================================
+
+enum TrialStatus:
+    """Status of a single trial."""
+    Running
+    Completed
+    Pruned
+    Failed
+
+impl TrialStatus:
+    fn to_text() -> text:
+        match self:
+            case Running: "running"
+            case Completed: "completed"
+            case Pruned: "pruned"
+            case Failed: "failed"
+
+# ============================================================================
+# Trial
+# ============================================================================
+
+struct Trial:
+    """A single hyperparameter evaluation."""
+    trial_id: i64
+    params: Dict<text, f64>
+    status: TrialStatus
+    value: f64?
+    intermediate_values: Dict<i64, f64>
+    run: Run?
+
+impl Trial:
+    me suggest_float(name: text, low: f64, high: f64) -> f64:
+        """Suggest a float hyperparameter in [low, high]."""
+        val value = rt_random_uniform(low, high)
+        self.params[name] = value
+        value
+
+    me suggest_int(name: text, low: i64, high: i64) -> i64:
+        """Suggest an integer hyperparameter in [low, high]."""
+        val value = rt_random_randint(low, high)
+        self.params[name] = value as f64
+        value
+
+    me suggest_choice(name: text, choices: [f64]) -> f64:
+        """Suggest from a list of discrete choices."""
+        val idx = rt_random_randint(0, choices.len() - 1)
+        val value = choices[idx]
+        self.params[name] = value
+        value
+
+    me report(step: i64, value: f64):
+        """Report an intermediate objective value."""
+        self.intermediate_values[step] = value
+        if self.run.?:
+            self.run.unwrap().log_metric("objective", value, step)
+
+    fn should_prune() -> bool:
+        """Check if this trial should be pruned (set by study's pruner)."""
+        self.status == TrialStatus.Pruned
+
+# ============================================================================
+# Sampler (hyperparameter suggestion strategies)
+# ============================================================================
+
+enum SamplerKind:
+    """Type of sampling strategy."""
+    Random
+    Grid
+    TPE
+
+struct Sampler:
+    """Hyperparameter sampler."""
+    kind: SamplerKind
+    seed: i64
+
+impl Sampler:
+    static fn random(seed: i64) -> Sampler:
+        Sampler(kind: SamplerKind.Random, seed: seed)
+
+    static fn grid() -> Sampler:
+        Sampler(kind: SamplerKind.Grid, seed: 0)
+
+    static fn tpe(seed: i64) -> Sampler:
+        Sampler(kind: SamplerKind.TPE, seed: seed)
+
+# ============================================================================
+# Pruner (early stopping strategies)
+# ============================================================================
+
+enum PrunerKind:
+    """Type of pruning strategy."""
+    NoPrune
+    Median
+    SuccessiveHalving
+
+struct Pruner:
+    """Trial pruner for early stopping."""
+    kind: PrunerKind
+    n_warmup_steps: i64
+    reduction_factor: f64
+
+impl Pruner:
+    static fn none() -> Pruner:
+        Pruner(kind: PrunerKind.NoPrune, n_warmup_steps: 0, reduction_factor: 1.0)
+
+    static fn median(n_warmup_steps: i64) -> Pruner:
+        Pruner(kind: PrunerKind.Median, n_warmup_steps: n_warmup_steps, reduction_factor: 1.0)
+
+    static fn successive_halving(reduction_factor: f64, n_warmup_steps: i64) -> Pruner:
+        Pruner(kind: PrunerKind.SuccessiveHalving, n_warmup_steps: n_warmup_steps, reduction_factor: reduction_factor)
+
+    fn should_prune(trial: Trial, completed_trials: [Trial]) -> bool:
+        """Decide if a trial should be pruned."""
+        match self.kind:
+            case NoPrune: false
+            case Median: prune_by_median(trial, completed_trials, self.n_warmup_steps)
+            case SuccessiveHalving: prune_by_halving(trial, completed_trials, self.reduction_factor, self.n_warmup_steps)
+
+fn prune_by_median(trial: Trial, completed: [Trial], warmup: i64) -> bool:
+    """Prune if trial is below median of completed trials at same step."""
+    if trial.intermediate_values.is_empty():
+        return false
+    val steps = trial.intermediate_values.keys()
+    val last_step = steps[-1]
+    if last_step < warmup:
+        return false
+
+    val trial_value = trial.intermediate_values[last_step]
+
+    # Collect values from completed trials at the same step
+    var values: [f64] = []
+    for t in completed:
+        if t.intermediate_values.contains_key(last_step):
+            values = values.merge([t.intermediate_values[last_step]])
+
+    if values.len() < 3:
+        return false
+
+    # Sort and find median
+    values = values.sort()
+    val median = values[values.len() / 2]
+    trial_value < median
+
+fn prune_by_halving(trial: Trial, completed: [Trial], factor: f64, warmup: i64) -> bool:
+    """Successive halving pruning."""
+    if trial.intermediate_values.is_empty():
+        return false
+    val steps = trial.intermediate_values.keys()
+    val last_step = steps[-1]
+    if last_step < warmup:
+        return false
+
+    val trial_value = trial.intermediate_values[last_step]
+
+    var values: [f64] = []
+    for t in completed:
+        if t.intermediate_values.contains_key(last_step):
+            values = values.merge([t.intermediate_values[last_step]])
+
+    if values.len() < 2:
+        return false
+
+    values = values.sort()
+    val cutoff_idx = (values.len() as f64 / factor) as i64
+    if cutoff_idx >= values.len():
+        return false
+    trial_value < values[cutoff_idx]
+
+# ============================================================================
+# Study
+# ============================================================================
+
+struct StudyConfig:
+    """Configuration for a study."""
+    name: text
+    direction: text      # "minimize" or "maximize"
+    sampler: Sampler
+    pruner: Pruner
+    max_trials: i64
+    time_limit_secs: i64?
+
+struct Study:
+    """A hyperparameter optimization study."""
+    config: StudyConfig
+    trials: [Trial]
+    best_trial: Trial?
+    start_time_micros: i64
+
+impl Study:
+    static fn create(name: text, direction: text) -> Study:
+        """Create a new study with defaults."""
+        Study(
+            config: StudyConfig(
+                name: name,
+                direction: direction,
+                sampler: Sampler.random(42),
+                pruner: Pruner.none(),
+                max_trials: 100,
+                time_limit_secs: nil
+            ),
+            trials: [],
+            best_trial: nil,
+            start_time_micros: rt_time_now_unix_micros()
+        )
+
+    static fn create_with(config: StudyConfig) -> Study:
+        """Create a study with explicit config."""
+        Study(
+            config: config,
+            trials: [],
+            best_trial: nil,
+            start_time_micros: rt_time_now_unix_micros()
+        )
+
+    me optimize(objective: fn(Trial) -> f64, n_trials: i64):
+        """Run optimization for n_trials."""
+        val max = if n_trials < self.config.max_trials: n_trials else: self.config.max_trials
+        var trial_num = 0
+        while trial_num < max:
+            # Check time limit
+            if self.config.time_limit_secs.?:
+                val elapsed = (rt_time_now_unix_micros() - self.start_time_micros) / 1000000
+                if elapsed >= self.config.time_limit_secs.unwrap():
+                    break
+
+            var trial = Trial(
+                trial_id: self.trials.len(),
+                params: {},
+                status: TrialStatus.Running,
+                value: nil,
+                intermediate_values: {},
+                run: nil
+            )
+
+            # Run objective
+            val value = objective(trial)
+            trial.value = Some(value)
+            trial.status = TrialStatus.Completed
+
+            # Check pruner
+            val completed = self.trials.filter(\t: t.status == TrialStatus.Completed)
+            if self.config.pruner.should_prune(trial, completed):
+                trial.status = TrialStatus.Pruned
+
+            # Update best
+            if trial.status == TrialStatus.Completed:
+                if not self.best_trial.?:
+                    self.best_trial = Some(trial)
+                else:
+                    val current_best = self.best_trial.unwrap()
+                    val is_better = match self.config.direction:
+                        case "minimize": value < current_best.value.unwrap()
+                        case _: value > current_best.value.unwrap()
+                    if is_better:
+                        self.best_trial = Some(trial)
+
+            self.trials = self.trials.merge([trial])
+            trial_num = trial_num + 1
+
+    fn completed_trials() -> [Trial]:
+        """Get all completed trials."""
+        self.trials.filter(\t: t.status == TrialStatus.Completed)
+
+    fn pruned_trials() -> [Trial]:
+        """Get all pruned trials."""
+        self.trials.filter(\t: t.status == TrialStatus.Pruned)
+
+    fn best_value() -> f64?:
+        """Get best objective value."""
+        if self.best_trial.?:
+            self.best_trial.unwrap().value
+        else:
+            nil
+
+    fn best_params() -> Dict<text, f64>:
+        """Get best hyperparameters."""
+        if self.best_trial.?:
+            self.best_trial.unwrap().params
+        else:
+            {}
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export TrialStatus, Trial, SamplerKind, Sampler, PrunerKind, Pruner
+export StudyConfig, Study

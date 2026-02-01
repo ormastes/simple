@@ -637,6 +637,7 @@ mod tests {
             is_abstract: false,
             is_sync: false,
             is_me_method: false,
+            is_generator: false,
             bounds_block: None,
             return_constraint: None,
             is_generic_template: false,

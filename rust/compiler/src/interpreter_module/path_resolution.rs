@@ -7,11 +7,23 @@
 //! - Standard library imports
 //! - __init__.spl directory modules
 
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use tracing::trace;
 
 use crate::error::CompileError;
+
+// Thread-local cache for resolved module paths to avoid repeated filesystem probing
+thread_local! {
+    static PATH_RESOLUTION_CACHE: RefCell<HashMap<(Vec<String>, PathBuf), Option<PathBuf>>> = RefCell::new(HashMap::new());
+}
+
+/// Clear the path resolution cache (called between test runs)
+pub fn clear_path_resolution_cache() {
+    PATH_RESOLUTION_CACHE.with(|cache| cache.borrow_mut().clear());
+}
 
 /// Resolve module path from segments
 ///
@@ -28,6 +40,25 @@ use crate::error::CompileError;
 /// # Returns
 /// Absolute path to the module file, or an error if not found
 pub fn resolve_module_path(parts: &[String], base_dir: &Path) -> Result<PathBuf, CompileError> {
+    // Check cache first
+    let cache_key = (parts.to_vec(), base_dir.to_path_buf());
+    let cached = PATH_RESOLUTION_CACHE.with(|cache| cache.borrow().get(&cache_key).cloned());
+    if let Some(cached_result) = cached {
+        return cached_result.ok_or_else(|| crate::error::factory::cannot_resolve_module(&parts.join(".")));
+    }
+
+    let result = resolve_module_path_uncached(parts, base_dir);
+
+    // Cache the result
+    let cache_value = result.as_ref().ok().cloned();
+    PATH_RESOLUTION_CACHE.with(|cache| {
+        cache.borrow_mut().insert(cache_key, cache_value);
+    });
+
+    result
+}
+
+fn resolve_module_path_uncached(parts: &[String], base_dir: &Path) -> Result<PathBuf, CompileError> {
     // Try resolving from base directory first (sibling files)
     let mut resolved = base_dir.to_path_buf();
     for part in parts {

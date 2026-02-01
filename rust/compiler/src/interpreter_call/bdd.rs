@@ -61,6 +61,9 @@ thread_local! {
 
     // Track ignored/skipped test names for qualified ignore prompting
     pub(crate) static BDD_IGNORED_TESTS: RefCell<Vec<String>> = RefCell::new(Vec::new());
+
+    // Track individual test results: (describe_path, test_name, passed, skipped)
+    pub(crate) static BDD_TEST_RESULTS: RefCell<Vec<(String, String, bool, bool)>> = RefCell::new(Vec::new());
 }
 
 /// Create an ExampleGroup Value object
@@ -179,6 +182,22 @@ fn update_last_child_in_current_group(updated_child: &Value) {
             }
         }
     });
+}
+
+/// Get the current describe/context path from the group stack
+fn get_current_describe_path() -> String {
+    BDD_GROUP_STACK.with(|cell| {
+        let stack = cell.borrow();
+        let mut parts = Vec::new();
+        for group in stack.iter() {
+            if let Value::Object { fields, .. } = group {
+                if let Some(Value::Str(desc)) = fields.get("description") {
+                    parts.push(desc.clone());
+                }
+            }
+        }
+        parts.join(" > ")
+    })
 }
 
 /// Invalidate hook caches (called when hooks are added or when entering/exiting contexts)
@@ -502,7 +521,7 @@ pub(super) fn eval_bdd_builtin(
 
             Ok(Some(result?))
         }
-        "it" => {
+        "it" | "slow_it" => {
             let name = eval_arg(
                 args,
                 0,
@@ -578,6 +597,8 @@ pub(super) fn eval_bdd_builtin(
                     println!("{}\x1b[31m✗ {}\x1b[0m", indent_str, name_str);
                     println!("{}  \x1b[31m{}\x1b[0m", indent_str, e);
                     BDD_COUNTS.with(|cell| cell.borrow_mut().1 += 1);
+                    let desc_path = get_current_describe_path();
+                    BDD_TEST_RESULTS.with(|cell| cell.borrow_mut().push((desc_path, name_str.clone(), false, false)));
                     // Don't propagate the error - allow other tests to run
                     Ok(Some(Value::Nil))
                 }
@@ -596,11 +617,17 @@ pub(super) fn eval_bdd_builtin(
                         println!("{}\x1b[32m✓ {}\x1b[0m", indent_str, name_str);
                         BDD_COUNTS.with(|cell| cell.borrow_mut().0 += 1);
                     }
+                    let desc_path = get_current_describe_path();
+                    BDD_TEST_RESULTS.with(|cell| cell.borrow_mut().push((desc_path, name_str.clone(), !failed, false)));
 
-                    // Clear lazy values after each test to reduce memory accumulation.
-                    // This forces lazy values to be re-evaluated for each test, which is
-                    // the expected behavior (fresh values per test).
-                    BDD_LAZY_VALUES.with(|cell| cell.borrow_mut().clear());
+                    // Reset lazy value caches after each test so they are
+                    // re-evaluated for the next test (fresh values per test).
+                    // We reset to None (not clear) to preserve the definitions.
+                    BDD_LAZY_VALUES.with(|cell| {
+                        for (_, (_, cached)) in cell.borrow_mut().iter_mut() {
+                            *cached = None;
+                        }
+                    });
 
                     Ok(Some(result?))
                 }
@@ -629,6 +656,9 @@ pub(super) fn eval_bdd_builtin(
 
             // Track skipped test for qualified ignore prompting
             BDD_IGNORED_TESTS.with(|cell| cell.borrow_mut().push(name_str.clone()));
+
+            let desc_path = get_current_describe_path();
+            BDD_TEST_RESULTS.with(|cell| cell.borrow_mut().push((desc_path, name_str.clone(), true, true)));
 
             BDD_COUNTS.with(|cell| cell.borrow_mut().0 += 1);
 
@@ -1328,6 +1358,9 @@ pub fn clear_bdd_state() {
     // Clear ignored tests tracking
     BDD_IGNORED_TESTS.with(|cell| cell.borrow_mut().clear());
 
+    // Clear individual test results
+    BDD_TEST_RESULTS.with(|cell| cell.borrow_mut().clear());
+
     // Clear global registries
     BDD_REGISTRY_GROUPS.with(|cell: &BddGroupsCell| cell.borrow_mut().clear());
     BDD_REGISTRY_CONTEXTS.with(|cell: &BddContextsCell| cell.borrow_mut().clear());
@@ -1337,4 +1370,9 @@ pub fn clear_bdd_state() {
 /// Get the list of ignored/skipped test names from the current run
 pub fn get_ignored_tests() -> Vec<String> {
     BDD_IGNORED_TESTS.with(|cell| cell.borrow().clone())
+}
+
+/// Get individual test results: (describe_path, test_name, passed, skipped)
+pub fn get_test_results() -> Vec<(String, String, bool, bool)> {
+    BDD_TEST_RESULTS.with(|cell| cell.borrow().clone())
 }

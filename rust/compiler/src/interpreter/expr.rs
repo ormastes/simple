@@ -38,7 +38,10 @@ fn try_unwrap_option_or_result(val: &Value) -> Option<Value> {
                 None
             }
         }
-        _ => None,
+        // Nil is treated as "absent" (like None/Err)
+        Value::Nil => None,
+        // Any other non-Option/non-Result value is treated as "present"
+        other => Some(other.clone()),
     }
 }
 

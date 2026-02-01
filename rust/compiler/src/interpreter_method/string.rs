@@ -296,10 +296,10 @@ if let Value::Str(ref s) = recv_val {
         }
         "last_index_of" | "rfind" => {
             let needle = eval_arg(args, 0, Value::Str(String::new()), env, functions, classes, enums, impl_methods)?.to_key_string();
-            match s.rfind(&needle) {
-                Some(idx) => return Ok(Value::Int(idx as i64)),
-                None => return Ok(Value::Int(-1)),
-            }
+            return Ok(match s.rfind(&needle) {
+                Some(idx) => Value::some(Value::Int(idx as i64)),
+                None => Value::none(),
+            });
         }
         "parse_int" => {
             match s.trim().parse::<i64>() {

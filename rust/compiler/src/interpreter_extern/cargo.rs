@@ -250,6 +250,131 @@ pub fn rt_cargo_clean(_args: &[Value]) -> Result<Value, CompileError> {
     }
 }
 
+/// Run doc-tests with cargo
+///
+/// Arguments:
+/// - package: text (package name, empty for all)
+///
+/// Returns: dict with test result fields
+pub fn rt_cargo_test_doc(args: &[Value]) -> Result<Value, CompileError> {
+    let package = match args.first() {
+        Some(Value::Str(s)) if !s.is_empty() => s.clone(),
+        _ => String::new(),
+    };
+
+    let mut cmd = Command::new("cargo");
+    cmd.arg("test");
+    cmd.arg("--doc");
+    cmd.current_dir("rust");
+
+    if !package.is_empty() {
+        cmd.arg("-p").arg(&package);
+    } else {
+        cmd.arg("--workspace");
+    }
+
+    let output = cmd.output();
+
+    match output {
+        Ok(output) => {
+            let success = output.status.success();
+            let exit_code = output.status.code().unwrap_or(1) as i64;
+            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            let (tests_run, tests_passed, tests_failed) = parse_test_output(&stdout);
+
+            Ok(create_test_result(
+                success, exit_code, stdout, stderr, tests_run, tests_passed, tests_failed,
+            ))
+        }
+        Err(e) => {
+            let stderr = format!("Failed to execute cargo: {}", e);
+            Ok(create_test_result(false, 1, String::new(), stderr, 0, 0, 0))
+        }
+    }
+}
+
+/// Run clippy with cargo
+///
+/// Returns: dict with build result fields
+pub fn rt_cargo_lint(args: &[Value]) -> Result<Value, CompileError> {
+    let start = Instant::now();
+
+    let mut cmd = Command::new("cargo");
+    cmd.arg("clippy");
+    cmd.arg("--workspace");
+    cmd.current_dir("rust");
+
+    // Check for --fix flag
+    let fix = match args.first() {
+        Some(Value::Bool(b)) => *b,
+        _ => false,
+    };
+    if fix {
+        cmd.arg("--fix").arg("--allow-dirty");
+    }
+
+    let output = cmd.output();
+    let duration_ms = start.elapsed().as_millis() as i64;
+
+    match output {
+        Ok(output) => {
+            let success = output.status.success();
+            let exit_code = output.status.code().unwrap_or(1) as i64;
+            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+            Ok(create_build_result(success, exit_code, stdout, stderr, duration_ms))
+        }
+        Err(e) => {
+            let stderr = format!("Failed to execute cargo: {}", e);
+            Ok(create_build_result(false, 1, String::new(), stderr, duration_ms))
+        }
+    }
+}
+
+/// Format code with cargo fmt
+///
+/// Arguments:
+/// - check_only: bool (true = check only, false = format in place)
+///
+/// Returns: dict with build result fields
+pub fn rt_cargo_fmt(args: &[Value]) -> Result<Value, CompileError> {
+    let start = Instant::now();
+
+    let check_only = match args.first() {
+        Some(Value::Bool(b)) => *b,
+        _ => false,
+    };
+
+    let mut cmd = Command::new("cargo");
+    cmd.arg("fmt");
+    cmd.arg("--all");
+    cmd.current_dir("rust");
+
+    if check_only {
+        cmd.arg("--check");
+    }
+
+    let output = cmd.output();
+    let duration_ms = start.elapsed().as_millis() as i64;
+
+    match output {
+        Ok(output) => {
+            let success = output.status.success();
+            let exit_code = output.status.code().unwrap_or(1) as i64;
+            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+            Ok(create_build_result(success, exit_code, stdout, stderr, duration_ms))
+        }
+        Err(e) => {
+            let stderr = format!("Failed to execute cargo: {}", e);
+            Ok(create_build_result(false, 1, String::new(), stderr, duration_ms))
+        }
+    }
+}
+
 /// Check code with cargo (no build)
 ///
 /// Returns: dict with fields:

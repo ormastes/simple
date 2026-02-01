@@ -4,10 +4,10 @@
 
 | Level | Mock Policy | Coverage Metric | Command |
 |-------|-------------|-----------------|---------|
-| Unit | All mocks allowed | Branch/Condition | `make test-unit` |
-| Integration | HAL-only mocks | Public func coverage | `make test-it` |
-| System | No mocks | Class/struct method | `make test-system` |
-| Environment | HAL/External/Lib | Branch/Condition | `make test-env` |
+| Unit | All mocks allowed | Branch/Condition | `simple build test --level=unit` |
+| Integration | HAL-only mocks | Public func coverage | `simple build test --level=integration` |
+| System | No mocks | Class/struct method | `simple build test --level=system` |
+| Environment | HAL/External/Lib | Branch/Condition | `simple build test --level=env` |
 
 ## Critical Rules
 
@@ -21,18 +21,18 @@
 
 ### Rust Tests
 ```bash
-cd rust && cargo test --workspace              # All tests
-cd rust && cargo test -p simple-driver         # Specific crate
-cd rust && cargo test -p simple-driver runner  # Pattern match
-make test                           # Via Makefile
+simple build rust test                         # All Rust tests
+simple build rust test -p simple-driver        # Specific crate
+simple build rust test -p simple-driver runner # Pattern match
+simple build test                              # All tests (Rust + Simple)
 ```
 
 ### Simple (.spl) Tests
 ```bash
-# Via cargo (auto-discovered)
-cd rust && cargo test -p simple-driver simple_stdlib
-cd rust && cargo test -p simple-driver simple_stdlib_unit
-cd rust && cargo test -p simple-driver simple_stdlib_system
+# Via simple build (auto-discovered)
+simple build rust test -p simple-driver simple_stdlib
+simple build rust test -p simple-driver simple_stdlib_unit
+simple build rust test -p simple-driver simple_stdlib_system
 
 # Direct interpreter
 ./rust/target/debug/simple src/std/test/unit/core/arithmetic_spec.spl
@@ -157,9 +157,9 @@ describe "Feature":
 ## Coverage
 
 ```bash
-make coverage          # HTML report
-make coverage-unit     # Unit coverage
-make coverage-all      # All reports
+simple build coverage              # HTML report
+simple build coverage --level=unit # Unit coverage
+simple build coverage --level=all  # All reports
 ```
 
 Target: 100% coverage for all levels.

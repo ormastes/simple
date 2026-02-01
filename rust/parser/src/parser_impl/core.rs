@@ -331,7 +331,7 @@ impl<'a> Parser<'a> {
         match &self.current.kind {
             TokenKind::Hash => self.parse_attributed_item_with_doc(doc_comment),
             TokenKind::At => self.parse_decorated_function_with_doc(doc_comment),
-            TokenKind::Fn | TokenKind::Me => self.parse_function_with_doc(doc_comment),
+            TokenKind::Fn | TokenKind::Me | TokenKind::Kernel | TokenKind::Gen => self.parse_function_with_doc(doc_comment),
             TokenKind::Async => self.parse_async_function_with_doc(doc_comment),
             TokenKind::Sync => self.parse_sync_function_with_doc(doc_comment),
             TokenKind::Struct => self.parse_struct_with_doc(doc_comment),
@@ -452,6 +452,7 @@ impl<'a> Parser<'a> {
             TokenKind::If => self.parse_if(),
             TokenKind::IfSuspend => self.parse_if_suspend(),
             TokenKind::Match => self.parse_match_stmt(),
+            TokenKind::MatchSuspend => self.parse_match_suspend(),
             TokenKind::For => self.parse_for(),
             TokenKind::ForSuspend => self.parse_for_suspend(),
             TokenKind::While => self.parse_while(),
@@ -546,6 +547,10 @@ impl<'a> Parser<'a> {
             TokenKind::Given | TokenKind::When | TokenKind::Then | TokenKind::AndThen => self.parse_step_ref_as_node(),
             // Wildcard suspension: _ ~= expr (discard awaited result)
             TokenKind::Underscore => self.parse_wildcard_suspend(),
+            // Note: Implicit val/var (`name = expr`) is experimental/future.
+            // Currently disabled because it conflicts with assignment syntax.
+            // When enabled, it needs scope analysis to distinguish new bindings from reassignment.
+            // The parse_implicit_val() method exists in var_decl.rs for future use.
             _ => self.parse_expression_or_assignment(),
         }
     }
@@ -670,6 +675,18 @@ impl<'a> Parser<'a> {
             } else if self.check(&TokenKind::From) {
                 self.advance();
                 Some("from".to_string())
+            } else if self.check(&TokenKind::By) {
+                self.advance();
+                Some("by".to_string())
+            } else if self.check(&TokenKind::Into) {
+                self.advance();
+                Some("into".to_string())
+            } else if self.check(&TokenKind::Onto) {
+                self.advance();
+                Some("onto".to_string())
+            } else if self.check(&TokenKind::With) {
+                self.advance();
+                Some("with".to_string())
             } else {
                 None
             };

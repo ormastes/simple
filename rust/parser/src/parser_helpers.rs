@@ -453,6 +453,10 @@ impl<'a> Parser<'a> {
             TokenKind::Unit => "unit".to_string(),
             // Allow 'actor' to be used as identifier (parameter names like 'actor: VoidPtr')
             TokenKind::Actor => "actor".to_string(),
+            // Allow 'kernel' and 'gen' to be used as identifiers (function/variable names)
+            // These keywords are only used for GPU kernel and generator declarations
+            TokenKind::Kernel => "kernel".to_string(),
+            TokenKind::Gen => "gen".to_string(),
             _ => {
                 return Err(ParseError::unexpected_token(
                     "identifier",
@@ -629,6 +633,10 @@ impl<'a> Parser<'a> {
             TokenKind::Then => "then",
             // Allow 'from' as method name (e.g., FilePath::from(path))
             TokenKind::From => "from",
+            // Allow call-site label keywords as method/field names
+            TokenKind::By => "by",
+            TokenKind::Into => "into",
+            TokenKind::Onto => "onto",
             // Allow 'common' as method/field name (e.g., obj.common)
             TokenKind::Common => "common",
             // Allow AOP keywords as method names (e.g., trainer.on(...))
@@ -658,24 +666,10 @@ impl<'a> Parser<'a> {
             TokenKind::Val => "val",
             // Allow 'move' as method name (e.g., MirOperand::move(local))
             TokenKind::Move => "move",
-            // Special error for 'exists' - reserved for verification quantifiers
-            TokenKind::Exists => {
-                return Err(ParseError::syntax_error_with_span(
-                    "Cannot use 'exists' as a function name.\n\
-                     \n\
-                     'exists' is a reserved keyword for existential quantifiers in verification:\n\
-                     Example: exists x in range: predicate\n\
-                     \n\
-                     To check file/path existence, use 'exist' instead:\n\
-                     - file.exist(path)   # In shell module\n\
-                     - path.exist(path)   # In shell module\n\
-                     - file_exist(path)   # In infra module\n\
-                     \n\
-                     Suggestion: Replace 'exists' with 'exist'"
-                        .to_string(),
-                    self.current.span,
-                ));
-            }
+            // Allow 'exists' as method name (e.g., fs.exists(path))
+            TokenKind::Exists => "exists",
+            // Allow 'kernel' as method/function name (e.g., fn kernel(...))
+            TokenKind::Kernel => "kernel",
             _ => {
                 return Err(ParseError::unexpected_token(
                     "identifier",

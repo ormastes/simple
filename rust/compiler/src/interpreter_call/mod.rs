@@ -7,7 +7,7 @@ mod core;
 mod mock;
 
 // Re-export public items
-pub use bdd::{clear_bdd_state, get_ignored_tests};
+pub use bdd::{clear_bdd_state, get_ignored_tests, get_test_results};
 pub use core::clear_class_instantiation_state;
 pub(crate) use bdd::{
     exec_block_value, BDD_AFTER_EACH, BDD_BEFORE_EACH, BDD_CONTEXT_DEFS, BDD_COUNTS, BDD_EXPECT_FAILED,
@@ -55,17 +55,13 @@ pub(crate) fn evaluate_call(
             return result;
         }
 
-        // Priority 2: Check regular functions early (fast path for user-defined calls)
-        if let Some(func) = functions.get(name).cloned() {
-            return core::exec_function(&func, args, env, functions, classes, enums, impl_methods, None);
-        }
-
-        // Priority 3: Try built-ins
+        // Priority 2: Try built-ins (before user functions, so builtins can't be shadowed)
         if let Some(result) = builtins::eval_builtin(name, args, env, functions, classes, enums, impl_methods)? {
             return Ok(result);
         }
 
-        // Try BDD framework
+        // Priority 3: Try BDD framework (before user functions, since imported DSL
+        // functions lack captured_env for module-level state like group_stack)
         if let Some(result) = bdd::eval_bdd_builtin(name, args, env, functions, classes, enums, impl_methods)? {
             return Ok(result);
         }
@@ -75,7 +71,8 @@ pub(crate) fn evaluate_call(
             return Ok(result);
         }
 
-        // Check env for decorated functions and closures
+        // Priority 4: Check env for decorated functions and closures (before functions HashMap,
+        // because decorators store the decorated version in env while the original remains in functions)
         if let Some(val) = env.get(name).cloned() {
             match val {
                 Value::Function { def, captured_env, .. } => {
@@ -112,6 +109,10 @@ pub(crate) fn evaluate_call(
                 Value::Constructor { class_name } => {
                     return core::instantiate_class(&class_name, args, env, functions, classes, enums, impl_methods);
                 }
+                Value::Generator(gen) => {
+                    // Calling a generator returns the next yielded value (or Nil if exhausted)
+                    return Ok(gen.next().unwrap_or(Value::Nil));
+                }
                 Value::NativeFunction(native) => {
                     let evaluated: Vec<Value> = args
                         .iter()
@@ -130,8 +131,32 @@ pub(crate) fn evaluate_call(
                         .collect::<Result<Vec<_>, _>>()?;
                     return (native.func)(&evaluated);
                 }
+                Value::Object { .. } => {
+                    // Support __call__ protocol for callable objects
+                    let evaluated_args: Vec<Value> = args
+                        .iter()
+                        .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    if let Some(result) = super::interpreter_control::call_method_if_exists(
+                        &val,
+                        "__call__",
+                        &evaluated_args,
+                        env,
+                        functions,
+                        classes,
+                        enums,
+                        impl_methods,
+                    )? {
+                        return Ok(result);
+                    }
+                }
                 _ => {}
             }
+        }
+
+        // Priority 5: Check regular functions (user-defined, non-decorated)
+        if let Some(func) = functions.get(name).cloned() {
+            return core::exec_function(&func, args, env, functions, classes, enums, impl_methods, None);
         }
 
         // Check class constructors (e.g., MyClass() instantiation)
@@ -446,35 +471,26 @@ pub(crate) fn evaluate_call(
                 });
             }
 
-            // Handle ClassName.new() as direct construction (returns empty dict with __type__)
+            // Handle ClassName.new() - deprecated, delegate to ClassName() constructor with warning
             if method_name == "new" {
-                // Handle special builtin types that need proper Value constructors
+                eprintln!("\x1b[33mwarning\x1b[0m: {}.new() is deprecated, use {}() instead", type_name, type_name);
+                // Special builtin types
                 match type_name.as_str() {
-                    "HashMap" => {
-                        return Ok(Value::Dict(std::collections::HashMap::new()));
-                    }
-                    "HashSet" => {
-                        return Ok(Value::Array(Vec::new())); // HashSet represented as Array in Simple
-                    }
-                    "BTreeMap" => {
-                        return Ok(Value::Dict(std::collections::HashMap::new()));
-                    }
-                    "BTreeSet" => {
-                        return Ok(Value::Array(Vec::new()));
-                    }
-                    "Device" => {
-                        // Default to CPU device
-                        return Ok(Value::Enum {
-                            enum_name: "Device".to_string(),
-                            variant: "CPU".to_string(),
-                            payload: None,
-                        });
-                    }
+                    "HashMap" | "BTreeMap" => return Ok(Value::Dict(std::collections::HashMap::new())),
+                    "HashSet" | "BTreeSet" => return Ok(Value::Array(Vec::new())),
+                    "Device" => return Ok(Value::Enum {
+                        enum_name: "Device".to_string(),
+                        variant: "CPU".to_string(),
+                        payload: None,
+                    }),
                     _ => {
-                        // Generic case: return typed dict
+                        // Delegate to regular constructor ClassName(args...)
+                        if classes.contains_key(type_name) {
+                            return core::instantiate_class(type_name, args, env, functions, classes, enums, impl_methods);
+                        }
+                        // Fallback for unknown types: return typed dict
                         let mut fields = std::collections::HashMap::new();
                         fields.insert("__type__".to_string(), Value::Str(type_name.to_string()));
-                        // Evaluate and add any named arguments as fields
                         for arg in args {
                             let val = evaluate_expr(&arg.value, env, functions, classes, enums, impl_methods)?;
                             if let Some(name) = &arg.name {
@@ -486,6 +502,79 @@ pub(crate) fn evaluate_call(
                 }
             }
         }
+        // Try static method dispatch for ClassName.method() calls
+        if segments.len() == 2 {
+            let type_name = &segments[0];
+            let method_name = &segments[1];
+
+            // Check class methods for static methods
+            if let Some(class_def) = classes.get(type_name.as_str()).cloned() {
+                if let Some(method) = class_def.methods.iter().find(|m| m.name == *method_name && m.is_static) {
+                    let mut local_env = env.clone();
+                    let non_self_params: Vec<_> = method.params.iter().filter(|p| p.name != "self").collect();
+                    for (i, param) in non_self_params.iter().enumerate() {
+                        if let Some(arg) = args.get(i) {
+                            let val = evaluate_expr(&arg.value, env, functions, classes, enums, impl_methods)?;
+                            local_env.insert(param.name.clone(), val);
+                        }
+                    }
+                    let result = super::exec_block_fn(
+                        &method.body, &mut local_env, functions, classes, enums, impl_methods
+                    );
+                    return match result {
+                        Ok((super::Control::Return(v), _)) => Ok(v),
+                        Ok((_, Some(v))) => Ok(v),
+                        Ok((_, None)) => Ok(Value::Nil),
+                        Err(e) => Err(e),
+                    };
+                }
+            }
+
+            // Check impl_methods for static methods
+            if let Some(methods) = impl_methods.get(type_name.as_str()) {
+                if let Some(method) = methods.iter().find(|m| m.name == *method_name && m.is_static) {
+                    let mut local_env = env.clone();
+                    let non_self_params: Vec<_> = method.params.iter().filter(|p| p.name != "self").collect();
+                    for (i, param) in non_self_params.iter().enumerate() {
+                        if let Some(arg) = args.get(i) {
+                            let val = evaluate_expr(&arg.value, env, functions, classes, enums, impl_methods)?;
+                            local_env.insert(param.name.clone(), val);
+                        }
+                    }
+                    let result = super::exec_block_fn(
+                        &method.body, &mut local_env, functions, classes, enums, impl_methods
+                    );
+                    return match result {
+                        Ok((super::Control::Return(v), _)) => Ok(v),
+                        Ok((_, Some(v))) => Ok(v),
+                        Ok((_, None)) => Ok(Value::Nil),
+                        Err(e) => Err(e),
+                    };
+                }
+            }
+
+            // Try as enum variant constructor (for user-defined enums)
+            if let Some(enum_def) = enums.get(type_name.as_str()) {
+                if enum_def.variants.iter().any(|v| v.name == *method_name) {
+                    let payload = if args.is_empty() {
+                        None
+                    } else if args.len() == 1 {
+                        Some(Box::new(evaluate_expr(&args[0].value, env, functions, classes, enums, impl_methods)?))
+                    } else {
+                        let vals: Result<Vec<Value>, _> = args.iter()
+                            .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
+                            .collect();
+                        Some(Box::new(Value::Tuple(vals?)))
+                    };
+                    return Ok(Value::Enum {
+                        enum_name: type_name.clone(),
+                        variant: method_name.clone(),
+                        payload,
+                    });
+                }
+            }
+        }
+
         let ctx = ErrorContext::new()
             .with_code(codes::INVALID_OPERATION)
             .with_help("path calls must be Type::method() or Type::Variant()");
@@ -603,6 +692,33 @@ pub(crate) fn evaluate_call(
                 variant: variant_name,
                 payload,
             })
+        }
+        Value::Object { ref class, ref fields } => {
+            // Support __call__ protocol: objects with __call__ method are callable
+            let evaluated_args: Vec<Value> = args
+                .iter()
+                .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
+                .collect::<Result<Vec<_>, _>>()?;
+            if let Some(result) = super::interpreter_control::call_method_if_exists(
+                &callee_val,
+                "__call__",
+                &evaluated_args,
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )? {
+                Ok(result)
+            } else {
+                let ctx = ErrorContext::new()
+                    .with_code(codes::NOT_CALLABLE)
+                    .with_help(format!("type '{}' does not implement __call__", class));
+                Err(CompileError::semantic_with_context(
+                    format!("object of type '{}' is not callable", class),
+                    ctx,
+                ))
+            }
         }
         _ => {
             let ctx = ErrorContext::new()

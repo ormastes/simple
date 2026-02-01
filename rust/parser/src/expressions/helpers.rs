@@ -277,6 +277,10 @@ impl<'a> Parser<'a> {
                 TokenKind::Alias => Some("alias".to_string()),
                 TokenKind::Bounds => Some("bounds".to_string()),
                 TokenKind::Outline => Some("outline".to_string()),
+                TokenKind::By => Some("by".to_string()),
+                TokenKind::Into => Some("into".to_string()),
+                TokenKind::Onto => Some("onto".to_string()),
+                TokenKind::With => Some("with".to_string()),
                 _ => None,
             };
             if let Some(id_clone) = maybe_name {
@@ -324,6 +328,18 @@ impl<'a> Parser<'a> {
             } else if self.check(&TokenKind::From) {
                 self.advance();
                 Some("from".to_string())
+            } else if self.check(&TokenKind::By) {
+                self.advance();
+                Some("by".to_string())
+            } else if self.check(&TokenKind::Into) {
+                self.advance();
+                Some("into".to_string())
+            } else if self.check(&TokenKind::Onto) {
+                self.advance();
+                Some("onto".to_string())
+            } else if self.check(&TokenKind::With) {
+                self.advance();
+                Some("with".to_string())
             } else {
                 None
             };
@@ -342,7 +358,8 @@ impl<'a> Parser<'a> {
                     TokenKind::Identifier { .. } |
                     TokenKind::Type | TokenKind::Default | TokenKind::Result |
                     TokenKind::From | TokenKind::To | TokenKind::In | TokenKind::Is |
-                    TokenKind::As | TokenKind::Match | TokenKind::Use | TokenKind::Alias | TokenKind::Bounds
+                    TokenKind::As | TokenKind::Match | TokenKind::Use | TokenKind::Alias | TokenKind::Bounds |
+                    TokenKind::By | TokenKind::Into | TokenKind::Onto | TokenKind::With
                 );
 
                 if is_likely_named_arg {

@@ -11,7 +11,7 @@ use super::core::Parser;
 impl<'a> Parser<'a> {
     pub(super) fn parse_pub_item_with_doc(&mut self, doc_comment: Option<DocComment>) -> Result<Node, ParseError> {
         match &self.current.kind {
-            TokenKind::Fn => {
+            TokenKind::Fn | TokenKind::Kernel | TokenKind::Gen => {
                 let mut node = self.parse_function_with_doc(doc_comment)?;
                 if let Node::Function(ref mut f) = node {
                     f.visibility = Visibility::Public;
@@ -73,7 +73,7 @@ impl<'a> Parser<'a> {
 
     pub(super) fn parse_pub_item(&mut self) -> Result<Node, ParseError> {
         match &self.current.kind {
-            TokenKind::Fn => {
+            TokenKind::Fn | TokenKind::Kernel | TokenKind::Gen => {
                 let mut node = self.parse_function()?;
                 if let Node::Function(ref mut f) = node {
                     f.visibility = Visibility::Public;
@@ -344,7 +344,7 @@ impl<'a> Parser<'a> {
                 }
                 Ok(node)
             }
-            TokenKind::Fn => self.parse_function_with_attrs(vec![], attributes),
+            TokenKind::Fn | TokenKind::Kernel | TokenKind::Gen => self.parse_function_with_attrs(vec![], attributes),
             TokenKind::Async => {
                 self.advance();
                 let mut func = self.parse_function_with_attrs(vec![], attributes)?;
@@ -383,7 +383,7 @@ impl<'a> Parser<'a> {
 
     pub(super) fn parse_pub_item_with_attrs(&mut self, attributes: Vec<Attribute>) -> Result<Node, ParseError> {
         match &self.current.kind {
-            TokenKind::Fn => {
+            TokenKind::Fn | TokenKind::Kernel | TokenKind::Gen => {
                 let mut node = self.parse_function_with_attrs(vec![], attributes)?;
                 if let Node::Function(ref mut f) = node {
                     f.visibility = Visibility::Public;

@@ -657,6 +657,7 @@ fn execute_test_files(
                         ignored: 0,
                         duration_ms: 0,
                         error: Some("Build cache not initialized for native mode".to_string()),
+                        individual_results: vec![],
                     }
                 }
             }
@@ -676,6 +677,7 @@ fn execute_test_files(
                         ignored: 0,
                         duration_ms: 0,
                         error: Some("No runner available (internal error)".to_string()),
+                        individual_results: vec![],
                     }
                 }
             }

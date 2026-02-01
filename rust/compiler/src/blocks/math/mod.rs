@@ -93,6 +93,14 @@ impl BlockHandler for MathBlock {
     fn kind(&self) -> &'static str {
         "m"
     }
+
+    fn display_string(&self, payload: &str) -> String {
+        let (payload_expr, _) = parse_backend_directive(payload);
+        match parser::parse_math(payload_expr) {
+            Ok((expr, _)) => rendering::unicode_text::to_text(&expr),
+            Err(_) => format!("m{{{}}}", payload),
+        }
+    }
 }
 
 /// Parse an optional `use backend X` directive at the start of a math payload.

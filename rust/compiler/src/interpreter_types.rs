@@ -75,8 +75,7 @@ pub(super) fn register_trait_impl(
     }
 
     if entry.specific_impls.contains(&target_key) {
-        // Duplicate impl is expected when the same module is loaded via different paths
-        return Ok(());
+        return Err(crate::error::factory::duplicate_impl(&trait_name, &target_key));
     }
 
     if entry.blanket_impl && !entry.default_blanket_impl {

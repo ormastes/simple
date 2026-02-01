@@ -65,6 +65,7 @@ impl<'a> Parser<'a> {
         // Accept both 'fn' and 'me' keywords
         // 'me' indicates a mutable method (modifies self)
         // Also accept 'me fn' as equivalent to 'me'
+        let mut is_generator = false;
         let is_me_method = if self.check(&TokenKind::Me) {
             self.advance();
             // Optionally consume 'fn' after 'me' (me fn is equivalent to me)
@@ -72,6 +73,13 @@ impl<'a> Parser<'a> {
                 self.advance();
             }
             true
+        } else if self.check(&TokenKind::Gen) {
+            is_generator = true;
+            self.advance();
+            false
+        } else if self.check(&TokenKind::Kernel) {
+            self.advance();
+            false
         } else {
             self.expect(&TokenKind::Fn)?;
             false
@@ -213,6 +221,7 @@ impl<'a> Parser<'a> {
             is_sync: false,
             is_static: false,
             is_me_method,
+            is_generator,
             bounds_block,
             return_constraint,
             is_generic_template: !generic_params.is_empty(),

@@ -14,6 +14,12 @@ mod math;
 impl<'a> Parser<'a> {
     pub(crate) fn parse_primary(&mut self) -> Result<Expr, ParseError> {
         match &self.current.kind.clone() {
+            // Ellipsis as expression placeholder: `...` is equivalent to pass/unit ()
+            // Used in specs and stubs: `fn foo(): ...`
+            TokenKind::Ellipsis => {
+                self.advance();
+                Ok(Expr::Tuple(vec![]))
+            }
             // Placeholder syntax: _ in expressions (for placeholder lambdas like nums.map(_ * 2))
             // The _ is parsed as an identifier and later transformed in argument parsing
             TokenKind::Underscore => {

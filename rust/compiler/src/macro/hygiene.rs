@@ -174,6 +174,7 @@ pub(super) fn apply_macro_hygiene_node(node: &Node, ctx: &mut MacroHygieneContex
                     }
                 })
                 .collect(),
+            is_suspend: stmt.is_suspend,
         }),
         Node::For(stmt) => {
             let iterable = apply_macro_hygiene_expr(&stmt.iterable, ctx);
