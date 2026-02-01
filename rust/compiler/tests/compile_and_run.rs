@@ -1,5 +1,5 @@
 use simple_compiler::CompilerPipeline;
-use simple_native_loader::ModuleLoader;
+use simple_runtime::loader::ModuleLoader;
 
 /// Common compilation and execution helper
 fn compile_with_method<F>(src: &str, compile_fn: F) -> i32

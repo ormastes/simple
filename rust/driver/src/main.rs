@@ -195,21 +195,13 @@ const COMMAND_TABLE: &[CommandEntry] = &[
         needs_rust_flags: &[],
     },
 
-    // Testing - special: has complex needs_rust_flags
+    // Testing - always use Rust handler (mature implementation with Rust test integration + DB tracking)
     CommandEntry {
         name: "test",
-        app_path: "src/app/test_runner_new/main.spl",
+        app_path: "",  // Rust handler is primary (has cargo test integration)
         rust_handler: Handler::ArgsGc(handle_test_rust),
-        env_override: "SIMPLE_TEST_RUNNER_RUST",
-        needs_rust_flags: &[
-            "--watch", "--parallel", "-p",
-            "--doctest", "--json",
-            "--diagram", "--seq-",
-            "--rust-tests", "--list-runs",
-            "--cleanup-runs", "--prune-runs",
-            "--capture-screenshots", "--full-parallel",
-            "--rust-ignored",
-        ],
+        env_override: "",
+        needs_rust_flags: &[],
     },
 
     // Code quality

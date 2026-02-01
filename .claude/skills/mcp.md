@@ -413,8 +413,9 @@ bugs |id, severity, status, title, file, line, description, reproducible_by|
 # Check simple_old binary exists
 ls -la ./rust/target/debug/simple_old
 
-# Rebuild if needed
-cd rust && cargo build
+# Rebuild if needed (first-time setup)
+simple build
+# Or: cd rust && cargo build
 
 # Test with debug output
 ./rust/target/debug/simple_old src/app/mcp/main.spl server --debug

@@ -554,29 +554,20 @@ make check-full    # + coverage + duplication → use: simple build check --full
 make test-all      # Run ALL tests → use: simple build test
 simple build rust test
 
-# Runtime binary (Rust core)
-./rust/target/debug/simple_runtime script.spl
-
-# CLI wrapper (Simple implementation)
-./bin/wrappers/simple script.spl
+# Run a Simple script
+simple script.spl
 ```
 
 ### Compile and Recompile
 
 ```bash
-# First-time setup (bootstrap the runtime)
-cd rust && cargo build                    # One-time: build the Rust runtime
-
-# After initial setup, use simple build for everything:
+# Build
 simple build                              # Debug build
 simple build --release                    # Release build
 simple build --bootstrap                  # Bootstrap build (9.3 MB, minimal size)
 
-# Run a Simple script directly
-./rust/target/debug/simple_runtime script.spl
-
-# Run with CLI wrapper
-./bin/wrappers/simple script.spl
+# Run a Simple script
+simple script.spl
 
 # Rust subproject commands
 simple build rust test                    # All Rust workspace tests
@@ -587,18 +578,19 @@ simple build rust fmt                     # Run rustfmt
 simple build rust check                   # Check without building
 simple build rust clean                   # Clean Rust artifacts
 
-# Run Simple/SSpec tests
-simple test                               # All Simple/SSpec tests
+# Run all tests (Rust + Simple/SSpec by default)
+simple test                               # All tests (Rust + Simple/SSpec)
+simple test --no-rust-tests               # Simple/SSpec tests only
 simple test path/to/spec.spl             # Single test file
 simple test --list                        # List tests without running
 
 # Run lint on Simple code
-./bin/wrappers/simple lint src/app/fix/rules.spl
+simple lint src/app/fix/rules.spl
 
 # Run fix with options
-./bin/wrappers/simple fix file.spl --dry-run        # Preview fixes
-./bin/wrappers/simple fix file.spl --fix-all         # Apply all fixes
-./bin/wrappers/simple fix file.spl --fix-interactive  # Prompt per fix
+simple fix file.spl --dry-run        # Preview fixes
+simple fix file.spl --fix-all         # Apply all fixes
+simple fix file.spl --fix-interactive  # Prompt per fix
 ```
 
 ### Fixing Rust Warnings
@@ -691,39 +683,42 @@ if upx.is_compressed("myapp"):
 
 ```bash
 # List all tests without running
-./rust/target/debug/simple_runtime test --list
+simple test --list
 
 # List tests with tags displayed
-./rust/target/debug/simple_runtime test --list --show-tags
+simple test --list --show-tags
 
 # List only ignored tests (at Rust level)
-./rust/target/debug/simple_runtime test --list-ignored
+simple test --list-ignored
 
 # Count tests by type
-./rust/target/debug/simple_runtime test --list | wc -l              # Total tests
-./rust/target/debug/simple_runtime test --list-ignored | wc -l     # Ignored tests
+simple test --list | wc -l              # Total tests
+simple test --list-ignored | wc -l     # Ignored tests
 ```
 
 ### Running Specific Test Types
 
 ```bash
-# Run all tests (excludes slow tests by default)
-./rust/target/debug/simple_runtime test
+# Run all tests (Rust + Simple/SSpec, excludes slow tests by default)
+simple test
+
+# Run only Simple/SSpec tests (skip Rust)
+simple test --no-rust-tests
 
 # Run only slow tests
-./rust/target/debug/simple_runtime test --only-slow
+simple test --only-slow
 
 # Run only skipped tests (usually fail - they're unimplemented)
-./rust/target/debug/simple_runtime test --only-skipped
+simple test --only-skipped
 
 # Run tests matching a pattern
-./rust/target/debug/simple_runtime test pattern_here
+simple test pattern_here
 
 # Run tests from specific file
-./rust/target/debug/simple_runtime test path/to/test_spec.spl
+simple test path/to/test_spec.spl
 
 # Run with tag filtering (AND logic)
-./rust/target/debug/simple_runtime test --tag=integration --tag=database
+simple test --tag=integration --tag=database
 ```
 
 ### Doc-Tests (Rust)
@@ -769,18 +764,19 @@ simple build rust test --doc 2>&1 | grep " ... ignored$" | wc -l
 
 ```bash
 # Development workflow
-./rust/target/debug/simple_runtime test                    # Quick feedback (excludes slow)
-./rust/target/debug/simple_runtime test --only-slow        # Before commit (run slow tests)
-simple build rust test --doc        # Verify doc examples
+simple test                    # All tests: Rust + Simple/SSpec (excludes slow)
+simple test --no-rust-tests    # Quick feedback (Simple/SSpec only)
+simple test --only-slow        # Before commit (run slow tests)
+simple build rust test --doc   # Verify doc examples
 
 # Investigation
-./rust/target/debug/simple_runtime test --list --show-tags           # See all tests with tags
-./rust/target/debug/simple_runtime test --only-skipped --list        # See unimplemented features
+simple test --list --show-tags           # See all tests with tags
+simple test --only-skipped --list        # See unimplemented features
 simple build rust test --doc -p simple-driver 2>&1 | grep ignored   # Check ignored doc-tests
 
 # Targeted testing
-./rust/target/debug/simple_runtime test my_feature         # Run tests matching "my_feature"
-./rust/target/debug/simple_runtime test --tag=integration  # Run integration tests only
+simple test my_feature         # Run tests matching "my_feature"
+simple test --tag=integration  # Run integration tests only
 ```
 
 ### Test Statistics
@@ -806,16 +802,16 @@ Test runs are automatically tracked in `doc/test/test_db.sdn` (in the `test_runs
 
 ```bash
 # List all test runs
-./rust/target/debug/simple_runtime test --list-runs
+simple test --list-runs
 
 # Cleanup stale runs (marks as crashed if running > 2 hours or process dead)
-./rust/target/debug/simple_runtime test --cleanup-runs
+simple test --cleanup-runs
 
 # Keep only 50 most recent runs
-./rust/target/debug/simple_runtime test --prune-runs=50
+simple test --prune-runs=50
 
 # List only running tests
-./rust/target/debug/simple_runtime test --list-runs --runs-status=running
+simple test --list-runs --runs-status=running
 ```
 
 **Run Record Fields:**
@@ -830,10 +826,8 @@ Test runs are automatically tracked in `doc/test/test_db.sdn` (in the `test_runs
 ## Lean 4 Verification
 
 ```bash
-./rust/target/debug/simple_runtime --gen-lean module.spl --verify memory|types|effects|all
+simple --gen-lean module.spl --verify memory|types|effects|all
 ```
-
-> **Note:** Use `simple build rust <cmd>` instead of direct cargo commands. Cargo workspace is at `rust/Cargo.toml`.
 
 Projects in `verification/`: borrow checker, GC safety, effects, SC-DRF.
 
