@@ -122,6 +122,32 @@ pub(super) fn eval_builtin(
                 }
             }
         }
+        "freeze" => {
+            let val = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
+            match val {
+                Value::Array(vec) => {
+                    // Create immutable frozen copy of array
+                    Ok(Some(Value::FrozenArray(std::sync::Arc::new(vec))))
+                }
+                Value::Dict(map) => {
+                    // Create immutable frozen copy of dict
+                    Ok(Some(Value::FrozenDict(std::sync::Arc::new(map))))
+                }
+                Value::FrozenArray(_) | Value::FrozenDict(_) => {
+                    // Already frozen, return as-is
+                    Ok(Some(val))
+                }
+                _ => {
+                    let ctx = ErrorContext::new()
+                        .with_code(codes::INVALID_OPERATION)
+                        .with_help("freeze() can only be used with arrays or dicts");
+                    Err(CompileError::semantic_with_context(
+                        "freeze expects array or dict argument".to_string(),
+                        ctx,
+                    ))
+                }
+            }
+        }
         "send" => {
             let target = args.get(0).ok_or_else(|| {
                 let ctx = ErrorContext::new()
@@ -498,7 +524,7 @@ pub(super) fn eval_builtin(
             })?;
             let val = evaluate_expr(&gen_arg.value, env, functions, classes, enums, impl_methods)?;
             if let Value::Generator(gen) = val {
-                return Ok(Some(Value::array(gen.collect_remaining())));
+                return Ok(Some(Value::Array(gen.collect_remaining())));
             }
             if let Value::Array(arr) = val {
                 return Ok(Some(Value::Array(arr)));

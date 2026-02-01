@@ -135,34 +135,34 @@ fn command_to_value(cmd: ShellCommand) -> Value {
             fields.insert("command".to_string(), Value::Str(command));
             fields.insert(
                 "args".to_string(),
-                Value::array(args.into_iter().map(Value::Str).collect()),
+                Value::Array(args.into_iter().map(Value::Str).collect()),
             );
-            Value::Dict(fields)
+            Value::dict(fields)
         }
         ShellCommand::Pipeline(cmds) => {
             let mut fields = HashMap::new();
             fields.insert("type".to_string(), Value::Str("pipeline".to_string()));
             fields.insert(
                 "commands".to_string(),
-                Value::array(cmds.into_iter().map(command_to_value).collect()),
+                Value::Array(cmds.into_iter().map(command_to_value).collect()),
             );
-            Value::Dict(fields)
+            Value::dict(fields)
         }
         ShellCommand::Assignment { name, value } => {
             let mut fields = HashMap::new();
             fields.insert("type".to_string(), Value::Str("assignment".to_string()));
             fields.insert("name".to_string(), Value::Str(name));
             fields.insert("value".to_string(), Value::Str(value));
-            Value::Dict(fields)
+            Value::dict(fields)
         }
         ShellCommand::Sequence(cmds) => {
             let mut fields = HashMap::new();
             fields.insert("type".to_string(), Value::Str("sequence".to_string()));
             fields.insert(
                 "commands".to_string(),
-                Value::array(cmds.into_iter().map(command_to_value).collect()),
+                Value::Array(cmds.into_iter().map(command_to_value).collect()),
             );
-            Value::Dict(fields)
+            Value::dict(fields)
         }
     }
 }

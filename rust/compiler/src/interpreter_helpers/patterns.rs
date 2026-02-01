@@ -284,7 +284,7 @@ pub(crate) fn handle_method_call_with_self_update(
                     let result = evaluate_expr(value_expr, env, functions, classes, enums, impl_methods)?;
                     if let Value::Array(new_arr) = &result {
                         // Return both the new array as result AND the update for self-mutation
-                        let new_array_val = Value::array(new_arr.clone());
+                        let new_array_val = Value::Array(new_arr.clone());
                         return Ok((new_array_val.clone(), Some((obj_name.clone(), new_array_val))));
                     }
                 }
