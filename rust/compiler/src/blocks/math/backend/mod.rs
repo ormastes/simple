@@ -16,6 +16,9 @@ pub mod cuda_eval;
 pub use auto_select::{analyze_complexity, select_backend, BackendSelection};
 pub use torch_eval::is_available as torch_available;
 pub use torch_eval::is_cuda_available as cuda_available;
+pub use torch_eval::cuda_device_count;
+pub use torch_eval::cuda_memory_allocated;
+pub use torch_eval::cuda_synchronize;
 
 /// Computation backend for math expressions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

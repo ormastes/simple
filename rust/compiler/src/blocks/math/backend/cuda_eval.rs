@@ -1,73 +1,37 @@
-//! CUDA computation backend for math evaluation.
+//! CUDA computation backend for math evaluation (stub).
 //!
-//! Provides direct CUDA computation via PyTorch's CUDA interface.
-//! Detection delegates to `rt_torch_cuda_available()` from simple-runtime.
-//!
-//! When CUDA is unavailable, falls back to Torch, then CPU evaluation.
+//! CUDA is not linked in the default build. All operations fall back to CPU
+//! via the torch_eval module.
 
 use crate::blocks::math::ast::MathExpr;
 use crate::error::CompileError;
 use crate::value::Value;
 
-// ============================================================================
-// Availability Detection
-// ============================================================================
+pub fn is_available() -> bool { super::torch_eval::is_cuda_available() }
+pub fn rt_cuda_available() -> bool { is_available() }
+pub fn device_count() -> i32 { super::torch_eval::cuda_device_count() }
+pub fn rt_cuda_device_count() -> i32 { device_count() }
 
-/// Check if CUDA backend is available at runtime.
-///
-/// Delegates to `rt_torch_cuda_available()` from simple-runtime.
-pub fn is_available() -> bool {
-    super::torch_eval::is_cuda_available()
-}
+// CUDA memory & device management (delegates to torch_eval)
+pub fn memory_allocated(device: i32) -> i64 { super::torch_eval::cuda_memory_allocated(device) }
+pub fn rt_cuda_memory_allocated(device: i32) -> i64 { memory_allocated(device) }
+pub fn synchronize(device: i32) -> i32 { super::torch_eval::cuda_synchronize(device) }
+pub fn rt_cuda_synchronize(device: i32) -> i32 { synchronize(device) }
+pub fn reset_peak_memory_stats(device: i32) -> i32 { super::torch_eval::cuda_reset_peak_memory_stats(device) }
+pub fn rt_cuda_reset_peak_memory_stats(device: i32) -> i32 { reset_peak_memory_stats(device) }
 
-/// Alias: `rt_cuda_available()` - short form.
-pub fn rt_cuda_available() -> bool {
-    is_available()
-}
+// Device transfer
+pub fn to_cuda(tensor_handle: u64, device_id: i32) -> u64 { super::torch_eval::rt_torch_to_cuda(tensor_handle, device_id) }
+pub fn rt_cuda_to_device(tensor_handle: u64, device_id: i32) -> u64 { to_cuda(tensor_handle, device_id) }
 
-/// Get the number of CUDA devices available.
-pub fn device_count() -> i32 {
-    super::torch_eval::cuda_device_count()
-}
-
-/// Alias: `rt_cuda_device_count()` - short form.
-pub fn rt_cuda_device_count() -> i32 {
-    device_count()
-}
-
-// ============================================================================
-// Evaluation
-// ============================================================================
-
-/// Evaluate a math expression using the CUDA backend.
-///
-/// Falls back to Torch (CPU device), then CPU evaluation if CUDA is not available.
 pub fn evaluate(expr: &MathExpr) -> Result<Value, CompileError> {
-    evaluate_on_device(expr, 1) // device 1 = CUDA:0
+    evaluate_on_device(expr, 1)
 }
 
-/// Evaluate a math expression on a specific CUDA device.
-///
-/// Device codes (CUDA-specific):
-/// - 1 = CUDA:0
-/// - 2 = CUDA:1
-/// - ...
-///
-/// Falls back to Torch CPU, then native CPU if the CUDA device is unavailable.
 pub fn evaluate_on_device(expr: &MathExpr, device: i32) -> Result<Value, CompileError> {
     if !is_available() {
-        tracing::debug!(
-            "[math::backend::cuda] CUDA unavailable, falling back to Torch/CPU evaluation"
-        );
         return super::torch_eval::evaluate(expr);
     }
-
-    tracing::debug!(
-        "[math::backend::cuda] Evaluating on CUDA device={} (1=CUDA:0, 2=CUDA:1, ...)",
-        device
-    );
-
-    // Delegate to torch evaluator with CUDA device code
     super::torch_eval::evaluate_with_device(expr, device)
 }
 
@@ -81,22 +45,14 @@ mod tests {
     }
 
     #[test]
-    fn test_device_count_non_negative() {
-        assert!(device_count() >= 0);
-    }
-
-    #[test]
     fn test_evaluate_basic() {
         let expr = MathExpr::Mul(Box::new(MathExpr::Int(3)), Box::new(MathExpr::Int(4)));
-        let result = evaluate(&expr).unwrap();
-        assert_eq!(result, Value::Int(12));
+        assert_eq!(evaluate(&expr).unwrap(), Value::Int(12));
     }
 
     #[test]
     fn test_evaluate_on_device_fallback() {
-        // Even if CUDA unavailable, should produce correct result via fallback
         let expr = MathExpr::Add(Box::new(MathExpr::Int(10)), Box::new(MathExpr::Int(5)));
-        let result = evaluate_on_device(&expr, 1).unwrap();
-        assert_eq!(result, Value::Int(15));
+        assert_eq!(evaluate_on_device(&expr, 1).unwrap(), Value::Int(15));
     }
 }
