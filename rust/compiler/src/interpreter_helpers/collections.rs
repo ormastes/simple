@@ -249,9 +249,15 @@ pub(crate) use interpreter_helpers_option_result::*;
 pub(crate) fn iter_to_vec(val: &Value) -> Result<Vec<Value>, CompileError> {
     match val {
         Value::Array(arr) => Ok(arr.clone()),
+        Value::FrozenArray(arr) => Ok(arr.as_ref().clone()),
+        Value::FixedSizeArray { data, .. } => Ok(data.clone()),
         Value::Tuple(tup) => Ok(tup.clone()),
         Value::Str(s) => Ok(s.chars().map(|c| Value::Str(c.to_string())).collect()),
         Value::Dict(map) => Ok(map
+            .iter()
+            .map(|(k, v)| Value::Tuple(vec![Value::Str(k.clone()), v.clone()]))
+            .collect()),
+        Value::FrozenDict(map) => Ok(map
             .iter()
             .map(|(k, v)| Value::Tuple(vec![Value::Str(k.clone()), v.clone()]))
             .collect()),
