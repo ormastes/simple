@@ -471,6 +471,7 @@ impl<'a> Parser<'a> {
                             mutability: Mutability::Immutable,
                             inject: false,
                             variadic: false,
+                            call_site_label: None,
                         };
                         f.params.insert(0, self_param);
                     }
@@ -537,6 +538,7 @@ impl<'a> Parser<'a> {
                             mutability: Mutability::Immutable,
                             inject: false,
                             variadic: false,
+                            call_site_label: None,
                         };
                         f.params.insert(0, self_param);
                     }
@@ -724,6 +726,7 @@ impl<'a> Parser<'a> {
                             mutability: Mutability::Immutable,
                             inject: false,
                             variadic: false,
+                            call_site_label: None,
                         };
                         f.params.insert(0, self_param);
                     }
@@ -761,6 +764,7 @@ impl<'a> Parser<'a> {
                             mutability: Mutability::Immutable,
                             inject: false,
                             variadic: false,
+                            call_site_label: None,
                         };
                         f.params.insert(0, self_param);
                     }

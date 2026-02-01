@@ -292,6 +292,7 @@ impl<'a> Parser<'a> {
                             mutability: crate::ast::Mutability::Immutable,
                             inject: false,
                             variadic: false,
+                            call_site_label: None,
                         };
                         f.params.insert(0, self_param);
                     }

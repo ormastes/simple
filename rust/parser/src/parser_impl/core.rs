@@ -67,6 +67,8 @@ pub struct Parser<'a> {
     /// When true, postfix parsing won't consume `{ ... }` after field access.
     /// Used to prevent ambiguity in `if cond { body }` syntax.
     pub(crate) no_brace_postfix: bool,
+    /// Buffer for statements produced by multi-node desugaring (e.g., structured_export)
+    pub(crate) pending_statements: Vec<Node>,
 }
 
 impl<'a> Parser<'a> {
@@ -90,6 +92,7 @@ impl<'a> Parser<'a> {
             error_hints: Vec::new(),
             pattern_indent_count: 0,
             no_brace_postfix: false,
+            pending_statements: Vec::new(),
         };
 
         // Check for common mistakes in the initial token
@@ -174,6 +177,7 @@ impl<'a> Parser<'a> {
             error_hints: Vec::new(),
             pattern_indent_count: 0,
             no_brace_postfix: false,
+            pending_statements: Vec::new(),
         }
     }
 
@@ -311,6 +315,11 @@ impl<'a> Parser<'a> {
     }
 
     pub(crate) fn parse_item(&mut self) -> Result<Node, ParseError> {
+        // Drain pending statements from multi-node desugaring (e.g., structured_export)
+        if !self.pending_statements.is_empty() {
+            return Ok(self.pending_statements.remove(0));
+        }
+
         // Skip leading newlines
         while self.check(&TokenKind::Newline) {
             self.advance();
@@ -638,6 +647,17 @@ impl<'a> Parser<'a> {
                 None
             };
 
+            // Check for call-site label decorator (e.g., `to`, `from`)
+            let call_site_label = if self.check(&TokenKind::To) {
+                self.advance();
+                Some("to".to_string())
+            } else if self.check(&TokenKind::From) {
+                self.advance();
+                Some("from".to_string())
+            } else {
+                None
+            };
+
             // Check for variadic parameter (e.g., items: T...)
             let variadic = if self.check(&TokenKind::Ellipsis) {
                 self.advance();
@@ -661,6 +681,7 @@ impl<'a> Parser<'a> {
                 mutability,
                 inject,
                 variadic,
+                call_site_label,
             });
 
             // Handle comma or newline between parameters
