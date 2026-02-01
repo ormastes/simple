@@ -268,7 +268,7 @@ impl Default for TestOptions {
             cpu_check_interval: 5,
             profile: false,
             profile_mode: None,
-            rust_tests: false,
+            rust_tests: true,
             rust_ignored_only: false,
 
             // Run management
