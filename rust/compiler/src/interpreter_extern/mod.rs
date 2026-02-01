@@ -60,6 +60,7 @@ pub mod gpu;
 pub mod diagram;
 pub mod memory;
 pub mod cli;
+pub mod cargo;
 pub mod sdn;
 pub mod coverage;
 pub mod cranelift;
@@ -738,6 +739,14 @@ pub(crate) fn call_extern_function(
         "rt_fault_set_max_recursion_depth" => cli::rt_fault_set_max_recursion_depth(&evaluated),
         "rt_fault_set_timeout" => cli::rt_fault_set_timeout(&evaluated),
         "rt_fault_set_execution_limit" => cli::rt_fault_set_execution_limit(&evaluated),
+
+        // ====================================================================
+        // Cargo Build System Functions (4 functions)
+        // ====================================================================
+        "rt_cargo_build" => cargo::rt_cargo_build(&evaluated),
+        "rt_cargo_test" => cargo::rt_cargo_test(&evaluated),
+        "rt_cargo_clean" => cargo::rt_cargo_clean(&evaluated),
+        "rt_cargo_check" => cargo::rt_cargo_check(&evaluated),
 
         // SDN operations
         "rt_sdn_version" => sdn::rt_sdn_version(&evaluated),

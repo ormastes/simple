@@ -23,6 +23,7 @@ pub mod bdd_ffi;
 mod async_gen;
 mod channels;
 pub mod cli_ffi;
+pub mod cargo_ffi;
 mod collections;
 pub mod log_ffi;
 mod contracts;

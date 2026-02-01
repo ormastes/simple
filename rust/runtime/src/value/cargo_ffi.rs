@@ -3,7 +3,7 @@
 // This module provides FFI functions that allow the Simple build system
 // to invoke cargo commands and get results back.
 
-use simple_runtime::value::{rt_dict_new, rt_dict_set, rt_string_new, RuntimeValue};
+use super::{rt_dict_new, rt_dict_set, rt_string_new, RuntimeValue};
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::process::Command;
