@@ -13,7 +13,7 @@ describe "Calculator":
             expect 2 + 2 == 4
 ```
 
-Run: `simple test` or `cd rust && cargo test -p simple-driver simple_stdlib`
+Run: `simple test` or `simple build rust test -p simple-driver simple_stdlib`
 
 ## Complete Workflow: Test → Documentation
 
@@ -85,7 +85,7 @@ describe "MyFeature":
 
 ```bash
 # Run your spec
-cd rust && cargo test -p simple-driver simple_stdlib_system_my_feature
+simple build rust test -p simple-driver simple_stdlib_system_my_feature
 
 # Or run directly
 ./rust/target/debug/simple simple/test/system/features/my_feature/my_feature_spec.spl
@@ -442,14 +442,14 @@ The generator creates an index with:
 
 ```bash
 # All stdlib tests
-cd rust && cargo test -p simple-driver simple_stdlib
+simple build rust test -p simple-driver simple_stdlib
 
 # By layer
-cd rust && cargo test -p simple-driver simple_stdlib_unit
-cd rust && cargo test -p simple-driver simple_stdlib_system
+simple build rust test -p simple-driver simple_stdlib_unit
+simple build rust test -p simple-driver simple_stdlib_system
 
 # Specific test
-cd rust && cargo test -p simple-driver simple_stdlib_unit_core_string_spec
+simple build rust test -p simple-driver simple_stdlib_unit_core_string_spec
 
 # Direct interpreter
 ./rust/target/debug/simple src/std/test/unit/core/arithmetic_spec.spl

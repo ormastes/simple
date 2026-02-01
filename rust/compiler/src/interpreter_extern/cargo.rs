@@ -305,8 +305,9 @@ pub fn rt_cargo_lint(args: &[Value]) -> Result<Value, CompileError> {
     cmd.arg("--workspace");
     cmd.current_dir("rust");
 
-    // Check for --fix flag
+    // Check for --fix flag (passed as i64: 1=true, 0=false)
     let fix = match args.first() {
+        Some(Value::Int(n)) => *n != 0,
         Some(Value::Bool(b)) => *b,
         _ => false,
     };
@@ -343,6 +344,7 @@ pub fn rt_cargo_fmt(args: &[Value]) -> Result<Value, CompileError> {
     let start = Instant::now();
 
     let check_only = match args.first() {
+        Some(Value::Int(n)) => *n != 0,
         Some(Value::Bool(b)) => *b,
         _ => false,
     };

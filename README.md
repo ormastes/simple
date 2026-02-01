@@ -34,7 +34,7 @@ A statically typed programming language with Python-like syntax, modern safety f
 # Build from source (using Simple's self-hosting build system)
 simple build --release
 
-# Or bootstrap from source (first-time)
+# First-time setup (bootstrap from Rust)
 cd rust && cargo build --release
 
 # Binary location
@@ -48,7 +48,7 @@ export PATH="$PWD/bin/wrappers:$PATH"
 
 ```bash
 simple build --release --features=vulkan
-# Or: cd rust && cargo build --release --features vulkan
+# Or for first-time: cd rust && cargo build --release --features vulkan
 ```
 
 ### Your First Program

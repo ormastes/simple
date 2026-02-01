@@ -239,7 +239,15 @@ pub fn run_tests(options: TestOptions) -> TestRunResult {
 
         // Run Rust tests if enabled
         if options.rust_tests {
+            // Find the rust/ workspace directory (where Cargo.toml lives)
             let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            let cwd = if cwd.join("Cargo.toml").exists() {
+                cwd // Already in rust/ directory
+            } else if cwd.join("rust").join("Cargo.toml").exists() {
+                cwd.join("rust") // Project root, use rust/ subdir
+            } else {
+                cwd // Fallback
+            };
             if !quiet {
                 if options.rust_ignored_only {
                     println!("\nTracking ignored Rust tests...");

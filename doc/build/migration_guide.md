@@ -132,8 +132,8 @@ build:
 
 ```bash
 # Build the Simple runtime (first-time setup)
-cd rust && cargo build
-# After initial build, use: simple build
+simple build
+# Or for first-time: cd rust && cargo build
 ```
 
 ### 2. Test Simple Build Commands
@@ -229,8 +229,8 @@ simple build --metrics --output=metrics.json
 
 ```bash
 # Ensure Simple runtime is built (first-time setup)
-cd rust && cargo build
-# After initial build, use: simple build
+simple build
+# Or for first-time: cd rust && cargo build
 
 # Ensure bin/wrappers/simple is executable
 chmod +x bin/wrappers/simple

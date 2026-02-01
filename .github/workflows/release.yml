@@ -4,14 +4,57 @@ on:
   push:
     tags:
       - 'v*.*.*'  # Trigger on version tags like v0.3.0
+    paths:
+      - 'simple.sdn'  # Trigger when project version changes
+    branches:
+      - main
   workflow_dispatch:  # Allow manual trigger
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  check-version:
+    name: Check Version Change
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.detect.outputs.version }}
+      changed: ${{ steps.detect.outputs.changed }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Detect version
+        id: detect
+        run: |
+          # Extract version from simple.sdn
+          VERSION=$(grep 'version:' simple.sdn | head -1 | sed 's/.*version: *//')
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            # Tag push - always build
+            echo "changed=true" >> $GITHUB_OUTPUT
+            echo "Triggered by tag: $GITHUB_REF"
+          elif [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+            echo "changed=true" >> $GITHUB_OUTPUT
+            echo "Triggered manually"
+          else
+            # Check if version in simple.sdn actually changed
+            PREV_VERSION=$(git show HEAD~1:simple.sdn 2>/dev/null | grep 'version:' | head -1 | sed 's/.*version: *//' || echo "")
+            if [ "$VERSION" != "$PREV_VERSION" ]; then
+              echo "changed=true" >> $GITHUB_OUTPUT
+              echo "Version changed: $PREV_VERSION -> $VERSION"
+            else
+              echo "changed=false" >> $GITHUB_OUTPUT
+              echo "Version unchanged ($VERSION), skipping build"
+            fi
+          fi
+
   build-bootstrap:
     name: Build Bootstrap Package
+    needs: check-version
+    if: needs.check-version.outputs.changed == 'true'
     strategy:
       matrix:
         include:
@@ -108,6 +151,8 @@ jobs:
 
   build-full:
     name: Build Full Package
+    needs: check-version
+    if: needs.check-version.outputs.changed == 'true'
     runs-on: ubuntu-latest
 
     steps:
@@ -245,6 +290,119 @@ jobs:
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  publish-ghcr:
+    name: Publish to GHCR
+    needs: [build-bootstrap, build-full, create-release]
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install oras CLI
+        run: |
+          curl -LO https://github.com/oras-project/oras/releases/download/v1.2.0/oras_1.2.0_linux_amd64.tar.gz
+          tar xzf oras_1.2.0_linux_amd64.tar.gz
+          sudo mv oras /usr/local/bin/
+
+      - name: Login to GHCR
+        run: |
+          oras login ghcr.io --username ${{ github.actor }} --password ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Extract version
+        id: version
+        run: echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+      - name: Publish bootstrap packages to GHCR
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+
+          for spk in artifacts/bootstrap-*/simple-bootstrap-*.spk; do
+            [ -f "$spk" ] || continue
+            PLATFORM=$(basename "$spk" | sed "s/simple-bootstrap-${VERSION}-//" | sed 's/.spk$//')
+            REF="ghcr.io/${{ github.repository_owner }}/simple-bootstrap:${VERSION}-${PLATFORM}"
+
+            echo "Publishing: $REF"
+            oras push "$REF" \
+              "$spk:application/vnd.simple.bootstrap.v1+tar" \
+              --artifact-type "application/vnd.simple.bootstrap.v1"
+
+            echo "Published: $REF"
+          done
+
+          # Tag latest for linux-x86_64 (most common)
+          LINUX_SPK=$(find artifacts -name "*linux-x86_64.spk" | head -1)
+          if [ -n "$LINUX_SPK" ]; then
+            oras push "ghcr.io/${{ github.repository_owner }}/simple-bootstrap:latest" \
+              "$LINUX_SPK:application/vnd.simple.bootstrap.v1+tar" \
+              --artifact-type "application/vnd.simple.bootstrap.v1"
+            echo "Tagged latest -> linux-x86_64"
+          fi
+
+      - name: Publish full package to GHCR
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          FULL_PKG=$(find artifacts -name "simple-full-*.tar.gz" | head -1)
+
+          if [ -n "$FULL_PKG" ]; then
+            REF="ghcr.io/${{ github.repository_owner }}/simple-full:${VERSION}"
+            echo "Publishing: $REF"
+            oras push "$REF" \
+              "$FULL_PKG:application/vnd.simple.package.v1+tar" \
+              --artifact-type "application/vnd.simple.package.v1"
+            echo "Published: $REF"
+          fi
+
+      - name: Publish compiler bootstrap to GHCR
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+
+          # Build a compiler-bootstrap artifact: src/app + src/std (the Simple-language parts)
+          mkdir -p /tmp/compiler-bootstrap
+          cp -r src/app /tmp/compiler-bootstrap/
+          cp -r src/std /tmp/compiler-bootstrap/
+          tar czf /tmp/simple-compiler-bootstrap-${VERSION}.tar.gz -C /tmp/compiler-bootstrap .
+
+          REF="ghcr.io/${{ github.repository_owner }}/simple-compiler:${VERSION}"
+          oras push "$REF" \
+            "/tmp/simple-compiler-bootstrap-${VERSION}.tar.gz:application/vnd.simple.compiler.v1+tar" \
+            --artifact-type "application/vnd.simple.compiler.v1"
+
+          oras push "ghcr.io/${{ github.repository_owner }}/simple-compiler:latest" \
+            "/tmp/simple-compiler-bootstrap-${VERSION}.tar.gz:application/vnd.simple.compiler.v1+tar" \
+            --artifact-type "application/vnd.simple.compiler.v1"
+
+          echo "Published compiler bootstrap: $REF"
+
+      - name: Summary
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          OWNER="${{ github.repository_owner }}"
+          echo "## GHCR Packages Published" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Package | Reference |" >> $GITHUB_STEP_SUMMARY
+          echo "|---------|-----------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Bootstrap (linux) | \`ghcr.io/${OWNER}/simple-bootstrap:${VERSION}-linux-x86_64\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Bootstrap (macOS ARM) | \`ghcr.io/${OWNER}/simple-bootstrap:${VERSION}-darwin-arm64\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Bootstrap (macOS Intel) | \`ghcr.io/${OWNER}/simple-bootstrap:${VERSION}-darwin-x86_64\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Bootstrap (Windows) | \`ghcr.io/${OWNER}/simple-bootstrap:${VERSION}-windows-x86_64\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Full Package | \`ghcr.io/${OWNER}/simple-full:${VERSION}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Compiler Bootstrap | \`ghcr.io/${OWNER}/simple-compiler:${VERSION}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Install with:" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
+          echo "oras pull ghcr.io/${OWNER}/simple-bootstrap:latest -o /tmp/simple" >> $GITHUB_STEP_SUMMARY
+          echo "tar xzf /tmp/simple/*.spk -C ~/.local" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
 
   test-installation:
     name: Test Installation

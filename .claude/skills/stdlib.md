@@ -143,13 +143,13 @@ describe "MyType":
 ### Run Tests
 ```bash
 # All stdlib tests
-cd rust && cargo test -p simple-driver simple_stdlib
+simple build rust test -p simple-driver simple_stdlib
 
 # Unit tests only
-cd rust && cargo test -p simple-driver simple_stdlib_unit
+simple build rust test -p simple-driver simple_stdlib_unit
 
 # Specific module
-cd rust && cargo test -p simple-driver simple_stdlib_unit_mymodule
+simple build rust test -p simple-driver simple_stdlib_unit_mymodule
 
 # Direct run
 ./rust/target/debug/simple src/std/test/unit/mymodule/mytype_spec.spl
