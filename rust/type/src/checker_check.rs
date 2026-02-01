@@ -251,6 +251,7 @@ impl TypeChecker {
                 | Node::MultiUse(_)
                 | Node::CommonUseStmt(_)
                 | Node::ExportUseStmt(_)
+                | Node::StructuredExportStmt(_)
                 | Node::AutoImportStmt(_)
                 | Node::RequiresCapabilities(_)
                 | Node::LeanBlock(_) => {

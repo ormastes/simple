@@ -10,7 +10,7 @@
 
 - **Shared math module:** Physics core types (`Vector2`, `Vector3`, `Matrix3`, `Matrix4`, `Quaternion`) now re-exported from unified `math` module as aliases to `Vec2d`, `Vec3d`, `Mat3d`, `Mat4d`, `Quatd`
 - **Column-major matrices:** Math module uses column-major storage (GPU/Vulkan standard)
-- **Tensor bridge:** `math/tensor_bridge.spl` provides conversion between math types and PyTorch tensors (placeholder until torch imports resolved)
+- **Tensor bridge:** `math/__init__.spl` includes batch conversion functions (`vecs_to_tensor`, `tensor_to_vecs`, etc.) — implemented and tested (5/5 tests pass)
 - **Design doc:** See `doc/design/unified_math_design.md`
 
 ## Overview

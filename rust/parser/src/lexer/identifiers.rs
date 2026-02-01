@@ -138,6 +138,7 @@ impl<'a> super::Lexer<'a> {
             "mod" => TokenKind::Mod,
             "use" => TokenKind::Use,
             "export" => TokenKind::Export,
+            "structured_export" => TokenKind::StructuredExport,
             "common" => TokenKind::Common,
             "auto" => TokenKind::Auto,
             "crate" => TokenKind::Crate,

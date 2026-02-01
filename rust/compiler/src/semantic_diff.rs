@@ -680,6 +680,7 @@ mod tests {
                     mutability: Mutability::Immutable,
                     inject: false,
                     variadic: false,
+                    call_site_label: None,
                 })
                 .collect(),
             return_type: ret_type,

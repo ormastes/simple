@@ -462,6 +462,7 @@ mod tests {
                 mutability: Mutability::Immutable,
                 inject: false,
                 variadic: false,
+                call_site_label: None,
             }],
             return_type: Some(Type::Simple("bool".to_string())),
             where_clause: vec![],

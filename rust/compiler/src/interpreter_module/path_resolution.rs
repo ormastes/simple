@@ -38,6 +38,12 @@ pub fn resolve_module_path(parts: &[String], base_dir: &Path) -> Result<PathBuf,
         return Ok(resolved);
     }
 
+    // Try .ssh extension (Simple shell scripts)
+    resolved.set_extension("ssh");
+    if resolved.exists() && resolved.is_file() {
+        return Ok(resolved);
+    }
+
     // Try __init__.spl in directory
     let mut init_resolved = base_dir.to_path_buf();
     for part in parts {
@@ -88,7 +94,7 @@ pub fn resolve_module_path(parts: &[String], base_dir: &Path) -> Result<PathBuf,
     let mut current = base_dir.to_path_buf();
     for _ in 0..10 {
         // Try various stdlib locations
-        for stdlib_subpath in &["src/std/src", "src/lib/std/src", "lib/std/src", "simple/std_lib/src", "std_lib/src"] {
+        for stdlib_subpath in &["src/std/src", "src/lib/std/src", "lib/std/src", "rust/lib/std/src", "simple/std_lib/src", "std_lib/src"] {
             let stdlib_candidate = current.join(stdlib_subpath);
             if stdlib_candidate.exists() {
                 // When importing from stdlib, "std" represents the stdlib root itself, not a subdirectory.

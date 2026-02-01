@@ -26,7 +26,7 @@ pub fn run_file_with_args(path: &PathBuf, gc_log: bool, gc_off: bool, args: Vec<
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
         let runner = create_runner(gc_log, gc_off);
         let extension = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-        let result = if matches!(extension, "spl" | "simple" | "sscript" | "") {
+        let result = if matches!(extension, "spl" | "simple" | "sscript" | "ssh" | "") {
             runner.run_file_interpreted_with_args(&path, args)
         } else {
             runner.run_file(&path)

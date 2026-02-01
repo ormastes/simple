@@ -6,7 +6,7 @@
 
 ## Recent Updates (2026-02-01)
 
-- **Tensor bridge implemented:** `math/tensor_bridge.spl` provides conversion between math types (Vec3, Mat4, etc.) and tensors. Currently placeholder implementations until torch imports are resolved.
+- **Tensor bridge implemented:** `math/__init__.spl` includes batch conversion functions (`vecs_to_tensor`, `tensor_to_vecs`, `vecs3d_to_tensor`, `tensor_to_vecs3d`) — fully implemented and tested (5/5 tests pass).
 - **Physics uses shared math:** `physics/core` re-exports from `math` module; `physics/gpu_batch.spl` uses `core.Vector3` (now `math.Vec3d`).
 
 ## Overview

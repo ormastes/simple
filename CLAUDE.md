@@ -338,6 +338,13 @@ See `/coding` skill for full details.
 - 🔧 **Auto-migrate**: Run `simple migrate --fix-generics src/` (Note: tool needs refinement)
 - 📅 **Timeline**: Deprecation warnings active, `[]` will be removed in v1.0.0
 
+### Pattern Binding Syntax (`if val` / `if var`)
+- ✅ **USE `if val`**: `if val Some(x) = expr:` (immutable pattern binding)
+- ✅ **USE `if var`**: `if var Some(x) = expr:` (mutable pattern binding)
+- ❌ **DEPRECATED `if let`**: Emits warning, use `if val` instead
+- 🔧 **EasyFix**: Rule `L:deprecated_if_let` auto-replaces `if let` → `if val`
+- Also applies to `while let` → `while val` and `elif let` → `elif val`
+
 ### Question Mark (`?`) Usage
 - ❌ **NEVER use `?` in method/function/variable names** - unlike Ruby
 - ✅ **`?` is an operator only**:

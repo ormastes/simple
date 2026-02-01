@@ -351,10 +351,23 @@ pub fn load_module_with_imports_validated(
 
     let source = fs::read_to_string(&path).map_err(|e| CompileError::Io(format!("Cannot read {:?}: {e}", path)))?;
     let mut parser = simple_parser::Parser::new(&source);
-    let module = parser.parse().map_err(|e| CompileError::Parse(format!("in {:?}: {e}", path)))?;
+    let mut module = parser.parse().map_err(|e| CompileError::Parse(format!("in {:?}: {e}", path)))?;
 
     // Display error hints (warnings, etc.) from parser
     display_parser_hints(&parser, &source, &path);
+
+    // Auto-import std.shell.* for .ssh files
+    if path.extension().and_then(|e| e.to_str()) == Some("ssh") {
+        use simple_parser::ast::{UseStmt, ModulePath, ImportTarget};
+        use simple_parser::token::Span;
+        let shell_import = Node::UseStmt(UseStmt {
+            span: Span::new(0, 0, 0, 0),
+            path: ModulePath::new(vec!["std".to_string(), "shell".to_string()]),
+            target: ImportTarget::Glob,
+            is_type_only: false,
+        });
+        module.items.insert(0, shell_import);
+    }
 
     // Extract this module's capabilities for passing to child imports
     let this_caps = extract_module_capabilities(&module);
@@ -609,7 +622,7 @@ fn resolve_use_to_path(use_stmt: &UseStmt, base: &Path) -> Option<PathBuf> {
     let mut current = base.to_path_buf();
     for _ in 0..10 {
         // Try various stdlib locations (matching interpreter behavior)
-        for stdlib_subpath in &["src/std/src", "src/lib/std/src", "lib/std/src", "simple/std_lib/src", "std_lib/src"] {
+        for stdlib_subpath in &["src/std/src", "src/lib/std/src", "lib/std/src", "rust/lib/std/src", "simple/std_lib/src", "std_lib/src"] {
             let stdlib_candidate = current.join(stdlib_subpath);
             if stdlib_candidate.exists() {
                 // Handle "std" prefix stripping for std.* imports

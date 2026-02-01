@@ -427,6 +427,7 @@ impl<'a> Parser<'a> {
             TokenKind::Mod => self.parse_mod(Visibility::Private, vec![]),
             TokenKind::Common => self.parse_common_use(),
             TokenKind::Export => self.parse_export_use(),
+            TokenKind::StructuredExport => self.parse_structured_export(),
             TokenKind::Auto => self.parse_auto_import(),
             TokenKind::Requires => self.parse_requires_capabilities(),
             // AOP & Unified Predicates (#1000-1050)
@@ -647,17 +648,6 @@ impl<'a> Parser<'a> {
                 None
             };
 
-            // Check for call-site label decorator (e.g., `to`, `from`)
-            let call_site_label = if self.check(&TokenKind::To) {
-                self.advance();
-                Some("to".to_string())
-            } else if self.check(&TokenKind::From) {
-                self.advance();
-                Some("from".to_string())
-            } else {
-                None
-            };
-
             // Check for variadic parameter (e.g., items: T...)
             let variadic = if self.check(&TokenKind::Ellipsis) {
                 self.advance();
@@ -669,6 +659,17 @@ impl<'a> Parser<'a> {
             let default = if self.check(&TokenKind::Assign) {
                 self.advance();
                 Some(self.parse_expression()?)
+            } else {
+                None
+            };
+
+            // Check for call-site label keyword after type (e.g., `from: text to`)
+            let call_site_label = if self.check(&TokenKind::To) {
+                self.advance();
+                Some("to".to_string())
+            } else if self.check(&TokenKind::From) {
+                self.advance();
+                Some("from".to_string())
             } else {
                 None
             };

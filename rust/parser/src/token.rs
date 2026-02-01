@@ -192,6 +192,7 @@ pub enum TokenKind {
     Export, // export (re-export)
     Common, // common (directory prelude)
     Auto,   // auto (auto import)
+    StructuredExport, // structured_export (block-style exports)
     Crate,  // crate (module root)
     In,
     Is,

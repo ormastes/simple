@@ -67,7 +67,7 @@ The `math` module provides shared mathematical types used by physics, game engin
 - `Vec3.to_tensor(device)` → `[3]` tensor
 - `Mat4.to_tensor(device)` → `[4,4]` tensor
 - `vecs_to_tensor([Vec3], device)` → `[N,3]` tensor
-- Currently placeholder implementations until torch imports are resolved.
+- Batch conversion functions implemented and tested: `vecs_to_tensor()`, `tensor_to_vecs()`, `vecs3d_to_tensor()`, `tensor_to_vecs3d()`
 
 ## Module Consumers
 
