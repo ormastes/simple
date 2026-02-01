@@ -115,6 +115,45 @@ pub(crate) fn exec_node(
                             }
                         }
                     }
+                    Some(Type::Array { size: Some(size_expr), .. }) => {
+                        // Fixed-size array: [T; N]
+                        // Evaluate the size expression to get a concrete integer
+                        let size_value = evaluate_expr(size_expr, env, functions, classes, enums, impl_methods)?;
+                        let size = match size_value {
+                            Value::Int(n) if n >= 0 => n as usize,
+                            _ => {
+                                let var_name = get_var_name(&let_stmt.pattern);
+                                return Err(CompileError::semantic(format!(
+                                    "Fixed-size array size must be a non-negative integer, got {:?}",
+                                    size_value
+                                )));
+                            }
+                        };
+
+                        // Convert Array to FixedSizeArray
+                        match value {
+                            Value::Array(data) => {
+                                if data.len() != size {
+                                    let var_name = get_var_name(&let_stmt.pattern);
+                                    return Err(CompileError::semantic(format!(
+                                        "Fixed-size array `{}` size mismatch: expected {}, got {}",
+                                        var_name,
+                                        size,
+                                        data.len()
+                                    )));
+                                }
+                                Value::FixedSizeArray { size, data }
+                            }
+                            _ => {
+                                let var_name = get_var_name(&let_stmt.pattern);
+                                return Err(CompileError::semantic(format!(
+                                    "Expected array for fixed-size array binding `{}`, got {:?}",
+                                    var_name,
+                                    value
+                                )));
+                            }
+                        }
+                    }
                     _ => value,
                 };
 
