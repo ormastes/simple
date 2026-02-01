@@ -312,6 +312,66 @@ pub(super) fn eval_collection_expr(
                         )
                     })
                 }
+                Value::FrozenArray(arr) => {
+                    // E1043 - Invalid Index Type
+                    let raw_idx = idx_val.as_int().map_err(|_| {
+                        let ctx = ErrorContext::new()
+                            .with_code(codes::INVALID_INDEX_TYPE)
+                            .with_help("array indices must be integers");
+                        CompileError::semantic_with_context(
+                            format!("cannot index frozen array with type `{}`", idx_val.type_name()),
+                            ctx,
+                        )
+                    })?;
+                    let len = arr.len() as i64;
+                    // Support negative indexing
+                    let idx = if raw_idx < 0 {
+                        (len + raw_idx) as usize
+                    } else {
+                        raw_idx as usize
+                    };
+                    arr.get(idx).cloned().ok_or_else(|| {
+                        // E3002 - Index Out Of Bounds
+                        let ctx = ErrorContext::new()
+                            .with_code(codes::INDEX_OUT_OF_BOUNDS)
+                            .with_help(format!("frozen array has {} element(s)", len))
+                            .with_note("ensure the index is within bounds");
+                        CompileError::semantic_with_context(
+                            format!("array index out of bounds: index is {} but length is {}", raw_idx, len),
+                            ctx,
+                        )
+                    })
+                }
+                Value::FixedSizeArray { size, data } => {
+                    // E1043 - Invalid Index Type
+                    let raw_idx = idx_val.as_int().map_err(|_| {
+                        let ctx = ErrorContext::new()
+                            .with_code(codes::INVALID_INDEX_TYPE)
+                            .with_help("array indices must be integers");
+                        CompileError::semantic_with_context(
+                            format!("cannot index fixed-size array with type `{}`", idx_val.type_name()),
+                            ctx,
+                        )
+                    })?;
+                    let len = size as i64;
+                    // Support negative indexing
+                    let idx = if raw_idx < 0 {
+                        (len + raw_idx) as usize
+                    } else {
+                        raw_idx as usize
+                    };
+                    data.get(idx).cloned().ok_or_else(|| {
+                        // E3002 - Index Out Of Bounds
+                        let ctx = ErrorContext::new()
+                            .with_code(codes::INDEX_OUT_OF_BOUNDS)
+                            .with_help(format!("fixed-size array has {} element(s)", size))
+                            .with_note("ensure the index is within bounds");
+                        CompileError::semantic_with_context(
+                            format!("array index out of bounds: index is {} but length is {}", raw_idx, size),
+                            ctx,
+                        )
+                    })
+                }
                 Value::Tuple(tup) => {
                     // E1043 - Invalid Index Type
                     let raw_idx = idx_val.as_int().map_err(|_| {
@@ -343,6 +403,11 @@ pub(super) fn eval_collection_expr(
                     })
                 }
                 Value::Dict(map) => {
+                    let key = idx_val.to_key_string();
+                    // Return nil for missing keys instead of erroring
+                    Ok(map.get(&key).cloned().unwrap_or(Value::Nil))
+                }
+                Value::FrozenDict(map) => {
                     let key = idx_val.to_key_string();
                     // Return nil for missing keys instead of erroring
                     Ok(map.get(&key).cloned().unwrap_or(Value::Nil))

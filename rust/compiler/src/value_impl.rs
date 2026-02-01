@@ -144,11 +144,26 @@ impl Value {
                 let parts: Vec<String> = items.iter().map(|v| v.to_display_string()).collect();
                 format!("[{}]", parts.join(", "))
             }
+            Value::FrozenArray(items) => {
+                let parts: Vec<String> = items.iter().map(|v| v.to_display_string()).collect();
+                format!("[{}]", parts.join(", "))
+            }
+            Value::FixedSizeArray { size, data } => {
+                let parts: Vec<String> = data.iter().map(|v| v.to_display_string()).collect();
+                format!("[{}; {}]", parts.join(", "), size)
+            }
             Value::Tuple(items) => {
                 let parts: Vec<String> = items.iter().map(|v| v.to_display_string()).collect();
                 format!("({})", parts.join(", "))
             }
             Value::Dict(map) => {
+                let parts: Vec<String> = map
+                    .iter()
+                    .map(|(k, v)| format!("{}: {}", k, v.to_display_string()))
+                    .collect();
+                format!("{{{}}}", parts.join(", "))
+            }
+            Value::FrozenDict(map) => {
                 let parts: Vec<String> = map
                     .iter()
                     .map(|(k, v)| format!("{}: {}", k, v.to_display_string()))
