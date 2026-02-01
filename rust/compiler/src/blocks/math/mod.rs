@@ -110,16 +110,10 @@ fn parse_backend_directive(payload: &str) -> (&str, backend::MathBackend) {
         let (name, remainder) = rest.split_at(end);
         let remainder = remainder.trim_start_matches(';').trim_start();
 
-        let backend = match name {
-            "auto" => backend::MathBackend::Auto,
-            "cpu" => backend::MathBackend::CPU,
-            "torch" => backend::MathBackend::Torch,
-            "cuda" => backend::MathBackend::CUDA,
-            _ => {
-                eprintln!("warning: unknown backend '{}', using auto", name);
-                backend::MathBackend::Auto
-            }
-        };
+        let backend = backend::MathBackend::from_str(name).unwrap_or_else(|| {
+            eprintln!("warning: unknown backend '{}', using auto", name);
+            backend::MathBackend::Auto
+        });
 
         tracing::debug!(
             "[math::block] Parsed backend directive: use backend {} -> {:?}",
@@ -311,6 +305,19 @@ mod tests {
     fn test_parse_backend_directive_unknown() {
         let (_payload, backend) = parse_backend_directive("use backend vulkan; 1");
         assert_eq!(backend, backend::MathBackend::Auto);
+    }
+
+    #[test]
+    fn test_parse_backend_directive_aliases() {
+        // "gpu" → CUDA
+        let (_, b) = parse_backend_directive("use backend gpu; 1");
+        assert_eq!(b, backend::MathBackend::CUDA);
+        // "native" → CPU
+        let (_, b) = parse_backend_directive("use backend native; 1");
+        assert_eq!(b, backend::MathBackend::CPU);
+        // "pytorch" → Torch
+        let (_, b) = parse_backend_directive("use backend pytorch; 1");
+        assert_eq!(b, backend::MathBackend::Torch);
     }
 
     // =========================================================================

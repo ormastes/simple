@@ -78,7 +78,7 @@ pub fn evaluate(expr: &MathExpr) -> Result<Value, CompileError> {
     Ok(result.to_value())
 }
 
-/// Evaluate math expression with a specific backend.
+/// Evaluate math expression with a specific preferred backend.
 ///
 /// Performs complexity analysis, selects backend (or uses preferred),
 /// logs the decision, and dispatches to the appropriate evaluator.
@@ -86,7 +86,6 @@ pub fn evaluate_with_backend(
     expr: &MathExpr,
     preferred: super::backend::MathBackend,
 ) -> Result<Value, CompileError> {
-    use super::backend::MathBackend;
     use super::backend::auto_select::{analyze_complexity, select_backend};
 
     let complexity = analyze_complexity(expr);
@@ -99,11 +98,20 @@ pub fn evaluate_with_backend(
         selection.reason
     );
 
-    match selection.backend {
-        MathBackend::CPU | MathBackend::Auto => evaluate(expr),
-        MathBackend::Torch => super::backend::torch_eval::evaluate(expr),
-        MathBackend::CUDA => super::backend::cuda_eval::evaluate(expr),
-    }
+    selection.backend.evaluate(expr)
+}
+
+/// Alias: `eval_expr` - shorter name following `eval_*` convention.
+pub fn eval_expr(expr: &MathExpr) -> Result<Value, CompileError> {
+    evaluate(expr)
+}
+
+/// Alias: `eval_with_backend` - shorter name following `eval_*` convention.
+pub fn eval_with_backend(
+    expr: &MathExpr,
+    preferred: super::backend::MathBackend,
+) -> Result<Value, CompileError> {
+    evaluate_with_backend(expr, preferred)
 }
 
 /// Evaluate with variable environment
