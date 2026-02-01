@@ -23,6 +23,10 @@ pub(crate) fn get_type_name(ty: &Type) -> String {
     match ty {
         Type::Simple(name) => name.clone(),
         Type::Generic { name, .. } => name.clone(),
+        Type::Tuple(elements) => format!("Tuple{}", elements.len()),
+        Type::Array { .. } => "Array".to_string(),
+        Type::Function { .. } => "Function".to_string(),
+        Type::Optional(_) => "Option".to_string(),
         _ => "unknown".to_string(),
     }
 }
@@ -57,7 +61,14 @@ pub(super) fn register_trait_impl(
     }
 
     let target_key = get_type_name(&impl_block.target_type);
-    let entry = registry.entry(trait_name.clone()).or_default();
+    // Include trait type params in registry key so Add<&str> != Add<text>
+    let registry_key = if impl_block.trait_type_params.is_empty() {
+        trait_name.clone()
+    } else {
+        let params: Vec<String> = impl_block.trait_type_params.iter().map(|t| get_type_name(t)).collect();
+        format!("{}<{}>", trait_name, params.join(", "))
+    };
+    let entry = registry.entry(registry_key).or_default();
 
     if is_blanket {
         if entry.blanket_impl {

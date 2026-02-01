@@ -120,13 +120,11 @@ impl StartupMetrics {
 
     /// Record a phase timing
     pub fn record(&mut self, phase: StartupPhase, duration: Duration) {
-        if metrics_enabled() {
-            self.timings.push(PhaseTiming {
-                phase,
-                duration,
-                start_time: self.start_time.unwrap_or_else(Instant::now),
-            });
-        }
+        self.timings.push(PhaseTiming {
+            phase,
+            duration,
+            start_time: self.start_time.unwrap_or_else(Instant::now),
+        });
     }
 
     /// Get total startup time

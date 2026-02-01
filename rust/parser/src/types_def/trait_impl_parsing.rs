@@ -103,13 +103,14 @@ impl<'a> Parser<'a> {
         // Parse the first type (could be trait name or target type)
         let first_type = self.parse_type()?;
 
-        let (trait_name, target_type) = if self.check(&TokenKind::For) {
+        let (trait_name, trait_type_params, target_type) = if self.check(&TokenKind::For) {
             // impl Trait for Type pattern
             self.advance();
             let target = self.parse_type()?;
             // Extract simple name from first_type for trait_name
-            let trait_name_str = match &first_type {
-                Type::Simple(name) | Type::Generic { name, .. } => name.clone(),
+            let (trait_name_str, trait_type_params) = match &first_type {
+                Type::Simple(name) => (name.clone(), vec![]),
+                Type::Generic { name, args } => (name.clone(), args.clone()),
                 _ => {
                     return Err(ParseError::unexpected_token(
                         "simple trait name",
@@ -118,10 +119,10 @@ impl<'a> Parser<'a> {
                     ))
                 }
             };
-            (Some(trait_name_str), target)
+            (Some(trait_name_str), trait_type_params, target)
         } else {
             // impl Type pattern (inherent impl)
-            (None, first_type)
+            (None, vec![], first_type)
         };
 
         let where_clause = self.parse_where_clause()?;
@@ -133,6 +134,7 @@ impl<'a> Parser<'a> {
             generic_params,
             target_type,
             trait_name,
+            trait_type_params,
             where_clause,
             associated_types,
             methods,

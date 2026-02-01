@@ -423,6 +423,7 @@ impl<'a> Parser<'a> {
             // Allow logical/conversion operators as trait names or identifiers
             TokenKind::Not => "Not".to_string(),
             TokenKind::From => "from".to_string(),
+            TokenKind::Into => "into".to_string(),
             // Allow math keywords to be used as identifiers (e.g., struct Slice<T>)
             // These are only keywords inside m{} math blocks
             TokenKind::Slice => "Slice".to_string(),
@@ -457,6 +458,9 @@ impl<'a> Parser<'a> {
             // These keywords are only used for GPU kernel and generator declarations
             TokenKind::Kernel => "kernel".to_string(),
             TokenKind::Gen => "gen".to_string(),
+            // Allow 'sync' to be used as identifier (method names like 'fn sync()')
+            // The 'sync' keyword is only used in sync/async context declarations
+            TokenKind::Sync => "sync".to_string(),
             _ => {
                 return Err(ParseError::unexpected_token(
                     "identifier",

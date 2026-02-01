@@ -486,6 +486,8 @@ pub struct ImplBlock {
     pub where_clause: WhereClause,
     pub target_type: Type,
     pub trait_name: Option<String>,
+    /// Type parameters of the trait: impl Add<&str> for text → [&str]
+    pub trait_type_params: Vec<Type>,
     /// Associated type implementations: `type Item = i64`
     pub associated_types: Vec<AssociatedTypeImpl>,
     pub methods: Vec<FunctionDef>,

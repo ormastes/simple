@@ -31,6 +31,7 @@ fn make_impl_block_with_attrs(
         where_clause: vec![],
         target_type,
         trait_name,
+        trait_type_params: vec![],
         associated_types,
         methods: vec![],
     }
@@ -49,6 +50,7 @@ fn make_impl_block(
         where_clause: vec![],
         target_type,
         trait_name,
+        trait_type_params: vec![],
         associated_types,
         methods: vec![],
     }
