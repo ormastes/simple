@@ -1044,6 +1044,7 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
             Node::MultiUse(_)
             | Node::CommonUseStmt(_)
             | Node::ExportUseStmt(_)
+            | Node::StructuredExportStmt(_)
             | Node::AutoImportStmt(_)
             | Node::RequiresCapabilities(_)
             | Node::HandlePool(_)
