@@ -24,6 +24,8 @@ mod async_gen;
 mod channels;
 pub mod cli_ffi;
 pub mod cargo_ffi;
+pub mod time_ffi;
+pub mod fs_ffi;
 mod collections;
 pub mod log_ffi;
 mod contracts;

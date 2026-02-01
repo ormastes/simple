@@ -12,6 +12,11 @@ pub mod auto_select;
 pub mod torch_eval;
 pub mod cuda_eval;
 
+// Re-export key items for ergonomic access
+pub use auto_select::{analyze_complexity, select_backend, BackendSelection};
+pub use torch_eval::is_available as torch_available;
+pub use torch_eval::is_cuda_available as cuda_available;
+
 /// Computation backend for math expressions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MathBackend {
@@ -43,6 +48,38 @@ impl MathBackend {
             MathBackend::CPU => "CPU",
             MathBackend::Torch => "Torch",
             MathBackend::CUDA => "CUDA",
+        }
+    }
+}
+
+impl MathBackend {
+    /// Parse a backend from a string name.
+    ///
+    /// Accepts: "auto", "cpu", "torch", "pytorch", "cuda", "gpu".
+    /// Returns `None` for unrecognized names.
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "auto" => Some(MathBackend::Auto),
+            "cpu" | "native" => Some(MathBackend::CPU),
+            "torch" | "pytorch" => Some(MathBackend::Torch),
+            "cuda" | "gpu" => Some(MathBackend::CUDA),
+            _ => None,
+        }
+    }
+
+    /// Evaluate a math expression using this backend.
+    ///
+    /// Convenience method that dispatches to the appropriate evaluator.
+    pub fn evaluate(&self, expr: &crate::blocks::math::ast::MathExpr) -> Result<crate::value::Value, crate::error::CompileError> {
+        match self {
+            MathBackend::Auto => {
+                let complexity = auto_select::analyze_complexity(expr);
+                let selection = auto_select::select_backend(&complexity, MathBackend::Auto);
+                selection.backend.evaluate(expr)
+            }
+            MathBackend::CPU => crate::blocks::math::eval::evaluate(expr),
+            MathBackend::Torch => torch_eval::evaluate(expr),
+            MathBackend::CUDA => cuda_eval::evaluate(expr),
         }
     }
 }
@@ -140,6 +177,8 @@ impl Default for ExprComplexity {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::blocks::math::ast::MathExpr;
+    use crate::value::Value;
 
     #[test]
     fn test_cpu_always_available() {
@@ -170,5 +209,53 @@ mod tests {
     #[test]
     fn test_display() {
         assert_eq!(format!("{}", MathBackend::CUDA), "CUDA");
+    }
+
+    #[test]
+    fn test_from_str() {
+        assert_eq!(MathBackend::from_str("auto"), Some(MathBackend::Auto));
+        assert_eq!(MathBackend::from_str("cpu"), Some(MathBackend::CPU));
+        assert_eq!(MathBackend::from_str("native"), Some(MathBackend::CPU));
+        assert_eq!(MathBackend::from_str("torch"), Some(MathBackend::Torch));
+        assert_eq!(MathBackend::from_str("pytorch"), Some(MathBackend::Torch));
+        assert_eq!(MathBackend::from_str("cuda"), Some(MathBackend::CUDA));
+        assert_eq!(MathBackend::from_str("gpu"), Some(MathBackend::CUDA));
+        assert_eq!(MathBackend::from_str("TORCH"), Some(MathBackend::Torch));
+        assert_eq!(MathBackend::from_str("unknown"), None);
+    }
+
+    #[test]
+    fn test_backend_evaluate_cpu() {
+        let expr = MathExpr::Add(Box::new(MathExpr::Int(2)), Box::new(MathExpr::Int(3)));
+        let result = MathBackend::CPU.evaluate(&expr).unwrap();
+        assert_eq!(result, Value::Int(5));
+    }
+
+    #[test]
+    fn test_backend_evaluate_auto() {
+        let expr = MathExpr::Mul(Box::new(MathExpr::Int(4)), Box::new(MathExpr::Int(5)));
+        let result = MathBackend::Auto.evaluate(&expr).unwrap();
+        assert_eq!(result, Value::Int(20));
+    }
+
+    #[test]
+    fn test_backend_evaluate_torch_fallback() {
+        let expr = MathExpr::Sub(Box::new(MathExpr::Int(10)), Box::new(MathExpr::Int(3)));
+        let result = MathBackend::Torch.evaluate(&expr).unwrap();
+        assert_eq!(result, Value::Int(7));
+    }
+
+    #[test]
+    fn test_backend_evaluate_cuda_fallback() {
+        let expr = MathExpr::Int(42);
+        let result = MathBackend::CUDA.evaluate(&expr).unwrap();
+        assert_eq!(result, Value::Int(42));
+    }
+
+    #[test]
+    fn test_re_exports() {
+        // Verify re-exports work
+        assert_eq!(torch_available(), torch_eval::is_available());
+        assert_eq!(cuda_available(), torch_eval::is_cuda_available());
     }
 }
