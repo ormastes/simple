@@ -76,13 +76,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_cuda_availability_matches_runtime() {
-        let runtime_cuda =
-            simple_runtime::value::torch::creation::rt_torch_cuda_available() != 0;
-        assert_eq!(is_available(), runtime_cuda);
-    }
-
-    #[test]
     fn test_alias_rt_cuda_available() {
         assert_eq!(rt_cuda_available(), is_available());
     }

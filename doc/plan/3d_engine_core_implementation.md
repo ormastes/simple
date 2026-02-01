@@ -14,14 +14,13 @@ This plan details the implementation of the core 3D graphics engine for Simple l
 ## Current State Analysis
 
 ### ✅ Already Implemented
-- Math primitives (Vec2, Vec3, Vec4) - basic operations
-- Matrix types (Mat3, Mat4) - basic operations
-- Scene graph structure (SceneNode, Scene)
-- Component enum (MeshRenderer, Light, Camera)
-- Renderer3D skeleton
-- Transform struct
-- Camera with FPS controller
+- **Unified math module** (`rust/lib/std/src/math/`): Vec2/3/4, Mat3/4, Quat, Transform, Color in f32+f64 variants (column-major, GPU-ready)
+- Scene graph structure (SceneNode trait in `game_engine/scene_node.spl`)
+- Component system (Component trait, ComponentManager in `game_engine/component.spl`)
+- Transform struct (`math.Transform` / `math.Transformd`)
 - Vulkan backend infrastructure
+
+**Note (2026-02-01):** Graphics math replaced by shared `math` module. Scene/render/shader work remains.
 
 ### ⚠️ Partially Implemented
 - Quaternion (referenced but may be incomplete)

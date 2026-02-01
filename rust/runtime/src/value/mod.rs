@@ -24,8 +24,7 @@ mod async_gen;
 mod channels;
 pub mod cli_ffi;
 pub mod cargo_ffi;
-pub mod time_ffi;
-pub mod fs_ffi;
+// time_ffi and fs_ffi removed - duplicates of ffi/file_io and ffi/env_process
 mod collections;
 pub mod log_ffi;
 mod contracts;
