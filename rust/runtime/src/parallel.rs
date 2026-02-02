@@ -462,7 +462,7 @@ mod tests {
             COUNTER.fetch_add(1, Ordering::SeqCst);
         }
 
-        rt_par_launch_1d(test_kernel as u64, 100, 32);
+        rt_par_launch_1d(test_kernel as *const () as u64, 100, 32);
 
         assert_eq!(COUNTER.load(Ordering::SeqCst), 100);
     }

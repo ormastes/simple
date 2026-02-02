@@ -47,6 +47,9 @@ tar -czf "$OUTPUT" \
   --exclude='.DS_Store' \
   --exclude='node_modules' \
   --exclude='*.log' \
+  --exclude="$OUTPUT" \
+  --exclude='simple-full-*.tar.gz' \
+  --exclude='simple-bootstrap-*.spk' \
   --transform="s,^,simple-${VERSION}/," \
   .
 
