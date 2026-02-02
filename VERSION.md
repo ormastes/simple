@@ -1,10 +1,21 @@
 # Simple Language Version History
 
-## Current Version: 0.3.0
+## Current Version: 0.4.0
 
 ---
 
 ## Versions
+
+### 0.4.0 (2026-02-02)
+
+**Coverage Stability** - Focus on test coverage stability and build system maturity.
+
+#### Goals
+- Coverage stability and reliability
+- Test pass rate improvements
+- Build system refinements
+
+---
 
 ### 0.3.0 (2026-01-30)
 
@@ -12,36 +23,40 @@
 
 #### Key Achievements
 
+**Self-Hosting Build System**
+- Complete build system written in Simple (~11,000 lines total)
+- 8 phases: Foundation, Testing, Coverage, Quality, Bootstrap, Package, Migration, Advanced
+- 4,440 lines of implementation, 2,370 lines of SSpec tests (290+ tests)
+- Commands: `build`, `test`, `coverage`, `lint`, `fmt`, `check`, `bootstrap`, `package`, `watch`, `metrics`
+- Replaces Makefile with type-safe Simple code
+
+**Package Management System**
+- Bootstrap package: minimal runtime-only installation (~6 MB)
+- Full package: complete source distribution with binaries
+- `simple package` CLI: build, install, uninstall, list, verify, upgrade
+- Multi-platform: Linux x86_64, macOS ARM64/x86_64, Windows x86_64
+- GitHub Actions automated release workflow with GHCR publishing
+
 **Bootstrap & Self-Compilation**
 - Fixed critical Gen2 bootstrap bug (dictionary mutation in compiled mode)
 - 3-stage verified bootstrap pipeline: `simple_runtime → simple_new1 → simple_new2 → simple_new3`
 - Deterministic compilation verified: `simple_new2` and `simple_new3` are bitwise identical
-- Root cause: Interpreter used value semantics, compiled mode used reference semantics
-- Fix: Rewrote copy-modify-reassign patterns to direct nested field mutation
+
+**Binary Optimization**
+- Reduced runtime binary size from 508 MB to 22 MB (95.7% reduction)
+- Bootstrap profile: 9.3 MB (76.8% reduction from release)
+- UPX compression support: ~4.5 MB (88.8% total reduction)
 
 **Binary Architecture Refactoring**
 - Renamed `simple_old` → `simple_runtime` (canonical name)
 - `simple` (default CLI) now runs Simple implementation (`src/app/cli/main.spl`)
 - New env var: `SIMPLE_RUNTIME_PATH` (preferred over `SIMPLE_OLD_PATH`)
 
-**Stable Release Workflow**
-- `make bootstrap-promote` — Promote verified compiler to `target/stable/`
-- `bootstrap.sdn` — Track bootstrap metadata (hashes, revisions)
-- `make bootstrap-from-stable` — Verify stable compiler reproducibility
-
 #### Statistics
-- Files modified: 11
-- Lines changed: ~200
-- Tests: 2254 passed (lib tests)
-- Bootstrap stages: All 3 stages ✅
-- Verification: `SHA256(simple_new2) == SHA256(simple_new3)` ✅
-
-#### Deferred to v0.4.0
-- Port more modules to Simple (loader, compiler, interpreter)
-- Performance optimization (2-3x faster compilation, 30% less memory)
-- LLM training/inference examples
-- Architecture refactoring (remove duplication, layer separation)
-- Fix pre-existing test failures
+- Build system: ~11,000 lines (impl + tests + docs)
+- Tests: 2254 passed (lib tests), 290+ SSpec build system tests
+- Bootstrap stages: All 3 stages verified
+- Package sizes: Bootstrap ~6 MB, Full ~200-300 MB
 
 ---
 
@@ -181,15 +196,6 @@ Initial release with core language features and tooling.
 ---
 
 ## Planned Versions
-
-### 0.4.0 (Target: Q2 2026)
-
-**Goals:**
-- 80%+ Simple Codebase — Move loader, compiler, interpreter to Simple
-- Performance — 2-3x faster compilation, 30% less memory
-- LLM training/inference examples with dimension checking
-- Architecture refactoring — Remove duplication, enforce layer boundaries
-- Stability — Fix pre-existing test failures, 100% pass rate
 
 ### 0.5.0 (Planned)
 
