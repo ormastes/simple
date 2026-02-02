@@ -1,3 +1,4 @@
+#![cfg(target_arch = "x86_64")]
 #![allow(unused_imports, deprecated)]
 
 use assert_cmd::Command;
