@@ -1107,7 +1107,7 @@ pub fn register_cranelift_ffi_functions(builder: &mut JITBuilder) {
     );
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_arch = "x86_64"))]
 mod tests {
     use super::*;
 

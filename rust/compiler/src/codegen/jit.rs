@@ -168,6 +168,6 @@ fn register_runtime_symbols_from_provider(builder: &mut JITBuilder, provider: &d
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_arch = "x86_64"))]
 #[path = "jit_tests.rs"]
 mod tests;

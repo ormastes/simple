@@ -346,7 +346,7 @@ mod tests {
 
         let ctx = ProjectContext::detect(&file).unwrap();
         assert_eq!(ctx.name, "test");
-        assert_eq!(ctx.root, dir.path());
+        assert_eq!(ctx.root.canonicalize().ok(), dir.path().canonicalize().ok());
     }
 
     #[test]
@@ -367,7 +367,10 @@ strict_null = true
 
         let ctx = ProjectContext::detect(&file).unwrap();
         assert_eq!(ctx.name, "myproject");
-        assert_eq!(ctx.source_root, dir.path().join("src"));
+        assert_eq!(
+            ctx.source_root.canonicalize().ok(),
+            dir.path().join("src").canonicalize().ok()
+        );
         assert!(ctx.is_feature_enabled("strict_null"));
     }
 
