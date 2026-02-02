@@ -17,8 +17,8 @@ pub struct Terminal:
 impl Terminal:
     # Get the default terminal
     @io
-    pub async fn default() -> Terminal:
-        return Terminal {stdin: native_stdin(), stdout: native_stdout(), stderr: native_stderr(), is_tty: native_is_tty(native_stdout()), raw_mode: false}
+    pub fn default() -> Terminal:
+        return Terminal(stdin: native_stdin(), stdout: native_stdout(), stderr: native_stderr(), is_tty: native_is_tty(native_stdout()), raw_mode: false)
 
     # Check if stdout is a TTY
     @pure
@@ -32,7 +32,7 @@ impl Terminal:
 
     # Enable raw mode (no line buffering, no echo)
     @io
-    pub async fn enable_raw_mode(self) -> Result<(), TermError>:
+    pub fn enable_raw_mode(self) -> Result<(), TermError>:
         if self.raw_mode:
             return Ok(())
         match native_enable_raw_mode(self.stdin):
@@ -43,7 +43,7 @@ impl Terminal:
 
     # Disable raw mode (restore normal terminal)
     @io
-    pub async fn disable_raw_mode(self) -> Result<(), TermError>:
+    pub fn disable_raw_mode(self) -> Result<(), TermError>:
         if not self.raw_mode:
             return Ok(())
         match native_disable_raw_mode(self.stdin):
@@ -54,16 +54,16 @@ impl Terminal:
 
     # Get terminal size
     @io
-    pub async fn size(self) -> Result<TermSize, TermError>:
+    pub fn size(self) -> Result<TermSize, TermError>:
         var rows: u16 = 0
         var cols: u16 = 0
         match native_get_term_size(self.stdout, &mut rows, &mut cols):
-            case 0: return Ok(TermSize { rows: rows, cols: cols })
+            case 0: return Ok(TermSize(rows: rows, cols: cols))
             case e: return Err(TermError.from_code(e))
 
     # Write string to stdout
     @io
-    pub async fn write(self, s: &str) -> Result<ByteCount, TermError>:
+    pub fn write(self, s: &str) -> Result<ByteCount, TermError>:
         val written = native_term_write(self.stdout, s.as_ptr(), s.len())
         if written < 0:
             return Err(TermError.from_code(written as i32))
@@ -71,14 +71,14 @@ impl Terminal:
 
     # Write line to stdout (with newline)
     @io
-    pub async fn writeln(self, s: &str) -> Result<ByteCount, TermError>:
-        val total = self.write(s).await?
-        val nl = self.write("\n").await?
+    pub fn writeln(self, s: &str) -> Result<ByteCount, TermError>:
+        val total = self.write(s)?
+        val nl = self.write("\n")?
         return Ok(total + nl)
 
     # Write to stderr
     @io
-    pub async fn write_err(self, s: &str) -> Result<ByteCount, TermError>:
+    pub fn write_err(self, s: &str) -> Result<ByteCount, TermError>:
         val written = native_term_write(self.stderr, s.as_ptr(), s.len())
         if written < 0:
             return Err(TermError.from_code(written as i32))
@@ -86,14 +86,14 @@ impl Terminal:
 
     # Flush stdout
     @io
-    pub async fn flush(self) -> Result<(), TermError>:
+    pub fn flush(self) -> Result<(), TermError>:
         match native_term_flush(self.stdout):
             case 0: return Ok(())
             case e: return Err(TermError.from_code(e))
 
     # Read a single byte from stdin
     @io
-    pub async fn read_byte(self) -> Result<u8, TermError>:
+    pub fn read_byte(self) -> Result<u8, TermError>:
         var buf: [u8; 1] = [0]
         val n = native_term_read(self.stdin, &mut buf[0], 1)
         if n < 0:
@@ -104,7 +104,7 @@ impl Terminal:
 
     # Read bytes into buffer
     @io
-    pub async fn read(self, buf: &mut [u8]) -> Result<ByteCount, TermError>:
+    pub fn read(self, buf: &mut [u8]) -> Result<ByteCount, TermError>:
         val n = native_term_read(self.stdin, buf.as_mut_ptr(), buf.len())
         if n < 0:
             return Err(TermError.from_code(n as i32))
@@ -112,10 +112,10 @@ impl Terminal:
 
     # Read a line from stdin
     @io
-    pub async fn read_line(self) -> Result<text, TermError>:
+    pub fn read_line(self) -> Result<text, TermError>:
         var line = text.new()
         loop:
-            val byte = self.read_byte().await?
+            val byte = self.read_byte()?
             if byte == '\n' as u8:
                 break
             if byte == '\r' as u8:
@@ -126,7 +126,7 @@ impl Terminal:
 
     # Read with timeout (milliseconds)
     @io
-    pub async fn read_timeout(self, buf: &mut [u8], timeout_ms: u64) -> Result<ByteCount, TermError>:
+    pub fn read_timeout(self, buf: &mut [u8], timeout_ms: u64) -> Result<ByteCount, TermError>:
         val n = native_term_read_timeout(self.stdin, buf.as_mut_ptr(), buf.len(), timeout_ms)
         if n < 0:
             return Err(TermError.from_code(n as i32))
@@ -134,7 +134,7 @@ impl Terminal:
 
     # Check if input is available (non-blocking)
     @io
-    pub async fn poll_input(self, timeout_ms: u64) -> Result<bool, TermError>:
+    pub fn poll_input(self, timeout_ms: u64) -> Result<bool, TermError>:
         match native_term_poll(self.stdin, timeout_ms):
             case 1: return Ok(true)
             case 0: return Ok(false)
@@ -142,73 +142,73 @@ impl Terminal:
 
     # Clear screen
     @io
-    pub async fn clear(self) -> Result<(), TermError>:
-        return self.write("\x1b[2J\x1b[H").await.map(|_| ())
+    pub fn clear(self) -> Result<(), TermError>:
+        return self.write(" + chr(27) +[2J + chr(27) +[H").map(|_| ())
 
     # Clear line
     @io
-    pub async fn clear_line(self) -> Result<(), TermError>:
-        return self.write("\x1b[2K").await.map(|_| ())
+    pub fn clear_line(self) -> Result<(), TermError>:
+        return self.write(" + chr(27) +[2K").map(|_| ())
 
     # Move cursor to position (1-indexed)
     @io
-    pub async fn move_to(self, row: u16, col: u16) -> Result<(), TermError>:
-        return self.write("\x1b[{row};{col}H").await.map(|_| ())
+    pub fn move_to(self, row: u16, col: u16) -> Result<(), TermError>:
+        return self.write(" + chr(27) +[{row};{col}H").map(|_| ())
 
     # Move cursor up
     @io
-    pub async fn move_up(self, n: u16) -> Result<(), TermError>:
+    pub fn move_up(self, n: u16) -> Result<(), TermError>:
         if n > 0:
-            return self.write("\x1b[{n}A").await.map(|_| ())
+            return self.write(" + chr(27) +[{n}A").map(|_| ())
         return Ok(())
 
     # Move cursor down
     @io
-    pub async fn move_down(self, n: u16) -> Result<(), TermError>:
+    pub fn move_down(self, n: u16) -> Result<(), TermError>:
         if n > 0:
-            return self.write("\x1b[{n}B").await.map(|_| ())
+            return self.write(" + chr(27) +[{n}B").map(|_| ())
         return Ok(())
 
     # Move cursor right
     @io
-    pub async fn move_right(self, n: u16) -> Result<(), TermError>:
+    pub fn move_right(self, n: u16) -> Result<(), TermError>:
         if n > 0:
-            return self.write("\x1b[{n}C").await.map(|_| ())
+            return self.write(" + chr(27) +[{n}C").map(|_| ())
         return Ok(())
 
     # Move cursor left
     @io
-    pub async fn move_left(self, n: u16) -> Result<(), TermError>:
+    pub fn move_left(self, n: u16) -> Result<(), TermError>:
         if n > 0:
-            return self.write("\x1b[{n}D").await.map(|_| ())
+            return self.write(" + chr(27) +[{n}D").map(|_| ())
         return Ok(())
 
     # Hide cursor
     @io
-    pub async fn hide_cursor(self) -> Result<(), TermError>:
-        return self.write("\x1b[?25l").await.map(|_| ())
+    pub fn hide_cursor(self) -> Result<(), TermError>:
+        return self.write(" + chr(27) +[?25l").map(|_| ())
 
     # Show cursor
     @io
-    pub async fn show_cursor(self) -> Result<(), TermError>:
-        return self.write("\x1b[?25h").await.map(|_| ())
+    pub fn show_cursor(self) -> Result<(), TermError>:
+        return self.write(" + chr(27) +[?25h").map(|_| ())
 
     # Save cursor position
     @io
-    pub async fn save_cursor(self) -> Result<(), TermError>:
-        return self.write("\x1b[s").await.map(|_| ())
+    pub fn save_cursor(self) -> Result<(), TermError>:
+        return self.write(" + chr(27) +[s").map(|_| ())
 
     # Restore cursor position
     @io
-    pub async fn restore_cursor(self) -> Result<(), TermError>:
-        return self.write("\x1b[u").await.map(|_| ())
+    pub fn restore_cursor(self) -> Result<(), TermError>:
+        return self.write(" + chr(27) +[u").map(|_| ())
 
     # Get cursor position
     @io
-    pub async fn cursor_position(self) -> Result<CursorPos, TermError>:
+    pub fn cursor_position(self) -> Result<CursorPos, TermError>:
         # Send position query
-        self.write("\x1b[6n").await?
-        self.flush().await?
+        self.write(" + chr(27) +[6n")?
+        self.flush()?
 
         # Read response: ESC [ rows ; cols R
         var buf: [u8; 32] = [0; 32]
@@ -216,7 +216,7 @@ impl Terminal:
 
         # Read until 'R'
         loop:
-            val byte = self.read_byte().await?
+            val byte = self.read_byte()?
             if idx >= 32:
                 return Err(TermError.InvalidResponse)
             buf[idx] = byte
@@ -229,13 +229,13 @@ impl Terminal:
 
     # Set terminal title
     @io
-    pub async fn set_title(self, title: &str) -> Result<(), TermError>:
-        return self.write("\x1b]0;{title}\x07").await.map(|_| ())
+    pub fn set_title(self, title: &str) -> Result<(), TermError>:
+        return self.write(" + chr(27) +]0;{title}" + chr(7) + "").map(|_| ())
 
     # Ring bell
     @io
-    pub async fn bell(self) -> Result<(), TermError>:
-        return self.write("\x07").await.map(|_| ())
+    pub fn bell(self) -> Result<(), TermError>:
+        return self.write("" + chr(7) + "").map(|_| ())
 
     # Drop - restore terminal state
     fn drop():
@@ -307,7 +307,7 @@ impl Terminal:
         return self.is_tty
 
     @io
-    pub async fn width(self) -> Result<u16, TermError>:
+    pub fn width(self) -> Result<u16, TermError>:
         """Get terminal width in columns.
 
         Returns:
@@ -316,11 +316,11 @@ impl Terminal:
         Example:
             terminal.width()  # → Ok(80)
         """
-        val size = self.size().await?
+        val size = self.size()?
         return Ok(size.cols)
 
     @io
-    pub async fn height(self) -> Result<u16, TermError>:
+    pub fn height(self) -> Result<u16, TermError>:
         """Get terminal height in rows.
 
         Returns:
@@ -329,11 +329,11 @@ impl Terminal:
         Example:
             terminal.height()  # → Ok(24)
         """
-        val size = self.size().await?
+        val size = self.size()?
         return Ok(size.rows)
 
     @io
-    pub async fn area(self) -> Result<u32, TermError>:
+    pub fn area(self) -> Result<u32, TermError>:
         """Get terminal area (width * height).
 
         Returns:
@@ -342,11 +342,11 @@ impl Terminal:
         Example:
             terminal.area()  # → Ok(1920)
         """
-        val size = self.size().await?
+        val size = self.size()?
         return Ok((size.rows as u32) * (size.cols as u32))
 
     @io
-    pub async fn print(self, s: &str) -> Result<(), TermError>:
+    pub fn print(self, s: &str) -> Result<(), TermError>:
         """Print string to stdout and flush (convenience method).
 
         Args:
@@ -358,11 +358,10 @@ impl Terminal:
         Example:
             terminal.print("Hello")
         """
-        self.write(s).await?
-        return self.flush().await
-
+        self.write(s)?
+        return self.flush()
     @io
-    pub async fn print_err(self, s: &str) -> Result<(), TermError>:
+    pub fn print_err(self, s: &str) -> Result<(), TermError>:
         """Print string to stderr (convenience method).
 
         Args:
@@ -374,7 +373,7 @@ impl Terminal:
         Example:
             terminal.print_err("Error message")
         """
-        return self.write_err(s).await.map(|_| ())
+        return self.write_err(s).map(|_| ())
 
     @pure
     pub fn summary(self) -> text:
@@ -419,24 +418,22 @@ fn parse_cursor_response(buf: &[u8]) -> Result<CursorPos, TermError>:
 
 # Read and parse a key event
 @io
-pub async fn read_key(term: &mut Terminal) -> Result<KeyEvent, TermError>:
-    val byte = term.read_byte().await?
+pub fn read_key(term: &mut Terminal) -> Result<KeyEvent, TermError>:
+    val byte = term.read_byte()?
 
     # Escape sequence
     if byte == 0x1b:
         # Check if more bytes available
-        if term.poll_input(50).await? == false:
+        if term.poll_input(50)? == false:
             return Ok(KeyEvent {
                 code: KeyCode.Escape,
                 modifiers: KeyModifiers.none()
             })
 
-        val byte2 = term.read_byte().await?
+        val byte2 = term.read_byte()?
         if byte2 == '[' as u8:
-            return parse_csi_sequence(term).await
-        else if byte2 == 'O' as u8:
-            return parse_ss3_sequence(term).await
-        else:
+            return parse_csi_sequence(term)        else if byte2 == 'O' as u8:
+            return parse_ss3_sequence(term)        else:
             # Alt + key
             return Ok(KeyEvent {
                 code: KeyCode.Char(byte2 as char),
@@ -470,8 +467,8 @@ pub async fn read_key(term: &mut Terminal) -> Result<KeyEvent, TermError>:
     })
 
 # Parse CSI (Control Sequence Introducer) sequence: ESC [
-async fn parse_csi_sequence(term: &mut Terminal) -> Result<KeyEvent, TermError>:
-    val byte = term.read_byte().await?
+fn parse_csi_sequence(term: &mut Terminal) -> Result<KeyEvent, TermError>:
+    val byte = term.read_byte()?
 
     match byte:
         case 'A' as u8: return Ok(KeyEvent { code: KeyCode.Up, modifiers: KeyModifiers.none() })
@@ -481,39 +478,39 @@ async fn parse_csi_sequence(term: &mut Terminal) -> Result<KeyEvent, TermError>:
         case 'H' as u8: return Ok(KeyEvent { code: KeyCode.Home, modifiers: KeyModifiers.none() })
         case 'F' as u8: return Ok(KeyEvent { code: KeyCode.End, modifiers: KeyModifiers.none() })
         case '1' as u8:
-            val next = term.read_byte().await?
+            val next = term.read_byte()?
             if next == '~' as u8:
                 return Ok(KeyEvent { code: KeyCode.Home, modifiers: KeyModifiers.none() })
             # F1-F4: ESC [ 1 1 ~ through ESC [ 1 4 ~
             if next >= '1' as u8 and next <= '5' as u8:
-                term.read_byte().await?  # Read ~
+                term.read_byte()?  # Read ~
                 val fn_num = next - '0' as u8
                 return Ok(KeyEvent { code: KeyCode.F(fn_num), modifiers: KeyModifiers.none() })
             return Ok(KeyEvent { code: KeyCode.Null, modifiers: KeyModifiers.none() })
         case '2' as u8:
-            val next = term.read_byte().await?
+            val next = term.read_byte()?
             if next == '~' as u8:
                 return Ok(KeyEvent { code: KeyCode.Insert, modifiers: KeyModifiers.none() })
             # F9-F12: ESC [ 2 0 ~ through ESC [ 2 4 ~
             return Ok(KeyEvent { code: KeyCode.Null, modifiers: KeyModifiers.none() })
         case '3' as u8:
-            term.read_byte().await?  # Read ~
+            term.read_byte()?  # Read ~
             return Ok(KeyEvent { code: KeyCode.Delete, modifiers: KeyModifiers.none() })
         case '4' as u8:
-            term.read_byte().await?  # Read ~
+            term.read_byte()?  # Read ~
             return Ok(KeyEvent { code: KeyCode.End, modifiers: KeyModifiers.none() })
         case '5' as u8:
-            term.read_byte().await?  # Read ~
+            term.read_byte()?  # Read ~
             return Ok(KeyEvent { code: KeyCode.PageUp, modifiers: KeyModifiers.none() })
         case '6' as u8:
-            term.read_byte().await?  # Read ~
+            term.read_byte()?  # Read ~
             return Ok(KeyEvent { code: KeyCode.PageDown, modifiers: KeyModifiers.none() })
         case _:
             return Ok(KeyEvent { code: KeyCode.Null, modifiers: KeyModifiers.none() })
 
 # Parse SS3 sequence: ESC O
-async fn parse_ss3_sequence(term: &mut Terminal) -> Result<KeyEvent, TermError>:
-    val byte = term.read_byte().await?
+fn parse_ss3_sequence(term: &mut Terminal) -> Result<KeyEvent, TermError>:
+    val byte = term.read_byte()?
 
     match byte:
         case 'P' as u8: return Ok(KeyEvent { code: KeyCode.F(1), modifiers: KeyModifiers.none() })
