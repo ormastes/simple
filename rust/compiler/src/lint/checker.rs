@@ -306,10 +306,7 @@ impl LintChecker {
     /// Check for export statements outside of __init__.spl files
     fn check_export_outside_init(&mut self, items: &[Node], source_file: &std::path::Path) {
         // Check if this is an __init__.spl file
-        let filename = source_file
-            .file_name()
-            .and_then(|f| f.to_str())
-            .unwrap_or("");
+        let filename = source_file.file_name().and_then(|f| f.to_str()).unwrap_or("");
 
         if filename == "__init__.spl" {
             return; // Exports are allowed in __init__.spl
@@ -328,10 +325,7 @@ impl LintChecker {
                         let file_display = source_file.display().to_string();
                         let suggestion = if let Some(parent) = source_file.parent() {
                             let init_path = parent.join("__init__.spl");
-                            format!(
-                                "move this export to {} (the directory manifest)",
-                                init_path.display()
-                            )
+                            format!("move this export to {} (the directory manifest)", init_path.display())
                         } else {
                             "move this export to the directory's __init__.spl file".to_string()
                         };
@@ -849,7 +843,12 @@ impl LintChecker {
                         description: "add [area][priority] format to TODO comment".to_string(),
                         replacements: vec![Replacement {
                             file: file_path.clone(),
-                            span: simple_common::diagnostic::Span::new(insert_pos, insert_pos, line_num, insert_pos - line_start + 1),
+                            span: simple_common::diagnostic::Span::new(
+                                insert_pos,
+                                insert_pos,
+                                line_num,
+                                insert_pos - line_start + 1,
+                            ),
                             new_text: "[runtime][P2] ".to_string(),
                         }],
                         confidence: FixConfidence::Uncertain,
@@ -1658,7 +1657,7 @@ impl LintChecker {
                         let segments = &use_stmt.path.segments;
                         if segments.first().map(|s| s.as_str()) == Some("crate") {
                             let segments = &segments[1..]; // Skip "crate" prefix
-                            // Walk the path segments, checking for __init__.spl boundaries
+                                                           // Walk the path segments, checking for __init__.spl boundaries
                             let mut current_dir = source_root.to_path_buf();
                             for (i, segment) in segments.iter().enumerate() {
                                 let next_dir = current_dir.join(segment);
@@ -1676,8 +1675,10 @@ impl LintChecker {
                                         }
 
                                         // The remaining segments go past the boundary
-                                        let remaining: Vec<&str> = segments[i + 1..].iter().map(|s| s.as_str()).collect();
-                                        let full_path = segments.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(".");
+                                        let remaining: Vec<&str> =
+                                            segments[i + 1..].iter().map(|s| s.as_str()).collect();
+                                        let full_path =
+                                            segments.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(".");
 
                                         checker.emit(
                                             LintName::InitBoundaryViolation,
@@ -1723,10 +1724,7 @@ impl LintChecker {
     /// subdirectories, not .spl code files.
     pub fn check_bypass_validity(&mut self, items: &[Node], source_file: &Path) {
         // Only check __init__.spl files
-        let filename = source_file
-            .file_name()
-            .and_then(|f| f.to_str())
-            .unwrap_or("");
+        let filename = source_file.file_name().and_then(|f| f.to_str()).unwrap_or("");
 
         if filename != "__init__.spl" {
             return;

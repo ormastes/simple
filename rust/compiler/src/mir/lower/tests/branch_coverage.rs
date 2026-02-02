@@ -7,7 +7,9 @@
 
 use super::common::*;
 use crate::hir::BinOp;
-use crate::mir::lower::{lower_to_mir_with_coverage, lower_to_mir_with_mode_and_di, ContractMode, MirLowerResult, MirLowerer};
+use crate::mir::lower::{
+    lower_to_mir_with_coverage, lower_to_mir_with_mode_and_di, ContractMode, MirLowerResult, MirLowerer,
+};
 use crate::mir::function::MirFunction;
 use crate::mir::{CallTarget, MirInst, Terminator};
 use crate::{hir, mir};
@@ -207,13 +209,15 @@ fn enum_payload_as_call() {
         compile_to_mir("enum Shape:\n    Circle(i64)\n    Square(i64)\n\nfn test():\n    val s = Shape.Circle(42)\n")
             .unwrap();
     // Enum variant constructors now lower to EnumWith (type-aware) or Call (fallback)
-    assert!(has_inst(&mir, |i| {
-        matches!(i, MirInst::EnumWith { enum_name, variant_name, .. }
+    assert!(
+        has_inst(&mir, |i| {
+            matches!(i, MirInst::EnumWith { enum_name, variant_name, .. }
             if enum_name == "Shape" && variant_name == "Circle")
-    }) || has_inst(&mir, |i| {
-        matches!(i, MirInst::Call { target, .. }
+        }) || has_inst(&mir, |i| {
+            matches!(i, MirInst::Call { target, .. }
             if target == &CallTarget::from_name("Shape.Circle"))
-    }));
+        })
+    );
 }
 
 // =============================================================================
@@ -459,9 +463,7 @@ fn continue_in_while() {
 #[test]
 fn enum_unit_variant_via_global() {
     // Enum unit variant access
-    let result = compile_to_mir(
-        "enum Color:\n    Red\n    Blue\n\nfn test():\n    val c = Color.Red\n",
-    );
+    let result = compile_to_mir("enum Color:\n    Red\n    Blue\n\nfn test():\n    val c = Color.Red\n");
     // Verify it compiles (or documents the current limitation)
     if let Ok(mir) = result {
         assert!(mir.functions.len() >= 1);
@@ -503,16 +505,15 @@ fn nested_if_else() {
 
 #[test]
 fn multiple_functions() {
-    let mir = compile_to_mir(
-        "fn add(a: i64, b: i64) -> i64:\n    return a + b\n\nfn test() -> i64:\n    return add(1, 2)\n",
-    ).unwrap();
+    let mir =
+        compile_to_mir("fn add(a: i64, b: i64) -> i64:\n    return a + b\n\nfn test() -> i64:\n    return add(1, 2)\n")
+            .unwrap();
     assert!(mir.functions.len() >= 2);
 }
 
 // =============================================================================
 // Contract with postcondition on return (lowering_stmt.rs line 227+)
 // =============================================================================
-
 
 // =============================================================================
 // Contract modes
@@ -605,9 +606,8 @@ fn index_set_float_value_boxing() {
 
 #[test]
 fn if_else_expression() {
-    let mir = compile_to_mir(
-        "fn test(x: i64) -> i64:\n    val result = if x > 0: 42 else: -1\n    return result\n",
-    ).unwrap();
+    let mir =
+        compile_to_mir("fn test(x: i64) -> i64:\n    val result = if x > 0: 42 else: -1\n    return result\n").unwrap();
     let func = &mir.functions[0];
     assert!(func.blocks.len() >= 3); // then, else, merge blocks
 }
@@ -633,7 +633,10 @@ fn if_else_stmt_with_else() {
 fn return_none_void() {
     let mir = compile_to_mir("fn test():\n    return\n").unwrap();
     let func = &mir.functions[0];
-    assert!(matches!(func.blocks.last().unwrap().terminator, Terminator::Return(None)));
+    assert!(matches!(
+        func.blocks.last().unwrap().terminator,
+        Terminator::Return(None)
+    ));
 }
 
 // =============================================================================
@@ -642,9 +645,7 @@ fn return_none_void() {
 
 #[test]
 fn drops_skip_parameters() {
-    let mir = compile_to_mir(
-        "fn test(a: i64, b: i64) -> i64:\n    let c = a + b\n    return c\n",
-    ).unwrap();
+    let mir = compile_to_mir("fn test(a: i64, b: i64) -> i64:\n    let c = a + b\n    return c\n").unwrap();
     // Should have drops for local `c` but not for params `a`, `b`
     let drop_count = count_inst(&mir, |i| matches!(i, MirInst::Drop { .. }));
     assert!(drop_count >= 1, "expected at least 1 drop for local c");
@@ -664,7 +665,8 @@ fn actor_spawn() {
 fn actor_join() {
     let mir = compile_to_mir(
         "fn test() -> i64:\n    val handle = spawn(42)\n    val result = join(handle)\n    return result\n",
-    ).unwrap();
+    )
+    .unwrap();
     assert!(has_inst(&mir, |i| matches!(i, MirInst::ActorJoin { .. })));
 }
 
@@ -706,7 +708,9 @@ bindings = [
     assert!(mir.functions.len() >= 2, "expected at least 2 functions");
     // Check that some DI-related call was injected somewhere
     let has_any_call = mir.functions.iter().any(|f| {
-        f.blocks.iter().any(|b| b.instructions.iter().any(|i| matches!(i, MirInst::Call { .. })))
+        f.blocks
+            .iter()
+            .any(|b| b.instructions.iter().any(|i| matches!(i, MirInst::Call { .. })))
     });
     assert!(has_any_call, "expected at least one call instruction in DI module");
 }
@@ -770,9 +774,7 @@ bindings = []
 #[test]
 fn unit_type_basic() {
     // Standalone unit: `unit Name: BaseType as suffix`
-    let result = compile_to_mir(
-        "unit UserId: i64 as uid\n\nfn test() -> i64:\n    return 42\n",
-    );
+    let result = compile_to_mir("unit UserId: i64 as uid\n\nfn test() -> i64:\n    return 42\n");
     if let Ok(mir) = result {
         assert!(mir.functions.len() >= 1);
     }
@@ -828,7 +830,11 @@ fn unit_bound_check_emit_direct() {
     lowerer.type_registry = Some(&registry);
 
     // Begin a function so we have a valid state
-    let mut func = MirFunction::new("test".to_string(), hir::TypeId::I64, simple_parser::ast::Visibility::Private);
+    let mut func = MirFunction::new(
+        "test".to_string(),
+        hir::TypeId::I64,
+        simple_parser::ast::Visibility::Private,
+    );
     func.new_block(); // block 0
     lowerer.begin_function(func, "test", false).unwrap();
 
@@ -841,7 +847,9 @@ fn unit_bound_check_emit_direct() {
     // Verify UnitBoundCheck was emitted
     let func_result = lowerer.end_function().unwrap();
     let has_bound_check = func_result.blocks.iter().any(|b| {
-        b.instructions.iter().any(|i| matches!(i, MirInst::UnitBoundCheck { .. }))
+        b.instructions
+            .iter()
+            .any(|i| matches!(i, MirInst::UnitBoundCheck { .. }))
     });
     assert!(has_bound_check, "expected UnitBoundCheck instruction");
 }
@@ -867,7 +875,11 @@ fn unit_bound_check_no_range() {
 
     let mut lowerer = MirLowerer::new();
     lowerer.type_registry = Some(&registry);
-    let mut func = MirFunction::new("test".to_string(), hir::TypeId::I64, simple_parser::ast::Visibility::Private);
+    let mut func = MirFunction::new(
+        "test".to_string(),
+        hir::TypeId::I64,
+        simple_parser::ast::Visibility::Private,
+    );
     func.new_block();
     lowerer.begin_function(func, "test", false).unwrap();
 
@@ -876,7 +888,9 @@ fn unit_bound_check_no_range() {
 
     let func_result = lowerer.end_function().unwrap();
     let has_bound_check = func_result.blocks.iter().any(|b| {
-        b.instructions.iter().any(|i| matches!(i, MirInst::UnitBoundCheck { .. }))
+        b.instructions
+            .iter()
+            .any(|i| matches!(i, MirInst::UnitBoundCheck { .. }))
     });
     assert!(!has_bound_check, "should NOT emit UnitBoundCheck when no range");
 }
@@ -896,7 +910,11 @@ fn union_wrap_emit_direct() {
 
     let mut lowerer = MirLowerer::new();
     lowerer.type_registry = Some(&registry);
-    let mut func = MirFunction::new("test".to_string(), hir::TypeId::I64, simple_parser::ast::Visibility::Private);
+    let mut func = MirFunction::new(
+        "test".to_string(),
+        hir::TypeId::I64,
+        simple_parser::ast::Visibility::Private,
+    );
     func.new_block();
     lowerer.begin_function(func, "test", false).unwrap();
 
@@ -907,9 +925,10 @@ fn union_wrap_emit_direct() {
     assert_ne!(wrapped, vreg, "expected new VReg from UnionWrap");
 
     let func_result = lowerer.end_function().unwrap();
-    let has_union_wrap = func_result.blocks.iter().any(|b| {
-        b.instructions.iter().any(|i| matches!(i, MirInst::UnionWrap { .. }))
-    });
+    let has_union_wrap = func_result
+        .blocks
+        .iter()
+        .any(|b| b.instructions.iter().any(|i| matches!(i, MirInst::UnionWrap { .. })));
     assert!(has_union_wrap, "expected UnionWrap instruction");
 }
 
@@ -926,14 +945,20 @@ fn union_wrap_not_needed() {
 
     let mut lowerer = MirLowerer::new();
     lowerer.type_registry = Some(&registry);
-    let mut func = MirFunction::new("test".to_string(), hir::TypeId::I64, simple_parser::ast::Visibility::Private);
+    let mut func = MirFunction::new(
+        "test".to_string(),
+        hir::TypeId::I64,
+        simple_parser::ast::Visibility::Private,
+    );
     func.new_block();
     lowerer.begin_function(func, "test", false).unwrap();
 
     let vreg = lowerer.with_func(|func, _| func.new_vreg()).unwrap();
 
     // Try wrapping f64 (not in union) — should return same vreg
-    let result = lowerer.emit_union_wrap_if_needed(union_ty, hir::TypeId::F64, vreg).unwrap();
+    let result = lowerer
+        .emit_union_wrap_if_needed(union_ty, hir::TypeId::F64, vreg)
+        .unwrap();
     assert_eq!(result, vreg, "non-variant type should return same vreg");
 
     lowerer.end_function().unwrap();
@@ -948,14 +973,20 @@ fn union_wrap_non_union_type() {
     let registry = hir::TypeRegistry::new();
     let mut lowerer = MirLowerer::new();
     lowerer.type_registry = Some(&registry);
-    let mut func = MirFunction::new("test".to_string(), hir::TypeId::I64, simple_parser::ast::Visibility::Private);
+    let mut func = MirFunction::new(
+        "test".to_string(),
+        hir::TypeId::I64,
+        simple_parser::ast::Visibility::Private,
+    );
     func.new_block();
     lowerer.begin_function(func, "test", false).unwrap();
 
     let vreg = lowerer.with_func(|func, _| func.new_vreg()).unwrap();
 
     // Target is i64 (not a union) — should return same vreg
-    let result = lowerer.emit_union_wrap_if_needed(hir::TypeId::I64, hir::TypeId::I64, vreg).unwrap();
+    let result = lowerer
+        .emit_union_wrap_if_needed(hir::TypeId::I64, hir::TypeId::I64, vreg)
+        .unwrap();
     assert_eq!(result, vreg);
 
     lowerer.end_function().unwrap();
@@ -1040,9 +1071,7 @@ fn method_call_qualified() {
 
 #[test]
 fn pointer_ref_and_deref_combined() {
-    let mir = compile_to_mir(
-        "fn test() -> i64:\n    val x: i64 = 42\n    val p = &x\n    return *p\n",
-    ).unwrap();
+    let mir = compile_to_mir("fn test() -> i64:\n    val x: i64 = 42\n    val p = &x\n    return *p\n").unwrap();
     assert!(has_inst(&mir, |i| matches!(i, MirInst::PointerRef { .. })));
     assert!(has_inst(&mir, |i| matches!(i, MirInst::PointerDeref { .. })));
 }
@@ -1053,9 +1082,7 @@ fn pointer_ref_and_deref_combined() {
 
 #[test]
 fn closure_captures() {
-    let mir = compile_to_mir(
-        "fn test() -> i64:\n    val x = 10\n    val f = \\y: x + y\n    return f(32)\n",
-    ).unwrap();
+    let mir = compile_to_mir("fn test() -> i64:\n    val x = 10\n    val f = \\y: x + y\n    return f(32)\n").unwrap();
     assert!(has_inst(&mir, |i| matches!(i, MirInst::ClosureCreate { .. })));
     assert!(has_inst(&mir, |i| matches!(i, MirInst::IndirectCall { .. })));
 }
@@ -1069,7 +1096,8 @@ fn contract_precondition_entry() {
     let mir = compile_to_mir_with_mode(
         "fn test(x: i64) -> i64:\n    in:\n        x > 0\n    return x\n",
         ContractMode::All,
-    ).unwrap();
+    )
+    .unwrap();
     assert!(has_inst(&mir, |i| matches!(i, MirInst::ContractCheck { .. })));
 }
 
@@ -1081,7 +1109,8 @@ fn contract_precondition_entry() {
 fn coverage_nested_and_or() {
     let mir = compile_with_coverage(
         "fn test(a: bool, b: bool, c: bool) -> i64:\n    if (a and b) or c:\n        return 1\n    return 0\n",
-    ).unwrap();
+    )
+    .unwrap();
     let probe_count = count_inst(&mir, |i| matches!(i, MirInst::ConditionProbe { .. }));
     assert!(probe_count >= 2, "expected >= 2 probes, got {}", probe_count);
 }
@@ -1106,9 +1135,10 @@ fn global_variable_load() {
 #[test]
 fn dict_with_values() {
     let mir = compile_to_mir("fn test():\n    val d = {\"x\": 1, \"y\": 2, \"z\": 3}\n").unwrap();
-    let insert_count = count_inst(&mir, |i| {
-        matches!(i, MirInst::Call { target, .. } if target.name() == "rt_dict_insert")
-    });
+    let insert_count = count_inst(
+        &mir,
+        |i| matches!(i, MirInst::Call { target, .. } if target.name() == "rt_dict_insert"),
+    );
     assert!(insert_count >= 3, "expected >= 3 dict inserts, got {}", insert_count);
 }
 
@@ -1120,7 +1150,8 @@ fn dict_with_values() {
 fn for_range_inclusive_generates_lteq() {
     let mir = compile_to_mir(
         "fn test() -> i64:\n    var sum = 0\n    for i in 0..=10:\n        sum = sum + i\n    return sum\n",
-    ).unwrap();
+    )
+    .unwrap();
     assert!(has_inst(&mir, |i| matches!(i, MirInst::BinOp { op: BinOp::LtEq, .. })));
 }
 
@@ -1138,7 +1169,11 @@ fn di_resolve_arg_no_config_error() {
     let mut lowerer = MirLowerer::new();
     lowerer.type_registry = Some(&registry);
 
-    let mut func = MirFunction::new("test".to_string(), hir::TypeId::I64, simple_parser::ast::Visibility::Private);
+    let mut func = MirFunction::new(
+        "test".to_string(),
+        hir::TypeId::I64,
+        simple_parser::ast::Visibility::Private,
+    );
     func.new_block();
     lowerer.begin_function(func, "test", false).unwrap();
 
@@ -1163,14 +1198,20 @@ mode = "hybrid"
 bindings = [
   { on = "pc{ type(i64) }", impl = "make_value", scope = "Transient", priority = 10 }
 ]
-"#.parse().expect("toml");
+"#
+    .parse()
+    .expect("toml");
     let di_config = crate::di::parse_di_config(&di_toml).expect("parse").expect("config");
 
     let mut lowerer = MirLowerer::new();
     lowerer.type_registry = Some(&registry);
     lowerer.di_config = Some(di_config);
 
-    let mut func = MirFunction::new("test".to_string(), hir::TypeId::I64, simple_parser::ast::Visibility::Private);
+    let mut func = MirFunction::new(
+        "test".to_string(),
+        hir::TypeId::I64,
+        simple_parser::ast::Visibility::Private,
+    );
     func.new_block();
     lowerer.begin_function(func, "test", false).unwrap();
 
@@ -1179,9 +1220,9 @@ bindings = [
 
     let func_result = lowerer.end_function().unwrap();
     let has_make_value_call = func_result.blocks.iter().any(|b| {
-        b.instructions.iter().any(|i| {
-            matches!(i, MirInst::Call { target, .. } if target.name() == "make_value")
-        })
+        b.instructions
+            .iter()
+            .any(|i| matches!(i, MirInst::Call { target, .. } if target.name() == "make_value"))
     });
     assert!(has_make_value_call, "expected Call to make_value from DI resolution");
 }
@@ -1200,14 +1241,20 @@ mode = "hybrid"
 bindings = [
   { on = "pc{ type(i64) }", impl = "make_singleton", scope = "Singleton", priority = 10 }
 ]
-"#.parse().expect("toml");
+"#
+    .parse()
+    .expect("toml");
     let di_config = crate::di::parse_di_config(&di_toml).expect("parse").expect("config");
 
     let mut lowerer = MirLowerer::new();
     lowerer.type_registry = Some(&registry);
     lowerer.di_config = Some(di_config);
 
-    let mut func = MirFunction::new("test".to_string(), hir::TypeId::I64, simple_parser::ast::Visibility::Private);
+    let mut func = MirFunction::new(
+        "test".to_string(),
+        hir::TypeId::I64,
+        simple_parser::ast::Visibility::Private,
+    );
     func.new_block();
     lowerer.begin_function(func, "test", false).unwrap();
 
@@ -1230,14 +1277,20 @@ mode = "hybrid"
 
 [di.profiles.default]
 bindings = []
-"#.parse().expect("toml");
+"#
+    .parse()
+    .expect("toml");
     let di_config = crate::di::parse_di_config(&di_toml).expect("parse").expect("config");
 
     let mut lowerer = MirLowerer::new();
     lowerer.type_registry = Some(&registry);
     lowerer.di_config = Some(di_config);
 
-    let mut func = MirFunction::new("test".to_string(), hir::TypeId::I64, simple_parser::ast::Visibility::Private);
+    let mut func = MirFunction::new(
+        "test".to_string(),
+        hir::TypeId::I64,
+        simple_parser::ast::Visibility::Private,
+    );
     func.new_block();
     lowerer.begin_function(func, "test", false).unwrap();
 
@@ -1262,7 +1315,9 @@ mode = "hybrid"
 bindings = [
   { on = "pc{ type(i64) }", impl = "make_i64", scope = "Transient", priority = 10 }
 ]
-"#.parse().expect("toml");
+"#
+    .parse()
+    .expect("toml");
     let di_config = crate::di::parse_di_config(&di_toml).expect("parse").expect("config");
 
     let mut lowerer = MirLowerer::new();
@@ -1270,15 +1325,22 @@ bindings = [
     lowerer.di_config = Some(di_config);
     lowerer.di_resolution_stack.push("make_i64".to_string());
 
-    let mut func = MirFunction::new("test".to_string(), hir::TypeId::I64, simple_parser::ast::Visibility::Private);
+    let mut func = MirFunction::new(
+        "test".to_string(),
+        hir::TypeId::I64,
+        simple_parser::ast::Visibility::Private,
+    );
     func.new_block();
     lowerer.begin_function(func, "test", false).unwrap();
 
     let result = lowerer.resolve_di_arg(hir::TypeId::I64, "fn1", 0);
     assert!(result.is_err(), "expected circular dependency error");
     let err_msg = format!("{}", result.unwrap_err());
-    assert!(err_msg.contains("Circular dependency") || err_msg.contains("circular"),
-        "expected circular dependency error, got: {}", err_msg);
+    assert!(
+        err_msg.contains("Circular dependency") || err_msg.contains("circular"),
+        "expected circular dependency error, got: {}",
+        err_msg
+    );
 
     lowerer.end_function().unwrap();
 }
@@ -1289,12 +1351,18 @@ bindings = [
 
 /// Helper: make an integer HirExpr for GPU args
 fn gpu_int_expr(val: i64) -> HirExpr {
-    HirExpr { kind: HirExprKind::Integer(val), ty: hir::TypeId::I64 }
+    HirExpr {
+        kind: HirExprKind::Integer(val),
+        ty: hir::TypeId::I64,
+    }
 }
 
 /// Helper: make a dummy HirExpr (local var) for GPU args that need lowered exprs
 fn gpu_dummy_expr() -> HirExpr {
-    HirExpr { kind: HirExprKind::Integer(0), ty: hir::TypeId::I64 }
+    HirExpr {
+        kind: HirExprKind::Integer(0),
+        ty: hir::TypeId::I64,
+    }
 }
 
 use crate::hir::{GpuIntrinsicKind, HirExpr, HirExprKind};
@@ -1302,7 +1370,11 @@ use crate::hir::{GpuIntrinsicKind, HirExpr, HirExprKind};
 /// Helper: set up MirLowerer for GPU tests
 fn gpu_lowerer_setup() -> MirLowerer<'static> {
     let mut lowerer = MirLowerer::new();
-    let mut func = MirFunction::new("gpu_test".to_string(), hir::TypeId::I64, simple_parser::ast::Visibility::Private);
+    let mut func = MirFunction::new(
+        "gpu_test".to_string(),
+        hir::TypeId::I64,
+        simple_parser::ast::Visibility::Private,
+    );
     func.new_block();
     lowerer.begin_function(func, "gpu_test", false).unwrap();
     lowerer
@@ -1314,7 +1386,11 @@ fn gpu_global_id_default_dim() {
     let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::GlobalId, &[]);
     assert!(result.is_ok());
     let func = lowerer.end_function().unwrap();
-    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(i, MirInst::GpuGlobalId { dim: 0, .. })));
+    assert!(func
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .any(|i| matches!(i, MirInst::GpuGlobalId { dim: 0, .. })));
 }
 
 #[test]
@@ -1323,7 +1399,11 @@ fn gpu_global_id_dim1() {
     let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::GlobalId, &[gpu_int_expr(1)]);
     assert!(result.is_ok());
     let func = lowerer.end_function().unwrap();
-    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(i, MirInst::GpuGlobalId { dim: 1, .. })));
+    assert!(func
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .any(|i| matches!(i, MirInst::GpuGlobalId { dim: 1, .. })));
 }
 
 #[test]
@@ -1332,7 +1412,11 @@ fn gpu_global_id_dim2() {
     let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::GlobalId, &[gpu_int_expr(2)]);
     assert!(result.is_ok());
     let func = lowerer.end_function().unwrap();
-    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(i, MirInst::GpuGlobalId { dim: 2, .. })));
+    assert!(func
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .any(|i| matches!(i, MirInst::GpuGlobalId { dim: 2, .. })));
 }
 
 #[test]
@@ -1346,7 +1430,10 @@ fn gpu_dim_arg_out_of_range() {
 #[test]
 fn gpu_dim_arg_non_integer() {
     let mut lowerer = gpu_lowerer_setup();
-    let non_int = HirExpr { kind: HirExprKind::Bool(true), ty: hir::TypeId::BOOL };
+    let non_int = HirExpr {
+        kind: HirExprKind::Bool(true),
+        ty: hir::TypeId::BOOL,
+    };
     let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::GlobalId, &[non_int]);
     assert!(result.is_err());
     lowerer.end_function().unwrap();
@@ -1358,7 +1445,11 @@ fn gpu_local_id() {
     let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::LocalId, &[gpu_int_expr(0)]);
     assert!(result.is_ok());
     let func = lowerer.end_function().unwrap();
-    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(i, MirInst::GpuLocalId { .. })));
+    assert!(func
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .any(|i| matches!(i, MirInst::GpuLocalId { .. })));
 }
 
 #[test]
@@ -1367,7 +1458,11 @@ fn gpu_group_id() {
     let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::GroupId, &[]);
     assert!(result.is_ok());
     let func = lowerer.end_function().unwrap();
-    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(i, MirInst::GpuGroupId { .. })));
+    assert!(func
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .any(|i| matches!(i, MirInst::GpuGroupId { .. })));
 }
 
 #[test]
@@ -1376,7 +1471,11 @@ fn gpu_global_size() {
     let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::GlobalSize, &[]);
     assert!(result.is_ok());
     let func = lowerer.end_function().unwrap();
-    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(i, MirInst::GpuGlobalSize { .. })));
+    assert!(func
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .any(|i| matches!(i, MirInst::GpuGlobalSize { .. })));
 }
 
 #[test]
@@ -1385,7 +1484,11 @@ fn gpu_local_size() {
     let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::LocalSize, &[]);
     assert!(result.is_ok());
     let func = lowerer.end_function().unwrap();
-    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(i, MirInst::GpuLocalSize { .. })));
+    assert!(func
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .any(|i| matches!(i, MirInst::GpuLocalSize { .. })));
 }
 
 #[test]
@@ -1394,7 +1497,11 @@ fn gpu_num_groups() {
     let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::NumGroups, &[]);
     assert!(result.is_ok());
     let func = lowerer.end_function().unwrap();
-    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(i, MirInst::GpuNumGroups { .. })));
+    assert!(func
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .any(|i| matches!(i, MirInst::GpuNumGroups { .. })));
 }
 
 #[test]
@@ -1403,7 +1510,11 @@ fn gpu_barrier() {
     let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::Barrier, &[]);
     assert!(result.is_ok());
     let func = lowerer.end_function().unwrap();
-    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(i, MirInst::GpuBarrier)));
+    assert!(func
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .any(|i| matches!(i, MirInst::GpuBarrier)));
 }
 
 #[test]
@@ -1412,8 +1523,12 @@ fn gpu_mem_fence_default() {
     let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::MemFence, &[]);
     assert!(result.is_ok());
     let func = lowerer.end_function().unwrap();
-    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i|
-        matches!(i, MirInst::GpuMemFence { scope: crate::mir::instructions::GpuMemoryScope::All })));
+    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(
+        i,
+        MirInst::GpuMemFence {
+            scope: crate::mir::instructions::GpuMemoryScope::All
+        }
+    )));
 }
 
 #[test]
@@ -1422,8 +1537,12 @@ fn gpu_mem_fence_workgroup() {
     let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::MemFence, &[gpu_int_expr(0)]);
     assert!(result.is_ok());
     let func = lowerer.end_function().unwrap();
-    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i|
-        matches!(i, MirInst::GpuMemFence { scope: crate::mir::instructions::GpuMemoryScope::WorkGroup })));
+    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(
+        i,
+        MirInst::GpuMemFence {
+            scope: crate::mir::instructions::GpuMemoryScope::WorkGroup
+        }
+    )));
 }
 
 #[test]
@@ -1432,19 +1551,30 @@ fn gpu_mem_fence_device() {
     let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::MemFence, &[gpu_int_expr(1)]);
     assert!(result.is_ok());
     let func = lowerer.end_function().unwrap();
-    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i|
-        matches!(i, MirInst::GpuMemFence { scope: crate::mir::instructions::GpuMemoryScope::Device })));
+    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(
+        i,
+        MirInst::GpuMemFence {
+            scope: crate::mir::instructions::GpuMemoryScope::Device
+        }
+    )));
 }
 
 #[test]
 fn gpu_mem_fence_non_integer_scope() {
     let mut lowerer = gpu_lowerer_setup();
-    let non_int = HirExpr { kind: HirExprKind::Bool(true), ty: hir::TypeId::BOOL };
+    let non_int = HirExpr {
+        kind: HirExprKind::Bool(true),
+        ty: hir::TypeId::BOOL,
+    };
     let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::MemFence, &[non_int]);
     assert!(result.is_ok());
     let func = lowerer.end_function().unwrap();
-    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i|
-        matches!(i, MirInst::GpuMemFence { scope: crate::mir::instructions::GpuMemoryScope::All })));
+    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(
+        i,
+        MirInst::GpuMemFence {
+            scope: crate::mir::instructions::GpuMemoryScope::All
+        }
+    )));
 }
 
 #[test]
@@ -1453,7 +1583,11 @@ fn gpu_simd_index() {
     let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdIndex, &[]);
     assert!(result.is_ok());
     let func = lowerer.end_function().unwrap();
-    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(i, MirInst::GpuGlobalId { dim: 0, .. })));
+    assert!(func
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .any(|i| matches!(i, MirInst::GpuGlobalId { dim: 0, .. })));
 }
 
 #[test]
@@ -1462,7 +1596,11 @@ fn gpu_simd_thread_index() {
     let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdThreadIndex, &[]);
     assert!(result.is_ok());
     let func = lowerer.end_function().unwrap();
-    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(i, MirInst::GpuLocalId { dim: 0, .. })));
+    assert!(func
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .any(|i| matches!(i, MirInst::GpuLocalId { dim: 0, .. })));
 }
 
 #[test]
@@ -1471,7 +1609,11 @@ fn gpu_simd_group_index() {
     let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdGroupIndex, &[]);
     assert!(result.is_ok());
     let func = lowerer.end_function().unwrap();
-    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(i, MirInst::GpuGroupId { dim: 0, .. })));
+    assert!(func
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .any(|i| matches!(i, MirInst::GpuGroupId { dim: 0, .. })));
 }
 
 #[test]
@@ -1480,7 +1622,11 @@ fn gpu_simd_sum() {
     let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdSum, &[gpu_dummy_expr()]);
     assert!(result.is_ok());
     let func = lowerer.end_function().unwrap();
-    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(i, MirInst::VecSum { .. })));
+    assert!(func
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .any(|i| matches!(i, MirInst::VecSum { .. })));
 }
 
 #[test]
@@ -1489,7 +1635,11 @@ fn gpu_simd_product() {
     let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdProduct, &[gpu_dummy_expr()]);
     assert!(result.is_ok());
     let func = lowerer.end_function().unwrap();
-    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(i, MirInst::VecProduct { .. })));
+    assert!(func
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .any(|i| matches!(i, MirInst::VecProduct { .. })));
 }
 
 #[test]
@@ -1498,7 +1648,11 @@ fn gpu_simd_min() {
     let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdMin, &[gpu_dummy_expr()]);
     assert!(result.is_ok());
     let func = lowerer.end_function().unwrap();
-    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(i, MirInst::VecMin { .. })));
+    assert!(func
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .any(|i| matches!(i, MirInst::VecMin { .. })));
 }
 
 #[test]
@@ -1507,7 +1661,11 @@ fn gpu_simd_max() {
     let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdMax, &[gpu_dummy_expr()]);
     assert!(result.is_ok());
     let func = lowerer.end_function().unwrap();
-    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(i, MirInst::VecMax { .. })));
+    assert!(func
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .any(|i| matches!(i, MirInst::VecMax { .. })));
 }
 
 #[test]
@@ -1516,7 +1674,11 @@ fn gpu_simd_all() {
     let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdAll, &[gpu_dummy_expr()]);
     assert!(result.is_ok());
     let func = lowerer.end_function().unwrap();
-    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(i, MirInst::VecAll { .. })));
+    assert!(func
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .any(|i| matches!(i, MirInst::VecAll { .. })));
 }
 
 #[test]
@@ -1525,7 +1687,11 @@ fn gpu_simd_any() {
     let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdAny, &[gpu_dummy_expr()]);
     assert!(result.is_ok());
     let func = lowerer.end_function().unwrap();
-    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(i, MirInst::VecAny { .. })));
+    assert!(func
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .any(|i| matches!(i, MirInst::VecAny { .. })));
 }
 
 #[test]
@@ -1534,16 +1700,27 @@ fn gpu_simd_extract() {
     let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdExtract, &[gpu_dummy_expr(), gpu_dummy_expr()]);
     assert!(result.is_ok());
     let func = lowerer.end_function().unwrap();
-    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(i, MirInst::VecExtract { .. })));
+    assert!(func
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .any(|i| matches!(i, MirInst::VecExtract { .. })));
 }
 
 #[test]
 fn gpu_simd_with() {
     let mut lowerer = gpu_lowerer_setup();
-    let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdWith, &[gpu_dummy_expr(), gpu_dummy_expr(), gpu_dummy_expr()]);
+    let result = lowerer.lower_gpu_intrinsic(
+        GpuIntrinsicKind::SimdWith,
+        &[gpu_dummy_expr(), gpu_dummy_expr(), gpu_dummy_expr()],
+    );
     assert!(result.is_ok());
     let func = lowerer.end_function().unwrap();
-    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(i, MirInst::VecWith { .. })));
+    assert!(func
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .any(|i| matches!(i, MirInst::VecWith { .. })));
 }
 
 #[test]
@@ -1552,7 +1729,11 @@ fn gpu_simd_sqrt() {
     let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdSqrt, &[gpu_dummy_expr()]);
     assert!(result.is_ok());
     let func = lowerer.end_function().unwrap();
-    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(i, MirInst::VecSqrt { .. })));
+    assert!(func
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .any(|i| matches!(i, MirInst::VecSqrt { .. })));
 }
 
 #[test]
@@ -1561,7 +1742,11 @@ fn gpu_simd_abs() {
     let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdAbs, &[gpu_dummy_expr()]);
     assert!(result.is_ok());
     let func = lowerer.end_function().unwrap();
-    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(i, MirInst::VecAbs { .. })));
+    assert!(func
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .any(|i| matches!(i, MirInst::VecAbs { .. })));
 }
 
 #[test]
@@ -1570,7 +1755,11 @@ fn gpu_simd_floor() {
     let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdFloor, &[gpu_dummy_expr()]);
     assert!(result.is_ok());
     let func = lowerer.end_function().unwrap();
-    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(i, MirInst::VecFloor { .. })));
+    assert!(func
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .any(|i| matches!(i, MirInst::VecFloor { .. })));
 }
 
 #[test]
@@ -1579,7 +1768,11 @@ fn gpu_simd_ceil() {
     let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdCeil, &[gpu_dummy_expr()]);
     assert!(result.is_ok());
     let func = lowerer.end_function().unwrap();
-    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(i, MirInst::VecCeil { .. })));
+    assert!(func
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .any(|i| matches!(i, MirInst::VecCeil { .. })));
 }
 
 #[test]
@@ -1588,7 +1781,11 @@ fn gpu_simd_round() {
     let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdRound, &[gpu_dummy_expr()]);
     assert!(result.is_ok());
     let func = lowerer.end_function().unwrap();
-    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(i, MirInst::VecRound { .. })));
+    assert!(func
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .any(|i| matches!(i, MirInst::VecRound { .. })));
 }
 
 #[test]
@@ -1597,25 +1794,43 @@ fn gpu_simd_shuffle() {
     let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdShuffle, &[gpu_dummy_expr(), gpu_dummy_expr()]);
     assert!(result.is_ok());
     let func = lowerer.end_function().unwrap();
-    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(i, MirInst::VecShuffle { .. })));
+    assert!(func
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .any(|i| matches!(i, MirInst::VecShuffle { .. })));
 }
 
 #[test]
 fn gpu_simd_blend() {
     let mut lowerer = gpu_lowerer_setup();
-    let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdBlend, &[gpu_dummy_expr(), gpu_dummy_expr(), gpu_dummy_expr()]);
+    let result = lowerer.lower_gpu_intrinsic(
+        GpuIntrinsicKind::SimdBlend,
+        &[gpu_dummy_expr(), gpu_dummy_expr(), gpu_dummy_expr()],
+    );
     assert!(result.is_ok());
     let func = lowerer.end_function().unwrap();
-    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(i, MirInst::VecBlend { .. })));
+    assert!(func
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .any(|i| matches!(i, MirInst::VecBlend { .. })));
 }
 
 #[test]
 fn gpu_simd_select() {
     let mut lowerer = gpu_lowerer_setup();
-    let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdSelect, &[gpu_dummy_expr(), gpu_dummy_expr(), gpu_dummy_expr()]);
+    let result = lowerer.lower_gpu_intrinsic(
+        GpuIntrinsicKind::SimdSelect,
+        &[gpu_dummy_expr(), gpu_dummy_expr(), gpu_dummy_expr()],
+    );
     assert!(result.is_ok());
     let func = lowerer.end_function().unwrap();
-    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(i, MirInst::VecSelect { .. })));
+    assert!(func
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .any(|i| matches!(i, MirInst::VecSelect { .. })));
 }
 
 #[test]
@@ -1624,16 +1839,27 @@ fn gpu_simd_load() {
     let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdLoad, &[gpu_dummy_expr(), gpu_dummy_expr()]);
     assert!(result.is_ok());
     let func = lowerer.end_function().unwrap();
-    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(i, MirInst::VecLoad { .. })));
+    assert!(func
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .any(|i| matches!(i, MirInst::VecLoad { .. })));
 }
 
 #[test]
 fn gpu_simd_store() {
     let mut lowerer = gpu_lowerer_setup();
-    let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdStore, &[gpu_dummy_expr(), gpu_dummy_expr(), gpu_dummy_expr()]);
+    let result = lowerer.lower_gpu_intrinsic(
+        GpuIntrinsicKind::SimdStore,
+        &[gpu_dummy_expr(), gpu_dummy_expr(), gpu_dummy_expr()],
+    );
     assert!(result.is_ok());
     let func = lowerer.end_function().unwrap();
-    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(i, MirInst::VecStore { .. })));
+    assert!(func
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .any(|i| matches!(i, MirInst::VecStore { .. })));
 }
 
 #[test]
@@ -1642,25 +1868,43 @@ fn gpu_simd_gather() {
     let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdGather, &[gpu_dummy_expr(), gpu_dummy_expr()]);
     assert!(result.is_ok());
     let func = lowerer.end_function().unwrap();
-    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(i, MirInst::VecGather { .. })));
+    assert!(func
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .any(|i| matches!(i, MirInst::VecGather { .. })));
 }
 
 #[test]
 fn gpu_simd_scatter() {
     let mut lowerer = gpu_lowerer_setup();
-    let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdScatter, &[gpu_dummy_expr(), gpu_dummy_expr(), gpu_dummy_expr()]);
+    let result = lowerer.lower_gpu_intrinsic(
+        GpuIntrinsicKind::SimdScatter,
+        &[gpu_dummy_expr(), gpu_dummy_expr(), gpu_dummy_expr()],
+    );
     assert!(result.is_ok());
     let func = lowerer.end_function().unwrap();
-    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(i, MirInst::VecScatter { .. })));
+    assert!(func
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .any(|i| matches!(i, MirInst::VecScatter { .. })));
 }
 
 #[test]
 fn gpu_simd_fma() {
     let mut lowerer = gpu_lowerer_setup();
-    let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdFma, &[gpu_dummy_expr(), gpu_dummy_expr(), gpu_dummy_expr()]);
+    let result = lowerer.lower_gpu_intrinsic(
+        GpuIntrinsicKind::SimdFma,
+        &[gpu_dummy_expr(), gpu_dummy_expr(), gpu_dummy_expr()],
+    );
     assert!(result.is_ok());
     let func = lowerer.end_function().unwrap();
-    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(i, MirInst::VecFma { .. })));
+    assert!(func
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .any(|i| matches!(i, MirInst::VecFma { .. })));
 }
 
 #[test]
@@ -1669,7 +1913,11 @@ fn gpu_simd_recip() {
     let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdRecip, &[gpu_dummy_expr()]);
     assert!(result.is_ok());
     let func = lowerer.end_function().unwrap();
-    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(i, MirInst::VecRecip { .. })));
+    assert!(func
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .any(|i| matches!(i, MirInst::VecRecip { .. })));
 }
 
 #[test]
@@ -1678,8 +1926,13 @@ fn gpu_simd_neighbor_left() {
     let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdNeighborLeft, &[gpu_dummy_expr()]);
     assert!(result.is_ok());
     let func = lowerer.end_function().unwrap();
-    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i|
-        matches!(i, MirInst::NeighborLoad { direction: crate::hir::NeighborDirection::Left, .. })));
+    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(
+        i,
+        MirInst::NeighborLoad {
+            direction: crate::hir::NeighborDirection::Left,
+            ..
+        }
+    )));
 }
 
 #[test]
@@ -1688,28 +1941,45 @@ fn gpu_simd_neighbor_right() {
     let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdNeighborRight, &[gpu_dummy_expr()]);
     assert!(result.is_ok());
     let func = lowerer.end_function().unwrap();
-    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i|
-        matches!(i, MirInst::NeighborLoad { direction: crate::hir::NeighborDirection::Right, .. })));
+    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(
+        i,
+        MirInst::NeighborLoad {
+            direction: crate::hir::NeighborDirection::Right,
+            ..
+        }
+    )));
 }
 
 #[test]
 fn gpu_simd_masked_load() {
     let mut lowerer = gpu_lowerer_setup();
-    let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdMaskedLoad,
-        &[gpu_dummy_expr(), gpu_dummy_expr(), gpu_dummy_expr(), gpu_dummy_expr()]);
+    let result = lowerer.lower_gpu_intrinsic(
+        GpuIntrinsicKind::SimdMaskedLoad,
+        &[gpu_dummy_expr(), gpu_dummy_expr(), gpu_dummy_expr(), gpu_dummy_expr()],
+    );
     assert!(result.is_ok());
     let func = lowerer.end_function().unwrap();
-    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(i, MirInst::VecMaskedLoad { .. })));
+    assert!(func
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .any(|i| matches!(i, MirInst::VecMaskedLoad { .. })));
 }
 
 #[test]
 fn gpu_simd_masked_store() {
     let mut lowerer = gpu_lowerer_setup();
-    let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdMaskedStore,
-        &[gpu_dummy_expr(), gpu_dummy_expr(), gpu_dummy_expr(), gpu_dummy_expr()]);
+    let result = lowerer.lower_gpu_intrinsic(
+        GpuIntrinsicKind::SimdMaskedStore,
+        &[gpu_dummy_expr(), gpu_dummy_expr(), gpu_dummy_expr(), gpu_dummy_expr()],
+    );
     assert!(result.is_ok());
     let func = lowerer.end_function().unwrap();
-    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(i, MirInst::VecMaskedStore { .. })));
+    assert!(func
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .any(|i| matches!(i, MirInst::VecMaskedStore { .. })));
 }
 
 #[test]
@@ -1718,7 +1988,11 @@ fn gpu_simd_min_vec() {
     let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdMinVec, &[gpu_dummy_expr(), gpu_dummy_expr()]);
     assert!(result.is_ok());
     let func = lowerer.end_function().unwrap();
-    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(i, MirInst::VecMinVec { .. })));
+    assert!(func
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .any(|i| matches!(i, MirInst::VecMinVec { .. })));
 }
 
 #[test]
@@ -1727,16 +2001,27 @@ fn gpu_simd_max_vec() {
     let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdMaxVec, &[gpu_dummy_expr(), gpu_dummy_expr()]);
     assert!(result.is_ok());
     let func = lowerer.end_function().unwrap();
-    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(i, MirInst::VecMaxVec { .. })));
+    assert!(func
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .any(|i| matches!(i, MirInst::VecMaxVec { .. })));
 }
 
 #[test]
 fn gpu_simd_clamp() {
     let mut lowerer = gpu_lowerer_setup();
-    let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdClamp, &[gpu_dummy_expr(), gpu_dummy_expr(), gpu_dummy_expr()]);
+    let result = lowerer.lower_gpu_intrinsic(
+        GpuIntrinsicKind::SimdClamp,
+        &[gpu_dummy_expr(), gpu_dummy_expr(), gpu_dummy_expr()],
+    );
     assert!(result.is_ok());
     let func = lowerer.end_function().unwrap();
-    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(i, MirInst::VecClamp { .. })));
+    assert!(func
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .any(|i| matches!(i, MirInst::VecClamp { .. })));
 }
 
 #[test]
@@ -1745,8 +2030,13 @@ fn gpu_atomic_add() {
     let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::GpuAtomicAdd, &[gpu_dummy_expr(), gpu_dummy_expr()]);
     assert!(result.is_ok());
     let func = lowerer.end_function().unwrap();
-    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i|
-        matches!(i, MirInst::GpuAtomic { op: crate::mir::instructions::GpuAtomicOp::Add, .. })));
+    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(
+        i,
+        MirInst::GpuAtomic {
+            op: crate::mir::instructions::GpuAtomicOp::Add,
+            ..
+        }
+    )));
 }
 
 #[test]
@@ -1755,8 +2045,13 @@ fn gpu_atomic_sub() {
     let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::GpuAtomicSub, &[gpu_dummy_expr(), gpu_dummy_expr()]);
     assert!(result.is_ok());
     let func = lowerer.end_function().unwrap();
-    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i|
-        matches!(i, MirInst::GpuAtomic { op: crate::mir::instructions::GpuAtomicOp::Sub, .. })));
+    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(
+        i,
+        MirInst::GpuAtomic {
+            op: crate::mir::instructions::GpuAtomicOp::Sub,
+            ..
+        }
+    )));
 }
 
 #[test]
@@ -1765,8 +2060,13 @@ fn gpu_atomic_min() {
     let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::GpuAtomicMin, &[gpu_dummy_expr(), gpu_dummy_expr()]);
     assert!(result.is_ok());
     let func = lowerer.end_function().unwrap();
-    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i|
-        matches!(i, MirInst::GpuAtomic { op: crate::mir::instructions::GpuAtomicOp::Min, .. })));
+    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(
+        i,
+        MirInst::GpuAtomic {
+            op: crate::mir::instructions::GpuAtomicOp::Min,
+            ..
+        }
+    )));
 }
 
 #[test]
@@ -1775,8 +2075,13 @@ fn gpu_atomic_max() {
     let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::GpuAtomicMax, &[gpu_dummy_expr(), gpu_dummy_expr()]);
     assert!(result.is_ok());
     let func = lowerer.end_function().unwrap();
-    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i|
-        matches!(i, MirInst::GpuAtomic { op: crate::mir::instructions::GpuAtomicOp::Max, .. })));
+    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(
+        i,
+        MirInst::GpuAtomic {
+            op: crate::mir::instructions::GpuAtomicOp::Max,
+            ..
+        }
+    )));
 }
 
 #[test]
@@ -1785,8 +2090,13 @@ fn gpu_atomic_and() {
     let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::GpuAtomicAnd, &[gpu_dummy_expr(), gpu_dummy_expr()]);
     assert!(result.is_ok());
     let func = lowerer.end_function().unwrap();
-    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i|
-        matches!(i, MirInst::GpuAtomic { op: crate::mir::instructions::GpuAtomicOp::And, .. })));
+    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(
+        i,
+        MirInst::GpuAtomic {
+            op: crate::mir::instructions::GpuAtomicOp::And,
+            ..
+        }
+    )));
 }
 
 #[test]
@@ -1795,8 +2105,13 @@ fn gpu_atomic_or() {
     let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::GpuAtomicOr, &[gpu_dummy_expr(), gpu_dummy_expr()]);
     assert!(result.is_ok());
     let func = lowerer.end_function().unwrap();
-    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i|
-        matches!(i, MirInst::GpuAtomic { op: crate::mir::instructions::GpuAtomicOp::Or, .. })));
+    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(
+        i,
+        MirInst::GpuAtomic {
+            op: crate::mir::instructions::GpuAtomicOp::Or,
+            ..
+        }
+    )));
 }
 
 #[test]
@@ -1805,28 +2120,47 @@ fn gpu_atomic_xor() {
     let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::GpuAtomicXor, &[gpu_dummy_expr(), gpu_dummy_expr()]);
     assert!(result.is_ok());
     let func = lowerer.end_function().unwrap();
-    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i|
-        matches!(i, MirInst::GpuAtomic { op: crate::mir::instructions::GpuAtomicOp::Xor, .. })));
+    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(
+        i,
+        MirInst::GpuAtomic {
+            op: crate::mir::instructions::GpuAtomicOp::Xor,
+            ..
+        }
+    )));
 }
 
 #[test]
 fn gpu_atomic_exchange() {
     let mut lowerer = gpu_lowerer_setup();
-    let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::GpuAtomicExchange, &[gpu_dummy_expr(), gpu_dummy_expr()]);
+    let result = lowerer.lower_gpu_intrinsic(
+        GpuIntrinsicKind::GpuAtomicExchange,
+        &[gpu_dummy_expr(), gpu_dummy_expr()],
+    );
     assert!(result.is_ok());
     let func = lowerer.end_function().unwrap();
-    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i|
-        matches!(i, MirInst::GpuAtomic { op: crate::mir::instructions::GpuAtomicOp::Xchg, .. })));
+    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(
+        i,
+        MirInst::GpuAtomic {
+            op: crate::mir::instructions::GpuAtomicOp::Xchg,
+            ..
+        }
+    )));
 }
 
 #[test]
 fn gpu_atomic_compare_exchange() {
     let mut lowerer = gpu_lowerer_setup();
-    let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::GpuAtomicCompareExchange,
-        &[gpu_dummy_expr(), gpu_dummy_expr(), gpu_dummy_expr()]);
+    let result = lowerer.lower_gpu_intrinsic(
+        GpuIntrinsicKind::GpuAtomicCompareExchange,
+        &[gpu_dummy_expr(), gpu_dummy_expr(), gpu_dummy_expr()],
+    );
     assert!(result.is_ok());
     let func = lowerer.end_function().unwrap();
-    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(i, MirInst::GpuAtomicCmpXchg { .. })));
+    assert!(func
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .any(|i| matches!(i, MirInst::GpuAtomicCmpXchg { .. })));
 }
 
 // =============================================================================
@@ -1836,51 +2170,91 @@ fn gpu_atomic_compare_exchange() {
 #[test]
 fn lvalue_local() {
     let mut lowerer = gpu_lowerer_setup();
-    let expr = HirExpr { kind: HirExprKind::Local(0), ty: hir::TypeId::I64 };
+    let expr = HirExpr {
+        kind: HirExprKind::Local(0),
+        ty: hir::TypeId::I64,
+    };
     let result = lowerer.lower_lvalue(&expr);
     assert!(result.is_ok());
     let func = lowerer.end_function().unwrap();
-    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(i, MirInst::LocalAddr { .. })));
+    assert!(func
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .any(|i| matches!(i, MirInst::LocalAddr { .. })));
 }
 
 #[test]
 fn lvalue_field_access() {
     let mut lowerer = gpu_lowerer_setup();
-    let receiver = Box::new(HirExpr { kind: HirExprKind::Local(0), ty: hir::TypeId::I64 });
-    let expr = HirExpr { kind: HirExprKind::FieldAccess { receiver, field_index: 1 }, ty: hir::TypeId::I64 };
+    let receiver = Box::new(HirExpr {
+        kind: HirExprKind::Local(0),
+        ty: hir::TypeId::I64,
+    });
+    let expr = HirExpr {
+        kind: HirExprKind::FieldAccess {
+            receiver,
+            field_index: 1,
+        },
+        ty: hir::TypeId::I64,
+    };
     let result = lowerer.lower_lvalue(&expr);
     assert!(result.is_ok());
     let func = lowerer.end_function().unwrap();
-    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(i, MirInst::GetElementPtr { .. })));
+    assert!(func
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .any(|i| matches!(i, MirInst::GetElementPtr { .. })));
 }
 
 #[test]
 fn lvalue_index() {
     let mut lowerer = gpu_lowerer_setup();
-    let receiver = Box::new(HirExpr { kind: HirExprKind::Integer(0), ty: hir::TypeId::I64 });
-    let index = Box::new(HirExpr { kind: HirExprKind::Integer(1), ty: hir::TypeId::I64 });
-    let expr = HirExpr { kind: HirExprKind::Index { receiver, index }, ty: hir::TypeId::I64 };
+    let receiver = Box::new(HirExpr {
+        kind: HirExprKind::Integer(0),
+        ty: hir::TypeId::I64,
+    });
+    let index = Box::new(HirExpr {
+        kind: HirExprKind::Integer(1),
+        ty: hir::TypeId::I64,
+    });
+    let expr = HirExpr {
+        kind: HirExprKind::Index { receiver, index },
+        ty: hir::TypeId::I64,
+    };
     let result = lowerer.lower_lvalue(&expr);
     assert!(result.is_ok());
     let func = lowerer.end_function().unwrap();
-    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(i, MirInst::GetElementPtr { .. })));
+    assert!(func
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .any(|i| matches!(i, MirInst::GetElementPtr { .. })));
 }
 
 #[test]
 fn lvalue_global() {
     let mut lowerer = gpu_lowerer_setup();
-    let expr = HirExpr { kind: HirExprKind::Global("my_global".to_string()), ty: hir::TypeId::I64 };
+    let expr = HirExpr {
+        kind: HirExprKind::Global("my_global".to_string()),
+        ty: hir::TypeId::I64,
+    };
     let result = lowerer.lower_lvalue(&expr);
     assert!(result.is_ok());
     let func = lowerer.end_function().unwrap();
-    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i|
-        matches!(i, MirInst::Call { target: CallTarget::Io(name), .. } if name.contains("__get_global_my_global"))));
+    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(
+        |i| matches!(i, MirInst::Call { target: CallTarget::Io(name), .. } if name.contains("__get_global_my_global"))
+    ));
 }
 
 #[test]
 fn lvalue_unsupported() {
     let mut lowerer = gpu_lowerer_setup();
-    let expr = HirExpr { kind: HirExprKind::Integer(42), ty: hir::TypeId::I64 };
+    let expr = HirExpr {
+        kind: HirExprKind::Integer(42),
+        ty: hir::TypeId::I64,
+    };
     let result = lowerer.lower_lvalue(&expr);
     assert!(result.is_err());
     lowerer.end_function().unwrap();
@@ -2058,7 +2432,10 @@ fn extract_effects_lock_base_no_async() {
 /// Helper: make an expression that causes lower_expr to return Err
 /// (unknown enum variant with no registry)
 fn failing_expr() -> HirExpr {
-    HirExpr { kind: HirExprKind::Global("Bogus::Nope".to_string()), ty: hir::TypeId::I64 }
+    HirExpr {
+        kind: HirExprKind::Global("Bogus::Nope".to_string()),
+        ty: hir::TypeId::I64,
+    }
 }
 
 // --- lowering_types.rs ? branches ---
@@ -2068,7 +2445,9 @@ fn union_wrap_idle_lowerer() {
     // with_func fails in Idle state -> covers ? on line 33
     let mut lowerer = MirLowerer::new();
     let mut registry = hir::TypeRegistry::new();
-    let union_ty = registry.register(hir::HirType::Union { variants: vec![hir::TypeId::I64, hir::TypeId::STRING] });
+    let union_ty = registry.register(hir::HirType::Union {
+        variants: vec![hir::TypeId::I64, hir::TypeId::STRING],
+    });
     lowerer.type_registry = Some(&registry);
     let result = lowerer.emit_union_wrap_if_needed(union_ty, hir::TypeId::I64, crate::mir::instructions::VReg(0));
     assert!(result.is_err());
@@ -2116,7 +2495,10 @@ fn gpu_simd_extract_second_arg_err() {
 #[test]
 fn gpu_simd_with_first_arg_err() {
     let mut lowerer = gpu_lowerer_setup();
-    let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdWith, &[failing_expr(), gpu_dummy_expr(), gpu_dummy_expr()]);
+    let result = lowerer.lower_gpu_intrinsic(
+        GpuIntrinsicKind::SimdWith,
+        &[failing_expr(), gpu_dummy_expr(), gpu_dummy_expr()],
+    );
     assert!(result.is_err());
     lowerer.end_function().unwrap();
 }
@@ -2124,7 +2506,10 @@ fn gpu_simd_with_first_arg_err() {
 #[test]
 fn gpu_simd_with_second_arg_err() {
     let mut lowerer = gpu_lowerer_setup();
-    let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdWith, &[gpu_dummy_expr(), failing_expr(), gpu_dummy_expr()]);
+    let result = lowerer.lower_gpu_intrinsic(
+        GpuIntrinsicKind::SimdWith,
+        &[gpu_dummy_expr(), failing_expr(), gpu_dummy_expr()],
+    );
     assert!(result.is_err());
     lowerer.end_function().unwrap();
 }
@@ -2132,7 +2517,10 @@ fn gpu_simd_with_second_arg_err() {
 #[test]
 fn gpu_simd_with_third_arg_err() {
     let mut lowerer = gpu_lowerer_setup();
-    let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdWith, &[gpu_dummy_expr(), gpu_dummy_expr(), failing_expr()]);
+    let result = lowerer.lower_gpu_intrinsic(
+        GpuIntrinsicKind::SimdWith,
+        &[gpu_dummy_expr(), gpu_dummy_expr(), failing_expr()],
+    );
     assert!(result.is_err());
     lowerer.end_function().unwrap();
 }
@@ -2156,7 +2544,10 @@ fn gpu_simd_shuffle_second_arg_err() {
 #[test]
 fn gpu_simd_blend_first_arg_err() {
     let mut lowerer = gpu_lowerer_setup();
-    let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdBlend, &[failing_expr(), gpu_dummy_expr(), gpu_dummy_expr()]);
+    let result = lowerer.lower_gpu_intrinsic(
+        GpuIntrinsicKind::SimdBlend,
+        &[failing_expr(), gpu_dummy_expr(), gpu_dummy_expr()],
+    );
     assert!(result.is_err());
     lowerer.end_function().unwrap();
 }
@@ -2164,7 +2555,10 @@ fn gpu_simd_blend_first_arg_err() {
 #[test]
 fn gpu_simd_blend_second_arg_err() {
     let mut lowerer = gpu_lowerer_setup();
-    let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdBlend, &[gpu_dummy_expr(), failing_expr(), gpu_dummy_expr()]);
+    let result = lowerer.lower_gpu_intrinsic(
+        GpuIntrinsicKind::SimdBlend,
+        &[gpu_dummy_expr(), failing_expr(), gpu_dummy_expr()],
+    );
     assert!(result.is_err());
     lowerer.end_function().unwrap();
 }
@@ -2172,7 +2566,10 @@ fn gpu_simd_blend_second_arg_err() {
 #[test]
 fn gpu_simd_blend_third_arg_err() {
     let mut lowerer = gpu_lowerer_setup();
-    let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdBlend, &[gpu_dummy_expr(), gpu_dummy_expr(), failing_expr()]);
+    let result = lowerer.lower_gpu_intrinsic(
+        GpuIntrinsicKind::SimdBlend,
+        &[gpu_dummy_expr(), gpu_dummy_expr(), failing_expr()],
+    );
     assert!(result.is_err());
     lowerer.end_function().unwrap();
 }
@@ -2180,7 +2577,10 @@ fn gpu_simd_blend_third_arg_err() {
 #[test]
 fn gpu_simd_select_first_arg_err() {
     let mut lowerer = gpu_lowerer_setup();
-    let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdSelect, &[failing_expr(), gpu_dummy_expr(), gpu_dummy_expr()]);
+    let result = lowerer.lower_gpu_intrinsic(
+        GpuIntrinsicKind::SimdSelect,
+        &[failing_expr(), gpu_dummy_expr(), gpu_dummy_expr()],
+    );
     assert!(result.is_err());
     lowerer.end_function().unwrap();
 }
@@ -2188,7 +2588,10 @@ fn gpu_simd_select_first_arg_err() {
 #[test]
 fn gpu_simd_select_second_arg_err() {
     let mut lowerer = gpu_lowerer_setup();
-    let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdSelect, &[gpu_dummy_expr(), failing_expr(), gpu_dummy_expr()]);
+    let result = lowerer.lower_gpu_intrinsic(
+        GpuIntrinsicKind::SimdSelect,
+        &[gpu_dummy_expr(), failing_expr(), gpu_dummy_expr()],
+    );
     assert!(result.is_err());
     lowerer.end_function().unwrap();
 }
@@ -2196,7 +2599,10 @@ fn gpu_simd_select_second_arg_err() {
 #[test]
 fn gpu_simd_select_third_arg_err() {
     let mut lowerer = gpu_lowerer_setup();
-    let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdSelect, &[gpu_dummy_expr(), gpu_dummy_expr(), failing_expr()]);
+    let result = lowerer.lower_gpu_intrinsic(
+        GpuIntrinsicKind::SimdSelect,
+        &[gpu_dummy_expr(), gpu_dummy_expr(), failing_expr()],
+    );
     assert!(result.is_err());
     lowerer.end_function().unwrap();
 }
@@ -2220,7 +2626,10 @@ fn gpu_simd_load_second_arg_err() {
 #[test]
 fn gpu_simd_store_first_arg_err() {
     let mut lowerer = gpu_lowerer_setup();
-    let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdStore, &[failing_expr(), gpu_dummy_expr(), gpu_dummy_expr()]);
+    let result = lowerer.lower_gpu_intrinsic(
+        GpuIntrinsicKind::SimdStore,
+        &[failing_expr(), gpu_dummy_expr(), gpu_dummy_expr()],
+    );
     assert!(result.is_err());
     lowerer.end_function().unwrap();
 }
@@ -2228,7 +2637,10 @@ fn gpu_simd_store_first_arg_err() {
 #[test]
 fn gpu_simd_store_second_arg_err() {
     let mut lowerer = gpu_lowerer_setup();
-    let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdStore, &[gpu_dummy_expr(), failing_expr(), gpu_dummy_expr()]);
+    let result = lowerer.lower_gpu_intrinsic(
+        GpuIntrinsicKind::SimdStore,
+        &[gpu_dummy_expr(), failing_expr(), gpu_dummy_expr()],
+    );
     assert!(result.is_err());
     lowerer.end_function().unwrap();
 }
@@ -2236,7 +2648,10 @@ fn gpu_simd_store_second_arg_err() {
 #[test]
 fn gpu_simd_store_third_arg_err() {
     let mut lowerer = gpu_lowerer_setup();
-    let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdStore, &[gpu_dummy_expr(), gpu_dummy_expr(), failing_expr()]);
+    let result = lowerer.lower_gpu_intrinsic(
+        GpuIntrinsicKind::SimdStore,
+        &[gpu_dummy_expr(), gpu_dummy_expr(), failing_expr()],
+    );
     assert!(result.is_err());
     lowerer.end_function().unwrap();
 }
@@ -2260,7 +2675,10 @@ fn gpu_simd_gather_second_arg_err() {
 #[test]
 fn gpu_simd_scatter_first_arg_err() {
     let mut lowerer = gpu_lowerer_setup();
-    let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdScatter, &[failing_expr(), gpu_dummy_expr(), gpu_dummy_expr()]);
+    let result = lowerer.lower_gpu_intrinsic(
+        GpuIntrinsicKind::SimdScatter,
+        &[failing_expr(), gpu_dummy_expr(), gpu_dummy_expr()],
+    );
     assert!(result.is_err());
     lowerer.end_function().unwrap();
 }
@@ -2268,7 +2686,10 @@ fn gpu_simd_scatter_first_arg_err() {
 #[test]
 fn gpu_simd_scatter_second_arg_err() {
     let mut lowerer = gpu_lowerer_setup();
-    let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdScatter, &[gpu_dummy_expr(), failing_expr(), gpu_dummy_expr()]);
+    let result = lowerer.lower_gpu_intrinsic(
+        GpuIntrinsicKind::SimdScatter,
+        &[gpu_dummy_expr(), failing_expr(), gpu_dummy_expr()],
+    );
     assert!(result.is_err());
     lowerer.end_function().unwrap();
 }
@@ -2276,7 +2697,10 @@ fn gpu_simd_scatter_second_arg_err() {
 #[test]
 fn gpu_simd_scatter_third_arg_err() {
     let mut lowerer = gpu_lowerer_setup();
-    let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdScatter, &[gpu_dummy_expr(), gpu_dummy_expr(), failing_expr()]);
+    let result = lowerer.lower_gpu_intrinsic(
+        GpuIntrinsicKind::SimdScatter,
+        &[gpu_dummy_expr(), gpu_dummy_expr(), failing_expr()],
+    );
     assert!(result.is_err());
     lowerer.end_function().unwrap();
 }
@@ -2284,7 +2708,10 @@ fn gpu_simd_scatter_third_arg_err() {
 #[test]
 fn gpu_simd_fma_first_arg_err() {
     let mut lowerer = gpu_lowerer_setup();
-    let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdFma, &[failing_expr(), gpu_dummy_expr(), gpu_dummy_expr()]);
+    let result = lowerer.lower_gpu_intrinsic(
+        GpuIntrinsicKind::SimdFma,
+        &[failing_expr(), gpu_dummy_expr(), gpu_dummy_expr()],
+    );
     assert!(result.is_err());
     lowerer.end_function().unwrap();
 }
@@ -2292,7 +2719,10 @@ fn gpu_simd_fma_first_arg_err() {
 #[test]
 fn gpu_simd_fma_second_arg_err() {
     let mut lowerer = gpu_lowerer_setup();
-    let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdFma, &[gpu_dummy_expr(), failing_expr(), gpu_dummy_expr()]);
+    let result = lowerer.lower_gpu_intrinsic(
+        GpuIntrinsicKind::SimdFma,
+        &[gpu_dummy_expr(), failing_expr(), gpu_dummy_expr()],
+    );
     assert!(result.is_err());
     lowerer.end_function().unwrap();
 }
@@ -2300,7 +2730,10 @@ fn gpu_simd_fma_second_arg_err() {
 #[test]
 fn gpu_simd_fma_third_arg_err() {
     let mut lowerer = gpu_lowerer_setup();
-    let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdFma, &[gpu_dummy_expr(), gpu_dummy_expr(), failing_expr()]);
+    let result = lowerer.lower_gpu_intrinsic(
+        GpuIntrinsicKind::SimdFma,
+        &[gpu_dummy_expr(), gpu_dummy_expr(), failing_expr()],
+    );
     assert!(result.is_err());
     lowerer.end_function().unwrap();
 }
@@ -2324,8 +2757,10 @@ fn gpu_neighbor_right_arg_err() {
 #[test]
 fn gpu_simd_masked_load_first_arg_err() {
     let mut lowerer = gpu_lowerer_setup();
-    let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdMaskedLoad,
-        &[failing_expr(), gpu_dummy_expr(), gpu_dummy_expr(), gpu_dummy_expr()]);
+    let result = lowerer.lower_gpu_intrinsic(
+        GpuIntrinsicKind::SimdMaskedLoad,
+        &[failing_expr(), gpu_dummy_expr(), gpu_dummy_expr(), gpu_dummy_expr()],
+    );
     assert!(result.is_err());
     lowerer.end_function().unwrap();
 }
@@ -2333,8 +2768,10 @@ fn gpu_simd_masked_load_first_arg_err() {
 #[test]
 fn gpu_simd_masked_load_second_arg_err() {
     let mut lowerer = gpu_lowerer_setup();
-    let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdMaskedLoad,
-        &[gpu_dummy_expr(), failing_expr(), gpu_dummy_expr(), gpu_dummy_expr()]);
+    let result = lowerer.lower_gpu_intrinsic(
+        GpuIntrinsicKind::SimdMaskedLoad,
+        &[gpu_dummy_expr(), failing_expr(), gpu_dummy_expr(), gpu_dummy_expr()],
+    );
     assert!(result.is_err());
     lowerer.end_function().unwrap();
 }
@@ -2342,8 +2779,10 @@ fn gpu_simd_masked_load_second_arg_err() {
 #[test]
 fn gpu_simd_masked_load_third_arg_err() {
     let mut lowerer = gpu_lowerer_setup();
-    let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdMaskedLoad,
-        &[gpu_dummy_expr(), gpu_dummy_expr(), failing_expr(), gpu_dummy_expr()]);
+    let result = lowerer.lower_gpu_intrinsic(
+        GpuIntrinsicKind::SimdMaskedLoad,
+        &[gpu_dummy_expr(), gpu_dummy_expr(), failing_expr(), gpu_dummy_expr()],
+    );
     assert!(result.is_err());
     lowerer.end_function().unwrap();
 }
@@ -2351,8 +2790,10 @@ fn gpu_simd_masked_load_third_arg_err() {
 #[test]
 fn gpu_simd_masked_load_fourth_arg_err() {
     let mut lowerer = gpu_lowerer_setup();
-    let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdMaskedLoad,
-        &[gpu_dummy_expr(), gpu_dummy_expr(), gpu_dummy_expr(), failing_expr()]);
+    let result = lowerer.lower_gpu_intrinsic(
+        GpuIntrinsicKind::SimdMaskedLoad,
+        &[gpu_dummy_expr(), gpu_dummy_expr(), gpu_dummy_expr(), failing_expr()],
+    );
     assert!(result.is_err());
     lowerer.end_function().unwrap();
 }
@@ -2360,8 +2801,10 @@ fn gpu_simd_masked_load_fourth_arg_err() {
 #[test]
 fn gpu_simd_masked_store_first_arg_err() {
     let mut lowerer = gpu_lowerer_setup();
-    let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdMaskedStore,
-        &[failing_expr(), gpu_dummy_expr(), gpu_dummy_expr(), gpu_dummy_expr()]);
+    let result = lowerer.lower_gpu_intrinsic(
+        GpuIntrinsicKind::SimdMaskedStore,
+        &[failing_expr(), gpu_dummy_expr(), gpu_dummy_expr(), gpu_dummy_expr()],
+    );
     assert!(result.is_err());
     lowerer.end_function().unwrap();
 }
@@ -2369,8 +2812,10 @@ fn gpu_simd_masked_store_first_arg_err() {
 #[test]
 fn gpu_simd_masked_store_second_arg_err() {
     let mut lowerer = gpu_lowerer_setup();
-    let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdMaskedStore,
-        &[gpu_dummy_expr(), failing_expr(), gpu_dummy_expr(), gpu_dummy_expr()]);
+    let result = lowerer.lower_gpu_intrinsic(
+        GpuIntrinsicKind::SimdMaskedStore,
+        &[gpu_dummy_expr(), failing_expr(), gpu_dummy_expr(), gpu_dummy_expr()],
+    );
     assert!(result.is_err());
     lowerer.end_function().unwrap();
 }
@@ -2378,8 +2823,10 @@ fn gpu_simd_masked_store_second_arg_err() {
 #[test]
 fn gpu_simd_masked_store_third_arg_err() {
     let mut lowerer = gpu_lowerer_setup();
-    let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdMaskedStore,
-        &[gpu_dummy_expr(), gpu_dummy_expr(), failing_expr(), gpu_dummy_expr()]);
+    let result = lowerer.lower_gpu_intrinsic(
+        GpuIntrinsicKind::SimdMaskedStore,
+        &[gpu_dummy_expr(), gpu_dummy_expr(), failing_expr(), gpu_dummy_expr()],
+    );
     assert!(result.is_err());
     lowerer.end_function().unwrap();
 }
@@ -2387,8 +2834,10 @@ fn gpu_simd_masked_store_third_arg_err() {
 #[test]
 fn gpu_simd_masked_store_fourth_arg_err() {
     let mut lowerer = gpu_lowerer_setup();
-    let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdMaskedStore,
-        &[gpu_dummy_expr(), gpu_dummy_expr(), gpu_dummy_expr(), failing_expr()]);
+    let result = lowerer.lower_gpu_intrinsic(
+        GpuIntrinsicKind::SimdMaskedStore,
+        &[gpu_dummy_expr(), gpu_dummy_expr(), gpu_dummy_expr(), failing_expr()],
+    );
     assert!(result.is_err());
     lowerer.end_function().unwrap();
 }
@@ -2396,7 +2845,10 @@ fn gpu_simd_masked_store_fourth_arg_err() {
 #[test]
 fn gpu_simd_clamp_first_arg_err() {
     let mut lowerer = gpu_lowerer_setup();
-    let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdClamp, &[failing_expr(), gpu_dummy_expr(), gpu_dummy_expr()]);
+    let result = lowerer.lower_gpu_intrinsic(
+        GpuIntrinsicKind::SimdClamp,
+        &[failing_expr(), gpu_dummy_expr(), gpu_dummy_expr()],
+    );
     assert!(result.is_err());
     lowerer.end_function().unwrap();
 }
@@ -2404,7 +2856,10 @@ fn gpu_simd_clamp_first_arg_err() {
 #[test]
 fn gpu_simd_clamp_second_arg_err() {
     let mut lowerer = gpu_lowerer_setup();
-    let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdClamp, &[gpu_dummy_expr(), failing_expr(), gpu_dummy_expr()]);
+    let result = lowerer.lower_gpu_intrinsic(
+        GpuIntrinsicKind::SimdClamp,
+        &[gpu_dummy_expr(), failing_expr(), gpu_dummy_expr()],
+    );
     assert!(result.is_err());
     lowerer.end_function().unwrap();
 }
@@ -2412,7 +2867,10 @@ fn gpu_simd_clamp_second_arg_err() {
 #[test]
 fn gpu_simd_clamp_third_arg_err() {
     let mut lowerer = gpu_lowerer_setup();
-    let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdClamp, &[gpu_dummy_expr(), gpu_dummy_expr(), failing_expr()]);
+    let result = lowerer.lower_gpu_intrinsic(
+        GpuIntrinsicKind::SimdClamp,
+        &[gpu_dummy_expr(), gpu_dummy_expr(), failing_expr()],
+    );
     assert!(result.is_err());
     lowerer.end_function().unwrap();
 }
@@ -2436,8 +2894,10 @@ fn gpu_atomic_second_arg_err() {
 #[test]
 fn gpu_atomic_cmpxchg_first_arg_err() {
     let mut lowerer = gpu_lowerer_setup();
-    let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::GpuAtomicCompareExchange,
-        &[failing_expr(), gpu_dummy_expr(), gpu_dummy_expr()]);
+    let result = lowerer.lower_gpu_intrinsic(
+        GpuIntrinsicKind::GpuAtomicCompareExchange,
+        &[failing_expr(), gpu_dummy_expr(), gpu_dummy_expr()],
+    );
     assert!(result.is_err());
     lowerer.end_function().unwrap();
 }
@@ -2445,8 +2905,10 @@ fn gpu_atomic_cmpxchg_first_arg_err() {
 #[test]
 fn gpu_atomic_cmpxchg_second_arg_err() {
     let mut lowerer = gpu_lowerer_setup();
-    let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::GpuAtomicCompareExchange,
-        &[gpu_dummy_expr(), failing_expr(), gpu_dummy_expr()]);
+    let result = lowerer.lower_gpu_intrinsic(
+        GpuIntrinsicKind::GpuAtomicCompareExchange,
+        &[gpu_dummy_expr(), failing_expr(), gpu_dummy_expr()],
+    );
     assert!(result.is_err());
     lowerer.end_function().unwrap();
 }
@@ -2454,8 +2916,10 @@ fn gpu_atomic_cmpxchg_second_arg_err() {
 #[test]
 fn gpu_atomic_cmpxchg_third_arg_err() {
     let mut lowerer = gpu_lowerer_setup();
-    let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::GpuAtomicCompareExchange,
-        &[gpu_dummy_expr(), gpu_dummy_expr(), failing_expr()]);
+    let result = lowerer.lower_gpu_intrinsic(
+        GpuIntrinsicKind::GpuAtomicCompareExchange,
+        &[gpu_dummy_expr(), gpu_dummy_expr(), failing_expr()],
+    );
     assert!(result.is_err());
     lowerer.end_function().unwrap();
 }
@@ -2500,8 +2964,17 @@ fn gpu_simd_min_vec_second_arg_err() {
 fn lvalue_field_access_receiver_err() {
     let mut lowerer = gpu_lowerer_setup();
     // Integer is an unsupported lvalue, so lower_lvalue on receiver fails
-    let receiver = Box::new(HirExpr { kind: HirExprKind::Integer(42), ty: hir::TypeId::I64 });
-    let expr = HirExpr { kind: HirExprKind::FieldAccess { receiver, field_index: 0 }, ty: hir::TypeId::I64 };
+    let receiver = Box::new(HirExpr {
+        kind: HirExprKind::Integer(42),
+        ty: hir::TypeId::I64,
+    });
+    let expr = HirExpr {
+        kind: HirExprKind::FieldAccess {
+            receiver,
+            field_index: 0,
+        },
+        ty: hir::TypeId::I64,
+    };
     let result = lowerer.lower_lvalue(&expr);
     assert!(result.is_err());
     lowerer.end_function().unwrap();
@@ -2512,7 +2985,10 @@ fn lvalue_index_receiver_err() {
     let mut lowerer = gpu_lowerer_setup();
     let receiver = Box::new(failing_expr());
     let index = Box::new(gpu_dummy_expr());
-    let expr = HirExpr { kind: HirExprKind::Index { receiver, index }, ty: hir::TypeId::I64 };
+    let expr = HirExpr {
+        kind: HirExprKind::Index { receiver, index },
+        ty: hir::TypeId::I64,
+    };
     let result = lowerer.lower_lvalue(&expr);
     assert!(result.is_err());
     lowerer.end_function().unwrap();
@@ -2523,7 +2999,10 @@ fn lvalue_index_index_err() {
     let mut lowerer = gpu_lowerer_setup();
     let receiver = Box::new(gpu_dummy_expr());
     let index = Box::new(failing_expr());
-    let expr = HirExpr { kind: HirExprKind::Index { receiver, index }, ty: hir::TypeId::I64 };
+    let expr = HirExpr {
+        kind: HirExprKind::Index { receiver, index },
+        ty: hir::TypeId::I64,
+    };
     let result = lowerer.lower_lvalue(&expr);
     assert!(result.is_err());
     lowerer.end_function().unwrap();
@@ -2549,7 +3028,10 @@ fn lvalue_method_call_with_struct_registry() {
     let registry_ref: &'static hir::TypeRegistry = Box::leak(Box::new(registry));
     lowerer.type_registry = Some(registry_ref);
 
-    let receiver = Box::new(HirExpr { kind: HirExprKind::Local(0), ty: struct_ty });
+    let receiver = Box::new(HirExpr {
+        kind: HirExprKind::Local(0),
+        ty: struct_ty,
+    });
     let expr = HirExpr {
         kind: HirExprKind::MethodCall {
             receiver,
@@ -2562,14 +3044,21 @@ fn lvalue_method_call_with_struct_registry() {
     let result = lowerer.lower_lvalue(&expr);
     assert!(result.is_ok());
     let func = lowerer.end_function().unwrap();
-    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(i, MirInst::GetElementPtr { .. })));
+    assert!(func
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .any(|i| matches!(i, MirInst::GetElementPtr { .. })));
 }
 
 #[test]
 fn lvalue_method_call_no_registry_fallback() {
     let mut lowerer = gpu_lowerer_setup();
     // No type_registry set -> falls through to runtime setter path
-    let receiver = Box::new(HirExpr { kind: HirExprKind::Integer(0), ty: hir::TypeId::I64 });
+    let receiver = Box::new(HirExpr {
+        kind: HirExprKind::Integer(0),
+        ty: hir::TypeId::I64,
+    });
     let expr = HirExpr {
         kind: HirExprKind::MethodCall {
             receiver,
@@ -2599,7 +3088,10 @@ fn lvalue_method_call_non_struct_type() {
     let registry_ref: &'static hir::TypeRegistry = Box::leak(Box::new(registry));
     lowerer.type_registry = Some(registry_ref);
 
-    let receiver = Box::new(HirExpr { kind: HirExprKind::Local(0), ty: enum_ty });
+    let receiver = Box::new(HirExpr {
+        kind: HirExprKind::Local(0),
+        ty: enum_ty,
+    });
     let expr = HirExpr {
         kind: HirExprKind::MethodCall {
             receiver,
@@ -2629,7 +3121,10 @@ fn lvalue_method_call_field_not_found() {
     let registry_ref: &'static hir::TypeRegistry = Box::leak(Box::new(registry));
     lowerer.type_registry = Some(registry_ref);
 
-    let receiver = Box::new(HirExpr { kind: HirExprKind::Local(0), ty: struct_ty });
+    let receiver = Box::new(HirExpr {
+        kind: HirExprKind::Local(0),
+        ty: struct_ty,
+    });
     let expr = HirExpr {
         kind: HirExprKind::MethodCall {
             receiver,
@@ -2659,7 +3154,8 @@ fn module_path_windows_separators() {
 fn union_wrap_no_registry() {
     let mut lowerer = gpu_lowerer_setup();
     // type_registry is None -> returns value unchanged
-    let result = lowerer.emit_union_wrap_if_needed(hir::TypeId::I64, hir::TypeId::I64, crate::mir::instructions::VReg(0));
+    let result =
+        lowerer.emit_union_wrap_if_needed(hir::TypeId::I64, hir::TypeId::I64, crate::mir::instructions::VReg(0));
     assert!(result.is_ok());
     assert_eq!(result.unwrap(), crate::mir::instructions::VReg(0));
     lowerer.end_function().unwrap();
@@ -2692,7 +3188,8 @@ fn union_wrap_type_not_found() {
     let registry = hir::TypeRegistry::new();
     let registry_ref: &'static hir::TypeRegistry = Box::leak(Box::new(registry));
     lowerer.type_registry = Some(registry_ref);
-    let result = lowerer.emit_union_wrap_if_needed(hir::TypeId(999), hir::TypeId::I64, crate::mir::instructions::VReg(0));
+    let result =
+        lowerer.emit_union_wrap_if_needed(hir::TypeId(999), hir::TypeId::I64, crate::mir::instructions::VReg(0));
     assert!(result.is_ok());
     assert_eq!(result.unwrap(), crate::mir::instructions::VReg(0));
     lowerer.end_function().unwrap();
@@ -2713,7 +3210,10 @@ fn gpu_dim_arg_negative() {
 fn lvalue_method_call_no_registry_method_with_args() {
     // MethodCall with args -> doesn't match the args.is_empty() guard -> falls to catch-all
     let mut lowerer = gpu_lowerer_setup();
-    let receiver = Box::new(HirExpr { kind: HirExprKind::Integer(0), ty: hir::TypeId::I64 });
+    let receiver = Box::new(HirExpr {
+        kind: HirExprKind::Integer(0),
+        ty: hir::TypeId::I64,
+    });
     let expr = HirExpr {
         kind: HirExprKind::MethodCall {
             receiver,
@@ -2745,7 +3245,10 @@ fn lvalue_method_call_receiver_fails() {
     lowerer.type_registry = Some(registry_ref);
 
     // Receiver is Integer(0) which fails in lower_lvalue
-    let receiver = Box::new(HirExpr { kind: HirExprKind::Integer(0), ty: struct_ty });
+    let receiver = Box::new(HirExpr {
+        kind: HirExprKind::Integer(0),
+        ty: struct_ty,
+    });
     let expr = HirExpr {
         kind: HirExprKind::MethodCall {
             receiver,
@@ -2948,7 +3451,8 @@ fn neighbor_access() {
 
 #[test]
 fn return_in_function_with_postcondition() {
-    let src = "fn abs(x: i64) -> i64:\n    out(ret):\n        ret >= 0\n    if x < 0:\n        return 0 - x\n    return x\n";
+    let src =
+        "fn abs(x: i64) -> i64:\n    out(ret):\n        ret >= 0\n    if x < 0:\n        return 0 - x\n    return x\n";
     let _ = compile_to_mir(src);
 }
 
@@ -3013,7 +3517,8 @@ fn for_in_with_array_literal() {
 
 #[test]
 fn return_err_value() {
-    let src = "enum Result:\n    Ok(i64)\n    Err(i64)\n\nfn test() -> i64:\n    var r = Result.Err(42)\n    return 0\n";
+    let src =
+        "enum Result:\n    Ok(i64)\n    Err(i64)\n\nfn test() -> i64:\n    var r = Result.Err(42)\n    return 0\n";
     let _ = try_compile_to_mir(src);
 }
 
@@ -3101,10 +3606,18 @@ fn lowerer_contract_mode() {
 #[test]
 fn lowerer_begin_function_when_lowering() {
     let mut lowerer = MirLowerer::new();
-    let func = MirFunction::new("f1".to_string(), hir::TypeId::I64, simple_parser::ast::Visibility::Private);
+    let func = MirFunction::new(
+        "f1".to_string(),
+        hir::TypeId::I64,
+        simple_parser::ast::Visibility::Private,
+    );
     lowerer.begin_function(func, "f1", false).unwrap();
 
-    let func2 = MirFunction::new("f2".to_string(), hir::TypeId::I64, simple_parser::ast::Visibility::Private);
+    let func2 = MirFunction::new(
+        "f2".to_string(),
+        hir::TypeId::I64,
+        simple_parser::ast::Visibility::Private,
+    );
     assert!(lowerer.begin_function(func2, "f2", false).is_err());
 }
 
@@ -3138,7 +3651,11 @@ fn lowerer_set_current_block_when_idle() {
 #[test]
 fn coverage_emit_path_probe_enabled() {
     let mut lowerer = MirLowerer::new().with_coverage(true);
-    let mut func = MirFunction::new("cov_test".to_string(), hir::TypeId::I64, simple_parser::ast::Visibility::Private);
+    let mut func = MirFunction::new(
+        "cov_test".to_string(),
+        hir::TypeId::I64,
+        simple_parser::ast::Visibility::Private,
+    );
     func.new_block();
     lowerer.begin_function(func, "cov_test", false).unwrap();
     let result = lowerer.emit_path_probe(1, 0);
@@ -3173,16 +3690,25 @@ fn di_builtin_type_name() {
 fn extract_attrs_already_has_inject() {
     let lowerer = MirLowerer::new();
     let func = hir::HirFunction {
-        name: "f".to_string(), span: None, params: vec![], locals: vec![],
-        return_type: hir::TypeId::I64, body: vec![],
+        name: "f".to_string(),
+        span: None,
+        params: vec![],
+        locals: vec![],
+        return_type: hir::TypeId::I64,
+        body: vec![],
         visibility: simple_parser::ast::Visibility::Public,
-        contract: None, is_pure: false, inject: true,
+        contract: None,
+        is_pure: false,
+        inject: true,
         concurrency_mode: hir::ConcurrencyMode::Actor,
         module_path: "".to_string(),
         attributes: vec!["inject".to_string()],
-        effects: vec![], layout_hint: None,
+        effects: vec![],
+        layout_hint: None,
         verification_mode: Default::default(),
-        is_ghost: false, is_sync: false, has_suspension: false,
+        is_ghost: false,
+        is_sync: false,
+        has_suspension: false,
     };
     let attrs = lowerer.extract_function_attributes(&func);
     assert_eq!(attrs.iter().filter(|a| *a == "inject").count(), 1);
@@ -3192,16 +3718,25 @@ fn extract_attrs_already_has_inject() {
 fn extract_attrs_already_has_pure() {
     let lowerer = MirLowerer::new();
     let func = hir::HirFunction {
-        name: "f".to_string(), span: None, params: vec![], locals: vec![],
-        return_type: hir::TypeId::I64, body: vec![],
+        name: "f".to_string(),
+        span: None,
+        params: vec![],
+        locals: vec![],
+        return_type: hir::TypeId::I64,
+        body: vec![],
         visibility: simple_parser::ast::Visibility::Public,
-        contract: None, is_pure: true, inject: false,
+        contract: None,
+        is_pure: true,
+        inject: false,
         concurrency_mode: hir::ConcurrencyMode::Actor,
         module_path: "".to_string(),
         attributes: vec!["pure".to_string()],
-        effects: vec![], layout_hint: None,
+        effects: vec![],
+        layout_hint: None,
         verification_mode: Default::default(),
-        is_ghost: false, is_sync: false, has_suspension: false,
+        is_ghost: false,
+        is_sync: false,
+        has_suspension: false,
     };
     let attrs = lowerer.extract_function_attributes(&func);
     assert_eq!(attrs.iter().filter(|a| *a == "pure").count(), 1);
@@ -3211,16 +3746,25 @@ fn extract_attrs_already_has_pure() {
 fn extract_attrs_already_has_mode() {
     let lowerer = MirLowerer::new();
     let func = hir::HirFunction {
-        name: "f".to_string(), span: None, params: vec![], locals: vec![],
-        return_type: hir::TypeId::I64, body: vec![],
+        name: "f".to_string(),
+        span: None,
+        params: vec![],
+        locals: vec![],
+        return_type: hir::TypeId::I64,
+        body: vec![],
         visibility: simple_parser::ast::Visibility::Public,
-        contract: None, is_pure: false, inject: false,
+        contract: None,
+        is_pure: false,
+        inject: false,
         concurrency_mode: hir::ConcurrencyMode::Actor,
         module_path: "".to_string(),
         attributes: vec!["actor".to_string()],
-        effects: vec![], layout_hint: None,
+        effects: vec![],
+        layout_hint: None,
         verification_mode: Default::default(),
-        is_ghost: false, is_sync: false, has_suspension: false,
+        is_ghost: false,
+        is_sync: false,
+        has_suspension: false,
     };
     let attrs = lowerer.extract_function_attributes(&func);
     assert_eq!(attrs.iter().filter(|a| *a == "actor").count(), 1);
@@ -3230,15 +3774,25 @@ fn extract_attrs_already_has_mode() {
 fn extract_effects_already_has_async() {
     let lowerer = MirLowerer::new();
     let func = hir::HirFunction {
-        name: "f".to_string(), span: None, params: vec![], locals: vec![],
-        return_type: hir::TypeId::I64, body: vec![],
+        name: "f".to_string(),
+        span: None,
+        params: vec![],
+        locals: vec![],
+        return_type: hir::TypeId::I64,
+        body: vec![],
         visibility: simple_parser::ast::Visibility::Public,
-        contract: None, is_pure: false, inject: false,
+        contract: None,
+        is_pure: false,
+        inject: false,
         concurrency_mode: hir::ConcurrencyMode::Actor,
-        module_path: "".to_string(), attributes: vec![],
+        module_path: "".to_string(),
+        attributes: vec![],
         effects: vec!["async".to_string()],
-        layout_hint: None, verification_mode: Default::default(),
-        is_ghost: false, is_sync: false, has_suspension: false,
+        layout_hint: None,
+        verification_mode: Default::default(),
+        is_ghost: false,
+        is_sync: false,
+        has_suspension: false,
     };
     let effects = lowerer.extract_function_effects(&func);
     assert_eq!(effects.iter().filter(|a| *a == "async").count(), 1);
@@ -3309,10 +3863,7 @@ fn coverage_store_local_variable() {
 #[test]
 fn coverage_load_store_if_expression() {
     // If-expression result merging emits Store (both branches) and Load (after merge)
-    let mir = compile_to_mir(
-        "fn test(a: bool) -> i64:\n    val x = if a: 1 else: 2\n    return x\n",
-    )
-    .unwrap();
+    let mir = compile_to_mir("fn test(a: bool) -> i64:\n    val x = if a: 1 else: 2\n    return x\n").unwrap();
     assert!(has_inst(&mir, |i| matches!(i, MirInst::Store { .. })));
     assert!(has_inst(&mir, |i| matches!(i, MirInst::Load { .. })));
 }
@@ -3357,10 +3908,9 @@ fn coverage_for_loop_store() {
 
 #[test]
 fn coverage_enum_unit_variant() {
-    let mir = compile_to_mir(
-        "enum Color:\n    Red\n    Blue\n\nfn test() -> i64:\n    val c = Color.Red\n    return 0\n",
-    )
-    .unwrap();
+    let mir =
+        compile_to_mir("enum Color:\n    Red\n    Blue\n\nfn test() -> i64:\n    val c = Color.Red\n    return 0\n")
+            .unwrap();
     assert!(has_inst(&mir, |i| matches!(i, MirInst::EnumUnit { .. })));
 }
 
@@ -3370,17 +3920,13 @@ fn coverage_enum_unit_variant() {
 
 #[test]
 fn coverage_decision_probe() {
-    let mir =
-        compile_with_coverage("fn test(a: bool) -> i64:\n    if a:\n        return 1\n    return 0\n").unwrap();
+    let mir = compile_with_coverage("fn test(a: bool) -> i64:\n    if a:\n        return 1\n    return 0\n").unwrap();
     assert!(has_inst(&mir, |i| matches!(i, MirInst::DecisionProbe { .. })));
 }
 
 #[test]
 fn coverage_path_probe() {
-    let mir = compile_with_coverage(
-        "fn test(a: bool) -> i64:\n    if a:\n        return 1\n    return 0\n",
-    )
-    .unwrap();
+    let mir = compile_with_coverage("fn test(a: bool) -> i64:\n    if a:\n        return 1\n    return 0\n").unwrap();
     assert!(has_inst(&mir, |i| matches!(i, MirInst::PathProbe { .. })));
 }
 
@@ -3417,14 +3963,9 @@ fn coverage_field_set() {
 #[test]
 fn coverage_pointer_new() {
     // PointerNew is emitted for HirExprKind::PointerNew
-    let result = try_compile_to_mir(
-        "fn test() -> i64:\n    val p = new i64(42)\n    return 0\n",
-    );
+    let result = try_compile_to_mir("fn test() -> i64:\n    val p = new i64(42)\n    return 0\n");
     if let Some(Ok(mir)) = result {
-        assert!(
-            has_inst(&mir, |i| matches!(i, MirInst::PointerNew { .. }))
-                || !mir.functions.is_empty()
-        );
+        assert!(has_inst(&mir, |i| matches!(i, MirInst::PointerNew { .. })) || !mir.functions.is_empty());
     }
 }
 
@@ -3475,10 +4016,9 @@ fn coverage_mixed_constants() {
 
 #[test]
 fn coverage_while_loop_load_store() {
-    let mir = compile_to_mir(
-        "fn test() -> i64:\n    var i: i64 = 0\n    while i < 10:\n        i = i + 1\n    return i\n",
-    )
-    .unwrap();
+    let mir =
+        compile_to_mir("fn test() -> i64:\n    var i: i64 = 0\n    while i < 10:\n        i = i + 1\n    return i\n")
+            .unwrap();
     assert!(has_inst(&mir, |i| matches!(i, MirInst::Load { .. })));
     assert!(has_inst(&mir, |i| matches!(i, MirInst::Store { .. })));
     assert!(has_inst(&mir, |i| matches!(i, MirInst::BinOp { .. })));
@@ -3509,10 +4049,7 @@ fn coverage_nested_if_else() {
 
 #[test]
 fn coverage_cast_int_to_float() {
-    let mir = compile_to_mir(
-        "fn test(x: i64) -> f64:\n    return x as f64\n",
-    )
-    .unwrap();
+    let mir = compile_to_mir("fn test(x: i64) -> f64:\n    return x as f64\n").unwrap();
     assert!(has_inst(&mir, |i| matches!(i, MirInst::Cast { .. })));
 }
 
@@ -3522,37 +4059,25 @@ fn coverage_cast_int_to_float() {
 
 #[test]
 fn coverage_binop_arithmetic() {
-    let mir = compile_to_mir(
-        "fn test(a: i64, b: i64) -> i64:\n    return a + b - a * b\n",
-    )
-    .unwrap();
+    let mir = compile_to_mir("fn test(a: i64, b: i64) -> i64:\n    return a + b - a * b\n").unwrap();
     assert!(count_inst(&mir, |i| matches!(i, MirInst::BinOp { .. })) >= 3);
 }
 
 #[test]
 fn coverage_binop_comparison() {
-    let mir = compile_to_mir(
-        "fn test(a: i64, b: i64) -> bool:\n    return a < b\n",
-    )
-    .unwrap();
+    let mir = compile_to_mir("fn test(a: i64, b: i64) -> bool:\n    return a < b\n").unwrap();
     assert!(has_inst(&mir, |i| matches!(i, MirInst::BinOp { op: BinOp::Lt, .. })));
 }
 
 #[test]
 fn coverage_binop_modulo() {
-    let mir = compile_to_mir(
-        "fn test(a: i64, b: i64) -> i64:\n    return a % b\n",
-    )
-    .unwrap();
+    let mir = compile_to_mir("fn test(a: i64, b: i64) -> i64:\n    return a % b\n").unwrap();
     assert!(has_inst(&mir, |i| matches!(i, MirInst::BinOp { op: BinOp::Mod, .. })));
 }
 
 #[test]
 fn coverage_binop_division() {
-    let mir = compile_to_mir(
-        "fn test(a: i64, b: i64) -> i64:\n    return a / b\n",
-    )
-    .unwrap();
+    let mir = compile_to_mir("fn test(a: i64, b: i64) -> i64:\n    return a / b\n").unwrap();
     assert!(has_inst(&mir, |i| matches!(i, MirInst::BinOp { op: BinOp::Div, .. })));
 }
 
@@ -3582,10 +4107,7 @@ fn coverage_struct_init_and_field_get() {
 
 #[test]
 fn coverage_closure_and_indirect_call() {
-    let mir = compile_to_mir(
-        "fn test() -> i64:\n    val f = \\x: x + 1\n    return f(41)\n",
-    )
-    .unwrap();
+    let mir = compile_to_mir("fn test() -> i64:\n    val f = \\x: x + 1\n    return f(41)\n").unwrap();
     assert!(has_inst(&mir, |i| matches!(i, MirInst::ClosureCreate { .. })));
     assert!(has_inst(&mir, |i| matches!(i, MirInst::IndirectCall { .. })));
 }
@@ -3596,10 +4118,8 @@ fn coverage_closure_and_indirect_call() {
 
 #[test]
 fn coverage_closure_captures() {
-    let mir = compile_to_mir(
-        "fn test() -> i64:\n    val a: i64 = 10\n    val f = \\x: x + a\n    return f(32)\n",
-    )
-    .unwrap();
+    let mir =
+        compile_to_mir("fn test() -> i64:\n    val a: i64 = 10\n    val f = \\x: x + a\n    return f(32)\n").unwrap();
     assert!(has_inst(&mir, |i| matches!(i, MirInst::ClosureCreate { .. })));
 }
 
@@ -3609,19 +4129,13 @@ fn coverage_closure_captures() {
 
 #[test]
 fn coverage_array_lit() {
-    let mir = compile_to_mir(
-        "fn test() -> i64:\n    val arr = [10, 20, 30]\n    return 0\n",
-    )
-    .unwrap();
+    let mir = compile_to_mir("fn test() -> i64:\n    val arr = [10, 20, 30]\n    return 0\n").unwrap();
     assert!(has_inst(&mir, |i| matches!(i, MirInst::ArrayLit { .. })));
 }
 
 #[test]
 fn coverage_tuple_lit() {
-    let mir = compile_to_mir(
-        "fn test() -> i64:\n    val t = (1, 2, 3)\n    return 0\n",
-    )
-    .unwrap();
+    let mir = compile_to_mir("fn test() -> i64:\n    val t = (1, 2, 3)\n    return 0\n").unwrap();
     assert!(has_inst(&mir, |i| matches!(i, MirInst::TupleLit { .. })));
 }
 
@@ -3740,9 +4254,7 @@ fn coverage_drop_struct() {
 #[test]
 fn coverage_pointer_ref_deref() {
     // Already tested in existing tests, but verify explicitly
-    let result = try_compile_to_mir(
-        "fn test(x: i64) -> i64:\n    val p = &x\n    return *p\n",
-    );
+    let result = try_compile_to_mir("fn test(x: i64) -> i64:\n    val p = &x\n    return *p\n");
     if let Some(Ok(mir)) = result {
         assert!(
             has_inst(&mir, |i| matches!(i, MirInst::PointerRef { .. }))
@@ -3758,9 +4270,7 @@ fn coverage_pointer_ref_deref() {
 
 #[test]
 fn coverage_global_load() {
-    let result = try_compile_to_mir(
-        "val MAGIC: i64 = 42\n\nfn test() -> i64:\n    return MAGIC\n",
-    );
+    let result = try_compile_to_mir("val MAGIC: i64 = 42\n\nfn test() -> i64:\n    return MAGIC\n");
     if let Some(Ok(mir)) = result {
         assert!(
             has_inst(&mir, |i| matches!(i, MirInst::GlobalLoad { .. }))
@@ -3791,19 +4301,15 @@ fn calc_statement() {
 
 #[test]
 fn coverage_call_explicit() {
-    let mir = compile_to_mir(
-        "fn add(a: i64, b: i64) -> i64:\n    return a + b\n\nfn test() -> i64:\n    return add(1, 2)\n",
-    )
-    .unwrap();
+    let mir =
+        compile_to_mir("fn add(a: i64, b: i64) -> i64:\n    return a + b\n\nfn test() -> i64:\n    return add(1, 2)\n")
+            .unwrap();
     assert!(has_inst(&mir, |i| matches!(i, MirInst::Call { .. })));
 }
 
 #[test]
 fn coverage_call_no_args() {
-    let mir = compile_to_mir(
-        "fn zero() -> i64:\n    return 0\n\nfn test() -> i64:\n    return zero()\n",
-    )
-    .unwrap();
+    let mir = compile_to_mir("fn zero() -> i64:\n    return 0\n\nfn test() -> i64:\n    return zero()\n").unwrap();
     assert!(has_inst(&mir, |i| matches!(i, MirInst::Call { .. })));
 }
 
@@ -3813,9 +4319,7 @@ fn coverage_call_no_args() {
 
 #[test]
 fn coverage_vec_lit() {
-    let result = try_compile_to_mir(
-        "fn test() -> i64:\n    val v = vec[1, 2, 3, 4]\n    return 0\n",
-    );
+    let result = try_compile_to_mir("fn test() -> i64:\n    val v = vec[1, 2, 3, 4]\n    return 0\n");
     if let Some(Ok(mir)) = result {
         assert!(has_inst(&mir, |i| matches!(i, MirInst::VecLit { .. })));
     }
@@ -3823,9 +4327,7 @@ fn coverage_vec_lit() {
 
 #[test]
 fn coverage_vec_lit_empty() {
-    let result = try_compile_to_mir(
-        "fn test() -> i64:\n    val v = vec[]\n    return 0\n",
-    );
+    let result = try_compile_to_mir("fn test() -> i64:\n    val v = vec[]\n    return 0\n");
     if let Some(Ok(mir)) = result {
         assert!(has_inst(&mir, |i| matches!(i, MirInst::VecLit { .. })));
     }
@@ -3838,13 +4340,20 @@ fn coverage_vec_lit_empty() {
 #[test]
 fn coverage_end_scope_direct() {
     let mut lowerer = MirLowerer::new();
-    let mut func = MirFunction::new("scope_test".to_string(), hir::TypeId::I64, simple_parser::ast::Visibility::Private);
+    let mut func = MirFunction::new(
+        "scope_test".to_string(),
+        hir::TypeId::I64,
+        simple_parser::ast::Visibility::Private,
+    );
     func.new_block();
     lowerer.begin_function(func, "scope_test", false).unwrap();
     let result = lowerer.emit_end_scope(0);
     assert!(result.is_ok());
     let finished = lowerer.end_function().unwrap();
-    assert!(finished.blocks.iter().any(|b| b.instructions.iter().any(|i| matches!(i, MirInst::EndScope { local_index: 0 }))));
+    assert!(finished.blocks.iter().any(|b| b
+        .instructions
+        .iter()
+        .any(|i| matches!(i, MirInst::EndScope { local_index: 0 }))));
 }
 
 // =============================================================================
@@ -3882,9 +4391,7 @@ fn coverage_generator_create_and_yield() {
 
 #[test]
 fn coverage_yield_standalone() {
-    let result = try_compile_to_mir(
-        "fn gen() -> i64:\n    yield 42\n    return 0\n",
-    );
+    let result = try_compile_to_mir("fn gen() -> i64:\n    yield 42\n    return 0\n");
     if let Some(Ok(mir)) = result {
         let has_yield = has_inst(&mir, |i| matches!(i, MirInst::Yield { .. }));
         assert!(has_yield || !mir.functions.is_empty());
@@ -3901,7 +4408,11 @@ fn coverage_yield_standalone() {
 
 /// Helper: build a MirFunction with one block, push instructions, return it.
 fn build_mir_func(name: &str, build: impl FnOnce(&mut MirFunction)) -> MirFunction {
-    let mut func = MirFunction::new(name.to_string(), hir::TypeId::I64, simple_parser::ast::Visibility::Private);
+    let mut func = MirFunction::new(
+        name.to_string(),
+        hir::TypeId::I64,
+        simple_parser::ast::Visibility::Private,
+    );
     func.new_block();
     build(&mut func);
     func
@@ -3948,7 +4459,10 @@ fn direct_gc_alloc() {
     let func = build_mir_func("gc_alloc_test", |f| {
         let dest = f.new_vreg();
         let block = f.block_mut(mir::BlockId(0)).unwrap();
-        block.instructions.push(MirInst::GcAlloc { dest, ty: hir::TypeId::I64 });
+        block.instructions.push(MirInst::GcAlloc {
+            dest,
+            ty: hir::TypeId::I64,
+        });
     });
     assert!(func_has_inst(&func, |i| matches!(i, MirInst::GcAlloc { .. })));
 }
@@ -3961,7 +4475,10 @@ fn direct_wait() {
         let dest = f.new_vreg();
         let target = f.new_vreg();
         let block = f.block_mut(mir::BlockId(0)).unwrap();
-        block.instructions.push(MirInst::Wait { dest: Some(dest), target });
+        block.instructions.push(MirInst::Wait {
+            dest: Some(dest),
+            target,
+        });
     });
     assert!(func_has_inst(&func, |i| matches!(i, MirInst::Wait { .. })));
 }
@@ -4004,7 +4521,11 @@ fn direct_index_set() {
         let index = f.new_vreg();
         let value = f.new_vreg();
         let block = f.block_mut(mir::BlockId(0)).unwrap();
-        block.instructions.push(MirInst::IndexSet { collection, index, value });
+        block.instructions.push(MirInst::IndexSet {
+            collection,
+            index,
+            value,
+        });
     });
     assert!(func_has_inst(&func, |i| matches!(i, MirInst::IndexSet { .. })));
 }
@@ -4050,7 +4571,10 @@ fn direct_const_symbol() {
     let func = build_mir_func("const_symbol_test", |f| {
         let dest = f.new_vreg();
         let block = f.block_mut(mir::BlockId(0)).unwrap();
-        block.instructions.push(MirInst::ConstSymbol { dest, value: "my_symbol".to_string() });
+        block.instructions.push(MirInst::ConstSymbol {
+            dest,
+            value: "my_symbol".to_string(),
+        });
     });
     assert!(func_has_inst(&func, |i| matches!(i, MirInst::ConstSymbol { .. })));
 }
@@ -4241,7 +4765,11 @@ fn direct_union_payload() {
         let dest = f.new_vreg();
         let value = f.new_vreg();
         let block = f.block_mut(mir::BlockId(0)).unwrap();
-        block.instructions.push(MirInst::UnionPayload { dest, value, type_index: 0 });
+        block.instructions.push(MirInst::UnionPayload {
+            dest,
+            value,
+            type_index: 0,
+        });
     });
     assert!(func_has_inst(&func, |i| matches!(i, MirInst::UnionPayload { .. })));
 }
@@ -4345,7 +4873,12 @@ fn direct_try_unwrap() {
         let error_dest = f.new_vreg();
         let error_block = f.new_block();
         let block = f.block_mut(mir::BlockId(0)).unwrap();
-        block.instructions.push(MirInst::TryUnwrap { dest, value, error_block, error_dest });
+        block.instructions.push(MirInst::TryUnwrap {
+            dest,
+            value,
+            error_block,
+            error_dest,
+        });
     });
     assert!(func_has_inst(&func, |i| matches!(i, MirInst::TryUnwrap { .. })));
 }
@@ -4411,7 +4944,10 @@ fn direct_contract_old_capture() {
         let block = f.block_mut(mir::BlockId(0)).unwrap();
         block.instructions.push(MirInst::ContractOldCapture { dest, value });
     });
-    assert!(func_has_inst(&func, |i| matches!(i, MirInst::ContractOldCapture { .. })));
+    assert!(func_has_inst(&func, |i| matches!(
+        i,
+        MirInst::ContractOldCapture { .. }
+    )));
 }
 
 // --- UnitWiden ---
@@ -4423,7 +4959,11 @@ fn direct_unit_widen() {
         let value = f.new_vreg();
         let block = f.block_mut(mir::BlockId(0)).unwrap();
         block.instructions.push(MirInst::UnitWiden {
-            dest, value, from_bits: 8, to_bits: 16, signed: true,
+            dest,
+            value,
+            from_bits: 8,
+            to_bits: 16,
+            signed: true,
         });
     });
     assert!(func_has_inst(&func, |i| matches!(i, MirInst::UnitWiden { .. })));
@@ -4439,7 +4979,11 @@ fn direct_unit_narrow() {
         let value = f.new_vreg();
         let block = f.block_mut(mir::BlockId(0)).unwrap();
         block.instructions.push(MirInst::UnitNarrow {
-            dest, value, from_bits: 16, to_bits: 8, signed: true,
+            dest,
+            value,
+            from_bits: 16,
+            to_bits: 8,
+            signed: true,
             overflow: UnitOverflowBehavior::Saturate,
         });
     });
@@ -4454,7 +4998,12 @@ fn direct_unit_saturate() {
         let dest = f.new_vreg();
         let value = f.new_vreg();
         let block = f.block_mut(mir::BlockId(0)).unwrap();
-        block.instructions.push(MirInst::UnitSaturate { dest, value, min: 0, max: 255 });
+        block.instructions.push(MirInst::UnitSaturate {
+            dest,
+            value,
+            min: 0,
+            max: 255,
+        });
     });
     assert!(func_has_inst(&func, |i| matches!(i, MirInst::UnitSaturate { .. })));
 }
@@ -4467,7 +5016,9 @@ fn direct_gpu_shared_alloc() {
         let dest = f.new_vreg();
         let block = f.block_mut(mir::BlockId(0)).unwrap();
         block.instructions.push(MirInst::GpuSharedAlloc {
-            dest, element_type: hir::TypeId::F64, size: 256,
+            dest,
+            element_type: hir::TypeId::F64,
+            size: 256,
         });
     });
     assert!(func_has_inst(&func, |i| matches!(i, MirInst::GpuSharedAlloc { .. })));
@@ -4482,7 +5033,12 @@ fn direct_par_map() {
         let input = f.new_vreg();
         let closure = f.new_vreg();
         let block = f.block_mut(mir::BlockId(0)).unwrap();
-        block.instructions.push(MirInst::ParMap { dest, input, closure, backend: None });
+        block.instructions.push(MirInst::ParMap {
+            dest,
+            input,
+            closure,
+            backend: None,
+        });
     });
     assert!(func_has_inst(&func, |i| matches!(i, MirInst::ParMap { .. })));
 }
@@ -4497,7 +5053,13 @@ fn direct_par_reduce() {
         let initial = f.new_vreg();
         let closure = f.new_vreg();
         let block = f.block_mut(mir::BlockId(0)).unwrap();
-        block.instructions.push(MirInst::ParReduce { dest, input, initial, closure, backend: None });
+        block.instructions.push(MirInst::ParReduce {
+            dest,
+            input,
+            initial,
+            closure,
+            backend: None,
+        });
     });
     assert!(func_has_inst(&func, |i| matches!(i, MirInst::ParReduce { .. })));
 }
@@ -4511,7 +5073,12 @@ fn direct_par_filter() {
         let input = f.new_vreg();
         let predicate = f.new_vreg();
         let block = f.block_mut(mir::BlockId(0)).unwrap();
-        block.instructions.push(MirInst::ParFilter { dest, input, predicate, backend: None });
+        block.instructions.push(MirInst::ParFilter {
+            dest,
+            input,
+            predicate,
+            backend: None,
+        });
     });
     assert!(func_has_inst(&func, |i| matches!(i, MirInst::ParFilter { .. })));
 }
@@ -4524,7 +5091,11 @@ fn direct_par_for_each() {
         let input = f.new_vreg();
         let closure = f.new_vreg();
         let block = f.block_mut(mir::BlockId(0)).unwrap();
-        block.instructions.push(MirInst::ParForEach { input, closure, backend: None });
+        block.instructions.push(MirInst::ParForEach {
+            input,
+            closure,
+            backend: None,
+        });
     });
     assert!(func_has_inst(&func, |i| matches!(i, MirInst::ParForEach { .. })));
 }
@@ -4539,7 +5110,9 @@ fn direct_dict_lit() {
         let val = f.new_vreg();
         let block = f.block_mut(mir::BlockId(0)).unwrap();
         block.instructions.push(MirInst::DictLit {
-            dest, keys: vec![key], values: vec![val],
+            dest,
+            keys: vec![key],
+            values: vec![val],
         });
     });
     assert!(func_has_inst(&func, |i| matches!(i, MirInst::DictLit { .. })));
@@ -4554,7 +5127,10 @@ fn direct_field_set() {
         let value = f.new_vreg();
         let block = f.block_mut(mir::BlockId(0)).unwrap();
         block.instructions.push(MirInst::FieldSet {
-            object, byte_offset: 0, field_type: hir::TypeId::I64, value,
+            object,
+            byte_offset: 0,
+            field_type: hir::TypeId::I64,
+            value,
         });
     });
     assert!(func_has_inst(&func, |i| matches!(i, MirInst::FieldSet { .. })));
@@ -4570,7 +5146,9 @@ fn direct_pointer_new() {
         let value = f.new_vreg();
         let block = f.block_mut(mir::BlockId(0)).unwrap();
         block.instructions.push(MirInst::PointerNew {
-            dest, kind: PointerKind::Unique, value,
+            dest,
+            kind: PointerKind::Unique,
+            value,
         });
     });
     assert!(func_has_inst(&func, |i| matches!(i, MirInst::PointerNew { .. })));

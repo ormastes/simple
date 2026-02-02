@@ -38,10 +38,7 @@ pub fn rt_i18n_context_new(env: &mut Env) -> Result<Value, CompileError> {
 /// - handle: i64 - Opaque pointer to MessageContext
 /// - key: String - Context key
 /// - value: String - Context value
-pub fn rt_i18n_context_insert(
-    args: &[Value],
-    _env: &mut Env,
-) -> Result<Value, CompileError> {
+pub fn rt_i18n_context_insert(args: &[Value], _env: &mut Env) -> Result<Value, CompileError> {
     if args.len() != 3 {
         return Err(CompileError::runtime(
             "rt_i18n_context_insert: expected 3 arguments (handle, key, value)".to_string(),
@@ -121,10 +118,7 @@ pub fn rt_i18n_context_free(args: &[Value], _env: &mut Env) -> Result<Value, Com
 /// - ctx_handle: i64 - Opaque pointer to MessageContext
 ///
 /// Returns the message ID as-is (no localization after i18n crate removal).
-pub fn rt_i18n_get_message(
-    args: &[Value],
-    _env: &mut Env,
-) -> Result<Value, CompileError> {
+pub fn rt_i18n_get_message(args: &[Value], _env: &mut Env) -> Result<Value, CompileError> {
     if args.len() != 3 {
         return Err(CompileError::runtime(
             "rt_i18n_get_message: expected 3 arguments (domain, id, ctx_handle)".to_string(),

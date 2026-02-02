@@ -53,10 +53,8 @@ pub fn disassemble(code: &[u8]) -> String {
                 write!(output, " s{}, s{}", a, b).unwrap();
             }
             // No-operand arithmetic/comparison/logical
-            ADD_I64 | SUB_I64 | MUL_I64 | DIV_I64 | MOD_I64 | NEG_I64 |
-            ADD_F64 | SUB_F64 | MUL_F64 | DIV_F64 |
-            EQ | NE | LT | LE | GT | GE |
-            AND | OR | NOT => {}
+            ADD_I64 | SUB_I64 | MUL_I64 | DIV_I64 | MOD_I64 | NEG_I64 | ADD_F64 | SUB_F64 | MUL_F64 | DIV_F64 | EQ
+            | NE | LT | LE | GT | GE | AND | OR | NOT => {}
             // Jump: opcode + i32
             JMP => {
                 let off = decoder.read_i32().unwrap_or(0);

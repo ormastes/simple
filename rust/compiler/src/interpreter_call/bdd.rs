@@ -221,10 +221,7 @@ fn get_before_each_hooks_cached() -> Vec<Value> {
             }
 
             // Not cached - compute and store
-            let flattened: Vec<Value> = hooks_stack
-                .iter()
-                .flat_map(|level| level.clone())
-                .collect();
+            let flattened: Vec<Value> = hooks_stack.iter().flat_map(|level| level.clone()).collect();
 
             cache.insert(depth, flattened.clone());
             flattened
@@ -247,11 +244,7 @@ fn get_after_each_hooks_cached() -> Vec<Value> {
             }
 
             // Not cached - compute and store (reverse for after hooks)
-            let flattened: Vec<Value> = hooks_stack
-                .iter()
-                .rev()
-                .flat_map(|level| level.clone())
-                .collect();
+            let flattened: Vec<Value> = hooks_stack.iter().rev().flat_map(|level| level.clone()).collect();
 
             cache.insert(depth, flattened.clone());
             flattened
@@ -1156,7 +1149,16 @@ pub(super) fn eval_bdd_builtin(
         "be_close_to" => {
             let target = eval_arg(args, 0, Value::Float(0.0), env, functions, classes, enums, impl_methods)?;
             let epsilon = if args.len() > 1 {
-                eval_arg(args, 1, Value::Float(0.001), env, functions, classes, enums, impl_methods)?
+                eval_arg(
+                    args,
+                    1,
+                    Value::Float(0.001),
+                    env,
+                    functions,
+                    classes,
+                    enums,
+                    impl_methods,
+                )?
             } else {
                 Value::Float(0.001)
             };

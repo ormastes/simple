@@ -30,10 +30,7 @@ fn expr_to_text(expr: &MathExpr) -> String {
                     .iter()
                     .map(|row| {
                         if let MathExpr::Array(cols) = row {
-                            cols.iter()
-                                .map(|e| expr_to_text(e))
-                                .collect::<Vec<_>>()
-                                .join(", ")
+                            cols.iter().map(|e| expr_to_text(e)).collect::<Vec<_>>().join(", ")
                         } else {
                             expr_to_text(row)
                         }
@@ -244,10 +241,7 @@ mod tests {
 
     #[test]
     fn test_text_pow_superscript() {
-        let expr = MathExpr::Pow(
-            Box::new(MathExpr::Var("x".to_string())),
-            Box::new(MathExpr::Int(2)),
-        );
+        let expr = MathExpr::Pow(Box::new(MathExpr::Var("x".to_string())), Box::new(MathExpr::Int(2)));
         assert_eq!(to_text(&expr), "x\u{00b2}");
     }
 

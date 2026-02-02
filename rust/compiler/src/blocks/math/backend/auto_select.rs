@@ -22,17 +22,11 @@ pub struct BackendSelection {
 /// Otherwise, backends are scored and the highest-scoring one is selected.
 ///
 /// All decisions are logged via `tracing::debug!`.
-pub fn select_backend(
-    complexity: &ExprComplexity,
-    preferred: MathBackend,
-) -> BackendSelection {
+pub fn select_backend(complexity: &ExprComplexity, preferred: MathBackend) -> BackendSelection {
     // If preferred is specified and available, use it
     if preferred != MathBackend::Auto {
         if preferred.is_available() {
-            tracing::debug!(
-                "[math::backend] Using preferred backend: {}",
-                preferred
-            );
+            tracing::debug!("[math::backend] Using preferred backend: {}", preferred);
             return BackendSelection {
                 backend: preferred,
                 score: f64::MAX,
@@ -60,26 +54,16 @@ pub fn select_backend(
 
         // Check feature requirements
         if complexity.needs_autograd && !cap.supports_autograd {
-            tracing::debug!(
-                "[math::backend] Backend.{}: lacks autograd support",
-                backend
-            );
+            tracing::debug!("[math::backend] Backend.{}: lacks autograd support", backend);
             continue;
         }
         if complexity.needs_symbolic && !cap.supports_symbolic {
-            tracing::debug!(
-                "[math::backend] Backend.{}: lacks symbolic support",
-                backend
-            );
+            tracing::debug!("[math::backend] Backend.{}: lacks symbolic support", backend);
             continue;
         }
 
         let score = compute_score(backend, complexity);
-        tracing::debug!(
-            "[math::backend] Backend.{}: available, score={:.1}",
-            backend,
-            score
-        );
+        tracing::debug!("[math::backend] Backend.{}: available, score={:.1}", backend, score);
 
         if best.as_ref().map_or(true, |b| score > b.score) {
             best = Some(BackendSelection {
@@ -175,10 +159,7 @@ pub fn analyze_complexity(expr: &crate::blocks::math::ast::MathExpr) -> ExprComp
     complexity
 }
 
-fn analyze_expr(
-    expr: &crate::blocks::math::ast::MathExpr,
-    complexity: &mut ExprComplexity,
-) {
+fn analyze_expr(expr: &crate::blocks::math::ast::MathExpr, complexity: &mut ExprComplexity) {
     use crate::blocks::math::ast::MathExpr;
 
     match expr {
@@ -188,8 +169,7 @@ fn analyze_expr(
             if matches!(elements.first(), Some(MathExpr::Array(_))) {
                 complexity.has_matrix_ops = true;
                 if let Some(MathExpr::Array(inner)) = elements.first() {
-                    complexity.estimated_elements =
-                        complexity.estimated_elements.max(elements.len() * inner.len());
+                    complexity.estimated_elements = complexity.estimated_elements.max(elements.len() * inner.len());
                 }
             }
             for e in elements {
@@ -202,8 +182,7 @@ fn analyze_expr(
                     complexity.has_matrix_ops = true;
                     complexity.has_tensors = true;
                 }
-                "zeros" | "ones" | "rand" | "randn" | "eye" | "tensor"
-                | "full" | "arange" | "linspace" => {
+                "zeros" | "ones" | "rand" | "randn" | "eye" | "tensor" | "full" | "arange" | "linspace" => {
                     complexity.has_tensors = true;
                 }
                 _ => {}
@@ -222,10 +201,18 @@ fn analyze_expr(
             }
             analyze_expr(body, complexity);
         }
-        MathExpr::Add(l, r) | MathExpr::Sub(l, r) | MathExpr::Mul(l, r)
-        | MathExpr::Div(l, r) | MathExpr::Pow(l, r) | MathExpr::Mod(l, r)
-        | MathExpr::Eq(l, r) | MathExpr::Neq(l, r) | MathExpr::Lt(l, r)
-        | MathExpr::Le(l, r) | MathExpr::Gt(l, r) | MathExpr::Ge(l, r)
+        MathExpr::Add(l, r)
+        | MathExpr::Sub(l, r)
+        | MathExpr::Mul(l, r)
+        | MathExpr::Div(l, r)
+        | MathExpr::Pow(l, r)
+        | MathExpr::Mod(l, r)
+        | MathExpr::Eq(l, r)
+        | MathExpr::Neq(l, r)
+        | MathExpr::Lt(l, r)
+        | MathExpr::Le(l, r)
+        | MathExpr::Gt(l, r)
+        | MathExpr::Ge(l, r)
         | MathExpr::Approx(l, r) => {
             analyze_expr(l, complexity);
             analyze_expr(r, complexity);

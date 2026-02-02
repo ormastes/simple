@@ -184,7 +184,11 @@ pub fn parse_di_config(toml: &toml::Value) -> Result<Option<DiConfig>, String> {
         .transpose()?
         .unwrap_or_default();
 
-    Ok(Some(DiConfig { mode, profiles, concurrent_backend }))
+    Ok(Some(DiConfig {
+        mode,
+        profiles,
+        concurrent_backend,
+    }))
 }
 
 /// Runtime DI container for managing instances.

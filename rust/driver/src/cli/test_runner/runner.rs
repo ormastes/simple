@@ -459,7 +459,10 @@ fn prompt_for_ignored_qualifications() {
     }
 
     println!();
-    println!("\x1b[33m⚠ {} ignored test(s) lack qualification:\x1b[0m", unqualified.len());
+    println!(
+        "\x1b[33m⚠ {} ignored test(s) lack qualification:\x1b[0m",
+        unqualified.len()
+    );
     for (i, name) in unqualified.iter().enumerate() {
         println!("  {}. {}", i + 1, name);
     }
@@ -826,8 +829,13 @@ fn finalize_profiling(options: &TestOptions, quiet: bool) {
             println!();
             println!("  Top functions by call count:");
             for (i, stat) in metrics.function_stats.iter().take(10).enumerate() {
-                println!("    {}. {} ({} calls, phase: {:?})",
-                    i + 1, stat.name, stat.call_count, stat.inferred_phase);
+                println!(
+                    "    {}. {} ({} calls, phase: {:?})",
+                    i + 1,
+                    stat.name,
+                    stat.call_count,
+                    stat.inferred_phase
+                );
             }
         }
         println!("───────────────────────────────────────────────────────────────");

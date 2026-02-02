@@ -54,11 +54,11 @@ pub enum CommonMistake {
     SemicolonAfterBlock, // }; instead of }
 
     // Colon-specific mistakes
-    MissingCommaInArgs,          // func(x: 10 y: 20) → func(x: 10, y: 20)
-    MissingColonBeforeBlock,     // fn foo() \n → fn foo(): \n
-    DictInsteadOfStruct,         // {x: 10} when Point(x: 10) intended
-    MissingIndentAfterColon,     // fn foo(): \n no indent
-    WrongIndentLevel,            // Inconsistent indentation
+    MissingCommaInArgs,      // func(x: 10 y: 20) → func(x: 10, y: 20)
+    MissingColonBeforeBlock, // fn foo() \n → fn foo(): \n
+    DictInsteadOfStruct,     // {x: 10} when Point(x: 10) intended
+    MissingIndentAfterColon, // fn foo(): \n no indent
+    WrongIndentLevel,        // Inconsistent indentation
 }
 
 impl CommonMistake {

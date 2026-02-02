@@ -472,7 +472,12 @@ pub(crate) fn evaluate_expr(
 
                 // Flatten nested Options: if field_val is already an Option, return it directly
                 // This prevents Some(Some(x)) and gives us just Some(x)
-                if let Value::Enum { enum_name, variant, payload } = &field_val {
+                if let Value::Enum {
+                    enum_name,
+                    variant,
+                    payload,
+                } = &field_val
+                {
                     if enum_name == "Option" && (variant == "Some" || variant == "None") {
                         // Field is already an Option, return it as-is (flattening behavior)
                         return Ok(field_val);

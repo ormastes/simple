@@ -289,8 +289,7 @@ main = 0
         )
         .unwrap();
     assert_eq!(
-        result.stdout,
-        "Line 1\nLine 2\nLine 3\n",
+        result.stdout, "Line 1\nLine 2\nLine 3\n",
         "Each print() should add its own newline"
     );
 }
@@ -313,8 +312,7 @@ main = 0
         )
         .unwrap();
     assert_eq!(
-        result.stdout,
-        "statement 1\nstatement 2\n",
+        result.stdout, "statement 1\nstatement 2\n",
         "Multiple print() statements should each add newline"
     );
 }
@@ -337,8 +335,7 @@ main = 0
         )
         .unwrap();
     assert_eq!(
-        result.stderr,
-        "err1\nerr2\n",
+        result.stderr, "err1\nerr2\n",
         "eprint() adds newlines in interpreter mode"
     );
 }
@@ -361,8 +358,7 @@ main = 0
         )
         .unwrap();
     assert_eq!(
-        result.stderr,
-        "err1\nerr2\n",
+        result.stderr, "err1\nerr2\n",
         "eprint() in interpreter mode adds newlines"
     );
 }
@@ -616,8 +612,7 @@ fn main() -> i64:
         )
         .unwrap();
     assert_eq!(
-        result.stdout,
-        "Line 1\nLine 2\nLine 3\n",
+        result.stdout, "Line 1\nLine 2\nLine 3\n",
         "Multiple print() calls should each add newline"
     );
     assert_eq!(result.exit_code, 0);
@@ -642,8 +637,7 @@ fn main() -> i64:
         )
         .unwrap();
     assert_eq!(
-        result.stdout,
-        "number: 42 bool: true\n",
+        result.stdout, "number: 42 bool: true\n",
         "print() with multiple mixed types should add newline"
     );
     assert_eq!(result.exit_code, 0);
@@ -669,8 +663,7 @@ fn main() -> i64:
         )
         .unwrap();
     assert_eq!(
-        result.stdout,
-        "statement 1\nstatement 2\n",
+        result.stdout, "statement 1\nstatement 2\n",
         "Multiple print() statements should each add newline"
     );
     assert_eq!(result.exit_code, 0);
@@ -697,8 +690,7 @@ fn main() -> i64:
         .unwrap();
     // Note: eprint does NOT add newline (only print does)
     assert_eq!(
-        result.stderr,
-        "error line 1error line 2",
+        result.stderr, "error line 1error line 2",
         "eprint() should NOT add newline (use eprintln() for that)"
     );
     assert_eq!(result.exit_code, 0);
@@ -725,8 +717,7 @@ fn main() -> i64:
         .unwrap();
     // Note: eprint does NOT add newlines in compiler mode
     assert_eq!(
-        result.stderr,
-        "error line 1error line 2",
+        result.stderr, "error line 1error line 2",
         "eprint() in compiler mode should NOT add newlines (different from interpreter)"
     );
     assert_eq!(result.exit_code, 0);

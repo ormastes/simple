@@ -363,7 +363,10 @@ fn try_compile_builtin_method_call<M: Module>(
 
     // Methods that mutate in-place (push, clear, reverse, sort) should return the receiver
     // so that chaining like `self.items = self.items.push(x)` works correctly.
-    let in_place_mutating = matches!(runtime_func, "rt_array_push" | "rt_array_clear" | "rt_array_reverse" | "rt_array_sort");
+    let in_place_mutating = matches!(
+        runtime_func,
+        "rt_array_push" | "rt_array_clear" | "rt_array_reverse" | "rt_array_sort"
+    );
 
     if in_place_mutating {
         Ok(Some(receiver_val))

@@ -13,8 +13,8 @@ use std::collections::HashMap;
 
 use crate::hir::{BinOp, NeighborDirection, PointerKind, TypeId, UnaryOp};
 use crate::mir::{
-    BlockId, CallTarget, ContractKind, Effect, FStringPart, GpuAtomicOp, GpuMemoryScope, MirPattern,
-    ParallelBackend, PatternBinding, UnitOverflowBehavior, VReg,
+    BlockId, CallTarget, ContractKind, Effect, FStringPart, GpuAtomicOp, GpuMemoryScope, MirPattern, ParallelBackend,
+    PatternBinding, UnitOverflowBehavior, VReg,
 };
 
 use super::emitter_trait::CodegenEmitter;
@@ -329,13 +329,7 @@ impl CodegenEmitter for MirInterpreterEmitter {
         self.set(dest, 0);
         Ok(())
     }
-    fn emit_vec_select(
-        &mut self,
-        dest: VReg,
-        _mask: VReg,
-        _if_true: VReg,
-        _if_false: VReg,
-    ) -> Result<(), Self::Error> {
+    fn emit_vec_select(&mut self, dest: VReg, _mask: VReg, _if_true: VReg, _if_false: VReg) -> Result<(), Self::Error> {
         self.set(dest, 0);
         Ok(())
     }
@@ -881,7 +875,16 @@ mod tests {
         let dest = VReg(2);
         dispatch_instruction(&mut e, &MirInst::ConstInt { dest: a, value: 10 }).unwrap();
         dispatch_instruction(&mut e, &MirInst::ConstInt { dest: b, value: 32 }).unwrap();
-        dispatch_instruction(&mut e, &MirInst::BinOp { dest, op: BinOp::Add, left: a, right: b }).unwrap();
+        dispatch_instruction(
+            &mut e,
+            &MirInst::BinOp {
+                dest,
+                op: BinOp::Add,
+                left: a,
+                right: b,
+            },
+        )
+        .unwrap();
         assert_eq!(e.get(dest), 42);
     }
 
@@ -901,7 +904,15 @@ mod tests {
         let src = VReg(0);
         let dest = VReg(1);
         dispatch_instruction(&mut e, &MirInst::ConstInt { dest: src, value: 42 }).unwrap();
-        dispatch_instruction(&mut e, &MirInst::UnaryOp { dest, op: UnaryOp::Neg, operand: src }).unwrap();
+        dispatch_instruction(
+            &mut e,
+            &MirInst::UnaryOp {
+                dest,
+                op: UnaryOp::Neg,
+                operand: src,
+            },
+        )
+        .unwrap();
         assert_eq!(e.get(dest), -42);
     }
 
@@ -911,7 +922,16 @@ mod tests {
         let src = VReg(0);
         let dest = VReg(1);
         dispatch_instruction(&mut e, &MirInst::ConstInt { dest: src, value: 300 }).unwrap();
-        dispatch_instruction(&mut e, &MirInst::UnitSaturate { dest, value: src, min: 0, max: 255 }).unwrap();
+        dispatch_instruction(
+            &mut e,
+            &MirInst::UnitSaturate {
+                dest,
+                value: src,
+                min: 0,
+                max: 255,
+            },
+        )
+        .unwrap();
         assert_eq!(e.get(dest), 255);
     }
 
@@ -922,8 +942,22 @@ mod tests {
         let boxed = VReg(1);
         let unboxed = VReg(2);
         dispatch_instruction(&mut e, &MirInst::ConstInt { dest: val, value: 42 }).unwrap();
-        dispatch_instruction(&mut e, &MirInst::BoxInt { dest: boxed, value: val }).unwrap();
-        dispatch_instruction(&mut e, &MirInst::UnboxInt { dest: unboxed, value: boxed }).unwrap();
+        dispatch_instruction(
+            &mut e,
+            &MirInst::BoxInt {
+                dest: boxed,
+                value: val,
+            },
+        )
+        .unwrap();
+        dispatch_instruction(
+            &mut e,
+            &MirInst::UnboxInt {
+                dest: unboxed,
+                value: boxed,
+            },
+        )
+        .unwrap();
         assert_eq!(e.get(unboxed), 42);
     }
 
@@ -933,8 +967,24 @@ mod tests {
         let val = VReg(0);
         let loaded = VReg(1);
         dispatch_instruction(&mut e, &MirInst::ConstInt { dest: val, value: 42 }).unwrap();
-        dispatch_instruction(&mut e, &MirInst::GlobalStore { global_name: "g".to_string(), value: val, ty: TypeId::I64 }).unwrap();
-        dispatch_instruction(&mut e, &MirInst::GlobalLoad { dest: loaded, global_name: "g".to_string(), ty: TypeId::I64 }).unwrap();
+        dispatch_instruction(
+            &mut e,
+            &MirInst::GlobalStore {
+                global_name: "g".to_string(),
+                value: val,
+                ty: TypeId::I64,
+            },
+        )
+        .unwrap();
+        dispatch_instruction(
+            &mut e,
+            &MirInst::GlobalLoad {
+                dest: loaded,
+                global_name: "g".to_string(),
+                ty: TypeId::I64,
+            },
+        )
+        .unwrap();
         assert_eq!(e.get(loaded), 42);
     }
 
@@ -942,7 +992,14 @@ mod tests {
     fn interp_contract_check_passes() {
         let mut e = MirInterpreterEmitter::new();
         let cond = VReg(0);
-        dispatch_instruction(&mut e, &MirInst::ConstBool { dest: cond, value: true }).unwrap();
+        dispatch_instruction(
+            &mut e,
+            &MirInst::ConstBool {
+                dest: cond,
+                value: true,
+            },
+        )
+        .unwrap();
         dispatch_instruction(
             &mut e,
             &MirInst::ContractCheck {
@@ -959,7 +1016,14 @@ mod tests {
     fn interp_contract_check_fails() {
         let mut e = MirInterpreterEmitter::new();
         let cond = VReg(0);
-        dispatch_instruction(&mut e, &MirInst::ConstBool { dest: cond, value: false }).unwrap();
+        dispatch_instruction(
+            &mut e,
+            &MirInst::ConstBool {
+                dest: cond,
+                value: false,
+            },
+        )
+        .unwrap();
         let result = dispatch_instruction(
             &mut e,
             &MirInst::ContractCheck {
@@ -980,7 +1044,15 @@ mod tests {
         let dest = VReg(2);
         dispatch_instruction(&mut e, &MirInst::ConstInt { dest: a, value: 42 }).unwrap();
         dispatch_instruction(&mut e, &MirInst::ConstInt { dest: b, value: 0 }).unwrap();
-        let result = dispatch_instruction(&mut e, &MirInst::BinOp { dest, op: BinOp::Div, left: a, right: b });
+        let result = dispatch_instruction(
+            &mut e,
+            &MirInst::BinOp {
+                dest,
+                op: BinOp::Div,
+                left: a,
+                right: b,
+            },
+        );
         assert!(result.is_err());
     }
 }

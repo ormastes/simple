@@ -102,7 +102,7 @@ impl Default for NativeBinaryOptions {
                 "pthread".to_string(),
                 "dl".to_string(),
                 "m".to_string(),
-                "gcc_s".to_string(), // Unwinding support
+                "gcc_s".to_string(),           // Unwinding support
                 "simple_compiler".to_string(), // Runtime FFI functions
             ],
             #[cfg(not(target_os = "linux"))]
@@ -714,10 +714,7 @@ mod tests {
         // Should find at least some standard library paths on Unix systems
         #[cfg(target_family = "unix")]
         {
-            assert!(
-                !paths.is_empty(),
-                "Should detect at least one system library path"
-            );
+            assert!(!paths.is_empty(), "Should detect at least one system library path");
         }
     }
 
@@ -742,10 +739,7 @@ mod tests {
 
     #[test]
     fn test_options_with_multiple_libraries() {
-        let options = NativeBinaryOptions::new()
-            .library("pthread")
-            .library("dl")
-            .library("m");
+        let options = NativeBinaryOptions::new().library("pthread").library("dl").library("m");
 
         // Note: .library() adds to existing libraries (which include defaults)
         assert!(options.libraries.contains(&"pthread".to_string()));

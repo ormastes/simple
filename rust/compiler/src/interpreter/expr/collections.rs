@@ -268,18 +268,28 @@ pub(super) fn eval_collection_expr(
                                 .unwrap_or_default();
                             Ok(Value::Str(sliced))
                         }
-                        Value::Object { ref class, ref fields, .. } => {
+                        Value::Object {
+                            ref class, ref fields, ..
+                        } => {
                             // Try __getitem__ for slice on Objects
-                            let getitem_method = classes.get(class.as_str())
+                            let getitem_method = classes
+                                .get(class.as_str())
                                 .and_then(|cd| cd.methods.iter().find(|m| m.name == "__getitem__").cloned())
-                                .or_else(|| impl_methods.get(class.as_str())
-                                    .and_then(|ms| ms.iter().find(|m| m.name == "__getitem__").cloned()));
+                                .or_else(|| {
+                                    impl_methods
+                                        .get(class.as_str())
+                                        .and_then(|ms| ms.iter().find(|m| m.name == "__getitem__").cloned())
+                                });
                             if let Some(method) = getitem_method {
                                 let self_ctx = Some((class.as_str(), fields));
                                 super::super::interpreter_call::exec_function_with_values_and_self(
                                     &method,
                                     &[idx_val.clone()],
-                                    env, functions, classes, enums, impl_methods,
+                                    env,
+                                    functions,
+                                    classes,
+                                    enums,
+                                    impl_methods,
                                     self_ctx,
                                 )
                             } else {
@@ -489,18 +499,28 @@ pub(super) fn eval_collection_expr(
                         })
                     }
                 }
-                Value::Object { ref class, ref fields, .. } => {
+                Value::Object {
+                    ref class, ref fields, ..
+                } => {
                     // Try __getitem__ method first (operator overloading)
-                    let getitem_method = classes.get(class.as_str())
+                    let getitem_method = classes
+                        .get(class.as_str())
                         .and_then(|cd| cd.methods.iter().find(|m| m.name == "__getitem__").cloned())
-                        .or_else(|| impl_methods.get(class.as_str())
-                            .and_then(|ms| ms.iter().find(|m| m.name == "__getitem__").cloned()));
+                        .or_else(|| {
+                            impl_methods
+                                .get(class.as_str())
+                                .and_then(|ms| ms.iter().find(|m| m.name == "__getitem__").cloned())
+                        });
                     if let Some(method) = getitem_method {
                         let self_ctx = Some((class.as_str(), fields));
                         super::super::interpreter_call::exec_function_with_values_and_self(
                             &method,
                             &[idx_val.clone()],
-                            env, functions, classes, enums, impl_methods,
+                            env,
+                            functions,
+                            classes,
+                            enums,
+                            impl_methods,
                             self_ctx,
                         )
                     } else {
@@ -624,12 +644,18 @@ pub(super) fn eval_collection_expr(
                 Value::Array(arr) => arr.len() as i64,
                 Value::Str(s) => s.len() as i64,
                 Value::Tuple(t) => t.len() as i64,
-                Value::Object { ref class, ref fields, .. } => {
+                Value::Object {
+                    ref class, ref fields, ..
+                } => {
                     // Try __getslice__ method for slicing
-                    let getslice_method = classes.get(class.as_str())
+                    let getslice_method = classes
+                        .get(class.as_str())
                         .and_then(|cd| cd.methods.iter().find(|m| m.name == "__getslice__").cloned())
-                        .or_else(|| impl_methods.get(class.as_str())
-                            .and_then(|ms| ms.iter().find(|m| m.name == "__getslice__").cloned()));
+                        .or_else(|| {
+                            impl_methods
+                                .get(class.as_str())
+                                .and_then(|ms| ms.iter().find(|m| m.name == "__getslice__").cloned())
+                        });
                     if let Some(method) = getslice_method {
                         let start_val = if let Some(s) = start {
                             evaluate_expr(s, env, functions, classes, enums, impl_methods)?
@@ -642,12 +668,18 @@ pub(super) fn eval_collection_expr(
                             Value::Int(-1)
                         };
                         let self_ctx = Some((class.as_str(), fields));
-                        return Ok(Some(super::super::interpreter_call::exec_function_with_values_and_self(
-                            &method,
-                            &[start_val, end_val],
-                            env, functions, classes, enums, impl_methods,
-                            self_ctx,
-                        )?));
+                        return Ok(Some(
+                            super::super::interpreter_call::exec_function_with_values_and_self(
+                                &method,
+                                &[start_val, end_val],
+                                env,
+                                functions,
+                                classes,
+                                enums,
+                                impl_methods,
+                                self_ctx,
+                            )?,
+                        ));
                     }
                     let ctx = ErrorContext::new()
                         .with_code(codes::INVALID_OPERATION)

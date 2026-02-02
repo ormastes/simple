@@ -701,7 +701,6 @@ impl BaseTokenKind {
             | BaseTokenKind::Pipe
             | BaseTokenKind::DoubleAmp
             | BaseTokenKind::DoublePipe
-
             | BaseTokenKind::Tilde
             | BaseTokenKind::Arrow
             | BaseTokenKind::FatArrow => TokenCategory::Operator,

@@ -4,11 +4,8 @@
 //! Run with: cargo run --example safety_examples -p simple-common
 
 use simple_common::{
-    safe_add, safe_sub, safe_mul, safe_div,
-    safe_index, safe_index_signed,
-    safe_char_at, safe_substring,
-    to_usize, to_i64,
-    ArithmeticError, IndexError, StringError,
+    safe_add, safe_sub, safe_mul, safe_div, safe_index, safe_index_signed, safe_char_at, safe_substring, to_usize,
+    to_i64, ArithmeticError, IndexError, StringError,
 };
 
 fn main() {
@@ -155,16 +152,14 @@ fn example_strings() {
 // Real-world example: Computing array sizes safely
 fn compute_buffer_size(width: i64, height: i64, bytes_per_pixel: usize) -> Result<usize, String> {
     // Step 1: Multiply dimensions
-    let pixel_count = safe_mul(width, height)
-        .map_err(|e| format!("Dimension overflow: {}", e))?;
+    let pixel_count = safe_mul(width, height).map_err(|e| format!("Dimension overflow: {}", e))?;
 
     // Step 2: Convert to usize
-    let pixel_count_usize = to_usize(pixel_count)
-        .map_err(|e| format!("Pixel count conversion failed: {}", e))?;
+    let pixel_count_usize = to_usize(pixel_count).map_err(|e| format!("Pixel count conversion failed: {}", e))?;
 
     // Step 3: Multiply by bytes per pixel
-    let total_bytes = safe_mul(pixel_count_usize, bytes_per_pixel)
-        .map_err(|e| format!("Buffer size overflow: {}", e))?;
+    let total_bytes =
+        safe_mul(pixel_count_usize, bytes_per_pixel).map_err(|e| format!("Buffer size overflow: {}", e))?;
 
     Ok(total_bytes)
 }

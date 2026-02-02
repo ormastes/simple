@@ -145,7 +145,14 @@ pub fn lint_file(path: &PathBuf, json_output: bool, fix_flags: &FixFlags) -> i32
 pub fn lint_file_internal(
     path: &std::path::Path,
     json_output: bool,
-) -> Option<(bool, usize, usize, Vec<simple_common::diagnostic::Diagnostic>, Vec<EasyFix>, Option<String>)> {
+) -> Option<(
+    bool,
+    usize,
+    usize,
+    Vec<simple_common::diagnostic::Diagnostic>,
+    Vec<EasyFix>,
+    Option<String>,
+)> {
     // Read file
     let source = match fs::read_to_string(path) {
         Ok(s) => s,
@@ -188,10 +195,7 @@ pub fn lint_file_internal(
         .collect();
 
     // Collect easy fixes from diagnostics
-    let easy_fixes: Vec<EasyFix> = diagnostics
-        .iter()
-        .filter_map(|d| d.easy_fix.clone())
-        .collect();
+    let easy_fixes: Vec<EasyFix> = diagnostics.iter().filter_map(|d| d.easy_fix.clone()).collect();
 
     if json_output {
         // Return diagnostics for aggregation
@@ -223,7 +227,14 @@ pub fn lint_file_internal(
         }
     }
 
-    Some((has_errors, error_count, warning_count, common_diags, easy_fixes, Some(source)))
+    Some((
+        has_errors,
+        error_count,
+        warning_count,
+        common_diags,
+        easy_fixes,
+        Some(source),
+    ))
 }
 
 /// Apply collected fixes based on fix flags

@@ -51,10 +51,26 @@ pub(crate) fn compile_binop<M: Module>(
             let cmp_result = builder.inst_results(call)[0];
             // icmp_imm returns I8, extend to I64
             let cmp_i8 = match op {
-                BinOp::Lt => builder.ins().icmp_imm(cranelift_codegen::ir::condcodes::IntCC::SignedLessThan, cmp_result, 0),
-                BinOp::Gt => builder.ins().icmp_imm(cranelift_codegen::ir::condcodes::IntCC::SignedGreaterThan, cmp_result, 0),
-                BinOp::LtEq => builder.ins().icmp_imm(cranelift_codegen::ir::condcodes::IntCC::SignedLessThanOrEqual, cmp_result, 0),
-                BinOp::GtEq => builder.ins().icmp_imm(cranelift_codegen::ir::condcodes::IntCC::SignedGreaterThanOrEqual, cmp_result, 0),
+                BinOp::Lt => {
+                    builder
+                        .ins()
+                        .icmp_imm(cranelift_codegen::ir::condcodes::IntCC::SignedLessThan, cmp_result, 0)
+                }
+                BinOp::Gt => builder.ins().icmp_imm(
+                    cranelift_codegen::ir::condcodes::IntCC::SignedGreaterThan,
+                    cmp_result,
+                    0,
+                ),
+                BinOp::LtEq => builder.ins().icmp_imm(
+                    cranelift_codegen::ir::condcodes::IntCC::SignedLessThanOrEqual,
+                    cmp_result,
+                    0,
+                ),
+                BinOp::GtEq => builder.ins().icmp_imm(
+                    cranelift_codegen::ir::condcodes::IntCC::SignedGreaterThanOrEqual,
+                    cmp_result,
+                    0,
+                ),
                 _ => unreachable!(),
             };
             ensure_i64(builder, cmp_i8)
@@ -169,7 +185,10 @@ pub(crate) fn compile_binop<M: Module>(
             // Matrix multiplication (@) - Simple Math #1930-#1939
             // Codegen requires runtime library support for dynamic array operations
             // Use interpreter mode (default) for full matrix multiplication support
-            return Err("Matrix multiplication (@) requires runtime library, use interpreter mode (already implemented)".to_string());
+            return Err(
+                "Matrix multiplication (@) requires runtime library, use interpreter mode (already implemented)"
+                    .to_string(),
+            );
         }
         BinOp::PipeForward => {
             // Pipe forward requires function call at runtime
@@ -238,17 +257,18 @@ pub(crate) fn compile_builtin_io_call<M: Module>(
                 // Print the argument value using rt_print_value / rt_println_value
                 // For the last arg of print/println/eprintln, use the ln variant
                 let is_last = i == args.len() - 1;
-                let fn_to_use = if is_last && (func_name == "print" || func_name == "println" || func_name == "eprintln") {
-                    print_value_fn
-                } else {
-                    // Use non-newline variant for intermediate args
-                    match func_name {
-                        "print" => "rt_print_value",
-                        "println" => "rt_print_value",
-                        "eprintln" => "rt_eprint_value",
-                        _ => print_value_fn,
-                    }
-                };
+                let fn_to_use =
+                    if is_last && (func_name == "print" || func_name == "println" || func_name == "eprintln") {
+                        print_value_fn
+                    } else {
+                        // Use non-newline variant for intermediate args
+                        match func_name {
+                            "print" => "rt_print_value",
+                            "println" => "rt_print_value",
+                            "eprintln" => "rt_eprint_value",
+                            _ => print_value_fn,
+                        }
+                    };
 
                 let print_id = ctx.runtime_funcs[fn_to_use];
                 let print_ref = ctx.module.declare_func_in_func(print_id, builder.func);

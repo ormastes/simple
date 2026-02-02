@@ -53,14 +53,14 @@ fn test_exists_as_method_name() {
     let module = parser.parse().unwrap();
     assert_eq!(module.items.len(), 1);
     match &module.items[0] {
-        Node::Expression(expr) => {
-            match expr {
-                Expr::MethodCall { receiver: _, method, .. } => {
-                    assert_eq!(method, "exists");
-                }
-                other => panic!("Expected MethodCall, got {:?}", other),
+        Node::Expression(expr) => match expr {
+            Expr::MethodCall {
+                receiver: _, method, ..
+            } => {
+                assert_eq!(method, "exists");
             }
-        }
+            other => panic!("Expected MethodCall, got {:?}", other),
+        },
         other => panic!("Expected Expression node, got {:?}", other),
     }
 }

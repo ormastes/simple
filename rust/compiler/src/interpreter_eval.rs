@@ -372,7 +372,8 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                 }
 
                 // Create class with additional fields/methods from macros and mixins
-                let has_additions = !additional_fields.is_empty() || !mixin_fields.is_empty() || !mixin_methods.is_empty();
+                let has_additions =
+                    !additional_fields.is_empty() || !mixin_fields.is_empty() || !mixin_methods.is_empty();
                 let final_class = if !has_additions {
                     c.clone()
                 } else {
@@ -459,7 +460,8 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
 
                             // Also store in thread-local registry for method dispatch
                             TRAIT_IMPLS.with(|cell| {
-                                cell.borrow_mut().insert((trait_name.clone(), type_name.clone()), combined_methods);
+                                cell.borrow_mut()
+                                    .insert((trait_name.clone(), type_name.clone()), combined_methods);
                             });
                         }
                         // Note: If trait not found, it might be defined in another module

@@ -37,20 +37,14 @@ fn expr_to_mathml(expr: &MathExpr) -> String {
                         format!("<mtr>{}</mtr>", cols)
                     })
                     .collect();
-                format!(
-                    "<mrow><mo>[</mo><mtable>{}</mtable><mo>]</mo></mrow>",
-                    rows.join("")
-                )
+                format!("<mrow><mo>[</mo><mtable>{}</mtable><mo>]</mo></mrow>", rows.join(""))
             } else {
                 // Column vector
                 let rows: Vec<String> = elements
                     .iter()
                     .map(|e| format!("<mtr><mtd>{}</mtd></mtr>", expr_to_mathml(e)))
                     .collect();
-                format!(
-                    "<mrow><mo>[</mo><mtable>{}</mtable><mo>]</mo></mrow>",
-                    rows.join("")
-                )
+                format!("<mrow><mo>[</mo><mtable>{}</mtable><mo>]</mo></mrow>", rows.join(""))
             }
         }
 
@@ -71,16 +65,8 @@ fn expr_to_mathml(expr: &MathExpr) -> String {
             expr_to_mathml(left),
             expr_to_mathml(right)
         ),
-        MathExpr::Div(left, right) => format!(
-            "<mfrac>{}{}</mfrac>",
-            expr_to_mathml(left),
-            expr_to_mathml(right)
-        ),
-        MathExpr::Pow(base, exp) => format!(
-            "<msup>{}{}</msup>",
-            expr_to_mathml(base),
-            expr_to_mathml(exp)
-        ),
+        MathExpr::Div(left, right) => format!("<mfrac>{}{}</mfrac>", expr_to_mathml(left), expr_to_mathml(right)),
+        MathExpr::Pow(base, exp) => format!("<msup>{}{}</msup>", expr_to_mathml(base), expr_to_mathml(exp)),
         MathExpr::Mod(left, right) => format!(
             "<mrow>{}<mo>mod</mo>{}</mrow>",
             expr_to_mathml(left),
@@ -88,23 +74,13 @@ fn expr_to_mathml(expr: &MathExpr) -> String {
         ),
 
         MathExpr::Neg(inner) => format!("<mrow><mo>-</mo>{}</mrow>", expr_to_mathml(inner)),
-        MathExpr::Abs(inner) => format!(
-            "<mrow><mo>|</mo>{}<mo>|</mo></mrow>",
-            expr_to_mathml(inner)
-        ),
+        MathExpr::Abs(inner) => format!("<mrow><mo>|</mo>{}<mo>|</mo></mrow>", expr_to_mathml(inner)),
 
         MathExpr::App(name, args) => app_to_mathml(name, args),
 
-        MathExpr::Subscript(base, index) => format!(
-            "<msub>{}{}</msub>",
-            expr_to_mathml(base),
-            expr_to_mathml(index)
-        ),
+        MathExpr::Subscript(base, index) => format!("<msub>{}{}</msub>", expr_to_mathml(base), expr_to_mathml(index)),
 
-        MathExpr::Group(inner) => format!(
-            "<mrow><mo>(</mo>{}<mo>)</mo></mrow>",
-            expr_to_mathml(inner)
-        ),
+        MathExpr::Group(inner) => format!("<mrow><mo>(</mo>{}<mo>)</mo></mrow>", expr_to_mathml(inner)),
 
         MathExpr::Sum { var, range, body } => format!(
             "<mrow><munderover><mo>&Sum;</mo><mrow><mi>{}</mi><mo>=</mo>{}</mrow>{}</munderover>{}</mrow>",
@@ -128,36 +104,12 @@ fn expr_to_mathml(expr: &MathExpr) -> String {
             var
         ),
 
-        MathExpr::Eq(l, r) => format!(
-            "<mrow>{}<mo>=</mo>{}</mrow>",
-            expr_to_mathml(l),
-            expr_to_mathml(r)
-        ),
-        MathExpr::Neq(l, r) => format!(
-            "<mrow>{}<mo>&ne;</mo>{}</mrow>",
-            expr_to_mathml(l),
-            expr_to_mathml(r)
-        ),
-        MathExpr::Lt(l, r) => format!(
-            "<mrow>{}<mo>&lt;</mo>{}</mrow>",
-            expr_to_mathml(l),
-            expr_to_mathml(r)
-        ),
-        MathExpr::Le(l, r) => format!(
-            "<mrow>{}<mo>&le;</mo>{}</mrow>",
-            expr_to_mathml(l),
-            expr_to_mathml(r)
-        ),
-        MathExpr::Gt(l, r) => format!(
-            "<mrow>{}<mo>&gt;</mo>{}</mrow>",
-            expr_to_mathml(l),
-            expr_to_mathml(r)
-        ),
-        MathExpr::Ge(l, r) => format!(
-            "<mrow>{}<mo>&ge;</mo>{}</mrow>",
-            expr_to_mathml(l),
-            expr_to_mathml(r)
-        ),
+        MathExpr::Eq(l, r) => format!("<mrow>{}<mo>=</mo>{}</mrow>", expr_to_mathml(l), expr_to_mathml(r)),
+        MathExpr::Neq(l, r) => format!("<mrow>{}<mo>&ne;</mo>{}</mrow>", expr_to_mathml(l), expr_to_mathml(r)),
+        MathExpr::Lt(l, r) => format!("<mrow>{}<mo>&lt;</mo>{}</mrow>", expr_to_mathml(l), expr_to_mathml(r)),
+        MathExpr::Le(l, r) => format!("<mrow>{}<mo>&le;</mo>{}</mrow>", expr_to_mathml(l), expr_to_mathml(r)),
+        MathExpr::Gt(l, r) => format!("<mrow>{}<mo>&gt;</mo>{}</mrow>", expr_to_mathml(l), expr_to_mathml(r)),
+        MathExpr::Ge(l, r) => format!("<mrow>{}<mo>&ge;</mo>{}</mrow>", expr_to_mathml(l), expr_to_mathml(r)),
         MathExpr::Approx(l, r) => format!(
             "<mrow>{}<mo>&approx;</mo>{}</mrow>",
             expr_to_mathml(l),
@@ -198,12 +150,9 @@ fn app_to_mathml(name: &str, args: &[MathExpr]) -> String {
             expr_to_mathml(&args[0]),
             expr_to_mathml(&args[1])
         ),
-        "abs" if args.len() == 1 => format!(
-            "<mrow><mo>|</mo>{}<mo>|</mo></mrow>",
-            expr_to_mathml(&args[0])
-        ),
-        "sin" | "cos" | "tan" | "log" | "ln" | "exp" | "sinh" | "cosh" | "tanh"
-        | "asin" | "acos" | "atan" | "arcsin" | "arccos" | "arctan" => {
+        "abs" if args.len() == 1 => format!("<mrow><mo>|</mo>{}<mo>|</mo></mrow>", expr_to_mathml(&args[0])),
+        "sin" | "cos" | "tan" | "log" | "ln" | "exp" | "sinh" | "cosh" | "tanh" | "asin" | "acos" | "atan"
+        | "arcsin" | "arccos" | "arctan" => {
             let args_ml: Vec<String> = args.iter().map(|a| expr_to_mathml(a)).collect();
             format!(
                 "<mrow><mi>{}</mi><mo>&ApplyFunction;</mo><mrow><mo>(</mo>{}<mo>)</mo></mrow></mrow>",
@@ -245,31 +194,19 @@ mod tests {
     #[test]
     fn test_mathml_frac() {
         let expr = MathExpr::App("frac".to_string(), vec![MathExpr::Int(1), MathExpr::Int(2)]);
-        assert_eq!(
-            to_mathml(&expr),
-            "<math><mfrac><mn>1</mn><mn>2</mn></mfrac></math>"
-        );
+        assert_eq!(to_mathml(&expr), "<math><mfrac><mn>1</mn><mn>2</mn></mfrac></math>");
     }
 
     #[test]
     fn test_mathml_sqrt() {
         let expr = MathExpr::App("sqrt".to_string(), vec![MathExpr::Int(16)]);
-        assert_eq!(
-            to_mathml(&expr),
-            "<math><msqrt><mn>16</mn></msqrt></math>"
-        );
+        assert_eq!(to_mathml(&expr), "<math><msqrt><mn>16</mn></msqrt></math>");
     }
 
     #[test]
     fn test_mathml_pow() {
-        let expr = MathExpr::Pow(
-            Box::new(MathExpr::Var("x".to_string())),
-            Box::new(MathExpr::Int(2)),
-        );
-        assert_eq!(
-            to_mathml(&expr),
-            "<math><msup><mi>x</mi><mn>2</mn></msup></math>"
-        );
+        let expr = MathExpr::Pow(Box::new(MathExpr::Var("x".to_string())), Box::new(MathExpr::Int(2)));
+        assert_eq!(to_mathml(&expr), "<math><msup><mi>x</mi><mn>2</mn></msup></math>");
     }
 
     #[test]

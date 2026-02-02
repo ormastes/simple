@@ -522,7 +522,7 @@ fn test_vm_bytecode_call() {
     main_enc.emit_opcode(CALL);
     main_enc.emit_u32(0); // function index
     main_enc.emit_u16(1); // 1 argument
-    // Pop result to s1
+                          // Pop result to s1
     main_enc.emit_opcode(POP);
     main_enc.emit_u16(1);
     // RET s1
@@ -812,7 +812,9 @@ fn test_vm_stress_deep_calls() {
     vm.set_functions(vec![func]);
 
     // Call with 500 (deep recursion but within MAX_CALL_DEPTH=1000)
-    let result = vm.call_function(0, &[RuntimeValue::from_int(500)]).expect("Execution failed");
+    let result = vm
+        .call_function(0, &[RuntimeValue::from_int(500)])
+        .expect("Execution failed");
     assert_eq!(result.as_int(), 500);
 }
 

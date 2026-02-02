@@ -111,8 +111,8 @@ pub use value::{
 
 // Re-export async runtime scheduler FFI functions
 pub use async_runtime::{
-    rt_async_poll_tasks, rt_async_run_until_complete, rt_async_schedule_await, rt_async_spawn,
-    rt_async_spawn_task, AsyncScheduler,
+    rt_async_poll_tasks, rt_async_run_until_complete, rt_async_schedule_await, rt_async_spawn, rt_async_spawn_task,
+    AsyncScheduler,
 };
 
 // Re-export AOP runtime FFI functions
@@ -414,11 +414,10 @@ pub use coverage::{
 
 // Re-export debug FFI functions
 pub use debug::{
-    rt_debug_add_breakpoint, rt_debug_continue, rt_debug_current_file, rt_debug_current_line,
-    rt_debug_is_active, rt_debug_list_breakpoints, rt_debug_locals, rt_debug_pause,
-    rt_debug_remove_all_breakpoints, rt_debug_remove_breakpoint, rt_debug_set_active,
-    rt_debug_set_step_mode, rt_debug_stack_depth, rt_debug_stack_trace, DebugFrame, DebugState,
-    StepMode,
+    rt_debug_add_breakpoint, rt_debug_continue, rt_debug_current_file, rt_debug_current_line, rt_debug_is_active,
+    rt_debug_list_breakpoints, rt_debug_locals, rt_debug_pause, rt_debug_remove_all_breakpoints,
+    rt_debug_remove_breakpoint, rt_debug_set_active, rt_debug_set_step_mode, rt_debug_stack_depth,
+    rt_debug_stack_trace, DebugFrame, DebugState, StepMode,
 };
 
 // Re-export concurrent collections types and FFI functions (#1108-#1112)

@@ -1486,7 +1486,11 @@ pub enum CompileError {
 
     /// Stack overflow (recursion depth exceeded)
     #[error("stack overflow: recursion depth {depth} exceeded limit {limit} in function '{function_name}'")]
-    StackOverflow { depth: u64, limit: u64, function_name: String },
+    StackOverflow {
+        depth: u64,
+        limit: u64,
+        function_name: String,
+    },
 
     /// Execution timeout exceeded (wall-clock)
     #[error("timeout: execution exceeded {timeout_secs} second limit")]

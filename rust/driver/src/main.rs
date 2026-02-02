@@ -79,7 +79,10 @@ fn dispatch_command(entry: &CommandEntry, ctx: &CommandContext) -> i32 {
     // 2. Check if any args require the Rust handler
     if !entry.needs_rust_flags.is_empty() {
         let needs_rust = ctx.args[1..].iter().any(|a| {
-            entry.needs_rust_flags.iter().any(|f| a.as_str() == *f || a.starts_with(f))
+            entry
+                .needs_rust_flags
+                .iter()
+                .any(|f| a.as_str() == *f || a.starts_with(f))
         });
         if needs_rust {
             return run_rust_handler(&entry.rust_handler, ctx);
@@ -110,11 +113,21 @@ fn run_rust_handler(handler: &Handler, ctx: &CommandContext) -> i32 {
 // Rust handler wrappers (adapt existing functions to uniform signatures)
 // ---------------------------------------------------------------------------
 
-fn handle_targets_wrapper() -> i32 { handle_targets() }
-fn handle_linkers_wrapper() -> i32 { handle_linkers() }
-fn handle_install_wrapper() -> i32 { handle_install() }
-fn handle_list_wrapper() -> i32 { handle_list() }
-fn handle_tree_wrapper() -> i32 { handle_tree() }
+fn handle_targets_wrapper() -> i32 {
+    handle_targets()
+}
+fn handle_linkers_wrapper() -> i32 {
+    handle_linkers()
+}
+fn handle_install_wrapper() -> i32 {
+    handle_install()
+}
+fn handle_list_wrapper() -> i32 {
+    handle_list()
+}
+fn handle_tree_wrapper() -> i32 {
+    handle_tree()
+}
 
 fn handle_check_wrapper(ctx: &CommandContext) -> i32 {
     handle_check_impl(ctx.args)
@@ -176,7 +189,6 @@ const COMMAND_TABLE: &[CommandEntry] = &[
         env_override: "SIMPLE_LINKERS_RUST",
         needs_rust_flags: &[],
     },
-
     // Web framework
     CommandEntry {
         name: "web",
@@ -185,7 +197,6 @@ const COMMAND_TABLE: &[CommandEntry] = &[
         env_override: "SIMPLE_WEB_RUST",
         needs_rust_flags: &[],
     },
-
     // File watching
     CommandEntry {
         name: "watch",
@@ -194,16 +205,14 @@ const COMMAND_TABLE: &[CommandEntry] = &[
         env_override: "SIMPLE_WATCH_RUST",
         needs_rust_flags: &[],
     },
-
     // Testing - always use Rust handler (mature implementation with Rust test integration + DB tracking)
     CommandEntry {
         name: "test",
-        app_path: "",  // Rust handler is primary (has cargo test integration)
+        app_path: "", // Rust handler is primary (has cargo test integration)
         rust_handler: Handler::ArgsGc(handle_test_rust),
         env_override: "",
         needs_rust_flags: &[],
     },
-
     // Code quality
     CommandEntry {
         name: "lint",
@@ -233,7 +242,6 @@ const COMMAND_TABLE: &[CommandEntry] = &[
         env_override: "SIMPLE_CHECK_RUST",
         needs_rust_flags: &[],
     },
-
     // Localization
     CommandEntry {
         name: "i18n",
@@ -242,7 +250,6 @@ const COMMAND_TABLE: &[CommandEntry] = &[
         env_override: "SIMPLE_I18N_RUST",
         needs_rust_flags: &[],
     },
-
     // Migration and tooling
     CommandEntry {
         name: "migrate",
@@ -279,7 +286,6 @@ const COMMAND_TABLE: &[CommandEntry] = &[
         env_override: "SIMPLE_CONSTR_RUST",
         needs_rust_flags: &[],
     },
-
     // Analysis
     CommandEntry {
         name: "query",
@@ -295,7 +301,6 @@ const COMMAND_TABLE: &[CommandEntry] = &[
         env_override: "SIMPLE_INFO_RUST",
         needs_rust_flags: &[],
     },
-
     // Auditing
     CommandEntry {
         name: "spec-coverage",
@@ -311,7 +316,6 @@ const COMMAND_TABLE: &[CommandEntry] = &[
         env_override: "SIMPLE_REPLAY_RUST",
         needs_rust_flags: &[],
     },
-
     // Code generation
     CommandEntry {
         name: "gen-lean",
@@ -362,7 +366,6 @@ const COMMAND_TABLE: &[CommandEntry] = &[
         env_override: "SIMPLE_SSPEC_DOCGEN_RUST",
         needs_rust_flags: &[],
     },
-
     // Brief view
     CommandEntry {
         name: "brief",
@@ -371,7 +374,6 @@ const COMMAND_TABLE: &[CommandEntry] = &[
         env_override: "SIMPLE_BRIEF_RUST",
         needs_rust_flags: &[],
     },
-
     // Dashboard
     CommandEntry {
         name: "dashboard",
@@ -380,7 +382,6 @@ const COMMAND_TABLE: &[CommandEntry] = &[
         env_override: "SIMPLE_DASHBOARD_RUST",
         needs_rust_flags: &[],
     },
-
     // Verification
     CommandEntry {
         name: "verify",
@@ -389,7 +390,6 @@ const COMMAND_TABLE: &[CommandEntry] = &[
         env_override: "SIMPLE_VERIFY_RUST",
         needs_rust_flags: &[],
     },
-
     // Qualified ignore
     CommandEntry {
         name: "qualify-ignore",
@@ -398,7 +398,6 @@ const COMMAND_TABLE: &[CommandEntry] = &[
         env_override: "SIMPLE_QUALIFY_IGNORE_RUST",
         needs_rust_flags: &[],
     },
-
     // Diagram
     CommandEntry {
         name: "diagram",
@@ -407,7 +406,6 @@ const COMMAND_TABLE: &[CommandEntry] = &[
         env_override: "SIMPLE_DIAGRAM_RUST",
         needs_rust_flags: &[],
     },
-
     // Package management
     CommandEntry {
         name: "init",
@@ -465,7 +463,6 @@ const COMMAND_TABLE: &[CommandEntry] = &[
         env_override: "SIMPLE_CACHE_RUST",
         needs_rust_flags: &[],
     },
-
     // Environment management
     CommandEntry {
         name: "env",
@@ -474,7 +471,6 @@ const COMMAND_TABLE: &[CommandEntry] = &[
         env_override: "SIMPLE_ENV_RUST",
         needs_rust_flags: &[],
     },
-
     // Lock file
     CommandEntry {
         name: "lock",
@@ -483,7 +479,6 @@ const COMMAND_TABLE: &[CommandEntry] = &[
         env_override: "SIMPLE_LOCK_RUST",
         needs_rust_flags: &[],
     },
-
     // Coverage (app-only)
     CommandEntry {
         name: "coverage",
@@ -495,7 +490,6 @@ const COMMAND_TABLE: &[CommandEntry] = &[
         env_override: "",
         needs_rust_flags: &[],
     },
-
     // Dependency graph (app-only)
     CommandEntry {
         name: "depgraph",
@@ -507,7 +501,6 @@ const COMMAND_TABLE: &[CommandEntry] = &[
         env_override: "",
         needs_rust_flags: &[],
     },
-
     // LSP (app-only)
     CommandEntry {
         name: "lsp",
@@ -519,7 +512,6 @@ const COMMAND_TABLE: &[CommandEntry] = &[
         env_override: "",
         needs_rust_flags: &[],
     },
-
     // DAP (app-only)
     CommandEntry {
         name: "dap",
@@ -531,7 +523,6 @@ const COMMAND_TABLE: &[CommandEntry] = &[
         env_override: "",
         needs_rust_flags: &[],
     },
-
     // Run command
     CommandEntry {
         name: "run",

@@ -31,7 +31,10 @@ impl ConcurrentBackend {
         match s {
             "pure_std" | "std" => Ok(ConcurrentBackend::PureStd),
             "native" => Ok(ConcurrentBackend::Native),
-            _ => Err(format!("unknown concurrent_backend '{}', expected 'pure_std' or 'native'", s)),
+            _ => Err(format!(
+                "unknown concurrent_backend '{}', expected 'pure_std' or 'native'",
+                s
+            )),
         }
     }
 }
@@ -172,9 +175,26 @@ pub trait LockProvider: Send + Sync + Debug {
 /// In PureStd mode, all operations fall back to sequential iteration.
 /// In Native mode, uses rayon for work-stealing parallel execution.
 pub trait ParallelIterProvider: Send + Sync + Debug {
-    fn par_map(&self, items: Vec<Value>, f: Box<dyn Fn(Value) -> Result<Value, CompileError> + Send + Sync>) -> Result<Vec<Value>, CompileError>;
-    fn par_filter(&self, items: Vec<Value>, f: Box<dyn Fn(&Value) -> Result<bool, CompileError> + Send + Sync>) -> Result<Vec<Value>, CompileError>;
-    fn par_reduce(&self, items: Vec<Value>, init: Value, f: Box<dyn Fn(Value, Value) -> Result<Value, CompileError> + Send + Sync>) -> Result<Value, CompileError>;
-    fn par_for_each(&self, items: Vec<Value>, f: Box<dyn Fn(Value) -> Result<(), CompileError> + Send + Sync>) -> Result<(), CompileError>;
+    fn par_map(
+        &self,
+        items: Vec<Value>,
+        f: Box<dyn Fn(Value) -> Result<Value, CompileError> + Send + Sync>,
+    ) -> Result<Vec<Value>, CompileError>;
+    fn par_filter(
+        &self,
+        items: Vec<Value>,
+        f: Box<dyn Fn(&Value) -> Result<bool, CompileError> + Send + Sync>,
+    ) -> Result<Vec<Value>, CompileError>;
+    fn par_reduce(
+        &self,
+        items: Vec<Value>,
+        init: Value,
+        f: Box<dyn Fn(Value, Value) -> Result<Value, CompileError> + Send + Sync>,
+    ) -> Result<Value, CompileError>;
+    fn par_for_each(
+        &self,
+        items: Vec<Value>,
+        f: Box<dyn Fn(Value) -> Result<(), CompileError> + Send + Sync>,
+    ) -> Result<(), CompileError>;
     fn par_pool_init(&self, num_threads: usize) -> Result<(), CompileError>;
 }

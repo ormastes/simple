@@ -49,7 +49,12 @@ fn build_smf_with_code_entry(code_bytes: &[u8], entry_offset: u64, gc: Option<&A
 }
 
 /// Build an SMF module with the given code bytes for a specific target architecture.
-fn build_smf_with_code_for_target(code_bytes: &[u8], entry_offset: u64, gc: Option<&Arc<dyn GcAllocator>>, target: Target) -> Vec<u8> {
+fn build_smf_with_code_for_target(
+    code_bytes: &[u8],
+    entry_offset: u64,
+    gc: Option<&Arc<dyn GcAllocator>>,
+    target: Target,
+) -> Vec<u8> {
     let section_table_offset = SmfHeader::SIZE as u64;
     let section_table_size = std::mem::size_of::<SmfSection>() as u64;
     let code_offset = section_table_offset + section_table_size;

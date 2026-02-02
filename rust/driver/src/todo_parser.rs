@@ -785,8 +785,8 @@ pub struct MyStruct {
     fn test_all_valid_areas() {
         let parser = TodoParser::new();
         let areas = vec![
-            "runtime", "codegen", "compiler", "parser", "type", "stdlib",
-            "gpu", "ui", "test", "driver", "loader", "pkg", "doc",
+            "runtime", "codegen", "compiler", "parser", "type", "stdlib", "gpu", "ui", "test", "driver", "loader",
+            "pkg", "doc",
         ];
 
         for area in areas {

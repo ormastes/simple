@@ -379,7 +379,9 @@ impl<'a> Parser<'a> {
             // Check for common mistakes
             let help = if matches!(kind, TokenKind::Comma) && matches!(self.current.kind, TokenKind::Colon) {
                 Some("Missing comma between arguments with named parameters".to_string())
-            } else if matches!(kind, TokenKind::Colon) && matches!(self.current.kind, TokenKind::Newline | TokenKind::Indent) {
+            } else if matches!(kind, TokenKind::Colon)
+                && matches!(self.current.kind, TokenKind::Newline | TokenKind::Indent)
+            {
                 Some("Missing colon before block body".to_string())
             } else {
                 None
@@ -547,9 +549,9 @@ impl<'a> Parser<'a> {
             TokenKind::Exists => "exists",     // Allow "exists" in exports (fs.exists)
             TokenKind::Forall => "forall",     // Allow "forall" in exports
             // Allow contextual keywords in paths/exports (they can be function names)
-            TokenKind::Skip => "skip",         // Allow "skip" (test function, contextual keyword)
-            TokenKind::Static => "static",     // Allow "static" (contextual keyword)
-            TokenKind::Default => "default",   // Allow "default" (contextual keyword)
+            TokenKind::Skip => "skip",     // Allow "skip" (test function, contextual keyword)
+            TokenKind::Static => "static", // Allow "static" (contextual keyword)
+            TokenKind::Default => "default", // Allow "default" (contextual keyword)
             // Allow math keywords in paths/exports
             TokenKind::Slice => "Slice",
             TokenKind::Tensor => "Tensor",

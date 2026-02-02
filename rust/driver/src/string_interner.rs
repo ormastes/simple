@@ -48,7 +48,11 @@ impl StringInterner {
 
     /// Serialize to SDN rows: `[id, value]`
     pub fn to_sdn_rows(&self) -> Vec<(u32, &str)> {
-        self.reverse.iter().enumerate().map(|(id, s)| (id as u32, s.as_str())).collect()
+        self.reverse
+            .iter()
+            .enumerate()
+            .map(|(id, s)| (id as u32, s.as_str()))
+            .collect()
     }
 }
 

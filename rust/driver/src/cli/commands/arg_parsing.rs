@@ -58,9 +58,15 @@ impl FixFlags {
 
     /// Whether any fix mode is active
     pub fn any_fix_mode(&self) -> bool {
-        self.fix || self.fix_all || self.fix_warnings || self.fix_errors
-            || self.fix_info || self.fix_id.is_some() || self.fix_code.is_some()
-            || self.fix_nth.is_some() || self.fix_interactive
+        self.fix
+            || self.fix_all
+            || self.fix_warnings
+            || self.fix_errors
+            || self.fix_info
+            || self.fix_id.is_some()
+            || self.fix_code.is_some()
+            || self.fix_nth.is_some()
+            || self.fix_interactive
     }
 }
 

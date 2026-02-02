@@ -303,9 +303,8 @@ fn try_call_fmt_method(
 ) -> Option<String> {
     use super::super::interpreter_control::call_method_if_exists;
     if let Value::Object { .. } = value {
-        if let Ok(Some(result)) = call_method_if_exists(
-            value, "fmt", &[], env, functions, classes, enums, impl_methods,
-        ) {
+        if let Ok(Some(result)) = call_method_if_exists(value, "fmt", &[], env, functions, classes, enums, impl_methods)
+        {
             if let Value::Str(s) = result {
                 return Some(s);
             }
@@ -327,9 +326,9 @@ pub(crate) fn try_call_debug_fmt_method(
 ) -> Option<String> {
     use super::super::interpreter_control::call_method_if_exists;
     if let Value::Object { .. } = value {
-        if let Ok(Some(result)) = call_method_if_exists(
-            value, "debug_fmt", &[], env, functions, classes, enums, impl_methods,
-        ) {
+        if let Ok(Some(result)) =
+            call_method_if_exists(value, "debug_fmt", &[], env, functions, classes, enums, impl_methods)
+        {
             if let Value::Str(s) = result {
                 return Some(s);
             }

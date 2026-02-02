@@ -160,7 +160,9 @@ impl<'a> MirLowerer<'a> {
                                 // Also check the callee's type - if it resolves to an enum
                                 matches!(registry.get(callee.ty), Some(crate::hir::HirType::Enum { .. }))
                             }
-                        } else { false };
+                        } else {
+                            false
+                        };
 
                         if is_enum && !arg_regs.is_empty() {
                             // For single-arg variants, use the arg directly as payload
@@ -571,7 +573,11 @@ impl<'a> MirLowerer<'a> {
 
                 // Create a call to the builtin function
                 if name.contains("enum") {
-                    eprintln!("[MIR-BUILTIN] lowering BuiltinCall: name={}, args={}", name, arg_regs.len());
+                    eprintln!(
+                        "[MIR-BUILTIN] lowering BuiltinCall: name={}, args={}",
+                        name,
+                        arg_regs.len()
+                    );
                 }
                 let target = CallTarget::from_name(name);
                 self.with_func(|func, current_block| {
@@ -1163,7 +1169,9 @@ impl<'a> MirLowerer<'a> {
                         // Try looking up by enum_name first
                         let by_name = if let Some(enum_type_id) = registry.lookup(enum_name) {
                             matches!(registry.get(enum_type_id), Some(HirType::Enum { .. }))
-                        } else { false };
+                        } else {
+                            false
+                        };
                         // Also check the expression's type
                         let by_expr_ty = matches!(registry.get(expr_ty), Some(HirType::Enum { .. }));
                         by_name || by_expr_ty

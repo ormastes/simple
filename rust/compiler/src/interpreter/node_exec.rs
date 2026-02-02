@@ -11,7 +11,8 @@ use super::expr::evaluate_expr;
 use super::interpreter_helpers::{bind_pattern_value, handle_method_call_with_self_update, handle_functional_update};
 use super::interpreter_control::{exec_if, exec_while, exec_loop, exec_for, exec_match, exec_context, exec_with};
 use super::interpreter_state::{
-    mark_as_moved, get_current_file, BLOCK_SCOPED_ENUMS, CONST_NAMES, IMMUTABLE_VARS, IN_IMMUTABLE_FN_METHOD, MODULE_GLOBALS,
+    mark_as_moved, get_current_file, BLOCK_SCOPED_ENUMS, CONST_NAMES, IMMUTABLE_VARS, IN_IMMUTABLE_FN_METHOD,
+    MODULE_GLOBALS,
 };
 use super::coverage_helpers::{record_node_coverage, extract_node_location};
 use crate::interpreter_unit::{is_unit_type, validate_unit_type, validate_unit_constraints};
@@ -115,7 +116,9 @@ pub(crate) fn exec_node(
                             }
                         }
                     }
-                    Some(Type::Array { size: Some(size_expr), .. }) => {
+                    Some(Type::Array {
+                        size: Some(size_expr), ..
+                    }) => {
                         // Fixed-size array: [T; N]
                         // Evaluate the size expression to get a concrete integer
                         let size_value = evaluate_expr(size_expr, env, functions, classes, enums, impl_methods)?;
@@ -148,8 +151,7 @@ pub(crate) fn exec_node(
                                 let var_name = get_var_name(&let_stmt.pattern);
                                 return Err(CompileError::semantic(format!(
                                     "Expected array for fixed-size array binding `{}`, got {:?}",
-                                    var_name,
-                                    value
+                                    var_name, value
                                 )));
                             }
                         }

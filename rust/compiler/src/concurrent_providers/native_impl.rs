@@ -9,8 +9,7 @@
 use crate::error::CompileError;
 use crate::value::Value;
 use super::{
-    Handle, MapProvider, ConcurrentMapProvider, ChannelProvider,
-    ThreadProvider, LockProvider, ParallelIterProvider,
+    Handle, MapProvider, ConcurrentMapProvider, ChannelProvider, ThreadProvider, LockProvider, ParallelIterProvider,
 };
 
 use dashmap::DashMap;
@@ -61,17 +60,19 @@ impl NativeMapProvider {
 
 macro_rules! get_map {
     ($self:expr, $handle:expr) => {
-        $self.hashmaps.get(&$handle).ok_or_else(|| {
-            CompileError::runtime(format!("Invalid HashMap handle: {}", $handle))
-        })
+        $self
+            .hashmaps
+            .get(&$handle)
+            .ok_or_else(|| CompileError::runtime(format!("Invalid HashMap handle: {}", $handle)))
     };
 }
 
 macro_rules! get_map_mut {
     ($self:expr, $handle:expr) => {
-        $self.hashmaps.get_mut(&$handle).ok_or_else(|| {
-            CompileError::runtime(format!("Invalid HashMap handle: {}", $handle))
-        })
+        $self
+            .hashmaps
+            .get_mut(&$handle)
+            .ok_or_else(|| CompileError::runtime(format!("Invalid HashMap handle: {}", $handle)))
     };
 }
 
@@ -128,7 +129,8 @@ impl MapProvider for NativeMapProvider {
 
     fn hashmap_entries(&self, handle: Handle) -> Result<Vec<Value>, CompileError> {
         let map = get_map!(self, handle)?;
-        Ok(map.iter()
+        Ok(map
+            .iter()
             .map(|(k, v)| Value::Array(vec![Value::Str(k.clone()), v.clone()]))
             .collect())
     }
@@ -141,97 +143,143 @@ impl MapProvider for NativeMapProvider {
     }
 
     fn hashset_insert(&self, handle: Handle, value: String) -> Result<bool, CompileError> {
-        let mut set = self.hashsets.get_mut(&handle).ok_or_else(|| {
-            CompileError::runtime(format!("Invalid HashSet handle: {}", handle))
-        })?;
+        let mut set = self
+            .hashsets
+            .get_mut(&handle)
+            .ok_or_else(|| CompileError::runtime(format!("Invalid HashSet handle: {}", handle)))?;
         Ok(set.insert(value))
     }
 
     fn hashset_contains(&self, handle: Handle, value: &str) -> Result<bool, CompileError> {
-        let set = self.hashsets.get(&handle).ok_or_else(|| {
-            CompileError::runtime(format!("Invalid HashSet handle: {}", handle))
-        })?;
+        let set = self
+            .hashsets
+            .get(&handle)
+            .ok_or_else(|| CompileError::runtime(format!("Invalid HashSet handle: {}", handle)))?;
         Ok(set.contains(value))
     }
 
     fn hashset_remove(&self, handle: Handle, value: &str) -> Result<bool, CompileError> {
-        let mut set = self.hashsets.get_mut(&handle).ok_or_else(|| {
-            CompileError::runtime(format!("Invalid HashSet handle: {}", handle))
-        })?;
+        let mut set = self
+            .hashsets
+            .get_mut(&handle)
+            .ok_or_else(|| CompileError::runtime(format!("Invalid HashSet handle: {}", handle)))?;
         Ok(set.remove(value))
     }
 
     fn hashset_len(&self, handle: Handle) -> Result<usize, CompileError> {
-        let set = self.hashsets.get(&handle).ok_or_else(|| {
-            CompileError::runtime(format!("Invalid HashSet handle: {}", handle))
-        })?;
+        let set = self
+            .hashsets
+            .get(&handle)
+            .ok_or_else(|| CompileError::runtime(format!("Invalid HashSet handle: {}", handle)))?;
         Ok(set.len())
     }
 
     fn hashset_clear(&self, handle: Handle) -> Result<(), CompileError> {
-        let mut set = self.hashsets.get_mut(&handle).ok_or_else(|| {
-            CompileError::runtime(format!("Invalid HashSet handle: {}", handle))
-        })?;
+        let mut set = self
+            .hashsets
+            .get_mut(&handle)
+            .ok_or_else(|| CompileError::runtime(format!("Invalid HashSet handle: {}", handle)))?;
         set.clear();
         Ok(())
     }
 
     fn hashset_to_array(&self, handle: Handle) -> Result<Vec<Value>, CompileError> {
-        let set = self.hashsets.get(&handle).ok_or_else(|| {
-            CompileError::runtime(format!("Invalid HashSet handle: {}", handle))
-        })?;
+        let set = self
+            .hashsets
+            .get(&handle)
+            .ok_or_else(|| CompileError::runtime(format!("Invalid HashSet handle: {}", handle)))?;
         Ok(set.iter().map(|s| Value::Str(s.clone())).collect())
     }
 
     fn hashset_union(&self, a: Handle, b: Handle) -> Result<Handle, CompileError> {
-        let set_a = self.hashsets.get(&a).ok_or_else(|| CompileError::runtime(format!("Invalid HashSet handle: {}", a)))?;
-        let set_b = self.hashsets.get(&b).ok_or_else(|| CompileError::runtime(format!("Invalid HashSet handle: {}", b)))?;
+        let set_a = self
+            .hashsets
+            .get(&a)
+            .ok_or_else(|| CompileError::runtime(format!("Invalid HashSet handle: {}", a)))?;
+        let set_b = self
+            .hashsets
+            .get(&b)
+            .ok_or_else(|| CompileError::runtime(format!("Invalid HashSet handle: {}", b)))?;
         let result: StdHashSet<String> = set_a.union(&set_b).cloned().collect();
-        drop(set_a); drop(set_b);
+        drop(set_a);
+        drop(set_b);
         let handle = self.next_hashset_id.fetch_add(1, Ordering::Relaxed);
         self.hashsets.insert(handle, result);
         Ok(handle)
     }
 
     fn hashset_intersection(&self, a: Handle, b: Handle) -> Result<Handle, CompileError> {
-        let set_a = self.hashsets.get(&a).ok_or_else(|| CompileError::runtime(format!("Invalid HashSet handle: {}", a)))?;
-        let set_b = self.hashsets.get(&b).ok_or_else(|| CompileError::runtime(format!("Invalid HashSet handle: {}", b)))?;
+        let set_a = self
+            .hashsets
+            .get(&a)
+            .ok_or_else(|| CompileError::runtime(format!("Invalid HashSet handle: {}", a)))?;
+        let set_b = self
+            .hashsets
+            .get(&b)
+            .ok_or_else(|| CompileError::runtime(format!("Invalid HashSet handle: {}", b)))?;
         let result: StdHashSet<String> = set_a.intersection(&set_b).cloned().collect();
-        drop(set_a); drop(set_b);
+        drop(set_a);
+        drop(set_b);
         let handle = self.next_hashset_id.fetch_add(1, Ordering::Relaxed);
         self.hashsets.insert(handle, result);
         Ok(handle)
     }
 
     fn hashset_difference(&self, a: Handle, b: Handle) -> Result<Handle, CompileError> {
-        let set_a = self.hashsets.get(&a).ok_or_else(|| CompileError::runtime(format!("Invalid HashSet handle: {}", a)))?;
-        let set_b = self.hashsets.get(&b).ok_or_else(|| CompileError::runtime(format!("Invalid HashSet handle: {}", b)))?;
+        let set_a = self
+            .hashsets
+            .get(&a)
+            .ok_or_else(|| CompileError::runtime(format!("Invalid HashSet handle: {}", a)))?;
+        let set_b = self
+            .hashsets
+            .get(&b)
+            .ok_or_else(|| CompileError::runtime(format!("Invalid HashSet handle: {}", b)))?;
         let result: StdHashSet<String> = set_a.difference(&set_b).cloned().collect();
-        drop(set_a); drop(set_b);
+        drop(set_a);
+        drop(set_b);
         let handle = self.next_hashset_id.fetch_add(1, Ordering::Relaxed);
         self.hashsets.insert(handle, result);
         Ok(handle)
     }
 
     fn hashset_symmetric_difference(&self, a: Handle, b: Handle) -> Result<Handle, CompileError> {
-        let set_a = self.hashsets.get(&a).ok_or_else(|| CompileError::runtime(format!("Invalid HashSet handle: {}", a)))?;
-        let set_b = self.hashsets.get(&b).ok_or_else(|| CompileError::runtime(format!("Invalid HashSet handle: {}", b)))?;
+        let set_a = self
+            .hashsets
+            .get(&a)
+            .ok_or_else(|| CompileError::runtime(format!("Invalid HashSet handle: {}", a)))?;
+        let set_b = self
+            .hashsets
+            .get(&b)
+            .ok_or_else(|| CompileError::runtime(format!("Invalid HashSet handle: {}", b)))?;
         let result: StdHashSet<String> = set_a.symmetric_difference(&set_b).cloned().collect();
-        drop(set_a); drop(set_b);
+        drop(set_a);
+        drop(set_b);
         let handle = self.next_hashset_id.fetch_add(1, Ordering::Relaxed);
         self.hashsets.insert(handle, result);
         Ok(handle)
     }
 
     fn hashset_is_subset(&self, a: Handle, b: Handle) -> Result<bool, CompileError> {
-        let set_a = self.hashsets.get(&a).ok_or_else(|| CompileError::runtime(format!("Invalid HashSet handle: {}", a)))?;
-        let set_b = self.hashsets.get(&b).ok_or_else(|| CompileError::runtime(format!("Invalid HashSet handle: {}", b)))?;
+        let set_a = self
+            .hashsets
+            .get(&a)
+            .ok_or_else(|| CompileError::runtime(format!("Invalid HashSet handle: {}", a)))?;
+        let set_b = self
+            .hashsets
+            .get(&b)
+            .ok_or_else(|| CompileError::runtime(format!("Invalid HashSet handle: {}", b)))?;
         Ok(set_a.is_subset(&set_b))
     }
 
     fn hashset_is_superset(&self, a: Handle, b: Handle) -> Result<bool, CompileError> {
-        let set_a = self.hashsets.get(&a).ok_or_else(|| CompileError::runtime(format!("Invalid HashSet handle: {}", a)))?;
-        let set_b = self.hashsets.get(&b).ok_or_else(|| CompileError::runtime(format!("Invalid HashSet handle: {}", b)))?;
+        let set_a = self
+            .hashsets
+            .get(&a)
+            .ok_or_else(|| CompileError::runtime(format!("Invalid HashSet handle: {}", a)))?;
+        let set_b = self
+            .hashsets
+            .get(&b)
+            .ok_or_else(|| CompileError::runtime(format!("Invalid HashSet handle: {}", b)))?;
         Ok(set_a.is_superset(&set_b))
     }
 
@@ -243,61 +291,101 @@ impl MapProvider for NativeMapProvider {
     }
 
     fn btreemap_insert(&self, handle: Handle, key: String, value: Value) -> Result<Value, CompileError> {
-        let mut map = self.btreemaps.get_mut(&handle).ok_or_else(|| CompileError::runtime(format!("Invalid BTreeMap handle: {}", handle)))?;
+        let mut map = self
+            .btreemaps
+            .get_mut(&handle)
+            .ok_or_else(|| CompileError::runtime(format!("Invalid BTreeMap handle: {}", handle)))?;
         let was_new = !map.contains_key(&key);
         map.insert(key, value);
         Ok(Value::Bool(was_new))
     }
 
     fn btreemap_get(&self, handle: Handle, key: &str) -> Result<Value, CompileError> {
-        let map = self.btreemaps.get(&handle).ok_or_else(|| CompileError::runtime(format!("Invalid BTreeMap handle: {}", handle)))?;
+        let map = self
+            .btreemaps
+            .get(&handle)
+            .ok_or_else(|| CompileError::runtime(format!("Invalid BTreeMap handle: {}", handle)))?;
         Ok(map.get(key).cloned().unwrap_or(Value::Nil))
     }
 
     fn btreemap_contains_key(&self, handle: Handle, key: &str) -> Result<bool, CompileError> {
-        let map = self.btreemaps.get(&handle).ok_or_else(|| CompileError::runtime(format!("Invalid BTreeMap handle: {}", handle)))?;
+        let map = self
+            .btreemaps
+            .get(&handle)
+            .ok_or_else(|| CompileError::runtime(format!("Invalid BTreeMap handle: {}", handle)))?;
         Ok(map.contains_key(key))
     }
 
     fn btreemap_remove(&self, handle: Handle, key: &str) -> Result<Value, CompileError> {
-        let mut map = self.btreemaps.get_mut(&handle).ok_or_else(|| CompileError::runtime(format!("Invalid BTreeMap handle: {}", handle)))?;
+        let mut map = self
+            .btreemaps
+            .get_mut(&handle)
+            .ok_or_else(|| CompileError::runtime(format!("Invalid BTreeMap handle: {}", handle)))?;
         Ok(map.remove(key).unwrap_or(Value::Nil))
     }
 
     fn btreemap_len(&self, handle: Handle) -> Result<usize, CompileError> {
-        let map = self.btreemaps.get(&handle).ok_or_else(|| CompileError::runtime(format!("Invalid BTreeMap handle: {}", handle)))?;
+        let map = self
+            .btreemaps
+            .get(&handle)
+            .ok_or_else(|| CompileError::runtime(format!("Invalid BTreeMap handle: {}", handle)))?;
         Ok(map.len())
     }
 
     fn btreemap_clear(&self, handle: Handle) -> Result<(), CompileError> {
-        let mut map = self.btreemaps.get_mut(&handle).ok_or_else(|| CompileError::runtime(format!("Invalid BTreeMap handle: {}", handle)))?;
+        let mut map = self
+            .btreemaps
+            .get_mut(&handle)
+            .ok_or_else(|| CompileError::runtime(format!("Invalid BTreeMap handle: {}", handle)))?;
         map.clear();
         Ok(())
     }
 
     fn btreemap_keys(&self, handle: Handle) -> Result<Vec<Value>, CompileError> {
-        let map = self.btreemaps.get(&handle).ok_or_else(|| CompileError::runtime(format!("Invalid BTreeMap handle: {}", handle)))?;
+        let map = self
+            .btreemaps
+            .get(&handle)
+            .ok_or_else(|| CompileError::runtime(format!("Invalid BTreeMap handle: {}", handle)))?;
         Ok(map.keys().map(|k| Value::Str(k.clone())).collect())
     }
 
     fn btreemap_values(&self, handle: Handle) -> Result<Vec<Value>, CompileError> {
-        let map = self.btreemaps.get(&handle).ok_or_else(|| CompileError::runtime(format!("Invalid BTreeMap handle: {}", handle)))?;
+        let map = self
+            .btreemaps
+            .get(&handle)
+            .ok_or_else(|| CompileError::runtime(format!("Invalid BTreeMap handle: {}", handle)))?;
         Ok(map.values().cloned().collect())
     }
 
     fn btreemap_entries(&self, handle: Handle) -> Result<Vec<Value>, CompileError> {
-        let map = self.btreemaps.get(&handle).ok_or_else(|| CompileError::runtime(format!("Invalid BTreeMap handle: {}", handle)))?;
-        Ok(map.iter().map(|(k, v)| Value::Array(vec![Value::Str(k.clone()), v.clone()])).collect())
+        let map = self
+            .btreemaps
+            .get(&handle)
+            .ok_or_else(|| CompileError::runtime(format!("Invalid BTreeMap handle: {}", handle)))?;
+        Ok(map
+            .iter()
+            .map(|(k, v)| Value::Array(vec![Value::Str(k.clone()), v.clone()]))
+            .collect())
     }
 
     fn btreemap_first_key(&self, handle: Handle) -> Result<Value, CompileError> {
-        let map = self.btreemaps.get(&handle).ok_or_else(|| CompileError::runtime(format!("Invalid BTreeMap handle: {}", handle)))?;
+        let map = self
+            .btreemaps
+            .get(&handle)
+            .ok_or_else(|| CompileError::runtime(format!("Invalid BTreeMap handle: {}", handle)))?;
         Ok(map.keys().next().map(|k| Value::Str(k.clone())).unwrap_or(Value::Nil))
     }
 
     fn btreemap_last_key(&self, handle: Handle) -> Result<Value, CompileError> {
-        let map = self.btreemaps.get(&handle).ok_or_else(|| CompileError::runtime(format!("Invalid BTreeMap handle: {}", handle)))?;
-        Ok(map.keys().next_back().map(|k| Value::Str(k.clone())).unwrap_or(Value::Nil))
+        let map = self
+            .btreemaps
+            .get(&handle)
+            .ok_or_else(|| CompileError::runtime(format!("Invalid BTreeMap handle: {}", handle)))?;
+        Ok(map
+            .keys()
+            .next_back()
+            .map(|k| Value::Str(k.clone()))
+            .unwrap_or(Value::Nil))
     }
 
     // --- BTreeSet ---
@@ -308,95 +396,163 @@ impl MapProvider for NativeMapProvider {
     }
 
     fn btreeset_insert(&self, handle: Handle, value: String) -> Result<bool, CompileError> {
-        let mut set = self.btreesets.get_mut(&handle).ok_or_else(|| CompileError::runtime(format!("Invalid BTreeSet handle: {}", handle)))?;
+        let mut set = self
+            .btreesets
+            .get_mut(&handle)
+            .ok_or_else(|| CompileError::runtime(format!("Invalid BTreeSet handle: {}", handle)))?;
         Ok(set.insert(value))
     }
 
     fn btreeset_contains(&self, handle: Handle, value: &str) -> Result<bool, CompileError> {
-        let set = self.btreesets.get(&handle).ok_or_else(|| CompileError::runtime(format!("Invalid BTreeSet handle: {}", handle)))?;
+        let set = self
+            .btreesets
+            .get(&handle)
+            .ok_or_else(|| CompileError::runtime(format!("Invalid BTreeSet handle: {}", handle)))?;
         Ok(set.contains(value))
     }
 
     fn btreeset_remove(&self, handle: Handle, value: &str) -> Result<bool, CompileError> {
-        let mut set = self.btreesets.get_mut(&handle).ok_or_else(|| CompileError::runtime(format!("Invalid BTreeSet handle: {}", handle)))?;
+        let mut set = self
+            .btreesets
+            .get_mut(&handle)
+            .ok_or_else(|| CompileError::runtime(format!("Invalid BTreeSet handle: {}", handle)))?;
         Ok(set.remove(value))
     }
 
     fn btreeset_len(&self, handle: Handle) -> Result<usize, CompileError> {
-        let set = self.btreesets.get(&handle).ok_or_else(|| CompileError::runtime(format!("Invalid BTreeSet handle: {}", handle)))?;
+        let set = self
+            .btreesets
+            .get(&handle)
+            .ok_or_else(|| CompileError::runtime(format!("Invalid BTreeSet handle: {}", handle)))?;
         Ok(set.len())
     }
 
     fn btreeset_clear(&self, handle: Handle) -> Result<(), CompileError> {
-        let mut set = self.btreesets.get_mut(&handle).ok_or_else(|| CompileError::runtime(format!("Invalid BTreeSet handle: {}", handle)))?;
+        let mut set = self
+            .btreesets
+            .get_mut(&handle)
+            .ok_or_else(|| CompileError::runtime(format!("Invalid BTreeSet handle: {}", handle)))?;
         set.clear();
         Ok(())
     }
 
     fn btreeset_to_array(&self, handle: Handle) -> Result<Vec<Value>, CompileError> {
-        let set = self.btreesets.get(&handle).ok_or_else(|| CompileError::runtime(format!("Invalid BTreeSet handle: {}", handle)))?;
+        let set = self
+            .btreesets
+            .get(&handle)
+            .ok_or_else(|| CompileError::runtime(format!("Invalid BTreeSet handle: {}", handle)))?;
         Ok(set.iter().map(|s| Value::Str(s.clone())).collect())
     }
 
     fn btreeset_first(&self, handle: Handle) -> Result<Value, CompileError> {
-        let set = self.btreesets.get(&handle).ok_or_else(|| CompileError::runtime(format!("Invalid BTreeSet handle: {}", handle)))?;
+        let set = self
+            .btreesets
+            .get(&handle)
+            .ok_or_else(|| CompileError::runtime(format!("Invalid BTreeSet handle: {}", handle)))?;
         Ok(set.iter().next().map(|s| Value::Str(s.clone())).unwrap_or(Value::Nil))
     }
 
     fn btreeset_last(&self, handle: Handle) -> Result<Value, CompileError> {
-        let set = self.btreesets.get(&handle).ok_or_else(|| CompileError::runtime(format!("Invalid BTreeSet handle: {}", handle)))?;
-        Ok(set.iter().next_back().map(|s| Value::Str(s.clone())).unwrap_or(Value::Nil))
+        let set = self
+            .btreesets
+            .get(&handle)
+            .ok_or_else(|| CompileError::runtime(format!("Invalid BTreeSet handle: {}", handle)))?;
+        Ok(set
+            .iter()
+            .next_back()
+            .map(|s| Value::Str(s.clone()))
+            .unwrap_or(Value::Nil))
     }
 
     fn btreeset_union(&self, a: Handle, b: Handle) -> Result<Handle, CompileError> {
-        let set_a = self.btreesets.get(&a).ok_or_else(|| CompileError::runtime(format!("Invalid BTreeSet handle: {}", a)))?;
-        let set_b = self.btreesets.get(&b).ok_or_else(|| CompileError::runtime(format!("Invalid BTreeSet handle: {}", b)))?;
+        let set_a = self
+            .btreesets
+            .get(&a)
+            .ok_or_else(|| CompileError::runtime(format!("Invalid BTreeSet handle: {}", a)))?;
+        let set_b = self
+            .btreesets
+            .get(&b)
+            .ok_or_else(|| CompileError::runtime(format!("Invalid BTreeSet handle: {}", b)))?;
         let result: BTreeSet<String> = set_a.union(&set_b).cloned().collect();
-        drop(set_a); drop(set_b);
+        drop(set_a);
+        drop(set_b);
         let handle = self.next_btreeset_id.fetch_add(1, Ordering::Relaxed);
         self.btreesets.insert(handle, result);
         Ok(handle)
     }
 
     fn btreeset_intersection(&self, a: Handle, b: Handle) -> Result<Handle, CompileError> {
-        let set_a = self.btreesets.get(&a).ok_or_else(|| CompileError::runtime(format!("Invalid BTreeSet handle: {}", a)))?;
-        let set_b = self.btreesets.get(&b).ok_or_else(|| CompileError::runtime(format!("Invalid BTreeSet handle: {}", b)))?;
+        let set_a = self
+            .btreesets
+            .get(&a)
+            .ok_or_else(|| CompileError::runtime(format!("Invalid BTreeSet handle: {}", a)))?;
+        let set_b = self
+            .btreesets
+            .get(&b)
+            .ok_or_else(|| CompileError::runtime(format!("Invalid BTreeSet handle: {}", b)))?;
         let result: BTreeSet<String> = set_a.intersection(&set_b).cloned().collect();
-        drop(set_a); drop(set_b);
+        drop(set_a);
+        drop(set_b);
         let handle = self.next_btreeset_id.fetch_add(1, Ordering::Relaxed);
         self.btreesets.insert(handle, result);
         Ok(handle)
     }
 
     fn btreeset_difference(&self, a: Handle, b: Handle) -> Result<Handle, CompileError> {
-        let set_a = self.btreesets.get(&a).ok_or_else(|| CompileError::runtime(format!("Invalid BTreeSet handle: {}", a)))?;
-        let set_b = self.btreesets.get(&b).ok_or_else(|| CompileError::runtime(format!("Invalid BTreeSet handle: {}", b)))?;
+        let set_a = self
+            .btreesets
+            .get(&a)
+            .ok_or_else(|| CompileError::runtime(format!("Invalid BTreeSet handle: {}", a)))?;
+        let set_b = self
+            .btreesets
+            .get(&b)
+            .ok_or_else(|| CompileError::runtime(format!("Invalid BTreeSet handle: {}", b)))?;
         let result: BTreeSet<String> = set_a.difference(&set_b).cloned().collect();
-        drop(set_a); drop(set_b);
+        drop(set_a);
+        drop(set_b);
         let handle = self.next_btreeset_id.fetch_add(1, Ordering::Relaxed);
         self.btreesets.insert(handle, result);
         Ok(handle)
     }
 
     fn btreeset_symmetric_difference(&self, a: Handle, b: Handle) -> Result<Handle, CompileError> {
-        let set_a = self.btreesets.get(&a).ok_or_else(|| CompileError::runtime(format!("Invalid BTreeSet handle: {}", a)))?;
-        let set_b = self.btreesets.get(&b).ok_or_else(|| CompileError::runtime(format!("Invalid BTreeSet handle: {}", b)))?;
+        let set_a = self
+            .btreesets
+            .get(&a)
+            .ok_or_else(|| CompileError::runtime(format!("Invalid BTreeSet handle: {}", a)))?;
+        let set_b = self
+            .btreesets
+            .get(&b)
+            .ok_or_else(|| CompileError::runtime(format!("Invalid BTreeSet handle: {}", b)))?;
         let result: BTreeSet<String> = set_a.symmetric_difference(&set_b).cloned().collect();
-        drop(set_a); drop(set_b);
+        drop(set_a);
+        drop(set_b);
         let handle = self.next_btreeset_id.fetch_add(1, Ordering::Relaxed);
         self.btreesets.insert(handle, result);
         Ok(handle)
     }
 
     fn btreeset_is_subset(&self, a: Handle, b: Handle) -> Result<bool, CompileError> {
-        let set_a = self.btreesets.get(&a).ok_or_else(|| CompileError::runtime(format!("Invalid BTreeSet handle: {}", a)))?;
-        let set_b = self.btreesets.get(&b).ok_or_else(|| CompileError::runtime(format!("Invalid BTreeSet handle: {}", b)))?;
+        let set_a = self
+            .btreesets
+            .get(&a)
+            .ok_or_else(|| CompileError::runtime(format!("Invalid BTreeSet handle: {}", a)))?;
+        let set_b = self
+            .btreesets
+            .get(&b)
+            .ok_or_else(|| CompileError::runtime(format!("Invalid BTreeSet handle: {}", b)))?;
         Ok(set_a.is_subset(&set_b))
     }
 
     fn btreeset_is_superset(&self, a: Handle, b: Handle) -> Result<bool, CompileError> {
-        let set_a = self.btreesets.get(&a).ok_or_else(|| CompileError::runtime(format!("Invalid BTreeSet handle: {}", a)))?;
-        let set_b = self.btreesets.get(&b).ok_or_else(|| CompileError::runtime(format!("Invalid BTreeSet handle: {}", b)))?;
+        let set_a = self
+            .btreesets
+            .get(&a)
+            .ok_or_else(|| CompileError::runtime(format!("Invalid BTreeSet handle: {}", a)))?;
+        let set_b = self
+            .btreesets
+            .get(&b)
+            .ok_or_else(|| CompileError::runtime(format!("Invalid BTreeSet handle: {}", b)))?;
         Ok(set_a.is_superset(&set_b))
     }
 }
@@ -430,29 +586,44 @@ impl ConcurrentMapProvider for NativeConcurrentMapProvider {
     }
 
     fn concurrent_map_insert(&self, handle: Handle, key: String, value: Value) -> Result<Value, CompileError> {
-        let map = self.maps.get(&handle).ok_or_else(|| CompileError::runtime(format!("Invalid concurrent map handle: {}", handle)))?;
+        let map = self
+            .maps
+            .get(&handle)
+            .ok_or_else(|| CompileError::runtime(format!("Invalid concurrent map handle: {}", handle)))?;
         let was_new = !map.contains_key(&key);
         map.insert(key, value);
         Ok(Value::Bool(was_new))
     }
 
     fn concurrent_map_get(&self, handle: Handle, key: &str) -> Result<Value, CompileError> {
-        let map = self.maps.get(&handle).ok_or_else(|| CompileError::runtime(format!("Invalid concurrent map handle: {}", handle)))?;
+        let map = self
+            .maps
+            .get(&handle)
+            .ok_or_else(|| CompileError::runtime(format!("Invalid concurrent map handle: {}", handle)))?;
         Ok(map.get(key).map(|v| v.value().clone()).unwrap_or(Value::Nil))
     }
 
     fn concurrent_map_remove(&self, handle: Handle, key: &str) -> Result<Value, CompileError> {
-        let map = self.maps.get(&handle).ok_or_else(|| CompileError::runtime(format!("Invalid concurrent map handle: {}", handle)))?;
+        let map = self
+            .maps
+            .get(&handle)
+            .ok_or_else(|| CompileError::runtime(format!("Invalid concurrent map handle: {}", handle)))?;
         Ok(map.remove(key).map(|(_, v)| v).unwrap_or(Value::Nil))
     }
 
     fn concurrent_map_len(&self, handle: Handle) -> Result<usize, CompileError> {
-        let map = self.maps.get(&handle).ok_or_else(|| CompileError::runtime(format!("Invalid concurrent map handle: {}", handle)))?;
+        let map = self
+            .maps
+            .get(&handle)
+            .ok_or_else(|| CompileError::runtime(format!("Invalid concurrent map handle: {}", handle)))?;
         Ok(map.len())
     }
 
     fn concurrent_map_contains_key(&self, handle: Handle, key: &str) -> Result<bool, CompileError> {
-        let map = self.maps.get(&handle).ok_or_else(|| CompileError::runtime(format!("Invalid concurrent map handle: {}", handle)))?;
+        let map = self
+            .maps
+            .get(&handle)
+            .ok_or_else(|| CompileError::runtime(format!("Invalid concurrent map handle: {}", handle)))?;
         Ok(map.contains_key(key))
     }
 }
@@ -574,13 +745,20 @@ impl ChannelProvider for NativeChannelProvider {
     }
 
     fn channel_send(&self, handle: Handle, value: Value) -> Result<(), CompileError> {
-        let tx = self.senders.get(&handle).ok_or_else(|| CompileError::runtime(format!("Channel {} not found", handle)))?;
-        tx.send(value).map_err(|_| CompileError::runtime("Failed to send to channel"))?;
+        let tx = self
+            .senders
+            .get(&handle)
+            .ok_or_else(|| CompileError::runtime(format!("Channel {} not found", handle)))?;
+        tx.send(value)
+            .map_err(|_| CompileError::runtime("Failed to send to channel"))?;
         Ok(())
     }
 
     fn channel_try_recv(&self, handle: Handle) -> Result<Value, CompileError> {
-        let rx = self.receivers.get(&handle).ok_or_else(|| CompileError::runtime(format!("Channel {} not found", handle)))?;
+        let rx = self
+            .receivers
+            .get(&handle)
+            .ok_or_else(|| CompileError::runtime(format!("Channel {} not found", handle)))?;
         let rx_guard = rx.lock().unwrap();
         match rx_guard.try_recv() {
             Ok(value) => Ok(value),
@@ -589,7 +767,10 @@ impl ChannelProvider for NativeChannelProvider {
     }
 
     fn channel_recv(&self, handle: Handle) -> Result<Value, CompileError> {
-        let rx = self.receivers.get(&handle).ok_or_else(|| CompileError::runtime(format!("Channel {} not found", handle)))?;
+        let rx = self
+            .receivers
+            .get(&handle)
+            .ok_or_else(|| CompileError::runtime(format!("Channel {} not found", handle)))?;
         let rx_clone = rx.clone();
         drop(rx); // Release DashMap ref before blocking
         let rx_guard = rx_clone.lock().unwrap();
@@ -651,7 +832,10 @@ impl LockProvider for NativeLockProvider {
 
     fn mutex_lock(&self, mutex: &Value) -> Result<Value, CompileError> {
         let id = Self::value_to_id(mutex)?;
-        let mtx = self.mutexes.get(&id).ok_or_else(|| CompileError::runtime(format!("Mutex {} not found", id)))?;
+        let mtx = self
+            .mutexes
+            .get(&id)
+            .ok_or_else(|| CompileError::runtime(format!("Mutex {} not found", id)))?;
         let guard = mtx.lock();
         Ok(guard.clone())
     }
@@ -659,7 +843,10 @@ impl LockProvider for NativeLockProvider {
     fn mutex_try_lock(&self, mutex: &Value) -> Result<Value, CompileError> {
         let id = Self::value_to_id(mutex)?;
         let mtx = {
-            let ref_guard = self.mutexes.get(&id).ok_or_else(|| CompileError::runtime(format!("Mutex {} not found", id)))?;
+            let ref_guard = self
+                .mutexes
+                .get(&id)
+                .ok_or_else(|| CompileError::runtime(format!("Mutex {} not found", id)))?;
             ref_guard.value().clone()
         };
         let result = match mtx.try_lock() {
@@ -671,7 +858,10 @@ impl LockProvider for NativeLockProvider {
 
     fn mutex_unlock(&self, mutex: &Value, new_value: Value) -> Result<Value, CompileError> {
         let id = Self::value_to_id(mutex)?;
-        let mtx = self.mutexes.get(&id).ok_or_else(|| CompileError::runtime(format!("Mutex {} not found", id)))?;
+        let mtx = self
+            .mutexes
+            .get(&id)
+            .ok_or_else(|| CompileError::runtime(format!("Mutex {} not found", id)))?;
         let mut guard = mtx.lock();
         *guard = new_value;
         Ok(Value::Int(0)) // Success
@@ -685,14 +875,20 @@ impl LockProvider for NativeLockProvider {
 
     fn rwlock_read(&self, rwlock: &Value) -> Result<Value, CompileError> {
         let id = Self::value_to_id(rwlock)?;
-        let rw = self.rwlocks.get(&id).ok_or_else(|| CompileError::runtime(format!("RwLock {} not found", id)))?;
+        let rw = self
+            .rwlocks
+            .get(&id)
+            .ok_or_else(|| CompileError::runtime(format!("RwLock {} not found", id)))?;
         let guard = rw.read();
         Ok(guard.clone())
     }
 
     fn rwlock_write(&self, rwlock: &Value) -> Result<Value, CompileError> {
         let id = Self::value_to_id(rwlock)?;
-        let rw = self.rwlocks.get(&id).ok_or_else(|| CompileError::runtime(format!("RwLock {} not found", id)))?;
+        let rw = self
+            .rwlocks
+            .get(&id)
+            .ok_or_else(|| CompileError::runtime(format!("RwLock {} not found", id)))?;
         let guard = rw.write();
         Ok(guard.clone())
     }
@@ -700,7 +896,10 @@ impl LockProvider for NativeLockProvider {
     fn rwlock_try_read(&self, rwlock: &Value) -> Result<Value, CompileError> {
         let id = Self::value_to_id(rwlock)?;
         let rw = {
-            let ref_guard = self.rwlocks.get(&id).ok_or_else(|| CompileError::runtime(format!("RwLock {} not found", id)))?;
+            let ref_guard = self
+                .rwlocks
+                .get(&id)
+                .ok_or_else(|| CompileError::runtime(format!("RwLock {} not found", id)))?;
             ref_guard.value().clone()
         };
         let result = match rw.try_read() {
@@ -713,7 +912,10 @@ impl LockProvider for NativeLockProvider {
     fn rwlock_try_write(&self, rwlock: &Value) -> Result<Value, CompileError> {
         let id = Self::value_to_id(rwlock)?;
         let rw = {
-            let ref_guard = self.rwlocks.get(&id).ok_or_else(|| CompileError::runtime(format!("RwLock {} not found", id)))?;
+            let ref_guard = self
+                .rwlocks
+                .get(&id)
+                .ok_or_else(|| CompileError::runtime(format!("RwLock {} not found", id)))?;
             ref_guard.value().clone()
         };
         let result = match rw.try_write() {
@@ -725,7 +927,10 @@ impl LockProvider for NativeLockProvider {
 
     fn rwlock_set(&self, rwlock: &Value, new_value: Value) -> Result<Value, CompileError> {
         let id = Self::value_to_id(rwlock)?;
-        let rw = self.rwlocks.get(&id).ok_or_else(|| CompileError::runtime(format!("RwLock {} not found", id)))?;
+        let rw = self
+            .rwlocks
+            .get(&id)
+            .ok_or_else(|| CompileError::runtime(format!("RwLock {} not found", id)))?;
         let mut guard = rw.write();
         *guard = new_value;
         Ok(Value::Int(0)) // Success
@@ -752,7 +957,11 @@ impl NativeParallelIterProvider {
 }
 
 impl ParallelIterProvider for NativeParallelIterProvider {
-    fn par_map(&self, items: Vec<Value>, f: Box<dyn Fn(Value) -> Result<Value, CompileError> + Send + Sync>) -> Result<Vec<Value>, CompileError> {
+    fn par_map(
+        &self,
+        items: Vec<Value>,
+        f: Box<dyn Fn(Value) -> Result<Value, CompileError> + Send + Sync>,
+    ) -> Result<Vec<Value>, CompileError> {
         let threshold = self.threshold.load(Ordering::Relaxed);
         if items.len() < threshold {
             // Sequential fallback for small collections
@@ -764,14 +973,19 @@ impl ParallelIterProvider for NativeParallelIterProvider {
         results.into_iter().collect()
     }
 
-    fn par_filter(&self, items: Vec<Value>, f: Box<dyn Fn(&Value) -> Result<bool, CompileError> + Send + Sync>) -> Result<Vec<Value>, CompileError> {
+    fn par_filter(
+        &self,
+        items: Vec<Value>,
+        f: Box<dyn Fn(&Value) -> Result<bool, CompileError> + Send + Sync>,
+    ) -> Result<Vec<Value>, CompileError> {
         let threshold = self.threshold.load(Ordering::Relaxed);
         if items.len() < threshold {
             return items.into_iter().filter(|v| f(v).unwrap_or(false)).map(Ok).collect();
         }
 
         use rayon::prelude::*;
-        let results: Vec<(Value, bool)> = items.into_par_iter()
+        let results: Vec<(Value, bool)> = items
+            .into_par_iter()
             .map(|v| {
                 let keep = f(&v).unwrap_or(false);
                 (v, keep)
@@ -780,7 +994,12 @@ impl ParallelIterProvider for NativeParallelIterProvider {
         Ok(results.into_iter().filter(|(_, keep)| *keep).map(|(v, _)| v).collect())
     }
 
-    fn par_reduce(&self, items: Vec<Value>, init: Value, f: Box<dyn Fn(Value, Value) -> Result<Value, CompileError> + Send + Sync>) -> Result<Value, CompileError> {
+    fn par_reduce(
+        &self,
+        items: Vec<Value>,
+        init: Value,
+        f: Box<dyn Fn(Value, Value) -> Result<Value, CompileError> + Send + Sync>,
+    ) -> Result<Value, CompileError> {
         // Parallel reduce is tricky because Value doesn't implement Send
         // in all variants. Use sequential for safety, rayon for large collections
         // when we can confirm sendability.
@@ -791,7 +1010,11 @@ impl ParallelIterProvider for NativeParallelIterProvider {
         Ok(acc)
     }
 
-    fn par_for_each(&self, items: Vec<Value>, f: Box<dyn Fn(Value) -> Result<(), CompileError> + Send + Sync>) -> Result<(), CompileError> {
+    fn par_for_each(
+        &self,
+        items: Vec<Value>,
+        f: Box<dyn Fn(Value) -> Result<(), CompileError> + Send + Sync>,
+    ) -> Result<(), CompileError> {
         let threshold = self.threshold.load(Ordering::Relaxed);
         if items.len() < threshold {
             for item in items {
@@ -802,9 +1025,7 @@ impl ParallelIterProvider for NativeParallelIterProvider {
 
         use rayon::prelude::*;
         // Collect errors from parallel execution
-        let errors: Vec<CompileError> = items.into_par_iter()
-            .filter_map(|v| f(v).err())
-            .collect();
+        let errors: Vec<CompileError> = items.into_par_iter().filter_map(|v| f(v).err()).collect();
 
         if let Some(err) = errors.into_iter().next() {
             Err(err)

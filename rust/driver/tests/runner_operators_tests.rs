@@ -171,7 +171,8 @@ main = SIZE
 
 #[test]
 fn runner_handles_impl_blocks() {
-    run_expect(r#"
+    run_expect(
+        r#"
 struct Point:
     x: i64
     y: i64
@@ -180,13 +181,16 @@ impl Point:
         return self.x + self.y
 let p = Point { x: 10, y: 20 }
 main = p.sum()
-"#, 30);
+"#,
+        30,
+    );
 }
 
 // Context blocks - now working!
 #[test]
 fn runner_handles_context_blocks() {
-    run_expect(r#"
+    run_expect(
+        r#"
 class Container:
     value: i64
 
@@ -198,7 +202,9 @@ var result = 0
 context container:
     result = get_value()
 main = result
-"#, 100);
+"#,
+        100,
+    );
 }
 
 // Macros may need different invocation syntax

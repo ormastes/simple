@@ -34,9 +34,7 @@ fn test_compress_with_auto_download() {
     assert!(output.status.success(), "Compilation failed");
     assert!(test_binary.exists(), "Test binary should exist");
 
-    let original_size = fs::metadata(&test_binary)
-        .expect("Failed to get metadata")
-        .len();
+    let original_size = fs::metadata(&test_binary).expect("Failed to get metadata").len();
 
     println!("✓ Test binary created: {} bytes", original_size);
 
@@ -52,13 +50,10 @@ fn test_compress_with_auto_download() {
             println!("✓ Compression succeeded: {}", output_path);
 
             // Verify it's compressed
-            let is_upx_compressed =
-                is_compressed(output_path.as_str()).expect("Failed to check if compressed");
+            let is_upx_compressed = is_compressed(output_path.as_str()).expect("Failed to check if compressed");
             assert!(is_upx_compressed, "Binary should be UPX-compressed");
 
-            let compressed_size = fs::metadata(&test_binary)
-                .expect("Failed to get metadata")
-                .len();
+            let compressed_size = fs::metadata(&test_binary).expect("Failed to get metadata").len();
             let ratio = original_size as f64 / compressed_size as f64;
 
             println!(
@@ -71,10 +66,7 @@ fn test_compress_with_auto_download() {
                 .output()
                 .expect("Failed to run compressed binary");
 
-            assert!(
-                run_output.status.success(),
-                "Compressed binary should run successfully"
-            );
+            assert!(run_output.status.success(), "Compressed binary should run successfully");
 
             let stdout = String::from_utf8_lossy(&run_output.stdout);
             assert!(

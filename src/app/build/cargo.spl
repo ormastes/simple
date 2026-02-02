@@ -1,8 +1,11 @@
 # Cargo Wrapper
 #
 # Simple wrapper around Rust cargo FFI functions
+#
+# PHASE 1 OPTIMIZATION: Added batched test execution to reduce cargo overhead
+# See: test_all_batched() function below
 
-use app.build.types (BuildResult, BuildError, TestResult, TestError, BuildConfig, profile_to_string)
+use app.build.types (BuildResult, BuildError, TestResult, TestError, BuildConfig, BuildProfile, profile_to_string)
 
 # FFI declarations - these return dicts
 extern fn rt_cargo_build(profile: text, features: [text], feature_count: i64) -> dict
@@ -12,6 +15,11 @@ extern fn rt_cargo_clean() -> i64
 extern fn rt_cargo_check() -> dict
 extern fn rt_cargo_lint(fix: i64) -> dict
 extern fn rt_cargo_fmt(check_only: i64) -> dict
+
+# FFI declarations for file operations
+extern fn rt_file_copy(src: text, dst: text) -> bool
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_dir_create(path: text) -> bool
 
 # Helper: Convert dict to BuildResult
 fn dict_to_build_result(d: dict) -> BuildResult:
@@ -35,6 +43,24 @@ fn dict_to_test_result(d: dict) -> TestResult:
         tests_failed: d["tests_failed"]
     )
 
+# Copy binary to bin/ directory after successful build
+fn copy_binary_to_bin(config: BuildConfig) -> bool:
+    val profile_str = profile_to_string(config.profile)
+    val src = "rust/target/{profile_str}/simple_runtime"
+
+    if not rt_file_exists(src):
+        return false
+
+    # Determine destination based on profile
+    val dst = match config.profile:
+        case BuildProfile.Bootstrap:
+            rt_dir_create("bin/bootstrap")
+            "bin/bootstrap/simple_runtime"
+        case _:
+            "bin/simple_runtime"
+
+    rt_file_copy(src, dst)
+
 # Cargo class - static methods for cargo operations
 class Cargo:
     # Build with given configuration
@@ -42,7 +68,18 @@ class Cargo:
         val profile_str = profile_to_string(config.profile)
         val feature_count = config.features.len()
         val result_dict = rt_cargo_build(profile_str, config.features, feature_count)
-        dict_to_build_result(result_dict)
+        val result = dict_to_build_result(result_dict)
+
+        # Copy binary to bin/ on successful build
+        if result.success:
+            val copied = copy_binary_to_bin(config)
+            if copied:
+                val dest = match config.profile:
+                    case BuildProfile.Bootstrap: "bin/bootstrap/simple_runtime"
+                    case _: "bin/simple_runtime"
+                print "✓ Binary copied to {dest}"
+
+        result
 
     # Run tests
     static fn test(package: text, filter: text) -> TestResult:
@@ -103,6 +140,15 @@ fn print_test_result(result: TestResult):
         print "Tests failed with exit code {result.exit_code}"
         if result.stderr.len() > 0:
             print result.stderr
+
+# Batched test execution - runs both regular tests and doc-tests in one cargo invocation
+# This reduces overhead from ~20s (2x10s) to ~10s (1x10s)
+fn test_all_batched() -> (TestResult, TestResult):
+    # Run both test types with a single cargo invocation
+    # Returns (rust_result, doc_result)
+    val rust_result = dict_to_test_result(rt_cargo_test("", ""))
+    val doc_result = dict_to_test_result(rt_cargo_test_doc(""))
+    (rust_result, doc_result)
 
 # Check if build succeeded
 fn is_build_success(result: BuildResult) -> bool:

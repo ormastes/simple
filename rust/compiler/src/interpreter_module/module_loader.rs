@@ -217,8 +217,8 @@ pub fn load_and_merge_module(
                     //   - path.segments = ["app", "lsp"]
                     //   - target = Single("server")
                     if parent_parts.len() >= 2 {
-                        modified_use_stmt.path.segments = parent_parts[..parent_parts.len()-1].to_vec();
-                        modified_use_stmt.target = ImportTarget::Single(parent_parts[parent_parts.len()-1].clone());
+                        modified_use_stmt.path.segments = parent_parts[..parent_parts.len() - 1].to_vec();
+                        modified_use_stmt.target = ImportTarget::Single(parent_parts[parent_parts.len() - 1].clone());
                     } else if parent_parts.len() == 1 {
                         // Single component like ["spec"] - path is empty, target is the component
                         modified_use_stmt.path.segments = vec![];
@@ -229,24 +229,20 @@ pub fn load_and_merge_module(
                         modified_use_stmt.target = ImportTarget::Glob;
                     }
 
-                    return load_and_merge_module(
-                        &modified_use_stmt,
-                        current_file,
-                        functions,
-                        classes,
-                        enums,
-                    ).and_then(|module_value| {
-                        // Extract the specific item from the loaded module
-                        if let Value::Dict(exports_dict) = &module_value {
-                            if let Some(value) = exports_dict.get(&item_name) {
-                                return Ok(value.clone());
+                    return load_and_merge_module(&modified_use_stmt, current_file, functions, classes, enums)
+                        .and_then(|module_value| {
+                            // Extract the specific item from the loaded module
+                            if let Value::Dict(exports_dict) = &module_value {
+                                if let Some(value) = exports_dict.get(&item_name) {
+                                    return Ok(value.clone());
+                                }
                             }
-                        }
-                        Err(CompileError::Runtime(format!(
-                            "Module {:?} does not export '{}'",
-                            parent_parts.join("."), item_name
-                        )))
-                    });
+                            Err(CompileError::Runtime(format!(
+                                "Module {:?} does not export '{}'",
+                                parent_parts.join("."),
+                                item_name
+                            )))
+                        });
                 }
             }
 
@@ -259,8 +255,7 @@ pub fn load_and_merge_module(
 
     // Check cache first - if we've already loaded this module, return cached exports
     if let Some(cached_exports) = get_cached_module_exports(&module_path) {
-        if let Value::Dict(d) = &cached_exports {
-        }
+        if let Value::Dict(d) = &cached_exports {}
         // Merge cached definitions (classes, functions, enums) into caller's HashMaps
         // This ensures that static method calls work on imported classes
         merge_cached_module_definitions(&module_path, classes, functions, enums);
@@ -349,7 +344,11 @@ pub fn load_and_merge_module(
     let mut exports: HashMap<String, Value> = HashMap::new();
     for (name, value) in module_exports {
         match value {
-            Value::Function { name: fn_name, def, captured_env: existing_env } => {
+            Value::Function {
+                name: fn_name,
+                def,
+                captured_env: existing_env,
+            } => {
                 // Merge: start with the function's existing captured_env (from its defining module),
                 // then overlay with this module's filtered_env. This preserves variables from
                 // sub-modules (e.g., group_stack from dsl.spl when re-exported via __init__.spl).
@@ -387,7 +386,8 @@ pub fn load_and_merge_module(
         classes.insert(name.clone(), class_def.clone());
     }
     for (name, func_def) in &module_functions {
-        if name != "main" {  // Don't add "main" from imported modules
+        if name != "main" {
+            // Don't add "main" from imported modules
             functions.insert(name.clone(), func_def.clone());
         }
     }

@@ -217,7 +217,11 @@ pub extern "C" fn rt_debug_set_active(active: i64) {
 
 #[no_mangle]
 pub extern "C" fn rt_debug_is_active() -> i64 {
-    if debug_state().active { 1 } else { 0 }
+    if debug_state().active {
+        1
+    } else {
+        0
+    }
 }
 
 #[no_mangle]
@@ -235,7 +239,11 @@ pub extern "C" fn rt_debug_remove_breakpoint(file_ptr: i64, file_len: i64, line:
         let slice = std::slice::from_raw_parts(file_ptr as *const u8, file_len as usize);
         std::str::from_utf8_unchecked(slice)
     };
-    if debug_state().remove_breakpoint(file, line as u32) { 1 } else { 0 }
+    if debug_state().remove_breakpoint(file, line as u32) {
+        1
+    } else {
+        0
+    }
 }
 
 #[no_mangle]

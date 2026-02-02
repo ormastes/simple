@@ -73,7 +73,10 @@ impl MathBackend {
     /// Evaluate a math expression using this backend.
     ///
     /// Convenience method that dispatches to the appropriate evaluator.
-    pub fn evaluate(&self, expr: &crate::blocks::math::ast::MathExpr) -> Result<crate::value::Value, crate::error::CompileError> {
+    pub fn evaluate(
+        &self,
+        expr: &crate::blocks::math::ast::MathExpr,
+    ) -> Result<crate::value::Value, crate::error::CompileError> {
         match self {
             MathBackend::Auto => {
                 let complexity = auto_select::analyze_complexity(expr);

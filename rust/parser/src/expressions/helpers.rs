@@ -344,7 +344,12 @@ impl<'a> Parser<'a> {
                 None
             };
 
-            args.push(Argument { name, value, span: arg_span, label });
+            args.push(Argument {
+                name,
+                value,
+                span: arg_span,
+                label,
+            });
 
             // Skip newlines, indent, dedent after argument (for multi-line argument lists)
             while self.check(&TokenKind::Newline) || self.check(&TokenKind::Indent) || self.check(&TokenKind::Dedent) {
@@ -354,12 +359,25 @@ impl<'a> Parser<'a> {
             if !self.check(&TokenKind::RParen) {
                 // Check if we found another identifier (possibly starting a named argument)
                 // This catches: func(a: 1 b: 2) where comma is missing
-                let is_likely_named_arg = matches!(&self.current.kind,
-                    TokenKind::Identifier { .. } |
-                    TokenKind::Type | TokenKind::Default | TokenKind::Result |
-                    TokenKind::From | TokenKind::To | TokenKind::In | TokenKind::Is |
-                    TokenKind::As | TokenKind::Match | TokenKind::Use | TokenKind::Alias | TokenKind::Bounds |
-                    TokenKind::By | TokenKind::Into | TokenKind::Onto | TokenKind::With
+                let is_likely_named_arg = matches!(
+                    &self.current.kind,
+                    TokenKind::Identifier { .. }
+                        | TokenKind::Type
+                        | TokenKind::Default
+                        | TokenKind::Result
+                        | TokenKind::From
+                        | TokenKind::To
+                        | TokenKind::In
+                        | TokenKind::Is
+                        | TokenKind::As
+                        | TokenKind::Match
+                        | TokenKind::Use
+                        | TokenKind::Alias
+                        | TokenKind::Bounds
+                        | TokenKind::By
+                        | TokenKind::Into
+                        | TokenKind::Onto
+                        | TokenKind::With
                 );
 
                 if is_likely_named_arg {
@@ -374,7 +392,10 @@ impl<'a> Parser<'a> {
                         // This is definitely a missing comma before a named argument
                         return Err(ParseError::contextual_error_with_help(
                             "function arguments",
-                            format!("expected comma before argument '{}', found identifier", self.current.lexeme),
+                            format!(
+                                "expected comma before argument '{}', found identifier",
+                                self.current.lexeme
+                            ),
                             self.current.span,
                             Some(format!("Insert comma before '{}'", self.current.lexeme)),
                             "Missing comma between function arguments. Use: func(a: 1, b: 2)",

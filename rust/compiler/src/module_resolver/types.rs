@@ -92,7 +92,9 @@ pub fn get_file_mode(ext: &str) -> FileMode {
 
 /// Get the compiler backend for an extension
 pub fn get_compiler_backend(ext: &str) -> CompilerBackend {
-    get_extension_config(ext).map(|c| c.backend).unwrap_or(CompilerBackend::Interpreted)
+    get_extension_config(ext)
+        .map(|c| c.backend)
+        .unwrap_or(CompilerBackend::Interpreted)
 }
 
 /// Result type for module resolution operations

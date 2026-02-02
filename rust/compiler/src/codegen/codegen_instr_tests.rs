@@ -9,8 +9,8 @@ use crate::codegen::Codegen;
 use crate::hir::{self, PointerKind, TypeId};
 use crate::mir::{MirFunction, MirLocal, MirModule, LocalKind};
 use crate::mir::{
-    BlockId, ContractKind, FStringPart, GpuAtomicOp, GpuMemoryScope, MirInst, MirLiteral,
-    MirPattern, ParallelBackend, PatternBinding, Terminator, UnitOverflowBehavior, VReg,
+    BlockId, ContractKind, FStringPart, GpuAtomicOp, GpuMemoryScope, MirInst, MirLiteral, MirPattern, ParallelBackend,
+    PatternBinding, Terminator, UnitOverflowBehavior, VReg,
 };
 use simple_parser::ast::Visibility;
 
@@ -48,7 +48,10 @@ fn aot_compiles_module(module: MirModule) -> bool {
 fn codegen_const_int() {
     assert!(aot_compiles("const_int", |f| {
         let dest = f.new_vreg();
-        f.block_mut(BlockId(0)).unwrap().instructions.push(MirInst::ConstInt { dest, value: 42 });
+        f.block_mut(BlockId(0))
+            .unwrap()
+            .instructions
+            .push(MirInst::ConstInt { dest, value: 42 });
         dest
     }));
 }
@@ -60,7 +63,12 @@ fn codegen_const_float() {
         let dest = f.new_vreg();
         let block = f.block_mut(BlockId(0)).unwrap();
         block.instructions.push(MirInst::ConstFloat { dest: fv, value: 3.14 });
-        block.instructions.push(MirInst::Cast { dest, source: fv, from_ty: TypeId::F64, to_ty: TypeId::I64 });
+        block.instructions.push(MirInst::Cast {
+            dest,
+            source: fv,
+            from_ty: TypeId::F64,
+            to_ty: TypeId::I64,
+        });
         dest
     }));
 }
@@ -69,7 +77,10 @@ fn codegen_const_float() {
 fn codegen_const_bool_true() {
     assert!(aot_compiles("const_bool_t", |f| {
         let dest = f.new_vreg();
-        f.block_mut(BlockId(0)).unwrap().instructions.push(MirInst::ConstBool { dest, value: true });
+        f.block_mut(BlockId(0))
+            .unwrap()
+            .instructions
+            .push(MirInst::ConstBool { dest, value: true });
         dest
     }));
 }
@@ -78,7 +89,10 @@ fn codegen_const_bool_true() {
 fn codegen_const_bool_false() {
     assert!(aot_compiles("const_bool_f", |f| {
         let dest = f.new_vreg();
-        f.block_mut(BlockId(0)).unwrap().instructions.push(MirInst::ConstBool { dest, value: false });
+        f.block_mut(BlockId(0))
+            .unwrap()
+            .instructions
+            .push(MirInst::ConstBool { dest, value: false });
         dest
     }));
 }
@@ -106,7 +120,11 @@ fn codegen_unary_negate() {
         let dest = f.new_vreg();
         let block = f.block_mut(BlockId(0)).unwrap();
         block.instructions.push(MirInst::ConstInt { dest: src, value: 42 });
-        block.instructions.push(MirInst::UnaryOp { dest, op: hir::UnaryOp::Neg, operand: src });
+        block.instructions.push(MirInst::UnaryOp {
+            dest,
+            op: hir::UnaryOp::Neg,
+            operand: src,
+        });
         dest
     }));
 }
@@ -118,7 +136,11 @@ fn codegen_unary_not() {
         let dest = f.new_vreg();
         let block = f.block_mut(BlockId(0)).unwrap();
         block.instructions.push(MirInst::ConstBool { dest: src, value: true });
-        block.instructions.push(MirInst::UnaryOp { dest, op: hir::UnaryOp::Not, operand: src });
+        block.instructions.push(MirInst::UnaryOp {
+            dest,
+            op: hir::UnaryOp::Not,
+            operand: src,
+        });
         dest
     }));
 }
@@ -131,8 +153,18 @@ fn codegen_cast_int_to_float_to_int() {
         let dest = f.new_vreg();
         let block = f.block_mut(BlockId(0)).unwrap();
         block.instructions.push(MirInst::ConstInt { dest: i, value: 7 });
-        block.instructions.push(MirInst::Cast { dest: fv, source: i, from_ty: TypeId::I64, to_ty: TypeId::F64 });
-        block.instructions.push(MirInst::Cast { dest, source: fv, from_ty: TypeId::F64, to_ty: TypeId::I64 });
+        block.instructions.push(MirInst::Cast {
+            dest: fv,
+            source: i,
+            from_ty: TypeId::I64,
+            to_ty: TypeId::F64,
+        });
+        block.instructions.push(MirInst::Cast {
+            dest,
+            source: fv,
+            from_ty: TypeId::F64,
+            to_ty: TypeId::I64,
+        });
         dest
     }));
 }
@@ -153,16 +185,31 @@ fn codegen_binop_all_ops() {
         let block = f.block_mut(BlockId(0)).unwrap();
         block.instructions.push(MirInst::ConstInt { dest: va, value: a });
         block.instructions.push(MirInst::ConstInt { dest: vb, value: b });
-        block.instructions.push(MirInst::BinOp { dest, op, left: va, right: vb });
+        block.instructions.push(MirInst::BinOp {
+            dest,
+            op,
+            left: va,
+            right: vb,
+        });
         block.terminator = Terminator::Return(Some(dest));
         f
     }
 
-    module.functions.push(make_binop_func("add_test", hir::BinOp::Add, 10, 32));
-    module.functions.push(make_binop_func("sub_test", hir::BinOp::Sub, 50, 8));
-    module.functions.push(make_binop_func("mul_test", hir::BinOp::Mul, 6, 7));
-    module.functions.push(make_binop_func("div_test", hir::BinOp::Div, 84, 2));
-    module.functions.push(make_binop_func("eq_test", hir::BinOp::Eq, 42, 42));
+    module
+        .functions
+        .push(make_binop_func("add_test", hir::BinOp::Add, 10, 32));
+    module
+        .functions
+        .push(make_binop_func("sub_test", hir::BinOp::Sub, 50, 8));
+    module
+        .functions
+        .push(make_binop_func("mul_test", hir::BinOp::Mul, 6, 7));
+    module
+        .functions
+        .push(make_binop_func("div_test", hir::BinOp::Div, 84, 2));
+    module
+        .functions
+        .push(make_binop_func("eq_test", hir::BinOp::Eq, 42, 42));
     module.functions.push(make_binop_func("lt_test", hir::BinOp::Lt, 5, 10));
 
     assert!(aot_compiles_module(module));
@@ -185,10 +232,21 @@ fn codegen_local_addr_store_load() {
         let val = f.new_vreg();
         let loaded = f.new_vreg();
         let block = f.block_mut(BlockId(0)).unwrap();
-        block.instructions.push(MirInst::LocalAddr { dest: addr, local_index: 0 });
+        block.instructions.push(MirInst::LocalAddr {
+            dest: addr,
+            local_index: 0,
+        });
         block.instructions.push(MirInst::ConstInt { dest: val, value: 42 });
-        block.instructions.push(MirInst::Store { addr, value: val, ty: TypeId::I64 });
-        block.instructions.push(MirInst::Load { dest: loaded, addr, ty: TypeId::I64 });
+        block.instructions.push(MirInst::Store {
+            addr,
+            value: val,
+            ty: TypeId::I64,
+        });
+        block.instructions.push(MirInst::Load {
+            dest: loaded,
+            addr,
+            ty: TypeId::I64,
+        });
         loaded
     }));
 }
@@ -205,8 +263,14 @@ fn codegen_box_unbox_int() {
         let unboxed = f.new_vreg();
         let block = f.block_mut(BlockId(0)).unwrap();
         block.instructions.push(MirInst::ConstInt { dest: val, value: 42 });
-        block.instructions.push(MirInst::BoxInt { dest: boxed, value: val });
-        block.instructions.push(MirInst::UnboxInt { dest: unboxed, value: boxed });
+        block.instructions.push(MirInst::BoxInt {
+            dest: boxed,
+            value: val,
+        });
+        block.instructions.push(MirInst::UnboxInt {
+            dest: unboxed,
+            value: boxed,
+        });
         unboxed
     }));
 }
@@ -220,9 +284,20 @@ fn codegen_box_unbox_float() {
         let dest = f.new_vreg();
         let block = f.block_mut(BlockId(0)).unwrap();
         block.instructions.push(MirInst::ConstFloat { dest: fval, value: 7.0 });
-        block.instructions.push(MirInst::BoxFloat { dest: boxed, value: fval });
-        block.instructions.push(MirInst::UnboxFloat { dest: unboxed, value: boxed });
-        block.instructions.push(MirInst::Cast { dest, source: unboxed, from_ty: TypeId::F64, to_ty: TypeId::I64 });
+        block.instructions.push(MirInst::BoxFloat {
+            dest: boxed,
+            value: fval,
+        });
+        block.instructions.push(MirInst::UnboxFloat {
+            dest: unboxed,
+            value: boxed,
+        });
+        block.instructions.push(MirInst::Cast {
+            dest,
+            source: unboxed,
+            from_ty: TypeId::F64,
+            to_ty: TypeId::I64,
+        });
         dest
     }));
 }
@@ -237,7 +312,10 @@ fn codegen_drop_noop() {
         let val = f.new_vreg();
         let block = f.block_mut(BlockId(0)).unwrap();
         block.instructions.push(MirInst::ConstInt { dest: val, value: 42 });
-        block.instructions.push(MirInst::Drop { value: val, ty: TypeId::I64 });
+        block.instructions.push(MirInst::Drop {
+            value: val,
+            ty: TypeId::I64,
+        });
         val
     }));
 }
@@ -263,9 +341,16 @@ fn codegen_decision_probe() {
         let cond = f.new_vreg();
         let ret = f.new_vreg();
         let block = f.block_mut(BlockId(0)).unwrap();
-        block.instructions.push(MirInst::ConstBool { dest: cond, value: true });
+        block.instructions.push(MirInst::ConstBool {
+            dest: cond,
+            value: true,
+        });
         block.instructions.push(MirInst::DecisionProbe {
-            decision_id: 0, result: cond, file: "test.spl".to_string(), line: 1, column: 1,
+            decision_id: 0,
+            result: cond,
+            file: "test.spl".to_string(),
+            line: 1,
+            column: 1,
         });
         block.instructions.push(MirInst::ConstInt { dest: ret, value: 42 });
         ret
@@ -278,10 +363,17 @@ fn codegen_condition_probe() {
         let cond = f.new_vreg();
         let ret = f.new_vreg();
         let block = f.block_mut(BlockId(0)).unwrap();
-        block.instructions.push(MirInst::ConstBool { dest: cond, value: true });
+        block.instructions.push(MirInst::ConstBool {
+            dest: cond,
+            value: true,
+        });
         block.instructions.push(MirInst::ConditionProbe {
-            decision_id: 0, condition_id: 0, result: cond,
-            file: "test.spl".to_string(), line: 1, column: 1,
+            decision_id: 0,
+            condition_id: 0,
+            result: cond,
+            file: "test.spl".to_string(),
+            line: 1,
+            column: 1,
         });
         block.instructions.push(MirInst::ConstInt { dest: ret, value: 42 });
         ret
@@ -293,7 +385,10 @@ fn codegen_path_probe() {
     assert!(aot_compiles("path_probe", |f| {
         let ret = f.new_vreg();
         let block = f.block_mut(BlockId(0)).unwrap();
-        block.instructions.push(MirInst::PathProbe { path_id: 0, block_id: 0 });
+        block.instructions.push(MirInst::PathProbe {
+            path_id: 0,
+            block_id: 0,
+        });
         block.instructions.push(MirInst::ConstInt { dest: ret, value: 42 });
         ret
     }));
@@ -310,8 +405,11 @@ fn codegen_unit_bound_check() {
         let block = f.block_mut(BlockId(0)).unwrap();
         block.instructions.push(MirInst::ConstInt { dest: val, value: 50 });
         block.instructions.push(MirInst::UnitBoundCheck {
-            value: val, unit_name: "Score".to_string(),
-            min: 0, max: 100, overflow: UnitOverflowBehavior::Default,
+            value: val,
+            unit_name: "Score".to_string(),
+            min: 0,
+            max: 100,
+            overflow: UnitOverflowBehavior::Default,
         });
         val
     }));
@@ -325,7 +423,11 @@ fn codegen_unit_widen() {
         let block = f.block_mut(BlockId(0)).unwrap();
         block.instructions.push(MirInst::ConstInt { dest: val, value: 42 });
         block.instructions.push(MirInst::UnitWiden {
-            dest, value: val, from_bits: 8, to_bits: 16, signed: true,
+            dest,
+            value: val,
+            from_bits: 8,
+            to_bits: 16,
+            signed: true,
         });
         dest
     }));
@@ -339,7 +441,11 @@ fn codegen_unit_narrow() {
         let block = f.block_mut(BlockId(0)).unwrap();
         block.instructions.push(MirInst::ConstInt { dest: val, value: 42 });
         block.instructions.push(MirInst::UnitNarrow {
-            dest, value: val, from_bits: 16, to_bits: 8, signed: true,
+            dest,
+            value: val,
+            from_bits: 16,
+            to_bits: 8,
+            signed: true,
             overflow: UnitOverflowBehavior::Saturate,
         });
         dest
@@ -353,7 +459,12 @@ fn codegen_unit_saturate() {
         let dest = f.new_vreg();
         let block = f.block_mut(BlockId(0)).unwrap();
         block.instructions.push(MirInst::ConstInt { dest: val, value: 300 });
-        block.instructions.push(MirInst::UnitSaturate { dest, value: val, min: 0, max: 255 });
+        block.instructions.push(MirInst::UnitSaturate {
+            dest,
+            value: val,
+            min: 0,
+            max: 255,
+        });
         dest
     }));
 }
@@ -367,7 +478,9 @@ fn codegen_enum_unit() {
     assert!(aot_compiles("enum_unit", |f| {
         let dest = f.new_vreg();
         f.block_mut(BlockId(0)).unwrap().instructions.push(MirInst::EnumUnit {
-            dest, enum_name: "Color".to_string(), variant_name: "Red".to_string(),
+            dest,
+            enum_name: "Color".to_string(),
+            variant_name: "Red".to_string(),
         });
         dest
     }));
@@ -379,9 +492,15 @@ fn codegen_enum_with() {
         let payload = f.new_vreg();
         let dest = f.new_vreg();
         let block = f.block_mut(BlockId(0)).unwrap();
-        block.instructions.push(MirInst::ConstInt { dest: payload, value: 42 });
+        block.instructions.push(MirInst::ConstInt {
+            dest: payload,
+            value: 42,
+        });
         block.instructions.push(MirInst::EnumWith {
-            dest, enum_name: "Option".to_string(), variant_name: "Some".to_string(), payload,
+            dest,
+            enum_name: "Option".to_string(),
+            variant_name: "Some".to_string(),
+            payload,
         });
         dest
     }));
@@ -394,7 +513,9 @@ fn codegen_enum_discriminant() {
         let dest = f.new_vreg();
         let block = f.block_mut(BlockId(0)).unwrap();
         block.instructions.push(MirInst::EnumUnit {
-            dest: val, enum_name: "Color".to_string(), variant_name: "Red".to_string(),
+            dest: val,
+            enum_name: "Color".to_string(),
+            variant_name: "Red".to_string(),
         });
         block.instructions.push(MirInst::EnumDiscriminant { dest, value: val });
         dest
@@ -408,9 +529,15 @@ fn codegen_enum_payload() {
         let wrapped = f.new_vreg();
         let dest = f.new_vreg();
         let block = f.block_mut(BlockId(0)).unwrap();
-        block.instructions.push(MirInst::ConstInt { dest: payload, value: 42 });
+        block.instructions.push(MirInst::ConstInt {
+            dest: payload,
+            value: 42,
+        });
         block.instructions.push(MirInst::EnumWith {
-            dest: wrapped, enum_name: "Option".to_string(), variant_name: "Some".to_string(), payload,
+            dest: wrapped,
+            enum_name: "Option".to_string(),
+            variant_name: "Some".to_string(),
+            payload,
         });
         block.instructions.push(MirInst::EnumPayload { dest, value: wrapped });
         dest
@@ -428,7 +555,11 @@ fn codegen_union_wrap() {
         let dest = f.new_vreg();
         let block = f.block_mut(BlockId(0)).unwrap();
         block.instructions.push(MirInst::ConstInt { dest: val, value: 42 });
-        block.instructions.push(MirInst::UnionWrap { dest, value: val, type_index: 0 });
+        block.instructions.push(MirInst::UnionWrap {
+            dest,
+            value: val,
+            type_index: 0,
+        });
         dest
     }));
 }
@@ -441,8 +572,14 @@ fn codegen_union_discriminant() {
         let dest = f.new_vreg();
         let block = f.block_mut(BlockId(0)).unwrap();
         block.instructions.push(MirInst::ConstInt { dest: val, value: 42 });
-        block.instructions.push(MirInst::UnionWrap { dest: wrapped, value: val, type_index: 0 });
-        block.instructions.push(MirInst::UnionDiscriminant { dest, value: wrapped });
+        block.instructions.push(MirInst::UnionWrap {
+            dest: wrapped,
+            value: val,
+            type_index: 0,
+        });
+        block
+            .instructions
+            .push(MirInst::UnionDiscriminant { dest, value: wrapped });
         dest
     }));
 }
@@ -455,8 +592,16 @@ fn codegen_union_payload() {
         let dest = f.new_vreg();
         let block = f.block_mut(BlockId(0)).unwrap();
         block.instructions.push(MirInst::ConstInt { dest: val, value: 42 });
-        block.instructions.push(MirInst::UnionWrap { dest: wrapped, value: val, type_index: 0 });
-        block.instructions.push(MirInst::UnionPayload { dest, value: wrapped, type_index: 0 });
+        block.instructions.push(MirInst::UnionWrap {
+            dest: wrapped,
+            value: val,
+            type_index: 0,
+        });
+        block.instructions.push(MirInst::UnionPayload {
+            dest,
+            value: wrapped,
+            type_index: 0,
+        });
         dest
     }));
 }
@@ -481,7 +626,10 @@ fn codegen_option_some() {
 fn codegen_option_none() {
     assert!(aot_compiles("opt_none", |f| {
         let dest = f.new_vreg();
-        f.block_mut(BlockId(0)).unwrap().instructions.push(MirInst::OptionNone { dest });
+        f.block_mut(BlockId(0))
+            .unwrap()
+            .instructions
+            .push(MirInst::OptionNone { dest });
         dest
     }));
 }
@@ -524,9 +672,17 @@ fn codegen_try_unwrap() {
     let block = func.block_mut(BlockId(0)).unwrap();
     block.instructions.push(MirInst::ConstInt { dest: val, value: 42 });
     block.instructions.push(MirInst::OptionSome { dest: opt, value: val });
-    block.instructions.push(MirInst::TryUnwrap { dest, value: opt, error_block, error_dest });
+    block.instructions.push(MirInst::TryUnwrap {
+        dest,
+        value: opt,
+        error_block,
+        error_dest,
+    });
 
-    assert!(func.blocks[0].instructions.iter().any(|i| matches!(i, MirInst::TryUnwrap { .. })));
+    assert!(func.blocks[0]
+        .instructions
+        .iter()
+        .any(|i| matches!(i, MirInst::TryUnwrap { .. })));
 }
 
 // =============================================================================
@@ -540,7 +696,11 @@ fn codegen_pointer_new() {
         let dest = f.new_vreg();
         let block = f.block_mut(BlockId(0)).unwrap();
         block.instructions.push(MirInst::ConstInt { dest: val, value: 42 });
-        block.instructions.push(MirInst::PointerNew { dest, kind: PointerKind::Unique, value: val });
+        block.instructions.push(MirInst::PointerNew {
+            dest,
+            kind: PointerKind::Unique,
+            value: val,
+        });
         dest
     }));
 }
@@ -553,8 +713,16 @@ fn codegen_pointer_ref_deref() {
         let dest = f.new_vreg();
         let block = f.block_mut(BlockId(0)).unwrap();
         block.instructions.push(MirInst::ConstInt { dest: val, value: 42 });
-        block.instructions.push(MirInst::PointerRef { dest: ptr, kind: PointerKind::Borrow, source: val });
-        block.instructions.push(MirInst::PointerDeref { dest, pointer: ptr, kind: PointerKind::Borrow });
+        block.instructions.push(MirInst::PointerRef {
+            dest: ptr,
+            kind: PointerKind::Borrow,
+            source: val,
+        });
+        block.instructions.push(MirInst::PointerDeref {
+            dest,
+            pointer: ptr,
+            kind: PointerKind::Borrow,
+        });
         dest
     }));
 }
@@ -569,10 +737,15 @@ fn codegen_contract_check() {
         let cond = f.new_vreg();
         let ret = f.new_vreg();
         let block = f.block_mut(BlockId(0)).unwrap();
-        block.instructions.push(MirInst::ConstBool { dest: cond, value: true });
+        block.instructions.push(MirInst::ConstBool {
+            dest: cond,
+            value: true,
+        });
         block.instructions.push(MirInst::ContractCheck {
-            condition: cond, kind: ContractKind::Precondition,
-            func_name: "contract_chk".to_string(), message: None,
+            condition: cond,
+            kind: ContractKind::Precondition,
+            func_name: "contract_chk".to_string(),
+            message: None,
         });
         block.instructions.push(MirInst::ConstInt { dest: ret, value: 42 });
         ret
@@ -586,7 +759,9 @@ fn codegen_contract_old_capture() {
         let dest = f.new_vreg();
         let block = f.block_mut(BlockId(0)).unwrap();
         block.instructions.push(MirInst::ConstInt { dest: val, value: 42 });
-        block.instructions.push(MirInst::ContractOldCapture { dest, value: val });
+        block
+            .instructions
+            .push(MirInst::ContractOldCapture { dest, value: val });
         dest
     }));
 }
@@ -620,7 +795,10 @@ fn codegen_array_lit() {
         let block = f.block_mut(BlockId(0)).unwrap();
         block.instructions.push(MirInst::ConstInt { dest: a, value: 1 });
         block.instructions.push(MirInst::ConstInt { dest: b, value: 2 });
-        block.instructions.push(MirInst::ArrayLit { dest, elements: vec![a, b] });
+        block.instructions.push(MirInst::ArrayLit {
+            dest,
+            elements: vec![a, b],
+        });
         dest
     }));
 }
@@ -634,7 +812,10 @@ fn codegen_tuple_lit() {
         let block = f.block_mut(BlockId(0)).unwrap();
         block.instructions.push(MirInst::ConstInt { dest: a, value: 1 });
         block.instructions.push(MirInst::ConstInt { dest: b, value: 2 });
-        block.instructions.push(MirInst::TupleLit { dest, elements: vec![a, b] });
+        block.instructions.push(MirInst::TupleLit {
+            dest,
+            elements: vec![a, b],
+        });
         dest
     }));
 }
@@ -648,7 +829,11 @@ fn codegen_dict_lit() {
         let block = f.block_mut(BlockId(0)).unwrap();
         block.instructions.push(MirInst::ConstInt { dest: k, value: 1 });
         block.instructions.push(MirInst::ConstInt { dest: v, value: 42 });
-        block.instructions.push(MirInst::DictLit { dest, keys: vec![k], values: vec![v] });
+        block.instructions.push(MirInst::DictLit {
+            dest,
+            keys: vec![k],
+            values: vec![v],
+        });
         dest
     }));
 }
@@ -660,7 +845,10 @@ fn codegen_vec_lit() {
         let dest = f.new_vreg();
         let block = f.block_mut(BlockId(0)).unwrap();
         block.instructions.push(MirInst::ConstInt { dest: a, value: 1 });
-        block.instructions.push(MirInst::VecLit { dest, elements: vec![a] });
+        block.instructions.push(MirInst::VecLit {
+            dest,
+            elements: vec![a],
+        });
         dest
     }));
 }
@@ -678,9 +866,16 @@ fn codegen_index_get() {
         let dest = f.new_vreg();
         let block = f.block_mut(BlockId(0)).unwrap();
         block.instructions.push(MirInst::ConstInt { dest: a, value: 42 });
-        block.instructions.push(MirInst::ArrayLit { dest: arr, elements: vec![a] });
+        block.instructions.push(MirInst::ArrayLit {
+            dest: arr,
+            elements: vec![a],
+        });
         block.instructions.push(MirInst::ConstInt { dest: idx, value: 0 });
-        block.instructions.push(MirInst::IndexGet { dest, collection: arr, index: idx });
+        block.instructions.push(MirInst::IndexGet {
+            dest,
+            collection: arr,
+            index: idx,
+        });
         dest
     }));
 }
@@ -694,10 +889,17 @@ fn codegen_index_set() {
         let val = f.new_vreg();
         let block = f.block_mut(BlockId(0)).unwrap();
         block.instructions.push(MirInst::ConstInt { dest: a, value: 0 });
-        block.instructions.push(MirInst::ArrayLit { dest: arr, elements: vec![a] });
+        block.instructions.push(MirInst::ArrayLit {
+            dest: arr,
+            elements: vec![a],
+        });
         block.instructions.push(MirInst::ConstInt { dest: idx, value: 0 });
         block.instructions.push(MirInst::ConstInt { dest: val, value: 42 });
-        block.instructions.push(MirInst::IndexSet { collection: arr, index: idx, value: val });
+        block.instructions.push(MirInst::IndexSet {
+            collection: arr,
+            index: idx,
+            value: val,
+        });
         arr
     }));
 }
@@ -713,10 +915,17 @@ fn codegen_slice_op() {
         let block = f.block_mut(BlockId(0)).unwrap();
         block.instructions.push(MirInst::ConstInt { dest: a, value: 1 });
         block.instructions.push(MirInst::ConstInt { dest: b, value: 2 });
-        block.instructions.push(MirInst::ArrayLit { dest: arr, elements: vec![a, b] });
+        block.instructions.push(MirInst::ArrayLit {
+            dest: arr,
+            elements: vec![a, b],
+        });
         block.instructions.push(MirInst::ConstInt { dest: start, value: 0 });
         block.instructions.push(MirInst::SliceOp {
-            dest, collection: arr, start: Some(start), end: None, step: None,
+            dest,
+            collection: arr,
+            start: Some(start),
+            end: None,
+            step: None,
         });
         dest
     }));
@@ -730,9 +939,13 @@ fn codegen_slice_op() {
 fn codegen_const_string() {
     assert!(aot_compiles("const_str", |f| {
         let dest = f.new_vreg();
-        f.block_mut(BlockId(0)).unwrap().instructions.push(MirInst::ConstString {
-            dest, value: "hello".to_string(),
-        });
+        f.block_mut(BlockId(0))
+            .unwrap()
+            .instructions
+            .push(MirInst::ConstString {
+                dest,
+                value: "hello".to_string(),
+            });
         dest
     }));
 }
@@ -741,9 +954,13 @@ fn codegen_const_string() {
 fn codegen_const_symbol() {
     assert!(aot_compiles("const_sym", |f| {
         let dest = f.new_vreg();
-        f.block_mut(BlockId(0)).unwrap().instructions.push(MirInst::ConstSymbol {
-            dest, value: "my_sym".to_string(),
-        });
+        f.block_mut(BlockId(0))
+            .unwrap()
+            .instructions
+            .push(MirInst::ConstSymbol {
+                dest,
+                value: "my_sym".to_string(),
+            });
         dest
     }));
 }
@@ -756,13 +973,13 @@ fn codegen_fstring_format() {
         let dest = f.new_vreg();
         let block = f.block_mut(BlockId(0)).unwrap();
         block.instructions.push(MirInst::ConstInt { dest: val, value: 42 });
-        block.instructions.push(MirInst::BoxInt { dest: boxed, value: val });
+        block.instructions.push(MirInst::BoxInt {
+            dest: boxed,
+            value: val,
+        });
         block.instructions.push(MirInst::FStringFormat {
             dest,
-            parts: vec![
-                FStringPart::Literal("value=".to_string()),
-                FStringPart::Expr(boxed),
-            ],
+            parts: vec![FStringPart::Literal("value=".to_string()), FStringPart::Expr(boxed)],
         });
         dest
     }));
@@ -790,11 +1007,20 @@ fn codegen_struct_init_field_get_set() {
             field_values: vec![val],
         });
         block.instructions.push(MirInst::FieldGet {
-            dest: got, object: obj, byte_offset: 0, field_type: TypeId::I64,
+            dest: got,
+            object: obj,
+            byte_offset: 0,
+            field_type: TypeId::I64,
         });
-        block.instructions.push(MirInst::ConstInt { dest: newval, value: 99 });
+        block.instructions.push(MirInst::ConstInt {
+            dest: newval,
+            value: 99,
+        });
         block.instructions.push(MirInst::FieldSet {
-            object: obj, byte_offset: 0, field_type: TypeId::I64, value: newval,
+            object: obj,
+            byte_offset: 0,
+            field_type: TypeId::I64,
+            value: newval,
         });
         got
     }));
@@ -810,8 +1036,10 @@ fn codegen_closure_create_and_indirect_call() {
     let mut func = MirFunction::new("identity".to_string(), TypeId::I64, Visibility::Public);
     let param_vreg = func.new_vreg();
     func.params.push(MirLocal {
-        name: "x".to_string(), ty: TypeId::I64,
-        kind: LocalKind::Parameter, is_ghost: false,
+        name: "x".to_string(),
+        ty: TypeId::I64,
+        kind: LocalKind::Parameter,
+        is_ghost: false,
     });
     func.block_mut(BlockId(0)).unwrap().terminator = Terminator::Return(Some(param_vreg));
 
@@ -857,8 +1085,10 @@ fn codegen_method_call_static() {
     let mut target = MirFunction::new("Point::get_x".to_string(), TypeId::I64, Visibility::Public);
     let self_vreg = target.new_vreg();
     target.params.push(MirLocal {
-        name: "self".to_string(), ty: TypeId::I64,
-        kind: LocalKind::Parameter, is_ghost: false,
+        name: "self".to_string(),
+        ty: TypeId::I64,
+        kind: LocalKind::Parameter,
+        is_ghost: false,
     });
     target.block_mut(BlockId(0)).unwrap().terminator = Terminator::Return(Some(self_vreg));
 
@@ -868,8 +1098,10 @@ fn codegen_method_call_static() {
     let block = main.block_mut(BlockId(0)).unwrap();
     block.instructions.push(MirInst::ConstInt { dest: recv, value: 42 });
     block.instructions.push(MirInst::MethodCallStatic {
-        dest: Some(dest), receiver: recv,
-        func_name: "Point::get_x".to_string(), args: vec![],
+        dest: Some(dest),
+        receiver: recv,
+        func_name: "Point::get_x".to_string(),
+        args: vec![],
     });
     block.terminator = Terminator::Return(Some(dest));
 
@@ -888,8 +1120,12 @@ fn codegen_method_call_virtual() {
         let block = f.block_mut(BlockId(0)).unwrap();
         block.instructions.push(MirInst::ConstInt { dest: recv, value: 42 });
         block.instructions.push(MirInst::MethodCallVirtual {
-            dest: Some(dest), receiver: recv, vtable_slot: 0,
-            param_types: vec![], return_type: TypeId::I64, args: vec![],
+            dest: Some(dest),
+            receiver: recv,
+            vtable_slot: 0,
+            param_types: vec![],
+            return_type: TypeId::I64,
+            args: vec![],
         });
         dest
     }));
@@ -903,10 +1139,16 @@ fn codegen_builtin_method() {
         let dest = f.new_vreg();
         let block = f.block_mut(BlockId(0)).unwrap();
         block.instructions.push(MirInst::ConstInt { dest: recv, value: 1 });
-        block.instructions.push(MirInst::ArrayLit { dest: arr, elements: vec![recv] });
+        block.instructions.push(MirInst::ArrayLit {
+            dest: arr,
+            elements: vec![recv],
+        });
         block.instructions.push(MirInst::BuiltinMethod {
-            dest: Some(dest), receiver: arr,
-            receiver_type: "Array".to_string(), method: "len".to_string(), args: vec![],
+            dest: Some(dest),
+            receiver: arr,
+            receiver_type: "Array".to_string(),
+            method: "len".to_string(),
+            args: vec![],
         });
         dest
     }));
@@ -918,9 +1160,12 @@ fn codegen_extern_method_call() {
         let dest = f.new_vreg();
         let block = f.block_mut(BlockId(0)).unwrap();
         block.instructions.push(MirInst::ExternMethodCall {
-            dest: Some(dest), receiver: None,
-            class_name: "Math".to_string(), method_name: "pi".to_string(),
-            is_static: true, args: vec![],
+            dest: Some(dest),
+            receiver: None,
+            class_name: "Math".to_string(),
+            method_name: "pi".to_string(),
+            is_static: true,
+            args: vec![],
         });
         dest
     }));
@@ -936,9 +1181,14 @@ fn codegen_pattern_test() {
         let subject = f.new_vreg();
         let dest = f.new_vreg();
         let block = f.block_mut(BlockId(0)).unwrap();
-        block.instructions.push(MirInst::ConstInt { dest: subject, value: 42 });
+        block.instructions.push(MirInst::ConstInt {
+            dest: subject,
+            value: 42,
+        });
         block.instructions.push(MirInst::PatternTest {
-            dest, subject, pattern: MirPattern::Literal(MirLiteral::Int(42)),
+            dest,
+            subject,
+            pattern: MirPattern::Literal(MirLiteral::Int(42)),
         });
         dest
     }));
@@ -950,10 +1200,17 @@ fn codegen_pattern_bind() {
         let subject = f.new_vreg();
         let dest = f.new_vreg();
         let block = f.block_mut(BlockId(0)).unwrap();
-        block.instructions.push(MirInst::ConstInt { dest: subject, value: 42 });
+        block.instructions.push(MirInst::ConstInt {
+            dest: subject,
+            value: 42,
+        });
         block.instructions.push(MirInst::PatternBind {
-            dest, subject,
-            binding: PatternBinding { name: "x".to_string(), path: vec![] },
+            dest,
+            subject,
+            binding: PatternBinding {
+                name: "x".to_string(),
+                path: vec![],
+            },
         });
         dest
     }));
@@ -969,7 +1226,9 @@ fn codegen_interp_call() {
         let dest = f.new_vreg();
         let block = f.block_mut(BlockId(0)).unwrap();
         block.instructions.push(MirInst::InterpCall {
-            dest: Some(dest), func_name: "test_func".to_string(), args: vec![],
+            dest: Some(dest),
+            func_name: "test_func".to_string(),
+            args: vec![],
         });
         dest
     }));
@@ -979,7 +1238,10 @@ fn codegen_interp_call() {
 fn codegen_interp_eval() {
     assert!(aot_compiles("interp_eval", |f| {
         let dest = f.new_vreg();
-        f.block_mut(BlockId(0)).unwrap().instructions.push(MirInst::InterpEval { dest, expr_index: 0 });
+        f.block_mut(BlockId(0))
+            .unwrap()
+            .instructions
+            .push(MirInst::InterpEval { dest, expr_index: 0 });
         dest
     }));
 }
@@ -992,7 +1254,10 @@ fn codegen_interp_eval() {
 fn codegen_gc_alloc() {
     assert!(aot_compiles("gc_alloc", |f| {
         let dest = f.new_vreg();
-        f.block_mut(BlockId(0)).unwrap().instructions.push(MirInst::GcAlloc { dest, ty: TypeId::I64 });
+        f.block_mut(BlockId(0))
+            .unwrap()
+            .instructions
+            .push(MirInst::GcAlloc { dest, ty: TypeId::I64 });
         dest
     }));
 }
@@ -1004,7 +1269,10 @@ fn codegen_wait() {
         let dest = f.new_vreg();
         let block = f.block_mut(BlockId(0)).unwrap();
         block.instructions.push(MirInst::ConstInt { dest: target, value: 0 });
-        block.instructions.push(MirInst::Wait { dest: Some(dest), target });
+        block.instructions.push(MirInst::Wait {
+            dest: Some(dest),
+            target,
+        });
         dest
     }));
 }
@@ -1018,7 +1286,9 @@ fn codegen_get_element_ptr() {
         let block = f.block_mut(BlockId(0)).unwrap();
         block.instructions.push(MirInst::ConstInt { dest: base, value: 0 });
         block.instructions.push(MirInst::ConstInt { dest: idx, value: 0 });
-        block.instructions.push(MirInst::GetElementPtr { dest, base, index: idx });
+        block
+            .instructions
+            .push(MirInst::GetElementPtr { dest, base, index: idx });
         dest
     }));
 }
@@ -1035,10 +1305,14 @@ fn codegen_global_load_store() {
     let block = func.block_mut(BlockId(0)).unwrap();
     block.instructions.push(MirInst::ConstInt { dest: val, value: 42 });
     block.instructions.push(MirInst::GlobalStore {
-        global_name: "MY_GLOBAL".to_string(), value: val, ty: TypeId::I64,
+        global_name: "MY_GLOBAL".to_string(),
+        value: val,
+        ty: TypeId::I64,
     });
     block.instructions.push(MirInst::GlobalLoad {
-        dest: loaded, global_name: "MY_GLOBAL".to_string(), ty: TypeId::I64,
+        dest: loaded,
+        global_name: "MY_GLOBAL".to_string(),
+        ty: TypeId::I64,
     });
     block.terminator = Terminator::Return(Some(loaded));
 
@@ -1059,9 +1333,15 @@ fn codegen_future_create() {
         let dest = f.new_vreg();
         let body_block = f.new_block();
         let ret = f.new_vreg();
-        f.block_mut(body_block).unwrap().instructions.push(MirInst::ConstInt { dest: ret, value: 42 });
+        f.block_mut(body_block)
+            .unwrap()
+            .instructions
+            .push(MirInst::ConstInt { dest: ret, value: 42 });
         f.block_mut(body_block).unwrap().terminator = Terminator::Return(Some(ret));
-        f.block_mut(BlockId(0)).unwrap().instructions.push(MirInst::FutureCreate { dest, body_block });
+        f.block_mut(BlockId(0))
+            .unwrap()
+            .instructions
+            .push(MirInst::FutureCreate { dest, body_block });
         dest
     }));
 }
@@ -1084,9 +1364,15 @@ fn codegen_actor_spawn() {
         let dest = f.new_vreg();
         let body_block = f.new_block();
         let ret = f.new_vreg();
-        f.block_mut(body_block).unwrap().instructions.push(MirInst::ConstInt { dest: ret, value: 0 });
+        f.block_mut(body_block)
+            .unwrap()
+            .instructions
+            .push(MirInst::ConstInt { dest: ret, value: 0 });
         f.block_mut(body_block).unwrap().terminator = Terminator::Return(Some(ret));
-        f.block_mut(BlockId(0)).unwrap().instructions.push(MirInst::ActorSpawn { dest, body_block });
+        f.block_mut(BlockId(0))
+            .unwrap()
+            .instructions
+            .push(MirInst::ActorSpawn { dest, body_block });
         dest
     }));
 }
@@ -1110,7 +1396,10 @@ fn codegen_actor_send() {
 fn codegen_actor_recv() {
     assert!(aot_compiles("actor_recv", |f| {
         let dest = f.new_vreg();
-        f.block_mut(BlockId(0)).unwrap().instructions.push(MirInst::ActorRecv { dest });
+        f.block_mut(BlockId(0))
+            .unwrap()
+            .instructions
+            .push(MirInst::ActorRecv { dest });
         dest
     }));
 }
@@ -1121,9 +1410,15 @@ fn codegen_generator_create() {
         let dest = f.new_vreg();
         let body_block = f.new_block();
         let ret = f.new_vreg();
-        f.block_mut(body_block).unwrap().instructions.push(MirInst::ConstInt { dest: ret, value: 0 });
+        f.block_mut(body_block)
+            .unwrap()
+            .instructions
+            .push(MirInst::ConstInt { dest: ret, value: 0 });
         f.block_mut(body_block).unwrap().terminator = Terminator::Return(Some(ret));
-        f.block_mut(BlockId(0)).unwrap().instructions.push(MirInst::GeneratorCreate { dest, body_block });
+        f.block_mut(BlockId(0))
+            .unwrap()
+            .instructions
+            .push(MirInst::GeneratorCreate { dest, body_block });
         dest
     }));
 }
@@ -1165,8 +1460,16 @@ fn codegen_par_map() {
         let dest = f.new_vreg();
         let block = f.block_mut(BlockId(0)).unwrap();
         block.instructions.push(MirInst::ConstInt { dest: input, value: 0 });
-        block.instructions.push(MirInst::ConstInt { dest: closure, value: 0 });
-        block.instructions.push(MirInst::ParMap { dest, input, closure, backend: None });
+        block.instructions.push(MirInst::ConstInt {
+            dest: closure,
+            value: 0,
+        });
+        block.instructions.push(MirInst::ParMap {
+            dest,
+            input,
+            closure,
+            backend: None,
+        });
         dest
     }));
 }
@@ -1180,9 +1483,21 @@ fn codegen_par_reduce() {
         let dest = f.new_vreg();
         let block = f.block_mut(BlockId(0)).unwrap();
         block.instructions.push(MirInst::ConstInt { dest: input, value: 0 });
-        block.instructions.push(MirInst::ConstInt { dest: initial, value: 0 });
-        block.instructions.push(MirInst::ConstInt { dest: closure, value: 0 });
-        block.instructions.push(MirInst::ParReduce { dest, input, initial, closure, backend: None });
+        block.instructions.push(MirInst::ConstInt {
+            dest: initial,
+            value: 0,
+        });
+        block.instructions.push(MirInst::ConstInt {
+            dest: closure,
+            value: 0,
+        });
+        block.instructions.push(MirInst::ParReduce {
+            dest,
+            input,
+            initial,
+            closure,
+            backend: None,
+        });
         dest
     }));
 }
@@ -1196,7 +1511,12 @@ fn codegen_par_filter() {
         let block = f.block_mut(BlockId(0)).unwrap();
         block.instructions.push(MirInst::ConstInt { dest: input, value: 0 });
         block.instructions.push(MirInst::ConstInt { dest: pred, value: 0 });
-        block.instructions.push(MirInst::ParFilter { dest, input, predicate: pred, backend: None });
+        block.instructions.push(MirInst::ParFilter {
+            dest,
+            input,
+            predicate: pred,
+            backend: None,
+        });
         dest
     }));
 }
@@ -1209,8 +1529,15 @@ fn codegen_par_for_each() {
         let ret = f.new_vreg();
         let block = f.block_mut(BlockId(0)).unwrap();
         block.instructions.push(MirInst::ConstInt { dest: input, value: 0 });
-        block.instructions.push(MirInst::ConstInt { dest: closure, value: 0 });
-        block.instructions.push(MirInst::ParForEach { input, closure, backend: None });
+        block.instructions.push(MirInst::ConstInt {
+            dest: closure,
+            value: 0,
+        });
+        block.instructions.push(MirInst::ParForEach {
+            input,
+            closure,
+            backend: None,
+        });
         block.instructions.push(MirInst::ConstInt { dest: ret, value: 0 });
         ret
     }));
@@ -1224,9 +1551,14 @@ fn codegen_par_for_each() {
 fn codegen_gpu_shared_alloc() {
     assert!(aot_compiles("gpu_shmem", |f| {
         let dest = f.new_vreg();
-        f.block_mut(BlockId(0)).unwrap().instructions.push(MirInst::GpuSharedAlloc {
-            dest, element_type: TypeId::F64, size: 64,
-        });
+        f.block_mut(BlockId(0))
+            .unwrap()
+            .instructions
+            .push(MirInst::GpuSharedAlloc {
+                dest,
+                element_type: TypeId::F64,
+                size: 64,
+            });
         dest
     }));
 }
@@ -1239,7 +1571,9 @@ fn codegen_neighbor_load() {
         let block = f.block_mut(BlockId(0)).unwrap();
         block.instructions.push(MirInst::ConstInt { dest: arr, value: 0 });
         block.instructions.push(MirInst::NeighborLoad {
-            dest, array: arr, direction: hir::NeighborDirection::Left,
+            dest,
+            array: arr,
+            direction: hir::NeighborDirection::Left,
         });
         dest
     }));
@@ -1255,7 +1589,10 @@ fn push_vec1(f: &mut MirFunction) -> VReg {
     let vec = f.new_vreg();
     let block = f.block_mut(BlockId(0)).unwrap();
     block.instructions.push(MirInst::ConstInt { dest: elem, value: 1 });
-    block.instructions.push(MirInst::VecLit { dest: vec, elements: vec![elem] });
+    block.instructions.push(MirInst::VecLit {
+        dest: vec,
+        elements: vec![elem],
+    });
     vec
 }
 
@@ -1264,7 +1601,10 @@ fn codegen_vec_sum() {
     assert!(aot_compiles("vec_sum", |f| {
         let src = push_vec1(f);
         let dest = f.new_vreg();
-        f.block_mut(BlockId(0)).unwrap().instructions.push(MirInst::VecSum { dest, source: src });
+        f.block_mut(BlockId(0))
+            .unwrap()
+            .instructions
+            .push(MirInst::VecSum { dest, source: src });
         dest
     }));
 }
@@ -1274,7 +1614,10 @@ fn codegen_vec_product() {
     assert!(aot_compiles("vec_product", |f| {
         let src = push_vec1(f);
         let dest = f.new_vreg();
-        f.block_mut(BlockId(0)).unwrap().instructions.push(MirInst::VecProduct { dest, source: src });
+        f.block_mut(BlockId(0))
+            .unwrap()
+            .instructions
+            .push(MirInst::VecProduct { dest, source: src });
         dest
     }));
 }
@@ -1284,7 +1627,10 @@ fn codegen_vec_min() {
     assert!(aot_compiles("vec_min", |f| {
         let src = push_vec1(f);
         let dest = f.new_vreg();
-        f.block_mut(BlockId(0)).unwrap().instructions.push(MirInst::VecMin { dest, source: src });
+        f.block_mut(BlockId(0))
+            .unwrap()
+            .instructions
+            .push(MirInst::VecMin { dest, source: src });
         dest
     }));
 }
@@ -1294,7 +1640,10 @@ fn codegen_vec_max() {
     assert!(aot_compiles("vec_max", |f| {
         let src = push_vec1(f);
         let dest = f.new_vreg();
-        f.block_mut(BlockId(0)).unwrap().instructions.push(MirInst::VecMax { dest, source: src });
+        f.block_mut(BlockId(0))
+            .unwrap()
+            .instructions
+            .push(MirInst::VecMax { dest, source: src });
         dest
     }));
 }
@@ -1304,7 +1653,10 @@ fn codegen_vec_all() {
     assert!(aot_compiles("vec_all", |f| {
         let src = push_vec1(f);
         let dest = f.new_vreg();
-        f.block_mut(BlockId(0)).unwrap().instructions.push(MirInst::VecAll { dest, source: src });
+        f.block_mut(BlockId(0))
+            .unwrap()
+            .instructions
+            .push(MirInst::VecAll { dest, source: src });
         dest
     }));
 }
@@ -1314,7 +1666,10 @@ fn codegen_vec_any() {
     assert!(aot_compiles("vec_any", |f| {
         let src = push_vec1(f);
         let dest = f.new_vreg();
-        f.block_mut(BlockId(0)).unwrap().instructions.push(MirInst::VecAny { dest, source: src });
+        f.block_mut(BlockId(0))
+            .unwrap()
+            .instructions
+            .push(MirInst::VecAny { dest, source: src });
         dest
     }));
 }
@@ -1327,7 +1682,11 @@ fn codegen_vec_extract() {
         let dest = f.new_vreg();
         let block = f.block_mut(BlockId(0)).unwrap();
         block.instructions.push(MirInst::ConstInt { dest: idx, value: 0 });
-        block.instructions.push(MirInst::VecExtract { dest, vector: src, index: idx });
+        block.instructions.push(MirInst::VecExtract {
+            dest,
+            vector: src,
+            index: idx,
+        });
         dest
     }));
 }
@@ -1342,7 +1701,12 @@ fn codegen_vec_with() {
         let block = f.block_mut(BlockId(0)).unwrap();
         block.instructions.push(MirInst::ConstInt { dest: idx, value: 0 });
         block.instructions.push(MirInst::ConstInt { dest: val, value: 99 });
-        block.instructions.push(MirInst::VecWith { dest, vector: src, index: idx, value: val });
+        block.instructions.push(MirInst::VecWith {
+            dest,
+            vector: src,
+            index: idx,
+            value: val,
+        });
         dest
     }));
 }
@@ -1352,7 +1716,10 @@ fn codegen_vec_sqrt() {
     assert!(aot_compiles("vec_sqrt", |f| {
         let src = push_vec1(f);
         let dest = f.new_vreg();
-        f.block_mut(BlockId(0)).unwrap().instructions.push(MirInst::VecSqrt { dest, source: src });
+        f.block_mut(BlockId(0))
+            .unwrap()
+            .instructions
+            .push(MirInst::VecSqrt { dest, source: src });
         dest
     }));
 }
@@ -1362,7 +1729,10 @@ fn codegen_vec_abs() {
     assert!(aot_compiles("vec_abs", |f| {
         let src = push_vec1(f);
         let dest = f.new_vreg();
-        f.block_mut(BlockId(0)).unwrap().instructions.push(MirInst::VecAbs { dest, source: src });
+        f.block_mut(BlockId(0))
+            .unwrap()
+            .instructions
+            .push(MirInst::VecAbs { dest, source: src });
         dest
     }));
 }
@@ -1372,7 +1742,10 @@ fn codegen_vec_floor() {
     assert!(aot_compiles("vec_floor", |f| {
         let src = push_vec1(f);
         let dest = f.new_vreg();
-        f.block_mut(BlockId(0)).unwrap().instructions.push(MirInst::VecFloor { dest, source: src });
+        f.block_mut(BlockId(0))
+            .unwrap()
+            .instructions
+            .push(MirInst::VecFloor { dest, source: src });
         dest
     }));
 }
@@ -1382,7 +1755,10 @@ fn codegen_vec_ceil() {
     assert!(aot_compiles("vec_ceil", |f| {
         let src = push_vec1(f);
         let dest = f.new_vreg();
-        f.block_mut(BlockId(0)).unwrap().instructions.push(MirInst::VecCeil { dest, source: src });
+        f.block_mut(BlockId(0))
+            .unwrap()
+            .instructions
+            .push(MirInst::VecCeil { dest, source: src });
         dest
     }));
 }
@@ -1392,7 +1768,10 @@ fn codegen_vec_round() {
     assert!(aot_compiles("vec_round", |f| {
         let src = push_vec1(f);
         let dest = f.new_vreg();
-        f.block_mut(BlockId(0)).unwrap().instructions.push(MirInst::VecRound { dest, source: src });
+        f.block_mut(BlockId(0))
+            .unwrap()
+            .instructions
+            .push(MirInst::VecRound { dest, source: src });
         dest
     }));
 }
@@ -1402,7 +1781,10 @@ fn codegen_vec_recip() {
     assert!(aot_compiles("vec_recip", |f| {
         let src = push_vec1(f);
         let dest = f.new_vreg();
-        f.block_mut(BlockId(0)).unwrap().instructions.push(MirInst::VecRecip { dest, source: src });
+        f.block_mut(BlockId(0))
+            .unwrap()
+            .instructions
+            .push(MirInst::VecRecip { dest, source: src });
         dest
     }));
 }
@@ -1413,7 +1795,11 @@ fn codegen_vec_shuffle() {
         let src = push_vec1(f);
         let indices = push_vec1(f);
         let dest = f.new_vreg();
-        f.block_mut(BlockId(0)).unwrap().instructions.push(MirInst::VecShuffle { dest, source: src, indices });
+        f.block_mut(BlockId(0)).unwrap().instructions.push(MirInst::VecShuffle {
+            dest,
+            source: src,
+            indices,
+        });
         dest
     }));
 }
@@ -1425,7 +1811,12 @@ fn codegen_vec_blend() {
         let b = push_vec1(f);
         let indices = push_vec1(f);
         let dest = f.new_vreg();
-        f.block_mut(BlockId(0)).unwrap().instructions.push(MirInst::VecBlend { dest, first: a, second: b, indices });
+        f.block_mut(BlockId(0)).unwrap().instructions.push(MirInst::VecBlend {
+            dest,
+            first: a,
+            second: b,
+            indices,
+        });
         dest
     }));
 }
@@ -1437,7 +1828,12 @@ fn codegen_vec_select() {
         let a = push_vec1(f);
         let b = push_vec1(f);
         let dest = f.new_vreg();
-        f.block_mut(BlockId(0)).unwrap().instructions.push(MirInst::VecSelect { dest, mask, if_true: a, if_false: b });
+        f.block_mut(BlockId(0)).unwrap().instructions.push(MirInst::VecSelect {
+            dest,
+            mask,
+            if_true: a,
+            if_false: b,
+        });
         dest
     }));
 }
@@ -1451,7 +1847,11 @@ fn codegen_vec_load() {
         let block = f.block_mut(BlockId(0)).unwrap();
         block.instructions.push(MirInst::ConstInt { dest: arr, value: 0 });
         block.instructions.push(MirInst::ConstInt { dest: off, value: 0 });
-        block.instructions.push(MirInst::VecLoad { dest, array: arr, offset: off });
+        block.instructions.push(MirInst::VecLoad {
+            dest,
+            array: arr,
+            offset: off,
+        });
         dest
     }));
 }
@@ -1466,7 +1866,11 @@ fn codegen_vec_store() {
         let block = f.block_mut(BlockId(0)).unwrap();
         block.instructions.push(MirInst::ConstInt { dest: arr, value: 0 });
         block.instructions.push(MirInst::ConstInt { dest: off, value: 0 });
-        block.instructions.push(MirInst::VecStore { source: src, array: arr, offset: off });
+        block.instructions.push(MirInst::VecStore {
+            source: src,
+            array: arr,
+            offset: off,
+        });
         block.instructions.push(MirInst::ConstInt { dest: ret, value: 0 });
         ret
     }));
@@ -1480,7 +1884,11 @@ fn codegen_vec_gather() {
         let dest = f.new_vreg();
         let block = f.block_mut(BlockId(0)).unwrap();
         block.instructions.push(MirInst::ConstInt { dest: arr, value: 0 });
-        block.instructions.push(MirInst::VecGather { dest, array: arr, indices });
+        block.instructions.push(MirInst::VecGather {
+            dest,
+            array: arr,
+            indices,
+        });
         dest
     }));
 }
@@ -1494,7 +1902,11 @@ fn codegen_vec_scatter() {
         let ret = f.new_vreg();
         let block = f.block_mut(BlockId(0)).unwrap();
         block.instructions.push(MirInst::ConstInt { dest: arr, value: 0 });
-        block.instructions.push(MirInst::VecScatter { source: src, array: arr, indices });
+        block.instructions.push(MirInst::VecScatter {
+            source: src,
+            array: arr,
+            indices,
+        });
         block.instructions.push(MirInst::ConstInt { dest: ret, value: 0 });
         ret
     }));
@@ -1507,7 +1919,10 @@ fn codegen_vec_fma() {
         let b = push_vec1(f);
         let c = push_vec1(f);
         let dest = f.new_vreg();
-        f.block_mut(BlockId(0)).unwrap().instructions.push(MirInst::VecFma { dest, a, b, c });
+        f.block_mut(BlockId(0))
+            .unwrap()
+            .instructions
+            .push(MirInst::VecFma { dest, a, b, c });
         dest
     }));
 }
@@ -1523,7 +1938,13 @@ fn codegen_vec_masked_load() {
         let block = f.block_mut(BlockId(0)).unwrap();
         block.instructions.push(MirInst::ConstInt { dest: arr, value: 0 });
         block.instructions.push(MirInst::ConstInt { dest: off, value: 0 });
-        block.instructions.push(MirInst::VecMaskedLoad { dest, array: arr, offset: off, mask, default: def });
+        block.instructions.push(MirInst::VecMaskedLoad {
+            dest,
+            array: arr,
+            offset: off,
+            mask,
+            default: def,
+        });
         dest
     }));
 }
@@ -1539,7 +1960,12 @@ fn codegen_vec_masked_store() {
         let block = f.block_mut(BlockId(0)).unwrap();
         block.instructions.push(MirInst::ConstInt { dest: arr, value: 0 });
         block.instructions.push(MirInst::ConstInt { dest: off, value: 0 });
-        block.instructions.push(MirInst::VecMaskedStore { source: src, array: arr, offset: off, mask });
+        block.instructions.push(MirInst::VecMaskedStore {
+            source: src,
+            array: arr,
+            offset: off,
+            mask,
+        });
         block.instructions.push(MirInst::ConstInt { dest: ret, value: 0 });
         ret
     }));
@@ -1551,7 +1977,10 @@ fn codegen_vec_min_vec() {
         let a = push_vec1(f);
         let b = push_vec1(f);
         let dest = f.new_vreg();
-        f.block_mut(BlockId(0)).unwrap().instructions.push(MirInst::VecMinVec { dest, a, b });
+        f.block_mut(BlockId(0))
+            .unwrap()
+            .instructions
+            .push(MirInst::VecMinVec { dest, a, b });
         dest
     }));
 }
@@ -1562,7 +1991,10 @@ fn codegen_vec_max_vec() {
         let a = push_vec1(f);
         let b = push_vec1(f);
         let dest = f.new_vreg();
-        f.block_mut(BlockId(0)).unwrap().instructions.push(MirInst::VecMaxVec { dest, a, b });
+        f.block_mut(BlockId(0))
+            .unwrap()
+            .instructions
+            .push(MirInst::VecMaxVec { dest, a, b });
         dest
     }));
 }
@@ -1574,7 +2006,12 @@ fn codegen_vec_clamp() {
         let lo = push_vec1(f);
         let hi = push_vec1(f);
         let dest = f.new_vreg();
-        f.block_mut(BlockId(0)).unwrap().instructions.push(MirInst::VecClamp { dest, source: src, lo, hi });
+        f.block_mut(BlockId(0)).unwrap().instructions.push(MirInst::VecClamp {
+            dest,
+            source: src,
+            lo,
+            hi,
+        });
         dest
     }));
 }
@@ -1592,7 +2029,12 @@ fn codegen_gpu_atomic() {
         let block = f.block_mut(BlockId(0)).unwrap();
         block.instructions.push(MirInst::ConstInt { dest: ptr, value: 0 });
         block.instructions.push(MirInst::ConstInt { dest: val, value: 1 });
-        block.instructions.push(MirInst::GpuAtomic { dest, op: GpuAtomicOp::Add, ptr, value: val });
+        block.instructions.push(MirInst::GpuAtomic {
+            dest,
+            op: GpuAtomicOp::Add,
+            ptr,
+            value: val,
+        });
         dest
     }));
 }
@@ -1606,9 +2048,20 @@ fn codegen_gpu_atomic_cmpxchg() {
         let dest = f.new_vreg();
         let block = f.block_mut(BlockId(0)).unwrap();
         block.instructions.push(MirInst::ConstInt { dest: ptr, value: 0 });
-        block.instructions.push(MirInst::ConstInt { dest: expected, value: 0 });
-        block.instructions.push(MirInst::ConstInt { dest: desired, value: 1 });
-        block.instructions.push(MirInst::GpuAtomicCmpXchg { dest, ptr, expected, desired });
+        block.instructions.push(MirInst::ConstInt {
+            dest: expected,
+            value: 0,
+        });
+        block.instructions.push(MirInst::ConstInt {
+            dest: desired,
+            value: 1,
+        });
+        block.instructions.push(MirInst::GpuAtomicCmpXchg {
+            dest,
+            ptr,
+            expected,
+            desired,
+        });
         dest
     }));
 }
@@ -1621,7 +2074,10 @@ fn codegen_gpu_atomic_cmpxchg() {
 fn codegen_gpu_global_id() {
     assert!(aot_compiles("gpu_gid", |f| {
         let dest = f.new_vreg();
-        f.block_mut(BlockId(0)).unwrap().instructions.push(MirInst::GpuGlobalId { dest, dim: 0 });
+        f.block_mut(BlockId(0))
+            .unwrap()
+            .instructions
+            .push(MirInst::GpuGlobalId { dest, dim: 0 });
         dest
     }));
 }
@@ -1630,7 +2086,10 @@ fn codegen_gpu_global_id() {
 fn codegen_gpu_local_id() {
     assert!(aot_compiles("gpu_lid", |f| {
         let dest = f.new_vreg();
-        f.block_mut(BlockId(0)).unwrap().instructions.push(MirInst::GpuLocalId { dest, dim: 0 });
+        f.block_mut(BlockId(0))
+            .unwrap()
+            .instructions
+            .push(MirInst::GpuLocalId { dest, dim: 0 });
         dest
     }));
 }
@@ -1639,7 +2098,10 @@ fn codegen_gpu_local_id() {
 fn codegen_gpu_group_id() {
     assert!(aot_compiles("gpu_grid", |f| {
         let dest = f.new_vreg();
-        f.block_mut(BlockId(0)).unwrap().instructions.push(MirInst::GpuGroupId { dest, dim: 0 });
+        f.block_mut(BlockId(0))
+            .unwrap()
+            .instructions
+            .push(MirInst::GpuGroupId { dest, dim: 0 });
         dest
     }));
 }
@@ -1648,7 +2110,10 @@ fn codegen_gpu_group_id() {
 fn codegen_gpu_global_size() {
     assert!(aot_compiles("gpu_gsz", |f| {
         let dest = f.new_vreg();
-        f.block_mut(BlockId(0)).unwrap().instructions.push(MirInst::GpuGlobalSize { dest, dim: 0 });
+        f.block_mut(BlockId(0))
+            .unwrap()
+            .instructions
+            .push(MirInst::GpuGlobalSize { dest, dim: 0 });
         dest
     }));
 }
@@ -1657,7 +2122,10 @@ fn codegen_gpu_global_size() {
 fn codegen_gpu_local_size() {
     assert!(aot_compiles("gpu_lsz", |f| {
         let dest = f.new_vreg();
-        f.block_mut(BlockId(0)).unwrap().instructions.push(MirInst::GpuLocalSize { dest, dim: 0 });
+        f.block_mut(BlockId(0))
+            .unwrap()
+            .instructions
+            .push(MirInst::GpuLocalSize { dest, dim: 0 });
         dest
     }));
 }
@@ -1666,7 +2134,10 @@ fn codegen_gpu_local_size() {
 fn codegen_gpu_num_groups() {
     assert!(aot_compiles("gpu_ngrp", |f| {
         let dest = f.new_vreg();
-        f.block_mut(BlockId(0)).unwrap().instructions.push(MirInst::GpuNumGroups { dest, dim: 0 });
+        f.block_mut(BlockId(0))
+            .unwrap()
+            .instructions
+            .push(MirInst::GpuNumGroups { dest, dim: 0 });
         dest
     }));
 }
@@ -1687,7 +2158,9 @@ fn codegen_gpu_mem_fence() {
     assert!(aot_compiles("gpu_fence", |f| {
         let ret = f.new_vreg();
         let block = f.block_mut(BlockId(0)).unwrap();
-        block.instructions.push(MirInst::GpuMemFence { scope: GpuMemoryScope::Device });
+        block.instructions.push(MirInst::GpuMemFence {
+            scope: GpuMemoryScope::Device,
+        });
         block.instructions.push(MirInst::ConstInt { dest: ret, value: 0 });
         ret
     }));
@@ -1732,14 +2205,21 @@ fn codegen_call() {
     let mut target = MirFunction::new("add_one".to_string(), TypeId::I64, Visibility::Public);
     let param = target.new_vreg();
     target.params.push(MirLocal {
-        name: "x".to_string(), ty: TypeId::I64,
-        kind: LocalKind::Parameter, is_ghost: false,
+        name: "x".to_string(),
+        ty: TypeId::I64,
+        kind: LocalKind::Parameter,
+        is_ghost: false,
     });
     let one = target.new_vreg();
     let result = target.new_vreg();
     let block = target.block_mut(BlockId(0)).unwrap();
     block.instructions.push(MirInst::ConstInt { dest: one, value: 1 });
-    block.instructions.push(MirInst::BinOp { dest: result, op: hir::BinOp::Add, left: param, right: one });
+    block.instructions.push(MirInst::BinOp {
+        dest: result,
+        op: hir::BinOp::Add,
+        left: param,
+        right: one,
+    });
     block.terminator = Terminator::Return(Some(result));
 
     let mut main = MirFunction::new("call_test".to_string(), TypeId::I64, Visibility::Public);

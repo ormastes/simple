@@ -7,8 +7,8 @@
 
 use simple_compiler::concurrent_providers::registry::ConcurrentProviderRegistry;
 use simple_compiler::concurrent_providers::{
-    ConcurrentBackend, ChannelProvider, ConcurrentMapProvider, Handle,
-    LockProvider, MapProvider, ParallelIterProvider, ThreadProvider,
+    ConcurrentBackend, ChannelProvider, ConcurrentMapProvider, Handle, LockProvider, MapProvider, ParallelIterProvider,
+    ThreadProvider,
 };
 use simple_compiler::concurrent_providers::native_impl::*;
 use simple_compiler::concurrent_providers::std_impl::*;
@@ -39,7 +39,10 @@ fn registry_pure_std_backend() {
 #[test]
 fn backend_parse() {
     assert_eq!(ConcurrentBackend::parse("std").unwrap(), ConcurrentBackend::PureStd);
-    assert_eq!(ConcurrentBackend::parse("pure_std").unwrap(), ConcurrentBackend::PureStd);
+    assert_eq!(
+        ConcurrentBackend::parse("pure_std").unwrap(),
+        ConcurrentBackend::PureStd
+    );
     assert_eq!(ConcurrentBackend::parse("native").unwrap(), ConcurrentBackend::Native);
     assert!(ConcurrentBackend::parse("invalid").is_err());
 }
@@ -170,7 +173,10 @@ fn native_btreemap_ordering() {
     p.btreemap_insert(h, "a".into(), Value::Int(1)).unwrap();
     p.btreemap_insert(h, "b".into(), Value::Int(2)).unwrap();
     let keys = p.btreemap_keys(h).unwrap();
-    assert_eq!(keys, vec![Value::Str("a".into()), Value::Str("b".into()), Value::Str("c".into())]);
+    assert_eq!(
+        keys,
+        vec![Value::Str("a".into()), Value::Str("b".into()), Value::Str("c".into())]
+    );
     assert_eq!(p.btreemap_first_key(h).unwrap(), Value::Str("a".into()));
     assert_eq!(p.btreemap_last_key(h).unwrap(), Value::Str("c".into()));
 }
@@ -217,7 +223,10 @@ fn native_btreeset_set_ops() {
     assert_eq!(p.btreeset_len(p.btreeset_union(a, b).unwrap()).unwrap(), 3);
     assert_eq!(p.btreeset_len(p.btreeset_intersection(a, b).unwrap()).unwrap(), 1);
     assert_eq!(p.btreeset_len(p.btreeset_difference(a, b).unwrap()).unwrap(), 1);
-    assert_eq!(p.btreeset_len(p.btreeset_symmetric_difference(a, b).unwrap()).unwrap(), 2);
+    assert_eq!(
+        p.btreeset_len(p.btreeset_symmetric_difference(a, b).unwrap()).unwrap(),
+        2
+    );
     assert!(p.btreeset_is_subset(a, p.btreeset_union(a, b).unwrap()).unwrap());
 }
 
@@ -246,7 +255,8 @@ fn native_concurrent_map_multithread() {
     for i in 0..10 {
         let p = p.clone();
         let handle = std::thread::spawn(move || {
-            p.concurrent_map_insert(h, format!("key_{}", i), Value::Int(i as i64)).unwrap();
+            p.concurrent_map_insert(h, format!("key_{}", i), Value::Int(i as i64))
+                .unwrap();
         });
         handles.push(handle);
     }
@@ -443,12 +453,15 @@ fn native_thread_is_done() {
 fn native_par_map() {
     let p = NativeParallelIterProvider::new();
     let items = vec![Value::Int(1), Value::Int(2), Value::Int(3)];
-    let result = p.par_map(items, Box::new(|v| {
-        match v {
-            Value::Int(n) => Ok(Value::Int(n * 2)),
-            _ => Ok(v),
-        }
-    })).unwrap();
+    let result = p
+        .par_map(
+            items,
+            Box::new(|v| match v {
+                Value::Int(n) => Ok(Value::Int(n * 2)),
+                _ => Ok(v),
+            }),
+        )
+        .unwrap();
     assert_eq!(result, vec![Value::Int(2), Value::Int(4), Value::Int(6)]);
 }
 
@@ -456,12 +469,15 @@ fn native_par_map() {
 fn native_par_filter() {
     let p = NativeParallelIterProvider::new();
     let items = vec![Value::Int(1), Value::Int(2), Value::Int(3), Value::Int(4)];
-    let result = p.par_filter(items, Box::new(|v| {
-        match v {
-            Value::Int(n) => Ok(*n % 2 == 0),
-            _ => Ok(false),
-        }
-    })).unwrap();
+    let result = p
+        .par_filter(
+            items,
+            Box::new(|v| match v {
+                Value::Int(n) => Ok(*n % 2 == 0),
+                _ => Ok(false),
+            }),
+        )
+        .unwrap();
     assert_eq!(result, vec![Value::Int(2), Value::Int(4)]);
 }
 
@@ -469,12 +485,16 @@ fn native_par_filter() {
 fn native_par_reduce() {
     let p = NativeParallelIterProvider::new();
     let items = vec![Value::Int(1), Value::Int(2), Value::Int(3)];
-    let result = p.par_reduce(items, Value::Int(0), Box::new(|acc, v| {
-        match (acc, v) {
-            (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a + b)),
-            _ => Ok(Value::Int(0)),
-        }
-    })).unwrap();
+    let result = p
+        .par_reduce(
+            items,
+            Value::Int(0),
+            Box::new(|acc, v| match (acc, v) {
+                (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a + b)),
+                _ => Ok(Value::Int(0)),
+            }),
+        )
+        .unwrap();
     assert_eq!(result, Value::Int(6));
 }
 

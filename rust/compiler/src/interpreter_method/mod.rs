@@ -114,7 +114,11 @@ pub(crate) fn evaluate_method_call(
             let needle = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
             let matched = match &recv_val {
                 Value::Str(s) => {
-                    if let Value::Str(n) = &needle { s.contains(n.as_str()) } else { false }
+                    if let Value::Str(n) = &needle {
+                        s.contains(n.as_str())
+                    } else {
+                        false
+                    }
                 }
                 Value::Array(arr) => arr.contains(&needle),
                 _ => false,
@@ -254,7 +258,16 @@ pub(crate) fn evaluate_method_call(
             return Ok(Value::Bool(matched));
         }
         "to_start_with" => {
-            let prefix = eval_arg(args, 0, Value::Str(String::new()), env, functions, classes, enums, impl_methods)?;
+            let prefix = eval_arg(
+                args,
+                0,
+                Value::Str(String::new()),
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )?;
             let matched = match (&recv_val, &prefix) {
                 (Value::Str(s), Value::Str(p)) => s.starts_with(p.as_str()),
                 _ => false,
@@ -273,7 +286,16 @@ pub(crate) fn evaluate_method_call(
             return Ok(Value::Bool(matched));
         }
         "to_end_with" => {
-            let suffix = eval_arg(args, 0, Value::Str(String::new()), env, functions, classes, enums, impl_methods)?;
+            let suffix = eval_arg(
+                args,
+                0,
+                Value::Str(String::new()),
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )?;
             let matched = match (&recv_val, &suffix) {
                 (Value::Str(s), Value::Str(p)) => s.ends_with(p.as_str()),
                 _ => false,
@@ -385,16 +407,31 @@ pub(crate) fn evaluate_method_call(
             }
         }
         Value::FrozenArray(arc_arr) => {
-            if let Some(result) =
-                collections::handle_frozen_array_methods(&arc_arr, method, args, env, functions, classes, enums, impl_methods)?
-            {
+            if let Some(result) = collections::handle_frozen_array_methods(
+                &arc_arr,
+                method,
+                args,
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )? {
                 return Ok(result);
             }
         }
         Value::FixedSizeArray { size, data } => {
-            if let Some(result) =
-                collections::handle_fixed_size_array_methods(*size, data, method, args, env, functions, classes, enums, impl_methods)?
-            {
+            if let Some(result) = collections::handle_fixed_size_array_methods(
+                *size,
+                data,
+                method,
+                args,
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )? {
                 return Ok(result);
             }
         }
@@ -413,9 +450,16 @@ pub(crate) fn evaluate_method_call(
             }
         }
         Value::FrozenDict(arc_map) => {
-            if let Some(result) =
-                collections::handle_frozen_dict_methods(&arc_map, method, args, env, functions, classes, enums, impl_methods)?
-            {
+            if let Some(result) = collections::handle_frozen_dict_methods(
+                &arc_map,
+                method,
+                args,
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )? {
                 return Ok(result);
             }
         }
@@ -954,8 +998,20 @@ pub(crate) fn evaluate_method_call_with_self_update(
     // Check if the method is a known mutating method
     let is_mutating_method = matches!(
         method,
-        "push" | "append" | "pop" | "insert" | "remove" | "reverse" | "rev" | "sort" | "clear"
-            | "extend" | "concat" | "set" | "delete" | "update"
+        "push"
+            | "append"
+            | "pop"
+            | "insert"
+            | "remove"
+            | "reverse"
+            | "rev"
+            | "sort"
+            | "clear"
+            | "extend"
+            | "concat"
+            | "set"
+            | "delete"
+            | "update"
     );
 
     if is_mutating_method {

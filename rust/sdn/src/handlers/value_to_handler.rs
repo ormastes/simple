@@ -12,11 +12,7 @@ pub fn replay_value<H: DataHandler + OpHandler>(value: &SdnValue, handler: &mut 
     replay_value_impl(value, handler, Span::default())
 }
 
-fn replay_value_impl<H: DataHandler + OpHandler>(
-    value: &SdnValue,
-    handler: &mut H,
-    span: Span,
-) -> Result<()> {
+fn replay_value_impl<H: DataHandler + OpHandler>(value: &SdnValue, handler: &mut H, span: Span) -> Result<()> {
     match value {
         SdnValue::Null => handler.on_null(span),
         SdnValue::Bool(b) => handler.on_bool(*b, span),

@@ -9,12 +9,7 @@ use crate::hir::{BinOp, TypeId, UnaryOp};
 use crate::mir::{BlockId, LocalKind, MirBlock, MirFunction, MirInst, MirLocal, Terminator, VReg};
 
 /// Helper to create a simple MIR function with one block.
-fn make_function(
-    name: &str,
-    params: Vec<MirLocal>,
-    instructions: Vec<MirInst>,
-    terminator: Terminator,
-) -> MirFunction {
+fn make_function(name: &str, params: Vec<MirLocal>, instructions: Vec<MirInst>, terminator: Terminator) -> MirFunction {
     let mut func = MirFunction::new(name.to_string(), TypeId::I64, Visibility::Public);
     func.params = params;
     func.blocks[0].instructions = instructions;
@@ -38,7 +33,10 @@ fn test_compile_const_int_return() {
     let func = make_function(
         "foo",
         vec![],
-        vec![MirInst::ConstInt { dest: VReg(0), value: 42 }],
+        vec![MirInst::ConstInt {
+            dest: VReg(0),
+            value: 42,
+        }],
         Terminator::Return(Some(VReg(0))),
     );
 
@@ -92,15 +90,24 @@ fn test_compile_arithmetic_expression() {
         "expr",
         vec![],
         vec![
-            MirInst::ConstInt { dest: VReg(0), value: 3 },
-            MirInst::ConstInt { dest: VReg(1), value: 4 },
+            MirInst::ConstInt {
+                dest: VReg(0),
+                value: 3,
+            },
+            MirInst::ConstInt {
+                dest: VReg(1),
+                value: 4,
+            },
             MirInst::BinOp {
                 dest: VReg(2),
                 op: BinOp::Add,
                 left: VReg(0),
                 right: VReg(1),
             },
-            MirInst::ConstInt { dest: VReg(3), value: 2 },
+            MirInst::ConstInt {
+                dest: VReg(3),
+                value: 2,
+            },
             MirInst::BinOp {
                 dest: VReg(4),
                 op: BinOp::Mul,
@@ -225,7 +232,10 @@ fn test_compile_copy() {
     let func = make_function(
         "identity",
         vec![param("x")],
-        vec![MirInst::Copy { dest: VReg(1), src: VReg(0) }],
+        vec![MirInst::Copy {
+            dest: VReg(1),
+            src: VReg(0),
+        }],
         Terminator::Return(Some(VReg(1))),
     );
 
@@ -273,7 +283,10 @@ fn test_compile_bool_const() {
     let func = make_function(
         "get_true",
         vec![],
-        vec![MirInst::ConstBool { dest: VReg(0), value: true }],
+        vec![MirInst::ConstBool {
+            dest: VReg(0),
+            value: true,
+        }],
         Terminator::Return(Some(VReg(0))),
     );
 

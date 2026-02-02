@@ -219,7 +219,8 @@ pub fn merge_cached_module_definitions(
     MODULE_FUNCTIONS_CACHE.with(|cache| {
         if let Some(cached_functions) = cache.borrow().get(&key) {
             for (name, func_def) in cached_functions {
-                if name != "main" {  // Don't add "main" from imported modules
+                if name != "main" {
+                    // Don't add "main" from imported modules
                     functions.insert(name.clone(), func_def.clone());
                 }
             }

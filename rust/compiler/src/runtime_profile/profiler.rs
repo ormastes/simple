@@ -678,12 +678,7 @@ pub fn record_call(function_name: &str) {
 
 /// Record a full call event (statistics + sequence) to the global profiler
 #[inline]
-pub fn record_full_call(
-    function_name: &str,
-    class_name: Option<&str>,
-    arguments: Vec<String>,
-    call_type: CallType,
-) {
+pub fn record_full_call(function_name: &str, class_name: Option<&str>, arguments: Vec<String>, call_type: CallType) {
     global_profiler().record_full_call(function_name, class_name, arguments, call_type);
 }
 

@@ -210,9 +210,7 @@ impl<'a> Parser<'a> {
                 // Strict mode: commas optional, continue if can start argument
                 // But stop at infix keywords (to, not_to) so they can be handled
                 // by parse_infix_keywords as method calls
-                if !self.can_start_argument()
-                    || matches!(self.current.kind, TokenKind::To | TokenKind::NotTo)
-                {
+                if !self.can_start_argument() || matches!(self.current.kind, TokenKind::To | TokenKind::NotTo) {
                     break;
                 }
             } else {

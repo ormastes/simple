@@ -105,11 +105,7 @@ pub trait CompilationContext {
     fn coverage_enabled(&self) -> bool;
 
     /// Compile a template with concrete type arguments.
-    fn compile_template(
-        &self,
-        template: &GenericTemplate,
-        type_args: &[ConcreteType],
-    ) -> Result<CompiledUnit, String>;
+    fn compile_template(&self, template: &GenericTemplate, type_args: &[ConcreteType]) -> Result<CompiledUnit, String>;
 
     /// Get the instantiation mode.
     fn instantiation_mode(&self) -> InstantiationMode;
@@ -145,11 +141,7 @@ impl<C: CompilationContext> TemplateInstantiator<C> {
     }
 
     /// Instantiate a template with concrete type arguments.
-    pub fn instantiate(
-        &mut self,
-        template_name: &str,
-        type_args: &[ConcreteType],
-    ) -> Result<CompiledUnit, String> {
+    pub fn instantiate(&mut self, template_name: &str, type_args: &[ConcreteType]) -> Result<CompiledUnit, String> {
         let key = mangle(template_name, type_args);
 
         // Cache check
@@ -302,23 +294,33 @@ mod tests {
 
     #[test]
     fn test_mangle_with_args() {
-        let args = vec![ConcreteType { name: "Int".to_string() }];
+        let args = vec![ConcreteType {
+            name: "Int".to_string(),
+        }];
         assert_eq!(mangle("List", &args), "List$Int");
     }
 
     #[test]
     fn test_mangle_multiple_args() {
         let args = vec![
-            ConcreteType { name: "String".to_string() },
-            ConcreteType { name: "Int".to_string() },
+            ConcreteType {
+                name: "String".to_string(),
+            },
+            ConcreteType {
+                name: "Int".to_string(),
+            },
         ];
         assert_eq!(mangle("Map", &args), "Map$String,Int");
     }
 
     #[test]
     fn test_mangle_unique_for_different_args() {
-        let args1 = vec![ConcreteType { name: "Int".to_string() }];
-        let args2 = vec![ConcreteType { name: "String".to_string() }];
+        let args1 = vec![ConcreteType {
+            name: "Int".to_string(),
+        }];
+        let args2 = vec![ConcreteType {
+            name: "String".to_string(),
+        }];
         assert_ne!(mangle("List", &args1), mangle("List", &args2));
     }
 
@@ -377,7 +379,9 @@ mod tests {
     fn test_context_compile_template() {
         let ctx = MockContext::new().with_template("List", vec!["T"]);
         let tmpl = ctx.load_template("List").unwrap();
-        let args = vec![ConcreteType { name: "Int".to_string() }];
+        let args = vec![ConcreteType {
+            name: "Int".to_string(),
+        }];
         let result = ctx.compile_template(&tmpl, &args);
         assert!(result.is_ok());
         let unit = result.unwrap();
@@ -421,7 +425,9 @@ mod tests {
         let ctx = MockContext::new().with_template("List", vec!["T"]);
         let mut inst = TemplateInstantiator::new(ctx);
 
-        let args = vec![ConcreteType { name: "Int".to_string() }];
+        let args = vec![ConcreteType {
+            name: "Int".to_string(),
+        }];
         let result = inst.instantiate("List", &args);
         assert!(result.is_ok());
 
@@ -435,7 +441,9 @@ mod tests {
         let ctx = MockContext::new().with_template("Box", vec!["T"]);
         let mut inst = TemplateInstantiator::new(ctx);
 
-        let args = vec![ConcreteType { name: "Int".to_string() }];
+        let args = vec![ConcreteType {
+            name: "Int".to_string(),
+        }];
         let r1 = inst.instantiate("Box", &args);
         let r2 = inst.instantiate("Box", &args);
         assert!(r1.is_ok());
@@ -450,9 +458,24 @@ mod tests {
         let ctx = MockContext::new().with_template("Wrapper", vec!["T"]);
         let mut inst = TemplateInstantiator::new(ctx);
 
-        let r1 = inst.instantiate("Wrapper", &[ConcreteType { name: "Int".to_string() }]);
-        let r2 = inst.instantiate("Wrapper", &[ConcreteType { name: "String".to_string() }]);
-        let r3 = inst.instantiate("Wrapper", &[ConcreteType { name: "Bool".to_string() }]);
+        let r1 = inst.instantiate(
+            "Wrapper",
+            &[ConcreteType {
+                name: "Int".to_string(),
+            }],
+        );
+        let r2 = inst.instantiate(
+            "Wrapper",
+            &[ConcreteType {
+                name: "String".to_string(),
+            }],
+        );
+        let r3 = inst.instantiate(
+            "Wrapper",
+            &[ConcreteType {
+                name: "Bool".to_string(),
+            }],
+        );
 
         assert!(r1.is_ok());
         assert!(r2.is_ok());
@@ -492,8 +515,12 @@ mod tests {
         let mut inst = TemplateInstantiator::new(ctx);
 
         let args = vec![
-            ConcreteType { name: "Int".to_string() },
-            ConcreteType { name: "String".to_string() },
+            ConcreteType {
+                name: "Int".to_string(),
+            },
+            ConcreteType {
+                name: "String".to_string(),
+            },
         ];
         let _ = inst.instantiate("Pair", &args);
 
@@ -524,12 +551,29 @@ mod tests {
             .with_template("Set", vec!["T"]);
         let mut inst = TemplateInstantiator::new(ctx);
 
-        let r1 = inst.instantiate("List", &[ConcreteType { name: "Int".to_string() }]);
-        let r2 = inst.instantiate("Map", &[
-            ConcreteType { name: "String".to_string() },
-            ConcreteType { name: "Int".to_string() },
-        ]);
-        let r3 = inst.instantiate("Set", &[ConcreteType { name: "Bool".to_string() }]);
+        let r1 = inst.instantiate(
+            "List",
+            &[ConcreteType {
+                name: "Int".to_string(),
+            }],
+        );
+        let r2 = inst.instantiate(
+            "Map",
+            &[
+                ConcreteType {
+                    name: "String".to_string(),
+                },
+                ConcreteType {
+                    name: "Int".to_string(),
+                },
+            ],
+        );
+        let r3 = inst.instantiate(
+            "Set",
+            &[ConcreteType {
+                name: "Bool".to_string(),
+            }],
+        );
 
         assert!(r1.is_ok());
         assert!(r2.is_ok());
@@ -545,7 +589,12 @@ mod tests {
         let ctx = MockContext::new().with_template("Clean", vec!["T"]);
         let mut inst = TemplateInstantiator::new(ctx);
 
-        let _ = inst.instantiate("Clean", &[ConcreteType { name: "Int".to_string() }]);
+        let _ = inst.instantiate(
+            "Clean",
+            &[ConcreteType {
+                name: "Int".to_string(),
+            }],
+        );
 
         // in_progress should be empty after successful instantiation
         assert!(inst.in_progress.is_empty());

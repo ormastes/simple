@@ -552,11 +552,7 @@ auto import router.route
         fs::create_dir_all(&lib).unwrap();
 
         // __init__.spl with #[bypass] on the directory header mod
-        fs::write(
-            lib.join("__init__.spl"),
-            "#[bypass]\nmod lib\n",
-        )
-        .unwrap();
+        fs::write(lib.join("__init__.spl"), "#[bypass]\nmod lib\n").unwrap();
 
         let mut resolver = ModuleResolver::new(dir.path().to_path_buf(), src);
         let manifest = resolver.load_manifest(&lib).unwrap();

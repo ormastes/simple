@@ -3,7 +3,6 @@
 //! This crate provides the main compilation pipeline for the Simple language,
 //! including interpretation, type checking, and code generation.
 
-
 pub mod repl_runner;
 pub mod mock_helper;
 pub mod aop_config;
@@ -99,14 +98,26 @@ pub use formatter::{FormatConfig, Formatter};
 pub use pretty_printer::{PrettyConfig, PrettyPrinter};
 pub use i18n::{ExtractionResult, I18nExtractor, I18nString, LocaleFile, LocaleGenerator};
 pub use interpreter::{
-    check_execution_limit, evaluate_module, get_execution_count, get_interpreter_args, is_debug_mode,
-    is_execution_limit_enabled, reset_execution_count, set_debug_mode, set_execution_limit,
-    set_execution_limit_enabled, set_interpreter_args, set_macro_trace,
+    check_execution_limit,
+    evaluate_module,
+    get_execution_count,
+    get_interpreter_args,
+    is_debug_mode,
+    is_execution_limit_enabled,
+    reset_execution_count,
+    set_debug_mode,
+    set_execution_limit,
+    set_execution_limit_enabled,
+    set_interpreter_args,
+    set_macro_trace,
     // Stack overflow detection
-    is_stack_overflow_detection_enabled, set_stack_overflow_detection_enabled,
-    set_max_recursion_depth, reset_recursion_depth,
+    is_stack_overflow_detection_enabled,
+    set_stack_overflow_detection_enabled,
+    set_max_recursion_depth,
+    reset_recursion_depth,
     // Timeout detection
-    is_timeout_exceeded, reset_timeout,
+    is_timeout_exceeded,
+    reset_timeout,
 };
 pub use watchdog::{start_watchdog, stop_watchdog};
 pub use ir_export::{export_ast, export_hir, export_mir, ExportResult};

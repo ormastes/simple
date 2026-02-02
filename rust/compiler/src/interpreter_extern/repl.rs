@@ -17,11 +17,19 @@ type ClearPreludeFn = fn() -> bool;
 type GetPreludeFn = fn(*mut u8, usize) -> usize;
 
 // Default stub implementations
-fn default_init() -> bool { false }
+fn default_init() -> bool {
+    false
+}
 fn default_cleanup() {}
-fn default_execute(_: *const u8, _: usize, _: *mut u8, _: usize) -> i32 { 1 }
-fn default_clear_prelude() -> bool { true }
-fn default_get_prelude(_: *mut u8, _: usize) -> usize { 0 }
+fn default_execute(_: *const u8, _: usize, _: *mut u8, _: usize) -> i32 {
+    1
+}
+fn default_clear_prelude() -> bool {
+    true
+}
+fn default_get_prelude(_: *mut u8, _: usize) -> usize {
+    0
+}
 
 struct ReplRunner {
     init: InitFn,

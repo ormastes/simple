@@ -3,8 +3,8 @@
 use std::sync::Arc;
 
 use super::{
-    ConcurrentBackend, MapProvider, ConcurrentMapProvider, ChannelProvider,
-    ThreadProvider, LockProvider, ParallelIterProvider,
+    ConcurrentBackend, MapProvider, ConcurrentMapProvider, ChannelProvider, ThreadProvider, LockProvider,
+    ParallelIterProvider,
 };
 use super::std_impl::*;
 use super::native_impl::*;

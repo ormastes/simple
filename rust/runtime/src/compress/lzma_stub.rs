@@ -63,22 +63,17 @@ impl Trailer {
         magic.copy_from_slice(&bytes[0..4]);
 
         if magic != MAGIC {
-            return Err(format!(
-                "Invalid magic: expected {:?}, got {:?}",
-                MAGIC, magic
-            ));
+            return Err(format!("Invalid magic: expected {:?}, got {:?}", MAGIC, magic));
         }
 
         let stub_size = u64::from_le_bytes([
             bytes[4], bytes[5], bytes[6], bytes[7], bytes[8], bytes[9], bytes[10], bytes[11],
         ]);
         let payload_size = u64::from_le_bytes([
-            bytes[12], bytes[13], bytes[14], bytes[15], bytes[16], bytes[17], bytes[18],
-            bytes[19],
+            bytes[12], bytes[13], bytes[14], bytes[15], bytes[16], bytes[17], bytes[18], bytes[19],
         ]);
         let original_size = u64::from_le_bytes([
-            bytes[20], bytes[21], bytes[22], bytes[23], bytes[24], bytes[25], bytes[26],
-            bytes[27],
+            bytes[20], bytes[21], bytes[22], bytes[23], bytes[24], bytes[25], bytes[26], bytes[27],
         ]);
         let checksum = u32::from_le_bytes([bytes[28], bytes[29], bytes[30], bytes[31]]);
 

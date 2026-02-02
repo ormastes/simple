@@ -902,18 +902,33 @@ impl PrettyPrinter {
                 self.print_expr(left);
                 self.write(" ");
                 self.write(match op {
-                    BinOp::Add => "+", BinOp::Sub => "-", BinOp::Mul => "*",
-                    BinOp::Div => "/", BinOp::Mod => "%", BinOp::Pow => "**",
+                    BinOp::Add => "+",
+                    BinOp::Sub => "-",
+                    BinOp::Mul => "*",
+                    BinOp::Div => "/",
+                    BinOp::Mod => "%",
+                    BinOp::Pow => "**",
                     BinOp::MatMul => "@",
-                    BinOp::Eq => "==", BinOp::NotEq => "!=",
-                    BinOp::Lt => "<", BinOp::Gt => ">",
-                    BinOp::LtEq => "<=", BinOp::GtEq => ">=",
-                    BinOp::And => "and", BinOp::Or => "or",
-                    BinOp::AndSuspend => "and~", BinOp::OrSuspend => "or~",
-                    BinOp::BitAnd => "&", BinOp::BitOr => "|", BinOp::BitXor => "xor",
-                    BinOp::ShiftLeft => "<<", BinOp::ShiftRight => ">>",
-                    BinOp::Is => "is", BinOp::In => "in", BinOp::NotIn => "not in",
-                    BinOp::PipeForward => "|>", BinOp::Parallel => "//",
+                    BinOp::Eq => "==",
+                    BinOp::NotEq => "!=",
+                    BinOp::Lt => "<",
+                    BinOp::Gt => ">",
+                    BinOp::LtEq => "<=",
+                    BinOp::GtEq => ">=",
+                    BinOp::And => "and",
+                    BinOp::Or => "or",
+                    BinOp::AndSuspend => "and~",
+                    BinOp::OrSuspend => "or~",
+                    BinOp::BitAnd => "&",
+                    BinOp::BitOr => "|",
+                    BinOp::BitXor => "xor",
+                    BinOp::ShiftLeft => "<<",
+                    BinOp::ShiftRight => ">>",
+                    BinOp::Is => "is",
+                    BinOp::In => "in",
+                    BinOp::NotIn => "not in",
+                    BinOp::PipeForward => "|>",
+                    BinOp::Parallel => "//",
                 });
                 self.write(" ");
                 self.print_expr(right);
@@ -921,10 +936,14 @@ impl PrettyPrinter {
             Expr::Unary { op, operand, .. } => {
                 use simple_parser::ast::UnaryOp;
                 self.write(match op {
-                    UnaryOp::Neg => "-", UnaryOp::Not => "not ",
-                    UnaryOp::BitNot => "~", UnaryOp::Ref => "&",
-                    UnaryOp::RefMut => "&mut ", UnaryOp::Deref => "*",
-                    UnaryOp::ChannelRecv => "<-", UnaryOp::Move => "move ",
+                    UnaryOp::Neg => "-",
+                    UnaryOp::Not => "not ",
+                    UnaryOp::BitNot => "~",
+                    UnaryOp::Ref => "&",
+                    UnaryOp::RefMut => "&mut ",
+                    UnaryOp::Deref => "*",
+                    UnaryOp::ChannelRecv => "<-",
+                    UnaryOp::Move => "move ",
                 });
                 self.print_expr(operand);
             }

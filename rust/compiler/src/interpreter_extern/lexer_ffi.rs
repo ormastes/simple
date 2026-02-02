@@ -123,7 +123,7 @@ impl TokenInfo {
                 name: None,
                 pattern: None,
                 value: None,
-            }
+            },
         }
     }
 }

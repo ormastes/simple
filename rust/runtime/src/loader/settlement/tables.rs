@@ -5,7 +5,9 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use super::super::smf::settlement::{FuncTableEntry, GlobalTableEntry, TypeTableEntry, FUNC_FLAG_TOMBSTONE, FUNC_FLAG_VALID};
+use super::super::smf::settlement::{
+    FuncTableEntry, GlobalTableEntry, TypeTableEntry, FUNC_FLAG_TOMBSTONE, FUNC_FLAG_VALID,
+};
 
 /// A handle to an entry in an indirection table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

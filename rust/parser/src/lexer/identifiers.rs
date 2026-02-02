@@ -117,9 +117,9 @@ impl<'a> super::Lexer<'a> {
                 // while keeping: skip (statement) and skip: (label)
                 if self.check('(') {
                     let pattern = NamePattern::detect(&name);
-                    TokenKind::Identifier { name, pattern }  // Method/function name
+                    TokenKind::Identifier { name, pattern } // Method/function name
                 } else {
-                    TokenKind::Skip  // Statement keyword
+                    TokenKind::Skip // Statement keyword
                 }
             }
             "return" => TokenKind::Return,
@@ -196,9 +196,9 @@ impl<'a> super::Lexer<'a> {
                 // while keeping: static fn method() (static method declaration)
                 if self.check('(') {
                     let pattern = NamePattern::detect(&name);
-                    TokenKind::Identifier { name, pattern }  // Method/function name
+                    TokenKind::Identifier { name, pattern } // Method/function name
                 } else {
-                    TokenKind::Static  // Keyword for static declarations
+                    TokenKind::Static // Keyword for static declarations
                 }
             }
             "type" => TokenKind::Type,
@@ -271,9 +271,9 @@ impl<'a> super::Lexer<'a> {
                 // while keeping: default -> ... (match default case)
                 if self.check('(') {
                     let pattern = NamePattern::detect(&name);
-                    TokenKind::Identifier { name, pattern }  // Method/function name
+                    TokenKind::Identifier { name, pattern } // Method/function name
                 } else {
-                    TokenKind::Default  // Keyword for match default
+                    TokenKind::Default // Keyword for match default
                 }
             }
             "_" => TokenKind::Underscore,
@@ -468,7 +468,10 @@ impl<'a> super::Lexer<'a> {
                         self.advance();
                     }
                 }
-                pre_lex.string_spans.push(TextSpan { start, end: payload.len() });
+                pre_lex.string_spans.push(TextSpan {
+                    start,
+                    end: payload.len(),
+                });
                 continue;
             }
 
@@ -496,7 +499,10 @@ impl<'a> super::Lexer<'a> {
                         self.advance();
                     }
                 }
-                pre_lex.string_spans.push(TextSpan { start, end: payload.len() });
+                pre_lex.string_spans.push(TextSpan {
+                    start,
+                    end: payload.len(),
+                });
                 continue;
             }
 
@@ -512,7 +518,10 @@ impl<'a> super::Lexer<'a> {
                     payload.push(cc);
                     self.advance();
                 }
-                pre_lex.comment_spans.push(TextSpan { start, end: payload.len() });
+                pre_lex.comment_spans.push(TextSpan {
+                    start,
+                    end: payload.len(),
+                });
                 continue;
             }
 
@@ -529,7 +538,10 @@ impl<'a> super::Lexer<'a> {
                         payload.push(cc);
                         self.advance();
                     }
-                    pre_lex.comment_spans.push(TextSpan { start, end: payload.len() });
+                    pre_lex.comment_spans.push(TextSpan {
+                        start,
+                        end: payload.len(),
+                    });
                     continue;
                 }
             }
@@ -570,7 +582,10 @@ impl<'a> super::Lexer<'a> {
                             None => break,
                         }
                     }
-                    pre_lex.comment_spans.push(TextSpan { start, end: payload.len() });
+                    pre_lex.comment_spans.push(TextSpan {
+                        start,
+                        end: payload.len(),
+                    });
                     continue;
                 }
             }

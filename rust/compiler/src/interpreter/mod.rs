@@ -29,15 +29,32 @@ pub(crate) use interpreter_state::{
     clear_moved_vars, get_aop_config, get_di_config, mark_as_moved, set_aop_config, set_di_config, ExecutionMode,
 };
 pub use interpreter_state::{
-    check_execution_limit, clear_interpreter_state, get_current_file, get_execution_count, get_interpreter_args,
-    init_signal_handlers, is_debug_mode, is_execution_limit_enabled, is_interrupted, reset_execution_count,
-    reset_interrupt, set_current_file, set_debug_mode, set_execution_limit, set_execution_limit_enabled,
+    check_execution_limit,
+    clear_interpreter_state,
+    get_current_file,
+    get_execution_count,
+    get_interpreter_args,
+    init_signal_handlers,
+    is_debug_mode,
+    is_execution_limit_enabled,
+    is_interrupted,
+    reset_execution_count,
+    reset_interrupt,
+    set_current_file,
+    set_debug_mode,
+    set_execution_limit,
+    set_execution_limit_enabled,
     set_interpreter_args,
     // Stack overflow detection
-    is_stack_overflow_detection_enabled, push_call_depth, set_max_recursion_depth,
-    set_stack_overflow_detection_enabled, reset_recursion_depth, RecursionGuard,
+    is_stack_overflow_detection_enabled,
+    push_call_depth,
+    set_max_recursion_depth,
+    set_stack_overflow_detection_enabled,
+    reset_recursion_depth,
+    RecursionGuard,
     // Timeout detection
-    is_timeout_exceeded, reset_timeout,
+    is_timeout_exceeded,
+    reset_timeout,
 };
 pub(crate) use interpreter_state::{
     ACTOR_INBOX, ACTOR_OUTBOX, ACTOR_SPAWNER, AOP_CONFIG, BASE_UNIT_DIMENSIONS, BDD_REGISTRY_CONTEXTS,

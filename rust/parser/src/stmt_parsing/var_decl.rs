@@ -905,7 +905,10 @@ impl Parser<'_> {
         }
 
         // Check for extern "C": block syntax (block of FFI declarations)
-        if matches!(&self.current.kind, TokenKind::String(_) | TokenKind::FString(_) | TokenKind::RawString(_)) {
+        if matches!(
+            &self.current.kind,
+            TokenKind::String(_) | TokenKind::FString(_) | TokenKind::RawString(_)
+        ) {
             self.advance(); // consume "C" or other ABI string
             self.expect(&TokenKind::Colon)?;
             // Parse block of extern fn declarations
@@ -932,7 +935,12 @@ impl Parser<'_> {
                     None
                 };
                 nodes.push(Node::Extern(ExternDef {
-                    span: Span::new(start_span.start, self.previous.span.end, start_span.line, start_span.column),
+                    span: Span::new(
+                        start_span.start,
+                        self.previous.span.end,
+                        start_span.line,
+                        start_span.column,
+                    ),
                     name,
                     params,
                     return_type,

@@ -504,7 +504,10 @@ pub enum Value {
     FrozenArray(Arc<Vec<Value>>),
     /// Fixed-size array with runtime size checking ([T; N] syntax)
     /// Rejects size-changing operations (push, pop, insert, remove, clear)
-    FixedSizeArray { size: usize, data: Vec<Value> },
+    FixedSizeArray {
+        size: usize,
+        data: Vec<Value>,
+    },
     Tuple(Vec<Value>),
     /// Mutable dict (default for dict literals)
     Dict(HashMap<String, Value>),

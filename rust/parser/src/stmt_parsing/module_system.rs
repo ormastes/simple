@@ -553,7 +553,7 @@ impl<'a> Parser<'a> {
                     // Check for comma-separated additional exports
                     while self.check(&TokenKind::Comma) {
                         self.advance(); // consume ','
-                        // Parse next dotted path or bare identifier
+                                        // Parse next dotted path or bare identifier
                         let next_item = self.expect_path_segment()?;
                         if self.check(&TokenKind::Dot) {
                             // Skip through module path to get to the item

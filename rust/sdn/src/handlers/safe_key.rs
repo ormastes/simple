@@ -99,12 +99,7 @@ impl OpHandler for SafeKeyHandler {
         self.inner.end_array()
     }
 
-    fn begin_table(
-        &mut self,
-        fields: Option<&[String]>,
-        types: Option<&[String]>,
-        span: Span,
-    ) -> Result<()> {
+    fn begin_table(&mut self, fields: Option<&[String]>, types: Option<&[String]>, span: Span) -> Result<()> {
         // Validate field names if present
         if let Some(fields) = fields {
             for field in fields {

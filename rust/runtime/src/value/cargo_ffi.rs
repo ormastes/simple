@@ -82,13 +82,7 @@ pub extern "C" fn rt_cargo_build(
     let output = match cmd.output() {
         Ok(output) => output,
         Err(e) => {
-            return create_build_result(
-                false,
-                1,
-                String::new(),
-                format!("Failed to execute cargo: {}", e),
-                0,
-            );
+            return create_build_result(false, 1, String::new(), format!("Failed to execute cargo: {}", e), 0);
         }
     };
 
@@ -111,10 +105,7 @@ pub extern "C" fn rt_cargo_build(
 /// - tests_passed: i64
 /// - tests_failed: i64
 #[no_mangle]
-pub extern "C" fn rt_cargo_test(
-    package: *const c_char,
-    filter: *const c_char,
-) -> RuntimeValue {
+pub extern "C" fn rt_cargo_test(package: *const c_char, filter: *const c_char) -> RuntimeValue {
     let package_str = unsafe {
         if package.is_null() {
             None
@@ -182,10 +173,7 @@ pub extern "C" fn rt_cargo_test(
 /// Clean cargo build artifacts
 #[no_mangle]
 pub extern "C" fn rt_cargo_clean() -> i64 {
-    let output = Command::new("cargo")
-        .arg("clean")
-        .current_dir("rust")
-        .output();
+    let output = Command::new("cargo").arg("clean").current_dir("rust").output();
 
     match output {
         Ok(output) => {
@@ -244,35 +232,15 @@ fn create_build_result(
 ) -> RuntimeValue {
     let dict = rt_dict_new(8);
 
-    rt_dict_set(
-        dict,
-        str_to_runtime("success"),
-        RuntimeValue::from_bool(success),
-    );
+    rt_dict_set(dict, str_to_runtime("success"), RuntimeValue::from_bool(success));
 
-    rt_dict_set(
-        dict,
-        str_to_runtime("exit_code"),
-        RuntimeValue::from_int(exit_code),
-    );
+    rt_dict_set(dict, str_to_runtime("exit_code"), RuntimeValue::from_int(exit_code));
 
-    rt_dict_set(
-        dict,
-        str_to_runtime("stdout"),
-        string_to_runtime(stdout),
-    );
+    rt_dict_set(dict, str_to_runtime("stdout"), string_to_runtime(stdout));
 
-    rt_dict_set(
-        dict,
-        str_to_runtime("stderr"),
-        string_to_runtime(stderr),
-    );
+    rt_dict_set(dict, str_to_runtime("stderr"), string_to_runtime(stderr));
 
-    rt_dict_set(
-        dict,
-        str_to_runtime("duration_ms"),
-        RuntimeValue::from_int(duration_ms),
-    );
+    rt_dict_set(dict, str_to_runtime("duration_ms"), RuntimeValue::from_int(duration_ms));
 
     dict
 }
@@ -289,35 +257,15 @@ fn create_test_result(
 ) -> RuntimeValue {
     let dict = rt_dict_new(8);
 
-    rt_dict_set(
-        dict,
-        str_to_runtime("success"),
-        RuntimeValue::from_bool(success),
-    );
+    rt_dict_set(dict, str_to_runtime("success"), RuntimeValue::from_bool(success));
 
-    rt_dict_set(
-        dict,
-        str_to_runtime("exit_code"),
-        RuntimeValue::from_int(exit_code),
-    );
+    rt_dict_set(dict, str_to_runtime("exit_code"), RuntimeValue::from_int(exit_code));
 
-    rt_dict_set(
-        dict,
-        str_to_runtime("stdout"),
-        string_to_runtime(stdout),
-    );
+    rt_dict_set(dict, str_to_runtime("stdout"), string_to_runtime(stdout));
 
-    rt_dict_set(
-        dict,
-        str_to_runtime("stderr"),
-        string_to_runtime(stderr),
-    );
+    rt_dict_set(dict, str_to_runtime("stderr"), string_to_runtime(stderr));
 
-    rt_dict_set(
-        dict,
-        str_to_runtime("tests_run"),
-        RuntimeValue::from_int(tests_run),
-    );
+    rt_dict_set(dict, str_to_runtime("tests_run"), RuntimeValue::from_int(tests_run));
 
     rt_dict_set(
         dict,

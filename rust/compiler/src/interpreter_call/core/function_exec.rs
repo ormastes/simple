@@ -262,12 +262,7 @@ fn exec_function_inner(
         } else {
             crate::runtime_profile::CallType::Direct
         };
-        crate::runtime_profile::record_full_call(
-            &func.name,
-            self_ctx.map(|(c, _)| c),
-            vec![],
-            call_type,
-        );
+        crate::runtime_profile::record_full_call(&func.name, self_ctx.map(|(c, _)| c), vec![], call_type);
     }
 
     // Coverage tracking - enabled via SIMPLE_COVERAGE env var
@@ -351,12 +346,7 @@ fn exec_function_with_values_inner(
 
     // Runtime profiler hooks
     if crate::runtime_profile::is_profiling_active() {
-        crate::runtime_profile::record_full_call(
-            &func.name,
-            None,
-            vec![],
-            crate::runtime_profile::CallType::Direct,
-        );
+        crate::runtime_profile::record_full_call(&func.name, None, vec![], crate::runtime_profile::CallType::Direct);
     }
 
     // Coverage tracking - enabled via SIMPLE_COVERAGE env var

@@ -24,9 +24,9 @@ use std::path::Path;
 /// Compression level for LZMA
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LzmaLevel {
-    Fast = 1,    // Level 1 - fastest
-    Normal = 6,  // Level 6 - balanced (default)
-    Best = 9,    // Level 9 - best compression
+    Fast = 1,   // Level 1 - fastest
+    Normal = 6, // Level 6 - balanced (default)
+    Best = 9,   // Level 9 - best compression
 }
 
 impl LzmaLevel {
@@ -108,11 +108,7 @@ fn get_stub_binary() -> Result<Vec<u8>, String> {
 ///
 /// # Returns
 /// Ok(compression_ratio) on success, Err on failure
-pub fn create_self_extracting(
-    input: &Path,
-    output: &Path,
-    level: LzmaLevel,
-) -> Result<f64, String> {
+pub fn create_self_extracting(input: &Path, output: &Path, level: LzmaLevel) -> Result<f64, String> {
     // Read input binary
     let original = fs::read(input).map_err(|e| format!("Failed to read input file: {}", e))?;
     let original_size = original.len();
@@ -141,16 +137,10 @@ pub fn create_self_extracting(
     let checksum = crc32(&compressed);
 
     // Create trailer
-    let trailer = Trailer::new(
-        stub_size as u64,
-        payload_size as u64,
-        original_size as u64,
-        checksum,
-    );
+    let trailer = Trailer::new(stub_size as u64, payload_size as u64, original_size as u64, checksum);
 
     // Write output file
-    let mut output_file =
-        fs::File::create(output).map_err(|e| format!("Failed to create output file: {}", e))?;
+    let mut output_file = fs::File::create(output).map_err(|e| format!("Failed to create output file: {}", e))?;
 
     // Write stub
     output_file
@@ -176,8 +166,7 @@ pub fn create_self_extracting(
             .map_err(|e| format!("Failed to get output file metadata: {}", e))?
             .permissions();
         perms.set_mode(0o755);
-        fs::set_permissions(output, perms)
-            .map_err(|e| format!("Failed to set executable permissions: {}", e))?;
+        fs::set_permissions(output, perms).map_err(|e| format!("Failed to set executable permissions: {}", e))?;
     }
 
     let total_size = stub_size + payload_size + TRAILER_SIZE;
@@ -270,11 +259,7 @@ pub fn create_self_extracting_auto(input: &Path, output: &Path) -> Result<f64, S
 /// - `level` should be 1 (fast), 6 (normal), or 9 (best)
 /// - Returns 0 on success, -1 on failure
 #[no_mangle]
-pub unsafe extern "C" fn self_extract_create(
-    input: *const c_char,
-    output: *const c_char,
-    level: i32,
-) -> i32 {
+pub unsafe extern "C" fn self_extract_create(input: *const c_char, output: *const c_char, level: i32) -> i32 {
     if input.is_null() || output.is_null() {
         return -1;
     }

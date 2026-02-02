@@ -28,16 +28,24 @@ fn try_dunder_binop(
     impl_methods: &ImplMethods,
 ) -> Option<Result<Value, CompileError>> {
     if let Value::Object { class, fields } = left {
-        let method = classes.get(class.as_str())
+        let method = classes
+            .get(class.as_str())
             .and_then(|cd| cd.methods.iter().find(|m| m.name == dunder_name).cloned())
-            .or_else(|| impl_methods.get(class.as_str())
-                .and_then(|ms| ms.iter().find(|m| m.name == dunder_name).cloned()));
+            .or_else(|| {
+                impl_methods
+                    .get(class.as_str())
+                    .and_then(|ms| ms.iter().find(|m| m.name == dunder_name).cloned())
+            });
         if let Some(method) = method {
             let self_ctx = Some((class.as_str(), fields));
             return Some(super::super::interpreter_call::exec_function_with_values_and_self(
                 &method,
                 &[right.clone()],
-                env, functions, classes, enums, impl_methods,
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
                 self_ctx,
             ));
         }
@@ -292,7 +300,16 @@ pub(super) fn eval_op_expr(
                     }
                     _ if use_float => Ok(Value::Float(left_val.as_float()? + right_val.as_float()?)),
                     _ => {
-                        if let Some(result) = try_dunder_binop("__add__", &left_val, &right_val, env, functions, classes, enums, impl_methods) {
+                        if let Some(result) = try_dunder_binop(
+                            "__add__",
+                            &left_val,
+                            &right_val,
+                            env,
+                            functions,
+                            classes,
+                            enums,
+                            impl_methods,
+                        ) {
                             result
                         } else {
                             Ok(Value::Int(left_val.as_int()? + right_val.as_int()?))
@@ -325,7 +342,16 @@ pub(super) fn eval_op_expr(
                         }
                         _ if use_float => Ok(Value::Float(left_val.as_float()? * right_val.as_float()?)),
                         _ => {
-                            if let Some(result) = try_dunder_binop("__mul__", &left_val, &right_val, env, functions, classes, enums, impl_methods) {
+                            if let Some(result) = try_dunder_binop(
+                                "__mul__",
+                                &left_val,
+                                &right_val,
+                                env,
+                                functions,
+                                classes,
+                                enums,
+                                impl_methods,
+                            ) {
                                 result
                             } else {
                                 Ok(Value::Int(left_val.as_int()? * right_val.as_int()?))
@@ -518,7 +544,16 @@ pub(super) fn eval_op_expr(
                         }
 
                         _ => {
-                            if let Some(result) = try_dunder_binop("__matmul__", &left_val, &right_val, env, functions, classes, enums, impl_methods) {
+                            if let Some(result) = try_dunder_binop(
+                                "__matmul__",
+                                &left_val,
+                                &right_val,
+                                env,
+                                functions,
+                                classes,
+                                enums,
+                                impl_methods,
+                            ) {
                                 result
                             } else {
                                 let ctx = ErrorContext::new()
@@ -908,10 +943,7 @@ fn matmul_matrix_multiply_2d(a: &[Value], b: &[Value]) -> Result<Value, CompileE
                 let ctx = ErrorContext::new()
                     .with_code(codes::TYPE_MISMATCH)
                     .with_help("matrix must have uniform rows");
-                return Err(CompileError::semantic_with_context(
-                    "matrix row is not an array",
-                    ctx,
-                ));
+                return Err(CompileError::semantic_with_context("matrix row is not an array", ctx));
             }
         };
         let mut row = Vec::with_capacity(q);
@@ -928,10 +960,7 @@ fn matmul_matrix_multiply_2d(a: &[Value], b: &[Value]) -> Result<Value, CompileE
                         let ctx = ErrorContext::new()
                             .with_code(codes::TYPE_MISMATCH)
                             .with_help("matrix must have uniform rows");
-                        return Err(CompileError::semantic_with_context(
-                            "matrix row is not an array",
-                            ctx,
-                        ));
+                        return Err(CompileError::semantic_with_context("matrix row is not an array", ctx));
                     }
                 };
                 let b_kj = &b_row[j];
@@ -1013,10 +1042,7 @@ fn matmul_matrix_vector(a: &[Value], b: &[Value]) -> Result<Value, CompileError>
                 let ctx = ErrorContext::new()
                     .with_code(codes::TYPE_MISMATCH)
                     .with_help("matrix must have uniform rows");
-                return Err(CompileError::semantic_with_context(
-                    "matrix row is not an array",
-                    ctx,
-                ));
+                return Err(CompileError::semantic_with_context("matrix row is not an array", ctx));
             }
         };
         let mut sum = Value::Int(0);
@@ -1105,10 +1131,7 @@ fn matmul_vector_matrix(a: &[Value], b: &[Value]) -> Result<Value, CompileError>
                     let ctx = ErrorContext::new()
                         .with_code(codes::TYPE_MISMATCH)
                         .with_help("matrix must have uniform rows");
-                    return Err(CompileError::semantic_with_context(
-                        "matrix row is not an array",
-                        ctx,
-                    ));
+                    return Err(CompileError::semantic_with_context("matrix row is not an array", ctx));
                 }
             };
             let b_kj = &b_row[j];

@@ -181,6 +181,12 @@ bindings = [
     assert!(has_use_num_call, "expected call to use_num in main");
 
     // Verify use_num and make_num functions were lowered
-    assert!(mir.functions.iter().any(|f| f.name == "use_num"), "use_num should be lowered");
-    assert!(mir.functions.iter().any(|f| f.name == "make_num"), "make_num should be lowered");
+    assert!(
+        mir.functions.iter().any(|f| f.name == "use_num"),
+        "use_num should be lowered"
+    );
+    assert!(
+        mir.functions.iter().any(|f| f.name == "make_num"),
+        "make_num should be lowered"
+    );
 }

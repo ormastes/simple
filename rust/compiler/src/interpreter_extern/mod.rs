@@ -102,9 +102,9 @@ fn resolve_fmt_for_print(
         .iter()
         .map(|v| {
             if let Value::Object { .. } = v {
-                if let Ok(Some(result)) = call_method_if_exists(
-                    v, "fmt", &[], env, functions, classes, enums, impl_methods,
-                ) {
+                if let Ok(Some(result)) =
+                    call_method_if_exists(v, "fmt", &[], env, functions, classes, enums, impl_methods)
+                {
                     return result;
                 }
             }
@@ -181,9 +181,9 @@ pub(crate) fn call_extern_function(
                 .iter()
                 .map(|v| {
                     if let Value::Object { .. } = v {
-                        if let Ok(Some(result)) = call_method_if_exists(
-                            v, "debug_fmt", &[], env, functions, classes, enums, impl_methods,
-                        ) {
+                        if let Ok(Some(result)) =
+                            call_method_if_exists(v, "debug_fmt", &[], env, functions, classes, enums, impl_methods)
+                        {
                             return result;
                         }
                     }
@@ -481,14 +481,9 @@ pub(crate) fn call_extern_function(
         "rt_thread_available_parallelism" => concurrency::rt_thread_available_parallelism(&evaluated),
         "rt_thread_sleep" => concurrency::rt_thread_sleep(&evaluated),
         "rt_thread_yield" => concurrency::rt_thread_yield(&evaluated),
-        "rt_thread_spawn_isolated" => concurrency::rt_thread_spawn_isolated_with_context(
-            &evaluated,
-            env,
-            functions,
-            classes,
-            enums,
-            impl_methods,
-        ),
+        "rt_thread_spawn_isolated" => {
+            concurrency::rt_thread_spawn_isolated_with_context(&evaluated, env, functions, classes, enums, impl_methods)
+        }
         "rt_thread_spawn_isolated2" => concurrency::rt_thread_spawn_isolated2_with_context(
             &evaluated,
             env,

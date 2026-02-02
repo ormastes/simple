@@ -330,17 +330,13 @@ impl<'a> Parser<'a> {
         // Detect missing comma before another dict entry
         if !self.check(&TokenKind::Comma) && !self.check(&TokenKind::RBrace) {
             // Check if current token is identifier followed by colon (pattern: key: value)
-            if matches!(self.current.kind, TokenKind::Identifier { .. })
-                && self.peek_is(&TokenKind::Colon)
-            {
+            if matches!(self.current.kind, TokenKind::Identifier { .. }) && self.peek_is(&TokenKind::Colon) {
                 return Err(ParseError::ContextualSyntaxError {
                     context: "dict literal".to_string(),
                     message: "expected comma between dict entries".to_string(),
                     span: self.current.span,
                     suggestion: Some("Insert comma after the value".to_string()),
-                    help: Some(
-                        "Dict entries must be separated by commas: {a: 1, b: 2}".to_string(),
-                    ),
+                    help: Some("Dict entries must be separated by commas: {a: 1, b: 2}".to_string()),
                     parse_context: None,
                 });
             }
@@ -383,18 +379,13 @@ impl<'a> Parser<'a> {
 
                 // Detect missing comma after this entry
                 if !self.check(&TokenKind::Comma) && !self.check(&TokenKind::RBrace) {
-                    if matches!(self.current.kind, TokenKind::Identifier { .. })
-                        && self.peek_is(&TokenKind::Colon)
-                    {
+                    if matches!(self.current.kind, TokenKind::Identifier { .. }) && self.peek_is(&TokenKind::Colon) {
                         return Err(ParseError::ContextualSyntaxError {
                             context: "dict literal".to_string(),
                             message: "expected comma between dict entries".to_string(),
                             span: self.current.span,
                             suggestion: Some("Insert comma after the value".to_string()),
-                            help: Some(
-                                "Dict entries must be separated by commas: {a: 1, b: 2}"
-                                    .to_string(),
-                            ),
+                            help: Some("Dict entries must be separated by commas: {a: 1, b: 2}".to_string()),
                             parse_context: None,
                         });
                     }

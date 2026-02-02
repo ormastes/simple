@@ -259,9 +259,7 @@ pub extern "C" fn rt_enum_discriminant(value: RuntimeValue) -> i64 {
 #[no_mangle]
 pub extern "C" fn rt_enum_check_discriminant(value: RuntimeValue, expected: i64) -> bool {
     get_typed_ptr::<RuntimeEnum>(value, HeapObjectType::Enum)
-        .map_or(false, |p| unsafe {
-            (*p).discriminant as i64 == expected
-        })
+        .map_or(false, |p| unsafe { (*p).discriminant as i64 == expected })
 }
 
 /// Unwrap an optional value: if it's a Some enum, return its payload; otherwise return as-is.
@@ -334,8 +332,7 @@ pub extern "C" fn rt_option_map(value: RuntimeValue, closure: RuntimeValue) -> R
 
     // Call the closure: fn(closure, payload) -> RuntimeValue
     // Closures are called with the closure itself as first arg (for captures) and the value as second
-    let func: extern "C" fn(RuntimeValue, RuntimeValue) -> RuntimeValue =
-        unsafe { std::mem::transmute(func_ptr) };
+    let func: extern "C" fn(RuntimeValue, RuntimeValue) -> RuntimeValue = unsafe { std::mem::transmute(func_ptr) };
     let result = func(closure, payload);
 
     // Wrap result in Some

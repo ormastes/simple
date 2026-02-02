@@ -288,7 +288,7 @@ pub unsafe extern "C" fn rt_cranelift_finalize_module(module: i64) -> i64 {
     {
         let modules = AOT_MODULES.lock().unwrap();
         if modules.contains_key(&module) {
-            return module;  // AOT module exists, return success (finalization happens in emit_object)
+            return module; // AOT module exists, return success (finalization happens in emit_object)
         }
     }
 

@@ -188,13 +188,13 @@ pub enum TokenKind {
     Import,
     From,
     As,
-    Mod,    // mod (module declaration)
-    Use,    // use (import)
-    Export, // export (re-export)
-    Common, // common (directory prelude)
-    Auto,   // auto (auto import)
+    Mod,              // mod (module declaration)
+    Use,              // use (import)
+    Export,           // export (re-export)
+    Common,           // common (directory prelude)
+    Auto,             // auto (auto import)
     StructuredExport, // structured_export (block-style exports)
-    Crate,  // crate (module root)
+    Crate,            // crate (module root)
     In,
     Is,
     Not,
@@ -258,8 +258,8 @@ pub enum TokenKind {
     // Custom Blocks (#1090-1098)
     // DSL embedding blocks: kind{payload} where payload is captured raw
     CustomBlock {
-        kind: String,    // Block kind: "m", "sh", "sql", "re", "md", "html", "graph", "img"
-        payload: String, // Raw payload content (not parsed by outer lexer)
+        kind: String,             // Block kind: "m", "sh", "sql", "re", "md", "html", "graph", "img"
+        payload: String,          // Raw payload content (not parsed by outer lexer)
         pre_lex_info: PreLexInfo, // Pre-lex info from Tier 1+2 scanning
     },
 
@@ -310,13 +310,13 @@ pub enum TokenKind {
     Default, // default (default value for sparse tensors)
 
     // Operators
-    Plus,        // +
-    Minus,       // -
-    Star,        // *
-    Slash,       // /
-    Percent,     // %
-    DoubleStar,  // **
-    Parallel,    // // (parallel execution, was floor division)
+    Plus,       // +
+    Minus,      // -
+    Star,       // *
+    Slash,      // /
+    Percent,    // %
+    DoubleStar, // **
+    Parallel,   // // (parallel execution, was floor division)
 
     Eq,    // ==
     NotEq, // !=

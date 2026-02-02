@@ -58,10 +58,7 @@ fn emit_profiler_call<M: Module>(
     Ok(())
 }
 
-fn emit_profiler_return<M: Module>(
-    ctx: &mut InstrContext<'_, M>,
-    builder: &mut FunctionBuilder,
-) -> InstrResult<()> {
+fn emit_profiler_return<M: Module>(ctx: &mut InstrContext<'_, M>, builder: &mut FunctionBuilder) -> InstrResult<()> {
     if !crate::runtime_profile::is_profiling_active() {
         return Ok(());
     }
@@ -329,8 +326,12 @@ pub fn compile_call<M: Module>(
             emit_profiler_return(ctx, builder)?;
         }
     } else {
-        eprintln!("[WARN compile_call] Function '{}' not found in func_ids ({} entries) or runtime_funcs ({} entries)",
-            func_name, ctx.func_ids.len(), ctx.runtime_funcs.len());
+        eprintln!(
+            "[WARN compile_call] Function '{}' not found in func_ids ({} entries) or runtime_funcs ({} entries)",
+            func_name,
+            ctx.func_ids.len(),
+            ctx.runtime_funcs.len()
+        );
     }
 
     Ok(())

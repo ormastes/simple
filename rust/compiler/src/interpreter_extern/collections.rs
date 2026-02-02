@@ -22,7 +22,9 @@ static HASHMAP_REGISTRY: OnceLock<Arc<Mutex<RustHashMap<HashMapHandle, RustHashM
 static NEXT_HASHMAP_ID: AtomicUsize = AtomicUsize::new(1);
 
 fn get_hashmap_registry() -> Arc<Mutex<RustHashMap<HashMapHandle, RustHashMap<String, Value>>>> {
-    HASHMAP_REGISTRY.get_or_init(|| Arc::new(Mutex::new(RustHashMap::new()))).clone()
+    HASHMAP_REGISTRY
+        .get_or_init(|| Arc::new(Mutex::new(RustHashMap::new())))
+        .clone()
 }
 
 fn alloc_hashmap_handle() -> HashMapHandle {
@@ -79,9 +81,9 @@ pub fn __rt_hashmap_insert(args: &[Value]) -> Result<Value, CompileError> {
     let registry = get_hashmap_registry();
     let mut reg = registry.lock().unwrap();
 
-    let map = reg.get_mut(&handle).ok_or_else(|| {
-        CompileError::runtime(format!("Invalid HashMap handle: {}", handle))
-    })?;
+    let map = reg
+        .get_mut(&handle)
+        .ok_or_else(|| CompileError::runtime(format!("Invalid HashMap handle: {}", handle)))?;
 
     let was_new = !map.contains_key(&key);
     map.insert(key, value);
@@ -116,9 +118,9 @@ pub fn __rt_hashmap_get(args: &[Value]) -> Result<Value, CompileError> {
     let registry = get_hashmap_registry();
     let reg = registry.lock().unwrap();
 
-    let map = reg.get(&handle).ok_or_else(|| {
-        CompileError::runtime(format!("Invalid HashMap handle: {}", handle))
-    })?;
+    let map = reg
+        .get(&handle)
+        .ok_or_else(|| CompileError::runtime(format!("Invalid HashMap handle: {}", handle)))?;
 
     match map.get(&key) {
         Some(value) => Ok(value.clone()),
@@ -153,9 +155,9 @@ pub fn __rt_hashmap_contains_key(args: &[Value]) -> Result<Value, CompileError> 
     let registry = get_hashmap_registry();
     let reg = registry.lock().unwrap();
 
-    let map = reg.get(&handle).ok_or_else(|| {
-        CompileError::runtime(format!("Invalid HashMap handle: {}", handle))
-    })?;
+    let map = reg
+        .get(&handle)
+        .ok_or_else(|| CompileError::runtime(format!("Invalid HashMap handle: {}", handle)))?;
 
     Ok(Value::Bool(map.contains_key(&key)))
 }
@@ -188,9 +190,9 @@ pub fn __rt_hashmap_remove(args: &[Value]) -> Result<Value, CompileError> {
     let registry = get_hashmap_registry();
     let mut reg = registry.lock().unwrap();
 
-    let map = reg.get_mut(&handle).ok_or_else(|| {
-        CompileError::runtime(format!("Invalid HashMap handle: {}", handle))
-    })?;
+    let map = reg
+        .get_mut(&handle)
+        .ok_or_else(|| CompileError::runtime(format!("Invalid HashMap handle: {}", handle)))?;
 
     match map.remove(&key) {
         Some(value) => Ok(value),
@@ -216,9 +218,9 @@ pub fn __rt_hashmap_len(args: &[Value]) -> Result<Value, CompileError> {
     let registry = get_hashmap_registry();
     let reg = registry.lock().unwrap();
 
-    let map = reg.get(&handle).ok_or_else(|| {
-        CompileError::runtime(format!("Invalid HashMap handle: {}", handle))
-    })?;
+    let map = reg
+        .get(&handle)
+        .ok_or_else(|| CompileError::runtime(format!("Invalid HashMap handle: {}", handle)))?;
 
     Ok(Value::Int(map.len() as i64))
 }
@@ -241,9 +243,9 @@ pub fn __rt_hashmap_clear(args: &[Value]) -> Result<Value, CompileError> {
     let registry = get_hashmap_registry();
     let mut reg = registry.lock().unwrap();
 
-    let map = reg.get_mut(&handle).ok_or_else(|| {
-        CompileError::runtime(format!("Invalid HashMap handle: {}", handle))
-    })?;
+    let map = reg
+        .get_mut(&handle)
+        .ok_or_else(|| CompileError::runtime(format!("Invalid HashMap handle: {}", handle)))?;
 
     map.clear();
     Ok(Value::Bool(true))
@@ -267,9 +269,9 @@ pub fn __rt_hashmap_keys(args: &[Value]) -> Result<Value, CompileError> {
     let registry = get_hashmap_registry();
     let reg = registry.lock().unwrap();
 
-    let map = reg.get(&handle).ok_or_else(|| {
-        CompileError::runtime(format!("Invalid HashMap handle: {}", handle))
-    })?;
+    let map = reg
+        .get(&handle)
+        .ok_or_else(|| CompileError::runtime(format!("Invalid HashMap handle: {}", handle)))?;
 
     let keys: Vec<Value> = map.keys().map(|k| Value::Str(k.clone())).collect();
     Ok(Value::Array(keys))
@@ -293,9 +295,9 @@ pub fn __rt_hashmap_values(args: &[Value]) -> Result<Value, CompileError> {
     let registry = get_hashmap_registry();
     let reg = registry.lock().unwrap();
 
-    let map = reg.get(&handle).ok_or_else(|| {
-        CompileError::runtime(format!("Invalid HashMap handle: {}", handle))
-    })?;
+    let map = reg
+        .get(&handle)
+        .ok_or_else(|| CompileError::runtime(format!("Invalid HashMap handle: {}", handle)))?;
 
     let values: Vec<Value> = map.values().cloned().collect();
     Ok(Value::Array(values))
@@ -319,15 +321,13 @@ pub fn __rt_hashmap_entries(args: &[Value]) -> Result<Value, CompileError> {
     let registry = get_hashmap_registry();
     let reg = registry.lock().unwrap();
 
-    let map = reg.get(&handle).ok_or_else(|| {
-        CompileError::runtime(format!("Invalid HashMap handle: {}", handle))
-    })?;
+    let map = reg
+        .get(&handle)
+        .ok_or_else(|| CompileError::runtime(format!("Invalid HashMap handle: {}", handle)))?;
 
     let entries: Vec<Value> = map
         .iter()
-        .map(|(k, v)| {
-            Value::Array(vec![Value::Str(k.clone()), v.clone()])
-        })
+        .map(|(k, v)| Value::Array(vec![Value::Str(k.clone()), v.clone()]))
         .collect();
 
     Ok(Value::Array(entries))
@@ -344,7 +344,9 @@ static HASHSET_REGISTRY: OnceLock<Arc<Mutex<RustHashMap<HashSetHandle, RustHashS
 static NEXT_HASHSET_ID: AtomicUsize = AtomicUsize::new(100000);
 
 fn get_hashset_registry() -> Arc<Mutex<RustHashMap<HashSetHandle, RustHashSet<String>>>> {
-    HASHSET_REGISTRY.get_or_init(|| Arc::new(Mutex::new(RustHashMap::new()))).clone()
+    HASHSET_REGISTRY
+        .get_or_init(|| Arc::new(Mutex::new(RustHashMap::new())))
+        .clone()
 }
 
 fn alloc_hashset_handle() -> HashSetHandle {
@@ -376,7 +378,11 @@ pub fn __rt_hashset_insert(args: &[Value]) -> Result<Value, CompileError> {
         let value = match args.get(1) {
             Some(Value::Str(s)) => s.clone(),
             Some(Value::Int(n)) => n.to_string(),
-            _ => return Err(CompileError::runtime("HashSet value must be a string or int".to_string())),
+            _ => {
+                return Err(CompileError::runtime(
+                    "HashSet value must be a string or int".to_string(),
+                ))
+            }
         };
         return registry.map.hashset_insert(handle, value).map(|b| Value::Bool(b));
     }
@@ -388,15 +394,19 @@ pub fn __rt_hashset_insert(args: &[Value]) -> Result<Value, CompileError> {
     let value = match args.get(1) {
         Some(Value::Str(s)) => s.clone(),
         Some(Value::Int(n)) => n.to_string(),
-        _ => return Err(CompileError::runtime("HashSet value must be a string or int".to_string())),
+        _ => {
+            return Err(CompileError::runtime(
+                "HashSet value must be a string or int".to_string(),
+            ))
+        }
     };
 
     let registry = get_hashset_registry();
     let mut reg = registry.lock().unwrap();
 
-    let set = reg.get_mut(&handle).ok_or_else(|| {
-        CompileError::runtime(format!("Invalid HashSet handle: {}", handle))
-    })?;
+    let set = reg
+        .get_mut(&handle)
+        .ok_or_else(|| CompileError::runtime(format!("Invalid HashSet handle: {}", handle)))?;
 
     Ok(Value::Bool(set.insert(value)))
 }
@@ -412,7 +422,11 @@ pub fn __rt_hashset_contains(args: &[Value]) -> Result<Value, CompileError> {
         let value = match args.get(1) {
             Some(Value::Str(s)) => s.clone(),
             Some(Value::Int(n)) => n.to_string(),
-            _ => return Err(CompileError::runtime("HashSet value must be a string or int".to_string())),
+            _ => {
+                return Err(CompileError::runtime(
+                    "HashSet value must be a string or int".to_string(),
+                ))
+            }
         };
         return registry.map.hashset_contains(handle, &value).map(|b| Value::Bool(b));
     }
@@ -424,15 +438,19 @@ pub fn __rt_hashset_contains(args: &[Value]) -> Result<Value, CompileError> {
     let value = match args.get(1) {
         Some(Value::Str(s)) => s.clone(),
         Some(Value::Int(n)) => n.to_string(),
-        _ => return Err(CompileError::runtime("HashSet value must be a string or int".to_string())),
+        _ => {
+            return Err(CompileError::runtime(
+                "HashSet value must be a string or int".to_string(),
+            ))
+        }
     };
 
     let registry = get_hashset_registry();
     let reg = registry.lock().unwrap();
 
-    let set = reg.get(&handle).ok_or_else(|| {
-        CompileError::runtime(format!("Invalid HashSet handle: {}", handle))
-    })?;
+    let set = reg
+        .get(&handle)
+        .ok_or_else(|| CompileError::runtime(format!("Invalid HashSet handle: {}", handle)))?;
 
     Ok(Value::Bool(set.contains(&value)))
 }
@@ -449,7 +467,11 @@ pub fn __rt_hashset_remove(args: &[Value]) -> Result<Value, CompileError> {
         let value = match args.get(1) {
             Some(Value::Str(s)) => s.clone(),
             Some(Value::Int(n)) => n.to_string(),
-            _ => return Err(CompileError::runtime("HashSet value must be a string or int".to_string())),
+            _ => {
+                return Err(CompileError::runtime(
+                    "HashSet value must be a string or int".to_string(),
+                ))
+            }
         };
         return registry.map.hashset_remove(handle, &value).map(|b| Value::Bool(b));
     }
@@ -461,15 +483,19 @@ pub fn __rt_hashset_remove(args: &[Value]) -> Result<Value, CompileError> {
     let value = match args.get(1) {
         Some(Value::Str(s)) => s.clone(),
         Some(Value::Int(n)) => n.to_string(),
-        _ => return Err(CompileError::runtime("HashSet value must be a string or int".to_string())),
+        _ => {
+            return Err(CompileError::runtime(
+                "HashSet value must be a string or int".to_string(),
+            ))
+        }
     };
 
     let registry = get_hashset_registry();
     let mut reg = registry.lock().unwrap();
 
-    let set = reg.get_mut(&handle).ok_or_else(|| {
-        CompileError::runtime(format!("Invalid HashSet handle: {}", handle))
-    })?;
+    let set = reg
+        .get_mut(&handle)
+        .ok_or_else(|| CompileError::runtime(format!("Invalid HashSet handle: {}", handle)))?;
 
     Ok(Value::Bool(set.remove(&value)))
 }
@@ -492,9 +518,9 @@ pub fn __rt_hashset_len(args: &[Value]) -> Result<Value, CompileError> {
     let registry = get_hashset_registry();
     let reg = registry.lock().unwrap();
 
-    let set = reg.get(&handle).ok_or_else(|| {
-        CompileError::runtime(format!("Invalid HashSet handle: {}", handle))
-    })?;
+    let set = reg
+        .get(&handle)
+        .ok_or_else(|| CompileError::runtime(format!("Invalid HashSet handle: {}", handle)))?;
 
     Ok(Value::Int(set.len() as i64))
 }
@@ -517,9 +543,9 @@ pub fn __rt_hashset_clear(args: &[Value]) -> Result<Value, CompileError> {
     let registry = get_hashset_registry();
     let mut reg = registry.lock().unwrap();
 
-    let set = reg.get_mut(&handle).ok_or_else(|| {
-        CompileError::runtime(format!("Invalid HashSet handle: {}", handle))
-    })?;
+    let set = reg
+        .get_mut(&handle)
+        .ok_or_else(|| CompileError::runtime(format!("Invalid HashSet handle: {}", handle)))?;
 
     set.clear();
     Ok(Value::Bool(true))
@@ -543,9 +569,9 @@ pub fn __rt_hashset_to_array(args: &[Value]) -> Result<Value, CompileError> {
     let registry = get_hashset_registry();
     let reg = registry.lock().unwrap();
 
-    let set = reg.get(&handle).ok_or_else(|| {
-        CompileError::runtime(format!("Invalid HashSet handle: {}", handle))
-    })?;
+    let set = reg
+        .get(&handle)
+        .ok_or_else(|| CompileError::runtime(format!("Invalid HashSet handle: {}", handle)))?;
 
     let array: Vec<Value> = set.iter().map(|s| Value::Str(s.clone())).collect();
     Ok(Value::Array(array))
@@ -578,13 +604,13 @@ pub fn __rt_hashset_union(args: &[Value]) -> Result<Value, CompileError> {
     let registry = get_hashset_registry();
     let reg = registry.lock().unwrap();
 
-    let set1 = reg.get(&handle1).ok_or_else(|| {
-        CompileError::runtime(format!("Invalid HashSet handle: {}", handle1))
-    })?;
+    let set1 = reg
+        .get(&handle1)
+        .ok_or_else(|| CompileError::runtime(format!("Invalid HashSet handle: {}", handle1)))?;
 
-    let set2 = reg.get(&handle2).ok_or_else(|| {
-        CompileError::runtime(format!("Invalid HashSet handle: {}", handle2))
-    })?;
+    let set2 = reg
+        .get(&handle2)
+        .ok_or_else(|| CompileError::runtime(format!("Invalid HashSet handle: {}", handle2)))?;
 
     let result: RustHashSet<String> = set1.union(set2).cloned().collect();
 
@@ -624,13 +650,13 @@ pub fn __rt_hashset_intersection(args: &[Value]) -> Result<Value, CompileError> 
     let registry = get_hashset_registry();
     let reg = registry.lock().unwrap();
 
-    let set1 = reg.get(&handle1).ok_or_else(|| {
-        CompileError::runtime(format!("Invalid HashSet handle: {}", handle1))
-    })?;
+    let set1 = reg
+        .get(&handle1)
+        .ok_or_else(|| CompileError::runtime(format!("Invalid HashSet handle: {}", handle1)))?;
 
-    let set2 = reg.get(&handle2).ok_or_else(|| {
-        CompileError::runtime(format!("Invalid HashSet handle: {}", handle2))
-    })?;
+    let set2 = reg
+        .get(&handle2)
+        .ok_or_else(|| CompileError::runtime(format!("Invalid HashSet handle: {}", handle2)))?;
 
     let result: RustHashSet<String> = set1.intersection(set2).cloned().collect();
 
@@ -670,13 +696,13 @@ pub fn __rt_hashset_difference(args: &[Value]) -> Result<Value, CompileError> {
     let registry = get_hashset_registry();
     let reg = registry.lock().unwrap();
 
-    let set1 = reg.get(&handle1).ok_or_else(|| {
-        CompileError::runtime(format!("Invalid HashSet handle: {}", handle1))
-    })?;
+    let set1 = reg
+        .get(&handle1)
+        .ok_or_else(|| CompileError::runtime(format!("Invalid HashSet handle: {}", handle1)))?;
 
-    let set2 = reg.get(&handle2).ok_or_else(|| {
-        CompileError::runtime(format!("Invalid HashSet handle: {}", handle2))
-    })?;
+    let set2 = reg
+        .get(&handle2)
+        .ok_or_else(|| CompileError::runtime(format!("Invalid HashSet handle: {}", handle2)))?;
 
     let result: RustHashSet<String> = set1.difference(set2).cloned().collect();
 
@@ -716,13 +742,13 @@ pub fn __rt_hashset_symmetric_difference(args: &[Value]) -> Result<Value, Compil
     let registry = get_hashset_registry();
     let reg = registry.lock().unwrap();
 
-    let set1 = reg.get(&handle1).ok_or_else(|| {
-        CompileError::runtime(format!("Invalid HashSet handle: {}", handle1))
-    })?;
+    let set1 = reg
+        .get(&handle1)
+        .ok_or_else(|| CompileError::runtime(format!("Invalid HashSet handle: {}", handle1)))?;
 
-    let set2 = reg.get(&handle2).ok_or_else(|| {
-        CompileError::runtime(format!("Invalid HashSet handle: {}", handle2))
-    })?;
+    let set2 = reg
+        .get(&handle2)
+        .ok_or_else(|| CompileError::runtime(format!("Invalid HashSet handle: {}", handle2)))?;
 
     let result: RustHashSet<String> = set1.symmetric_difference(set2).cloned().collect();
 
@@ -762,13 +788,13 @@ pub fn __rt_hashset_is_subset(args: &[Value]) -> Result<Value, CompileError> {
     let registry = get_hashset_registry();
     let reg = registry.lock().unwrap();
 
-    let set1 = reg.get(&handle1).ok_or_else(|| {
-        CompileError::runtime(format!("Invalid HashSet handle: {}", handle1))
-    })?;
+    let set1 = reg
+        .get(&handle1)
+        .ok_or_else(|| CompileError::runtime(format!("Invalid HashSet handle: {}", handle1)))?;
 
-    let set2 = reg.get(&handle2).ok_or_else(|| {
-        CompileError::runtime(format!("Invalid HashSet handle: {}", handle2))
-    })?;
+    let set2 = reg
+        .get(&handle2)
+        .ok_or_else(|| CompileError::runtime(format!("Invalid HashSet handle: {}", handle2)))?;
 
     Ok(Value::Bool(set1.is_subset(set2)))
 }
@@ -800,13 +826,13 @@ pub fn __rt_hashset_is_superset(args: &[Value]) -> Result<Value, CompileError> {
     let registry = get_hashset_registry();
     let reg = registry.lock().unwrap();
 
-    let set1 = reg.get(&handle1).ok_or_else(|| {
-        CompileError::runtime(format!("Invalid HashSet handle: {}", handle1))
-    })?;
+    let set1 = reg
+        .get(&handle1)
+        .ok_or_else(|| CompileError::runtime(format!("Invalid HashSet handle: {}", handle1)))?;
 
-    let set2 = reg.get(&handle2).ok_or_else(|| {
-        CompileError::runtime(format!("Invalid HashSet handle: {}", handle2))
-    })?;
+    let set2 = reg
+        .get(&handle2)
+        .ok_or_else(|| CompileError::runtime(format!("Invalid HashSet handle: {}", handle2)))?;
 
     Ok(Value::Bool(set1.is_superset(set2)))
 }
@@ -818,11 +844,14 @@ pub fn __rt_hashset_is_superset(args: &[Value]) -> Result<Value, CompileError> {
 type BTreeMapHandle = usize;
 
 // Global registry for BTreeMaps
-static BTREEMAP_REGISTRY: OnceLock<Arc<Mutex<RustHashMap<BTreeMapHandle, RustBTreeMap<String, Value>>>>> = OnceLock::new();
+static BTREEMAP_REGISTRY: OnceLock<Arc<Mutex<RustHashMap<BTreeMapHandle, RustBTreeMap<String, Value>>>>> =
+    OnceLock::new();
 static NEXT_BTREEMAP_ID: AtomicUsize = AtomicUsize::new(200000);
 
 fn get_btreemap_registry() -> Arc<Mutex<RustHashMap<BTreeMapHandle, RustBTreeMap<String, Value>>>> {
-    BTREEMAP_REGISTRY.get_or_init(|| Arc::new(Mutex::new(RustHashMap::new()))).clone()
+    BTREEMAP_REGISTRY
+        .get_or_init(|| Arc::new(Mutex::new(RustHashMap::new())))
+        .clone()
 }
 
 fn alloc_btreemap_handle() -> BTreeMapHandle {
@@ -890,9 +919,9 @@ pub fn __rt_btreemap_insert(args: &[Value]) -> Result<Value, CompileError> {
     let registry = get_btreemap_registry();
     let mut reg = registry.lock().unwrap();
 
-    let map = reg.get_mut(&handle).ok_or_else(|| {
-        CompileError::runtime(format!("Invalid BTreeMap handle: {}", handle))
-    })?;
+    let map = reg
+        .get_mut(&handle)
+        .ok_or_else(|| CompileError::runtime(format!("Invalid BTreeMap handle: {}", handle)))?;
 
     let was_new = !map.contains_key(&key);
     map.insert(key, value);
@@ -927,9 +956,9 @@ pub fn __rt_btreemap_get(args: &[Value]) -> Result<Value, CompileError> {
     let registry = get_btreemap_registry();
     let reg = registry.lock().unwrap();
 
-    let map = reg.get(&handle).ok_or_else(|| {
-        CompileError::runtime(format!("Invalid BTreeMap handle: {}", handle))
-    })?;
+    let map = reg
+        .get(&handle)
+        .ok_or_else(|| CompileError::runtime(format!("Invalid BTreeMap handle: {}", handle)))?;
 
     match map.get(&key) {
         Some(value) => Ok(value.clone()),
@@ -964,9 +993,9 @@ pub fn __rt_btreemap_contains_key(args: &[Value]) -> Result<Value, CompileError>
     let registry = get_btreemap_registry();
     let reg = registry.lock().unwrap();
 
-    let map = reg.get(&handle).ok_or_else(|| {
-        CompileError::runtime(format!("Invalid BTreeMap handle: {}", handle))
-    })?;
+    let map = reg
+        .get(&handle)
+        .ok_or_else(|| CompileError::runtime(format!("Invalid BTreeMap handle: {}", handle)))?;
 
     Ok(Value::Bool(map.contains_key(&key)))
 }
@@ -999,9 +1028,9 @@ pub fn __rt_btreemap_remove(args: &[Value]) -> Result<Value, CompileError> {
     let registry = get_btreemap_registry();
     let mut reg = registry.lock().unwrap();
 
-    let map = reg.get_mut(&handle).ok_or_else(|| {
-        CompileError::runtime(format!("Invalid BTreeMap handle: {}", handle))
-    })?;
+    let map = reg
+        .get_mut(&handle)
+        .ok_or_else(|| CompileError::runtime(format!("Invalid BTreeMap handle: {}", handle)))?;
 
     match map.remove(&key) {
         Some(value) => Ok(value),
@@ -1027,9 +1056,9 @@ pub fn __rt_btreemap_len(args: &[Value]) -> Result<Value, CompileError> {
     let registry = get_btreemap_registry();
     let reg = registry.lock().unwrap();
 
-    let map = reg.get(&handle).ok_or_else(|| {
-        CompileError::runtime(format!("Invalid BTreeMap handle: {}", handle))
-    })?;
+    let map = reg
+        .get(&handle)
+        .ok_or_else(|| CompileError::runtime(format!("Invalid BTreeMap handle: {}", handle)))?;
 
     Ok(Value::Int(map.len() as i64))
 }
@@ -1052,9 +1081,9 @@ pub fn __rt_btreemap_clear(args: &[Value]) -> Result<Value, CompileError> {
     let registry = get_btreemap_registry();
     let mut reg = registry.lock().unwrap();
 
-    let map = reg.get_mut(&handle).ok_or_else(|| {
-        CompileError::runtime(format!("Invalid BTreeMap handle: {}", handle))
-    })?;
+    let map = reg
+        .get_mut(&handle)
+        .ok_or_else(|| CompileError::runtime(format!("Invalid BTreeMap handle: {}", handle)))?;
 
     map.clear();
     Ok(Value::Bool(true))
@@ -1078,9 +1107,9 @@ pub fn __rt_btreemap_keys(args: &[Value]) -> Result<Value, CompileError> {
     let registry = get_btreemap_registry();
     let reg = registry.lock().unwrap();
 
-    let map = reg.get(&handle).ok_or_else(|| {
-        CompileError::runtime(format!("Invalid BTreeMap handle: {}", handle))
-    })?;
+    let map = reg
+        .get(&handle)
+        .ok_or_else(|| CompileError::runtime(format!("Invalid BTreeMap handle: {}", handle)))?;
 
     let keys: Vec<Value> = map.keys().map(|k| Value::Str(k.clone())).collect();
     Ok(Value::Array(keys))
@@ -1104,9 +1133,9 @@ pub fn __rt_btreemap_values(args: &[Value]) -> Result<Value, CompileError> {
     let registry = get_btreemap_registry();
     let reg = registry.lock().unwrap();
 
-    let map = reg.get(&handle).ok_or_else(|| {
-        CompileError::runtime(format!("Invalid BTreeMap handle: {}", handle))
-    })?;
+    let map = reg
+        .get(&handle)
+        .ok_or_else(|| CompileError::runtime(format!("Invalid BTreeMap handle: {}", handle)))?;
 
     let values: Vec<Value> = map.values().cloned().collect();
     Ok(Value::Array(values))
@@ -1130,15 +1159,13 @@ pub fn __rt_btreemap_entries(args: &[Value]) -> Result<Value, CompileError> {
     let registry = get_btreemap_registry();
     let reg = registry.lock().unwrap();
 
-    let map = reg.get(&handle).ok_or_else(|| {
-        CompileError::runtime(format!("Invalid BTreeMap handle: {}", handle))
-    })?;
+    let map = reg
+        .get(&handle)
+        .ok_or_else(|| CompileError::runtime(format!("Invalid BTreeMap handle: {}", handle)))?;
 
     let entries: Vec<Value> = map
         .iter()
-        .map(|(k, v)| {
-            Value::Array(vec![Value::Str(k.clone()), v.clone()])
-        })
+        .map(|(k, v)| Value::Array(vec![Value::Str(k.clone()), v.clone()]))
         .collect();
 
     Ok(Value::Array(entries))
@@ -1163,9 +1190,9 @@ pub fn __rt_btreemap_first_key(args: &[Value]) -> Result<Value, CompileError> {
     let registry = get_btreemap_registry();
     let reg = registry.lock().unwrap();
 
-    let map = reg.get(&handle).ok_or_else(|| {
-        CompileError::runtime(format!("Invalid BTreeMap handle: {}", handle))
-    })?;
+    let map = reg
+        .get(&handle)
+        .ok_or_else(|| CompileError::runtime(format!("Invalid BTreeMap handle: {}", handle)))?;
 
     match map.keys().next() {
         Some(key) => Ok(Value::Str(key.clone())),
@@ -1192,9 +1219,9 @@ pub fn __rt_btreemap_last_key(args: &[Value]) -> Result<Value, CompileError> {
     let registry = get_btreemap_registry();
     let reg = registry.lock().unwrap();
 
-    let map = reg.get(&handle).ok_or_else(|| {
-        CompileError::runtime(format!("Invalid BTreeMap handle: {}", handle))
-    })?;
+    let map = reg
+        .get(&handle)
+        .ok_or_else(|| CompileError::runtime(format!("Invalid BTreeMap handle: {}", handle)))?;
 
     match map.keys().next_back() {
         Some(key) => Ok(Value::Str(key.clone())),
@@ -1213,7 +1240,9 @@ static BTREESET_REGISTRY: OnceLock<Arc<Mutex<RustHashMap<BTreeSetHandle, RustBTr
 static NEXT_BTREESET_ID: AtomicUsize = AtomicUsize::new(300000);
 
 fn get_btreeset_registry() -> Arc<Mutex<RustHashMap<BTreeSetHandle, RustBTreeSet<String>>>> {
-    BTREESET_REGISTRY.get_or_init(|| Arc::new(Mutex::new(RustHashMap::new()))).clone()
+    BTREESET_REGISTRY
+        .get_or_init(|| Arc::new(Mutex::new(RustHashMap::new())))
+        .clone()
 }
 
 fn alloc_btreeset_handle() -> BTreeSetHandle {
@@ -1245,7 +1274,11 @@ pub fn __rt_btreeset_insert(args: &[Value]) -> Result<Value, CompileError> {
         let value = match args.get(1) {
             Some(Value::Str(s)) => s.clone(),
             Some(Value::Int(n)) => n.to_string(),
-            _ => return Err(CompileError::runtime("BTreeSet value must be a string or int".to_string())),
+            _ => {
+                return Err(CompileError::runtime(
+                    "BTreeSet value must be a string or int".to_string(),
+                ))
+            }
         };
         return registry.map.btreeset_insert(handle, value).map(|b| Value::Bool(b));
     }
@@ -1257,15 +1290,19 @@ pub fn __rt_btreeset_insert(args: &[Value]) -> Result<Value, CompileError> {
     let value = match args.get(1) {
         Some(Value::Str(s)) => s.clone(),
         Some(Value::Int(n)) => n.to_string(),
-        _ => return Err(CompileError::runtime("BTreeSet value must be a string or int".to_string())),
+        _ => {
+            return Err(CompileError::runtime(
+                "BTreeSet value must be a string or int".to_string(),
+            ))
+        }
     };
 
     let registry = get_btreeset_registry();
     let mut reg = registry.lock().unwrap();
 
-    let set = reg.get_mut(&handle).ok_or_else(|| {
-        CompileError::runtime(format!("Invalid BTreeSet handle: {}", handle))
-    })?;
+    let set = reg
+        .get_mut(&handle)
+        .ok_or_else(|| CompileError::runtime(format!("Invalid BTreeSet handle: {}", handle)))?;
 
     Ok(Value::Bool(set.insert(value)))
 }
@@ -1281,7 +1318,11 @@ pub fn __rt_btreeset_contains(args: &[Value]) -> Result<Value, CompileError> {
         let value = match args.get(1) {
             Some(Value::Str(s)) => s.clone(),
             Some(Value::Int(n)) => n.to_string(),
-            _ => return Err(CompileError::runtime("BTreeSet value must be a string or int".to_string())),
+            _ => {
+                return Err(CompileError::runtime(
+                    "BTreeSet value must be a string or int".to_string(),
+                ))
+            }
         };
         return registry.map.btreeset_contains(handle, &value).map(|b| Value::Bool(b));
     }
@@ -1293,15 +1334,19 @@ pub fn __rt_btreeset_contains(args: &[Value]) -> Result<Value, CompileError> {
     let value = match args.get(1) {
         Some(Value::Str(s)) => s.clone(),
         Some(Value::Int(n)) => n.to_string(),
-        _ => return Err(CompileError::runtime("BTreeSet value must be a string or int".to_string())),
+        _ => {
+            return Err(CompileError::runtime(
+                "BTreeSet value must be a string or int".to_string(),
+            ))
+        }
     };
 
     let registry = get_btreeset_registry();
     let reg = registry.lock().unwrap();
 
-    let set = reg.get(&handle).ok_or_else(|| {
-        CompileError::runtime(format!("Invalid BTreeSet handle: {}", handle))
-    })?;
+    let set = reg
+        .get(&handle)
+        .ok_or_else(|| CompileError::runtime(format!("Invalid BTreeSet handle: {}", handle)))?;
 
     Ok(Value::Bool(set.contains(&value)))
 }
@@ -1318,7 +1363,11 @@ pub fn __rt_btreeset_remove(args: &[Value]) -> Result<Value, CompileError> {
         let value = match args.get(1) {
             Some(Value::Str(s)) => s.clone(),
             Some(Value::Int(n)) => n.to_string(),
-            _ => return Err(CompileError::runtime("BTreeSet value must be a string or int".to_string())),
+            _ => {
+                return Err(CompileError::runtime(
+                    "BTreeSet value must be a string or int".to_string(),
+                ))
+            }
         };
         return registry.map.btreeset_remove(handle, &value).map(|b| Value::Bool(b));
     }
@@ -1330,15 +1379,19 @@ pub fn __rt_btreeset_remove(args: &[Value]) -> Result<Value, CompileError> {
     let value = match args.get(1) {
         Some(Value::Str(s)) => s.clone(),
         Some(Value::Int(n)) => n.to_string(),
-        _ => return Err(CompileError::runtime("BTreeSet value must be a string or int".to_string())),
+        _ => {
+            return Err(CompileError::runtime(
+                "BTreeSet value must be a string or int".to_string(),
+            ))
+        }
     };
 
     let registry = get_btreeset_registry();
     let mut reg = registry.lock().unwrap();
 
-    let set = reg.get_mut(&handle).ok_or_else(|| {
-        CompileError::runtime(format!("Invalid BTreeSet handle: {}", handle))
-    })?;
+    let set = reg
+        .get_mut(&handle)
+        .ok_or_else(|| CompileError::runtime(format!("Invalid BTreeSet handle: {}", handle)))?;
 
     Ok(Value::Bool(set.remove(&value)))
 }
@@ -1361,9 +1414,9 @@ pub fn __rt_btreeset_len(args: &[Value]) -> Result<Value, CompileError> {
     let registry = get_btreeset_registry();
     let reg = registry.lock().unwrap();
 
-    let set = reg.get(&handle).ok_or_else(|| {
-        CompileError::runtime(format!("Invalid BTreeSet handle: {}", handle))
-    })?;
+    let set = reg
+        .get(&handle)
+        .ok_or_else(|| CompileError::runtime(format!("Invalid BTreeSet handle: {}", handle)))?;
 
     Ok(Value::Int(set.len() as i64))
 }
@@ -1386,9 +1439,9 @@ pub fn __rt_btreeset_clear(args: &[Value]) -> Result<Value, CompileError> {
     let registry = get_btreeset_registry();
     let mut reg = registry.lock().unwrap();
 
-    let set = reg.get_mut(&handle).ok_or_else(|| {
-        CompileError::runtime(format!("Invalid BTreeSet handle: {}", handle))
-    })?;
+    let set = reg
+        .get_mut(&handle)
+        .ok_or_else(|| CompileError::runtime(format!("Invalid BTreeSet handle: {}", handle)))?;
 
     set.clear();
     Ok(Value::Bool(true))
@@ -1412,9 +1465,9 @@ pub fn __rt_btreeset_to_array(args: &[Value]) -> Result<Value, CompileError> {
     let registry = get_btreeset_registry();
     let reg = registry.lock().unwrap();
 
-    let set = reg.get(&handle).ok_or_else(|| {
-        CompileError::runtime(format!("Invalid BTreeSet handle: {}", handle))
-    })?;
+    let set = reg
+        .get(&handle)
+        .ok_or_else(|| CompileError::runtime(format!("Invalid BTreeSet handle: {}", handle)))?;
 
     let array: Vec<Value> = set.iter().map(|s| Value::Str(s.clone())).collect();
     Ok(Value::Array(array))
@@ -1439,9 +1492,9 @@ pub fn __rt_btreeset_first(args: &[Value]) -> Result<Value, CompileError> {
     let registry = get_btreeset_registry();
     let reg = registry.lock().unwrap();
 
-    let set = reg.get(&handle).ok_or_else(|| {
-        CompileError::runtime(format!("Invalid BTreeSet handle: {}", handle))
-    })?;
+    let set = reg
+        .get(&handle)
+        .ok_or_else(|| CompileError::runtime(format!("Invalid BTreeSet handle: {}", handle)))?;
 
     match set.iter().next() {
         Some(elem) => Ok(Value::Str(elem.clone())),
@@ -1468,9 +1521,9 @@ pub fn __rt_btreeset_last(args: &[Value]) -> Result<Value, CompileError> {
     let registry = get_btreeset_registry();
     let reg = registry.lock().unwrap();
 
-    let set = reg.get(&handle).ok_or_else(|| {
-        CompileError::runtime(format!("Invalid BTreeSet handle: {}", handle))
-    })?;
+    let set = reg
+        .get(&handle)
+        .ok_or_else(|| CompileError::runtime(format!("Invalid BTreeSet handle: {}", handle)))?;
 
     match set.iter().next_back() {
         Some(elem) => Ok(Value::Str(elem.clone())),
@@ -1505,13 +1558,13 @@ pub fn __rt_btreeset_union(args: &[Value]) -> Result<Value, CompileError> {
     let registry = get_btreeset_registry();
     let reg = registry.lock().unwrap();
 
-    let set1 = reg.get(&handle1).ok_or_else(|| {
-        CompileError::runtime(format!("Invalid BTreeSet handle: {}", handle1))
-    })?;
+    let set1 = reg
+        .get(&handle1)
+        .ok_or_else(|| CompileError::runtime(format!("Invalid BTreeSet handle: {}", handle1)))?;
 
-    let set2 = reg.get(&handle2).ok_or_else(|| {
-        CompileError::runtime(format!("Invalid BTreeSet handle: {}", handle2))
-    })?;
+    let set2 = reg
+        .get(&handle2)
+        .ok_or_else(|| CompileError::runtime(format!("Invalid BTreeSet handle: {}", handle2)))?;
 
     let result: RustBTreeSet<String> = set1.union(set2).cloned().collect();
 
@@ -1551,13 +1604,13 @@ pub fn __rt_btreeset_intersection(args: &[Value]) -> Result<Value, CompileError>
     let registry = get_btreeset_registry();
     let reg = registry.lock().unwrap();
 
-    let set1 = reg.get(&handle1).ok_or_else(|| {
-        CompileError::runtime(format!("Invalid BTreeSet handle: {}", handle1))
-    })?;
+    let set1 = reg
+        .get(&handle1)
+        .ok_or_else(|| CompileError::runtime(format!("Invalid BTreeSet handle: {}", handle1)))?;
 
-    let set2 = reg.get(&handle2).ok_or_else(|| {
-        CompileError::runtime(format!("Invalid BTreeSet handle: {}", handle2))
-    })?;
+    let set2 = reg
+        .get(&handle2)
+        .ok_or_else(|| CompileError::runtime(format!("Invalid BTreeSet handle: {}", handle2)))?;
 
     let result: RustBTreeSet<String> = set1.intersection(set2).cloned().collect();
 
@@ -1597,13 +1650,13 @@ pub fn __rt_btreeset_difference(args: &[Value]) -> Result<Value, CompileError> {
     let registry = get_btreeset_registry();
     let reg = registry.lock().unwrap();
 
-    let set1 = reg.get(&handle1).ok_or_else(|| {
-        CompileError::runtime(format!("Invalid BTreeSet handle: {}", handle1))
-    })?;
+    let set1 = reg
+        .get(&handle1)
+        .ok_or_else(|| CompileError::runtime(format!("Invalid BTreeSet handle: {}", handle1)))?;
 
-    let set2 = reg.get(&handle2).ok_or_else(|| {
-        CompileError::runtime(format!("Invalid BTreeSet handle: {}", handle2))
-    })?;
+    let set2 = reg
+        .get(&handle2)
+        .ok_or_else(|| CompileError::runtime(format!("Invalid BTreeSet handle: {}", handle2)))?;
 
     let result: RustBTreeSet<String> = set1.difference(set2).cloned().collect();
 
@@ -1643,13 +1696,13 @@ pub fn __rt_btreeset_symmetric_difference(args: &[Value]) -> Result<Value, Compi
     let registry = get_btreeset_registry();
     let reg = registry.lock().unwrap();
 
-    let set1 = reg.get(&handle1).ok_or_else(|| {
-        CompileError::runtime(format!("Invalid BTreeSet handle: {}", handle1))
-    })?;
+    let set1 = reg
+        .get(&handle1)
+        .ok_or_else(|| CompileError::runtime(format!("Invalid BTreeSet handle: {}", handle1)))?;
 
-    let set2 = reg.get(&handle2).ok_or_else(|| {
-        CompileError::runtime(format!("Invalid BTreeSet handle: {}", handle2))
-    })?;
+    let set2 = reg
+        .get(&handle2)
+        .ok_or_else(|| CompileError::runtime(format!("Invalid BTreeSet handle: {}", handle2)))?;
 
     let result: RustBTreeSet<String> = set1.symmetric_difference(set2).cloned().collect();
 
@@ -1689,13 +1742,13 @@ pub fn __rt_btreeset_is_subset(args: &[Value]) -> Result<Value, CompileError> {
     let registry = get_btreeset_registry();
     let reg = registry.lock().unwrap();
 
-    let set1 = reg.get(&handle1).ok_or_else(|| {
-        CompileError::runtime(format!("Invalid BTreeSet handle: {}", handle1))
-    })?;
+    let set1 = reg
+        .get(&handle1)
+        .ok_or_else(|| CompileError::runtime(format!("Invalid BTreeSet handle: {}", handle1)))?;
 
-    let set2 = reg.get(&handle2).ok_or_else(|| {
-        CompileError::runtime(format!("Invalid BTreeSet handle: {}", handle2))
-    })?;
+    let set2 = reg
+        .get(&handle2)
+        .ok_or_else(|| CompileError::runtime(format!("Invalid BTreeSet handle: {}", handle2)))?;
 
     Ok(Value::Bool(set1.is_subset(set2)))
 }
@@ -1727,13 +1780,13 @@ pub fn __rt_btreeset_is_superset(args: &[Value]) -> Result<Value, CompileError> 
     let registry = get_btreeset_registry();
     let reg = registry.lock().unwrap();
 
-    let set1 = reg.get(&handle1).ok_or_else(|| {
-        CompileError::runtime(format!("Invalid BTreeSet handle: {}", handle1))
-    })?;
+    let set1 = reg
+        .get(&handle1)
+        .ok_or_else(|| CompileError::runtime(format!("Invalid BTreeSet handle: {}", handle1)))?;
 
-    let set2 = reg.get(&handle2).ok_or_else(|| {
-        CompileError::runtime(format!("Invalid BTreeSet handle: {}", handle2))
-    })?;
+    let set2 = reg
+        .get(&handle2)
+        .ok_or_else(|| CompileError::runtime(format!("Invalid BTreeSet handle: {}", handle2)))?;
 
     Ok(Value::Bool(set1.is_superset(set2)))
 }
