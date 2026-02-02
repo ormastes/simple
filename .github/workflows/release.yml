@@ -56,6 +56,7 @@ jobs:
     needs: check-version
     if: needs.check-version.outputs.changed == 'true'
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
@@ -64,12 +65,9 @@ jobs:
           - os: macos-latest
             platform: darwin-arm64
             target: aarch64-apple-darwin
-          - os: macos-15  # Intel Mac
+          - os: macos-15  # Intel Mac (cross-compile)
             platform: darwin-x86_64
             target: x86_64-apple-darwin
-          - os: windows-latest
-            platform: windows-x86_64
-            target: x86_64-pc-windows-msvc
 
     runs-on: ${{ matrix.os }}
 
@@ -94,45 +92,12 @@ jobs:
           cd rust
           cargo build --profile release-opt --target ${{ matrix.target }}
 
-      - name: Build bootstrap package (Linux/macOS)
-        if: runner.os != 'Windows'
+      - name: Build bootstrap package
         run: |
           chmod +x script/build-bootstrap.sh
           ./script/build-bootstrap.sh
         env:
           TARGET: ${{ matrix.target }}
-
-      - name: Build bootstrap package (Windows)
-        if: runner.os == 'Windows'
-        shell: bash
-        run: |
-          # Windows-specific build logic
-          VERSION=$(grep '^version = ' rust/driver/Cargo.toml | head -1 | cut -d'"' -f2)
-          PLATFORM="${{ matrix.platform }}"
-          OUTPUT="simple-bootstrap-${VERSION}-${PLATFORM}.spk"
-
-          # Create package structure
-          mkdir -p pkg/bin pkg/lib/simple/{stdlib,app}
-
-          # Copy runtime
-          cp rust/target/${{ matrix.target }}/release-opt/simple_runtime.exe pkg/bin/
-
-          # Copy apps
-          cp -r src/app/{cli,run,compile,check,repl} pkg/lib/simple/app/
-
-          # Generate manifest
-          cat > pkg/manifest.sdn <<EOF
-          package:
-            name: simple-bootstrap
-            version: ${VERSION}
-            type: bootstrap
-            platform: ${PLATFORM}
-          EOF
-
-          # Create archive
-          tar -czf "${OUTPUT}" -C pkg .
-
-          echo "Package created: ${OUTPUT}"
 
       - name: Calculate checksums
         run: |
@@ -234,7 +199,7 @@ jobs:
           - **Linux x86_64**: \`simple-bootstrap-${{ steps.version.outputs.version }}-linux-x86_64.spk\`
           - **macOS ARM64** (Apple Silicon): \`simple-bootstrap-${{ steps.version.outputs.version }}-darwin-arm64.spk\`
           - **macOS x86_64** (Intel): \`simple-bootstrap-${{ steps.version.outputs.version }}-darwin-x86_64.spk\`
-          - **Windows x86_64**: \`simple-bootstrap-${{ steps.version.outputs.version }}-windows-x86_64.spk\`
+          - **Windows**: Coming soon (build from source)
 
           ### Full Package (Development)
 
@@ -447,7 +412,7 @@ jobs:
     needs: build-bootstrap
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-latest, macos-latest]
 
     runs-on: ${{ matrix.os }}
 
@@ -458,24 +423,9 @@ jobs:
           pattern: bootstrap-*
           merge-multiple: true
 
-      - name: Test installation (Linux/macOS)
-        if: runner.os != 'Windows'
+      - name: Test installation
         run: |
-          # Find the package for this platform
           PKG=$(ls simple-bootstrap-*.spk | head -1)
-
-          # Extract to test location
           mkdir -p test-install
           tar -xzf "${PKG}" -C test-install
-
-          # Verify runtime works
           test-install/bin/simple_runtime --version
-
-      - name: Test installation (Windows)
-        if: runner.os == 'Windows'
-        shell: bash
-        run: |
-          PKG=$(ls simple-bootstrap-*.spk | head -1)
-          mkdir -p test-install
-          tar -xzf "${PKG}" -C test-install
-          test-install/bin/simple_runtime.exe --version
