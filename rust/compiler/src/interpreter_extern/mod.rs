@@ -79,6 +79,7 @@ pub mod regex;
 pub mod ast_ffi;
 pub mod env_ffi;
 pub mod error_ffi;
+pub mod span_ffi;
 
 // Import parent interpreter types
 type Enums = HashMap<String, EnumDef>;
@@ -1134,6 +1135,16 @@ pub(crate) fn call_extern_function(
         "rt_error_throw" => error_ffi::rt_error_throw(&evaluated),
         "rt_error_message" => error_ffi::rt_error_message(&evaluated),
         "rt_error_free" => error_ffi::rt_error_free(&evaluated),
+
+        // ====================================================================
+        // Span Interop FFI (6 functions)
+        // ====================================================================
+        "rt_span_create" => span_ffi::rt_span_create(&evaluated),
+        "rt_span_start" => span_ffi::rt_span_start(&evaluated),
+        "rt_span_end" => span_ffi::rt_span_end(&evaluated),
+        "rt_span_line" => span_ffi::rt_span_line(&evaluated),
+        "rt_span_column" => span_ffi::rt_span_column(&evaluated),
+        "rt_span_free" => span_ffi::rt_span_free(&evaluated),
 
         _ => Err(common::unknown_function(name)),
     }
