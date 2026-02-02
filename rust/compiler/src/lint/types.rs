@@ -59,6 +59,10 @@ pub enum LintName {
     InitBoundaryViolation,
     /// #[bypass] attribute on a directory that contains .spl files
     BypassWithCodeFiles,
+    /// Unknown decorator (@name) not in known whitelist
+    UnknownDecorator,
+    /// Unknown attribute (#[name]) not in known whitelist
+    UnknownAttribute,
 }
 
 impl LintName {
@@ -80,6 +84,8 @@ impl LintName {
             LintName::ExportOutsideInit => "export_outside_init",
             LintName::InitBoundaryViolation => "init_boundary_violation",
             LintName::BypassWithCodeFiles => "bypass_with_code_files",
+            LintName::UnknownDecorator => "unknown_decorator",
+            LintName::UnknownAttribute => "unknown_attribute",
         }
     }
 
@@ -101,6 +107,13 @@ impl LintName {
             "export_outside_init" => Some(LintName::ExportOutsideInit),
             "init_boundary_violation" => Some(LintName::InitBoundaryViolation),
             "bypass_with_code_files" => Some(LintName::BypassWithCodeFiles),
+            "unknown_decorator" => Some(LintName::UnknownDecorator),
+            "unknown_attribute" => Some(LintName::UnknownAttribute),
+            "unknown_annotation" => {
+                // Meta-lint: suppresses both unknown_decorator and unknown_attribute
+                // Handled specially in config.rs apply_attributes
+                Some(LintName::UnknownDecorator) // Returns one; the other is handled via apply_attributes
+            }
             _ => None,
         }
     }
@@ -124,6 +137,8 @@ impl LintName {
             LintName::ExportOutsideInit => LintLevel::Warn,
             LintName::InitBoundaryViolation => LintLevel::Warn,
             LintName::BypassWithCodeFiles => LintLevel::Warn,
+            LintName::UnknownDecorator => LintLevel::Warn,
+            LintName::UnknownAttribute => LintLevel::Warn,
         }
     }
 
@@ -593,6 +608,47 @@ Either:
     [lints]
     bypass_with_code_files = "allow"
 "#.to_string(),
+            LintName::UnknownDecorator => r#"Lint: unknown_decorator
+Level: warn (default)
+
+=== What it checks ===
+
+Warns when an unknown decorator (@name) is used that is not in the known whitelist.
+
+Known decorators: @async, @pure, @io, @net, @fs, @unsafe, @verify, @trusted, @ghost,
+@auto_lean, @bounds, @extern, @simd, @inline, @test, @property_test, @snapshot_test,
+@deprecated, @generated_by, @Lib, @inject, @sys_inject
+
+=== How to suppress ===
+
+    #[allow(unknown_decorator)]
+    @MyCustomDecorator
+    fn my_function():
+        pass
+
+Or suppress all unknown annotations:
+    #[allow(unknown_annotation)]
+"#.to_string(),
+            LintName::UnknownAttribute => r#"Lint: unknown_attribute
+Level: warn (default)
+
+=== What it checks ===
+
+Warns when an unknown attribute (#[name]) is used that is not in the known whitelist.
+
+Known attributes: #[allow], #[warn], #[deny], #[default], #[concurrency_mode], #[layout],
+#[pure], #[snapshot], #[deprecated], #[bypass], #[skip_todo], #[generated], #[inline]
+
+=== How to suppress ===
+
+    #[allow(unknown_attribute)]
+    #[my_custom_attr]
+    fn my_function():
+        pass
+
+Or suppress all unknown annotations:
+    #[allow(unknown_annotation)]
+"#.to_string(),
             LintName::ExportOutsideInit => r#"Lint: export_outside_init
 Level: deny (error)
 
@@ -671,6 +727,8 @@ This lint cannot be suppressed. All exports must be in __init__.spl files.
             LintName::ExportOutsideInit,
             LintName::InitBoundaryViolation,
             LintName::BypassWithCodeFiles,
+            LintName::UnknownDecorator,
+            LintName::UnknownAttribute,
         ]
     }
 }

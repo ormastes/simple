@@ -1,0 +1,138 @@
+"""
+# FFI Generator System Test
+
+**Feature IDs:** #905-906
+**Category:** Tooling
+**Difficulty:** 2/5
+**Status:** Implemented
+
+## Overview
+
+System-level tests for the `simple ffi-gen` CLI command, exercising
+arg parsing, --dry-run output, --gen-intern mode, --help, and error cases.
+"""
+
+import std.spec
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_env_cwd() -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_dir_create(path: text, recursive: bool) -> bool
+extern fn rt_dir_remove(path: text, recursive: bool) -> bool
+
+fn run_simple(args: [text]) -> (text, text, i64):
+    val cwd = rt_env_cwd()
+    val bin = "{cwd}/bin/simple"
+    rt_process_run(bin, args)
+
+# ============================================================================
+# Test Group 1: CLI Help and Basic Usage
+# ============================================================================
+
+describe "FFI Generator CLI":
+    """
+    ## CLI Interface
+
+    Tests that the ffi-gen subcommand handles flags correctly.
+    """
+
+    context "when --help is passed":
+        """
+        ### Scenario: Help Output
+
+        The --help flag should print usage info and exit 0.
+        """
+
+        it "prints usage and exits 0":
+            val result = run_simple(["ffi-gen", "--help"])
+            val stdout = result.0
+            val exit_code = result.2
+            expect(exit_code).to(eq(0))
+            expect(stdout).to(contain("ffi-gen"))
+            expect(stdout).to(contain("--dry-run"))
+            expect(stdout).to(contain("--gen-intern"))
+
+    context "when no arguments are passed":
+        """
+        ### Scenario: Missing File Argument
+
+        Should print an error and exit non-zero.
+        """
+
+        it "prints error and exits non-zero":
+            val result = run_simple(["ffi-gen"])
+            val exit_code = result.2
+            expect(exit_code).to(not_eq(0))
+
+# ============================================================================
+# Test Group 2: Dry Run Mode
+# ============================================================================
+
+describe "FFI Generator Dry Run":
+    """
+    ## Dry Run
+
+    With --dry-run, generated code is printed but no files are written.
+    """
+
+    context "when --dry-run with a valid @Lib source":
+        """
+        ### Scenario: Dry Run Output
+
+        Should print generated Rust code to stdout without creating files.
+        """
+
+        it "outputs generated code without writing files":
+            val cwd = rt_env_cwd()
+            val test_file = "{cwd}/build/rust/ffi_gen_system_test_input.spl"
+            rt_dir_create("{cwd}/build/rust", true)
+
+            val source = "@Lib(lang: \"rust\", name: \"regex\", version: \"1.10\")\nextern class Regex:\n    static fn new(pattern: text) -> Regex\n    fn is_match(input: text) -> bool\n"
+            rt_file_write_text(test_file, source)
+
+            val result = run_simple(["ffi-gen", test_file, "--dry-run"])
+            val stdout = result.0
+            val exit_code = result.2
+
+            expect(exit_code).to(eq(0))
+            expect(stdout).to(contain("fn"))
+
+            # Clean up
+            rt_dir_remove("{cwd}/build/rust/ffi_gen_system_test_input.spl", false)
+
+# ============================================================================
+# Test Group 3: Gen-Intern Mode
+# ============================================================================
+
+describe "FFI Generator Gen-Intern Mode":
+    """
+    ## Gen-Intern
+
+    With --gen-intern, generates interpreter_extern Rust module from spec.
+    """
+
+    context "when --gen-intern --dry-run with a valid source":
+        """
+        ### Scenario: Intern Dry Run
+
+        Should print generated interpreter_extern module.
+        """
+
+        it "outputs intern module code":
+            val cwd = rt_env_cwd()
+            val test_file = "{cwd}/build/rust/ffi_gen_intern_test_input.spl"
+            rt_dir_create("{cwd}/build/rust", true)
+
+            val source = "@Lib(lang: \"rust\", name: \"regex\", version: \"1.10\")\nextern class Regex:\n    static fn new(pattern: text) -> Regex\n    fn is_match(input: text) -> bool\n"
+            rt_file_write_text(test_file, source)
+
+            val result = run_simple(["ffi-gen", "--gen-intern", test_file, "--dry-run"])
+            val stdout = result.0
+            val exit_code = result.2
+
+            expect(exit_code).to(eq(0))
+            expect(stdout).to(contain("gen-intern"))
+
+            # Clean up
+            rt_dir_remove("{cwd}/build/rust/ffi_gen_intern_test_input.spl", false)

@@ -381,7 +381,8 @@ mod tests {
 
     #[test]
     fn test_symbol_list_not_empty() {
-        assert!(!RUNTIME_SYMBOL_NAMES.is_empty());
+        // Verify the list has a reasonable number of symbols
+        assert!(RUNTIME_SYMBOL_NAMES.len() > 10);
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_array_new"));
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_println_value"));
     }

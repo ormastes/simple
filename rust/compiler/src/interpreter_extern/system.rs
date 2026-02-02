@@ -10,6 +10,7 @@ use simple_runtime::value::{
     rt_env_home as ffi_env_home, rt_env_remove as ffi_env_remove, rt_env_set as ffi_env_set,
     rt_env_temp as ffi_env_temp, rt_set_debug_mode as ffi_set_debug_mode, rt_set_macro_trace as ffi_set_macro_trace,
     rt_process_run as ffi_process_run, rt_process_run_timeout as ffi_process_run_timeout,
+    rt_platform_name as ffi_platform_name,
 };
 use simple_runtime::value::ffi::config::{
     rt_is_debug_mode_enabled as ffi_is_debug_mode_enabled, rt_is_macro_trace_enabled as ffi_is_macro_trace_enabled,
@@ -367,6 +368,33 @@ pub fn rt_process_run_timeout(args: &[Value]) -> Result<Value, CompileError> {
         let result = ffi_process_run_timeout(cmd.as_ptr(), cmd.len() as u64, args_array, timeout_ms);
         Ok(runtime_to_value(result))
     }
+}
+
+/// Get platform name
+///
+/// Callable from Simple as: `rt_platform_name()`
+///
+/// # Returns
+/// * String: "linux", "macos", "windows", etc.
+pub fn rt_platform_name(_args: &[Value]) -> Result<Value, CompileError> {
+    unsafe {
+        let result = ffi_platform_name();
+        Ok(runtime_to_value(result))
+    }
+}
+
+/// Exit the process with given exit code
+///
+/// Callable from Simple as: `rt_exit(code)`
+///
+/// # Arguments
+/// * `args` - Evaluated arguments [code: Int]
+pub fn rt_exit(args: &[Value]) -> Result<Value, CompileError> {
+    let code = match args.first() {
+        Some(Value::Int(n)) => *n as i32,
+        _ => 1,
+    };
+    std::process::exit(code);
 }
 
 #[cfg(test)]
