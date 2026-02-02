@@ -593,6 +593,8 @@ pub(crate) fn call_extern_function(
         // File metadata
         "rt_file_exists" | "rt_file_exists_str" => file_io::rt_file_exists(&evaluated),
         "rt_file_stat" => file_io::rt_file_stat(&evaluated),
+        "rt_file_size" => file_io::rt_file_size(&evaluated),
+        "rt_file_hash_sha256" => file_io::rt_file_hash_sha256(&evaluated),
         // File operations
         "rt_file_canonicalize" => file_io::rt_file_canonicalize(&evaluated),
         "rt_file_read_text" => file_io::rt_file_read_text(&evaluated),
