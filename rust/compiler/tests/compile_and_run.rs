@@ -1,3 +1,4 @@
+#![cfg(target_arch = "x86_64")]
 use simple_compiler::CompilerPipeline;
 use simple_runtime::loader::ModuleLoader;
 
