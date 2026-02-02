@@ -5,6 +5,16 @@ on:
     branches: [ main, master, develop ]
   pull_request:
     branches: [ main, master, develop ]
+  workflow_dispatch:
+    inputs:
+      run_slow_tests:
+        description: 'Run slow tests (ignored tests)'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
 
 env:
   CARGO_TERM_COLOR: always
@@ -227,3 +237,34 @@ jobs:
       run: |
         echo "Testing coverage data collection..."
         SIMPLE_COVERAGE=1 cargo test --test interpreter_coverage_line -- --test-threads=1 --nocapture 2>&1 | grep -E "test result|passed"
+
+  slow-tests:
+    name: Slow Tests (Manual)
+    runs-on: ubuntu-latest
+    if: github.event.inputs.run_slow_tests == 'true'
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Install SPIR-V Tools
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y spirv-tools
+
+    - name: Build debug runtime
+      run: |
+        cd rust
+        cargo build
+
+    - name: Run Rust slow tests
+      run: cargo test --workspace -- --ignored --nocapture
+      continue-on-error: false
+
+    - name: Run Simple/SSpec slow tests
+      run: |
+        bin/simple src/app/build/test.spl --only-slow
+      continue-on-error: false
