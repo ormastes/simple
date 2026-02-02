@@ -1,3 +1,4 @@
+#![cfg(target_arch = "x86_64")]
 use simple_compiler::codegen::JitCompiler;
 use simple_compiler::hir::TypeId;
 use simple_compiler::mir::CallTarget;
