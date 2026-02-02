@@ -25,16 +25,19 @@ fn runner_compiles_and_runs_stub() {
 }
 
 /// Test AOT executable mode specifically (all 3 modes: interpreter, JIT, AOT)
+/// Skips gracefully if simple-stub binary is not available (e.g., in coverage builds).
 #[test]
 fn runner_aot_executable_works() {
-    use crate::test_helpers::run_expect_all;
+    use crate::test_helpers::run_expect_all_optional;
     // Simple integer returns work in AOT
-    run_expect_all("main = 42", 42);
-    run_expect_all("main = 0", 0);
-    run_expect_all("main = 100", 100);
+    if !run_expect_all_optional("main = 42", 42) {
+        return;
+    }
+    run_expect_all_optional("main = 0", 0);
+    run_expect_all_optional("main = 100", 100);
     // Simple arithmetic works in AOT
-    run_expect_all("main = 1 + 2", 3);
-    run_expect_all("main = 10 * 5", 50);
+    run_expect_all_optional("main = 1 + 2", 3);
+    run_expect_all_optional("main = 10 * 5", 50);
 }
 
 #[test]
