@@ -4,7 +4,7 @@
 //! and execute LZMA-compressed payloads embedded in self-extracting executables.
 //!
 //! Binary format:
-//! ```
+//! ```text
 //! ┌──────────────────────────┐
 //! │ Decompressor Stub (~40KB)│ ← This code, compiled
 //! ├──────────────────────────┤
