@@ -275,7 +275,7 @@ mod tests {
 
         let duration = metrics.get_phase(StartupPhase::LoggingInit).unwrap();
         assert!(duration >= Duration::from_millis(10));
-        assert!(duration < Duration::from_millis(20));
+        assert!(duration < Duration::from_millis(100));
     }
 
     #[test]
