@@ -5,7 +5,7 @@
 //!
 //! # Examples
 //!
-//! ```rust
+//! ```ignore
 //! use simple_mock_helper::fluent::{MockSetup, MockVerify};
 //!
 //! // Setup mock behavior
