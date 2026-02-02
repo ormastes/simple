@@ -1,3 +1,4 @@
+#![cfg(target_arch = "x86_64")]
 use simple_runtime::value::{rt_generator_new, rt_generator_next, rt_value_as_int, rt_value_is_nil, RuntimeValue};
 
 use simple_compiler::codegen::JitCompiler;
