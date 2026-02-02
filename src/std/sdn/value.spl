@@ -1,0 +1,183 @@
+# SDN Value Types
+#
+# Runtime value representation for parsed SDN data.
+# Port of rust/sdn/src/value.rs
+
+export SdnValue, Span
+
+# Source location span
+struct Span:
+    start: i64
+    end: i64
+    line: i64
+    column: i64
+
+impl Span:
+    static fn empty() -> Span:
+        Span(start: 0, end: 0, line: 0, column: 0)
+
+    fn merge(other: Span) -> Span:
+        Span(
+            start: self.start,
+            end: other.end,
+            line: self.line,
+            column: self.column
+        )
+
+# SDN value representing any parsed SDN data
+enum SdnValue:
+    Null
+    Bool(bool)
+    Int(i64)
+    Float(f64)
+    String(text)
+    Array([SdnValue])
+    Dict(Dict<text, SdnValue>)
+    Table(fields: [text]?, types: [text]?, rows: [[SdnValue]])
+
+impl SdnValue:
+    # Type checks
+    fn is_null() -> bool:
+        match self:
+            case SdnValue.Null: true
+            case _: false
+
+    fn is_bool() -> bool:
+        match self:
+            case SdnValue.Bool(_): true
+            case _: false
+
+    fn is_int() -> bool:
+        match self:
+            case SdnValue.Int(_): true
+            case _: false
+
+    fn is_float() -> bool:
+        match self:
+            case SdnValue.Float(_): true
+            case _: false
+
+    fn is_number() -> bool:
+        self.is_int() or self.is_float()
+
+    fn is_string() -> bool:
+        match self:
+            case SdnValue.String(_): true
+            case _: false
+
+    fn is_array() -> bool:
+        match self:
+            case SdnValue.Array(_): true
+            case _: false
+
+    fn is_dict() -> bool:
+        match self:
+            case SdnValue.Dict(_): true
+            case _: false
+
+    fn is_table() -> bool:
+        match self:
+            case SdnValue.Table(_, _, _): true
+            case _: false
+
+    # Value extraction
+    fn as_bool() -> bool?:
+        match self:
+            case SdnValue.Bool(b): Some(b)
+            case _: None
+
+    fn as_i64() -> i64?:
+        match self:
+            case SdnValue.Int(i): Some(i)
+            case _: None
+
+    fn as_f64() -> f64?:
+        match self:
+            case SdnValue.Float(f): Some(f)
+            case SdnValue.Int(i): Some(i.to_f64())
+            case _: None
+
+    fn as_str() -> text?:
+        match self:
+            case SdnValue.String(s): Some(s)
+            case _: None
+
+    fn as_array() -> [SdnValue]?:
+        match self:
+            case SdnValue.Array(arr): Some(arr)
+            case _: None
+
+    fn as_dict() -> Dict<text, SdnValue>?:
+        match self:
+            case SdnValue.Dict(d): Some(d)
+            case _: None
+
+    # Key access (for dicts) or index access (for arrays)
+    fn get(key: text) -> SdnValue?:
+        match self:
+            case SdnValue.Dict(d):
+                d.get(key)
+            case SdnValue.Array(arr):
+                val idx = key.to_int()
+                if idx.?:
+                    val i = idx.unwrap()
+                    if i >= 0 and i < arr.len():
+                        Some(arr[i])
+                    else:
+                        None
+                else:
+                    None
+            case _:
+                None
+
+    # Dotted path access (e.g., "server.port")
+    fn get_path(path: text) -> SdnValue?:
+        val keys = path.split(".")
+        var current = self
+        for key in keys:
+            val next = current.get(key)
+            if not next.?:
+                return None
+            current = next.unwrap()
+        Some(current)
+
+    # Type name
+    fn type_name() -> text:
+        match self:
+            case SdnValue.Null: "null"
+            case SdnValue.Bool(_): "bool"
+            case SdnValue.Int(_): "int"
+            case SdnValue.Float(_): "float"
+            case SdnValue.String(_): "string"
+            case SdnValue.Array(_): "array"
+            case SdnValue.Dict(_): "dict"
+            case SdnValue.Table(_, _, _): "table"
+
+    # Display
+    fn to_text() -> text:
+        match self:
+            case SdnValue.Null: "null"
+            case SdnValue.Bool(b):
+                if b: "true" else: "false"
+            case SdnValue.Int(i): "{i}"
+            case SdnValue.Float(f): "{f}"
+            case SdnValue.String(s):
+                if s.contains(" ") or s.contains(",") or s.contains(":"):
+                    val escaped = s.replace("\"", "\\\"")
+                    "\"{escaped}\""
+                else:
+                    s
+            case SdnValue.Array(arr):
+                val parts = arr.map(\v: v.to_text())
+                "[{parts.join(", ")}]"
+            case SdnValue.Dict(d):
+                val parts = [for (k, v) in d: "{k}: {v.to_text()}"]
+                "{" + parts.join(", ") + "}"
+            case SdnValue.Table(fields, _, rows):
+                var result = ""
+                if fields.?:
+                    result = "|{fields.unwrap().join(", ")}|"
+                for row in rows:
+                    val cells = row.map(\v: v.to_text())
+                    result = result + "\n    {cells.join(", ")}"
+                result

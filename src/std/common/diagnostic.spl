@@ -1,0 +1,230 @@
+# Diagnostic
+#
+# Rust-style diagnostic messages with source context, colored output, and EasyFix support.
+# Port of rust/common/src/diagnostic.rs
+
+export Severity, Span, Label, EasyFix, Replacement, FixConfidence
+export Diagnostic, Diagnostics, SourceRegistry
+
+# Severity level
+enum Severity:
+    Error       # Fatal error
+    Warning     # Warning
+    Note        # Informational note
+    Help        # Helpful suggestion
+
+impl Severity:
+    fn name() -> text:
+        match self:
+            case Severity.Error: "error"
+            case Severity.Warning: "warning"
+            case Severity.Note: "note"
+            case Severity.Help: "help"
+
+    fn color() -> text:
+        match self:
+            case Severity.Error: "\x1b[1;31m"
+            case Severity.Warning: "\x1b[1;33m"
+            case Severity.Note: "\x1b[1;36m"
+            case Severity.Help: "\x1b[1;32m"
+
+# Source location span
+struct Span:
+    start: i64
+    end: i64
+    line: i64
+    column: i64
+
+impl Span:
+    static fn at(pos: i64, line: i64, column: i64) -> Span:
+        Span(start: pos, end: pos, line: line, column: column)
+
+    fn to(other: Span) -> Span:
+        Span(start: self.start.min(other.start), end: self.end.max(other.end),
+             line: self.line.min(other.line), column: self.column)
+
+# Confidence level for an auto-fix
+enum FixConfidence:
+    Safe        # Safe to auto-apply
+    Likely      # Likely correct, should review
+    Uncertain   # May change semantics
+
+# A single text replacement
+struct Replacement:
+    file: text
+    span: Span
+    new_text: text
+
+# Machine-applicable fix
+struct EasyFix:
+    id: text
+    description: text
+    replacements: [Replacement]
+    confidence: FixConfidence
+
+# A label attached to a span
+struct Label:
+    span: Span
+    message: text
+    primary: bool
+
+impl Label:
+    static fn primary(span: Span, message: text) -> Label:
+        Label(span: span, message: message, primary: true)
+
+    static fn secondary(span: Span, message: text) -> Label:
+        Label(span: span, message: message, primary: false)
+
+# A diagnostic message with source context
+struct Diagnostic:
+    severity: Severity
+    code: text?
+    message: text
+    labels: [Label]
+    notes: [text]
+    help: [text]
+    file: text?
+    easy_fix: EasyFix?
+
+impl Diagnostic:
+    static fn error(message: text) -> Diagnostic:
+        Diagnostic(severity: Severity.Error, code: None, message: message,
+                   labels: [], notes: [], help: [], file: None, easy_fix: None)
+
+    static fn warning(message: text) -> Diagnostic:
+        Diagnostic(severity: Severity.Warning, code: None, message: message,
+                   labels: [], notes: [], help: [], file: None, easy_fix: None)
+
+    fn with_code(code: text) -> Diagnostic:
+        Diagnostic(severity: self.severity, code: Some(code), message: self.message,
+                   labels: self.labels, notes: self.notes, help: self.help,
+                   file: self.file, easy_fix: self.easy_fix)
+
+    fn with_file(file: text) -> Diagnostic:
+        Diagnostic(severity: self.severity, code: self.code, message: self.message,
+                   labels: self.labels, notes: self.notes, help: self.help,
+                   file: Some(file), easy_fix: self.easy_fix)
+
+    fn with_label(span: Span, message: text) -> Diagnostic:
+        val new_labels = self.labels + [Label.primary(span, message)]
+        Diagnostic(severity: self.severity, code: self.code, message: self.message,
+                   labels: new_labels, notes: self.notes, help: self.help,
+                   file: self.file, easy_fix: self.easy_fix)
+
+    fn with_secondary_label(span: Span, message: text) -> Diagnostic:
+        val new_labels = self.labels + [Label.secondary(span, message)]
+        Diagnostic(severity: self.severity, code: self.code, message: self.message,
+                   labels: new_labels, notes: self.notes, help: self.help,
+                   file: self.file, easy_fix: self.easy_fix)
+
+    fn with_note(note: text) -> Diagnostic:
+        val new_notes = self.notes + [note]
+        Diagnostic(severity: self.severity, code: self.code, message: self.message,
+                   labels: self.labels, notes: new_notes, help: self.help,
+                   file: self.file, easy_fix: self.easy_fix)
+
+    fn with_help(help_msg: text) -> Diagnostic:
+        val new_help = self.help + [help_msg]
+        Diagnostic(severity: self.severity, code: self.code, message: self.message,
+                   labels: self.labels, notes: self.notes, help: new_help,
+                   file: self.file, easy_fix: self.easy_fix)
+
+    fn with_easy_fix(fix: EasyFix) -> Diagnostic:
+        Diagnostic(severity: self.severity, code: self.code, message: self.message,
+                   labels: self.labels, notes: self.notes, help: self.help,
+                   file: self.file, easy_fix: Some(fix))
+
+    # Format with source context
+    fn format(source: text, use_color: bool) -> text:
+        val reset = if use_color: "\x1b[0m" else: ""
+        val bold = if use_color: "\x1b[1m" else: ""
+        val blue = if use_color: "\x1b[1;34m" else: ""
+        val severity_color = if use_color: self.severity.color() else: ""
+
+        val code_str = if self.code.?: "[{self.code.unwrap()}]" else: ""
+        var output = "{severity_color}{self.severity.name()}{code_str}{reset}: {bold}{self.message}{reset}\n"
+
+        val lines = source.split("\n")
+
+        for label in self.labels:
+            val file = self.file ?? "<source>"
+            output = output + "  {blue}-->{reset} {file}:{label.span.line}:{label.span.column}\n"
+
+            if label.span.line > 0 and label.span.line <= lines.len():
+                val line_num = label.span.line
+                val line_str = lines[line_num - 1]
+                output = output + "   {blue}|{reset}\n"
+                output = output + " {blue}{line_num}{reset} {blue}|{reset} {line_str}\n"
+
+                val underline_char = if label.primary: "^" else: "-"
+                val col = (label.span.column - 1).max(0)
+                val len = (label.span.end - label.span.start).max(1)
+                val spaces = " ".repeat(col)
+                val underline = underline_char.repeat(len)
+                val ul_color = if label.primary: severity_color else: blue
+                output = output + "   {blue}|{reset} {spaces}{ul_color}{underline}{reset} {label.message}\n"
+
+        for note in self.notes:
+            val note_color = if use_color: Severity.Note.color() else: ""
+            output = output + "  {note_color}= note:{reset} {note}\n"
+
+        for h in self.help:
+            val help_color = if use_color: Severity.Help.color() else: ""
+            output = output + "  {help_color}= help:{reset} {h}\n"
+
+        output
+
+    fn format_plain(source: text) -> text:
+        self.format(source, false)
+
+# Collection of diagnostics
+class Diagnostics:
+    items: [Diagnostic]
+
+impl Diagnostics:
+    static fn empty() -> Diagnostics:
+        Diagnostics(items: [])
+
+    me push(diag: Diagnostic):
+        self.items.push(diag)
+
+    fn has_errors() -> bool:
+        self.items.any(\d: d.severity == Severity.Error)
+
+    fn error_count() -> i64:
+        self.items.filter(\d: d.severity == Severity.Error).len()
+
+    fn warning_count() -> i64:
+        self.items.filter(\d: d.severity == Severity.Warning).len()
+
+    fn len() -> i64:
+        self.items.len()
+
+    fn format(source: text, use_color: bool) -> text:
+        var output = ""
+        for diag in self.items:
+            output = output + diag.format(source, use_color) + "\n"
+        output
+
+# Registry of source files for multi-file diagnostics
+class SourceRegistry:
+    files: Dict<text, text>
+
+impl SourceRegistry:
+    static fn empty() -> SourceRegistry:
+        SourceRegistry(files: {})
+
+    me add(path: text, source: text):
+        self.files[path] = source
+
+    fn get(path: text) -> text?:
+        if self.files.has(path):
+            Some(self.files[path])
+        else:
+            None
+
+    fn contains(path: text) -> bool:
+        self.files.has(path)
+
+    fn len() -> i64:
+        self.files.len()

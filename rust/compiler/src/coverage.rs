@@ -108,6 +108,13 @@ pub fn init_coverage() {
     init_global_coverage();
 }
 
+/// Initialize coverage if environment variable is set
+pub fn init_coverage_from_env() {
+    if std::env::var("SIMPLE_COVERAGE").is_ok() {
+        init_global_coverage();
+    }
+}
+
 pub fn is_coverage_enabled() -> bool {
     GLOBAL_COVERAGE.get().is_some()
 }

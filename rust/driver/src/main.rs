@@ -541,6 +541,9 @@ fn main() {
     // Initialize metrics and startup tracking
     let (metrics_enabled, mut metrics) = init_metrics();
 
+    // Initialize coverage if SIMPLE_COVERAGE env var is set
+    simple_compiler::init_coverage_from_env();
+
     // PHASE 1: Early startup - parse args and start prefetching
     let early_config = early_startup(&mut metrics);
 

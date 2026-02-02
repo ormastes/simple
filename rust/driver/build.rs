@@ -130,16 +130,26 @@ fn generate_test_file(test_root: &Path, dest_path: &Path, prefix: &str) {
             let test_name = sanitize_test_name(&relative);
             let path_str = path.display().to_string().replace('\\', "/");
 
-            // Check if this test contains slow_it() calls
-            let is_slow_test = if let Ok(content) = fs::read_to_string(path) {
-                content.contains("slow_it")
+            // Check if this test contains slow_it() calls or is marked as pending
+            let (is_slow_test, is_pending_test) = if let Ok(content) = fs::read_to_string(path) {
+                let is_slow = content.contains("slow_it");
+                // Check for @pending annotation in first 10 lines (features not yet implemented)
+                let is_pending = content.lines().take(10).any(|line| {
+                    let trimmed = line.trim();
+                    trimmed == "# @pending" || trimmed.starts_with("# @pending ")
+                });
+                (is_slow, is_pending)
             } else {
-                false
+                (false, false)
             };
 
-            // Add #[ignore] for slow tests so they're skipped by default
+            // Add #[ignore] for slow tests or pending tests so they're skipped by default
             // Run with: cargo test -- --ignored
-            let ignore_attr = if is_slow_test { "#[ignore]\n" } else { "" };
+            let ignore_attr = if is_slow_test || is_pending_test {
+                "#[ignore]\n"
+            } else {
+                ""
+            };
 
             // Use a larger stack size (8MB) for Simple interpreter tests
             // The interpreter uses recursive evaluation which can overflow the default 2MB stack
