@@ -69,8 +69,7 @@ pub struct SuiteRecord {
 }
 
 /// Status change type for tracking transitions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum ChangeType {
     #[default]
     NoChange,
@@ -300,15 +299,27 @@ impl Record for TestRecord {
 
         let qualified_by = {
             let s = get_field(15);
-            if s.is_empty() { None } else { Some(s) }
+            if s.is_empty() {
+                None
+            } else {
+                Some(s)
+            }
         };
         let qualified_at = {
             let s = get_field(16);
-            if s.is_empty() { None } else { Some(s) }
+            if s.is_empty() {
+                None
+            } else {
+                Some(s)
+            }
         };
         let qualified_reason = {
             let s = get_field(17);
-            if s.is_empty() { None } else { Some(s) }
+            if s.is_empty() {
+                None
+            } else {
+                Some(s)
+            }
         };
 
         Ok(TestRecord {
@@ -633,9 +644,13 @@ impl TestRunRecord {
             Ok(start) => {
                 if start > chrono::Utc::now() {
                     report.add_violation(
-                        IntegrityViolation::new(ViolationType::FutureTimestamp, "start_time", "Start time is in the future")
-                            .with_expected("Past or present")
-                            .with_actual(self.start_time.clone()),
+                        IntegrityViolation::new(
+                            ViolationType::FutureTimestamp,
+                            "start_time",
+                            "Start time is in the future",
+                        )
+                        .with_expected("Past or present")
+                        .with_actual(self.start_time.clone()),
                     );
                 }
 
@@ -685,7 +700,10 @@ impl TestRunRecord {
                 IntegrityViolation::new(
                     ViolationType::CountInconsistent,
                     "test_count",
-                    format!("Sum of results ({}) exceeds total test count ({})", sum, self.test_count),
+                    format!(
+                        "Sum of results ({}) exceeds total test count ({})",
+                        sum, self.test_count
+                    ),
                 )
                 .with_expected(format!("≥ {}", sum))
                 .with_actual(self.test_count.to_string()),
@@ -693,7 +711,10 @@ impl TestRunRecord {
         }
 
         match self.status {
-            TestRunStatus::Completed | TestRunStatus::Crashed | TestRunStatus::TimedOut | TestRunStatus::Interrupted => {
+            TestRunStatus::Completed
+            | TestRunStatus::Crashed
+            | TestRunStatus::TimedOut
+            | TestRunStatus::Interrupted => {
                 if self.end_time.is_empty() {
                     report.add_violation(
                         IntegrityViolation::new(
@@ -736,8 +757,17 @@ impl Record for TestRunRecord {
 
     fn field_names() -> &'static [&'static str] {
         &[
-            "run_id", "start_time", "end_time", "pid", "hostname", "status", "test_count", "passed", "failed",
-            "crashed", "timed_out",
+            "run_id",
+            "start_time",
+            "end_time",
+            "pid",
+            "hostname",
+            "status",
+            "test_count",
+            "passed",
+            "failed",
+            "crashed",
+            "timed_out",
         ]
     }
 
@@ -1047,7 +1077,11 @@ impl TestDb {
             .values()
             .map(|r| {
                 let parts: Vec<&str> = r.test_id.splitn(3, "::").collect();
-                let suite_name = if parts.len() >= 2 { parts[1].to_string() } else { "default".to_string() };
+                let suite_name = if parts.len() >= 2 {
+                    parts[1].to_string()
+                } else {
+                    "default".to_string()
+                };
                 (
                     r.test_id.clone(),
                     r.test_file.clone(),
@@ -1180,7 +1214,9 @@ pub fn load_test_db(path: &Path) -> Result<TestDb, String> {
 
     let _lock = FileLock::acquire(path, 10).map_err(|e| format!("Failed to acquire lock: {:?}", e))?;
 
-    let file_size = fs::metadata(path).map_err(|e| format!("Failed to stat file: {}", e))?.len();
+    let file_size = fs::metadata(path)
+        .map_err(|e| format!("Failed to stat file: {}", e))?
+        .len();
     const MAX_DB_SIZE: u64 = 500 * 1024 * 1024;
     if file_size > MAX_DB_SIZE {
         eprintln!(
@@ -1227,7 +1263,12 @@ pub fn load_test_db(path: &Path) -> Result<TestDb, String> {
             eprintln!("[INFO] Auto-migrating test_db.sdn from V2 to V3 format");
             let backup_path = path.with_extension("sdn.v2_backup");
             if let Err(e) = fs::copy(path, &backup_path) {
-                debug_log!(DebugLevel::Basic, "TestDB", "Warning: Failed to create V2 backup: {}", e);
+                debug_log!(
+                    DebugLevel::Basic,
+                    "TestDB",
+                    "Warning: Failed to create V2 backup: {}",
+                    e
+                );
             }
             // Drop lock before saving (save acquires its own)
             drop(_lock);
@@ -1259,7 +1300,12 @@ fn load_test_db_v3(path: &Path, content: &str) -> Result<TestDb, String> {
     let mut db = TestDb::new();
 
     // Load strings table
-    if let Some(SdnValue::Table { fields: Some(_fields), rows, .. }) = dict.get("strings") {
+    if let Some(SdnValue::Table {
+        fields: Some(_fields),
+        rows,
+        ..
+    }) = dict.get("strings")
+    {
         for row in rows {
             let id = match row.get(0) {
                 Some(SdnValue::Int(n)) => *n as u32,
@@ -1280,7 +1326,10 @@ fn load_test_db_v3(path: &Path, content: &str) -> Result<TestDb, String> {
     }
 
     // Load files table
-    if let Some(SdnValue::Table { fields: Some(_), rows, .. }) = dict.get("files") {
+    if let Some(SdnValue::Table {
+        fields: Some(_), rows, ..
+    }) = dict.get("files")
+    {
         for row in rows {
             let file_id = sdn_row_u32(row, 0);
             let path_str = sdn_row_u32(row, 1);
@@ -1289,7 +1338,10 @@ fn load_test_db_v3(path: &Path, content: &str) -> Result<TestDb, String> {
     }
 
     // Load suites table
-    if let Some(SdnValue::Table { fields: Some(_), rows, .. }) = dict.get("suites") {
+    if let Some(SdnValue::Table {
+        fields: Some(_), rows, ..
+    }) = dict.get("suites")
+    {
         for row in rows {
             let suite_id = sdn_row_u32(row, 0);
             let file_id = sdn_row_u32(row, 1);
@@ -1303,7 +1355,12 @@ fn load_test_db_v3(path: &Path, content: &str) -> Result<TestDb, String> {
     }
 
     // Load tests table
-    if let Some(SdnValue::Table { fields: Some(fields), rows, .. }) = dict.get("tests") {
+    if let Some(SdnValue::Table {
+        fields: Some(fields),
+        rows,
+        ..
+    }) = dict.get("tests")
+    {
         for row in rows {
             let get = |name: &str| -> String {
                 fields
@@ -1354,8 +1411,14 @@ fn load_test_db_v3(path: &Path, content: &str) -> Result<TestDb, String> {
                 _ => TestStatus::Passed,
             };
 
+            // Counters are loaded from volatile file; use defaults here,
+            // then overwrite from counters table in load_volatile_data().
             let last_change_str = get("last_change");
-            let last_change = ChangeType::from_str(&last_change_str);
+            let last_change = if last_change_str.is_empty() {
+                ChangeType::NoChange
+            } else {
+                ChangeType::from_str(&last_change_str)
+            };
 
             let total_runs: usize = get("total_runs").parse().unwrap_or(0);
             let passed_count: usize = get("passed").parse().unwrap_or(0);
@@ -1399,20 +1462,36 @@ fn load_test_db_v3(path: &Path, content: &str) -> Result<TestDb, String> {
             let tags: Vec<String> = if tags_str.is_empty() {
                 Vec::new()
             } else {
-                tags_str.split(',').filter(|s| !s.is_empty()).map(|s| s.to_string()).collect()
+                tags_str
+                    .split(',')
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string())
+                    .collect()
             };
 
             let qualified_by = {
                 let s = get("qualified_by");
-                if s.is_empty() { None } else { Some(s) }
+                if s.is_empty() {
+                    None
+                } else {
+                    Some(s)
+                }
             };
             let qualified_at = {
                 let s = get("qualified_at");
-                if s.is_empty() { None } else { Some(s) }
+                if s.is_empty() {
+                    None
+                } else {
+                    Some(s)
+                }
             };
             let qualified_reason = {
                 let s = get("qualified_reason");
-                if s.is_empty() { None } else { Some(s) }
+                if s.is_empty() {
+                    None
+                } else {
+                    Some(s)
+                }
             };
 
             let record = TestRecord {
@@ -1475,6 +1554,37 @@ fn load_volatile_data(db: &mut TestDb, runs_path: &Path) -> Result<(), String> {
         SdnValue::Dict(d) => d,
         _ => return Ok(()), // No dict root, skip
     };
+
+    // Load counters (total_runs, passed, failed, flaky_count, last_change)
+    if let Some(SdnValue::Table { rows, .. }) = dict.get("counters") {
+        for row in rows {
+            let test_id = sdn_row_u32(row, 0);
+            let total_runs: usize = sdn_row_u32(row, 1) as usize;
+            let passed: usize = sdn_row_u32(row, 2) as usize;
+            let failed: usize = sdn_row_u32(row, 3) as usize;
+            let flaky_count: u32 = sdn_row_u32(row, 4);
+            let last_change_str = sdn_row_string(row, 5);
+            let last_change = ChangeType::from_str(&last_change_str);
+
+            // Find record by name_str_id matching test_id
+            for record in db.records.values_mut() {
+                if record.name_str_id == Some(test_id) {
+                    record.execution_history.total_runs = total_runs;
+                    record.execution_history.passed = passed;
+                    record.execution_history.failed = failed;
+                    record.execution_history.failure_rate_pct = if total_runs > 0 {
+                        (failed as f64 / total_runs as f64) * 100.0
+                    } else {
+                        0.0
+                    };
+                    record.execution_history.flaky = flaky_count > 0;
+                    record.flaky_count = flaky_count;
+                    record.last_change = last_change;
+                    break;
+                }
+            }
+        }
+    }
 
     // Load timing summaries
     if let Some(SdnValue::Table { rows, .. }) = dict.get("timing") {
@@ -1645,7 +1755,11 @@ fn parse_test_db_sdn_v2(doc: &simple_sdn::SdnDocument) -> Result<TestDb, String>
 
             let failure: Option<TestFailure> = {
                 let s = get_field("failure");
-                if s.is_empty() { None } else { serde_json::from_str(&s).ok() }
+                if s.is_empty() {
+                    None
+                } else {
+                    serde_json::from_str(&s).ok()
+                }
             };
 
             let execution_history: ExecutionHistory = {
@@ -1668,7 +1782,11 @@ fn parse_test_db_sdn_v2(doc: &simple_sdn::SdnDocument) -> Result<TestDb, String>
 
             let timing_config: Option<TimingConfig> = {
                 let s = get_field("timing_config");
-                if s.is_empty() { None } else { serde_json::from_str(&s).ok() }
+                if s.is_empty() {
+                    None
+                } else {
+                    serde_json::from_str(&s).ok()
+                }
             };
 
             let related_bugs: Vec<String> = get_field("related_bugs")
@@ -1689,15 +1807,27 @@ fn parse_test_db_sdn_v2(doc: &simple_sdn::SdnDocument) -> Result<TestDb, String>
 
             let qualified_by = {
                 let s = get_field("qualified_by");
-                if s.is_empty() { None } else { Some(s) }
+                if s.is_empty() {
+                    None
+                } else {
+                    Some(s)
+                }
             };
             let qualified_at = {
                 let s = get_field("qualified_at");
-                if s.is_empty() { None } else { Some(s) }
+                if s.is_empty() {
+                    None
+                } else {
+                    Some(s)
+                }
             };
             let qualified_reason = {
                 let s = get_field("qualified_reason");
-                if s.is_empty() { None } else { Some(s) }
+                if s.is_empty() {
+                    None
+                } else {
+                    Some(s)
+                }
             };
 
             let record = TestRecord {
@@ -1769,7 +1899,11 @@ pub fn save_test_db(path: &Path, db: &TestDb) -> Result<(), String> {
     if path.exists() {
         if let Ok(existing) = fs::read_to_string(path) {
             if existing == content {
-                debug_log!(DebugLevel::Detailed, "TestDB", "No changes to test_db.sdn, skipping write");
+                debug_log!(
+                    DebugLevel::Detailed,
+                    "TestDB",
+                    "No changes to test_db.sdn, skipping write"
+                );
                 // Still save volatile data
                 save_volatile_data(path, db)?;
                 return Ok(());
@@ -1777,17 +1911,7 @@ pub fn save_test_db(path: &Path, db: &TestDb) -> Result<(), String> {
         }
     }
 
-    // Create backup
-    if path.exists() {
-        if let Ok(meta) = fs::metadata(path) {
-            if meta.len() > 0 {
-                let backup_path = path.with_extension("sdn.prev");
-                if let Err(e) = fs::copy(path, &backup_path) {
-                    debug_log!(DebugLevel::Basic, "TestDB", "Warning: Failed to create backup: {}", e);
-                }
-            }
-        }
-    }
+    // No .sdn.prev backup — jj handles history/rollback
 
     // Atomic write
     let temp_path = path.with_extension("sdn.tmp");
@@ -1830,8 +1954,9 @@ fn build_v3_sdn(db: &TestDb) -> String {
     }
     out.push('\n');
 
-    // Tests table — sorted by test_id for deterministic output
-    out.push_str("tests |test_id, suite_id, name_str, category_str, status_str, last_change, total_runs, passed, failed, flaky_count, tags_str, description_str, valid, qualified_by, qualified_at, qualified_reason|\n");
+    // Tests table — stable fields only (counters/timing in volatile runs file)
+    // Sorted by test_id for deterministic output
+    out.push_str("tests |test_id, suite_id, name_str, category_str, status_str, tags_str, description_str, valid, qualified_by, qualified_at, qualified_reason|\n");
     let mut sorted_records: Vec<_> = db.records.values().collect();
     sorted_records.sort_by(|a, b| a.test_id.cmp(&b.test_id));
 
@@ -1840,28 +1965,34 @@ fn build_v3_sdn(db: &TestDb) -> String {
         let name_str = record.name_str_id.unwrap_or(0);
         let category_str = record.category_str_id.unwrap_or(0);
         let status_str = record.status_str_id.unwrap_or(0);
-        let last_change = record.last_change;
         let tags_str = record.tags.join(",");
         let desc = &record.description;
 
         out.push_str(&format!(
-            "    {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}\n",
+            "    {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}\n",
             idx,
             suite_id,
             name_str,
             category_str,
             status_str,
-            last_change,
-            record.execution_history.total_runs,
-            record.execution_history.passed,
-            record.execution_history.failed,
-            record.flaky_count,
-            if tags_str.is_empty() { String::new() } else { format!("\"{}\"", tags_str) },
-            if desc.is_empty() { String::new() } else { format!("\"{}\"", desc.replace('"', "\\\"")) },
+            if tags_str.is_empty() {
+                String::new()
+            } else {
+                format!("\"{}\"", tags_str)
+            },
+            if desc.is_empty() {
+                String::new()
+            } else {
+                format!("\"{}\"", desc.replace('"', "\\\""))
+            },
             record.valid,
             record.qualified_by.as_deref().unwrap_or(""),
             record.qualified_at.as_deref().unwrap_or(""),
-            record.qualified_reason.as_deref().map(|s| format!("\"{}\"", s.replace('"', "\\\""))).unwrap_or_default(),
+            record
+                .qualified_reason
+                .as_deref()
+                .map(|s| format!("\"{}\"", s.replace('"', "\\\"")))
+                .unwrap_or_default(),
         ));
     }
 
@@ -1877,6 +2008,27 @@ fn save_volatile_data(db_path: &Path, db: &TestDb) -> Result<(), String> {
     }
 
     let mut out = String::new();
+
+    // Counters (volatile — per-test run counts, changes every run)
+    out.push_str("counters |test_id, total_runs, passed, failed, flaky_count, last_change|\n");
+    let mut counter_ids: Vec<_> = db
+        .records
+        .values()
+        .filter_map(|r| r.name_str_id.map(|id| (id, r)))
+        .collect();
+    counter_ids.sort_by_key(|(id, _)| *id);
+    for (id, record) in &counter_ids {
+        out.push_str(&format!(
+            "    {}, {}, {}, {}, {}, {}\n",
+            id,
+            record.execution_history.total_runs,
+            record.execution_history.passed,
+            record.execution_history.failed,
+            record.flaky_count,
+            record.last_change,
+        ));
+    }
+    out.push('\n');
 
     // Timing summaries
     out.push_str("timing |test_id, last_ms, p50, p90, p95, baseline_median|\n");
@@ -2207,9 +2359,17 @@ fn update_test_timing(test: &mut TestRecord, duration_ms: f64, all_tests_run: bo
         return;
     }
 
-    let value_to_use = if timing_config.use_median { stats.median } else { stats.mean };
+    let value_to_use = if timing_config.use_median {
+        stats.median
+    } else {
+        stats.mean
+    };
 
-    let avg_change = has_significant_change(value_to_use, test.timing.baseline_median, timing_config.update_threshold_pct);
+    let avg_change = has_significant_change(
+        value_to_use,
+        test.timing.baseline_median,
+        timing_config.update_threshold_pct,
+    );
     let std_dev_change = has_significant_change(stats.std_dev, test.timing.baseline_std_dev, 10.0);
 
     if avg_change || std_dev_change {
@@ -2290,7 +2450,11 @@ pub fn generate_test_result_docs(db: &TestDb, output_dir: &Path) -> Result<(), S
     md.push_str("|--------|-------|-----------|\n");
 
     let pct = |count: usize| {
-        if total == 0 { 0.0 } else { (count as f64 / total as f64) * 100.0 }
+        if total == 0 {
+            0.0
+        } else {
+            (count as f64 / total as f64) * 100.0
+        }
     };
 
     md.push_str(&format!("| ✅ Passed | {} | {:.1}% |\n", passed, pct(passed)));
@@ -2366,7 +2530,13 @@ pub fn generate_test_result_docs(db: &TestDb, output_dir: &Path) -> Result<(), S
                 } else {
                     0.0
                 };
-                let indicator = if change_pct > 10.0 { "🔴" } else if change_pct > 5.0 { "🟡" } else { "" };
+                let indicator = if change_pct > 10.0 {
+                    "🔴"
+                } else if change_pct > 5.0 {
+                    "🟡"
+                } else {
+                    ""
+                };
                 md.push_str(&format!(
                     "**Timing:** {:.1}ms (baseline: {:.1}ms, {:+.1}% {})\n\n",
                     test.timing.last_run_time, test.timing.baseline_median, change_pct, indicator
@@ -2437,7 +2607,11 @@ pub fn generate_test_result_docs(db: &TestDb, output_dir: &Path) -> Result<(), S
         md.push_str("|------|------|---------|-----|----------------|\n");
 
         for (test, cv_pct) in high_variance.iter().take(10) {
-            let recommendation = if *cv_pct > 80.0 { "Investigate flakiness" } else { "May need longer warmup" };
+            let recommendation = if *cv_pct > 80.0 {
+                "Investigate flakiness"
+            } else {
+                "May need longer warmup"
+            };
             md.push_str(&format!(
                 "| {} | {:.1}ms | {:.1}ms | {:.1}% | {} |\n",
                 test.test_name, test.timing.baseline_mean, test.timing.baseline_std_dev, cv_pct, recommendation
@@ -2671,29 +2845,57 @@ mod tests {
 
         // First run: passed
         update_test_result(
-            &mut db, "test_001", "test_example", "test.spl", "unit",
-            TestStatus::Passed, 10.0, None, true,
+            &mut db,
+            "test_001",
+            "test_example",
+            "test.spl",
+            "unit",
+            TestStatus::Passed,
+            10.0,
+            None,
+            true,
         );
         assert_eq!(db.records.get("test_001").unwrap().last_change, ChangeType::NewTest);
 
         // Second run: still passed
         update_test_result(
-            &mut db, "test_001", "test_example", "test.spl", "unit",
-            TestStatus::Passed, 10.0, None, true,
+            &mut db,
+            "test_001",
+            "test_example",
+            "test.spl",
+            "unit",
+            TestStatus::Passed,
+            10.0,
+            None,
+            true,
         );
         assert_eq!(db.records.get("test_001").unwrap().last_change, ChangeType::NewTest); // no change overwrites
 
         // Third run: failed
         update_test_result(
-            &mut db, "test_001", "test_example", "test.spl", "unit",
-            TestStatus::Failed, 10.0, None, true,
+            &mut db,
+            "test_001",
+            "test_example",
+            "test.spl",
+            "unit",
+            TestStatus::Failed,
+            10.0,
+            None,
+            true,
         );
         assert_eq!(db.records.get("test_001").unwrap().last_change, ChangeType::PassToFail);
 
         // Fourth run: back to passed
         update_test_result(
-            &mut db, "test_001", "test_example", "test.spl", "unit",
-            TestStatus::Passed, 10.0, None, true,
+            &mut db,
+            "test_001",
+            "test_example",
+            "test.spl",
+            "unit",
+            TestStatus::Passed,
+            10.0,
+            None,
+            true,
         );
         assert_eq!(db.records.get("test_001").unwrap().last_change, ChangeType::FailToPass);
         assert_eq!(db.records.get("test_001").unwrap().flaky_count, 2);
@@ -2704,16 +2906,37 @@ mod tests {
         let mut db = TestDb::new();
 
         update_test_result(
-            &mut db, "test/foo.spl::suite1::test_a", "test_a", "test/foo.spl", "unit",
-            TestStatus::Passed, 10.0, None, true,
+            &mut db,
+            "test/foo.spl::suite1::test_a",
+            "test_a",
+            "test/foo.spl",
+            "unit",
+            TestStatus::Passed,
+            10.0,
+            None,
+            true,
         );
         update_test_result(
-            &mut db, "test/foo.spl::suite1::test_b", "test_b", "test/foo.spl", "unit",
-            TestStatus::Passed, 10.0, None, true,
+            &mut db,
+            "test/foo.spl::suite1::test_b",
+            "test_b",
+            "test/foo.spl",
+            "unit",
+            TestStatus::Passed,
+            10.0,
+            None,
+            true,
         );
         update_test_result(
-            &mut db, "test/bar.spl::suite2::test_c", "test_c", "test/bar.spl", "unit",
-            TestStatus::Passed, 10.0, None, true,
+            &mut db,
+            "test/bar.spl::suite2::test_c",
+            "test_c",
+            "test/bar.spl",
+            "unit",
+            TestStatus::Passed,
+            10.0,
+            None,
+            true,
         );
 
         assert_eq!(db.files.len(), 2);
@@ -2748,7 +2971,10 @@ mod tests {
 
         let report = run.validate_record();
         assert!(report.has_violations());
-        assert_eq!(report.violations[0].violation_type, ViolationType::TimestampInconsistent);
+        assert_eq!(
+            report.violations[0].violation_type,
+            ViolationType::TimestampInconsistent
+        );
     }
 
     #[test]
@@ -2819,10 +3045,7 @@ mod tests {
         let report = run.validate_record();
         assert!(report.has_violations());
         assert_eq!(report.violations[0].violation_type, ViolationType::FutureTimestamp);
-        assert_eq!(
-            report.violations[0].severity(),
-            crate::unified_db::Severity::Critical
-        );
+        assert_eq!(report.violations[0].severity(), crate::unified_db::Severity::Critical);
     }
 
     #[test]
@@ -2881,13 +3104,17 @@ mod tests {
         let critical = ViolationType::FutureTimestamp;
 
         let mut report = crate::unified_db::IntegrityReport::new("test");
-        report.add_violation(crate::unified_db::IntegrityViolation::new(warning, "field1", "message1"));
+        report.add_violation(crate::unified_db::IntegrityViolation::new(
+            warning, "field1", "message1",
+        ));
         assert_eq!(report.max_severity(), Severity::Warning);
 
         report.add_violation(crate::unified_db::IntegrityViolation::new(error, "field2", "message2"));
         assert_eq!(report.max_severity(), Severity::Error);
 
-        report.add_violation(crate::unified_db::IntegrityViolation::new(critical, "field3", "message3"));
+        report.add_violation(crate::unified_db::IntegrityViolation::new(
+            critical, "field3", "message3",
+        ));
         assert_eq!(report.max_severity(), Severity::Critical);
     }
 
@@ -2951,9 +3178,13 @@ mod tests {
 
         let mut report = crate::unified_db::IntegrityReport::new("test_run_123");
         report.add_violation(
-            IntegrityViolation::new(ViolationType::StaleRunning, "status", "Run has been 'running' for >2 hours")
-                .with_expected("Completed or Crashed")
-                .with_actual("Running"),
+            IntegrityViolation::new(
+                ViolationType::StaleRunning,
+                "status",
+                "Run has been 'running' for >2 hours",
+            )
+            .with_expected("Completed or Crashed")
+            .with_actual("Running"),
         );
 
         let report_text = report.to_report();
@@ -2978,8 +3209,15 @@ mod tests {
         let mut db = TestDb::new();
 
         update_test_result(
-            &mut db, "test/foo.spl::suite1::test_a", "test_a", "test/foo.spl", "unit",
-            TestStatus::Passed, 10.0, None, true,
+            &mut db,
+            "test/foo.spl::suite1::test_a",
+            "test_a",
+            "test/foo.spl",
+            "unit",
+            TestStatus::Passed,
+            10.0,
+            None,
+            true,
         );
 
         let content = build_v3_sdn(&db);

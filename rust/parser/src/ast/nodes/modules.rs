@@ -125,10 +125,7 @@ pub enum StructuredExportEntry {
     /// Re-export with alias: `ItemName as Alias`
     Aliased { name: String, alias: String },
     /// Re-export from a module: `module.{Item1, Item2}`
-    FromModule {
-        path: ModulePath,
-        items: Vec<ImportTarget>,
-    },
+    FromModule { path: ModulePath, items: Vec<ImportTarget> },
     /// Glob re-export: `module.*`
     Glob(ModulePath),
 }

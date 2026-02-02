@@ -145,14 +145,7 @@ pub(crate) fn extract_elf_text_section(elf_data: &[u8]) -> Option<Vec<u8>> {
         );
 
         // Handle GOT-relative relocations by appending inline GOT entries
-        apply_got_relocations(
-            &mut code,
-            elf_data,
-            rela_offset,
-            rela_size,
-            symtab_off,
-            strtab_off,
-        );
+        apply_got_relocations(&mut code, elf_data, rela_offset, rela_size, symtab_off, strtab_off);
     }
 
     Some(code)
@@ -293,7 +286,9 @@ pub(crate) fn find_symbol_offset_in_object(object_code: &[u8], symbol_name: &str
         return None;
     }
     let strtab_off = u64::from_le_bytes(
-        object_code[strtab_sh_offset + 24..strtab_sh_offset + 32].try_into().ok()?,
+        object_code[strtab_sh_offset + 24..strtab_sh_offset + 32]
+            .try_into()
+            .ok()?,
     ) as usize;
 
     // Iterate symbols (ELF64 symbol entry = 24 bytes)

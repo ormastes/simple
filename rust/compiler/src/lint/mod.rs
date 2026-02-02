@@ -546,14 +546,20 @@ export use Client.*
 
     #[test]
     fn test_init_boundary_violation_lint_name() {
-        assert_eq!(LintName::from_str("init_boundary_violation"), Some(LintName::InitBoundaryViolation));
+        assert_eq!(
+            LintName::from_str("init_boundary_violation"),
+            Some(LintName::InitBoundaryViolation)
+        );
         assert_eq!(LintName::InitBoundaryViolation.as_str(), "init_boundary_violation");
         assert_eq!(LintName::InitBoundaryViolation.default_level(), LintLevel::Warn);
     }
 
     #[test]
     fn test_bypass_with_code_files_lint_name() {
-        assert_eq!(LintName::from_str("bypass_with_code_files"), Some(LintName::BypassWithCodeFiles));
+        assert_eq!(
+            LintName::from_str("bypass_with_code_files"),
+            Some(LintName::BypassWithCodeFiles)
+        );
         assert_eq!(LintName::BypassWithCodeFiles.as_str(), "bypass_with_code_files");
         assert_eq!(LintName::BypassWithCodeFiles.default_level(), LintLevel::Warn);
     }
@@ -666,7 +672,11 @@ use crate.utils.helper.help
         fs::create_dir_all(&http).unwrap();
         fs::write(project.join("simple.toml"), "[package]\nname = \"test\"\n").unwrap();
         fs::write(lib.join("__init__.spl"), "#[bypass]\nmod lib\n").unwrap();
-        fs::write(http.join("__init__.spl"), "pub mod client\nexport use client.HttpClient\n").unwrap();
+        fs::write(
+            http.join("__init__.spl"),
+            "pub mod client\nexport use client.HttpClient\n",
+        )
+        .unwrap();
         fs::write(http.join("client.spl"), "pub struct HttpClient:\n    url: str\n").unwrap();
 
         // use crate.lib.http.client.HttpClient — lib is bypass, so transparent
@@ -687,7 +697,10 @@ use crate.lib.http.HttpClient
         assert!(
             diagnostics.iter().all(|d| d.lint != LintName::InitBoundaryViolation),
             "bypass directory should be transparent, got: {:?}",
-            diagnostics.iter().map(|d| format!("{:?}: {}", d.lint, d.message)).collect::<Vec<_>>()
+            diagnostics
+                .iter()
+                .map(|d| format!("{:?}: {}", d.lint, d.message))
+                .collect::<Vec<_>>()
         );
     }
 

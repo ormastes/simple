@@ -15,8 +15,7 @@ type ImplMethods = HashMap<String, Vec<FunctionDef>>;
 const METHOD_SELF: &str = "self";
 
 /// Static empty map to avoid allocation on every `bind_args` call.
-static EMPTY_INJECTED: std::sync::LazyLock<HashMap<String, Value>> =
-    std::sync::LazyLock::new(HashMap::new);
+static EMPTY_INJECTED: std::sync::LazyLock<HashMap<String, Value>> = std::sync::LazyLock::new(HashMap::new);
 
 pub(crate) fn bind_args(
     params: &[Parameter],
@@ -153,9 +152,10 @@ pub(crate) fn bind_args_with_injected(
                     if let Some(p) = param {
                         if let Some(expected) = &p.call_site_label {
                             if label != expected {
-                                let ctx = ErrorContext::new()
-                                    .with_code(codes::TYPE_MISMATCH)
-                                    .with_help(format!("parameter '{}' expects label '{}', not '{}'", name, expected, label));
+                                let ctx = ErrorContext::new().with_code(codes::TYPE_MISMATCH).with_help(format!(
+                                    "parameter '{}' expects label '{}', not '{}'",
+                                    name, expected, label
+                                ));
                                 return Err(CompileError::semantic_with_context(
                                     format!("call-site label mismatch: expected '{}' but got '{}'", expected, label),
                                     ctx,
@@ -207,9 +207,10 @@ pub(crate) fn bind_args_with_injected(
                     if let Some(label) = &arg.label {
                         if let Some(expected) = &param.call_site_label {
                             if label != expected {
-                                let ctx = ErrorContext::new()
-                                    .with_code(codes::TYPE_MISMATCH)
-                                    .with_help(format!("parameter '{}' expects label '{}', not '{}'", param.name, expected, label));
+                                let ctx = ErrorContext::new().with_code(codes::TYPE_MISMATCH).with_help(format!(
+                                    "parameter '{}' expects label '{}', not '{}'",
+                                    param.name, expected, label
+                                ));
                                 return Err(CompileError::semantic_with_context(
                                     format!("call-site label mismatch: expected '{}' but got '{}'", expected, label),
                                     ctx,
@@ -220,7 +221,10 @@ pub(crate) fn bind_args_with_injected(
                                 .with_code(codes::TYPE_MISMATCH)
                                 .with_help(format!("parameter '{}' does not declare a call-site label", param.name));
                             return Err(CompileError::semantic_with_context(
-                                format!("unexpected call-site label '{}' on argument for parameter '{}'", label, param.name),
+                                format!(
+                                    "unexpected call-site label '{}' on argument for parameter '{}'",
+                                    label, param.name
+                                ),
                                 ctx,
                             ));
                         }

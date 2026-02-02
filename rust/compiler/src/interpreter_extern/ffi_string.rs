@@ -7,9 +7,7 @@ use crate::value::Value;
 use simple_runtime::value::RuntimeValue;
 
 // Import actual FFI functions from runtime
-use simple_runtime::value::{
-    rt_string_new, rt_string_concat, rt_string_len, rt_string_eq,
-};
+use simple_runtime::value::{rt_string_new, rt_string_concat, rt_string_len, rt_string_eq};
 
 // ============================================================================
 // String Creation
@@ -19,10 +17,12 @@ use simple_runtime::value::{
 pub fn rt_string_new_fn(args: &[Value]) -> Result<Value, CompileError> {
     let text = match args.first() {
         Some(Value::Str(s)) => s.as_str(),
-        _ => return Err(CompileError::semantic_with_context(
-            "rt_string_new expects text argument".to_string(),
-            ErrorContext::new().with_code(codes::TYPE_MISMATCH),
-        )),
+        _ => {
+            return Err(CompileError::semantic_with_context(
+                "rt_string_new expects text argument".to_string(),
+                ErrorContext::new().with_code(codes::TYPE_MISMATCH),
+            ))
+        }
     };
 
     let bytes = text.as_bytes();
@@ -36,18 +36,24 @@ pub fn rt_string_new_fn(args: &[Value]) -> Result<Value, CompileError> {
 
 /// Concatenate two strings
 pub fn rt_string_concat_fn(args: &[Value]) -> Result<Value, CompileError> {
-    let a_raw = args.get(0)
-        .ok_or_else(|| CompileError::semantic_with_context(
-            "rt_string_concat expects 2 arguments".to_string(),
-            ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
-        ))?
+    let a_raw = args
+        .get(0)
+        .ok_or_else(|| {
+            CompileError::semantic_with_context(
+                "rt_string_concat expects 2 arguments".to_string(),
+                ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
+            )
+        })?
         .as_int()?;
 
-    let b_raw = args.get(1)
-        .ok_or_else(|| CompileError::semantic_with_context(
-            "rt_string_concat expects 2 arguments".to_string(),
-            ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
-        ))?
+    let b_raw = args
+        .get(1)
+        .ok_or_else(|| {
+            CompileError::semantic_with_context(
+                "rt_string_concat expects 2 arguments".to_string(),
+                ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
+            )
+        })?
         .as_int()?;
 
     let a = RuntimeValue::from_raw(a_raw as u64);
@@ -59,11 +65,14 @@ pub fn rt_string_concat_fn(args: &[Value]) -> Result<Value, CompileError> {
 
 /// Get string length
 pub fn rt_string_len_fn(args: &[Value]) -> Result<Value, CompileError> {
-    let str_raw = args.first()
-        .ok_or_else(|| CompileError::semantic_with_context(
-            "rt_string_len expects 1 argument".to_string(),
-            ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
-        ))?
+    let str_raw = args
+        .first()
+        .ok_or_else(|| {
+            CompileError::semantic_with_context(
+                "rt_string_len expects 1 argument".to_string(),
+                ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
+            )
+        })?
         .as_int()?;
 
     let string = RuntimeValue::from_raw(str_raw as u64);
@@ -73,18 +82,24 @@ pub fn rt_string_len_fn(args: &[Value]) -> Result<Value, CompileError> {
 
 /// Check if two strings are equal
 pub fn rt_string_eq_fn(args: &[Value]) -> Result<Value, CompileError> {
-    let a_raw = args.get(0)
-        .ok_or_else(|| CompileError::semantic_with_context(
-            "rt_string_eq expects 2 arguments".to_string(),
-            ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
-        ))?
+    let a_raw = args
+        .get(0)
+        .ok_or_else(|| {
+            CompileError::semantic_with_context(
+                "rt_string_eq expects 2 arguments".to_string(),
+                ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
+            )
+        })?
         .as_int()?;
 
-    let b_raw = args.get(1)
-        .ok_or_else(|| CompileError::semantic_with_context(
-            "rt_string_eq expects 2 arguments".to_string(),
-            ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
-        ))?
+    let b_raw = args
+        .get(1)
+        .ok_or_else(|| {
+            CompileError::semantic_with_context(
+                "rt_string_eq expects 2 arguments".to_string(),
+                ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
+            )
+        })?
         .as_int()?;
 
     let a = RuntimeValue::from_raw(a_raw as u64);

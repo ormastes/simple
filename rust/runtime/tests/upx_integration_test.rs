@@ -19,10 +19,7 @@ fn test_upx_auto_download() {
                 use std::os::unix::fs::PermissionsExt;
                 let metadata = std::fs::metadata(&path).unwrap();
                 let permissions = metadata.permissions();
-                assert!(
-                    permissions.mode() & 0o111 != 0,
-                    "UPX should be executable"
-                );
+                assert!(permissions.mode() & 0o111 != 0, "UPX should be executable");
             }
 
             // Try to run it

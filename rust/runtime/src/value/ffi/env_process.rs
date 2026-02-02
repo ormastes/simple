@@ -396,7 +396,12 @@ pub unsafe extern "C" fn rt_process_execute(cmd_ptr: *const u8, cmd_len: u64, ar
 /// Returns tuple (stdout: String, stderr: String, exit_code: Int)
 /// exit_code = -1 on timeout or spawn failure
 #[no_mangle]
-pub unsafe extern "C" fn rt_process_run_timeout(cmd_ptr: *const u8, cmd_len: u64, args: RuntimeValue, timeout_ms: i64) -> RuntimeValue {
+pub unsafe extern "C" fn rt_process_run_timeout(
+    cmd_ptr: *const u8,
+    cmd_len: u64,
+    args: RuntimeValue,
+    timeout_ms: i64,
+) -> RuntimeValue {
     use std::process::Command;
     use std::sync::mpsc;
     use std::thread;

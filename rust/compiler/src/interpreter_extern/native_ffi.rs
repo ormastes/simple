@@ -1,9 +1,8 @@
 /// Native compilation and execution FFI functions
 ///
 /// Provides bridge from Simple interpreter to LLVM native code generation.
-
 use crate::error::CompileError;
-use crate::value::Value as Value;
+use crate::value::Value;
 use std::path::Path;
 use std::process::Command;
 use std::time::Instant;
@@ -33,10 +32,7 @@ pub fn rt_compile_to_native(args: &[Value]) -> Result<Value, CompileError> {
     // Check if source file exists
     if !Path::new(source_path).exists() {
         let error_msg = format!("Source file not found: {}", source_path);
-        return Ok(Value::Tuple(vec![
-            Value::Bool(false),
-            Value::Str(error_msg.into()),
-        ]));
+        return Ok(Value::Tuple(vec![Value::Bool(false), Value::Str(error_msg.into())]));
     }
 
     // For now, return "not implemented" - actual LLVM compilation will be added
@@ -48,10 +44,7 @@ pub fn rt_compile_to_native(args: &[Value]) -> Result<Value, CompileError> {
     // 4. Link to create executable
 
     let error_msg = "Native compilation not yet implemented - LLVM backend in progress";
-    Ok(Value::Tuple(vec![
-        Value::Bool(false),
-        Value::Str(error_msg.into()),
-    ]))
+    Ok(Value::Tuple(vec![Value::Bool(false), Value::Str(error_msg.into())]))
 }
 
 /// Execute a native binary with arguments and timeout
@@ -77,11 +70,7 @@ pub fn rt_execute_native(args: &[Value]) -> Result<Value, CompileError> {
             for arg in arr.iter() {
                 match arg {
                     Value::Str(s) => args_vec.push(s.to_string()),
-                    _ => {
-                        return Err(CompileError::runtime(
-                            "all arguments must be strings",
-                        ))
-                    }
+                    _ => return Err(CompileError::runtime("all arguments must be strings")),
                 }
             }
             args_vec
@@ -105,10 +94,7 @@ pub fn rt_execute_native(args: &[Value]) -> Result<Value, CompileError> {
 
     // Execute binary with timeout
     let start = Instant::now();
-    let output = match Command::new(binary_path)
-        .args(&cmd_args)
-        .output()
-    {
+    let output = match Command::new(binary_path).args(&cmd_args).output() {
         Ok(output) => output,
         Err(e) => {
             return Ok(Value::Tuple(vec![
@@ -148,9 +134,7 @@ pub fn rt_execute_native(args: &[Value]) -> Result<Value, CompileError> {
 /// Returns: bool (true if deleted successfully)
 pub fn rt_file_delete(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() != 1 {
-        return Err(CompileError::runtime(
-            "rt_file_delete requires 1 argument (path)",
-        ));
+        return Err(CompileError::runtime("rt_file_delete requires 1 argument (path)"));
     }
 
     let path = match &args[0] {
@@ -173,10 +157,7 @@ mod tests {
         // Create a temp file so we reach the "not yet implemented" path
         let tmp = std::env::temp_dir().join("simple_test_native.spl");
         std::fs::write(&tmp, "fn main(): pass").unwrap();
-        let args = vec![
-            Value::Str(tmp.to_string_lossy().into()),
-            Value::Str("test.out".into()),
-        ];
+        let args = vec![Value::Str(tmp.to_string_lossy().into()), Value::Str("test.out".into())];
         let result = rt_compile_to_native(&args).unwrap();
         let _ = std::fs::remove_file(&tmp);
 
@@ -186,7 +167,9 @@ mod tests {
                 assert_eq!(values[0], Value::Bool(false));
                 match &values[1] {
                     Value::Str(s) => {
-                        assert!(s.contains("not yet implemented") || s.contains("not implemented") || s.contains("Not"));
+                        assert!(
+                            s.contains("not yet implemented") || s.contains("not implemented") || s.contains("Not")
+                        );
                     }
                     _ => panic!("Expected error message"),
                 }

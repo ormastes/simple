@@ -49,7 +49,9 @@ impl ValueBuilder {
             Some(BuilderFrame::Array { items }) => {
                 items.push(value);
             }
-            Some(BuilderFrame::Table { current_row: Some(row), .. }) => {
+            Some(BuilderFrame::Table {
+                current_row: Some(row), ..
+            }) => {
                 row.push(value);
             }
             None => {
@@ -122,12 +124,7 @@ impl OpHandler for ValueBuilder {
         Ok(())
     }
 
-    fn begin_table(
-        &mut self,
-        fields: Option<&[String]>,
-        types: Option<&[String]>,
-        _span: Span,
-    ) -> Result<()> {
+    fn begin_table(&mut self, fields: Option<&[String]>, types: Option<&[String]>, _span: Span) -> Result<()> {
         self.stack.push(BuilderFrame::Table {
             fields: fields.map(|f| f.to_vec()),
             types: types.map(|t| t.to_vec()),
@@ -154,7 +151,10 @@ impl OpHandler for ValueBuilder {
     }
 
     fn end_table(&mut self) -> Result<()> {
-        if let Some(BuilderFrame::Table { fields, types, rows, .. }) = self.stack.pop() {
+        if let Some(BuilderFrame::Table {
+            fields, types, rows, ..
+        }) = self.stack.pop()
+        {
             self.push_value(SdnValue::Table { fields, types, rows });
         }
         Ok(())
@@ -207,7 +207,10 @@ mod tests {
         builder.end_dict().unwrap();
         builder.end_dict().unwrap();
         let value = builder.finish().unwrap();
-        assert_eq!(value.get_path("server.host").and_then(|v| v.as_str()), Some("localhost"));
+        assert_eq!(
+            value.get_path("server.host").and_then(|v| v.as_str()),
+            Some("localhost")
+        );
     }
 
     #[test]

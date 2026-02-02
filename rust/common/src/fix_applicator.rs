@@ -26,7 +26,11 @@ pub enum FixError {
 impl fmt::Display for FixError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            FixError::ConflictingReplacements { file, fix_id_a, fix_id_b } => {
+            FixError::ConflictingReplacements {
+                file,
+                fix_id_a,
+                fix_id_b,
+            } => {
                 write!(f, "conflicting fixes in {}: {} and {}", file, fix_id_a, fix_id_b)
             }
             FixError::FileNotFound(file) => write!(f, "file not found: {}", file),
@@ -61,10 +65,7 @@ pub struct FixApplicator;
 
 impl FixApplicator {
     /// Apply fixes to source content. Returns map of file -> new content.
-    pub fn apply(
-        fixes: &[EasyFix],
-        sources: &SourceRegistry,
-    ) -> Result<HashMap<String, String>, FixError> {
+    pub fn apply(fixes: &[EasyFix], sources: &SourceRegistry) -> Result<HashMap<String, String>, FixError> {
         // Group replacements by file, tagged with fix ID
         let mut by_file: HashMap<String, Vec<(&str, &Replacement)>> = HashMap::new();
         for fix in fixes {
@@ -79,9 +80,7 @@ impl FixApplicator {
         let mut results = HashMap::new();
 
         for (file, mut replacements) in by_file {
-            let source = sources
-                .get(&file)
-                .ok_or_else(|| FixError::FileNotFound(file.clone()))?;
+            let source = sources.get(&file).ok_or_else(|| FixError::FileNotFound(file.clone()))?;
 
             // Sort by start position (descending) so we can apply from end to start
             // without invalidating earlier offsets
@@ -119,11 +118,7 @@ impl FixApplicator {
     }
 
     /// Apply fixes in-place to files on disk.
-    pub fn apply_to_disk(
-        fixes: &[EasyFix],
-        sources: &SourceRegistry,
-        dry_run: bool,
-    ) -> Result<FixReport, FixError> {
+    pub fn apply_to_disk(fixes: &[EasyFix], sources: &SourceRegistry, dry_run: bool) -> Result<FixReport, FixError> {
         let new_contents = Self::apply(fixes, sources)?;
         let mut report = FixReport::default();
 
@@ -241,8 +236,17 @@ mod tests {
             },
         ];
 
-        assert_eq!(FixApplicator::filter_by_confidence(&fixes, FixConfidence::Safe).len(), 1);
-        assert_eq!(FixApplicator::filter_by_confidence(&fixes, FixConfidence::Likely).len(), 2);
-        assert_eq!(FixApplicator::filter_by_confidence(&fixes, FixConfidence::Uncertain).len(), 3);
+        assert_eq!(
+            FixApplicator::filter_by_confidence(&fixes, FixConfidence::Safe).len(),
+            1
+        );
+        assert_eq!(
+            FixApplicator::filter_by_confidence(&fixes, FixConfidence::Likely).len(),
+            2
+        );
+        assert_eq!(
+            FixApplicator::filter_by_confidence(&fixes, FixConfidence::Uncertain).len(),
+            3
+        );
     }
 }

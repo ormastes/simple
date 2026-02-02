@@ -196,11 +196,7 @@ impl ParseError {
         }
     }
 
-    pub fn contextual_error(
-        context: impl Into<String>,
-        message: impl Into<String>,
-        span: Span,
-    ) -> Self {
+    pub fn contextual_error(context: impl Into<String>, message: impl Into<String>, span: Span) -> Self {
         Self::ContextualSyntaxError {
             context: context.into(),
             message: message.into(),

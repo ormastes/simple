@@ -211,10 +211,18 @@ fn arg_string_literal_with_label() {
 #[test]
 fn declaration_and_call_site_labels_match() {
     let decl_items = parse("fn convert(data: bytes, src: Format from, dst: Format to):\n    pass");
-    let decl = if let Node::Function(f) = &decl_items[0] { f } else { panic!("expected function") };
+    let decl = if let Node::Function(f) = &decl_items[0] {
+        f
+    } else {
+        panic!("expected function")
+    };
 
     let call_items = parse("convert(raw_data, Format.JSON from, Format.XML to)");
-    let call_args = if let Node::Expression(Expr::Call { args, .. }) = &call_items[0] { args } else { panic!("expected call") };
+    let call_args = if let Node::Expression(Expr::Call { args, .. }) = &call_items[0] {
+        args
+    } else {
+        panic!("expected call")
+    };
 
     assert_eq!(decl.params[1].call_site_label, call_args[1].label);
     assert_eq!(decl.params[2].call_site_label, call_args[2].label);
@@ -225,10 +233,18 @@ fn declaration_and_call_site_labels_match() {
 #[test]
 fn declaration_and_call_by_label_match() {
     let decl_items = parse("fn scale(value: f64, factor: f64 by):\n    pass");
-    let decl = if let Node::Function(f) = &decl_items[0] { f } else { panic!("expected function") };
+    let decl = if let Node::Function(f) = &decl_items[0] {
+        f
+    } else {
+        panic!("expected function")
+    };
 
     let call_items = parse("scale(10.0, 2.5 by)");
-    let call_args = if let Node::Expression(Expr::Call { args, .. }) = &call_items[0] { args } else { panic!("expected call") };
+    let call_args = if let Node::Expression(Expr::Call { args, .. }) = &call_items[0] {
+        args
+    } else {
+        panic!("expected call")
+    };
 
     assert_eq!(decl.params[1].call_site_label, call_args[1].label);
     assert_eq!(decl.params[1].call_site_label, Some("by".to_string()));

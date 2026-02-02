@@ -332,11 +332,7 @@ fn poll_for_token(
 }
 
 /// Get user info from userinfo endpoint or ID token
-fn get_user_info(
-    agent: &ureq::Agent,
-    access_token: &str,
-    config: &OAuthConfig,
-) -> Result<UserInfo, String> {
+fn get_user_info(agent: &ureq::Agent, access_token: &str, config: &OAuthConfig) -> Result<UserInfo, String> {
     let userinfo_endpoint = match config.provider {
         OAuthProvider::Google => "https://openidconnect.googleapis.com/v1/userinfo",
         OAuthProvider::Microsoft => "https://graph.microsoft.com/oidc/userinfo",

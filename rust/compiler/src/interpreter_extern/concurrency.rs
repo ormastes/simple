@@ -42,7 +42,10 @@ lazy_static::lazy_static! {
 pub fn rt_thread_available_parallelism(_args: &[Value]) -> Result<Value, CompileError> {
     let registry = get_concurrent_registry();
     if registry.backend() != ConcurrentBackend::PureStd {
-        return registry.thread.thread_available_parallelism().map(|n| Value::Int(n as i64));
+        return registry
+            .thread
+            .thread_available_parallelism()
+            .map(|n| Value::Int(n as i64));
     }
 
     let cores = thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
@@ -141,8 +144,7 @@ pub fn rt_thread_spawn_isolated_with_context(
 
     // Evaluate the body expression
     let body_value =
-        evaluate_expr(&body, &mut local_env, functions, classes, enums, impl_methods)
-            .unwrap_or(Value::Nil);
+        evaluate_expr(&body, &mut local_env, functions, classes, enums, impl_methods).unwrap_or(Value::Nil);
 
     // If it's a BlockClosure, execute it; otherwise use the value directly
     let result = match &body_value {
@@ -283,7 +285,10 @@ pub fn rt_thread_is_done(args: &[Value]) -> Result<Value, CompileError> {
                 ))
             }
         };
-        return registry.thread.thread_is_done(handle).map(|b| Value::Int(if b { 1 } else { 0 }));
+        return registry
+            .thread
+            .thread_is_done(handle)
+            .map(|b| Value::Int(if b { 1 } else { 0 }));
     }
 
     // For now, always return true (thread is done)
@@ -522,7 +527,10 @@ pub fn rt_channel_is_closed(args: &[Value]) -> Result<Value, CompileError> {
                 ))
             }
         };
-        return registry.channel.channel_is_closed(channel_id).map(|b| Value::Int(if b { 1 } else { 0 }));
+        return registry
+            .channel
+            .channel_is_closed(channel_id)
+            .map(|b| Value::Int(if b { 1 } else { 0 }));
     }
 
     if args.len() != 1 {

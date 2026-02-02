@@ -5,8 +5,8 @@ use super::bdd::{BDD_AFTER_EACH, BDD_BEFORE_EACH, BDD_CONTEXT_DEFS, BDD_INDENT};
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::interpreter::{
     evaluate_expr, exec_with, get_type_name, pattern_matches, BLOCK_SCOPED_ENUMS, CONST_NAMES, CONTEXT_OBJECT,
-    CONTEXT_VAR_NAME, EXTERN_FUNCTIONS, IMMUTABLE_VARS, MACRO_DEFINITION_ORDER, MIXINS, MODULE_GLOBALS,
-    TRAIT_IMPLS, TRAITS, USER_MACROS,
+    CONTEXT_VAR_NAME, EXTERN_FUNCTIONS, IMMUTABLE_VARS, MACRO_DEFINITION_ORDER, MIXINS, MODULE_GLOBALS, TRAIT_IMPLS,
+    TRAITS, USER_MACROS,
 };
 use crate::value::*;
 use simple_parser::ast::{ClassDef, EnumDef, Expr, FunctionDef, Node};
@@ -35,8 +35,7 @@ fn inject_mixins(class_def: &ClassDef) -> ClassDef {
         let registry = cell.borrow();
         // Transitive resolution: BFS through mixin dependencies
         let mut seen_mixins = std::collections::HashSet::new();
-        let mut queue: std::collections::VecDeque<String> =
-            class_def.mixins.iter().map(|m| m.name.clone()).collect();
+        let mut queue: std::collections::VecDeque<String> = class_def.mixins.iter().map(|m| m.name.clone()).collect();
         while let Some(mixin_name) = queue.pop_front() {
             if !seen_mixins.insert(mixin_name.clone()) {
                 continue; // Diamond dedup
@@ -620,10 +619,8 @@ pub(super) fn exec_block_closure(
 
                         // Register in TRAIT_IMPLS with combined methods
                         TRAIT_IMPLS.with(|cell| {
-                            cell.borrow_mut().insert(
-                                (trait_name.clone(), type_name.clone()),
-                                combined_methods.clone(),
-                            );
+                            cell.borrow_mut()
+                                .insert((trait_name.clone(), type_name.clone()), combined_methods.clone());
                         });
 
                         // Merge impl methods into ClassDef (mirrors interpreter_eval.rs:358-359)
@@ -633,10 +630,8 @@ pub(super) fn exec_block_closure(
                     } else {
                         // Trait not found - just register the impl methods
                         TRAIT_IMPLS.with(|cell| {
-                            cell.borrow_mut().insert(
-                                (trait_name.clone(), type_name.clone()),
-                                impl_block.methods.clone(),
-                            );
+                            cell.borrow_mut()
+                                .insert((trait_name.clone(), type_name.clone()), impl_block.methods.clone());
                         });
 
                         // Merge impl methods into ClassDef
@@ -1007,10 +1002,8 @@ fn exec_block_closure_mut(
 
                         // Register in TRAIT_IMPLS with combined methods
                         TRAIT_IMPLS.with(|cell| {
-                            cell.borrow_mut().insert(
-                                (trait_name.clone(), type_name.clone()),
-                                combined_methods.clone(),
-                            );
+                            cell.borrow_mut()
+                                .insert((trait_name.clone(), type_name.clone()), combined_methods.clone());
                         });
 
                         // Merge impl methods into ClassDef (mirrors interpreter_eval.rs:358-359)
@@ -1020,10 +1013,8 @@ fn exec_block_closure_mut(
                     } else {
                         // Trait not found - just register the impl methods
                         TRAIT_IMPLS.with(|cell| {
-                            cell.borrow_mut().insert(
-                                (trait_name.clone(), type_name.clone()),
-                                impl_block.methods.clone(),
-                            );
+                            cell.borrow_mut()
+                                .insert((trait_name.clone(), type_name.clone()), impl_block.methods.clone());
                         });
 
                         // Merge impl methods into ClassDef
@@ -1042,14 +1033,7 @@ fn exec_block_closure_mut(
             }
             Node::Const(const_stmt) => {
                 // Evaluate const value
-                let value = evaluate_expr(
-                    &const_stmt.value,
-                    local_env,
-                    functions,
-                    classes,
-                    enums,
-                    impl_methods,
-                )?;
+                let value = evaluate_expr(&const_stmt.value, local_env, functions, classes, enums, impl_methods)?;
                 // Insert into environment
                 local_env.insert(const_stmt.name.clone(), value);
                 // Register as const name
@@ -1058,14 +1042,7 @@ fn exec_block_closure_mut(
             }
             Node::Static(static_stmt) => {
                 // Evaluate static value
-                let value = evaluate_expr(
-                    &static_stmt.value,
-                    local_env,
-                    functions,
-                    classes,
-                    enums,
-                    impl_methods,
-                )?;
+                let value = evaluate_expr(&static_stmt.value, local_env, functions, classes, enums, impl_methods)?;
                 // Insert into environment
                 local_env.insert(static_stmt.name.clone(), value);
                 // Register as const if immutable

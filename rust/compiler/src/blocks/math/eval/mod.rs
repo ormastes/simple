@@ -82,10 +82,7 @@ pub fn evaluate(expr: &MathExpr) -> Result<Value, CompileError> {
 ///
 /// Performs complexity analysis, selects backend (or uses preferred),
 /// logs the decision, and dispatches to the appropriate evaluator.
-pub fn evaluate_with_backend(
-    expr: &MathExpr,
-    preferred: super::backend::MathBackend,
-) -> Result<Value, CompileError> {
+pub fn evaluate_with_backend(expr: &MathExpr, preferred: super::backend::MathBackend) -> Result<Value, CompileError> {
     use super::backend::auto_select::{analyze_complexity, select_backend};
 
     let complexity = analyze_complexity(expr);
@@ -107,10 +104,7 @@ pub fn eval_expr(expr: &MathExpr) -> Result<Value, CompileError> {
 }
 
 /// Alias: `eval_with_backend` - shorter name following `eval_*` convention.
-pub fn eval_with_backend(
-    expr: &MathExpr,
-    preferred: super::backend::MathBackend,
-) -> Result<Value, CompileError> {
+pub fn eval_with_backend(expr: &MathExpr, preferred: super::backend::MathBackend) -> Result<Value, CompileError> {
     evaluate_with_backend(expr, preferred)
 }
 

@@ -1,0 +1,148 @@
+# Test Discovery Cache
+#
+# Caches the list of test files to avoid full directory scans on every run.
+# Cache is invalidated when:
+# - Cache is older than 60 seconds
+# - Any .spl file has been modified since last scan
+# - Cache file doesn't exist
+
+# FFI declarations
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_modified_time(path: text) -> i64
+extern fn rt_read_file(path: text) -> text
+extern fn rt_write_file(path: text, content: text) -> bool
+extern fn rt_current_time_ms() -> i64
+extern fn rt_glob(pattern: text) -> [text]
+
+class TestDiscoveryCache:
+    cache_file: text
+    test_files: [text]
+    last_scan_time: i64
+    cache_ttl_ms: i64
+
+    # Create cache with default settings
+    static fn default() -> TestDiscoveryCache:
+        TestDiscoveryCache(
+            cache_file: ".simple/test-discovery.cache",
+            test_files: [],
+            last_scan_time: 0,
+            cache_ttl_ms: 60000  # 60 seconds
+        )
+
+    # Get test files (from cache if fresh, otherwise scan)
+    fn get_tests() -> [text]:
+        if self.is_cache_fresh():
+            self.test_files
+        else:
+            self.refresh_cache()
+
+    # Check if cache is still valid
+    fn is_cache_fresh() -> bool:
+        # Check if cache file exists
+        if not rt_file_exists(self.cache_file):
+            return false
+
+        # Check cache age
+        val now = rt_current_time_ms()
+        val cache_age_ms = now - self.last_scan_time
+
+        if cache_age_ms > self.cache_ttl_ms:
+            return false
+
+        # Check if any test files were modified since last scan
+        for file in self.test_files:
+            val mtime = rt_file_modified_time(file)
+            if mtime > self.last_scan_time:
+                return false
+
+        true
+
+    # Refresh cache by scanning filesystem
+    me refresh_cache() -> [text]:
+        print "[Cache] Discovering test files..."
+
+        # Scan for all *_spec.spl and *_test.spl files
+        val spec_files = rt_glob("test/**/*_spec.spl")
+        val test_files = rt_glob("test/**/*_test.spl")
+
+        self.test_files = spec_files.merge(test_files)
+        self.last_scan_time = rt_current_time_ms()
+
+        # Save to cache file
+        self.save_cache()
+
+        print "[Cache] Found {self.test_files.len()} test files"
+
+        self.test_files
+
+    # Save cache to disk
+    me save_cache():
+        # Serialize cache data
+        val cache_data = serialize_cache(self.test_files, self.last_scan_time)
+        rt_write_file(self.cache_file, cache_data)
+
+    # Load cache from disk
+    me load_cache():
+        if rt_file_exists(self.cache_file):
+            val cache_data = rt_read_file(self.cache_file)
+            val (files, scan_time) = deserialize_cache(cache_data)
+            self.test_files = files
+            self.last_scan_time = scan_time
+
+    # Clear cache
+    me clear_cache():
+        self.test_files = []
+        self.last_scan_time = 0
+        if rt_file_exists(self.cache_file):
+            # Delete cache file
+            execute_shell("rm -f {self.cache_file}")
+
+# Serialize cache data (simple line-based format)
+fn serialize_cache(files: [text], scan_time: i64) -> text:
+    var parts = ["{scan_time}"]
+    for file in files:
+        parts.push(file)
+    parts.join("\n") + "\n"
+
+# Deserialize cache data
+fn deserialize_cache(data: text) -> ([text], i64):
+    val lines = data.split("\n")
+
+    if lines.len() == 0:
+        return ([], 0)
+
+    # First line is scan_time
+    val scan_time = lines[0].parse_i64() ?? 0
+
+    # Rest are file paths
+    var files = []
+    for i in 1..lines.len():
+        if lines[i].len() > 0:
+            files = files.merge([lines[i]])
+
+    (files, scan_time)
+
+# Helper: Execute shell command
+extern fn rt_shell_exec(cmd: text) -> i64
+fn execute_shell(cmd: text) -> i64:
+    rt_shell_exec(cmd)
+
+# Global cache instance (lazy initialization)
+var global_test_cache: TestDiscoveryCache? = None
+
+# Get or create global cache instance
+fn get_test_cache() -> TestDiscoveryCache:
+    if not global_test_cache.?:
+        global_test_cache = Some(TestDiscoveryCache.default())
+
+    global_test_cache.unwrap()
+
+# Public API: Get all test files (with caching)
+fn discover_test_files() -> [text]:
+    val cache = get_test_cache()
+    cache.get_tests()
+
+# Public API: Clear test discovery cache
+fn clear_test_discovery_cache():
+    val cache = get_test_cache()
+    cache.clear_cache()

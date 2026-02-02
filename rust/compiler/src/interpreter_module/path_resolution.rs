@@ -125,7 +125,14 @@ fn resolve_module_path_uncached(parts: &[String], base_dir: &Path) -> Result<Pat
     let mut current = base_dir.to_path_buf();
     for _ in 0..10 {
         // Try various stdlib locations
-        for stdlib_subpath in &["src/std/src", "src/lib/std/src", "lib/std/src", "rust/lib/std/src", "simple/std_lib/src", "std_lib/src"] {
+        for stdlib_subpath in &[
+            "src/std/src",
+            "src/lib/std/src",
+            "lib/std/src",
+            "rust/lib/std/src",
+            "simple/std_lib/src",
+            "std_lib/src",
+        ] {
             let stdlib_candidate = current.join(stdlib_subpath);
             if stdlib_candidate.exists() {
                 // When importing from stdlib, "std" represents the stdlib root itself, not a subdirectory.

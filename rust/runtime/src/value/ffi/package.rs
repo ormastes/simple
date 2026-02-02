@@ -58,10 +58,7 @@ fn calculate_sha256(file_path: &str) -> io::Result<String> {
 /// - `output_path` must be a valid null-terminated C string
 /// - Returns 0 on success, -1 on error
 #[no_mangle]
-pub unsafe extern "C" fn rt_package_create_tarball(
-    source_dir: *const c_char,
-    output_path: *const c_char,
-) -> i32 {
+pub unsafe extern "C" fn rt_package_create_tarball(source_dir: *const c_char, output_path: *const c_char) -> i32 {
     if source_dir.is_null() || output_path.is_null() {
         return -1;
     }
@@ -105,10 +102,7 @@ fn create_tarball(source_dir: &str, output_path: &str) -> io::Result<()> {
 /// - `dest_dir` must be a valid null-terminated C string
 /// - Returns 0 on success, -1 on error
 #[no_mangle]
-pub unsafe extern "C" fn rt_package_extract_tarball(
-    tarball_path: *const c_char,
-    dest_dir: *const c_char,
-) -> i32 {
+pub unsafe extern "C" fn rt_package_extract_tarball(tarball_path: *const c_char, dest_dir: *const c_char) -> i32 {
     if tarball_path.is_null() || dest_dir.is_null() {
         return -1;
     }
@@ -172,10 +166,7 @@ pub unsafe extern "C" fn rt_package_file_size(file_path: *const c_char) -> i64 {
 /// - `dst_path` must be a valid null-terminated C string
 /// - Returns 0 on success, -1 on error
 #[no_mangle]
-pub unsafe extern "C" fn rt_package_copy_file(
-    src_path: *const c_char,
-    dst_path: *const c_char,
-) -> i32 {
+pub unsafe extern "C" fn rt_package_copy_file(src_path: *const c_char, dst_path: *const c_char) -> i32 {
     if src_path.is_null() || dst_path.is_null() {
         return -1;
     }
@@ -247,10 +238,7 @@ pub unsafe extern "C" fn rt_package_remove_dir_all(dir_path: *const c_char) -> i
 /// - `link_path` must be a valid null-terminated C string
 /// - Returns 0 on success, -1 on error
 #[no_mangle]
-pub unsafe extern "C" fn rt_package_create_symlink(
-    target: *const c_char,
-    link_path: *const c_char,
-) -> i32 {
+pub unsafe extern "C" fn rt_package_create_symlink(target: *const c_char, link_path: *const c_char) -> i32 {
     if target.is_null() || link_path.is_null() {
         return -1;
     }
@@ -391,10 +379,7 @@ mod tests {
 
         let hash = calculate_sha256(file_path.to_str().unwrap()).unwrap();
         // SHA256 of "Hello, World!"
-        assert_eq!(
-            hash,
-            "dffd6021bb2bd5b0af676290809ec3a53191dd81c7f70a4b28688a362182986f"
-        );
+        assert_eq!(hash, "dffd6021bb2bd5b0af676290809ec3a53191dd81c7f70a4b28688a362182986f");
     }
 
     #[test]

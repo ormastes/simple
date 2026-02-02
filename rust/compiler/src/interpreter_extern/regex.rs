@@ -39,12 +39,15 @@ pub fn find_all(args: &[Value]) -> Result<Value, CompileError> {
     let text = args.get(1).map(|v| v.to_display_string()).unwrap_or_default();
     match regex::Regex::new(&pattern) {
         Ok(re) => {
-            let results: Vec<Value> = re.find_iter(&text)
-                .map(|m| Value::Array(vec![
-                    Value::Str(m.as_str().to_string()),
-                    Value::Int(m.start() as i64),
-                    Value::Int(m.end() as i64),
-                ]))
+            let results: Vec<Value> = re
+                .find_iter(&text)
+                .map(|m| {
+                    Value::Array(vec![
+                        Value::Str(m.as_str().to_string()),
+                        Value::Int(m.start() as i64),
+                        Value::Int(m.end() as i64),
+                    ])
+                })
                 .collect();
             Ok(Value::Array(results))
         }
@@ -59,7 +62,8 @@ pub fn captures(args: &[Value]) -> Result<Value, CompileError> {
     match regex::Regex::new(&pattern) {
         Ok(re) => {
             if let Some(caps) = re.captures(&text) {
-                let results: Vec<Value> = caps.iter()
+                let results: Vec<Value> = caps
+                    .iter()
                     .map(|m| match m {
                         Some(m) => Value::Str(m.as_str().to_string()),
                         None => Value::Nil,
@@ -102,9 +106,7 @@ pub fn split(args: &[Value]) -> Result<Value, CompileError> {
     let text = args.get(1).map(|v| v.to_display_string()).unwrap_or_default();
     match regex::Regex::new(&pattern) {
         Ok(re) => {
-            let parts: Vec<Value> = re.split(&text)
-                .map(|s| Value::Str(s.to_string()))
-                .collect();
+            let parts: Vec<Value> = re.split(&text).map(|s| Value::Str(s.to_string())).collect();
             Ok(Value::Array(parts))
         }
         Err(e) => Err(CompileError::semantic(format!("invalid regex pattern: {}", e))),
@@ -118,9 +120,7 @@ pub fn split_n(args: &[Value]) -> Result<Value, CompileError> {
     let limit = args.get(2).and_then(|v| v.as_int().ok()).unwrap_or(0) as usize;
     match regex::Regex::new(&pattern) {
         Ok(re) => {
-            let parts: Vec<Value> = re.splitn(&text, limit)
-                .map(|s| Value::Str(s.to_string()))
-                .collect();
+            let parts: Vec<Value> = re.splitn(&text, limit).map(|s| Value::Str(s.to_string())).collect();
             Ok(Value::Array(parts))
         }
         Err(e) => Err(CompileError::semantic(format!("invalid regex pattern: {}", e))),

@@ -112,12 +112,7 @@ impl OpHandler for NoopHandler {
         Ok(())
     }
 
-    fn begin_table(
-        &mut self,
-        _fields: Option<&[String]>,
-        _types: Option<&[String]>,
-        span: Span,
-    ) -> Result<()> {
+    fn begin_table(&mut self, _fields: Option<&[String]>, _types: Option<&[String]>, span: Span) -> Result<()> {
         self.depth += 1;
         self.check_depth(span)
     }

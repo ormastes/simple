@@ -83,16 +83,10 @@ pub enum SdnError {
     IoError(String),
 
     #[error("Security error: {message}")]
-    SecurityError {
-        message: String,
-        span: Option<Span>,
-    },
+    SecurityError { message: String, span: Option<Span> },
 
     #[error("Parse error: {message}")]
-    ParseError {
-        message: String,
-        span: Option<Span>,
-    },
+    ParseError { message: String, span: Option<Span> },
 }
 
 impl SdnError {

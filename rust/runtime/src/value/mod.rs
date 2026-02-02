@@ -104,7 +104,8 @@ pub use channels::RuntimeChannel;
 pub use collections::{
     rt_array_clear, rt_array_get, rt_array_len, rt_array_new, rt_array_pop, rt_array_push, rt_array_set, rt_contains,
     rt_cstring_to_text, rt_index_get, rt_index_set, rt_slice, rt_string_concat, rt_string_data, rt_string_ends_with,
-    rt_string_eq, rt_string_len, rt_string_new, rt_string_starts_with, rt_tuple_get, rt_tuple_len, rt_tuple_new, rt_tuple_set,
+    rt_string_eq, rt_string_len, rt_string_new, rt_string_starts_with, rt_tuple_get, rt_tuple_len, rt_tuple_new,
+    rt_tuple_set,
 };
 
 // Re-export dict FFI functions
@@ -259,10 +260,9 @@ pub use async_gen::{
 // Re-export core FFI functions
 pub use ffi::{
     rt_alloc, rt_free, rt_function_not_found, rt_interp_call, rt_interp_eval, rt_method_not_found, rt_ptr_to_value,
-    rt_value_as_bool, rt_value_as_float, rt_value_as_int, rt_value_bool, rt_value_compare, rt_value_eq,
-    rt_value_float, rt_value_int,
-    rt_value_is_bool, rt_value_is_float, rt_value_is_heap, rt_value_is_int, rt_value_is_nil, rt_value_nil,
-    rt_value_to_ptr, rt_value_truthy,
+    rt_value_as_bool, rt_value_as_float, rt_value_as_int, rt_value_bool, rt_value_compare, rt_value_eq, rt_value_float,
+    rt_value_int, rt_value_is_bool, rt_value_is_float, rt_value_is_heap, rt_value_is_int, rt_value_is_nil,
+    rt_value_nil, rt_value_to_ptr, rt_value_truthy,
 };
 
 // Re-export interpreter bridge handler setters (for compiler crate)
@@ -314,7 +314,8 @@ pub use ffi::{
     rt_file_stat,
     // File ops
     rt_file_canonicalize,
-    rt_file_read_text, rt_file_read_text_rv,
+    rt_file_read_text,
+    rt_file_read_text_rv,
     rt_file_write_text,
     rt_file_copy,
     rt_file_remove,

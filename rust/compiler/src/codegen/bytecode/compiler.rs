@@ -333,10 +333,7 @@ impl BytecodeCompiler {
                     BinOp::And | BinOp::AndSuspend => self.encoder.emit_opcode(opcodes::AND),
                     BinOp::Or | BinOp::OrSuspend => self.encoder.emit_opcode(opcodes::OR),
                     _ => {
-                        return Err(CompileError::UnsupportedInstruction(format!(
-                            "BinOp {:?}",
-                            op
-                        )));
+                        return Err(CompileError::UnsupportedInstruction(format!("BinOp {:?}", op)));
                     }
                 }
 
@@ -446,7 +443,11 @@ impl BytecodeCompiler {
                 self.encoder.emit_u16(elements.len() as u16);
             }
 
-            MirInst::IndexGet { dest, collection, index } => {
+            MirInst::IndexGet {
+                dest,
+                collection,
+                index,
+            } => {
                 let dest_slot = self.alloc_slot(*dest)?;
                 let coll_slot = self.get_slot(*collection)?;
                 let idx_slot = self.get_slot(*index)?;
@@ -456,7 +457,11 @@ impl BytecodeCompiler {
                 self.encoder.emit_u16(idx_slot);
             }
 
-            MirInst::IndexSet { collection, index, value } => {
+            MirInst::IndexSet {
+                collection,
+                index,
+                value,
+            } => {
                 let coll_slot = self.get_slot(*collection)?;
                 let idx_slot = self.get_slot(*index)?;
                 let val_slot = self.get_slot(*value)?;
@@ -469,8 +474,7 @@ impl BytecodeCompiler {
             // =================================================================
             // No-ops (safe to skip in bytecode)
             // =================================================================
-            MirInst::Drop { .. }
-            | MirInst::EndScope { .. } => {
+            MirInst::Drop { .. } | MirInst::EndScope { .. } => {
                 // No-op in bytecode (GC handles cleanup)
             }
 
@@ -503,7 +507,11 @@ impl BytecodeCompiler {
                 self.record_jump_fixup(*target);
             }
 
-            Terminator::Branch { cond, then_block, else_block } => {
+            Terminator::Branch {
+                cond,
+                then_block,
+                else_block,
+            } => {
                 let cond_slot = self.get_slot(*cond)?;
 
                 // Push condition and branch

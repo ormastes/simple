@@ -428,9 +428,7 @@ impl LlvmBackend {
             }
 
             // Pointer instructions (not yet implemented)
-            MirInst::PointerNew { .. }
-            | MirInst::PointerRef { .. }
-            | MirInst::PointerDeref { .. } => {
+            MirInst::PointerNew { .. } | MirInst::PointerRef { .. } | MirInst::PointerDeref { .. } => {
                 // Pointer operations not yet implemented
             }
 
@@ -481,9 +479,7 @@ impl LlvmBackend {
             }
 
             // Coverage instrumentation (not yet implemented)
-            MirInst::DecisionProbe { .. }
-            | MirInst::ConditionProbe { .. }
-            | MirInst::PathProbe { .. } => {
+            MirInst::DecisionProbe { .. } | MirInst::ConditionProbe { .. } | MirInst::PathProbe { .. } => {
                 // Coverage instrumentation not yet implemented
             }
 

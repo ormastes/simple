@@ -101,7 +101,16 @@ impl<'a> Parser<'a> {
             }
             // Allow certain keywords as identifier patterns
             // These are keywords that are commonly used as variable names
-            TokenKind::New | TokenKind::Old | TokenKind::Type | TokenKind::Examples | TokenKind::From | TokenKind::Val | TokenKind::Var | TokenKind::Gen | TokenKind::Kernel | TokenKind::Impl => {
+            TokenKind::New
+            | TokenKind::Old
+            | TokenKind::Type
+            | TokenKind::Examples
+            | TokenKind::From
+            | TokenKind::Val
+            | TokenKind::Var
+            | TokenKind::Gen
+            | TokenKind::Kernel
+            | TokenKind::Impl => {
                 let name = match &self.current.kind {
                     TokenKind::New => "new".to_string(),
                     TokenKind::Old => "old".to_string(),

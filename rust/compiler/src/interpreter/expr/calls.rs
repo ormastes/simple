@@ -212,6 +212,39 @@ pub(super) fn eval_call_expr(
                                 impl_methods,
                             )?));
                         }
+                        // Try no-paren method call: field() with zero arguments
+                        // This enables Ruby-style method calls like list.len instead of list.len()
+                        if let Some(method) = class_def.methods.iter().find(|m| m.name == *field) {
+                            let self_val = Value::Object {
+                                class: class.clone(),
+                                fields: fields.clone(),
+                            };
+                            return Ok(Some(exec_method_function(
+                                method,
+                                &[],
+                                &self_val,
+                                env,
+                                functions,
+                                classes,
+                                enums,
+                                impl_methods,
+                            )?));
+                        }
+                    }
+
+                    // Also try calling as method via impl blocks (for trait implementations)
+                    let empty_args: Vec<Argument> = vec![];
+                    if let Ok(result) = evaluate_method_call(
+                        receiver,
+                        field,
+                        &empty_args,
+                        env,
+                        functions,
+                        classes,
+                        enums,
+                        impl_methods,
+                    ) {
+                        return Ok(Some(result));
                     }
 
                     // E1012 - Undefined Field

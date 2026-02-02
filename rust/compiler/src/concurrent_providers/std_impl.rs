@@ -7,8 +7,7 @@
 use crate::error::CompileError;
 use crate::value::Value;
 use super::{
-    Handle, MapProvider, ConcurrentMapProvider, ChannelProvider,
-    ThreadProvider, LockProvider, ParallelIterProvider,
+    Handle, MapProvider, ConcurrentMapProvider, ChannelProvider, ThreadProvider, LockProvider, ParallelIterProvider,
 };
 
 // ============================================================================
@@ -637,15 +636,28 @@ impl StdParallelIterProvider {
 }
 
 impl ParallelIterProvider for StdParallelIterProvider {
-    fn par_map(&self, items: Vec<Value>, f: Box<dyn Fn(Value) -> Result<Value, CompileError> + Send + Sync>) -> Result<Vec<Value>, CompileError> {
+    fn par_map(
+        &self,
+        items: Vec<Value>,
+        f: Box<dyn Fn(Value) -> Result<Value, CompileError> + Send + Sync>,
+    ) -> Result<Vec<Value>, CompileError> {
         items.into_iter().map(|v| f(v)).collect()
     }
 
-    fn par_filter(&self, items: Vec<Value>, f: Box<dyn Fn(&Value) -> Result<bool, CompileError> + Send + Sync>) -> Result<Vec<Value>, CompileError> {
+    fn par_filter(
+        &self,
+        items: Vec<Value>,
+        f: Box<dyn Fn(&Value) -> Result<bool, CompileError> + Send + Sync>,
+    ) -> Result<Vec<Value>, CompileError> {
         items.into_iter().filter(|v| f(v).unwrap_or(false)).map(Ok).collect()
     }
 
-    fn par_reduce(&self, items: Vec<Value>, init: Value, f: Box<dyn Fn(Value, Value) -> Result<Value, CompileError> + Send + Sync>) -> Result<Value, CompileError> {
+    fn par_reduce(
+        &self,
+        items: Vec<Value>,
+        init: Value,
+        f: Box<dyn Fn(Value, Value) -> Result<Value, CompileError> + Send + Sync>,
+    ) -> Result<Value, CompileError> {
         let mut acc = init;
         for item in items {
             acc = f(acc, item)?;
@@ -653,7 +665,11 @@ impl ParallelIterProvider for StdParallelIterProvider {
         Ok(acc)
     }
 
-    fn par_for_each(&self, items: Vec<Value>, f: Box<dyn Fn(Value) -> Result<(), CompileError> + Send + Sync>) -> Result<(), CompileError> {
+    fn par_for_each(
+        &self,
+        items: Vec<Value>,
+        f: Box<dyn Fn(Value) -> Result<(), CompileError> + Send + Sync>,
+    ) -> Result<(), CompileError> {
         for item in items {
             f(item)?;
         }

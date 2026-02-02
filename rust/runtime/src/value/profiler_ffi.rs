@@ -59,7 +59,11 @@ pub extern "C" fn rt_profiler_record_return() {
 /// Check if profiling is active (for Cranelift conditional emission).
 #[no_mangle]
 pub extern "C" fn rt_profiler_is_active() -> i32 {
-    if PROFILING_ENABLED.load(Ordering::Relaxed) { 1 } else { 0 }
+    if PROFILING_ENABLED.load(Ordering::Relaxed) {
+        1
+    } else {
+        0
+    }
 }
 
 // Callback mechanism to bridge runtime -> compiler profiler

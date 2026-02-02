@@ -116,7 +116,9 @@ pub fn parse_qualify_ignore_args(args: &[String]) -> QualifyIgnoreArgs {
                         "microsoft" => AuthProvider::Microsoft,
                         #[cfg(not(feature = "oauth"))]
                         "google" | "microsoft" => {
-                            eprintln!("Error: OAuth providers require the 'oauth' feature. Rebuild with --features oauth");
+                            eprintln!(
+                                "Error: OAuth providers require the 'oauth' feature. Rebuild with --features oauth"
+                            );
                             AuthProvider::Password
                         }
                         _ => AuthProvider::Password,

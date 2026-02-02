@@ -69,12 +69,7 @@ pub trait OpHandler {
     fn end_array(&mut self) -> Result<()>;
 
     /// Begin parsing a table
-    fn begin_table(
-        &mut self,
-        fields: Option<&[String]>,
-        types: Option<&[String]>,
-        span: Span,
-    ) -> Result<()>;
+    fn begin_table(&mut self, fields: Option<&[String]>, types: Option<&[String]>, span: Span) -> Result<()>;
 
     /// Begin a table row
     fn begin_row(&mut self) -> Result<()>;

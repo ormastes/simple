@@ -538,6 +538,7 @@ simple build check              # All quality checks (lint + fmt + test)
 
 simple build clean              # Clean build artifacts
 simple build bootstrap          # 3-stage bootstrap pipeline
+simple build bootstrap-rebuild  # Rebuild compiler from bootstrap binary
 simple build package            # Create distribution packages
 simple build watch              # Watch mode (auto-rebuild)
 simple build metrics            # Show build metrics
@@ -657,13 +658,30 @@ if upx.is_compressed("myapp"):
 
 | Binary | Location | Language | Purpose |
 |--------|----------|----------|---------|
-| `simple_runtime` | `rust/target/debug/simple_runtime` | Rust | Core runtime (bootstraps Simple code) |
-| `simple_stub_old` | `rust/target/debug/simple_stub_old` | Rust | Settlement loader stub |
-| `simple` | `bin/wrappers/simple` | Shell+Simple | Default CLI → `src/app/cli/main.spl` (via `simple_runtime`) |
-| `simple_runtime` | `bin/wrappers/simple_runtime` | Shell | Direct passthrough to Rust runtime binary |
-| `simple_stub` | `bin/wrappers/simple_stub` | Shell+Simple | Stub wrapper → `src/app/stub/main.spl` |
+| `simple_runtime` | `rust/target/{profile}/simple_runtime` | Rust | Core runtime (builds Simple code) |
+| `simple` | `bin/simple` | Shell+Simple | Default CLI → `src/app/cli/main.spl` |
+| `simple_runtime` | `bin/simple_runtime` | Shell | Runtime wrapper (discovers binary) |
+| `simple` | `bin/bootstrap/simple` | Shell+Simple | Bootstrap CLI (minimal 9.3 MB) |
+| `simple_runtime` | `bin/bootstrap/simple_runtime` | Rust | Bootstrap runtime (9.3 MB minimal) |
 
 **All user-facing tools are now Simple apps** in `src/app/`. The Rust `simple_runtime` binary provides the runtime.
+
+### Setting up PATH
+
+Add both `bin/` and `bin/bootstrap/` to your PATH:
+
+```bash
+# Add to ~/.bashrc or ~/.zshrc
+export PATH="/home/ormastes/dev/pub/simple/bin:/home/ormastes/dev/pub/simple/bin/bootstrap:$PATH"
+
+# Or use relative path if working in repository
+export PATH="$(pwd)/bin:$(pwd)/bin/bootstrap:$PATH"
+```
+
+This allows:
+- `simple` - Uses development build first, falls back to bootstrap
+- `bin/bootstrap/simple` - Always uses minimal bootstrap binary
+- Bootstrap can rebuild entire compiler with `simple build bootstrap-rebuild`
 
 ---
 

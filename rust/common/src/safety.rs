@@ -156,8 +156,14 @@ impl_checked_ops!(i8, i16, i32, i64, i128, isize, u8, u16, u32, u64, u128, usize
 /// Error type for type conversions
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConversionError {
-    Overflow { from: String, to: &'static str, value: String },
-    NegativeToUnsigned { value: String },
+    Overflow {
+        from: String,
+        to: &'static str,
+        value: String,
+    },
+    NegativeToUnsigned {
+        value: String,
+    },
 }
 
 impl fmt::Display for ConversionError {
@@ -253,7 +259,11 @@ impl fmt::Display for IndexError {
                 write!(f, "index out of bounds: index is {} but length is {}", index, len)
             }
             IndexError::NegativeIndex { index, len } => {
-                write!(f, "negative index out of bounds: index is {} but length is {}", index, len)
+                write!(
+                    f,
+                    "negative index out of bounds: index is {} but length is {}",
+                    index, len
+                )
             }
         }
     }
@@ -272,10 +282,9 @@ pub fn safe_index<T>(slice: &[T], index: usize) -> Result<&T, IndexError> {
 /// Safe mutable array indexing with bounds checking
 pub fn safe_index_mut<T>(slice: &mut [T], index: usize) -> Result<&mut T, IndexError> {
     let len = slice.len();
-    slice.get_mut(index).ok_or_else(|| IndexError::OutOfBounds {
-        index,
-        len,
-    })
+    slice
+        .get_mut(index)
+        .ok_or_else(|| IndexError::OutOfBounds { index, len })
 }
 
 /// Safe indexing with negative index support (Python-style)
@@ -316,9 +325,9 @@ pub fn safe_index_mut_signed<T>(slice: &mut [T], index: i64) -> Result<&mut T, I
 
 /// Safe mutex lock with descriptive error message
 pub fn safe_lock<'a, T>(mutex: &'a Mutex<T>, context: &str) -> MutexGuard<'a, T> {
-    mutex.lock().unwrap_or_else(|e| {
-        panic!("Mutex poisoned in context '{}': {}", context, e)
-    })
+    mutex
+        .lock()
+        .unwrap_or_else(|e| panic!("Mutex poisoned in context '{}': {}", context, e))
 }
 
 /// Try to lock mutex with custom error handling
@@ -327,9 +336,9 @@ pub fn try_lock<'a, T, E>(
     context: &str,
     error_fn: impl FnOnce(String) -> E,
 ) -> Result<MutexGuard<'a, T>, E> {
-    mutex.lock().map_err(|e| {
-        error_fn(format!("Mutex poisoned in context '{}': {}", context, e))
-    })
+    mutex
+        .lock()
+        .map_err(|e| error_fn(format!("Mutex poisoned in context '{}': {}", context, e)))
 }
 
 // ============================================
@@ -350,7 +359,11 @@ impl fmt::Display for StringError {
                 write!(f, "invalid UTF-8 boundary at byte index {}", byte_index)
             }
             StringError::IndexOutOfBounds { char_index, char_count } => {
-                write!(f, "character index {} out of bounds (length: {})", char_index, char_count)
+                write!(
+                    f,
+                    "character index {} out of bounds (length: {})",
+                    char_index, char_count
+                )
             }
         }
     }
@@ -360,12 +373,10 @@ impl std::error::Error for StringError {}
 
 /// Safe character indexing (UTF-8 aware)
 pub fn safe_char_at(s: &str, char_index: usize) -> Result<char, StringError> {
-    s.chars()
-        .nth(char_index)
-        .ok_or_else(|| StringError::IndexOutOfBounds {
-            char_index,
-            char_count: s.chars().count(),
-        })
+    s.chars().nth(char_index).ok_or_else(|| StringError::IndexOutOfBounds {
+        char_index,
+        char_count: s.chars().count(),
+    })
 }
 
 /// Safe substring extraction (UTF-8 aware, by character indices)
@@ -434,7 +445,10 @@ mod tests {
         let arr = [1, 2, 3];
         let result = safe_index(&arr, 5);
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), IndexError::OutOfBounds { index: 5, len: 3 }));
+        assert!(matches!(
+            result.unwrap_err(),
+            IndexError::OutOfBounds { index: 5, len: 3 }
+        ));
     }
 
     #[test]

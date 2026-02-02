@@ -57,32 +57,28 @@ pub fn get_cached_upx_path(version: &str) -> Result<PathBuf, String> {
 ///
 /// Returns: Some(path) if found in PATH, None otherwise
 pub fn find_upx_in_path() -> Option<PathBuf> {
-    Command::new("upx")
-        .arg("--version")
-        .output()
-        .ok()
-        .and_then(|output| {
-            if output.status.success() {
-                // Try to get the full path using 'which' on Unix or 'where' on Windows
-                #[cfg(unix)]
-                let which_output = Command::new("which").arg("upx").output().ok()?;
-                #[cfg(windows)]
-                let which_output = Command::new("where").arg("upx").output().ok()?;
+    Command::new("upx").arg("--version").output().ok().and_then(|output| {
+        if output.status.success() {
+            // Try to get the full path using 'which' on Unix or 'where' on Windows
+            #[cfg(unix)]
+            let which_output = Command::new("which").arg("upx").output().ok()?;
+            #[cfg(windows)]
+            let which_output = Command::new("where").arg("upx").output().ok()?;
 
-                if which_output.status.success() {
-                    let path_str = String::from_utf8_lossy(&which_output.stdout);
-                    let path = path_str.trim();
-                    if !path.is_empty() {
-                        return Some(PathBuf::from(path));
-                    }
+            if which_output.status.success() {
+                let path_str = String::from_utf8_lossy(&which_output.stdout);
+                let path = path_str.trim();
+                if !path.is_empty() {
+                    return Some(PathBuf::from(path));
                 }
-
-                // Fallback: just return "upx" as a path
-                Some(PathBuf::from("upx"))
-            } else {
-                None
             }
-        })
+
+            // Fallback: just return "upx" as a path
+            Some(PathBuf::from("upx"))
+        } else {
+            None
+        }
+    })
 }
 
 /// Find UPX binary (system PATH or cache)
@@ -191,8 +187,7 @@ fn download_file(url: &str, dest: &Path) -> Result<(), String> {
         .map_err(|e| format!("Failed to read response: {}", e))?;
 
     // Write to destination
-    let mut file =
-        fs::File::create(dest).map_err(|e| format!("Failed to create destination file: {}", e))?;
+    let mut file = fs::File::create(dest).map_err(|e| format!("Failed to create destination file: {}", e))?;
     file.write_all(&buffer)
         .map_err(|e| format!("Failed to write file: {}", e))?;
 
@@ -220,7 +215,10 @@ fn extract_tar_xz(archive_path: &Path, dest_dir: &Path) -> Result<PathBuf, Strin
 
     let mut upx_binary_path: Option<PathBuf> = None;
 
-    for entry_result in archive.entries().map_err(|e| format!("Failed to read archive entries: {}", e))? {
+    for entry_result in archive
+        .entries()
+        .map_err(|e| format!("Failed to read archive entries: {}", e))?
+    {
         let mut entry = entry_result.map_err(|e| format!("Failed to read entry: {}", e))?;
         let path = entry.path().map_err(|e| format!("Failed to get entry path: {}", e))?;
 
@@ -276,8 +274,7 @@ pub fn download_upx(version: &str) -> Result<PathBuf, String> {
     // Create version-specific directory
     let version_dir = cache_dir.join(version);
     if !version_dir.exists() {
-        fs::create_dir_all(&version_dir)
-            .map_err(|e| format!("Failed to create version directory: {}", e))?;
+        fs::create_dir_all(&version_dir).map_err(|e| format!("Failed to create version directory: {}", e))?;
     }
 
     // Download to temporary file
@@ -371,10 +368,8 @@ mod tests {
 
         // Should succeed on supported platforms
         let target = Target::host();
-        if matches!(
-            target.os,
-            TargetOS::Linux | TargetOS::MacOS | TargetOS::Windows
-        ) && matches!(target.arch, TargetArch::X86_64 | TargetArch::Aarch64 | TargetArch::X86)
+        if matches!(target.os, TargetOS::Linux | TargetOS::MacOS | TargetOS::Windows)
+            && matches!(target.arch, TargetArch::X86_64 | TargetArch::Aarch64 | TargetArch::X86)
         {
             assert!(result.is_ok());
             let filename = result.unwrap();
@@ -387,10 +382,8 @@ mod tests {
         let result = get_upx_download_url("4.2.4");
 
         let target = Target::host();
-        if matches!(
-            target.os,
-            TargetOS::Linux | TargetOS::MacOS | TargetOS::Windows
-        ) && matches!(target.arch, TargetArch::X86_64 | TargetArch::Aarch64 | TargetArch::X86)
+        if matches!(target.os, TargetOS::Linux | TargetOS::MacOS | TargetOS::Windows)
+            && matches!(target.arch, TargetArch::X86_64 | TargetArch::Aarch64 | TargetArch::X86)
         {
             assert!(result.is_ok());
             let url = result.unwrap();

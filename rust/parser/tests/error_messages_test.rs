@@ -17,13 +17,25 @@ fn test():
     let err_msg = format!("{}", err);
 
     // Should mention function arguments context
-    assert!(err_msg.contains("function arguments"), "Error should mention 'function arguments' context. Got: {}", err_msg);
+    assert!(
+        err_msg.contains("function arguments"),
+        "Error should mention 'function arguments' context. Got: {}",
+        err_msg
+    );
 
     // Should mention the missing comma
-    assert!(err_msg.contains("comma") || err_msg.contains("Comma"), "Error should mention comma. Got: {}", err_msg);
+    assert!(
+        err_msg.contains("comma") || err_msg.contains("Comma"),
+        "Error should mention comma. Got: {}",
+        err_msg
+    );
 
     // Should mention the argument name
-    assert!(err_msg.contains("y"), "Error should mention argument 'y'. Got: {}", err_msg);
+    assert!(
+        err_msg.contains("y"),
+        "Error should mention argument 'y'. Got: {}",
+        err_msg
+    );
 }
 
 #[test]
@@ -40,8 +52,16 @@ fn test():
     let err = result.unwrap_err();
     let err_msg = format!("{}", err);
 
-    assert!(err_msg.contains("function arguments"), "Error should mention 'function arguments'. Got: {}", err_msg);
-    assert!(err_msg.contains("volume"), "Error should mention argument 'volume'. Got: {}", err_msg);
+    assert!(
+        err_msg.contains("function arguments"),
+        "Error should mention 'function arguments'. Got: {}",
+        err_msg
+    );
+    assert!(
+        err_msg.contains("volume"),
+        "Error should mention argument 'volume'. Got: {}",
+        err_msg
+    );
 }
 
 #[test]
@@ -73,14 +93,24 @@ fn test():
 
     // Check if it's a ContextualSyntaxError
     match err {
-        ParseError::ContextualSyntaxError { context, message, suggestion, help, .. } => {
+        ParseError::ContextualSyntaxError {
+            context,
+            message,
+            suggestion,
+            help,
+            ..
+        } => {
             assert_eq!(context, "function arguments");
             assert!(message.contains("b"));
             assert!(suggestion.is_some(), "Should provide a suggestion");
             assert!(help.is_some(), "Should provide help text");
 
             let sugg = suggestion.unwrap();
-            assert!(sugg.contains("comma") || sugg.contains("b"), "Suggestion should mention comma or 'b'. Got: {}", sugg);
+            assert!(
+                sugg.contains("comma") || sugg.contains("b"),
+                "Suggestion should mention comma or 'b'. Got: {}",
+                sugg
+            );
         }
         _ => panic!("Expected ContextualSyntaxError, got: {:?}", err),
     }
@@ -100,8 +130,16 @@ fn test():
     let err = result.unwrap_err();
     let err_msg = format!("{}", err);
 
-    assert!(err_msg.contains("dict literal"), "Error should mention 'dict literal' context. Got: {}", err_msg);
-    assert!(err_msg.contains("comma"), "Error should mention comma. Got: {}", err_msg);
+    assert!(
+        err_msg.contains("dict literal"),
+        "Error should mention 'dict literal' context. Got: {}",
+        err_msg
+    );
+    assert!(
+        err_msg.contains("comma"),
+        "Error should mention comma. Got: {}",
+        err_msg
+    );
 }
 
 #[test]
@@ -118,13 +156,23 @@ fn test():
     let err = result.unwrap_err();
 
     match err {
-        ParseError::ContextualSyntaxError { context, message, suggestion, help, .. } => {
+        ParseError::ContextualSyntaxError {
+            context,
+            message,
+            suggestion,
+            help,
+            ..
+        } => {
             assert_eq!(context, "dict literal");
             assert!(message.contains("comma"));
             assert!(suggestion.is_some());
             assert!(help.is_some());
             let help_text = help.unwrap();
-            assert!(help_text.contains("{a: 1, b: 2}"), "Help should show example. Got: {}", help_text);
+            assert!(
+                help_text.contains("{a: 1, b: 2}"),
+                "Help should show example. Got: {}",
+                help_text
+            );
         }
         _ => panic!("Expected ContextualSyntaxError, got: {:?}", err),
     }
@@ -144,8 +192,16 @@ fn test():
     let err = result.unwrap_err();
     let err_msg = format!("{}", err);
 
-    assert!(err_msg.contains("array literal"), "Error should mention 'array literal' context. Got: {}", err_msg);
-    assert!(err_msg.contains("comma"), "Error should mention comma. Got: {}", err_msg);
+    assert!(
+        err_msg.contains("array literal"),
+        "Error should mention 'array literal' context. Got: {}",
+        err_msg
+    );
+    assert!(
+        err_msg.contains("comma"),
+        "Error should mention comma. Got: {}",
+        err_msg
+    );
 }
 
 #[test]
@@ -162,13 +218,23 @@ fn test():
     let err = result.unwrap_err();
 
     match err {
-        ParseError::ContextualSyntaxError { context, message, suggestion, help, .. } => {
+        ParseError::ContextualSyntaxError {
+            context,
+            message,
+            suggestion,
+            help,
+            ..
+        } => {
             assert_eq!(context, "array literal");
             assert!(message.contains("comma"));
             assert!(suggestion.is_some());
             assert!(help.is_some());
             let help_text = help.unwrap();
-            assert!(help_text.contains("[1, 2, 3]"), "Help should show example. Got: {}", help_text);
+            assert!(
+                help_text.contains("[1, 2, 3]"),
+                "Help should show example. Got: {}",
+                help_text
+            );
         }
         _ => panic!("Expected ContextualSyntaxError, got: {:?}", err),
     }

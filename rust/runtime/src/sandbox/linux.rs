@@ -779,11 +779,7 @@ mod tests {
 
     #[test]
     fn test_multiple_read_paths() {
-        let paths = vec![
-            PathBuf::from("/etc"),
-            PathBuf::from("/usr"),
-            PathBuf::from("/var/log"),
-        ];
+        let paths = vec![PathBuf::from("/etc"), PathBuf::from("/usr"), PathBuf::from("/var/log")];
         let config = SandboxConfig::new().with_read_paths(paths.clone());
 
         assert_eq!(config.filesystem.read_paths.len(), 3);
@@ -814,9 +810,9 @@ mod tests {
 
         // Should contain at least one of the localhost IPs
         if !ips.is_empty() {
-            let has_localhost = ips.iter().any(|ip| {
-                ip == "127.0.0.1" || ip == "::1" || ip.starts_with("127.0.")
-            });
+            let has_localhost = ips
+                .iter()
+                .any(|ip| ip == "127.0.0.1" || ip == "::1" || ip.starts_with("127.0."));
             assert!(has_localhost, "Expected localhost IP in: {:?}", ips);
         }
     }

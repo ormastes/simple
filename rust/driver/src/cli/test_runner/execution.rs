@@ -268,7 +268,11 @@ pub fn run_test_file_safe_mode(path: &Path, options: &super::types::TestOptions)
                 // Fall back to summary line parsing
                 let (p, f) = parse_test_output(&combined_output);
                 if p == 0 && f == 0 {
-                    if exit_code == 0 { (1, 0, 0) } else { (0, 1, 0) }
+                    if exit_code == 0 {
+                        (1, 0, 0)
+                    } else {
+                        (0, 1, 0)
+                    }
                 } else {
                     (p, f, 0)
                 }
@@ -308,13 +312,13 @@ pub fn run_test_file_safe_mode(path: &Path, options: &super::types::TestOptions)
 fn find_simple_binary() -> PathBuf {
     // Try to find the binary in common locations
     let candidates = vec![
-        PathBuf::from("./bin/wrappers/simple"),           // Wrapper script (preferred)
+        PathBuf::from("./bin/wrappers/simple"),              // Wrapper script (preferred)
         PathBuf::from("./rust/target/debug/simple_runtime"), // Direct runtime (debug)
         PathBuf::from("./rust/target/release/simple_runtime"), // Direct runtime (release)
-        PathBuf::from("./target/debug/simple_old"),       // Legacy (old)
-        PathBuf::from("./target/release/simple_old"),     // Legacy (old)
-        PathBuf::from("simple"),                          // In PATH
-        PathBuf::from("simple_old"),                      // Legacy in PATH
+        PathBuf::from("./target/debug/simple_old"),          // Legacy (old)
+        PathBuf::from("./target/release/simple_old"),        // Legacy (old)
+        PathBuf::from("simple"),                             // In PATH
+        PathBuf::from("simple_old"),                         // Legacy in PATH
     ];
 
     for candidate in candidates {

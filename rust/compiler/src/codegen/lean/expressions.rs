@@ -702,7 +702,7 @@ impl<'a> ExprTranslator<'a> {
             BinOp::Div => "/".to_string(),
             BinOp::Mod => "%".to_string(),
             BinOp::Pow => "^".to_string(),
-            BinOp::MatMul => "*".to_string(),   // Matrix multiplication
+            BinOp::MatMul => "*".to_string(), // Matrix multiplication
             BinOp::Eq => "==".to_string(),
             BinOp::NotEq => "!=".to_string(),
             BinOp::Lt => "<".to_string(),

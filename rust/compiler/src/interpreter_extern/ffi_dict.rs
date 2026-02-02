@@ -8,8 +8,7 @@ use simple_runtime::value::RuntimeValue;
 
 // Import actual FFI functions from runtime
 use simple_runtime::value::{
-    rt_dict_new, rt_dict_set, rt_dict_get, rt_dict_len,
-    rt_dict_clear, rt_dict_keys, rt_dict_values,
+    rt_dict_new, rt_dict_set, rt_dict_get, rt_dict_len, rt_dict_clear, rt_dict_keys, rt_dict_values,
 };
 
 // ============================================================================
@@ -35,25 +34,34 @@ pub fn rt_dict_new_fn(args: &[Value]) -> Result<Value, CompileError> {
 
 /// Set key-value pair in dictionary
 pub fn rt_dict_set_fn(args: &[Value]) -> Result<Value, CompileError> {
-    let dict_raw = args.get(0)
-        .ok_or_else(|| CompileError::semantic_with_context(
-            "rt_dict_set expects 3 arguments".to_string(),
-            ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
-        ))?
+    let dict_raw = args
+        .get(0)
+        .ok_or_else(|| {
+            CompileError::semantic_with_context(
+                "rt_dict_set expects 3 arguments".to_string(),
+                ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
+            )
+        })?
         .as_int()?;
 
-    let key_raw = args.get(1)
-        .ok_or_else(|| CompileError::semantic_with_context(
-            "rt_dict_set expects 3 arguments".to_string(),
-            ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
-        ))?
+    let key_raw = args
+        .get(1)
+        .ok_or_else(|| {
+            CompileError::semantic_with_context(
+                "rt_dict_set expects 3 arguments".to_string(),
+                ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
+            )
+        })?
         .as_int()?;
 
-    let val_raw = args.get(2)
-        .ok_or_else(|| CompileError::semantic_with_context(
-            "rt_dict_set expects 3 arguments".to_string(),
-            ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
-        ))?
+    let val_raw = args
+        .get(2)
+        .ok_or_else(|| {
+            CompileError::semantic_with_context(
+                "rt_dict_set expects 3 arguments".to_string(),
+                ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
+            )
+        })?
         .as_int()?;
 
     let dict = RuntimeValue::from_raw(dict_raw as u64);
@@ -66,18 +74,24 @@ pub fn rt_dict_set_fn(args: &[Value]) -> Result<Value, CompileError> {
 
 /// Get value from dictionary by key
 pub fn rt_dict_get_fn(args: &[Value]) -> Result<Value, CompileError> {
-    let dict_raw = args.get(0)
-        .ok_or_else(|| CompileError::semantic_with_context(
-            "rt_dict_get expects 2 arguments".to_string(),
-            ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
-        ))?
+    let dict_raw = args
+        .get(0)
+        .ok_or_else(|| {
+            CompileError::semantic_with_context(
+                "rt_dict_get expects 2 arguments".to_string(),
+                ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
+            )
+        })?
         .as_int()?;
 
-    let key_raw = args.get(1)
-        .ok_or_else(|| CompileError::semantic_with_context(
-            "rt_dict_get expects 2 arguments".to_string(),
-            ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
-        ))?
+    let key_raw = args
+        .get(1)
+        .ok_or_else(|| {
+            CompileError::semantic_with_context(
+                "rt_dict_get expects 2 arguments".to_string(),
+                ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
+            )
+        })?
         .as_int()?;
 
     let dict = RuntimeValue::from_raw(dict_raw as u64);
@@ -89,11 +103,14 @@ pub fn rt_dict_get_fn(args: &[Value]) -> Result<Value, CompileError> {
 
 /// Get dictionary length
 pub fn rt_dict_len_fn(args: &[Value]) -> Result<Value, CompileError> {
-    let dict_raw = args.first()
-        .ok_or_else(|| CompileError::semantic_with_context(
-            "rt_dict_len expects 1 argument".to_string(),
-            ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
-        ))?
+    let dict_raw = args
+        .first()
+        .ok_or_else(|| {
+            CompileError::semantic_with_context(
+                "rt_dict_len expects 1 argument".to_string(),
+                ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
+            )
+        })?
         .as_int()?;
 
     let dict = RuntimeValue::from_raw(dict_raw as u64);
@@ -103,11 +120,14 @@ pub fn rt_dict_len_fn(args: &[Value]) -> Result<Value, CompileError> {
 
 /// Clear all entries from dictionary
 pub fn rt_dict_clear_fn(args: &[Value]) -> Result<Value, CompileError> {
-    let dict_raw = args.first()
-        .ok_or_else(|| CompileError::semantic_with_context(
-            "rt_dict_clear expects 1 argument".to_string(),
-            ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
-        ))?
+    let dict_raw = args
+        .first()
+        .ok_or_else(|| {
+            CompileError::semantic_with_context(
+                "rt_dict_clear expects 1 argument".to_string(),
+                ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
+            )
+        })?
         .as_int()?;
 
     let dict = RuntimeValue::from_raw(dict_raw as u64);
@@ -117,11 +137,14 @@ pub fn rt_dict_clear_fn(args: &[Value]) -> Result<Value, CompileError> {
 
 /// Get all keys from dictionary
 pub fn rt_dict_keys_fn(args: &[Value]) -> Result<Value, CompileError> {
-    let dict_raw = args.first()
-        .ok_or_else(|| CompileError::semantic_with_context(
-            "rt_dict_keys expects 1 argument".to_string(),
-            ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
-        ))?
+    let dict_raw = args
+        .first()
+        .ok_or_else(|| {
+            CompileError::semantic_with_context(
+                "rt_dict_keys expects 1 argument".to_string(),
+                ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
+            )
+        })?
         .as_int()?;
 
     let dict = RuntimeValue::from_raw(dict_raw as u64);
@@ -131,11 +154,14 @@ pub fn rt_dict_keys_fn(args: &[Value]) -> Result<Value, CompileError> {
 
 /// Get all values from dictionary
 pub fn rt_dict_values_fn(args: &[Value]) -> Result<Value, CompileError> {
-    let dict_raw = args.first()
-        .ok_or_else(|| CompileError::semantic_with_context(
-            "rt_dict_values expects 1 argument".to_string(),
-            ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
-        ))?
+    let dict_raw = args
+        .first()
+        .ok_or_else(|| {
+            CompileError::semantic_with_context(
+                "rt_dict_values expects 1 argument".to_string(),
+                ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
+            )
+        })?
         .as_int()?;
 
     let dict = RuntimeValue::from_raw(dict_raw as u64);

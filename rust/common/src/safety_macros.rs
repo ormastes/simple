@@ -82,15 +82,7 @@ macro_rules! safe_mutex_lock {
 #[macro_export]
 macro_rules! checked_unwrap {
     ($expr:expr, $msg:expr) => {
-        $expr.unwrap_or_else(|| {
-            panic!(
-                "{}:{}: {} - {}",
-                file!(),
-                line!(),
-                $msg,
-                stringify!($expr)
-            )
-        })
+        $expr.unwrap_or_else(|| panic!("{}:{}: {} - {}", file!(), line!(), $msg, stringify!($expr)))
     };
 }
 

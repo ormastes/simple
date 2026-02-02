@@ -13,9 +13,9 @@ use std::process::Command;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(i32)]
 pub enum CompressionLevel {
-    Fast = 1,        // --fast (fastest, less compression)
-    Best = 2,        // --best (balanced, recommended)
-    UltraBrute = 3,  // --ultra-brute (slowest, maximum compression)
+    Fast = 1,       // --fast (fastest, less compression)
+    Best = 2,       // --best (balanced, recommended)
+    UltraBrute = 3, // --ultra-brute (slowest, maximum compression)
 }
 
 impl CompressionLevel {
@@ -59,11 +59,7 @@ fn get_upx_path() -> Result<PathBuf, String> {
 ///
 /// # Returns
 /// Ok(output_path) on success, Err(message) on failure
-pub fn compress_file(
-    input: &str,
-    output: Option<&str>,
-    level: CompressionLevel,
-) -> Result<String, String> {
+pub fn compress_file(input: &str, output: Option<&str>, level: CompressionLevel) -> Result<String, String> {
     // Get UPX path (auto-download if needed)
     let upx_path = get_upx_path()?;
 
@@ -75,14 +71,13 @@ pub fn compress_file(
 
     // If output is different from input, copy first
     if output_path != input {
-        std::fs::copy(input, output_path)
-            .map_err(|e| format!("Failed to copy file: {}", e))?;
+        std::fs::copy(input, output_path).map_err(|e| format!("Failed to copy file: {}", e))?;
     }
 
     // Run UPX compression
     let cmd_output = Command::new(&upx_path)
         .arg(level.as_args())
-        .arg("--lzma")  // Use LZMA compression (better ratio)
+        .arg("--lzma") // Use LZMA compression (better ratio)
         .arg(output_path)
         .output()
         .map_err(|e| format!("Failed to run UPX: {}", e))?;
@@ -112,12 +107,11 @@ pub fn decompress_file(input: &str, output: &str) -> Result<String, String> {
     }
 
     // Copy input to output first
-    std::fs::copy(input, output)
-        .map_err(|e| format!("Failed to copy file: {}", e))?;
+    std::fs::copy(input, output).map_err(|e| format!("Failed to copy file: {}", e))?;
 
     // Run UPX decompression
     let cmd_output = Command::new(&upx_path)
-        .arg("-d")  // Decompress
+        .arg("-d") // Decompress
         .arg(output)
         .output()
         .map_err(|e| format!("Failed to run UPX: {}", e))?;
@@ -147,7 +141,7 @@ pub fn is_compressed(file: &str) -> Result<bool, String> {
 
     // Run UPX test (returns success if compressed)
     let cmd_output = Command::new(&upx_path)
-        .arg("-t")  // Test
+        .arg("-t") // Test
         .arg(file)
         .output()
         .map_err(|e| format!("Failed to run UPX: {}", e))?;
@@ -160,7 +154,7 @@ pub fn is_compressed(file: &str) -> Result<bool, String> {
 /// Note: This is approximate and requires the file to be UPX-compressed
 pub fn get_compression_ratio(file: &str) -> Result<f64, String> {
     if !is_compressed(file)? {
-        return Ok(1.0);  // Not compressed
+        return Ok(1.0); // Not compressed
     }
 
     // Get UPX path (auto-download if needed)
@@ -168,7 +162,7 @@ pub fn get_compression_ratio(file: &str) -> Result<f64, String> {
 
     // Run UPX list to get info
     let cmd_output = Command::new(&upx_path)
-        .arg("-l")  // List info
+        .arg("-l") // List info
         .arg(file)
         .output()
         .map_err(|e| format!("Failed to run UPX: {}", e))?;
@@ -185,10 +179,7 @@ pub fn get_compression_ratio(file: &str) -> Result<f64, String> {
             let parts: Vec<&str> = line.split_whitespace().collect();
             if parts.len() >= 4 {
                 // Parse original and compressed sizes
-                if let (Ok(original), Ok(compressed)) = (
-                    parts[0].parse::<f64>(),
-                    parts[2].parse::<f64>(),
-                ) {
+                if let (Ok(original), Ok(compressed)) = (parts[0].parse::<f64>(), parts[2].parse::<f64>()) {
                     if compressed > 0.0 {
                         return Ok(original / compressed);
                     }
@@ -210,11 +201,7 @@ pub fn get_compression_ratio(file: &str) -> Result<f64, String> {
 /// - `input` and `output` must be valid null-terminated C strings
 /// - Returns 0 on success, -1 on failure
 #[no_mangle]
-pub unsafe extern "C" fn upx_compress_file(
-    input: *const c_char,
-    output: *const c_char,
-    level: i32,
-) -> i32 {
+pub unsafe extern "C" fn upx_compress_file(input: *const c_char, output: *const c_char, level: i32) -> i32 {
     if input.is_null() {
         return -1;
     }
@@ -235,7 +222,7 @@ pub unsafe extern "C" fn upx_compress_file(
 
     let compression_level = match CompressionLevel::from_i32(level) {
         Some(l) => l,
-        None => CompressionLevel::Best,  // Default to best
+        None => CompressionLevel::Best, // Default to best
     };
 
     match compress_file(input_str, output_str, compression_level) {
@@ -250,10 +237,7 @@ pub unsafe extern "C" fn upx_compress_file(
 /// - `input` and `output` must be valid null-terminated C strings
 /// - Returns 0 on success, -1 on failure
 #[no_mangle]
-pub unsafe extern "C" fn upx_decompress_file(
-    input: *const c_char,
-    output: *const c_char,
-) -> i32 {
+pub unsafe extern "C" fn upx_decompress_file(input: *const c_char, output: *const c_char) -> i32 {
     if input.is_null() || output.is_null() {
         return -1;
     }

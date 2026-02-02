@@ -759,8 +759,8 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_cranelift_module_new", &[I64, I64], &[I64]), // name (RuntimeValue), target -> module_handle
     RuntimeFuncSpec::new("rt_cranelift_new_module", &[I64, I64, I64], &[I64]), // name_ptr, name_len, target -> module_handle (JIT)
     RuntimeFuncSpec::new("rt_cranelift_new_aot_module", &[I64, I64, I64], &[I64]), // name_ptr, name_len, target -> module_handle (AOT)
-    RuntimeFuncSpec::new("rt_cranelift_finalize_module", &[I64], &[I64]),      // module -> success
-    RuntimeFuncSpec::new("rt_cranelift_free_module", &[I64], &[]),             // module -> ()
+    RuntimeFuncSpec::new("rt_cranelift_finalize_module", &[I64], &[I64]),          // module -> success
+    RuntimeFuncSpec::new("rt_cranelift_free_module", &[I64], &[]),                 // module -> ()
     // Signature building
     RuntimeFuncSpec::new("rt_cranelift_new_signature", &[I64], &[I64]), // call_conv -> sig_handle
     RuntimeFuncSpec::new("rt_cranelift_sig_add_param", &[I64, I64], &[]), // sig, type -> ()
@@ -867,7 +867,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // =========================================================================
     RuntimeFuncSpec::new("rt_file_canonicalize", &[I64, I64], &[I64]), // path_ptr, path_len -> RuntimeValue
     RuntimeFuncSpec::new("rt_file_read_text", &[I64, I64], &[I64]),    // path_ptr, path_len -> RuntimeValue
-    RuntimeFuncSpec::new("rt_file_read_text_rv", &[I64], &[I64]),     // RuntimeValue(string) -> RuntimeValue
+    RuntimeFuncSpec::new("rt_file_read_text_rv", &[I64], &[I64]),      // RuntimeValue(string) -> RuntimeValue
     RuntimeFuncSpec::new("rt_file_write_text", &[I64, I64, I64, I64], &[I8]), // path, content -> bool
     RuntimeFuncSpec::new("rt_file_copy", &[I64, I64, I64, I64], &[I8]), // src, dest -> bool
     RuntimeFuncSpec::new("rt_file_remove", &[I64, I64], &[I8]),        // path -> bool
@@ -941,12 +941,12 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_bdd_format_results", &[], &[I64]),   // -> failures count
     RuntimeFuncSpec::new("rt_bdd_clear_state", &[], &[]),
     // RuntimeValue-based BDD wrappers (for Cranelift codegen)
-    RuntimeFuncSpec::new("rt_bdd_describe_start_rv", &[I64], &[]),  // name as RuntimeValue string
-    RuntimeFuncSpec::new("rt_bdd_it_start_rv", &[I64], &[]),        // name as RuntimeValue string
-    RuntimeFuncSpec::new("rt_bdd_expect_eq_rv", &[I64, I64], &[]),  // actual, expected as RuntimeValues
-    RuntimeFuncSpec::new("rt_bdd_expect_truthy_rv", &[I64], &[]),   // value as RuntimeValue
+    RuntimeFuncSpec::new("rt_bdd_describe_start_rv", &[I64], &[]), // name as RuntimeValue string
+    RuntimeFuncSpec::new("rt_bdd_it_start_rv", &[I64], &[]),       // name as RuntimeValue string
+    RuntimeFuncSpec::new("rt_bdd_expect_eq_rv", &[I64, I64], &[]), // actual, expected as RuntimeValues
+    RuntimeFuncSpec::new("rt_bdd_expect_truthy_rv", &[I64], &[]),  // value as RuntimeValue
     // Runtime profiler FFI
-    RuntimeFuncSpec::new("rt_profiler_record_call", &[I64], &[]),    // name_ptr (C string)
+    RuntimeFuncSpec::new("rt_profiler_record_call", &[I64], &[]), // name_ptr (C string)
     RuntimeFuncSpec::new("rt_profiler_record_return", &[], &[]),
     RuntimeFuncSpec::new("rt_profiler_is_active", &[], &[I32]),
 ];

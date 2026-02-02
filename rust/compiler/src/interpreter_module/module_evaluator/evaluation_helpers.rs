@@ -444,7 +444,11 @@ pub(super) fn export_functions(
             exported_count += 1;
         }
     }
-    trace!(total_functions = local_functions.len(), exported = exported_count, "Finished exporting public functions");
+    trace!(
+        total_functions = local_functions.len(),
+        exported = exported_count,
+        "Finished exporting public functions"
+    );
 }
 
 /// Process bare export statements

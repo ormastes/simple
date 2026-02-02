@@ -257,9 +257,7 @@ impl SpirvModule {
             }
 
             // Pointer instructions (not yet implemented)
-            MirInst::PointerNew { .. }
-            | MirInst::PointerRef { .. }
-            | MirInst::PointerDeref { .. } => {
+            MirInst::PointerNew { .. } | MirInst::PointerRef { .. } | MirInst::PointerDeref { .. } => {
                 return Err(CompileError::Codegen(format!(
                     "Pointer operations not yet implemented in SPIR-V: {:?}",
                     inst
@@ -267,10 +265,7 @@ impl SpirvModule {
             }
 
             // Memory safety (not applicable to GPU)
-            MirInst::Drop { .. }
-            | MirInst::EndScope { .. }
-            | MirInst::GcAlloc { .. }
-            | MirInst::Wait { .. } => {
+            MirInst::Drop { .. } | MirInst::EndScope { .. } | MirInst::GcAlloc { .. } | MirInst::Wait { .. } => {
                 return Err(CompileError::Codegen(format!(
                     "Memory management not applicable to GPU kernels: {:?}",
                     inst

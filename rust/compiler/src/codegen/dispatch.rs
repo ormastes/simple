@@ -145,9 +145,7 @@ pub fn dispatch_instruction<E: CodegenEmitter>(emitter: &mut E, inst: &MirInst) 
         MirInst::VecMinVec { dest, a, b } => emitter.emit_vec_min_vec(*dest, *a, *b),
         MirInst::VecMaxVec { dest, a, b } => emitter.emit_vec_max_vec(*dest, *a, *b),
         MirInst::VecClamp { dest, source, lo, hi } => emitter.emit_vec_clamp(*dest, *source, *lo, *hi),
-        MirInst::NeighborLoad { dest, array, direction } => {
-            emitter.emit_neighbor_load(*dest, *array, *direction)
-        }
+        MirInst::NeighborLoad { dest, array, direction } => emitter.emit_neighbor_load(*dest, *array, *direction),
 
         // =====================================================================
         // Structs / Fields
@@ -216,7 +214,14 @@ pub fn dispatch_instruction<E: CodegenEmitter>(emitter: &mut E, inst: &MirInst) 
             method_name,
             is_static,
             args,
-        } => emitter.emit_extern_method_call(dest, receiver.as_ref().copied(), class_name, method_name, *is_static, args),
+        } => emitter.emit_extern_method_call(
+            dest,
+            receiver.as_ref().copied(),
+            class_name,
+            method_name,
+            *is_static,
+            args,
+        ),
 
         // =====================================================================
         // Pattern matching

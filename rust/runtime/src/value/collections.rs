@@ -574,7 +574,11 @@ pub extern "C" fn rt_string_eq(string1: RuntimeValue, string2: RuntimeValue) -> 
     unsafe {
         let slice1 = std::slice::from_raw_parts(data1, len1 as usize);
         let slice2 = std::slice::from_raw_parts(data2, len2 as usize);
-        if slice1 == slice2 { 1 } else { 0 }
+        if slice1 == slice2 {
+            1
+        } else {
+            0
+        }
     }
 }
 

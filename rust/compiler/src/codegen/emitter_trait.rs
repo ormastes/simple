@@ -5,8 +5,8 @@
 
 use crate::hir::{BinOp, NeighborDirection, PointerKind, TypeId, UnaryOp};
 use crate::mir::{
-    BlockId, CallTarget, ContractKind, Effect, FStringPart, GpuAtomicOp, GpuMemoryScope,
-    MirPattern, ParallelBackend, PatternBinding, UnitOverflowBehavior, VReg,
+    BlockId, CallTarget, ContractKind, Effect, FStringPart, GpuAtomicOp, GpuMemoryScope, MirPattern, ParallelBackend,
+    PatternBinding, UnitOverflowBehavior, VReg,
 };
 
 /// Unified instruction emission interface for MIR-based backends.
@@ -55,12 +55,7 @@ pub trait CodegenEmitter {
     // Calls
     // =========================================================================
     fn emit_call(&mut self, dest: &Option<VReg>, target: &CallTarget, args: &[VReg]) -> Result<(), Self::Error>;
-    fn emit_interp_call(
-        &mut self,
-        dest: &Option<VReg>,
-        func_name: &str,
-        args: &[VReg],
-    ) -> Result<(), Self::Error>;
+    fn emit_interp_call(&mut self, dest: &Option<VReg>, func_name: &str, args: &[VReg]) -> Result<(), Self::Error>;
     fn emit_interp_eval(&mut self, dest: VReg, expr_index: usize) -> Result<(), Self::Error>;
     fn emit_indirect_call(
         &mut self,
@@ -115,13 +110,8 @@ pub trait CodegenEmitter {
         mask: VReg,
         default: VReg,
     ) -> Result<(), Self::Error>;
-    fn emit_vec_masked_store(
-        &mut self,
-        source: VReg,
-        array: VReg,
-        offset: VReg,
-        mask: VReg,
-    ) -> Result<(), Self::Error>;
+    fn emit_vec_masked_store(&mut self, source: VReg, array: VReg, offset: VReg, mask: VReg)
+        -> Result<(), Self::Error>;
     fn emit_vec_min_vec(&mut self, dest: VReg, a: VReg, b: VReg) -> Result<(), Self::Error>;
     fn emit_vec_max_vec(&mut self, dest: VReg, a: VReg, b: VReg) -> Result<(), Self::Error>;
     fn emit_vec_clamp(&mut self, dest: VReg, source: VReg, lo: VReg, hi: VReg) -> Result<(), Self::Error>;
@@ -206,12 +196,7 @@ pub trait CodegenEmitter {
     // Pattern matching
     // =========================================================================
     fn emit_pattern_test(&mut self, dest: VReg, subject: VReg, pattern: &MirPattern) -> Result<(), Self::Error>;
-    fn emit_pattern_bind(
-        &mut self,
-        dest: VReg,
-        subject: VReg,
-        binding: &PatternBinding,
-    ) -> Result<(), Self::Error>;
+    fn emit_pattern_bind(&mut self, dest: VReg, subject: VReg, binding: &PatternBinding) -> Result<(), Self::Error>;
 
     // =========================================================================
     // Enums / Unions

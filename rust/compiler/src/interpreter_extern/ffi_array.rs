@@ -8,8 +8,7 @@ use simple_runtime::value::RuntimeValue;
 
 // Import actual FFI functions from runtime
 use simple_runtime::value::{
-    rt_array_new, rt_array_push, rt_array_get, rt_array_set,
-    rt_array_pop, rt_array_clear, rt_array_len,
+    rt_array_new, rt_array_push, rt_array_get, rt_array_set, rt_array_pop, rt_array_clear, rt_array_len,
 };
 
 // ============================================================================
@@ -18,11 +17,14 @@ use simple_runtime::value::{
 
 /// Create new array with capacity
 pub fn rt_array_new_fn(args: &[Value]) -> Result<Value, CompileError> {
-    let capacity = args.first()
-        .ok_or_else(|| CompileError::semantic_with_context(
-            "rt_array_new expects 1 argument".to_string(),
-            ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
-        ))?
+    let capacity = args
+        .first()
+        .ok_or_else(|| {
+            CompileError::semantic_with_context(
+                "rt_array_new expects 1 argument".to_string(),
+                ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
+            )
+        })?
         .as_int()? as u64;
 
     let rv = rt_array_new(capacity);
@@ -35,18 +37,24 @@ pub fn rt_array_new_fn(args: &[Value]) -> Result<Value, CompileError> {
 
 /// Push element to array
 pub fn rt_array_push_fn(args: &[Value]) -> Result<Value, CompileError> {
-    let arr_raw = args.get(0)
-        .ok_or_else(|| CompileError::semantic_with_context(
-            "rt_array_push expects 2 arguments".to_string(),
-            ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
-        ))?
+    let arr_raw = args
+        .get(0)
+        .ok_or_else(|| {
+            CompileError::semantic_with_context(
+                "rt_array_push expects 2 arguments".to_string(),
+                ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
+            )
+        })?
         .as_int()?;
 
-    let val_raw = args.get(1)
-        .ok_or_else(|| CompileError::semantic_with_context(
-            "rt_array_push expects 2 arguments".to_string(),
-            ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
-        ))?
+    let val_raw = args
+        .get(1)
+        .ok_or_else(|| {
+            CompileError::semantic_with_context(
+                "rt_array_push expects 2 arguments".to_string(),
+                ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
+            )
+        })?
         .as_int()?;
 
     let arr = RuntimeValue::from_raw(arr_raw as u64);
@@ -58,18 +66,24 @@ pub fn rt_array_push_fn(args: &[Value]) -> Result<Value, CompileError> {
 
 /// Get element from array at index
 pub fn rt_array_get_fn(args: &[Value]) -> Result<Value, CompileError> {
-    let arr_raw = args.get(0)
-        .ok_or_else(|| CompileError::semantic_with_context(
-            "rt_array_get expects 2 arguments".to_string(),
-            ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
-        ))?
+    let arr_raw = args
+        .get(0)
+        .ok_or_else(|| {
+            CompileError::semantic_with_context(
+                "rt_array_get expects 2 arguments".to_string(),
+                ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
+            )
+        })?
         .as_int()?;
 
-    let index = args.get(1)
-        .ok_or_else(|| CompileError::semantic_with_context(
-            "rt_array_get expects 2 arguments".to_string(),
-            ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
-        ))?
+    let index = args
+        .get(1)
+        .ok_or_else(|| {
+            CompileError::semantic_with_context(
+                "rt_array_get expects 2 arguments".to_string(),
+                ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
+            )
+        })?
         .as_int()?;
 
     let arr = RuntimeValue::from_raw(arr_raw as u64);
@@ -79,25 +93,34 @@ pub fn rt_array_get_fn(args: &[Value]) -> Result<Value, CompileError> {
 
 /// Set element in array at index
 pub fn rt_array_set_fn(args: &[Value]) -> Result<Value, CompileError> {
-    let arr_raw = args.get(0)
-        .ok_or_else(|| CompileError::semantic_with_context(
-            "rt_array_set expects 3 arguments".to_string(),
-            ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
-        ))?
+    let arr_raw = args
+        .get(0)
+        .ok_or_else(|| {
+            CompileError::semantic_with_context(
+                "rt_array_set expects 3 arguments".to_string(),
+                ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
+            )
+        })?
         .as_int()?;
 
-    let index = args.get(1)
-        .ok_or_else(|| CompileError::semantic_with_context(
-            "rt_array_set expects 3 arguments".to_string(),
-            ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
-        ))?
+    let index = args
+        .get(1)
+        .ok_or_else(|| {
+            CompileError::semantic_with_context(
+                "rt_array_set expects 3 arguments".to_string(),
+                ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
+            )
+        })?
         .as_int()?;
 
-    let val_raw = args.get(2)
-        .ok_or_else(|| CompileError::semantic_with_context(
-            "rt_array_set expects 3 arguments".to_string(),
-            ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
-        ))?
+    let val_raw = args
+        .get(2)
+        .ok_or_else(|| {
+            CompileError::semantic_with_context(
+                "rt_array_set expects 3 arguments".to_string(),
+                ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
+            )
+        })?
         .as_int()?;
 
     let arr = RuntimeValue::from_raw(arr_raw as u64);
@@ -109,11 +132,14 @@ pub fn rt_array_set_fn(args: &[Value]) -> Result<Value, CompileError> {
 
 /// Pop element from array
 pub fn rt_array_pop_fn(args: &[Value]) -> Result<Value, CompileError> {
-    let arr_raw = args.first()
-        .ok_or_else(|| CompileError::semantic_with_context(
-            "rt_array_pop expects 1 argument".to_string(),
-            ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
-        ))?
+    let arr_raw = args
+        .first()
+        .ok_or_else(|| {
+            CompileError::semantic_with_context(
+                "rt_array_pop expects 1 argument".to_string(),
+                ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
+            )
+        })?
         .as_int()?;
 
     let arr = RuntimeValue::from_raw(arr_raw as u64);
@@ -123,11 +149,14 @@ pub fn rt_array_pop_fn(args: &[Value]) -> Result<Value, CompileError> {
 
 /// Clear all elements from array
 pub fn rt_array_clear_fn(args: &[Value]) -> Result<Value, CompileError> {
-    let arr_raw = args.first()
-        .ok_or_else(|| CompileError::semantic_with_context(
-            "rt_array_clear expects 1 argument".to_string(),
-            ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
-        ))?
+    let arr_raw = args
+        .first()
+        .ok_or_else(|| {
+            CompileError::semantic_with_context(
+                "rt_array_clear expects 1 argument".to_string(),
+                ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
+            )
+        })?
         .as_int()?;
 
     let arr = RuntimeValue::from_raw(arr_raw as u64);
@@ -137,11 +166,14 @@ pub fn rt_array_clear_fn(args: &[Value]) -> Result<Value, CompileError> {
 
 /// Get array length
 pub fn rt_array_len_fn(args: &[Value]) -> Result<Value, CompileError> {
-    let arr_raw = args.first()
-        .ok_or_else(|| CompileError::semantic_with_context(
-            "rt_array_len expects 1 argument".to_string(),
-            ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
-        ))?
+    let arr_raw = args
+        .first()
+        .ok_or_else(|| {
+            CompileError::semantic_with_context(
+                "rt_array_len expects 1 argument".to_string(),
+                ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
+            )
+        })?
         .as_int()?;
 
     let arr = RuntimeValue::from_raw(arr_raw as u64);

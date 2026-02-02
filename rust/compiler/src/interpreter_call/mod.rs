@@ -296,7 +296,9 @@ pub(crate) fn evaluate_call(
             }
 
             // Try block-scoped enums (defined in test blocks)
-            if let Some(enum_def) = crate::interpreter::BLOCK_SCOPED_ENUMS.with(|cell| cell.borrow().get(module_name).cloned()) {
+            if let Some(enum_def) =
+                crate::interpreter::BLOCK_SCOPED_ENUMS.with(|cell| cell.borrow().get(module_name).cloned())
+            {
                 if enum_def.variants.iter().any(|v| &v.name == field) {
                     let payload = if args.is_empty() {
                         None
@@ -454,7 +456,10 @@ pub(crate) fn evaluate_call(
 
             if type_name == "Result" && (method_name == "Ok" || method_name == "Err") {
                 if args.is_empty() {
-                    return Err(CompileError::semantic(&format!("Result.{} requires one argument", method_name)));
+                    return Err(CompileError::semantic(&format!(
+                        "Result.{} requires one argument",
+                        method_name
+                    )));
                 }
                 let payload = Some(Box::new(evaluate_expr(
                     &args[0].value,
@@ -473,20 +478,33 @@ pub(crate) fn evaluate_call(
 
             // Handle ClassName.new() - deprecated, delegate to ClassName() constructor with warning
             if method_name == "new" {
-                eprintln!("\x1b[33mwarning\x1b[0m: {}.new() is deprecated, use {}() instead", type_name, type_name);
+                eprintln!(
+                    "\x1b[33mwarning\x1b[0m: {}.new() is deprecated, use {}() instead",
+                    type_name, type_name
+                );
                 // Special builtin types
                 match type_name.as_str() {
                     "HashMap" | "BTreeMap" => return Ok(Value::Dict(std::collections::HashMap::new())),
                     "HashSet" | "BTreeSet" => return Ok(Value::Array(Vec::new())),
-                    "Device" => return Ok(Value::Enum {
-                        enum_name: "Device".to_string(),
-                        variant: "CPU".to_string(),
-                        payload: None,
-                    }),
+                    "Device" => {
+                        return Ok(Value::Enum {
+                            enum_name: "Device".to_string(),
+                            variant: "CPU".to_string(),
+                            payload: None,
+                        })
+                    }
                     _ => {
                         // Delegate to regular constructor ClassName(args...)
                         if classes.contains_key(type_name) {
-                            return core::instantiate_class(type_name, args, env, functions, classes, enums, impl_methods);
+                            return core::instantiate_class(
+                                type_name,
+                                args,
+                                env,
+                                functions,
+                                classes,
+                                enums,
+                                impl_methods,
+                            );
                         }
                         // Fallback for unknown types: return typed dict
                         let mut fields = std::collections::HashMap::new();
@@ -518,9 +536,8 @@ pub(crate) fn evaluate_call(
                             local_env.insert(param.name.clone(), val);
                         }
                     }
-                    let result = super::exec_block_fn(
-                        &method.body, &mut local_env, functions, classes, enums, impl_methods
-                    );
+                    let result =
+                        super::exec_block_fn(&method.body, &mut local_env, functions, classes, enums, impl_methods);
                     return match result {
                         Ok((super::Control::Return(v), _)) => Ok(v),
                         Ok((_, Some(v))) => Ok(v),
@@ -541,9 +558,8 @@ pub(crate) fn evaluate_call(
                             local_env.insert(param.name.clone(), val);
                         }
                     }
-                    let result = super::exec_block_fn(
-                        &method.body, &mut local_env, functions, classes, enums, impl_methods
-                    );
+                    let result =
+                        super::exec_block_fn(&method.body, &mut local_env, functions, classes, enums, impl_methods);
                     return match result {
                         Ok((super::Control::Return(v), _)) => Ok(v),
                         Ok((_, Some(v))) => Ok(v),
@@ -559,9 +575,17 @@ pub(crate) fn evaluate_call(
                     let payload = if args.is_empty() {
                         None
                     } else if args.len() == 1 {
-                        Some(Box::new(evaluate_expr(&args[0].value, env, functions, classes, enums, impl_methods)?))
+                        Some(Box::new(evaluate_expr(
+                            &args[0].value,
+                            env,
+                            functions,
+                            classes,
+                            enums,
+                            impl_methods,
+                        )?))
                     } else {
-                        let vals: Result<Vec<Value>, _> = args.iter()
+                        let vals: Result<Vec<Value>, _> = args
+                            .iter()
                             .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
                             .collect();
                         Some(Box::new(Value::Tuple(vals?)))

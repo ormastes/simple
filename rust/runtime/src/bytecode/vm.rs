@@ -658,7 +658,8 @@ impl BytecodeVM {
                 // =============================================================
                 JMP => {
                     let offset = self.read_i32()?;
-                    let new_ip = (self.ip as isize).checked_add(offset as isize)
+                    let new_ip = (self.ip as isize)
+                        .checked_add(offset as isize)
                         .ok_or(VmError::InvalidJumpTarget(offset as isize))?;
                     if new_ip < 0 || new_ip > self.code.len() as isize {
                         return Err(VmError::InvalidJumpTarget(new_ip));
@@ -670,7 +671,8 @@ impl BytecodeVM {
                     let offset = self.read_i32()?;
                     let cond = self.pop()?;
                     if cond.as_bool() {
-                        let new_ip = (self.ip as isize).checked_add(offset as isize)
+                        let new_ip = (self.ip as isize)
+                            .checked_add(offset as isize)
                             .ok_or(VmError::InvalidJumpTarget(offset as isize))?;
                         if new_ip < 0 || new_ip > self.code.len() as isize {
                             return Err(VmError::InvalidJumpTarget(new_ip));
@@ -683,7 +685,8 @@ impl BytecodeVM {
                     let offset = self.read_i32()?;
                     let cond = self.pop()?;
                     if !cond.as_bool() {
-                        let new_ip = (self.ip as isize).checked_add(offset as isize)
+                        let new_ip = (self.ip as isize)
+                            .checked_add(offset as isize)
                             .ok_or(VmError::InvalidJumpTarget(offset as isize))?;
                         if new_ip < 0 || new_ip > self.code.len() as isize {
                             return Err(VmError::InvalidJumpTarget(new_ip));
@@ -788,10 +791,8 @@ impl BytecodeVM {
 
                     // Set up locals for new frame
                     let frame_pointer = self.locals.len();
-                    self.locals.resize(
-                        frame_pointer + func.local_count as usize,
-                        RuntimeValue::NIL,
-                    );
+                    self.locals
+                        .resize(frame_pointer + func.local_count as usize, RuntimeValue::NIL);
                     for (i, arg) in args.iter().enumerate() {
                         self.locals[frame_pointer + i] = *arg;
                     }
@@ -1059,7 +1060,8 @@ impl BytecodeVM {
                         a.as_float() < b.as_float()
                     };
                     if !is_lt {
-                        let new_ip = (self.ip as isize).checked_add(offset as isize)
+                        let new_ip = (self.ip as isize)
+                            .checked_add(offset as isize)
                             .ok_or(VmError::InvalidJumpTarget(offset as isize))?;
                         if new_ip < 0 || new_ip > self.code.len() as isize {
                             return Err(VmError::InvalidJumpTarget(new_ip));
@@ -1073,7 +1075,8 @@ impl BytecodeVM {
                     let b = self.pop()?;
                     let a = self.pop()?;
                     if a != b {
-                        let new_ip = (self.ip as isize).checked_add(offset as isize)
+                        let new_ip = (self.ip as isize)
+                            .checked_add(offset as isize)
                             .ok_or(VmError::InvalidJumpTarget(offset as isize))?;
                         if new_ip < 0 || new_ip > self.code.len() as isize {
                             return Err(VmError::InvalidJumpTarget(new_ip));
@@ -1115,7 +1118,8 @@ impl BytecodeVM {
 
         // Set up locals for this function
         let frame_pointer = self.locals.len();
-        self.locals.resize(frame_pointer + func.local_count as usize, RuntimeValue::NIL);
+        self.locals
+            .resize(frame_pointer + func.local_count as usize, RuntimeValue::NIL);
 
         // Copy arguments to locals
         for (i, arg) in args.iter().enumerate() {

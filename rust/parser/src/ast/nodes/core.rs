@@ -776,7 +776,12 @@ impl Argument {
 
     /// Create an argument with an explicit span
     pub fn with_span(name: Option<String>, value: Expr, span: Span) -> Self {
-        Argument { name, value, span, label: None }
+        Argument {
+            name,
+            value,
+            span,
+            label: None,
+        }
     }
 }
 
@@ -944,7 +949,7 @@ pub struct EnumVariant {
     pub span: Span,
     pub name: String,
     pub fields: Option<Vec<EnumField>>, // None = unit, Some = tuple/struct
-    pub discriminant: Option<Expr>,      // Optional explicit value: Variant = 0
+    pub discriminant: Option<Expr>,     // Optional explicit value: Variant = 0
 }
 
 #[derive(Debug, Clone, PartialEq)]

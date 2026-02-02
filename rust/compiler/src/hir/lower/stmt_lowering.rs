@@ -1,4 +1,6 @@
-use simple_parser::{self as ast, ast::ContractClause, ast::Expr, ast::MatchStmt, ast::Mutability, ast::Pattern, ast::SkipBody, Node};
+use simple_parser::{
+    self as ast, ast::ContractClause, ast::Expr, ast::MatchStmt, ast::Mutability, ast::Pattern, ast::SkipBody, Node,
+};
 
 use super::super::lifetime::{ReferenceOrigin, ScopeKind};
 use super::super::types::*;
@@ -552,8 +554,7 @@ impl Lowerer {
             // Context statement: context obj: body
             // Requires expression-level context tracking - mark as unsupported for native codegen
             Node::Context(_) => Err(LowerError::Unsupported(
-                "Context statements require interpreter mode. Native codegen support is planned."
-                    .to_string(),
+                "Context statements require interpreter mode. Native codegen support is planned.".to_string(),
             )),
 
             // Module-level definitions that should not appear in statement context
@@ -1043,11 +1044,7 @@ impl Lowerer {
     /// Returns Some(stmts) if the expression is a BDD call, None otherwise.
     ///
     /// Handles: describe, context, it, test, expect, before_each, after_each
-    fn try_lower_bdd_statement(
-        &mut self,
-        expr: &Expr,
-        ctx: &mut FunctionContext,
-    ) -> LowerResult<Option<Vec<HirStmt>>> {
+    fn try_lower_bdd_statement(&mut self, expr: &Expr, ctx: &mut FunctionContext) -> LowerResult<Option<Vec<HirStmt>>> {
         let (name, args) = match expr {
             Expr::Call { callee, args } => {
                 if let Expr::Identifier(name) = callee.as_ref() {
@@ -1069,7 +1066,10 @@ impl Lowerer {
                 let name_hir = if !args.is_empty() {
                     self.lower_expr(&args[0].value, ctx)?
                 } else {
-                    HirExpr { kind: HirExprKind::String("unnamed".to_string()), ty: TypeId::STRING }
+                    HirExpr {
+                        kind: HirExprKind::String("unnamed".to_string()),
+                        ty: TypeId::STRING,
+                    }
                 };
 
                 // Emit rt_bdd_describe_start_rv(name)
@@ -1106,7 +1106,10 @@ impl Lowerer {
                 let name_hir = if !args.is_empty() {
                     self.lower_expr(&args[0].value, ctx)?
                 } else {
-                    HirExpr { kind: HirExprKind::String("unnamed".to_string()), ty: TypeId::STRING }
+                    HirExpr {
+                        kind: HirExprKind::String("unnamed".to_string()),
+                        ty: TypeId::STRING,
+                    }
                 };
 
                 // Emit rt_bdd_it_start_rv(name)
@@ -1127,7 +1130,10 @@ impl Lowerer {
                 stmts.push(HirStmt::Expr(HirExpr {
                     kind: HirExprKind::BuiltinCall {
                         name: "rt_bdd_it_end".to_string(),
-                        args: vec![HirExpr { kind: HirExprKind::Integer(1), ty: TypeId::I64 }],
+                        args: vec![HirExpr {
+                            kind: HirExprKind::Integer(1),
+                            ty: TypeId::I64,
+                        }],
                     },
                     ty: TypeId::NIL,
                 }));

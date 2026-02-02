@@ -59,11 +59,7 @@ pub struct MathBlock;
 
 impl MathBlock {
     /// Evaluate with a specific preferred backend.
-    pub fn evaluate_with_backend(
-        &self,
-        payload: &str,
-        preferred: backend::MathBackend,
-    ) -> BlockResult {
+    pub fn evaluate_with_backend(&self, payload: &str, preferred: backend::MathBackend) -> BlockResult {
         let (expr, warnings) = parser::parse_math(payload)?;
 
         for warning in &warnings {
@@ -112,9 +108,7 @@ fn parse_backend_directive(payload: &str) -> (&str, backend::MathBackend) {
     if let Some(rest) = trimmed.strip_prefix("use backend ") {
         let rest = rest.trim_start();
         // Find the backend name (until whitespace or semicolon)
-        let end = rest
-            .find(|c: char| c.is_whitespace() || c == ';')
-            .unwrap_or(rest.len());
+        let end = rest.find(|c: char| c.is_whitespace() || c == ';').unwrap_or(rest.len());
         let (name, remainder) = rest.split_at(end);
         let remainder = remainder.trim_start_matches(';').trim_start();
 
@@ -387,10 +381,7 @@ mod tests {
         // Matrix operation with auto backend (should pick CPU since Torch/CUDA unavailable)
         let handler = MathBlock;
         let result = handler
-            .evaluate_with_backend(
-                "matmul([[1, 0], [0, 1]], [[5, 6], [7, 8]])",
-                backend::MathBackend::Auto,
-            )
+            .evaluate_with_backend("matmul([[1, 0], [0, 1]], [[5, 6], [7, 8]])", backend::MathBackend::Auto)
             .unwrap();
         if let Value::Array(outer) = result {
             assert_eq!(outer.len(), 2);

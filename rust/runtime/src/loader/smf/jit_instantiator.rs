@@ -242,10 +242,8 @@ impl JitInstantiator {
         let compiled_address: usize = 0;
 
         // Cache the result
-        self.jit_cache.insert(
-            entry.mangled_name.clone(),
-            (compiled_code.clone(), compiled_address),
-        );
+        self.jit_cache
+            .insert(entry.mangled_name.clone(), (compiled_code.clone(), compiled_address));
 
         // Register in symbol table if available
         if let Some(ref table) = self.symbol_table {

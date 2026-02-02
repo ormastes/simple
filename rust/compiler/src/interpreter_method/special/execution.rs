@@ -3,7 +3,9 @@
 // Special type methods: Unit, Option, Result, Mock, Future, Channel, ThreadPool, TraitObject, Object, Constructor
 
 use crate::error::CompileError;
-use crate::interpreter::{bind_args, exec_block_fn, Control, Enums, ImplMethods, CONST_NAMES, IMMUTABLE_VARS, IN_IMMUTABLE_FN_METHOD};
+use crate::interpreter::{
+    bind_args, exec_block_fn, Control, Enums, ImplMethods, CONST_NAMES, IMMUTABLE_VARS, IN_IMMUTABLE_FN_METHOD,
+};
 use crate::value::{Env, OptionVariant, ResultVariant, SpecialEnumType, Value};
 use simple_parser::ast::{Argument, ClassDef, FunctionDef};
 use std::collections::HashMap;

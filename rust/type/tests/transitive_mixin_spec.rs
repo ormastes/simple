@@ -76,11 +76,16 @@ fn test_transitive_two_level_chain() {
     // Timestamped requires Base → should return [Timestamped, Base]
     let mut checker = TypeChecker::new();
     checker.mixins.insert("Base".to_string(), create_base_mixin());
-    checker.mixins.insert("Timestamped".to_string(), create_timestamped_mixin());
+    checker
+        .mixins
+        .insert("Timestamped".to_string(), create_timestamped_mixin());
 
     let result = checker.resolve_transitive_mixins(&["Timestamped".to_string()]);
     assert_eq!(result.len(), 2, "Should resolve 2 mixins");
-    assert!(result.contains(&"Timestamped".to_string()), "Should contain Timestamped");
+    assert!(
+        result.contains(&"Timestamped".to_string()),
+        "Should contain Timestamped"
+    );
     assert!(result.contains(&"Base".to_string()), "Should contain Base");
 }
 
@@ -89,13 +94,18 @@ fn test_transitive_three_level_chain() {
     // Versioned requires Timestamped requires Base → [Versioned, Timestamped, Base]
     let mut checker = TypeChecker::new();
     checker.mixins.insert("Base".to_string(), create_base_mixin());
-    checker.mixins.insert("Timestamped".to_string(), create_timestamped_mixin());
+    checker
+        .mixins
+        .insert("Timestamped".to_string(), create_timestamped_mixin());
     checker.mixins.insert("Versioned".to_string(), create_versioned_mixin());
 
     let result = checker.resolve_transitive_mixins(&["Versioned".to_string()]);
     assert_eq!(result.len(), 3, "Should resolve 3 mixins");
     assert!(result.contains(&"Versioned".to_string()), "Should contain Versioned");
-    assert!(result.contains(&"Timestamped".to_string()), "Should contain Timestamped");
+    assert!(
+        result.contains(&"Timestamped".to_string()),
+        "Should contain Timestamped"
+    );
     assert!(result.contains(&"Base".to_string()), "Should contain Base");
 }
 
@@ -170,7 +180,10 @@ fn test_transitive_partial_resolution() {
     let result = checker.resolve_transitive_mixins(&["Versioned".to_string()]);
     // Should get Versioned, but not Timestamped or Base (chain broken)
     assert!(result.contains(&"Versioned".to_string()), "Should contain Versioned");
-    assert!(!result.contains(&"Base".to_string()), "Should NOT contain Base (chain broken)");
+    assert!(
+        !result.contains(&"Base".to_string()),
+        "Should NOT contain Base (chain broken)"
+    );
 }
 
 #[test]
@@ -199,7 +212,9 @@ fn test_transitive_field_resolution_two_level() {
     // get_all_fields should return fields from 2-level mixin chain
     let mut checker = TypeChecker::new();
     checker.mixins.insert("Base".to_string(), create_base_mixin());
-    checker.mixins.insert("Timestamped".to_string(), create_timestamped_mixin());
+    checker
+        .mixins
+        .insert("Timestamped".to_string(), create_timestamped_mixin());
 
     // Register composition: type "Document" uses "Timestamped"
     let mixin_ref = simple_parser::MixinRef {
@@ -216,8 +231,14 @@ fn test_transitive_field_resolution_two_level() {
 
     let field_names: Vec<&str> = fields.iter().map(|(n, _)| n.as_str()).collect();
     assert!(field_names.contains(&"id"), "Should have id from Base");
-    assert!(field_names.contains(&"created_at"), "Should have created_at from Timestamped");
-    assert!(field_names.contains(&"updated_at"), "Should have updated_at from Timestamped");
+    assert!(
+        field_names.contains(&"created_at"),
+        "Should have created_at from Timestamped"
+    );
+    assert!(
+        field_names.contains(&"updated_at"),
+        "Should have updated_at from Timestamped"
+    );
 }
 
 #[test]
@@ -225,7 +246,9 @@ fn test_transitive_field_resolution_three_level() {
     // get_all_fields should return fields from 3-level mixin chain
     let mut checker = TypeChecker::new();
     checker.mixins.insert("Base".to_string(), create_base_mixin());
-    checker.mixins.insert("Timestamped".to_string(), create_timestamped_mixin());
+    checker
+        .mixins
+        .insert("Timestamped".to_string(), create_timestamped_mixin());
     checker.mixins.insert("Versioned".to_string(), create_versioned_mixin());
 
     // Register composition: type "Document" uses "Versioned"
@@ -243,8 +266,14 @@ fn test_transitive_field_resolution_three_level() {
 
     let field_names: Vec<&str> = fields.iter().map(|(n, _)| n.as_str()).collect();
     assert!(field_names.contains(&"id"), "Should have id from Base");
-    assert!(field_names.contains(&"created_at"), "Should have created_at from Timestamped");
-    assert!(field_names.contains(&"updated_at"), "Should have updated_at from Timestamped");
+    assert!(
+        field_names.contains(&"created_at"),
+        "Should have created_at from Timestamped"
+    );
+    assert!(
+        field_names.contains(&"updated_at"),
+        "Should have updated_at from Timestamped"
+    );
     assert!(field_names.contains(&"version"), "Should have version from Versioned");
 }
 
@@ -295,8 +324,14 @@ fn test_mixin_instantiate_preserves_required_mixins() {
 
     let instantiated = mixin.instantiate(&[Type::Int]).expect("Should instantiate");
 
-    assert_eq!(instantiated.required_mixins, vec!["Base".to_string()],
-        "required_mixins should be preserved after instantiation");
-    assert_eq!(instantiated.required_traits, vec!["Show".to_string()],
-        "required_traits should also be preserved");
+    assert_eq!(
+        instantiated.required_mixins,
+        vec!["Base".to_string()],
+        "required_mixins should be preserved after instantiation"
+    );
+    assert_eq!(
+        instantiated.required_traits,
+        vec!["Show".to_string()],
+        "required_traits should also be preserved"
+    );
 }

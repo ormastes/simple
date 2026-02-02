@@ -38,9 +38,7 @@ pub extern "C" fn rt_value_eq(a: RuntimeValue, b: RuntimeValue) -> u8 {
     if a.is_heap() && b.is_heap() {
         let ptr_a = a.as_heap_ptr();
         let ptr_b = b.as_heap_ptr();
-        if ptr_a.is_null() || ptr_b.is_null()
-            || (ptr_a as usize) < 0x1000 || (ptr_b as usize) < 0x1000
-        {
+        if ptr_a.is_null() || ptr_b.is_null() || (ptr_a as usize) < 0x1000 || (ptr_b as usize) < 0x1000 {
             return 0;
         }
         unsafe {
@@ -92,7 +90,13 @@ pub extern "C" fn rt_value_compare(a: RuntimeValue, b: RuntimeValue) -> i64 {
     if a.is_int() && b.is_int() {
         let ai = a.as_int();
         let bi = b.as_int();
-        return if ai < bi { -1 } else if ai > bi { 1 } else { 0 };
+        return if ai < bi {
+            -1
+        } else if ai > bi {
+            1
+        } else {
+            0
+        };
     }
 
     // Float comparison
@@ -104,7 +108,13 @@ pub extern "C" fn rt_value_compare(a: RuntimeValue, b: RuntimeValue) -> i64 {
         let a_valid = af.is_normal() || af.is_infinite() || af.is_nan() || af == 0.0;
         let b_valid = bf.is_normal() || bf.is_infinite() || bf.is_nan() || bf == 0.0;
         if a_valid && b_valid {
-            return if af < bf { -1 } else if af > bf { 1 } else { 0 };
+            return if af < bf {
+                -1
+            } else if af > bf {
+                1
+            } else {
+                0
+            };
         }
         // Fall through to raw comparison for raw untagged integers
     }
@@ -127,9 +137,7 @@ pub extern "C" fn rt_value_compare(a: RuntimeValue, b: RuntimeValue) -> i64 {
         let b_valid = !ptr_b.is_null() && (ptr_b as usize) >= 0x1000;
         if a_valid && b_valid {
             unsafe {
-                if (*ptr_a).object_type == HeapObjectType::String
-                    && (*ptr_b).object_type == HeapObjectType::String
-                {
+                if (*ptr_a).object_type == HeapObjectType::String && (*ptr_b).object_type == HeapObjectType::String {
                     let str_a = ptr_a as *const RuntimeString;
                     let str_b = ptr_b as *const RuntimeString;
                     let len_a = (*str_a).len as usize;
@@ -169,21 +177,39 @@ pub extern "C" fn rt_value_compare(a: RuntimeValue, b: RuntimeValue) -> i64 {
         let bf = b.as_float();
         if bf.is_normal() || bf.is_infinite() || bf.is_nan() {
             let af = a.as_int() as f64;
-            return if af < bf { -1 } else if af > bf { 1 } else { 0 };
+            return if af < bf {
+                -1
+            } else if af > bf {
+                1
+            } else {
+                0
+            };
         }
     }
     if a.is_float() && b.is_int() {
         let af = a.as_float();
         if af.is_normal() || af.is_infinite() || af.is_nan() {
             let bf = b.as_int() as f64;
-            return if af < bf { -1 } else if af > bf { 1 } else { 0 };
+            return if af < bf {
+                -1
+            } else if af > bf {
+                1
+            } else {
+                0
+            };
         }
     }
 
     // Fallback: compare raw bits
     let ra = a.to_raw() as i64;
     let rb = b.to_raw() as i64;
-    if ra < rb { -1 } else if ra > rb { 1 } else { 0 }
+    if ra < rb {
+        -1
+    } else if ra > rb {
+        1
+    } else {
+        0
+    }
 }
 
 #[cfg(test)]

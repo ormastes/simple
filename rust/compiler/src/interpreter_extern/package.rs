@@ -38,10 +38,7 @@ fn value_to_cstring(val: &Value) -> Result<CString, CompileError> {
 fn value_to_i32(val: &Value) -> Result<i32, CompileError> {
     match val {
         Value::Int(n) => Ok(*n as i32),
-        _ => Err(CompileError::semantic(format!(
-            "Expected int, got {}",
-            val.type_name()
-        ))),
+        _ => Err(CompileError::semantic(format!("Expected int, got {}", val.type_name()))),
     }
 }
 
@@ -58,9 +55,7 @@ pub fn sha256(args: &[Value]) -> Result<Value, CompileError> {
     unsafe {
         let result_ptr = rt_package_sha256(path.as_ptr());
         if result_ptr.is_null() {
-            return Err(CompileError::semantic(
-                "Failed to calculate checksum".to_string(),
-            ));
+            return Err(CompileError::semantic("Failed to calculate checksum".to_string()));
         }
 
         let c_str = std::ffi::CStr::from_ptr(result_ptr);

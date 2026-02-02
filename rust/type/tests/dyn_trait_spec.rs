@@ -7,7 +7,10 @@
 // - Dyn traits in generic containers
 
 use simple_type::{check, Type, TypeChecker, TypeError};
-use simple_parser::ast::{Expr, ImplBlock, Node, TraitDef, ClassDef, FunctionDef, Parameter, Block, Type as AstType, Visibility, Effect, MacroInvocation, MixinRef, Mutability};
+use simple_parser::ast::{
+    Expr, ImplBlock, Node, TraitDef, ClassDef, FunctionDef, Parameter, Block, Type as AstType, Visibility, Effect,
+    MacroInvocation, MixinRef, Mutability,
+};
 use simple_parser::Span;
 use std::collections::HashMap;
 
@@ -35,7 +38,10 @@ fn create_logger_trait() -> TraitDef {
             }],
             return_type: Some(AstType::Simple("nil".to_string())),
             where_clause: vec![],
-            body: Block { span: Span::new(0, 0, 0, 0), statements: vec![] },
+            body: Block {
+                span: Span::new(0, 0, 0, 0),
+                statements: vec![],
+            },
             visibility: Visibility::Private,
             effects: vec![],
             decorators: vec![],
@@ -86,7 +92,10 @@ fn create_console_logger_class() -> ClassDef {
             }],
             return_type: Some(AstType::Simple("nil".to_string())),
             where_clause: vec![],
-            body: Block { span: Span::new(0, 0, 0, 0), statements: vec![] },
+            body: Block {
+                span: Span::new(0, 0, 0, 0),
+                statements: vec![],
+            },
             visibility: Visibility::Private,
             effects: vec![],
             decorators: vec![],
@@ -145,7 +154,10 @@ fn create_logger_impl() -> ImplBlock {
             }],
             return_type: Some(AstType::Simple("nil".to_string())),
             where_clause: vec![],
-            body: Block { span: Span::new(0, 0, 0, 0), statements: vec![] },
+            body: Block {
+                span: Span::new(0, 0, 0, 0),
+                statements: vec![],
+            },
             visibility: Visibility::Private,
             effects: vec![],
             decorators: vec![],
@@ -201,7 +213,10 @@ fn test_dyn_trait_cannot_unify_with_int() {
     let t1 = Type::DynTrait("Logger".to_string());
     let t2 = Type::Int;
 
-    assert!(checker.unify(&t1, &t2).is_err(), "dyn Trait cannot unify with concrete type");
+    assert!(
+        checker.unify(&t1, &t2).is_err(),
+        "dyn Trait cannot unify with concrete type"
+    );
 }
 
 #[test]
@@ -211,7 +226,10 @@ fn test_int_cannot_unify_with_dyn_trait() {
     let t1 = Type::Int;
     let t2 = Type::DynTrait("Logger".to_string());
 
-    assert!(checker.unify(&t1, &t2).is_err(), "Concrete type cannot unify with dyn Trait");
+    assert!(
+        checker.unify(&t1, &t2).is_err(),
+        "Concrete type cannot unify with dyn Trait"
+    );
 }
 
 #[test]
@@ -221,7 +239,10 @@ fn test_dyn_trait_types_compatible_same_trait() {
     let t1 = Type::DynTrait("Logger".to_string());
     let t2 = Type::DynTrait("Logger".to_string());
 
-    assert!(checker.types_compatible(&t1, &t2), "Same dyn trait types should be compatible");
+    assert!(
+        checker.types_compatible(&t1, &t2),
+        "Same dyn trait types should be compatible"
+    );
 }
 
 #[test]
@@ -231,7 +252,10 @@ fn test_dyn_trait_types_not_compatible_different_traits() {
     let t1 = Type::DynTrait("Logger".to_string());
     let t2 = Type::DynTrait("Drawable".to_string());
 
-    assert!(!checker.types_compatible(&t1, &t2), "Different dyn trait types should not be compatible");
+    assert!(
+        !checker.types_compatible(&t1, &t2),
+        "Different dyn trait types should not be compatible"
+    );
 }
 
 #[test]
@@ -255,7 +279,9 @@ fn test_dyn_trait_coercion_validates_impl() {
 
     // Register trait impl
     let impl_block = create_logger_impl();
-    checker.check_items(&[Node::Impl(impl_block)]).expect("Impl should register");
+    checker
+        .check_items(&[Node::Impl(impl_block)])
+        .expect("Impl should register");
 
     // Now test coercion check logic
     let concrete_ty = Type::Named("ConsoleLogger".to_string());
@@ -266,7 +292,10 @@ fn test_dyn_trait_coercion_validates_impl() {
     let result = checker.unify(&concrete_ty, &dyn_ty);
     // Note: unify will fail because Named and DynTrait don't unify directly
     // The actual coercion check is in checker_check.rs in the Let handler
-    assert!(result.is_err(), "Direct unification should fail - coercion is separate validation");
+    assert!(
+        result.is_err(),
+        "Direct unification should fail - coercion is separate validation"
+    );
 }
 
 #[test]

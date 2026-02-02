@@ -108,7 +108,10 @@ impl<'a> Parser<'a> {
         // Check for struct initialization: Name { field: value, ... }
         // Allow both uppercase (Point { x: 1 }) and lowercase (text { data: ptr }) names
         // Disambiguate from dict literals by checking if `{ identifier :` pattern follows
-        } else if self.check(&TokenKind::LBrace) && !self.no_brace_postfix && (name.chars().next().map_or(false, |c| c.is_uppercase()) || self.peek_is_struct_init()) {
+        } else if self.check(&TokenKind::LBrace)
+            && !self.no_brace_postfix
+            && (name.chars().next().map_or(false, |c| c.is_uppercase()) || self.peek_is_struct_init())
+        {
             self.advance(); // consume '{'
                             // Skip newlines after opening brace
             while self.check(&TokenKind::Newline) {

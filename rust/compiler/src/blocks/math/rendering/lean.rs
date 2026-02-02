@@ -35,10 +35,7 @@ fn expr_to_lean(expr: &MathExpr) -> String {
                     .iter()
                     .map(|row| {
                         if let MathExpr::Array(cols) = row {
-                            cols.iter()
-                                .map(|e| expr_to_lean(e))
-                                .collect::<Vec<_>>()
-                                .join(", ")
+                            cols.iter().map(|e| expr_to_lean(e)).collect::<Vec<_>>().join(", ")
                         } else {
                             expr_to_lean(row)
                         }
@@ -119,11 +116,7 @@ fn expr_to_lean(expr: &MathExpr) -> String {
         MathExpr::Ge(l, r) => format!("{} \u{2265} {}", expr_to_lean(l), expr_to_lean(r)),
         MathExpr::Approx(l, r) => {
             // No standard approx in Lean, use abs diff
-            format!(
-                "|{} - {}| < \u{03b5}",
-                expr_to_lean(l),
-                expr_to_lean(r)
-            )
+            format!("|{} - {}| < \u{03b5}", expr_to_lean(l), expr_to_lean(r))
         }
     }
 }
@@ -218,10 +211,7 @@ mod tests {
 
     #[test]
     fn test_lean_pow() {
-        let expr = MathExpr::Pow(
-            Box::new(MathExpr::Var("x".to_string())),
-            Box::new(MathExpr::Int(2)),
-        );
+        let expr = MathExpr::Pow(Box::new(MathExpr::Var("x".to_string())), Box::new(MathExpr::Int(2)));
         assert_eq!(to_lean(&expr), "x ^ 2");
     }
 

@@ -29,7 +29,16 @@ pub fn evaluate_module_exports(
     global_functions: &mut HashMap<String, simple_parser::ast::FunctionDef>,
     global_classes: &mut HashMap<String, ClassDef>,
     global_enums: &mut Enums,
-) -> Result<(Env, HashMap<String, Value>, HashMap<String, simple_parser::ast::FunctionDef>, HashMap<String, ClassDef>, Enums), CompileError> {
+) -> Result<
+    (
+        Env,
+        HashMap<String, Value>,
+        HashMap<String, simple_parser::ast::FunctionDef>,
+        HashMap<String, ClassDef>,
+        Enums,
+    ),
+    CompileError,
+> {
     let mut env: Env = HashMap::new();
     let mut exports: HashMap<String, Value> = HashMap::new();
     let mut local_functions: HashMap<String, simple_parser::ast::FunctionDef> = HashMap::new();

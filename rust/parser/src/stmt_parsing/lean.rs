@@ -276,39 +276,39 @@ impl<'a> Parser<'a> {
         let is_by = matches!(&self.current.kind, TokenKind::By)
             || matches!(&self.current.kind, TokenKind::Identifier { name, .. } if name == "by");
         if is_by {
-                self.advance(); // consume "by"
-                self.expect(&TokenKind::Colon)?;
+            self.advance(); // consume "by"
+            self.expect(&TokenKind::Colon)?;
 
-                // Expect string literal
-                match &self.current.kind {
-                    TokenKind::String(s) | TokenKind::RawString(s) => {
-                        let justification = s.clone();
-                        self.advance();
-                        return Ok(Some(justification));
-                    }
-                    TokenKind::FString(parts) => {
-                        let mut value = String::new();
-                        for part in parts {
-                            match part {
-                                crate::token::FStringToken::Literal(s) => value.push_str(s),
-                                crate::token::FStringToken::Expr(_) => {
-                                    return Err(ParseError::syntax_error_with_span(
-                                        "calc justification cannot contain interpolated expressions",
-                                        self.current.span,
-                                    ));
-                                }
+            // Expect string literal
+            match &self.current.kind {
+                TokenKind::String(s) | TokenKind::RawString(s) => {
+                    let justification = s.clone();
+                    self.advance();
+                    return Ok(Some(justification));
+                }
+                TokenKind::FString(parts) => {
+                    let mut value = String::new();
+                    for part in parts {
+                        match part {
+                            crate::token::FStringToken::Literal(s) => value.push_str(s),
+                            crate::token::FStringToken::Expr(_) => {
+                                return Err(ParseError::syntax_error_with_span(
+                                    "calc justification cannot contain interpolated expressions",
+                                    self.current.span,
+                                ));
                             }
                         }
-                        self.advance();
-                        return Ok(Some(value));
                     }
-                    _ => {
-                        return Err(ParseError::syntax_error_with_span(
-                            "expected string literal for calc justification",
-                            self.current.span,
-                        ));
-                    }
+                    self.advance();
+                    return Ok(Some(value));
                 }
+                _ => {
+                    return Err(ParseError::syntax_error_with_span(
+                        "expected string literal for calc justification",
+                        self.current.span,
+                    ));
+                }
+            }
         }
         Ok(None)
     }

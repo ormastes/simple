@@ -44,7 +44,11 @@ pub fn compile_load<M: Module>(
             let val = builder.use_var(var);
             ctx.vreg_values.insert(dest, val);
         } else {
-            eprintln!("[CODEGEN-WARN] Load: local_index={} has no Variable! variables has {:?}", local_index, ctx.variables.keys().collect::<Vec<_>>());
+            eprintln!(
+                "[CODEGEN-WARN] Load: local_index={} has no Variable! variables has {:?}",
+                local_index,
+                ctx.variables.keys().collect::<Vec<_>>()
+            );
         }
     } else {
         if let Some(&val) = ctx.vreg_values.get(&addr) {

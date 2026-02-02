@@ -122,12 +122,7 @@ impl OpHandler for RestrictedHandler {
         self.inner.end_array()
     }
 
-    fn begin_table(
-        &mut self,
-        fields: Option<&[String]>,
-        types: Option<&[String]>,
-        span: Span,
-    ) -> Result<()> {
+    fn begin_table(&mut self, fields: Option<&[String]>, types: Option<&[String]>, span: Span) -> Result<()> {
         if !self.allow_tables {
             return Err(SdnError::SecurityError {
                 message: "Tables not allowed in this context".to_string(),

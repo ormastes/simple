@@ -9,8 +9,8 @@ use cranelift_module::Module;
 
 use crate::hir::{BinOp, NeighborDirection, PointerKind, TypeId, UnaryOp};
 use crate::mir::{
-    BlockId, CallTarget, ContractKind, Effect, FStringPart, GpuAtomicOp, GpuMemoryScope, MirPattern,
-    ParallelBackend, PatternBinding, UnitOverflowBehavior, VReg,
+    BlockId, CallTarget, ContractKind, Effect, FStringPart, GpuAtomicOp, GpuMemoryScope, MirPattern, ParallelBackend,
+    PatternBinding, UnitOverflowBehavior, VReg,
 };
 
 use super::emitter_trait::CodegenEmitter;
@@ -57,12 +57,18 @@ impl<M: Module> CodegenEmitter for CraneliftEmitter<'_, '_, M> {
         super::instr::basic_ops::compile_copy(self.ctx, self.builder, dest, src)
     }
     fn emit_binop(&mut self, dest: VReg, op: BinOp, left: VReg, right: VReg) -> Result<(), String> {
-        let lhs = self.ctx.vreg_values.get(&left).copied().unwrap_or_else(|| {
-            self.builder.ins().iconst(types::I64, 0)
-        });
-        let rhs = self.ctx.vreg_values.get(&right).copied().unwrap_or_else(|| {
-            self.builder.ins().iconst(types::I64, 0)
-        });
+        let lhs = self
+            .ctx
+            .vreg_values
+            .get(&left)
+            .copied()
+            .unwrap_or_else(|| self.builder.ins().iconst(types::I64, 0));
+        let rhs = self
+            .ctx
+            .vreg_values
+            .get(&right)
+            .copied()
+            .unwrap_or_else(|| self.builder.ins().iconst(types::I64, 0));
         let val = super::instr::core::compile_binop(self.ctx, self.builder, op, lhs, rhs)?;
         self.ctx.vreg_values.insert(dest, val);
         Ok(())
@@ -94,10 +100,12 @@ impl<M: Module> CodegenEmitter for CraneliftEmitter<'_, '_, M> {
             .ok_or_else(|| format!("Global variable '{}' not found", global_name))?;
         let global_ref = self.ctx.module.declare_data_in_func(*global_id, self.builder.func);
         let global_addr = self.builder.ins().global_value(types::I64, global_ref);
-        let val = self
-            .builder
-            .ins()
-            .load(super::types_util::type_id_to_cranelift(ty), MemFlags::new(), global_addr, 0);
+        let val = self.builder.ins().load(
+            super::types_util::type_id_to_cranelift(ty),
+            MemFlags::new(),
+            global_addr,
+            0,
+        );
         self.ctx.vreg_values.insert(dest, val);
         Ok(())
     }
@@ -136,12 +144,7 @@ impl<M: Module> CodegenEmitter for CraneliftEmitter<'_, '_, M> {
     fn emit_call(&mut self, dest: &Option<VReg>, target: &CallTarget, args: &[VReg]) -> Result<(), String> {
         super::instr::calls::compile_call(self.ctx, self.builder, dest, target, args)
     }
-    fn emit_interp_call(
-        &mut self,
-        dest: &Option<VReg>,
-        func_name: &str,
-        args: &[VReg],
-    ) -> Result<(), String> {
+    fn emit_interp_call(&mut self, dest: &Option<VReg>, func_name: &str, args: &[VReg]) -> Result<(), String> {
         super::instr::core::compile_interp_call(self.ctx, self.builder, dest, func_name, args)
     }
     fn emit_interp_eval(&mut self, dest: VReg, expr_index: usize) -> Result<(), String> {
@@ -270,13 +273,7 @@ impl<M: Module> CodegenEmitter for CraneliftEmitter<'_, '_, M> {
     ) -> Result<(), String> {
         super::instr::simd_stubs::compile_vec_masked_load(self.ctx, self.builder, dest, array, offset, mask, default)
     }
-    fn emit_vec_masked_store(
-        &mut self,
-        source: VReg,
-        array: VReg,
-        offset: VReg,
-        mask: VReg,
-    ) -> Result<(), String> {
+    fn emit_vec_masked_store(&mut self, source: VReg, array: VReg, offset: VReg, mask: VReg) -> Result<(), String> {
         super::instr::simd_stubs::compile_vec_masked_store(self.ctx, self.builder, source, array, offset, mask)
     }
     fn emit_vec_min_vec(&mut self, dest: VReg, a: VReg, b: VReg) -> Result<(), String> {
@@ -442,12 +439,7 @@ impl<M: Module> CodegenEmitter for CraneliftEmitter<'_, '_, M> {
         super::instr::pattern::compile_pattern_test(self.ctx, self.builder, dest, subject, pattern);
         Ok(())
     }
-    fn emit_pattern_bind(
-        &mut self,
-        dest: VReg,
-        subject: VReg,
-        binding: &PatternBinding,
-    ) -> Result<(), String> {
+    fn emit_pattern_bind(&mut self, dest: VReg, subject: VReg, binding: &PatternBinding) -> Result<(), String> {
         super::instr::pattern::compile_pattern_bind(self.ctx, self.builder, dest, subject, binding);
         Ok(())
     }
@@ -674,9 +666,12 @@ impl<M: Module> CodegenEmitter for CraneliftEmitter<'_, '_, M> {
     // Boxing
     // =========================================================================
     fn emit_box_int(&mut self, dest: VReg, value: VReg) -> Result<(), String> {
-        let mut val = self.ctx.vreg_values.get(&value).copied().unwrap_or_else(|| {
-            self.builder.ins().iconst(types::I64, 0)
-        });
+        let mut val = self
+            .ctx
+            .vreg_values
+            .get(&value)
+            .copied()
+            .unwrap_or_else(|| self.builder.ins().iconst(types::I64, 0));
         let val_type = self.builder.func.dfg.value_type(val);
         if val_type == types::I32 || val_type == types::I8 || val_type == types::I16 {
             val = self.builder.ins().sextend(types::I64, val);
@@ -687,9 +682,12 @@ impl<M: Module> CodegenEmitter for CraneliftEmitter<'_, '_, M> {
         Ok(())
     }
     fn emit_box_float(&mut self, dest: VReg, value: VReg) -> Result<(), String> {
-        let val = self.ctx.vreg_values.get(&value).copied().unwrap_or_else(|| {
-            self.builder.ins().f64const(0.0)
-        });
+        let val = self
+            .ctx
+            .vreg_values
+            .get(&value)
+            .copied()
+            .unwrap_or_else(|| self.builder.ins().f64const(0.0));
         let bits = self.builder.ins().bitcast(types::I64, MemFlags::new(), val);
         let three = self.builder.ins().iconst(types::I64, 3);
         let shifted = self.builder.ins().ushr(bits, three);
@@ -700,18 +698,24 @@ impl<M: Module> CodegenEmitter for CraneliftEmitter<'_, '_, M> {
         Ok(())
     }
     fn emit_unbox_int(&mut self, dest: VReg, value: VReg) -> Result<(), String> {
-        let val = self.ctx.vreg_values.get(&value).copied().unwrap_or_else(|| {
-            self.builder.ins().iconst(types::I64, 0)
-        });
+        let val = self
+            .ctx
+            .vreg_values
+            .get(&value)
+            .copied()
+            .unwrap_or_else(|| self.builder.ins().iconst(types::I64, 0));
         let three = self.builder.ins().iconst(types::I64, 3);
         let unboxed = self.builder.ins().sshr(val, three);
         self.ctx.vreg_values.insert(dest, unboxed);
         Ok(())
     }
     fn emit_unbox_float(&mut self, dest: VReg, value: VReg) -> Result<(), String> {
-        let val = self.ctx.vreg_values.get(&value).copied().unwrap_or_else(|| {
-            self.builder.ins().iconst(types::I64, 0)
-        });
+        let val = self
+            .ctx
+            .vreg_values
+            .get(&value)
+            .copied()
+            .unwrap_or_else(|| self.builder.ins().iconst(types::I64, 0));
         let three = self.builder.ins().iconst(types::I64, 3);
         let shifted = self.builder.ins().ushr(val, three);
         let bits = self.builder.ins().ishl(shifted, three);
@@ -754,13 +758,7 @@ impl<M: Module> CodegenEmitter for CraneliftEmitter<'_, '_, M> {
         super::instr::collections::compile_gpu_atomic(self.ctx, self.builder, dest, op, ptr, value);
         Ok(())
     }
-    fn emit_gpu_atomic_cmpxchg(
-        &mut self,
-        dest: VReg,
-        ptr: VReg,
-        expected: VReg,
-        desired: VReg,
-    ) -> Result<(), String> {
+    fn emit_gpu_atomic_cmpxchg(&mut self, dest: VReg, ptr: VReg, expected: VReg, desired: VReg) -> Result<(), String> {
         super::instr::collections::compile_gpu_atomic_cmpxchg(self.ctx, self.builder, dest, ptr, expected, desired);
         Ok(())
     }

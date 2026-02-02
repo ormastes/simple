@@ -349,8 +349,7 @@ impl Lowerer {
                 // Check if subject or literal is a string type - use rt_string_eq for string comparison
                 // Also check CHAR and ANY since string indexing returns single-char strings
                 // and the literal may be a string (e.g., char literals like '(' are strings)
-                let is_string =
-                    subject_ty == TypeId::STRING
+                let is_string = subject_ty == TypeId::STRING
                     || subject_ty == TypeId::CHAR
                     || matches!(self.module.types.get(subject_ty), Some(HirType::String | HirType::Char))
                     || lit_hir.ty == TypeId::STRING

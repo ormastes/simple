@@ -279,7 +279,10 @@ macro_rules! init_integration_tests {
         $crate::mock_helper::mock_policy::init_mocks_for_only_default();
     };
     ($name:expr) => {
-        $crate::mock_helper::test_check::init_test_level_named($crate::mock_helper::test_check::TestLevel::Integration, $name);
+        $crate::mock_helper::test_check::init_test_level_named(
+            $crate::mock_helper::test_check::TestLevel::Integration,
+            $name,
+        );
         $crate::mock_helper::mock_policy::init_mocks_for_only_default();
     };
     (patterns: $patterns:expr) => {
@@ -298,7 +301,10 @@ macro_rules! init_system_tests {
         $crate::mock_helper::mock_policy::init_mocks_for_system();
     };
     ($name:expr) => {
-        $crate::mock_helper::test_check::init_test_level_named($crate::mock_helper::test_check::TestLevel::System, $name);
+        $crate::mock_helper::test_check::init_test_level_named(
+            $crate::mock_helper::test_check::TestLevel::System,
+            $name,
+        );
         $crate::mock_helper::mock_policy::init_mocks_for_system();
     };
 }
@@ -314,7 +320,10 @@ macro_rules! init_env_tests {
         $crate::mock_helper::mock_policy::init_mocks_for_only($crate::mock_helper::mock_policy::DEFAULT_ENV_PATTERNS);
     };
     ($name:expr) => {
-        $crate::mock_helper::test_check::init_test_level_named($crate::mock_helper::test_check::TestLevel::Environment, $name);
+        $crate::mock_helper::test_check::init_test_level_named(
+            $crate::mock_helper::test_check::TestLevel::Environment,
+            $name,
+        );
         $crate::mock_helper::mock_policy::init_mocks_for_only($crate::mock_helper::mock_policy::DEFAULT_ENV_PATTERNS);
     };
     (patterns: $patterns:expr) => {

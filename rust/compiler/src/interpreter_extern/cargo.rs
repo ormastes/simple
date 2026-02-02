@@ -8,13 +8,7 @@ use std::process::Command;
 use std::time::Instant;
 
 /// Helper: Create a dict Value with build result fields
-fn create_build_result(
-    success: bool,
-    exit_code: i64,
-    stdout: String,
-    stderr: String,
-    duration_ms: i64,
-) -> Value {
+fn create_build_result(success: bool, exit_code: i64, stdout: String, stderr: String, duration_ms: i64) -> Value {
     let mut fields = std::collections::HashMap::new();
     fields.insert("success".to_string(), Value::Bool(success));
     fields.insert("exit_code".to_string(), Value::Int(exit_code));
@@ -113,9 +107,7 @@ pub fn rt_cargo_build(args: &[Value]) -> Result<Value, CompileError> {
             let stdout = String::from_utf8_lossy(&output.stdout).to_string();
             let stderr = String::from_utf8_lossy(&output.stderr).to_string();
 
-            Ok(create_build_result(
-                success, exit_code, stdout, stderr, duration_ms,
-            ))
+            Ok(create_build_result(success, exit_code, stdout, stderr, duration_ms))
         }
         Err(e) => {
             let stderr = format!("Failed to execute cargo: {}", e);
@@ -190,15 +182,7 @@ pub fn rt_cargo_test(args: &[Value]) -> Result<Value, CompileError> {
         }
         Err(e) => {
             let stderr = format!("Failed to execute cargo: {}", e);
-            Ok(create_test_result(
-                false,
-                1,
-                String::new(),
-                stderr,
-                0,
-                0,
-                0,
-            ))
+            Ok(create_test_result(false, 1, String::new(), stderr, 0, 0, 0))
         }
     }
 }
@@ -284,7 +268,13 @@ pub fn rt_cargo_test_doc(args: &[Value]) -> Result<Value, CompileError> {
             let (tests_run, tests_passed, tests_failed) = parse_test_output(&stdout);
 
             Ok(create_test_result(
-                success, exit_code, stdout, stderr, tests_run, tests_passed, tests_failed,
+                success,
+                exit_code,
+                stdout,
+                stderr,
+                tests_run,
+                tests_passed,
+                tests_failed,
             ))
         }
         Err(e) => {
@@ -404,9 +394,7 @@ pub fn rt_cargo_check(_args: &[Value]) -> Result<Value, CompileError> {
             let stdout = String::from_utf8_lossy(&output.stdout).to_string();
             let stderr = String::from_utf8_lossy(&output.stderr).to_string();
 
-            Ok(create_build_result(
-                success, exit_code, stdout, stderr, duration_ms,
-            ))
+            Ok(create_build_result(success, exit_code, stdout, stderr, duration_ms))
         }
         Err(e) => {
             let stderr = format!("Failed to execute cargo: {}", e);

@@ -9,12 +9,10 @@ use simple_runtime::value::{
     rt_env_all as ffi_env_all, rt_env_cwd as ffi_env_cwd, rt_env_exists as ffi_env_exists, rt_env_get as ffi_env_get,
     rt_env_home as ffi_env_home, rt_env_remove as ffi_env_remove, rt_env_set as ffi_env_set,
     rt_env_temp as ffi_env_temp, rt_set_debug_mode as ffi_set_debug_mode, rt_set_macro_trace as ffi_set_macro_trace,
-    rt_process_run as ffi_process_run,
-    rt_process_run_timeout as ffi_process_run_timeout,
+    rt_process_run as ffi_process_run, rt_process_run_timeout as ffi_process_run_timeout,
 };
 use simple_runtime::value::ffi::config::{
-    rt_is_debug_mode_enabled as ffi_is_debug_mode_enabled,
-    rt_is_macro_trace_enabled as ffi_is_macro_trace_enabled,
+    rt_is_debug_mode_enabled as ffi_is_debug_mode_enabled, rt_is_macro_trace_enabled as ffi_is_macro_trace_enabled,
 };
 
 /// Get command-line arguments
@@ -328,7 +326,9 @@ pub fn rt_process_run_timeout(args: &[Value]) -> Result<Value, CompileError> {
     use simple_runtime::value::{rt_array_new, rt_array_push, rt_string_new};
 
     if args.len() < 3 {
-        return Err(CompileError::runtime("rt_process_run_timeout requires 3 arguments (cmd, args, timeout_ms)"));
+        return Err(CompileError::runtime(
+            "rt_process_run_timeout requires 3 arguments (cmd, args, timeout_ms)",
+        ));
     }
 
     let cmd = match &args[0] {
@@ -356,7 +356,11 @@ pub fn rt_process_run_timeout(args: &[Value]) -> Result<Value, CompileError> {
 
     let timeout_ms = match &args[2] {
         Value::Int(n) => *n,
-        _ => return Err(CompileError::runtime("rt_process_run_timeout: timeout_ms must be an integer")),
+        _ => {
+            return Err(CompileError::runtime(
+                "rt_process_run_timeout: timeout_ms must be an integer",
+            ))
+        }
     };
 
     unsafe {
