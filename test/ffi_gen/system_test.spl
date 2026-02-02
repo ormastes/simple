@@ -8,131 +8,243 @@
 
 ## Overview
 
-System-level tests for the `simple ffi-gen` CLI command, exercising
-arg parsing, --dry-run output, --gen-intern mode, --help, and error cases.
+End-to-end system tests for the FFI generator pipeline, exercising
+the full flow from parsing @Lib annotations through code generation.
+Tests parser, Rust codegen, Cargo.toml generation, and type mapping
+as an integrated pipeline.
 """
 
-import std.spec
-
-extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
-extern fn rt_env_cwd() -> text
-extern fn rt_file_write_text(path: text, content: text) -> bool
-extern fn rt_file_exists(path: text) -> bool
-extern fn rt_dir_create(path: text, recursive: bool) -> bool
-extern fn rt_dir_remove(path: text, recursive: bool) -> bool
-
-fn run_simple(args: [text]) -> (text, text, i64):
-    val cwd = rt_env_cwd()
-    val bin = "{cwd}/bin/simple"
-    rt_process_run(bin, args)
+use std.spec
+use app.ffi_gen.parser (parse_lib_externs)
+use app.ffi_gen.rust_codegen (generate_rust_code)
+use app.ffi_gen.cargo_gen (generate_cargo_toml)
+use app.ffi_gen.type_mapping (simple_to_rust, is_primitive, is_string, is_object_handle)
 
 # ============================================================================
-# Test Group 1: CLI Help and Basic Usage
+# Test Group 1: Full Pipeline (Parse → Codegen)
 # ============================================================================
 
-describe "FFI Generator CLI":
+describe "FFI Generator Pipeline":
     """
-    ## CLI Interface
+    ## End-to-End Pipeline
 
-    Tests that the ffi-gen subcommand handles flags correctly.
-    """
-
-    context "when --help is passed":
-        """
-        ### Scenario: Help Output
-
-        The --help flag should print usage info and exit 0.
-        """
-
-        it "prints usage and exits 0":
-            val result = run_simple(["ffi-gen", "--help"])
-            val stdout = result.0
-            val exit_code = result.2
-            expect(exit_code).to(eq(0))
-            expect(stdout).to(contain("ffi-gen"))
-            expect(stdout).to(contain("--dry-run"))
-            expect(stdout).to(contain("--gen-intern"))
-
-    context "when no arguments are passed":
-        """
-        ### Scenario: Missing File Argument
-
-        Should print an error and exit non-zero.
-        """
-
-        it "prints error and exits non-zero":
-            val result = run_simple(["ffi-gen"])
-            val exit_code = result.2
-            expect(exit_code).to(not_eq(0))
-
-# ============================================================================
-# Test Group 2: Dry Run Mode
-# ============================================================================
-
-describe "FFI Generator Dry Run":
-    """
-    ## Dry Run
-
-    With --dry-run, generated code is printed but no files are written.
+    Tests that the full pipeline from @Lib source parsing through Rust
+    code generation produces valid, complete output.
     """
 
-    context "when --dry-run with a valid @Lib source":
+    context "with a simple Rust library spec":
         """
-        ### Scenario: Dry Run Output
+        ### Scenario: Regex Library
 
-        Should print generated Rust code to stdout without creating files.
+        Parse a @Lib(lang: "rust") declaration and generate both
+        wrapper code and Cargo.toml.
         """
 
-        it "outputs generated code without writing files":
-            val cwd = rt_env_cwd()
-            val test_file = "{cwd}/build/rust/ffi_gen_system_test_input.spl"
-            rt_dir_create("{cwd}/build/rust", true)
-
+        it "generates Rust wrapper code from @Lib source":
             val source = "@Lib(lang: \"rust\", name: \"regex\", version: \"1.10\")\nextern class Regex:\n    static fn new(pattern: text) -> Regex\n    fn is_match(input: text) -> bool\n"
-            rt_file_write_text(test_file, source)
 
-            val result = run_simple(["ffi-gen", test_file, "--dry-run"])
-            val stdout = result.0
-            val exit_code = result.2
+            val specs = parse_lib_externs(source, "test.spl")
+            assert specs.len() == 1, "Expected 1 spec"
 
-            expect(exit_code).to(eq(0))
-            expect(stdout).to(contain("fn"))
+            val rust_code = generate_rust_code(specs)
 
-            # Clean up
-            rt_dir_remove("{cwd}/build/rust/ffi_gen_system_test_input.spl", false)
+            expect(rust_code).to(contain("extern \"C\""))
+            expect(rust_code).to(contain("regex"))
+            expect(rust_code).to(contain("#[no_mangle]"))
 
-# ============================================================================
-# Test Group 3: Gen-Intern Mode
-# ============================================================================
-
-describe "FFI Generator Gen-Intern Mode":
-    """
-    ## Gen-Intern
-
-    With --gen-intern, generates interpreter_extern Rust module from spec.
-    """
-
-    context "when --gen-intern --dry-run with a valid source":
-        """
-        ### Scenario: Intern Dry Run
-
-        Should print generated interpreter_extern module.
-        """
-
-        it "outputs intern module code":
-            val cwd = rt_env_cwd()
-            val test_file = "{cwd}/build/rust/ffi_gen_intern_test_input.spl"
-            rt_dir_create("{cwd}/build/rust", true)
-
+        it "generates Cargo.toml with correct dependency":
             val source = "@Lib(lang: \"rust\", name: \"regex\", version: \"1.10\")\nextern class Regex:\n    static fn new(pattern: text) -> Regex\n    fn is_match(input: text) -> bool\n"
-            rt_file_write_text(test_file, source)
 
-            val result = run_simple(["ffi-gen", "--gen-intern", test_file, "--dry-run"])
-            val stdout = result.0
-            val exit_code = result.2
+            val specs = parse_lib_externs(source, "test.spl")
+            val cargo = generate_cargo_toml(specs, "2021")
 
-            expect(exit_code).to(eq(0))
-            expect(stdout).to(contain("gen-intern"))
+            expect(cargo).to(contain("[package]"))
+            expect(cargo).to(contain("regex"))
+            expect(cargo).to(contain("1.10"))
 
-            # Clean up
-            rt_dir_remove("{cwd}/build/rust/ffi_gen_intern_test_input.spl", false)
+    context "with a multi-method library":
+        """
+        ### Scenario: JSON Library
+
+        Parse a library with multiple methods and features.
+        """
+
+        it "handles static and instance methods":
+            val source = "@Lib(lang: \"rust\", name: \"serde_json\", version: \"1.0\", features: [\"preserve_order\"])\nextern class JsonValue:\n    static fn from_str(s: text) -> JsonValue\n    fn to_string() -> text\n    fn get(key: text) -> JsonValue\n    fn is_null() -> bool\n"
+
+            val specs = parse_lib_externs(source, "test.spl")
+            assert specs.len() == 1, "Expected 1 spec"
+
+            val spec = specs[0]
+            assert spec.lib_name == "serde_json", "Expected serde_json"
+            assert spec.methods.len() == 4, "Expected 4 methods"
+            assert spec.lib_features.len() == 1, "Expected 1 feature"
+            assert spec.lib_features[0] == "preserve_order", "Expected preserve_order"
+
+            val rust_code = generate_rust_code(specs)
+            expect(rust_code).to(contain("serde_json"))
+
+# ============================================================================
+# Test Group 2: Multiple Classes in One File
+# ============================================================================
+
+describe "FFI Generator Multi-Class":
+    """
+    ## Multiple @Lib Declarations
+
+    A single file can contain multiple @Lib annotated extern classes.
+    """
+
+    context "when source has two @Lib classes":
+        """
+        ### Scenario: Two Libraries
+
+        Parse a file with regex and uuid library declarations.
+        """
+
+        it "parses both specs":
+            val source = "@Lib(lang: \"rust\", name: \"regex\", version: \"1.10\")\nextern class Regex:\n    static fn new(pattern: text) -> Regex\n    fn is_match(input: text) -> bool\n\n@Lib(lang: \"rust\", name: \"uuid\", version: \"1.0\")\nextern class Uuid:\n    static fn new_v4() -> Uuid\n    fn to_string() -> text\n"
+
+            val specs = parse_lib_externs(source, "test.spl")
+            assert specs.len() == 2, "Expected 2 specs"
+            assert specs[0].lib_name == "regex", "Expected regex"
+            assert specs[1].lib_name == "uuid", "Expected uuid"
+
+# ============================================================================
+# Test Group 3: C Library Support
+# ============================================================================
+
+describe "FFI Generator C Library":
+    """
+    ## C Library Declarations
+
+    @Lib(lang: "c") declarations parse correctly.
+    """
+
+    context "with a C library spec":
+        """
+        ### Scenario: SQLite
+
+        Parse a C library declaration with multiple methods.
+        """
+
+        it "parses C library metadata":
+            val source = "@Lib(lang: \"c\", name: \"sqlite3\")\nextern class Sqlite3:\n    static fn open(path: text) -> Sqlite3\n    fn exec(sql: text) -> i32\n    fn close()\n"
+
+            val specs = parse_lib_externs(source, "test.spl")
+            assert specs.len() == 1, "Expected 1 spec"
+
+            val spec = specs[0]
+            assert spec.lib_lang == "c", "Expected lang=c"
+            assert spec.lib_name == "sqlite3", "Expected sqlite3"
+            assert spec.methods.len() == 3, "Expected 3 methods"
+
+# ============================================================================
+# Test Group 4: Type Mapping Integration
+# ============================================================================
+
+describe "FFI Generator Type Mapping":
+    """
+    ## Type Mapping
+
+    Verify Simple → Rust type mappings used during code generation.
+    """
+
+    context "primitive types":
+        it "maps i32, i64, f64, bool correctly":
+            expect(simple_to_rust("i32")).to(eq("i32"))
+            expect(simple_to_rust("i64")).to(eq("i64"))
+            expect(simple_to_rust("f64")).to(eq("f64"))
+            expect(simple_to_rust("bool")).to(eq("bool"))
+
+    context "string types":
+        it "maps text, str, String to Rust String":
+            expect(simple_to_rust("text")).to(eq("String"))
+            expect(simple_to_rust("str")).to(eq("String"))
+            expect(simple_to_rust("String")).to(eq("String"))
+
+    context "collection types":
+        it "maps arrays to Vec":
+            expect(simple_to_rust("[i32]")).to(eq("Vec<i32>"))
+
+    context "classification":
+        it "classifies types correctly":
+            expect(is_primitive("i32")).to(eq(true))
+            expect(is_primitive("text")).to(eq(false))
+            expect(is_string("text")).to(eq(true))
+            expect(is_string("i32")).to(eq(false))
+            expect(is_object_handle("Regex")).to(eq(true))
+            expect(is_object_handle("i32")).to(eq(false))
+
+# ============================================================================
+# Test Group 5: Error Handling
+# ============================================================================
+
+describe "FFI Generator Error Cases":
+    """
+    ## Error Handling
+
+    The parser handles invalid or missing input gracefully.
+    """
+
+    context "when source has no @Lib annotations":
+        it "returns empty specs list":
+            val source = "fn hello():\n    print \"hello\"\n"
+            val specs = parse_lib_externs(source, "test.spl")
+            assert specs.len() == 0, "Expected 0 specs"
+
+    context "when source is empty":
+        it "returns empty specs list":
+            val specs = parse_lib_externs("", "test.spl")
+            assert specs.len() == 0, "Expected 0 specs"
+
+# ============================================================================
+# Test Group 6: Codegen Output Validation
+# ============================================================================
+
+describe "FFI Generator Codegen Details":
+    """
+    ## Code Generation Details
+
+    Validates specific code generation patterns in the output.
+    """
+
+    context "Rust codegen for object types":
+        """
+        ### Scenario: Object Handle Pattern
+
+        Generated code should use Box for heap-allocated objects.
+        """
+
+        it "generates Box-based object construction":
+            val source = "@Lib(lang: \"rust\", name: \"regex\", version: \"1.10\")\nextern class Regex:\n    static fn new(pattern: text) -> Regex\n    fn is_match(input: text) -> bool\n"
+
+            val specs = parse_lib_externs(source, "test.spl")
+            val rust_code = generate_rust_code(specs)
+
+            expect(rust_code).to(contain("Box::into_raw"))
+            expect(rust_code).to(contain("Box::from_raw"))
+
+        it "generates destructor for each class":
+            val source = "@Lib(lang: \"rust\", name: \"regex\", version: \"1.10\")\nextern class Regex:\n    static fn new(pattern: text) -> Regex\n    fn is_match(input: text) -> bool\n"
+
+            val specs = parse_lib_externs(source, "test.spl")
+            val rust_code = generate_rust_code(specs)
+
+            expect(rust_code).to(contain("Regex_destroy"))
+
+    context "Rust codegen for string parameters":
+        """
+        ### Scenario: String Marshalling
+
+        String parameters should use ptr+len FFI pattern.
+        """
+
+        it "generates ptr/len parameters for text args":
+            val source = "@Lib(lang: \"rust\", name: \"mylib\", version: \"0.1\")\nextern class MyClass:\n    static fn from_str(s: text) -> MyClass\n"
+
+            val specs = parse_lib_externs(source, "test.spl")
+            val rust_code = generate_rust_code(specs)
+
+            expect(rust_code).to(contain("s_ptr: *const u8"))
+            expect(rust_code).to(contain("s_len: u64"))

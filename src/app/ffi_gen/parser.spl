@@ -3,8 +3,6 @@
 # Parses @Lib annotations and extern class declarations from Simple source code.
 # Uses line-based text scanning (no AST dependency).
 
-import type_mapping
-
 # ============================================================================
 # Data Structures
 # ============================================================================
@@ -41,6 +39,66 @@ class ParamSpec:
     type_name: text
 
 # ============================================================================
+# String Helpers (avoid .find()/.rfind() which return Option in module context)
+# ============================================================================
+
+# Extract content between first "(" and last ")" using split
+fn extract_between_parens(line: text) -> text:
+    if not line.contains("(") or not line.contains(")"):
+        return ""
+    val parts = line.split("(")
+    if parts.len() < 2:
+        return ""
+    # Rejoin everything after first "("
+    var inner = parts[1]
+    var idx = 2
+    while idx < parts.len():
+        inner = inner + "(" + parts[idx]
+        idx = idx + 1
+    # Remove last ")"
+    if not inner.contains(")"):
+        return ""
+    val rparts = inner.split(")")
+    # Everything except the last part, rejoined with ")"
+    var result = rparts[0]
+    var j = 1
+    while j < rparts.len() - 1:
+        result = result + ")" + rparts[j]
+        j = j + 1
+    result
+
+# Extract first quoted string: finds "..." and returns content
+fn extract_first_quoted(s: text) -> text:
+    if not s.contains("\""):
+        return ""
+    val parts = s.split("\"")
+    if parts.len() < 3:
+        return ""
+    parts[1]
+
+# Extract content before first occurrence of needle
+fn before_first(s: text, needle: text) -> text:
+    if not s.contains(needle):
+        return s
+    val parts = s.split(needle)
+    parts[0]
+
+# Extract content after first occurrence of needle
+fn after_first(s: text, needle: text) -> text:
+    if not s.contains(needle):
+        return ""
+    val parts = s.split(needle)
+    if parts.len() < 2:
+        return ""
+    # Rejoin everything after first occurrence
+    var result = parts[1]
+    var idx = 2
+    while idx < parts.len():
+        result = result + needle + parts[idx]
+        idx = idx + 1
+    result
+
+# ============================================================================
 # Parser Implementation
 # ============================================================================
 
@@ -73,7 +131,7 @@ fn parse_lib_externs(source: text, file_path: text) -> [LibExternSpec]:
                         val method_line = lines[k]
                         # Stop at first non-indented, non-empty line
                         if method_line.trim() != "" and not method_line.starts_with("    ") and not method_line.starts_with("\t"):
-                            k = k  # break
+                            break
                         elif method_line.trim() == "":
                             k = k + 1
                         else:
@@ -127,72 +185,49 @@ fn parse_lib_annotation(line: text) -> LibAnnotation:
     var pkg_config = ""
     var link = ""
 
-    # Extract content between @Lib( and )
-    val start = line.find("(")
-    val end = line.rfind(")")
-    if start < 0 or end < 0:
+    val content = extract_between_parens(line)
+    if content == "":
         return LibAnnotation(lib_lang: "", lib_name: "", lib_version: "", lib_features: [], lib_pkg_config: "", lib_link: "")
 
-    val content = line[start + 1:end]
-
     # Parse key: "value" pairs
-    lang = extract_string_field(content, "lang")
-    name = extract_string_field(content, "name")
-    version = extract_string_field(content, "version")
-    pkg_config = extract_string_field(content, "pkg_config")
-    link = extract_string_field(content, "link")
-    features = extract_string_list_field(content, "features")
+    lang = extract_field_value(content, "lang")
+    name = extract_field_value(content, "name")
+    version = extract_field_value(content, "version")
+    pkg_config = extract_field_value(content, "pkg_config")
+    link = extract_field_value(content, "link")
+    features = extract_list_field(content, "features")
 
     LibAnnotation(lib_lang: lang, lib_name: name, lib_version: version, lib_features: features, lib_pkg_config: pkg_config, lib_link: link)
 
 # Extract a string value for a key from "key: \"value\"" format
-fn extract_string_field(content: text, key: text) -> text:
+fn extract_field_value(content: text, key: text) -> text:
     val search = "{key}:"
-    val pos = content.find(search)
-    if pos < 0:
-        # Try without space after colon
+    if not content.contains(search):
         val search2 = "{key} :"
-        val pos2 = content.find(search2)
-        if pos2 < 0:
+        if not content.contains(search2):
             return ""
-        val after = content[pos2 + search2.len():].trim()
-        return extract_quoted_string(after)
+        val after = after_first(content, search2).trim()
+        return extract_first_quoted(after)
 
-    val after = content[pos + search.len():].trim()
-    extract_quoted_string(after)
-
-# Extract the first quoted string from text
-fn extract_quoted_string(text_val: text) -> text:
-    val quote_start = text_val.find("\"")
-    if quote_start < 0:
-        return ""
-    val rest = text_val[quote_start + 1:]
-    val quote_end = rest.find("\"")
-    if quote_end < 0:
-        return ""
-    rest[:quote_end]
+    val after = after_first(content, search).trim()
+    extract_first_quoted(after)
 
 # Extract a list of strings from "features: [\"a\", \"b\"]" format
-fn extract_string_list_field(content: text, key: text) -> [text]:
+fn extract_list_field(content: text, key: text) -> [text]:
     val search = "{key}:"
-    val pos = content.find(search)
-    if pos < 0:
+    if not content.contains(search):
         return []
 
-    val after = content[pos + search.len():].trim()
-    val bracket_start = after.find("[")
-    if bracket_start < 0:
-        return []
-    val bracket_end = after.find("]")
-    if bracket_end < 0:
+    val after = after_first(content, search).trim()
+    if not after.contains("[") or not after.contains("]"):
         return []
 
-    val list_content = after[bracket_start + 1:bracket_end]
+    val bracket_content = extract_between_parens(after.replace("[", "(").replace("]", ")"))
     var items: [text] = []
-    val parts = list_content.split(",")
+    val parts = bracket_content.split(",")
     for part in parts:
         val trimmed = part.trim()
-        val extracted = extract_quoted_string(trimmed)
+        val extracted = extract_first_quoted(trimmed)
         if extracted != "":
             items.push(extracted)
 
@@ -232,24 +267,22 @@ fn parse_method_line(line: text, line_num: i64) -> ExternMethodSpec:
     else:
         return ExternMethodSpec(name: "", kind: "", params: [], return_type: "", line_number: line_num)
 
-    # Extract method name
-    val paren_pos = rest.find("(")
-    if paren_pos < 0:
+    # Extract method name (before first "(")
+    if not rest.contains("("):
         return ExternMethodSpec(name: "", kind: "", params: [], return_type: "", line_number: line_num)
 
-    val name = rest[:paren_pos].trim()
-    val after_name = rest[paren_pos:]
+    val name = before_first(rest, "(").trim()
+    val after_name = after_first(rest, "(")
 
-    # Extract parameters
-    val close_paren = after_name.find(")")
-    if close_paren < 0:
+    # Extract parameters (before first ")")
+    if not after_name.contains(")"):
         return ExternMethodSpec(name: "", kind: "", params: [], return_type: "", line_number: line_num)
 
-    val params_str = after_name[1:close_paren]
+    val params_str = before_first(after_name, ")")
     val params = parse_params(params_str)
 
     # Extract return type
-    val after_params = after_name[close_paren + 1:].trim()
+    val after_params = after_first(after_name, ")").trim()
     var return_type = ""
     if after_params.starts_with("->"):
         return_type = after_params[2:].trim()
@@ -269,10 +302,9 @@ fn parse_params(params_str: text) -> [ParamSpec]:
     val parts = trimmed.split(",")
     for part in parts:
         val p = part.trim()
-        val colon_pos = p.find(":")
-        if colon_pos > 0:
-            val param_name = p[:colon_pos].trim()
-            val param_type = p[colon_pos + 1:].trim()
+        if p.contains(":"):
+            val param_name = before_first(p, ":").trim()
+            val param_type = after_first(p, ":").trim()
             params.push(ParamSpec(name: param_name, type_name: param_type))
 
     params
