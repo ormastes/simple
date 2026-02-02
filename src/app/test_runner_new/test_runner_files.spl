@@ -74,24 +74,34 @@ fn discover_test_files(base_path: text, options: TestOptions) -> List<text>:
             return [base_path]
         return []
     val all_files = rt_dir_walk(base_path)
+    # Check if we need content-based filtering at all
+    val needs_content = options.list_ignored or options.only_slow or options.only_skipped or options.tag != ""
     var test_files: List<text> = []
     for f in all_files:
         if not is_test_file(f):
             continue
         if not matches_level(f, options.level):
             continue
-        # --list-ignored: only show files with ignored tests
-        if options.list_ignored and not file_has_ignored_test(f):
-            continue
-        # Filter by --only-slow (unless --all)
-        if options.only_slow and not options.run_all and not file_has_slow_test(f):
-            continue
-        # Filter by --only-skipped
-        if options.only_skipped and not file_has_skip_tag(f):
-            continue
-        # Filter by --tag
-        if options.tag != "" and not file_has_tag(f, options.tag):
-            continue
+        # Read file content ONCE for all content-based filters
+        if needs_content:
+            val content = read_file_content(f)
+            # --list-ignored: only show files with ignored tests
+            if options.list_ignored:
+                val has_ignored = content.contains("slow_it ") or content.contains("tag: \"skip\"") or content.contains("tag: 'skip'")
+                if not has_ignored:
+                    continue
+            # Filter by --only-slow (unless --all)
+            if options.only_slow and not options.run_all:
+                if not content.contains("slow_it "):
+                    continue
+            # Filter by --only-skipped
+            if options.only_skipped:
+                if not (content.contains("tag: \"skip\"") or content.contains("tag: 'skip'")):
+                    continue
+            # Filter by --tag
+            if options.tag != "":
+                if not (content.contains("tag: \"{options.tag}\"") or content.contains("tag: '{options.tag}'")):
+                    continue
         test_files.push(f)
 
     # Apply seed shuffle
@@ -135,7 +145,7 @@ fn shuffle_files(files: List<text>, seed: i64) -> List<text>:
     for f in files:
         hashes.push(simple_hash(f, seed))
 
-    # Selection sort by hash
+    # Build index array
     var n = files.len()
     var idx: List<i64> = []
     var j = 0
@@ -143,19 +153,20 @@ fn shuffle_files(files: List<text>, seed: i64) -> List<text>:
         idx.push(j)
         j = j + 1
 
-    var ii = 0
-    while ii < n - 1:
-        var min_pos = ii
-        var jj = ii + 1
-        while jj < n:
-            if hashes[idx[jj]] < hashes[idx[min_pos]]:
-                min_pos = jj
-            jj = jj + 1
-        if min_pos != ii:
-            val tmp = idx[ii]
-            idx[ii] = idx[min_pos]
-            idx[min_pos] = tmp
-        ii = ii + 1
+    # Shell sort by hash - O(n log²n) instead of O(n²)
+    var gap = n / 2
+    while gap > 0:
+        var i = gap
+        while i < n:
+            val tmp_idx = idx[i]
+            val tmp_hash = hashes[tmp_idx]
+            var k = i
+            while k >= gap and hashes[idx[k - gap]] > tmp_hash:
+                idx[k] = idx[k - gap]
+                k = k - gap
+            idx[k] = tmp_idx
+            i = i + 1
+        gap = gap / 2
 
     var result: List<text> = []
     var k = 0
@@ -239,10 +250,12 @@ fn print_discovery_summary(files: List<text>, options: TestOptions):
     print "Discovered {files.len()} test file(s)"
     for f in files:
         if options.show_tags:
+            # Read file content ONCE for all tag checks
+            val content = read_file_content(f)
             var tags: List<text> = []
-            if file_has_slow_test(f):
+            if content.contains("slow_it "):
                 tags.push("slow")
-            if file_has_skip_tag(f):
+            if content.contains("tag: \"skip\"") or content.contains("tag: 'skip'"):
                 tags.push("skip")
             if tags.len() > 0:
                 val tag_str = tags.join(", ")
