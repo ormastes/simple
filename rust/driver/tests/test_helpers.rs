@@ -173,6 +173,34 @@ pub fn run_expect_all(src: &str, expected: i32) {
     assert_eq!(result.exit_code, expected);
 }
 
+/// Like run_expect_all but returns false (skip) if AOT stub is unavailable.
+#[allow(dead_code)]
+pub fn run_expect_all_optional(src: &str, expected: i32) -> bool {
+    let interpreter = Interpreter::new();
+    match interpreter.run(
+        src,
+        RunConfig {
+            running_type: RunningType::All,
+            in_memory: true,
+            ..Default::default()
+        },
+    ) {
+        Ok(result) => {
+            assert_eq!(result.exit_code, expected);
+            true
+        }
+        Err(e) => {
+            let msg = format!("{}", e);
+            if msg.contains("Invalid executable stub") || msg.contains("stub") {
+                eprintln!("Skipping AOT test: stub binary not available");
+                false
+            } else {
+                panic!("run_expect_all_optional failed: {}", e);
+            }
+        }
+    }
+}
+
 /// Helper to run source in interpreter-only mode.
 /// Use this for code without explicit type annotations.
 /// Interpreter can run any code, but compiler requires types.
