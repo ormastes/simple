@@ -76,6 +76,9 @@ pub mod i18n;
 pub mod native_ffi;
 pub mod package;
 pub mod regex;
+pub mod ast_ffi;
+pub mod env_ffi;
+pub mod error_ffi;
 
 // Import parent interpreter types
 type Enums = HashMap<String, EnumDef>;
@@ -753,6 +756,9 @@ pub(crate) fn call_extern_function(
         // i18n
         "rt_cli_run_i18n" => cli::rt_cli_run_i18n(&evaluated),
 
+        // FFI generator
+        "rt_cli_run_ffi_gen" => cli::rt_cli_run_ffi_gen(&evaluated),
+
         // Context pack generation
         "rt_context_generate" => cli::rt_context_generate(&evaluated),
         "rt_context_stats" => cli::rt_context_stats(&evaluated),
@@ -1066,6 +1072,68 @@ pub(crate) fn call_extern_function(
         "ffi_regex_replace_all" => regex::replace_all(&evaluated),
         "ffi_regex_split" => regex::split(&evaluated),
         "ffi_regex_split_n" => regex::split_n(&evaluated),
+
+        // ====================================================================
+        // AST Node Accessor FFI (28 functions)
+        // ====================================================================
+        "rt_ast_expr_tag" => ast_ffi::rt_ast_expr_tag(&evaluated),
+        "rt_ast_expr_int_value" => ast_ffi::rt_ast_expr_int_value(&evaluated),
+        "rt_ast_expr_float_value" => ast_ffi::rt_ast_expr_float_value(&evaluated),
+        "rt_ast_expr_string_value" => ast_ffi::rt_ast_expr_string_value(&evaluated),
+        "rt_ast_expr_bool_value" => ast_ffi::rt_ast_expr_bool_value(&evaluated),
+        "rt_ast_expr_ident_name" => ast_ffi::rt_ast_expr_ident_name(&evaluated),
+        "rt_ast_expr_binary_op" => ast_ffi::rt_ast_expr_binary_op(&evaluated),
+        "rt_ast_expr_binary_left" => ast_ffi::rt_ast_expr_binary_left(&evaluated),
+        "rt_ast_expr_binary_right" => ast_ffi::rt_ast_expr_binary_right(&evaluated),
+        "rt_ast_expr_unary_op" => ast_ffi::rt_ast_expr_unary_op(&evaluated),
+        "rt_ast_expr_unary_operand" => ast_ffi::rt_ast_expr_unary_operand(&evaluated),
+        "rt_ast_expr_call_callee" => ast_ffi::rt_ast_expr_call_callee(&evaluated),
+        "rt_ast_expr_call_arg_count" => ast_ffi::rt_ast_expr_call_arg_count(&evaluated),
+        "rt_ast_expr_call_arg" => ast_ffi::rt_ast_expr_call_arg(&evaluated),
+        "rt_ast_arg_value" => ast_ffi::rt_ast_arg_value(&evaluated),
+        "rt_ast_arg_name" => ast_ffi::rt_ast_arg_name(&evaluated),
+        "rt_ast_expr_method_receiver" => ast_ffi::rt_ast_expr_method_receiver(&evaluated),
+        "rt_ast_expr_method_name" => ast_ffi::rt_ast_expr_method_name(&evaluated),
+        "rt_ast_expr_method_arg_count" => ast_ffi::rt_ast_expr_method_arg_count(&evaluated),
+        "rt_ast_expr_method_arg" => ast_ffi::rt_ast_expr_method_arg(&evaluated),
+        "rt_ast_expr_field_receiver" => ast_ffi::rt_ast_expr_field_receiver(&evaluated),
+        "rt_ast_expr_field_name" => ast_ffi::rt_ast_expr_field_name(&evaluated),
+        "rt_ast_expr_array_len" => ast_ffi::rt_ast_expr_array_len(&evaluated),
+        "rt_ast_expr_array_get" => ast_ffi::rt_ast_expr_array_get(&evaluated),
+        "rt_ast_expr_free" => ast_ffi::rt_ast_expr_free(&evaluated),
+        "rt_ast_node_free" => ast_ffi::rt_ast_node_free(&evaluated),
+        "rt_ast_arg_free" => ast_ffi::rt_ast_arg_free(&evaluated),
+        "rt_ast_registry_clear" => ast_ffi::rt_ast_registry_clear(&evaluated),
+        "rt_ast_registry_count" => ast_ffi::rt_ast_registry_count(&evaluated),
+
+        // ====================================================================
+        // Environment/Scope FFI (12 functions)
+        // ====================================================================
+        "rt_env_new_handle" => env_ffi::rt_env_new(&evaluated),
+        "rt_env_push_scope" => env_ffi::rt_env_push_scope(&evaluated),
+        "rt_env_pop_scope" => env_ffi::rt_env_pop_scope(&evaluated),
+        "rt_env_define_var" => env_ffi::rt_env_define(&evaluated),
+        "rt_env_get_var" => env_ffi::rt_env_get_var(&evaluated),
+        "rt_env_set_var" => env_ffi::rt_env_set_var(&evaluated),
+        "rt_env_has_var" => env_ffi::rt_env_has_var(&evaluated),
+        "rt_env_snapshot" => env_ffi::rt_env_snapshot(&evaluated),
+        "rt_env_scope_depth" => env_ffi::rt_env_scope_depth(&evaluated),
+        "rt_env_free_handle" => env_ffi::rt_env_free_handle(&evaluated),
+        "rt_env_var_count" => env_ffi::rt_env_var_count(&evaluated),
+        "rt_env_var_names" => env_ffi::rt_env_var_names(&evaluated),
+
+        // ====================================================================
+        // Error Creation FFI (9 functions)
+        // ====================================================================
+        "rt_error_semantic" => error_ffi::rt_error_semantic(&evaluated),
+        "rt_error_type_mismatch" => error_ffi::rt_error_type_mismatch(&evaluated),
+        "rt_error_undefined_var" => error_ffi::rt_error_undefined_var(&evaluated),
+        "rt_error_arg_count" => error_ffi::rt_error_arg_count(&evaluated),
+        "rt_error_division_by_zero" => error_ffi::rt_error_division_by_zero(&evaluated),
+        "rt_error_index_oob" => error_ffi::rt_error_index_oob(&evaluated),
+        "rt_error_throw" => error_ffi::rt_error_throw(&evaluated),
+        "rt_error_message" => error_ffi::rt_error_message(&evaluated),
+        "rt_error_free" => error_ffi::rt_error_free(&evaluated),
 
         _ => Err(common::unknown_function(name)),
     }

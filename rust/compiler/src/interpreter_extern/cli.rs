@@ -344,6 +344,11 @@ pub fn rt_cli_run_i18n(_args: &[Value]) -> Result<Value, CompileError> {
     interpreter_not_supported("rt_cli_run_i18n")
 }
 
+/// Run FFI generator command
+pub fn rt_cli_run_ffi_gen(_args: &[Value]) -> Result<Value, CompileError> {
+    interpreter_not_supported("rt_cli_run_ffi_gen")
+}
+
 /// Generate context pack
 pub fn rt_context_generate(_args: &[Value]) -> Result<Value, CompileError> {
     interpreter_not_supported("rt_context_generate")
