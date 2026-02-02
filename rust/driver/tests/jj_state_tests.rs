@@ -21,6 +21,11 @@ fn assert_jj_commit_contains(repo_path: &PathBuf, expected: &str) {
     );
 }
 
+/// Returns true if jj CLI is available on this system
+fn jj_available() -> bool {
+    std::process::Command::new("jj").arg("--version").output().is_ok()
+}
+
 /// Helper to set up a jj repo and return (TempDir, path, manager)
 fn setup_jj_repo() -> (TempDir, PathBuf, JjStateManager) {
     let temp = TempDir::new().unwrap();
@@ -60,6 +65,9 @@ fn jj_state_manager_disabled_when_no_repo() {
 
 #[test]
 fn snapshot_build_creates_commit() {
+    if !jj_available() {
+        return;
+    }
     let temp = TempDir::new().unwrap();
     let repo_path = temp.path().to_path_buf();
 
@@ -89,6 +97,9 @@ fn snapshot_build_creates_commit() {
 
 #[test]
 fn snapshot_test_creates_commit() {
+    if !jj_available() {
+        return;
+    }
     let temp = TempDir::new().unwrap();
     let repo_path = temp.path().to_path_buf();
 
@@ -163,6 +174,9 @@ fn test_metadata_serializes_correctly() {
 
 #[test]
 fn get_last_working_state_returns_latest() {
+    if !jj_available() {
+        return;
+    }
     let (_temp, repo_path, manager) = setup_jj_repo();
 
     // Create a build snapshot
@@ -252,6 +266,9 @@ fn snapshot_message_format_correct() {
 
 #[test]
 fn multiple_snapshots_track_history() {
+    if !jj_available() {
+        return;
+    }
     let (_temp, repo_path, manager) = setup_jj_repo();
 
     // Create multiple snapshots
@@ -308,6 +325,9 @@ fn snapshot_fails_gracefully_no_repo() {
 
 #[test]
 fn snapshot_preserves_git_state() {
+    if !jj_available() {
+        return;
+    }
     let temp = TempDir::new().unwrap();
     let repo_path = temp.path().to_path_buf();
 
@@ -377,6 +397,9 @@ fn snapshot_preserves_git_state() {
 
 #[test]
 fn snapshot_is_idempotent() {
+    if !jj_available() {
+        return;
+    }
     let (_temp, _repo_path, manager) = setup_jj_repo();
 
     let metadata = BuildMetadata {
