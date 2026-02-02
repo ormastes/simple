@@ -382,7 +382,7 @@ fn get_elf_string(elf_data: &[u8], strtab_off: usize, offset: usize) -> String {
 }
 
 /// Resolve a runtime symbol name to its address.
-#[allow(function_casts_as_integer)]
+#[allow(clippy::fn_to_numeric_cast_any)]
 fn resolve_runtime_symbol(name: &str) -> Option<usize> {
     // Map symbol names to function pointers
     let addr: usize = match name {
