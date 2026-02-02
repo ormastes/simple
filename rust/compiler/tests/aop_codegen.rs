@@ -79,7 +79,7 @@ fn jit_can_call_rt_aop_invoke_around() {
 
     let wrapper: extern "C" fn(i64, i64, i64, i64, i64) -> i64 = unsafe { std::mem::transmute(func_ptr) };
     let result_raw = wrapper(
-        target_sum as usize as i64,
+        target_sum as *const () as usize as i64,
         advices.as_ptr() as usize as i64,
         advices.len() as i64,
         args.len() as i64,
