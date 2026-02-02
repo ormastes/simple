@@ -463,6 +463,8 @@ pub(crate) fn call_extern_function(
         "rt_env_home" => system::rt_env_home(&evaluated),
         "rt_env_temp" => system::rt_env_temp(&evaluated),
         "rt_env_cwd" => system::rt_env_cwd(&evaluated),
+        "rt_platform_name" => system::rt_platform_name(&evaluated),
+        "rt_exit" => system::rt_exit(&evaluated),
 
         // ====================================================================
         // Memory Operations (7 functions)

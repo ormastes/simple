@@ -105,7 +105,11 @@ impl LintConfig {
             if let Some(ref args) = attr.args {
                 for arg in args {
                     if let Expr::Identifier(lint_name) = arg {
-                        if let Some(lint) = LintName::from_str(lint_name) {
+                        // Handle meta-lint "unknown_annotation" which suppresses both
+                        if lint_name == "unknown_annotation" {
+                            self.set_level(LintName::UnknownDecorator, level);
+                            self.set_level(LintName::UnknownAttribute, level);
+                        } else if let Some(lint) = LintName::from_str(lint_name) {
                             self.set_level(lint, level);
                         }
                     }

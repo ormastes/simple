@@ -96,7 +96,7 @@ fn create_example_group(description: String, parent: Option<Value>) -> Value {
 }
 
 /// Create an Example Value object
-fn create_example(description: String, block: Value) -> Value {
+fn create_example(description: String, block: Value, resource_limits: Option<Value>) -> Value {
     let mut fields = HashMap::new();
     fields.insert("description".to_string(), Value::Str(description));
     fields.insert("block".to_string(), block);
@@ -112,10 +112,17 @@ fn create_example(description: String, block: Value) -> Value {
     );
     fields.insert(
         "resource_limits".to_string(),
-        Value::Enum {
-            enum_name: "Option".to_string(),
-            variant: "None".to_string(),
-            payload: None,
+        match resource_limits {
+            Some(limits) => Value::Enum {
+                enum_name: "Option".to_string(),
+                variant: "Some".to_string(),
+                payload: Some(Box::new(limits)),
+            },
+            None => Value::Enum {
+                enum_name: "Option".to_string(),
+                variant: "None".to_string(),
+                payload: None,
+            },
         },
     );
 
@@ -514,7 +521,8 @@ pub(super) fn eval_bdd_builtin(
 
             Ok(Some(result?))
         }
-        "it" | "slow_it" => {
+        "it" | "slow_it" | "limited_it" => {
+            let keyword = name;
             let name = eval_arg(
                 args,
                 0,
@@ -529,10 +537,35 @@ pub(super) fn eval_bdd_builtin(
                 Value::Str(s) => s.clone(),
                 _ => "unnamed".to_string(),
             };
-            let block = eval_arg(args, 1, Value::Nil, env, functions, classes, enums, impl_methods)?;
+            // For limited_it, extract named resource_limits argument
+            let mut resource_limits = None;
+            let mut block_index = 1;
+            if keyword == "limited_it" {
+                // Look for named "resource_limits" argument
+                for (i, arg) in args.iter().enumerate() {
+                    if arg.name.as_deref() == Some("resource_limits") || arg.label.as_deref() == Some("resource_limits")
+                    {
+                        let limits_val = eval_arg(args, i, Value::Nil, env, functions, classes, enums, impl_methods)?;
+                        resource_limits = Some(limits_val);
+                        // Block is the last argument
+                        block_index = args.len() - 1;
+                        break;
+                    }
+                }
+            }
+            let block = eval_arg(
+                args,
+                block_index,
+                Value::Nil,
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )?;
 
             // Create and register Example object with current group
-            let example = create_example(name_str.clone(), block.clone());
+            let example = create_example(name_str.clone(), block.clone(), resource_limits);
             add_example_to_current_group(example);
 
             BDD_EXPECT_FAILED.with(|cell| *cell.borrow_mut() = false);

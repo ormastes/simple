@@ -953,4 +953,137 @@ pub fn create_router() -> Router:
         // Should NOT error: no export statements
         assert!(diagnostics.iter().all(|d| d.lint != LintName::ExportOutsideInit));
     }
+
+    // =========================================================================
+    // Unknown annotation tests
+    // =========================================================================
+
+    #[test]
+    fn test_unknown_decorator_warns() {
+        let code = r#"
+@MyCustomDecorator
+fn my_function():
+    pass
+"#;
+        let diagnostics = check_code(code);
+        let unknown_dec: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.lint == LintName::UnknownDecorator)
+            .collect();
+        assert_eq!(unknown_dec.len(), 1);
+        assert!(unknown_dec[0].message.contains("@MyCustomDecorator"));
+    }
+
+    #[test]
+    fn test_known_decorator_no_warning() {
+        let code = r#"
+@pure
+fn my_function():
+    pass
+"#;
+        let diagnostics = check_code(code);
+        assert!(diagnostics.iter().all(|d| d.lint != LintName::UnknownDecorator));
+    }
+
+    #[test]
+    fn test_unknown_attribute_warns() {
+        let code = r#"
+#[my_custom_attr]
+fn my_function():
+    pass
+"#;
+        let diagnostics = check_code(code);
+        let unknown_attr: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.lint == LintName::UnknownAttribute)
+            .collect();
+        assert_eq!(unknown_attr.len(), 1);
+        assert!(unknown_attr[0].message.contains("#[my_custom_attr]"));
+    }
+
+    #[test]
+    fn test_known_attribute_no_warning() {
+        let code = r#"
+#[allow(primitive_api)]
+pub fn my_function(x: i64):
+    pass
+"#;
+        let diagnostics = check_code(code);
+        assert!(diagnostics.iter().all(|d| d.lint != LintName::UnknownAttribute));
+    }
+
+    #[test]
+    fn test_allow_unknown_decorator_suppresses() {
+        let code = r#"
+#[allow(unknown_decorator)]
+@MyCustomDecorator
+fn my_function():
+    pass
+"#;
+        let diagnostics = check_code(code);
+        assert!(diagnostics.iter().all(|d| d.lint != LintName::UnknownDecorator));
+    }
+
+    #[test]
+    fn test_allow_unknown_annotation_suppresses_both() {
+        let code = r#"
+#[allow(unknown_annotation)]
+@MyCustomDecorator
+fn my_function():
+    pass
+"#;
+        let diagnostics = check_code(code);
+        assert!(diagnostics.iter().all(|d| d.lint != LintName::UnknownDecorator));
+        assert!(diagnostics.iter().all(|d| d.lint != LintName::UnknownAttribute));
+    }
+
+    #[test]
+    fn test_all_known_effect_decorators_no_warning() {
+        let code = r#"
+@async
+fn f1():
+    pass
+
+@io
+fn f2():
+    pass
+
+@net
+fn f3():
+    pass
+
+@fs
+fn f4():
+    pass
+
+@unsafe
+fn f5():
+    pass
+"#;
+        let diagnostics = check_code(code);
+        assert!(diagnostics.iter().all(|d| d.lint != LintName::UnknownDecorator));
+    }
+
+    #[test]
+    fn test_unknown_decorator_and_unknown_attribute_lint_names() {
+        assert_eq!(
+            LintName::from_str("unknown_decorator"),
+            Some(LintName::UnknownDecorator)
+        );
+        assert_eq!(
+            LintName::from_str("unknown_attribute"),
+            Some(LintName::UnknownAttribute)
+        );
+        assert_eq!(LintName::UnknownDecorator.as_str(), "unknown_decorator");
+        assert_eq!(LintName::UnknownAttribute.as_str(), "unknown_attribute");
+        assert_eq!(LintName::UnknownDecorator.default_level(), LintLevel::Warn);
+        assert_eq!(LintName::UnknownAttribute.default_level(), LintLevel::Warn);
+    }
+
+    #[test]
+    fn test_all_lints_includes_unknown_annotation_lints() {
+        let all = LintName::all_lints();
+        assert!(all.contains(&LintName::UnknownDecorator));
+        assert!(all.contains(&LintName::UnknownAttribute));
+    }
 }
