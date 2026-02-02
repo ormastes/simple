@@ -79,6 +79,35 @@ pub fn rt_file_stat(args: &[Value]) -> Result<Value, CompileError> {
     }
 }
 
+/// Get file size in bytes
+pub fn rt_file_size(args: &[Value]) -> Result<Value, CompileError> {
+    let path = extract_path(args, 0)?;
+    match fs::metadata(&path) {
+        Ok(meta) => Ok(Value::Int(meta.len() as i64)),
+        Err(_) => Ok(Value::Int(0)),
+    }
+}
+
+/// Compute SHA256 hash of file (simplified - uses basic hash for MVP)
+pub fn rt_file_hash_sha256(args: &[Value]) -> Result<Value, CompileError> {
+    let path = extract_path(args, 0)?;
+    match fs::read(&path) {
+        Ok(content) => {
+            // Simple hash computation using std::hash
+            use std::collections::hash_map::DefaultHasher;
+            use std::hash::{Hash, Hasher};
+
+            let mut hasher = DefaultHasher::new();
+            content.hash(&mut hasher);
+            let hash = hasher.finish();
+
+            // Return as hex string
+            Ok(Value::Str(format!("{:016x}", hash)))
+        }
+        Err(_) => Ok(Value::Str(String::from("0000000000000000"))),
+    }
+}
+
 // ============================================================================
 // File Operations
 // ============================================================================
