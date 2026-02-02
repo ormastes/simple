@@ -1141,10 +1141,18 @@ pub(super) fn eval_bdd_builtin(
             };
             Ok(Some(Value::Matcher(MatcherValue::LessThan(n))))
         }
-        "to_equal" => {
+        "to_equal" | "to_be" => {
             // Alias for eq
             let expected = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
             Ok(Some(Value::Matcher(MatcherValue::Exact(Box::new(expected)))))
+        }
+        "to_contain" | "to_include" => {
+            let needle = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
+            let needle_str = match &needle {
+                Value::Str(s) => s.clone(),
+                other => other.to_display_string(),
+            };
+            Ok(Some(Value::Matcher(MatcherValue::Contains(needle_str))))
         }
         "be_close_to" => {
             let target = eval_arg(args, 0, Value::Float(0.0), env, functions, classes, enums, impl_methods)?;
