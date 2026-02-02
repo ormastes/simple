@@ -1,0 +1,239 @@
+# FFI Wrapper Generator - Main Entry Point
+#
+# Generates Rust/C wrapper code from @Lib annotated extern class declarations.
+# The generated wrappers expose extern "C" functions callable by the Simple runtime.
+#
+# Usage:
+#   simple ffi-gen <file.spl> [OPTIONS]
+#
+# Options:
+#   --output=<dir>    Output directory for generated code (default: generated/ffi/)
+#   --dry-run         Print generated code without writing files
+#   --verbose         Enable verbose logging
+#   --lang=<lang>     Filter to specific language (rust, c)
+#   --help            Show this help message
+
+use app.cli_util (get_cli_args)
+
+import parser
+import rust_codegen
+import cargo_gen
+import type_mapping
+import builder
+
+# FFI for file I/O and process execution
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_dir_create(path: text, recursive: bool) -> bool
+extern fn rt_env_cwd() -> text
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+# ============================================================================
+# CLI Options
+# ============================================================================
+
+class CliOptions:
+    input_file: text
+    output_dir: text
+    dry_run: bool
+    verbose: bool
+    lang_filter: text
+    show_help: bool
+
+    static fn default() -> CliOptions:
+        CliOptions(
+            input_file: "",
+            output_dir: "generated/ffi",
+            dry_run: false,
+            verbose: false,
+            lang_filter: "",
+            show_help: false
+        )
+
+# ============================================================================
+# Help
+# ============================================================================
+
+fn print_help():
+    print "FFI Wrapper Generator"
+    print "====================="
+    print ""
+    print "Generates Rust/C wrapper code from @Lib annotated extern class declarations."
+    print ""
+    print "Usage:"
+    print "  simple ffi-gen <file.spl> [OPTIONS]"
+    print ""
+    print "Options:"
+    print "  --output=<dir>    Output directory (default: generated/ffi/)"
+    print "  --dry-run         Print generated code without writing"
+    print "  --verbose         Verbose logging"
+    print "  --lang=<lang>     Filter by language: rust, c"
+    print "  -h, --help        Show this help"
+    print ""
+    print "Examples:"
+    print "  simple ffi-gen src/my_lib.spl"
+    print "  simple ffi-gen src/my_lib.spl --output=gen/ --verbose"
+    print "  simple ffi-gen src/my_lib.spl --dry-run"
+    print ""
+    print "Annotation format:"
+    print "  @Lib(lang: \"rust\", name: \"regex\", version: \"1.10\")"
+    print "  extern class Regex:"
+    print "      static fn new(pattern: text) -> Regex"
+    print "      fn is_match(input: text) -> bool"
+
+fn print_error(msg: text):
+    print "error: {msg}"
+
+# ============================================================================
+# Argument Parsing
+# ============================================================================
+
+fn parse_args(args: [text]) -> CliOptions:
+    var opts = CliOptions.default()
+
+    for arg in args:
+        if arg == "-h" or arg == "--help":
+            opts.show_help = true
+        elif arg == "--dry-run":
+            opts.dry_run = true
+        elif arg == "--verbose":
+            opts.verbose = true
+        elif arg.starts_with("--output="):
+            opts.output_dir = arg[9:]
+        elif arg.starts_with("--lang="):
+            opts.lang_filter = arg[7:]
+        elif not arg.starts_with("--") and not arg.starts_with("-"):
+            opts.input_file = arg
+
+    opts
+
+# ============================================================================
+# Logging
+# ============================================================================
+
+fn log_info(msg: text, verbose: bool):
+    if verbose:
+        print "[ffi-gen] {msg}"
+
+fn log_step(msg: text):
+    print "  {msg}"
+
+# ============================================================================
+# Generation Pipeline
+# ============================================================================
+
+fn generate_for_file(input_path: text, opts: CliOptions) -> i64:
+    log_info("Reading {input_path}", opts.verbose)
+
+    # Read source file
+    val source = rt_file_read_text(input_path)
+    if source == "":
+        print_error("Failed to read or empty file: {input_path}")
+        return 1
+
+    # Parse @Lib annotations and extern class declarations
+    log_info("Parsing @Lib annotations...", opts.verbose)
+    val lib_specs = parser.parse_lib_externs(source, input_path)
+
+    if lib_specs.len() == 0:
+        print "No @Lib annotations found in {input_path}"
+        return 0
+
+    print "Found {lib_specs.len()} @Lib extern class(es):"
+    for spec in lib_specs:
+        log_step("{spec.class_name} -> {spec.lib_lang}:{spec.lib_name} v{spec.lib_version}")
+
+    # Filter by language if specified
+    var specs = lib_specs
+    if opts.lang_filter != "":
+        specs = lib_specs.filter(\s: s.lib_lang == opts.lang_filter)
+        if specs.len() == 0:
+            print "No @Lib annotations match lang={opts.lang_filter}"
+            return 0
+
+    # Generate code per language backend
+    var rust_specs = specs.filter(\s: s.lib_lang == "rust")
+    var c_specs = specs.filter(\s: s.lib_lang == "c" or s.lib_lang == "cpp")
+
+    if rust_specs.len() > 0:
+        val result = generate_rust_wrappers(rust_specs, opts)
+        if result != 0:
+            return result
+
+    if c_specs.len() > 0:
+        print "warning: C/C++ codegen not yet implemented, skipping {c_specs.len()} spec(s)"
+
+    print "Done."
+    return 0
+
+fn generate_rust_wrappers(specs: [parser.LibExternSpec], opts: CliOptions) -> i64:
+    log_info("Generating Rust wrappers...", opts.verbose)
+
+    # Generate Rust source
+    val rust_source = rust_codegen.generate(specs)
+
+    # Generate Cargo.toml
+    val cargo_toml = cargo_gen.generate(specs)
+
+    if opts.dry_run:
+        print ""
+        print "=== Generated Cargo.toml ==="
+        print cargo_toml
+        print ""
+        print "=== Generated src/lib.rs ==="
+        print rust_source
+        return 0
+
+    # Write files
+    val out_dir = opts.output_dir
+    if not rt_dir_create(out_dir, true):
+        print_error("Failed to create output directory: {out_dir}")
+        return 1
+    if not rt_dir_create("{out_dir}/src", true):
+        print_error("Failed to create src directory: {out_dir}/src")
+        return 1
+
+    if not rt_file_write_text("{out_dir}/Cargo.toml", cargo_toml):
+        print_error("Failed to write Cargo.toml")
+        return 1
+    log_step("Wrote {out_dir}/Cargo.toml")
+
+    if not rt_file_write_text("{out_dir}/src/lib.rs", rust_source):
+        print_error("Failed to write src/lib.rs")
+        return 1
+    log_step("Wrote {out_dir}/src/lib.rs")
+
+    # Build the generated crate
+    log_info("Building generated crate...", opts.verbose)
+    val build_result = builder.build_crate(out_dir, opts.verbose)
+    if build_result != 0:
+        print_error("Failed to build generated crate")
+        return 1
+
+    log_step("Build successful")
+    return 0
+
+# ============================================================================
+# Entry Point
+# ============================================================================
+
+fn main() -> i64:
+    val args = get_cli_args()
+    val opts = parse_args(args)
+
+    if opts.show_help:
+        print_help()
+        return 0
+
+    if opts.input_file == "":
+        print_error("No input file specified")
+        print ""
+        print_help()
+        return 1
+
+    if not rt_file_exists(opts.input_file):
+        print_error("File not found: {opts.input_file}")
+        return 1
+
+    generate_for_file(opts.input_file, opts)

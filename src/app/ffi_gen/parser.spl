@@ -1,0 +1,278 @@
+# FFI Wrapper Generator - Parser Module
+#
+# Parses @Lib annotations and extern class declarations from Simple source code.
+# Uses line-based text scanning (no AST dependency).
+
+import type_mapping
+
+# ============================================================================
+# Data Structures
+# ============================================================================
+
+# Represents an @Lib annotation with its associated extern class
+class LibExternSpec:
+    # @Lib annotation fields
+    lib_lang: text        # "rust", "c", "cpp"
+    lib_name: text        # crate/package name
+    lib_version: text     # version constraint
+    lib_features: [text]  # optional features list
+    lib_pkg_config: text  # optional pkg-config name (C/C++)
+    lib_link: text        # optional linker flag override
+
+    # Extern class definition
+    class_name: text
+    methods: [ExternMethodSpec]
+
+    # Source location
+    source_file: text
+    line_number: i64
+
+# Represents an extern method declaration
+class ExternMethodSpec:
+    name: text
+    kind: text            # "static", "immutable", "mutable"
+    params: [ParamSpec]
+    return_type: text
+    line_number: i64
+
+# Represents a method parameter
+class ParamSpec:
+    name: text
+    type_name: text
+
+# ============================================================================
+# Parser Implementation
+# ============================================================================
+
+# Parse all @Lib extern class declarations from source
+fn parse_lib_externs(source: text, file_path: text) -> [LibExternSpec]:
+    var specs: [LibExternSpec] = []
+    val lines = source.split("\n")
+
+    var i = 0
+    while i < lines.len():
+        val line = lines[i].trim()
+
+        # Look for @Lib annotation
+        if line.starts_with("@Lib("):
+            val annotation = parse_lib_annotation(line)
+            if annotation.lib_lang != "":
+                # Next non-empty line should be "extern class ..."
+                var j = i + 1
+                while j < lines.len() and lines[j].trim() == "":
+                    j = j + 1
+
+                if j < lines.len() and lines[j].trim().starts_with("extern class"):
+                    val class_line = lines[j].trim()
+                    val class_name = parse_class_name(class_line)
+
+                    # Parse methods in the class body
+                    var methods: [ExternMethodSpec] = []
+                    var k = j + 1
+                    while k < lines.len():
+                        val method_line = lines[k]
+                        # Stop at first non-indented, non-empty line
+                        if method_line.trim() != "" and not method_line.starts_with("    ") and not method_line.starts_with("\t"):
+                            k = k  # break
+                        elif method_line.trim() == "":
+                            k = k + 1
+                        else:
+                            val method = parse_method_line(method_line.trim(), k + 1)
+                            if method.name != "":
+                                methods.push(method)
+                            k = k + 1
+
+                    val spec = LibExternSpec(
+                        lib_lang: annotation.lib_lang,
+                        lib_name: annotation.lib_name,
+                        lib_version: annotation.lib_version,
+                        lib_features: annotation.lib_features,
+                        lib_pkg_config: annotation.lib_pkg_config,
+                        lib_link: annotation.lib_link,
+                        class_name: class_name,
+                        methods: methods,
+                        source_file: file_path,
+                        line_number: i + 1
+                    )
+                    specs.push(spec)
+                    i = k
+                else:
+                    i = j
+            else:
+                i = i + 1
+        else:
+            i = i + 1
+
+    specs
+
+# ============================================================================
+# Annotation Parsing
+# ============================================================================
+
+# Intermediate struct for annotation fields
+class LibAnnotation:
+    lib_lang: text
+    lib_name: text
+    lib_version: text
+    lib_features: [text]
+    lib_pkg_config: text
+    lib_link: text
+
+# Parse @Lib(lang: "rust", name: "regex", version: "1.10", ...) annotation
+fn parse_lib_annotation(line: text) -> LibAnnotation:
+    var lang = ""
+    var name = ""
+    var version = ""
+    var features: [text] = []
+    var pkg_config = ""
+    var link = ""
+
+    # Extract content between @Lib( and )
+    val start = line.find("(")
+    val end = line.rfind(")")
+    if start < 0 or end < 0:
+        return LibAnnotation(lib_lang: "", lib_name: "", lib_version: "", lib_features: [], lib_pkg_config: "", lib_link: "")
+
+    val content = line[start + 1:end]
+
+    # Parse key: "value" pairs
+    lang = extract_string_field(content, "lang")
+    name = extract_string_field(content, "name")
+    version = extract_string_field(content, "version")
+    pkg_config = extract_string_field(content, "pkg_config")
+    link = extract_string_field(content, "link")
+    features = extract_string_list_field(content, "features")
+
+    LibAnnotation(lib_lang: lang, lib_name: name, lib_version: version, lib_features: features, lib_pkg_config: pkg_config, lib_link: link)
+
+# Extract a string value for a key from "key: \"value\"" format
+fn extract_string_field(content: text, key: text) -> text:
+    val search = "{key}:"
+    val pos = content.find(search)
+    if pos < 0:
+        # Try without space after colon
+        val search2 = "{key} :"
+        val pos2 = content.find(search2)
+        if pos2 < 0:
+            return ""
+        val after = content[pos2 + search2.len():].trim()
+        return extract_quoted_string(after)
+
+    val after = content[pos + search.len():].trim()
+    extract_quoted_string(after)
+
+# Extract the first quoted string from text
+fn extract_quoted_string(text_val: text) -> text:
+    val quote_start = text_val.find("\"")
+    if quote_start < 0:
+        return ""
+    val rest = text_val[quote_start + 1:]
+    val quote_end = rest.find("\"")
+    if quote_end < 0:
+        return ""
+    rest[:quote_end]
+
+# Extract a list of strings from "features: [\"a\", \"b\"]" format
+fn extract_string_list_field(content: text, key: text) -> [text]:
+    val search = "{key}:"
+    val pos = content.find(search)
+    if pos < 0:
+        return []
+
+    val after = content[pos + search.len():].trim()
+    val bracket_start = after.find("[")
+    if bracket_start < 0:
+        return []
+    val bracket_end = after.find("]")
+    if bracket_end < 0:
+        return []
+
+    val list_content = after[bracket_start + 1:bracket_end]
+    var items: [text] = []
+    val parts = list_content.split(",")
+    for part in parts:
+        val trimmed = part.trim()
+        val extracted = extract_quoted_string(trimmed)
+        if extracted != "":
+            items.push(extracted)
+
+    items
+
+# ============================================================================
+# Class and Method Parsing
+# ============================================================================
+
+# Parse class name from "extern class ClassName:"
+fn parse_class_name(line: text) -> text:
+    val trimmed = line.trim()
+    # Remove "extern class " prefix and ":" suffix
+    var name = trimmed
+    if name.starts_with("extern class "):
+        name = name[13:]
+    if name.ends_with(":"):
+        name = name[:-1]
+    name.trim()
+
+# Parse a method line like "static fn new(pattern: text) -> Regex"
+# or "fn is_match(input: text) -> bool"
+# or "me move(dx: i64, dy: i64)"
+fn parse_method_line(line: text, line_num: i64) -> ExternMethodSpec:
+    var kind = "immutable"
+    var rest = line
+
+    if rest.starts_with("static fn "):
+        kind = "static"
+        rest = rest[10:]
+    elif rest.starts_with("me "):
+        kind = "mutable"
+        rest = rest[3:]
+    elif rest.starts_with("fn "):
+        kind = "immutable"
+        rest = rest[3:]
+    else:
+        return ExternMethodSpec(name: "", kind: "", params: [], return_type: "", line_number: line_num)
+
+    # Extract method name
+    val paren_pos = rest.find("(")
+    if paren_pos < 0:
+        return ExternMethodSpec(name: "", kind: "", params: [], return_type: "", line_number: line_num)
+
+    val name = rest[:paren_pos].trim()
+    val after_name = rest[paren_pos:]
+
+    # Extract parameters
+    val close_paren = after_name.find(")")
+    if close_paren < 0:
+        return ExternMethodSpec(name: "", kind: "", params: [], return_type: "", line_number: line_num)
+
+    val params_str = after_name[1:close_paren]
+    val params = parse_params(params_str)
+
+    # Extract return type
+    val after_params = after_name[close_paren + 1:].trim()
+    var return_type = ""
+    if after_params.starts_with("->"):
+        return_type = after_params[2:].trim()
+        # Remove trailing colon if present
+        if return_type.ends_with(":"):
+            return_type = return_type[:-1].trim()
+
+    ExternMethodSpec(name: name, kind: kind, params: params, return_type: return_type, line_number: line_num)
+
+# Parse parameter list "name: type, name2: type2"
+fn parse_params(params_str: text) -> [ParamSpec]:
+    var params: [ParamSpec] = []
+    val trimmed = params_str.trim()
+    if trimmed == "":
+        return params
+
+    val parts = trimmed.split(",")
+    for part in parts:
+        val p = part.trim()
+        val colon_pos = p.find(":")
+        if colon_pos > 0:
+            val param_name = p[:colon_pos].trim()
+            val param_type = p[colon_pos + 1:].trim()
+            params.push(ParamSpec(name: param_name, type_name: param_type))
+
+    params
