@@ -39,7 +39,8 @@ fi
 # Create tarball
 echo -e "${GREEN}Creating source tarball...${NC}"
 
-tar -czf "$OUTPUT" \
+TMPOUT="/tmp/$OUTPUT"
+tar -czf "$TMPOUT" \
   --exclude='.git' \
   --exclude='rust/target' \
   --exclude='__pycache__' \
@@ -47,11 +48,11 @@ tar -czf "$OUTPUT" \
   --exclude='.DS_Store' \
   --exclude='node_modules' \
   --exclude='*.log' \
-  --exclude="$OUTPUT" \
   --exclude='simple-full-*.tar.gz' \
   --exclude='simple-bootstrap-*.spk' \
   --transform="s,^,simple-${VERSION}/," \
   .
+mv "$TMPOUT" "$OUTPUT"
 
 PKG_SIZE=$(stat -f%z "$OUTPUT" 2>/dev/null || stat -c%s "$OUTPUT")
 
