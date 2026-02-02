@@ -398,6 +398,7 @@ fn runner_handles_power_operator() {
 }
 
 #[test]
+#[ignore] // // was repurposed from floor division to parallel execution operator; use .fdiv() instead
 fn runner_handles_floor_division() {
     run_expect("main = 7 // 2", 3); // floor(7/2) = 3
     run_expect("main = 10 // 3", 3); // floor(10/3) = 3
