@@ -706,6 +706,8 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // Lexer and brief
     RuntimeFuncSpec::new("rt_cli_run_lex", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_cli_run_brief", &[I64], &[I64]),
+    // FFI generation
+    RuntimeFuncSpec::new("rt_cli_run_ffi_gen", &[I64], &[I64]),
     // Context pack generation
     RuntimeFuncSpec::new("rt_context_generate", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_context_stats", &[I64, I64], &[I64]),

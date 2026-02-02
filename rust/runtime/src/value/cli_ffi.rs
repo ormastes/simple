@@ -441,6 +441,11 @@ pub extern "C" fn rt_cli_run_brief(_args: RuntimeValue) -> i64 {
 }
 
 #[no_mangle]
+pub extern "C" fn rt_cli_run_ffi_gen(_args: RuntimeValue) -> i64 {
+    delegate_to_simple_old("ffi-gen", _args)
+}
+
+#[no_mangle]
 pub extern "C" fn rt_context_generate(
     _path: RuntimeValue,
     _target: RuntimeValue,
