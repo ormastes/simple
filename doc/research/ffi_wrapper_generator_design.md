@@ -120,20 +120,52 @@ extern class NdArray:
 
 ## Architecture
 
+### Build Directory Layout
+
+```
+build/
+  rust/                          ← Persistent Rust build environment
+    rust-toolchain.toml          ← Generated from simple.sdn ffi.rust config
+    ffi_gen/                     ← Generated FFI wrapper crate
+      Cargo.toml                 ← Auto-generated with @Lib dependencies
+      src/
+        lib.rs                   ← Auto-generated extern "C" wrappers
+      target/                    ← Cargo build output (cached across runs)
+        release/
+          libsimple_ffi_wrapper.so
+```
+
+The `build/rust/` environment is **set up once** from `simple.sdn` config and **persists
+across runs** to avoid repeated Rust toolchain setup overhead. Only `--clean` removes it.
+
+### Config in simple.sdn
+
+```sdn
+ffi:
+  rust:
+    channel: stable        # Rust toolchain: stable, nightly, 1.78.0, etc.
+    edition: 2021          # Cargo edition for generated crates
+    components: [clippy]   # Extra rustup components
+```
+
+### Generation Flow
+
 ```
 Simple source with @Lib(lang: "rust", name: "regex", version: "1.10") extern class
     │
     ▼
 src/app/ffi_gen/main.spl  ← The generator (written in Simple)
     │
+    ├── Reads ffi.rust config from simple.sdn
+    ├── Ensures build/rust/ env exists (rust-toolchain.toml)
     ├── Parses @Lib annotations + extern class/fn declarations
     ├── Dispatches to language-specific codegen backend
     │   ├── rust_codegen.spl → Rust wrapper + Cargo.toml
     │   ├── c_codegen.spl → C wrapper + build.rs (future)
     │   └── ...
-    ├── Downloads dependency (cargo add / pkg-config / pip)
-    ├── Calls build tool to compile wrapper → .so/.a
-    └── Outputs extern fn dispatch entries
+    ├── Writes generated crate to build/rust/ffi_gen/
+    ├── Calls cargo build (uses build/rust/rust-toolchain.toml)
+    └── Outputs .so/.a in build/rust/ffi_gen/target/release/
 ```
 
 ### Generated Code Pattern (Rust)
@@ -152,14 +184,18 @@ When `@Lib` is found during `simple build`:
 
 ```
 simple build
+  ├── Ensure build/rust/ env (from simple.sdn ffi.rust config)
   ├── Scan .spl files for @Lib annotations
   ├── For each @Lib crate:
-  │   ├── Generate Rust wrapper (src/app/ffi_gen/)
-  │   ├── Generate Cargo.toml with dependency
-  │   └── cargo build --profile=<matching profile>
-  ├── Link FFI .so/.a files
+  │   ├── Generate Rust wrapper → build/rust/ffi_gen/src/lib.rs
+  │   ├── Generate Cargo.toml → build/rust/ffi_gen/Cargo.toml
+  │   └── cargo build --release (uses build/rust/rust-toolchain.toml)
+  ├── Link .so/.a from build/rust/ffi_gen/target/release/
   └── Continue normal Cargo build of simple_runtime
 ```
+
+The `build/rust/` directory persists across builds. Only `simple ffi-gen --clean`
+removes it to force a fresh Rust environment setup.
 
 ## Type Mapping
 
@@ -284,7 +320,7 @@ fn main():
 
 ```bash
 # Generate wrappers
-simple ffi-gen src/user_code.spl --output generated/
+simple ffi-gen src/user_code.spl
 
 # Or automatically during build
 simple build  # detects @Lib, generates + compiles wrappers
