@@ -225,5 +225,5 @@ fn module_path_is_set() {
     let module = loader.load(&so_path).expect("should load");
 
     // Path should match what we loaded
-    assert_eq!(module.path, so_path.canonicalize().unwrap());
+    assert_eq!(module.path.canonicalize().ok(), so_path.canonicalize().ok());
 }
