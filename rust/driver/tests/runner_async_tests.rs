@@ -17,8 +17,8 @@ use test_helpers::run_expect;
 fn runner_generator_single_yield() {
     run_expect(
         r#"
-let gen = generator(\: yield 42)
-main = next(gen)
+let g = generator(\: yield 42)
+main = next(g)
 "#,
         42,
     );
@@ -28,10 +28,10 @@ main = next(gen)
 fn runner_generator_multiple_yields() {
     run_expect(
         r#"
-let gen = generator(\: [yield 1, yield 2, yield 3])
-let a = next(gen)
-let b = next(gen)
-let c = next(gen)
+let g = generator(\: [yield 1, yield 2, yield 3])
+let a = next(g)
+let b = next(g)
+let c = next(g)
 main = a + b + c
 "#,
         6,
@@ -43,9 +43,9 @@ fn runner_generator_exhaustion_returns_nil() {
     // After generator is exhausted, next() returns nil which converts to 0
     run_expect(
         r#"
-let gen = generator(\: yield 10)
-let first = next(gen)
-let second = next(gen)
+let g = generator(\: yield 10)
+let first = next(g)
+let second = next(g)
 # nil is falsy, so this returns first (10)
 main = if second: second else: first
 "#,
@@ -59,9 +59,9 @@ fn runner_generator_state_preserved_across_yields() {
     // Using tuple expression to sequence operations in single line
     run_expect(
         r#"
-let gen = generator(\: (yield 10, yield 15)[1])
-let a = next(gen)
-let b = next(gen)
+let g = generator(\: (yield 10, yield 15)[1])
+let a = next(g)
+let b = next(g)
 main = a + b
 "#,
         25,
@@ -74,9 +74,9 @@ fn runner_generator_with_captured_variable() {
     run_expect(
         r#"
 let base = 100
-let gen = generator(\: [yield base, yield base])
-let a = next(gen)
-let b = next(gen)
+let g = generator(\: [yield base, yield base])
+let a = next(g)
+let b = next(g)
 main = a + b
 "#,
         200,
@@ -89,8 +89,8 @@ fn runner_generator_arithmetic_in_yield() {
     run_expect(
         r#"
 let value = 2 * 3
-let gen = generator(\: yield value)
-main = next(gen)
+let g = generator(\: yield value)
+main = next(g)
 "#,
         6,
     );
@@ -101,8 +101,8 @@ fn runner_generator_nested_iteration() {
     // Test using next() multiple times to drain generator
     run_expect(
         r#"
-let gen = generator(\: [yield 1, yield 2, yield 3, yield 4])
-let sum = next(gen) + next(gen) + next(gen) + next(gen)
+let g = generator(\: [yield 1, yield 2, yield 3, yield 4])
+let sum = next(g) + next(g) + next(g) + next(g)
 main = sum
 "#,
         10,
@@ -120,10 +120,10 @@ fn parity_generator_basic_sequence() {
     // The interpreter tests in interpreter_async_tests.rs use same patterns
     run_expect(
         r#"
-let gen = generator(\: [yield 1, yield 2, yield 3])
-let first = next(gen)
-let second = next(gen)
-let third = next(gen)
+let g = generator(\: [yield 1, yield 2, yield 3])
+let first = next(g)
+let second = next(g)
+let third = next(g)
 main = first + second + third
 "#,
         6,
@@ -135,8 +135,8 @@ fn parity_generator_single_value() {
     // Matches interpreter_generator_single test
     run_expect(
         r#"
-let gen = generator(\: yield 42)
-main = next(gen)
+let g = generator(\: yield 42)
+main = next(g)
 "#,
         42,
     );
@@ -301,10 +301,10 @@ fn parity_generator_multiple_captures() {
 let a = 10
 let b = 20
 let c = 30
-let gen = generator(\: [yield a, yield b, yield c])
-let x = next(gen)
-let y = next(gen)
-let z = next(gen)
+let g = generator(\: [yield a, yield b, yield c])
+let x = next(g)
+let y = next(g)
+let z = next(g)
 main = x + y + z
 "#,
         60,
@@ -318,10 +318,10 @@ fn parity_generator_capture_and_compute() {
     run_expect(
         r#"
 let multiplier = 10
-let gen = generator(\: [yield (1 * multiplier), yield (2 * multiplier), yield (3 * multiplier)])
-let a = next(gen)
-let b = next(gen)
-let c = next(gen)
+let g = generator(\: [yield (1 * multiplier), yield (2 * multiplier), yield (3 * multiplier)])
+let a = next(g)
+let b = next(g)
+let c = next(g)
 main = a + b + c
 "#,
         60,
@@ -380,9 +380,9 @@ fn parity_generator_state_and_capture() {
     run_expect(
         r#"
 let offset = 100
-let gen = generator(\: [yield (1 + offset), yield (2 + offset)])
-let a = next(gen)
-let b = next(gen)
+let g = generator(\: [yield (1 + offset), yield (2 + offset)])
+let a = next(g)
+let b = next(g)
 main = a + b
 "#,
         203,
@@ -395,9 +395,9 @@ fn parity_generator_exhaustion_with_capture() {
     run_expect(
         r#"
 let value = 42
-let gen = generator(\: yield value)
-let first = next(gen)
-let second = next(gen)
+let g = generator(\: yield value)
+let first = next(g)
+let second = next(g)
 main = first
 "#,
         42,
@@ -412,8 +412,8 @@ fn parity_nested_generator_captures() {
         r#"
 let x = 5
 let y = 3
-let gen = generator(\: yield (x * y + x))
-main = next(gen)
+let g = generator(\: yield (x * y + x))
+main = next(g)
 "#,
         20,
     );
