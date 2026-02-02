@@ -130,7 +130,10 @@ pub extern "C" fn native_pty_read(fd: i64, timeout_ms: i64) -> RuntimeValue {
                     return string_to_runtime_value("");
                 } else {
                     // Error or would block
+                    #[cfg(target_os = "linux")]
                     let errno = *libc::__errno_location();
+                    #[cfg(target_os = "macos")]
+                    let errno = *libc::__error();
                     if errno == libc::EAGAIN || errno == libc::EWOULDBLOCK {
                         // No data available, check timeout
                         if start.elapsed() >= timeout_duration {
