@@ -32,7 +32,7 @@ fn test_actor_spawn() {
 
     LOCAL_COUNTER.with(|c| c.set(0));
 
-    let actor = rt_actor_spawn(local_counting_actor as u64, RuntimeValue::NIL);
+    let actor = rt_actor_spawn(local_counting_actor as *const () as u64, RuntimeValue::NIL);
 
     // Should return a valid actor handle
     assert!(actor.is_heap());
@@ -103,7 +103,7 @@ fn test_actor_send_and_recv() {
     RECV_VALUE.store(0, Ordering::SeqCst);
 
     // Spawn actor
-    let actor = rt_actor_spawn(recv_actor as u64, RuntimeValue::NIL);
+    let actor = rt_actor_spawn(recv_actor as *const () as u64, RuntimeValue::NIL);
 
     // Give actor time to start and block on recv
     thread::sleep(Duration::from_millis(20));
@@ -148,7 +148,7 @@ fn test_actor_multiple_messages() {
     MULTI_SUM.store(0, Ordering::SeqCst);
 
     // Spawn actor
-    let actor = rt_actor_spawn(multi_recv_actor as u64, RuntimeValue::NIL);
+    let actor = rt_actor_spawn(multi_recv_actor as *const () as u64, RuntimeValue::NIL);
 
     // Give actor time to start
     thread::sleep(Duration::from_millis(20));
@@ -169,7 +169,7 @@ fn test_actor_multiple_messages() {
 fn test_actor_join() {
     ACTOR_RAN.store(false, Ordering::SeqCst);
 
-    let actor = rt_actor_spawn(flag_setting_actor as u64, RuntimeValue::NIL);
+    let actor = rt_actor_spawn(flag_setting_actor as *const () as u64, RuntimeValue::NIL);
 
     // Join should wait for actor to complete
     let result = rt_actor_join(actor);
@@ -198,7 +198,7 @@ fn test_actor_is_alive() {
         thread::sleep(Duration::from_millis(200));
     }
 
-    let actor = rt_actor_spawn(long_running_actor as u64, RuntimeValue::NIL);
+    let actor = rt_actor_spawn(long_running_actor as *const () as u64, RuntimeValue::NIL);
 
     // Should be alive immediately after spawn
     let alive = rt_actor_is_alive(actor);
@@ -230,9 +230,9 @@ fn test_actor_concurrent_spawns() {
     CONCURRENT_COUNTER.store(0, Ordering::SeqCst);
 
     // Spawn multiple actors concurrently
-    let actor1 = rt_actor_spawn(concurrent_counting_actor as u64, RuntimeValue::NIL);
-    let actor2 = rt_actor_spawn(concurrent_counting_actor as u64, RuntimeValue::NIL);
-    let actor3 = rt_actor_spawn(concurrent_counting_actor as u64, RuntimeValue::NIL);
+    let actor1 = rt_actor_spawn(concurrent_counting_actor as *const () as u64, RuntimeValue::NIL);
+    let actor2 = rt_actor_spawn(concurrent_counting_actor as *const () as u64, RuntimeValue::NIL);
+    let actor3 = rt_actor_spawn(concurrent_counting_actor as *const () as u64, RuntimeValue::NIL);
 
     // All should have valid, unique IDs
     let id1 = rt_actor_id(actor1);
@@ -274,7 +274,7 @@ fn test_actor_message_ordering() {
 
     ORDER_SUM.store(0, Ordering::SeqCst);
 
-    let actor = rt_actor_spawn(ordered_actor as u64, RuntimeValue::NIL);
+    let actor = rt_actor_spawn(ordered_actor as *const () as u64, RuntimeValue::NIL);
     thread::sleep(Duration::from_millis(20));
 
     // Send messages in order
@@ -304,7 +304,7 @@ fn test_actor_recv_timeout() {
 
     RECV_FAILED.store(false, Ordering::SeqCst);
 
-    let actor = rt_actor_spawn(timeout_actor as u64, RuntimeValue::NIL);
+    let actor = rt_actor_spawn(timeout_actor as *const () as u64, RuntimeValue::NIL);
 
     // Don't send any message - let recv timeout
     // Join to ensure actor completed
@@ -331,7 +331,7 @@ fn test_actor_with_context() {
     use crate::value::rt_array_new;
     let ctx = rt_array_new(1);
 
-    let actor = rt_actor_spawn(context_actor as u64, ctx);
+    let actor = rt_actor_spawn(context_actor as *const () as u64, ctx);
 
     // Wait for actor
     rt_actor_join(actor);
