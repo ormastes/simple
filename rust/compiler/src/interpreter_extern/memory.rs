@@ -154,3 +154,106 @@ fn parse_size_string(s: &str) -> Option<usize> {
         s.parse::<usize>().ok()
     }
 }
+
+// ============================================================================
+// System Allocator Functions
+// ============================================================================
+
+/// Allocate memory with specified size and alignment
+///
+/// Callable from Simple as: `sys_malloc(size, align)`
+///
+/// # Arguments
+/// * `args` - [size: usize, align: usize]
+///
+/// # Returns
+/// * Byte array representing allocated memory pointer
+pub fn sys_malloc(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 2 {
+        return Err(CompileError::runtime("sys_malloc requires 2 arguments (size, align)"));
+    }
+
+    let size = args[0].as_int()? as usize;
+    let align = args[1].as_int()? as usize;
+
+    // Allocate memory using Rust's allocator
+    let layout = std::alloc::Layout::from_size_align(size, align)
+        .map_err(|_| CompileError::runtime("sys_malloc: invalid size or alignment"))?;
+
+    unsafe {
+        let ptr = std::alloc::alloc(layout);
+        if ptr.is_null() {
+            return Err(CompileError::runtime("sys_malloc: allocation failed"));
+        }
+
+        // Return pointer as a single-element byte array containing the pointer address
+        // We use a trick: encode the pointer as an Int value
+        Ok(Value::Int(ptr as i64))
+    }
+}
+
+/// Free memory allocated by sys_malloc
+///
+/// Callable from Simple as: `sys_free(ptr, size, align)`
+///
+/// # Arguments
+/// * `args` - [ptr: [u8], size: usize, align: usize]
+pub fn sys_free(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 3 {
+        return Err(CompileError::runtime("sys_free requires 3 arguments (ptr, size, align)"));
+    }
+
+    let ptr_val = args[0].as_int()?;
+    let size = args[1].as_int()? as usize;
+    let align = args[2].as_int()? as usize;
+
+    if ptr_val == 0 {
+        // Null pointer - nothing to free
+        return Ok(Value::Nil);
+    }
+
+    // Deallocate memory
+    let layout = std::alloc::Layout::from_size_align(size, align)
+        .map_err(|_| CompileError::runtime("sys_free: invalid size or alignment"))?;
+
+    unsafe {
+        let ptr = ptr_val as *mut u8;
+        std::alloc::dealloc(ptr, layout);
+    }
+
+    Ok(Value::Nil)
+}
+
+/// Reallocate memory
+///
+/// Callable from Simple as: `sys_realloc(ptr, old_size, new_size, align)`
+///
+/// # Arguments
+/// * `args` - [ptr: [u8], old_size: usize, new_size: usize, align: usize]
+///
+/// # Returns
+/// * New pointer as byte array
+pub fn sys_realloc(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 4 {
+        return Err(CompileError::runtime("sys_realloc requires 4 arguments (ptr, old_size, new_size, align)"));
+    }
+
+    let ptr_val = args[0].as_int()?;
+    let old_size = args[1].as_int()? as usize;
+    let new_size = args[2].as_int()? as usize;
+    let align = args[3].as_int()? as usize;
+
+    let old_layout = std::alloc::Layout::from_size_align(old_size, align)
+        .map_err(|_| CompileError::runtime("sys_realloc: invalid old size or alignment"))?;
+
+    unsafe {
+        let old_ptr = ptr_val as *mut u8;
+        let new_ptr = std::alloc::realloc(old_ptr, old_layout, new_size);
+
+        if new_ptr.is_null() {
+            return Err(CompileError::runtime("sys_realloc: reallocation failed"));
+        }
+
+        Ok(Value::Int(new_ptr as i64))
+    }
+}
