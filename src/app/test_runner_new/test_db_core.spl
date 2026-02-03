@@ -18,6 +18,8 @@ use test_db_types.*
 use test_db_io.{DB_PATH, RUNS_PATH, read_db_file, write_db_file_locked}
 use test_db_parser.{parse_stable_db, parse_volatile_db, ParsedStableDb, ParsedVolatileDb}
 use test_db_serializer.{serialize_stable_db, serialize_volatile_db}
+use test_stats.{compute_statistics, compute_percentiles, detect_outliers_iqr, sort_f64, percentile_at, abs_f64, detect_flaky_test}
+use test_db_validation.{validate_database, print_validation_warnings}
 
 # =========================================================================
 # TestDatabase
@@ -219,6 +221,9 @@ impl TestDatabase:
     # -----------------------------------------------------------------
 
     me update_counter(name_str: i64, status: text, is_new: bool, change: text):
+        # Map status to short label for last_10_runs
+        val run_label = if status == "passed": "pass" elif status == "failed": "fail" else: "skip"
+
         # Find existing counter
         var found = false
         var i = 0
@@ -233,6 +238,12 @@ impl TestDatabase:
                 if is_flaky_change(change):
                     self.counters[i].flaky_count = self.counters[i].flaky_count + 1
                 self.counters[i].last_change = change
+                # B1: Update last_10_runs (cap at 10)
+                self.counters[i].last_10_runs = append_run_label(self.counters[i].last_10_runs, run_label)
+                # B2: Compute failure_rate_pct
+                val total = self.counters[i].total_runs
+                if total > 0:
+                    self.counters[i].failure_rate_pct = self.counters[i].failed.to_float() / total.to_float() * 100.0
                 found = true
                 break
             i = i + 1
@@ -240,13 +251,16 @@ impl TestDatabase:
         if not found:
             val passed_count = if status == "passed": 1 else: 0
             val failed_count = if status == "failed": 1 else: 0
+            val fail_rate = if status == "failed": 100.0 else: 0.0
             self.counters.push(CounterRecord(
                 test_id: name_str,
                 total_runs: 1,
                 passed: passed_count,
                 failed: failed_count,
                 flaky_count: 0,
-                last_change: "new_test"
+                last_change: "new_test",
+                last_10_runs: run_label,
+                failure_rate_pct: fail_rate
             ))
 
     # -----------------------------------------------------------------
