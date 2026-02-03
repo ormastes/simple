@@ -283,11 +283,7 @@ fn test_shuffle_with_different_seed_produces_different_order() {
 
 #[test]
 fn test_shuffle_preserves_all_elements() {
-    let mut tests = vec![
-        PathBuf::from("a.spl"),
-        PathBuf::from("b.spl"),
-        PathBuf::from("c.spl"),
-    ];
+    let mut tests = vec![PathBuf::from("a.spl"), PathBuf::from("b.spl"), PathBuf::from("c.spl")];
 
     let original_len = tests.len();
 
@@ -357,10 +353,14 @@ fn test_run_tests_with_single_passing_test() {
     fs::create_dir_all(&test_dir).unwrap();
 
     let test_file = test_dir.join("simple_spec.spl");
-    fs::write(&test_file, r#"
+    fs::write(
+        &test_file,
+        r#"
         it "simple test":
             assert 1 + 1 == 2
-    "#).unwrap();
+    "#,
+    )
+    .unwrap();
 
     // Should run and pass
 }
@@ -372,10 +372,14 @@ fn test_run_tests_counts_passed_and_failed() {
     fs::create_dir_all(&test_dir).unwrap();
 
     let test_file = test_dir.join("mixed_spec.spl");
-    fs::write(&test_file, r#"
+    fs::write(
+        &test_file,
+        r#"
         it "pass": assert true
         it "fail": assert false
-    "#).unwrap();
+    "#,
+    )
+    .unwrap();
 
     // Should count 1 passed, 1 failed
 }
@@ -478,4 +482,3 @@ fn test_run_tests_profile_mode() {
     // Should collect profiling data
     assert!(options.profile);
 }
-

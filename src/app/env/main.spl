@@ -1,15 +1,144 @@
 # Simple CLI - env command
-# Delegates to Rust runtime via FFI
+# Virtual environment management
 
 use app.cli_util (get_cli_args)
-extern fn rt_cli_handle_env(args: [str]) -> i64
+
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_dir_create(path: text, recursive: bool) -> bool
+extern fn rt_env_cwd() -> text
+extern fn rt_env_get(key: text) -> text
+extern fn rt_package_remove_dir_all(path: text) -> i32
+extern fn rt_package_is_dir(path: text) -> i32
 
 fn print_help():
-    print "Usage: simple env [options]"
-    print "Manages virtual environments"
+    print "Usage: simple env <subcommand>"
     print ""
-    print "Run 'simple env --help' for Rust-level help."
+    print "Manage Simple virtual environments."
+    print ""
+    print "Subcommands:"
+    print "  create         Create a new virtual environment"
+    print "  activate       Show activation instructions"
+    print "  deactivate     Show deactivation instructions"
+    print "  status         Show current environment status"
+    print "  delete         Delete the virtual environment"
+    print ""
+    print "Options:"
+    print "  --name=<name>  Environment name (default: .simple-env)"
+    print "  -h, --help     Show this help"
+
+fn get_env_dir(name: text) -> text:
+    val cwd = rt_env_cwd()
+    "{cwd}/{name}"
+
+fn handle_create(env_name: text) -> i64:
+    val env_dir = get_env_dir(env_name)
+
+    if rt_package_is_dir(env_dir) == 1:
+        print "error: environment '{env_name}' already exists"
+        return 1
+
+    if not rt_dir_create(env_dir, true):
+        print "error: failed to create environment directory"
+        return 1
+
+    rt_dir_create("{env_dir}/lib", true)
+    rt_dir_create("{env_dir}/bin", true)
+    rt_dir_create("{env_dir}/simple_modules", true)
+
+    val config = "# Simple Virtual Environment\nname: {env_name}\ncreated: 2026-02-03\n"
+    rt_file_write_text("{env_dir}/env.sdn", config)
+
+    val activate = "# Source this file to activate the environment\n# Usage: source {env_name}/activate.sh\nexport SIMPLE_ENV=\"{env_dir}\"\nexport OLD_PATH=\"$PATH\"\nexport PATH=\"{env_dir}/bin:$PATH\"\nexport SIMPLE_MODULES=\"{env_dir}/simple_modules\"\n"
+    rt_file_write_text("{env_dir}/activate.sh", activate)
+
+    val deactivate = "# Source this file to deactivate the environment\nexport PATH=\"$OLD_PATH\"\nunset SIMPLE_ENV\nunset OLD_PATH\nunset SIMPLE_MODULES\n"
+    rt_file_write_text("{env_dir}/deactivate.sh", deactivate)
+
+    print "Created virtual environment '{env_name}'"
+    print ""
+    print "To activate:"
+    print "  source {env_name}/activate.sh"
+    0
+
+fn handle_activate(env_name: text) -> i64:
+    val env_dir = get_env_dir(env_name)
+    if rt_package_is_dir(env_dir) != 1:
+        print "error: environment '{env_name}' does not exist"
+        print "Run 'simple env create' first."
+        return 1
+
+    print "To activate the environment:"
+    print "  source {env_name}/activate.sh"
+    print ""
+    print "To deactivate:"
+    print "  source {env_name}/deactivate.sh"
+    0
+
+fn handle_status(env_name: text) -> i64:
+    val active = rt_env_get("SIMPLE_ENV")
+    if active != "":
+        print "Active environment: {active}"
+    else:
+        val env_dir = get_env_dir(env_name)
+        if rt_package_is_dir(env_dir) == 1:
+            print "Environment '{env_name}' exists but is not active."
+            print "Run 'source {env_name}/activate.sh' to activate."
+        else:
+            print "No virtual environment found."
+            print "Run 'simple env create' to create one."
+    0
+
+fn handle_delete(env_name: text) -> i64:
+    val env_dir = get_env_dir(env_name)
+    if rt_package_is_dir(env_dir) != 1:
+        print "error: environment '{env_name}' does not exist"
+        return 1
+
+    val result = rt_package_remove_dir_all(env_dir)
+    if result != 0:
+        print "error: failed to delete environment"
+        return 1
+
+    print "Deleted virtual environment '{env_name}'"
+    0
 
 fn main() -> i64:
     val args = get_cli_args()
-    rt_cli_handle_env(args)
+
+    if args.len() == 0:
+        print_help()
+        return 0
+
+    var env_name = ".simple-env"
+    var subcommand = ""
+
+    for arg in args:
+        if arg == "-h" or arg == "--help":
+            print_help()
+            return 0
+        elif arg.starts_with("--name="):
+            env_name = arg[7:]
+        elif not arg.starts_with("-"):
+            if subcommand == "":
+                subcommand = arg
+
+    match subcommand:
+        case "create":
+            return handle_create(env_name)
+        case "activate":
+            return handle_activate(env_name)
+        case "deactivate":
+            print "To deactivate:"
+            print "  source {env_name}/deactivate.sh"
+            return 0
+        case "status":
+            return handle_status(env_name)
+        case "delete":
+            return handle_delete(env_name)
+        case _:
+            print "error: unknown subcommand '{subcommand}'"
+            print ""
+            print_help()
+            return 1

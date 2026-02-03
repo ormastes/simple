@@ -11,9 +11,7 @@
 
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::value::Value;
-use simple_parser::ast::{
-    Argument, BinOp, Block, Expr, FunctionDef, MatchArm, Node, Parameter, Pattern, UnaryOp,
-};
+use simple_parser::ast::{Argument, BinOp, Block, Expr, FunctionDef, MatchArm, Node, Parameter, Pattern, UnaryOp};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -146,7 +144,9 @@ pub fn rt_ast_expr_tag(args: &[Value]) -> Result<Value, CompileError> {
     let handle = get_handle(args, 0, "rt_ast_expr_tag")?;
     EXPR_REGISTRY.with(|r| {
         let reg = r.borrow();
-        let expr = reg.get(&handle).ok_or_else(|| invalid_handle("rt_ast_expr_tag", handle))?;
+        let expr = reg
+            .get(&handle)
+            .ok_or_else(|| invalid_handle("rt_ast_expr_tag", handle))?;
         let tag = match expr {
             Expr::Integer(_) => "Integer",
             Expr::Float(_) => "Float",
@@ -222,7 +222,9 @@ pub fn rt_ast_expr_int_value(args: &[Value]) -> Result<Value, CompileError> {
     let handle = get_handle(args, 0, "rt_ast_expr_int_value")?;
     EXPR_REGISTRY.with(|r| {
         let reg = r.borrow();
-        let expr = reg.get(&handle).ok_or_else(|| invalid_handle("rt_ast_expr_int_value", handle))?;
+        let expr = reg
+            .get(&handle)
+            .ok_or_else(|| invalid_handle("rt_ast_expr_int_value", handle))?;
         match expr {
             Expr::Integer(i) => Ok(Value::Int(*i)),
             _ => Err(CompileError::semantic_with_context(
@@ -238,7 +240,9 @@ pub fn rt_ast_expr_float_value(args: &[Value]) -> Result<Value, CompileError> {
     let handle = get_handle(args, 0, "rt_ast_expr_float_value")?;
     EXPR_REGISTRY.with(|r| {
         let reg = r.borrow();
-        let expr = reg.get(&handle).ok_or_else(|| invalid_handle("rt_ast_expr_float_value", handle))?;
+        let expr = reg
+            .get(&handle)
+            .ok_or_else(|| invalid_handle("rt_ast_expr_float_value", handle))?;
         match expr {
             Expr::Float(f) => Ok(Value::Float(*f)),
             _ => Err(CompileError::semantic_with_context(
@@ -254,7 +258,9 @@ pub fn rt_ast_expr_string_value(args: &[Value]) -> Result<Value, CompileError> {
     let handle = get_handle(args, 0, "rt_ast_expr_string_value")?;
     EXPR_REGISTRY.with(|r| {
         let reg = r.borrow();
-        let expr = reg.get(&handle).ok_or_else(|| invalid_handle("rt_ast_expr_string_value", handle))?;
+        let expr = reg
+            .get(&handle)
+            .ok_or_else(|| invalid_handle("rt_ast_expr_string_value", handle))?;
         match expr {
             Expr::String(s) => Ok(Value::Str(s.clone())),
             _ => Err(CompileError::semantic_with_context(
@@ -270,7 +276,9 @@ pub fn rt_ast_expr_bool_value(args: &[Value]) -> Result<Value, CompileError> {
     let handle = get_handle(args, 0, "rt_ast_expr_bool_value")?;
     EXPR_REGISTRY.with(|r| {
         let reg = r.borrow();
-        let expr = reg.get(&handle).ok_or_else(|| invalid_handle("rt_ast_expr_bool_value", handle))?;
+        let expr = reg
+            .get(&handle)
+            .ok_or_else(|| invalid_handle("rt_ast_expr_bool_value", handle))?;
         match expr {
             Expr::Bool(b) => Ok(Value::Bool(*b)),
             _ => Err(CompileError::semantic_with_context(
@@ -286,7 +294,9 @@ pub fn rt_ast_expr_ident_name(args: &[Value]) -> Result<Value, CompileError> {
     let handle = get_handle(args, 0, "rt_ast_expr_ident_name")?;
     EXPR_REGISTRY.with(|r| {
         let reg = r.borrow();
-        let expr = reg.get(&handle).ok_or_else(|| invalid_handle("rt_ast_expr_ident_name", handle))?;
+        let expr = reg
+            .get(&handle)
+            .ok_or_else(|| invalid_handle("rt_ast_expr_ident_name", handle))?;
         match expr {
             Expr::Identifier(name) => Ok(Value::Str(name.clone())),
             _ => Err(CompileError::semantic_with_context(
@@ -304,7 +314,9 @@ pub fn rt_ast_expr_binary_op(args: &[Value]) -> Result<Value, CompileError> {
     let handle = get_handle(args, 0, "rt_ast_expr_binary_op")?;
     EXPR_REGISTRY.with(|r| {
         let reg = r.borrow();
-        let expr = reg.get(&handle).ok_or_else(|| invalid_handle("rt_ast_expr_binary_op", handle))?;
+        let expr = reg
+            .get(&handle)
+            .ok_or_else(|| invalid_handle("rt_ast_expr_binary_op", handle))?;
         match expr {
             Expr::Binary { op, .. } => {
                 let s = match op {
@@ -351,7 +363,9 @@ pub fn rt_ast_expr_binary_left(args: &[Value]) -> Result<Value, CompileError> {
     let handle = get_handle(args, 0, "rt_ast_expr_binary_left")?;
     EXPR_REGISTRY.with(|r| {
         let reg = r.borrow();
-        let expr = reg.get(&handle).ok_or_else(|| invalid_handle("rt_ast_expr_binary_left", handle))?;
+        let expr = reg
+            .get(&handle)
+            .ok_or_else(|| invalid_handle("rt_ast_expr_binary_left", handle))?;
         match expr {
             Expr::Binary { left, .. } => {
                 let child_handle = register_expr(*left.clone());
@@ -370,7 +384,9 @@ pub fn rt_ast_expr_binary_right(args: &[Value]) -> Result<Value, CompileError> {
     let handle = get_handle(args, 0, "rt_ast_expr_binary_right")?;
     EXPR_REGISTRY.with(|r| {
         let reg = r.borrow();
-        let expr = reg.get(&handle).ok_or_else(|| invalid_handle("rt_ast_expr_binary_right", handle))?;
+        let expr = reg
+            .get(&handle)
+            .ok_or_else(|| invalid_handle("rt_ast_expr_binary_right", handle))?;
         match expr {
             Expr::Binary { right, .. } => {
                 let child_handle = register_expr(*right.clone());
@@ -389,7 +405,9 @@ pub fn rt_ast_expr_unary_op(args: &[Value]) -> Result<Value, CompileError> {
     let handle = get_handle(args, 0, "rt_ast_expr_unary_op")?;
     EXPR_REGISTRY.with(|r| {
         let reg = r.borrow();
-        let expr = reg.get(&handle).ok_or_else(|| invalid_handle("rt_ast_expr_unary_op", handle))?;
+        let expr = reg
+            .get(&handle)
+            .ok_or_else(|| invalid_handle("rt_ast_expr_unary_op", handle))?;
         match expr {
             Expr::Unary { op, .. } => {
                 let s = match op {
@@ -417,7 +435,9 @@ pub fn rt_ast_expr_unary_operand(args: &[Value]) -> Result<Value, CompileError> 
     let handle = get_handle(args, 0, "rt_ast_expr_unary_operand")?;
     EXPR_REGISTRY.with(|r| {
         let reg = r.borrow();
-        let expr = reg.get(&handle).ok_or_else(|| invalid_handle("rt_ast_expr_unary_operand", handle))?;
+        let expr = reg
+            .get(&handle)
+            .ok_or_else(|| invalid_handle("rt_ast_expr_unary_operand", handle))?;
         match expr {
             Expr::Unary { operand, .. } => {
                 let child_handle = register_expr(*operand.clone());
@@ -436,7 +456,9 @@ pub fn rt_ast_expr_call_callee(args: &[Value]) -> Result<Value, CompileError> {
     let handle = get_handle(args, 0, "rt_ast_expr_call_callee")?;
     EXPR_REGISTRY.with(|r| {
         let reg = r.borrow();
-        let expr = reg.get(&handle).ok_or_else(|| invalid_handle("rt_ast_expr_call_callee", handle))?;
+        let expr = reg
+            .get(&handle)
+            .ok_or_else(|| invalid_handle("rt_ast_expr_call_callee", handle))?;
         match expr {
             Expr::Call { callee, .. } => {
                 let child_handle = register_expr(*callee.clone());
@@ -455,7 +477,9 @@ pub fn rt_ast_expr_call_arg_count(args: &[Value]) -> Result<Value, CompileError>
     let handle = get_handle(args, 0, "rt_ast_expr_call_arg_count")?;
     EXPR_REGISTRY.with(|r| {
         let reg = r.borrow();
-        let expr = reg.get(&handle).ok_or_else(|| invalid_handle("rt_ast_expr_call_arg_count", handle))?;
+        let expr = reg
+            .get(&handle)
+            .ok_or_else(|| invalid_handle("rt_ast_expr_call_arg_count", handle))?;
         match expr {
             Expr::Call { args: call_args, .. } => Ok(Value::Int(call_args.len() as i64)),
             _ => Err(CompileError::semantic_with_context(
@@ -472,12 +496,18 @@ pub fn rt_ast_expr_call_arg(args: &[Value]) -> Result<Value, CompileError> {
     let index = get_handle(args, 1, "rt_ast_expr_call_arg")? as usize;
     EXPR_REGISTRY.with(|r| {
         let reg = r.borrow();
-        let expr = reg.get(&handle).ok_or_else(|| invalid_handle("rt_ast_expr_call_arg", handle))?;
+        let expr = reg
+            .get(&handle)
+            .ok_or_else(|| invalid_handle("rt_ast_expr_call_arg", handle))?;
         match expr {
             Expr::Call { args: call_args, .. } => {
                 let arg = call_args.get(index).ok_or_else(|| {
                     CompileError::semantic_with_context(
-                        format!("rt_ast_expr_call_arg: index {} out of bounds ({})", index, call_args.len()),
+                        format!(
+                            "rt_ast_expr_call_arg: index {} out of bounds ({})",
+                            index,
+                            call_args.len()
+                        ),
                         ErrorContext::new().with_code(codes::INDEX_OUT_OF_BOUNDS),
                     )
                 })?;
@@ -497,7 +527,9 @@ pub fn rt_ast_arg_value(args: &[Value]) -> Result<Value, CompileError> {
     let handle = get_handle(args, 0, "rt_ast_arg_value")?;
     ARG_REGISTRY.with(|r| {
         let reg = r.borrow();
-        let arg = reg.get(&handle).ok_or_else(|| invalid_handle("rt_ast_arg_value", handle))?;
+        let arg = reg
+            .get(&handle)
+            .ok_or_else(|| invalid_handle("rt_ast_arg_value", handle))?;
         let expr_handle = register_expr(arg.value.clone());
         Ok(Value::Int(expr_handle))
     })
@@ -508,7 +540,9 @@ pub fn rt_ast_arg_name(args: &[Value]) -> Result<Value, CompileError> {
     let handle = get_handle(args, 0, "rt_ast_arg_name")?;
     ARG_REGISTRY.with(|r| {
         let reg = r.borrow();
-        let arg = reg.get(&handle).ok_or_else(|| invalid_handle("rt_ast_arg_name", handle))?;
+        let arg = reg
+            .get(&handle)
+            .ok_or_else(|| invalid_handle("rt_ast_arg_name", handle))?;
         match &arg.name {
             Some(name) => Ok(Value::Str(name.clone())),
             None => Ok(Value::Nil),
@@ -521,7 +555,9 @@ pub fn rt_ast_expr_method_receiver(args: &[Value]) -> Result<Value, CompileError
     let handle = get_handle(args, 0, "rt_ast_expr_method_receiver")?;
     EXPR_REGISTRY.with(|r| {
         let reg = r.borrow();
-        let expr = reg.get(&handle).ok_or_else(|| invalid_handle("rt_ast_expr_method_receiver", handle))?;
+        let expr = reg
+            .get(&handle)
+            .ok_or_else(|| invalid_handle("rt_ast_expr_method_receiver", handle))?;
         match expr {
             Expr::MethodCall { receiver, .. } => {
                 let child_handle = register_expr(*receiver.clone());
@@ -540,7 +576,9 @@ pub fn rt_ast_expr_method_name(args: &[Value]) -> Result<Value, CompileError> {
     let handle = get_handle(args, 0, "rt_ast_expr_method_name")?;
     EXPR_REGISTRY.with(|r| {
         let reg = r.borrow();
-        let expr = reg.get(&handle).ok_or_else(|| invalid_handle("rt_ast_expr_method_name", handle))?;
+        let expr = reg
+            .get(&handle)
+            .ok_or_else(|| invalid_handle("rt_ast_expr_method_name", handle))?;
         match expr {
             Expr::MethodCall { method, .. } => Ok(Value::Str(method.clone())),
             _ => Err(CompileError::semantic_with_context(
@@ -556,7 +594,9 @@ pub fn rt_ast_expr_method_arg_count(args: &[Value]) -> Result<Value, CompileErro
     let handle = get_handle(args, 0, "rt_ast_expr_method_arg_count")?;
     EXPR_REGISTRY.with(|r| {
         let reg = r.borrow();
-        let expr = reg.get(&handle).ok_or_else(|| invalid_handle("rt_ast_expr_method_arg_count", handle))?;
+        let expr = reg
+            .get(&handle)
+            .ok_or_else(|| invalid_handle("rt_ast_expr_method_arg_count", handle))?;
         match expr {
             Expr::MethodCall { args: method_args, .. } => Ok(Value::Int(method_args.len() as i64)),
             _ => Err(CompileError::semantic_with_context(
@@ -573,7 +613,9 @@ pub fn rt_ast_expr_method_arg(args: &[Value]) -> Result<Value, CompileError> {
     let index = get_handle(args, 1, "rt_ast_expr_method_arg")? as usize;
     EXPR_REGISTRY.with(|r| {
         let reg = r.borrow();
-        let expr = reg.get(&handle).ok_or_else(|| invalid_handle("rt_ast_expr_method_arg", handle))?;
+        let expr = reg
+            .get(&handle)
+            .ok_or_else(|| invalid_handle("rt_ast_expr_method_arg", handle))?;
         match expr {
             Expr::MethodCall { args: method_args, .. } => {
                 let arg = method_args.get(index).ok_or_else(|| {
@@ -598,7 +640,9 @@ pub fn rt_ast_expr_field_receiver(args: &[Value]) -> Result<Value, CompileError>
     let handle = get_handle(args, 0, "rt_ast_expr_field_receiver")?;
     EXPR_REGISTRY.with(|r| {
         let reg = r.borrow();
-        let expr = reg.get(&handle).ok_or_else(|| invalid_handle("rt_ast_expr_field_receiver", handle))?;
+        let expr = reg
+            .get(&handle)
+            .ok_or_else(|| invalid_handle("rt_ast_expr_field_receiver", handle))?;
         match expr {
             Expr::FieldAccess { receiver, .. } => {
                 let child_handle = register_expr(*receiver.clone());
@@ -616,7 +660,9 @@ pub fn rt_ast_expr_field_name(args: &[Value]) -> Result<Value, CompileError> {
     let handle = get_handle(args, 0, "rt_ast_expr_field_name")?;
     EXPR_REGISTRY.with(|r| {
         let reg = r.borrow();
-        let expr = reg.get(&handle).ok_or_else(|| invalid_handle("rt_ast_expr_field_name", handle))?;
+        let expr = reg
+            .get(&handle)
+            .ok_or_else(|| invalid_handle("rt_ast_expr_field_name", handle))?;
         match expr {
             Expr::FieldAccess { field, .. } => Ok(Value::Str(field.clone())),
             _ => Err(CompileError::semantic_with_context(
@@ -632,7 +678,9 @@ pub fn rt_ast_expr_array_len(args: &[Value]) -> Result<Value, CompileError> {
     let handle = get_handle(args, 0, "rt_ast_expr_array_len")?;
     EXPR_REGISTRY.with(|r| {
         let reg = r.borrow();
-        let expr = reg.get(&handle).ok_or_else(|| invalid_handle("rt_ast_expr_array_len", handle))?;
+        let expr = reg
+            .get(&handle)
+            .ok_or_else(|| invalid_handle("rt_ast_expr_array_len", handle))?;
         match expr {
             Expr::Array(elems) => Ok(Value::Int(elems.len() as i64)),
             _ => Err(CompileError::semantic_with_context(
@@ -649,7 +697,9 @@ pub fn rt_ast_expr_array_get(args: &[Value]) -> Result<Value, CompileError> {
     let index = get_handle(args, 1, "rt_ast_expr_array_get")? as usize;
     EXPR_REGISTRY.with(|r| {
         let reg = r.borrow();
-        let expr = reg.get(&handle).ok_or_else(|| invalid_handle("rt_ast_expr_array_get", handle))?;
+        let expr = reg
+            .get(&handle)
+            .ok_or_else(|| invalid_handle("rt_ast_expr_array_get", handle))?;
         match expr {
             Expr::Array(elems) => {
                 let elem = elems.get(index).ok_or_else(|| {

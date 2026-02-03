@@ -325,4 +325,3 @@ fn test_update_rules_fields() {
     assert_eq!(rules.track_top_variance_pct, 0.1);
     assert!(!rules.rewrite_top_variance);
 }
-

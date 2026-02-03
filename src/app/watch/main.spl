@@ -1,22 +1,126 @@
 # Simple CLI - watch command
-# Delegates to Rust runtime via FFI
+# Watch files for changes and auto-rebuild
 
 use app.cli_util (get_cli_args)
-extern fn rt_cli_watch_file(path: str) -> i64
+
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_modified_time(path: text) -> i64
+extern fn rt_env_cwd() -> text
+extern fn rt_dir_walk(path: text) -> [text]
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_time_now_unix_micros() -> i64
 
 fn print_help():
-    print "Usage: simple watch <file>"
-    print "Watches file for changes and auto-recompiles"
+    print "Usage: simple watch [path] [options]"
     print ""
-    print "Run 'simple watch --help' for Rust-level help."
+    print "Watch files for changes and auto-rebuild."
+    print ""
+    print "Arguments:"
+    print "  [path]           File or directory to watch (default: src/)"
+    print ""
+    print "Options:"
+    print "  --cmd=<command>  Command to run on change (default: simple build)"
+    print "  --interval=<ms>  Poll interval in ms (default: 1000)"
+    print "  --ext=<ext>      File extension filter (default: .spl)"
+    print "  -h, --help       Show this help"
+
+fn collect_mtimes(path: text, ext: text) -> [(text, i64)]:
+    var result = []
+    if path.ends_with(ext):
+        val mtime = rt_file_modified_time(path)
+        result.push((path, mtime))
+    else:
+        val files = rt_dir_walk(path)
+        for file in files:
+            if file.ends_with(ext):
+                val mtime = rt_file_modified_time(file)
+                result.push((file, mtime))
+    result
+
+fn find_changes(old_mtimes: [(text, i64)], new_mtimes: [(text, i64)]) -> [text]:
+    var changed = []
+    for (new_path, new_mtime) in new_mtimes:
+        var found = false
+        for (old_path, old_mtime) in old_mtimes:
+            if old_path == new_path:
+                found = true
+                if new_mtime != old_mtime:
+                    changed.push(new_path)
+        if not found:
+            changed.push(new_path)
+    changed
+
+fn sleep_ms(ms: i64):
+    # Busy-wait using time (no rt_sleep_ms available yet)
+    val start = rt_time_now_unix_micros()
+    val target = start + ms * 1000
+    while rt_time_now_unix_micros() < target:
+        pass
 
 fn main() -> i64:
     val args = get_cli_args()
-    if args.len() == 0:
-        print "Error: missing file path"
-        print_help()
+
+    var watch_path = ""
+    var command = "simple build"
+    var interval = 1000
+    var ext = ".spl"
+
+    for arg in args:
+        if arg == "-h" or arg == "--help":
+            print_help()
+            return 0
+        elif arg.starts_with("--cmd="):
+            command = arg[6:]
+        elif arg.starts_with("--interval="):
+            interval = arg[11:].to_int()
+        elif arg.starts_with("--ext="):
+            ext = arg[6:]
+        elif not arg.starts_with("-"):
+            watch_path = arg
+
+    val cwd = rt_env_cwd()
+    if watch_path == "":
+        watch_path = "{cwd}/src"
+
+    if not rt_file_exists(watch_path):
+        print "error: path not found: {watch_path}"
         return 1
-    if args[0] == "--help" or args[0] == "-h":
-        print_help()
-        return 0
-    rt_cli_watch_file(args[0])
+
+    print "Watching {watch_path} for changes (interval: {interval}ms)..."
+    print "Command: {command}"
+    print "Press Ctrl+C to stop."
+    print ""
+
+    var prev_mtimes = collect_mtimes(watch_path, ext)
+
+    while true:
+        sleep_ms(interval)
+
+        val current_mtimes = collect_mtimes(watch_path, ext)
+        val changed = find_changes(prev_mtimes, current_mtimes)
+
+        if changed.len() > 0:
+            print "[change detected] {changed.len()} file(s) changed"
+            for file in changed:
+                val display = if file.starts_with(cwd): file[cwd.len() + 1:] else: file
+                print "  {display}"
+
+            print "Running: {command}"
+            val cmd_parts = command.split(" ")
+            val cmd = cmd_parts[0]
+            val cmd_args = cmd_parts[1:]
+            val (stdout, stderr, exit_code) = rt_process_run(cmd, cmd_args)
+            if stdout != "":
+                print stdout
+            if stderr != "":
+                print stderr
+            if exit_code == 0:
+                print "[success]"
+            else:
+                print "[failed] exit code: {exit_code}"
+            print ""
+
+            prev_mtimes = current_mtimes
+
+    0

@@ -1,17 +1,34 @@
 # Expression Evaluation
 #
 # All expression evaluation logic.
+# Port of expression dispatch from rust/compiler/src/interpreter*.rs
 
 from literals import {eval_literal}
 from arithmetic import {eval_binary_op, eval_unary_op}
 from collections import {eval_array, eval_dict, eval_tuple}
 from calls import {eval_call, eval_method_call}
+from advanced import {
+    eval_fstring, eval_range, eval_slice, eval_comprehension,
+    eval_optional_chain, eval_null_coalesce,
+    eval_await, eval_spawn, eval_ternary,
+    eval_type_check, eval_type_cast,
+    eval_pipe, eval_compose,
+    eval_set, eval_assignment,
+    eval_enum_variant, eval_struct_literal
+}
 
 export eval_expr, evaluate
 export eval_literal, eval_binary_op, eval_unary_op
 export eval_array, eval_dict, eval_tuple
 export eval_call, eval_method_call
 export eval_loss_block, eval_nograd_block, eval_array_with_suffix
+export eval_fstring, eval_range, eval_slice, eval_comprehension
+export eval_optional_chain, eval_null_coalesce
+export eval_await, eval_spawn, eval_ternary
+export eval_type_check, eval_type_cast
+export eval_pipe, eval_compose
+export eval_set, eval_assignment
+export eval_enum_variant, eval_struct_literal
 
 from ..core import {Interpreter, Value, InterpreterError, RuntimeValue, Closure}
 
@@ -59,9 +76,80 @@ fn evaluate(interp: &Interpreter, expr: &Expr) -> Result<Value, InterpreterError
         case Expr.Tuple(elements):
             return eval_tuple(interp, elements)
 
+        case Expr.Set(elements):
+            return eval_set(interp, elements)
+
         case Expr.Lambda(params, body):
             return eval_lambda(interp, params, body)
 
+        # Format strings
+        case Expr.FString(parts):
+            return eval_fstring(interp, parts)
+
+        # Range expressions
+        case Expr.Range(start, end, inclusive):
+            return eval_range(interp, start, end, inclusive)
+
+        # Slice expressions
+        case Expr.Slice(collection, start, end, step):
+            val coll = evaluate(interp, collection)?
+            val s = if start.?: Some(evaluate(interp, start.unwrap())?) else: None
+            val e = if end.?: Some(evaluate(interp, end.unwrap())?) else: None
+            val st = if step.?: Some(evaluate(interp, step.unwrap())?) else: None
+            return eval_slice(interp, coll, s, e, st)
+
+        # List comprehension
+        case Expr.Comprehension(binding, iterable, filter, body):
+            return eval_comprehension(interp, binding, iterable, filter, body)
+
+        # Optional chaining
+        case Expr.OptionalChain(base, chain):
+            return eval_optional_chain(interp, base, chain)
+
+        # Null coalescing
+        case Expr.NullCoalesce(expr, default):
+            return eval_null_coalesce(interp, expr, default)
+
+        # Await expression
+        case Expr.Await(inner):
+            return eval_await(interp, inner)
+
+        # Spawn expression
+        case Expr.Spawn(inner):
+            return eval_spawn(interp, inner)
+
+        # Ternary
+        case Expr.Ternary(cond, then_expr, else_expr):
+            return eval_ternary(interp, cond, then_expr, else_expr)
+
+        # Type check (is)
+        case Expr.TypeCheck(value, type_name):
+            return eval_type_check(interp, value, type_name)
+
+        # Type cast (as)
+        case Expr.TypeCast(value, type_name):
+            return eval_type_cast(interp, value, type_name)
+
+        # Pipeline operators
+        case Expr.Pipe(value, func):
+            return eval_pipe(interp, value, func)
+
+        case Expr.Compose(f, g):
+            return eval_compose(interp, f, g)
+
+        # Assignment expression
+        case Expr.Assignment(target, value):
+            return eval_assignment(interp, target, value)
+
+        # Enum variant construction
+        case Expr.EnumVariant(enum_name, variant_name, args):
+            return eval_enum_variant(interp, enum_name, variant_name, args)
+
+        # Struct literal construction
+        case Expr.StructLiteral(name, fields):
+            return eval_struct_literal(interp, name, fields)
+
+        # DL blocks
         case Expr.LossBlock(body):
             return eval_loss_block(interp, body)
 

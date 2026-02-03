@@ -1,38 +1,105 @@
 # Conditional Statements
 #
-# if/elif/else evaluation.
+# if/elif/else evaluation with if-val/if-var pattern binding.
+# Port of exec_if from rust/compiler/src/interpreter_control.rs
 
 from ..core import {Interpreter, Value, InterpreterError}
 from ..expr import {evaluate}
+from match import {match_pattern}
 
-export eval_if, eval_elif
+export eval_if, eval_elif, eval_if_expr
 
 # Evaluate an if statement
-fn eval_if(interp: &Interpreter, condition: &Expr, then_block: &Block, else_branch: Option<&ElseBranch>) -> Result<Value, InterpreterError>:
-    # Evaluate condition
-    val cond_value = evaluate(interp, condition)?
+fn eval_if(interp: Interpreter, condition: Expr, then_block: Block,
+           elif_branches: [(Expr, Block)], else_block: Block?,
+           let_pattern: Pattern?, is_suspend: bool) -> Result<Value, InterpreterError>:
 
-    if cond_value.is_truthy():
-        # Execute then block
+    # Handle if-val / if-var: if val Some(x) = expr:
+    if let_pattern.?:
+        val pattern = let_pattern.unwrap()
+        val value = evaluate(interp, condition)?
+        val bindings = match_pattern(value, pattern)?
+        if bindings.?:
+            # Pattern matched - add bindings and execute then block
+            interp.env.push_scope()
+            for (name, val) in bindings.unwrap():
+                interp.env.define(name, val)
+            val result = interp.eval_block(then_block)
+            interp.env.pop_scope()
+            return result
+        elif else_block.?:
+            return interp.eval_block(else_block.unwrap())
+        return Ok(Value.nil())
+
+    # Normal if condition
+    val cond_val = evaluate(interp, condition)?
+    # For if~ (is_suspend), await the condition
+    val cond_val = if is_suspend: cond_val.await_if_promise()? else: cond_val
+
+    if cond_val.is_truthy():
         return interp.eval_block(then_block)
-    else:
-        # Check for else branch
-        match else_branch:
-            case Some(branch):
-                return eval_else_branch(interp, branch)
-            case None:
-                return Ok(Value.null())
 
-# Evaluate an elif chain
-fn eval_elif(interp: &Interpreter, condition: &Expr, then_block: &Block, else_branch: Option<&ElseBranch>) -> Result<Value, InterpreterError>:
-    # Same logic as if
-    return eval_if(interp, condition, then_block, else_branch)
+    # Check elif branches
+    for (elif_cond, elif_block) in elif_branches:
+        val elif_val = evaluate(interp, elif_cond)?
+        val elif_val = if is_suspend: elif_val.await_if_promise()? else: elif_val
+        if elif_val.is_truthy():
+            return interp.eval_block(elif_block)
 
-# Evaluate else branch (could be else block or elif)
-fn eval_else_branch(interp: &Interpreter, branch: &ElseBranch) -> Result<Value, InterpreterError>:
-    match branch:
-        case ElseBranch.Else(block):
+    # Else block
+    if else_block.?:
+        return interp.eval_block(else_block.unwrap())
+
+    Ok(Value.nil())
+
+# Evaluate an elif chain (same logic as if)
+fn eval_elif(interp: Interpreter, condition: Expr, then_block: Block,
+             else_branch: ElseBranch?) -> Result<Value, InterpreterError>:
+    val cond_val = evaluate(interp, condition)?
+    if cond_val.is_truthy():
+        return interp.eval_block(then_block)
+    match else_branch:
+        case Some(ElseBranch.Else(block)):
             return interp.eval_block(block)
+        case Some(ElseBranch.ElseIf(cond, block, next)):
+            return eval_elif(interp, cond, block, next)
+        case None:
+            return Ok(Value.nil())
 
-        case ElseBranch.ElseIf(condition, then_block, else_branch):
-            return eval_if(interp, condition, then_block, *else_branch)
+# Evaluate if as an expression (for implicit return)
+fn eval_if_expr(interp: Interpreter, condition: Expr, then_block: Block,
+                elif_branches: [(Expr, Block)], else_block: Block?,
+                let_pattern: Pattern?, is_suspend: bool) -> Result<Value, InterpreterError>:
+
+    # Handle if-val / if-var pattern binding
+    if let_pattern.?:
+        val pattern = let_pattern.unwrap()
+        val value = evaluate(interp, condition)?
+        val bindings = match_pattern(value, pattern)?
+        if bindings.?:
+            interp.env.push_scope()
+            for (name, val) in bindings.unwrap():
+                interp.env.define(name, val)
+            val result = interp.eval_block_value(then_block)
+            interp.env.pop_scope()
+            return result
+        elif else_block.?:
+            return interp.eval_block_value(else_block.unwrap())
+        return Ok(Value.nil())
+
+    val cond_val = evaluate(interp, condition)?
+    val cond_val = if is_suspend: cond_val.await_if_promise()? else: cond_val
+
+    if cond_val.is_truthy():
+        return interp.eval_block_value(then_block)
+
+    for (elif_cond, elif_block) in elif_branches:
+        val elif_val = evaluate(interp, elif_cond)?
+        val elif_val = if is_suspend: elif_val.await_if_promise()? else: elif_val
+        if elif_val.is_truthy():
+            return interp.eval_block_value(elif_block)
+
+    if else_block.?:
+        return interp.eval_block_value(else_block.unwrap())
+
+    Ok(Value.nil())
