@@ -248,6 +248,10 @@ class TraitSolver:
     # All known impl blocks (indexed by trait name)
     impls: Dict<Symbol, [ImplBlock]>
 
+    # All known impl blocks (indexed by target type symbol)
+    # Enables efficient lookup: "what traits does type X implement?"
+    impls_by_type: Dict<Symbol, [ImplBlock]>
+
     # Cache of solved obligations: (type, trait) -> success
     cache: Dict<(HirType, Symbol), bool>
 
@@ -263,6 +267,7 @@ impl TraitSolver:
         TraitSolver(
             traits: {},
             impls: {},
+            impls_by_type: {},
             cache: {},
             obligations: [],
             errors: []
@@ -273,18 +278,30 @@ impl TraitSolver:
         self.traits[trait_def.name] = trait_def
 
     me add_impl(impl_block: ImplBlock):
-        """Register an impl block."""
+        """Register an impl block.
+
+        Indexes by both trait name and target type for efficient lookup.
+        """
         val trait_name = impl_block.trait_name
 
-        # Get existing impls for this trait
-        var impl_list = if self.impls[trait_name].?:
+        # Index by trait name
+        var impl_list_by_trait = if self.impls[trait_name].?:
             self.impls[trait_name]
         else:
             []
+        impl_list_by_trait = impl_list_by_trait.push(impl_block)
+        self.impls[trait_name] = impl_list_by_trait
 
-        # Add new impl
-        impl_list = impl_list.push(impl_block)
-        self.impls[trait_name] = impl_list
+        # Index by target type (extract symbol from Named type)
+        match impl_block.for_type.kind:
+            case Named(type_symbol, _):
+                var impl_list_by_type = if self.impls_by_type[type_symbol].?:
+                    self.impls_by_type[type_symbol]
+                else:
+                    []
+                impl_list_by_type = impl_list_by_type.push(impl_block)
+                self.impls_by_type[type_symbol] = impl_list_by_type
+            case _: pass  # Skip non-named types for now
 
     me add_obligation(ty: HirType, trait_: Symbol, cause: ObligationCause, span: Span):
         """Add an obligation to solve."""
@@ -390,7 +407,40 @@ impl TraitSolver:
 
     fn get_trait(name: Symbol) -> TraitDef?:
         """Get trait definition by name."""
-        self.impls[name]
+        self.traits[name]
+
+    fn get_impls_for_type(type_symbol: Symbol) -> [ImplBlock]:
+        """Get all impl blocks for a given type.
+
+        Returns all traits implemented by the type.
+        Useful for: "what can I do with this type?"
+        """
+        if self.impls_by_type[type_symbol].?:
+            self.impls_by_type[type_symbol]
+        else:
+            []
+
+    fn get_impls_for_trait(trait_name: Symbol) -> [ImplBlock]:
+        """Get all impl blocks for a given trait.
+
+        Returns all types that implement the trait.
+        Useful for: "what types implement this trait?"
+        """
+        if self.impls[trait_name].?:
+            self.impls[trait_name]
+        else:
+            []
+
+    fn find_impl_for_type_and_trait(type_symbol: Symbol, trait_name: Symbol) -> ImplBlock?:
+        """Find specific impl block for (type, trait) pair.
+
+        Most efficient lookup using both indices.
+        """
+        val impls_for_type = self.get_impls_for_type(type_symbol)
+        for impl_block in impls_for_type:
+            if impl_block.trait_name == trait_name:
+                return Some(impl_block)
+        None
 
     me check_coherence():
         """Check coherence rules (no overlapping impls).

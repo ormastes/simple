@@ -24,6 +24,7 @@
 use compiler.hir.*
 use compiler.lexer.*
 use compiler.dim_constraints.*
+use compiler.traits.*
 use type_infer_types.*
 
 struct HmInferContext:
@@ -55,6 +56,8 @@ struct HmInferContext:
     runtime_checks: DimCheckGenerator
     # Dimension check mode (controls runtime check generation)
     dim_check_mode: DimCheckMode
+    # Trait solver for trait resolution
+    trait_solver: TraitSolver
 
 impl HmInferContext:
     static fn new() -> HmInferContext:
@@ -70,7 +73,8 @@ impl HmInferContext:
             errors: [],
             dim_solver: DimSolver.new(),
             runtime_checks: DimCheckGenerator.new(DimCheckMode.Assert),
-            dim_check_mode: DimCheckMode.Assert
+            dim_check_mode: DimCheckMode.Assert,
+            trait_solver: TraitSolver.create()
         )
 
     static fn with_dim_check_mode(mode: DimCheckMode) -> HmInferContext:
@@ -83,7 +87,8 @@ impl HmInferContext:
             errors: [],
             dim_solver: DimSolver.new(),
             runtime_checks: DimCheckGenerator.new(mode),
-            dim_check_mode: mode
+            dim_check_mode: mode,
+            trait_solver: TraitSolver.create()
         )
 
     static fn with_builtins() -> HmInferContext:
@@ -126,6 +131,100 @@ impl HmInferContext:
         )
         val len_scheme = self.generalize_all(len_ty)
         self.env["len"] = len_scheme
+
+    # =========================================================================
+    # Trait Collection (Phase B.1)
+    # =========================================================================
+
+    me collect_traits_from_module(module: HirModule):
+        """Collect all traits from a HIR module into the trait solver.
+
+        Iterates through module.traits and registers each trait definition.
+        """
+        for trait_id in module.traits.keys():
+            val hir_trait = module.traits[trait_id]
+            val trait_def = self.convert_hir_trait_to_def(hir_trait)
+            self.trait_solver.add_trait(trait_def)
+
+    me collect_impls_from_module(module: HirModule):
+        """Collect all impl blocks from a HIR module into the trait solver.
+
+        Iterates through module.impls and registers each impl block.
+        """
+        for hir_impl in module.impls:
+            val impl_block = self.convert_hir_impl_to_block(hir_impl)
+            self.trait_solver.add_impl(impl_block)
+
+    fn convert_hir_trait_to_def(hir_trait: HirTrait) -> TraitDef:
+        """Convert HirTrait to TraitDef for the trait solver.
+
+        Extracts method signatures from HirFunctions.
+        """
+        var methods: [MethodSignature] = []
+        for hir_fn in hir_trait.methods:
+            val sig = MethodSignature(
+                name: hir_fn.name,
+                params: hir_fn.params.map(\p: p.type_),
+                return_type: hir_fn.return_type,
+                effects: hir_fn.effects,
+                span: hir_fn.span
+            )
+            methods = methods.push(sig)
+
+        # Extract supertrait symbols
+        var supertraits: [Symbol] = []
+        for st_type in hir_trait.supertraits:
+            # Extract symbol from Named type
+            match st_type.kind:
+                case Named(symbol, _):
+                    supertraits = supertraits.push(symbol)
+                case _: pass  # Skip non-named supertraits for now
+
+        # Extract type parameter symbols
+        var type_params: [Symbol] = []
+        for tp in hir_trait.type_params:
+            type_params = type_params.push(tp.symbol)
+
+        TraitDef(
+            name: hir_trait.symbol,
+            methods: methods,
+            defaults: hir_trait.defaults,
+            supertraits: supertraits,
+            type_params: type_params,
+            span: hir_trait.span
+        )
+
+    fn convert_hir_impl_to_block(hir_impl: HirImpl) -> ImplBlock:
+        """Convert HirImpl to ImplBlock for the trait solver.
+
+        Resolves method implementations from symbol IDs.
+        """
+        # Extract trait symbol from trait type
+        var trait_symbol: Symbol? = nil
+        if hir_impl.trait_.?:
+            match hir_impl.trait_.unwrap().kind:
+                case Named(symbol, _):
+                    trait_symbol = Some(symbol)
+                case _: pass
+
+        # For inherent impls (no trait), use a special marker symbol
+        val trait_name = trait_symbol ?? SymbolId(id: -1)
+
+        # Extract type parameter symbols
+        var type_params: [Symbol] = []
+        for tp in hir_impl.type_params:
+            type_params = type_params.push(tp.symbol)
+
+        # Note: Method implementations would be looked up from module.functions
+        # For now, create empty impl block (methods resolved during obligation solving)
+        ImplBlock(
+            trait_name: trait_name,
+            for_type: hir_impl.type_,
+            type_params: type_params,
+            where_clause: hir_impl.where_clause,
+            methods: [],  # TODO: Resolve from module.functions via method symbols
+            span: hir_impl.span
+        )
 
     # =========================================================================
     # Level Management
