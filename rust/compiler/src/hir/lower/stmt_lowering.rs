@@ -214,10 +214,11 @@ impl Lowerer {
                     None
                 };
 
-                for (elif_cond, elif_body) in if_stmt.elif_branches.iter().rev() {
+                for (_elif_pattern, elif_cond, elif_body) in if_stmt.elif_branches.iter().rev() {
                     let elif_condition = self.lower_expr(elif_cond, ctx)?;
                     let elif_then = self.lower_block(elif_body, ctx)?;
 
+                    // TODO: Handle elif val/var pattern bindings in HIR lowering
                     else_block = Some(vec![HirStmt::If {
                         condition: elif_condition,
                         then_block: elif_then,

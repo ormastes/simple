@@ -53,7 +53,7 @@ fn has_suspension_in_node(node: &Node) -> bool {
                 return true;
             }
             // Check elif branches
-            for (cond, block) in &if_stmt.elif_branches {
+            for (_pattern, cond, block) in &if_stmt.elif_branches {
                 if has_suspension_in_expr(cond) || has_suspension_in_body(block) {
                     return true;
                 }

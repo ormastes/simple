@@ -80,7 +80,7 @@ impl<'a> CallSiteAnalyzer<'a> {
             Node::If(if_stmt) => {
                 self.analyze_expr(&if_stmt.condition);
                 self.analyze_block(&if_stmt.then_block);
-                for (cond, block) in &if_stmt.elif_branches {
+                for (_pattern, cond, block) in &if_stmt.elif_branches {
                     self.analyze_expr(cond);
                     self.analyze_block(block);
                 }

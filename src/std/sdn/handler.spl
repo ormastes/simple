@@ -1,0 +1,151 @@
+# SDN Handler Traits
+#
+# Trait-based architecture for SDN parsing that separates data processing
+# from operation processing. Enables: zero-allocation validation,
+# security policies, custom processing pipelines.
+#
+# Port of rust/sdn/src/handler.rs
+
+from value import {Span}
+from error import {SdnError}
+
+# ============================================================================
+# Handler Traits
+# ============================================================================
+
+trait DataHandler:
+    """Handles primitive data values during parsing.
+
+    Each method is called when the parser encounters a primitive value.
+    Implementations can build data structures, validate, or ignore values.
+    """
+    fn on_null(span: Span) -> Result<(), SdnError>
+    fn on_bool(value: bool, span: Span) -> Result<(), SdnError>
+    fn on_int(value: i64, span: Span) -> Result<(), SdnError>
+    fn on_float(value: f64, span: Span) -> Result<(), SdnError>
+    fn on_string(value: text, span: Span) -> Result<(), SdnError>
+
+trait OpHandler:
+    """Handles structural operations during parsing.
+
+    Each method is called when the parser enters/exits a container structure.
+    This allows enforcing policies or tracking nesting depth.
+    """
+    fn begin_dict(span: Span) -> Result<(), SdnError>
+    fn dict_key(key: text, span: Span) -> Result<(), SdnError>
+    fn end_dict() -> Result<(), SdnError>
+    fn begin_array(span: Span) -> Result<(), SdnError>
+    fn end_array() -> Result<(), SdnError>
+    fn begin_table(fields: [text]?, types: [text]?, span: Span) -> Result<(), SdnError>
+    fn begin_row() -> Result<(), SdnError>
+    fn end_row() -> Result<(), SdnError>
+    fn end_table() -> Result<(), SdnError>
+
+# ============================================================================
+# No-Op Handler (for validation without allocation)
+# ============================================================================
+
+struct NoOpHandler:
+    """Handler that does nothing — for validation only."""
+
+impl DataHandler for NoOpHandler:
+    fn on_null(span: Span) -> Result<(), SdnError>:
+        Ok(())
+    fn on_bool(value: bool, span: Span) -> Result<(), SdnError>:
+        Ok(())
+    fn on_int(value: i64, span: Span) -> Result<(), SdnError>:
+        Ok(())
+    fn on_float(value: f64, span: Span) -> Result<(), SdnError>:
+        Ok(())
+    fn on_string(value: text, span: Span) -> Result<(), SdnError>:
+        Ok(())
+
+impl OpHandler for NoOpHandler:
+    fn begin_dict(span: Span) -> Result<(), SdnError>:
+        Ok(())
+    fn dict_key(key: text, span: Span) -> Result<(), SdnError>:
+        Ok(())
+    fn end_dict() -> Result<(), SdnError>:
+        Ok(())
+    fn begin_array(span: Span) -> Result<(), SdnError>:
+        Ok(())
+    fn end_array() -> Result<(), SdnError>:
+        Ok(())
+    fn begin_table(fields: [text]?, types: [text]?, span: Span) -> Result<(), SdnError>:
+        Ok(())
+    fn begin_row() -> Result<(), SdnError>:
+        Ok(())
+    fn end_row() -> Result<(), SdnError>:
+        Ok(())
+    fn end_table() -> Result<(), SdnError>:
+        Ok(())
+
+# ============================================================================
+# Restricted Handler (security policy enforcement)
+# ============================================================================
+
+struct RestrictedHandler:
+    """Handler that blocks tables and limits nesting depth."""
+    max_depth: i64
+    current_depth: i64
+    allow_tables: bool
+
+impl RestrictedHandler:
+    static fn default() -> RestrictedHandler:
+        RestrictedHandler(max_depth: 10, current_depth: 0, allow_tables: true)
+
+    static fn no_tables(max_depth: i64) -> RestrictedHandler:
+        RestrictedHandler(max_depth: max_depth, current_depth: 0, allow_tables: false)
+
+impl DataHandler for RestrictedHandler:
+    fn on_null(span: Span) -> Result<(), SdnError>:
+        Ok(())
+    fn on_bool(value: bool, span: Span) -> Result<(), SdnError>:
+        Ok(())
+    fn on_int(value: i64, span: Span) -> Result<(), SdnError>:
+        Ok(())
+    fn on_float(value: f64, span: Span) -> Result<(), SdnError>:
+        Ok(())
+    fn on_string(value: text, span: Span) -> Result<(), SdnError>:
+        Ok(())
+
+impl OpHandler for RestrictedHandler:
+    fn begin_dict(span: Span) -> Result<(), SdnError>:
+        self.current_depth = self.current_depth + 1
+        if self.current_depth > self.max_depth:
+            return Err(SdnError.security_error("nesting depth exceeded", span))
+        Ok(())
+
+    fn dict_key(key: text, span: Span) -> Result<(), SdnError>:
+        Ok(())
+
+    fn end_dict() -> Result<(), SdnError>:
+        self.current_depth = self.current_depth - 1
+        Ok(())
+
+    fn begin_array(span: Span) -> Result<(), SdnError>:
+        self.current_depth = self.current_depth + 1
+        if self.current_depth > self.max_depth:
+            return Err(SdnError.security_error("nesting depth exceeded", span))
+        Ok(())
+
+    fn end_array() -> Result<(), SdnError>:
+        self.current_depth = self.current_depth - 1
+        Ok(())
+
+    fn begin_table(fields: [text]?, types: [text]?, span: Span) -> Result<(), SdnError>:
+        if not self.allow_tables:
+            return Err(SdnError.security_error("tables not allowed", span))
+        Ok(())
+
+    fn begin_row() -> Result<(), SdnError>:
+        Ok(())
+
+    fn end_row() -> Result<(), SdnError>:
+        Ok(())
+
+    fn end_table() -> Result<(), SdnError>:
+        Ok(())
+
+export DataHandler, OpHandler
+export NoOpHandler, RestrictedHandler

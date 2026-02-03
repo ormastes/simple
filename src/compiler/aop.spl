@@ -1,19 +1,86 @@
 # Aspect-Oriented Programming Support
 #
-# AOP weaving for cross-cutting concerns like logging.
+# AOP weaving for cross-cutting concerns: logging, tracing, contracts, error handling.
+# Aspects are registered with pointcut patterns and woven at MIR level.
 
-use config.Logger
+use compiler.config (Logger)
 
-# Logging aspect.
+# ============================================================================
+# Pointcut Matching
+# ============================================================================
+
+enum PointcutKind:
+    """Types of pointcut patterns."""
+    NamePattern     # Match by function name glob (e.g., "parse_*")
+    Annotation      # Match by annotation (e.g., "@log")
+    Module          # Match by module name
+    All             # Match everything
+
+struct Pointcut:
+    """A pointcut selects which join points an aspect applies to."""
+    kind: PointcutKind
+    pattern: text       # Glob pattern or annotation name
+
+impl Pointcut:
+    static fn name(pattern: text) -> Pointcut:
+        Pointcut(kind: PointcutKind.NamePattern, pattern: pattern)
+
+    static fn annotation(name: text) -> Pointcut:
+        Pointcut(kind: PointcutKind.Annotation, pattern: name)
+
+    static fn module(name: text) -> Pointcut:
+        Pointcut(kind: PointcutKind.Module, pattern: name)
+
+    static fn all() -> Pointcut:
+        Pointcut(kind: PointcutKind.All, pattern: "*")
+
+    fn matches_name(fn_name: text) -> bool:
+        """Check if a function name matches this pointcut."""
+        match self.kind:
+            case All: true
+            case NamePattern:
+                if self.pattern == "*":
+                    return true
+                if self.pattern.ends_with("*"):
+                    val prefix = self.pattern[0:self.pattern.len() - 1]
+                    return fn_name.starts_with(prefix)
+                if self.pattern.starts_with("*"):
+                    val suffix = self.pattern[1:]
+                    return fn_name.ends_with(suffix)
+                self.pattern == fn_name
+            case Module: false    # Module matching needs module context
+            case Annotation: false  # Annotation matching needs AST context
+
+# ============================================================================
+# Advice Types
+# ============================================================================
+
+enum AdviceKind:
+    Before
+    After
+    Around
+
+struct Advice:
+    """An advice is code that runs at a join point."""
+    kind: AdviceKind
+    pointcut: Pointcut
+    handler: fn(text, [Any]) -> Any    # (fn_name, args) -> result
+    order: i64                         # Lower = higher priority
+
+# ============================================================================
+# Aspects
+# ============================================================================
+
 class LogAspect:
+    """Logging cross-cutting concern."""
     level: i64
     logger: Logger
 
     fn before(name: text, args: [Any]):
-        self.logger.log(self.level, ">> {name}")
+        self.logger.log(self.level, "AOP", ">> {name}")
 
     fn after(name: text, result: Any):
-        self.logger.log(self.level, "<< {name}")
+        self.logger.log(self.level, "AOP", "<< {name}")
 
     fn around(name: text, args: [Any], proceed: fn() -> Any) -> Any:
         self.before(name, args)
@@ -21,19 +88,98 @@ class LogAspect:
         self.after(name, result)
         result
 
-# AOP weaver that applies aspects.
-class AopWeaver:
-    aspects: [LogAspect]
+class TracingAspect:
+    """Performance tracing cross-cutting concern."""
     logger: Logger
 
-    me add_aspect(aspect: LogAspect):
-        self.aspects.push(aspect)
+    fn before(name: text, args: [Any]):
+        self.logger.log(20, "TRACE", "enter {name}")
+
+    fn after(name: text, result: Any):
+        self.logger.log(20, "TRACE", "exit {name}")
+
+class ContractAspect:
+    """Design-by-contract checking (pre/post/invariant)."""
+    preconditions: Dict<text, fn([Any]) -> bool>
+    postconditions: Dict<text, fn(Any) -> bool>
+
+    fn check_pre(name: text, args: [Any]) -> bool:
+        if self.preconditions.contains(name):
+            return self.preconditions[name](args)
+        true
+
+    fn check_post(name: text, result: Any) -> bool:
+        if self.postconditions.contains(name):
+            return self.postconditions[name](result)
+        true
+
+# ============================================================================
+# AOP Weaver
+# ============================================================================
+
+class AopWeaver:
+    """AOP weaver that applies aspects at registered pointcuts.
+
+    Currently collects advice for future MIR-level weaving.
+    The weave() method is a placeholder until MIR transformation is ready.
+    """
+    advices: [Advice]
+    logger: Logger
+
+    me add_before(pointcut: Pointcut, handler: fn(text, [Any]) -> Any, order: i64):
+        """Register before advice."""
+        self.advices = self.advices.push(Advice(
+            kind: AdviceKind.Before,
+            pointcut: pointcut,
+            handler: handler,
+            order: order
+        ))
+
+    me add_after(pointcut: Pointcut, handler: fn(text, [Any]) -> Any, order: i64):
+        """Register after advice."""
+        self.advices = self.advices.push(Advice(
+            kind: AdviceKind.After,
+            pointcut: pointcut,
+            handler: handler,
+            order: order
+        ))
+
+    me add_around(pointcut: Pointcut, handler: fn(text, [Any]) -> Any, order: i64):
+        """Register around advice."""
+        self.advices = self.advices.push(Advice(
+            kind: AdviceKind.Around,
+            pointcut: pointcut,
+            handler: handler,
+            order: order
+        ))
+
+    me add_log_aspect(aspect: LogAspect, pointcut: Pointcut):
+        """Register a logging aspect at a pointcut."""
+        self.add_before(pointcut, \name, args: aspect.before(name, args), 100)
+        self.add_after(pointcut, \name, args: aspect.after(name, args[0]), 100)
+
+    me add_tracing_aspect(aspect: TracingAspect, pointcut: Pointcut):
+        """Register a tracing aspect at a pointcut."""
+        self.add_before(pointcut, \name, args: aspect.before(name, args), 50)
+        self.add_after(pointcut, \name, args: aspect.after(name, args[0]), 50)
+
+    fn advices_for(fn_name: text) -> [Advice]:
+        """Get all advices matching a function name, sorted by order."""
+        var matching: [Advice] = []
+        for advice in self.advices:
+            if advice.pointcut.matches_name(fn_name):
+                matching = matching.push(advice)
+        # Sort by order (lower first)
+        matching.sort_by(\a, b: a.order - b.order)
 
     fn weave(mir: Any) -> Any:
         """Weave all aspects into MIR module.
 
-        Applies before/after/around advice to matching functions.
         TODO: Implement actual MIR transformation when MIR weaving is ready.
+        Currently returns MIR unchanged — aspects are recorded for runtime application.
         """
-        # For now, return MIR unchanged - aspects are recorded for later application
         mir
+
+export PointcutKind, Pointcut, AdviceKind, Advice
+export LogAspect, TracingAspect, ContractAspect
+export AopWeaver

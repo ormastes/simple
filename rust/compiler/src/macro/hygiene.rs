@@ -110,8 +110,9 @@ pub(super) fn apply_macro_hygiene_node(node: &Node, ctx: &mut MacroHygieneContex
                 let elif_branches = stmt
                     .elif_branches
                     .iter()
-                    .map(|(cond, block)| {
+                    .map(|(pattern, cond, block)| {
                         (
+                            pattern.as_ref().map(|p| apply_macro_hygiene_pattern(p, ctx, false)),
                             apply_macro_hygiene_expr(cond, ctx),
                             apply_macro_hygiene_block(block, ctx, true),
                         )
@@ -138,8 +139,9 @@ pub(super) fn apply_macro_hygiene_node(node: &Node, ctx: &mut MacroHygieneContex
                     elif_branches: stmt
                         .elif_branches
                         .iter()
-                        .map(|(cond, block)| {
+                        .map(|(pattern, cond, block)| {
                             (
+                                pattern.as_ref().map(|p| apply_macro_hygiene_pattern(p, ctx, false)),
                                 apply_macro_hygiene_expr(cond, ctx),
                                 apply_macro_hygiene_block(block, ctx, true),
                             )

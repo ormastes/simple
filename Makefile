@@ -78,18 +78,22 @@ test-verbose:
 # Test by level (per test.md policy)
 # Unit tests: all workspace tests (631+ tests)
 test-unit:
+	$(call DEPRECATION_WARNING,test --level=unit)
 	cd rust && cargo test --workspace
 
 # Integration tests: tests/ crate integration level
 test-integration:
+	$(call DEPRECATION_WARNING,test --level=integration)
 	cd rust && cargo test -p simple-tests --test integration
 
 # System tests: tests/ crate system level
 test-system:
+	$(call DEPRECATION_WARNING,test --level=system)
 	cd rust && cargo test -p simple-tests --test system
 
 # Environment tests: tests/ crate environment level
 test-environment:
+	$(call DEPRECATION_WARNING,test --level=environment)
 	cd rust && cargo test -p simple-tests --test environment
 
 # ============================================================================
@@ -189,14 +193,17 @@ coverage-html:
 	cd rust && cargo llvm-cov --workspace --html --output-dir $(COVERAGE_DIR)/html
 
 coverage-lcov:
+	$(call DEPRECATION_WARNING,coverage --format=lcov)
 	@mkdir -p $(COVERAGE_DIR)
 	cd rust && cargo llvm-cov --workspace --lcov --output-path $(COVERAGE_DIR)/lcov.info
 
 coverage-json:
+	$(call DEPRECATION_WARNING,coverage --format=json)
 	@mkdir -p $(COVERAGE_DIR)
 	cd rust && cargo llvm-cov --workspace --json --output-path $(COVERAGE_DIR)/coverage.json
 
 coverage-summary:
+	$(call DEPRECATION_WARNING,coverage --summary)
 	cd rust && cargo llvm-cov --workspace
 
 # Coverage by test level (per test.md policy)

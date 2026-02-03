@@ -1,0 +1,165 @@
+# EasyFix Rules
+#
+# Compiler-integrated fix suggestions: typo correction, type coercion,
+# keyword reordering. Uses Levenshtein distance for fuzzy matching.
+#
+# Port of rust/common/src/easy_fix_rules.rs
+# Design: "Impl in Simple unless it has big performance differences" (CLAUDE.md)
+
+from diagnostic import {EasyFix, FixConfidence, Replacement, Span}
+
+# ============================================================================
+# Levenshtein Distance
+# ============================================================================
+
+fn levenshtein(a: text, b: text) -> i64:
+    """Compute Levenshtein edit distance between two strings."""
+    val m = a.len()
+    val n = b.len()
+    if m == 0:
+        return n
+    if n == 0:
+        return m
+
+    # Initialize prev row: [0, 1, 2, ..., n]
+    var prev: [i64] = [for i in 0..=n: i]
+    var curr: [i64] = [for _ in 0..=n: 0]
+
+    var i = 1
+    while i <= m:
+        curr[0] = i
+        var j = 1
+        while j <= n:
+            val cost = if a[i - 1] == b[j - 1]: 0 else: 1
+            val del = prev[j] + 1
+            val ins = curr[j - 1] + 1
+            val sub = prev[j - 1] + cost
+            # min of three
+            var min_val = del
+            if ins < min_val:
+                min_val = ins
+            if sub < min_val:
+                min_val = sub
+            curr[j] = min_val
+            j = j + 1
+        # Swap prev and curr
+        val tmp = prev
+        prev = curr
+        curr = tmp
+        i = i + 1
+
+    prev[n]
+
+# ============================================================================
+# Typo Suggestion
+# ============================================================================
+
+fn suggest_typo_fix(
+    file: text,
+    line: i64,
+    column: i64,
+    byte_start: i64,
+    byte_end: i64,
+    misspelled: text,
+    known_names: [text]
+) -> EasyFix?:
+    """Suggest a typo fix for a misspelled identifier.
+
+    Returns an EasyFix if a known name is within edit distance 2.
+    """
+    var best_name = ""
+    var best_dist = 3  # max threshold
+
+    for name in known_names:
+        val dist = levenshtein(misspelled, name)
+        if dist > 0 and dist < best_dist:
+            best_dist = dist
+            best_name = name
+
+    if best_name.?:
+        Some(EasyFix(
+            id: "E:typo_suggestion:{line}",
+            description: "did you mean `{best_name}`?",
+            replacements: [Replacement(
+                file: file,
+                span: Span(start: byte_start, end: byte_end, line: line, column: column),
+                new_text: best_name
+            )],
+            confidence: FixConfidence.Likely
+        ))
+    else:
+        nil
+
+# ============================================================================
+# Type Coercion Suggestion
+# ============================================================================
+
+fn suggest_type_coercion_fix(
+    file: text,
+    line: i64,
+    column: i64,
+    byte_end: i64,
+    expected_type: text,
+    actual_type: text
+) -> EasyFix?:
+    """Suggest a type coercion fix for a type mismatch.
+
+    Returns an EasyFix inserting the appropriate conversion method.
+    """
+    val coercion = match (expected_type, actual_type):
+        case ("String", "Int") | ("String", "Float") | ("String", "Bool"):
+            ".to_string()"
+        case ("Int", "Float"):
+            ".to_int()"
+        case ("Float", "Int"):
+            ".to_float()"
+        case ("Bool", "Int"):
+            " != 0"
+        case _:
+            return nil
+
+    Some(EasyFix(
+        id: "E:type_mismatch_coercion:{line}",
+        description: "insert `{coercion}` to convert {actual_type} to {expected_type}",
+        replacements: [Replacement(
+            file: file,
+            span: Span(start: byte_end, end: byte_end, line: line, column: column),
+            new_text: coercion
+        )],
+        confidence: FixConfidence.Likely
+    ))
+
+# ============================================================================
+# Keyword Reorder Suggestion
+# ============================================================================
+
+fn suggest_keyword_reorder(
+    file: text,
+    line: i64,
+    column: i64,
+    byte_start: i64,
+    found_keywords: text
+) -> EasyFix?:
+    """Suggest a keyword reorder fix for parser contextual keyword errors.
+
+    Detects common misordered keyword sequences and returns the correct order.
+    """
+    val (correct, old_len) = match found_keywords:
+        case "async static fn ": ("static async fn ", 16)
+        case "static pub fn ": ("pub static fn ", 14)
+        case "pub async static fn ": ("pub static async fn ", 20)
+        case _: return nil
+
+    Some(EasyFix(
+        id: "E:parser_contextual_keyword:{line}",
+        description: "reorder keywords: `{correct.trim()}`",
+        replacements: [Replacement(
+            file: file,
+            span: Span(start: byte_start, end: byte_start + old_len, line: line, column: column),
+            new_text: correct
+        )],
+        confidence: FixConfidence.Safe
+    ))
+
+export levenshtein
+export suggest_typo_fix, suggest_type_coercion_fix, suggest_keyword_reorder

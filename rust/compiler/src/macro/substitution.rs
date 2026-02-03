@@ -136,8 +136,9 @@ fn substitute_node_templates(node: &Node, const_bindings: &HashMap<String, Strin
             elif_branches: stmt
                 .elif_branches
                 .iter()
-                .map(|(cond, block)| {
+                .map(|(pattern, cond, block)| {
                     (
+                        pattern.clone(),
                         substitute_expr_templates(cond, const_bindings),
                         substitute_block_templates(block, const_bindings),
                     )

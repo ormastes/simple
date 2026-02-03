@@ -143,8 +143,8 @@ impl I18nExtractor {
                 self.visit_expr(&if_stmt.condition);
                 self.visit_block(&if_stmt.then_block);
                 for elif in &if_stmt.elif_branches {
-                    self.visit_expr(&elif.0);
-                    self.visit_block(&elif.1);
+                    self.visit_expr(&elif.1);
+                    self.visit_block(&elif.2);
                 }
                 if let Some(else_block) = &if_stmt.else_block {
                     self.visit_block(else_block);

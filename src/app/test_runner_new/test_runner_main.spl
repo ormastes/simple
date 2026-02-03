@@ -1,6 +1,7 @@
 # Test Runner Main Orchestration
 #
 # Main test runner entry point and orchestration logic.
+# Supports DB writes, parallel execution, feature DB, and doc generation.
 
 use app.cli_util (get_cli_args)
 
@@ -9,7 +10,10 @@ use test_runner_args.parse_test_args
 use test_runner_files.{discover_test_files, print_discovery_summary}
 use test_runner_execute.{run_test_file_interpreter, run_test_file_smf, run_test_file_native}
 use test_runner_output.{print_result, print_summary}
-use test_runner_db.write_test_db_run
+use test_db_core.TestDatabase
+use feature_db.FeatureDatabase
+use doc_generator.generate_all_docs
+use rust_test_runner.{run_rust_tests, RustTestResult}
 
 # =========================================================================
 # Environment Variable Propagation
@@ -125,7 +129,7 @@ fn main() -> i64:
 
     val options = parse_test_args(args)
 
-    print "Simple Test Runner v0.3.0"
+    print "Simple Test Runner v0.4.0"
     print ""
 
     val run_start = rt_time_now_unix_micros()
@@ -134,21 +138,71 @@ fn main() -> i64:
 
     print_summary(result, options.format)
 
-    # DISABLED: Test DB writes use unsafe file append without locking
-    # This causes race conditions with Rust test runner and database corruption
-    # TODO: Re-enable after implementing rt_file_atomic_write() FFI
-    # See: doc/report/test_db_consistency_analysis_2026-01-30.md
-    #
-    # if not options.list and result.files.len() > 0:
-    #     write_test_db_run(result, run_start, run_end)
+    # Write test DB (now with proper file locking and atomic writes)
+    if not options.list and result.files.len() > 0:
+        update_test_database(result, run_start, run_end)
 
     if result.is_ok():
         return 0
     return 1
 
 # =========================================================================
+# Test Database Update
+# =========================================================================
+
+fn update_test_database(result: TestRunResult, run_start: i64, run_end: i64):
+    val db_result = TestDatabase.load()
+    if db_result.err.?:
+        print "Warning: Could not load test database: {db_result.unwrap_err()}"
+        return
+
+    val db = db_result.unwrap()
+
+    # Start run tracking
+    val run_id = db.start_run()
+
+    # Update individual test results
+    for file_result in result.files:
+        # For now, record file-level results
+        # Individual test results require output parsing (future enhancement)
+        val status = if file_result.failed > 0:
+            TestStatus.Failed
+        elif file_result.timed_out:
+            TestStatus.Failed
+        else:
+            TestStatus.Passed
+
+        val suite_name = "default"
+        val category = "Unknown"
+        val duration = file_result.duration_ms.to_float()
+
+        db.update_test_result(
+            file_result.path,
+            file_result.path,
+            suite_name,
+            category,
+            status,
+            duration
+        )
+
+    # Complete run
+    val total = result.total_passed + result.total_failed
+    db.complete_run(run_id, total, result.total_passed, result.total_failed, result.total_timed_out)
+
+    # Save database
+    val save_result = db.save()
+    if save_result.err.?:
+        print "Warning: Could not save test database: {save_result.unwrap_err()}"
+        return
+
+    # Generate documentation
+    val fdb = FeatureDatabase.load()
+    generate_all_docs(db, fdb)
+
+# =========================================================================
 # Exports
 # =========================================================================
 
 export propagate_env_vars, run_tests, mode_to_str, run_single_test
+export update_test_database
 export main

@@ -436,8 +436,9 @@ impl<'a> Monomorphizer<'a> {
                 new_if.elif_branches = if_stmt
                     .elif_branches
                     .iter()
-                    .map(|(cond, block)| {
+                    .map(|(pattern, cond, block)| {
                         (
+                            pattern.clone(),
                             self.substitute_in_expr(cond, bindings),
                             self.substitute_in_block(block, bindings),
                         )
