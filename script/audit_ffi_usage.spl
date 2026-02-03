@@ -1,0 +1,220 @@
+#!/usr/bin/env simple
+# FFI Usage Audit Script
+# Finds direct FFI calls (rt_*) that should use wrappers instead
+
+use app.io.{file_read, file_exists, dir_walk, glob}
+
+struct FfiCall:
+    file: text
+    line: i64
+    function_name: text
+    context: text
+
+struct FfiDeclaration:
+    file: text
+    function_name: text
+    has_wrapper: bool
+
+fn main():
+    print "=== FFI Usage Audit ==="
+    print ""
+
+    # Step 1: Find all extern fn declarations
+    print "Step 1: Finding extern fn declarations..."
+    val declarations = find_extern_declarations()
+    print "Found {declarations.len()} extern fn declarations"
+    print ""
+
+    # Step 2: Find all direct rt_* calls
+    print "Step 2: Finding direct FFI calls..."
+    val direct_calls = find_direct_ffi_calls()
+    print "Found {direct_calls.len()} direct FFI calls"
+    print ""
+
+    # Step 3: Check which calls lack wrappers
+    print "Step 3: Checking for missing wrappers..."
+    val missing_wrappers = check_missing_wrappers(direct_calls, declarations)
+    print "Found {missing_wrappers.len()} calls without wrappers"
+    print ""
+
+    # Step 4: Generate report
+    print "Step 4: Generating report..."
+    generate_report(missing_wrappers)
+    print ""
+    print "Report saved to: doc/report/ffi_direct_calls.md"
+
+fn find_extern_declarations() -> [FfiDeclaration]:
+    var result: [FfiDeclaration] = []
+
+    # Search in src/ and rust/lib/std/src/
+    val patterns = ["src/**/*.spl", "rust/lib/std/src/**/*.spl"]
+
+    for pattern in patterns:
+        val files = glob(pattern)
+        for file_path in files:
+            if not file_path.contains("/core/") and not file_exists(file_path):
+                continue
+
+            val content = file_read(file_path)
+            val lines = content.split("\n")
+
+            for i in 0..lines.len():
+                val line = lines[i]
+                if line.trim().starts_with("extern fn "):
+                    val func_name = extract_function_name(line)
+                    if func_name.starts_with("rt_"):
+                        val decl = FfiDeclaration(
+                            file: file_path,
+                            function_name: func_name,
+                            has_wrapper: check_has_wrapper(content, func_name)
+                        )
+                        result.push(decl)
+
+    result
+
+fn find_direct_ffi_calls() -> [FfiCall]:
+    var result: [FfiCall] = []
+
+    val patterns = ["src/**/*.spl", "test/**/*.spl", "rust/lib/std/src/**/*.spl"]
+
+    for pattern in patterns:
+        val files = glob(pattern)
+        for file_path in files:
+            # Skip core and ffi wrapper files
+            if file_path.contains("/core/") or file_path.ends_with("/ffi.spl") or file_path.ends_with("io/mod.spl"):
+                continue
+
+            if not file_exists(file_path):
+                continue
+
+            val content = file_read(file_path)
+            val lines = content.split("\n")
+
+            for i in 0..lines.len():
+                val line = lines[i]
+                # Look for rt_* function calls
+                if line.contains("rt_") and not line.trim().starts_with("extern fn") and not line.trim().starts_with("#"):
+                    val func_names = extract_rt_calls(line)
+                    for func_name in func_names:
+                        val call = FfiCall(
+                            file: file_path,
+                            line: i + 1,
+                            function_name: func_name,
+                            context: line.trim()
+                        )
+                        result.push(call)
+
+    result
+
+fn extract_function_name(line: text) -> text:
+    # Extract from "extern fn rt_function_name(...)"
+    val parts = line.split("extern fn ")[1].split("(")
+    if parts.len() > 0:
+        parts[0].trim()
+    else:
+        ""
+
+fn extract_rt_calls(line: text) -> [text]:
+    var result: [text] = []
+    var i = 0
+
+    while i < line.len():
+        if i + 3 < line.len() and line[i..i+3] == "rt_":
+            # Found rt_ prefix
+            var j = i + 3
+            while j < line.len() and (line[j].is_alphanumeric() or line[j] == '_'):
+                j = j + 1
+            val func_name = line[i..j]
+            result.push(func_name)
+            i = j
+        else:
+            i = i + 1
+
+    result
+
+fn check_has_wrapper(content: text, extern_name: text) -> bool:
+    # Check if there's a wrapper function
+    val wrapper_name = extern_name.replace("rt_", "")
+
+    # Look for: fn wrapper_name(...) and it calls extern_name
+    val lines = content.split("\n")
+    var found_wrapper = false
+    var in_wrapper = false
+
+    for line in lines:
+        if line.contains("fn {wrapper_name}(") or line.contains("fn {wrapper_name} ("):
+            in_wrapper = true
+
+        if in_wrapper and line.contains(extern_name):
+            found_wrapper = true
+            break
+
+        # End of function
+        if in_wrapper and line.trim().starts_with("fn "):
+            in_wrapper = false
+
+    found_wrapper
+
+fn check_missing_wrappers(calls: [FfiCall], declarations: [FfiDeclaration]) -> [FfiCall]:
+    var result: [FfiCall] = []
+
+    # Build map of functions with wrappers
+    var has_wrapper_map: dict = {}
+    for decl in declarations:
+        if decl.has_wrapper:
+            has_wrapper_map[decl.function_name] = true
+
+    # Check each call
+    for call in calls:
+        # Skip if it's in a wrapper definition itself
+        if call.context.contains("fn ") and call.context.contains("("):
+            continue
+
+        # Check if wrapper exists
+        if not has_wrapper_map.get(call.function_name, false):
+            result.push(call)
+
+    result
+
+fn generate_report(calls: [FfiCall]):
+    var report = "# Direct FFI Calls Without Wrappers\n\n"
+    report = report + "## Summary\n\n"
+    report = report + "Found {calls.len()} direct FFI calls that should use wrapper functions.\n\n"
+    report = report + "## Calls by File\n\n"
+
+    # Group by file
+    var by_file: dict = {}
+    for call in calls:
+        if not by_file.has_key(call.file):
+            by_file[call.file] = []
+        by_file[call.file].push(call)
+
+    # Sort and output
+    val files = by_file.keys().sort()
+    for file in files:
+        report = report + "### {file}\n\n"
+        val file_calls = by_file[file]
+        for call in file_calls:
+            report = report + "- Line {call.line}: `{call.function_name}()`\n"
+            report = report + "  ```simple\n  {call.context}\n  ```\n"
+        report = report + "\n"
+
+    report = report + "## Recommendations\n\n"
+    report = report + "For each direct FFI call:\n\n"
+    report = report + "1. Check if wrapper exists in `src/app/io/mod.spl` or `src/compiler/ffi.spl`\n"
+    report = report + "2. If wrapper exists: Update code to use wrapper\n"
+    report = report + "3. If no wrapper: Add TODO comment or create wrapper\n\n"
+    report = report + "Example fix:\n"
+    report = report + "```simple\n"
+    report = report + "# Before (direct FFI)\n"
+    report = report + "val exists = rt_file_exists(path)\n\n"
+    report = report + "# After (using wrapper)\n"
+    report = report + "use app.io.{file_exists}\n"
+    report = report + "val exists = file_exists(path)\n"
+    report = report + "```\n"
+
+    # Write report
+    extern fn rt_file_write_text(path: text, content: text) -> bool
+    rt_file_write_text("doc/report/ffi_direct_calls.md", report)
+
+main()

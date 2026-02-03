@@ -1,0 +1,303 @@
+# Monomorphization Note SDN
+#
+# Tracks monomorphization metadata and serializes to SDN format.
+# Used for debugging generic template instantiations and dependency analysis.
+#
+# Port of rust/compiler/src/monomorphize/note_sdn.rs (494 lines)
+
+export NoteSdnMetadata, InstantiationEntry, PossibleInstantiationEntry
+export TypeInferenceEntry, DependencyEdge, CircularWarning, CircularError
+export InstantiationStatus, DependencyKind
+
+use monomorphize.engine (ConcreteType)
+
+# ============================================================================
+# Enums
+# ============================================================================
+
+enum InstantiationStatus:
+    Compiled
+    Deferred
+    JitCompiled
+
+impl InstantiationStatus:
+    fn as_str() -> text:
+        match self:
+            case Compiled: "compiled"
+            case Deferred: "deferred"
+            case JitCompiled: "jit_compiled"
+
+    static fn from_str(s: text) -> Result<InstantiationStatus, text>:
+        match s:
+            case "compiled": Ok(InstantiationStatus.Compiled)
+            case "deferred": Ok(InstantiationStatus.Deferred)
+            case "jit_compiled": Ok(InstantiationStatus.JitCompiled)
+            case _: Err("Unknown instantiation status: {s}")
+
+enum DependencyKind:
+    TypeParam    # Type parameter dependency (e.g., List<T> depends on T)
+    FieldType    # Field type dependency (e.g., struct with field of type T)
+    InnerType    # Inner type dependency (e.g., Option<T> wraps T)
+    MethodDep    # Method dependency (e.g., method returns T)
+
+impl DependencyKind:
+    fn as_str() -> text:
+        match self:
+            case TypeParam: "type_param"
+            case FieldType: "field_type"
+            case InnerType: "inner_type"
+            case MethodDep: "method_dep"
+
+    static fn from_str(s: text) -> Result<DependencyKind, text>:
+        match s:
+            case "type_param": Ok(DependencyKind.TypeParam)
+            case "field_type": Ok(DependencyKind.FieldType)
+            case "inner_type": Ok(DependencyKind.InnerType)
+            case "method_dep": Ok(DependencyKind.MethodDep)
+            case _: Err("Unknown dependency kind: {s}")
+
+# ============================================================================
+# Entry Types
+# ============================================================================
+
+struct InstantiationEntry:
+    template: text           # Template base name
+    type_args: text          # Concrete type arguments (comma-separated)
+    mangled_name: text       # Mangled symbol name
+    from_file: text          # Source file
+    from_loc: text           # Source location (file:line:col)
+    output_file: text        # Object file (.o)
+    status: InstantiationStatus
+
+impl InstantiationEntry:
+    static fn new(
+        template: text,
+        type_args: [ConcreteType],
+        mangled_name: text,
+        from_file: text,
+        from_loc: text,
+        output_file: text,
+        status: InstantiationStatus
+    ) -> InstantiationEntry:
+        val type_args_str = type_args.map(\t: t.to_string()).join(",")
+        InstantiationEntry(
+            template: template,
+            type_args: type_args_str,
+            mangled_name: mangled_name,
+            from_file: from_file,
+            from_loc: from_loc,
+            output_file: output_file,
+            status: status
+        )
+
+struct PossibleInstantiationEntry:
+    template: text           # Template base name
+    type_args: text          # Concrete type arguments
+    mangled_name: text       # Mangled symbol name
+    required_by: text        # Which module needs this instantiation
+    can_defer: bool          # Can this be deferred to link/load time?
+
+impl PossibleInstantiationEntry:
+    static fn new(
+        template: text,
+        type_args: [ConcreteType],
+        mangled_name: text,
+        required_by: text,
+        can_defer: bool
+    ) -> PossibleInstantiationEntry:
+        val type_args_str = type_args.map(\t: t.to_string()).join(",")
+        PossibleInstantiationEntry(
+            template: template,
+            type_args: type_args_str,
+            mangled_name: mangled_name,
+            required_by: required_by,
+            can_defer: can_defer
+        )
+
+struct TypeInferenceEntry:
+    inferred_type: text      # Inferred type (may be placeholder like "?T")
+    expr: text               # Expression text
+    context: text            # Inference context (e.g., "literal", "var_init")
+    from_file: text          # Source file
+    from_loc: text           # Source location (file:line:col)
+
+impl TypeInferenceEntry:
+    static fn new(
+        inferred_type: text,
+        expr: text,
+        context: text,
+        from_file: text,
+        from_loc: text
+    ) -> TypeInferenceEntry:
+        TypeInferenceEntry(
+            inferred_type: inferred_type,
+            expr: expr,
+            context: context,
+            from_file: from_file,
+            from_loc: from_loc
+        )
+
+struct DependencyEdge:
+    from_inst: text          # Source instantiation (e.g., "List$Int")
+    to_inst: text            # Target instantiation (e.g., "Int")
+    dep_kind: DependencyKind
+
+impl DependencyEdge:
+    static fn new(from_inst: text, to_inst: text, dep_kind: DependencyKind) -> DependencyEdge:
+        DependencyEdge(from_inst: from_inst, to_inst: to_inst, dep_kind: dep_kind)
+
+struct CircularWarning:
+    cycle_path: text         # Cycle path (e.g., "Node$T->Option$Node$T->Node$T")
+    severity: text           # Severity level
+
+impl CircularWarning:
+    static fn new(cycle_path: text, severity: text) -> CircularWarning:
+        CircularWarning(cycle_path: cycle_path, severity: severity)
+
+struct CircularError:
+    cycle_path: text         # Cycle path (e.g., "A$T->B$T->C$T->A$T")
+    error_code: text         # Error code (e.g., "E0420", "E0421")
+
+impl CircularError:
+    static fn new(cycle_path: text, error_code: text) -> CircularError:
+        CircularError(cycle_path: cycle_path, error_code: error_code)
+
+# ============================================================================
+# Main Metadata Container
+# ============================================================================
+
+struct NoteSdnMetadata:
+    instantiations: [InstantiationEntry]
+    possible: [PossibleInstantiationEntry]
+    type_inferences: [TypeInferenceEntry]
+    dependencies: [DependencyEdge]
+    circular_warnings: [CircularWarning]
+    circular_errors: [CircularError]
+
+impl NoteSdnMetadata:
+    static fn new() -> NoteSdnMetadata:
+        NoteSdnMetadata(
+            instantiations: [],
+            possible: [],
+            type_inferences: [],
+            dependencies: [],
+            circular_warnings: [],
+            circular_errors: []
+        )
+
+    fn is_empty() -> bool:
+        self.instantiations.is_empty() and
+        self.possible.is_empty() and
+        self.type_inferences.is_empty() and
+        self.dependencies.is_empty() and
+        self.circular_warnings.is_empty() and
+        self.circular_errors.is_empty()
+
+    me add_instantiation(entry: InstantiationEntry):
+        self.instantiations = self.instantiations.push(entry)
+
+    me add_possible(entry: PossibleInstantiationEntry):
+        self.possible = self.possible.push(entry)
+
+    me add_type_inference(entry: TypeInferenceEntry):
+        self.type_inferences = self.type_inferences.push(entry)
+
+    me add_dependency(edge: DependencyEdge):
+        self.dependencies = self.dependencies.push(edge)
+
+    me add_circular_warning(warning: CircularWarning):
+        self.circular_warnings = self.circular_warnings.push(warning)
+
+    me add_circular_error(error: CircularError):
+        self.circular_errors = self.circular_errors.push(error)
+
+    # ========================================================================
+    # SDN Serialization
+    # ========================================================================
+
+    fn to_sdn() -> text:
+        """Serialize to SDN format for debugging and tracking."""
+        var lines: [text] = []
+
+        # Header
+        lines = lines.push("# Monomorphization Note (SDN format)")
+        lines = lines.push("# Generated by Simple compiler monomorphization pass")
+        lines = lines.push("")
+
+        # Instantiations table
+        lines = lines.push("instantiations |template, type_args, mangled_name, from_file, from_loc, output_file, status|")
+        for entry in self.instantiations:
+            val template = escape_sdn(entry.template)
+            val type_args = escape_sdn(entry.type_args)
+            val mangled_name = escape_sdn(entry.mangled_name)
+            val from_file = escape_sdn(entry.from_file)
+            val from_loc = escape_sdn(entry.from_loc)
+            val output_file = escape_sdn(entry.output_file)
+            val status = entry.status.as_str()
+            lines = lines.push("    \"{template}\", \"{type_args}\", \"{mangled_name}\", \"{from_file}\", \"{from_loc}\", \"{output_file}\", \"{status}\"")
+        lines = lines.push("")
+
+        # Possible instantiations table
+        lines = lines.push("possible |template, type_args, mangled_name, required_by, can_defer|")
+        for entry in self.possible:
+            val template = escape_sdn(entry.template)
+            val type_args = escape_sdn(entry.type_args)
+            val mangled_name = escape_sdn(entry.mangled_name)
+            val required_by = escape_sdn(entry.required_by)
+            val can_defer = if entry.can_defer: "true" else: "false"
+            lines = lines.push("    \"{template}\", \"{type_args}\", \"{mangled_name}\", \"{required_by}\", \"{can_defer}\"")
+        lines = lines.push("")
+
+        # Type inferences table
+        lines = lines.push("type_inferences |inferred_type, expr, context, from_file, from_loc|")
+        for entry in self.type_inferences:
+            val inferred_type = escape_sdn(entry.inferred_type)
+            val expr = escape_sdn(entry.expr)
+            val context = escape_sdn(entry.context)
+            val from_file = escape_sdn(entry.from_file)
+            val from_loc = escape_sdn(entry.from_loc)
+            lines = lines.push("    \"{inferred_type}\", \"{expr}\", \"{context}\", \"{from_file}\", \"{from_loc}\"")
+        lines = lines.push("")
+
+        # Dependencies table
+        lines = lines.push("dependencies |from_inst, to_inst, dep_kind|")
+        for edge in self.dependencies:
+            val from_inst = escape_sdn(edge.from_inst)
+            val to_inst = escape_sdn(edge.to_inst)
+            val dep_kind = edge.dep_kind.as_str()
+            lines = lines.push("    \"{from_inst}\", \"{to_inst}\", \"{dep_kind}\"")
+        lines = lines.push("")
+
+        # Circular warnings table
+        lines = lines.push("circular_warnings |cycle_path, severity|")
+        for warning in self.circular_warnings:
+            val cycle_path = escape_sdn(warning.cycle_path)
+            val severity = escape_sdn(warning.severity)
+            lines = lines.push("    \"{cycle_path}\", \"{severity}\"")
+        lines = lines.push("")
+
+        # Circular errors table
+        lines = lines.push("circular_errors |cycle_path, error_code|")
+        for error in self.circular_errors:
+            val cycle_path = escape_sdn(error.cycle_path)
+            val error_code = escape_sdn(error.error_code)
+            lines = lines.push("    \"{cycle_path}\", \"{error_code}\"")
+        lines = lines.push("")
+
+        # Footer
+        lines = lines.push("# END_NOTE")
+        lines = lines.push("")
+
+        lines.join("\n")
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+fn escape_sdn(s: text) -> text:
+    """Escape special characters for SDN format."""
+    s.replace("\\", "\\\\")
+     .replace("\"", "\\\"")
+     .replace("\n", "\\n")
+     .replace("\r", "\\r")
+     .replace("\t", "\\t")

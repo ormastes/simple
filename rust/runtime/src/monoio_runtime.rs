@@ -147,8 +147,9 @@ pub extern "C" fn monoio_runtime_shutdown_global() -> RuntimeValue {
 /// Feature #1734: CPU topology detection
 #[no_mangle]
 pub extern "C" fn monoio_get_num_cores() -> RuntimeValue {
-    let num_cores = num_cpus::get();
-    RuntimeValue::from_int(num_cores as i64)
+    // Use syscall instead of num_cpus crate
+    let num_cores = unsafe { crate::syscalls_ffi::rt_system_cpu_count() };
+    RuntimeValue::from_int(num_cores)
 }
 
 /// Configure io_uring entries (ring size)

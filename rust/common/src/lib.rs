@@ -181,6 +181,7 @@ impl<L: DynLoader + Default> Default for ModuleRegistry<L> {
 
 pub mod fault_detection;
 
+// GC migrated to Simple (src/app/gc/) - Minimal stubs for compatibility
 pub mod gc;
 
 pub mod target;
