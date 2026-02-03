@@ -1734,6 +1734,223 @@ impl HmInferContext:
         # After all type inference, solve dimension constraints
         self.check_dim_constraints()
 
+    # ========================================================================
+    # Effect Inference and Checking
+    # ========================================================================
+
+    me infer_expr_effects(expr: HirExpr) -> [Effect]:
+        """Infer the effects of an expression.
+
+        Returns the set of effects that the expression may perform.
+        Used for tracking side effects and enforcing effect boundaries.
+        """
+        match expr.kind:
+            # Pure expressions - no effects
+            case IntLit(_, _) | FloatLit(_, _) | StringLit(_, _):
+                []
+            case BoolLit(_) | CharLit(_) | Unit | NilLit:
+                []
+            case Var(_):
+                # Variable access is pure (reading is not a side effect)
+                []
+
+            # Literals with subexpressions - collect effects from elements
+            case ArrayLit(elements, _):
+                var effects: [Effect] = []
+                for elem in elements:
+                    effects = self.merge_effects(effects, self.infer_expr_effects(elem))
+                effects
+
+            case TupleLit(elements):
+                var effects: [Effect] = []
+                for elem in elements:
+                    effects = self.merge_effects(effects, self.infer_expr_effects(elem))
+                effects
+
+            case DictLit(entries, _, _):
+                var effects: [Effect] = []
+                for (k, v) in entries:
+                    effects = self.merge_effects(effects, self.infer_expr_effects(k))
+                    effects = self.merge_effects(effects, self.infer_expr_effects(v))
+                effects
+
+            # Binary and unary operations - combine operand effects
+            case Binary(_, left, right):
+                self.merge_effects(self.infer_expr_effects(left), self.infer_expr_effects(right))
+
+            case Unary(_, operand):
+                self.infer_expr_effects(operand)
+
+            # Control flow - collect effects from branches
+            case If(cond, then_, else_):
+                var effects = self.infer_expr_effects(cond)
+                effects = self.merge_effects(effects, self.infer_block_effects(then_))
+                if else_.?:
+                    effects = self.merge_effects(effects, self.infer_block_effects(else_.unwrap()))
+                effects
+
+            case Match(scrutinee, arms):
+                var effects = self.infer_expr_effects(scrutinee)
+                for arm in arms:
+                    if arm.guard.?:
+                        effects = self.merge_effects(effects, self.infer_expr_effects(arm.guard.unwrap()))
+                    effects = self.merge_effects(effects, self.infer_expr_effects(arm.body))
+                effects
+
+            # Function/method calls - get effects from callee type
+            case Call(callee, args, _):
+                var effects = self.infer_expr_effects(callee)
+                for arg in args:
+                    effects = self.merge_effects(effects, self.infer_expr_effects(arg.value))
+
+                # Add effects from the called function
+                match self.infer_expr(callee):
+                    case Ok(callee_ty):
+                        effects = self.merge_effects(effects, self.get_function_effects(callee_ty))
+                    case _: pass
+
+                effects
+
+            case MethodCall(receiver, method, args, _):
+                var effects = self.infer_expr_effects(receiver)
+                for arg in args:
+                    effects = self.merge_effects(effects, self.infer_expr_effects(arg.value))
+
+                # Method calls may have effects depending on the method
+                # For now, conservatively assume IO effect
+                effects.push(Effect(kind: EffectKind.IO, span: expr.span))
+
+            # Closures - effects of the body
+            case Closure(params, body, _):
+                self.infer_expr_effects(body)
+
+            # Field access and indexing - effects from base
+            case Field(base, _, _):
+                self.infer_expr_effects(base)
+
+            case Index(base, index):
+                self.merge_effects(self.infer_expr_effects(base), self.infer_expr_effects(index))
+
+            # Blocks
+            case Block(block):
+                self.infer_block_effects(block)
+
+            # Loop constructs - effects from body
+            case Loop(body, _):
+                self.infer_block_effects(body)
+
+            case While(cond, body, _):
+                self.merge_effects(self.infer_expr_effects(cond), self.infer_block_effects(body))
+
+            case For(_, iter, body, _):
+                self.merge_effects(self.infer_expr_effects(iter), self.infer_block_effects(body))
+
+            # Range - pure
+            case Range(start, end, _, _):
+                var effects: [Effect] = []
+                if start.?:
+                    effects = self.merge_effects(effects, self.infer_expr_effects(start.unwrap()))
+                if end.?:
+                    effects = self.merge_effects(effects, self.infer_expr_effects(end.unwrap()))
+                effects
+
+            case _:
+                # Unknown expression kind - conservatively assume no effects
+                []
+
+    me infer_block_effects(block: HirBlock) -> [Effect]:
+        """Infer effects of a block."""
+        var effects: [Effect] = []
+
+        for stmt in block.stmts:
+            effects = self.merge_effects(effects, self.infer_stmt_effects(stmt))
+
+        if block.value.?:
+            effects = self.merge_effects(effects, self.infer_expr_effects(block.value.unwrap()))
+
+        effects
+
+    me infer_stmt_effects(stmt: HirStmt) -> [Effect]:
+        """Infer effects of a statement."""
+        match stmt.kind:
+            case Expr(expr):
+                self.infer_expr_effects(expr)
+
+            case Let(_, _, init):
+                # Let binding includes effects from initializer
+                self.infer_expr_effects(init)
+
+            case Assign(target, _, value):
+                # Assignment is a mutation effect
+                var effects = self.infer_expr_effects(target)
+                effects = self.merge_effects(effects, self.infer_expr_effects(value))
+                effects.push(Effect(kind: EffectKind.Mutates, span: stmt.span))
+
+            case Block(block):
+                self.infer_block_effects(block)
+
+    me get_function_effects(fn_ty: HirType) -> [Effect]:
+        """Extract effects from a function type."""
+        match fn_ty.kind:
+            case Function(_, _, effects):
+                effects
+            case _:
+                []
+
+    me check_effect_compatibility(required: [Effect], provided: [Effect], span: Span) -> Result<(), TypeInferError>:
+        """Check if provided effects are compatible with required effects.
+
+        An effect system typically checks that:
+        - Pure contexts cannot call functions with side effects
+        - Async contexts can call both sync and async functions
+        - Sync contexts cannot call async functions
+        - Specific effects (IO, Mutates) are allowed in appropriate contexts
+        """
+        # For each required effect, check if it's provided
+        for req_effect in required:
+            var found = false
+            for prov_effect in provided:
+                if self.effects_match(req_effect, prov_effect):
+                    found = true
+                    break
+
+            if not found:
+                return Err(TypeInferError.Other(
+                    "effect mismatch: required effect {req_effect.kind} not provided",
+                    span
+                ))
+
+        Ok(())
+
+    fn effects_match(effect1: Effect, effect2: Effect) -> bool:
+        """Check if two effects match."""
+        match (effect1.kind, effect2.kind):
+            case (Pure, Pure): true
+            case (IO, IO): true
+            case (Async, Async): true
+            case (Mutates, Mutates): true
+            case (Allocates, Allocates): true
+            case (Throws(ty1), Throws(ty2)):
+                # Types should match, but for now just check both are Throws
+                true
+            case (Custom(name1), Custom(name2)):
+                name1 == name2
+            case _:
+                false
+
+    me merge_effects(effects1: [Effect], effects2: [Effect]) -> [Effect]:
+        """Merge two effect sets, removing duplicates."""
+        var result = effects1
+        for effect in effects2:
+            var found = false
+            for existing in result:
+                if self.effects_match(effect, existing):
+                    found = true
+                    break
+            if not found:
+                result = result.push(effect)
+        result
+
 # ============================================================================
 # Exports
 # ============================================================================

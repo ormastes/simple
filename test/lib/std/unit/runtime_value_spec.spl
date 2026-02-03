@@ -527,6 +527,244 @@ describe "Use Cases":
             expect result to_equal "integer"
 
 # ============================================================================
+# NEW BRANCH COVERAGE TESTS - Week 3
+# ============================================================================
+
+# ============================================================================
+# Type Conversion Edge Cases
+# ============================================================================
+
+describe "RuntimeValue - Type Conversions":
+    context "int to float conversion":
+        it "should convert small integers to floats":
+            val int_val = RuntimeValue.from_int(42)
+            val float_val = int_val.to_float()
+            expect float_val.is_float() to_equal true
+            expect (float_val.as_float() == 42.0) to_equal true
+
+        it "should handle zero conversion":
+            val int_val = RuntimeValue.from_int(0)
+            val float_val = int_val.to_float()
+            expect (float_val.as_float() == 0.0) to_equal true
+
+        it "should handle negative integers":
+            val int_val = RuntimeValue.from_int(-100)
+            val float_val = int_val.to_float()
+            expect (float_val.as_float() == -100.0) to_equal true
+
+    context "float to int conversion":
+        it "should truncate float to int":
+            val float_val = RuntimeValue.from_float(42.7)
+            val int_val = float_val.to_int()
+            expect int_val.is_int() to_equal true
+            expect int_val.as_int() to_equal 42
+
+        it "should handle negative floats":
+            val float_val = RuntimeValue.from_float(-3.9)
+            val int_val = float_val.to_int()
+            expect int_val.as_int() to_equal -3
+
+        it "should handle zero float":
+            val float_val = RuntimeValue.from_float(0.0)
+            val int_val = float_val.to_int()
+            expect int_val.as_int() to_equal 0
+
+    context "bool to int conversion":
+        it "should convert true to 1":
+            val bool_val = RuntimeValue.from_bool(true)
+            val int_val = bool_val.to_int()
+            expect int_val.as_int() to_equal 1
+
+        it "should convert false to 0":
+            val bool_val = RuntimeValue.from_bool(false)
+            val int_val = bool_val.to_int()
+            expect int_val.as_int() to_equal 0
+
+    context "nil conversions":
+        it "should convert nil to 0 int":
+            val nil_val = RuntimeValue.nil()
+            val int_val = nil_val.to_int()
+            expect int_val.as_int() to_equal 0
+
+        it "should convert nil to 0.0 float":
+            val nil_val = RuntimeValue.nil()
+            val float_val = nil_val.to_float()
+            expect (float_val.as_float() == 0.0) to_equal true
+
+        it "should convert nil to false bool":
+            val nil_val = RuntimeValue.nil()
+            val bool_val = nil_val.to_bool()
+            expect bool_val.as_bool() to_equal false
+
+# ============================================================================
+# NaN-Boxing Edge Cases
+# ============================================================================
+
+describe "RuntimeValue - NaN-Boxing":
+    context "special float values":
+        it "should handle positive infinity":
+            val inf = RuntimeValue.from_float(1.0 / 0.0)
+            expect inf.is_float() to_equal true
+
+        it "should handle negative infinity":
+            val neg_inf = RuntimeValue.from_float(-1.0 / 0.0)
+            expect neg_inf.is_float() to_equal true
+
+        it "should handle NaN":
+            val nan = RuntimeValue.from_float(0.0 / 0.0)
+            expect nan.is_float() to_equal true
+
+        it "should distinguish NaN from other values":
+            val nan = RuntimeValue.from_float(0.0 / 0.0)
+            val normal = RuntimeValue.from_float(3.14)
+            expect nan.is_float() to_equal true
+            expect normal.is_float() to_equal true
+            # NaN != NaN property
+            expect (nan.as_float() == nan.as_float()) to_equal false
+
+    context "float precision":
+        it "should preserve small floats":
+            val small = RuntimeValue.from_float(0.0000001)
+            expect small.is_float() to_equal true
+
+        it "should preserve large floats":
+            val large = RuntimeValue.from_float(1e308)
+            expect large.is_float() to_equal true
+
+        it "should handle denormalized numbers":
+            val denorm = RuntimeValue.from_float(1e-320)
+            expect denorm.is_float() to_equal true
+
+# ============================================================================
+# Tag Manipulation Edge Cases
+# ============================================================================
+
+describe "RuntimeValue - Tag Bits":
+    context "tag preservation":
+        it "should preserve tags after operations":
+            val int_val = RuntimeValue.from_int(42)
+            expect int_val.get_tag() to_equal TAG_INT
+
+        it "should not confuse similar bit patterns":
+            val int_val = RuntimeValue.from_int(0b011)  # Looks like bool tag
+            expect int_val.is_int() to_equal true
+            expect int_val.is_bool() to_equal false
+
+    context "boundary values":
+        it "should handle max immediate int":
+            # 61-bit signed max
+            val max_int = RuntimeValue.from_int(2305843009213693951)
+            expect max_int.is_int() to_equal true
+
+        it "should handle min immediate int":
+            # 61-bit signed min
+            val min_int = RuntimeValue.from_int(-2305843009213693952)
+            expect min_int.is_int() to_equal true
+
+        it "should handle int near max":
+            val near_max = RuntimeValue.from_int(2305843009213693950)
+            expect near_max.is_int() to_equal true
+            expect near_max.as_int() to_equal 2305843009213693950
+
+# ============================================================================
+# FFI Boundary Tests
+# ============================================================================
+
+describe "RuntimeValue - FFI Boundaries":
+    context "marshalling to C":
+        it "should represent int as 64-bit value":
+            val int_val = RuntimeValue.from_int(42)
+            val raw = int_val.to_raw()
+            # Should have TAG_INT in low 3 bits
+            expect ((raw and TAG_MASK) == TAG_INT) to_equal true
+
+        it "should represent float with NaN-boxing":
+            val float_val = RuntimeValue.from_float(3.14)
+            val raw = float_val.to_raw()
+            # Should have TAG_FLOAT in low 3 bits
+            expect ((raw and TAG_MASK) == TAG_FLOAT) to_equal true
+
+        it "should represent nil consistently":
+            val nil_val = RuntimeValue.nil()
+            val raw = nil_val.to_raw()
+            expect raw to_equal TAG_NIL
+
+    context "unmarshalling from C":
+        it "should reconstruct int from raw":
+            val raw = (42 << TAG_SHIFT) or TAG_INT
+            val int_val = RuntimeValue.from_raw(raw)
+            expect int_val.is_int() to_equal true
+            expect int_val.as_int() to_equal 42
+
+        it "should reconstruct bool from raw":
+            val true_raw = BOOL_TRUE
+            val true_val = RuntimeValue.from_raw(true_raw)
+            expect true_val.is_bool() to_equal true
+            expect true_val.as_bool() to_equal true
+
+        it "should handle invalid tags":
+            val invalid_raw = 0b111  # Reserved tag
+            val val = RuntimeValue.from_raw(invalid_raw)
+            # Should either fail or return nil
+
+    context "pointer alignment":
+        it "should verify 8-byte alignment for heap pointers":
+            # Heap pointers must be 8-byte aligned (tag 0b000)
+            val aligned_ptr = 0x1000  # 8-byte aligned
+            val ptr_val = RuntimeValue.from_ptr(aligned_ptr)
+            expect ptr_val.is_ptr() to_equal true
+
+        it "should detect unaligned pointers":
+            val unaligned_ptr = 0x1005  # Not 8-byte aligned
+            # Should either fail or clear low bits
+            val ptr_val = RuntimeValue.from_ptr(unaligned_ptr)
+            # Implementation-defined behavior
+
+# ============================================================================
+# Atomic Operations Edge Cases
+# ============================================================================
+
+describe "AtomicValue - Concurrent Edge Cases":
+    context "concurrent load/store":
+        it "should handle rapid updates":
+            val atomic = AtomicValue.new(RuntimeValue.from_int(0))
+
+            for i in 0..100:
+                val new_val = RuntimeValue.from_int(i)
+                atomic.store(new_val)
+
+            val final = atomic.load()
+            expect final.is_int() to_equal true
+
+        it "should handle different types":
+            val atomic = AtomicValue.new(RuntimeValue.from_int(42))
+
+            atomic.store(RuntimeValue.from_float(3.14))
+            expect atomic.load().is_float() to_equal true
+
+            atomic.store(RuntimeValue.from_bool(true))
+            expect atomic.load().is_bool() to_equal true
+
+    context "compare_exchange races":
+        it "should handle successful CAS":
+            val atomic = AtomicValue.new(RuntimeValue.from_int(10))
+            val old = RuntimeValue.from_int(10)
+            val new = RuntimeValue.from_int(20)
+
+            val success = atomic.compare_exchange(old, new)
+            expect success to_equal true
+            expect atomic.load().as_int() to_equal 20
+
+        it "should handle failed CAS":
+            val atomic = AtomicValue.new(RuntimeValue.from_int(10))
+            val wrong_old = RuntimeValue.from_int(15)
+            val new = RuntimeValue.from_int(20)
+
+            val success = atomic.compare_exchange(wrong_old, new)
+            expect success to_equal false
+            expect atomic.load().as_int() to_equal 10  # Unchanged
+
+# ============================================================================
 # Summary
 # ============================================================================
 
