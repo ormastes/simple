@@ -51,6 +51,20 @@ fn generate_test_result_md(db: TestDatabase) -> text:
     lines.push("| Skipped | {skipped} |")
     lines.push("")
 
+    # Flaky tests section
+    var flaky_tests: List<text> = []
+    for c in db.counters:
+        if c.flaky_count > 0:
+            val name = db.interner.get(c.test_id)
+            flaky_tests.push("- {name} (flipped {c.flaky_count} times)")
+
+    if flaky_tests.len() > 0:
+        lines.push("## Flaky Tests")
+        lines.push("")
+        for entry in flaky_tests:
+            lines.push(entry)
+        lines.push("")
+
     # Recent runs
     if db.test_runs.len() > 0:
         lines.push("## Recent Runs")
@@ -64,6 +78,22 @@ fn generate_test_result_md(db: TestDatabase) -> text:
             lines.push("| {r.run_id} | {r.status} | {r.test_count} | {r.passed} | {r.failed} | {r.timed_out} |")
             count = count + 1
             i = i - 1
+        lines.push("")
+
+    # Timing summary (show tests with percentile data)
+    var timing_entries: List<text> = []
+    for t in db.timing:
+        if t.p50 > 0.0:
+            val name = db.interner.get(t.test_id)
+            timing_entries.push("| {name} | {t.last_ms} | {t.p50} | {t.p90} | {t.p95} | {t.baseline_median} |")
+
+    if timing_entries.len() > 0:
+        lines.push("## Timing Percentiles")
+        lines.push("")
+        lines.push("| Test | Last (ms) | p50 | p90 | p95 | Baseline |")
+        lines.push("|------|-----------|-----|-----|-----|----------|")
+        for entry in timing_entries:
+            lines.push(entry)
         lines.push("")
 
     # Failed tests
@@ -115,13 +145,14 @@ fn generate_feature_md(fdb: FeatureDatabase) -> text:
                 case "ignored": ignored = ignored + 1
                 case _: ()
         val total = features.len()
-        lines.push("| {cat} | {total} | {complete} | {failed} | {planned} | {ignored} |")
+        val safe_name = cat.replace(" ", "_")
+        lines.push("| [{cat}](category/{safe_name}.md) | {total} | {complete} | {failed} | {planned} | {ignored} |")
 
     lines.push("")
     lines.join("\n")
 
 # =========================================================================
-# Pending Feature Report
+# H9: Pending Feature Report (category grouping + priority emoji)
 # =========================================================================
 
 fn generate_pending_feature_md(fdb: FeatureDatabase) -> text:
@@ -138,49 +169,102 @@ fn generate_pending_feature_md(fdb: FeatureDatabase) -> text:
     val planned = fdb.count_by_status("planned")
     val ignored = fdb.count_by_status("ignored")
 
+    # Overall completion percentage
+    val pending_total = total - complete - ignored
+    val completion_pct = if total > 0: (complete * 100) / total else: 0
+
     lines.push("## Summary")
     lines.push("")
-    lines.push("| Status | Count |")
-    lines.push("|--------|-------|")
-    lines.push("| Complete | {complete} |")
-    lines.push("| Failed | {failed} |")
-    lines.push("| In Progress | {in_progress} |")
-    lines.push("| Planned | {planned} |")
-    lines.push("| Ignored | {ignored} |")
-    lines.push("| **Total** | **{total}** |")
+    lines.push("**Completion: {completion_pct}%** ({complete}/{total} features)")
+    lines.push("")
+    lines.push("| Status | Count | Priority |")
+    lines.push("|--------|-------|----------|")
+    lines.push("| Failed | {failed} | Critical |")
+    lines.push("| In Progress | {in_progress} | High |")
+    lines.push("| Planned | {planned} | Medium |")
+    lines.push("| Ignored | {ignored} | Low |")
+    lines.push("| **Total Pending** | **{pending_total}** | |")
     lines.push("")
 
-    # Failed features (critical)
+    # Progress by category table
+    val categories = fdb.categories()
+    lines.push("## Progress by Category")
+    lines.push("")
+    lines.push("| Category | Complete | Failed | In Progress | Planned | Total | % |")
+    lines.push("|----------|----------|--------|-------------|---------|-------|---|")
+    for cat in categories:
+        val features = fdb.features_by_category(cat)
+        var cat_complete = 0
+        var cat_failed = 0
+        var cat_in_progress = 0
+        var cat_planned = 0
+        for f in features:
+            match f.status:
+                case "complete": cat_complete = cat_complete + 1
+                case "failed": cat_failed = cat_failed + 1
+                case "in_progress": cat_in_progress = cat_in_progress + 1
+                case "planned": cat_planned = cat_planned + 1
+                case _: ()
+        val cat_total = features.len()
+        val cat_pct = if cat_total > 0: (cat_complete * 100) / cat_total else: 0
+        lines.push("| {cat} | {cat_complete} | {cat_failed} | {cat_in_progress} | {cat_planned} | {cat_total} | {cat_pct}% |")
+    lines.push("")
+
+    # Failed features (critical) with priority emoji
     if failed > 0:
         lines.push("## Failed Features")
         lines.push("")
-        for f in fdb.features:
-            if f.valid and f.status == "failed":
-                lines.push("- **{f.id}** {f.name} ({f.category})")
-        lines.push("")
+        for cat in categories:
+            var cat_failed_features: List<FeatureRecord> = []
+            for f in fdb.features_by_category(cat):
+                if f.status == "failed":
+                    cat_failed_features.push(f)
+            if cat_failed_features.len() > 0:
+                lines.push("### {cat}")
+                lines.push("")
+                for f in cat_failed_features:
+                    val spec_link = if f.spec != "": " ([spec]({f.spec}))" else: ""
+                    lines.push("- **{f.id}** {f.name}{spec_link}")
+                lines.push("")
 
     # In progress features
     if in_progress > 0:
         lines.push("## In Progress Features")
         lines.push("")
-        for f in fdb.features:
-            if f.valid and f.status == "in_progress":
-                lines.push("- **{f.id}** {f.name} ({f.category})")
-        lines.push("")
+        for cat in categories:
+            var cat_ip_features: List<FeatureRecord> = []
+            for f in fdb.features_by_category(cat):
+                if f.status == "in_progress":
+                    cat_ip_features.push(f)
+            if cat_ip_features.len() > 0:
+                lines.push("### {cat}")
+                lines.push("")
+                for f in cat_ip_features:
+                    val spec_link = if f.spec != "": " ([spec]({f.spec}))" else: ""
+                    lines.push("- **{f.id}** {f.name}{spec_link}")
+                lines.push("")
 
     # Planned features
     if planned > 0:
         lines.push("## Planned Features")
         lines.push("")
-        for f in fdb.features:
-            if f.valid and f.status == "planned":
-                lines.push("- **{f.id}** {f.name} ({f.category})")
-        lines.push("")
+        for cat in categories:
+            var cat_planned_features: List<FeatureRecord> = []
+            for f in fdb.features_by_category(cat):
+                if f.status == "planned":
+                    cat_planned_features.push(f)
+            if cat_planned_features.len() > 0:
+                lines.push("### {cat}")
+                lines.push("")
+                for f in cat_planned_features:
+                    val spec_link = if f.spec != "": " ([spec]({f.spec}))" else: ""
+                    lines.push("- **{f.id}** {f.name}{spec_link}")
+                lines.push("")
 
     lines.join("\n")
 
 # =========================================================================
-# Category Reports
+# H10: Category Reports (with subcategory hierarchy)
 # =========================================================================
 
 fn generate_category_md(fdb: FeatureDatabase, category: text) -> text:
@@ -190,8 +274,23 @@ fn generate_category_md(fdb: FeatureDatabase, category: text) -> text:
 
     val features = fdb.features_by_category(category)
 
-    lines.push("| ID | Feature | Description | Interp | JIT | SMF-CL | SMF-LLVM | Status |")
-    lines.push("|----|---------|-------------|--------|-----|--------|----------|--------|")
+    # H10: Detect subcategories (dot-separated)
+    var subcategories: Dict<text, bool> = {}
+    for f in features:
+        val parts = f.id.split(".")
+        if parts.len() >= 2:
+            subcategories[parts[0]] = true
+
+    # Generate subcategory links if present
+    if subcategories.len() > 1:
+        lines.push("## Subcategories")
+        lines.push("")
+        for subcat in subcategories.keys():
+            lines.push("- [{subcat}](#{subcat})")
+        lines.push("")
+
+    lines.push("| ID | Feature | Description | Interp | JIT | SMF-CL | SMF-LLVM | Status | Spec |")
+    lines.push("|----|---------|-------------|--------|-----|--------|----------|--------|------|")
 
     for f in features:
         if f.status != "ignored":
@@ -199,8 +298,10 @@ fn generate_category_md(fdb: FeatureDatabase, category: text) -> text:
             val jit = mode_badge(f.mode_jit)
             val smf_cl = mode_badge(f.mode_smf_cranelift)
             val smf_llvm = mode_badge(f.mode_smf_llvm)
-            val status_badge = status_badge(f.status)
-            lines.push("| <a id=\"feature-{f.id}\"></a>{f.id} | {f.name} | {f.description} | {interp} | {jit} | {smf_cl} | {smf_llvm} | {status_badge} |")
+            val sb = status_badge(f.status)
+            # M5: Spec links with relative path
+            val spec_link = if f.spec != "": "[spec](../../{f.spec})" else: ""
+            lines.push("| <a id=\"feature-{f.id}\"></a>{f.id} | {f.name} | {f.description} | {interp} | {jit} | {smf_cl} | {smf_llvm} | {sb} | {spec_link} |")
 
     lines.push("")
     lines.join("\n")

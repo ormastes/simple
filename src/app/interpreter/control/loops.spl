@@ -6,6 +6,7 @@
 # Port of exec_for, exec_while, exec_loop from interpreter_control.rs
 
 from ..core import {Interpreter, Value, InterpreterError}
+from ..core.execution_guard import {check_loop_safety}
 from ..expr import {evaluate}
 from match import {match_pattern, bind_pattern}
 
@@ -37,6 +38,9 @@ fn eval_for(interp: Interpreter, pattern: Pattern, iterable_expr: Expr,
 
     var index = 0
     for item in items:
+        # Safety: check timeout, interrupt, execution limit
+        check_loop_safety().map_err(\e: InterpreterError.RuntimeError(e))?
+
         # For for~ (is_suspend), await each item
         val item = if is_suspend: item.await_if_promise()? else: item
 
@@ -87,6 +91,7 @@ fn eval_while(interp: Interpreter, condition: Expr, body: Block,
     if let_pattern.?:
         val pattern = let_pattern.unwrap()
         loop:
+            check_loop_safety().map_err(\e: InterpreterError.RuntimeError(e))?
             val value = evaluate(interp, condition)?
             val bindings = match_pattern(value, pattern)?
             if not bindings.?:
@@ -113,6 +118,7 @@ fn eval_while(interp: Interpreter, condition: Expr, body: Block,
 
     # Normal while loop
     loop:
+        check_loop_safety().map_err(\e: InterpreterError.RuntimeError(e))?
         val cond_val = evaluate(interp, condition)?
         val cond_val = if is_suspend: cond_val.await_if_promise()? else: cond_val
 
@@ -138,6 +144,7 @@ fn eval_while(interp: Interpreter, condition: Expr, body: Block,
 # Evaluate an infinite loop (loop: body)
 fn eval_loop(interp: Interpreter, body: Block) -> Result<Value, InterpreterError>:
     loop:
+        check_loop_safety().map_err(\e: InterpreterError.RuntimeError(e))?
         match eval_loop_body(interp, body):
             case Ok(ControlFlow.Continue):
                 continue

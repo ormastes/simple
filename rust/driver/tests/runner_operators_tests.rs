@@ -397,14 +397,7 @@ fn runner_handles_power_operator() {
     run_expect("main = 3 ** 4", 81); // 3^4 = 81
 }
 
-#[test]
-#[ignore] // // was repurposed from floor division to parallel execution operator; use .fdiv() instead
-fn runner_handles_floor_division() {
-    run_expect("main = 7 // 2", 3); // floor(7/2) = 3
-    run_expect("main = 10 // 3", 3); // floor(10/3) = 3
-    run_expect("main = -7 // 2", -4); // floor(-7/2) = -4 (rounds toward negative infinity)
-    run_expect("main = 8 // 4", 2); // exact division
-}
+// Removed: runner_handles_floor_division - // was repurposed to parallel execution operator
 
 #[test]
 fn runner_handles_in_operator() {

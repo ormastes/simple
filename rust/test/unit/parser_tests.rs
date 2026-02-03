@@ -184,21 +184,7 @@ fn test_parse_binary_pow() {
     }
 }
 
-// Floor division operator was replaced with parallel operator (//)
-// The parallel operator is not yet implemented as a BinOp
-#[test]
-#[ignore]
-fn test_parse_binary_floor_div() {
-    // TODO: Update this test when parallel operator is fully implemented
-    // or remove if floor division is permanently removed
-    let module = parse("7 // 2").unwrap();
-    if let Node::Expression(Expr::Binary { op, .. }) = &module.items[0] {
-        // BinOp::FloorDiv no longer exists
-        panic!("Expected binary expression");
-    } else {
-        panic!("Expected binary expression");
-    }
-}
+// Removed: test_parse_binary_floor_div - // was repurposed to parallel execution operator
 
 #[test]
 fn test_parse_binary_eq() {

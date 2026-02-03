@@ -1024,7 +1024,7 @@ fn test_string_split_empty() {
 }
 
 #[test]
-#[ignore] // Invalid input nil-return not yet implemented
+#[ignore] // FIXABLE: Invalid input nil-return not yet implemented
 fn test_string_split_invalid() {
     let s = rt_string_new("test".as_ptr(), 4);
     let not_a_string = RuntimeValue::from_int(42);
@@ -1070,7 +1070,7 @@ fn test_string_replace_multiple() {
 }
 
 #[test]
-#[ignore] // Invalid input nil-return not yet implemented
+#[ignore] // FIXABLE: Invalid input nil-return not yet implemented
 fn test_string_replace_invalid() {
     let s = rt_string_new("test".as_ptr(), 4);
     let old = rt_string_new("t".as_ptr(), 1);
@@ -1114,7 +1114,7 @@ fn test_string_trim_all_whitespace() {
 }
 
 #[test]
-#[ignore] // Invalid input nil-return not yet implemented
+#[ignore] // FIXABLE: Invalid input nil-return not yet implemented
 fn test_string_trim_invalid() {
     let not_a_string = RuntimeValue::from_int(42);
     assert!(rt_string_trim(not_a_string).is_nil());
@@ -1157,7 +1157,7 @@ fn test_string_join_single_element() {
 }
 
 #[test]
-#[ignore] // Invalid input nil-return not yet implemented
+#[ignore] // FIXABLE: Invalid input nil-return not yet implemented
 fn test_string_join_invalid() {
     let arr = rt_array_new(1);
     rt_array_push(arr, rt_string_new("test".as_ptr(), 4));
@@ -1188,7 +1188,7 @@ fn test_string_to_upper_mixed() {
 }
 
 #[test]
-#[ignore] // Invalid input nil-return not yet implemented
+#[ignore] // FIXABLE: Invalid input nil-return not yet implemented
 fn test_string_to_upper_invalid() {
     let not_a_string = RuntimeValue::from_int(42);
     assert!(rt_string_to_upper(not_a_string).is_nil());
@@ -1213,7 +1213,7 @@ fn test_string_to_lower_mixed() {
 }
 
 #[test]
-#[ignore] // Invalid input nil-return not yet implemented
+#[ignore] // FIXABLE: Invalid input nil-return not yet implemented
 fn test_string_to_lower_invalid() {
     let not_a_string = RuntimeValue::from_int(42);
     assert!(rt_string_to_lower(not_a_string).is_nil());
