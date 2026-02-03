@@ -1,0 +1,144 @@
+# Process Management System Library
+#
+# Provides process spawning and management operations.
+
+# FFI declarations for PTY-based spawning
+extern fn native_process_spawn_with_pty(command: str, args: [str], slave_fd: i32) -> i32
+extern fn native_process_wait(pid: i32) -> i32
+extern fn native_process_terminate(pid: i32) -> bool
+extern fn native_process_kill(pid: i32) -> bool
+
+# FFI declarations for command execution
+extern fn native_command_run(command: str, args: [str]) -> i64
+extern fn native_command_output(command: str, args: [str]) -> [Any]
+extern fn native_command_run_timeout(command: str, args: [str], timeout_ms: i64) -> i64
+
+
+struct Process:
+    """
+    Represents a running process.
+
+    Attributes:
+        pid: Process ID
+    """
+    pid: i32
+
+    fn wait(self) -> i32:
+        """
+        Wait for process to exit and return exit code.
+
+        Returns:
+            Exit code of the process
+        """
+        return native_process_wait(self.pid)
+
+    fn terminate(self):
+        """
+        Send SIGTERM to the process.
+        """
+        native_process_terminate(self.pid)
+
+    fn kill(self):
+        """
+        Send SIGKILL to the process.
+        """
+        native_process_kill(self.pid)
+
+
+fn spawn_with_pty(command: str, args: [str], slave_fd: i32) -> Process:
+    """
+    Spawn a process with its stdin/stdout/stderr connected to a PTY slave.
+
+    Args:
+        command: Program to execute
+        args: Command line arguments
+        slave_fd: File descriptor of PTY slave
+
+    Returns:
+        Process object representing the spawned process
+    """
+    val pid = native_process_spawn_with_pty(command, args, slave_fd)
+    if pid < 0:
+        raise RuntimeError("Failed to spawn process")
+    return Process(pid: pid)
+
+
+# =============================================================================
+# Command Execution API
+# =============================================================================
+
+struct CommandResult:
+    """Result of command execution with captured output."""
+    exit_code: i64
+    stdout: str
+
+    fn is_success(self) -> bool:
+        """Check if command completed successfully (exit code 0)."""
+        return self.exit_code == 0
+
+    fn is_error(self) -> bool:
+        """Check if command failed."""
+        return self.exit_code != 0
+
+
+fn run(command: str, args: [str]) -> i64:
+    """
+    Execute a command and wait for completion.
+
+    Args:
+        command: Command to execute (e.g., "ls", "/usr/bin/simple")
+        args: Array of string arguments
+
+    Returns:
+        Exit code of the process (0 for success, non-zero for failure, -1 for spawn error)
+
+    Example:
+        val exit_code = run("echo", ["hello", "world"])
+        if exit_code == 0:
+            print("Success!")
+    """
+    return native_command_run(command, args)
+
+
+fn output(command: str, args: [str]) -> CommandResult:
+    """
+    Execute a command and capture its stdout output.
+
+    Args:
+        command: Command to execute
+        args: Array of string arguments
+
+    Returns:
+        CommandResult with exit_code and stdout
+
+    Example:
+        val result = output("echo", ["hello"])
+        if result.is_success():
+            print("Output: {result.stdout}")
+    """
+    val result = native_command_output(command, args)
+    return CommandResult(exit_code: result[0] as i64, stdout: result[1] as str)
+
+
+fn run_timeout(command: str, args: [str], timeout_ms: i64) -> i64:
+    """
+    Execute a command with a timeout.
+
+    Args:
+        command: Command to execute
+        args: Array of string arguments
+        timeout_ms: Timeout in milliseconds
+
+    Returns:
+        Exit code, or -2 if timed out, -1 on error
+
+    Example:
+        val exit_code = run_timeout("sleep", ["10"], 1000)  # 1 second timeout
+        if exit_code == -2:
+            print("Command timed out!")
+    """
+    return native_command_run_timeout(command, args, timeout_ms)
+
+
+# Constant for timeout indicator
+val TIMEOUT_EXIT_CODE: i64 = -2

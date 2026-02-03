@@ -1,0 +1,386 @@
+# Background Worker Pool
+# Manage worker threads for CPU-intensive tasks
+
+# External FFI declarations (implemented in Rust/Node.js)
+extern fn electron_worker_create(script_path: text, worker_id: i64): void
+extern fn electron_worker_send(worker_id: i64, message: text): void
+extern fn electron_worker_terminate(worker_id: i64): void
+extern fn electron_worker_pool_create(size: i64, pool_id: i64): void
+extern fn electron_worker_pool_exec(pool_id: i64, task: text, task_id: i64): void
+extern fn electron_worker_pool_terminate(pool_id: i64): void
+
+# Callback registries
+val worker_message_callbacks: Dict<i64, List<fn(data: text): void>> = {}
+val worker_error_callbacks: Dict<i64, List<fn(error: text): void>> = {}
+val pool_result_callbacks: Dict<i64, Dict<i64, fn(result: text): void>> = {}
+val pool_error_callbacks: Dict<i64, Dict<i64, fn(error: text): void>> = {}
+val next_worker_id: i64 = 0
+val next_pool_id: i64 = 0
+val next_task_id: i64 = 0
+
+# Worker class for managing individual worker threads
+class Worker:
+    val worker_id: i64
+    val script_path: text
+
+    fn __init__(script_path: text):
+        """Create a new worker thread.
+
+        Args:
+            script_path: Path to JavaScript file to execute in worker
+
+        Example:
+            worker = Worker("./compute.js")
+            worker.on_message(fn(data):
+                print("Result: {data}")
+            )
+            worker.send('{"operation": "factorial", "n": 20}')
+        """
+        self.worker_id = next_worker_id
+        next_worker_id = next_worker_id + 1
+        self.script_path = script_path
+
+        # Initialize callback storage
+        worker_message_callbacks[self.worker_id] = []
+        worker_error_callbacks[self.worker_id] = []
+
+        # Create native worker
+        electron_worker_create(script_path, self.worker_id)
+
+    fn send(message: text):
+        """Send message to worker thread.
+
+        Args:
+            message: JSON string with task data
+
+        Example:
+            worker.send('{"cmd": "process", "data": [1, 2, 3]}')
+        """
+        electron_worker_send(self.worker_id, message)
+
+    fn on_message(handler: fn(data: text): void):
+        """Register handler for worker messages.
+
+        Example:
+            worker.on_message(fn(result):
+                parsed = json.parse(result)
+                print("Worker returned: {parsed}")
+            )
+        """
+        worker_message_callbacks[self.worker_id].append(handler)
+
+    fn on_error(handler: fn(error: text): void):
+        """Register handler for worker errors.
+
+        Example:
+            worker.on_error(fn(err):
+                print("Worker error: {err}")
+            )
+        """
+        worker_error_callbacks[self.worker_id].append(handler)
+
+    fn terminate():
+        """Terminate worker and clean up resources."""
+        electron_worker_terminate(self.worker_id)
+        worker_message_callbacks.delete(self.worker_id)
+        worker_error_callbacks.delete(self.worker_id)
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    fn get_worker_id(): i64 =
+        """Get worker ID.
+
+        Returns:
+            Worker identifier
+
+        Example:
+            worker.get_worker_id()  # → 0
+        """
+        self.worker_id
+
+    fn get_script_path(): text =
+        """Get worker script path.
+
+        Returns:
+            Path to worker script
+
+        Example:
+            worker.get_script_path()  # → "./compute.js"
+        """
+        self.script_path
+
+    fn has_message_callbacks(): bool =
+        """Check if has message callbacks registered.
+
+        Returns:
+            true if callbacks exist
+
+        Example:
+            worker.has_message_callbacks()  # → true
+        """
+        worker_message_callbacks.has_key(self.worker_id) and
+        worker_message_callbacks[self.worker_id].len() > 0
+
+    fn has_error_callbacks(): bool =
+        """Check if has error callbacks registered.
+
+        Returns:
+            true if callbacks exist
+
+        Example:
+            worker.has_error_callbacks()  # → true
+        """
+        worker_error_callbacks.has_key(self.worker_id) and
+        worker_error_callbacks[self.worker_id].len() > 0
+
+    fn summary(): text =
+        """Get worker summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            worker.summary()
+            # → "Worker #0: './compute.js', has callbacks"
+        """
+        val callbacks_str = if self.has_message_callbacks() or self.has_error_callbacks() {
+            "has callbacks"
+        } else {
+            "no callbacks"
+        }
+        "Worker #{self.worker_id}: '{self.script_path}', {callbacks_str}"
+
+# Worker Pool class for load-balanced task execution
+class WorkerPool:
+    val pool_id: i64
+    val size: i64
+    val pending_tasks: i64
+
+    fn __init__(size: i64 = 4):
+        """Create a pool of worker threads.
+
+        Args:
+            size: Number of worker threads in pool (default: 4)
+
+        Example:
+            pool = WorkerPool(size=8)
+            pool.exec('{"compute": "prime", "n": 1000000}', fn(result):
+                print("Found primes: {result}")
+            )
+        """
+        self.pool_id = next_pool_id
+        next_pool_id = next_pool_id + 1
+        self.size = size
+        self.pending_tasks = 0
+
+        # Initialize callback storage
+        pool_result_callbacks[self.pool_id] = {}
+        pool_error_callbacks[self.pool_id] = {}
+
+        # Create native worker pool
+        electron_worker_pool_create(size, self.pool_id)
+
+    fn exec(task: text, on_result: fn(result: text): void, on_error: fn(error: text): void = fn(e): print("Task error: {e}")):
+        """Execute task on available worker in pool.
+
+        Args:
+            task: JSON string describing task
+            on_result: Callback for successful result
+            on_error: Callback for errors (optional)
+
+        Example:
+            pool.exec(
+                '{"operation": "hash", "data": "large file content"}',
+                fn(hash): print("Hash: {hash}"),
+                fn(err): print("Failed: {err}")
+            )
+        """
+        val task_id = next_task_id
+        next_task_id = next_task_id + 1
+
+        # Store callbacks
+        pool_result_callbacks[self.pool_id][task_id] = on_result
+        pool_error_callbacks[self.pool_id][task_id] = on_error
+
+        # Submit to pool
+        self.pending_tasks = self.pending_tasks + 1
+        electron_worker_pool_exec(self.pool_id, task, task_id)
+
+    fn exec_batch(tasks: List<text>, on_complete: fn(results: List<text>): void):
+        """Execute multiple tasks and collect results.
+
+        Args:
+            tasks: List of task JSON strings
+            on_complete: Callback with all results (called once)
+
+        Example:
+            pool.exec_batch(
+                ['{"n": 100}', '{"n": 200}', '{"n": 300}'],
+                fn(results):
+                    for r in results:
+                        print("Result: {r}")
+            )
+        """
+        val results = []
+        val completed = 0
+        val total = tasks.len()
+
+        for task in tasks:
+            self.exec(
+                task,
+                fn(result):
+                    results.append(result)
+                    completed = completed + 1
+                    if completed == total:
+                        on_complete(results)
+                ,
+                fn(error):
+                    results.append('{"error": "' + error + '"}')
+                    completed = completed + 1
+                    if completed == total:
+                        on_complete(results)
+            )
+
+    fn pending_count(): i64 =
+        """Get number of pending tasks."""
+        self.pending_tasks
+
+    fn is_idle(): bool =
+        """Check if pool has no pending tasks."""
+        self.pending_tasks == 0
+
+    fn terminate():
+        """Terminate all workers in pool and clean up."""
+        electron_worker_pool_terminate(self.pool_id)
+        pool_result_callbacks.delete(self.pool_id)
+        pool_error_callbacks.delete(self.pool_id)
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    fn get_pool_id(): i64 =
+        """Get pool ID.
+
+        Returns:
+            Pool identifier
+
+        Example:
+            pool.get_pool_id()  # → 0
+        """
+        self.pool_id
+
+    fn get_size(): i64 =
+        """Get pool size (number of workers).
+
+        Returns:
+            Worker count
+
+        Example:
+            pool.get_size()  # → 4
+        """
+        self.size
+
+    fn get_pending_count(): i64 =
+        """Get number of pending tasks (alias for pending_count).
+
+        Returns:
+            Pending task count
+
+        Example:
+            pool.get_pending_count()  # → 0
+        """
+        self.pending_tasks
+
+    fn has_pending_tasks(): bool =
+        """Check if has pending tasks.
+
+        Returns:
+            true if pending_tasks > 0
+
+        Example:
+            pool.has_pending_tasks()  # → false
+        """
+        self.pending_tasks > 0
+
+    fn summary(): text =
+        """Get worker pool summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            pool.summary()
+            # → "WorkerPool #0: 4 workers, 0 pending tasks, idle"
+        """
+        val idle_str = if self.is_idle() { "idle" } else { "busy" }
+        "WorkerPool #{self.pool_id}: {self.size} workers, {self.pending_tasks} pending tasks, {idle_str}"
+
+# FFI callbacks (called by native layer)
+pub fn _trigger_worker_message(worker_id: i64, data: text):
+    """Internal: Called when worker sends message."""
+    if worker_message_callbacks.has_key(worker_id):
+        handlers = worker_message_callbacks[worker_id]
+        for handler in handlers:
+            handler(data)
+
+pub fn _trigger_worker_error(worker_id: i64, error: text):
+    """Internal: Called when worker errors."""
+    if worker_error_callbacks.has_key(worker_id):
+        handlers = worker_error_callbacks[worker_id]
+        for handler in handlers:
+            handler(error)
+
+pub fn _trigger_pool_result(pool_id: i64, task_id: i64, result: text):
+    """Internal: Called when pool task completes."""
+    if pool_result_callbacks.has_key(pool_id):
+        if pool_result_callbacks[pool_id].has_key(task_id):
+            callback = pool_result_callbacks[pool_id][task_id]
+            callback(result)
+
+            # Clean up
+            pool_result_callbacks[pool_id].delete(task_id)
+            pool_error_callbacks[pool_id].delete(task_id)
+
+pub fn _trigger_pool_error(pool_id: i64, task_id: i64, error: text):
+    """Internal: Called when pool task fails."""
+    if pool_error_callbacks.has_key(pool_id):
+        if pool_error_callbacks[pool_id].has_key(task_id):
+            callback = pool_error_callbacks[pool_id][task_id]
+            callback(error)
+
+            # Clean up
+            pool_result_callbacks[pool_id].delete(task_id)
+            pool_error_callbacks[pool_id].delete(task_id)
+
+# Convenience function for one-off worker execution
+pub fn run_worker(script_path: text, message: text, on_result: fn(data: text): void, on_error: fn(error: text): void = fn(e): print("Error: {e}")):
+    """Run a one-off worker task.
+
+    Creates worker, sends message, waits for result, then terminates.
+
+    Args:
+        script_path: Path to worker script
+        message: Message to send
+        on_result: Result callback
+        on_error: Error callback (optional)
+
+    Example:
+        worker.run_worker(
+            "./hash.js",
+            '{"file": "large.bin"}',
+            fn(hash): print("SHA256: {hash}")
+        )
+    """
+    val w = Worker(script_path)
+    w.on_message(fn(data):
+        on_result(data)
+        w.terminate()
+    )
+    w.on_error(fn(err):
+        on_error(err)
+        w.terminate()
+    )
+    w.send(message)

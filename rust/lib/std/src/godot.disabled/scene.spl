@@ -1,0 +1,736 @@
+# Godot Scene Management
+#
+# Type-safe wrappers for Godot's scene system
+#
+# Features:
+# - Scene loading and switching
+# - PackedScene resource management
+# - Node instancing and tree manipulation
+# - Scene preloading and caching
+#
+# Based on: https://docs.godotengine.org/en/stable/classes/class_scenetree.html
+
+use godot.ffi
+use godot.variant
+use godot.node
+use godot.resource
+
+mod scene
+
+# Packed Scene Resource
+# Represents a saved scene that can be instanced
+pub struct PackedScene:
+    resource: resource.Resource
+
+impl PackedScene:
+    # Create from resource
+    pub fn from_resource(res: resource.Resource) -> PackedScene:
+        return PackedScene(resource: res)
+
+    # Load a packed scene from file path
+    pub fn load(path: text) -> Result<PackedScene, text>:
+        val loader = resource.ResourceLoader.get_singleton()
+        val result = loader.load(path)
+        
+        if result.is_ok():
+            return Ok(PackedScene.from_resource(result.unwrap()))
+        else:
+            return Err(result.unwrap_err())
+
+    # Load asynchronously
+    pub async fn load_async(path: text) -> Result<PackedScene, text>:
+        val loader = resource.ResourceLoader.get_singleton()
+        val result = await loader.load_async(path)
+        
+        if result.is_ok():
+            return Ok(PackedScene.from_resource(result.unwrap()))
+        else:
+            return Err(result.unwrap_err())
+
+    # Instance the scene (create a copy)
+    pub fn instantiate(self) -> node.Node:
+        val obj = self.resource.as_object()
+        val result = obj.call0("instantiate")
+        val node_ptr = result.as_object().ptr()
+        return node.Node.from_ptr(node_ptr)
+
+    # Check if can instance
+    pub fn can_instantiate(self) -> bool:
+        val obj = self.resource.as_object()
+        val result = obj.call0("can_instantiate")
+        return result.as_bool()
+
+    # Get scene state
+    pub fn get_state(self) -> SceneState:
+        val obj = self.resource.as_object()
+        val result = obj.call0("get_state")
+        return SceneState.from_ptr(result.as_object().ptr())
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    fn is_ready() -> bool:
+        """Check if scene can be instantiated (alias for can_instantiate).
+
+        Returns:
+            true if ready to instantiate
+
+        Example:
+            scene.is_ready()  # → true
+        """
+        return self.can_instantiate()
+
+    static fn create_instance() -> node.Node:
+        """Create an instance of the scene (alias for instantiate).
+
+        Returns:
+            New node instance
+
+        Example:
+            instance = scene.create_instance()
+        """
+        return self.instantiate()
+
+    fn try_instantiate() -> Option<node.Node>:
+        """Try to instantiate scene, returning None if not ready.
+
+        Returns:
+            Option containing node or None
+
+        Example:
+            if val Some(instance) = scene.try_instantiate():
+                # Use instance
+        """
+        if self.can_instantiate():
+            return Some(self.instantiate())
+        else:
+            return None
+
+    fn summary() -> text:
+        """Get packed scene summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            scene.summary()
+            # → "PackedScene: ready"
+        """
+        val status = if self.can_instantiate() { "ready" } else { "not ready" }
+        return "PackedScene: {status}"
+
+
+# Scene State
+# Represents the structure of a packed scene
+pub struct SceneState:
+    ptr: ffi.GDExtensionObjectPtr
+
+impl SceneState:
+    pub fn from_ptr(ptr: ffi.GDExtensionObjectPtr) -> SceneState:
+        return SceneState(ptr: ptr)
+
+    # Get number of nodes in scene
+    pub fn get_node_count(self) -> i32:
+        val obj = variant.Object.from_ptr(self.ptr)
+        val result = obj.call0("get_node_count")
+        return result.as_int() as i32
+
+    # Get node name by index
+    pub fn get_node_name(self, idx: i32) -> text:
+        val obj = variant.Object.from_ptr(self.ptr)
+        val idx_var = variant.Variant.from_int(idx as i64)
+        val result = obj.call1("get_node_name", idx_var)
+        return result.as_string()
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    fn is_empty() -> bool:
+        """Check if scene state has no nodes.
+
+        Returns:
+            true if empty
+
+        Example:
+            state.is_empty()  # → false
+        """
+        return self.get_node_count() == 0
+
+    fn has_nodes() -> bool:
+        """Check if scene state has any nodes.
+
+        Returns:
+            true if has nodes
+
+        Example:
+            state.has_nodes()  # → true
+        """
+        return self.get_node_count() > 0
+
+    fn summary() -> text:
+        """Get scene state summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            state.summary()
+            # → "SceneState: 5 nodes"
+        """
+        val count = self.get_node_count()
+        return "SceneState: {count} nodes"
+
+
+# Scene Tree
+# Manages the active scene hierarchy
+pub struct SceneTree:
+    singleton_ptr: ffi.GDExtensionObjectPtr
+
+impl SceneTree:
+    # Get SceneTree singleton
+    pub fn get_singleton() -> SceneTree:
+        val ptr = ffi.godot_get_singleton("SceneTree")
+        return SceneTree(singleton_ptr: ptr)
+
+    # Get root viewport node
+    pub fn get_root(self) -> node.Node:
+        val obj = variant.Object.from_ptr(self.singleton_ptr)
+        val result = obj.call0("get_root")
+        return node.Node.from_ptr(result.as_object().ptr())
+
+    # Change to a new scene
+    pub fn change_scene_to_file(mut self, path: text) -> Result<(), text>:
+        val obj = variant.Object.from_ptr(self.singleton_ptr)
+        val path_var = variant.Variant.from_string(path)
+        val result = obj.call1("change_scene_to_file", path_var)
+        
+        val error_code = result.as_int()
+        if error_code == 0:  # OK
+            return Ok(())
+        else:
+            return Err("Failed to change scene: error code {error_code}")
+
+    # Change to a packed scene
+    pub fn change_scene_to_packed(mut self, packed_scene: PackedScene) -> Result<(), text>:
+        val obj = variant.Object.from_ptr(self.singleton_ptr)
+        val scene_var = variant.Variant.from_object(packed_scene.resource.as_object())
+        val result = obj.call1("change_scene_to_packed", scene_var)
+        
+        val error_code = result.as_int()
+        if error_code == 0:  # OK
+            return Ok(())
+        else:
+            return Err("Failed to change scene: error code {error_code}")
+
+    # Reload current scene
+    pub fn reload_current_scene(mut self) -> Result<(), text>:
+        val obj = variant.Object.from_ptr(self.singleton_ptr)
+        val result = obj.call0("reload_current_scene")
+        
+        val error_code = result.as_int()
+        if error_code == 0:
+            return Ok(())
+        else:
+            return Err("Failed to reload scene: error code {error_code}")
+
+    # Get current scene root node
+    pub fn get_current_scene(self) -> Option<node.Node>:
+        val obj = variant.Object.from_ptr(self.singleton_ptr)
+        val result = obj.call0("get_current_scene")
+        
+        if result.is_null():
+            return None
+        else:
+            return Some(node.Node.from_ptr(result.as_object().ptr()))
+
+    # Set current scene
+    pub fn set_current_scene(mut self, child_node: node.Node):
+        val obj = variant.Object.from_ptr(self.singleton_ptr)
+        val node_var = variant.Variant.from_object(child_node.as_object())
+        obj.call1("set_current_scene", node_var)
+
+    # Quit the application
+    pub fn quit(mut self, exit_code: i32 = 0):
+        val obj = variant.Object.from_ptr(self.singleton_ptr)
+        val code_var = variant.Variant.from_int(exit_code as i64)
+        obj.call1("quit", code_var)
+
+    # Get nodes in a group
+    pub fn get_nodes_in_group(self, group: text) -> Array<node.Node>:
+        val obj = variant.Object.from_ptr(self.singleton_ptr)
+        val group_var = variant.Variant.from_string(group)
+        val result = obj.call1("get_nodes_in_group", group_var)
+
+        # Convert Godot Array to Simple Array<node.Node>
+        var nodes: Array<node.Node> = Array.new()
+        val godot_array = result.as_array()
+        val count = godot_array.size()
+
+        var i: i32 = 0
+        while i < count:
+            val element = godot_array.get(i)
+            if not element.is_null():
+                val node_ptr = element.as_object().ptr()
+                nodes.push(node.Node.from_ptr(node_ptr))
+            i = i + 1
+
+        return nodes
+
+    # Get frame count
+    pub fn get_frame(self) -> i64:
+        val obj = variant.Object.from_ptr(self.singleton_ptr)
+        val result = obj.call0("get_frame")
+        return result.as_int()
+
+    # Check if paused
+    pub fn is_paused(self) -> bool:
+        val obj = variant.Object.from_ptr(self.singleton_ptr)
+        val result = obj.call0("is_paused")
+        return result.as_bool()
+
+    # Set paused
+    pub fn set_paused(mut self, enable: bool):
+        val obj = variant.Object.from_ptr(self.singleton_ptr)
+        val pause_var = variant.Variant.from_bool(enable)
+        obj.call1("set_paused", pause_var)
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    fn is_running() -> bool:
+        """Check if game is running (not paused).
+
+        Returns:
+            true if not paused
+
+        Example:
+            tree.is_running()  # → true
+        """
+        return not self.is_paused()
+
+    me pause():
+        """Pause the game (set paused to true).
+
+        Example:
+            tree.pause()
+        """
+        self.set_paused(true)
+
+    me unpause():
+        """Unpause the game (set paused to false).
+
+        Example:
+            tree.unpause()
+        """
+        self.set_paused(false)
+
+    me resume():
+        """Resume the game (alias for unpause).
+
+        Example:
+            tree.resume()
+        """
+        self.set_paused(false)
+
+    fn has_current_scene() -> bool:
+        """Check if a current scene is set.
+
+        Returns:
+            true if current scene exists
+
+        Example:
+            tree.has_current_scene()  # → true
+        """
+        return self.get_current_scene().is_some()
+
+    me try_change_scene(path: text) -> bool:
+        """Try to change scene, returning true on success.
+
+        Args:
+            path: Scene file path
+
+        Returns:
+            true if changed successfully
+
+        Example:
+            tree.try_change_scene("res://level2.tscn")  # → true
+        """
+        return self.change_scene_to_file(path).is_ok()
+
+    me try_reload_scene() -> bool:
+        """Try to reload current scene, returning true on success.
+
+        Returns:
+            true if reloaded successfully
+
+        Example:
+            tree.try_reload_scene()  # → true
+        """
+        return self.reload_current_scene().is_ok()
+
+    me exit(code: i32 = 0):
+        """Exit the application (alias for quit).
+
+        Args:
+            code: Exit code (default 0)
+
+        Example:
+            tree.exit(0)
+        """
+        self.quit(code)
+
+    me exit_success():
+        """Exit with success code (0).
+
+        Example:
+            tree.exit_success()
+        """
+        self.quit(0)
+
+    me exit_failure():
+        """Exit with failure code (1).
+
+        Example:
+            tree.exit_failure()
+        """
+        self.quit(1)
+
+    fn get_frame_count() -> i64:
+        """Get frame count (alias for get_frame).
+
+        Returns:
+            Frame number
+
+        Example:
+            tree.get_frame_count()  # → 12345
+        """
+        return self.get_frame()
+
+    fn summary() -> text:
+        """Get scene tree summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            tree.summary()
+            # → "SceneTree: running, frame=12345"
+        """
+        val status = if self.is_paused() { "paused" } else { "running" }
+        val frame = self.get_frame()
+        return "SceneTree: {status}, frame={frame}"
+
+
+# Scene Manager Helper
+# Higher-level scene management API
+pub struct SceneManager:
+    tree: SceneTree
+    cache: Dict<text, PackedScene>  # Scene path -> PackedScene
+    loading: Dict<text, bool>        # Track async loads
+
+impl SceneManager:
+    # Create new scene manager
+    pub fn new() -> SceneManager:
+        return SceneManager(
+            tree: SceneTree.get_singleton(),
+            cache: {},
+            loading: {}
+        )
+
+    # Preload a scene into cache
+    pub fn preload_scene(mut self, path: text) -> Result<(), text>:
+        # Check if already cached
+        if self.cache.contains_key(path):
+            return Ok(())
+
+        # Load scene
+        val result = PackedScene.load(path)
+        if result.is_ok():
+            self.cache[path] = result.unwrap()
+            return Ok(())
+        else:
+            return Err(result.unwrap_err())
+
+    # Preload scene asynchronously
+    pub async fn preload_scene_async(mut self, path: text) -> Result<(), text>:
+        # Check if already cached
+        if self.cache.contains_key(path):
+            return Ok(())
+
+        # Check if already loading - wait for it to complete
+        if self.loading.get(path).unwrap_or(false):
+            # Wait for loading to complete using polling with async yield
+            val max_wait_ms: i64 = 30000  # 30 second timeout
+            val poll_interval_ms: i64 = 16  # ~60fps polling
+            var waited_ms: i64 = 0
+
+            while waited_ms < max_wait_ms:
+                # Check if loading completed
+                if not self.loading.get(path).unwrap_or(false):
+                    # Loading done, check cache
+                    if self.cache.contains_key(path):
+                        return Ok(())
+                    else:
+                        # Loading failed - try again below
+                        break
+
+                # Async yield to allow other work
+                await async_sleep_ms(poll_interval_ms)
+                waited_ms = waited_ms + poll_interval_ms
+
+            # If still loading after timeout, return error
+            if self.loading.get(path).unwrap_or(false):
+                return Err("Timeout waiting for scene to load: {path}")
+
+            # Check if it loaded successfully
+            if self.cache.contains_key(path):
+                return Ok(())
+            # Otherwise fall through to load it ourselves
+
+        # Mark as loading
+        self.loading[path] = true
+
+        # Load scene
+        val result = await PackedScene.load_async(path)
+
+        # Mark as done loading
+        self.loading[path] = false
+
+        if result.is_ok():
+            self.cache[path] = result.unwrap()
+            return Ok(())
+        else:
+            return Err(result.unwrap_err())
+
+    # Change to cached scene (instant if preloaded)
+    pub fn change_to_scene(mut self, path: text) -> Result<(), text>:
+        # Check cache first
+        if self.cache.contains_key(path):
+            val packed = self.cache[path]
+            return self.tree.change_scene_to_packed(packed)
+        else:
+            # Load and change immediately
+            return self.tree.change_scene_to_file(path)
+
+    # Clear scene cache
+    pub fn clear_cache(mut self):
+        self.cache.clear()
+
+    # Get cache size
+    pub fn get_cache_size(self) -> i32:
+        return self.cache.len()
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    fn is_cached(path: text) -> bool:
+        """Check if scene is in cache.
+
+        Args:
+            path: Scene file path
+
+        Returns:
+            true if cached
+
+        Example:
+            manager.is_cached("res://level1.tscn")  # → true
+        """
+        return self.cache.contains_key(path)
+
+    fn is_loading(path: text) -> bool:
+        """Check if scene is currently loading.
+
+        Args:
+            path: Scene file path
+
+        Returns:
+            true if loading
+
+        Example:
+            manager.is_loading("res://level2.tscn")  # → false
+        """
+        return self.loading.get(path).unwrap_or(false)
+
+    fn has_cache() -> bool:
+        """Check if cache has any scenes.
+
+        Returns:
+            true if cache not empty
+
+        Example:
+            manager.has_cache()  # → true
+        """
+        return self.get_cache_size() > 0
+
+    fn is_cache_empty() -> bool:
+        """Check if cache is empty.
+
+        Returns:
+            true if cache empty
+
+        Example:
+            manager.is_cache_empty()  # → false
+        """
+        return self.get_cache_size() == 0
+
+    me try_preload(path: text) -> bool:
+        """Try to preload scene, returning true on success.
+
+        Args:
+            path: Scene file path
+
+        Returns:
+            true if preloaded successfully
+
+        Example:
+            manager.try_preload("res://level1.tscn")  # → true
+        """
+        return self.preload_scene(path).is_ok()
+
+    me try_change_scene(path: text) -> bool:
+        """Try to change scene, returning true on success.
+
+        Args:
+            path: Scene file path
+
+        Returns:
+            true if changed successfully
+
+        Example:
+            manager.try_change_scene("res://level2.tscn")  # → true
+        """
+        return self.change_to_scene(path).is_ok()
+
+    fn count_cached() -> i32:
+        """Count number of cached scenes (alias for get_cache_size).
+
+        Returns:
+            Number of cached scenes
+
+        Example:
+            manager.count_cached()  # → 3
+        """
+        return self.get_cache_size()
+
+    fn summary() -> text:
+        """Get scene manager summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            manager.summary()
+            # → "SceneManager: 3 cached scenes"
+        """
+        val count = self.get_cache_size()
+        return "SceneManager: {count} cached scenes"
+
+
+# Helper: Async sleep for a given number of milliseconds
+async fn async_sleep_ms(ms: i64):
+    """Async sleep that yields control while waiting.
+
+    Uses thread sleep internally but yields the async runtime.
+
+    Args:
+        ms: Milliseconds to sleep
+    """
+    @extern("runtime", "rt_thread_sleep")
+    fn _rt_thread_sleep(ms: i64)
+
+    # In an async context, this will yield while sleeping
+    _rt_thread_sleep(ms)
+
+
+# Local Array type for Godot scene module
+# Uses Vec<T> internally as Simple's built-in dynamic array
+pub struct Array<T>:
+    items: Vec<T>
+
+impl<T> Array<T>:
+    pub fn new() -> Array<T>:
+        return Array(items: vec![])
+
+    pub fn push(mut self, item: T):
+        self.items.push(item)
+
+    pub fn pop(mut self) -> Option<T>:
+        return self.items.pop()
+
+    pub fn len(self) -> i32:
+        return self.items.len() as i32
+
+    pub fn is_empty(self) -> bool:
+        return self.items.len() == 0
+
+    pub fn get(self, index: i32) -> Option<T>:
+        if index >= 0 and index < self.items.len() as i32:
+            return Some(self.items[index as usize])
+        return None
+
+    pub fn clear(mut self):
+        self.items.clear()
+
+
+# Local Dict type for Godot scene module
+# Uses Simple's hash map functionality via FFI
+pub struct Dict<K, V>:
+    keys: Vec<K>
+    values: Vec<V>
+
+impl<K, V> Dict<K, V>:
+    pub fn new() -> Dict<K, V>:
+        return Dict(keys: vec![], values: vec![])
+
+    pub fn insert(mut self, key: K, value: V):
+        # Check if key exists
+        var i: usize = 0
+        while i < self.keys.len():
+            if self.keys[i] == key:
+                self.values[i] = value
+                return
+            i = i + 1
+        # Key not found, add new entry
+        self.keys.push(key)
+        self.values.push(value)
+
+    pub fn contains_key(self, key: K) -> bool:
+        var i: usize = 0
+        while i < self.keys.len():
+            if self.keys[i] == key:
+                return true
+            i = i + 1
+        return false
+
+    pub fn get(self, key: K) -> Option<V>:
+        var i: usize = 0
+        while i < self.keys.len():
+            if self.keys[i] == key:
+                return Some(self.values[i])
+            i = i + 1
+        return None
+
+    pub fn remove(mut self, key: K) -> Option<V>:
+        var i: usize = 0
+        while i < self.keys.len():
+            if self.keys[i] == key:
+                val value = self.values[i]
+                self.keys.remove(i)
+                self.values.remove(i)
+                return Some(value)
+            i = i + 1
+        return None
+
+    pub fn clear(mut self):
+        self.keys.clear()
+        self.values.clear()
+
+    pub fn len(self) -> i32:
+        return self.keys.len() as i32
+
+    pub fn is_empty(self) -> bool:
+        return self.keys.len() == 0

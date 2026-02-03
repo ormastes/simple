@@ -1,0 +1,78 @@
+# Symbol Hashing Utilities
+#
+# Pure functional symbol hashing for compiler symbols.
+# Uses polynomial rolling hash with type tagging.
+#
+# Lean-friendly: Pure mathematical functions, provable hash properties,
+# deterministic hash computation
+
+# Symbol hash tag bit (bit 62 indicates symbol type)
+val SYMBOL_TYPE_BIT: i64 = 1 << 62
+
+# Polynomial hash base (prime number for better distribution)
+val HASH_BASE: i64 = 31
+
+# Compute polynomial rolling hash for a string
+# Uses Horner's method: h = b0*31^0 + b1*31^1 + b2*31^2 + ...
+fn poly_hash(s: text) -> i64:
+    var hash: i64 = 0
+    var power: i64 = 1
+    var index = 0
+
+    for c in s:
+        val byte_val = c.to_byte() as i64
+        hash = hash.wrapping_add(byte_val.wrapping_mul(power))
+        power = power.wrapping_mul(HASH_BASE)
+        index = index + 1
+
+    hash
+
+# Hash a symbol with type tagging
+# Symbols are tagged with bit 62 set to distinguish from other integer values
+fn hash_symbol(symbol: text) -> i64:
+    val hash = poly_hash(symbol)
+    hash | SYMBOL_TYPE_BIT
+
+# Check if a hash value represents a symbol (has type tag)
+fn is_symbol_hash(hash: i64) -> bool:
+    (hash & SYMBOL_TYPE_BIT) != 0
+
+# Remove symbol type tag from hash
+fn untag_symbol_hash(hash: i64) -> i64:
+    hash & ~SYMBOL_TYPE_BIT
+
+# Get the raw polynomial hash without type tag
+fn get_raw_hash(symbol: text) -> i64:
+    poly_hash(symbol)
+
+# Hash multiple symbols and return array
+fn hash_symbols(symbols: [text]) -> [i64]:
+    [for s in symbols: hash_symbol(s)]
+
+# Check hash collision between two symbols
+fn has_collision(s1: text, s2: text) -> bool:
+    hash_symbol(s1) == hash_symbol(s2) and s1 != s2
+
+# Compute hash distribution for multiple symbols
+# Returns map from hash value to count
+fn hash_distribution(symbols: [text]) -> HashMap<i64, i32>:
+    var dist = HashMap.new()
+    for s in symbols:
+        val h = hash_symbol(s)
+        val count = dist.get(h).unwrap_or(0)
+        dist = dist.insert(h, count + 1)
+    dist
+
+# Check if all symbols in a list have unique hashes
+fn all_unique_hashes(symbols: [text]) -> bool:
+    val hashes = hash_symbols(symbols)
+    val unique_set = HashSet.from_list(hashes)
+    unique_set.size() == hashes.length()
+
+# Estimate collision probability for n symbols
+# Based on birthday problem approximation
+fn collision_probability(n: i32) -> f64:
+    # For 64-bit hashes, probability ≈ n^2 / (2 * 2^63)
+    val n_f = n as f64
+    val hash_space = 2.0.pow(63.0)
+    (n_f * n_f) / (2.0 * hash_space)

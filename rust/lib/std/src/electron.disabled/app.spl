@@ -1,0 +1,121 @@
+# Electron App Lifecycle Management
+# Controls the application lifecycle (ready, quit, etc.)
+
+# External FFI declarations (implemented in Rust/Node.js)
+extern fn electron_app_on(event: text, callback_id: i64): void
+extern fn electron_app_quit(): void
+extern fn electron_app_is_ready(): bool
+extern fn electron_app_get_path(name: text): text
+extern fn electron_app_set_name(name: text): void
+extern fn electron_app_get_version(): text
+
+# Callback registry for event handlers
+val event_callbacks: Dict<text, List<fn(): void>> = {}
+val next_callback_id: i64 = 0
+
+# Register event handler
+pub fn on(event: text, handler: fn(): void):
+    """Register an event handler for app lifecycle events.
+
+    Supported events:
+    - "ready": App is ready to create windows
+    - "window-all-closed": All windows closed
+    - "before-quit": Before app quits
+    - "will-quit": App is about to quit
+    - "quit": App has quit
+
+    Example:
+        app.on("ready", fn():
+            print("App is ready!")
+        )
+    """
+    # Store callback
+    if not event_callbacks.has_key(event):
+        event_callbacks[event] = []
+
+    event_callbacks[event].append(handler)
+
+    # Register with native Electron
+    callback_id = next_callback_id
+    next_callback_id = next_callback_id + 1
+
+    electron_app_on(event, callback_id)
+
+# Trigger callback from native side (called by FFI)
+pub fn _trigger_callback(event: text, callback_id: i64):
+    """Internal: Called by FFI layer when event fires."""
+    if event_callbacks.has_key(event):
+        handlers = event_callbacks[event]
+        if callback_id < handlers.len():
+            handler = handlers[callback_id]
+            handler()
+
+# Quit application
+pub fn quit():
+    """Quit the application immediately."""
+    electron_app_quit()
+
+# Check if app is ready
+pub fn is_ready(): bool =
+    """Check if app is ready."""
+    electron_app_is_ready()
+
+# Get special directory paths
+pub fn get_path(name: text): text =
+    """Get path to special directory.
+
+    Supported paths:
+    - "home": User's home directory
+    - "appData": Per-user application data
+    - "userData": Directory for app's config files
+    - "temp": Temporary directory
+    - "exe": Current executable
+    - "desktop": User's desktop
+    - "documents": User's documents
+    - "downloads": User's downloads
+    - "music": User's music
+    - "pictures": User's pictures
+    - "videos": User's videos
+    - "logs": App's log files
+
+    Example:
+        config_dir = app.get_path("userData")
+        print("Config: {config_dir}")
+    """
+    electron_app_get_path(name)
+
+# Set application name
+pub fn set_name(name: text):
+    """Set application name (shown in menus, etc.)."""
+    electron_app_set_name(name)
+
+# Get application version
+pub fn get_version(): text =
+    """Get application version from package.json."""
+    electron_app_get_version()
+
+# Wait for ready event
+pub fn when_ready(handler: fn(): void):
+    """Execute handler when app is ready.
+
+    If app is already ready, executes immediately.
+    Otherwise, waits for 'ready' event.
+
+    Example:
+        app.when_ready(fn():
+            create_tray()
+            start_monitoring()
+        )
+    """
+    if is_ready():
+        handler()
+    else:
+        on("ready", handler)
+
+# Prevent default quit behavior
+pub fn prevent_quit():
+    """Keep app running even when all windows are closed.
+
+    Useful for system tray applications.
+    """
+    on("window-all-closed", fn(): pass)

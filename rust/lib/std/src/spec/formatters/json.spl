@@ -1,0 +1,169 @@
+# JSON Formatter - Machine-readable output for CI/CD
+# Outputs test results in JSON format for parsing by CI systems
+
+use spec.runner.executor.{TestResult, ExecutionResults, TestStatus}
+use io.{println}
+use json.{Object, Array, encode}
+
+# JSON formatter - machine-readable output
+class JsonFormatter:
+    pretty_print: bool
+    include_metadata: bool
+
+impl JsonFormatter:
+    fn new() -> JsonFormatter:
+        return JsonFormatter {
+            pretty_print: false,
+            include_metadata: true
+        }
+
+    fn with_pretty_print() -> JsonFormatter:
+        """Enable pretty-printed JSON output."""
+        self.pretty_print = true
+        return self
+
+    fn without_metadata() -> JsonFormatter:
+        """Exclude metadata from output."""
+        self.include_metadata = false
+        return self
+
+    fn format_status(status: TestStatus) -> text:
+        """Convert test status to string."""
+        match status:
+            case TestStatus.Passed:
+                return "passed"
+            case TestStatus.Failed(_):
+                return "failed"
+            case TestStatus.Pending:
+                return "pending"
+            case TestStatus.Skipped:
+                return "skipped"
+
+    fn format_example(result: TestResult) -> Object:
+        """Format a single test result as JSON object."""
+        var obj = Object.new()
+
+        obj.set("description", result.example.description)
+        obj.set("full_description", result.full_description())
+        obj.set("status", self.format_status(result.status))
+        obj.set("duration_ms", result.duration_ms)
+
+        # Add failure message if present
+        match result.failure_message:
+            case Some(message):
+                obj.set("failure_message", message)
+            case None:
+                pass
+
+        # Add tags if present
+        if not result.example.tags.is_empty():
+            obj.set("tags", result.example.tags)
+
+        # Add group hierarchy
+        obj.set("group", result.group.full_description())
+
+        return obj
+
+    fn format_summary(results: ExecutionResults) -> Object:
+        """Format summary statistics as JSON object."""
+        var obj = Object.new()
+
+        obj.set("duration_seconds", results.total_duration_ms / 1000.0)
+        obj.set("example_count", results.total_count())
+        obj.set("passed_count", results.passed_count())
+        obj.set("failed_count", results.failed_count())
+        obj.set("pending_count", results.pending_count())
+        obj.set("skipped_count", results.skipped_count())
+        obj.set("success_rate", results.success_rate())
+        obj.set("all_passed", results.all_passed())
+
+        return obj
+
+    fn format_metadata() -> Object:
+        """Format metadata (framework version, runtime, etc.)."""
+        var obj = Object.new()
+
+        obj.set("framework", "SSpec")
+        obj.set("version", "0.1.0")
+        obj.set("language", "Simple")
+
+        # Add timestamp
+        val now = Time.now()
+        obj.set("timestamp", now.to_iso8601())
+
+        return obj
+
+    fn format_results(results: ExecutionResults) -> Object:
+        """Format complete test results as JSON."""
+        var root = Object.new()
+
+        # Add summary
+        root.set("summary", self.format_summary(results))
+
+        # Add all examples
+        var examples = Array.new()
+        for result in results.results:
+            examples.push(self.format_example(result))
+        root.set("examples", examples)
+
+        # Add failures (separate list for convenience)
+        var failures = Array.new()
+        for failure in results.failures():
+            failures.push(self.format_example(failure))
+        root.set("failures", failures)
+
+        # Add metadata if requested
+        if self.include_metadata:
+            root.set("metadata", self.format_metadata())
+
+        return root
+
+    fn to_json(results: ExecutionResults) -> text:
+        """Convert results to JSON string."""
+        val obj = self.format_results(results)
+
+        if self.pretty_print:
+            return encode(obj, indent = 2)
+        else:
+            return encode(obj)
+
+    fn print_results(results: ExecutionResults) -> void:
+        """Print JSON results to stdout."""
+        println(self.to_json(results))
+
+    fn write_to_file(results: ExecutionResults, path: text) -> void:
+        """Write JSON results to file."""
+        val json_str = self.to_json(results)
+        File.write(path, json_str)
+
+# Convenience functions
+
+fn to_json(results: ExecutionResults) -> text:
+    """Convert results to JSON string."""
+    val formatter = JsonFormatter.new()
+    return formatter.to_json(results)
+
+fn to_json_pretty(results: ExecutionResults) -> text:
+    """Convert results to pretty-printed JSON string."""
+    val formatter = JsonFormatter.new().with_pretty_print()
+    return formatter.to_json(results)
+
+fn print_json_results(results: ExecutionResults) -> void:
+    """Print JSON results to stdout."""
+    val formatter = JsonFormatter.new()
+    formatter.print_results(results)
+
+fn print_json_results_pretty(results: ExecutionResults) -> void:
+    """Print pretty JSON results to stdout."""
+    val formatter = JsonFormatter.new().with_pretty_print()
+    formatter.print_results(results)
+
+fn write_json_results(results: ExecutionResults, path: text) -> void:
+    """Write JSON results to file."""
+    val formatter = JsonFormatter.new().with_pretty_print()
+    formatter.write_to_file(results, path)
+
+export JsonFormatter
+export to_json, to_json_pretty
+export print_json_results, print_json_results_pretty
+export write_json_results

@@ -1,0 +1,368 @@
+# Actor Model for Game Logic
+#
+# Engine-agnostic game logic using Simple's actor model
+# Provides concurrent, message-passing game entities
+#
+# Features:
+# - Game entity actors
+# - Message-based communication
+# - Concurrent game logic
+# - Actor lifecycle management
+# - Integration with engine update loops
+
+use math
+
+mod actor_model
+
+# GameMessage
+# Standard messages for game actors
+pub enum GameMessage:
+    Update(f32)                    # Delta time
+    Spawn(math.Vec3)              # Position
+    Despawn
+    SetPosition(math.Vec3)
+    GetPosition
+    Damage(i32)
+    Heal(i32)
+    Custom(text, text)            # Custom message type + data
+
+impl GameMessage:
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    pub fn is_update(self) -> bool:
+        """Check if message is Update."""
+        match self:
+            case Update(_): true
+            case _: false
+
+    pub fn is_spawn(self) -> bool:
+        """Check if message is Spawn."""
+        match self:
+            case Spawn(_): true
+            case _: false
+
+    pub fn is_despawn(self) -> bool:
+        """Check if message is Despawn."""
+        match self:
+            case Despawn: true
+            case _: false
+
+    pub fn is_set_position(self) -> bool:
+        """Check if message is SetPosition."""
+        match self:
+            case SetPosition(_): true
+            case _: false
+
+    pub fn is_get_position(self) -> bool:
+        """Check if message is GetPosition."""
+        match self:
+            case GetPosition: true
+            case _: false
+
+    pub fn is_damage(self) -> bool:
+        """Check if message is Damage."""
+        match self:
+            case Damage(_): true
+            case _: false
+
+    pub fn is_heal(self) -> bool:
+        """Check if message is Heal."""
+        match self:
+            case Heal(_): true
+            case _: false
+
+    pub fn is_custom(self) -> bool:
+        """Check if message is Custom."""
+        match self:
+            case Custom(_, _): true
+            case _: false
+
+    pub fn get_delta(self) -> f32:
+        """Get delta time from Update message."""
+        match self:
+            case GameMessage.Update(delta):
+                delta
+            case _:
+                0.0
+
+    pub fn to_string(self) -> text:
+        """Convert message to string representation."""
+        match self:
+            case Update(delta): "Update({delta})"
+            case Spawn(pos): "Spawn({pos.x}, {pos.y}, {pos.z})"
+            case Despawn: "Despawn"
+            case SetPosition(pos): "SetPosition({pos.x}, {pos.y}, {pos.z})"
+            case GetPosition: "GetPosition"
+            case Damage(amount): "Damage({amount})"
+            case Heal(amount): "Heal({amount})"
+            case Custom(msg_type, _): "Custom({msg_type})"
+
+    pub fn description(self) -> text:
+        """Get message description."""
+        match self:
+            case Update(_): "Frame update with delta time"
+            case Spawn(_): "Spawn entity at position"
+            case Despawn: "Remove entity from world"
+            case SetPosition(_): "Set entity position"
+            case GetPosition: "Query entity position"
+            case Damage(_): "Deal damage to entity"
+            case Heal(_): "Heal entity"
+            case Custom(_, _): "Custom game message"
+
+    pub fn summary(self) -> text:
+        """Get comprehensive summary of the game message."""
+        val msg_str = self.to_string()
+        val desc = self.description()
+        var category = "other"
+
+        if self.is_update():
+            category = "lifecycle"
+        elif self.is_spawn() or self.is_despawn():
+            category = "lifecycle"
+        elif self.is_set_position() or self.is_get_position():
+            category = "transform"
+        elif self.is_damage() or self.is_heal():
+            category = "health"
+        elif self.is_custom():
+            category = "custom"
+
+        "GameMessage: {msg_str} ({desc}, {category})"
+
+
+# GameEntity trait
+# Common interface for game entities using actors
+pub trait GameEntity:
+    # Lifecycle
+    fn on_spawn()
+    fn on_despawn()
+    fn on_update(delta: f32)
+
+    # Message handling
+    fn handle_message(message: GameMessage) -> Option<GameMessage>
+
+    # State queries
+    fn is_alive() -> bool
+    fn get_entity_id() -> i32
+
+
+# EntityActor
+# Simple actor wrapper for game entities
+pub struct EntityActor:
+    entity_id: i32
+    position: math.Vec3
+    health: i32
+    max_health: i32
+    alive: bool
+
+impl EntityActor:
+    pub static fn create(entity_id: i32) -> EntityActor:
+        return EntityActor(
+            entity_id: entity_id,
+            position: math.Vec3.zero(),
+            health: 100,
+            max_health: 100,
+            alive: true,
+        )
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    pub fn get_position(self) -> math.Vec3:
+        """Get entity position."""
+        return self.position
+
+    pub fn get_health(self) -> i32:
+        """Get current health."""
+        return self.health
+
+    pub fn get_max_health(self) -> i32:
+        """Get maximum health."""
+        return self.max_health
+
+    pub fn health_percentage(self) -> f32:
+        """Get health as percentage (0.0 to 1.0)."""
+        if self.max_health == 0:
+            return 0.0
+        return self.health as f32 / self.max_health as f32
+
+    pub fn is_full_health(self) -> bool:
+        """Check if at full health."""
+        return self.health >= self.max_health
+
+    pub fn is_dead(self) -> bool:
+        """Check if entity is dead."""
+        return not self.alive
+
+    pub fn summary(self) -> text:
+        """Get entity actor summary."""
+        val status = if self.alive { "alive" } else { "dead" }
+        val health_pct = (self.health_percentage() * 100.0) as i32
+        return "EntityActor #{self.entity_id}: {status}, pos=({self.position.x}, {self.position.y}, {self.position.z}), health={self.health}/{self.max_health} ({health_pct}%)"
+
+impl GameEntity for EntityActor:
+    me on_spawn():
+        self.alive = true
+
+    me on_despawn():
+        self.alive = false
+
+    me on_update(delta: f32):
+        pass
+
+    me handle_message(message: GameMessage) -> Option<GameMessage>:
+        match message:
+            case GameMessage.Update(delta):
+                self.on_update(delta)
+                return None
+            case GameMessage.SetPosition(pos):
+                self.position = pos
+                return None
+            case GameMessage.GetPosition:
+                return Some(GameMessage.SetPosition(self.position))
+            case GameMessage.Damage(amount):
+                self.health = self.health - amount
+                if self.health <= 0:
+                    self.health = 0
+                    self.alive = false
+                    self.on_despawn()
+                return None
+            case GameMessage.Heal(amount):
+                self.health = self.health + amount
+                if self.health > self.max_health:
+                    self.health = self.max_health
+                return None
+            case GameMessage.Despawn:
+                self.on_despawn()
+                return None
+            case _:
+                return None
+
+    fn is_alive() -> bool:
+        return self.alive
+
+    fn get_entity_id() -> i32:
+        return self.entity_id
+
+
+# EntityManager
+# Manages collection of game entity actors
+pub struct EntityManager:
+    entities: Vec<(i32, EntityActor)>  # entity_id -> actor
+    next_id: i32
+
+impl EntityManager:
+    pub static fn create() -> EntityManager:
+        return EntityManager(
+            entities: [],
+            next_id: 1,
+        )
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    pub fn entity_count(self) -> usize:
+        """Get number of entities."""
+        return self.entities.len()
+
+    pub fn has_entities(self) -> bool:
+        """Check if has any entities."""
+        return self.entities.len() > 0
+
+    pub fn is_empty(self) -> bool:
+        """Check if manager is empty."""
+        return self.entities.len() == 0
+
+    pub fn has_entity(self, entity_id: i32) -> bool:
+        """Check if entity with ID exists."""
+        for (id, _) in self.entities:
+            if id == entity_id:
+                return true
+        return false
+
+    pub fn get_next_id(self) -> i32:
+        """Get next entity ID that will be assigned."""
+        return self.next_id
+
+    pub fn summary(self) -> text:
+        """Get entity manager summary."""
+        val count = self.entity_count()
+        return "EntityManager: {count} entities, next_id={self.next_id}"
+
+    # Spawn new entity
+    pub me spawn_entity() -> i32:
+        val entity_id = self.next_id
+        self.next_id = self.next_id + 1
+
+        var entity = EntityActor.create(entity_id)
+        entity.on_spawn()
+
+        self.entities.push((entity_id, entity))
+        return entity_id
+
+    # Despawn entity
+    pub me despawn_entity(entity_id: i32):
+        var new_entities = Vec.new()
+        for (id, mut entity) in self.entities:
+            if id == entity_id:
+                entity.on_despawn()
+            else:
+                new_entities.push((id, entity))
+        self.entities = new_entities
+
+    # Send message to entity
+    pub me send_message(entity_id: i32, message: GameMessage) -> Option<GameMessage>:
+        for (id, mut entity) in self.entities:
+            if id == entity_id:
+                return entity.handle_message(message)
+        return None
+
+    # Broadcast message to all entities
+    pub me broadcast_message(message: GameMessage):
+        for (id, mut entity) in self.entities:
+            entity.handle_message(message)
+
+    # Update all entities
+    pub me update_all(delta: f32):
+        self.broadcast_message(GameMessage.Update(delta))
+
+    # Get entity count
+    pub fn get_entity_count(self) -> i32:
+        return self.entities.len()
+
+
+# Global entity manager (lazy singleton pattern)
+var ENTITY_MANAGER: Option<EntityManager> = None
+
+# Get global entity manager
+pub fn get_entity_manager() -> EntityManager:
+    if ENTITY_MANAGER.is_none():
+        ENTITY_MANAGER = Some(EntityManager.create())
+
+    return ENTITY_MANAGER.unwrap()
+
+
+# Utility functions
+
+# Spawn entity
+pub fn spawn_game_entity() -> i32:
+    var manager = get_entity_manager()
+    return manager.spawn_entity()
+
+# Despawn entity
+pub fn despawn_game_entity(entity_id: i32):
+    var manager = get_entity_manager()
+    manager.despawn_entity(entity_id)
+
+# Send message to entity
+pub fn send_entity_message(entity_id: i32, message: GameMessage) -> Option<GameMessage>:
+    var manager = get_entity_manager()
+    return manager.send_message(entity_id, message)
+
+# Update all game entities
+pub fn update_game_entities(delta: f32):
+    var manager = get_entity_manager()
+    manager.update_all(delta)

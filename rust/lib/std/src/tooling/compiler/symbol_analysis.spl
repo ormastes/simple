@@ -1,0 +1,211 @@
+# Symbol Analysis Types
+#
+# Data structures for linker symbol analysis.
+# Tracks symbol visibility, references, and reachability.
+#
+# Lean-friendly: Pure data structures with predicate methods,
+# provable visibility and reachability properties
+
+# Symbol reference kind
+enum RefKind:
+    # Direct call reference
+    Call
+    # Address-of reference
+    AddressOf
+    # Data reference
+    Data
+    # Type reference
+    Type
+
+impl RefKind:
+    # Get string name of reference kind
+    fn name() -> text:
+        match self:
+            RefKind.Call -> "call"
+            RefKind.AddressOf -> "address_of"
+            RefKind.Data -> "data"
+            RefKind.Type -> "type"
+
+    # Check if this is a code reference (call or address-of)
+    fn is_code_reference() -> bool:
+        match self:
+            RefKind.Call | RefKind.AddressOf -> true
+            _ -> false
+
+    # Check if this is a data reference
+    fn is_data_reference() -> bool:
+        match self:
+            RefKind.Data | RefKind.Type -> true
+            _ -> false
+
+# Symbol visibility level
+enum SymbolVisibility:
+    # Exported (public) symbol
+    Export
+    # Imported (external) symbol
+    Import
+    # Local (private) symbol
+    Local
+    # Hidden (internal linkage)
+    Hidden
+
+impl SymbolVisibility:
+    # Get string name of visibility
+    fn name() -> text:
+        match self:
+            SymbolVisibility.Export -> "export"
+            SymbolVisibility.Import -> "import"
+            SymbolVisibility.Local -> "local"
+            SymbolVisibility.Hidden -> "hidden"
+
+    # Check if symbol is visible outside module
+    fn is_external() -> bool:
+        match self:
+            SymbolVisibility.Export | SymbolVisibility.Import -> true
+            _ -> false
+
+    # Check if symbol is internal to module
+    fn is_internal() -> bool:
+        not self.is_external()
+
+    # Get visibility order (for sorting)
+    fn order() -> i32:
+        match self:
+            SymbolVisibility.Export -> 0
+            SymbolVisibility.Import -> 1
+            SymbolVisibility.Hidden -> 2
+            SymbolVisibility.Local -> 3
+
+# Analyzed symbol with references and metadata
+struct AnalyzedSymbol:
+    name: text
+    visibility: SymbolVisibility
+    size: i32
+    references: HashSet<text>
+    ref_kinds: HashMap<text, RefKind>
+    is_reachable: bool
+    group_id: Option<i32>
+    section: text
+
+impl AnalyzedSymbol:
+    # Create a new analyzed symbol
+    static fn new(name: text, visibility: SymbolVisibility) -> AnalyzedSymbol:
+        AnalyzedSymbol(
+            name: name,
+            visibility: visibility,
+            size: 0,
+            references: HashSet.new(),
+            ref_kinds: HashMap.new(),
+            is_reachable: false,
+            group_id: None,
+            section: ".text"
+        )
+
+    # Add a reference to another symbol
+    me add_reference(target: text, kind: RefKind):
+        self.references = self.references.insert(target)
+        self.ref_kinds = self.ref_kinds.insert(target, kind)
+
+    # Check if symbol is exported
+    fn is_exported() -> bool:
+        self.visibility == SymbolVisibility.Export
+
+    # Check if symbol is imported
+    fn is_imported() -> bool:
+        self.visibility == SymbolVisibility.Import
+
+    # Check if symbol is local
+    fn is_local() -> bool:
+        self.visibility == SymbolVisibility.Local
+
+    # Check if symbol is hidden
+    fn is_hidden() -> bool:
+        self.visibility == SymbolVisibility.Hidden
+
+    # Get number of references
+    fn reference_count() -> i32:
+        self.references.size()
+
+    # Check if symbol references another symbol
+    fn references_symbol(target: text) -> bool:
+        self.references.contains(target)
+
+    # Get reference kind for a target symbol
+    fn get_ref_kind(target: text) -> Option<RefKind>:
+        self.ref_kinds.get(target)
+
+    # Check if symbol has any code references
+    fn has_code_references() -> bool:
+        for (_, kind) in self.ref_kinds:
+            if kind.is_code_reference():
+                return true
+        false
+
+    # Check if symbol has any data references
+    fn has_data_references() -> bool:
+        for (_, kind) in self.ref_kinds:
+            if kind.is_data_reference():
+                return true
+        false
+
+    # Check if symbol is in a specific section
+    fn in_section(section_name: text) -> bool:
+        self.section == section_name
+
+    # Check if symbol is in text section
+    fn in_text_section() -> bool:
+        self.in_section(".text")
+
+    # Check if symbol is in data section
+    fn in_data_section() -> bool:
+        self.in_section(".data") or self.in_section(".rodata")
+
+# Statistics from symbol analysis
+struct SymbolAnalysisStats:
+    total_symbols: i32
+    exported_symbols: i32
+    imported_symbols: i32
+    local_symbols: i32
+    hidden_symbols: i32
+
+impl SymbolAnalysisStats:
+    # Create empty statistics
+    static fn new() -> SymbolAnalysisStats:
+        SymbolAnalysisStats(
+            total_symbols: 0,
+            exported_symbols: 0,
+            imported_symbols: 0,
+            local_symbols: 0,
+            hidden_symbols: 0
+        )
+
+    # Compute statistics from list of symbols
+    static fn from_symbols(symbols: [AnalyzedSymbol]) -> SymbolAnalysisStats:
+        var stats = SymbolAnalysisStats.new()
+        stats.total_symbols = symbols.length()
+
+        for sym in symbols:
+            if sym.is_exported():
+                stats.exported_symbols = stats.exported_symbols + 1
+            else if sym.is_imported():
+                stats.imported_symbols = stats.imported_symbols + 1
+            else if sym.is_local():
+                stats.local_symbols = stats.local_symbols + 1
+            else if sym.is_hidden():
+                stats.hidden_symbols = stats.hidden_symbols + 1
+
+        stats
+
+    # Get ratio of exported symbols
+    fn export_ratio() -> f64:
+        if self.total_symbols == 0:
+            0.0
+        else:
+            (self.exported_symbols as f64) / (self.total_symbols as f64)
+
+    # Get ratio of local symbols
+    fn local_ratio() -> f64:
+        if self.total_symbols == 0:
+            0.0
+        else:
+            (self.local_symbols as f64) / (self.total_symbols as f64)

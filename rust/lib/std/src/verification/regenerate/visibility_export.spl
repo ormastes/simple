@@ -1,0 +1,134 @@
+# Visibility Export - Visibility rules verification
+# Generates Lean verification for visibility/export rules
+
+use verification.lean.codegen as codegen
+
+fn regenerate_visibility_export() -> text:
+    gen = codegen.LeanCodegen.create("VisibilityExport")
+
+    # Namespace
+    gen = gen.add_namespace("VisibilityExport")
+
+    # Block comment
+    gen = gen.add_block_comment([
+        "# Visibility and Export Model",
+        "",
+        "This model formalizes the visibility and export rules.",
+        "",
+        "## Key Properties",
+        "1. Visibility is the intersection of declaration visibility and ancestor visibility",
+        "2. A directory's public API consists only of child modules declared as `pub mod`"
+    ])
+
+    # Visibility inductive
+    visibility = codegen.build_enum_with_deriving("Visibility", [
+        ("pub", []),
+        ("priv", [])
+    ], ["DecidableEq", "Repr", "BEq"])
+    gen.add_inductive(visibility)
+
+    # SymbolId structure
+    symbolid = codegen.build_class_with_deriving("SymbolId", [("name", codegen.make_string_type())], ["DecidableEq", "Repr"])
+    gen.add_structure(symbolid)
+
+    # Symbol structure
+    symbol = codegen.build_class_with_deriving("Symbol", [
+        ("id", codegen.make_simple_type("SymbolId")),
+        ("visibility", codegen.make_simple_type("Visibility"))
+    ], ["Repr"])
+    gen.add_structure(symbol)
+
+    # ModDecl structure
+    moddecl = codegen.build_class_with_deriving("ModDecl", [
+        ("name", codegen.make_string_type()),
+        ("isPub", codegen.make_simple_type("bool"))
+    ], ["Repr"])
+    gen.add_structure(moddecl)
+
+    # DirManifest structure
+    manifest = codegen.build_class_with_deriving("DirManifest", [
+        ("name", codegen.make_string_type()),
+        ("children", codegen.make_list_type(codegen.make_simple_type("ModDecl"))),
+        ("exports", codegen.make_list_type(codegen.make_simple_type("SymbolId")))
+    ], ["Repr"])
+    gen.add_structure(manifest)
+
+    # ModuleContents structure
+    contents = codegen.build_class_with_deriving("ModuleContents", [
+        ("symbols", codegen.make_list_type(codegen.make_simple_type("Symbol")))
+    ], ["Repr"])
+    gen.add_structure(contents)
+
+    # Helper functions
+    gen = gen.add_raw_line("def DirManifest.isChildPublic (m : DirManifest) (childName : text) : bool :=")
+    gen = gen.add_raw_line("  m.children.any (fun d => d.name == childName && d.isPub)")
+    gen = gen.add_blank()
+
+    gen = gen.add_raw_line("def DirManifest.isExported (m : DirManifest) (sym : SymbolId) : bool :=")
+    gen = gen.add_raw_line("  m.exports.any (· == sym)")
+    gen = gen.add_blank()
+
+    gen = gen.add_raw_line("def ModuleContents.symbolVisibility (mc : ModuleContents) (sym : SymbolId) : Option Visibility :=")
+    gen = gen.add_raw_line("  mc.symbols.find? (·.id == sym) |>.map (·.visibility)")
+    gen = gen.add_blank()
+
+    # visibilityMeet function
+    meet_def = codegen.build_function(
+        "visibilityMeet",
+        [("v1", codegen.make_simple_type("Visibility")), ("v2", codegen.make_simple_type("Visibility"))],
+        codegen.make_simple_type("Visibility"),
+        "match v1, v2 with\n| Visibility.pub, Visibility.pub => Visibility.pub\n| _, _ => Visibility.priv"
+    )
+    gen = gen.add_function(meet_def)
+
+    # Meet theorems
+    gen = gen.add_theorem(codegen.build_theorem("meet_comm", [("v1", "Visibility"), ("v2", "Visibility")], "visibilityMeet v1 v2 = visibilityMeet v2 v1", "cases v1 <;> cases v2 <;> rfl"))
+    gen = gen.add_theorem(codegen.build_theorem("meet_assoc", [("v1", "Visibility"), ("v2", "Visibility"), ("v3", "Visibility")], "visibilityMeet (visibilityMeet v1 v2) v3 = visibilityMeet v1 (visibilityMeet v2 v3)", "cases v1 <;> cases v2 <;> cases v3 <;> rfl"))
+    gen = gen.add_theorem(codegen.build_theorem("meet_private_left", [("v", "Visibility")], "visibilityMeet Visibility.priv v = Visibility.priv", "cases v <;> rfl"))
+    gen = gen.add_theorem(codegen.build_theorem("meet_private_right", [("v", "Visibility")], "visibilityMeet v Visibility.priv = Visibility.priv", "cases v <;> rfl"))
+    gen = gen.add_theorem(codegen.build_theorem("meet_public_left", [("v", "Visibility")], "visibilityMeet Visibility.pub v = v", "cases v <;> rfl"))
+    gen = gen.add_theorem(codegen.build_theorem("meet_public_right", [("v", "Visibility")], "visibilityMeet v Visibility.pub = v", "cases v <;> rfl"))
+
+    # ancestorVisibility function
+    ancestor_def = codegen.build_function(
+        "ancestorVisibility",
+        [("path", codegen.make_list_type(codegen.make_simple_type("Visibility")))],
+        codegen.make_simple_type("Visibility"),
+        "path.foldl visibilityMeet Visibility.pub"
+    )
+    gen = gen.add_function(ancestor_def)
+
+    # foldl_priv_absorbs theorem
+    gen = gen.add_theorem(codegen.build_theorem(
+        "foldl_priv_absorbs",
+        [("vs", "List Visibility")],
+        "List.foldl visibilityMeet Visibility.priv vs = Visibility.priv",
+        "induction vs with\n| nil => rfl\n| cons v vs ih => simp [List.foldl, meet_private_left, ih]"
+    ))
+
+    # any_private_means_private theorem
+    gen = gen.add_theorem(codegen.build_theorem(
+        "any_private_means_private",
+        [("path", "List Visibility")],
+        "Visibility.priv ∈ path → ancestorVisibility path = Visibility.priv",
+        "intro h\ninduction path with\n| nil => simp at h\n| cons v vs ih =>\n  unfold ancestorVisibility List.foldl\n  cases hv : v with\n  | priv => simp [visibilityMeet, foldl_priv_absorbs]\n  | pub =>\n    simp [visibilityMeet]\n    cases h with\n    | head => simp_all\n    | tail _ hmem => unfold ancestorVisibility at ih; exact ih hmem"
+    ))
+
+    # all_public_means_public theorem
+    gen = gen.add_theorem(codegen.build_theorem(
+        "all_public_means_public",
+        [("path", "List Visibility")],
+        "(∀ v ∈ path, v = Visibility.pub) → ancestorVisibility path = Visibility.pub",
+        "intro h\ninduction path with\n| nil => rfl\n| cons v vs ih =>\n  unfold ancestorVisibility List.foldl\n  have hv : v = Visibility.pub := h v (List.mem_cons_self ..)\n  rw [hv]\n  simp [visibilityMeet]\n  unfold ancestorVisibility at ih\n  apply ih\n  intro v' hv'\n  exact h v' (List.mem_cons_of_mem v hv')"
+    ))
+
+    # End namespace
+    gen = gen.end_namespace("VisibilityExport")
+
+    return gen.emit()
+
+
+# ============================================================================
+# 7. MacroAutoImport - Macro import semantics (159 lines)
+# ============================================================================
+

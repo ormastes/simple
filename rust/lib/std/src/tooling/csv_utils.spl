@@ -1,0 +1,275 @@
+# CSV (Comma-Separated Values) utilities
+# Enhanced CSV parsing and formatting
+
+use super.string_utils.{trim, pad_right}
+use super.list_utils.{map_list}
+
+# =====================================
+# CSV Parsing
+# =====================================
+
+# Parse CSV with support for quoted fields
+fn parse_csv_line_quoted(line: text) -> List<text>:
+    var fields = []
+    var current_field = ""
+    var in_quotes = false
+    var i = 0
+
+    while i < line.len():
+        val ch = line.chars()[i]
+
+        if ch == "\"":
+            if in_quotes and i + 1 < line.len() and line.chars()[i + 1] == "\"":
+                # Escaped quote
+                current_field = current_field + "\""
+                i = i + 1
+            else:
+                # Toggle quote mode
+                in_quotes = not in_quotes
+        elif ch == "," and not in_quotes:
+            # End of field
+            fields.push(trim(current_field))
+            current_field = ""
+        else:
+            current_field = current_field + ch
+
+        i = i + 1
+
+    # Add last field
+    fields.push(trim(current_field))
+    fields
+
+# Parse entire CSV text into rows
+fn parse_csv(text: text) -> List<List<text>>:
+    val lines = text.split("\n")
+    var rows = []
+
+    for line in lines:
+        val trimmed = trim(line)
+        if not trimmed.is_empty():
+            rows.push(parse_csv_line_quoted(trimmed))
+
+    rows
+
+# Parse CSV with headers
+struct CsvData:
+    headers: List<text>
+    rows: List<List<text>>
+
+fn parse_csv_with_headers(text: text) -> Option<CsvData>:
+    val lines = text.split("\n")
+    if lines.is_empty():
+        return None
+
+    val headers = parse_csv_line_quoted(lines[0])
+    var rows = []
+
+    for i in 1..lines.len():
+        val trimmed = trim(lines[i])
+        if not trimmed.is_empty():
+            rows.push(parse_csv_line_quoted(trimmed))
+
+    Some(CsvData(headers: headers, rows: rows))
+
+# =====================================
+# CSV Formatting
+# =====================================
+
+# Format a list of values as CSV line
+fn format_csv_line(fields: List<text>) -> text:
+    var result = []
+
+    for field in fields:
+        result.push(quote_csv_field(field))
+
+    result.join(",")
+
+# Format entire CSV data
+fn format_csv(rows: List<List<text>>) -> text:
+    var lines = []
+
+    for row in rows:
+        lines.push(format_csv_line(row))
+
+    lines.join("\n")
+
+# Format CSV with headers
+fn format_csv_with_headers(data: CsvData) -> text:
+    var lines = []
+
+    # Add header row
+    lines.push(format_csv_line(data.headers))
+
+    # Add data rows
+    for row in data.rows:
+        lines.push(format_csv_line(row))
+
+    lines.join("\n")
+
+# Quote CSV field if it contains special characters
+fn quote_csv_field(field: text) -> text:
+    # Check if quoting is needed
+    val needs_quotes = field.contains(",") or field.contains("\"") or field.contains("\n")
+
+    if not needs_quotes:
+        return field
+
+    # Escape quotes and wrap in quotes
+    val escaped = field.replace("\"", "\"\"")
+    "\"{escaped}\""
+
+# =====================================
+# CSV Validation
+# =====================================
+
+# Check if all rows have same number of columns
+fn is_rectangular_csv(rows: List<List<text>>) -> bool:
+    if rows.is_empty():
+        return true
+
+    val expected_cols = rows[0].len()
+
+    for row in rows:
+        if row.len() != expected_cols:
+            return false
+
+    true
+
+# Get column count
+fn get_column_count(rows: List<List<text>>) -> i32:
+    if rows.is_empty():
+        return 0
+    rows[0].len()
+
+# Get row count
+fn get_row_count(rows: List<List<text>>) -> i32:
+    rows.len()
+
+# =====================================
+# CSV Transformation
+# =====================================
+
+# Extract a column by index
+fn get_column(rows: List<List<text>>, col_index: i32) -> List<text>:
+    var column = []
+
+    for row in rows:
+        if col_index < row.len():
+            column.push(row[col_index])
+
+    column
+
+# Extract a column by header name
+fn get_column_by_name(data: CsvData, header: text) -> Option<List<text>>:
+    # Find header index
+    var col_index = -1
+    for i in 0..data.headers.len():
+        if data.headers[i] == header:
+            col_index = i
+            break
+
+    if col_index < 0:
+        return None
+
+    Some(get_column(data.rows, col_index))
+
+# Transpose CSV (swap rows and columns)
+fn transpose_csv(rows: List<List<text>>) -> List<List<text>>:
+    if rows.is_empty():
+        return []
+
+    val col_count = get_column_count(rows)
+    var transposed = []
+
+    for col_idx in 0..col_count:
+        transposed.push(get_column(rows, col_idx))
+
+    transposed
+
+# Filter rows by predicate
+fn filter_rows(data: CsvData, predicate: fn(List<text>) -> bool) -> CsvData:
+    val filtered = data.rows.filter(predicate)
+    CsvData(headers: data.headers, rows: filtered)
+
+# Map over rows
+fn map_rows(data: CsvData, mapper: fn(List<text>) -> List<text>) -> CsvData:
+    val mapped = map_list(data.rows, mapper)
+    CsvData(headers: data.headers, rows: mapped)
+
+# =====================================
+# CSV Statistics
+# =====================================
+
+# Count non-empty cells
+fn count_non_empty_cells(rows: List<List<text>>) -> i32:
+    var count = 0
+
+    for row in rows:
+        for cell in row:
+            if not trim(cell).is_empty():
+                count = count + 1
+
+    count
+
+# Find maximum field length
+fn max_field_length(rows: List<List<text>>) -> i32:
+    var max_len = 0
+
+    for row in rows:
+        for field in row:
+            if field.len() > max_len:
+                max_len = field.len()
+
+    max_len
+
+# =====================================
+# CSV Formatting for Display
+# =====================================
+
+# Format CSV as aligned table
+fn format_csv_table(rows: List<List<text>>) -> text:
+    if rows.is_empty():
+        return ""
+
+    # Calculate column widths
+    val col_count = get_column_count(rows)
+    var col_widths = []
+    for _ in 0..col_count:
+        col_widths.push(0)
+
+    for row in rows:
+        for i in 0..row.len():
+            if row[i].len() > col_widths[i]:
+                col_widths[i] = row[i].len()
+
+    # Format rows
+    var output = ""
+    for row in rows:
+        var line = ""
+        for i in 0..row.len():
+            if i > 0:
+                line = line + " | "
+            line = line + pad_right(row[i], col_widths[i], " ")
+        output = output + line + "\n"
+
+    output
+
+# Format CSV with headers as table
+fn format_csv_table_with_headers(data: CsvData) -> text:
+    var all_rows = [data.headers]
+    for row in data.rows:
+        all_rows.push(row)
+
+    val table = format_csv_table(all_rows)
+
+    # Add separator after header
+    val lines = table.split("\n")
+    if lines.len() > 1:
+        val separator_len = lines[0].len()
+        var separator = ""
+        for _ in 0..separator_len:
+            separator = separator + "-"
+
+        lines[0] + "\n" + separator + "\n" + lines[1..lines.len()].join("\n")
+    else:
+        table

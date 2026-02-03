@@ -1,0 +1,113 @@
+# Electron Power Monitor API
+# Monitor system power events (battery, AC, sleep, etc.)
+
+# External FFI declarations
+extern fn electron_power_on(event: text, callback_id: i64): void
+extern fn electron_power_get_battery_level(): f64
+extern fn electron_power_is_on_battery(): bool
+extern fn electron_power_get_status(): text
+
+# Event callback registry
+val power_callbacks: Dict<text, List<fn(): void>> = {}
+val next_callback_id: i64 = 0
+
+# Register power event handler
+pub fn on(event: text, handler: fn(): void):
+    """Register handler for power events.
+
+    Supported events:
+    - "suspend": System is about to suspend
+    - "resume": System resumed from suspend
+    - "on-ac": System plugged into AC power
+    - "on-battery": System on battery power
+    - "shutdown": System is shutting down (Linux/macOS)
+    - "lock-screen": Screen locked (macOS/Windows)
+    - "unlock-screen": Screen unlocked (macOS/Windows)
+
+    Example:
+        power.on("on-battery", fn():
+            print("Running on battery!")
+        )
+
+        power.on("suspend", fn():
+            save_state()
+        )
+    """
+    # Store callback
+    if not power_callbacks.has_key(event):
+        power_callbacks[event] = []
+
+    power_callbacks[event].append(handler)
+
+    # Register with native
+    val callback_id = next_callback_id
+    next_callback_id = next_callback_id + 1
+
+    electron_power_on(event, callback_id)
+
+# Convenience handlers
+pub fn on_battery_low(handler: fn(): void):
+    """Register handler for low battery event.
+
+    Triggers when battery level drops below 20%.
+    """
+    on("on-battery", fn():
+        level = get_battery_level()
+        if level < 0.2:
+            handler()
+    )
+
+pub fn on_suspend(handler: fn(): void):
+    """Register handler for system suspend."""
+    on("suspend", handler)
+
+pub fn on_resume(handler: fn(): void):
+    """Register handler for system resume."""
+    on("resume", handler)
+
+pub fn on_ac_power(handler: fn(): void):
+    """Register handler for AC power connected."""
+    on("on-ac", handler)
+
+pub fn on_battery_power(handler: fn(): void):
+    """Register handler for battery power."""
+    on("on-battery", handler)
+
+# Get battery information
+pub fn get_battery_level(): f64 =
+    """Get current battery level (0.0 to 1.0).
+
+    Returns:
+        Battery level as fraction (0.0 = empty, 1.0 = full)
+        Returns -1.0 if battery info unavailable
+
+    Example:
+        level = power.get_battery_level()
+        print("Battery: {(level * 100).to_i32()}%")
+    """
+    electron_power_get_battery_level()
+
+pub fn is_on_battery(): bool =
+    """Check if system is running on battery power.
+
+    Returns:
+        true if on battery, false if on AC power
+    """
+    electron_power_is_on_battery()
+
+pub fn get_status(): text =
+    """Get power status string.
+
+    Returns:
+        "charging", "discharging", "full", or "unknown"
+    """
+    electron_power_get_status()
+
+# Trigger callback from FFI
+pub fn _trigger_callback(event: text, callback_id: i64):
+    """Internal: Called by FFI when power event occurs."""
+    if power_callbacks.has_key(event):
+        handlers = power_callbacks[event]
+        if callback_id < handlers.len():
+            handler = handlers[callback_id]
+            handler()

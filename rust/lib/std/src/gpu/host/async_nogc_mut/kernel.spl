@@ -1,0 +1,195 @@
+# GPU Kernel Launch - Async kernel compilation and execution
+
+use std.core.result.*
+use std.gpu.host.async_nogc_mut.buffer.GpuError
+
+# Kernel launch configuration
+struct LaunchConfig:
+    global_size: [u32; 3]
+    local_size: [u32; 3]
+
+impl LaunchConfig:
+    fn new_1d(global: u32, local: u32) -> LaunchConfig:
+        LaunchConfig {global_size: [global, 1, 1], local_size: [local, 1, 1]}
+
+    fn new_2d(global: [u32; 2], local: [u32; 2]) -> LaunchConfig:
+        LaunchConfig {
+            global_size: [global[0], global[1], 1],
+            local_size: [local[0], local[1], 1]
+        }
+
+    fn new_3d(global: [u32; 3], local: [u32; 3]) -> LaunchConfig:
+        LaunchConfig {
+            global_size: global,
+            local_size: local
+        }
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    fn get_global_size() -> [u32; 3]:
+        """Get global work size.
+
+        Returns:
+            Global work size in 3D
+
+        Example:
+            config.get_global_size()  # → [1024, 1, 1]
+        """
+        return self.global_size
+
+    fn get_local_size() -> [u32; 3]:
+        """Get local work group size.
+
+        Returns:
+            Local work size in 3D
+
+        Example:
+            config.get_local_size()  # → [256, 1, 1]
+        """
+        return self.local_size
+
+    fn total_threads() -> u64:
+        """Calculate total number of threads.
+
+        Returns:
+            Total threads (global_x * global_y * global_z)
+
+        Example:
+            config.total_threads()  # → 1024
+        """
+        return (self.global_size[0] as u64) *
+               (self.global_size[1] as u64) *
+               (self.global_size[2] as u64)
+
+    fn total_workgroups() -> u64:
+        """Calculate total number of workgroups.
+
+        Returns:
+            Total workgroups
+
+        Example:
+            config.total_workgroups()  # → 4
+        """
+        val groups_x = (self.global_size[0] + self.local_size[0] - 1) / self.local_size[0]
+        val groups_y = (self.global_size[1] + self.local_size[1] - 1) / self.local_size[1]
+        val groups_z = (self.global_size[2] + self.local_size[2] - 1) / self.local_size[2]
+        return (groups_x as u64) * (groups_y as u64) * (groups_z as u64)
+
+    fn is_1d() -> bool:
+        """Check if configuration is 1-dimensional.
+
+        Returns:
+            true if only X dimension is used
+
+        Example:
+            config.is_1d()  # → true
+        """
+        return self.global_size[1] == 1 and self.global_size[2] == 1
+
+    fn is_2d() -> bool:
+        """Check if configuration is 2-dimensional.
+
+        Returns:
+            true if only X and Y dimensions are used
+
+        Example:
+            config.is_2d()  # → false
+        """
+        return self.global_size[1] > 1 and self.global_size[2] == 1
+
+    fn is_3d() -> bool:
+        """Check if configuration is 3-dimensional.
+
+        Returns:
+            true if all dimensions are used
+
+        Example:
+            config.is_3d()  # → false
+        """
+        return self.global_size[2] > 1
+
+    fn summary() -> str:
+        """Get launch config summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            config.summary()
+            # → "LaunchConfig: global=[1024,1,1], local=[256,1,1], 1024 threads"
+        """
+        val gx = self.global_size[0]
+        val gy = self.global_size[1]
+        val gz = self.global_size[2]
+        val lx = self.local_size[0]
+        val ly = self.local_size[1]
+        val lz = self.local_size[2]
+        val threads = self.total_threads()
+        return "LaunchConfig: global=[{gx},{gy},{gz}], local=[{lx},{ly},{lz}], {threads} threads"
+
+# Kernel event for synchronization
+struct KernelEvent:
+    _handle: u64
+
+impl KernelEvent:
+    async fn wait(self) -> Result<(), GpuError>
+    fn is_complete() -> bool
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    fn get_handle() -> u64:
+        """Get underlying event handle.
+
+        Returns:
+            Event handle identifier
+
+        Example:
+            event.get_handle()  # → 0x7f8a1c000100
+        """
+        return self._handle
+
+    fn is_pending() -> bool:
+        """Check if event is still pending (not complete).
+
+        Returns:
+            true if event is not yet complete
+
+        Example:
+            event.is_pending()  # → false
+        """
+        return not self.is_complete()
+
+    async fn synchronize(self) -> Result<(), GpuError>:
+        """Wait for event to complete (alias for wait).
+
+        Returns:
+            Result with () on success, GpuError on failure
+
+        Example:
+            await event.synchronize()
+        """
+        return await self.wait()
+
+    fn summary() -> str:
+        """Get event summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            event.summary()
+            # → "KernelEvent: handle=0x7f8a1c000100, complete=true"
+        """
+        val complete_str = if self.is_complete() { "true" } else { "false" }
+        return "KernelEvent: handle=0x{self._handle:x}, complete={complete_str}"
+
+# Async kernel launch
+extern async fn launch(
+    kernel_fn: fn,
+    config: LaunchConfig,
+    args: &[any]
+) -> Result<KernelEvent, GpuError>
