@@ -19,7 +19,7 @@ For detailed guidance, invoke with `/skill-name`:
 | `todo` | TODO/FIXME comment format |
 | `doc` | Documentation writing: specs (SSpec), research, design, guides |
 | `deeplearning` | **Deep learning**: Pipeline operators, dimension checking, NN layers |
-| `ffi` | **FFI generation**: Write specs in `.spl`, generate Rust with `simple ffi-gen` |
+| `ffi` | **FFI wrappers**: Two-tier pattern (`extern fn` + wrapper), type conversions |
 
 Skills located in `.claude/skills/`.
 
@@ -40,6 +40,11 @@ Skills located in `.claude/skills/`.
   - Commands: `build`, `test`, `coverage`, `lint`, `fmt`, `check`, `bootstrap`, `package`
   - Replaces Makefile with type-safe Simple code
   - See: `doc/build/getting_started.md`, `src/app/build/`
+- **File Extensions**:
+  - `.spl` - Standard Simple source file
+  - `.ssh` - Simple Shell Script (executable with `#!simple` shebang, use for build/install scripts)
+  - `.sspec` - SSpec test/specification file
+  - **Note**: `.ssh` files should start with `#!simple` shebang to be directly executable
 - **LLM-Friendly**: IR export, context packs, lint framework (75% complete)
   - **New Lints**: `print_in_test_spec`, `todo_format`
   - **EasyFix Rules** (9 auto-fix rules): See `/coding` skill and `src/app/fix/rules.spl`
@@ -325,11 +330,23 @@ See `/coding` skill for full details.
 ### Scripts
 - ❌ **NEVER write Python/Bash** - use Simple (`.spl`) only
 
-### Rust Files
-- ❌ **NEVER write `.rs` files manually** - use `simple ffi-gen` to generate from specs
-- ✅ **Write FFI specs** in `src/app/ffi_gen/specs/*.spl` instead
-- ✅ **Generate Rust code**: `simple ffi-gen --gen-all` or `simple ffi-gen --gen-module spec.spl`
-- 📖 **FFI Generation Guide**: See `doc/guide/ffi_gen_guide.md`
+### Rust Files and FFI
+- ❌ **NEVER write `.rs` files manually** - all FFI is Simple-first
+- ❌ **NEVER manually create Rust FFI implementations** - use `simple ffi-gen`
+- ✅ **Write FFI specs in Simple** at `src/app/ffi_gen/specs/*.spl`
+- ✅ **Generate Rust code**: `simple ffi-gen --gen-all` or `simple ffi-gen --gen-intern <spec.spl>`
+- ✅ **Write FFI wrappers in Simple** using the two-tier pattern:
+  ```simple
+  # Tier 1: Extern declaration (in src/app/io/mod.spl)
+  extern fn rt_file_read_text(path: text) -> text
+
+  # Tier 2: Simple-friendly wrapper
+  fn file_read(path: text) -> text:
+      rt_file_read_text(path)
+  ```
+- ✅ **Main FFI module**: `src/app/io/mod.spl` (all extern fn declarations)
+- ✅ **FFI specs location**: `src/app/ffi_gen/specs/` (generates `build/rust/ffi_gen/src/`)
+- 📖 **FFI Skill**: See `/ffi` for complete patterns and type conversions
 
 ### Tests
 - ❌ **NEVER add `#[ignore]`** without user approval
@@ -858,66 +875,91 @@ Projects in `verification/`: borrow checker, GC safety, effects, SC-DRF.
 
 ---
 
-## FFI Wrapper Generation
+## FFI Wrappers (Simple-First Approach)
 
-**All FFI wrappers are generated from Simple spec files, not hand-written Rust.**
+**All FFI wrappers are written in Simple using the two-tier pattern.**
 
-### Quick Commands
+### Two-Tier Pattern
 
-```bash
-# Generate all FFI modules
-simple ffi-gen --gen-all
+```simple
+# Tier 1: Extern declaration (raw FFI binding)
+extern fn rt_file_read_text(path: text) -> text
 
-# Generate single module from spec
-simple ffi-gen --gen-module src/app/ffi_gen/specs/file_io.spl
-
-# Preview generated code (dry-run)
-simple ffi-gen --gen-all --dry-run
-
-# Generate and verify (cargo check)
-simple ffi-gen --gen-all --verify
-
-# Clean and regenerate
-simple ffi-gen --clean && simple ffi-gen --gen-all
+# Tier 2: Simple-friendly wrapper (idiomatic API)
+fn file_read(path: text) -> text:
+    rt_file_read_text(path)
 ```
 
-### Spec File Location
+**Why two tiers?**
+- `extern fn` - Raw binding to runtime, prefixed with `rt_`
+- Wrapper `fn` - Clean API for Simple users, handles type conversions
 
-| Category | Spec File | Generated Output |
-|----------|-----------|------------------|
-| Runtime Values | `specs/runtime_value_full.spl` | `build/rust/ffi_gen/src/runtime_value.rs` |
-| GC | `specs/gc_full.spl` | `build/rust/ffi_gen/src/gc.rs` |
-| File I/O | `specs/file_io.spl` | `build/rust/ffi_gen/src/file_io.rs` |
-| Process | `specs/process.spl` | `build/rust/ffi_gen/src/process.rs` |
-| Time | `specs/time.spl` | `build/rust/ffi_gen/src/time.rs` |
-| System | `specs/system.spl` | `build/rust/ffi_gen/src/system.rs` |
+### Main FFI Module
+
+All FFI declarations live in `src/app/io/mod.spl`:
+
+| Category | Prefix | Examples |
+|----------|--------|----------|
+| File | `rt_file_` | read, write, exists, copy, delete |
+| Directory | `rt_dir_` | create, list, walk, remove |
+| Environment | `rt_env_` | cwd, home, get, set |
+| Process | `rt_process_` | run, run_timeout, run_with_limits |
+| Time | `rt_time_`, `rt_timestamp_` | now, year, month, day |
+| System | `rt_getpid`, `rt_hostname` | pid, hostname, cpu_count |
+| CLI | `rt_cli_` | run_file, run_tests, run_lint |
 
 ### Adding New FFI Functions
 
-1. **Create or edit spec file** in `src/app/ffi_gen/specs/`
-2. **Define function specs** using `InternFnSpec`:
+1. **Add extern declaration** in `src/app/io/mod.spl`:
    ```simple
-   specs.push(InternFnSpec(
-       name: "rt_my_function",
-       category: "my_category",
-       params: [InternParamSpec(name: "arg", value_type: "String")],
-       return_type: "i64",
-       runtime_fn: "rt_my_function",
-       doc: "Description of function"
-   ))
+   extern fn rt_my_function(arg1: text, arg2: i64) -> bool
    ```
-3. **Generate code**: `simple ffi-gen --gen-all`
-4. **Verify**: `simple ffi-gen --verify`
 
-### Configuration (simple.sdn)
+2. **Add wrapper function**:
+   ```simple
+   fn my_function(arg1: text, arg2: i64) -> bool:
+       rt_my_function(arg1, arg2)
+   ```
 
-```sdn
-ffi:
-  rust:
-    channel: stable
-    edition: 2021
-    components: [clippy, rustfmt]
+3. **Group with section comment**:
+   ```simple
+   # --- My category ---
+   extern fn rt_my_function(...)
+   fn my_function(...)
+   ```
+
+### Type Conversions
+
+| Simple Type | Rust Type | Notes |
+|-------------|-----------|-------|
+| `text` | `String` | Automatic |
+| `i64`, `i32` | `i64`, `i32` | Direct |
+| `bool` | `bool` | Direct |
+| `[text]` | `Vec<String>` | Array of strings |
+| `(text, text, i64)` | Tuple | Multiple returns |
+| `[text]?` | `Option<Vec<String>>` | Optional |
+
+### Error Handling Patterns
+
+```simple
+# Pattern 1: Boolean return
+fn file_write(path: text, content: text) -> bool:
+    rt_file_write_text(path, content)
+
+# Pattern 2: Tuple with error info
+fn process_run(cmd: text, args: [text]) -> (text, text, i64):
+    rt_process_run(cmd, args)  # (stdout, stderr, exit_code)
+
+# Pattern 3: Empty string for failure
+fn env_get(key: text) -> text:
+    rt_env_get(key)  # "" if not set
 ```
+
+### See Also
+
+- `/ffi` skill - Complete FFI patterns and examples
+- `src/app/io/mod.spl` - Main FFI wrapper module
+- `doc/guide/ffi_gen_guide.md` - Legacy FFI generation (for reference)
 
 ---
 

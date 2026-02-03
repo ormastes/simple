@@ -1,0 +1,107 @@
+# FFI Wrapper Build Script (Simple)
+#
+# Builds the simple-ffi-wrapper library using cargo.
+#
+# Usage:
+#   simple build.spl [--release]
+
+extern fn rt_env_cwd() -> text
+extern fn rt_env_get(name: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_copy(src: text, dst: text) -> bool
+extern fn rt_dir_create(path: text, recursive: bool) -> bool
+extern fn rt_process_run(cmd: text, args: [text]) -> text
+
+fn main():
+    val args = get_args()
+    val release = args.contains("--release")
+    val profile = if release: "release" else: "debug"
+
+    val script_dir = rt_env_cwd()
+    val build_dir = script_dir + "/build"
+
+    print "Building simple-ffi-wrapper ({profile})..."
+    print ""
+
+    # Create build directory
+    rt_dir_create(build_dir, true)
+
+    # Create Cargo.toml
+    val cargo_toml = "[package]
+name = \"simple-ffi-wrapper\"
+version = \"0.1.0\"
+edition = \"2021\"
+
+[lib]
+crate-type = [\"cdylib\", \"rlib\"]
+
+[dependencies]
+bdwgc-alloc = \"0.6\"
+glob = \"0.3\"
+hostname = \"0.4\"
+libc = \"0.2\"
+"
+    rt_file_write_text(build_dir + "/Cargo.toml", cargo_toml)
+
+    # Create src directory
+    rt_dir_create(build_dir + "/src", true)
+
+    # Copy source files (rename .txt to .rs)
+    copy_source(script_dir, build_dir, "lib.txt", "lib.rs")
+    copy_source(script_dir, build_dir, "gc.txt", "gc.rs")
+    copy_source(script_dir, build_dir, "env.txt", "env.rs")
+    copy_source(script_dir, build_dir, "file_io.txt", "file_io.rs")
+    copy_source(script_dir, build_dir, "runtime_value.txt", "runtime_value.rs")
+    copy_source(script_dir, build_dir, "bootstrap_ffi.txt", "bootstrap_ffi.rs")
+
+    # Build with cargo
+    val cargo_args = if release:
+        ["build", "--release", "--manifest-path", build_dir + "/Cargo.toml"]
+    else:
+        ["build", "--manifest-path", build_dir + "/Cargo.toml"]
+
+    print "Running cargo build..."
+    val result = rt_process_run("cargo", cargo_args)
+    print result
+
+    # Copy output to lib/
+    val lib_dir = if release:
+        build_dir + "/target/release"
+    else:
+        build_dir + "/target/debug"
+
+    rt_dir_create(script_dir + "/lib", true)
+
+    val so_file = lib_dir + "/libsimple_ffi_wrapper.so"
+    if rt_file_exists(so_file):
+        rt_file_copy(so_file, script_dir + "/lib/libsimple_ffi_wrapper.so")
+        print "Built: lib/libsimple_ffi_wrapper.so"
+
+    val dylib_file = lib_dir + "/libsimple_ffi_wrapper.dylib"
+    if rt_file_exists(dylib_file):
+        rt_file_copy(dylib_file, script_dir + "/lib/libsimple_ffi_wrapper.dylib")
+        print "Built: lib/libsimple_ffi_wrapper.dylib"
+
+    val a_file = lib_dir + "/libsimple_ffi_wrapper.a"
+    if rt_file_exists(a_file):
+        rt_file_copy(a_file, script_dir + "/lib/libsimple_ffi_wrapper.a")
+        print "Built: lib/libsimple_ffi_wrapper.a"
+
+    print ""
+    print "Build complete!"
+    print "Library files are in: {script_dir}/lib/"
+
+fn copy_source(script_dir: text, build_dir: text, src_name: text, dst_name: text):
+    val src_path = script_dir + "/src/" + src_name
+    val dst_path = build_dir + "/src/" + dst_name
+    if rt_file_exists(src_path):
+        rt_file_copy(src_path, dst_path)
+        print "  Copied {dst_name}"
+    else:
+        print "  WARNING: {src_name} not found"
+
+fn get_args() -> [text]:
+    # TODO: Get actual CLI args
+    []

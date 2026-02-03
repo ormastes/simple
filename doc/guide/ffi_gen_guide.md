@@ -1,16 +1,35 @@
-# FFI Wrapper Generation Guide
+# FFI Guide
 
 ## Overview
 
-Simple uses a code generation approach for FFI wrappers. Instead of writing Rust code manually, you define FFI specifications in Simple (`.spl` files), and the `simple ffi-gen` tool generates the corresponding Rust code.
+Simple uses a **Simple-first approach** for FFI. All FFI wrappers are written directly in Simple using the two-tier pattern.
 
-## Why Generated FFI?
+**Primary approach: Simple FFI Wrappers** (see `/ffi` skill)
 
-1. **Single source of truth** - Spec files define the interface
-2. **Consistency** - All FFI code follows the same patterns
-3. **Maintainability** - Change specs, regenerate code
-4. **Type safety** - Generator validates types and signatures
-5. **Documentation** - Specs include doc strings that become Rust docs
+```simple
+# In src/app/io/mod.spl
+
+# Tier 1: Extern declaration
+extern fn rt_file_read_text(path: text) -> text
+
+# Tier 2: Wrapper function
+fn file_read(path: text) -> text:
+    rt_file_read_text(path)
+```
+
+## Why Simple-First FFI?
+
+1. **Single source of truth** - FFI defined in Simple, not Rust
+2. **Consistency** - All wrappers follow the two-tier pattern
+3. **Maintainability** - Edit `.spl` files, not `.rs` files
+4. **Type safety** - Simple compiler validates types
+5. **Documentation** - Self-documenting Simple code
+
+---
+
+## Legacy: FFI Code Generation
+
+For generating Rust boilerplate from specs (advanced use cases only):
 
 ## Quick Start
 
@@ -264,8 +283,22 @@ simple ffi-gen --gen-all --verify
 4. **Preview first** - Use `--dry-run` before generating
 5. **Match signatures exactly** - Spec must match `extern fn` in io/mod.spl
 
+## Recommended Approach
+
+**For most FFI needs, use the Simple-first approach:**
+
+1. Add `extern fn rt_...` declaration to `src/app/io/mod.spl`
+2. Add wrapper function with clean name
+3. Done - no code generation needed
+
+**Use FFI generation only for:**
+- Generating large amounts of boilerplate Rust code
+- Complex struct/enum definitions that need Rust representation
+- Bootstrap tooling that requires generated Rust
+
 ## See Also
 
-- `/ffi` skill for quick reference
-- `src/app/ffi_gen/specs/` for examples
-- `src/app/io/mod.spl` for extern declarations
+- `/ffi` skill - **Primary reference** for Simple FFI wrappers
+- `src/app/io/mod.spl` - Main FFI wrapper module (extern declarations)
+- `src/app/ffi_gen/specs/` - Spec files for code generation (legacy)
+- `CLAUDE.md` - FFI Wrappers section
