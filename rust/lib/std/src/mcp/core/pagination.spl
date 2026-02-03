@@ -1,0 +1,345 @@
+# MCP Pagination Support
+# Cursor-based pagination for MCP list operations
+# Follows MCP specification 2025-11-25
+
+use core.*
+
+# Default page size
+pub val DEFAULT_PAGE_SIZE: i64 = 100
+pub val MAX_PAGE_SIZE: i64 = 1000
+
+# Cursor for pagination
+pub class Cursor:
+    pub offset: i64
+    pub limit: i64
+
+    static fn new(offset: i64, limit: i64) -> Cursor:
+        return Cursor(offset: offset, limit: limit)
+
+    static fn first_page(limit: i64) -> Cursor:
+        return Cursor.new(0, limit)
+
+    static fn default() -> Cursor:
+        return Cursor.first_page(DEFAULT_PAGE_SIZE)
+
+    # Encode cursor to opaque string (base64-like)
+    pub fn encode() -> text:
+        # Simple encoding: "o<offset>l<limit>"
+        return "o{self.offset}l{self.limit}"
+
+    # Decode cursor from opaque string
+    static fn decode(encoded: text) -> Option<Cursor>:
+        if not encoded.starts_with("o"):
+            return nil
+
+        # Parse offset
+        var offset: i64 = 0
+        var limit: i64 = DEFAULT_PAGE_SIZE
+        var i = 1
+        var parsing_offset = true
+
+        while i < encoded.len():
+            val ch = encoded.char_at(i)
+            if ch == "l":
+                parsing_offset = false
+                i = i + 1
+                continue
+
+            if ch >= "0" and ch <= "9":
+                val digit = ch.ord() - "0".ord()
+                if parsing_offset:
+                    offset = offset * 10 + digit
+                else:
+                    limit = limit * 10 + digit
+            i = i + 1
+
+        return Some(Cursor.new(offset, limit))
+
+    # Get next cursor
+    pub fn next() -> Cursor:
+        return Cursor.new(self.offset + self.limit, self.limit)
+
+    # Get previous cursor (or nil if at start)
+    pub fn previous() -> Option<Cursor>:
+        if self.offset == 0:
+            return nil
+        val new_offset = if self.offset >= self.limit:
+            self.offset - self.limit
+        else:
+            0
+        return Some(Cursor.new(new_offset, self.limit))
+
+# Paginated response wrapper
+pub class PaginatedResponse<T>:
+    pub items: List<T>
+    pub next_cursor: Option<text>
+    pub total_count: Option<i64>
+
+    static fn new(items: List<T>) -> PaginatedResponse<T>:
+        return PaginatedResponse(
+            items: items,
+            next_cursor: nil,
+            total_count: nil
+        )
+
+    pub fn with_cursor(self, cursor: text) -> PaginatedResponse<T>:
+        return PaginatedResponse(
+            items: self.items,
+            next_cursor: Some(cursor),
+            total_count: self.total_count
+        )
+
+    pub fn with_total(self, total: i64) -> PaginatedResponse<T>:
+        return PaginatedResponse(
+            items: self.items,
+            next_cursor: self.next_cursor,
+            total_count: Some(total)
+        )
+
+    pub fn has_more() -> bool:
+        match self.next_cursor:
+            case Some(_): true
+            case nil: false
+
+    pub fn is_empty() -> bool:
+        return self.items.len() == 0
+
+    pub fn count() -> i64:
+        return self.items.len()
+
+# Paginator for processing lists
+pub class Paginator<T>:
+    pub items: List<T>
+    pub page_size: i64
+
+    static fn new(items: List<T>, page_size: i64) -> Paginator<T>:
+        val size = if page_size > MAX_PAGE_SIZE:
+            MAX_PAGE_SIZE
+        elif page_size <= 0:
+            DEFAULT_PAGE_SIZE
+        else:
+            page_size
+
+        return Paginator(items: items, page_size: size)
+
+    static fn with_default_size(items: List<T>) -> Paginator<T>:
+        return Paginator.new(items, DEFAULT_PAGE_SIZE)
+
+    # Get page by cursor string
+    pub fn get_page(cursor: Option<text>) -> PaginatedResponse<T>:
+        val decoded_cursor = match cursor:
+            case Some(c):
+                match Cursor.decode(c):
+                    case Some(cur): cur
+                    case nil: Cursor.default()
+            case nil:
+                Cursor.default()
+
+        return self.get_page_at(decoded_cursor.offset, decoded_cursor.limit)
+
+    # Get page at offset
+    pub fn get_page_at(offset: i64, limit: i64) -> PaginatedResponse<T>:
+        val total = self.items.len()
+
+        # Clamp offset and limit
+        val actual_offset = if offset < 0:
+            0
+        elif offset >= total:
+            total
+        else:
+            offset
+
+        val actual_limit = if limit <= 0:
+            DEFAULT_PAGE_SIZE
+        elif limit > MAX_PAGE_SIZE:
+            MAX_PAGE_SIZE
+        else:
+            limit
+
+        # Extract page items
+        val end_idx = if actual_offset + actual_limit > total:
+            total
+        else:
+            actual_offset + actual_limit
+
+        var page_items: List<T> = []
+        for i in actual_offset..end_idx:
+            page_items.append(self.items[i])
+
+        # Build response
+        var response = PaginatedResponse.new(page_items)
+        response = response.with_total(total)
+
+        # Add next cursor if there are more items
+        if end_idx < total:
+            val next_cursor = Cursor.new(end_idx, actual_limit)
+            response = response.with_cursor(next_cursor.encode())
+
+        return response
+
+    # Get total count
+    pub fn total() -> i64:
+        return self.items.len()
+
+    # Check if there are items
+    pub fn is_empty() -> bool:
+        return self.items.len() == 0
+
+    # Get all pages as an iterator
+    pub fn pages() -> PageIterator<T>:
+        return PageIterator.new(self)
+
+# Page iterator for iterating through all pages
+pub class PageIterator<T>:
+    pub paginator: Paginator<T>
+    pub current_offset: i64
+
+    static fn new(paginator: Paginator<T>) -> PageIterator<T>:
+        return PageIterator(
+            paginator: paginator,
+            current_offset: 0
+        )
+
+    pub me next() -> Option<PaginatedResponse<T>>:
+        if self.current_offset >= self.paginator.total():
+            return nil
+
+        val page = self.paginator.get_page_at(self.current_offset, self.paginator.page_size)
+        self.current_offset = self.current_offset + self.paginator.page_size
+        return Some(page)
+
+    pub fn has_next() -> bool:
+        return self.current_offset < self.paginator.total()
+
+# Pagination configuration
+pub class PaginationConfig:
+    pub default_page_size: i64
+    pub max_page_size: i64
+    pub include_total: bool
+
+    static fn new() -> PaginationConfig:
+        return PaginationConfig(
+            default_page_size: DEFAULT_PAGE_SIZE,
+            max_page_size: MAX_PAGE_SIZE,
+            include_total: true
+        )
+
+    pub fn with_defaults(default_size: i64, max_size: i64) -> PaginationConfig:
+        return PaginationConfig(
+            default_page_size: default_size,
+            max_page_size: max_size,
+            include_total: true
+        )
+
+    pub fn clamp_page_size(requested: i64) -> i64:
+        if requested <= 0:
+            return self.default_page_size
+        elif requested > self.max_page_size:
+            return self.max_page_size
+        else:
+            return requested
+
+# Helper functions for paginating common MCP responses
+
+# Paginate a list of resources
+pub fn paginate_resources<T>(items: List<T>, cursor: Option<text>, page_size: i64) -> PaginatedResponse<T>:
+    val paginator = Paginator.new(items, page_size)
+    return paginator.get_page(cursor)
+
+# Paginate a list of tools
+pub fn paginate_tools<T>(items: List<T>, cursor: Option<text>, page_size: i64) -> PaginatedResponse<T>:
+    val paginator = Paginator.new(items, page_size)
+    return paginator.get_page(cursor)
+
+# Paginate a list of prompts
+pub fn paginate_prompts<T>(items: List<T>, cursor: Option<text>, page_size: i64) -> PaginatedResponse<T>:
+    val paginator = Paginator.new(items, page_size)
+    return paginator.get_page(cursor)
+
+# Parse cursor from request params
+pub fn parse_cursor_from_params(params: Dict<text, Any>) -> Option<text>:
+    match params.get("cursor"):
+        case Some(val):
+            match val:
+                case text as s:
+                    if s != "":
+                        return Some(s)
+                    else:
+                        return nil
+                case _:
+                    return nil
+        case nil:
+            return nil
+
+# Build pagination response dict
+pub fn build_pagination_response<T>(
+    key: text,
+    response: PaginatedResponse<T>,
+    item_converter: fn(T) -> Dict<text, Any>
+) -> Dict<text, Any>:
+    var result: Dict<text, Any> = {}
+
+    # Convert items
+    var items_list: List<Dict<text, Any>> = []
+    for item in response.items:
+        items_list.append(item_converter(item))
+
+    result.set(key, items_list)
+
+    # Add next cursor if present
+    match response.next_cursor:
+        case Some(cursor):
+            result.set("nextCursor", cursor)
+        case nil:
+            pass
+
+    return result
+
+# Streaming pagination for large datasets
+pub class StreamingPaginator<T>:
+    pub fetch_fn: fn(i64, i64) -> List<T>   # Function to fetch items at offset with limit
+    pub page_size: i64
+    pub total_count: Option<i64>
+
+    static fn new(fetch_fn: fn(i64, i64) -> List<T>, page_size: i64) -> StreamingPaginator<T>:
+        return StreamingPaginator(
+            fetch_fn: fetch_fn,
+            page_size: page_size,
+            total_count: nil
+        )
+
+    pub fn with_total(self, total: i64) -> StreamingPaginator<T>:
+        return StreamingPaginator(
+            fetch_fn: self.fetch_fn,
+            page_size: self.page_size,
+            total_count: Some(total)
+        )
+
+    pub fn get_page(cursor: Option<text>) -> PaginatedResponse<T>:
+        val decoded_cursor = match cursor:
+            case Some(c):
+                match Cursor.decode(c):
+                    case Some(cur): cur
+                    case nil: Cursor.default()
+            case nil:
+                Cursor.default()
+
+        # Fetch items using the fetch function
+        val items = self.fetch_fn(decoded_cursor.offset, decoded_cursor.limit)
+
+        var response = PaginatedResponse.new(items)
+
+        # Add total if known
+        match self.total_count:
+            case Some(total):
+                response = response.with_total(total)
+            case nil:
+                pass
+
+        # Determine if there are more items
+        # If we got a full page, assume there might be more
+        if items.len() >= self.page_size:
+            val next_cursor = Cursor.new(decoded_cursor.offset + items.len(), self.page_size)
+            response = response.with_cursor(next_cursor.encode())
+
+        return response

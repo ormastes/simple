@@ -1,0 +1,535 @@
+# Fail-Safe Resource Monitor
+# Monitors system resources and prevents resource exhaustion
+# Tracks memory, file handles, connections, and other system resources
+
+use core.*
+use std.failsafe.core.*
+
+# ============================================================================
+# RESOURCE TYPES
+# ============================================================================
+
+# Resource types that can be monitored
+pub enum ResourceType:
+    Memory
+    FileHandles
+    Connections
+    Threads
+    Goroutines
+    DiskSpace
+    Custom(text)
+
+    pub fn to_string() -> text:
+        match self:
+            case Memory: "memory"
+            case FileHandles: "file_handles"
+            case Connections: "connections"
+            case Threads: "threads"
+            case Goroutines: "goroutines"
+            case DiskSpace: "disk_space"
+            case Custom(name): name
+
+# Resource usage snapshot
+pub class ResourceUsage:
+    pub resource_type: ResourceType
+    pub current: i64
+    pub limit: i64
+    pub timestamp: i64
+
+    static fn new(resource_type: ResourceType, current: i64, limit: i64) -> ResourceUsage:
+        return ResourceUsage(
+            resource_type: resource_type,
+            current: current,
+            limit: limit,
+            timestamp: current_time_ms()
+        )
+
+    # Get usage percentage (0.0 - 1.0)
+    pub fn usage_percent() -> f64:
+        if self.limit == 0:
+            return 0.0
+        return self.current as f64 / self.limit as f64
+
+    # Check if usage is over threshold
+    pub fn is_over_threshold(threshold: f64) -> bool:
+        return self.usage_percent() >= threshold
+
+    # Get available resources
+    pub fn available() -> i64:
+        if self.current >= self.limit:
+            return 0
+        return self.limit - self.current
+
+# ============================================================================
+# RESOURCE LIMITS
+# ============================================================================
+
+# Resource limit configuration
+pub class ResourceLimits:
+    pub memory_bytes: i64
+    pub max_file_handles: i64
+    pub max_connections: i64
+    pub max_threads: i64
+    pub disk_space_bytes: i64
+    pub warning_threshold: f64      # Percentage to trigger warning (0.0-1.0)
+    pub critical_threshold: f64     # Percentage to trigger critical alert
+
+    static fn default() -> ResourceLimits:
+        return ResourceLimits(
+            memory_bytes: 1024 * 1024 * 1024,   # 1 GB
+            max_file_handles: 1024,
+            max_connections: 256,
+            max_threads: 100,
+            disk_space_bytes: 10 * 1024 * 1024 * 1024,  # 10 GB
+            warning_threshold: 0.75,
+            critical_threshold: 0.90
+        )
+
+    static fn strict() -> ResourceLimits:
+        return ResourceLimits(
+            memory_bytes: 512 * 1024 * 1024,    # 512 MB
+            max_file_handles: 256,
+            max_connections: 64,
+            max_threads: 50,
+            disk_space_bytes: 1024 * 1024 * 1024,  # 1 GB
+            warning_threshold: 0.60,
+            critical_threshold: 0.80
+        )
+
+    static fn permissive() -> ResourceLimits:
+        return ResourceLimits(
+            memory_bytes: 4 * 1024 * 1024 * 1024,   # 4 GB
+            max_file_handles: 4096,
+            max_connections: 1024,
+            max_threads: 500,
+            disk_space_bytes: 100 * 1024 * 1024 * 1024,  # 100 GB
+            warning_threshold: 0.85,
+            critical_threshold: 0.95
+        )
+
+# ============================================================================
+# RESOURCE ALERT
+# ============================================================================
+
+# Alert level for resource issues
+pub enum AlertLevel:
+    Info
+    Warning
+    Critical
+    Emergency
+
+    pub fn to_string() -> text:
+        match self:
+            case Info: "info"
+            case Warning: "warning"
+            case Critical: "critical"
+            case Emergency: "emergency"
+
+# Resource alert
+pub class ResourceAlert:
+    pub id: text
+    pub resource_type: ResourceType
+    pub level: AlertLevel
+    pub message: text
+    pub usage: ResourceUsage
+    pub timestamp: i64
+    pub acknowledged: bool
+
+    static fn new(id: text, resource_type: ResourceType, level: AlertLevel, message: text, usage: ResourceUsage) -> ResourceAlert:
+        return ResourceAlert(
+            id: id,
+            resource_type: resource_type,
+            level: level,
+            message: message,
+            usage: usage,
+            timestamp: current_time_ms(),
+            acknowledged: false
+        )
+
+    pub me acknowledge():
+        self.acknowledged = true
+
+# ============================================================================
+# RESOURCE MONITOR
+# ============================================================================
+
+# Monitor for tracking resource usage
+pub class ResourceMonitor:
+    pub limits: ResourceLimits
+    pub usage_history: Dict<text, List<ResourceUsage>>
+    pub alerts: List<ResourceAlert>
+    pub alert_callbacks: List<fn(ResourceAlert)>
+    pub next_alert_id: i64
+    pub stats: ResourceMonitorStats
+    pub enabled: bool
+    pub check_interval_ms: i64
+    pub history_max_entries: i64
+
+    static fn new(limits: ResourceLimits) -> ResourceMonitor:
+        return ResourceMonitor(
+            limits: limits,
+            usage_history: {},
+            alerts: [],
+            alert_callbacks: [],
+            next_alert_id: 0,
+            stats: ResourceMonitorStats.new(),
+            enabled: true,
+            check_interval_ms: 5000,    # 5 seconds
+            history_max_entries: 1000
+        )
+
+    static fn default() -> ResourceMonitor:
+        return ResourceMonitor.new(ResourceLimits.default())
+
+    # Register alert callback
+    pub me on_alert(callback: fn(ResourceAlert)):
+        self.alert_callbacks.append(callback)
+
+    # Check memory usage
+    pub me check_memory() -> FailSafeResult<ResourceUsage>:
+        val current = get_memory_usage_bytes()
+        val usage = ResourceUsage.new(ResourceType.Memory, current, self.limits.memory_bytes)
+        self.record_usage(usage)
+        return self.check_thresholds(usage)
+
+    # Check file handle usage
+    pub me check_file_handles() -> FailSafeResult<ResourceUsage>:
+        val current = get_open_file_handles()
+        val usage = ResourceUsage.new(ResourceType.FileHandles, current, self.limits.max_file_handles)
+        self.record_usage(usage)
+        return self.check_thresholds(usage)
+
+    # Check connection count
+    pub me check_connections() -> FailSafeResult<ResourceUsage>:
+        val current = get_open_connections()
+        val usage = ResourceUsage.new(ResourceType.Connections, current, self.limits.max_connections)
+        self.record_usage(usage)
+        return self.check_thresholds(usage)
+
+    # Check thread count
+    pub me check_threads() -> FailSafeResult<ResourceUsage>:
+        val current = get_thread_count()
+        val usage = ResourceUsage.new(ResourceType.Threads, current, self.limits.max_threads)
+        self.record_usage(usage)
+        return self.check_thresholds(usage)
+
+    # Check all resources
+    pub me check_all() -> FailSafeResult<Dict<text, ResourceUsage>>:
+        if not self.enabled:
+            return FailSafeResult.Ok({})
+
+        var results: Dict<text, ResourceUsage> = {}
+        var errors: List<FailSafeError> = []
+
+        # Check memory
+        match self.check_memory():
+            case FailSafeResult.Ok(usage):
+                results.set("memory", usage)
+            case FailSafeResult.Err(e):
+                errors.append(e)
+                # Still record the usage even if over threshold
+                val current = get_memory_usage_bytes()
+                results.set("memory", ResourceUsage.new(ResourceType.Memory, current, self.limits.memory_bytes))
+
+        # Check file handles
+        match self.check_file_handles():
+            case FailSafeResult.Ok(usage):
+                results.set("file_handles", usage)
+            case FailSafeResult.Err(e):
+                errors.append(e)
+
+        # Check connections
+        match self.check_connections():
+            case FailSafeResult.Ok(usage):
+                results.set("connections", usage)
+            case FailSafeResult.Err(e):
+                errors.append(e)
+
+        # Check threads
+        match self.check_threads():
+            case FailSafeResult.Ok(usage):
+                results.set("threads", usage)
+            case FailSafeResult.Err(e):
+                errors.append(e)
+
+        self.stats.checks_performed = self.stats.checks_performed + 1
+
+        if errors.len() > 0:
+            self.stats.threshold_violations = self.stats.threshold_violations + 1
+            return FailSafeResult.Err(
+                FailSafeError.new(ErrorCategory.ResourceExhausted, "Resource thresholds exceeded")
+                    .with_detail("violations", errors.len().to_string())
+            )
+
+        return FailSafeResult.Ok(results)
+
+    # Record usage to history
+    fn record_usage(usage: ResourceUsage):
+        val key = usage.resource_type.to_string()
+
+        var history = match self.usage_history.get(key):
+            case Some(h): h
+            case nil: []
+
+        history.append(usage)
+
+        # Trim history if too large
+        if history.len() > self.history_max_entries:
+            history = history[-(self.history_max_entries):]
+
+        self.usage_history.set(key, history)
+
+    # Check thresholds and create alerts if needed
+    fn check_thresholds(usage: ResourceUsage) -> FailSafeResult<ResourceUsage>:
+        val percent = usage.usage_percent()
+
+        if percent >= self.limits.critical_threshold:
+            self.create_alert(usage, AlertLevel.Critical, "Resource critical: {usage.resource_type.to_string()} at {(percent * 100.0) as i64}%")
+
+            if percent >= 0.99:
+                self.create_alert(usage, AlertLevel.Emergency, "Resource exhausted: {usage.resource_type.to_string()}")
+                return FailSafeResult.Err(
+                    FailSafeError.new(ErrorCategory.ResourceExhausted, "Resource exhausted: {usage.resource_type.to_string()}")
+                        .with_detail("current", usage.current.to_string())
+                        .with_detail("limit", usage.limit.to_string())
+                        .with_detail("percent", (percent * 100.0).to_string())
+                )
+        elif percent >= self.limits.warning_threshold:
+            self.create_alert(usage, AlertLevel.Warning, "Resource warning: {usage.resource_type.to_string()} at {(percent * 100.0) as i64}%")
+
+        return FailSafeResult.Ok(usage)
+
+    # Create and dispatch alert
+    fn create_alert(usage: ResourceUsage, level: AlertLevel, message: text):
+        val id = "alert_{self.next_alert_id}"
+        self.next_alert_id = self.next_alert_id + 1
+
+        val alert = ResourceAlert.new(id, usage.resource_type, level, message, usage)
+        self.alerts.append(alert)
+        self.stats.alerts_raised = self.stats.alerts_raised + 1
+
+        # Notify callbacks
+        for callback in self.alert_callbacks:
+            callback(alert)
+
+    # Get recent alerts
+    pub fn get_recent_alerts(count: i64) -> List<ResourceAlert>:
+        if self.alerts.len() <= count:
+            return self.alerts
+        return self.alerts[-(count):]
+
+    # Get unacknowledged alerts
+    pub fn get_unacknowledged_alerts() -> List<ResourceAlert>:
+        var result: List<ResourceAlert> = []
+        for alert in self.alerts:
+            if not alert.acknowledged:
+                result.append(alert)
+        return result
+
+    # Acknowledge all alerts
+    pub me acknowledge_all():
+        for alert in self.alerts:
+            alert.acknowledge()
+
+    # Get usage history for resource type
+    pub fn get_history(resource_type: ResourceType) -> List<ResourceUsage>:
+        match self.usage_history.get(resource_type.to_string()):
+            case Some(history): history
+            case nil: []
+
+    # Get average usage for resource type
+    pub fn get_average_usage(resource_type: ResourceType) -> f64:
+        val history = self.get_history(resource_type)
+        if history.len() == 0:
+            return 0.0
+
+        var total: f64 = 0.0
+        for usage in history:
+            total = total + usage.usage_percent()
+        return total / history.len() as f64
+
+    # Enable monitoring
+    pub me enable():
+        self.enabled = true
+
+    # Disable monitoring
+    pub me disable():
+        self.enabled = false
+
+    # Clear history and alerts
+    pub me reset():
+        self.usage_history = {}
+        self.alerts = []
+        self.stats = ResourceMonitorStats.new()
+
+# Monitor statistics
+pub class ResourceMonitorStats:
+    pub checks_performed: i64
+    pub threshold_violations: i64
+    pub alerts_raised: i64
+    pub started_at: i64
+
+    static fn new() -> ResourceMonitorStats:
+        return ResourceMonitorStats(
+            checks_performed: 0,
+            threshold_violations: 0,
+            alerts_raised: 0,
+            started_at: current_time_ms()
+        )
+
+    pub fn violation_rate() -> f64:
+        if self.checks_performed == 0:
+            return 0.0
+        return self.threshold_violations as f64 / self.checks_performed as f64
+
+# ============================================================================
+# RESOURCE GUARD
+# ============================================================================
+
+# Guard that prevents operations when resources are low
+pub class ResourceGuard:
+    pub monitor: ResourceMonitor
+    pub required_memory: i64
+    pub required_handles: i64
+    pub required_connections: i64
+
+    static fn new(monitor: ResourceMonitor) -> ResourceGuard:
+        return ResourceGuard(
+            monitor: monitor,
+            required_memory: 0,
+            required_handles: 0,
+            required_connections: 0
+        )
+
+    pub fn require_memory(self, bytes: i64) -> ResourceGuard:
+        return ResourceGuard(
+            monitor: self.monitor,
+            required_memory: bytes,
+            required_handles: self.required_handles,
+            required_connections: self.required_connections
+        )
+
+    pub fn require_handles(self, count: i64) -> ResourceGuard:
+        return ResourceGuard(
+            monitor: self.monitor,
+            required_memory: self.required_memory,
+            required_handles: count,
+            required_connections: self.required_connections
+        )
+
+    pub fn require_connections(self, count: i64) -> ResourceGuard:
+        return ResourceGuard(
+            monitor: self.monitor,
+            required_memory: self.required_memory,
+            required_handles: self.required_handles,
+            required_connections: count
+        )
+
+    # Check if resources are available
+    pub fn check() -> FailSafeResult<()>:
+        # Check memory
+        if self.required_memory > 0:
+            val current = get_memory_usage_bytes()
+            val available = self.monitor.limits.memory_bytes - current
+            if available < self.required_memory:
+                return FailSafeResult.Err(
+                    FailSafeError.new(ErrorCategory.ResourceExhausted, "Insufficient memory")
+                        .with_detail("required", self.required_memory.to_string())
+                        .with_detail("available", available.to_string())
+                )
+
+        # Check file handles
+        if self.required_handles > 0:
+            val current = get_open_file_handles()
+            val available = self.monitor.limits.max_file_handles - current
+            if available < self.required_handles:
+                return FailSafeResult.Err(
+                    FailSafeError.new(ErrorCategory.ResourceExhausted, "Insufficient file handles")
+                        .with_detail("required", self.required_handles.to_string())
+                        .with_detail("available", available.to_string())
+                )
+
+        # Check connections
+        if self.required_connections > 0:
+            val current = get_open_connections()
+            val available = self.monitor.limits.max_connections - current
+            if available < self.required_connections:
+                return FailSafeResult.Err(
+                    FailSafeError.new(ErrorCategory.ResourceExhausted, "Insufficient connections")
+                        .with_detail("required", self.required_connections.to_string())
+                        .with_detail("available", available.to_string())
+                )
+
+        return FailSafeResult.Ok(())
+
+    # Execute operation only if resources available
+    pub fn execute<T>(operation: fn() -> T) -> FailSafeResult<T>:
+        match self.check():
+            case FailSafeResult.Err(e):
+                return FailSafeResult.Err(e)
+            case FailSafeResult.Ok(_):
+                pass
+
+        return FailSafeResult.Ok(operation())
+
+# ============================================================================
+# WRAPPER FUNCTIONS
+# ============================================================================
+
+# Check resources before executing
+pub fn with_resource_check<T>(
+    monitor: ResourceMonitor,
+    operation: fn() -> T
+) -> FailSafeResult<T>:
+    match monitor.check_all():
+        case FailSafeResult.Err(e):
+            return FailSafeResult.Err(e)
+        case FailSafeResult.Ok(_):
+            pass
+
+    return FailSafeResult.Ok(operation())
+
+# Execute with resource requirements
+pub fn with_resource_requirements<T>(
+    monitor: ResourceMonitor,
+    memory_bytes: i64,
+    file_handles: i64,
+    operation: fn() -> T
+) -> FailSafeResult<T>:
+    val guard = ResourceGuard.new(monitor)
+        .require_memory(memory_bytes)
+        .require_handles(file_handles)
+
+    return guard.execute(operation)
+
+# Get current resource summary
+pub fn get_resource_summary(monitor: ResourceMonitor) -> Dict<text, f64>:
+    var summary: Dict<text, f64> = {}
+
+    val mem = get_memory_usage_bytes()
+    summary.set("memory_percent", (mem as f64 / monitor.limits.memory_bytes as f64) * 100.0)
+
+    val handles = get_open_file_handles()
+    summary.set("file_handles_percent", (handles as f64 / monitor.limits.max_file_handles as f64) * 100.0)
+
+    val conns = get_open_connections()
+    summary.set("connections_percent", (conns as f64 / monitor.limits.max_connections as f64) * 100.0)
+
+    val threads = get_thread_count()
+    summary.set("threads_percent", (threads as f64 / monitor.limits.max_threads as f64) * 100.0)
+
+    return summary
+
+# ============================================================================
+# HELPER FUNCTIONS
+# ============================================================================
+
+fn current_time_ms() -> i64:
+    return time_now_ms()
+
+# FFI for resource monitoring (implementation dependent on runtime)
+extern fn get_memory_usage_bytes() -> i64
+extern fn get_open_file_handles() -> i64
+extern fn get_open_connections() -> i64
+extern fn get_thread_count() -> i64
+extern fn time_now_ms() -> i64

@@ -19,16 +19,14 @@
 #   --help            Show this help message
 
 use app.cli_util (get_cli_args)
-
-import parser
-import rust_codegen
-import cargo_gen
-import type_mapping
-import builder
-import intern_codegen
-
-# I/O imports
 use app.io.mod (file_read, file_write, file_exists, dir_create, dir_remove, cwd, process_run)
+
+# Local module imports (using fully qualified paths)
+use app.ffi_gen.parser*
+use app.ffi_gen.rust_codegen*
+use app.ffi_gen.cargo_gen*
+use app.ffi_gen.builder*
+use app.ffi_gen.intern_codegen*
 
 # ============================================================================
 # Rust Build Environment Config (from simple.sdn)
@@ -297,7 +295,7 @@ fn generate_for_file(input_path: text, opts: CliOptions, rust_config: RustEnvCon
 
     # Parse @Lib annotations and extern class declarations
     log_info("Parsing @Lib annotations...", opts.verbose)
-    val lib_specs = parser.parse_lib_externs(source, input_path)
+    val lib_specs = parse_lib_externs(source, input_path)
 
     if lib_specs.len() == 0:
         print "No @Lib annotations found in {input_path}"
@@ -330,14 +328,14 @@ fn generate_for_file(input_path: text, opts: CliOptions, rust_config: RustEnvCon
     print "Done."
     return 0
 
-fn generate_rust_wrappers(specs: [parser.LibExternSpec], opts: CliOptions, rust_config: RustEnvConfig) -> i64:
+fn generate_rust_wrappers(specs: [LibExternSpec], opts: CliOptions, rust_config: RustEnvConfig) -> i64:
     log_info("Generating Rust wrappers...", opts.verbose)
 
     # Generate Rust source
-    val rust_source = rust_codegen.generate_rust_code(specs)
+    val rust_source = generate_rust_code(specs)
 
     # Generate Cargo.toml (with edition from config)
-    val cargo_toml = cargo_gen.generate_cargo_toml(specs, rust_config.edition)
+    val cargo_toml = generate_cargo_toml(specs, rust_config.edition)
 
     if opts.dry_run:
         print ""
@@ -369,7 +367,7 @@ fn generate_rust_wrappers(specs: [parser.LibExternSpec], opts: CliOptions, rust_
 
     # Build the generated crate (cargo will use build/rust/rust-toolchain.toml)
     log_info("Building generated crate...", opts.verbose)
-    val build_result = builder.build_crate(out_dir, opts.verbose)
+    val build_result = build_crate(out_dir, opts.verbose)
     if build_result != 0:
         print_error("Failed to build generated crate")
         return 1
@@ -387,7 +385,7 @@ fn generate_rust_wrappers(specs: [parser.LibExternSpec], opts: CliOptions, rust_
 fn generate_intern(spec_path: text, opts: CliOptions) -> i64:
     log_info("Reading intern spec: {spec_path}", opts.verbose)
 
-    val source = file_read(spec_path)
+    val source: text = file_read(spec_path)
     if source == "":
         print_error("Failed to read or empty file: {spec_path}")
         return 1
@@ -395,7 +393,7 @@ fn generate_intern(spec_path: text, opts: CliOptions) -> i64:
     # Parse the spec file to extract InternFnSpec declarations.
     # The spec is a Simple source file that defines functions returning specs.
     # For now we parse it as structured text declarations.
-    val specs = intern_codegen.parse_intern_specs(source)
+    val specs: [InternFnSpec] = parse_intern_specs(source)
 
     if specs.len() == 0:
         print "No intern specs found in {spec_path}"
@@ -407,10 +405,10 @@ fn generate_intern(spec_path: text, opts: CliOptions) -> i64:
     print "Generating interpreter_extern/{category}.rs ({specs.len()} functions)"
 
     # Generate module source
-    val module_source = intern_codegen.generate_module(category, specs)
+    val module_source = generate_module(category, specs)
 
     # Generate dispatch entries
-    val dispatch = intern_codegen.generate_dispatch_entries(specs)
+    val dispatch = generate_dispatch_entries(specs)
 
     if opts.dry_run:
         print ""

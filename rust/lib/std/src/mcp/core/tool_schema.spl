@@ -1,0 +1,686 @@
+# MCP Tool Schema Validation
+# JSON Schema validation for tool arguments and annotations
+# Follows MCP specification 2025-11-25
+
+use core.*
+use std.mcp.core.protocol.*
+use std.mcp.core.error_handler.*
+use std.mcp.core.logger.*
+
+# JSON Schema types
+pub enum SchemaType:
+    String
+    Number
+    Integer
+    Boolean
+    Array
+    Object
+    Null
+    Any
+
+    pub fn to_string() -> text:
+        match self:
+            case String: "string"
+            case Number: "number"
+            case Integer: "integer"
+            case Boolean: "boolean"
+            case Array: "array"
+            case Object: "object"
+            case Null: "null"
+            case Any: "any"
+
+    static fn from_string(s: text) -> SchemaType:
+        if s == "string":
+            return SchemaType.String
+        elif s == "number":
+            return SchemaType.Number
+        elif s == "integer":
+            return SchemaType.Integer
+        elif s == "boolean":
+            return SchemaType.Boolean
+        elif s == "array":
+            return SchemaType.Array
+        elif s == "object":
+            return SchemaType.Object
+        elif s == "null":
+            return SchemaType.Null
+        else:
+            return SchemaType.Any
+
+# Schema property definition
+pub class SchemaProperty:
+    pub name: text
+    pub schema_type: SchemaType
+    pub description: text
+    pub required: bool
+    pub default_value: Option<Any>
+    pub enum_values: Option<List<Any>>
+    pub min_value: Option<f64>
+    pub max_value: Option<f64>
+    pub min_length: Option<i64>
+    pub max_length: Option<i64>
+    pub pattern: Option<text>
+    pub items_schema: Option<ToolSchema>
+
+    static fn new(name: text, schema_type: SchemaType) -> SchemaProperty:
+        return SchemaProperty(
+            name: name,
+            schema_type: schema_type,
+            description: "",
+            required: false,
+            default_value: nil,
+            enum_values: nil,
+            min_value: nil,
+            max_value: nil,
+            min_length: nil,
+            max_length: nil,
+            pattern: nil,
+            items_schema: nil
+        )
+
+    pub fn with_description(self, desc: text) -> SchemaProperty:
+        return SchemaProperty(
+            name: self.name,
+            schema_type: self.schema_type,
+            description: desc,
+            required: self.required,
+            default_value: self.default_value,
+            enum_values: self.enum_values,
+            min_value: self.min_value,
+            max_value: self.max_value,
+            min_length: self.min_length,
+            max_length: self.max_length,
+            pattern: self.pattern,
+            items_schema: self.items_schema
+        )
+
+    pub fn as_required(self) -> SchemaProperty:
+        return SchemaProperty(
+            name: self.name,
+            schema_type: self.schema_type,
+            description: self.description,
+            required: true,
+            default_value: self.default_value,
+            enum_values: self.enum_values,
+            min_value: self.min_value,
+            max_value: self.max_value,
+            min_length: self.min_length,
+            max_length: self.max_length,
+            pattern: self.pattern,
+            items_schema: self.items_schema
+        )
+
+    pub fn with_default(self, value: Any) -> SchemaProperty:
+        return SchemaProperty(
+            name: self.name,
+            schema_type: self.schema_type,
+            description: self.description,
+            required: self.required,
+            default_value: Some(value),
+            enum_values: self.enum_values,
+            min_value: self.min_value,
+            max_value: self.max_value,
+            min_length: self.min_length,
+            max_length: self.max_length,
+            pattern: self.pattern,
+            items_schema: self.items_schema
+        )
+
+    pub fn with_enum(self, values: List<Any>) -> SchemaProperty:
+        return SchemaProperty(
+            name: self.name,
+            schema_type: self.schema_type,
+            description: self.description,
+            required: self.required,
+            default_value: self.default_value,
+            enum_values: Some(values),
+            min_value: self.min_value,
+            max_value: self.max_value,
+            min_length: self.min_length,
+            max_length: self.max_length,
+            pattern: self.pattern,
+            items_schema: self.items_schema
+        )
+
+    pub fn with_range(self, min_val: f64, max_val: f64) -> SchemaProperty:
+        return SchemaProperty(
+            name: self.name,
+            schema_type: self.schema_type,
+            description: self.description,
+            required: self.required,
+            default_value: self.default_value,
+            enum_values: self.enum_values,
+            min_value: Some(min_val),
+            max_value: Some(max_val),
+            min_length: self.min_length,
+            max_length: self.max_length,
+            pattern: self.pattern,
+            items_schema: self.items_schema
+        )
+
+    pub fn with_length(self, min_len: i64, max_len: i64) -> SchemaProperty:
+        return SchemaProperty(
+            name: self.name,
+            schema_type: self.schema_type,
+            description: self.description,
+            required: self.required,
+            default_value: self.default_value,
+            enum_values: self.enum_values,
+            min_value: self.min_value,
+            max_value: self.max_value,
+            min_length: Some(min_len),
+            max_length: Some(max_len),
+            pattern: self.pattern,
+            items_schema: self.items_schema
+        )
+
+    pub fn with_pattern(self, pattern: text) -> SchemaProperty:
+        return SchemaProperty(
+            name: self.name,
+            schema_type: self.schema_type,
+            description: self.description,
+            required: self.required,
+            default_value: self.default_value,
+            enum_values: self.enum_values,
+            min_value: self.min_value,
+            max_value: self.max_value,
+            min_length: self.min_length,
+            max_length: self.max_length,
+            pattern: Some(pattern),
+            items_schema: self.items_schema
+        )
+
+    pub fn to_dict() -> Dict<text, Any>:
+        var result: Dict<text, Any> = {
+            "type": self.schema_type.to_string()
+        }
+
+        if self.description != "":
+            result.set("description", self.description)
+
+        match self.default_value:
+            case Some(v):
+                result.set("default", v)
+            case nil:
+                pass
+
+        match self.enum_values:
+            case Some(values):
+                result.set("enum", values)
+            case nil:
+                pass
+
+        match self.min_value:
+            case Some(v):
+                result.set("minimum", v)
+            case nil:
+                pass
+
+        match self.max_value:
+            case Some(v):
+                result.set("maximum", v)
+            case nil:
+                pass
+
+        match self.min_length:
+            case Some(v):
+                result.set("minLength", v)
+            case nil:
+                pass
+
+        match self.max_length:
+            case Some(v):
+                result.set("maxLength", v)
+            case nil:
+                pass
+
+        match self.pattern:
+            case Some(p):
+                result.set("pattern", p)
+            case nil:
+                pass
+
+        return result
+
+# Validation error
+pub class ValidationError:
+    pub path: text
+    pub message: text
+    pub expected: text
+    pub actual: text
+
+    static fn new(path: text, message: text) -> ValidationError:
+        return ValidationError(
+            path: path,
+            message: message,
+            expected: "",
+            actual: ""
+        )
+
+    pub fn with_expected(self, expected: text) -> ValidationError:
+        return ValidationError(
+            path: self.path,
+            message: self.message,
+            expected: expected,
+            actual: self.actual
+        )
+
+    pub fn with_actual(self, actual: text) -> ValidationError:
+        return ValidationError(
+            path: self.path,
+            message: self.message,
+            expected: self.expected,
+            actual: actual
+        )
+
+    pub fn to_string() -> text:
+        var msg = "{self.path}: {self.message}"
+        if self.expected != "":
+            msg = msg + " (expected: {self.expected}"
+            if self.actual != "":
+                msg = msg + ", got: {self.actual}"
+            msg = msg + ")"
+        return msg
+
+# Tool schema
+pub class ToolSchema:
+    pub properties: Dict<text, SchemaProperty>
+    pub required: List<text>
+    pub additional_properties: bool
+
+    static fn new() -> ToolSchema:
+        return ToolSchema(
+            properties: {},
+            required: [],
+            additional_properties: true
+        )
+
+    pub fn add_property(self, prop: SchemaProperty) -> ToolSchema:
+        var new_props = self.properties.clone()
+        new_props.set(prop.name, prop)
+
+        var new_required = self.required.clone()
+        if prop.required and not new_required.contains(prop.name):
+            new_required.append(prop.name)
+
+        return ToolSchema(
+            properties: new_props,
+            required: new_required,
+            additional_properties: self.additional_properties
+        )
+
+    pub fn with_string(self, name: text, desc: text, required: bool) -> ToolSchema:
+        var prop = SchemaProperty.new(name, SchemaType.String).with_description(desc)
+        if required:
+            prop = prop.as_required()
+        return self.add_property(prop)
+
+    pub fn with_number(self, name: text, desc: text, required: bool) -> ToolSchema:
+        var prop = SchemaProperty.new(name, SchemaType.Number).with_description(desc)
+        if required:
+            prop = prop.as_required()
+        return self.add_property(prop)
+
+    pub fn with_integer(self, name: text, desc: text, required: bool) -> ToolSchema:
+        var prop = SchemaProperty.new(name, SchemaType.Integer).with_description(desc)
+        if required:
+            prop = prop.as_required()
+        return self.add_property(prop)
+
+    pub fn with_boolean(self, name: text, desc: text, required: bool) -> ToolSchema:
+        var prop = SchemaProperty.new(name, SchemaType.Boolean).with_description(desc)
+        if required:
+            prop = prop.as_required()
+        return self.add_property(prop)
+
+    pub fn disallow_additional_properties(self) -> ToolSchema:
+        return ToolSchema(
+            properties: self.properties,
+            required: self.required,
+            additional_properties: false
+        )
+
+    # Validate arguments against schema
+    pub fn validate(arguments: Dict<text, Any>) -> Result<(), List<ValidationError>>:
+        var errors: List<ValidationError> = []
+
+        # Check required properties
+        for req_name in self.required:
+            if not arguments.has_key(req_name):
+                errors.append(ValidationError.new(
+                    req_name,
+                    "Required property is missing"
+                ))
+            else:
+                match arguments.get(req_name):
+                    case Some(val):
+                        if val == nil:
+                            errors.append(ValidationError.new(
+                                req_name,
+                                "Required property is null"
+                            ))
+                    case nil:
+                        pass
+
+        # Validate each provided argument
+        for arg_name in arguments.keys():
+            match self.properties.get(arg_name):
+                case Some(prop):
+                    match arguments.get(arg_name):
+                        case Some(value):
+                            val prop_errors = self.validate_value(arg_name, value, prop)
+                            for err in prop_errors:
+                                errors.append(err)
+                        case nil:
+                            pass
+                case nil:
+                    if not self.additional_properties:
+                        errors.append(ValidationError.new(
+                            arg_name,
+                            "Unknown property"
+                        ))
+
+        if errors.len() > 0:
+            return Err(errors)
+        return Ok(())
+
+    fn validate_value(path: text, value: Any, prop: SchemaProperty) -> List<ValidationError>:
+        var errors: List<ValidationError> = []
+
+        # Type checking
+        val actual_type = get_type_of(value)
+        val expected_type = prop.schema_type
+
+        if not is_type_compatible(actual_type, expected_type):
+            errors.append(ValidationError.new(path, "Type mismatch")
+                .with_expected(expected_type.to_string())
+                .with_actual(actual_type.to_string()))
+            return errors
+
+        # Enum validation
+        match prop.enum_values:
+            case Some(enum_vals):
+                var found = false
+                for enum_val in enum_vals:
+                    if value == enum_val:
+                        found = true
+                        break
+                if not found:
+                    errors.append(ValidationError.new(path, "Value not in enum"))
+            case nil:
+                pass
+
+        # String length validation
+        if expected_type == SchemaType.String:
+            match value:
+                case text as s:
+                    match prop.min_length:
+                        case Some(min_len):
+                            if s.len() < min_len:
+                                errors.append(ValidationError.new(path, "String too short")
+                                    .with_expected("min length {min_len}")
+                                    .with_actual("length {s.len()}"))
+                        case nil:
+                            pass
+
+                    match prop.max_length:
+                        case Some(max_len):
+                            if s.len() > max_len:
+                                errors.append(ValidationError.new(path, "String too long")
+                                    .with_expected("max length {max_len}")
+                                    .with_actual("length {s.len()}"))
+                        case nil:
+                            pass
+                case _:
+                    pass
+
+        # Number range validation
+        if expected_type == SchemaType.Number or expected_type == SchemaType.Integer:
+            match value:
+                case i64 as n:
+                    val num = n as f64
+                    match prop.min_value:
+                        case Some(min_val):
+                            if num < min_val:
+                                errors.append(ValidationError.new(path, "Number too small")
+                                    .with_expected("min {min_val}")
+                                    .with_actual("{num}"))
+                        case nil:
+                            pass
+
+                    match prop.max_value:
+                        case Some(max_val):
+                            if num > max_val:
+                                errors.append(ValidationError.new(path, "Number too large")
+                                    .with_expected("max {max_val}")
+                                    .with_actual("{num}"))
+                        case nil:
+                            pass
+                case f64 as n:
+                    match prop.min_value:
+                        case Some(min_val):
+                            if n < min_val:
+                                errors.append(ValidationError.new(path, "Number too small"))
+                        case nil:
+                            pass
+
+                    match prop.max_value:
+                        case Some(max_val):
+                            if n > max_val:
+                                errors.append(ValidationError.new(path, "Number too large"))
+                        case nil:
+                            pass
+                case _:
+                    pass
+
+        return errors
+
+    pub fn to_dict() -> Dict<text, Any>:
+        var props: Dict<text, Any> = {}
+        for name in self.properties.keys():
+            match self.properties.get(name):
+                case Some(prop):
+                    props.set(name, prop.to_dict())
+                case nil:
+                    pass
+
+        return {
+            "type": "object",
+            "properties": props,
+            "required": self.required,
+            "additionalProperties": self.additional_properties
+        }
+
+# Tool annotations (MCP tool hints)
+pub class ToolAnnotations:
+    pub read_only_hint: Option<bool>
+    pub destructive_hint: Option<bool>
+    pub idempotent_hint: Option<bool>
+    pub open_world_hint: Option<bool>
+    pub title: Option<text>
+
+    static fn new() -> ToolAnnotations:
+        return ToolAnnotations(
+            read_only_hint: nil,
+            destructive_hint: nil,
+            idempotent_hint: nil,
+            open_world_hint: nil,
+            title: nil
+        )
+
+    static fn read_only() -> ToolAnnotations:
+        return ToolAnnotations(
+            read_only_hint: Some(true),
+            destructive_hint: Some(false),
+            idempotent_hint: Some(true),
+            open_world_hint: nil,
+            title: nil
+        )
+
+    static fn destructive() -> ToolAnnotations:
+        return ToolAnnotations(
+            read_only_hint: Some(false),
+            destructive_hint: Some(true),
+            idempotent_hint: nil,
+            open_world_hint: nil,
+            title: nil
+        )
+
+    static fn idempotent() -> ToolAnnotations:
+        return ToolAnnotations(
+            read_only_hint: nil,
+            destructive_hint: nil,
+            idempotent_hint: Some(true),
+            open_world_hint: nil,
+            title: nil
+        )
+
+    pub fn with_title(self, title: text) -> ToolAnnotations:
+        return ToolAnnotations(
+            read_only_hint: self.read_only_hint,
+            destructive_hint: self.destructive_hint,
+            idempotent_hint: self.idempotent_hint,
+            open_world_hint: self.open_world_hint,
+            title: Some(title)
+        )
+
+    pub fn is_read_only() -> bool:
+        match self.read_only_hint:
+            case Some(v): v
+            case nil: false
+
+    pub fn is_destructive() -> bool:
+        match self.destructive_hint:
+            case Some(v): v
+            case nil: false
+
+    pub fn is_idempotent() -> bool:
+        match self.idempotent_hint:
+            case Some(v): v
+            case nil: false
+
+    pub fn to_dict() -> Dict<text, Any>:
+        var result: Dict<text, Any> = {}
+
+        match self.read_only_hint:
+            case Some(v):
+                result.set("readOnlyHint", v)
+            case nil:
+                pass
+
+        match self.destructive_hint:
+            case Some(v):
+                result.set("destructiveHint", v)
+            case nil:
+                pass
+
+        match self.idempotent_hint:
+            case Some(v):
+                result.set("idempotentHint", v)
+            case nil:
+                pass
+
+        match self.open_world_hint:
+            case Some(v):
+                result.set("openWorldHint", v)
+            case nil:
+                pass
+
+        match self.title:
+            case Some(t):
+                result.set("title", t)
+            case nil:
+                pass
+
+        return result
+
+# Annotated tool definition
+pub class AnnotatedTool:
+    pub name: text
+    pub description: text
+    pub schema: ToolSchema
+    pub annotations: ToolAnnotations
+
+    static fn new(name: text, description: text) -> AnnotatedTool:
+        return AnnotatedTool(
+            name: name,
+            description: description,
+            schema: ToolSchema.new(),
+            annotations: ToolAnnotations.new()
+        )
+
+    pub fn with_schema(self, schema: ToolSchema) -> AnnotatedTool:
+        return AnnotatedTool(
+            name: self.name,
+            description: self.description,
+            schema: schema,
+            annotations: self.annotations
+        )
+
+    pub fn with_annotations(self, annotations: ToolAnnotations) -> AnnotatedTool:
+        return AnnotatedTool(
+            name: self.name,
+            description: self.description,
+            schema: self.schema,
+            annotations: annotations
+        )
+
+    pub fn to_dict() -> Dict<text, Any>:
+        var result: Dict<text, Any> = {
+            "name": self.name,
+            "description": self.description,
+            "inputSchema": self.schema.to_dict()
+        }
+
+        val ann_dict = self.annotations.to_dict()
+        if ann_dict.len() > 0:
+            result.set("annotations", ann_dict)
+
+        return result
+
+# Helper functions
+fn get_type_of(value: Any) -> SchemaType:
+    if value == nil:
+        return SchemaType.Null
+    # Type detection would be more sophisticated in real implementation
+    return SchemaType.Any
+
+fn is_type_compatible(actual: SchemaType, expected: SchemaType) -> bool:
+    if expected == SchemaType.Any:
+        return true
+    if actual == expected:
+        return true
+    # Integer is compatible with Number
+    if actual == SchemaType.Integer and expected == SchemaType.Number:
+        return true
+    return false
+
+# Schema builder helper
+pub class SchemaBuilder:
+    pub schema: ToolSchema
+
+    static fn new() -> SchemaBuilder:
+        return SchemaBuilder(schema: ToolSchema.new())
+
+    pub me string(name: text, desc: text, required: bool) -> SchemaBuilder:
+        self.schema = self.schema.with_string(name, desc, required)
+        return self
+
+    pub me number(name: text, desc: text, required: bool) -> SchemaBuilder:
+        self.schema = self.schema.with_number(name, desc, required)
+        return self
+
+    pub me integer(name: text, desc: text, required: bool) -> SchemaBuilder:
+        self.schema = self.schema.with_integer(name, desc, required)
+        return self
+
+    pub me boolean(name: text, desc: text, required: bool) -> SchemaBuilder:
+        self.schema = self.schema.with_boolean(name, desc, required)
+        return self
+
+    pub me strict() -> SchemaBuilder:
+        self.schema = self.schema.disallow_additional_properties()
+        return self
+
+    pub fn build() -> ToolSchema:
+        return self.schema

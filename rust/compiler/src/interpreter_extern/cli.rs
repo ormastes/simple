@@ -345,8 +345,36 @@ pub fn rt_cli_run_i18n(_args: &[Value]) -> Result<Value, CompileError> {
 }
 
 /// Run FFI generator command
-pub fn rt_cli_run_ffi_gen(_args: &[Value]) -> Result<Value, CompileError> {
-    interpreter_not_supported("rt_cli_run_ffi_gen")
+pub fn rt_cli_run_ffi_gen(args: &[Value]) -> Result<Value, CompileError> {
+    // For now, delegate to the Simple ffi_gen module by invoking it as a subprocess
+    // Extract arguments as strings
+    let mut cmd_args: Vec<String> = Vec::new();
+    for arg in args {
+        if let Value::Str(s) = arg {
+            cmd_args.push(s.clone());
+        }
+    }
+
+    // Call Simple ffi-gen module
+    let ffi_gen_path = "src/app/ffi_gen/main.spl";
+
+    // Build command: simple run src/app/ffi_gen/main.spl <args>
+    let mut cmd = std::process::Command::new("./bin/simple");
+    cmd.arg(ffi_gen_path);
+    for arg in cmd_args {
+        cmd.arg(arg);
+    }
+
+    match cmd.status() {
+        Ok(status) => {
+            let code = status.code().unwrap_or(1);
+            Ok(Value::Int(code as i64))
+        }
+        Err(e) => {
+            eprintln!("error: failed to run ffi_gen: {}", e);
+            Ok(Value::Int(1))
+        }
+    }
 }
 
 /// Generate context pack

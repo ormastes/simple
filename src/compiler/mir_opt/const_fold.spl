@@ -49,15 +49,27 @@ impl ConstantEvaluator:
 
         Returns Some(result) if operation can be folded, None otherwise.
         """
-        match (left, right):
-            case (Int(l), Int(r)):
-                self.try_fold_int_binop(op, l, r)
+        match left:
+            case Int(l):
+                match right:
+                    case Int(r):
+                        self.try_fold_int_binop(op, l, r)
+                    case _:
+                        nil
 
-            case (Float(l), Float(r)):
-                self.try_fold_float_binop(op, l, r)
+            case Float(l):
+                match right:
+                    case Float(r):
+                        self.try_fold_float_binop(op, l, r)
+                    case _:
+                        nil
 
-            case (Bool(l), Bool(r)):
-                self.try_fold_bool_binop(op, l, r)
+            case Bool(l):
+                match right:
+                    case Bool(r):
+                        self.try_fold_bool_binop(op, l, r)
+                    case _:
+                        nil
 
             case _:
                 nil  # Can't fold
@@ -159,15 +171,27 @@ impl ConstantEvaluator:
 
     me try_fold_unaryop(op: MirUnaryOp, operand: MirConstValue) -> MirConstValue?:
         """Try to fold unary operation with constant operand."""
-        match (op, operand):
-            case (Neg, Int(val)):
-                Some(MirConstValue.Int(-val))
-            case (Neg, Float(val)):
-                Some(MirConstValue.Float(-val))
-            case (Not, Bool(val)):
-                Some(MirConstValue.Bool(not val))
-            case (BitNot, Int(val)):
-                Some(MirConstValue.Int(not val))  # Bitwise NOT
+        match op:
+            case Neg:
+                match operand:
+                    case Int(value):
+                        Some(MirConstValue.Int(-value))
+                    case Float(value):
+                        Some(MirConstValue.Float(-value))
+                    case _:
+                        nil
+            case Not:
+                match operand:
+                    case Bool(value):
+                        Some(MirConstValue.Bool(not value))
+                    case _:
+                        nil
+            case BitNot:
+                match operand:
+                    case Int(value):
+                        Some(MirConstValue.Int(not value))  # Bitwise NOT
+                    case _:
+                        nil
             case _:
                 nil
 
@@ -202,41 +226,57 @@ impl AlgebraicSimplifier:
         Returns Some(operand) if simplified to single operand, None otherwise.
         """
         # Check for identity operations
-        match (op, right.kind):
-            # x + 0 = x
-            case (Add, Const(Int(0), _)):
-                self.simplified_count = self.simplified_count + 1
-                Some(left)
+        match op:
+            case Add:
+                match right.kind:
+                    case Const(Int(0), _):
+                        self.simplified_count = self.simplified_count + 1
+                        Some(left)
+                    case _:
+                        nil
 
-            # x * 1 = x
-            case (Mul, Const(Int(1), _)):
-                self.simplified_count = self.simplified_count + 1
-                Some(left)
+            case Mul:
+                match right.kind:
+                    case Const(Int(1), _):
+                        self.simplified_count = self.simplified_count + 1
+                        Some(left)
+                    case Const(Int(0), ty):
+                        self.simplified_count = self.simplified_count + 1
+                        Some(MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(0), ty)))
+                    case _:
+                        nil
 
-            # x * 0 = 0
-            case (Mul, Const(Int(0), ty)):
-                self.simplified_count = self.simplified_count + 1
-                Some(MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(0), ty)))
+            case Sub:
+                match right.kind:
+                    case Const(Int(0), _):
+                        self.simplified_count = self.simplified_count + 1
+                        Some(left)
+                    case _:
+                        nil
 
-            # x - 0 = x
-            case (Sub, Const(Int(0), _)):
-                self.simplified_count = self.simplified_count + 1
-                Some(left)
+            case Div:
+                match right.kind:
+                    case Const(Int(1), _):
+                        self.simplified_count = self.simplified_count + 1
+                        Some(left)
+                    case _:
+                        nil
 
-            # x / 1 = x
-            case (Div, Const(Int(1), _)):
-                self.simplified_count = self.simplified_count + 1
-                Some(left)
+            case BitOr:
+                match right.kind:
+                    case Const(Int(0), _):
+                        self.simplified_count = self.simplified_count + 1
+                        Some(left)
+                    case _:
+                        nil
 
-            # x | 0 = x
-            case (BitOr, Const(Int(0), _)):
-                self.simplified_count = self.simplified_count + 1
-                Some(left)
-
-            # x ^ 0 = x
-            case (BitXor, Const(Int(0), _)):
-                self.simplified_count = self.simplified_count + 1
-                Some(left)
+            case BitXor:
+                match right.kind:
+                    case Const(Int(0), _):
+                        self.simplified_count = self.simplified_count + 1
+                        Some(left)
+                    case _:
+                        nil
 
             case _:
                 nil  # No simplification
@@ -332,15 +372,21 @@ impl ConstantFolding:
         match inst.kind:
             case BinOp(dest, op, left, right):
                 # Try constant evaluation
-                match (left.kind, right.kind):
-                    case (Const(lval, _), Const(rval, rty)):
-                        val folded = self.evaluator.try_fold_binop(op, lval, rval)
-                        if folded.?:
-                            self.folded_instructions = self.folded_instructions + 1
-                            return MirInst(
-                                kind: MirInstKind.Const(dest, folded.unwrap(), rty),
-                                span: inst.span
-                            )
+                match left.kind:
+                    case Const(lval, _):
+                        match right.kind:
+                            case Const(rval, rty):
+                                val folded = self.evaluator.try_fold_binop(op, lval, rval)
+                                if folded.?:
+                                    self.folded_instructions = self.folded_instructions + 1
+                                    return MirInst(
+                                        kind: MirInstKind.Const(dest, folded.unwrap(), rty),
+                                        span: inst.span
+                                    )
+                            case _:
+                                pass
+                    case _:
+                        pass
 
                 # Try algebraic simplification
                 val simplified = self.simplifier.try_simplify_binop(op, left, right)
@@ -351,9 +397,9 @@ impl ConstantFolding:
                                 kind: MirInstKind.Copy(dest, src),
                                 span: inst.span
                             )
-                        case Const(val, ty):
+                        case Const(const_val, ty):
                             return MirInst(
-                                kind: MirInstKind.Const(dest, val, ty),
+                                kind: MirInstKind.Const(dest, const_val, ty),
                                 span: inst.span
                             )
                         case _:
@@ -364,8 +410,8 @@ impl ConstantFolding:
 
             case UnaryOp(dest, op, operand):
                 match operand.kind:
-                    case Const(val, ty):
-                        val folded = self.evaluator.try_fold_unaryop(op, val)
+                    case Const(const_val, ty):
+                        val folded = self.evaluator.try_fold_unaryop(op, const_val)
                         if folded.?:
                             self.folded_instructions = self.folded_instructions + 1
                             return MirInst(
