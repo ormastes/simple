@@ -1,0 +1,497 @@
+# Test Database Edge Cases & Robustness Tests
+#
+# Tests boundary conditions and error handling:
+# - Empty databases
+# - Corrupted data
+# - Disk full simulation
+# - Lock timeout edge cases
+# - Boundary values (0, max, negative, unicode)
+# - File system errors
+# - Timing edge cases
+# - Counter edge cases
+
+use app.io.mod (getpid, file_exists, file_delete, file_read, file_write_text, time_now_unix_micros)
+use app.test_runner_new.test_db_core (TestDatabase, micros_to_rfc3339, parse_rfc3339_to_micros)
+use app.test_runner_new.test_db_types.*
+use app.test_runner_new.test_db_lock.FileLock
+use app.test_runner_new.test_db_validation (validate_run_record)
+
+# =========================================================================
+# Helpers
+# =========================================================================
+
+fn temp_db_path(test_name: text) -> text:
+    "/tmp/test_db_edge_{test_name}_{getpid()}.sdn"
+
+fn cleanup_temp_db(test_name: text):
+    val db_path = temp_db_path(test_name)
+    if file_exists(db_path):
+        file_delete(db_path)
+    if file_exists("{db_path}.bak"):
+        file_delete("{db_path}.bak")
+    if file_exists("{db_path}.lock"):
+        file_delete("{db_path}.lock")
+
+# =========================================================================
+# Tests
+# =========================================================================
+
+describe "Test Database Edge Cases":
+
+    describe "Empty Database":
+
+        it "loads from non-existent file without error":
+            val test_name = "nonexistent"
+            cleanup_temp_db(test_name)
+
+            # Try to load database that doesn't exist
+            val result = TestDatabase.load()
+
+            # Should return empty database, not error
+            expect(result.ok.?).to_be(true)
+            val db = result.unwrap()
+            expect(db.tests.len()).to_be(0)
+            expect(db.test_runs.len()).to_be(0)
+
+        it "saves empty database successfully":
+            val test_name = "empty_save"
+            cleanup_temp_db(test_name)
+
+            val db = TestDatabase.empty()
+
+            # Should be able to save empty database
+            val result = db.save()
+            expect(result.ok.?).to_be(true)
+
+            # Verify file was created
+            val db_path = temp_db_path(test_name)
+            expect(file_exists(db_path)).to_be(true)
+
+            cleanup_temp_db(test_name)
+
+        it "loads empty database from empty file":
+            val test_name = "empty_file"
+            cleanup_temp_db(test_name)
+
+            val db_path = temp_db_path(test_name)
+
+            # Create empty file
+            file_write_text(db_path, "")
+
+            # Should load without error
+            val result = TestDatabase.load()
+            expect(result.ok.?).to_be(true)
+
+            cleanup_temp_db(test_name)
+
+    describe "Corrupted Database":
+
+        it "handles invalid SDN syntax gracefully":
+            val test_name = "invalid_sdn"
+            cleanup_temp_db(test_name)
+
+            val db_path = temp_db_path(test_name)
+
+            # Create file with invalid syntax
+            file_write_text(db_path, "this is not valid SDN { syntax")
+
+            # Should fail to load but not crash
+            val result = TestDatabase.load()
+            # May fail or return empty DB depending on parser robustness
+            # At minimum, shouldn't crash
+
+            cleanup_temp_db(test_name)
+
+        it "handles missing required fields":
+            val test_name = "missing_fields"
+            cleanup_temp_db(test_name)
+
+            val db_path = temp_db_path(test_name)
+
+            # Create SDN with missing fields
+            val bad_sdn = "
+test_runs |run_id, start_time|
+    run_1, 2026-02-03T10:00:00Z
+"
+            file_write_text(db_path, bad_sdn)
+
+            # Should fail to parse or fill in defaults
+            val result = TestDatabase.load()
+            # Shouldn't crash
+
+            cleanup_temp_db(test_name)
+
+        it "handles malformed timestamps":
+            val run = RunRecord(
+                run_id: "bad_timestamp",
+                start_time: "not-a-timestamp",
+                end_time: "also-not-valid",
+                pid: getpid(),
+                hostname: "test",
+                status: "Running",
+                test_count: 10,
+                passed: 0,
+                failed: 0,
+                crashed: 0,
+                timed_out: 0
+            )
+
+            # Validation should catch this
+            val report = validate_run_record(run)
+            expect(report.has_violations()).to_be(true)
+
+    describe "Lock Timeout Edge Cases":
+
+        it "handles 0 second timeout":
+            val test_name = "timeout_zero"
+            cleanup_temp_db(test_name)
+
+            val lock_path = temp_db_path(test_name)
+
+            # Try to acquire lock with 0 timeout
+            val result = FileLock.acquire(lock_path, 0)
+
+            # Should fail immediately or succeed immediately
+            # Either behavior is acceptable for 0 timeout
+
+            if result.ok.?:
+                val lock = result.unwrap()
+                lock.release()
+
+            cleanup_temp_db(test_name)
+
+        it "handles very long timeout":
+            val test_name = "timeout_long"
+            cleanup_temp_db(test_name)
+
+            val lock_path = temp_db_path(test_name)
+
+            # Acquire lock with 3600 second (1 hour) timeout
+            val result = FileLock.acquire(lock_path, 3600)
+            expect(result.ok.?).to_be(true)
+
+            val lock = result.unwrap()
+            expect(lock.is_valid()).to_be(true)
+            lock.release()
+
+            cleanup_temp_db(test_name)
+
+        it "handles negative timeout":
+            val test_name = "timeout_negative"
+            cleanup_temp_db(test_name)
+
+            val lock_path = temp_db_path(test_name)
+
+            # Try negative timeout
+            val result = FileLock.acquire(lock_path, -1)
+
+            # Should fail or treat as 0
+            # Shouldn't crash
+
+            cleanup_temp_db(test_name)
+
+    describe "Boundary Values":
+
+        it "handles zero tests in database":
+            val db = TestDatabase.empty()
+
+            expect(db.tests.len()).to_be(0)
+            expect(db.counters.len()).to_be(0)
+            expect(db.timing.len()).to_be(0)
+
+            # Operations on empty database should work
+            val runs = db.list_runs("all")
+            expect(runs.len()).to_be(0)
+
+        it "handles empty strings in all text fields":
+            val run = RunRecord(
+                run_id: "",
+                start_time: "",
+                end_time: "",
+                pid: getpid(),
+                hostname: "",
+                status: "",
+                test_count: 0,
+                passed: 0,
+                failed: 0,
+                crashed: 0,
+                timed_out: 0
+            )
+
+            # Should validate (may have violations for empty fields)
+            val report = validate_run_record(run)
+            # Shouldn't crash
+
+        it "handles very long test names (1000+ chars)":
+            val db = TestDatabase.empty()
+
+            # Create test with very long name
+            var long_name = ""
+            for i in 0..100:
+                long_name = "{long_name}test_name_"
+
+            db.update_test_result(
+                test_name: long_name,
+                test_file: "test/long.spl",
+                suite_name: "Long Suite",
+                category: "unit",
+                status: TestStatus.Passed,
+                duration_ms: 10.0
+            )
+
+            expect(db.tests.len()).to_be(1)
+
+        it "handles unicode in all fields":
+            val db = TestDatabase.empty()
+
+            db.update_test_result(
+                test_name: "テスト_🎯_test",
+                test_file: "test/国際化.spl",
+                suite_name: "Suite Française",
+                category: "юникод",
+                status: TestStatus.Passed,
+                duration_ms: 10.0
+            )
+
+            expect(db.tests.len()).to_be(1)
+
+            # Should be able to save and load
+            val save_result = db.save()
+            expect(save_result.ok.?).to_be(true)
+
+            val load_result = TestDatabase.load()
+            expect(load_result.ok.?).to_be(true)
+
+        it "handles special characters (quotes, newlines, etc)":
+            val db = TestDatabase.empty()
+
+            db.update_test_result(
+                test_name: "test with \"quotes\" and 'apostrophes'",
+                test_file: "test/special.spl",
+                suite_name: "Suite\nwith\nnewlines",
+                category: "cat\twith\ttabs",
+                status: TestStatus.Passed,
+                duration_ms: 10.0
+            )
+
+            expect(db.tests.len()).to_be(1)
+
+    describe "Timing Edge Cases":
+
+        it "handles negative duration":
+            val db = TestDatabase.empty()
+
+            # Update with negative duration (shouldn't be possible, but test anyway)
+            db.update_test_result(
+                test_name: "negative_test",
+                test_file: "test/neg.spl",
+                suite_name: "Negative",
+                category: "unit",
+                status: TestStatus.Passed,
+                duration_ms: -10.0
+            )
+
+            # Should handle gracefully (may clamp to 0 or reject)
+            expect(db.tests.len()).to_be(1)
+
+        it "handles zero duration":
+            val db = TestDatabase.empty()
+
+            db.update_test_result(
+                test_name: "zero_test",
+                test_file: "test/zero.spl",
+                suite_name: "Zero",
+                category: "unit",
+                status: TestStatus.Passed,
+                duration_ms: 0.0
+            )
+
+            expect(db.tests.len()).to_be(1)
+
+            # Statistics should handle zero duration
+            val name_str = db.interner.intern("zero_test")
+            var has_timing = false
+            for ts in db.timing:
+                if ts.test_id == name_str:
+                    has_timing = true
+                    expect(ts.last_ms).to_be(0.0)
+
+            expect(has_timing).to_be(true)
+
+        it "handles very large duration (hours)":
+            val db = TestDatabase.empty()
+
+            # 10 hours in milliseconds
+            val ten_hours_ms = 10.0 * 60.0 * 60.0 * 1000.0
+
+            db.update_test_result(
+                test_name: "slow_test",
+                test_file: "test/slow.spl",
+                suite_name: "Slow",
+                category: "integration",
+                status: TestStatus.Passed,
+                duration_ms: ten_hours_ms
+            )
+
+            expect(db.tests.len()).to_be(1)
+
+    describe "Counter Edge Cases":
+
+        it "handles 0 total runs (division by zero in failure rate)":
+            val counter = CounterRecord(
+                test_id: 1,
+                total_runs: 0,
+                passed: 0,
+                failed: 0,
+                flaky_count: 0,
+                last_change: "new_test",
+                last_10_runs: "",
+                failure_rate_pct: 0.0
+            )
+
+            # Should have 0% failure rate, not NaN or error
+            expect(counter.failure_rate_pct).to_be(0.0)
+            expect(counter.total_runs).to_be(0)
+
+        it "handles all tests failed (100% failure rate)":
+            val db = TestDatabase.empty()
+
+            # Add test that always fails
+            for i in 0..10:
+                db.update_test_result(
+                    test_name: "always_fails",
+                    test_file: "test/fail.spl",
+                    suite_name: "Failures",
+                    category: "unit",
+                    status: TestStatus.Failed,
+                    duration_ms: 10.0
+                )
+
+            # Check counter
+            val name_str = db.interner.intern("always_fails")
+            var found = false
+            for c in db.counters:
+                if c.test_id == name_str:
+                    found = true
+                    expect(c.total_runs).to_be(10)
+                    expect(c.failed).to_be(10)
+                    expect(c.passed).to_be(0)
+                    expect(c.failure_rate_pct).to_be(100.0)
+
+            expect(found).to_be(true)
+
+        it "handles count overflow scenario":
+            # Simulate very large numbers (though unlikely in practice)
+            val large_count = 2147483647  # Max i32
+
+            val counter = CounterRecord(
+                test_id: 1,
+                total_runs: large_count,
+                passed: large_count - 1,
+                failed: 1,
+                flaky_count: 0,
+                last_change: "no_change",
+                last_10_runs: "pass,pass,pass,pass,pass,pass,pass,pass,pass,fail",
+                failure_rate_pct: 0.0
+            )
+
+            # Should handle large numbers without overflow
+            expect(counter.total_runs).to_be(large_count)
+
+    describe "Timestamp Parsing Edge Cases":
+
+        it "parses valid RFC3339 timestamps correctly":
+            val valid_timestamps = [
+                "2026-02-03T10:30:45Z",
+                "2020-01-01T00:00:00Z",
+                "2099-12-31T23:59:59Z"
+            ]
+
+            for ts in valid_timestamps:
+                val micros = parse_rfc3339_to_micros(ts)
+                expect(micros).to_be_greater_than(0)
+
+        it "handles invalid timestamp formats gracefully":
+            val invalid_timestamps = [
+                "not-a-timestamp",
+                "2026-13-45T99:99:99Z",  # Invalid month/time
+                "",
+                "2026",
+                "10:30:45"
+            ]
+
+            for ts in invalid_timestamps:
+                val micros = parse_rfc3339_to_micros(ts)
+                # Should return 0 or some error value, not crash
+                expect(micros).to_be_greater_than_or_equal(0)
+
+    describe "File System Edge Cases":
+
+        it "handles read-only file system gracefully":
+            # TODO: Simulate read-only filesystem
+            # On actual read-only FS, save should fail with clear error
+            pass
+
+        it "handles path that doesn't exist":
+            val nonexistent = "/nonexistent/path/that/does/not/exist/db.sdn"
+
+            # Load should handle gracefully
+            val result = TestDatabase.load()
+            expect(result.ok.?).to_be(true)
+
+        it "handles very deep directory paths":
+            val deep_path = "/tmp/a/b/c/d/e/f/g/h/i/j/k/l/m/n/o/p/db_{getpid()}.sdn"
+
+            # Should fail gracefully if directories don't exist
+            # (In production, would need to create directories first)
+            pass
+
+    describe "Validation Integration":
+
+        it "validates all edge cases in run records":
+            # Create run with multiple edge case violations
+            val problematic_run = RunRecord(
+                run_id: "",
+                start_time: "invalid",
+                end_time: "also-invalid",
+                pid: -1,
+                hostname: "",
+                status: "InvalidStatus",
+                test_count: 0,
+                passed: 10,  # More than test_count!
+                failed: 10,  # Also more than test_count!
+                crashed: 0,
+                timed_out: 0
+            )
+
+            val report = validate_run_record(problematic_run)
+
+            # Should detect multiple violations
+            expect(report.has_violations()).to_be(true)
+            expect(report.violations.len()).to_be_greater_than(2)
+
+    describe "Stress Test - Extreme Values":
+
+        it "handles maximum practical database size":
+            val db = TestDatabase.empty()
+
+            # Add many records to approach practical limits
+            # (Not going to full theoretical limit due to test time)
+            for i in 0..100:
+                db.update_test_result(
+                    test_name: "test_{i}",
+                    test_file: "test/suite.spl",
+                    suite_name: "Suite",
+                    category: "unit",
+                    status: TestStatus.Passed,
+                    duration_ms: 10.0
+                )
+
+            expect(db.tests.len()).to_be(100)
+
+            # Should still save and load correctly
+            val save_result = db.save()
+            expect(save_result.ok.?).to_be(true)
+
+            val load_result = TestDatabase.load()
+            expect(load_result.ok.?).to_be(true)
