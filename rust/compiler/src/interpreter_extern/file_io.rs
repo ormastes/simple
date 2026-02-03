@@ -678,6 +678,38 @@ pub fn rt_getpid(_args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Int(std::process::id() as i64))
 }
 
+/// Check if a process with given PID exists
+pub fn rt_process_exists(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 1 {
+        return Err(CompileError::new("rt_process_exists() expects 1 argument (pid: i64)"));
+    }
+
+    let pid = match &args[0] {
+        Value::Int(i) => *i,
+        _ => return Err(CompileError::new("rt_process_exists() expects i64 argument")),
+    };
+
+    // On Unix systems, sending signal 0 checks if process exists
+    #[cfg(unix)]
+    {
+        use nix::sys::signal::{kill, Signal};
+        use nix::unistd::Pid;
+
+        let result = kill(Pid::from_raw(pid as i32), Signal::SIGCONT);
+        // Process exists if kill succeeds OR if errno is EPERM (no permission to signal)
+        let exists = result.is_ok() ||
+                     matches!(result.err(), Some(nix::errno::Errno::EPERM));
+        Ok(Value::Bool(exists))
+    }
+
+    #[cfg(not(unix))]
+    {
+        // Fallback for non-Unix: always return true
+        // This is conservative - assume process might exist
+        Ok(Value::Bool(true))
+    }
+}
+
 /// Get hostname
 pub fn rt_hostname(_args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Str(get_hostname()))

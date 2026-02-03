@@ -259,6 +259,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_file_unlock",
     // System info
     "rt_getpid",
+    "rt_process_exists",
     "rt_hostname",
     "rt_system_cpu_count",
     "rt_time_now_monotonic_ms",

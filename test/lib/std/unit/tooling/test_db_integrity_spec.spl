@@ -1,4 +1,3 @@
-# @pending
 # Test Database Integrity Validation Specification
 #
 # Tests the data integrity validation system that detects stale/inconsistent
@@ -11,10 +10,12 @@
 # 3. Timestamp consistency - end_time > start_time, no future timestamps
 # 4. Count consistency - passed+failed+crashed+timed_out ≤ test_count
 # 5. Status consistency - Completed/Crashed must have end_time
+use app.io.mod (getpid, time_now_unix_micros)
+use app.test_runner_new.test_db_core (TestDatabase, micros_to_rfc3339, parse_rfc3339_to_micros)
+use app.test_runner_new.test_db_types.*
 
-# @skip
-use std.tooling.testing.runner
-use std.time.datetime
+# External FFI for process checking
+extern fn rt_process_exists(pid: i64) -> bool
 
 # Helper: Create test run with specified fields
 fn create_test_run(run_id, status, start_time, end_time, pid, test_count, passed, failed, crashed, timed_out):
@@ -33,20 +34,22 @@ fn create_test_run(run_id, status, start_time, end_time, pid, test_count, passed
     }
 
 # Helper: Get timestamp from hours ago
-fn hours_ago(hours):
-    val now = DateTime.now()
-    val past = now.subtract_hours(hours)
-    past.to_rfc3339()
+fn hours_ago(hours: i64) -> text:
+    val now_micros = time_now_unix_micros()
+    val hours_in_micros = hours * 3600 * 1000000
+    val past_micros = now_micros - hours_in_micros
+    micros_to_rfc3339(past_micros)
 
 # Helper: Get future timestamp
-fn future_time():
-    val now = DateTime.now()
-    val future = now.add_hours(1)
-    future.to_rfc3339()
+fn future_time() -> text:
+    val now_micros = time_now_unix_micros()
+    val one_hour_micros = 3600 * 1000000
+    val future_micros = now_micros + one_hour_micros
+    micros_to_rfc3339(future_micros)
 
 # Helper: Get current timestamp
-fn now_time():
-    DateTime.now().to_rfc3339()
+fn now_time() -> text:
+    micros_to_rfc3339(time_now_unix_micros())
 
 # Helper: Create valid run
 fn create_valid_run(run_id):
@@ -55,7 +58,7 @@ fn create_valid_run(run_id):
         "Running",
         hours_ago(1),  # 1 hour ago - not stale
         "",
-        Process.current_pid(),  # Current process - alive
+        getpid(),  # Current process - alive
         10,
         0,
         0,
@@ -70,7 +73,7 @@ fn create_stale_run(run_id):
         "Running",
         hours_ago(3),  # 3 hours ago - stale
         "",
-        Process.current_pid(),
+        getpid(),
         10,
         0,
         0,
@@ -129,7 +132,7 @@ describe "Test Database Integrity Validation":
                 "Completed",
                 hours_ago(5),  # 5 hours ago
                 hours_ago(4),  # Ended 4 hours ago
-                Process.current_pid(),
+                getpid(),
                 10,
                 10,
                 0,
@@ -179,7 +182,7 @@ describe "Test Database Integrity Validation":
                 "Completed",
                 "2026-01-30T10:00:00Z",
                 "2026-01-30T09:00:00Z",  # Before start_time
-                Process.current_pid(),
+                getpid(),
                 10,
                 10,
                 0,
@@ -199,7 +202,7 @@ describe "Test Database Integrity Validation":
                 "Running",
                 future_time(),  # Future timestamp
                 "",
-                Process.current_pid(),
+                getpid(),
                 10,
                 0,
                 0,
@@ -219,7 +222,7 @@ describe "Test Database Integrity Validation":
                 "Completed",
                 hours_ago(2),
                 hours_ago(1),  # After start_time
-                Process.current_pid(),
+                getpid(),
                 10,
                 10,
                 0,
@@ -239,7 +242,7 @@ describe "Test Database Integrity Validation":
                 "Completed",
                 "not-a-timestamp",  # Invalid format
                 hours_ago(1),
-                Process.current_pid(),
+                getpid(),
                 10,
                 10,
                 0,
@@ -261,7 +264,7 @@ describe "Test Database Integrity Validation":
                 "Completed",
                 hours_ago(2),
                 hours_ago(1),
-                Process.current_pid(),
+                getpid(),
                 10,  # test_count
                 8,   # passed
                 3,   # failed (8 + 3 = 11 > 10)
@@ -281,7 +284,7 @@ describe "Test Database Integrity Validation":
                 "Completed",
                 hours_ago(2),
                 hours_ago(1),
-                Process.current_pid(),
+                getpid(),
                 10,
                 7,
                 2,
@@ -299,7 +302,7 @@ describe "Test Database Integrity Validation":
                 "Completed",
                 hours_ago(2),
                 hours_ago(1),
-                Process.current_pid(),
+                getpid(),
                 20,
                 10,
                 3,
@@ -319,7 +322,7 @@ describe "Test Database Integrity Validation":
                 "Completed",
                 hours_ago(2),
                 "",  # Missing end_time
-                Process.current_pid(),
+                getpid(),
                 10,
                 10,
                 0,
@@ -339,7 +342,7 @@ describe "Test Database Integrity Validation":
                 "Running",
                 hours_ago(1),
                 hours_ago(0),  # Shouldn't have end_time when Running
-                Process.current_pid(),
+                getpid(),
                 10,
                 5,
                 0,
@@ -360,7 +363,7 @@ describe "Test Database Integrity Validation":
                 "Running",
                 hours_ago(1),
                 "",
-                Process.current_pid(),
+                getpid(),
                 10,
                 5,
                 0,
@@ -377,7 +380,7 @@ describe "Test Database Integrity Validation":
                 "Completed",
                 hours_ago(2),
                 hours_ago(1),
-                Process.current_pid(),
+                getpid(),
                 10,
                 10,
                 0,
@@ -484,7 +487,7 @@ describe "Test Database Integrity Validation":
                 "Completed",
                 "2026-01-30T10:00:00Z",
                 "2026-01-30T09:00:00Z",
-                Process.current_pid(),
+                getpid(),
                 10,
                 10,
                 0,
