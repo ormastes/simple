@@ -26,9 +26,10 @@ fn next_handle() -> i64 {
 fn get_i64(args: &[Value], idx: usize, name: &str) -> Result<i64, CompileError> {
     match args.get(idx) {
         Some(Value::Int(v)) => Ok(*v),
-        _ => Err(CompileError::runtime(
-            format!("{}: expected integer argument at index {}", name, idx),
-        )),
+        _ => Err(CompileError::runtime(format!(
+            "{}: expected integer argument at index {}",
+            name, idx
+        ))),
     }
 }
 
@@ -51,9 +52,9 @@ pub fn rt_span_start(args: &[Value]) -> Result<Value, CompileError> {
     let handle = get_i64(args, 0, "rt_span_start")?;
     SPAN_REGISTRY.with(|r| {
         let reg = r.borrow();
-        let span = reg.get(&handle).ok_or_else(|| {
-            CompileError::runtime(format!("rt_span_start: invalid handle {}", handle))
-        })?;
+        let span = reg
+            .get(&handle)
+            .ok_or_else(|| CompileError::runtime(format!("rt_span_start: invalid handle {}", handle)))?;
         Ok(Value::Int(span.start as i64))
     })
 }
@@ -63,9 +64,9 @@ pub fn rt_span_end(args: &[Value]) -> Result<Value, CompileError> {
     let handle = get_i64(args, 0, "rt_span_end")?;
     SPAN_REGISTRY.with(|r| {
         let reg = r.borrow();
-        let span = reg.get(&handle).ok_or_else(|| {
-            CompileError::runtime(format!("rt_span_end: invalid handle {}", handle))
-        })?;
+        let span = reg
+            .get(&handle)
+            .ok_or_else(|| CompileError::runtime(format!("rt_span_end: invalid handle {}", handle)))?;
         Ok(Value::Int(span.end as i64))
     })
 }
@@ -75,9 +76,9 @@ pub fn rt_span_line(args: &[Value]) -> Result<Value, CompileError> {
     let handle = get_i64(args, 0, "rt_span_line")?;
     SPAN_REGISTRY.with(|r| {
         let reg = r.borrow();
-        let span = reg.get(&handle).ok_or_else(|| {
-            CompileError::runtime(format!("rt_span_line: invalid handle {}", handle))
-        })?;
+        let span = reg
+            .get(&handle)
+            .ok_or_else(|| CompileError::runtime(format!("rt_span_line: invalid handle {}", handle)))?;
         Ok(Value::Int(span.line as i64))
     })
 }
@@ -87,9 +88,9 @@ pub fn rt_span_column(args: &[Value]) -> Result<Value, CompileError> {
     let handle = get_i64(args, 0, "rt_span_column")?;
     SPAN_REGISTRY.with(|r| {
         let reg = r.borrow();
-        let span = reg.get(&handle).ok_or_else(|| {
-            CompileError::runtime(format!("rt_span_column: invalid handle {}", handle))
-        })?;
+        let span = reg
+            .get(&handle)
+            .ok_or_else(|| CompileError::runtime(format!("rt_span_column: invalid handle {}", handle)))?;
         Ok(Value::Int(span.column as i64))
     })
 }
