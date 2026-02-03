@@ -157,8 +157,9 @@ pub(super) fn register_definitions(
             Node::Extern(ext) => {
                 // Register extern function declarations in the global EXTERN_FUNCTIONS
                 crate::interpreter::EXTERN_FUNCTIONS.with(|cell| {
-                    cell.borrow_mut().insert(ext.name.clone());
-                    eprintln!("[DEBUG] Registered extern function from module: {}", ext.name);
+                    let mut externs = cell.borrow_mut();
+                    externs.insert(ext.name.clone());
+                    eprintln!("[DEBUG] Registered extern function from module: {} (total: {})", ext.name, externs.len());
                 });
             }
             Node::Trait(t) => {
