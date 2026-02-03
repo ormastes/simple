@@ -1,0 +1,1653 @@
+# Lexer for the Simple Language
+#
+# Tokenizes source code into a stream of Tokens with indentation tracking.
+# Port of rust/parser/src/lexer/ (mod.rs + all sub-modules)
+
+from token import {Span, Token, TokenKind, NamePattern, NumericSuffix,
+                   FStringToken, TextSpan, PreLexInfo}
+
+export Lexer
+
+# Escape processing result
+enum EscapeResult:
+    Char(text)
+    Error(text)
+    Unterminated
+
+class Lexer:
+    source: text
+    pos: i64
+    line: i64
+    column: i64
+    indent_stack: [i64]
+    pending_tokens: [Token]
+    at_line_start: bool
+    bracket_depth: i64
+    force_indentation_depth: i64
+
+    static fn from_source(source: text) -> Lexer:
+        Lexer(source: source, pos: 0, line: 1, column: 1,
+              indent_stack: [0], pending_tokens: [],
+              at_line_start: true, bracket_depth: 0,
+              force_indentation_depth: 0)
+
+    static fn expression(source: text) -> Lexer:
+        Lexer(source: source, pos: 0, line: 1, column: 1,
+              indent_stack: [0], pending_tokens: [],
+              at_line_start: false, bracket_depth: 0,
+              force_indentation_depth: 0)
+
+    me enable_forced_indentation():
+        self.force_indentation_depth = self.force_indentation_depth + 1
+
+    me disable_forced_indentation():
+        if self.force_indentation_depth > 0:
+            self.force_indentation_depth = self.force_indentation_depth - 1
+
+    fn tokenize() -> [Token]:
+        var tokens_: [Token] = []
+        loop:
+            val tok = self.next_token()
+            val is_eof = tok.kind is TokenKind.Eof
+            tokens_.push(tok)
+            if is_eof:
+                break
+        tokens_
+
+    # ── Core character access ───────────────────────────────────────
+
+    fn peek() -> text?:
+        if self.pos >= self.source.len():
+            return None
+        Some(self.source[self.pos])
+
+    fn peek_ahead(n: i64) -> text?:
+        val idx = self.pos + n
+        if idx >= self.source.len():
+            return None
+        Some(self.source[idx])
+
+    me advance() -> text?:
+        if self.pos >= self.source.len():
+            return None
+        val ch = self.source[self.pos]
+        self.pos = self.pos + 1
+        self.column = self.column + 1
+        Some(ch)
+
+    fn check(expected: text) -> bool:
+        self.peek() == Some(expected)
+
+    fn check_ahead(n: i64, expected: text) -> bool:
+        self.peek_ahead(n) == Some(expected)
+
+    fn check_alpha() -> bool:
+        match self.peek():
+            case Some(c): c.is_alpha() or c == "_"
+            case None: false
+
+    me match_char(expected: text, if_match: TokenKind, otherwise: TokenKind) -> TokenKind:
+        if self.check(expected):
+            self.advance()
+            if_match
+        else:
+            otherwise
+
+    me skip_whitespace():
+        while self.peek().?:
+            val ch = self.peek().unwrap()
+            if ch == " " or ch == "\t" or ch == "\r":
+                self.advance()
+            else:
+                break
+
+    # ── Escape processing ───────────────────────────────────────────
+
+    me process_escape(allow_braces: bool) -> EscapeResult:
+        match self.peek():
+            case Some("n"):
+                self.advance()
+                EscapeResult.Char("\n")
+            case Some("t"):
+                self.advance()
+                EscapeResult.Char("\t")
+            case Some("r"):
+                self.advance()
+                EscapeResult.Char("\r")
+            case Some("\\"):
+                self.advance()
+                EscapeResult.Char("\\")
+            case Some("\""):
+                self.advance()
+                EscapeResult.Char("\"")
+            case Some("0"):
+                self.advance()
+                EscapeResult.Char("\0")
+            case Some("{") if allow_braces:
+                self.advance()
+                EscapeResult.Char("{")
+            case Some("}") if allow_braces:
+                self.advance()
+                EscapeResult.Char("}")
+            case Some(c):
+                EscapeResult.Error("Invalid escape sequence: \\{c}")
+            case None:
+                EscapeResult.Unterminated
+
+    # ── Comment handling ────────────────────────────────────────────
+
+    fn clean_doc_comment(content: text) -> text:
+        val lines_ = content.lines()
+        val cleaned_ = lines_.map(\line:
+            val trimmed = line.trim()
+            if trimmed.starts_with("*"):
+                trimmed[1:].trim_start()
+            else:
+                trimmed
+        )
+        cleaned_.join("\n").trim()
+
+    me parse_nested_comment() -> text:
+        var content_ = ""
+        var depth_ = 1
+        while depth_ > 0:
+            match self.advance():
+                case Some("*"):
+                    if self.check("/"):
+                        self.advance()
+                        depth_ = depth_ - 1
+                        if depth_ > 0:
+                            content_ = content_ + "*/"
+                    else:
+                        content_ = content_ + "*"
+                case Some("/"):
+                    if self.check("*"):
+                        self.advance()
+                        depth_ = depth_ + 1
+                        content_ = content_ + "/*"
+                    else:
+                        content_ = content_ + "/"
+                case Some("\n"):
+                    self.line = self.line + 1
+                    self.column = 1
+                    content_ = content_ + "\n"
+                case Some(ch):
+                    content_ = content_ + ch
+                case None:
+                    break
+        content_
+
+    me skip_comment() -> TokenKind:
+        while self.peek().?:
+            if self.peek().unwrap() == "\n":
+                break
+            self.advance()
+        self.next_token().kind
+
+    me skip_block_comment() -> TokenKind:
+        var depth_ = 1
+        while depth_ > 0:
+            match self.advance():
+                case Some("*"):
+                    if self.check("/"):
+                        self.advance()
+                        depth_ = depth_ - 1
+                case Some("/"):
+                    if self.check("*"):
+                        self.advance()
+                        depth_ = depth_ + 1
+                case Some("\n"):
+                    self.line = self.line + 1
+                    self.column = 1
+                case Some(_): ()
+                case None: break
+        self.next_token().kind
+
+    me read_doc_block_comment(start_pos: i64, start_line: i64, start_column: i64) -> Token:
+        val content_ = self.parse_nested_comment()
+        val cleaned = Lexer.clean_doc_comment(content_)
+        Token(kind: TokenKind.DocComment(cleaned),
+              span: Span(start: start_pos, end: self.pos, line: start_line, column: start_column),
+              lexeme: self.source[start_pos:self.pos])
+
+    me read_doc_line_comment(start_pos: i64, start_line: i64, start_column: i64) -> Token:
+        while self.peek().?:
+            val ch = self.peek().unwrap()
+            if ch == " " or ch == "\t":
+                self.advance()
+            else:
+                break
+        if not self.peek().? or self.peek().unwrap() == "\n":
+            return self.read_doc_block_triple_slash(start_pos, start_line, start_column)
+        val content_start = self.pos
+        while self.peek().?:
+            if self.peek().unwrap() == "\n":
+                break
+            self.advance()
+        val content_ = self.source[content_start:self.pos].trim()
+        Token(kind: TokenKind.DocComment(content_),
+              span: Span(start: start_pos, end: self.pos, line: start_line, column: start_column),
+              lexeme: self.source[start_pos:self.pos])
+
+    me read_doc_block_triple_slash(start_pos: i64, start_line: i64, start_column: i64) -> Token:
+        var content_ = ""
+        if self.peek() == Some("\n"):
+            self.advance()
+            self.line = self.line + 1
+            self.column = 1
+        loop:
+            val line_start = self.pos
+            var leading_ = 0
+            while self.peek() == Some(" ") or self.peek() == Some("\t"):
+                self.advance()
+                leading_ = leading_ + 1
+            if self.peek() == Some("/"):
+                self.advance()
+                if self.peek() == Some("/"):
+                    self.advance()
+                    if self.peek() == Some("/"):
+                        self.advance()
+                        var only_ws_ = true
+                        while self.peek().?:
+                            val c = self.peek().unwrap()
+                            if c == "\n" or c == "\r":
+                                break
+                            elif c != " " and c != "\t":
+                                only_ws_ = false
+                                break
+                            self.advance()
+                        if only_ws_:
+                            if self.peek() == Some("\n"):
+                                self.advance()
+                                self.line = self.line + 1
+                                self.column = 1
+                            break
+                        else:
+                            content_ = content_ + self.source[line_start:self.pos]
+                    else:
+                        content_ = content_ + self.source[line_start:self.pos]
+                else:
+                    content_ = content_ + self.source[line_start:self.pos]
+            else:
+                if leading_ > 0:
+                    content_ = content_ + " ".repeat(leading_)
+            while self.peek().?:
+                val c = self.peek().unwrap()
+                if c == "\n":
+                    content_ = content_ + "\n"
+                    self.advance()
+                    self.line = self.line + 1
+                    self.column = 1
+                    break
+                content_ = content_ + c
+                self.advance()
+            if not self.peek().?:
+                break
+        Token(kind: TokenKind.DocComment(content_.trim()),
+              span: Span(start: start_pos, end: self.pos, line: start_line, column: start_column),
+              lexeme: self.source[start_pos:self.pos])
+
+    # ── Number scanning ─────────────────────────────────────────────
+
+    me is_unit_suffix_start() -> bool:
+        val next_pos = self.pos + 1
+        if next_pos >= self.source.len():
+            return false
+        val next_ch = self.source[next_pos]
+        next_ch.is_alpha() and not next_ch.is_digit()
+
+    me scan_radix_digits(num_str_: var text, is_valid: fn(text) -> bool) -> bool:
+        var found_ = false
+        while self.peek().?:
+            val c = self.peek().unwrap()
+            if is_valid(c):
+                num_str_ = num_str_ + c
+                self.advance()
+                found_ = true
+            elif c == "_":
+                if self.is_unit_suffix_start():
+                    break
+                self.advance()
+            else:
+                break
+        found_
+
+    me scan_numeric_suffix() -> NumericSuffix?:
+        if not self.peek().?:
+            return None
+        val ch = self.peek().unwrap()
+        if ch != "i" and ch != "u" and ch != "f" and ch != "_":
+            return None
+        var suffix_ = ""
+        var lookahead_ = self.pos
+        while lookahead_ < self.source.len():
+            val c = self.source[lookahead_]
+            if c.is_alphanumeric() or c == "_":
+                suffix_ = suffix_ + c
+                lookahead_ = lookahead_ + 1
+            else:
+                break
+        val result_ = match suffix_:
+            case "i8": Some(NumericSuffix.I8)
+            case "i16": Some(NumericSuffix.I16)
+            case "i32": Some(NumericSuffix.I32)
+            case "i64": Some(NumericSuffix.I64)
+            case "u8": Some(NumericSuffix.U8)
+            case "u16": Some(NumericSuffix.U16)
+            case "u32": Some(NumericSuffix.U32)
+            case "u64": Some(NumericSuffix.U64)
+            case "f32": Some(NumericSuffix.F32)
+            case "f64": Some(NumericSuffix.F64)
+            case s if s.starts_with("_") and s.len() > 1:
+                Some(NumericSuffix.Unit(s[1:]))
+            case _: None
+        if result_.?:
+            for _ in 0..suffix_.len():
+                self.advance()
+        result_
+
+    me scan_number(first: text) -> TokenKind:
+        var num_ = first
+        var is_float_ = false
+        if first == "0":
+            if self.peek().?:
+                val ch = self.peek().unwrap()
+                if ch == "x" or ch == "X":
+                    self.advance()
+                    num_ = num_ + ch
+                    self.scan_radix_digits(num_, \c: c.is_hex_digit())
+                    match i64.parse_radix(num_[2:], 16):
+                        case Ok(n):
+                            match self.scan_numeric_suffix():
+                                case Some(s): return TokenKind.TypedInteger(n, s)
+                                case None: return TokenKind.Integer(n)
+                        case Err(_): return TokenKind.Error("Invalid hex number: {num_}")
+                elif ch == "o" or ch == "O":
+                    self.advance()
+                    num_ = num_ + ch
+                    self.scan_radix_digits(num_, \c: c >= "0" and c <= "7")
+                    match i64.parse_radix(num_[2:], 8):
+                        case Ok(n):
+                            match self.scan_numeric_suffix():
+                                case Some(s): return TokenKind.TypedInteger(n, s)
+                                case None: return TokenKind.Integer(n)
+                        case Err(_): return TokenKind.Error("Invalid octal number: {num_}")
+                elif ch == "b" or ch == "B":
+                    self.advance()
+                    num_ = num_ + ch
+                    self.scan_radix_digits(num_, \c: c == "0" or c == "1")
+                    match i64.parse_radix(num_[2:], 2):
+                        case Ok(n):
+                            match self.scan_numeric_suffix():
+                                case Some(s): return TokenKind.TypedInteger(n, s)
+                                case None: return TokenKind.Integer(n)
+                        case Err(_): return TokenKind.Error("Invalid binary number: {num_}")
+        # Decimal digits
+        while self.peek().?:
+            val ch = self.peek().unwrap()
+            if ch.is_digit():
+                num_ = num_ + ch
+                self.advance()
+            elif ch == "_":
+                if self.is_unit_suffix_start():
+                    break
+                self.advance()
+            else:
+                break
+        # Float decimal part
+        if self.check("."):
+            if self.peek_ahead(1).? and self.peek_ahead(1).unwrap().is_digit():
+                is_float_ = true
+                self.advance()
+                num_ = num_ + "."
+                while self.peek().?:
+                    val ch = self.peek().unwrap()
+                    if ch.is_digit():
+                        num_ = num_ + ch
+                        self.advance()
+                    elif ch == "_":
+                        if self.is_unit_suffix_start():
+                            break
+                        self.advance()
+                    else:
+                        break
+        # Exponent
+        if self.peek().?:
+            val ch = self.peek().unwrap()
+            if ch == "e" or ch == "E":
+                is_float_ = true
+                self.advance()
+                num_ = num_ + ch
+                if self.peek().?:
+                    val sign = self.peek().unwrap()
+                    if sign == "+" or sign == "-":
+                        self.advance()
+                        num_ = num_ + sign
+                while self.peek().?:
+                    val c = self.peek().unwrap()
+                    if c.is_digit():
+                        num_ = num_ + c
+                        self.advance()
+                    else:
+                        break
+        val suffix_ = self.scan_numeric_suffix()
+        if is_float_:
+            match f64.parse(num_):
+                case Ok(n):
+                    match suffix_:
+                        case Some(s): TokenKind.TypedFloat(n, s)
+                        case None: TokenKind.Float(n)
+                case Err(_): TokenKind.Error("Invalid float: {num_}")
+        else:
+            match i64.parse(num_):
+                case Ok(n):
+                    match suffix_:
+                        case Some(s): TokenKind.TypedInteger(n, s)
+                        case None: TokenKind.Integer(n)
+                case Err(_): TokenKind.Error("Invalid integer: {num_}")
+
+    # ── String scanning ─────────────────────────────────────────────
+
+    me scan_string_unit_suffix() -> text?:
+        if self.peek() != Some("_"):
+            return None
+        var suffix_ = ""
+        var look_ = self.pos
+        if look_ < self.source.len() and self.source[look_] == "_":
+            suffix_ = suffix_ + "_"
+            look_ = look_ + 1
+            while look_ < self.source.len():
+                val c = self.source[look_]
+                if c.is_alphanumeric() or c == "_":
+                    suffix_ = suffix_ + c
+                    look_ = look_ + 1
+                else:
+                    break
+        if suffix_.len() > 1:
+            for _ in 0..suffix_.len():
+                self.advance()
+            Some(suffix_[1:])
+        else:
+            None
+
+    me scan_raw_string() -> TokenKind:
+        var value_ = ""
+        while self.peek().?:
+            val ch = self.peek().unwrap()
+            if ch == "'":
+                self.advance()
+                match self.scan_string_unit_suffix():
+                    case Some(s): return TokenKind.TypedRawString(value_, s)
+                    case None: return TokenKind.RawString(value_)
+            elif ch == "\\":
+                self.advance()
+                if self.peek().?:
+                    val next = self.peek().unwrap()
+                    if next == "'":
+                        self.advance()
+                        value_ = value_ + "'"
+                    elif next == "\n":
+                        value_ = value_ + "\\"
+                    else:
+                        self.advance()
+                        value_ = value_ + "\\" + next
+                else:
+                    value_ = value_ + "\\"
+            elif ch == "\n":
+                return TokenKind.Error("Unterminated raw string")
+            else:
+                self.advance()
+                value_ = value_ + ch
+        TokenKind.Error("Unterminated raw string")
+
+    me scan_raw_double_string() -> TokenKind:
+        var value_ = ""
+        while self.peek().?:
+            val ch = self.peek().unwrap()
+            if ch == "\"":
+                self.advance()
+                match self.scan_string_unit_suffix():
+                    case Some(s): return TokenKind.TypedRawString(value_, s)
+                    case None: return TokenKind.RawString(value_)
+            elif ch == "\n":
+                return TokenKind.Error("Unterminated raw string")
+            else:
+                self.advance()
+                value_ = value_ + ch
+        TokenKind.Error("Unterminated raw string")
+
+    me scan_triple_quoted_string() -> TokenKind:
+        self.advance()  # Second "
+        self.advance()  # Third "
+        var value_ = ""
+        while self.peek().?:
+            val ch = self.peek().unwrap()
+            if ch == "\"":
+                if self.peek_ahead(1) == Some("\"") and self.peek_ahead(2) == Some("\""):
+                    self.advance()
+                    self.advance()
+                    self.advance()
+                    return TokenKind.String(value_)
+                else:
+                    self.advance()
+                    value_ = value_ + "\""
+            else:
+                self.advance()
+                if ch == "\n":
+                    self.line = self.line + 1
+                    self.column = 1
+                value_ = value_ + ch
+        TokenKind.Error("Unterminated triple-quoted string")
+
+    me scan_fstring() -> TokenKind:
+        self.scan_fstring_impl(false)
+
+    me scan_triple_fstring() -> TokenKind:
+        self.advance()  # Second "
+        self.advance()  # Third "
+        self.scan_fstring_impl(true)
+
+    me scan_fstring_impl(is_triple: bool) -> TokenKind:
+        var parts_: [FStringToken] = []
+        var current_ = ""
+        var has_interp_ = false
+        while self.peek().?:
+            val ch = self.peek().unwrap()
+            if ch == "\"":
+                if is_triple:
+                    if self.peek_ahead(1) == Some("\"") and self.peek_ahead(2) == Some("\""):
+                        self.advance()
+                        self.advance()
+                        self.advance()
+                        if current_.len() > 0:
+                            parts_.push(FStringToken.Literal(current_))
+                        return TokenKind.FString(parts_)
+                    else:
+                        self.advance()
+                        current_ = current_ + "\""
+                        continue
+                else:
+                    self.advance()
+                    if current_.len() > 0:
+                        parts_.push(FStringToken.Literal(current_))
+                    if not has_interp_:
+                        match self.scan_string_unit_suffix():
+                            case Some(s): return TokenKind.TypedString(current_, s)
+                            case None: ()
+                    return TokenKind.FString(parts_)
+            elif ch == "{":
+                self.advance()
+                if self.check("{"):
+                    self.advance()
+                    current_ = current_ + "{"
+                    continue
+                if self.check("\\") or self.check("'") or self.check("\""):
+                    current_ = current_ + "{"
+                    continue
+                if current_.len() > 0:
+                    parts_.push(FStringToken.Literal(current_))
+                    current_ = ""
+                var expr_ = ""
+                var brace_depth_ = 1
+                var in_str_: text? = None
+                while self.peek().?:
+                    val c = self.peek().unwrap()
+                    if c == "\\":
+                        self.advance()
+                        if self.peek().?:
+                            val next = self.peek().unwrap()
+                            if next == "\"" or next == "'":
+                                self.advance()
+                                expr_ = expr_ + next
+                            elif next == "\\":
+                                self.advance()
+                                expr_ = expr_ + "\\"
+                            elif next == "n":
+                                self.advance()
+                                expr_ = expr_ + "\\n"
+                            elif next == "t":
+                                self.advance()
+                                expr_ = expr_ + "\\t"
+                            else:
+                                expr_ = expr_ + "\\"
+                        else:
+                            expr_ = expr_ + "\\"
+                        continue
+                    if c == "\"":
+                        match in_str_:
+                            case Some(q) if q == "\"": in_str_ = None
+                            case Some(_): ()
+                            case None: in_str_ = Some("\"")
+                        expr_ = expr_ + c
+                        self.advance()
+                        continue
+                    if not in_str_.?:
+                        if c == "}":
+                            brace_depth_ = brace_depth_ - 1
+                            if brace_depth_ == 0:
+                                self.advance()
+                                break
+                        elif c == "{":
+                            brace_depth_ = brace_depth_ + 1
+                    expr_ = expr_ + c
+                    self.advance()
+                if brace_depth_ != 0:
+                    return TokenKind.Error("Unclosed { in f-string")
+                if expr_.trim().len() == 0:
+                    current_ = current_ + "{}"
+                else:
+                    parts_.push(FStringToken.Expr(expr_))
+                    has_interp_ = true
+            elif ch == "}":
+                self.advance()
+                if self.check("}"):
+                    self.advance()
+                current_ = current_ + "}"
+            elif ch == "\\":
+                self.advance()
+                match self.process_escape(true):
+                    case EscapeResult.Char(c): current_ = current_ + c
+                    case EscapeResult.Error(msg): return TokenKind.Error(msg)
+                    case EscapeResult.Unterminated: return TokenKind.Error("Unterminated f-string")
+            elif ch == "\n":
+                if is_triple:
+                    self.advance()
+                    self.line = self.line + 1
+                    self.column = 1
+                    current_ = current_ + ch
+                else:
+                    return TokenKind.Error("Unterminated f-string")
+            else:
+                self.advance()
+                current_ = current_ + ch
+        if is_triple:
+            TokenKind.Error("Unterminated triple-quoted f-string")
+        else:
+            TokenKind.Error("Unterminated f-string")
+
+    # ── i18n string scanning ────────────────────────────────────────
+
+    me scan_i18n_string(name: text) -> TokenKind:
+        var parts_: [FStringToken] = []
+        var current_ = ""
+        var has_interp_ = false
+        while self.peek().?:
+            val ch = self.peek().unwrap()
+            if ch == "\"":
+                self.advance()
+                if current_.len() > 0:
+                    parts_.push(FStringToken.Literal(current_))
+                if has_interp_:
+                    return TokenKind.I18nFString(name: name, parts: parts_)
+                else:
+                    val default_ = parts_.map(\p: match p:
+                        case FStringToken.Literal(s): s
+                        case _: ""
+                    ).join("")
+                    return TokenKind.I18nString(name: name, default_text: default_)
+            elif ch == "{":
+                self.advance()
+                if self.check("{"):
+                    self.advance()
+                    current_ = current_ + "{"
+                    continue
+                if current_.len() > 0:
+                    parts_.push(FStringToken.Literal(current_))
+                    current_ = ""
+                var expr_ = ""
+                var depth_ = 1
+                while self.peek().?:
+                    val c = self.peek().unwrap()
+                    if c == "}":
+                        depth_ = depth_ - 1
+                        if depth_ == 0:
+                            self.advance()
+                            break
+                    elif c == "{":
+                        depth_ = depth_ + 1
+                    expr_ = expr_ + c
+                    self.advance()
+                if depth_ != 0:
+                    return TokenKind.Error("Unclosed { in i18n string")
+                parts_.push(FStringToken.Expr(expr_))
+                has_interp_ = true
+            elif ch == "}":
+                self.advance()
+                if self.check("}"):
+                    self.advance()
+                    current_ = current_ + "}"
+                else:
+                    return TokenKind.Error("Single } in i18n string (use }} to escape)")
+            elif ch == "\\":
+                self.advance()
+                match self.process_escape(true):
+                    case EscapeResult.Char(c): current_ = current_ + c
+                    case EscapeResult.Error(msg): return TokenKind.Error(msg)
+                    case EscapeResult.Unterminated: return TokenKind.Error("Unterminated i18n string")
+            elif ch == "\n":
+                return TokenKind.Error("Unterminated i18n string")
+            else:
+                self.advance()
+                current_ = current_ + ch
+        TokenKind.Error("Unterminated i18n string")
+
+    me scan_i18n_triple_string(name: text) -> TokenKind:
+        self.advance()  # Second "
+        self.advance()  # Third "
+        var parts_: [FStringToken] = []
+        var current_ = ""
+        var has_interp_ = false
+        while self.peek().?:
+            val ch = self.peek().unwrap()
+            if ch == "\"":
+                if self.peek_ahead(1) == Some("\"") and self.peek_ahead(2) == Some("\""):
+                    self.advance()
+                    self.advance()
+                    self.advance()
+                    if current_.len() > 0:
+                        parts_.push(FStringToken.Literal(current_))
+                    if has_interp_:
+                        return TokenKind.I18nFString(name: name, parts: parts_)
+                    else:
+                        val default_ = parts_.map(\p: match p:
+                            case FStringToken.Literal(s): s
+                            case _: ""
+                        ).join("")
+                        return TokenKind.I18nString(name: name, default_text: default_)
+                else:
+                    self.advance()
+                    current_ = current_ + "\""
+            elif ch == "{":
+                self.advance()
+                if self.check("{"):
+                    self.advance()
+                    current_ = current_ + "{"
+                    continue
+                if current_.len() > 0:
+                    parts_.push(FStringToken.Literal(current_))
+                    current_ = ""
+                var expr_ = ""
+                var depth_ = 1
+                while self.peek().?:
+                    val c = self.peek().unwrap()
+                    if c == "}":
+                        depth_ = depth_ - 1
+                        if depth_ == 0:
+                            self.advance()
+                            break
+                    elif c == "{":
+                        depth_ = depth_ + 1
+                    expr_ = expr_ + c
+                    self.advance()
+                if depth_ != 0:
+                    return TokenKind.Error("Unclosed { in i18n string")
+                parts_.push(FStringToken.Expr(expr_))
+                has_interp_ = true
+            elif ch == "}":
+                self.advance()
+                if self.check("}"):
+                    self.advance()
+                    current_ = current_ + "}"
+                else:
+                    return TokenKind.Error("Single } in i18n string (use }} to escape)")
+            elif ch == "\\":
+                self.advance()
+                match self.process_escape(true):
+                    case EscapeResult.Char(c): current_ = current_ + c
+                    case EscapeResult.Error(msg): return TokenKind.Error(msg)
+                    case EscapeResult.Unterminated: return TokenKind.Error("Unterminated triple-quoted i18n string")
+            elif ch == "\n":
+                self.advance()
+                self.line = self.line + 1
+                self.column = 1
+                current_ = current_ + ch
+            else:
+                self.advance()
+                current_ = current_ + ch
+        TokenKind.Error("Unterminated triple-quoted i18n string")
+
+    # ── Identifier and keyword scanning ─────────────────────────────
+
+    me scan_identifier(first: text) -> TokenKind:
+        # f-string: f"..."
+        if first == "f" and self.check("\""):
+            self.advance()
+            if self.check("\"") and self.check_ahead(1, "\""):
+                return self.scan_triple_fstring()
+            return self.scan_fstring()
+        # Raw string: r"..."
+        if first == "r" and self.check("\""):
+            self.advance()
+            if self.check("\"") and self.check_ahead(1, "\""):
+                return self.scan_triple_quoted_string()
+            return self.scan_raw_double_string()
+        # Pointcut: pc{...}
+        if first == "p" and self.peek() == Some("c") and self.peek_ahead(1) == Some("{"):
+            self.advance()  # c
+            self.advance()  # {
+            return self.scan_pointcut()
+        # Custom blocks
+        match self.try_scan_custom_block(first):
+            case Some(kind): return kind
+            case None: ()
+        var name_ = first
+        while self.peek().?:
+            val ch = self.peek().unwrap()
+            if ch.is_alphanumeric() or ch == "_":
+                name_ = name_ + ch
+                self.advance()
+            else:
+                break
+        # i18n pattern: Name_"..."
+        if name_.ends_with("_") and self.check("\""):
+            self.advance()
+            if self.check("\"") and self.check_ahead(1, "\""):
+                return self.scan_i18n_triple_string(name_)
+            return self.scan_i18n_string(name_)
+        # Suspension keywords: if~, while~, for~, match~, and~, or~
+        if self.check("~"):
+            match name_:
+                case "if":
+                    self.advance()
+                    return TokenKind.IfSuspend
+                case "while":
+                    self.advance()
+                    return TokenKind.WhileSuspend
+                case "for":
+                    self.advance()
+                    return TokenKind.ForSuspend
+                case "match":
+                    self.advance()
+                    return TokenKind.MatchSuspend
+                case "and":
+                    self.advance()
+                    return TokenKind.AndSuspend
+                case "or":
+                    self.advance()
+                    return TokenKind.OrSuspend
+                case _: ()
+        # Keywords
+        match name_:
+            case "fn": TokenKind.Fn
+            case "me": TokenKind.Me
+            case "let": TokenKind.Let
+            case "mut": TokenKind.Mut
+            case "val": TokenKind.Val
+            case "var": TokenKind.Var
+            case "if": TokenKind.If
+            case "elif": TokenKind.Elif
+            case "else": TokenKind.Else
+            case "for": TokenKind.For
+            case "while": TokenKind.While
+            case "loop": TokenKind.Loop
+            case "break": TokenKind.Break
+            case "continue": TokenKind.Continue
+            case "pass": TokenKind.Pass
+            case "defer": TokenKind.Defer
+            case "skip":
+                if self.check("("):
+                    TokenKind.Identifier(name: name_, pattern: NamePattern.detect(name_))
+                else:
+                    TokenKind.Skip
+            case "return": TokenKind.Return
+            case "match": TokenKind.Match
+            case "case": TokenKind.Case
+            case "struct": TokenKind.Struct
+            case "class": TokenKind.Class
+            case "enum": TokenKind.Enum
+            case "union": TokenKind.Union
+            case "trait": TokenKind.Trait
+            case "impl": TokenKind.Impl
+            case "mixin": TokenKind.Mixin
+            case "actor": TokenKind.Actor
+            case "kernel": TokenKind.Kernel
+            case "gen": TokenKind.Gen
+            case "extends": TokenKind.Extends
+            case "pub": TokenKind.Pub
+            case "priv": TokenKind.Priv
+            case "import": TokenKind.Import
+            case "from": TokenKind.From
+            case "as": TokenKind.As
+            case "mod": TokenKind.Mod
+            case "use": TokenKind.Use
+            case "export": TokenKind.Export
+            case "structured_export": TokenKind.StructuredExport
+            case "common": TokenKind.Common
+            case "auto": TokenKind.Auto
+            case "crate": TokenKind.Crate
+            case "in": TokenKind.In
+            case "is": TokenKind.Is
+            case "not": TokenKind.Not
+            case "and": TokenKind.And
+            case "xor": TokenKind.Xor
+            case "or":
+                if self.check(":"):
+                    self.advance()
+                    TokenKind.OrColon
+                else:
+                    TokenKind.Or
+            case "or_return":
+                if self.check(":"):
+                    self.advance()
+                    TokenKind.OrReturn
+                else:
+                    TokenKind.Identifier(name: "or_return", pattern: NamePattern.detect("or_return"))
+            case "true": TokenKind.Bool(true)
+            case "false": TokenKind.Bool(false)
+            case "nil": TokenKind.Nil
+            case "spawn": TokenKind.Spawn
+            case "go": TokenKind.Go
+            case "new": TokenKind.New
+            case "self": TokenKind.Self_
+            case "super": TokenKind.Super
+            case "async": TokenKind.Async
+            case "await": TokenKind.Await
+            case "sync": TokenKind.Sync
+            case "yield": TokenKind.Yield
+            case "move": TokenKind.Move
+            case "const": TokenKind.Const
+            case "static":
+                if self.check("("):
+                    TokenKind.Identifier(name: name_, pattern: NamePattern.detect(name_))
+                else:
+                    TokenKind.Static
+            case "type": TokenKind.Type
+            case "unit": TokenKind.Unit
+            case "extern": TokenKind.Extern
+            case "context": TokenKind.Context
+            case "with": TokenKind.With
+            case "by": TokenKind.By
+            case "into": TokenKind.Into
+            case "onto": TokenKind.Onto
+            case "ghost": TokenKind.Ghost
+            case "macro": TokenKind.Macro
+            case "vec": TokenKind.Vec
+            case "shared": TokenKind.Shared
+            case "gpu": TokenKind.Gpu
+            case "bounds": TokenKind.Bounds
+            case "dyn": TokenKind.Dyn
+            case "repr": TokenKind.Repr
+            case "literal": TokenKind.Literal
+            case "alias": TokenKind.Alias
+            case "out": TokenKind.Out
+            case "out_err": TokenKind.OutErr
+            case "where": TokenKind.Where
+            case "requires": TokenKind.Requires
+            case "ensures": TokenKind.Ensures
+            case "invariant": TokenKind.Invariant
+            case "old": TokenKind.Old
+            case "result": TokenKind.Result
+            case "decreases": TokenKind.Decreases
+            case "forall": TokenKind.Forall
+            case "exists": TokenKind.Exists
+            case "assert" if self.peek() != Some("!") and self.peek() != Some("("): TokenKind.Assert
+            case "assume" if self.peek() != Some("!") and self.peek() != Some("("): TokenKind.Assume
+            case "admit" if self.peek() != Some("!") and self.peek() != Some("("): TokenKind.Admit
+            case "to": TokenKind.To
+            case "not_to": TokenKind.NotTo
+            case "feature": TokenKind.Feature
+            case "scenario": TokenKind.Scenario
+            case "outline": TokenKind.Outline
+            case "examples": TokenKind.Examples
+            case "given": TokenKind.Given
+            case "when": TokenKind.When
+            case "then": TokenKind.Then
+            case "and_then": TokenKind.AndThen
+            case "handle_pool": TokenKind.HandlePool
+            case "grid": TokenKind.Grid
+            case "tensor": TokenKind.Tensor
+            case "slice": TokenKind.Slice
+            case "flat": TokenKind.Flat
+            case "default":
+                if self.check("("):
+                    TokenKind.Identifier(name: name_, pattern: NamePattern.detect(name_))
+                else:
+                    TokenKind.Default
+            case "_": TokenKind.Underscore
+            case "on": TokenKind.On
+            case "bind": TokenKind.Bind
+            case "forbid": TokenKind.Forbid
+            case "allow": TokenKind.Allow
+            case "mock": TokenKind.Mock
+            case "unwrap": TokenKind.Unwrap
+            case _:
+                TokenKind.Identifier(name: name_, pattern: NamePattern.detect(name_))
+
+    me scan_pointcut() -> TokenKind:
+        var content_ = ""
+        var depth_ = 1
+        while self.peek().?:
+            val ch = self.peek().unwrap()
+            if ch == "{":
+                depth_ = depth_ + 1
+                content_ = content_ + ch
+                self.advance()
+            elif ch == "}":
+                depth_ = depth_ - 1
+                if depth_ == 0:
+                    self.advance()
+                    return TokenKind.Pointcut(content_)
+                content_ = content_ + ch
+                self.advance()
+            else:
+                content_ = content_ + ch
+                self.advance()
+        TokenKind.Error("Unclosed pointcut expression (missing '}')")
+
+    me try_scan_custom_block(first: text) -> TokenKind?:
+        if first == "m" and self.peek() == Some("{"):
+            self.advance()
+            return Some(self.scan_custom_block_payload("m"))
+        match first:
+            case "s":
+                if self.peek() == Some("h") and self.peek_ahead(1) == Some("{"):
+                    self.advance()
+                    self.advance()
+                    return Some(self.scan_custom_block_payload("sh"))
+                if self.peek() == Some("q") and self.peek_ahead(1) == Some("l") and self.peek_ahead(2) == Some("{"):
+                    self.advance()
+                    self.advance()
+                    self.advance()
+                    return Some(self.scan_custom_block_payload("sql"))
+            case "r":
+                if self.peek() == Some("e") and self.peek_ahead(1) == Some("{"):
+                    self.advance()
+                    self.advance()
+                    return Some(self.scan_custom_block_payload("re"))
+            case "h":
+                if self.peek() == Some("t") and self.peek_ahead(1) == Some("m") and self.peek_ahead(2) == Some("l") and self.peek_ahead(3) == Some("{"):
+                    self.advance()
+                    self.advance()
+                    self.advance()
+                    self.advance()
+                    return Some(self.scan_custom_block_payload("html"))
+            case "g":
+                if self.peek() == Some("r") and self.peek_ahead(1) == Some("a") and self.peek_ahead(2) == Some("p") and self.peek_ahead(3) == Some("h") and self.peek_ahead(4) == Some("{"):
+                    self.advance()
+                    self.advance()
+                    self.advance()
+                    self.advance()
+                    self.advance()
+                    return Some(self.scan_custom_block_payload("graph"))
+            case "i":
+                if self.peek() == Some("m") and self.peek_ahead(1) == Some("g") and self.peek_ahead(2) == Some("{"):
+                    self.advance()
+                    self.advance()
+                    self.advance()
+                    return Some(self.scan_custom_block_payload("img"))
+            case "l":
+                if self.peek() == Some("e") and self.peek_ahead(1) == Some("a") and self.peek_ahead(2) == Some("n") and self.peek_ahead(3) == Some("{"):
+                    self.advance()
+                    self.advance()
+                    self.advance()
+                    self.advance()
+                    return Some(self.scan_custom_block_payload("lean"))
+            case _: ()
+        # Also check "md" - first char is 'm' but already handled 'm{' above
+        if first == "m" and self.peek() == Some("d") and self.peek_ahead(1) == Some("{"):
+            self.advance()
+            self.advance()
+            return Some(self.scan_custom_block_payload("md"))
+        None
+
+    me scan_custom_block_payload(kind: text) -> TokenKind:
+        var payload_ = ""
+        var depth_: i64 = 1
+        var pre_lex_ = PreLexInfo(string_spans: [], comment_spans: [],
+                                   escape_positions: [], brace_pairs: [])
+        var brace_stack_: [i64] = []
+        while self.peek().?:
+            val pos_ = payload_.len()
+            val ch = self.peek().unwrap()
+            # Escape sequences
+            if ch == "\\":
+                pre_lex_.escape_positions.push(pos_)
+                payload_ = payload_ + ch
+                self.advance()
+                if self.peek().?:
+                    payload_ = payload_ + self.peek().unwrap()
+                    self.advance()
+                continue
+            # Double-quoted strings
+            if ch == "\"":
+                val start_ = pos_
+                payload_ = payload_ + ch
+                self.advance()
+                while self.peek().?:
+                    val sc = self.peek().unwrap()
+                    if sc == "\\":
+                        pre_lex_.escape_positions.push(payload_.len())
+                        payload_ = payload_ + sc
+                        self.advance()
+                        if self.peek().?:
+                            payload_ = payload_ + self.peek().unwrap()
+                            self.advance()
+                    elif sc == "\"":
+                        payload_ = payload_ + sc
+                        self.advance()
+                        break
+                    else:
+                        payload_ = payload_ + sc
+                        self.advance()
+                pre_lex_.string_spans.push(TextSpan(start: start_, end: payload_.len()))
+                continue
+            # Single-quoted strings
+            if ch == "'":
+                val start_ = pos_
+                payload_ = payload_ + ch
+                self.advance()
+                while self.peek().?:
+                    val sc = self.peek().unwrap()
+                    if sc == "\\":
+                        pre_lex_.escape_positions.push(payload_.len())
+                        payload_ = payload_ + sc
+                        self.advance()
+                        if self.peek().?:
+                            payload_ = payload_ + self.peek().unwrap()
+                            self.advance()
+                    elif sc == "'":
+                        payload_ = payload_ + sc
+                        self.advance()
+                        break
+                    else:
+                        payload_ = payload_ + sc
+                        self.advance()
+                pre_lex_.string_spans.push(TextSpan(start: start_, end: payload_.len()))
+                continue
+            # Line comments
+            if ch == "#":
+                val start_ = pos_
+                payload_ = payload_ + ch
+                self.advance()
+                while self.peek().?:
+                    if self.peek().unwrap() == "\n":
+                        break
+                    payload_ = payload_ + self.peek().unwrap()
+                    self.advance()
+                pre_lex_.comment_spans.push(TextSpan(start: start_, end: payload_.len()))
+                continue
+            # Block comments
+            if ch == "/" and self.peek_ahead(1) == Some("*"):
+                val start_ = pos_
+                payload_ = payload_ + ch
+                self.advance()
+                payload_ = payload_ + "*"
+                self.advance()
+                var cdepth_ = 1
+                while cdepth_ > 0:
+                    match self.peek():
+                        case Some("/"):
+                            payload_ = payload_ + "/"
+                            self.advance()
+                            if self.peek() == Some("*"):
+                                payload_ = payload_ + "*"
+                                self.advance()
+                                cdepth_ = cdepth_ + 1
+                        case Some("*"):
+                            payload_ = payload_ + "*"
+                            self.advance()
+                            if self.peek() == Some("/"):
+                                payload_ = payload_ + "/"
+                                self.advance()
+                                cdepth_ = cdepth_ - 1
+                        case Some(c):
+                            payload_ = payload_ + c
+                            self.advance()
+                        case None: break
+                pre_lex_.comment_spans.push(TextSpan(start: start_, end: payload_.len()))
+                continue
+            # Brace tracking
+            if ch == "{":
+                brace_stack_.push(pos_)
+                depth_ = depth_ + 1
+                payload_ = payload_ + ch
+                self.advance()
+            elif ch == "}":
+                depth_ = depth_ - 1
+                if depth_ == 0:
+                    self.advance()
+                    return TokenKind.CustomBlock(kind: kind, payload: payload_, pre_lex_info: pre_lex_)
+                if brace_stack_.len() > 0:
+                    val open_ = brace_stack_.pop()
+                    pre_lex_.brace_pairs.push((open_, pos_))
+                payload_ = payload_ + ch
+                self.advance()
+            else:
+                payload_ = payload_ + ch
+                self.advance()
+        TokenKind.Error("Unclosed {kind} block (missing '}')")
+
+    me scan_symbol() -> TokenKind:
+        var name_ = ""
+        while self.peek().?:
+            val ch = self.peek().unwrap()
+            if ch.is_alphanumeric() or ch == "_":
+                name_ = name_ + ch
+                self.advance()
+            else:
+                break
+        if name_.len() == 0:
+            TokenKind.Colon
+        else:
+            TokenKind.Symbol(name_)
+
+    # ── Indentation handling ────────────────────────────────────────
+
+    me handle_indentation() -> Token?:
+        val start_pos_ = self.pos
+        val start_line_ = self.line
+        var indent_ = 0
+        var pending_: Token? = None
+        while self.peek().?:
+            val ch = self.peek().unwrap()
+            if ch == " ":
+                indent_ = indent_ + 1
+                self.advance()
+            elif ch == "\t":
+                indent_ = indent_ + 4
+                self.advance()
+            elif ch == "\n":
+                self.advance()
+                self.line = self.line + 1
+                self.column = 1
+                indent_ = 0
+            elif ch == "#":
+                val hash_start = self.pos
+                self.advance()
+                val next = self.peek()
+                if next == Some("["):
+                    pending_ = Some(Token(kind: TokenKind.Hash,
+                        span: Span(start: self.pos - 1, end: self.pos, line: self.line, column: self.column - 1),
+                        lexeme: "#"))
+                    break
+                elif next == Some("#"):
+                    self.advance()
+                    while self.peek().?:
+                        val c = self.peek().unwrap()
+                        if c == " " or c == "\t":
+                            self.advance()
+                        else:
+                            break
+                    var doc_content_ = ""
+                    while self.peek().?:
+                        if self.peek().unwrap() == "\n":
+                            break
+                        doc_content_ = doc_content_ + self.peek().unwrap()
+                        self.advance()
+                    pending_ = Some(Token(kind: TokenKind.DocComment(doc_content_.trim()),
+                        span: Span(start: hash_start, end: self.pos, line: self.line, column: self.column),
+                        lexeme: self.source[hash_start:self.pos]))
+                    break
+                else:
+                    while self.peek().?:
+                        if self.peek().unwrap() == "\n":
+                            break
+                        self.advance()
+                    if self.peek() == Some("\n"):
+                        self.advance()
+                        self.line = self.line + 1
+                        self.column = 1
+                    indent_ = 0
+            elif ch == "/":
+                val slash_start = self.pos
+                val slash_line = self.line
+                val slash_col = self.column
+                self.advance()
+                if self.peek() == Some("*"):
+                    self.advance()
+                    if self.peek() == Some("*") and self.peek_ahead(1) != Some("/"):
+                        self.advance()
+                        val content_ = self.parse_nested_comment()
+                        val cleaned = Lexer.clean_doc_comment(content_)
+                        pending_ = Some(Token(kind: TokenKind.DocComment(cleaned),
+                            span: Span(start: slash_start, end: self.pos, line: slash_line, column: slash_col),
+                            lexeme: self.source[slash_start:self.pos]))
+                        break
+                    var depth_ = 1
+                    while depth_ > 0:
+                        match self.advance():
+                            case Some("*"):
+                                if self.check("/"):
+                                    self.advance()
+                                    depth_ = depth_ - 1
+                            case Some("/"):
+                                if self.check("*"):
+                                    self.advance()
+                                    depth_ = depth_ + 1
+                            case Some("\n"):
+                                self.line = self.line + 1
+                                self.column = 1
+                            case Some(_): ()
+                            case None: break
+                    indent_ = 0
+                elif self.peek() == Some("/"):
+                    self.advance()
+                    if self.peek() == Some("/"):
+                        self.advance()
+                        while self.peek() == Some(" ") or self.peek() == Some("\t"):
+                            self.advance()
+                        if not self.peek().? or self.peek().unwrap() == "\n":
+                            pending_ = Some(self.read_doc_block_triple_slash(slash_start, slash_line, slash_col))
+                            break
+                        val cs = self.pos
+                        while self.peek().?:
+                            if self.peek().unwrap() == "\n":
+                                break
+                            self.advance()
+                        pending_ = Some(Token(kind: TokenKind.DocComment(self.source[cs:self.pos].trim()),
+                            span: Span(start: slash_start, end: self.pos, line: slash_line, column: slash_col),
+                            lexeme: self.source[slash_start:self.pos]))
+                        break
+                    else:
+                        return Some(Token(kind: TokenKind.Parallel,
+                            span: Span(start: self.pos - 2, end: self.pos, line: self.line, column: self.column - 2),
+                            lexeme: "//"))
+                elif self.peek() == Some("="):
+                    self.advance()
+                    return Some(Token(kind: TokenKind.SlashAssign,
+                        span: Span(start: self.pos - 2, end: self.pos, line: self.line, column: self.column - 2),
+                        lexeme: "/="))
+                else:
+                    return Some(Token(kind: TokenKind.Slash,
+                        span: Span(start: self.pos - 1, end: self.pos, line: self.line, column: self.column - 1),
+                        lexeme: "/"))
+            else:
+                break
+        if pending_.?:
+            val tok = pending_.unwrap()
+            val current_ = self.indent_stack.last() ?? 0
+            if indent_ > current_:
+                self.indent_stack.push(indent_)
+                self.pending_tokens.push(tok)
+                return Some(Token(kind: TokenKind.Indent,
+                    span: Span(start: start_pos_, end: self.pos, line: start_line_, column: 1),
+                    lexeme: ""))
+            elif indent_ < current_:
+                self.pending_tokens.push(tok)
+                while self.indent_stack.len() > 0:
+                    val top = self.indent_stack.last() ?? 0
+                    if top <= indent_:
+                        break
+                    self.indent_stack.pop()
+                    self.pending_tokens.push(Token(kind: TokenKind.Dedent,
+                        span: Span(start: start_pos_, end: self.pos, line: start_line_, column: 1),
+                        lexeme: ""))
+                return self.pending_tokens.pop()
+            return Some(tok)
+        val current_ = self.indent_stack.last() ?? 0
+        if indent_ > current_:
+            self.indent_stack.push(indent_)
+            Some(Token(kind: TokenKind.Indent,
+                span: Span(start: start_pos_, end: self.pos, line: start_line_, column: 1),
+                lexeme: ""))
+        elif indent_ < current_:
+            while self.indent_stack.len() > 0:
+                val top = self.indent_stack.last() ?? 0
+                if top <= indent_:
+                    break
+                self.indent_stack.pop()
+                self.pending_tokens.push(Token(kind: TokenKind.Dedent,
+                    span: Span(start: start_pos_, end: self.pos, line: start_line_, column: 1),
+                    lexeme: ""))
+            self.pending_tokens.pop()
+        else:
+            None
+
+    # ── Main tokenizer ──────────────────────────────────────────────
+
+    me next_token() -> Token:
+        if self.pending_tokens.len() > 0:
+            return self.pending_tokens.pop()
+        if self.at_line_start:
+            self.at_line_start = false
+            if self.bracket_depth == 0 or self.force_indentation_depth > 0:
+                match self.handle_indentation():
+                    case Some(tok): return tok
+                    case None: ()
+            else:
+                while self.peek().?:
+                    val ch = self.peek().unwrap()
+                    if ch == " " or ch == "\t":
+                        self.advance()
+                    elif ch == "\n":
+                        self.advance()
+                        self.line = self.line + 1
+                        self.column = 1
+                    else:
+                        break
+        self.skip_whitespace()
+        val start_pos_ = self.pos
+        val start_line_ = self.line
+        val start_col_ = self.column
+        val ch_opt = self.advance()
+        if not ch_opt.?:
+            while self.indent_stack.len() > 1:
+                self.indent_stack.pop()
+                self.pending_tokens.push(Token(kind: TokenKind.Dedent,
+                    span: Span(start: start_pos_, end: start_pos_, line: start_line_, column: start_col_),
+                    lexeme: ""))
+            if self.pending_tokens.len() > 0:
+                return self.pending_tokens.pop()
+            return Token(kind: TokenKind.Eof,
+                span: Span(start: start_pos_, end: start_pos_, line: start_line_, column: start_col_),
+                lexeme: "")
+        val ch = ch_opt.unwrap()
+        val kind_ = match ch:
+            case "\n":
+                self.line = self.line + 1
+                self.column = 1
+                self.at_line_start = true
+                if self.bracket_depth > 0 and self.force_indentation_depth == 0:
+                    return self.next_token()
+                TokenKind.Newline
+            case "(":
+                self.bracket_depth = self.bracket_depth + 1
+                TokenKind.LParen
+            case ")":
+                if self.bracket_depth > 0:
+                    self.bracket_depth = self.bracket_depth - 1
+                TokenKind.RParen
+            case "[":
+                self.bracket_depth = self.bracket_depth + 1
+                TokenKind.LBracket
+            case "]":
+                if self.bracket_depth > 0:
+                    self.bracket_depth = self.bracket_depth - 1
+                TokenKind.RBracket
+            case "{":
+                self.bracket_depth = self.bracket_depth + 1
+                TokenKind.LBrace
+            case "}":
+                if self.bracket_depth > 0:
+                    self.bracket_depth = self.bracket_depth - 1
+                TokenKind.RBrace
+            case ",": TokenKind.Comma
+            case ";": TokenKind.Semicolon
+            case "@": TokenKind.At
+            case "#":
+                if self.peek() == Some("["):
+                    TokenKind.Hash
+                elif self.peek() == Some("#"):
+                    self.advance()
+                    return self.read_doc_line_comment(start_pos_, start_line_, start_col_)
+                else:
+                    self.skip_comment()
+            case "$": TokenKind.Dollar
+            case "\\":
+                if self.peek() == Some("\n"):
+                    self.advance()
+                    self.line = self.line + 1
+                    self.column = 1
+                    return self.next_token()
+                TokenKind.Backslash
+            case "^": TokenKind.Error("'^' is not allowed outside math blocks. Use 'xor' for bitwise XOR, '**' for power, or m{} for math expressions")
+            case "~":
+                if self.check("+"):
+                    self.advance()
+                    if self.check("="):
+                        self.advance()
+                        TokenKind.TildePlusAssign
+                    else:
+                        TokenKind.Tilde
+                elif self.check("-"):
+                    self.advance()
+                    if self.check("="):
+                        self.advance()
+                        TokenKind.TildeMinusAssign
+                    else:
+                        TokenKind.Tilde
+                elif self.check("*"):
+                    self.advance()
+                    if self.check("="):
+                        self.advance()
+                        TokenKind.TildeStarAssign
+                    else:
+                        TokenKind.Tilde
+                elif self.check("/"):
+                    self.advance()
+                    if self.check("="):
+                        self.advance()
+                        TokenKind.TildeSlashAssign
+                    else:
+                        TokenKind.Tilde
+                elif self.check("="):
+                    self.advance()
+                    TokenKind.TildeAssign
+                else:
+                    TokenKind.Tilde
+            case "?":
+                if self.check("?"):
+                    self.advance()
+                    TokenKind.DoubleQuestion
+                elif self.check("."):
+                    self.advance()
+                    TokenKind.QuestionDot
+                else:
+                    TokenKind.Question
+            case "+": self.match_char("=", TokenKind.PlusAssign, TokenKind.Plus)
+            case "-":
+                if self.check(">"):
+                    self.advance()
+                    TokenKind.Arrow
+                elif self.check("="):
+                    self.advance()
+                    TokenKind.MinusAssign
+                else:
+                    TokenKind.Minus
+            case "*":
+                if self.check("*"):
+                    self.advance()
+                    TokenKind.DoubleStar
+                elif self.check("="):
+                    self.advance()
+                    TokenKind.StarAssign
+                else:
+                    TokenKind.Star
+            case "/":
+                if self.check("*"):
+                    self.advance()
+                    if self.peek() == Some("*") and self.peek_ahead(1) != Some("/"):
+                        self.advance()
+                        return self.read_doc_block_comment(start_pos_, start_line_, start_col_)
+                    else:
+                        self.skip_block_comment()
+                elif self.check("/"):
+                    self.advance()
+                    if self.check("/"):
+                        self.advance()
+                        return self.read_doc_line_comment(start_pos_, start_line_, start_col_)
+                    else:
+                        TokenKind.Parallel
+                elif self.check("="):
+                    self.advance()
+                    TokenKind.SlashAssign
+                else:
+                    TokenKind.Slash
+            case "%": self.match_char("=", TokenKind.PercentAssign, TokenKind.Percent)
+            case "&":
+                if self.check("&"):
+                    self.advance()
+                    TokenKind.DoubleAmp
+                else:
+                    TokenKind.Ampersand
+            case "|":
+                if self.check("|"):
+                    self.advance()
+                    TokenKind.DoublePipe
+                elif self.check(">"):
+                    self.advance()
+                    TokenKind.PipeForward
+                else:
+                    TokenKind.Pipe
+            case "=":
+                if self.check("="):
+                    self.advance()
+                    TokenKind.Eq
+                elif self.check(">"):
+                    self.advance()
+                    TokenKind.FatArrow
+                else:
+                    TokenKind.Assign
+            case "!":
+                if self.check("="):
+                    self.advance()
+                    TokenKind.NotEq
+                else:
+                    TokenKind.Bang
+            case "<":
+                if self.check("-"):
+                    self.advance()
+                    TokenKind.ChannelArrow
+                elif self.check("="):
+                    self.advance()
+                    TokenKind.LtEq
+                elif self.check("<"):
+                    self.advance()
+                    TokenKind.ShiftLeft
+                else:
+                    TokenKind.Lt
+            case ">":
+                if self.check("="):
+                    self.advance()
+                    TokenKind.GtEq
+                elif self.check(">"):
+                    self.advance()
+                    TokenKind.ShiftRight
+                else:
+                    TokenKind.Gt
+            case ":":
+                if self.check(":"):
+                    self.advance()
+                    TokenKind.DoubleColon
+                elif self.check_alpha():
+                    self.scan_symbol()
+                else:
+                    TokenKind.Colon
+            case ".":
+                if self.check("."):
+                    self.advance()
+                    if self.check("."):
+                        self.advance()
+                        TokenKind.Ellipsis
+                    elif self.check("="):
+                        self.advance()
+                        TokenKind.DoubleDotEq
+                    else:
+                        TokenKind.DoubleDot
+                elif self.check("?"):
+                    self.advance()
+                    TokenKind.DotQuestion
+                else:
+                    TokenKind.Dot
+            case "\"":
+                if self.check("\"") and self.check_ahead(1, "\""):
+                    self.scan_triple_quoted_string()
+                else:
+                    self.scan_fstring()
+            case "'": self.scan_raw_string()
+            case c if c.is_digit(): self.scan_number(c)
+            case c if c.is_alpha() or c == "_": self.scan_identifier(c)
+            case c: TokenKind.Error("Unexpected character: '{c}'")
+        val end_pos_ = self.pos
+        val lexeme_ = self.source[start_pos_:end_pos_]
+        Token(kind: kind_, span: Span(start: start_pos_, end: end_pos_, line: start_line_, column: start_col_), lexeme: lexeme_)

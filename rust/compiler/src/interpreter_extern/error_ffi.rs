@@ -66,10 +66,7 @@ fn get_string_arg(args: &[Value], index: usize, name: &str) -> Result<String, Co
 /// Create a semantic error: (message: str) -> error_handle
 pub fn rt_error_semantic(args: &[Value]) -> Result<Value, CompileError> {
     let message = get_string_arg(args, 0, "rt_error_semantic")?;
-    let err = CompileError::semantic_with_context(
-        message,
-        ErrorContext::new().with_code(codes::INVALID_OPERATION),
-    );
+    let err = CompileError::semantic_with_context(message, ErrorContext::new().with_code(codes::INVALID_OPERATION));
     let handle = register_error(err);
     Ok(Value::Int(handle))
 }
@@ -77,10 +74,7 @@ pub fn rt_error_semantic(args: &[Value]) -> Result<Value, CompileError> {
 /// Create a type mismatch error: (message: str) -> error_handle
 pub fn rt_error_type_mismatch(args: &[Value]) -> Result<Value, CompileError> {
     let message = get_string_arg(args, 0, "rt_error_type_mismatch")?;
-    let err = CompileError::semantic_with_context(
-        message,
-        ErrorContext::new().with_code(codes::TYPE_MISMATCH),
-    );
+    let err = CompileError::semantic_with_context(message, ErrorContext::new().with_code(codes::TYPE_MISMATCH));
     let handle = register_error(err);
     Ok(Value::Int(handle))
 }

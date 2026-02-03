@@ -85,9 +85,9 @@ pub use build_log::{
 };
 pub use build_mode::{BuildMode, DeterministicConfig};
 pub use coverage::{
-    get_coverage_output_path, get_global_coverage, init_coverage, init_coverage_from_env, is_coverage_enabled, save_global_coverage, Condition,
-    CoverageCollector, CoverageReport, CoverageStats, CoverageSummary, Decision, ExecutionPath, FunctionCoverage,
-    ModuleCoverage, SourceLoc,
+    get_coverage_output_path, get_global_coverage, init_coverage, init_coverage_from_env, is_coverage_enabled,
+    save_global_coverage, Condition, CoverageCollector, CoverageReport, CoverageStats, CoverageSummary, Decision,
+    ExecutionPath, FunctionCoverage, ModuleCoverage, SourceLoc,
 };
 pub use di::{
     create_di_match_context, parse_di_config, DependencyGraph, DiBindingRule, DiConfig, DiContainer, DiMode, DiProfile,

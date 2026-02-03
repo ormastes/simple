@@ -1,133 +1,163 @@
-# @pending
-"""
-Formatter Basic Tests
-Feature: Code Formatter
-Category: Formatting, Development Tools
-Status: Complete
+# @Feature 702.2: Formatter Basic Unit Tests
+# @Description: Unit tests for formatter helper functions and edge cases
 
-Unit tests for Simple language formatter basic functionality.
-Tests indentation, spacing, and basic formatting rules.
-"""
+use app.formatter.main.*
 
-# Helper functions for formatter testing
+# ============================================================================
+# Helper: last_index_of
+# ============================================================================
 
-fn count_leading_spaces(line: str) -> i64:
-    var count = 0
-    for i in 0..line.len():
-        if line[i] == ' ':
-            count = count + 1
-        else:
-            break
-    return count
+describe "last_index_of":
+    it "finds pattern in string":
+        val result = last_index_of("hello world", "o")
+        expect result.?
 
-fn is_properly_indented(line: str, expected_indent: i64) -> bool:
-    val actual = count_leading_spaces(line)
-    actual == expected_indent
+    it "returns None for missing pattern":
+        val result = last_index_of("hello", "z")
+        expect not result.?
 
-describe "Indentation Rules":
-    """
-    Tests for proper indentation formatting.
-    """
+# ============================================================================
+# FormatConfig defaults
+# ============================================================================
 
-    it "uses 4-space indentation":
-        val indent_size = 4
-        expect indent_size == 4
+describe "FormatConfig defaults":
+    it "has sensible defaults":
+        val config = FormatConfig(indent_size: 4, max_line_length: 100, use_tabs: false, blank_lines_between_items: 2, continuation_indent: 8)
+        expect config.indent_size > 0
+        expect config.max_line_length > 0
+        expect config.continuation_indent > 0
 
-    it "calculates leading spaces correctly":
-        val line1 = "fn test():"
-        val line2 = "    return 42"
-        val line3 = "        nested"
+    it "continuation indent is larger than indent size":
+        val config = FormatConfig(indent_size: 4, max_line_length: 100, use_tabs: false, blank_lines_between_items: 2, continuation_indent: 8)
+        expect config.continuation_indent > config.indent_size
 
-        expect count_leading_spaces(line1) == 0
-        expect count_leading_spaces(line2) == 4
-        expect count_leading_spaces(line3) == 8
+# ============================================================================
+# Formatter - format_code_lines
+# ============================================================================
 
-    it "validates indentation levels":
-        val code_line = "    if x > 0:"
-        expect is_properly_indented(code_line, 4)
+describe "format_code_lines":
+    it "formats simple list of lines":
+        val f = Formatter(indent_level: 0, config: FormatConfig(indent_size: 4, max_line_length: 100, use_tabs: false, blank_lines_between_items: 2, continuation_indent: 8))
+        val result = f.format_code_lines(["val x = 5", "val y = 10"])
+        match result:
+            Ok(lines):
+                expect lines.len() >= 2
+            Err(e):
+                expect false
 
-describe "Spacing Rules":
-    """
-    Tests for spacing around operators and keywords.
-    """
+    it "handles empty list":
+        val f = Formatter(indent_level: 0, config: FormatConfig(indent_size: 4, max_line_length: 100, use_tabs: false, blank_lines_between_items: 2, continuation_indent: 8))
+        val result = f.format_code_lines([])
+        match result:
+            Ok(lines):
+                expect lines.len() == 0
+            Err(e):
+                expect false
 
-    it "adds spaces around binary operators":
-        val with_spaces = "x + y"
-        val without_spaces = "x+y"
+    it "collapses excessive blank lines":
+        val f = Formatter(indent_level: 0, config: FormatConfig(indent_size: 4, max_line_length: 100, use_tabs: false, blank_lines_between_items: 2, continuation_indent: 8))
+        val result = f.format_code_lines(["val x = 5", "", "", "", "", "val y = 10"])
+        match result:
+            Ok(lines):
+                # Should limit blank lines to config.blank_lines_between_items
+                var blank_count = 0
+                var max_blank = 0
+                for line in lines:
+                    if line.trim().is_empty():
+                        blank_count = blank_count + 1
+                    else:
+                        if blank_count > max_blank:
+                            max_blank = blank_count
+                        blank_count = 0
+                expect max_blank <= 2
+            Err(e):
+                expect false
 
-        expect with_spaces.contains(" + ")
-        expect not without_spaces.contains(" + ")
+    it "adds blank lines between top-level definitions":
+        val f = Formatter(indent_level: 0, config: FormatConfig(indent_size: 4, max_line_length: 100, use_tabs: false, blank_lines_between_items: 2, continuation_indent: 8))
+        val result = f.format_code_lines(["fn foo():", "fn bar():"])
+        match result:
+            Ok(lines):
+                # Should have blank lines inserted between definitions
+                expect lines.len() > 2
+            Err(e):
+                expect false
 
-    it "formats function definitions":
-        val formatted = "fn add(a: i64, b: i64) -> i64:"
-        expect formatted.starts_with("fn ")
-        expect formatted.ends_with(":")
+# ============================================================================
+# Formatter - break_function_signature
+# ============================================================================
 
-    it "formats method calls":
-        val call = "object.method(arg1, arg2)"
-        expect call.contains(".")
-        expect call.contains("(")
-        expect call.contains(")")
+describe "break_function_signature":
+    it "breaks long signature at parens":
+        val f = Formatter(indent_level: 0, config: FormatConfig(indent_size: 4, max_line_length: 100, use_tabs: false, blank_lines_between_items: 2, continuation_indent: 8))
+        val result = f.break_function_signature(
+            "fn long_name(param1: Int, param2: String, param3: Bool) -> Result",
+            "",
+            "        "
+        )
+        expect result.len() >= 1
 
-describe "Line Formatting":
-    """
-    Tests for line-level formatting rules.
-    """
+    it "keeps short signature on one line":
+        val f = Formatter(indent_level: 0, config: FormatConfig(indent_size: 4, max_line_length: 100, use_tabs: false, blank_lines_between_items: 2, continuation_indent: 8))
+        val result = f.break_function_signature("fn short(x: Int) -> Int", "", "    ")
+        expect result.len() >= 1
 
-    it "removes trailing whitespace":
-        val line_with_trailing = "code    "
-        val line_clean = "code"
+# ============================================================================
+# Formatter - break_function_call
+# ============================================================================
 
-        expect line_with_trailing.trim() == line_clean
+describe "break_function_call":
+    it "breaks long call at parens":
+        val f = Formatter(indent_level: 0, config: FormatConfig(indent_size: 4, max_line_length: 100, use_tabs: false, blank_lines_between_items: 2, continuation_indent: 8))
+        val result = f.break_function_call(
+            "my_function(first_arg, second_arg, third_arg)",
+            "",
+            "        "
+        )
+        expect result.len() >= 1
 
-    it "preserves empty lines":
-        val empty_line = ""
-        expect empty_line.len() == 0
+    it "handles call without parens gracefully":
+        val f = Formatter(indent_level: 0, config: FormatConfig(indent_size: 4, max_line_length: 100, use_tabs: false, blank_lines_between_items: 2, continuation_indent: 8))
+        val result = f.break_function_call("no_parens_here", "", "    ")
+        expect result.len() == 1
 
-    it "handles multiline strings":
-        val multiline = "line1\nline2\nline3"
-        expect multiline.contains("\n")
+# ============================================================================
+# Formatter - break_collection
+# ============================================================================
 
-describe "Statement Formatting":
-    """
-    Tests for formatting different statement types.
-    """
+describe "break_collection":
+    it "breaks array literal":
+        val f = Formatter(indent_level: 0, config: FormatConfig(indent_size: 4, max_line_length: 100, use_tabs: false, blank_lines_between_items: 2, continuation_indent: 8))
+        val result = f.break_collection("[1, 2, 3, 4, 5]", "", "        ")
+        expect result.len() >= 1
 
-    it "formats variable declarations":
-        val decl1 = "val x = 42"
-        val decl2 = "var y = 100"
+# ============================================================================
+# Edge cases
+# ============================================================================
 
-        expect decl1.starts_with("val ")
-        expect decl2.starts_with("var ")
+describe "formatter edge cases":
+    it "handles all-whitespace line":
+        val f = Formatter(indent_level: 0, config: FormatConfig(indent_size: 4, max_line_length: 100, use_tabs: false, blank_lines_between_items: 2, continuation_indent: 8))
+        val count = f.count_leading_spaces("     ")
+        expect count == 5
 
-    it "formats if statements":
-        val if_stmt = "if condition:"
-        expect if_stmt.starts_with("if ")
-        expect if_stmt.ends_with(":")
+    it "is_definition with trait":
+        val f = Formatter(indent_level: 0, config: FormatConfig(indent_size: 4, max_line_length: 100, use_tabs: false, blank_lines_between_items: 2, continuation_indent: 8))
+        expect f.is_definition("trait Foo:")
 
-    it "formats match expressions":
-        val match_expr = "match value:"
-        expect match_expr.starts_with("match ")
-        expect match_expr.ends_with(":")
+    it "break_long_line with fn signature":
+        val f = Formatter(indent_level: 0, config: FormatConfig(indent_size: 4, max_line_length: 100, use_tabs: false, blank_lines_between_items: 2, continuation_indent: 8))
+        val line = "fn very_long_function_name(param1: Int, param2: String) -> Result"
+        val result = f.break_long_line(line, 0)
+        expect result.len() >= 1
 
-describe "Expression Formatting":
-    """
-    Tests for formatting expressions.
-    """
+    it "format_line with zero indent":
+        val f = Formatter(indent_level: 0, config: FormatConfig(indent_size: 4, max_line_length: 100, use_tabs: false, blank_lines_between_items: 2, continuation_indent: 8))
+        val result = f.format_line("val x = 5", 0)
+        expect result.len() == 1
+        expect result[0].contains("x")
 
-    it "formats function calls":
-        val call = "function(arg1, arg2)"
-        expect call.contains("(")
-        expect call.contains(",")
-        expect call.contains(")")
-
-    it "formats array literals":
-        val array = "[1, 2, 3]"
-        expect array.starts_with("[")
-        expect array.ends_with("]")
-
-    it "formats struct initialization":
-        val struct_init = "Point { x: 10, y: 20 }"
-        expect struct_init.contains("{")
-        expect struct_init.contains("}")
-        expect struct_init.contains(":")
+    it "format_line with nested indent":
+        val f = Formatter(indent_level: 0, config: FormatConfig(indent_size: 4, max_line_length: 100, use_tabs: false, blank_lines_between_items: 2, continuation_indent: 8))
+        val result = f.format_line("val x = 5", 3)
+        expect result[0].starts_with("            ")

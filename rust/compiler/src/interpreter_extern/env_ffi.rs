@@ -58,9 +58,7 @@ impl ScopeStack {
     }
 
     fn pop_scope(&mut self) {
-        if let (Some(vars), Some(shadows)) =
-            (self.scope_vars.pop(), self.shadow_stack.pop())
-        {
+        if let (Some(vars), Some(shadows)) = (self.scope_vars.pop(), self.shadow_stack.pop()) {
             // Remove vars defined in this scope
             for name in &vars {
                 self.env.remove(name);
@@ -68,8 +66,12 @@ impl ScopeStack {
             // Restore shadowed values
             for (name, old_val) in shadows {
                 match old_val {
-                    Some(v) => { self.env.insert(name, v); }
-                    None => { self.env.remove(&name); }
+                    Some(v) => {
+                        self.env.insert(name, v);
+                    }
+                    None => {
+                        self.env.remove(&name);
+                    }
                 }
             }
         }
@@ -152,9 +154,7 @@ pub fn register_env(env: Env) -> i64 {
 
 /// Get the underlying Env from a handle (for passing back to Rust interpreter)
 pub fn get_env(handle: i64) -> Option<Env> {
-    ENV_REGISTRY.with(|r| {
-        r.borrow().get(&handle).map(|s| s.snapshot())
-    })
+    ENV_REGISTRY.with(|r| r.borrow().get(&handle).map(|s| s.snapshot()))
 }
 
 // ============================================================================
@@ -175,7 +175,9 @@ pub fn rt_env_push_scope(args: &[Value]) -> Result<Value, CompileError> {
     let handle = get_handle(args, 0, "rt_env_push_scope")?;
     ENV_REGISTRY.with(|r| {
         let mut reg = r.borrow_mut();
-        let stack = reg.get_mut(&handle).ok_or_else(|| invalid_handle("rt_env_push_scope", handle))?;
+        let stack = reg
+            .get_mut(&handle)
+            .ok_or_else(|| invalid_handle("rt_env_push_scope", handle))?;
         stack.push_scope();
         Ok(Value::Nil)
     })
@@ -186,7 +188,9 @@ pub fn rt_env_pop_scope(args: &[Value]) -> Result<Value, CompileError> {
     let handle = get_handle(args, 0, "rt_env_pop_scope")?;
     ENV_REGISTRY.with(|r| {
         let mut reg = r.borrow_mut();
-        let stack = reg.get_mut(&handle).ok_or_else(|| invalid_handle("rt_env_pop_scope", handle))?;
+        let stack = reg
+            .get_mut(&handle)
+            .ok_or_else(|| invalid_handle("rt_env_pop_scope", handle))?;
         stack.pop_scope();
         Ok(Value::Nil)
     })
@@ -205,7 +209,9 @@ pub fn rt_env_define(args: &[Value]) -> Result<Value, CompileError> {
     })?;
     ENV_REGISTRY.with(|r| {
         let mut reg = r.borrow_mut();
-        let stack = reg.get_mut(&handle).ok_or_else(|| invalid_handle("rt_env_define", handle))?;
+        let stack = reg
+            .get_mut(&handle)
+            .ok_or_else(|| invalid_handle("rt_env_define", handle))?;
         stack.define(name, value);
         Ok(Value::Nil)
     })
@@ -217,7 +223,9 @@ pub fn rt_env_get_var(args: &[Value]) -> Result<Value, CompileError> {
     let name = get_string_arg(args, 1, "rt_env_get_var")?;
     ENV_REGISTRY.with(|r| {
         let reg = r.borrow();
-        let stack = reg.get(&handle).ok_or_else(|| invalid_handle("rt_env_get_var", handle))?;
+        let stack = reg
+            .get(&handle)
+            .ok_or_else(|| invalid_handle("rt_env_get_var", handle))?;
         match stack.get(&name) {
             Some(v) => Ok(v.clone()),
             None => Ok(Value::Nil),
@@ -237,7 +245,9 @@ pub fn rt_env_set_var(args: &[Value]) -> Result<Value, CompileError> {
     })?;
     ENV_REGISTRY.with(|r| {
         let mut reg = r.borrow_mut();
-        let stack = reg.get_mut(&handle).ok_or_else(|| invalid_handle("rt_env_set_var", handle))?;
+        let stack = reg
+            .get_mut(&handle)
+            .ok_or_else(|| invalid_handle("rt_env_set_var", handle))?;
         Ok(Value::Bool(stack.set(&name, value)))
     })
 }
@@ -248,7 +258,9 @@ pub fn rt_env_has_var(args: &[Value]) -> Result<Value, CompileError> {
     let name = get_string_arg(args, 1, "rt_env_has_var")?;
     ENV_REGISTRY.with(|r| {
         let reg = r.borrow();
-        let stack = reg.get(&handle).ok_or_else(|| invalid_handle("rt_env_has_var", handle))?;
+        let stack = reg
+            .get(&handle)
+            .ok_or_else(|| invalid_handle("rt_env_has_var", handle))?;
         Ok(Value::Bool(stack.get(&name).is_some()))
     })
 }
@@ -258,7 +270,9 @@ pub fn rt_env_snapshot(args: &[Value]) -> Result<Value, CompileError> {
     let handle = get_handle(args, 0, "rt_env_snapshot")?;
     ENV_REGISTRY.with(|r| {
         let reg = r.borrow();
-        let stack = reg.get(&handle).ok_or_else(|| invalid_handle("rt_env_snapshot", handle))?;
+        let stack = reg
+            .get(&handle)
+            .ok_or_else(|| invalid_handle("rt_env_snapshot", handle))?;
         let snapshot = stack.snapshot();
         drop(reg);
         let new_handle = register_env(snapshot);
@@ -271,7 +285,9 @@ pub fn rt_env_scope_depth(args: &[Value]) -> Result<Value, CompileError> {
     let handle = get_handle(args, 0, "rt_env_scope_depth")?;
     ENV_REGISTRY.with(|r| {
         let reg = r.borrow();
-        let stack = reg.get(&handle).ok_or_else(|| invalid_handle("rt_env_scope_depth", handle))?;
+        let stack = reg
+            .get(&handle)
+            .ok_or_else(|| invalid_handle("rt_env_scope_depth", handle))?;
         Ok(Value::Int(stack.scope_vars.len() as i64))
     })
 }
@@ -290,7 +306,9 @@ pub fn rt_env_var_count(args: &[Value]) -> Result<Value, CompileError> {
     let handle = get_handle(args, 0, "rt_env_var_count")?;
     ENV_REGISTRY.with(|r| {
         let reg = r.borrow();
-        let stack = reg.get(&handle).ok_or_else(|| invalid_handle("rt_env_var_count", handle))?;
+        let stack = reg
+            .get(&handle)
+            .ok_or_else(|| invalid_handle("rt_env_var_count", handle))?;
         Ok(Value::Int(stack.env.len() as i64))
     })
 }
@@ -300,7 +318,9 @@ pub fn rt_env_var_names(args: &[Value]) -> Result<Value, CompileError> {
     let handle = get_handle(args, 0, "rt_env_var_names")?;
     ENV_REGISTRY.with(|r| {
         let reg = r.borrow();
-        let stack = reg.get(&handle).ok_or_else(|| invalid_handle("rt_env_var_names", handle))?;
+        let stack = reg
+            .get(&handle)
+            .ok_or_else(|| invalid_handle("rt_env_var_names", handle))?;
         let names: Vec<Value> = stack.env.keys().map(|k| Value::Str(k.clone())).collect();
         Ok(Value::Array(names))
     })

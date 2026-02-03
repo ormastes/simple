@@ -1,0 +1,77 @@
+# I18n (Internationalization) Extern Functions
+#
+# Simple HashMap-based message context for localization.
+# Port of rust/compiler/src/interpreter_extern/i18n.rs
+# Note: No actual localization - returns messages as-is.
+
+from ..core import {Value, InterpreterError}
+
+export MessageContext, i18n_context_new, i18n_context_insert
+export i18n_context_free, i18n_get_message, i18n_severity_name
+
+# Simple message context (replaces opaque handle pattern)
+class MessageContext:
+    values: Dict<text, text>
+
+impl MessageContext:
+    static fn empty() -> MessageContext:
+        MessageContext(values: {})
+
+    me insert(key: text, value: text):
+        self.values[key] = value
+
+    fn get(key: text) -> text?:
+        self.values.get(key)
+
+# Global registry for contexts (replaces raw pointer handles)
+var _contexts: Dict<i64, MessageContext> = {}
+var _next_handle: i64 = 1
+
+fn i18n_context_new(args: [Value]) -> Result<Value, InterpreterError>:
+    val handle = _next_handle
+    _next_handle = _next_handle + 1
+    _contexts[handle] = MessageContext.empty()
+    Ok(Value.int(handle))
+
+fn i18n_context_insert(args: [Value]) -> Result<Value, InterpreterError>:
+    if args.len() != 3:
+        return Err(InterpreterError.ArityError(
+            "rt_i18n_context_insert: expected 3 arguments (handle, key, value)"))
+    val handle = args[0].as_int() ?? return Err(
+        InterpreterError.TypeError("first argument must be Int (handle)"))
+    val key = args[1].as_string() ?? return Err(
+        InterpreterError.TypeError("second argument must be String (key)"))
+    val value = args[2].as_string() ?? return Err(
+        InterpreterError.TypeError("third argument must be String (value)"))
+    val ctx = _contexts.get(handle) ?? return Err(
+        InterpreterError.RuntimeError("invalid context handle"))
+    ctx.insert(key, value)
+    Ok(Value.nil())
+
+fn i18n_context_free(args: [Value]) -> Result<Value, InterpreterError>:
+    if args.len() != 1:
+        return Err(InterpreterError.ArityError(
+            "rt_i18n_context_free: expected 1 argument (handle)"))
+    val handle = args[0].as_int() ?? return Err(
+        InterpreterError.TypeError("argument must be Int (handle)"))
+    _contexts.remove(handle)
+    Ok(Value.nil())
+
+fn i18n_get_message(args: [Value]) -> Result<Value, InterpreterError>:
+    if args.len() != 3:
+        return Err(InterpreterError.ArityError(
+            "rt_i18n_get_message: expected 3 arguments (domain, id, ctx_handle)"))
+    val domain = args[0].as_string() ?? return Err(
+        InterpreterError.TypeError("first argument must be String (domain)"))
+    val id = args[1].as_string() ?? return Err(
+        InterpreterError.TypeError("second argument must be String (id)"))
+    # Return domain.id as message (no localization)
+    Ok(Value.string("{domain}.{id}"))
+
+fn i18n_severity_name(args: [Value]) -> Result<Value, InterpreterError>:
+    if args.len() != 1:
+        return Err(InterpreterError.ArityError(
+            "rt_i18n_severity_name: expected 1 argument (severity)"))
+    val severity = args[0].as_string() ?? return Err(
+        InterpreterError.TypeError("argument must be String"))
+    Ok(Value.string(severity))

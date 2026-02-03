@@ -1,15 +1,112 @@
 # Simple CLI - remove command
-# Delegates to Rust runtime via FFI
+# Removes a dependency from simple.sdn manifest
 
 use app.cli_util (get_cli_args)
-extern fn rt_cli_handle_remove(args: [str]) -> i64
+
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_env_cwd() -> text
 
 fn print_help():
-    print "Usage: simple remove [options]"
-    print "Removes a dependency"
+    print "Usage: simple remove <package>"
     print ""
-    print "Run 'simple remove --help' for Rust-level help."
+    print "Remove a dependency from simple.sdn"
+    print ""
+    print "Arguments:"
+    print "  <package>    Package name to remove"
+    print ""
+    print "Options:"
+    print "  --dev        Remove from dev dependencies only"
+    print "  -h, --help   Show this help"
+
+fn find_manifest_path() -> text:
+    val cwd = rt_env_cwd()
+    val sdn_path = "{cwd}/simple.sdn"
+    val toml_path = "{cwd}/simple.toml"
+    if rt_file_exists(sdn_path):
+        return sdn_path
+    if rt_file_exists(toml_path):
+        return toml_path
+    ""
+
+fn remove_dependency_from_sdn(content: text, name: text, dev_only: bool) -> (text, bool):
+    val lines = content.split("\n")
+    var result = []
+    var in_target_section = false
+    var removing = false
+    var removed = false
+    var current_section = ""
+
+    for line in lines:
+        # Track sections
+        if not line.starts_with(" ") and not line.starts_with("\t") and line.trim().ends_with(":"):
+            current_section = line.trim().trim_end(":")
+            in_target_section = (not dev_only and current_section == "dependencies") or current_section == "dev_dependencies"
+
+        if in_target_section and not removing:
+            # Check if this line starts the dependency entry
+            val trimmed = line.trim()
+            if trimmed.starts_with("{name}:") or trimmed.starts_with("{name} "):
+                removing = true
+                removed = true
+                # Skip this line (don't add to result)
+            else:
+                result.push(line)
+        elif removing:
+            # Skip continuation lines (indented more than section items)
+            val trimmed = line.trim()
+            if line.starts_with("    ") and trimmed != "" and not trimmed.ends_with(":"):
+                # Still part of the multi-line dep entry, skip
+                pass
+            else:
+                removing = false
+                result.push(line)
+        else:
+            result.push(line)
+
+    (result.join("\n"), removed)
 
 fn main() -> i64:
     val args = get_cli_args()
-    rt_cli_handle_remove(args)
+
+    if args.len() == 0:
+        print "error: missing package name"
+        print ""
+        print_help()
+        return 1
+
+    var dev_only = false
+    var package_name = ""
+
+    for arg in args:
+        if arg == "-h" or arg == "--help":
+            print_help()
+            return 0
+        elif arg == "--dev":
+            dev_only = true
+        elif not arg.starts_with("-"):
+            package_name = arg
+
+    if package_name == "":
+        print "error: missing package name"
+        return 1
+
+    val manifest_path = find_manifest_path()
+    if manifest_path == "":
+        print "error: no simple.sdn or simple.toml found in current directory"
+        return 1
+
+    val content = rt_file_read_text(manifest_path)
+    val (new_content, removed) = remove_dependency_from_sdn(content, package_name, dev_only)
+
+    if not removed:
+        print "error: dependency '{package_name}' not found in manifest"
+        return 1
+
+    if not rt_file_write_text(manifest_path, new_content):
+        print "error: failed to write {manifest_path}"
+        return 1
+
+    print "Removed dependency '{package_name}'"
+    0
