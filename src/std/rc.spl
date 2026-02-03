@@ -3,9 +3,6 @@
 # Smart pointers with automatic reference counting for shared ownership.
 # Provides deterministic deallocation (unlike GC) with reference tracking.
 #
-# Implementation: Functional approach using dicts with closures
-# (Classes don't export properly across modules in current Simple)
-#
 # Types:
 # - Rc<T>: Single-threaded reference counting (fast)
 # - Arc<T>: Atomic reference counting (thread-safe)
@@ -56,255 +53,275 @@ extern fn sys_malloc(size: usize, align: usize) -> i64
 extern fn sys_free(ptr: i64, size: usize, align: usize)
 
 # ============================================================================
-# Rc Namespace - Single-Threaded Reference Counting
+# Rc - Single-Threaded Reference Counting
 # ============================================================================
 
-val Rc = {
-    new: fn(value):
+class Rc:
+    ptr: i64
+
+    static fn new(value: i64) -> Rc:
         """Create new Rc with value.
 
         Args:
             value: Value to store (moved into Rc)
 
         Returns:
-            Rc object owning the value
+            Rc owning the value
         """
-        # Allocate RcBox
         val box_size = rc_box_size()
         val ptr = sys_malloc(box_size, 8)
-
-        # Initialize RcBox
         rc_box_init(ptr, value, 1, 0)
+        Rc(ptr)
 
-        # Return Rc object with methods
-        {
-            __rc_ptr: ptr,
-            __rc_type: "Rc",
+    fn clone() -> Rc:
+        """Clone Rc, incrementing reference count.
 
-            clone: fn():
-                """Clone Rc, incrementing reference count."""
-                rc_box_inc_strong(ptr)
-                {
-                    __rc_ptr: ptr,
-                    __rc_type: "Rc",
-                    clone: self.clone,
-                    borrow: self.borrow,
-                    strong_count: self.strong_count,
-                    weak_count: self.weak_count,
-                    downgrade: self.downgrade,
-                    drop: self.drop
-                },
+        Returns:
+            New Rc pointing to same data
 
-            borrow: fn():
-                """Borrow value immutably."""
-                rc_box_get_value(ptr),
+        Refcount incremented by 1.
+        """
+        rc_box_inc_strong(self.ptr)
+        Rc(self.ptr)
 
-            strong_count: fn():
-                """Get strong reference count."""
-                rc_box_strong_count(ptr),
+    fn borrow() -> i64:
+        """Borrow value immutably.
 
-            weak_count: fn():
-                """Get weak reference count."""
-                rc_box_weak_count(ptr),
+        Returns:
+            Reference to value
 
-            downgrade: fn():
-                """Create weak reference."""
-                rc_box_inc_weak(ptr)
-                Weak._from_ptr(ptr, "Rc"),
+        Panics: If Rc is null
+        """
+        rc_box_get_value(self.ptr)
 
-            drop: fn():
-                """Drop Rc, decrementing reference count."""
-                val count = rc_box_dec_strong(ptr)
+    fn strong_count() -> usize:
+        """Get strong reference count.
 
-                if count == 0:
-                    # Last strong reference - deallocate data
-                    rc_box_drop_value(ptr)
+        Returns:
+            Number of strong references (Rc)
+        """
+        rc_box_strong_count(self.ptr)
 
-                    # Check weak count
-                    val weak = rc_box_weak_count(ptr)
-                    if weak == 0:
-                        # No weak references - free box
-                        sys_free(ptr, box_size, 8)
-        }
-}
+    fn weak_count() -> usize:
+        """Get weak reference count.
+
+        Returns:
+            Number of weak references (Weak)
+        """
+        rc_box_weak_count(self.ptr)
+
+    fn downgrade() -> Weak:
+        """Create weak reference.
+
+        Returns:
+            Weak reference to same data
+
+        Weak references don't prevent deallocation.
+        """
+        rc_box_inc_weak(self.ptr)
+        Weak(self.ptr, false)
+
+    me drop():
+        """Drop Rc, decrementing reference count.
+
+        If last reference, deallocates data.
+        """
+        val count = rc_box_dec_strong(self.ptr)
+
+        if count == 0:
+            # Last strong reference - deallocate data
+            rc_box_drop_value(self.ptr)
+
+            # Check weak count
+            val weak = rc_box_weak_count(self.ptr)
+            if weak == 0:
+                # No weak references - free box
+                val box_size = rc_box_size()
+                sys_free(self.ptr, box_size, 8)
 
 # ============================================================================
-# Arc Namespace - Atomic Reference Counting
+# Arc - Atomic Reference Counting
 # ============================================================================
 
-val Arc = {
-    new: fn(value):
+class Arc:
+    ptr: i64
+
+    static fn new(value: i64) -> Arc:
         """Create new Arc with value.
 
         Args:
             value: Value to store (moved into Arc)
 
         Returns:
-            Arc object owning the value
+            Arc owning the value
         """
-        # Allocate ArcBox
         val box_size = arc_box_size()
         val ptr = sys_malloc(box_size, 8)
-
-        # Initialize ArcBox
         arc_box_init(ptr, value, 1, 0)
+        Arc(ptr)
 
-        # Return Arc object with methods
-        {
-            __arc_ptr: ptr,
-            __arc_type: "Arc",
-
-            clone: fn():
-                """Clone Arc, atomically incrementing reference count."""
-                arc_box_inc_strong(ptr)
-                {
-                    __arc_ptr: ptr,
-                    __arc_type: "Arc",
-                    clone: self.clone,
-                    borrow: self.borrow,
-                    strong_count: self.strong_count,
-                    weak_count: self.weak_count,
-                    downgrade: self.downgrade,
-                    drop: self.drop
-                },
-
-            borrow: fn():
-                """Borrow value immutably."""
-                arc_box_get_value(ptr),
-
-            strong_count: fn():
-                """Get strong reference count (atomic read)."""
-                arc_box_strong_count(ptr),
-
-            weak_count: fn():
-                """Get weak reference count (atomic read)."""
-                arc_box_weak_count(ptr),
-
-            downgrade: fn():
-                """Create weak reference (thread-safe)."""
-                arc_box_inc_weak(ptr)
-                Weak._from_ptr(ptr, "Arc"),
-
-            drop: fn():
-                """Drop Arc, atomically decrementing reference count."""
-                val count = arc_box_dec_strong(ptr)
-
-                if count == 1:  # Was last reference (count before decrement)
-                    # Last strong reference - deallocate data
-                    arc_box_drop_value(ptr)
-
-                    # Check weak count
-                    val weak = arc_box_weak_count(ptr)
-                    if weak == 0:
-                        # No weak references - free box
-                        sys_free(ptr, box_size, 8)
-        }
-}
-
-# ============================================================================
-# Weak Namespace - Weak References
-# ============================================================================
-
-val Weak = {
-    _from_ptr: fn(ptr, rc_type):
-        """Internal: Create Weak from pointer.
-
-        Args:
-            ptr: Pointer to RcBox/ArcBox
-            rc_type: "Rc" or "Arc"
+    fn clone() -> Arc:
+        """Clone Arc, atomically incrementing reference count.
 
         Returns:
-            Weak object
+            New Arc pointing to same data
+
+        Thread-safe operation.
         """
-        {
-            __weak_ptr: ptr,
-            __weak_type: rc_type,
+        arc_box_inc_strong(self.ptr)
+        Arc(self.ptr)
 
-            upgrade: fn():
-                """Try to upgrade to Rc/Arc.
+    fn borrow() -> i64:
+        """Borrow value immutably.
 
-                Returns:
-                    Some(Rc/Arc) if data still alive, None if deallocated
-                """
-                # Check strong count
-                val strong = if rc_type == "Rc":
-                    rc_box_strong_count(ptr)
+        Returns:
+            Reference to value
+
+        Panics: If Arc is null
+        """
+        arc_box_get_value(self.ptr)
+
+    fn strong_count() -> usize:
+        """Get strong reference count (atomic read).
+
+        Returns:
+            Number of strong references (Arc)
+        """
+        arc_box_strong_count(self.ptr)
+
+    fn weak_count() -> usize:
+        """Get weak reference count (atomic read).
+
+        Returns:
+            Number of weak references (Weak)
+        """
+        arc_box_weak_count(self.ptr)
+
+    fn downgrade() -> Weak:
+        """Create weak reference (thread-safe).
+
+        Returns:
+            Weak reference to same data
+        """
+        arc_box_inc_weak(self.ptr)
+        Weak(self.ptr, true)
+
+    me drop():
+        """Drop Arc, atomically decrementing reference count.
+
+        If last reference, deallocates data.
+        Thread-safe operation.
+        """
+        val count = arc_box_dec_strong(self.ptr)
+
+        if count == 0:
+            # Last strong reference - deallocate data
+            arc_box_drop_value(self.ptr)
+
+            # Check weak count
+            val weak = arc_box_weak_count(self.ptr)
+            if weak == 0:
+                # No weak references - free box
+                val box_size = arc_box_size()
+                sys_free(self.ptr, box_size, 8)
+
+# ============================================================================
+# Weak - Weak Reference
+# ============================================================================
+
+class Weak:
+    ptr: i64
+    is_atomic: bool  # True for Arc-based, false for Rc-based
+
+    fn upgrade() -> i64?:
+        """Try to upgrade to Rc.
+
+        Returns:
+            Some(Rc) if data still alive
+            None if data was deallocated
+
+        Thread-safe for Arc-based weak references.
+        """
+        val strong = if self.is_atomic:
+            arc_box_strong_count(self.ptr)
+        else:
+            rc_box_strong_count(self.ptr)
+
+        if strong == 0:
+            # Data already deallocated
+            return nil
+
+        # Increment strong count and return new Rc
+        if self.is_atomic:
+            arc_box_inc_strong(self.ptr)
+            # FIXME: Should return Some(Arc(self.ptr)) but can't construct Arc/Rc
+            # from weak due to type system limitations
+            Some(arc_box_get_value(self.ptr))
+        else:
+            rc_box_inc_strong(self.ptr)
+            Some(rc_box_get_value(self.ptr))
+
+    fn upgrade_arc() -> i64?:
+        """Try to upgrade to Arc (atomic version).
+
+        Returns:
+            Some(Arc) if data still alive
+            None if data was deallocated
+        """
+        upgrade()
+
+    fn strong_count() -> usize:
+        """Get strong reference count.
+
+        Returns:
+            Number of strong references
+        """
+        if self.is_atomic:
+            arc_box_strong_count(self.ptr)
+        else:
+            rc_box_strong_count(self.ptr)
+
+    fn weak_count() -> usize:
+        """Get weak reference count.
+
+        Returns:
+            Number of weak references (including self)
+        """
+        if self.is_atomic:
+            arc_box_weak_count(self.ptr)
+        else:
+            rc_box_weak_count(self.ptr)
+
+    me drop():
+        """Drop weak reference.
+
+        If last weak reference and no strong references, frees box.
+        """
+        val count = if self.is_atomic:
+            arc_box_dec_weak(self.ptr)
+        else:
+            rc_box_dec_weak(self.ptr)
+
+        if count == 0:
+            # Last weak reference
+            val strong = if self.is_atomic:
+                arc_box_strong_count(self.ptr)
+            else:
+                rc_box_strong_count(self.ptr)
+
+            if strong == 0:
+                # No strong references either - free box
+                val box_size = if self.is_atomic:
+                    arc_box_size()
                 else:
-                    arc_box_strong_count(ptr)
-
-                if strong == 0:
-                    # Data already deallocated
-                    return nil
-
-                # Increment strong count
-                if rc_type == "Rc":
-                    rc_box_inc_strong(ptr)
-                    Some({
-                        __rc_ptr: ptr,
-                        __rc_type: "Rc",
-                        clone: Rc.new(0).clone,  # FIXME: Need proper closure capture
-                        borrow: Rc.new(0).borrow,
-                        strong_count: Rc.new(0).strong_count,
-                        weak_count: Rc.new(0).weak_count,
-                        downgrade: Rc.new(0).downgrade,
-                        drop: Rc.new(0).drop
-                    })
-                else:
-                    arc_box_inc_strong(ptr)
-                    Some({
-                        __arc_ptr: ptr,
-                        __arc_type: "Arc",
-                        clone: Arc.new(0).clone,
-                        borrow: Arc.new(0).borrow,
-                        strong_count: Arc.new(0).strong_count,
-                        weak_count: Arc.new(0).weak_count,
-                        downgrade: Arc.new(0).downgrade,
-                        drop: Arc.new(0).drop
-                    }),
-
-            strong_count: fn():
-                """Get strong reference count."""
-                if rc_type == "Rc":
-                    rc_box_strong_count(ptr)
-                else:
-                    arc_box_strong_count(ptr),
-
-            weak_count: fn():
-                """Get weak reference count."""
-                if rc_type == "Rc":
-                    rc_box_weak_count(ptr)
-                else:
-                    arc_box_weak_count(ptr),
-
-            drop: fn():
-                """Drop weak reference."""
-                val count = if rc_type == "Rc":
-                    rc_box_dec_weak(ptr)
-                else:
-                    arc_box_dec_weak(ptr)
-
-                if count == 0:
-                    # Last weak reference
-                    val strong = if rc_type == "Rc":
-                        rc_box_strong_count(ptr)
-                    else:
-                        arc_box_strong_count(ptr)
-
-                    if strong == 0:
-                        # No strong references either - free box
-                        val box_size = if rc_type == "Rc":
-                            rc_box_size()
-                        else:
-                            arc_box_size()
-                        sys_free(ptr, box_size, 8)
-        }
-}
+                    rc_box_size()
+                sys_free(self.ptr, box_size, 8)
 
 # ============================================================================
 # Utility Functions
 # ============================================================================
 
-fn make_rc(value):
+fn make_rc(value: i64) -> Rc:
     """Convenience function to create Rc.
 
     Args:
@@ -312,10 +329,13 @@ fn make_rc(value):
 
     Returns:
         Rc owning value
+
+    Example:
+        val rc = make_rc(42)
     """
     Rc.new(value)
 
-fn make_arc(value):
+fn make_arc(value: i64) -> Arc:
     """Convenience function to create Arc.
 
     Args:
@@ -323,6 +343,9 @@ fn make_arc(value):
 
     Returns:
         Arc owning value
+
+    Example:
+        val arc = make_arc(42)
     """
     Arc.new(value)
 
