@@ -1,0 +1,544 @@
+"""
+# Environment Specification
+
+**Feature IDs:** #3001-3030
+**Category:** Interpreter
+**Difficulty:** 3/5
+**Status:** In Progress
+
+## Overview
+
+Environment provides variable binding management using symbol interning.
+It manages lexical scopes with parent chains, supports mutable/immutable
+variables, and uses PersistentDict for O(1) scope snapshots via structural sharing.
+
+## Key Features
+
+- Lexical scoping with parent chain traversal
+- Mutable and immutable variable binding
+- Symbol interning for performance (O(1) vs O(n) lookups)
+- PersistentDict for efficient scope copying
+- Global variable support
+- String and SymbolId APIs
+
+## Implementation
+
+File: `/home/ormastes/dev/pub/simple/src/app/interpreter/core/environment.spl`
+"""
+
+use std.test.sspec.*
+use app.interpreter.core.environment.*
+use app.interpreter.value.Value
+use app.interpreter.symbol.{SymbolId, intern}
+
+
+# ============================================================================
+# Test Group 1: Binding
+# ============================================================================
+
+describe "Binding":
+    """
+    ## Variable Binding
+
+    Validates Binding struct and name_str() method.
+    """
+
+    it "stores name, value, and mutability":
+        val name = intern("x")
+        val value = Value.Int(42)
+        val binding = Binding(name: name, value: value, mutable: true)
+
+        expect(binding.mutable).to(be_true())
+
+    it "returns string name":
+        val name = intern("test_var")
+        val value = Value.Bool(true)
+        val binding = Binding(name: name, value: value, mutable: false)
+
+        val name_str = binding.name_str()
+
+        expect(name_str).to(eq("test_var"))
+
+
+# ============================================================================
+# Test Group 2: Scope Creation
+# ============================================================================
+
+describe "Scope Creation":
+    """
+    ## Scope Initialization
+
+    Validates Scope.new() and with_parent().
+    """
+
+    it "creates empty scope":
+        val scope = Scope.new()
+
+        expect(scope.parent.?).to(be_false())
+
+    it "creates scope with parent":
+        val parent = Scope.new()
+        val child = Scope.with_parent(&parent)
+
+        expect(child.parent.?).to(be_true())
+
+
+# ============================================================================
+# Test Group 3: Scope Variable Definition
+# ============================================================================
+
+describe "Scope Variable Definition":
+    """
+    ## Variable Definition
+
+    Validates define() and define_str() for adding variables to scope.
+    """
+
+    it "defines mutable variable":
+        val scope = Scope.new()
+        val name = intern("x")
+        val value = Value.Int(10)
+
+        val new_scope = scope.define(name, value, true)
+
+        val binding = new_scope.get(name)
+        expect(binding.?).to(be_true())
+        expect(binding.unwrap().mutable).to(be_true())
+
+    it "defines immutable variable":
+        val scope = Scope.new()
+        val name = intern("y")
+        val value = Value.Float(3.14)
+
+        val new_scope = scope.define(name, value, false)
+
+        val binding = new_scope.get(name)
+        expect(binding.?).to(be_true())
+        expect(binding.unwrap().mutable).to(be_false())
+
+    it "defines variable by string name":
+        val scope = Scope.new()
+        val value = Value.String("hello")
+
+        val new_scope = scope.define_str("message", value, true)
+
+        val binding = new_scope.get_str("message")
+        expect(binding.?).to(be_true())
+
+
+# ============================================================================
+# Test Group 4: Scope Variable Lookup
+# ============================================================================
+
+describe "Scope Variable Lookup":
+    """
+    ## Variable Lookup
+
+    Validates get() and get_str() for retrieving variables.
+    """
+
+    it "retrieves defined variable":
+        val name = intern("x")
+        val value = Value.Int(42)
+        val scope = Scope.new().define(name, value, true)
+
+        val binding = scope.get(name)
+
+        expect(binding.?).to(be_true())
+        match binding.unwrap().value:
+            case Int(v):
+                expect(v).to(eq(42))
+            case _:
+                fail("Expected Int value")
+
+    it "returns nil for undefined variable":
+        val scope = Scope.new()
+        val name = intern("undefined")
+
+        val binding = scope.get(name)
+
+        expect(binding.?).to(be_false())
+
+    it "searches parent scope":
+        val parent_name = intern("parent_var")
+        val parent_value = Value.String("in parent")
+        val parent = Scope.new().define(parent_name, parent_value, true)
+        val child = Scope.with_parent(&parent)
+
+        val binding = child.get(parent_name)
+
+        expect(binding.?).to(be_true())
+
+    it "retrieves by string name":
+        val value = Value.Bool(true)
+        val scope = Scope.new().define_str("flag", value, true)
+
+        val binding = scope.get_str("flag")
+
+        expect(binding.?).to(be_true())
+
+    it "returns nil for non-interned string":
+        val scope = Scope.new()
+
+        val binding = scope.get_str("never_interned")
+
+        expect(binding.?).to(be_false())
+
+
+# ============================================================================
+# Test Group 5: Scope Variable Mutation
+# ============================================================================
+
+describe "Scope Variable Mutation":
+    """
+    ## Variable Mutation
+
+    Validates set() and set_str() for updating variables.
+    """
+
+    it "updates mutable variable":
+        val name = intern("x")
+        val initial = Value.Int(10)
+        val scope = Scope.new().define(name, initial, true)
+        val updated = Value.Int(20)
+
+        val result = scope.set(name, updated)
+
+        match result:
+            case Ok(new_scope):
+                val binding = new_scope.get(name)
+                match binding.unwrap().value:
+                    case Int(v):
+                        expect(v).to(eq(20))
+                    case _:
+                        fail("Expected Int value")
+            case Err(_):
+                fail("Expected Ok result")
+
+    it "rejects mutation of immutable variable":
+        val name = intern("const_x")
+        val initial = Value.Int(100)
+        val scope = Scope.new().define(name, initial, false)
+        val updated = Value.Int(200)
+
+        val result = scope.set(name, updated)
+
+        match result:
+            case Ok(_):
+                fail("Expected Err for immutable variable")
+            case Err(msg):
+                expect(msg).to(contain("immutable"))
+
+    it "returns error for undefined variable":
+        val scope = Scope.new()
+        val name = intern("missing")
+        val value = Value.Int(42)
+
+        val result = scope.set(name, value)
+
+        match result:
+            case Ok(_):
+                fail("Expected Err for undefined variable")
+            case Err(msg):
+                expect(msg).to(contain("Undefined"))
+
+    it "updates variable by string name":
+        val scope = Scope.new().define_str("x", Value.Int(5), true)
+        val updated = Value.Int(15)
+
+        val result = scope.set_str("x", updated)
+
+        match result:
+            case Ok(new_scope):
+                val binding = new_scope.get_str("x")
+                expect(binding.?).to(be_true())
+            case Err(_):
+                fail("Expected Ok result")
+
+    it "returns error for non-interned string":
+        val scope = Scope.new()
+
+        val result = scope.set_str("never_defined", Value.Int(1))
+
+        match result:
+            case Err(msg):
+                expect(msg).to(contain("Undefined"))
+            case Ok(_):
+                fail("Expected Err for undefined variable")
+
+
+# ============================================================================
+# Test Group 6: Environment Initialization
+# ============================================================================
+
+describe "Environment Initialization":
+    """
+    ## Environment Creation
+
+    Validates Environment.new().
+    """
+
+    it "creates environment with initial scope":
+        val env = Environment.new()
+
+        expect(env.scopes.len()).to(eq(1))
+
+
+# ============================================================================
+# Test Group 7: Environment Scope Management
+# ============================================================================
+
+describe "Environment Scope Management":
+    """
+    ## Scope Stack Management
+
+    Validates push_scope(), pop_scope(), and current_scope().
+    """
+
+    it "pushes new scope":
+        var env = Environment.new()
+        val initial_len = env.scopes.len()
+
+        env.push_scope()
+
+        expect(env.scopes.len()).to(eq(initial_len + 1))
+
+    it "pops scope":
+        var env = Environment.new()
+        env.push_scope()
+        env.push_scope()
+        val before_pop = env.scopes.len()
+
+        env.pop_scope()
+
+        expect(env.scopes.len()).to(eq(before_pop - 1))
+
+    it "preserves root scope on pop":
+        var env = Environment.new()
+
+        env.pop_scope()
+
+        expect(env.scopes.len()).to(eq(1))
+
+    it "maintains parent chain":
+        var env = Environment.new()
+        val name = intern("outer")
+        env.define(name, Value.Int(10))
+
+        env.push_scope()
+        val inner_name = intern("inner")
+        env.define(inner_name, Value.Int(20))
+
+        # Inner scope should access outer variable
+        val outer_val = env.get(name)
+        expect(outer_val.?).to(be_true())
+
+
+# ============================================================================
+# Test Group 8: Environment Variable Operations
+# ============================================================================
+
+describe "Environment Variable Operations":
+    """
+    ## Variable Definition and Retrieval
+
+    Validates define(), define_const(), get(), and set().
+    """
+
+    it "defines mutable variable":
+        var env = Environment.new()
+        val name = intern("x")
+
+        env.define(name, Value.Int(42))
+
+        val value = env.get(name)
+        expect(value.?).to(be_true())
+
+    it "defines immutable variable":
+        var env = Environment.new()
+        val name = intern("pi")
+
+        env.define_const(name, Value.Float(3.14159))
+
+        val value = env.get(name)
+        expect(value.?).to(be_true())
+
+    it "retrieves variable value":
+        var env = Environment.new()
+        val name = intern("greeting")
+        env.define(name, Value.String("Hello"))
+
+        val value = env.get(name)
+
+        match value.unwrap():
+            case String(s):
+                expect(s).to(eq("Hello"))
+            case _:
+                fail("Expected String value")
+
+    it "returns nil for undefined variable":
+        val env = Environment.new()
+        val name = intern("nonexistent")
+
+        val value = env.get(name)
+
+        expect(value.?).to(be_false())
+
+    it "updates mutable variable":
+        var env = Environment.new()
+        val name = intern("counter")
+        env.define(name, Value.Int(0))
+
+        val result = env.set(name, Value.Int(1))
+
+        match result:
+            case Ok(_):
+                val updated = env.get(name)
+                match updated.unwrap():
+                    case Int(v):
+                        expect(v).to(eq(1))
+                    case _:
+                        fail("Expected Int value")
+            case Err(_):
+                fail("Expected Ok result")
+
+    it "defines global variable":
+        var env = Environment.new()
+        val name = intern("global_var")
+
+        env.define_global(name, Value.Bool(true))
+
+        val value = env.get(name)
+        expect(value.?).to(be_true())
+
+
+# ============================================================================
+# Test Group 9: Environment String API
+# ============================================================================
+
+describe "Environment String API":
+    """
+    ## String-based Variable Operations
+
+    Validates define_str(), define_const_str(), get_str(), set_str().
+    """
+
+    it "defines variable by string name":
+        var env = Environment.new()
+
+        env.define_str("name", Value.String("Alice"))
+
+        val value = env.get_str("name")
+        expect(value.?).to(be_true())
+
+    it "defines const by string name":
+        var env = Environment.new()
+
+        env.define_const_str("MAX", Value.Int(100))
+
+        val value = env.get_str("MAX")
+        expect(value.?).to(be_true())
+
+    it "retrieves by string name":
+        var env = Environment.new()
+        env.define_str("key", Value.String("value"))
+
+        val result = env.get_str("key")
+
+        expect(result.?).to(be_true())
+
+    it "updates by string name":
+        var env = Environment.new()
+        env.define_str("x", Value.Int(1))
+
+        val result = env.set_str("x", Value.Int(2))
+
+        match result:
+            case Ok(_):
+                pass  # Expected
+            case Err(_):
+                fail("Expected Ok result")
+
+    it "defines global by string name":
+        var env = Environment.new()
+
+        env.define_global_str("GLOBAL", Value.Int(999))
+
+        val value = env.get_str("GLOBAL")
+        expect(value.?).to(be_true())
+
+
+# ============================================================================
+# Test Group 10: EnvironmentWithInterner
+# ============================================================================
+
+describe "EnvironmentWithInterner":
+    """
+    ## Environment with Interner Reference
+
+    Validates EnvironmentWithInterner.new() and with_interner().
+    """
+
+    it "creates with global interner":
+        val env_int = EnvironmentWithInterner.new()
+
+        expect(env_int.env.scopes.len()).to(eq(1))
+
+    it "interns string":
+        val env_int = EnvironmentWithInterner.new()
+
+        val sym = env_int.intern("test")
+
+        expect(sym.id).to(be_greater_than(0))
+
+    it "resolves symbol":
+        val env_int = EnvironmentWithInterner.new()
+        val sym = env_int.intern("resolve_me")
+
+        val resolved = env_int.resolve(sym)
+
+        expect(resolved.?).to(be_true())
+        expect(resolved.unwrap()).to(eq("resolve_me"))
+
+
+# ============================================================================
+# Test Group 11: Scope Shadowing
+# ============================================================================
+
+describe "Variable Shadowing":
+    """
+    ## Variable Shadowing
+
+    Validates that inner scopes can shadow outer variables.
+    """
+
+    it "shadows outer variable":
+        var env = Environment.new()
+        val name = intern("x")
+
+        env.define(name, Value.Int(1))
+        env.push_scope()
+        env.define(name, Value.Int(2))
+
+        val value = env.get(name)
+        match value.unwrap():
+            case Int(v):
+                expect(v).to(eq(2))  # Should get inner value
+            case _:
+                fail("Expected Int value")
+
+    it "restores outer value after pop":
+        var env = Environment.new()
+        val name = intern("x")
+
+        env.define(name, Value.Int(10))
+        env.push_scope()
+        env.define(name, Value.Int(20))
+        env.pop_scope()
+
+        val value = env.get(name)
+        match value.unwrap():
+            case Int(v):
+                expect(v).to(eq(10))  # Should get outer value again
+            case _:
+                fail("Expected Int value")
