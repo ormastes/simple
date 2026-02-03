@@ -1,7 +1,7 @@
 //! RC/ARC FFI wrappers for Simple language
 //!
-//! Thin wrappers around std::rc::Rc and std::sync::Arc.
-//! Uses raw pointer approach where Simple manages allocation with sys_malloc/sys_free.
+//! Provides reference counting operations for Rc<T> and Arc<T>.
+//! Uses raw pointers where Simple manages allocation with sys_malloc/sys_free.
 //!
 //! Memory layout:
 //! ```
@@ -11,18 +11,50 @@
 //! ├────────────────────────────────┤
 //! │ weak_count: usize/AtomicUsize   │
 //! ├────────────────────────────────┤
-//! │ value: T                        │
+//! │ value: T (Value enum)           │
 //! └────────────────────────────────┘
 //! ```
 //!
-//! Simple code calls sys_malloc() to allocate memory, then calls rc_box_init()
-//! to initialize the box with counts and value.
+//! Simple code calls sys_malloc() to allocate memory (returns Int pointer),
+//! then calls rc_box_init() to initialize the box with counts and value.
 
 use crate::error::CompileError;
 use crate::value::Value;
-use std::mem::{size_of, align_of};
+use std::mem::size_of;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::ptr;
+
+// ============================================================================
+// Helper Functions
+// ============================================================================
+
+/// Extract raw pointer from Value (Int or Array)
+fn get_ptr(val: &Value, func_name: &str) -> Result<*mut u8, CompileError> {
+    match val {
+        Value::Int(addr) => {
+            if *addr == 0 {
+                return Err(CompileError::runtime(&format!("{}: ptr is null", func_name)));
+            }
+            Ok(*addr as *mut u8)
+        }
+        Value::Array(bytes) => {
+            if bytes.is_empty() {
+                return Err(CompileError::runtime(&format!("{}: ptr is null", func_name)));
+            }
+            Ok(bytes.as_ptr() as *mut u8)
+        }
+        _ => Err(CompileError::runtime(&format!("{}: ptr must be Int or Array", func_name))),
+    }
+}
+
+/// Extract raw pointer, allowing null
+fn get_ptr_nullable(val: &Value) -> *mut u8 {
+    match val {
+        Value::Int(addr) => *addr as *mut u8,
+        Value::Array(bytes) if !bytes.is_empty() => bytes.as_ptr() as *mut u8,
+        _ => std::ptr::null_mut(),
+    }
+}
 
 // ============================================================================
 // Rc Box Operations (Non-Atomic)
@@ -30,47 +62,22 @@ use std::ptr;
 
 /// Get size of RcBox<T> for allocation
 ///
-/// Returns: size_of(usize) * 2 + size_of(T)
-pub fn rc_box_size(args: &[Value]) -> Result<Value, CompileError> {
-    // For now, we return a fixed size since we don't have generic type info
-    // In practice, Simple will pass the value and we calculate from that
-    if args.is_empty() {
-        // Generic call - return header size (2 * usize)
-        Ok(Value::Int((size_of::<usize>() * 2) as i64))
-    } else {
-        // Calculate size based on value type
-        let value_size = match &args[0] {
-            Value::Int(_) => size_of::<i64>(),
-            Value::Float(_) => size_of::<f64>(),
-            Value::Bool(_) => size_of::<bool>(),
-            Value::Str(s) => size_of::<usize>() * 2 + s.len(), // String size
-            Value::Array(arr) => size_of::<usize>() * 2 + arr.len() * size_of::<Value>(),
-            _ => size_of::<Value>(), // Default to Value size
-        };
-        let total = size_of::<usize>() * 2 + value_size;
-        Ok(Value::Int(total as i64))
-    }
+/// Returns: size_of(usize) * 2 + size_of(Value)
+pub fn rc_box_size(_args: &[Value]) -> Result<Value, CompileError> {
+    // RcBox header: strong_count + weak_count + Value
+    let total = size_of::<usize>() * 2 + size_of::<Value>();
+    Ok(Value::Int(total as i64))
 }
 
 /// Initialize RcBox with value and counts
 ///
-/// Args: (ptr: Array<u8>, value: T, strong: Int, weak: Int)
+/// Args: (ptr: Int, value: T, strong: Int, weak: Int)
 pub fn rc_box_init(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() != 4 {
         return Err(CompileError::runtime("rc_box_init requires 4 arguments (ptr, value, strong, weak)"));
     }
 
-    let ptr = match &args[0] {
-        Value::Array(bytes) => {
-            if bytes.is_empty() {
-                return Err(CompileError::runtime("rc_box_init: ptr is null"));
-            }
-            // Get raw pointer from array
-            bytes.as_ptr() as *mut u8
-        }
-        _ => return Err(CompileError::runtime("rc_box_init: first argument must be byte array")),
-    };
-
+    let ptr = get_ptr(&args[0], "rc_box_init")?;
     let value = args[1].clone();
     let strong = args[2].as_int()? as usize;
     let weak = args[3].as_int()? as usize;
@@ -94,22 +101,14 @@ pub fn rc_box_init(args: &[Value]) -> Result<Value, CompileError> {
 
 /// Get value from RcBox
 ///
-/// Args: (ptr: Array<u8>)
+/// Args: (ptr: Int)
 /// Returns: T (cloned)
 pub fn rc_box_get_value(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() != 1 {
         return Err(CompileError::runtime("rc_box_get_value requires 1 argument (ptr)"));
     }
 
-    let ptr = match &args[0] {
-        Value::Array(bytes) => {
-            if bytes.is_empty() {
-                return Err(CompileError::runtime("rc_box_get_value: ptr is null"));
-            }
-            bytes.as_ptr() as *mut u8
-        }
-        _ => return Err(CompileError::runtime("rc_box_get_value: argument must be byte array")),
-    };
+    let ptr = get_ptr(&args[0], "rc_box_get_value")?;
 
     unsafe {
         // Read value at offset sizeof(usize) * 2
@@ -120,21 +119,13 @@ pub fn rc_box_get_value(args: &[Value]) -> Result<Value, CompileError> {
 
 /// Drop value in RcBox (run destructor)
 ///
-/// Args: (ptr: Array<u8>)
+/// Args: (ptr: Int)
 pub fn rc_box_drop_value(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() != 1 {
         return Err(CompileError::runtime("rc_box_drop_value requires 1 argument (ptr)"));
     }
 
-    let ptr = match &args[0] {
-        Value::Array(bytes) => {
-            if bytes.is_empty() {
-                return Err(CompileError::runtime("rc_box_drop_value: ptr is null"));
-            }
-            bytes.as_ptr() as *mut u8
-        }
-        _ => return Err(CompileError::runtime("rc_box_drop_value: argument must be byte array")),
-    };
+    let ptr = get_ptr(&args[0], "rc_box_drop_value")?;
 
     unsafe {
         // Drop value at offset sizeof(usize) * 2
@@ -147,22 +138,17 @@ pub fn rc_box_drop_value(args: &[Value]) -> Result<Value, CompileError> {
 
 /// Get strong reference count
 ///
-/// Args: (ptr: Array<u8>)
+/// Args: (ptr: Int)
 /// Returns: usize (strong count)
 pub fn rc_box_strong_count(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() != 1 {
         return Err(CompileError::runtime("rc_box_strong_count requires 1 argument (ptr)"));
     }
 
-    let ptr = match &args[0] {
-        Value::Array(bytes) => {
-            if bytes.is_empty() {
-                return Ok(Value::Int(0));
-            }
-            bytes.as_ptr() as *const u8
-        }
-        _ => return Err(CompileError::runtime("rc_box_strong_count: argument must be byte array")),
-    };
+    let ptr = get_ptr_nullable(&args[0]);
+    if ptr.is_null() {
+        return Ok(Value::Int(0));
+    }
 
     unsafe {
         let strong_ptr = ptr as *const usize;
@@ -172,22 +158,17 @@ pub fn rc_box_strong_count(args: &[Value]) -> Result<Value, CompileError> {
 
 /// Get weak reference count
 ///
-/// Args: (ptr: Array<u8>)
+/// Args: (ptr: Int)
 /// Returns: usize (weak count)
 pub fn rc_box_weak_count(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() != 1 {
         return Err(CompileError::runtime("rc_box_weak_count requires 1 argument (ptr)"));
     }
 
-    let ptr = match &args[0] {
-        Value::Array(bytes) => {
-            if bytes.is_empty() {
-                return Ok(Value::Int(0));
-            }
-            bytes.as_ptr() as *const u8
-        }
-        _ => return Err(CompileError::runtime("rc_box_weak_count: argument must be byte array")),
-    };
+    let ptr = get_ptr_nullable(&args[0]);
+    if ptr.is_null() {
+        return Ok(Value::Int(0));
+    }
 
     unsafe {
         let weak_ptr = ptr.add(size_of::<usize>()) as *const usize;
@@ -197,21 +178,13 @@ pub fn rc_box_weak_count(args: &[Value]) -> Result<Value, CompileError> {
 
 /// Increment strong reference count
 ///
-/// Args: (ptr: Array<u8>)
+/// Args: (ptr: Int)
 pub fn rc_box_inc_strong(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() != 1 {
         return Err(CompileError::runtime("rc_box_inc_strong requires 1 argument (ptr)"));
     }
 
-    let ptr = match &args[0] {
-        Value::Array(bytes) => {
-            if bytes.is_empty() {
-                return Err(CompileError::runtime("rc_box_inc_strong: ptr is null"));
-            }
-            bytes.as_ptr() as *mut u8
-        }
-        _ => return Err(CompileError::runtime("rc_box_inc_strong: argument must be byte array")),
-    };
+    let ptr = get_ptr(&args[0], "rc_box_inc_strong")?;
 
     unsafe {
         let strong_ptr = ptr as *mut usize;
@@ -223,22 +196,17 @@ pub fn rc_box_inc_strong(args: &[Value]) -> Result<Value, CompileError> {
 
 /// Decrement strong reference count
 ///
-/// Args: (ptr: Array<u8>)
+/// Args: (ptr: Int)
 /// Returns: usize (count after decrement)
 pub fn rc_box_dec_strong(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() != 1 {
         return Err(CompileError::runtime("rc_box_dec_strong requires 1 argument (ptr)"));
     }
 
-    let ptr = match &args[0] {
-        Value::Array(bytes) => {
-            if bytes.is_empty() {
-                return Ok(Value::Int(0));
-            }
-            bytes.as_ptr() as *mut u8
-        }
-        _ => return Err(CompileError::runtime("rc_box_dec_strong: argument must be byte array")),
-    };
+    let ptr = get_ptr_nullable(&args[0]);
+    if ptr.is_null() {
+        return Ok(Value::Int(0));
+    }
 
     unsafe {
         let strong_ptr = ptr as *mut usize;
@@ -249,21 +217,13 @@ pub fn rc_box_dec_strong(args: &[Value]) -> Result<Value, CompileError> {
 
 /// Increment weak reference count
 ///
-/// Args: (ptr: Array<u8>)
+/// Args: (ptr: Int)
 pub fn rc_box_inc_weak(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() != 1 {
         return Err(CompileError::runtime("rc_box_inc_weak requires 1 argument (ptr)"));
     }
 
-    let ptr = match &args[0] {
-        Value::Array(bytes) => {
-            if bytes.is_empty() {
-                return Err(CompileError::runtime("rc_box_inc_weak: ptr is null"));
-            }
-            bytes.as_ptr() as *mut u8
-        }
-        _ => return Err(CompileError::runtime("rc_box_inc_weak: argument must be byte array")),
-    };
+    let ptr = get_ptr(&args[0], "rc_box_inc_weak")?;
 
     unsafe {
         let weak_ptr = ptr.add(size_of::<usize>()) as *mut usize;
@@ -275,22 +235,17 @@ pub fn rc_box_inc_weak(args: &[Value]) -> Result<Value, CompileError> {
 
 /// Decrement weak reference count
 ///
-/// Args: (ptr: Array<u8>)
+/// Args: (ptr: Int)
 /// Returns: usize (count after decrement)
 pub fn rc_box_dec_weak(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() != 1 {
         return Err(CompileError::runtime("rc_box_dec_weak requires 1 argument (ptr)"));
     }
 
-    let ptr = match &args[0] {
-        Value::Array(bytes) => {
-            if bytes.is_empty() {
-                return Ok(Value::Int(0));
-            }
-            bytes.as_ptr() as *mut u8
-        }
-        _ => return Err(CompileError::runtime("rc_box_dec_weak: argument must be byte array")),
-    };
+    let ptr = get_ptr_nullable(&args[0]);
+    if ptr.is_null() {
+        return Ok(Value::Int(0));
+    }
 
     unsafe {
         let weak_ptr = ptr.add(size_of::<usize>()) as *mut usize;
@@ -305,30 +260,23 @@ pub fn rc_box_dec_weak(args: &[Value]) -> Result<Value, CompileError> {
 
 /// Get size of ArcBox<T> for allocation
 ///
-/// Returns: size_of(AtomicUsize) * 2 + size_of(T)
-pub fn arc_box_size(args: &[Value]) -> Result<Value, CompileError> {
-    // Same as rc_box_size since AtomicUsize has same size as usize
-    rc_box_size(args)
+/// Returns: size_of(AtomicUsize) * 2 + size_of(Value)
+pub fn arc_box_size(_args: &[Value]) -> Result<Value, CompileError> {
+    // ArcBox header: AtomicUsize strong + AtomicUsize weak + Value
+    // AtomicUsize has same size as usize
+    let total = size_of::<AtomicUsize>() * 2 + size_of::<Value>();
+    Ok(Value::Int(total as i64))
 }
 
 /// Initialize ArcBox with value and counts (atomic)
 ///
-/// Args: (ptr: Array<u8>, value: T, strong: Int, weak: Int)
+/// Args: (ptr: Int, value: T, strong: Int, weak: Int)
 pub fn arc_box_init(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() != 4 {
         return Err(CompileError::runtime("arc_box_init requires 4 arguments (ptr, value, strong, weak)"));
     }
 
-    let ptr = match &args[0] {
-        Value::Array(bytes) => {
-            if bytes.is_empty() {
-                return Err(CompileError::runtime("arc_box_init: ptr is null"));
-            }
-            bytes.as_ptr() as *mut u8
-        }
-        _ => return Err(CompileError::runtime("arc_box_init: first argument must be byte array")),
-    };
-
+    let ptr = get_ptr(&args[0], "arc_box_init")?;
     let value = args[1].clone();
     let strong = args[2].as_int()? as usize;
     let weak = args[3].as_int()? as usize;
@@ -352,39 +300,34 @@ pub fn arc_box_init(args: &[Value]) -> Result<Value, CompileError> {
 
 /// Get value from ArcBox
 ///
-/// Args: (ptr: Array<u8>)
+/// Args: (ptr: Int)
 /// Returns: T (cloned)
 pub fn arc_box_get_value(args: &[Value]) -> Result<Value, CompileError> {
-    // Same as rc_box_get_value - value access doesn't need atomics
+    // Value access doesn't need atomics
     rc_box_get_value(args)
 }
 
 /// Drop value in ArcBox (run destructor)
 ///
-/// Args: (ptr: Array<u8>)
+/// Args: (ptr: Int)
 pub fn arc_box_drop_value(args: &[Value]) -> Result<Value, CompileError> {
-    // Same as rc_box_drop_value
+    // Drop doesn't need atomics
     rc_box_drop_value(args)
 }
 
 /// Get strong reference count (atomic load)
 ///
-/// Args: (ptr: Array<u8>)
+/// Args: (ptr: Int)
 /// Returns: usize (strong count)
 pub fn arc_box_strong_count(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() != 1 {
         return Err(CompileError::runtime("arc_box_strong_count requires 1 argument (ptr)"));
     }
 
-    let ptr = match &args[0] {
-        Value::Array(bytes) => {
-            if bytes.is_empty() {
-                return Ok(Value::Int(0));
-            }
-            bytes.as_ptr() as *const u8
-        }
-        _ => return Err(CompileError::runtime("arc_box_strong_count: argument must be byte array")),
-    };
+    let ptr = get_ptr_nullable(&args[0]);
+    if ptr.is_null() {
+        return Ok(Value::Int(0));
+    }
 
     unsafe {
         let strong_ptr = ptr as *const AtomicUsize;
@@ -395,22 +338,17 @@ pub fn arc_box_strong_count(args: &[Value]) -> Result<Value, CompileError> {
 
 /// Get weak reference count (atomic load)
 ///
-/// Args: (ptr: Array<u8>)
+/// Args: (ptr: Int)
 /// Returns: usize (weak count)
 pub fn arc_box_weak_count(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() != 1 {
         return Err(CompileError::runtime("arc_box_weak_count requires 1 argument (ptr)"));
     }
 
-    let ptr = match &args[0] {
-        Value::Array(bytes) => {
-            if bytes.is_empty() {
-                return Ok(Value::Int(0));
-            }
-            bytes.as_ptr() as *const u8
-        }
-        _ => return Err(CompileError::runtime("arc_box_weak_count: argument must be byte array")),
-    };
+    let ptr = get_ptr_nullable(&args[0]);
+    if ptr.is_null() {
+        return Ok(Value::Int(0));
+    }
 
     unsafe {
         let weak_ptr = ptr.add(size_of::<AtomicUsize>()) as *const AtomicUsize;
@@ -421,21 +359,13 @@ pub fn arc_box_weak_count(args: &[Value]) -> Result<Value, CompileError> {
 
 /// Increment strong reference count (atomic)
 ///
-/// Args: (ptr: Array<u8>)
+/// Args: (ptr: Int)
 pub fn arc_box_inc_strong(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() != 1 {
         return Err(CompileError::runtime("arc_box_inc_strong requires 1 argument (ptr)"));
     }
 
-    let ptr = match &args[0] {
-        Value::Array(bytes) => {
-            if bytes.is_empty() {
-                return Err(CompileError::runtime("arc_box_inc_strong: ptr is null"));
-            }
-            bytes.as_ptr() as *mut u8
-        }
-        _ => return Err(CompileError::runtime("arc_box_inc_strong: argument must be byte array")),
-    };
+    let ptr = get_ptr(&args[0], "arc_box_inc_strong")?;
 
     unsafe {
         let strong_ptr = ptr as *const AtomicUsize;
@@ -447,22 +377,17 @@ pub fn arc_box_inc_strong(args: &[Value]) -> Result<Value, CompileError> {
 
 /// Decrement strong reference count (atomic)
 ///
-/// Args: (ptr: Array<u8>)
+/// Args: (ptr: Int)
 /// Returns: usize (count after decrement)
 pub fn arc_box_dec_strong(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() != 1 {
         return Err(CompileError::runtime("arc_box_dec_strong requires 1 argument (ptr)"));
     }
 
-    let ptr = match &args[0] {
-        Value::Array(bytes) => {
-            if bytes.is_empty() {
-                return Ok(Value::Int(0));
-            }
-            bytes.as_ptr() as *mut u8
-        }
-        _ => return Err(CompileError::runtime("arc_box_dec_strong: argument must be byte array")),
-    };
+    let ptr = get_ptr_nullable(&args[0]);
+    if ptr.is_null() {
+        return Ok(Value::Int(0));
+    }
 
     unsafe {
         let strong_ptr = ptr as *const AtomicUsize;
@@ -473,21 +398,13 @@ pub fn arc_box_dec_strong(args: &[Value]) -> Result<Value, CompileError> {
 
 /// Increment weak reference count (atomic)
 ///
-/// Args: (ptr: Array<u8>)
+/// Args: (ptr: Int)
 pub fn arc_box_inc_weak(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() != 1 {
         return Err(CompileError::runtime("arc_box_inc_weak requires 1 argument (ptr)"));
     }
 
-    let ptr = match &args[0] {
-        Value::Array(bytes) => {
-            if bytes.is_empty() {
-                return Err(CompileError::runtime("arc_box_inc_weak: ptr is null"));
-            }
-            bytes.as_ptr() as *mut u8
-        }
-        _ => return Err(CompileError::runtime("arc_box_inc_weak: argument must be byte array")),
-    };
+    let ptr = get_ptr(&args[0], "arc_box_inc_weak")?;
 
     unsafe {
         let weak_ptr = ptr.add(size_of::<AtomicUsize>()) as *const AtomicUsize;
@@ -499,22 +416,17 @@ pub fn arc_box_inc_weak(args: &[Value]) -> Result<Value, CompileError> {
 
 /// Decrement weak reference count (atomic)
 ///
-/// Args: (ptr: Array<u8>)
+/// Args: (ptr: Int)
 /// Returns: usize (count after decrement)
 pub fn arc_box_dec_weak(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() != 1 {
         return Err(CompileError::runtime("arc_box_dec_weak requires 1 argument (ptr)"));
     }
 
-    let ptr = match &args[0] {
-        Value::Array(bytes) => {
-            if bytes.is_empty() {
-                return Ok(Value::Int(0));
-            }
-            bytes.as_ptr() as *mut u8
-        }
-        _ => return Err(CompileError::runtime("arc_box_dec_weak: argument must be byte array")),
-    };
+    let ptr = get_ptr_nullable(&args[0]);
+    if ptr.is_null() {
+        return Ok(Value::Int(0));
+    }
 
     unsafe {
         let weak_ptr = ptr.add(size_of::<AtomicUsize>()) as *const AtomicUsize;
