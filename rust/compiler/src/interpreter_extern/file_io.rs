@@ -681,24 +681,19 @@ pub fn rt_getpid(_args: &[Value]) -> Result<Value, CompileError> {
 /// Check if a process with given PID exists
 pub fn rt_process_exists(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() != 1 {
-        return Err(CompileError::new("rt_process_exists() expects 1 argument (pid: i64)"));
+        return Err(CompileError::semantic("rt_process_exists() expects 1 argument (pid: i64)"));
     }
 
     let pid = match &args[0] {
         Value::Int(i) => *i,
-        _ => return Err(CompileError::new("rt_process_exists() expects i64 argument")),
+        _ => return Err(CompileError::semantic("rt_process_exists() expects i64 argument")),
     };
 
-    // On Unix systems, sending signal 0 checks if process exists
+    // On Unix systems, check /proc/<pid> directory
     #[cfg(unix)]
     {
-        use nix::sys::signal::{kill, Signal};
-        use nix::unistd::Pid;
-
-        let result = kill(Pid::from_raw(pid as i32), Signal::SIGCONT);
-        // Process exists if kill succeeds OR if errno is EPERM (no permission to signal)
-        let exists = result.is_ok() ||
-                     matches!(result.err(), Some(nix::errno::Errno::EPERM));
+        let proc_path = format!("/proc/{}", pid);
+        let exists = std::path::Path::new(&proc_path).exists();
         Ok(Value::Bool(exists))
     }
 
