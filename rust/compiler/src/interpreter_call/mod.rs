@@ -43,7 +43,18 @@ pub(crate) fn evaluate_call(
 ) -> Result<Value, CompileError> {
     // Priority 1: Check extern functions first (before builtins)
     if let Expr::Identifier(name) = callee.as_ref() {
-        let is_extern = EXTERN_FUNCTIONS.with(|cell| cell.borrow().contains(name));
+        let is_extern = EXTERN_FUNCTIONS.with(|cell| {
+            let externs = cell.borrow();
+            let contains = externs.contains(name);
+            if !contains && name.contains("_box_") {
+                eprintln!("[DEBUG] Looking for '{}' in EXTERN_FUNCTIONS: {}", name, contains);
+                eprintln!("[DEBUG] EXTERN_FUNCTIONS contains {} functions", externs.len());
+                if externs.len() < 50 {
+                    eprintln!("[DEBUG] Functions: {:?}", externs.iter().take(10).collect::<Vec<_>>());
+                }
+            }
+            contains
+        });
         if is_extern {
             if runtime_profile::is_profiling_active() {
                 runtime_profile::record_full_call(name, None, vec![], runtime_profile::CallType::Ffi);
