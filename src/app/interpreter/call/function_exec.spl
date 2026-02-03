@@ -6,13 +6,11 @@
 # arg_binding.rs, lambda.rs, async_support.rs
 
 from ..core import {Interpreter, Value, InterpreterError}
+from ..core.execution_guard import {push_call_depth, ExecutionGuard}
 from arg_binding import {bind_args, bind_named_args}
 
 export exec_function, exec_function_with_captured_env
 export exec_function_with_values, exec_lambda
-
-# Maximum recursion depth to prevent stack overflow
-val MAX_RECURSION_DEPTH = 512
 
 # ================================================================
 # Function Execution
@@ -21,12 +19,9 @@ val MAX_RECURSION_DEPTH = 512
 # Execute a function definition with arguments
 fn exec_function(interp: Interpreter, func_def: FunctionDef, args: [Value],
                  named_args: Dict<text, Value>, self_value: Value?) -> Result<Value, InterpreterError>:
-    # Stack overflow detection
-    interp.call_depth = interp.call_depth + 1
-    if interp.call_depth > MAX_RECURSION_DEPTH:
-        interp.call_depth = interp.call_depth - 1
-        return Err(InterpreterError.StackOverflow(
-            "maximum recursion depth ({MAX_RECURSION_DEPTH}) exceeded"))
+    # Stack overflow detection (configurable via fault_detection module)
+    val guard = push_call_depth(func_def.name ?? "anonymous")
+        .map_err(\e: InterpreterError.StackOverflow(e))?
 
     # Save const/immutable state (prevent leaking from caller to callee)
     val saved_consts = interp.const_names.clone()
@@ -59,8 +54,7 @@ fn exec_function(interp: Interpreter, func_def: FunctionDef, args: [Value],
     interp.const_names = saved_consts
     interp.immutable_vars = saved_immutables
 
-    # Decrement call depth
-    interp.call_depth = interp.call_depth - 1
+    # Guard auto-decrements recursion depth when it goes out of scope
 
     # Handle result
     match result:

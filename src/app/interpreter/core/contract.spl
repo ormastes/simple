@@ -1,0 +1,207 @@
+# Contract Checking
+#
+# Runtime contract validation for the interpreter:
+# preconditions, postconditions, invariants, and old() value capture.
+#
+# Port of rust/compiler/src/interpreter_contract.rs
+
+from eval import {Interpreter, Value, InterpreterError}
+
+export OldValueCapture, ContractViolation
+export check_contract, capture_old_values
+export check_entry_contracts, check_exit_contracts
+
+# ============================================================================
+# Contract Violation Error
+# ============================================================================
+
+enum ContractViolation:
+    """Type of contract violation."""
+    Precondition(func_name: text, message: text?)
+    Postcondition(func_name: text, message: text?)
+    Invariant(func_name: text, message: text?, is_exit: bool)
+
+fn violation_message(v: ContractViolation) -> text:
+    match v:
+        case Precondition(func, msg):
+            if msg.?:
+                "Precondition violation in function '{func}': {msg.unwrap()}"
+            else:
+                "Precondition violation in function '{func}': contract condition failed"
+        case Postcondition(func, msg):
+            if msg.?:
+                "Postcondition violation in function '{func}': {msg.unwrap()}"
+            else:
+                "Postcondition violation in function '{func}': contract condition failed"
+        case Invariant(func, msg, is_exit):
+            val phase = if is_exit: "Exit" else: "Entry"
+            if msg.?:
+                "{phase} invariant violation in function '{func}': {msg.unwrap()}"
+            else:
+                "{phase} invariant violation in function '{func}': contract condition failed"
+
+# ============================================================================
+# Old Value Capture
+# ============================================================================
+
+class OldValueCapture:
+    """Storage for old() expression values captured at function entry.
+
+    Maps expression keys (stringified) to their values at entry time.
+    Used by postconditions to compare pre- and post-state.
+    """
+    captures: Dict<text, Value>
+
+impl OldValueCapture:
+    static fn empty() -> OldValueCapture:
+        OldValueCapture(captures: {})
+
+    me capture(key: text, value: Value):
+        self.captures[key] = value
+
+    fn get(key: text) -> Value?:
+        self.captures.get(key)
+
+# ============================================================================
+# Core Contract Checking
+# ============================================================================
+
+fn check_contract(condition: bool, kind: text, func_name: text, message: text?) -> Result<(), text>:
+    """Check a contract condition. Returns Err with violation message if false."""
+    if not condition:
+        if message.?:
+            Err("{kind} violation in function '{func_name}': {message.unwrap()}")
+        else:
+            Err("{kind} violation in function '{func_name}': contract condition failed")
+    else:
+        Ok(())
+
+fn check_clause(interp: Interpreter, condition: Expr, kind: text,
+                func_name: text, message: text?) -> Result<(), InterpreterError>:
+    """Evaluate a contract clause condition and check the result."""
+    val result = interp.eval_expr(condition)?
+    if not result.is_bool():
+        return Err(InterpreterError.TypeError(
+            "contract condition must evaluate to bool, got {result.type_name()}"))
+    if not result.as_bool():
+        val msg = if message.?:
+            "{kind} violation in function '{func_name}': {message.unwrap()}"
+        else:
+            "{kind} violation in function '{func_name}': contract condition failed"
+        return Err(InterpreterError.RuntimeError(msg))
+    Ok(())
+
+# ============================================================================
+# Old Value Capture from Contract Block
+# ============================================================================
+
+fn capture_old_values(interp: Interpreter, contract: ContractBlock) -> Result<OldValueCapture, InterpreterError>:
+    """Scan postconditions for old() expressions and capture their values."""
+    var captures = OldValueCapture.empty()
+
+    # Collect old() expressions from postconditions
+    val old_exprs = collect_old_expressions_from_contract(contract)
+
+    for expr in old_exprs:
+        val value = interp.eval_expr(expr)?
+        captures.capture(expr.to_string(), value)
+
+    Ok(captures)
+
+fn collect_old_expressions_from_contract(contract: ContractBlock) -> [Expr]:
+    """Find all old() sub-expressions in postconditions."""
+    var result: [Expr] = []
+    for clause in contract.postconditions:
+        result = result.merge(collect_old_exprs(clause.condition))
+    for clause in contract.error_postconditions:
+        result = result.merge(collect_old_exprs(clause.condition))
+    result
+
+fn collect_old_exprs(expr: Expr) -> [Expr]:
+    """Recursively collect old() expressions from an AST expression."""
+    match expr:
+        case ContractOld(inner):
+            [inner]
+        case Binary(left, _op, right):
+            collect_old_exprs(left).merge(collect_old_exprs(right))
+        case Unary(_op, operand):
+            collect_old_exprs(operand)
+        case Call(callee, args):
+            var result = collect_old_exprs(callee)
+            for arg in args:
+                result = result.merge(collect_old_exprs(arg.value))
+            result
+        case FieldAccess(receiver, _field):
+            collect_old_exprs(receiver)
+        case Index(receiver, index):
+            collect_old_exprs(receiver).merge(collect_old_exprs(index))
+        case MethodCall(receiver, _name, args):
+            var result = collect_old_exprs(receiver)
+            for arg in args:
+                result = result.merge(collect_old_exprs(arg.value))
+            result
+        case _: []
+
+# ============================================================================
+# Entry Contract Checking (preconditions + entry invariants)
+# ============================================================================
+
+fn check_entry_contracts(interp: Interpreter, contract: ContractBlock,
+                         func_name: text) -> Result<(), InterpreterError>:
+    """Check preconditions and entry invariants before function execution."""
+    # 1. Preconditions
+    for clause in contract.preconditions:
+        check_clause(interp, clause.condition, "Precondition", func_name, clause.message)?
+
+    # 2. Entry invariants
+    for clause in contract.invariants:
+        check_clause(interp, clause.condition, "Entry invariant", func_name, clause.message)?
+
+    Ok(())
+
+# ============================================================================
+# Exit Contract Checking (postconditions + exit invariants)
+# ============================================================================
+
+fn check_exit_contracts(interp: Interpreter, contract: ContractBlock,
+                        func_name: text, return_value: Value,
+                        old_captures: OldValueCapture) -> Result<(), InterpreterError>:
+    """Check postconditions and exit invariants after function execution."""
+    val result_binding = contract.postcondition_binding ?? "ret"
+
+    # 1. Exit invariants
+    for clause in contract.invariants:
+        check_clause(interp, clause.condition, "Exit invariant", func_name, clause.message)?
+
+    # 2. Postconditions (with result binding and old() substitution)
+    interp.env.push_scope()
+    interp.env.define(result_binding, return_value)
+
+    for clause in contract.postconditions:
+        # Substitute old() expressions with captured values
+        val condition = substitute_old_exprs(clause.condition, old_captures)
+        check_clause(interp, condition, "Postcondition", func_name, clause.message)?
+
+    interp.env.pop_scope()
+    Ok(())
+
+fn substitute_old_exprs(expr: Expr, captures: OldValueCapture) -> Expr:
+    """Replace old() sub-expressions with their captured literal values."""
+    match expr:
+        case ContractOld(inner):
+            val key = inner.to_string()
+            val captured = captures.get(key)
+            if captured.?:
+                # Replace old(expr) with the captured literal value
+                Expr.Literal(captured.unwrap())
+            else:
+                expr  # Keep as-is if not captured (error will surface at eval time)
+        case Binary(left, op, right):
+            Expr.Binary(
+                left: substitute_old_exprs(left, captures),
+                op: op,
+                right: substitute_old_exprs(right, captures)
+            )
+        case Unary(op, operand):
+            Expr.Unary(op: op, operand: substitute_old_exprs(operand, captures))
+        case _: expr

@@ -203,7 +203,7 @@ fn test_load_test_db_nonexistent() {
 }
 
 #[test]
-#[ignore] // TODO: Fix SDN serialization format issue
+#[ignore] // FIXABLE: Fix SDN serialization format issue
 fn test_save_and_load_test_db() {
     let temp_dir = TempDir::new().unwrap();
     let db_path = temp_dir.path().join("test_db.sdn");

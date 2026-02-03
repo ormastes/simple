@@ -6,6 +6,12 @@
 extern fn rt_getpid() -> i64
 extern fn rt_hostname() -> text
 extern fn rt_time_now_unix_micros() -> i64
+extern fn rt_timestamp_get_year(micros: i64) -> i32
+extern fn rt_timestamp_get_month(micros: i64) -> i32
+extern fn rt_timestamp_get_day(micros: i64) -> i32
+extern fn rt_timestamp_get_hour(micros: i64) -> i32
+extern fn rt_timestamp_get_minute(micros: i64) -> i32
+extern fn rt_timestamp_get_second(micros: i64) -> i32
 
 use string_interner.StringInterner
 use test_db_types.*
@@ -167,6 +173,7 @@ impl TestDatabase:
 
         val test_idx = self.find_test_index(name_str, suite_id)
         val is_new = test_idx < 0
+        var change = "new_test"
 
         if is_new:
             # Create new test record
@@ -185,7 +192,7 @@ impl TestDatabase:
         else:
             # Update existing test
             val old_status_str = self.interner.get(self.tests[test_idx].status_str)
-            val change = change_type_str(old_status_str, status_str_val, false)
+            change = change_type_str(old_status_str, status_str_val, false)
 
             self.tests[test_idx].status_str = status_str
             self.tests[test_idx].category_str = category_str
@@ -199,19 +206,19 @@ impl TestDatabase:
                     run_id: ""
                 ))
 
-        # Update counters
-        self.update_counter(name_str, status_str_val, is_new)
+        # C1: Update counters with flaky detection
+        self.update_counter(name_str, status_str_val, is_new, change)
 
-        # Update timing
+        # Update timing with percentile computation and window cap
         self.update_timing(name_str, duration_ms)
 
         self.dirty = true
 
     # -----------------------------------------------------------------
-    # Counter management
+    # Counter management (C1: flaky count on PassToFail/FailToPass)
     # -----------------------------------------------------------------
 
-    me update_counter(name_str: i64, status: text, is_new: bool):
+    me update_counter(name_str: i64, status: text, is_new: bool, change: text):
         # Find existing counter
         var found = false
         var i = 0
@@ -222,7 +229,9 @@ impl TestDatabase:
                     self.counters[i].passed = self.counters[i].passed + 1
                 elif status == "failed":
                     self.counters[i].failed = self.counters[i].failed + 1
-                val change = if is_new: "new_test" else: self.counters[i].last_change
+                # C1: Increment flaky count on status flip
+                if is_flaky_change(change):
+                    self.counters[i].flaky_count = self.counters[i].flaky_count + 1
                 self.counters[i].last_change = change
                 found = true
                 break
@@ -241,18 +250,49 @@ impl TestDatabase:
             ))
 
     # -----------------------------------------------------------------
-    # Timing management
+    # Timing management (C2: percentiles, C3: window cap, C6: baseline)
     # -----------------------------------------------------------------
 
     me update_timing(name_str: i64, duration_ms: f64):
-        # Update summary
+        val config = TimingConfig.defaults()
+
+        # Add timing run
+        self.timing_runs.push(TimingRun(
+            test_id: name_str,
+            timestamp: micros_to_rfc3339(rt_time_now_unix_micros()),
+            duration_ms: duration_ms,
+            outlier: false
+        ))
+
+        # C3: Cap timing runs to max per test
+        self.cap_timing_runs(name_str, config.max_runs_per_test)
+
+        # Collect runs for this test
+        val runs = self.collect_timing_runs(name_str)
+
+        # H4: Remove outliers using IQR method
+        val clean_runs = detect_outliers_iqr(runs, config.outlier_iqr_multiplier)
+
+        # C2: Compute percentiles
+        val (p50, p90, p95, p99) = compute_percentiles(clean_runs)
+
+        # Update or create summary
         var found = false
         var i = 0
         while i < self.timing.len():
             if self.timing[i].test_id == name_str:
+                val old_baseline = self.timing[i].baseline_median
                 self.timing[i].last_ms = duration_ms
-                # Simple p50 update: keep last value for now
-                # Full percentile computation deferred to future enhancement
+                self.timing[i].p50 = p50
+                self.timing[i].p90 = p90
+                self.timing[i].p95 = p95
+                # C6: Baseline recomputation with change detection
+                if old_baseline == 0.0 or old_baseline < 0.001:
+                    self.timing[i].baseline_median = p50
+                else:
+                    val change_ratio = abs_f64(p50 - old_baseline) / old_baseline
+                    if change_ratio > config.baseline_change_threshold:
+                        self.timing[i].baseline_median = p50
                 found = true
                 break
             i = i + 1
@@ -261,19 +301,36 @@ impl TestDatabase:
             self.timing.push(TimingSummary(
                 test_id: name_str,
                 last_ms: duration_ms,
-                p50: 0.0,
-                p90: 0.0,
-                p95: 0.0,
-                baseline_median: 0.0
+                p50: p50,
+                p90: p90,
+                p95: p95,
+                baseline_median: p50
             ))
 
-        # Add timing run (cap at 10 per test)
-        self.timing_runs.push(TimingRun(
-            test_id: name_str,
-            timestamp: micros_to_rfc3339(rt_time_now_unix_micros()),
-            duration_ms: duration_ms,
-            outlier: false
-        ))
+    me cap_timing_runs(test_id: i64, max_count: i64):
+        # Count runs for this test
+        var count = 0
+        for tr in self.timing_runs:
+            if tr.test_id == test_id:
+                count = count + 1
+
+        # If over cap, rebuild list keeping only the newest max_count runs
+        if count > max_count:
+            var to_skip = count - max_count
+            var new_runs: List<TimingRun> = []
+            for tr in self.timing_runs:
+                if tr.test_id == test_id and to_skip > 0:
+                    to_skip = to_skip - 1
+                    continue
+                new_runs.push(tr)
+            self.timing_runs = new_runs
+
+    fn collect_timing_runs(test_id: i64) -> List<f64>:
+        var runs: List<f64> = []
+        for tr in self.timing_runs:
+            if tr.test_id == test_id:
+                runs.push(tr.duration_ms)
+        runs
 
     # -----------------------------------------------------------------
     # Run tracking
@@ -315,16 +372,168 @@ impl TestDatabase:
                 return
             i = i + 1
 
+    # -----------------------------------------------------------------
+    # H1: Cleanup stale runs (time-based, mark as crashed if > max_age)
+    # -----------------------------------------------------------------
+
+    me cleanup_stale_runs(max_age_hours: i64):
+        val now = rt_time_now_unix_micros()
+        val max_age_micros = max_age_hours * 3600 * 1000000
+        var i = 0
+        while i < self.test_runs.len():
+            if self.test_runs[i].status == "running":
+                # Parse start_time back to micros for comparison
+                val start_micros = parse_rfc3339_to_micros(self.test_runs[i].start_time)
+                if start_micros > 0 and (now - start_micros) > max_age_micros:
+                    self.test_runs[i].status = "crashed"
+                    self.test_runs[i].end_time = micros_to_rfc3339(now)
+                    self.dirty = true
+            i = i + 1
+
+    # -----------------------------------------------------------------
+    # H2: Prune old runs (keep N most recent)
+    # -----------------------------------------------------------------
+
+    me prune_runs(keep_count: i64):
+        if self.test_runs.len() <= keep_count:
+            return
+        val start = self.test_runs.len() - keep_count
+        var new_runs: List<RunRecord> = []
+        var i = start
+        while i < self.test_runs.len():
+            new_runs.push(self.test_runs[i])
+            i = i + 1
+        self.test_runs = new_runs
+        self.dirty = true
+
+    # -----------------------------------------------------------------
+    # H3: List runs with status filter
+    # -----------------------------------------------------------------
+
+    fn list_runs(status_filter: text) -> List<RunRecord>:
+        if status_filter == "" or status_filter == "all":
+            return self.test_runs
+        var result: List<RunRecord> = []
+        for r in self.test_runs:
+            if r.status == status_filter:
+                result.push(r)
+        result
+
 # =========================================================================
-# Helpers
+# C7: RFC 3339 timestamp formatting using FFI
 # =========================================================================
 
 fn micros_to_rfc3339(micros: i64) -> text:
-    # Simple ISO 8601 approximation from unix microseconds
-    val secs = micros / 1000000
-    val remaining_micros = micros % 1000000
-    # Use basic format - full RFC3339 would need date/time decomposition
-    "{secs}.{remaining_micros}"
+    val year = rt_timestamp_get_year(micros)
+    val month = rt_timestamp_get_month(micros)
+    val day = rt_timestamp_get_day(micros)
+    val hour = rt_timestamp_get_hour(micros)
+    val minute = rt_timestamp_get_minute(micros)
+    val second = rt_timestamp_get_second(micros)
+    val y = pad_int(year, 4)
+    val mo = pad_int(month, 2)
+    val d = pad_int(day, 2)
+    val h = pad_int(hour, 2)
+    val mi = pad_int(minute, 2)
+    val s = pad_int(second, 2)
+    "{y}-{mo}-{d}T{h}:{mi}:{s}Z"
+
+fn pad_int(n: i32, width: i64) -> text:
+    var s = "{n}"
+    while s.len() < width:
+        s = "0{s}"
+    s
+
+fn parse_rfc3339_to_micros(ts: text) -> i64:
+    # Parse "YYYY-MM-DDTHH:MM:SSZ" back to approximate micros
+    # Falls back to 0 on parse failure
+    if ts.len() < 19:
+        return 0
+    val year = ts[0:4].to_int_or(0)
+    val month = ts[5:7].to_int_or(1)
+    val day = ts[8:10].to_int_or(1)
+    val hour = ts[11:13].to_int_or(0)
+    val minute = ts[14:16].to_int_or(0)
+    val second = ts[17:19].to_int_or(0)
+    # Approximate: use days since epoch
+    # Rough estimate: 365.25 days/year, 30.44 days/month
+    val days = (year - 1970) * 365 + (month - 1) * 30 + (day - 1)
+    val secs = days * 86400 + hour * 3600 + minute * 60 + second
+    secs * 1000000
+
+# =========================================================================
+# C2: Percentile computation (sorted list + linear interpolation)
+# =========================================================================
+
+fn compute_percentiles(samples: List<f64>) -> (f64, f64, f64, f64):
+    if samples.len() == 0:
+        return (0.0, 0.0, 0.0, 0.0)
+    if samples.len() == 1:
+        val v = samples[0]
+        return (v, v, v, v)
+
+    val sorted = sort_f64(samples)
+    val p50 = percentile_at(sorted, 0.50)
+    val p90 = percentile_at(sorted, 0.90)
+    val p95 = percentile_at(sorted, 0.95)
+    val p99 = percentile_at(sorted, 0.99)
+    (p50, p90, p95, p99)
+
+fn percentile_at(sorted: List<f64>, p: f64) -> f64:
+    val n = sorted.len()
+    if n == 1:
+        return sorted[0]
+    val rank = p * (n - 1).to_float()
+    val lower = rank.to_int()
+    val upper = lower + 1
+    if upper >= n:
+        return sorted[n - 1]
+    val frac = rank - lower.to_float()
+    sorted[lower] * (1.0 - frac) + sorted[upper] * frac
+
+fn sort_f64(items: List<f64>) -> List<f64>:
+    # Simple insertion sort (timing runs are small, max 10)
+    var result: List<f64> = []
+    for item in items:
+        result.push(item)
+    var i = 1
+    while i < result.len():
+        val key = result[i]
+        var j = i - 1
+        while j >= 0 and result[j] > key:
+            result[j + 1] = result[j]
+            j = j - 1
+        result[j + 1] = key
+        i = i + 1
+    result
+
+# =========================================================================
+# H4: Outlier detection (IQR method)
+# =========================================================================
+
+fn detect_outliers_iqr(samples: List<f64>, multiplier: f64) -> List<f64>:
+    if samples.len() < 4:
+        return samples
+    val sorted = sort_f64(samples)
+    val n = sorted.len()
+    val q1 = percentile_at(sorted, 0.25)
+    val q3 = percentile_at(sorted, 0.75)
+    val iqr = q3 - q1
+    val lower_bound = q1 - multiplier * iqr
+    val upper_bound = q3 + multiplier * iqr
+    var result: List<f64> = []
+    for v in sorted:
+        if v >= lower_bound and v <= upper_bound:
+            result.push(v)
+    if result.len() == 0:
+        return samples
+    result
+
+fn abs_f64(x: f64) -> f64:
+    if x < 0.0:
+        return 0.0 - x
+    x
 
 export TestDatabase
-export micros_to_rfc3339
+export micros_to_rfc3339, parse_rfc3339_to_micros
+export compute_percentiles, detect_outliers_iqr, sort_f64

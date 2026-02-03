@@ -11,7 +11,7 @@ export eval_if, eval_elif, eval_if_expr
 
 # Evaluate an if statement
 fn eval_if(interp: Interpreter, condition: Expr, then_block: Block,
-           elif_branches: [(Expr, Block)], else_block: Block?,
+           elif_branches: [(Pattern?, Expr, Block)], else_block: Block?,
            let_pattern: Pattern?, is_suspend: bool) -> Result<Value, InterpreterError>:
 
     # Handle if-val / if-var: if val Some(x) = expr:
@@ -40,11 +40,23 @@ fn eval_if(interp: Interpreter, condition: Expr, then_block: Block,
         return interp.eval_block(then_block)
 
     # Check elif branches
-    for (elif_cond, elif_block) in elif_branches:
-        val elif_val = evaluate(interp, elif_cond)?
-        val elif_val = if is_suspend: elif_val.await_if_promise()? else: elif_val
-        if elif_val.is_truthy():
-            return interp.eval_block(elif_block)
+    for (elif_pattern, elif_cond, elif_block) in elif_branches:
+        if elif_pattern.?:
+            # elif val PATTERN = EXPR: pattern binding
+            val value = evaluate(interp, elif_cond)?
+            val bindings = match_pattern(value, elif_pattern.unwrap())?
+            if bindings.?:
+                interp.env.push_scope()
+                for (name, val) in bindings.unwrap():
+                    interp.env.define(name, val)
+                val result = interp.eval_block(elif_block)
+                interp.env.pop_scope()
+                return result
+        else:
+            val elif_val = evaluate(interp, elif_cond)?
+            val elif_val = if is_suspend: elif_val.await_if_promise()? else: elif_val
+            if elif_val.is_truthy():
+                return interp.eval_block(elif_block)
 
     # Else block
     if else_block.?:
@@ -68,7 +80,7 @@ fn eval_elif(interp: Interpreter, condition: Expr, then_block: Block,
 
 # Evaluate if as an expression (for implicit return)
 fn eval_if_expr(interp: Interpreter, condition: Expr, then_block: Block,
-                elif_branches: [(Expr, Block)], else_block: Block?,
+                elif_branches: [(Pattern?, Expr, Block)], else_block: Block?,
                 let_pattern: Pattern?, is_suspend: bool) -> Result<Value, InterpreterError>:
 
     # Handle if-val / if-var pattern binding
@@ -93,11 +105,22 @@ fn eval_if_expr(interp: Interpreter, condition: Expr, then_block: Block,
     if cond_val.is_truthy():
         return interp.eval_block_value(then_block)
 
-    for (elif_cond, elif_block) in elif_branches:
-        val elif_val = evaluate(interp, elif_cond)?
-        val elif_val = if is_suspend: elif_val.await_if_promise()? else: elif_val
-        if elif_val.is_truthy():
-            return interp.eval_block_value(elif_block)
+    for (elif_pattern, elif_cond, elif_block) in elif_branches:
+        if elif_pattern.?:
+            val value = evaluate(interp, elif_cond)?
+            val bindings = match_pattern(value, elif_pattern.unwrap())?
+            if bindings.?:
+                interp.env.push_scope()
+                for (name, val) in bindings.unwrap():
+                    interp.env.define(name, val)
+                val result = interp.eval_block_value(elif_block)
+                interp.env.pop_scope()
+                return result
+        else:
+            val elif_val = evaluate(interp, elif_cond)?
+            val elif_val = if is_suspend: elif_val.await_if_promise()? else: elif_val
+            if elif_val.is_truthy():
+                return interp.eval_block_value(elif_block)
 
     if else_block.?:
         return interp.eval_block_value(else_block.unwrap())

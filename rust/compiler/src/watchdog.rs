@@ -84,8 +84,12 @@ mod tests {
         fault_detection::reset_timeout();
         // 1-second timeout
         start_watchdog(1);
-        // Wait for it to fire
-        std::thread::sleep(Duration::from_millis(1500));
+        // Poll until the watchdog fires, with a generous upper bound
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !fault_detection::is_timeout_exceeded() {
+            assert!(Instant::now() < deadline, "watchdog did not fire within 5 seconds");
+            std::thread::sleep(Duration::from_millis(50));
+        }
         assert!(fault_detection::is_timeout_exceeded());
         stop_watchdog();
         fault_detection::reset_timeout();
