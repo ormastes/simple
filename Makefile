@@ -73,6 +73,7 @@ test-rust:
 	cd rust && cargo test --workspace
 
 test-verbose:
+	$(call DEPRECATION_WARNING,test --verbose)
 	cd rust && cargo test --workspace -- --nocapture
 
 # Test by level (per test.md policy)
