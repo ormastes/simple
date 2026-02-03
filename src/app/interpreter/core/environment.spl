@@ -8,8 +8,9 @@
 # - Memory: One interned string vs many duplicate strings
 
 from value import {Value}
-from symbol import {SymbolId, intern, resolve, GLOBAL_INTERNER}
-from ..collections.persistent_dict import {PersistentDict}
+from symbol import {SymbolId, intern, resolve, get_or_none}
+# TODO: Re-enable when collections module is complete
+# from ..collections.persistent_dict import {Dict}
 
 export Environment, Scope, Binding, EnvironmentWithInterner
 
@@ -35,25 +36,25 @@ impl Binding:
 struct Scope:
     """A single scope (lexical block).
 
-    Uses PersistentDict for bindings, enabling O(1) scope snapshots
+    Uses Dict for bindings, enabling O(1) scope snapshots
     via structural sharing. Push/pop scope only copies the modified path
     (~7 nodes) rather than the entire bindings map.
     """
-    bindings: PersistentDict<i64, Binding>  # SymbolId.id -> Binding (HAMT, structural sharing)
+    bindings: Dict<i64, Binding>  # SymbolId.id -> Binding (HAMT, structural sharing)
     parent: Option<&Scope>
 
 impl Scope:
     static fn new() -> Scope:
         """Create a new empty scope."""
         Scope(
-            bindings: PersistentDict.new(),
+            bindings: Dict.new(),
             parent: None
         )
 
     static fn with_parent(parent: &Scope) -> Scope:
         """Create a new scope with a parent."""
         Scope(
-            bindings: PersistentDict.new(),
+            bindings: Dict.new(),
             parent: Some(parent)
         )
 
@@ -89,7 +90,7 @@ impl Scope:
         First checks if the string is interned. If not, the binding
         cannot exist (all bindings use interned symbols).
         """
-        val sym = GLOBAL_INTERNER.get_or_none(name)
+        val sym = get_or_none(name)
         if sym.?:
             self.get(sym.unwrap())
         else:
@@ -119,7 +120,7 @@ impl Scope:
 
     fn set_str(name: text, value: Value) -> Result<Scope, text>:
         """Set a variable's value by string name."""
-        val sym = GLOBAL_INTERNER.get_or_none(name)
+        val sym = get_or_none(name)
         if sym.?:
             self.set(sym.unwrap(), value)
         else:
@@ -149,7 +150,7 @@ impl Environment:
     me push_scope():
         """Enter a new scope.
 
-        With PersistentDict, the parent scope's bindings are shared
+        With Dict, the parent scope's bindings are shared
         (not copied). Only new/modified bindings allocate new nodes.
         """
         val parent = self.current_scope()
@@ -218,7 +219,7 @@ impl Environment:
 
     fn get_str(name: text) -> Value?:
         """Get a variable's value by string name."""
-        val sym = GLOBAL_INTERNER.get_or_none(name)
+        val sym = get_or_none(name)
         if sym.?:
             self.get(sym.unwrap())
         else:
@@ -226,7 +227,7 @@ impl Environment:
 
     me set_str(name: text, value: Value) -> Result<(), text>:
         """Set a variable's value by string name."""
-        val sym = GLOBAL_INTERNER.get_or_none(name)
+        val sym = get_or_none(name)
         if sym.?:
             self.set(sym.unwrap(), value)
         else:
