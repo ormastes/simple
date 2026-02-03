@@ -40,10 +40,11 @@ Successfully implemented reference capabilities (`mut T`, `iso T`) and concurren
 ### Reference Capabilities
 
 ```simple
-# Three capability levels:
-x: i64          # Shared (T) - read-only, aliasable
-x: mut i64      # Exclusive (mut T) - single writer
-x: iso i64      # Isolated (iso T) - unique + transferable
+# Four capability levels:
+x: Data          # Shared (T) - read-only, aliasable
+x: mut Data      # Exclusive (mut T) - single writer
+x: ~Data         # Isolated (~T / iso T) - unique + transferable
+x: @Data         # Atomic RC (@T / Arc) - thread-safe ref-counted
 ```
 
 **Conversion Rules (downgrades only):**

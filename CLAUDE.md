@@ -19,6 +19,7 @@ For detailed guidance, invoke with `/skill-name`:
 | `todo` | TODO/FIXME comment format |
 | `doc` | Documentation writing: specs (SSpec), research, design, guides |
 | `deeplearning` | **Deep learning**: Pipeline operators, dimension checking, NN layers |
+| `ffi` | **FFI generation**: Write specs in `.spl`, generate Rust with `simple ffi-gen` |
 
 Skills located in `.claude/skills/`.
 
@@ -323,6 +324,12 @@ See `/coding` skill for full details.
 
 ### Scripts
 - ❌ **NEVER write Python/Bash** - use Simple (`.spl`) only
+
+### Rust Files
+- ❌ **NEVER write `.rs` files manually** - use `simple ffi-gen` to generate from specs
+- ✅ **Write FFI specs** in `src/app/ffi_gen/specs/*.spl` instead
+- ✅ **Generate Rust code**: `simple ffi-gen --gen-all` or `simple ffi-gen --gen-module spec.spl`
+- 📖 **FFI Generation Guide**: See `doc/guide/ffi_gen_guide.md`
 
 ### Tests
 - ❌ **NEVER add `#[ignore]`** without user approval
@@ -848,6 +855,69 @@ simple --gen-lean module.spl --verify memory|types|effects|all
 ```
 
 Projects in `verification/`: borrow checker, GC safety, effects, SC-DRF.
+
+---
+
+## FFI Wrapper Generation
+
+**All FFI wrappers are generated from Simple spec files, not hand-written Rust.**
+
+### Quick Commands
+
+```bash
+# Generate all FFI modules
+simple ffi-gen --gen-all
+
+# Generate single module from spec
+simple ffi-gen --gen-module src/app/ffi_gen/specs/file_io.spl
+
+# Preview generated code (dry-run)
+simple ffi-gen --gen-all --dry-run
+
+# Generate and verify (cargo check)
+simple ffi-gen --gen-all --verify
+
+# Clean and regenerate
+simple ffi-gen --clean && simple ffi-gen --gen-all
+```
+
+### Spec File Location
+
+| Category | Spec File | Generated Output |
+|----------|-----------|------------------|
+| Runtime Values | `specs/runtime_value_full.spl` | `build/rust/ffi_gen/src/runtime_value.rs` |
+| GC | `specs/gc_full.spl` | `build/rust/ffi_gen/src/gc.rs` |
+| File I/O | `specs/file_io.spl` | `build/rust/ffi_gen/src/file_io.rs` |
+| Process | `specs/process.spl` | `build/rust/ffi_gen/src/process.rs` |
+| Time | `specs/time.spl` | `build/rust/ffi_gen/src/time.rs` |
+| System | `specs/system.spl` | `build/rust/ffi_gen/src/system.rs` |
+
+### Adding New FFI Functions
+
+1. **Create or edit spec file** in `src/app/ffi_gen/specs/`
+2. **Define function specs** using `InternFnSpec`:
+   ```simple
+   specs.push(InternFnSpec(
+       name: "rt_my_function",
+       category: "my_category",
+       params: [InternParamSpec(name: "arg", value_type: "String")],
+       return_type: "i64",
+       runtime_fn: "rt_my_function",
+       doc: "Description of function"
+   ))
+   ```
+3. **Generate code**: `simple ffi-gen --gen-all`
+4. **Verify**: `simple ffi-gen --verify`
+
+### Configuration (simple.sdn)
+
+```sdn
+ffi:
+  rust:
+    channel: stable
+    edition: 2021
+    components: [clippy, rustfmt]
+```
 
 ---
 

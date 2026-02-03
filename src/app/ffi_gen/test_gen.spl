@@ -1,0 +1,110 @@
+# FFI Wrapper Generator - Test Module Code Generation
+#
+# Generates Rust #[cfg(test)] mod tests from TestSpec.
+#
+# Usage:
+#   import app.ffi_gen.test_gen (generate_tests, generate_test_module)
+
+use app.ffi_gen.types*
+
+# ============================================================================
+# Test Module Generation
+# ============================================================================
+
+# Generate a complete #[cfg(test)] mod tests block
+fn generate_test_module(tests: [TestSpec]) -> text:
+    if tests.len() == 0:
+        return ""
+
+    var out = ""
+    out = out + "#[cfg(test)]\n"
+    out = out + "mod tests {{\n"
+    out = out + "    use super::*;\n"
+    out = out + "\n"
+
+    for test in tests:
+        out = out + generate_test(test)
+        out = out + "\n"
+
+    out = out + "}}\n"
+    out
+
+# Generate a single test function
+fn generate_test(spec: TestSpec) -> text:
+    var out = ""
+
+    # Doc comment
+    if spec.doc != "":
+        for line in spec.doc.split("\n"):
+            out = out + "    /// {line}\n"
+
+    # Attributes
+    out = out + "    #[test]\n"
+    if spec.ignored:
+        if spec.ignore_reason != "":
+            out = out + "    #[ignore = \"{spec.ignore_reason}\"]\n"
+        else:
+            out = out + "    #[ignore]\n"
+
+    out = out + "    fn {spec.name}() {{\n"
+
+    # Body - indent each line
+    for line in spec.body.split("\n"):
+        if line.trim() != "":
+            out = out + "        {line}\n"
+        else:
+            out = out + "\n"
+
+    out = out + "    }}\n"
+    out
+
+# ============================================================================
+# Convenience Constructors
+# ============================================================================
+
+# Create a simple test that wraps unsafe code
+fn unsafe_test(name: text, body: text) -> TestSpec:
+    TestSpec.test(name, "unsafe {{\n{body}\n}}")
+
+# Create a test with setup and teardown pattern
+fn test_with_cleanup(name: text, setup: text, test_body: text, cleanup: text) -> TestSpec:
+    val body = "{setup}\n{test_body}\n{cleanup}"
+    TestSpec.test(name, body)
+
+# Create a test that allocates and frees values
+fn alloc_test(name: text, alloc_code: text, test_code: text, free_code: text) -> TestSpec:
+    val body = "unsafe {{\n    {alloc_code}\n    {test_code}\n    {free_code}\n}}"
+    TestSpec.test(name, body)
+
+# ============================================================================
+# Common Test Patterns
+# ============================================================================
+
+# Generate assertion: assert!(!ptr.is_null())
+fn assert_not_null(var_name: text) -> text:
+    "assert!(!{var_name}.is_null());"
+
+# Generate assertion: assert_eq!(actual, expected)
+fn assert_eq(actual: text, expected: text) -> text:
+    "assert_eq!({actual}, {expected});"
+
+# Generate assertion: assert!(condition)
+fn assert_true(condition: text) -> text:
+    "assert!({condition});"
+
+# Generate assertion: assert!(!condition)
+fn assert_false(condition: text) -> text:
+    "assert!(!{condition});"
+
+# Generate let binding for test
+fn let_val(name: text, value: text) -> text:
+    "let {name} = {value};"
+
+# Generate value creation and test pattern
+fn test_value_creation(fn_name: text, var_name: text, args: text, assertions: [text]) -> text:
+    var out = "let {var_name} = {fn_name}({args});\n"
+    out = out + "assert!(!{var_name}.is_null());\n"
+    for assertion in assertions:
+        out = out + "{assertion}\n"
+    out = out + "rt_value_free({var_name});"
+    out

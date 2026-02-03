@@ -14,20 +14,30 @@ Simple uses a two-domain memory model:
 
 ## Pointer Types
 
-| Syntax | Name | Domain | Ownership | Mutation |
-|--------|------|--------|-----------|----------|
-| `T` | GC Reference | GC | GC-managed | Via `mut` |
-| `&T` | Unique | Manual | Single owner | Via `mut` |
-| `*T` | Shared | Manual | Ref-counted | Read-only |
-| `-T` | Weak | Manual | Non-owning | N/A |
-| `+T` | Handle | Manual | Pool-managed | Via pool |
+| Syntax | Name | Domain | Ownership | Mutation | Thread-Safe |
+|--------|------|--------|-----------|----------|-------------|
+| `T` | GC Reference | GC | GC-managed | Via `mut` | N/A |
+| `&T` | Unique | Manual | Single owner | Via `mut` | N/A |
+| `*T` | Shared (Rc) | Manual | Ref-counted | Read-only (COW) | No |
+| `@T` | Atomic (Arc) | Manual | Atomic ref-counted | Read-only (COW) | **Yes** |
+| `-T` | Weak | Manual | Non-owning | N/A | Depends |
+| `+T` | Handle | Manual | Pool-managed | Via pool | N/A |
 
-**Capabilities:**
-| Syntax | Name | Aliasing |
-|--------|------|----------|
-| `T` | Shared | Multiple readers OK |
-| `mut T` | Exclusive | Single writer only |
-| `iso T` | Isolated | No aliasing, transferable |
+**Note:** `T` resolves to:
+- **GC mode (default):** GC-managed reference
+- **No-GC mode:** `&T` (unique borrowed reference)
+
+**Reference Capabilities:**
+
+| Keyword | Symbol | Name | Aliasing | Transferable |
+|---------|--------|------|----------|--------------|
+| (none) | `T` | Shared (Imm) | Multiple readers | Copy |
+| `mut` | `mut T` | Exclusive (Mut) | Single writer | No |
+| `iso` | `~T` | Isolated (Iso) | No aliasing | **Move** |
+
+Capabilities can combine with pointer types:
+- `~@Data` - Isolated atomic pointer (thread-safe + transferable)
+- `mut *Data` - Mutable shared pointer (single writer to Rc)
 
 ---
 
@@ -173,6 +183,18 @@ fn read(data: Data):         # Shared access
     # data.value = 10        # Error: no mut
 ```
 
+### Rule 5: Isolated Requires No Aliases
+
+```simple
+fn bad(data: ~Data):
+    val copy = data        # Error: iso can't be aliased
+    pass
+
+fn good(data: ~Data):
+    val moved = move data  # OK: ownership transfer
+    pass
+```
+
 ---
 
 ## Implementation
@@ -189,7 +211,9 @@ fn read(data: Data):         # Shared access
 |------|----------|
 | `T` | `GcAllocator::alloc_bytes` |
 | `&T` | Stack/heap malloc + RAII drop |
-| `*T` | Refcounted struct |
+| `*T` | `Rc<T>` (refcounted struct) |
+| `@T` | `Arc<T>` (atomic refcount, thread-safe) |
+| `~T` | Capability marker (compile-time, erased) |
 | `-T` | Weak refcount |
 | `+T` | Pool slot + generation |
 
@@ -232,3 +256,23 @@ simple run --debug-rc script.spl
 - **Architecture:** `doc/architecture/memory_model_implementation.md`
 - **Spec:** `doc/spec/generated/memory.md`
 - **Tests:** `simple/std_lib/test/features/types/memory_safety_spec.spl`
+
+---
+
+## Lean Verification (TODO)
+
+### Isolated Capability Verification
+
+- [ ] **Aliasing Invariant**: Prove `iso T` values have exactly one owner
+- [ ] **Transfer Safety**: Prove `move` transfers preserve isolation
+- [ ] **Downgrade Correctness**: Prove `iso -> mut -> imm` preserves safety
+- [ ] **Actor Message Safety**: Prove actor messages with `iso` are data-race free
+- [ ] **No Upgrade**: Prove `imm -> iso` and `mut -> iso` are impossible
+
+### Arc Verification
+
+- [ ] **Atomic Refcount**: Prove refcount operations are atomic
+- [ ] **Thread Safety**: Prove `@T` can be safely shared across threads
+- [ ] **Weak Upgrade**: Prove weak upgrade is atomic and safe
+
+See `doc/todo/lean_iso_verification.md` for detailed proof obligations.

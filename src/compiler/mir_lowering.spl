@@ -369,6 +369,13 @@ impl MirLowering:
             case Range(start, end, inclusive, step):
                 self.lower_range(start, end, inclusive, step)
 
+            # Async/Await expressions
+            case Await(future_expr):
+                self.lower_await(future_expr)
+
+            case Yield(value):
+                self.lower_yield(value)
+
             case _:
                 self.error("unsupported MIR expression: {expr.kind}", nil)
                 nil
@@ -742,6 +749,136 @@ impl MirLowering:
         val _pop_result = self.builder.new_temp(MirType.unit())
 
         body_result ?? self.builder.new_temp(MirType.unit())
+
+    # ========================================================================
+    # Async/Await Lowering
+    # ========================================================================
+
+    me lower_await(future_expr: HirExpr) -> LocalId:
+        """Lower await expression to MIR.
+
+        await expr:
+        1. Lower the future/promise expression
+        2. Emit Await instruction that suspends until promise resolves
+        3. Return the resolved value
+        """
+        # Lower the future expression to get a Promise<T>
+        val promise_local = self.lower_expr(future_expr)
+
+        # Create destination for the awaited result
+        # The result type should be the inner type of Promise<T>
+        # For now, use i64 as placeholder (proper type inference in future)
+        val result_type = MirType.i64()
+        val dest = self.builder.new_temp(result_type)
+
+        # Emit Await instruction
+        self.builder.emit(MirInst(
+            kind: MirInstKind.Await(dest: dest, promise: mir_operand_copy(promise_local)),
+            span: nil
+        ))
+
+        dest
+
+    me lower_yield(value: HirExpr?) -> LocalId:
+        """Lower yield expression to MIR.
+
+        yield expr:
+        1. Lower the optional value expression
+        2. Emit Yield instruction that suspends the generator
+        3. Return unit (yield is a statement-like expression)
+        """
+        # Lower the optional value
+        val value_operand = if value.?:
+            val value_local = self.lower_expr(value.unwrap())
+            Some(mir_operand_copy(value_local))
+        else:
+            nil
+
+        # Emit Yield instruction
+        self.builder.emit(MirInst(
+            kind: MirInstKind.Yield(value: value_operand),
+            span: nil
+        ))
+
+        # Yield returns unit
+        self.builder.new_temp(MirType.unit())
+
+    me lower_spawn(handler: HirExpr, args: [HirExpr]) -> LocalId:
+        """Lower spawn expression to MIR.
+
+        spawn handler(args):
+        1. Lower the handler expression (async function)
+        2. Lower all argument expressions
+        3. Emit Spawn instruction
+        4. Return the spawned task/actor handle
+        """
+        # Lower handler
+        val handler_local = self.lower_expr(handler)
+
+        # Lower arguments
+        var arg_operands: [MirOperand] = []
+        for arg in args:
+            val arg_local = self.lower_expr(arg)
+            arg_operands = arg_operands.push(mir_operand_copy(arg_local))
+
+        # Create destination for the task handle
+        val dest = self.builder.new_temp(MirType.i64())  # Task handle type
+
+        # Emit Spawn instruction
+        self.builder.emit(MirInst(
+            kind: MirInstKind.Spawn(dest: dest, handler: mir_operand_copy(handler_local), args: arg_operands),
+            span: nil
+        ))
+
+        dest
+
+    me lower_send(actor: HirExpr, message: HirExpr) -> LocalId:
+        """Lower send expression to MIR.
+
+        actor <- message:
+        1. Lower the actor expression
+        2. Lower the message expression
+        3. Emit Send instruction
+        4. Return unit
+        """
+        # Lower actor and message
+        val actor_local = self.lower_expr(actor)
+        val message_local = self.lower_expr(message)
+
+        # Emit Send instruction
+        self.builder.emit(MirInst(
+            kind: MirInstKind.Send(actor: mir_operand_copy(actor_local), message: mir_operand_copy(message_local)),
+            span: nil
+        ))
+
+        # Send returns unit
+        self.builder.new_temp(MirType.unit())
+
+    me lower_receive(timeout: HirExpr?) -> LocalId:
+        """Lower receive expression to MIR.
+
+        receive or receive(timeout):
+        1. Lower optional timeout expression
+        2. Emit Receive instruction
+        3. Return the received message
+        """
+        # Lower optional timeout
+        val timeout_operand = if timeout.?:
+            val timeout_local = self.lower_expr(timeout.unwrap())
+            Some(mir_operand_copy(timeout_local))
+        else:
+            nil
+
+        # Create destination for received message
+        val dest = self.builder.new_temp(MirType.i64())  # Message type
+
+        # Emit Receive instruction
+        self.builder.emit(MirInst(
+            kind: MirInstKind.Receive(dest: dest, timeout: timeout_operand),
+            span: nil
+        ))
+
+        dest
 
     me lower_range(start: HirExpr?, end: HirExpr?, inclusive: bool, step: HirExpr?) -> LocalId:
         """Lower range expression to runtime call.

@@ -1,0 +1,435 @@
+# Performance Benchmarks
+#
+# Framework for measuring compiler and runtime performance.
+# Used to track performance regressions and compare
+# different compilation strategies.
+#
+# Benchmark categories:
+# - Compilation: Measure compile time
+# - Runtime: Measure execution time
+# - Memory: Measure allocation and GC
+# - Throughput: Measure operations per second
+
+# ============================================================================
+# Benchmark Result
+# ============================================================================
+
+struct BenchmarkResult:
+    """Result of a single benchmark run."""
+    name: text
+    iterations: i64
+    total_time_ns: i64
+    min_time_ns: i64
+    max_time_ns: i64
+    avg_time_ns: i64
+    std_dev_ns: i64
+    throughput: f64?
+
+impl BenchmarkResult:
+    static fn create(name: text, times: [i64]) -> BenchmarkResult:
+        """Create result from a list of timing samples."""
+        val n = times.len()
+        if n == 0:
+            return BenchmarkResult(
+                name: name,
+                iterations: 0,
+                total_time_ns: 0,
+                min_time_ns: 0,
+                max_time_ns: 0,
+                avg_time_ns: 0,
+                std_dev_ns: 0,
+                throughput: nil
+            )
+
+        var total = 0
+        var min_val = times[0]
+        var max_val = times[0]
+
+        for t in times:
+            total = total + t
+            if t < min_val:
+                min_val = t
+            if t > max_val:
+                max_val = t
+
+        val avg = total / n
+
+        # Calculate standard deviation
+        var variance = 0
+        for t in times:
+            val diff = t - avg
+            variance = variance + (diff * diff)
+        variance = variance / n
+        val std_dev = variance.sqrt().to_i64()
+
+        BenchmarkResult(
+            name: name,
+            iterations: n,
+            total_time_ns: total,
+            min_time_ns: min_val,
+            max_time_ns: max_val,
+            avg_time_ns: avg,
+            std_dev_ns: std_dev,
+            throughput: nil
+        )
+
+    fn format_result() -> text:
+        """Format benchmark result for display."""
+        var output = "Benchmark: {self.name}\n"
+        output = "{output}  Iterations: {self.iterations}\n"
+        output = "{output}  Min:  {self.format_time(self.min_time_ns)}\n"
+        output = "{output}  Max:  {self.format_time(self.max_time_ns)}\n"
+        output = "{output}  Avg:  {self.format_time(self.avg_time_ns)}\n"
+        output = "{output}  Std:  {self.format_time(self.std_dev_ns)}\n"
+
+        if self.throughput.?:
+            output = "{output}  Throughput: {self.throughput.unwrap():.2} ops/sec\n"
+
+        output
+
+    fn format_time(ns: i64) -> text:
+        """Format nanoseconds in human-readable form."""
+        if ns < 1000:
+            "{ns} ns"
+        elif ns < 1000000:
+            "{ns / 1000}.{(ns % 1000) / 100} us"
+        elif ns < 1000000000:
+            "{ns / 1000000}.{(ns % 1000000) / 100000} ms"
+        else:
+            "{ns / 1000000000}.{(ns % 1000000000) / 100000000} s"
+
+# ============================================================================
+# Benchmark Configuration
+# ============================================================================
+
+struct BenchmarkConfig:
+    """Configuration for running benchmarks."""
+    warmup_iterations: i64
+    measurement_iterations: i64
+    min_duration_ns: i64
+    max_duration_ns: i64
+
+impl BenchmarkConfig:
+    static fn default_config() -> BenchmarkConfig:
+        BenchmarkConfig(
+            warmup_iterations: 3,
+            measurement_iterations: 10,
+            min_duration_ns: 100000000,      # 100ms minimum
+            max_duration_ns: 60000000000     # 60s maximum
+        )
+
+    static fn quick() -> BenchmarkConfig:
+        """Quick benchmarks for CI."""
+        BenchmarkConfig(
+            warmup_iterations: 1,
+            measurement_iterations: 3,
+            min_duration_ns: 10000000,       # 10ms minimum
+            max_duration_ns: 10000000000     # 10s maximum
+        )
+
+    static fn thorough() -> BenchmarkConfig:
+        """Thorough benchmarks for release validation."""
+        BenchmarkConfig(
+            warmup_iterations: 10,
+            measurement_iterations: 100,
+            min_duration_ns: 1000000000,     # 1s minimum
+            max_duration_ns: 300000000000    # 5 minutes maximum
+        )
+
+# ============================================================================
+# Benchmark Definition
+# ============================================================================
+
+struct Benchmark:
+    """A single benchmark to run."""
+    name: text
+    description: text
+    setup_fn: fn()?
+    bench_fn: fn()
+    teardown_fn: fn()?
+    category: text
+
+impl Benchmark:
+    static fn create(name: text, bench_fn: fn()) -> Benchmark:
+        Benchmark(
+            name: name,
+            description: "",
+            setup_fn: nil,
+            bench_fn: bench_fn,
+            teardown_fn: nil,
+            category: "general"
+        )
+
+    fn with_description(desc: text) -> Benchmark:
+        Benchmark(
+            name: self.name,
+            description: desc,
+            setup_fn: self.setup_fn,
+            bench_fn: self.bench_fn,
+            teardown_fn: self.teardown_fn,
+            category: self.category
+        )
+
+    fn with_category(cat: text) -> Benchmark:
+        Benchmark(
+            name: self.name,
+            description: self.description,
+            setup_fn: self.setup_fn,
+            bench_fn: self.bench_fn,
+            teardown_fn: self.teardown_fn,
+            category: cat
+        )
+
+    fn with_setup(f: fn()) -> Benchmark:
+        Benchmark(
+            name: self.name,
+            description: self.description,
+            setup_fn: Some(f),
+            bench_fn: self.bench_fn,
+            teardown_fn: self.teardown_fn,
+            category: self.category
+        )
+
+    fn with_teardown(f: fn()) -> Benchmark:
+        Benchmark(
+            name: self.name,
+            description: self.description,
+            setup_fn: self.setup_fn,
+            bench_fn: self.bench_fn,
+            teardown_fn: Some(f),
+            category: self.category
+        )
+
+# ============================================================================
+# Benchmark Runner
+# ============================================================================
+
+class BenchmarkRunner:
+    """Runs benchmarks and collects results."""
+    config: BenchmarkConfig
+    benchmarks: [Benchmark]
+    results: [BenchmarkResult]
+
+    static fn create(config: BenchmarkConfig) -> BenchmarkRunner:
+        BenchmarkRunner(
+            config: config,
+            benchmarks: [],
+            results: []
+        )
+
+    static fn default_runner() -> BenchmarkRunner:
+        BenchmarkRunner.create(BenchmarkConfig.default_config())
+
+    me add_benchmark(bench: Benchmark):
+        """Add a benchmark to run."""
+        self.benchmarks = self.benchmarks.push(bench)
+
+    me run_all() -> [BenchmarkResult]:
+        """Run all benchmarks and return results."""
+        self.results = []
+
+        for bench in self.benchmarks:
+            val result = self.run_benchmark(bench)
+            self.results = self.results.push(result)
+
+        self.results
+
+    fn run_benchmark(bench: Benchmark) -> BenchmarkResult:
+        """Run a single benchmark."""
+        # Run setup if defined
+        if bench.setup_fn.?:
+            (bench.setup_fn.unwrap())()
+
+        # Warmup iterations
+        for _ in 0..self.config.warmup_iterations:
+            (bench.bench_fn)()
+
+        # Measurement iterations
+        var times: [i64] = []
+        for _ in 0..self.config.measurement_iterations:
+            val start = time_now_ns()
+            (bench.bench_fn)()
+            val end = time_now_ns()
+            times = times.push(end - start)
+
+        # Run teardown if defined
+        if bench.teardown_fn.?:
+            (bench.teardown_fn.unwrap())()
+
+        BenchmarkResult.create(bench.name, times)
+
+    fn get_results() -> [BenchmarkResult]:
+        """Get collected results."""
+        self.results
+
+# Placeholder for timing function - would need FFI support
+fn time_now_ns() -> i64:
+    """Get current time in nanoseconds."""
+    # Would be implemented via FFI
+    0
+
+# ============================================================================
+# Benchmark Suite
+# ============================================================================
+
+class BenchmarkSuite:
+    """Collection of related benchmarks."""
+    name: text
+    description: text
+    benchmarks: [Benchmark]
+
+    static fn create(name: text) -> BenchmarkSuite:
+        BenchmarkSuite(
+            name: name,
+            description: "",
+            benchmarks: []
+        )
+
+    me add(bench: Benchmark):
+        """Add a benchmark to the suite."""
+        self.benchmarks = self.benchmarks.push(bench)
+
+    fn run(config: BenchmarkConfig) -> BenchmarkSuiteResult:
+        """Run all benchmarks in the suite."""
+        var runner = BenchmarkRunner.create(config)
+
+        for bench in self.benchmarks:
+            runner.add_benchmark(bench)
+
+        val results = runner.run_all()
+        BenchmarkSuiteResult.from_results(self.name, results)
+
+struct BenchmarkSuiteResult:
+    """Result of running a benchmark suite."""
+    suite_name: text
+    results: [BenchmarkResult]
+    total_time_ns: i64
+
+impl BenchmarkSuiteResult:
+    static fn from_results(name: text, results: [BenchmarkResult]) -> BenchmarkSuiteResult:
+        var total = 0
+        for r in results:
+            total = total + r.total_time_ns
+        BenchmarkSuiteResult(
+            suite_name: name,
+            results: results,
+            total_time_ns: total
+        )
+
+    fn format_summary() -> text:
+        var output = "Benchmark Suite: {self.suite_name}\n"
+        output = "{output}═══════════════════════════════════════════════════════════\n"
+
+        for r in self.results:
+            output = "{output}{r.format_result()}\n"
+
+        output = "{output}───────────────────────────────────────────────────────────\n"
+        output = "{output}Total Time: {BenchmarkResult(name: \"\", iterations: 0, total_time_ns: self.total_time_ns, min_time_ns: 0, max_time_ns: 0, avg_time_ns: 0, std_dev_ns: 0, throughput: nil).format_time(self.total_time_ns)}\n"
+        output
+
+# ============================================================================
+# Comparison
+# ============================================================================
+
+struct BenchmarkComparison:
+    """Compare two benchmark results."""
+    name: text
+    baseline: BenchmarkResult
+    current: BenchmarkResult
+    speedup: f64
+    is_regression: bool
+
+impl BenchmarkComparison:
+    static fn compare(baseline: BenchmarkResult, current: BenchmarkResult) -> BenchmarkComparison:
+        val speedup = if current.avg_time_ns > 0:
+            baseline.avg_time_ns.to_f64() / current.avg_time_ns.to_f64()
+        else:
+            1.0
+
+        BenchmarkComparison(
+            name: current.name,
+            baseline: baseline,
+            current: current,
+            speedup: speedup,
+            is_regression: speedup < 0.95  # 5% threshold
+        )
+
+    fn format_comparison() -> text:
+        var output = "Comparison: {self.name}\n"
+        output = "{output}  Baseline: {self.baseline.format_time(self.baseline.avg_time_ns)}\n"
+        output = "{output}  Current:  {self.current.format_time(self.current.avg_time_ns)}\n"
+
+        if self.speedup >= 1.0:
+            output = "{output}  Speedup:  {self.speedup:.2}x faster\n"
+        else:
+            output = "{output}  Slowdown: {1.0 / self.speedup:.2}x slower\n"
+
+        if self.is_regression:
+            output = "{output}  ⚠️ REGRESSION DETECTED\n"
+
+        output
+
+# ============================================================================
+# Standard Benchmarks
+# ============================================================================
+
+fn fibonacci_benchmark() -> Benchmark:
+    """Fibonacci benchmark for basic computation."""
+    Benchmark.create("fibonacci_30", \\:
+        val _ = fib(30)
+        pass
+    ).with_description("Calculate 30th Fibonacci number")
+     .with_category("computation")
+
+fn fib(n: i64) -> i64:
+    if n <= 1: n else: fib(n - 1) + fib(n - 2)
+
+fn array_sum_benchmark() -> Benchmark:
+    """Array sum benchmark for collection operations."""
+    Benchmark.create("array_sum_10000", \\:
+        var sum = 0
+        for i in 0..10000:
+            sum = sum + i
+        pass
+    ).with_description("Sum integers 0 to 9999")
+     .with_category("collection")
+
+fn string_concat_benchmark() -> Benchmark:
+    """String concatenation benchmark."""
+    Benchmark.create("string_concat_1000", \\:
+        var s = ""
+        for i in 0..1000:
+            s = "{s}x"
+        pass
+    ).with_description("Concatenate 1000 single characters")
+     .with_category("string")
+
+fn allocation_benchmark() -> Benchmark:
+    """Allocation benchmark for memory management."""
+    Benchmark.create("allocations_1000", \\:
+        var items: [[i64]] = []
+        for i in 0..1000:
+            items = items.push([i, i * 2, i * 3])
+        pass
+    ).with_description("Allocate 1000 small arrays")
+     .with_category("memory")
+
+fn standard_benchmarks() -> BenchmarkSuite:
+    """Get standard benchmark suite."""
+    var suite = BenchmarkSuite.create("Standard Benchmarks")
+    suite.add(fibonacci_benchmark())
+    suite.add(array_sum_benchmark())
+    suite.add(string_concat_benchmark())
+    suite.add(allocation_benchmark())
+    suite
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export BenchmarkResult, BenchmarkConfig, Benchmark
+export BenchmarkRunner, BenchmarkSuite, BenchmarkSuiteResult
+export BenchmarkComparison
+export fibonacci_benchmark, array_sum_benchmark
+export string_concat_benchmark, allocation_benchmark
+export standard_benchmarks

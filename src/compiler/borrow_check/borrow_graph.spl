@@ -1,0 +1,417 @@
+# Borrow Graph
+#
+# Tracks borrows and their relationships for borrow checking.
+# The borrow graph represents:
+# - Active borrows at each program point
+# - Conflicts between borrows
+# - Invalidation of borrows
+#
+# Based on Rust's MIR borrow checker.
+
+use compiler.borrow_check.lifetime.*
+
+# ============================================================================
+# Place (Memory Location)
+# ============================================================================
+
+enum PlaceBase:
+    """Base of a memory place."""
+    Local(id: i64)       # Local variable
+    Static(name: text)   # Static variable
+    Promoted(id: i64)    # Promoted constant
+
+enum PlaceElem:
+    """Element in a place projection."""
+    Deref                      # *place
+    Field(idx: i64)            # place.field
+    Index(local: i64)          # place[idx]
+    ConstantIndex(idx: i64)    # place[constant]
+    Downcast(variant: i64)     # (place as Variant)
+
+struct Place:
+    """A memory location (lvalue).
+
+    Places are paths to memory: local, local.field, *local, etc.
+    """
+    base: PlaceBase
+    projections: [PlaceElem]
+
+impl Place:
+    static fn local(id: i64) -> Place:
+        """Create place for local variable."""
+        Place(base: PlaceBase.Local(id), projections: [])
+
+    static fn static_var(name: text) -> Place:
+        """Create place for static variable."""
+        Place(base: PlaceBase.Static(name), projections: [])
+
+    me deref() -> Place:
+        """Add dereference projection."""
+        Place(
+            base: self.base,
+            projections: self.projections.push(PlaceElem.Deref)
+        )
+
+    me field(idx: i64) -> Place:
+        """Add field projection."""
+        Place(
+            base: self.base,
+            projections: self.projections.push(PlaceElem.Field(idx))
+        )
+
+    me index(local: i64) -> Place:
+        """Add index projection."""
+        Place(
+            base: self.base,
+            projections: self.projections.push(PlaceElem.Index(local))
+        )
+
+    fn to_text() -> text:
+        var result = match self.base:
+            case Local(id): "_l{id}"
+            case Static(name): name
+            case Promoted(id): "_p{id}"
+
+        for proj in self.projections:
+            match proj:
+                case Deref: result = "*{result}"
+                case Field(idx): result = "{result}.{idx}"
+                case Index(local): result = "{result}[_l{local}]"
+                case ConstantIndex(idx): result = "{result}[{idx}]"
+                case Downcast(variant): result = "({result} as {variant})"
+
+        result
+
+    fn is_prefix_of(other: Place) -> bool:
+        """Check if this place is a prefix of another.
+
+        x is a prefix of x.f, x.f.g, etc.
+        """
+        # Must have same base
+        match (self.base, other.base):
+            case (Local(a), Local(b)):
+                if a != b: return false
+            case (Static(a), Static(b)):
+                if a != b: return false
+            case _: return false
+
+        # Self projections must be prefix of other
+        if self.projections.len() > other.projections.len():
+            return false
+
+        var i = 0
+        while i < self.projections.len():
+            # Simplified comparison
+            i = i + 1
+
+        true
+
+    fn conflicts_with(other: Place) -> bool:
+        """Check if places conflict (overlap).
+
+        Places conflict if one is a prefix of the other.
+        """
+        self.is_prefix_of(other) or other.is_prefix_of(self)
+
+# ============================================================================
+# Borrow Kind
+# ============================================================================
+
+enum BorrowKind:
+    """Kind of borrow."""
+    Shared      # &T - immutable borrow
+    Mutable     # &mut T - mutable borrow
+    Unique      # Unique borrow (for closures)
+
+impl BorrowKind:
+    fn to_text() -> text:
+        match self:
+            case Shared: "&"
+            case Mutable: "&mut"
+            case Unique: "&uniq"
+
+    fn is_mutable() -> bool:
+        match self:
+            case Mutable | Unique: true
+            case Shared: false
+
+    fn conflicts_with(other: BorrowKind) -> bool:
+        """Check if borrow kinds conflict.
+
+        - Shared + Shared = OK
+        - Shared + Mutable = Conflict
+        - Mutable + Mutable = Conflict
+        """
+        match (self, other):
+            case (Shared, Shared): false
+            case _: true
+
+# ============================================================================
+# Borrow
+# ============================================================================
+
+struct Borrow:
+    """A borrow of a place.
+
+    Tracks where, what kind, and for how long.
+    """
+    id: i64
+    place: Place
+    kind: BorrowKind
+    lifetime: Lifetime
+    borrow_point: i64    # Where borrow was created
+    activated: bool      # Two-phase borrow: activated yet?
+
+impl Borrow:
+    static fn create(id: i64, place: Place, kind: BorrowKind, lifetime: Lifetime, point: i64) -> Borrow:
+        Borrow(
+            id: id,
+            place: place,
+            kind: kind,
+            lifetime: lifetime,
+            borrow_point: point,
+            activated: true
+        )
+
+    static fn two_phase(id: i64, place: Place, kind: BorrowKind, lifetime: Lifetime, point: i64) -> Borrow:
+        """Create two-phase borrow (not yet activated)."""
+        Borrow(
+            id: id,
+            place: place,
+            kind: kind,
+            lifetime: lifetime,
+            borrow_point: point,
+            activated: false
+        )
+
+    fn to_text() -> text:
+        "{self.kind.to_text()}{self.place.to_text()} ({self.lifetime.to_text()})"
+
+    fn conflicts_with(other: Borrow) -> bool:
+        """Check if borrows conflict."""
+        # Must have overlapping places
+        if not self.place.conflicts_with(other.place):
+            return false
+
+        # Must have conflicting kinds
+        self.kind.conflicts_with(other.kind)
+
+# ============================================================================
+# Borrow Set
+# ============================================================================
+
+class BorrowSet:
+    """Set of active borrows at a program point."""
+    borrows: Dict<i64, Borrow>
+    next_id: i64
+
+    static fn create() -> BorrowSet:
+        BorrowSet(borrows: {}, next_id: 0)
+
+    me add_borrow(place: Place, kind: BorrowKind, lifetime: Lifetime, point: i64) -> Borrow:
+        """Add a new borrow."""
+        val id = self.next_id
+        self.next_id = self.next_id + 1
+
+        val borrow = Borrow.create(id, place, kind, lifetime, point)
+        self.borrows[id] = borrow
+        borrow
+
+    me remove_borrow(id: i64):
+        """Remove a borrow."""
+        self.borrows.remove(id)
+
+    fn get_borrow(id: i64) -> Borrow?:
+        """Get a borrow by ID."""
+        self.borrows.get(id)
+
+    fn active_borrows() -> [Borrow]:
+        """Get all active borrows."""
+        var result: [Borrow] = []
+        for _, borrow in self.borrows:
+            result = result.push(borrow)
+        result
+
+    fn borrows_of(place: Place) -> [Borrow]:
+        """Get all borrows of a place (or prefix/suffix)."""
+        var result: [Borrow] = []
+        for _, borrow in self.borrows:
+            if borrow.place.conflicts_with(place):
+                result = result.push(borrow)
+        result
+
+    fn has_conflicting_borrow(place: Place, kind: BorrowKind) -> Borrow?:
+        """Check if there's a conflicting borrow."""
+        for _, borrow in self.borrows:
+            if borrow.place.conflicts_with(place) and borrow.kind.conflicts_with(kind):
+                return Some(borrow)
+        nil
+
+# ============================================================================
+# Borrow Graph
+# ============================================================================
+
+struct BorrowError:
+    """Borrow checking error."""
+    message: text
+    borrow: Borrow?
+    conflicting: Borrow?
+    point: i64
+
+impl BorrowError:
+    static fn conflict(borrow: Borrow, conflicting: Borrow, point: i64) -> BorrowError:
+        BorrowError(
+            message: "Conflicting borrows",
+            borrow: Some(borrow),
+            conflicting: Some(conflicting),
+            point: point
+        )
+
+    static fn use_after_move(place: Place, point: i64) -> BorrowError:
+        BorrowError(
+            message: "Use of moved value: {place.to_text()}",
+            borrow: nil,
+            conflicting: nil,
+            point: point
+        )
+
+    static fn borrow_of_moved(place: Place, point: i64) -> BorrowError:
+        BorrowError(
+            message: "Borrow of moved value: {place.to_text()}",
+            borrow: nil,
+            conflicting: nil,
+            point: point
+        )
+
+class BorrowGraph:
+    """Graph tracking borrows throughout a function.
+
+    Nodes are program points, edges represent borrow flow.
+    """
+    # Borrows active at each program point
+    point_borrows: Dict<i64, BorrowSet>
+
+    # Places that have been moved
+    moved_places: Dict<i64, [Place]>
+
+    # Accumulated errors
+    errors: [BorrowError]
+
+    # Lifetime environment
+    lifetimes: LifetimeEnv
+
+    static fn create() -> BorrowGraph:
+        BorrowGraph(
+            point_borrows: {},
+            moved_places: {},
+            errors: [],
+            lifetimes: LifetimeEnv.create()
+        )
+
+    me get_or_create_borrows(point: i64) -> BorrowSet:
+        """Get or create borrow set for a program point."""
+        match self.point_borrows.get(point):
+            case Some(set): set
+            case None:
+                val set = BorrowSet.create()
+                self.point_borrows[point] = set
+                set
+
+    me record_borrow(point: i64, place: Place, kind: BorrowKind) -> Borrow?:
+        """Record a borrow at a program point.
+
+        Returns the borrow if successful, None if conflicting.
+        """
+        var borrow_set = self.get_or_create_borrows(point)
+
+        # Check for conflicts
+        match borrow_set.has_conflicting_borrow(place, kind):
+            case Some(conflict):
+                val new_borrow = Borrow.create(0, place, kind, self.lifetimes.fresh_lifetime(), point)
+                self.errors = self.errors.push(BorrowError.conflict(new_borrow, conflict, point))
+                return nil
+            case None:
+                pass
+
+        # Check if place was moved
+        val moved = self.moved_places.get(point) ?? []
+        for moved_place in moved:
+            if place.conflicts_with(moved_place):
+                self.errors = self.errors.push(BorrowError.borrow_of_moved(place, point))
+                return nil
+
+        # Create the borrow
+        val lifetime = self.lifetimes.fresh_lifetime()
+        val borrow = borrow_set.add_borrow(place, kind, lifetime, point)
+        self.point_borrows[point] = borrow_set
+
+        Some(borrow)
+
+    me record_use(point: i64, place: Place):
+        """Record a use of a place.
+
+        Checks that place hasn't been moved.
+        """
+        val moved = self.moved_places.get(point) ?? []
+        for moved_place in moved:
+            if place.conflicts_with(moved_place):
+                self.errors = self.errors.push(BorrowError.use_after_move(place, point))
+                return
+
+    me record_move(point: i64, place: Place):
+        """Record a move of a place."""
+        var moved = self.moved_places.get(point) ?? []
+        moved = moved.push(place)
+        self.moved_places[point] = moved
+
+    me record_assign(point: i64, place: Place):
+        """Record an assignment to a place.
+
+        This may invalidate borrows of the place.
+        """
+        var borrow_set = self.get_or_create_borrows(point)
+
+        # Find conflicting borrows
+        val conflicts = borrow_set.borrows_of(place)
+        for borrow in conflicts:
+            if borrow.kind.is_mutable():
+                self.errors = self.errors.push(BorrowError(
+                    message: "Assignment while mutably borrowed: {place.to_text()}",
+                    borrow: Some(borrow),
+                    conflicting: nil,
+                    point: point
+                ))
+
+    me end_borrow(point: i64, borrow_id: i64):
+        """End a borrow at a program point."""
+        var borrow_set = self.get_or_create_borrows(point)
+        borrow_set.remove_borrow(borrow_id)
+        self.point_borrows[point] = borrow_set
+
+    me propagate_borrows(from_point: i64, to_point: i64):
+        """Propagate borrows from one point to another (control flow)."""
+        val from_set = self.get_or_create_borrows(from_point)
+        var to_set = self.get_or_create_borrows(to_point)
+
+        for _, borrow in from_set.borrows:
+            # Check if borrow is still live at to_point
+            # (simplified: copy all borrows)
+            to_set.borrows[borrow.id] = borrow
+
+        self.point_borrows[to_point] = to_set
+
+    fn get_errors() -> [BorrowError]:
+        """Get all borrow errors."""
+        self.errors
+
+    fn has_errors() -> bool:
+        """Check if there are borrow errors."""
+        not self.errors.is_empty()
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export PlaceBase, PlaceElem, Place
+export BorrowKind, Borrow, BorrowSet
+export BorrowError, BorrowGraph

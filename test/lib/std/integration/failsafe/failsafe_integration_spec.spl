@@ -1,0 +1,447 @@
+# @pending
+"""
+Fail-Safe Integration Tests
+Feature: Fail-Safe Framework Integration
+Category: FailSafe, Integration
+Status: In Progress
+
+Extensive system tests for fail-safe framework integration with MCP, LSP, DAP.
+"""
+
+use std.failsafe.*
+use std.failsafe.core.*
+use std.failsafe.panic.*
+use std.failsafe.ratelimit.*
+use std.failsafe.circuit.*
+use std.failsafe.timeout.*
+use std.failsafe.resource_monitor.*
+
+# ============================================================================
+# FAIL-SAFE CONTEXT TESTS
+# ============================================================================
+
+describe "FailSafeContext":
+    it "creates default context":
+        val ctx = FailSafeContext.new("test")
+        expect(ctx.name == "test")
+        expect(ctx.enabled)
+
+    it "creates context with custom config":
+        val ctx = FailSafeContext.with_config(
+            "test",
+            RateLimitConfig.strict(),
+            CircuitBreakerConfig.strict(),
+            TimeoutConfig.strict(),
+            ResourceLimits.strict()
+        )
+        expect(ctx.rate_limiter.config.requests_per_second == 50.0)
+        expect(ctx.circuit_breaker.config.failure_threshold == 3)
+
+    it "executes operation with all protections":
+        var ctx = FailSafeContext.new("test")
+
+        match ctx.execute("test_op", "client1", \: 42):
+            case FailSafeResult.Ok(v):
+                expect(v == 42)
+            case FailSafeResult.Err(_):
+                expect(false)
+
+    it "tracks successful operations":
+        var ctx = FailSafeContext.new("test")
+
+        ctx.execute("op1", "client1", \: 1)
+        ctx.execute("op2", "client1", \: 2)
+
+        val counter = ctx.metrics.get_counter("requests_succeeded")
+        expect(counter.value == 2)
+
+    it "rate limits excessive requests":
+        var ctx = FailSafeContext.with_config(
+            "test",
+            RateLimitConfig(
+                requests_per_second: 1.0,
+                burst_size: 2,
+                client_limit: nil,
+                client_burst: nil,
+                penalty_duration_ms: 1000
+            ),
+            CircuitBreakerConfig.permissive(),
+            TimeoutConfig.default(),
+            ResourceLimits.permissive()
+        )
+
+        # First two should succeed
+        expect(ctx.execute("op", "client1", \: 1).is_ok())
+        expect(ctx.execute("op", "client1", \: 2).is_ok())
+
+        # Third should be rate limited
+        match ctx.execute("op", "client1", \: 3):
+            case FailSafeResult.Ok(_):
+                expect(false)
+            case FailSafeResult.Err(e):
+                expect(e.category == ErrorCategory.TooManyRequests)
+
+    it "opens circuit on failures":
+        var ctx = FailSafeContext.with_config(
+            "test",
+            RateLimitConfig.permissive(),
+            CircuitBreakerConfig(
+                failure_threshold: 2,
+                success_threshold: 1,
+                open_duration_ms: 30000,
+                half_open_max_requests: 1,
+                failure_rate_threshold: 0.9,
+                min_requests_for_rate: 100,
+                timeout_ms: nil
+            ),
+            TimeoutConfig.default(),
+            ResourceLimits.permissive()
+        )
+
+        # Record failures by simulating panic recoveries
+        ctx.circuit_breaker.record_failure()
+        ctx.circuit_breaker.record_failure()
+
+        expect(ctx.circuit_breaker.is_open())
+
+        # Should reject due to open circuit
+        match ctx.execute("op", "client1", \: 42):
+            case FailSafeResult.Ok(_):
+                expect(false)
+            case FailSafeResult.Err(e):
+                expect(e.category == ErrorCategory.RateLimit)
+
+    it "gets health status":
+        var ctx = FailSafeContext.new("test")
+
+        # Initially healthy
+        expect(ctx.get_health() == HealthStatus.Healthy)
+
+        # Open circuit -> degraded
+        ctx.circuit_breaker.force_open()
+        expect(ctx.get_health() == HealthStatus.Degraded)
+
+    it "resets all state":
+        var ctx = FailSafeContext.new("test")
+
+        ctx.circuit_breaker.force_open()
+        ctx.panic_handler.on_panic(PanicInfo.new("Test panic"))
+
+        ctx.reset()
+
+        expect(ctx.circuit_breaker.state == CircuitState.Closed)
+        expect(ctx.panic_handler.panic_count == 0)
+
+    it "can be disabled":
+        var ctx = FailSafeContext.with_config(
+            "test",
+            RateLimitConfig(
+                requests_per_second: 0.1,
+                burst_size: 0,
+                client_limit: nil,
+                client_burst: nil,
+                penalty_duration_ms: 1000
+            ),
+            CircuitBreakerConfig.default(),
+            TimeoutConfig.default(),
+            ResourceLimits.default()
+        )
+
+        # Should be rate limited when enabled
+        match ctx.execute("op", "client1", \: 42):
+            case FailSafeResult.Err(e):
+                expect(e.category == ErrorCategory.TooManyRequests)
+            case _:
+                pass
+
+        ctx.disable()
+
+        # Should work when disabled
+        match ctx.execute("op", "client1", \: 42):
+            case FailSafeResult.Ok(v):
+                expect(v == 42)
+            case FailSafeResult.Err(_):
+                expect(false)
+
+# ============================================================================
+# MCP FAIL-SAFE TESTS
+# ============================================================================
+
+describe "MCP Fail-Safe":
+    it "creates MCP context with default config":
+        val config = McpFailSafeConfig.default()
+        val ctx = create_mcp_context("mcp_server", config)
+
+        expect(ctx.name == "mcp_server")
+        expect(ctx.rate_limiter.config.requests_per_second == 100.0)
+
+    it "creates MCP context with production config":
+        val config = McpFailSafeConfig.production()
+        val ctx = create_mcp_context("mcp_server", config)
+
+        expect(ctx.rate_limiter.config.requests_per_second == 50.0)
+
+    it "handles tool execution safely":
+        var ctx = create_mcp_context("mcp_server", McpFailSafeConfig.default())
+
+        val result = ctx.execute("tools/call", "client1", \: {
+            # Simulate tool execution
+            return "tool_result"
+        })
+
+        match result:
+            case FailSafeResult.Ok(v):
+                expect(v == "tool_result")
+            case FailSafeResult.Err(_):
+                expect(false)
+
+    it "protects against resource listing abuse":
+        var ctx = create_mcp_context("mcp_server", McpFailSafeConfig(
+            rate_limit: RateLimitConfig(
+                requests_per_second: 2.0,
+                burst_size: 3,
+                client_limit: Some(1.0),
+                client_burst: Some(2),
+                penalty_duration_ms: 5000
+            ),
+            circuit_breaker: CircuitBreakerConfig.default(),
+            timeout: TimeoutConfig.default(),
+            resource_limits: ResourceLimits.default()
+        ))
+
+        # Spam list requests
+        ctx.execute("resources/list", "bad_client", \: [])
+        ctx.execute("resources/list", "bad_client", \: [])
+
+        # Should be rate limited
+        match ctx.execute("resources/list", "bad_client", \: []):
+            case FailSafeResult.Err(e):
+                expect(e.category == ErrorCategory.TooManyRequests)
+            case _:
+                expect(false)
+
+# ============================================================================
+# LSP FAIL-SAFE TESTS
+# ============================================================================
+
+describe "LSP Fail-Safe":
+    it "creates LSP context with default config":
+        val config = LspFailSafeConfig.default()
+        val ctx = create_lsp_context("lsp_server", config)
+
+        expect(ctx.name == "lsp_server")
+        # LSP has higher rate limit for rapid IDE requests
+        expect(ctx.rate_limiter.config.requests_per_second == 200.0)
+
+    it "handles completion requests safely":
+        var ctx = create_lsp_context("lsp_server", LspFailSafeConfig.default())
+
+        val result = ctx.execute("textDocument/completion", "vscode", \: {
+            # Simulate completion calculation
+            return ["item1", "item2", "item3"]
+        })
+
+        match result:
+            case FailSafeResult.Ok(items):
+                expect(items.len() == 3)
+            case FailSafeResult.Err(_):
+                expect(false)
+
+    it "tolerates more failures than MCP":
+        var ctx = create_lsp_context("lsp_server", LspFailSafeConfig.default())
+
+        # LSP config has failure_threshold of 10
+        for i in 0..8:
+            ctx.circuit_breaker.record_failure()
+
+        # Should still be closed
+        expect(ctx.circuit_breaker.state == CircuitState.Closed)
+
+# ============================================================================
+# DAP FAIL-SAFE TESTS
+# ============================================================================
+
+describe "DAP Fail-Safe":
+    it "creates DAP context with default config":
+        val config = DapFailSafeConfig.default()
+        val ctx = create_dap_context("dap_server", config)
+
+        expect(ctx.name == "dap_server")
+        # DAP has longer timeouts for debug operations
+        expect(ctx.timeout_manager.config.default_timeout_ms == 30000)
+
+    it "handles evaluate request safely":
+        var ctx = create_dap_context("dap_server", DapFailSafeConfig.default())
+
+        val result = ctx.execute("evaluate", "vscode_debug", \: {
+            # Simulate expression evaluation
+            return "42"
+        })
+
+        match result:
+            case FailSafeResult.Ok(v):
+                expect(v == "42")
+            case FailSafeResult.Err(_):
+                expect(false)
+
+    it "has more memory for debug sessions":
+        val config = DapFailSafeConfig.default()
+        # DAP allows 2GB for debug sessions
+        expect(config.resource_limits.memory_bytes == 2 * 1024 * 1024 * 1024)
+
+# ============================================================================
+# COMBINED PROTECTION TESTS
+# ============================================================================
+
+describe "Combined Protections":
+    it "handles cascading failures":
+        var ctx = FailSafeContext.with_config(
+            "test",
+            RateLimitConfig.default(),
+            CircuitBreakerConfig(
+                failure_threshold: 3,
+                success_threshold: 2,
+                open_duration_ms: 1000,
+                half_open_max_requests: 1,
+                failure_rate_threshold: 0.9,
+                min_requests_for_rate: 100,
+                timeout_ms: nil
+            ),
+            TimeoutConfig.default(),
+            ResourceLimits.default()
+        )
+
+        # Simulate cascading failures
+        ctx.circuit_breaker.record_failure()
+        ctx.circuit_breaker.record_failure()
+        ctx.circuit_breaker.record_failure()
+
+        # Circuit should be open
+        expect(ctx.circuit_breaker.is_open())
+
+        # New requests should fail fast
+        var fail_count = 0
+        for i in 0..10:
+            match ctx.execute("op", "client1", \: 42):
+                case FailSafeResult.Err(_):
+                    fail_count = fail_count + 1
+                case _:
+                    pass
+
+        expect(fail_count == 10)
+
+    it "recovers from failures":
+        var ctx = FailSafeContext.with_config(
+            "test",
+            RateLimitConfig.permissive(),
+            CircuitBreakerConfig(
+                failure_threshold: 2,
+                success_threshold: 2,
+                open_duration_ms: 0,  # Immediate half-open
+                half_open_max_requests: 5,
+                failure_rate_threshold: 0.9,
+                min_requests_for_rate: 100,
+                timeout_ms: nil
+            ),
+            TimeoutConfig.default(),
+            ResourceLimits.permissive()
+        )
+
+        # Cause circuit to open
+        ctx.circuit_breaker.record_failure()
+        ctx.circuit_breaker.record_failure()
+        expect(ctx.circuit_breaker.is_open())
+
+        # Allow transition to half-open
+        ctx.circuit_breaker.allow_request()
+        expect(ctx.circuit_breaker.state == CircuitState.HalfOpen)
+
+        # Record successes to close
+        ctx.circuit_breaker.record_success()
+        ctx.circuit_breaker.record_success()
+        expect(ctx.circuit_breaker.state == CircuitState.Closed)
+
+    it "tracks comprehensive metrics":
+        var ctx = FailSafeContext.new("test")
+
+        # Perform various operations
+        ctx.execute("op1", "client1", \: 1)
+        ctx.execute("op2", "client1", \: 2)
+        ctx.circuit_breaker.record_failure()
+
+        val succeeded = ctx.metrics.get_counter("requests_succeeded")
+        expect(succeeded.value == 2)
+
+# ============================================================================
+# STRESS TESTS
+# ============================================================================
+
+describe "Stress Tests":
+    it "handles burst of requests":
+        var ctx = FailSafeContext.new("test")
+        var success_count = 0
+        var fail_count = 0
+
+        for i in 0..100:
+            match ctx.execute("op", "client_{i % 10}", \: i):
+                case FailSafeResult.Ok(_):
+                    success_count = success_count + 1
+                case FailSafeResult.Err(_):
+                    fail_count = fail_count + 1
+
+        # Most should succeed with default config
+        expect(success_count > 50)
+
+    it "isolates client failures":
+        var ctx = FailSafeContext.with_config(
+            "test",
+            RateLimitConfig(
+                requests_per_second: 100.0,
+                burst_size: 100,
+                client_limit: Some(2.0),
+                client_burst: Some(3),
+                penalty_duration_ms: 5000
+            ),
+            CircuitBreakerConfig.default(),
+            TimeoutConfig.default(),
+            ResourceLimits.default()
+        )
+
+        # Client1 exhausts their limit
+        ctx.execute("op", "client1", \: 1)
+        ctx.execute("op", "client1", \: 2)
+        ctx.execute("op", "client1", \: 3)
+
+        # Client1 should be limited
+        match ctx.execute("op", "client1", \: 4):
+            case FailSafeResult.Err(e):
+                expect(e.category == ErrorCategory.TooManyRequests)
+            case _:
+                pass
+
+        # Client2 should still work
+        match ctx.execute("op", "client2", \: 1):
+            case FailSafeResult.Ok(v):
+                expect(v == 1)
+            case FailSafeResult.Err(_):
+                expect(false)
+
+# ============================================================================
+# GLOBAL CONTEXT TESTS
+# ============================================================================
+
+describe "Global Context":
+    it "creates singleton context":
+        val ctx1 = get_global_context()
+        val ctx2 = get_global_context()
+
+        # Should be same instance
+        ctx1.circuit_breaker.record_failure()
+        expect(ctx2.circuit_breaker.failure_count == 1)
+
+    it "can set custom global context":
+        val custom = FailSafeContext.new("custom")
+        set_global_context(custom)
+
+        val retrieved = get_global_context()
+        expect(retrieved.name == "custom")

@@ -1,0 +1,256 @@
+# Borrow Checking
+#
+# Complete borrow checking system for memory safety:
+# - Lifetime tracking and inference
+# - Borrow tracking and conflict detection
+# - Non-Lexical Lifetimes (NLL) for precise analysis
+#
+# Architecture:
+# - lifetime.spl: Lifetime representation and constraints
+# - borrow_graph.spl: Borrow tracking and conflicts
+# - nll.spl: NLL borrow checker with liveness
+# - mod.spl: Integration and main API
+#
+# Usage:
+#   val checker = BorrowChecker.create()
+#   checker.check_function(mir_function)
+#   val errors = checker.get_errors()
+
+use compiler.borrow_check.lifetime.*
+use compiler.borrow_check.borrow_graph.*
+use compiler.borrow_check.nll.*
+use compiler.mir_data.*
+
+# ============================================================================
+# Borrow Check Result
+# ============================================================================
+
+enum BorrowCheckResult:
+    """Result of borrow checking."""
+    Ok
+    Errors(errors: [NLLError])
+
+impl BorrowCheckResult:
+    fn is_ok() -> bool:
+        match self:
+            case Ok: true
+            case _: false
+
+    fn get_errors() -> [NLLError]:
+        match self:
+            case Ok: []
+            case Errors(errors): errors
+
+# ============================================================================
+# Borrow Checker
+# ============================================================================
+
+class BorrowChecker:
+    """Main borrow checking interface.
+
+    Provides high-level API for checking MIR functions.
+    """
+    errors: [NLLError]
+    checked_functions: [text]
+
+    static fn create() -> BorrowChecker:
+        BorrowChecker(
+            errors: [],
+            checked_functions: []
+        )
+
+    me check_function(func: MirBody) -> BorrowCheckResult:
+        """Check a MIR function for borrow violations.
+
+        Builds CFG, runs NLL checker, and collects errors.
+        """
+        # Build CFG from MIR
+        val cfg = self.build_cfg(func)
+
+        # Create and run NLL checker
+        var nll = NLLChecker.create(cfg)
+
+        # Analyze borrows in the function
+        self.analyze_mir_borrows(func, nll)
+
+        # Run the checker
+        if nll.check():
+            self.checked_functions = self.checked_functions.push(func.name)
+            BorrowCheckResult.Ok
+        else:
+            val errors = nll.get_errors()
+            for err in errors:
+                self.errors = self.errors.push(err)
+            BorrowCheckResult.Errors(errors)
+
+    me build_cfg(func: MirBody) -> ControlFlowGraph:
+        """Build CFG from MIR function."""
+        var cfg = ControlFlowGraph.create()
+
+        # Create basic blocks
+        var block_id = 0
+        for mir_block in func.blocks:
+            var block = BasicBlock.create(block_id)
+
+            # Add statements
+            var stmt_id = 0
+            for inst in mir_block.instructions:
+                block.add_statement(stmt_id)
+                stmt_id = stmt_id + 1
+
+            # Set terminator based on MIR terminator
+            block.set_terminator(self.convert_terminator(mir_block.terminator, block_id))
+
+            cfg.add_block(block)
+            block_id = block_id + 1
+
+        # Set entry and compute predecessors
+        if block_id > 0:
+            cfg.set_entry(0)
+        cfg.compute_predecessors()
+
+        cfg
+
+    fn convert_terminator(mir_term: MirTerminator, block_id: i64) -> Terminator:
+        """Convert MIR terminator to CFG terminator."""
+        match mir_term:
+            case Return(_):
+                Terminator.Return
+            case Goto(target):
+                Terminator.Goto(target.id)
+            case Switch(_, targets, default):
+                var target_ids: [i64] = []
+                for case_ in targets:
+                    target_ids = target_ids.push(case_.target.id)
+                Terminator.SwitchInt(target_ids, default.id)
+            case If(_, then_, else_):
+                Terminator.SwitchInt([then_.id], else_.id)
+            case CallTerminator(_, _, _, normal, unwind):
+                val target = Some(normal.id)
+                val unwind_id = if unwind.?: Some(unwind.unwrap().id) else: nil
+                Terminator.Call(target, unwind_id)
+            case Unreachable:
+                Terminator.Unreachable
+            case Abort(_):
+                Terminator.Unreachable
+            case _:
+                Terminator.Unreachable
+
+    me analyze_mir_borrows(func: MirBody, nll: NLLChecker):
+        """Analyze borrows in MIR instructions."""
+        var point = 0
+
+        for mir_block in func.blocks:
+            for inst in mir_block.instructions:
+                self.analyze_instruction(inst, nll, point)
+                point = point + 1
+
+    me analyze_instruction(inst: MirInst, nll: NLLChecker, point: i64):
+        """Analyze a single MIR instruction for borrows."""
+        match inst.kind:
+            case Ref(dest, borrow_kind, place):
+                # This creates a borrow
+                val mir_place = self.convert_place(place)
+                val kind = if borrow_kind == MirBorrowKind.Shared:
+                    BorrowKind.Shared
+                else:
+                    BorrowKind.Mutable
+                nll.record_borrow(point, mir_place, kind)
+
+            case Copy(dest, src):
+                # Copy uses the source
+                nll.record_use(point, Place.local(src.id))
+
+            case Move(dest, src):
+                # Move consumes the source
+                nll.record_move(point, Place.local(src.id))
+
+            case Assign(dest, _):
+                # Assignment to destination
+                nll.record_use(point, Place.local(dest.id))
+
+            case _:
+                pass
+
+    fn convert_place(mir_place: MirPlace) -> Place:
+        """Convert MIR place to borrow checker place."""
+        var place = Place.local(mir_place.local.id)
+
+        for proj in mir_place.projection:
+            match proj:
+                case MirProjection.Deref:
+                    place = place.deref()
+                case MirProjection.Field(idx):
+                    place = place.field(idx)
+                case MirProjection.Index(local):
+                    place = place.index(local.id)
+                case MirProjection.Downcast(_):
+                    pass
+
+        place
+
+    fn get_all_errors() -> [NLLError]:
+        """Get all accumulated errors."""
+        self.errors
+
+    fn format_all_errors() -> [text]:
+        """Format all errors for display."""
+        var result: [text] = []
+        for err in self.errors:
+            var msg = "error[E0502]: {err.message}"
+            if err.primary_span.?:
+                msg = "{msg}\n  --> location:{err.primary_span.unwrap()}"
+            for (span, label) in err.secondary_spans:
+                msg = "{msg}\n  | {label} at {span}"
+            if err.help.?:
+                msg = "{msg}\n  = help: {err.help.unwrap()}"
+            result = result.push(msg)
+        result
+
+# ============================================================================
+# Convenience Functions
+# ============================================================================
+
+fn check_mir_function(func: MirBody) -> BorrowCheckResult:
+    """Check a single MIR function for borrow violations."""
+    var checker = BorrowChecker.create()
+    checker.check_function(func)
+
+fn check_mir_module(module: MirModule) -> [NLLError]:
+    """Check all functions in a MIR module."""
+    var checker = BorrowChecker.create()
+    var all_errors: [NLLError] = []
+
+    for symbol in module.functions.keys():
+        val mir_fn = module.functions[symbol]
+        val body = MirBody.from_function(mir_fn)
+        match checker.check_function(body):
+            case Errors(errors):
+                for err in errors:
+                    all_errors = all_errors.push(err)
+            case _:
+                pass
+
+    all_errors
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+# Re-export from submodules
+export Lifetime, Region from lifetime
+export ConstraintKind, LifetimeConstraint from lifetime
+export LifetimeEnv, LifetimeInference from lifetime
+
+export PlaceBase, PlaceElem, Place from borrow_graph
+export BorrowKind, Borrow, BorrowSet from borrow_graph
+export BorrowError, BorrowGraph from borrow_graph
+
+export BasicBlock, Terminator, ControlFlowGraph from nll
+export LivenessResult, LivenessAnalysis from nll
+export NLLError, NLLChecker from nll
+
+# Export this module's types
+export BorrowCheckResult
+export BorrowChecker
+export check_mir_function, check_mir_module
