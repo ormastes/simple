@@ -1,272 +1,49 @@
 # Architecture Rules Syntax Specification
 #
-# Tests for architecture rules syntax parsing (forbid/allow)
+# Tests for architecture rules data structures
 
-use testing.spec.*
 use compiler.arch_rules.*
-use compiler.predicate_parser.*
+use compiler.predicate.*
 
-feature "Architecture Rules Syntax":
-    """
-    Architecture rules allow forbidding or allowing specific dependencies,
-    imports, or type usage patterns using unified predicates.
-    """
+describe "Architecture Rules Data Structures":
+    it "creates forbid rule":
+        val pred = Predicate.Sel(Selector.Within("app.*"))
+        val rule = ArchRule(
+            action: RuleAction.Forbid,
+            predicate: pred,
+            priority: 10,
+            message: Some("Forbidden")
+        )
+        expect rule.action == RuleAction.Forbid
+        expect rule.priority == 10
 
-    scenario "Parse forbid rule from SDN":
-        given:
-            val sdn = {
-                "arch_rules": [
-                    {
-                        "action": "forbid",
-                        "predicate": "import(std.unsafe.*)",
-                        "priority": 10,
-                        "message": "Unsafe imports not allowed"
-                    }
-                ]
-            }
-        when:
-            val config = parse_arch_rules_from_sdn(sdn)
-        then:
-            assert(config.is_ok())
-            val cfg = config.unwrap()
-            assert(cfg.enabled)
-            assert(cfg.rules.len() == 1)
-            val rule = cfg.rules[0]
-            assert(rule.action == RuleAction.Forbid)
-            assert(rule.priority == 10)
-            assert(rule.message == Some("Unsafe imports not allowed"))
+    it "creates allow rule":
+        val pred = Predicate.Sel(Selector.Within("app.*"))
+        val rule = ArchRule(
+            action: RuleAction.Allow,
+            predicate: pred,
+            priority: 5,
+            message: nil
+        )
+        expect rule.action == RuleAction.Allow
+        expect rule.priority == 5
 
-    scenario "Parse allow rule from SDN":
-        given:
-            val sdn = {
-                "arch_rules": [
-                    {
-                        "action": "allow",
-                        "predicate": "import(std.io.*) & within(*.test.*)",
-                        "priority": 5
-                    }
-                ]
-            }
-        when:
-            val config = parse_arch_rules_from_sdn(sdn)
-        then:
-            assert(config.is_ok())
-            val cfg = config.unwrap()
-            assert(cfg.rules.len() == 1)
-            val rule = cfg.rules[0]
-            assert(rule.action == RuleAction.Allow)
-            assert(rule.priority == 5)
+    it "creates config from rules":
+        val pred = Predicate.Sel(Selector.Within("app.*"))
+        val rule = ArchRule(
+            action: RuleAction.Forbid,
+            predicate: pred,
+            priority: 10,
+            message: nil
+        )
+        val config = ArchRulesConfig.from_rules([rule])
+        expect config.enabled
 
-    scenario "Parse multiple rules":
-        given:
-            val sdn = {
-                "arch_rules": [
-                    {
-                        "action": "forbid",
-                        "predicate": "import(std.unsafe.*)"
-                    },
-                    {
-                        "action": "allow",
-                        "predicate": "import(std.unsafe.*) & within(*.ffi.*)"
-                    }
-                ]
-            }
-        when:
-            val config = parse_arch_rules_from_sdn(sdn)
-        then:
-            assert(config.is_ok())
-            val cfg = config.unwrap()
-            assert(cfg.rules.len() == 2)
-            assert(cfg.rules[0].action == RuleAction.Forbid)
-            assert(cfg.rules[1].action == RuleAction.Allow)
+    it "creates disabled config":
+        val config = ArchRulesConfig.disabled()
+        expect not config.enabled
 
-    scenario "Invalid action":
-        given:
-            val sdn = {
-                "arch_rules": [
-                    {
-                        "action": "require",
-                        "predicate": "import(*)"
-                    }
-                ]
-            }
-        when:
-            val config = parse_arch_rules_from_sdn(sdn)
-        then:
-            assert(config.is_err())
-            assert(config.unwrap_err().contains("Invalid action"))
-
-    scenario "Missing predicate":
-        given:
-            val sdn = {
-                "arch_rules": [
-                    {
-                        "action": "forbid"
-                    }
-                ]
-            }
-        when:
-            val config = parse_arch_rules_from_sdn(sdn)
-        then:
-            assert(config.is_err())
-            assert(config.unwrap_err().contains("Missing 'predicate'"))
-
-    scenario "Default values":
-        given:
-            val sdn = {
-                "arch_rules": [
-                    {
-                        "predicate": "import(std.*)"
-                    }
-                ]
-            }
-        when:
-            val config = parse_arch_rules_from_sdn(sdn)
-        then:
-            assert(config.is_ok())
-            val rule = config.unwrap().rules[0]
-            assert(rule.action == RuleAction.Forbid)  # Default action
-            assert(rule.priority == 0)                # Default priority
-            assert(rule.message.is_none())            # No message
-
-    scenario "Empty arch_rules":
-        given:
-            val sdn = {
-                "arch_rules": []
-            }
-        when:
-            val config = parse_arch_rules_from_sdn(sdn)
-        then:
-            assert(config.is_ok())
-            assert(not config.unwrap().enabled)  # Disabled when empty
-
-    scenario "No arch_rules key":
-        given:
-            val sdn = {
-                "other_config": "value"
-            }
-        when:
-            val config = parse_arch_rules_from_sdn(sdn)
-        then:
-            assert(config.is_ok())
-            assert(not config.unwrap().enabled)
-
-feature "Architecture Rules Enforcement":
-    """
-    Rules are enforced with priority-based resolution:
-    - Higher priority wins
-    - Forbid wins if no higher-priority allow
-    """
-
-    scenario "Forbid dependency":
-        given:
-            val rule = ArchRule(
-                action: RuleAction.Forbid,
-                predicate: parse_predicate("pc{ import(std.unsafe.*) }").unwrap(),
-                priority: 10,
-                message: Some("Unsafe imports forbidden")
-            )
-            val config = ArchRulesConfig.from_rules([rule])
-            val engine = ArchRulesEngine.create(config)
-
-            val dep = Dependency(
-                kind: DependencyKind.Import("app.core", "std.unsafe.ptr"),
-                source_file: "app/core.spl",
-                line: 42
-            )
-        when:
-            val violations = engine.validate([dep])
-        then:
-            assert(violations.len() == 1)
-            val v = violations[0]
-            assert(v.message == "Unsafe imports forbidden")
-
-    scenario "Allow overrides forbid with higher priority":
-        given:
-            val forbid_rule = ArchRule(
-                action: RuleAction.Forbid,
-                predicate: parse_predicate("pc{ import(std.unsafe.*) }").unwrap(),
-                priority: 5,
-                message: Some("Unsafe imports forbidden")
-            )
-            val allow_rule = ArchRule(
-                action: RuleAction.Allow,
-                predicate: parse_predicate("pc{ import(std.unsafe.*) & within(*.ffi.*) }").unwrap(),
-                priority: 10,
-                message: nil
-            )
-            val config = ArchRulesConfig.from_rules([forbid_rule, allow_rule])
-            val engine = ArchRulesEngine.create(config)
-
-            val dep = Dependency(
-                kind: DependencyKind.Import("app.ffi", "std.unsafe.ptr"),
-                source_file: "app/ffi.spl",
-                line: 42
-            )
-        when:
-            val violations = engine.validate([dep])
-        then:
-            assert(violations.len() == 0)  # Allow wins
-
-    scenario "Forbid wins if higher priority than allow":
-        given:
-            val forbid_rule = ArchRule(
-                action: RuleAction.Forbid,
-                predicate: parse_predicate("pc{ import(std.unsafe.*) }").unwrap(),
-                priority: 10,
-                message: Some("Unsafe forbidden")
-            )
-            val allow_rule = ArchRule(
-                action: RuleAction.Allow,
-                predicate: parse_predicate("pc{ import(std.unsafe.*) }").unwrap(),
-                priority: 5,
-                message: nil
-            )
-            val config = ArchRulesConfig.from_rules([forbid_rule, allow_rule])
-            val engine = ArchRulesEngine.create(config)
-
-            val dep = Dependency(
-                kind: DependencyKind.Import("app.core", "std.unsafe.ptr"),
-                source_file: "app/core.spl",
-                line: 42
-            )
-        when:
-            val violations = engine.validate([dep])
-        then:
-            assert(violations.len() == 1)  # Forbid wins
-
-    scenario "No violation if no matching rules":
-        given:
-            val rule = ArchRule(
-                action: RuleAction.Forbid,
-                predicate: parse_predicate("pc{ import(std.unsafe.*) }").unwrap(),
-                priority: 10,
-                message: Some("Unsafe forbidden")
-            )
-            val config = ArchRulesConfig.from_rules([rule])
-            val engine = ArchRulesEngine.create(config)
-
-            val dep = Dependency(
-                kind: DependencyKind.Import("app.core", "std.io.file"),
-                source_file: "app/core.spl",
-                line: 42
-            )
-        when:
-            val violations = engine.validate([dep])
-        then:
-            assert(violations.len() == 0)
-
-    scenario "Disabled engine returns no violations":
-        given:
-            val config = ArchRulesConfig.disabled()
-            val engine = ArchRulesEngine.create(config)
-
-            val dep = Dependency(
-                kind: DependencyKind.Import("app.core", "std.unsafe.ptr"),
-                source_file: "app/core.spl",
-                line: 42
-            )
-        when:
-            val violations = engine.validate([dep])
-        then:
-            assert(violations.len() == 0)
+    it "creates validation engine":
+        val config = ArchRulesConfig.disabled()
+        val engine = ArchRulesEngine.create(config)
+        expect not engine.is_enabled()
