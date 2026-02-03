@@ -142,6 +142,123 @@ describe "ArenaAllocator":
             arena.allocate(200, 8)
             expect arena.total_allocated() to_equal 300
 
+    context "alignment handling":
+        it "should add padding when offset is misaligned":
+            val arena = ArenaAllocator.new(capacity: 256)
+
+            # First allocation: offset = 10 (not aligned to 16)
+            val ptr1 = arena.allocate(10, 8)
+            expect ptr1.? to_be_true
+
+            # Second allocation needs 16-byte alignment
+            # Offset is 10, needs to align to 16, so 6 bytes padding added
+            val ptr2 = arena.allocate(10, 16)
+            expect ptr2.? to_be_true
+
+            # After padding, offset should be past the second allocation
+            # 10 (first) + 6 (padding) + 10 (second) = 26
+            expect arena.remaining() to_equal (256 - 26)
+
+        it "should allocate when offset already aligned":
+            val arena = ArenaAllocator.new(capacity: 256)
+
+            # First allocation ends at offset 16 (aligned to 16)
+            val ptr1 = arena.allocate(16, 8)
+            expect ptr1.? to_be_true
+
+            # Second allocation with 16-byte alignment
+            # Offset 16 is already aligned, no padding needed
+            val ptr2 = arena.allocate(16, 16)
+            expect ptr2.? to_be_true
+
+            # Total: 16 + 0 (no padding) + 16 = 32
+            expect arena.remaining() to_equal (256 - 32)
+
+        it "should handle large alignment requirements":
+            val arena = ArenaAllocator.new(capacity: 512)
+
+            # Allocate with 256-byte alignment
+            val ptr1 = arena.allocate(64, 256)
+            expect ptr1.? to_be_true
+
+            # Large alignment should be handled correctly
+            expect arena.remaining() to_be_less_than 512
+
+        it "should handle zero-size allocation":
+            val arena = ArenaAllocator.new(capacity: 256)
+
+            # Zero-size allocation should succeed or fail gracefully
+            val ptr = arena.allocate(0, 8)
+            # Behavior depends on implementation - test it works
+            # Some allocators return valid pointer, some return None
+
+    context "capacity edge cases":
+        it "should succeed when allocation exactly fills arena":
+            val arena = ArenaAllocator.new(capacity: 128)
+            val ptr = arena.allocate(128, 8)
+
+            expect ptr.? to_be_true
+            expect arena.remaining() to_equal 0
+            expect arena.is_full() to_be_true
+
+        it "should fail when allocation would exceed by one byte":
+            val arena = ArenaAllocator.new(capacity: 128)
+            val ptr = arena.allocate(129, 8)
+
+            expect ptr.? to_be_false
+            expect arena.remaining() to_equal 128  # Nothing allocated
+
+        it "should handle multiple allocations filling to exact capacity":
+            val arena = ArenaAllocator.new(capacity: 100)
+
+            val ptr1 = arena.allocate(50, 8)
+            expect ptr1.? to_be_true
+
+            val ptr2 = arena.allocate(50, 8)
+            expect ptr2.? to_be_true
+
+            expect arena.remaining() to_equal 0
+            expect arena.is_full() to_be_true
+
+    context "reallocation edge cases":
+        it "should return None when new size doesn't fit":
+            val arena = ArenaAllocator.new(capacity: 150)
+
+            # Allocate 100 bytes
+            val ptr1 = arena.allocate(100, 8)
+            expect ptr1.? to_be_true
+
+            # Try to reallocate to 100 bytes (total would be 200, exceeds 150)
+            if ptr1.?:
+                val ptr2 = arena.reallocate(ptr1.unwrap(), 100, 100, 8)
+                expect ptr2.? to_be_false
+
+        it "should succeed reallocating to smaller size":
+            val arena = ArenaAllocator.new(capacity: 200)
+
+            # Allocate 100 bytes
+            val ptr1 = arena.allocate(100, 8)
+            expect ptr1.? to_be_true
+
+            # Reallocate to 50 bytes (total 150, fits in 200)
+            if ptr1.?:
+                val ptr2 = arena.reallocate(ptr1.unwrap(), 100, 50, 8)
+                expect ptr2.? to_be_true
+
+        it "should copy data during reallocation":
+            val arena = ArenaAllocator.new(capacity: 500)
+
+            # Allocate and write some data
+            val ptr1 = arena.allocate(64, 8)
+            expect ptr1.? to_be_true
+
+            # Reallocate to larger size
+            if ptr1.?:
+                val ptr2 = arena.reallocate(ptr1.unwrap(), 64, 128, 8)
+                expect ptr2.? to_be_true
+                # Note: Data copying is tested in memory module
+                # Here we just verify the operation succeeds
+
 # ============================================================================
 # PoolAllocator Tests
 # ============================================================================

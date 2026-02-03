@@ -1,15 +1,15 @@
 # Test Results
 
-**Generated:** 2026-02-03 03:35:17
-**Total Tests:** 67
-**Status:** ⚠️ 37 FAILED
+**Generated:** 2026-02-03 06:51:53
+**Total Tests:** 44
+**Status:** ⚠️ 44 FAILED
 
 ## Summary
 
 | Status | Count | Percentage |
 |--------|-------|-----------|
-| ✅ Passed | 30 | 44.8% |
-| ❌ Failed | 37 | 55.2% |
+| ✅ Passed | 0 | 0.0% |
+| ❌ Failed | 44 | 100.0% |
 | ⏭️ Skipped | 0 | 0.0% |
 | 🔕 Ignored | 0 | 0.0% |
 | 🔐 Qualified Ignore | 0 | 0.0% |
@@ -20,582 +20,687 @@
 
 | Test | Change | Run |
 |------|--------|-----|
-| creates lexer with source | new_test |  |
-| initializes indent stack with zero | new_test |  |
-| initializes with no pending dedents | new_test |  |
-| starts with normal lexer mode | new_test |  |
-| checks if at end with empty source | new_test |  |
-| checks if at end with content | new_test |  |
-| peeks at current character | new_test |  |
-| peeks at next character | new_test |  |
-| advances position | new_test |  |
-| scans identifier | new_test |  |
-| scans integer number | new_test |  |
-| scans plus operator | new_test |  |
-| scans minus operator | new_test |  |
-| scans asterisk operator | new_test |  |
-| scans slash operator | new_test |  |
-| scans equals operator | new_test |  |
-| recognizes val keyword | new_test |  |
-| recognizes var keyword | new_test |  |
-| recognizes fn keyword | new_test |  |
-| recognizes if keyword | new_test |  |
+| creates default configuration | new_test |  |
+| allows custom configuration | new_test |  |
+| supports disabling JIT | new_test |  |
+| identifies Success as success | new_test |  |
+| handles Success without address | new_test |  |
+| identifies CompilationError as error | new_test |  |
+| identifies CircularDependency as error | new_test |  |
+| identifies UpdateFailed as error | new_test |  |
+| identifies NotFound as neither success nor error | new_test |  |
+| creates with default config | new_test |  |
+| creates with custom config | new_test |  |
+| initializes empty caches | new_test |  |
+| loads metadata successfully | new_test |  |
+| caches loaded metadata | new_test |  |
+| handles missing SMF files | new_test |  |
+| tracks loaded SMF count | new_test |  |
+| returns false when JIT is disabled | new_test |  |
+| returns false for unknown symbols | new_test |  |
+| returns true for symbols in metadata | new_test |  |
+| returns None for unknown symbols | new_test |  |
 
 ---
 
-## ❌ Failed Tests (37)
+## ❌ Failed Tests (44)
 
-### 🔴 recognizes else keyword
+### 🔴 handles update errors
 
-**File:** `test/compiler/lexer_comprehensive_spec.spl`
-**Category:** Unknown
-**Failed:** 2026-02-03T03:35:17.596312104+00:00
+**File:** `test/lib/std/unit/compiler/loader/jit_instantiator_spec.spl`
+**Category:** Unit
+**Failed:** 2026-02-03T06:51:53.714520252+00:00
 **Flaky:** No (100.0% failure rate)
 
 **Error:**
 ```
-Test 'recognizes else keyword' failed
-Location: test/compiler/lexer_comprehensive_spec.spl
+Test 'handles update errors' failed
+Location: test/lib/std/unit/compiler/loader/jit_instantiator_spec.spl
 ```
 
 ---
 
-### 🔴 scans simple string
+### 🔴 identifies UpdateFailed as error
 
-**File:** `test/compiler/lexer_comprehensive_spec.spl`
-**Category:** Unknown
-**Failed:** 2026-02-03T03:35:17.596364524+00:00
+**File:** `test/lib/std/unit/compiler/loader/jit_instantiator_spec.spl`
+**Category:** Unit
+**Failed:** 2026-02-03T06:51:53.714434258+00:00
 **Flaky:** No (100.0% failure rate)
 
 **Error:**
 ```
-Test 'scans simple string' failed
-Location: test/compiler/lexer_comprehensive_spec.spl
+Test 'identifies UpdateFailed as error' failed
+Location: test/lib/std/unit/compiler/loader/jit_instantiator_spec.spl
 ```
 
 ---
 
-### 🔴 scans underscore identifier
+### 🔴 adds to instantiations list
 
-**File:** `test/compiler/lexer_comprehensive_spec.spl`
-**Category:** Unknown
-**Failed:** 2026-02-03T03:35:17.596475356+00:00
+**File:** `test/lib/std/unit/compiler/loader/jit_instantiator_spec.spl`
+**Category:** Unit
+**Failed:** 2026-02-03T06:51:53.714515633+00:00
 **Flaky:** No (100.0% failure rate)
 
 **Error:**
 ```
-Test 'scans underscore identifier' failed
-Location: test/compiler/lexer_comprehensive_spec.spl
+Test 'adds to instantiations list' failed
+Location: test/lib/std/unit/compiler/loader/jit_instantiator_spec.spl
 ```
 
 ---
 
-### 🔴 scans or operator
+### 🔴 resolves registered symbols
 
-**File:** `test/compiler/lexer_comprehensive_spec.spl`
-**Category:** Unknown
-**Failed:** 2026-02-03T03:35:17.596423677+00:00
+**File:** `test/lib/std/unit/compiler/loader/jit_instantiator_spec.spl`
+**Category:** Unit
+**Failed:** 2026-02-03T06:51:53.714551371+00:00
 **Flaky:** No (100.0% failure rate)
 
 **Error:**
 ```
-Test 'scans or operator' failed
-Location: test/compiler/lexer_comprehensive_spec.spl
+Test 'resolves registered symbols' failed
+Location: test/lib/std/unit/compiler/loader/jit_instantiator_spec.spl
 ```
 
 ---
 
-### 🔴 scans binary number
+### 🔴 creates with custom config
 
-**File:** `test/compiler/lexer_comprehensive_spec.spl`
-**Category:** Unknown
-**Failed:** 2026-02-03T03:35:17.596389191+00:00
+**File:** `test/lib/std/unit/compiler/loader/jit_instantiator_spec.spl`
+**Category:** Unit
+**Failed:** 2026-02-03T06:51:53.714445149+00:00
 **Flaky:** No (100.0% failure rate)
 
 **Error:**
 ```
-Test 'scans binary number' failed
-Location: test/compiler/lexer_comprehensive_spec.spl
+Test 'creates with custom config' failed
+Location: test/lib/std/unit/compiler/loader/jit_instantiator_spec.spl
 ```
 
 ---
 
-### 🔴 scans greater than or equal
+### 🔴 identifies NotFound as neither success nor error
 
-**File:** `test/compiler/lexer_comprehensive_spec.spl`
-**Category:** Unknown
-**Failed:** 2026-02-03T03:35:17.596412556+00:00
+**File:** `test/lib/std/unit/compiler/loader/jit_instantiator_spec.spl`
+**Category:** Unit
+**Failed:** 2026-02-03T06:51:53.714438957+00:00
 **Flaky:** No (100.0% failure rate)
 
 **Error:**
 ```
-Test 'scans greater than or equal' failed
-Location: test/compiler/lexer_comprehensive_spec.spl
+Test 'identifies NotFound as neither success nor error' failed
+Location: test/lib/std/unit/compiler/loader/jit_instantiator_spec.spl
 ```
 
 ---
 
-### 🔴 recognizes match keyword
+### 🔴 returns None for unknown symbols
 
-**File:** `test/compiler/lexer_comprehensive_spec.spl`
-**Category:** Unknown
-**Failed:** 2026-02-03T03:35:17.596320360+00:00
+**File:** `test/lib/std/unit/compiler/loader/jit_instantiator_spec.spl`
+**Category:** Unit
+**Failed:** 2026-02-03T06:51:53.714554427+00:00
 **Flaky:** No (100.0% failure rate)
 
 **Error:**
 ```
-Test 'recognizes match keyword' failed
-Location: test/compiler/lexer_comprehensive_spec.spl
+Test 'returns None for unknown symbols' failed
+Location: test/lib/std/unit/compiler/loader/jit_instantiator_spec.spl
 ```
 
 ---
 
-### 🔴 scans equality
+### 🔴 loads SMF metadata
 
-**File:** `test/compiler/lexer_comprehensive_spec.spl`
-**Category:** Unknown
-**Failed:** 2026-02-03T03:35:17.596415361+00:00
+**File:** `test/lib/std/unit/compiler/loader/jit_instantiator_spec.spl`
+**Category:** Unit
+**Failed:** 2026-02-03T06:51:53.714563454+00:00
 **Flaky:** No (100.0% failure rate)
 
 **Error:**
 ```
-Test 'scans equality' failed
-Location: test/compiler/lexer_comprehensive_spec.spl
+Test 'loads SMF metadata' failed
+Location: test/lib/std/unit/compiler/loader/jit_instantiator_spec.spl
 ```
 
 ---
 
-### 🔴 recognizes return keyword
+### 🔴 handles Success without address
 
-**File:** `test/compiler/lexer_comprehensive_spec.spl`
-**Category:** Unknown
-**Failed:** 2026-02-03T03:35:17.596326001+00:00
+**File:** `test/lib/std/unit/compiler/loader/jit_instantiator_spec.spl`
+**Category:** Unit
+**Failed:** 2026-02-03T06:51:53.714421945+00:00
 **Flaky:** No (100.0% failure rate)
 
 **Error:**
 ```
-Test 'recognizes return keyword' failed
-Location: test/compiler/lexer_comprehensive_spec.spl
+Test 'handles Success without address' failed
+Location: test/lib/std/unit/compiler/loader/jit_instantiator_spec.spl
 ```
 
 ---
 
-### 🔴 scans hex number
+### 🔴 reports initial empty stats
 
-**File:** `test/compiler/lexer_comprehensive_spec.spl`
-**Category:** Unknown
-**Failed:** 2026-02-03T03:35:17.596386226+00:00
+**File:** `test/lib/std/unit/compiler/loader/jit_instantiator_spec.spl`
+**Category:** Unit
+**Failed:** 2026-02-03T06:51:53.714526434+00:00
 **Flaky:** No (100.0% failure rate)
 
 **Error:**
 ```
-Test 'scans hex number' failed
-Location: test/compiler/lexer_comprehensive_spec.spl
+Test 'reports initial empty stats' failed
+Location: test/lib/std/unit/compiler/loader/jit_instantiator_spec.spl
 ```
 
 ---
 
-### 🔴 scans identifier with numbers
+### 🔴 propagates load errors
 
-**File:** `test/compiler/lexer_comprehensive_spec.spl`
-**Category:** Unknown
-**Failed:** 2026-02-03T03:35:17.596478772+00:00
+**File:** `test/lib/std/unit/compiler/loader/jit_instantiator_spec.spl`
+**Category:** Unit
+**Failed:** 2026-02-03T06:51:53.714565959+00:00
 **Flaky:** No (100.0% failure rate)
 
 **Error:**
 ```
-Test 'scans identifier with numbers' failed
-Location: test/compiler/lexer_comprehensive_spec.spl
+Test 'propagates load errors' failed
+Location: test/lib/std/unit/compiler/loader/jit_instantiator_spec.spl
 ```
 
 ---
 
-### 🔴 scans empty string
+### 🔴 detects direct cycle
 
-**File:** `test/compiler/lexer_comprehensive_spec.spl`
-**Category:** Unknown
-**Failed:** 2026-02-03T03:35:17.596367480+00:00
+**File:** `test/lib/std/unit/compiler/loader/jit_instantiator_spec.spl`
+**Category:** Unit
+**Failed:** 2026-02-03T06:51:53.714494863+00:00
 **Flaky:** No (100.0% failure rate)
 
 **Error:**
 ```
-Test 'scans empty string' failed
-Location: test/compiler/lexer_comprehensive_spec.spl
+Test 'detects direct cycle' failed
+Location: test/lib/std/unit/compiler/loader/jit_instantiator_spec.spl
 ```
 
 ---
 
-### 🔴 recognizes case keyword
+### 🔴 caches JIT result
 
-**File:** `test/compiler/lexer_comprehensive_spec.spl`
-**Category:** Unknown
-**Failed:** 2026-02-03T03:35:17.596323426+00:00
+**File:** `test/lib/std/unit/compiler/loader/jit_instantiator_spec.spl`
+**Category:** Unit
+**Failed:** 2026-02-03T06:51:53.714560208+00:00
 **Flaky:** No (100.0% failure rate)
 
 **Error:**
 ```
-Test 'recognizes case keyword' failed
-Location: test/compiler/lexer_comprehensive_spec.spl
+Test 'caches JIT result' failed
+Location: test/lib/std/unit/compiler/loader/jit_instantiator_spec.spl
 ```
 
 ---
 
-### 🔴 scans less than
+### 🔴 tracks cached compilations
 
-**File:** `test/compiler/lexer_comprehensive_spec.spl`
-**Category:** Unknown
-**Failed:** 2026-02-03T03:35:17.596404571+00:00
+**File:** `test/lib/std/unit/compiler/loader/jit_instantiator_spec.spl`
+**Category:** Unit
+**Failed:** 2026-02-03T06:51:53.714529119+00:00
 **Flaky:** No (100.0% failure rate)
 
 **Error:**
 ```
-Test 'scans less than' failed
-Location: test/compiler/lexer_comprehensive_spec.spl
+Test 'tracks cached compilations' failed
+Location: test/lib/std/unit/compiler/loader/jit_instantiator_spec.spl
 ```
 
 ---
 
-### 🔴 scans not operator
+### 🔴 returns CompilationError at max depth
 
-**File:** `test/compiler/lexer_comprehensive_spec.spl`
-**Category:** Unknown
-**Failed:** 2026-02-03T03:35:17.596426082+00:00
+**File:** `test/lib/std/unit/compiler/loader/jit_instantiator_spec.spl`
+**Category:** Unit
+**Failed:** 2026-02-03T06:51:53.714488762+00:00
 **Flaky:** No (100.0% failure rate)
 
 **Error:**
 ```
-Test 'scans not operator' failed
-Location: test/compiler/lexer_comprehensive_spec.spl
+Test 'returns CompilationError at max depth' failed
+Location: test/lib/std/unit/compiler/loader/jit_instantiator_spec.spl
 ```
 
 ---
 
-### 🔴 skips spaces between tokens
+### 🔴 tracks loaded SMF files
 
-**File:** `test/compiler/lexer_comprehensive_spec.spl`
-**Category:** Unknown
-**Failed:** 2026-02-03T03:35:17.596468332+00:00
+**File:** `test/lib/std/unit/compiler/loader/jit_instantiator_spec.spl`
+**Category:** Unit
+**Failed:** 2026-02-03T06:51:53.714532084+00:00
 **Flaky:** No (100.0% failure rate)
 
 **Error:**
 ```
-Test 'skips spaces between tokens' failed
-Location: test/compiler/lexer_comprehensive_spec.spl
+Test 'tracks loaded SMF files' failed
+Location: test/lib/std/unit/compiler/loader/jit_instantiator_spec.spl
 ```
 
 ---
 
-### 🔴 scans identifier
+### 🔴 identifies CircularDependency as error
 
-**File:** `test/compiler/lexer_comprehensive_spec.spl`
-**Category:** Unknown
-**Failed:** 2026-02-03T03:35:17.596272509+00:00
+**File:** `test/lib/std/unit/compiler/loader/jit_instantiator_spec.spl`
+**Category:** Unit
+**Failed:** 2026-02-03T06:51:53.714428637+00:00
 **Flaky:** No (100.0% failure rate)
 
 **Error:**
 ```
-Test 'scans identifier' failed
-Location: test/compiler/lexer_comprehensive_spec.spl
+Test 'identifies CircularDependency as error' failed
+Location: test/lib/std/unit/compiler/loader/jit_instantiator_spec.spl
 ```
 
 ---
 
-### 🔴 recognizes if keyword
+### 🔴 returns NotFound when disabled
 
-**File:** `test/compiler/lexer_comprehensive_spec.spl`
-**Category:** Unknown
-**Failed:** 2026-02-03T03:35:17.596306043+00:00
+**File:** `test/lib/std/unit/compiler/loader/jit_instantiator_spec.spl`
+**Category:** Unit
+**Failed:** 2026-02-03T06:51:53.714485476+00:00
 **Flaky:** No (100.0% failure rate)
 
 **Error:**
 ```
-Test 'recognizes if keyword' failed
-Location: test/compiler/lexer_comprehensive_spec.spl
+Test 'returns NotFound when disabled' failed
+Location: test/lib/std/unit/compiler/loader/jit_instantiator_spec.spl
 ```
 
 ---
 
-### 🔴 scans identifier with underscores
+### 🔴 creates with default config
 
-**File:** `test/compiler/lexer_comprehensive_spec.spl`
-**Category:** Unknown
-**Failed:** 2026-02-03T03:35:17.596481718+00:00
+**File:** `test/lib/std/unit/compiler/loader/jit_instantiator_spec.spl`
+**Category:** Unit
+**Failed:** 2026-02-03T06:51:53.714442383+00:00
 **Flaky:** No (100.0% failure rate)
 
 **Error:**
 ```
-Test 'scans identifier with underscores' failed
-Location: test/compiler/lexer_comprehensive_spec.spl
+Test 'creates with default config' failed
+Location: test/lib/std/unit/compiler/loader/jit_instantiator_spec.spl
 ```
 
 ---
 
-### 🔴 recognizes while keyword
+### 🔴 allows custom configuration
 
-**File:** `test/compiler/lexer_comprehensive_spec.spl`
-**Category:** Unknown
-**Failed:** 2026-02-03T03:35:17.596315050+00:00
+**File:** `test/lib/std/unit/compiler/loader/jit_instantiator_spec.spl`
+**Category:** Unit
+**Failed:** 2026-02-03T06:51:53.714410152+00:00
 **Flaky:** No (100.0% failure rate)
 
 **Error:**
 ```
-Test 'recognizes while keyword' failed
-Location: test/compiler/lexer_comprehensive_spec.spl
+Test 'allows custom configuration' failed
+Location: test/lib/std/unit/compiler/loader/jit_instantiator_spec.spl
 ```
 
 ---
 
-### 🔴 scans float with decimal
+### 🔴 returns NotFound for unknown symbol
 
-**File:** `test/compiler/lexer_comprehensive_spec.spl`
-**Category:** Unknown
-**Failed:** 2026-02-03T03:35:17.596383220+00:00
+**File:** `test/lib/std/unit/compiler/loader/jit_instantiator_spec.spl`
+**Category:** Unit
+**Failed:** 2026-02-03T06:51:53.714497949+00:00
 **Flaky:** No (100.0% failure rate)
 
 **Error:**
 ```
-Test 'scans float with decimal' failed
-Location: test/compiler/lexer_comprehensive_spec.spl
+Test 'returns NotFound for unknown symbol' failed
+Location: test/lib/std/unit/compiler/loader/jit_instantiator_spec.spl
 ```
 
 ---
 
-### 🔴 recognizes fn keyword
+### 🔴 creates default configuration
 
-**File:** `test/compiler/lexer_comprehensive_spec.spl`
-**Category:** Unknown
-**Failed:** 2026-02-03T03:35:17.596303317+00:00
+**File:** `test/lib/std/unit/compiler/loader/jit_instantiator_spec.spl`
+**Category:** Unit
+**Failed:** 2026-02-03T06:51:53.714404141+00:00
 **Flaky:** No (100.0% failure rate)
 
 **Error:**
 ```
-Test 'recognizes fn keyword' failed
-Location: test/compiler/lexer_comprehensive_spec.spl
+Test 'creates default configuration' failed
+Location: test/lib/std/unit/compiler/loader/jit_instantiator_spec.spl
 ```
 
 ---
 
-### 🔴 scans greater than
+### 🔴 handles missing SMF files
 
-**File:** `test/compiler/lexer_comprehensive_spec.spl`
-**Category:** Unknown
-**Failed:** 2026-02-03T03:35:17.596407236+00:00
+**File:** `test/lib/std/unit/compiler/loader/jit_instantiator_spec.spl`
+**Category:** Unit
+**Failed:** 2026-02-03T06:51:53.714460348+00:00
 **Flaky:** No (100.0% failure rate)
 
 **Error:**
 ```
-Test 'scans greater than' failed
-Location: test/compiler/lexer_comprehensive_spec.spl
+Test 'handles missing SMF files' failed
+Location: test/lib/std/unit/compiler/loader/jit_instantiator_spec.spl
 ```
 
 ---
 
-### 🔴 recognizes val keyword
+### 🔴 finds possible entry in loaded metadata
 
-**File:** `test/compiler/lexer_comprehensive_spec.spl`
-**Category:** Unknown
-**Failed:** 2026-02-03T03:35:17.596297687+00:00
+**File:** `test/lib/std/unit/compiler/loader/jit_instantiator_spec.spl`
+**Category:** Unit
+**Failed:** 2026-02-03T06:51:53.714481668+00:00
 **Flaky:** No (100.0% failure rate)
 
 **Error:**
 ```
-Test 'recognizes val keyword' failed
-Location: test/compiler/lexer_comprehensive_spec.spl
+Test 'finds possible entry in loaded metadata' failed
+Location: test/lib/std/unit/compiler/loader/jit_instantiator_spec.spl
 ```
 
 ---
 
-### 🔴 scans octal number
+### 🔴 loads metadata successfully
 
-**File:** `test/compiler/lexer_comprehensive_spec.spl`
-**Category:** Unknown
-**Failed:** 2026-02-03T03:35:17.596391846+00:00
+**File:** `test/lib/std/unit/compiler/loader/jit_instantiator_spec.spl`
+**Category:** Unit
+**Failed:** 2026-02-03T06:51:53.714451280+00:00
 **Flaky:** No (100.0% failure rate)
 
 **Error:**
 ```
-Test 'scans octal number' failed
-Location: test/compiler/lexer_comprehensive_spec.spl
+Test 'loads metadata successfully' failed
+Location: test/lib/std/unit/compiler/loader/jit_instantiator_spec.spl
 ```
 
 ---
 
-### 🔴 scans and operator
+### 🔴 returns cached code
 
-**File:** `test/compiler/lexer_comprehensive_spec.spl`
-**Category:** Unknown
-**Failed:** 2026-02-03T03:35:17.596420852+00:00
+**File:** `test/lib/std/unit/compiler/loader/jit_instantiator_spec.spl`
+**Category:** Unit
+**Failed:** 2026-02-03T06:51:53.714491617+00:00
 **Flaky:** No (100.0% failure rate)
 
 **Error:**
 ```
-Test 'scans and operator' failed
-Location: test/compiler/lexer_comprehensive_spec.spl
+Test 'returns cached code' failed
+Location: test/lib/std/unit/compiler/loader/jit_instantiator_spec.spl
 ```
 
 ---
 
-### 🔴 scans zero
+### 🔴 tries JIT on miss
 
-**File:** `test/compiler/lexer_comprehensive_spec.spl`
-**Category:** Unknown
-**Failed:** 2026-02-03T03:35:17.596374583+00:00
+**File:** `test/lib/std/unit/compiler/loader/jit_instantiator_spec.spl`
+**Category:** Unit
+**Failed:** 2026-02-03T06:51:53.714557342+00:00
 **Flaky:** No (100.0% failure rate)
 
 **Error:**
 ```
-Test 'scans zero' failed
-Location: test/compiler/lexer_comprehensive_spec.spl
+Test 'tries JIT on miss' failed
+Location: test/lib/std/unit/compiler/loader/jit_instantiator_spec.spl
 ```
 
 ---
 
-### 🔴 skips tabs
+### 🔴 identifies Success as success
 
-**File:** `test/compiler/lexer_comprehensive_spec.spl`
-**Category:** Unknown
-**Failed:** 2026-02-03T03:35:17.596471648+00:00
+**File:** `test/lib/std/unit/compiler/loader/jit_instantiator_spec.spl`
+**Category:** Unit
+**Failed:** 2026-02-03T06:51:53.714418408+00:00
 **Flaky:** No (100.0% failure rate)
 
 **Error:**
 ```
-Test 'skips tabs' failed
-Location: test/compiler/lexer_comprehensive_spec.spl
+Test 'identifies Success as success' failed
+Location: test/lib/std/unit/compiler/loader/jit_instantiator_spec.spl
 ```
 
 ---
 
-### 🔴 scans multi-digit integer
+### 🔴 initializes empty caches
 
-**File:** `test/compiler/lexer_comprehensive_spec.spl`
-**Category:** Unknown
-**Failed:** 2026-02-03T03:35:17.596380565+00:00
+**File:** `test/lib/std/unit/compiler/loader/jit_instantiator_spec.spl`
+**Category:** Unit
+**Failed:** 2026-02-03T06:51:53.714448164+00:00
 **Flaky:** No (100.0% failure rate)
 
 **Error:**
 ```
-Test 'scans multi-digit integer' failed
-Location: test/compiler/lexer_comprehensive_spec.spl
+Test 'initializes empty caches' failed
+Location: test/lib/std/unit/compiler/loader/jit_instantiator_spec.spl
 ```
 
 ---
 
-### 🔴 skips single-line comment
+### 🔴 removes from possible list
 
-**File:** `test/compiler/lexer_comprehensive_spec.spl`
-**Category:** Unknown
-**Failed:** 2026-02-03T03:35:17.596398128+00:00
+**File:** `test/lib/std/unit/compiler/loader/jit_instantiator_spec.spl`
+**Category:** Unit
+**Failed:** 2026-02-03T06:51:53.714504201+00:00
 **Flaky:** No (100.0% failure rate)
 
 **Error:**
 ```
-Test 'skips single-line comment' failed
-Location: test/compiler/lexer_comprehensive_spec.spl
+Test 'removes from possible list' failed
+Location: test/lib/std/unit/compiler/loader/jit_instantiator_spec.spl
 ```
 
 ---
 
-### 🔴 scans single digit
+### 🔴 skips SMF updates
 
-**File:** `test/compiler/lexer_comprehensive_spec.spl`
-**Category:** Unknown
-**Failed:** 2026-02-03T03:35:17.596377569+00:00
+**File:** `test/lib/std/unit/compiler/loader/jit_instantiator_spec.spl`
+**Category:** Unit
+**Failed:** 2026-02-03T06:51:53.714523428+00:00
 **Flaky:** No (100.0% failure rate)
 
 **Error:**
 ```
-Test 'scans single digit' failed
-Location: test/compiler/lexer_comprehensive_spec.spl
+Test 'skips SMF updates' failed
+Location: test/lib/std/unit/compiler/loader/jit_instantiator_spec.spl
 ```
 
 ---
 
-### 🔴 recognizes for keyword
+### 🔴 overwrites existing registration
 
-**File:** `test/compiler/lexer_comprehensive_spec.spl`
-**Category:** Unknown
-**Failed:** 2026-02-03T03:35:17.596317725+00:00
+**File:** `test/lib/std/unit/compiler/loader/jit_instantiator_spec.spl`
+**Category:** Unit
+**Failed:** 2026-02-03T06:51:53.714547834+00:00
 **Flaky:** No (100.0% failure rate)
 
 **Error:**
 ```
-Test 'recognizes for keyword' failed
-Location: test/compiler/lexer_comprehensive_spec.spl
+Test 'overwrites existing registration' failed
+Location: test/lib/std/unit/compiler/loader/jit_instantiator_spec.spl
 ```
 
 ---
 
-### 🔴 tracks line numbers
+### 🔴 updates metadata in memory
 
-**File:** `test/compiler/lexer_comprehensive_spec.spl`
-**Category:** Unknown
-**Failed:** 2026-02-03T03:35:17.596458744+00:00
+**File:** `test/lib/std/unit/compiler/loader/jit_instantiator_spec.spl`
+**Category:** Unit
+**Failed:** 2026-02-03T06:51:53.714501226+00:00
 **Flaky:** No (100.0% failure rate)
 
 **Error:**
 ```
-Test 'tracks line numbers' failed
-Location: test/compiler/lexer_comprehensive_spec.spl
+Test 'updates metadata in memory' failed
+Location: test/lib/std/unit/compiler/loader/jit_instantiator_spec.spl
 ```
 
 ---
 
-### 🔴 scans integer number
+### 🔴 returns false for unknown symbols
 
-**File:** `test/compiler/lexer_comprehensive_spec.spl`
-**Category:** Unknown
-**Failed:** 2026-02-03T03:35:17.596275775+00:00
+**File:** `test/lib/std/unit/compiler/loader/jit_instantiator_spec.spl`
+**Category:** Unit
+**Failed:** 2026-02-03T06:51:53.714470126+00:00
 **Flaky:** No (100.0% failure rate)
 
 **Error:**
 ```
-Test 'scans integer number' failed
-Location: test/compiler/lexer_comprehensive_spec.spl
+Test 'returns false for unknown symbols' failed
+Location: test/lib/std/unit/compiler/loader/jit_instantiator_spec.spl
 ```
 
 ---
 
-### 🔴 scans string with spaces
+### 🔴 identifies CompilationError as error
 
-**File:** `test/compiler/lexer_comprehensive_spec.spl`
-**Category:** Unknown
-**Failed:** 2026-02-03T03:35:17.596371047+00:00
+**File:** `test/lib/std/unit/compiler/loader/jit_instantiator_spec.spl`
+**Category:** Unit
+**Failed:** 2026-02-03T06:51:53.714425501+00:00
 **Flaky:** No (100.0% failure rate)
 
 **Error:**
 ```
-Test 'scans string with spaces' failed
-Location: test/compiler/lexer_comprehensive_spec.spl
+Test 'identifies CompilationError as error' failed
+Location: test/lib/std/unit/compiler/loader/jit_instantiator_spec.spl
 ```
 
 ---
 
-### 🔴 scans less than or equal
+### 🔴 creates with default config
 
-**File:** `test/compiler/lexer_comprehensive_spec.spl`
-**Category:** Unknown
-**Failed:** 2026-02-03T03:35:17.596409680+00:00
+**File:** `test/lib/std/unit/compiler/loader/jit_instantiator_spec.spl`
+**Category:** Unit
+**Failed:** 2026-02-03T06:51:53.714535110+00:00
 **Flaky:** No (100.0% failure rate)
 
 **Error:**
 ```
-Test 'scans less than or equal' failed
-Location: test/compiler/lexer_comprehensive_spec.spl
+Test 'creates with default config' failed
+Location: test/lib/std/unit/compiler/loader/jit_instantiator_spec.spl
 ```
 
 ---
 
-### 🔴 recognizes var keyword
+### 🔴 caches loaded metadata
 
-**File:** `test/compiler/lexer_comprehensive_spec.spl`
-**Category:** Unknown
-**Failed:** 2026-02-03T03:35:17.596300793+00:00
+**File:** `test/lib/std/unit/compiler/loader/jit_instantiator_spec.spl`
+**Category:** Unit
+**Failed:** 2026-02-03T06:51:53.714453966+00:00
 **Flaky:** No (100.0% failure rate)
 
 **Error:**
 ```
-Test 'recognizes var keyword' failed
-Location: test/compiler/lexer_comprehensive_spec.spl
+Test 'caches loaded metadata' failed
+Location: test/lib/std/unit/compiler/loader/jit_instantiator_spec.spl
+```
+
+---
+
+### 🔴 tracks loaded SMF count
+
+**File:** `test/lib/std/unit/compiler/loader/jit_instantiator_spec.spl`
+**Category:** Unit
+**Failed:** 2026-02-03T06:51:53.714464105+00:00
+**Flaky:** No (100.0% failure rate)
+
+**Error:**
+```
+Test 'tracks loaded SMF count' failed
+Location: test/lib/std/unit/compiler/loader/jit_instantiator_spec.spl
+```
+
+---
+
+### 🔴 supports disabling JIT
+
+**File:** `test/lib/std/unit/compiler/loader/jit_instantiator_spec.spl`
+**Category:** Unit
+**Failed:** 2026-02-03T06:51:53.714413438+00:00
+**Flaky:** No (100.0% failure rate)
+
+**Error:**
+```
+Test 'supports disabling JIT' failed
+Location: test/lib/std/unit/compiler/loader/jit_instantiator_spec.spl
+```
+
+---
+
+### 🔴 returns false when JIT is disabled
+
+**File:** `test/lib/std/unit/compiler/loader/jit_instantiator_spec.spl`
+**Category:** Unit
+**Failed:** 2026-02-03T06:51:53.714467111+00:00
+**Flaky:** No (100.0% failure rate)
+
+**Error:**
+```
+Test 'returns false when JIT is disabled' failed
+Location: test/lib/std/unit/compiler/loader/jit_instantiator_spec.spl
+```
+
+---
+
+### 🔴 returns true for symbols in metadata
+
+**File:** `test/lib/std/unit/compiler/loader/jit_instantiator_spec.spl`
+**Category:** Unit
+**Failed:** 2026-02-03T06:51:53.714475016+00:00
+**Flaky:** No (100.0% failure rate)
+
+**Error:**
+```
+Test 'returns true for symbols in metadata' failed
+Location: test/lib/std/unit/compiler/loader/jit_instantiator_spec.spl
+```
+
+---
+
+### 🔴 returns None for unknown symbols
+
+**File:** `test/lib/std/unit/compiler/loader/jit_instantiator_spec.spl`
+**Category:** Unit
+**Failed:** 2026-02-03T06:51:53.714478663+00:00
+**Flaky:** No (100.0% failure rate)
+
+**Error:**
+```
+Test 'returns None for unknown symbols' failed
+Location: test/lib/std/unit/compiler/loader/jit_instantiator_spec.spl
+```
+
+---
+
+### 🔴 creates with custom config
+
+**File:** `test/lib/std/unit/compiler/loader/jit_instantiator_spec.spl`
+**Category:** Unit
+**Failed:** 2026-02-03T06:51:53.714538286+00:00
+**Flaky:** No (100.0% failure rate)
+
+**Error:**
+```
+Test 'creates with custom config' failed
+Location: test/lib/std/unit/compiler/loader/jit_instantiator_spec.spl
+```
+
+---
+
+### 🔴 registers symbol address
+
+**File:** `test/lib/std/unit/compiler/loader/jit_instantiator_spec.spl`
+**Category:** Unit
+**Failed:** 2026-02-03T06:51:53.714541983+00:00
+**Flaky:** No (100.0% failure rate)
+
+**Error:**
+```
+Test 'registers symbol address' failed
+Location: test/lib/std/unit/compiler/loader/jit_instantiator_spec.spl
 ```
 
 ---
@@ -608,11 +713,11 @@ Location: test/compiler/lexer_comprehensive_spec.spl
 
 ## 🎯 Action Items
 
-### Priority 1: Fix Failing Tests (37)
+### Priority 1: Fix Failing Tests (44)
 
-1. **recognizes else keyword** - Test 'recognizes else keyword' failed
-2. **scans simple string** - Test 'scans simple string' failed
-3. **scans underscore identifier** - Test 'scans underscore identifier' failed
-4. **scans or operator** - Test 'scans or operator' failed
-5. **scans binary number** - Test 'scans binary number' failed
+1. **handles update errors** - Test 'handles update errors' failed
+2. **identifies UpdateFailed as error** - Test 'identifies UpdateFailed as error' failed
+3. **adds to instantiations list** - Test 'adds to instantiations list' failed
+4. **resolves registered symbols** - Test 'resolves registered symbols' failed
+5. **creates with custom config** - Test 'creates with custom config' failed
 
