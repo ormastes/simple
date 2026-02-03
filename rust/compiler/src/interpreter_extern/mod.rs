@@ -80,6 +80,7 @@ pub mod ast_ffi;
 pub mod env_ffi;
 pub mod error_ffi;
 pub mod span_ffi;
+pub mod rc;
 
 // Import parent interpreter types
 type Enums = HashMap<String, EnumDef>;
@@ -471,7 +472,7 @@ pub(crate) fn call_extern_function(
         "rt_exit" => system::rt_exit(&evaluated),
 
         // ====================================================================
-        // Memory Operations (7 functions)
+        // Memory Operations (10 functions: 7 query + 3 allocator)
         // ====================================================================
         "memory_usage" => memory::memory_usage(&evaluated),
         "memory_limit" => memory::memory_limit(&evaluated),
@@ -480,6 +481,38 @@ pub(crate) fn call_extern_function(
         "default_memory_limit" => memory::default_memory_limit(&evaluated),
         "format_bytes" => memory::format_bytes(&evaluated),
         "parse_memory_size" => memory::parse_memory_size(&evaluated),
+
+        // System allocator
+        "sys_malloc" => memory::sys_malloc(&evaluated),
+        "sys_free" => memory::sys_free(&evaluated),
+        "sys_realloc" => memory::sys_realloc(&evaluated),
+
+        // ====================================================================
+        // RC/ARC Operations (20 functions: Rc + Arc reference counting)
+        // ====================================================================
+        // Rc box operations (non-atomic)
+        "rc_box_size" => rc::rc_box_size(&evaluated),
+        "rc_box_init" => rc::rc_box_init(&evaluated),
+        "rc_box_get_value" => rc::rc_box_get_value(&evaluated),
+        "rc_box_drop_value" => rc::rc_box_drop_value(&evaluated),
+        "rc_box_strong_count" => rc::rc_box_strong_count(&evaluated),
+        "rc_box_weak_count" => rc::rc_box_weak_count(&evaluated),
+        "rc_box_inc_strong" => rc::rc_box_inc_strong(&evaluated),
+        "rc_box_dec_strong" => rc::rc_box_dec_strong(&evaluated),
+        "rc_box_inc_weak" => rc::rc_box_inc_weak(&evaluated),
+        "rc_box_dec_weak" => rc::rc_box_dec_weak(&evaluated),
+
+        // Arc box operations (atomic)
+        "arc_box_size" => rc::arc_box_size(&evaluated),
+        "arc_box_init" => rc::arc_box_init(&evaluated),
+        "arc_box_get_value" => rc::arc_box_get_value(&evaluated),
+        "arc_box_drop_value" => rc::arc_box_drop_value(&evaluated),
+        "arc_box_strong_count" => rc::arc_box_strong_count(&evaluated),
+        "arc_box_weak_count" => rc::arc_box_weak_count(&evaluated),
+        "arc_box_inc_strong" => rc::arc_box_inc_strong(&evaluated),
+        "arc_box_dec_strong" => rc::arc_box_dec_strong(&evaluated),
+        "arc_box_inc_weak" => rc::arc_box_inc_weak(&evaluated),
+        "arc_box_dec_weak" => rc::arc_box_dec_weak(&evaluated),
 
         // ====================================================================
         // Concurrency Operations (15 functions: Thread + Channel)

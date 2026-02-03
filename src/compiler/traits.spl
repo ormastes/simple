@@ -1,0 +1,518 @@
+# Trait System for Simple
+#
+# Implements Rust-style traits:
+# - Trait definitions with method signatures
+# - Impl blocks for trait implementations
+# - Trait bounds on generics (T: Trait)
+# - Trait objects for dynamic dispatch (dyn Trait)
+# - Obligation-based constraint solving
+#
+# Design: doc/design/trait_system_design.md
+
+use compiler.hir.*
+use compiler.lexer.*
+
+# ============================================================================
+# Trait Definition
+# ============================================================================
+
+struct TraitDef:
+    """Definition of a trait.
+
+    A trait declares method signatures that types can implement.
+
+    Example:
+        trait Display:
+            fn to_string() -> text
+    """
+    name: Symbol                    # Trait name
+    methods: [MethodSignature]      # Required method signatures
+    defaults: [HirFunction]         # Default implementations
+    supertraits: [Symbol]           # Supertrait bounds (Trait: Supertrait)
+    type_params: [Symbol]           # Generic parameters on trait
+    span: Span
+
+impl TraitDef:
+    static fn create(name: Symbol, span: Span) -> TraitDef:
+        """Create a new trait definition."""
+        TraitDef(
+            name: name,
+            methods: [],
+            defaults: [],
+            supertraits: [],
+            type_params: [],
+            span: span
+        )
+
+    fn has_method(method_name: text) -> bool:
+        """Check if trait has a method with given name."""
+        for method in self.methods:
+            if method.name == method_name:
+                return true
+        false
+
+    fn get_method(method_name: text) -> MethodSignature?:
+        """Get method signature by name."""
+        for method in self.methods:
+            if method.name == method_name:
+                return Some(method)
+        None
+
+struct MethodSignature:
+    """Method signature in a trait definition."""
+    name: text                      # Method name
+    params: [HirType]               # Parameter types
+    return_type: HirType            # Return type
+    effects: [Effect]               # Effect annotations
+    span: Span
+
+impl MethodSignature:
+    fn arity() -> i64:
+        """Get number of parameters."""
+        self.params.len()
+
+# ============================================================================
+# Impl Block
+# ============================================================================
+
+struct ImplBlock:
+    """Implementation of a trait for a specific type.
+
+    Example:
+        impl Display for Point:
+            fn to_string() -> text:
+                "Point({self.x}, {self.y})"
+    """
+    trait_name: Symbol              # Which trait is being implemented
+    for_type: HirType               # Which type is implementing the trait
+    type_params: [Symbol]           # Generic parameters (impl<T> Trait for Vec<T>)
+    where_clause: [TraitBound]      # Where T: Trait constraints
+    methods: [HirFunction]          # Method implementations
+    span: Span
+
+impl ImplBlock:
+    static fn create(trait_name: Symbol, for_type: HirType, span: Span) -> ImplBlock:
+        """Create a new impl block."""
+        ImplBlock(
+            trait_name: trait_name,
+            for_type: for_type,
+            type_params: [],
+            where_clause: [],
+            methods: [],
+            span: span
+        )
+
+    fn has_method(method_name: text) -> bool:
+        """Check if impl has a method with given name."""
+        for method in self.methods:
+            if method.name == method_name:
+                return true
+        false
+
+    fn get_method(method_name: text) -> HirFunction?:
+        """Get method implementation by name."""
+        for method in self.methods:
+            if method.name == method_name:
+                return Some(method)
+        None
+
+    fn matches_type(ty: HirType) -> bool:
+        """Check if this impl matches the given type (ignoring generics for now)."""
+        # TODO: Handle generic type matching
+        self.for_type == ty
+
+# ============================================================================
+# Trait Bound
+# ============================================================================
+
+struct TraitBound:
+    """A constraint on a type parameter: T: Trait
+
+    Used in:
+    - Function signatures: fn foo<T: Display>(x: T)
+    - Where clauses: fn foo<T>(x: T) where T: Display
+    - Impl blocks: impl<T: Clone> Clone for Vec<T>
+    """
+    type_param: Symbol              # Type variable being constrained (e.g., T)
+    trait_name: Symbol              # Required trait (e.g., Display)
+    span: Span
+
+impl TraitBound:
+    static fn create(type_param: Symbol, trait_name: Symbol, span: Span) -> TraitBound:
+        """Create a new trait bound."""
+        TraitBound(
+            type_param: type_param,
+            trait_name: trait_name,
+            span: span
+        )
+
+enum TraitBoundKind:
+    """Kind of trait bound."""
+    Single(Symbol)                  # T: Trait
+    Multiple([Symbol])              # T: Trait1 + Trait2
+    Supertrait(Symbol, Symbol)      # In trait definition: trait Ord: Eq
+
+impl TraitBoundKind:
+    fn is_single() -> bool:
+        match self:
+            case Single(_): true
+            case _: false
+
+    fn traits() -> [Symbol]:
+        """Get list of trait symbols in this bound."""
+        match self:
+            case Single(t): [t]
+            case Multiple(ts): ts
+            case Supertrait(sub, sup): [sub, sup]
+
+# ============================================================================
+# Obligation
+# ============================================================================
+
+struct Obligation:
+    """A trait bound that must be proven during type checking.
+
+    Created when:
+    - Calling a function with trait bounds
+    - Using a method that requires a trait
+    - Satisfying a where clause
+
+    Must be satisfied by finding an impl block.
+    """
+    type_: HirType                  # The type that must implement the trait
+    trait_: Symbol                  # The trait that must be implemented
+    cause: ObligationCause          # Why this obligation was created
+    span: Span                      # Source location
+
+impl Obligation:
+    static fn create(ty: HirType, trait_: Symbol, cause: ObligationCause, span: Span) -> Obligation:
+        """Create a new obligation."""
+        Obligation(
+            type_: ty,
+            trait_: trait_,
+            cause: cause,
+            span: span
+        )
+
+    fn description() -> text:
+        """Get human-readable description."""
+        "require {self.type_} : {self.trait_}"
+
+enum ObligationCause:
+    """Why an obligation was created (for error messages)."""
+    FunctionCall(Symbol)            # From calling fn<T: Trait>
+    MethodCall(Symbol, text)        # From calling method
+    TraitBound(Symbol)              # From where clause
+    FieldAccess(Symbol, text)       # From accessing field
+    BuiltIn                         # From built-in constraint
+
+impl ObligationCause:
+    fn description() -> text:
+        match self:
+            case FunctionCall(name):
+                "function call to {name}"
+            case MethodCall(receiver, method):
+                "method call {receiver}.{method}"
+            case TraitBound(param):
+                "trait bound on {param}"
+            case FieldAccess(ty, field):
+                "field access {ty}.{field}"
+            case BuiltIn:
+                "built-in constraint"
+
+# ============================================================================
+# Trait Solver
+# ============================================================================
+
+class TraitSolver:
+    """Solves trait obligations by searching impl blocks.
+
+    Algorithm (simplified Rust trait solver):
+    1. Collect obligations from function calls and method calls
+    2. For each obligation T: Trait:
+       a. Search for impl Trait for T
+       b. Check where clauses recursively
+       c. Report error if no impl found
+    3. Cache results to avoid duplicate work
+
+    Note: This is a simplified solver. Full Rust solver handles:
+    - Higher-ranked trait bounds
+    - Associated types
+    - Negative impls
+    - Specialization
+    - Coherence checking
+    """
+    # All known trait definitions
+    traits: Dict<Symbol, TraitDef>
+
+    # All known impl blocks (indexed by trait name)
+    impls: Dict<Symbol, [ImplBlock]>
+
+    # Cache of solved obligations: (type, trait) -> success
+    cache: Dict<(HirType, Symbol), bool>
+
+    # Current obligations to solve
+    obligations: [Obligation]
+
+    # Errors encountered during solving
+    errors: [TraitError]
+
+impl TraitSolver:
+    static fn create() -> TraitSolver:
+        """Create a new trait solver."""
+        TraitSolver(
+            traits: {},
+            impls: {},
+            cache: {},
+            obligations: [],
+            errors: []
+        )
+
+    me add_trait(trait_def: TraitDef):
+        """Register a trait definition."""
+        self.traits[trait_def.name] = trait_def
+
+    me add_impl(impl_block: ImplBlock):
+        """Register an impl block."""
+        val trait_name = impl_block.trait_name
+
+        # Get existing impls for this trait
+        var impl_list = if self.impls[trait_name].?:
+            self.impls[trait_name]
+        else:
+            []
+
+        # Add new impl
+        impl_list = impl_list.push(impl_block)
+        self.impls[trait_name] = impl_list
+
+    me add_obligation(ty: HirType, trait_: Symbol, cause: ObligationCause, span: Span):
+        """Add an obligation to solve."""
+        val obligation = Obligation.create(ty, trait_, cause, span)
+        self.obligations = self.obligations.push(obligation)
+
+    fn has_obligations() -> bool:
+        """Check if there are pending obligations."""
+        not self.obligations.is_empty()
+
+    me solve_all() -> Result<(), [TraitError]>:
+        """Solve all pending obligations.
+
+        Returns Ok if all obligations satisfied, Err with errors otherwise.
+        """
+        for obligation in self.obligations:
+            match self.solve_obligation(obligation):
+                case Err(err):
+                    self.errors = self.errors.push(err)
+                case _: pass
+
+        # Clear obligations after solving
+        self.obligations = []
+
+        if self.errors.is_empty():
+            Ok(())
+        else:
+            val errors = self.errors
+            self.errors = []  # Clear for next round
+            Err(errors)
+
+    me solve_obligation(obligation: Obligation) -> Result<(), TraitError>:
+        """Solve a single obligation.
+
+        Algorithm:
+        1. Check cache for previously solved
+        2. Search for matching impl block
+        3. Recursively check where clauses
+        4. Cache result
+        """
+        val ty = obligation.type_
+        val trait_ = obligation.trait_
+
+        # Check cache
+        val cache_key = (ty, trait_)
+        if self.cache[cache_key].?:
+            if self.cache[cache_key]:
+                return Ok(())
+            else:
+                return Err(TraitError.Unsatisfied(obligation))
+
+        # Search for impl
+        match self.find_impl(ty, trait_):
+            case Some(impl_block):
+                # Check where clauses recursively
+                for bound in impl_block.where_clause:
+                    match self.solve_trait_bound(bound, obligation.span):
+                        case Err(e):
+                            self.cache[cache_key] = false
+                            return Err(e)
+                        case _: pass
+
+                # Success - cache it
+                self.cache[cache_key] = true
+                Ok(())
+
+            case None:
+                # No impl found - cache failure
+                self.cache[cache_key] = false
+                Err(TraitError.Unsatisfied(obligation))
+
+    fn find_impl(ty: HirType, trait_: Symbol) -> ImplBlock?:
+        """Find impl block for type and trait.
+
+        Returns the first matching impl (coherence ensures uniqueness).
+        """
+        if not self.impls[trait_].?:
+            return None
+
+        val impl_list = self.impls[trait_]
+        for impl_block in impl_list:
+            if impl_block.matches_type(ty):
+                return Some(impl_block)
+
+        None
+
+    me solve_trait_bound(bound: TraitBound, span: Span) -> Result<(), TraitError>:
+        """Solve a trait bound from a where clause.
+
+        Creates a new obligation for the bound.
+        """
+        # Convert type param to type variable
+        val ty = HirType(
+            kind: HirTypeKind.TypeParam(bound.type_param, []),
+            span: bound.span
+        )
+
+        val cause = ObligationCause.TraitBound(bound.type_param)
+        self.add_obligation(ty, bound.trait_name, cause, span)
+
+        # Will be solved in next solve_all() call
+        Ok(())
+
+    fn get_trait(name: Symbol) -> TraitDef?:
+        """Get trait definition by name."""
+        self.impls[name]
+
+    me check_coherence():
+        """Check coherence rules (no overlapping impls).
+
+        For now, just checks no duplicate impls for same (trait, type) pair.
+        Full coherence checking requires more sophisticated overlap detection.
+        """
+        for (trait_name, impl_list) in self.impls:
+            var seen: [HirType] = []
+            for impl_block in impl_list:
+                val ty = impl_block.for_type
+                if seen.contains(ty):
+                    val error = TraitError.Overlapping(trait_name, ty, impl_block.span)
+                    self.errors = self.errors.push(error)
+                else:
+                    seen = seen.push(ty)
+
+# ============================================================================
+# Trait Errors
+# ============================================================================
+
+enum TraitError:
+    """Errors from trait resolution."""
+    Unsatisfied(obligation: Obligation)
+    Ambiguous(type_: HirType, trait_: Symbol, candidates: [ImplBlock])
+    Overlapping(trait_: Symbol, type_: HirType, span: Span)
+    MissingMethod(trait_: Symbol, method: text, type_: HirType, span: Span)
+    CyclicBound(type_param: Symbol, span: Span)
+    UndefinedTrait(name: Symbol, span: Span)
+
+impl TraitError:
+    fn message() -> text:
+        """Get human-readable error message."""
+        match self:
+            case Unsatisfied(obligation):
+                "trait bound not satisfied: {obligation.type_} does not implement {obligation.trait_}\n  required by {obligation.cause.description()}"
+
+            case Ambiguous(ty, trait_, candidates):
+                "ambiguous trait impl: {candidates.len()} candidates for {ty} : {trait_}"
+
+            case Overlapping(trait_, ty, _):
+                "overlapping impls for {trait_} for {ty}"
+
+            case MissingMethod(trait_, method, ty, _):
+                "missing method '{method}' in impl {trait_} for {ty}"
+
+            case CyclicBound(param, _):
+                "cyclic trait bound on type parameter {param}"
+
+            case UndefinedTrait(name, _):
+                "undefined trait: {name}"
+
+    fn span() -> Span:
+        """Get source span for error."""
+        match self:
+            case Unsatisfied(obligation): obligation.span
+            case Ambiguous(_, _, _): Span(start: 0, end: 0, line: 0, col: 0)  # TODO
+            case Overlapping(_, _, span): span
+            case MissingMethod(_, _, _, span): span
+            case CyclicBound(_, span): span
+            case UndefinedTrait(_, span): span
+
+# ============================================================================
+# Built-in Traits
+# ============================================================================
+
+fn create_builtin_traits() -> [TraitDef]:
+    """Create definitions for built-in traits.
+
+    Built-in traits:
+    - Clone: fn clone() -> Self
+    - Copy: marker trait (Clone + trivial bitwise copy)
+    - Debug: fn debug() -> text
+    - Default: fn default() -> Self
+    - Drop: fn drop()
+    - Eq: fn eq(other: Self) -> bool
+    - Ord: fn cmp(other: Self) -> Ordering (requires Eq)
+    """
+    var traits: [TraitDef] = []
+    val dummy_span = Span(start: 0, end: 0, line: 0, col: 0)
+
+    # Clone trait
+    var clone_trait = TraitDef.create(Symbol(id: 1, name: "Clone"), dummy_span)
+    # TODO: Add method signatures
+    traits = traits.push(clone_trait)
+
+    # Copy trait (marker, no methods)
+    var copy_trait = TraitDef.create(Symbol(id: 2, name: "Copy"), dummy_span)
+    copy_trait.supertraits = [Symbol(id: 1, name: "Clone")]  # Copy: Clone
+    traits = traits.push(copy_trait)
+
+    # Debug trait
+    var debug_trait = TraitDef.create(Symbol(id: 3, name: "Debug"), dummy_span)
+    traits = traits.push(debug_trait)
+
+    # Default trait
+    var default_trait = TraitDef.create(Symbol(id: 4, name: "Default"), dummy_span)
+    traits = traits.push(default_trait)
+
+    # Drop trait
+    var drop_trait = TraitDef.create(Symbol(id: 5, name: "Drop"), dummy_span)
+    traits = traits.push(drop_trait)
+
+    # Eq trait
+    var eq_trait = TraitDef.create(Symbol(id: 6, name: "Eq"), dummy_span)
+    traits = traits.push(eq_trait)
+
+    # Ord trait
+    var ord_trait = TraitDef.create(Symbol(id: 7, name: "Ord"), dummy_span)
+    ord_trait.supertraits = [Symbol(id: 6, name: "Eq")]  # Ord: Eq
+    traits = traits.push(ord_trait)
+
+    traits
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export TraitDef, MethodSignature
+export ImplBlock
+export TraitBound, TraitBoundKind
+export Obligation, ObligationCause
+export TraitSolver
+export TraitError
+export create_builtin_traits
