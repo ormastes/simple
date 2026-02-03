@@ -804,7 +804,7 @@ impl LintChecker {
                     for stmt in &if_stmt.then_block.statements {
                         check_stmt(checker, stmt);
                     }
-                    for (elif_cond, elif_block) in &if_stmt.elif_branches {
+                    for (_elif_pattern, elif_cond, elif_block) in &if_stmt.elif_branches {
                         check_expr(checker, elif_cond);
                         for stmt in &elif_block.statements {
                             check_stmt(checker, stmt);
@@ -1405,7 +1405,7 @@ impl LintChecker {
                     for stmt in &if_stmt.then_block.statements {
                         check_stmt(checker, stmt);
                     }
-                    for (elif_cond, elif_block) in &if_stmt.elif_branches {
+                    for (_elif_pattern, elif_cond, elif_block) in &if_stmt.elif_branches {
                         check_expr(checker, elif_cond);
                         for stmt in &elif_block.statements {
                             check_stmt(checker, stmt);
@@ -1694,7 +1694,7 @@ impl LintChecker {
                     for stmt in &if_stmt.then_block.statements {
                         check_stmt_for_resources(scope, stmt);
                     }
-                    for (cond, block) in &if_stmt.elif_branches {
+                    for (_pattern, cond, block) in &if_stmt.elif_branches {
                         check_expr_for_close(scope, cond);
                         for stmt in &block.statements {
                             check_stmt_for_resources(scope, stmt);

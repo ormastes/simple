@@ -386,8 +386,11 @@ impl TypeChecker {
                     self.bind_pattern(pattern);
                 }
                 self.check_block_with_macro_rules(&if_stmt.then_block)?;
-                for (cond, block) in &if_stmt.elif_branches {
+                for (elif_pattern, cond, block) in &if_stmt.elif_branches {
                     let _ = self.infer_expr(cond)?;
+                    if let Some(pattern) = elif_pattern {
+                        self.bind_pattern(pattern);
+                    }
                     self.check_block_with_macro_rules(block)?;
                 }
                 if let Some(block) = &if_stmt.else_block {

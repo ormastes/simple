@@ -170,7 +170,7 @@ fn analyze_node(node: &Node, reasons: &mut Vec<FallbackReason>) {
         Node::If(if_stmt) => {
             analyze_expr(&if_stmt.condition, reasons);
             analyze_block(&if_stmt.then_block, reasons);
-            for (cond, block) in &if_stmt.elif_branches {
+            for (_pattern, cond, block) in &if_stmt.elif_branches {
                 analyze_expr(cond, reasons);
                 analyze_block(block, reasons);
             }

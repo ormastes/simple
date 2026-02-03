@@ -6,7 +6,9 @@
 from value import {SdnValue, Span}
 from lexer import {Token, TokenKind, Lexer}
 
-export parse, parse_file, SdnParser, SdnError
+export parse, parse_file, parse_untrusted, parse_config, parse_safe
+export parse_with_spans
+export SdnParser, SdnError
 
 # Parse error
 enum SdnError:
@@ -28,6 +30,7 @@ class SdnParser:
     pos: i64
     source: text
     current_path: [text]
+    span_map: Dict<text, Span>
 
 impl SdnParser:
     static fn from_source(source: text) -> SdnParser:
@@ -37,8 +40,19 @@ impl SdnParser:
             tokens: tokens,
             pos: 0,
             source: source,
-            current_path: []
+            current_path: [],
+            span_map: {}
         )
+
+    fn spans() -> Dict<text, Span>:
+        """Get recorded path -> span mappings."""
+        self.span_map
+
+    me record_span(start_span: Span, end_span: Span):
+        """Record span for current path."""
+        if self.current_path.?:
+            val path = self.current_path.join(".")
+            self.span_map[path] = start_span.merge(end_span)
 
     # Parse document into SdnValue (typically a Dict)
     fn parse() -> Result<SdnValue, SdnError>:
@@ -63,6 +77,7 @@ impl SdnParser:
         if self.is_at_end():
             return Ok(None)
 
+        val start = self.current_span()
         val name = self.expect_identifier()?
         self.current_path.push(name)
 
@@ -83,6 +98,7 @@ impl SdnParser:
                     span: self.current_span()
                 ))
 
+        self.record_span(start, self.current_span())
         self.current_path.pop()
         result
 
@@ -563,3 +579,104 @@ fn parse_file(path: text) -> Result<SdnValue, SdnError>:
     extern fn rt_file_read_text(path: text) -> text
     val source = rt_file_read_text(path)
     parse(source)
+
+# Parse with span tracking - returns value tree AND path->span map
+fn parse_with_spans(source: text) -> Result<(SdnValue, Dict<text, Span>), SdnError>:
+    var parser = SdnParser.from_source(source)
+    val result = parser.parse()?
+    Ok((result, parser.spans()))
+
+# ============================================================================
+# Safe Parsing Functions (from Rust parse_untrusted, parse_config, parse_safe)
+# ============================================================================
+
+val MAX_UNTRUSTED_DEPTH: i64 = 32
+val MAX_UNTRUSTED_SIZE: i64 = 1048576  # 1 MB
+
+fn parse_untrusted(source: text) -> Result<SdnValue, SdnError>:
+    """Parse untrusted input with depth and size limits.
+    Two-pass: validate limits first, then parse."""
+    if source.len() > MAX_UNTRUSTED_SIZE:
+        return Err(SdnError.SyntaxError(
+            message: "Input too large: {source.len()} bytes (max {MAX_UNTRUSTED_SIZE})",
+            span: Span.empty()
+        ))
+    # Check nesting depth by counting indent levels
+    var max_depth = 0
+    var current_depth = 0
+    for ch in source:
+        if ch == "\n":
+            current_depth = 0
+        elif ch == " ":
+            current_depth = current_depth + 1
+        else:
+            val depth = current_depth / 4  # 4 spaces per indent
+            if depth > max_depth:
+                max_depth = depth
+    if max_depth > MAX_UNTRUSTED_DEPTH:
+        return Err(SdnError.SyntaxError(
+            message: "Nesting depth {max_depth} exceeds limit {MAX_UNTRUSTED_DEPTH}",
+            span: Span.empty()
+        ))
+    parse(source)
+
+fn parse_config(source: text) -> Result<SdnValue, SdnError>:
+    """Parse as flat dict only (no nested dicts, arrays, or tables).
+    For configuration files where structure should be simple."""
+    val result = parse(source)?
+    match result:
+        case SdnValue.Dict(d):
+            for (key, value) in d:
+                match value:
+                    case SdnValue.Dict(_) | SdnValue.Array(_) | SdnValue.Table(_, _, _):
+                        return Err(SdnError.SyntaxError(
+                            message: "Config mode: nested structures not allowed at key '{key}'",
+                            span: Span.empty()
+                        ))
+                    case _:
+                        pass
+            Ok(result)
+        case _:
+            Err(SdnError.SyntaxError(
+                message: "Config mode: root must be a dict",
+                span: Span.empty()
+            ))
+
+fn parse_safe(source: text) -> Result<SdnValue, SdnError>:
+    """Parse with key validation: reject prototype pollution, path traversal, control chars."""
+    val result = parse_untrusted(source)?
+    validate_keys(result)?
+    Ok(result)
+
+fn validate_keys(value: SdnValue) -> Result<(), SdnError>:
+    """Recursively validate all dict keys for safety."""
+    match value:
+        case SdnValue.Dict(d):
+            for (key, v) in d:
+                # Reject prototype pollution
+                if key == "__proto__" or key == "constructor" or key == "prototype":
+                    return Err(SdnError.SyntaxError(
+                        message: "Unsafe key rejected: '{key}'",
+                        span: Span.empty()
+                    ))
+                # Reject path traversal
+                if key.contains("..") or key.contains("/") or key.contains("\\"):
+                    return Err(SdnError.SyntaxError(
+                        message: "Path traversal in key rejected: '{key}'",
+                        span: Span.empty()
+                    ))
+                # Reject control characters
+                for ch in key:
+                    val code = ch.code_point()
+                    if code < 32 and code != 9 and code != 10:
+                        return Err(SdnError.SyntaxError(
+                            message: "Control character in key rejected: '{key}'",
+                            span: Span.empty()
+                        ))
+                validate_keys(v)?
+        case SdnValue.Array(arr):
+            for item in arr:
+                validate_keys(item)?
+        case _:
+            pass
+    Ok(())

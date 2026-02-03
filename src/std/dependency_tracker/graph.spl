@@ -113,18 +113,21 @@ impl ImportGraph:
         in_stack[module] = false
         None
 
-    # Topological sort (dependencies first)
+    # Topological sort using Kahn's algorithm (dependencies first)
     fn topological_order() -> Result<[text], CyclicDependencyError>:
-        var in_degree = {}
+        # Compute in-degree: count INCOMING edges for each module
+        var in_degree: Dict<text, i64> = {}
         for module in self.modules():
             if not in_degree.has(module):
                 in_degree[module] = 0
+        # For each module's imports, the TARGET gets an incoming edge
+        for module in self.modules():
             for dep in self.imports_of(module):
                 in_degree[dep] = (in_degree.get(dep) ?? 0) + 1
 
-        # Start with modules that have no dependencies
-        var queue = [for m in self.modules() if (in_degree.get(m) ?? 0) == 0: m]
-        var result = []
+        # Start with modules that have no incoming edges (no dependencies ON them)
+        var queue: [text] = [for m in self.modules() if (in_degree.get(m) ?? 0) == 0: m]
+        var result: [text] = []
 
         while queue.len() > 0:
             val module = queue.pop_front()
@@ -141,6 +144,55 @@ impl ImportGraph:
             return Err(CyclicDependencyError(cycle: ["unknown"]))
 
         Ok(result)
+
+    # Strongly connected components using Tarjan's algorithm
+    fn strongly_connected_components() -> [[text]]:
+        var index_counter = 0
+        var stack: [text] = []
+        var on_stack: Dict<text, bool> = {}
+        var indices: Dict<text, i64> = {}
+        var lowlinks: Dict<text, i64> = {}
+        var result: [[text]] = []
+
+        for module in self.modules():
+            if not indices.has(module):
+                self.tarjan_dfs(module, index_counter, stack, on_stack,
+                               indices, lowlinks, result)
+
+        result
+
+    fn tarjan_dfs(module: text, index_counter: mut i64, stack: mut [text],
+                  on_stack: mut Dict<text, bool>,
+                  indices: mut Dict<text, i64>, lowlinks: mut Dict<text, i64>,
+                  result: mut [[text]]):
+        indices[module] = index_counter
+        lowlinks[module] = index_counter
+        index_counter = index_counter + 1
+        stack.push(module)
+        on_stack[module] = true
+
+        for dep in self.imports_of(module):
+            if not indices.has(dep):
+                self.tarjan_dfs(dep, index_counter, stack, on_stack,
+                               indices, lowlinks, result)
+                val dep_low = lowlinks[dep]
+                if dep_low < lowlinks[module]:
+                    lowlinks[module] = dep_low
+            elif on_stack.get(dep) ?? false:
+                val dep_idx = indices[dep]
+                if dep_idx < lowlinks[module]:
+                    lowlinks[module] = dep_idx
+
+        # Root of SCC
+        if lowlinks[module] == indices[module]:
+            var scc: [text] = []
+            while true:
+                val w = stack.pop()
+                on_stack[w] = false
+                scc.push(w)
+                if w == module:
+                    break
+            result.push(scc)
 
     # Get transitive imports of a module
     fn transitive_imports(module: text) -> [text]:

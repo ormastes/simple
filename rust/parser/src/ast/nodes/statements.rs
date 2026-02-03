@@ -83,7 +83,7 @@ pub struct IfStmt {
     pub let_pattern: Option<Pattern>,
     pub condition: Expr,
     pub then_block: Block,
-    pub elif_branches: Vec<(Expr, Block)>,
+    pub elif_branches: Vec<(Option<Pattern>, Expr, Block)>,
     pub else_block: Option<Block>,
     /// Suspension if statement (if~) for explicit suspension points in async-by-default
     pub is_suspend: bool,

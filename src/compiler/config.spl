@@ -1,8 +1,40 @@
 # Compiler Configuration
 #
 # Configuration types and loaders for the compiler.
+# Supports: .sdn files, env vars, CLI args, profile selection.
 
 use compiler.ffi (rt_env_get)
+
+# ============================================================================
+# Profile
+# ============================================================================
+
+enum CompilerProfile:
+    """Compilation profile controlling backend selection and logging."""
+    Dev      # FullHirInst + DebugLogger
+    Test     # FullHirInst + TestLogger (deterministic)
+    Prod     # FullHirInst + ProductionLogger
+    Sdn      # SdnHirInst (no-op) + SdnLogger
+
+impl CompilerProfile:
+    fn to_text() -> text:
+        match self:
+            case Dev: "dev"
+            case Test: "test"
+            case Prod: "prod"
+            case Sdn: "sdn"
+
+    static fn from_text(s: text) -> CompilerProfile:
+        match s.lower():
+            case "dev" | "development": CompilerProfile.Dev
+            case "test" | "testing": CompilerProfile.Test
+            case "prod" | "production" | "release": CompilerProfile.Prod
+            case "sdn" | "data": CompilerProfile.Sdn
+            case _: CompilerProfile.Dev
+
+# ============================================================================
+# Config (key-value bag)
+# ============================================================================
 
 struct Config:
     """Runtime configuration."""
@@ -16,6 +48,116 @@ struct Config:
 
     me set(self, key: text, value: text):
         self.values[key] = value
+
+# ============================================================================
+# CompilerConfig (unified config from all sources)
+# ============================================================================
+
+struct CompilerConfig:
+    """Unified compiler configuration from .sdn, env vars, and CLI args.
+
+    Precedence (highest first): CLI args > env vars > .sdn file > defaults.
+    """
+    profile: CompilerProfile
+    log_level: i64
+    type_inference: TypeInferenceConfig
+    values: Dict<text, text>
+    # Flags
+    use_rust_types: bool      # --use-rust-types fallback
+    use_rust_interp: bool     # --fast-interp Rust interpreter fallback
+    use_rust_lexer: bool      # --fast-lex Rust lexer fallback
+    deterministic: bool       # Deterministic mode (fixed seeds, sorted)
+    coverage_enabled: bool
+
+impl CompilerConfig:
+    static fn default() -> CompilerConfig:
+        CompilerConfig(
+            profile: CompilerProfile.Dev,
+            log_level: 0,
+            type_inference: TypeInferenceConfig.default(),
+            values: {},
+            use_rust_types: false,
+            use_rust_interp: false,
+            use_rust_lexer: false,
+            deterministic: false,
+            coverage_enabled: false
+        )
+
+    static fn from_env() -> CompilerConfig:
+        """Load config from environment variables."""
+        var config = CompilerConfig.default()
+
+        val profile_env = rt_env_get("SIMPLE_PROFILE")
+        if profile_env.?:
+            config.profile = CompilerProfile.from_text(profile_env.unwrap())
+
+        val log_env = rt_env_get("SIMPLE_LOG")
+        if log_env.?:
+            config.log_level = match log_env.unwrap():
+                case "trace": 20
+                case "debug": 10
+                case "info": 4
+                case "warn": 2
+                case "error": 1
+                case _: 0
+
+        val det_env = rt_env_get("SIMPLE_DETERMINISTIC")
+        if det_env.? and det_env.unwrap() == "1":
+            config.deterministic = true
+
+        val cov_env = rt_env_get("SIMPLE_COVERAGE")
+        if cov_env.? and cov_env.unwrap() == "1":
+            config.coverage_enabled = true
+
+        config
+
+    me apply_cli_args(args: [text]):
+        """Apply CLI arguments (highest precedence)."""
+        var i = 0
+        while i < args.len():
+            val arg = args[i]
+            match arg:
+                case "--profile":
+                    if i + 1 < args.len():
+                        self.profile = CompilerProfile.from_text(args[i + 1])
+                        i = i + 1
+                case "--use-rust-types":
+                    self.use_rust_types = true
+                case "--fast-interp":
+                    self.use_rust_interp = true
+                case "--fast-lex":
+                    self.use_rust_lexer = true
+                case "--deterministic":
+                    self.deterministic = true
+                case "--coverage":
+                    self.coverage_enabled = true
+                case _:
+                    # Check for --key=value form
+                    if arg.starts_with("--") and arg.contains("="):
+                        val parts = arg[2:].split("=")
+                        if parts.len() >= 2:
+                            self.values[parts[0]] = parts[1]
+            i = i + 1
+
+    me apply_sdn(content: text):
+        """Apply config from SDN content (lowest precedence, only fills gaps)."""
+        for line in content.split("\n"):
+            val trimmed = line.trim()
+            if trimmed.is_empty() or trimmed.starts_with("#"):
+                continue
+            val parts = trimmed.split(":")
+            if parts.len() >= 2:
+                val key = parts[0].trim()
+                val value = parts[1].trim()
+                if not self.values.contains(key):
+                    self.values[key] = value
+
+    fn logger() -> Logger:
+        """Create a Logger matching this config."""
+        Logger(level: self.log_level)
+
+    fn get(key: text) -> text?:
+        self.values.get(key)
 
 class Logger:
     """Simple logger.
@@ -217,5 +359,5 @@ impl TypeInferenceConfig:
         # Module config takes full precedence
         module_config
 
-export Config, Logger
+export CompilerProfile, Config, CompilerConfig, Logger
 export TypeDefault, TypeInferenceConfig

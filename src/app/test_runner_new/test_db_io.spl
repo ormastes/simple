@@ -1,0 +1,96 @@
+# Test Database I/O
+#
+# Atomic read/write operations with backup creation for the test database.
+
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_atomic_write(path: text, content: text) -> bool
+extern fn rt_file_copy(src: text, dst: text) -> bool
+
+use test_db_lock.FileLock
+
+# =========================================================================
+# Constants
+# =========================================================================
+
+val DB_PATH = "doc/test/test_db.sdn"
+val RUNS_PATH = "doc/test/test_db_runs.sdn"
+val LOCK_TIMEOUT = 10  # seconds
+val MAX_FILE_SIZE = 500 * 1024 * 1024  # 500 MB
+
+# =========================================================================
+# Safe File Reading
+# =========================================================================
+
+fn read_db_file(path: text) -> Result<text, text>:
+    if not rt_file_exists(path):
+        return Ok("")
+    val content = rt_file_read_text(path)
+    if content.len() > MAX_FILE_SIZE:
+        return Err("Database file {path} exceeds 500 MB limit")
+    Ok(content)
+
+# =========================================================================
+# Atomic Write with Locking
+# =========================================================================
+
+fn write_db_file_locked(path: text, content: text) -> Result<(), text>:
+    # Acquire lock
+    val lock_result = FileLock.acquire(path, LOCK_TIMEOUT)
+    if lock_result.err.?:
+        return Err(lock_result.unwrap_err())
+
+    val lock = lock_result.unwrap()
+
+    # Guard against overwriting non-empty with empty
+    if content.trim() == "" and rt_file_exists(path):
+        val existing = rt_file_read_text(path)
+        if existing.trim() != "":
+            lock.release()
+            return Err("Refusing to overwrite non-empty {path} with empty content")
+
+    # Create backup if file exists
+    if rt_file_exists(path):
+        val backup_path = "{path}.bak"
+        rt_file_copy(path, backup_path)
+
+    # Atomic write
+    val success = rt_file_atomic_write(path, content)
+    lock.release()
+
+    if success:
+        Ok(())
+    else:
+        Err("Failed to write {path}")
+
+# =========================================================================
+# Locked Read-Modify-Write
+# =========================================================================
+
+fn update_db_file(path: text, updater: fn(text) -> text) -> Result<(), text>:
+    val lock_result = FileLock.acquire(path, LOCK_TIMEOUT)
+    if lock_result.err.?:
+        return Err(lock_result.unwrap_err())
+
+    val lock = lock_result.unwrap()
+
+    var content = ""
+    if rt_file_exists(path):
+        content = rt_file_read_text(path)
+
+    val new_content = updater(content)
+
+    # Backup before write
+    if rt_file_exists(path):
+        rt_file_copy(path, "{path}.bak")
+
+    val success = rt_file_atomic_write(path, new_content)
+    lock.release()
+
+    if success:
+        Ok(())
+    else:
+        Err("Failed to write {path}")
+
+export DB_PATH, RUNS_PATH, LOCK_TIMEOUT, MAX_FILE_SIZE
+export read_db_file, write_db_file_locked, update_db_file

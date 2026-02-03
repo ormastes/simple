@@ -66,7 +66,7 @@ impl<'a> Parser<'a> {
                 let mut elif_branches = Vec::new();
                 while self.check(&TokenKind::Elif) {
                     self.advance();
-                    let elif_condition = self.parse_expression()?;
+                    let (elif_pattern, elif_condition) = self.parse_optional_let_pattern()?;
                     self.expect(&TokenKind::Colon)?;
                     let elif_block = if !self.check(&TokenKind::Newline) {
                         let stmt = self.parse_item()?;
@@ -77,7 +77,7 @@ impl<'a> Parser<'a> {
                     } else {
                         self.parse_block()?
                     };
-                    elif_branches.push((elif_condition, elif_block));
+                    elif_branches.push((elif_pattern, elif_condition, elif_block));
                 }
 
                 let mut else_block = None;
@@ -86,7 +86,7 @@ impl<'a> Parser<'a> {
                     if self.check(&TokenKind::If) {
                         // else if -> treat as elif
                         self.advance();
-                        let elif_condition = self.parse_expression()?;
+                        let (elif_pattern, elif_condition) = self.parse_optional_let_pattern()?;
                         self.expect(&TokenKind::Colon)?;
                         let elif_block = if !self.check(&TokenKind::Newline) {
                             let stmt = self.parse_item()?;
@@ -97,7 +97,7 @@ impl<'a> Parser<'a> {
                         } else {
                             self.parse_block()?
                         };
-                        elif_branches.push((elif_condition, elif_block));
+                        elif_branches.push((elif_pattern, elif_condition, elif_block));
                     } else {
                         self.expect(&TokenKind::Colon)?;
                         else_block = if !self.check(&TokenKind::Newline) {
@@ -184,10 +184,10 @@ impl<'a> Parser<'a> {
         let mut elif_branches = Vec::new();
         while self.check(&TokenKind::Elif) {
             self.advance();
-            let elif_condition = self.parse_expression()?;
+            let (elif_pattern, elif_condition) = self.parse_optional_let_pattern()?;
             self.expect(&TokenKind::Colon)?;
             let elif_block = self.parse_block()?;
-            elif_branches.push((elif_condition, elif_block));
+            elif_branches.push((elif_pattern, elif_condition, elif_block));
         }
 
         // Handle 'else if' as 'elif' (support both syntaxes)
@@ -199,10 +199,10 @@ impl<'a> Parser<'a> {
             while self.check(&TokenKind::If) {
                 // This is 'else if', treat it as elif
                 self.advance(); // consume 'if'
-                let elif_condition = self.parse_expression()?;
+                let (elif_pattern, elif_condition) = self.parse_optional_let_pattern()?;
                 self.expect(&TokenKind::Colon)?;
                 let elif_block = self.parse_block()?;
-                elif_branches.push((elif_condition, elif_block));
+                elif_branches.push((elif_pattern, elif_condition, elif_block));
 
                 // Check if there's another 'else if' or final 'else'
                 if self.check(&TokenKind::Else) {
@@ -638,10 +638,10 @@ impl<'a> Parser<'a> {
         let mut elif_branches = Vec::new();
         while self.check(&TokenKind::Elif) {
             self.advance();
-            let elif_condition = self.parse_expression()?;
+            let (elif_pattern, elif_condition) = self.parse_optional_let_pattern()?;
             self.expect(&TokenKind::Colon)?;
             let elif_block = self.parse_block()?;
-            elif_branches.push((elif_condition, elif_block));
+            elif_branches.push((elif_pattern, elif_condition, elif_block));
         }
 
         let mut else_block = None;
@@ -649,10 +649,10 @@ impl<'a> Parser<'a> {
             self.advance();
             while self.check(&TokenKind::If) {
                 self.advance();
-                let elif_condition = self.parse_expression()?;
+                let (elif_pattern, elif_condition) = self.parse_optional_let_pattern()?;
                 self.expect(&TokenKind::Colon)?;
                 let elif_block = self.parse_block()?;
-                elif_branches.push((elif_condition, elif_block));
+                elif_branches.push((elif_pattern, elif_condition, elif_block));
 
                 if self.check(&TokenKind::Else) {
                     self.advance();

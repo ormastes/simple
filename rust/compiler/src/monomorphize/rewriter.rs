@@ -108,7 +108,7 @@ impl<'a> CallSiteRewriter<'a> {
                 new_if.elif_branches = if_stmt
                     .elif_branches
                     .iter()
-                    .map(|(cond, block)| (self.rewrite_expr(cond), self.rewrite_block(block)))
+                    .map(|(pattern, cond, block)| (pattern.clone(), self.rewrite_expr(cond), self.rewrite_block(block)))
                     .collect();
                 new_if.else_block = if_stmt.else_block.as_ref().map(|b| self.rewrite_block(b));
                 Node::If(new_if)

@@ -412,8 +412,8 @@ fn collect_calls_from_node(node: &Node, valid_funcs: &HashSet<String>, called: &
                 collect_calls_from_block(else_block, valid_funcs, called);
             }
             for elif in &if_stmt.elif_branches {
-                collect_calls_from_expr(&elif.0, valid_funcs, called);
-                collect_calls_from_block(&elif.1, valid_funcs, called);
+                collect_calls_from_expr(&elif.1, valid_funcs, called);
+                collect_calls_from_block(&elif.2, valid_funcs, called);
             }
         }
         Node::While(stmt) => {

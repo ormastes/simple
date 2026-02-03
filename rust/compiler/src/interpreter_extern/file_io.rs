@@ -9,6 +9,24 @@ use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::Path;
+use std::sync::Mutex;
+
+// Global lock handle counter and active locks
+static LOCK_HANDLES: Mutex<Option<LockState>> = Mutex::new(None);
+
+struct LockState {
+    next_id: i64,
+    active: HashMap<i64, std::path::PathBuf>,
+}
+
+impl LockState {
+    fn new() -> Self {
+        LockState {
+            next_id: 1,
+            active: HashMap::new(),
+        }
+    }
+}
 
 // Helper to create Option::Some(value)
 fn make_some(value: Value) -> Value {
@@ -567,4 +585,129 @@ pub fn rt_path_join(args: &[Value]) -> Result<Value, CompileError> {
 
     let joined = Path::new(&path1).join(&path2);
     Ok(Value::Str(joined.to_string_lossy().to_string()))
+}
+
+// ============================================================================
+// File Locking
+// ============================================================================
+
+/// Acquire a file lock (PID-based lock file with timeout)
+///
+/// Callable from Simple as: `rt_file_lock(path, timeout_secs)`
+///
+/// Returns lock handle (>0) on success, -1 on failure
+pub fn rt_file_lock(args: &[Value]) -> Result<Value, CompileError> {
+    let path = extract_path(args, 0)?;
+    let timeout_secs = match args.get(1) {
+        Some(Value::Int(n)) => *n,
+        _ => 10, // default 10 seconds
+    };
+
+    let lock_path = format!("{}.lock", path);
+    let pid = std::process::id();
+    let hostname = get_hostname();
+    let lock_content = format!("{}:{}", pid, hostname);
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs as u64);
+    let mut backoff_ms = 10u64;
+
+    loop {
+        // Try to create lock file exclusively
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&lock_path)
+        {
+            Ok(mut f) => {
+                let _ = f.write_all(lock_content.as_bytes());
+                // Register handle
+                let mut state = LOCK_HANDLES.lock().unwrap();
+                let state = state.get_or_insert_with(LockState::new);
+                let handle = state.next_id;
+                state.next_id += 1;
+                state.active.insert(handle, std::path::PathBuf::from(&lock_path));
+                return Ok(Value::Int(handle));
+            }
+            Err(_) => {
+                // Check if lock is stale (>60 seconds old)
+                if let Ok(meta) = fs::metadata(&lock_path) {
+                    if let Ok(modified) = meta.modified() {
+                        if modified.elapsed().unwrap_or_default() > std::time::Duration::from_secs(60) {
+                            let _ = fs::remove_file(&lock_path);
+                            continue;
+                        }
+                    }
+                }
+
+                if std::time::Instant::now() >= deadline {
+                    return Ok(Value::Int(-1));
+                }
+
+                std::thread::sleep(std::time::Duration::from_millis(backoff_ms));
+                backoff_ms = (backoff_ms * 2).min(500);
+            }
+        }
+    }
+}
+
+/// Release a file lock by handle
+///
+/// Callable from Simple as: `rt_file_unlock(handle)`
+pub fn rt_file_unlock(args: &[Value]) -> Result<Value, CompileError> {
+    let handle = match args.first() {
+        Some(Value::Int(n)) => *n,
+        _ => return Ok(Value::Bool(false)),
+    };
+
+    let mut state = LOCK_HANDLES.lock().unwrap();
+    if let Some(state) = state.as_mut() {
+        if let Some(lock_path) = state.active.remove(&handle) {
+            let _ = fs::remove_file(&lock_path);
+            return Ok(Value::Bool(true));
+        }
+    }
+    Ok(Value::Bool(false))
+}
+
+// ============================================================================
+// System Info
+// ============================================================================
+
+/// Get current process PID
+pub fn rt_getpid(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(std::process::id() as i64))
+}
+
+/// Get hostname
+pub fn rt_hostname(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Str(get_hostname()))
+}
+
+fn get_hostname() -> String {
+    // Try /etc/hostname on Linux
+    if let Ok(h) = fs::read_to_string("/etc/hostname") {
+        let trimmed = h.trim().to_string();
+        if !trimmed.is_empty() {
+            return trimmed;
+        }
+    }
+    // Fallback to HOSTNAME env var
+    std::env::var("HOSTNAME").unwrap_or_else(|_| "unknown".to_string())
+}
+
+/// Get number of CPU cores
+pub fn rt_system_cpu_count(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(std::thread::available_parallelism()
+        .map(|n| n.get() as i64)
+        .unwrap_or(1)))
+}
+
+/// Get monotonic time in milliseconds
+pub fn rt_time_now_monotonic_ms(_args: &[Value]) -> Result<Value, CompileError> {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64;
+    Ok(Value::Int(ms))
 }

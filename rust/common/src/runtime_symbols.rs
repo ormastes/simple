@@ -254,6 +254,14 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_path_stem",
     "rt_path_relative",
     "rt_path_join",
+    // File locking
+    "rt_file_lock",
+    "rt_file_unlock",
+    // System info
+    "rt_getpid",
+    "rt_hostname",
+    "rt_system_cpu_count",
+    "rt_time_now_monotonic_ms",
     // High-performance collections (HashMap)
     "rt_hashmap_new",
     "rt_hashmap_insert",

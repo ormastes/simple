@@ -639,6 +639,14 @@ pub(crate) fn call_extern_function(
         "rt_path_stem" => file_io::rt_path_stem(&evaluated),
         "rt_path_relative" => file_io::rt_path_relative(&evaluated),
         "rt_path_join" => file_io::rt_path_join(&evaluated),
+        // File locking
+        "rt_file_lock" => file_io::rt_file_lock(&evaluated),
+        "rt_file_unlock" => file_io::rt_file_unlock(&evaluated),
+        // System info
+        "rt_getpid" => file_io::rt_getpid(&evaluated),
+        "rt_hostname" => file_io::rt_hostname(&evaluated),
+        "rt_system_cpu_count" => file_io::rt_system_cpu_count(&evaluated),
+        "rt_time_now_monotonic_ms" => file_io::rt_time_now_monotonic_ms(&evaluated),
 
         // ====================================================================
         // Collections FFI Operations (HashMap, HashSet, BTree)

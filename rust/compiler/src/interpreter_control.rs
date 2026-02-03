@@ -126,22 +126,33 @@ pub(super) fn exec_if(
         return exec_block(&if_stmt.then_block, env, functions, classes, enums, impl_methods);
     }
 
-    for (idx, (cond, block)) in if_stmt.elif_branches.iter().enumerate() {
-        let elif_val = evaluate_expr(cond, env, functions, classes, enums, impl_methods)?;
-        let elif_val = if if_stmt.is_suspend {
-            await_value(elif_val)?
+    for (idx, (pattern, cond, block)) in if_stmt.elif_branches.iter().enumerate() {
+        if let Some(pattern) = pattern {
+            // elif val PATTERN = EXPR: pattern binding
+            let value = evaluate_expr(cond, env, functions, classes, enums, impl_methods)?;
+            let mut bindings = HashMap::new();
+            if pattern_matches(pattern, &value, &mut bindings, enums)? {
+                for (name, val) in bindings {
+                    env.insert(name, val);
+                }
+                return exec_block(block, env, functions, classes, enums, impl_methods);
+            }
         } else {
-            elif_val
-        };
-        let elif_decision = elif_val.truthy();
+            let elif_val = evaluate_expr(cond, env, functions, classes, enums, impl_methods)?;
+            let elif_val = if if_stmt.is_suspend {
+                await_value(elif_val)?
+            } else {
+                elif_val
+            };
+            let elif_decision = elif_val.truthy();
 
-        // COVERAGE: Record decision for elif statement
-        // Compute a different decision ID for each elif by incorporating the index
-        let elif_decision_id = if_stmt.span.line as u32 + idx as u32;
-        record_decision_coverage_ffi("<source>", if_stmt.span.line + idx, if_stmt.span.column, elif_decision);
+            // COVERAGE: Record decision for elif statement
+            let elif_decision_id = if_stmt.span.line as u32 + idx as u32;
+            record_decision_coverage_ffi("<source>", if_stmt.span.line + idx, if_stmt.span.column, elif_decision);
 
-        if elif_decision {
-            return exec_block(block, env, functions, classes, enums, impl_methods);
+            if elif_decision {
+                return exec_block(block, env, functions, classes, enums, impl_methods);
+            }
         }
     }
 
@@ -676,19 +687,34 @@ pub(crate) fn exec_if_expr(
         };
     }
 
-    for (cond, block) in if_stmt.elif_branches.iter() {
-        let elif_val = evaluate_expr(cond, env, functions, classes, enums, impl_methods)?;
-        let elif_val = if if_stmt.is_suspend {
-            await_value(elif_val)?
+    for (pattern, cond, block) in if_stmt.elif_branches.iter() {
+        if let Some(pattern) = pattern {
+            let value = evaluate_expr(cond, env, functions, classes, enums, impl_methods)?;
+            let mut bindings = HashMap::new();
+            if pattern_matches(pattern, &value, &mut bindings, enums)? {
+                for (name, val) in bindings {
+                    env.insert(name, val);
+                }
+                let (flow, last_val) = exec_block_fn(block, env, functions, classes, enums, impl_methods)?;
+                return match flow {
+                    Control::Return(v) => Ok(v),
+                    _ => Ok(last_val.unwrap_or(Value::Nil)),
+                };
+            }
         } else {
-            elif_val
-        };
-        if elif_val.truthy() {
-            let (flow, last_val) = exec_block_fn(block, env, functions, classes, enums, impl_methods)?;
-            return match flow {
-                Control::Return(v) => Ok(v),
-                _ => Ok(last_val.unwrap_or(Value::Nil)),
+            let elif_val = evaluate_expr(cond, env, functions, classes, enums, impl_methods)?;
+            let elif_val = if if_stmt.is_suspend {
+                await_value(elif_val)?
+            } else {
+                elif_val
             };
+            if elif_val.truthy() {
+                let (flow, last_val) = exec_block_fn(block, env, functions, classes, enums, impl_methods)?;
+                return match flow {
+                    Control::Return(v) => Ok(v),
+                    _ => Ok(last_val.unwrap_or(Value::Nil)),
+                };
+            }
         }
     }
 
