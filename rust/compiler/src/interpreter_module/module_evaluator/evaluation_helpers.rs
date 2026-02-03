@@ -60,7 +60,9 @@ pub(super) fn register_definitions(
     exports: &mut HashMap<String, Value>,
     env: &mut Env,
 ) {
+    eprintln!("[DEBUG] register_definitions: processing {} items", items.len());
     for item in items.iter() {
+        eprintln!("[DEBUG] register_definitions: processing node type: {:?}", std::mem::discriminant(item));
         match item {
             Node::Function(f) => {
                 local_functions.insert(f.name.clone(), f.clone());
