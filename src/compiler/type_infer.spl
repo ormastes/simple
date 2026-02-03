@@ -160,6 +160,36 @@ impl HmInferContext:
             val impl_block = self.convert_hir_impl_to_block(hir_impl)
             self.trait_solver.add_impl(impl_block)
 
+    me collect_function_bounds_from_module(module: HirModule):
+        """Collect trait bounds from all functions in a module.
+
+        Stores trait bounds indexed by function symbol ID for obligation
+        generation during function calls.
+        """
+        for func_id in module.functions.keys():
+            val hir_fn = module.functions[func_id]
+
+            # Collect all trait bounds from type parameters
+            var all_bounds: [HirTraitBound] = []
+
+            # Bounds from type parameters (T: Trait in fn foo<T: Trait>)
+            for tp in hir_fn.type_params:
+                for bound_type in tp.bounds:
+                    # Convert bound type to HirTraitBound
+                    match bound_type.kind:
+                        case Named(trait_symbol, _):
+                            val bound = HirTraitBound(
+                                type_param: tp.symbol,
+                                trait_: bound_type,
+                                span: tp.span
+                            )
+                            all_bounds = all_bounds.push(bound)
+                        case _: pass
+
+            # Store bounds indexed by function symbol
+            if not all_bounds.is_empty():
+                self.function_bounds[hir_fn.symbol.id] = all_bounds
+
     fn convert_hir_trait_to_def(hir_trait: HirTrait) -> TraitDef:
         """Convert HirTrait to TraitDef for the trait solver.
 
@@ -252,19 +282,42 @@ impl HmInferContext:
             val cause = ObligationCause.TraitBound(bound.type_param)
             self.trait_solver.add_obligation(ty, trait_symbol.unwrap(), cause, span)
 
-    me generate_obligations_for_function_call(callee_ty: HirType, type_args: [HirType], span: Span):
+    me generate_obligations_for_function_call(func_symbol: SymbolId, type_args: [HirType], span: Span):
         """Generate obligations from a function call with trait-bounded type parameters.
 
-        When calling `fn foo<T: Display>(x: T)`, we need to prove `T: Display`
-        for whatever type T is instantiated with.
+        When calling `fn foo<T: Display>(x: T)` with T=i64, we need to prove `i64: Display`.
 
-        For now, this is a simplified implementation that will be enhanced when
-        we have function metadata available in the type inference context.
+        Algorithm:
+        1. Look up function's trait bounds from function_bounds
+        2. For each bound `TypeParam: Trait`:
+           - Find the concrete type that TypeParam is instantiated with
+           - Generate obligation: concrete_type must implement Trait
         """
-        # TODO: Look up function definition to get trait bounds
-        # For now, skip obligation generation for function calls
-        # This will be implemented when we integrate function metadata
-        pass
+        # Look up trait bounds for this function
+        if not self.function_bounds[func_symbol.id].?:
+            return  # No trait bounds on this function
+
+        val bounds = self.function_bounds[func_symbol.id]
+
+        # For each trait bound, generate an obligation
+        for bound in bounds:
+            # Find which type parameter this bound refers to
+            # For now, assume bounds match type_args by index
+            # TODO: Properly map type parameters to type arguments
+
+            # Generate obligation for the bound
+            self.generate_obligation_for_bound_with_args(bound, type_args, span)
+
+    me generate_obligation_for_bound_with_args(bound: HirTraitBound, type_args: [HirType], span: Span):
+        """Generate obligation for a bound given concrete type arguments.
+
+        Maps the type parameter in the bound to its concrete type from type_args,
+        then creates an obligation.
+        """
+        # TODO: Properly map bound.type_param to the corresponding type_arg
+        # For now, generate obligation with first type arg if available
+        if not type_args.is_empty():
+            self.generate_obligation_for_bound(type_args[0], bound, span)
 
     me generate_obligation_for_method_call(receiver_ty: HirType, method_name: text, span: Span):
         """Generate obligations for a method call.
@@ -299,6 +352,31 @@ impl HmInferContext:
         """
         for bound in bounds:
             self.generate_obligation_for_bound(ty, bound, span)
+
+    me solve_trait_obligations() -> Result<(), [TraitError]>:
+        """Solve all pending trait obligations.
+
+        Should be called after type inference is complete for a module.
+        Returns errors if any obligations cannot be satisfied.
+        """
+        match self.trait_solver.solve_all():
+            case Ok(_):
+                Ok(())
+            case Err(trait_errors):
+                # Convert trait errors to type inference errors
+                for trait_err in trait_errors:
+                    match trait_err:
+                        case Unsatisfied(obligation):
+                            val type_err = TypeInferError.TraitNotImplemented(
+                                ty: obligation.type_,
+                                trait_name: obligation.trait_.id.to_text(),
+                                span: obligation.span
+                            )
+                            self.errors = self.errors.push(type_err)
+                        case _:
+                            # Other trait errors
+                            pass
+                Err(trait_errors)
 
     # =========================================================================
     # Level Management
@@ -846,6 +924,7 @@ impl HmInferContext:
             case Call(callee, args, type_args):
                 match self.infer_expr(callee):
                     case Ok(callee_ty):
+                        # Infer argument types
                         var arg_types: [HirType] = []
                         for arg in args:
                             match self.infer_expr(arg.value):
@@ -860,17 +939,34 @@ impl HmInferContext:
 
                         match self.unify(callee_ty, expected_fn_ty):
                             case Err(e): Err(e)
-                            case _: Ok(self.resolve(ret_ty))
+                            case _:
+                                # Generate trait obligations if callee is a function with bounds
+                                # Extract function symbol from callee expression
+                                match callee.kind:
+                                    case Var(func_symbol):
+                                        # Lower type_args from AST types to HIR types
+                                        var hir_type_args: [HirType] = []
+                                        # TODO: Lower type_args when available
+                                        self.generate_obligations_for_function_call(func_symbol, hir_type_args, span)
+                                    case _: pass  # Not a direct function call
+
+                                Ok(self.resolve(ret_ty))
                     case Err(e): Err(e)
 
             # Method calls
             case MethodCall(receiver, method, args, _):
                 match self.infer_expr(receiver):
-                    case Ok(_):
+                    case Ok(receiver_ty):
+                        # Infer argument types
                         for arg in args:
                             match self.infer_expr(arg.value):
                                 case Err(e): return Err(e)
                                 case _: pass
+
+                        # Generate trait obligation for method call
+                        # This will be enhanced in Phase C (Method Resolution)
+                        self.generate_obligation_for_method_call(receiver_ty, method, span)
+
                         # Method resolution requires more type information
                         # For now, return fresh var
                         Ok(self.fresh_var(span))
