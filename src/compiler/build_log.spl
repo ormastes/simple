@@ -1,0 +1,138 @@
+# Build Logging and Replay
+#
+# Records compilation sessions for debugging and auditing.
+# Captures phases, timing, diagnostics, and artifacts.
+#
+# Port of rust/compiler/src/build_log.rs (491 lines)
+
+export BuildLog, BuildEnvironment, BuildInputs, BuildPhase
+export BuildOutput, BuildDiagnostic, BuildLogger
+
+# ============================================================================
+# Build Log Types
+# ============================================================================
+
+enum PhaseResult:
+    Success
+    Warning
+    Error
+
+enum DiagnosticLevel:
+    Error
+    Warning
+    Info
+    Hint
+
+struct BuildEnvironment:
+    working_dir: text
+    env_vars: {text: text}
+
+struct BuildInputs:
+    source_files: [text]
+    dependencies: {text: text}
+
+struct BuildPhase:
+    name: text
+    duration_ms: i64
+    result: PhaseResult
+    error: text?
+
+struct BuildOutput:
+    artifacts: [text]
+    total_size: i64
+
+struct BuildDiagnostic:
+    level: DiagnosticLevel
+    message: text
+    file: text?
+    line: i64?
+    code: text?
+
+struct BuildLog:
+    session_id: text
+    timestamp: text
+    compiler_version: text
+    command: text
+    environment: BuildEnvironment
+    inputs: BuildInputs
+    phases: [BuildPhase]
+    output: BuildOutput?
+    diagnostics: [BuildDiagnostic]
+    success: bool
+
+impl BuildLog:
+    fn total_duration_ms() -> i64:
+        self.phases.map(\p: p.duration_ms).fold(0, \a, b: a + b)
+
+    fn error_count() -> i64:
+        self.diagnostics.filter(\d: match d.level: case Error: true; case _: false).len()
+
+    fn warning_count() -> i64:
+        self.diagnostics.filter(\d: match d.level: case Warning: true; case _: false).len()
+
+# ============================================================================
+# Build Logger
+# ============================================================================
+
+class BuildLogger:
+    """Records build session details."""
+    session_id: text
+    start_time: text
+    command: text
+    phases: [BuildPhase]
+    diagnostics: [BuildDiagnostic]
+    source_files: [text]
+
+impl BuildLogger:
+    static fn start(command: text) -> BuildLogger:
+        extern fn rt_time_now_iso() -> text
+        extern fn rt_uuid_v4() -> text
+        BuildLogger(session_id: rt_uuid_v4(), start_time: rt_time_now_iso(),
+                    command: command, phases: [], diagnostics: [],
+                    source_files: [])
+
+    me add_source_file(path: text):
+        self.source_files = self.source_files.push(path)
+
+    me start_phase(name: text) -> i64:
+        """Returns phase index for later completion."""
+        extern fn rt_time_millis() -> i64
+        val idx = self.phases.len()
+        self.phases = self.phases.push(BuildPhase(
+            name: name, duration_ms: 0,
+            result: PhaseResult.Success, error: nil))
+        rt_time_millis()
+
+    me end_phase(start_millis: i64, result: PhaseResult, error: text?):
+        extern fn rt_time_millis() -> i64
+        val duration = rt_time_millis() - start_millis
+        if self.phases.?:
+            val last_idx = self.phases.len() - 1
+            val phase = self.phases[last_idx]
+            self.phases = self.phases[:last_idx].push(BuildPhase(
+                name: phase.name, duration_ms: duration,
+                result: result, error: error))
+
+    me add_diagnostic(level: DiagnosticLevel, message: text,
+                      file: text?, line: i64?, code: text?):
+        self.diagnostics = self.diagnostics.push(BuildDiagnostic(
+            level: level, message: message, file: file,
+            line: line, code: code))
+
+    me finish(output: BuildOutput?) -> BuildLog:
+        extern fn rt_env_var(name: text) -> text?
+        val working_dir = rt_env_var("PWD") ?? "."
+        val success = self.diagnostics.filter(\d:
+            match d.level: case Error: true; case _: false).len() == 0
+
+        BuildLog(
+            session_id: self.session_id,
+            timestamp: self.start_time,
+            compiler_version: "0.1.0",
+            command: self.command,
+            environment: BuildEnvironment(working_dir: working_dir, env_vars: {}),
+            inputs: BuildInputs(source_files: self.source_files, dependencies: {}),
+            phases: self.phases,
+            output: output,
+            diagnostics: self.diagnostics,
+            success: success)

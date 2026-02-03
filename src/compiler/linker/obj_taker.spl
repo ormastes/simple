@@ -7,13 +7,16 @@
 #
 # Key features:
 # - Template loading from TemplateCode sections
-# - Type inference using compiler.type_infer
+# - Type inference using compiler FFI (no direct imports)
 # - Caching for efficiency
 # - Cross-module type unification
+#
+# Architecture:
+# - Uses compiler_ffi for type inference and code generation
+# - No direct dependency on compiler modules
+# - Clean FFI boundary with serialization
 
-use ../type_infer.*
-use ../monomorphize/note_sdn.*
-use ../monomorphize/metadata.*
+use ../loader/compiler_ffi.*
 
 # ============================================================================
 # Result Types
@@ -21,7 +24,7 @@ use ../monomorphize/metadata.*
 
 enum ObjTakeResult:
     """Result of taking an object from SMF."""
-    Code(bytes: [u8], symbol: SmfSymbol, ty: HirType?)
+    Code(bytes: [u8], symbol: SmfSymbol, ty: TypeInfo?)
     Template(template: Template, symbol: SmfSymbol)
     Deferred(symbol: text, hints: DeferredHints)
     NotFound(symbol: text)
@@ -110,7 +113,7 @@ impl Template:
     fn arity() -> i32:
         self.type_params.len() as i32
 
-    fn substitute(type_args: [HirType]) -> SubstitutedTemplate:
+    fn substitute(type_args: [TypeInfo]) -> SubstitutedTemplate:
         """Substitute type parameters with concrete types."""
         SubstitutedTemplate(
             template: self,
@@ -121,7 +124,7 @@ impl Template:
 struct SubstitutedTemplate:
     """Template with type arguments applied."""
     template: Template
-    type_args: [HirType]
+    type_args: [TypeInfo]
     mangled_name: text
 
 # ============================================================================
@@ -139,7 +142,7 @@ struct DeferredTypeVar:
     """A type variable to be resolved."""
     id: i64
     name: text
-    fallback: HirType?
+    fallback: TypeInfo?
 
 struct DeferredConstraint:
     """Constraint on deferred type variables."""
@@ -159,7 +162,7 @@ struct UsageSite:
     """Location where symbol is used (for type inference)."""
     file: text
     loc: text
-    context_type: HirType?
+    context_type: TypeInfo?
 
 # ============================================================================
 # ObjTaker
@@ -167,14 +170,14 @@ struct UsageSite:
 
 struct ObjTaker:
     """Shared component for object extraction with type inference."""
-    # Type inference context (from compiler.type_infer)
-    infer_ctx: HmInferContext
+    # Compiler context (FFI handle to Rust compiler)
+    compiler_ctx: CompilerContext
     # Template cache: name -> Template
     template_cache: Dict<text, Template>
     # Instance cache: mangled_name -> code bytes
     instance_cache: Dict<text, [u8]>
-    # Loaded SMF metadata
-    smf_metadata: Dict<text, NoteSdnMetadata>
+    # Loaded SMF metadata (simplified - no compiler types)
+    smf_metadata: Dict<text, text>
     # Configuration
     config: ObjTakerConfig
 
@@ -196,9 +199,9 @@ impl ObjTakerConfig:
 
 impl ObjTaker:
     static fn new(config: ObjTakerConfig) -> ObjTaker:
-        """Create a new ObjTaker with HM type inference context."""
+        """Create a new ObjTaker with compiler context."""
         ObjTaker(
-            infer_ctx: HmInferContext.with_builtins(),
+            compiler_ctx: CompilerContext.create(),
             template_cache: {},
             instance_cache: {},
             smf_metadata: {},
@@ -209,10 +212,10 @@ impl ObjTaker:
         """Create ObjTaker with default configuration."""
         ObjTaker.new(ObjTakerConfig.default())
 
-    static fn with_inference_context(ctx: HmInferContext, config: ObjTakerConfig) -> ObjTaker:
-        """Create ObjTaker with existing inference context (for sharing across modules)."""
+    static fn with_compiler_context(ctx: CompilerContext, config: ObjTakerConfig) -> ObjTaker:
+        """Create ObjTaker with existing compiler context (for sharing across modules)."""
         ObjTaker(
-            infer_ctx: ctx,
+            compiler_ctx: ctx,
             template_cache: {},
             instance_cache: {},
             smf_metadata: {},
@@ -265,7 +268,7 @@ impl ObjTaker:
         else:
             self.take_concrete(smf_reader, symbol)
 
-    me take_with_types(smf_reader: SmfReader, symbol_name: text, type_args: [HirType]) -> ObjTakeResult:
+    me take_with_types(smf_reader: SmfReader, symbol_name: text, type_args: [TypeInfo]) -> ObjTakeResult:
         """Take object with explicit type arguments."""
         val mangled = mangle_name(symbol_name, type_args)
 
@@ -443,68 +446,29 @@ impl ObjTaker:
             usage_sites: usage_sites
         )
 
-    me infer_type_args(template: Template, hints: [UsageSite]) -> Result<[HirType], text>:
-        """Infer type arguments from usage hints using HM inference.
+    fn infer_type_args(template: Template, hints: [UsageSite]) -> Result<[TypeInfo], text>:
+        """Infer type arguments from usage hints using compiler FFI.
 
-        Uses HmInferContext to:
-        1. Create fresh type variables for each template parameter
-        2. Unify with usage context types from hints
-        3. Resolve final concrete types through substitution
+        Delegates to compiler via FFI:
+        1. Converts hints to FFI format (UsageHint)
+        2. Calls compiler_ctx.infer_types()
+        3. Returns inferred types or error
         """
-        val dummy_span = Span(start: 0, end: 0, line: 0, col: 0)
-
-        # Create fresh type variables for each template parameter
-        var param_vars: Dict<text, HirType> = {}
-        for param in template.type_params:
-            val fresh = self.infer_ctx.fresh_var(dummy_span)
-            param_vars[param] = fresh
-
-        # Unify with usage hints
+        # Convert UsageSite to UsageHint (compiler_ffi format)
+        var ffi_hints: [UsageHint] = []
         for hint in hints:
-            if hint.context_type.?:
-                val context_ty = hint.context_type.unwrap()
-                # Try to extract type bindings from context
-                # This unifies the fresh variables with concrete types from usage
-                self.unify_with_context(param_vars, context_ty)
+            val ffi_hint = UsageHint(
+                file: hint.file,
+                location: hint.loc,
+                context_type: hint.context_type
+            )
+            ffi_hints = ffi_hints.push(ffi_hint)
 
-        # Resolve all parameters through substitution
-        var inferred: [HirType] = []
-        for param in template.type_params:
-            val var_ty = param_vars[param]
-            val resolved = self.infer_ctx.subst.apply(var_ty)
+        # Call compiler FFI to infer types
+        self.compiler_ctx.infer_types(template.name, ffi_hints)
 
-            # Check if fully resolved (not still a type variable)
-            if self.is_unresolved(resolved):
-                return Err("Cannot infer type for parameter {param}")
-
-            inferred = inferred.push(resolved)
-
-        Ok(inferred)
-
-    fn is_unresolved(ty: HirType) -> bool:
-        """Check if type is still an unresolved type variable."""
-        match ty.kind:
-            case Infer(_, _): true
-            case _: false
-
-    me unify_with_context(param_vars: Dict<text, HirType>, context_ty: HirType):
-        """Unify template parameter variables with context type."""
-        # Extract type information from context and unify
-        # This is a simplified version - full implementation would
-        # traverse the context type structure
-        match context_ty.kind:
-            case Named(name, args):
-                # If context has type arguments, unify with corresponding params
-                for (i, arg) in args.enumerate():
-                    if i < param_vars.len():
-                        val param_name = param_vars.keys()[i]
-                        val param_var = param_vars[param_name]
-                        self.infer_ctx.unify(param_var, arg)
-            case _:
-                pass
-
-    me instantiate(template: Template, type_args: [HirType]) -> ObjTakeResult:
-        """Instantiate template with type arguments."""
+    me instantiate(template: Template, type_args: [TypeInfo]) -> ObjTakeResult:
+        """Instantiate template with type arguments using compiler FFI."""
         if type_args.len() != template.type_params.len():
             return ObjTakeResult.Error(
                 "Type argument count mismatch: expected {template.type_params.len()}, got {type_args.len()}"
@@ -515,28 +479,39 @@ impl ObjTaker:
         if self.config.verbose:
             print "[obj-taker] Instantiating {template.name} as {substituted.mangled_name}"
 
-        # Generate code for instantiation
-        val code = generate_instantiation_code(substituted)
-
-        # Cache
-        if self.config.enable_caching:
-            self.instance_cache[substituted.mangled_name] = code
-
-        ObjTakeResult.Code(
-            bytes: code,
-            symbol: SmfSymbol(
-                name: substituted.mangled_name,
-                section_index: 0,
-                offset: 0,
-                size: code.len() as i64,
-                ty: SymbolType.Function,
-                binding: SymbolBinding.Global,
-                is_generic_template: false,
-                template_param_count: 0,
-                template_offset: 0
-            ),
-            ty: None
+        # Generate code via compiler FFI
+        val template_bytes = TemplateBytes(
+            bytes: template.body,
+            name: template.name,
+            param_count: template.type_params.len() as i32
         )
+
+        val code_result = self.compiler_ctx.instantiate(template_bytes, type_args)
+
+        match code_result:
+            case Ok(code):
+                # Cache successful instantiation
+                if self.config.enable_caching:
+                    self.instance_cache[substituted.mangled_name] = code
+
+                ObjTakeResult.Code(
+                    bytes: code,
+                    symbol: SmfSymbol(
+                        name: substituted.mangled_name,
+                        section_index: 0,
+                        offset: 0,
+                        size: code.len() as i64,
+                        ty: SymbolType.Function,
+                        binding: SymbolBinding.Global,
+                        is_generic_template: false,
+                        template_param_count: 0,
+                        template_offset: 0
+                    ),
+                    ty: None
+                )
+
+            case Err(msg):
+                ObjTakeResult.Error("Template instantiation failed: {msg}")
 
     # ========================================================================
     # Cache Management
@@ -566,7 +541,7 @@ struct CacheStats:
 # Helper Functions
 # ============================================================================
 
-fn mangle_name(base: text, type_args: [HirType]) -> text:
+fn mangle_name(base: text, type_args: [TypeInfo]) -> text:
     """Mangle a generic name with type arguments."""
     if type_args.is_empty():
         return base
@@ -574,19 +549,12 @@ fn mangle_name(base: text, type_args: [HirType]) -> text:
     val args_str = type_args.map(\t: type_to_mangled_str(t)).join("_")
     "{base}${args_str}"
 
-fn type_to_mangled_str(ty: HirType) -> text:
-    """Convert type to mangled string representation."""
-    match ty.kind:
-        case Int(bits, signed):
-            if signed: "i{bits}" else: "u{bits}"
-        case Float(bits):
-            "f{bits}"
-        case Bool: "bool"
-        case String: "str"
-        case Void: "void"
-        case Named(name, _): name
-        case Array(elem, _): "arr_{type_to_mangled_str(elem)}"
-        case _: "unknown"
+fn type_to_mangled_str(ty: TypeInfo) -> text:
+    """Convert type to mangled string representation.
+
+    Delegates to compiler_ffi.type_to_string() for consistent formatting.
+    """
+    type_to_string(ty)
 
 fn parse_template(bytes: [u8], symbol: SmfSymbol) -> Result<Template, text>:
     """Parse template from serialized bytes."""
@@ -611,12 +579,6 @@ fn generate_type_params(count: i32) -> [text]:
             result = result.push("T{i}")
     result
 
-fn generate_instantiation_code(substituted: SubstitutedTemplate) -> [u8]:
-    """Generate code for an instantiated template."""
-    # TODO: Implement proper code generation
-    # For now, return placeholder
-    []
-
 # ============================================================================
 # SMF Reader Interface (to be implemented by smf_reader.spl)
 # ============================================================================
@@ -630,25 +592,25 @@ trait SmfReader:
     fn read_note_sdn() -> Result<NoteSdnMetadata, text>
 
 # ============================================================================
-# Type Inference Integration
+# Compiler FFI Integration
 # ============================================================================
 #
-# ObjTaker uses the existing HmInferContext from compiler.type_infer for:
-# - Creating fresh type variables
-# - Unifying types during instantiation
-# - Resolving substituted types
-# - Generalizing polymorphic types
+# ObjTaker uses compiler FFI (compiler_ffi module) for:
+# - Type inference (compiler_ctx.infer_types)
+# - Template instantiation (compiler_ctx.instantiate)
+# - Type checking (compiler_ctx.check_types)
 #
-# The HmInferContext provides full Hindley-Milner inference with:
-# - Level-based generalization
-# - Substitution tracking
-# - Dimension constraint solving (for tensor types)
+# Benefits of FFI approach:
+# - No circular dependency (loader ↔ compiler)
+# - Clean separation of concerns
+# - Easy to version/update compiler
+# - Simpler bootstrap process
 #
 # Usage:
-#   val ctx = HmInferContext.with_builtins()
-#   val fresh = ctx.fresh_var(span)
-#   ctx.unify(t1, t2)
-#   val resolved = ctx.subst.apply(ty)
+#   val ctx = CompilerContext.create()
+#   val types = ctx.infer_types(template_name, hints)?
+#   val code = ctx.instantiate(template_bytes, type_args)?
+#   ctx.destroy()
 
 # ============================================================================
 # Exports
@@ -670,4 +632,4 @@ export ConstraintKind
 export UsageSite
 export CacheStats
 export SmfReader
-# Note: Uses HmInferContext from compiler.type_infer for type inference
+# Note: Uses CompilerContext from compiler_ffi (FFI wrapper, not direct compiler import)

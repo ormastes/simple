@@ -6,20 +6,7 @@
 # See: test_all_batched() function below
 
 use app.build.types (BuildResult, BuildError, TestResult, TestError, BuildConfig, BuildProfile, profile_to_string)
-
-# FFI declarations - these return dicts
-extern fn rt_cargo_build(profile: text, features: [text], feature_count: i64) -> dict
-extern fn rt_cargo_test(package: text, filter: text) -> dict
-extern fn rt_cargo_test_doc(package: text) -> dict
-extern fn rt_cargo_clean() -> i64
-extern fn rt_cargo_check() -> dict
-extern fn rt_cargo_lint(fix: i64) -> dict
-extern fn rt_cargo_fmt(check_only: i64) -> dict
-
-# FFI declarations for file operations
-extern fn rt_file_copy(src: text, dst: text) -> bool
-extern fn rt_file_exists(path: text) -> bool
-extern fn rt_dir_create(path: text) -> bool
+use app.io.mod (cargo_build, cargo_test, cargo_test_doc, cargo_clean, cargo_check, cargo_lint, cargo_fmt, file_copy, file_exists, dir_create)
 
 # Helper: Convert dict to BuildResult
 fn dict_to_build_result(d: dict) -> BuildResult:
@@ -48,7 +35,7 @@ fn copy_binary_to_bin(config: BuildConfig) -> bool:
     val profile_str = profile_to_string(config.profile)
     val src = "rust/target/{profile_str}/simple_runtime"
 
-    if not rt_file_exists(src):
+    if not file_exists(src):
         return false
 
     # Determine destination based on profile
@@ -58,9 +45,9 @@ fn copy_binary_to_bin(config: BuildConfig) -> bool:
 
     # Create directory if needed
     if config.profile == BuildProfile.Bootstrap:
-        rt_dir_create("bin/bootstrap")
+        dir_create("bin/bootstrap", false)
 
-    rt_file_copy(src, dst)
+    file_copy(src, dst)
 
 # Cargo class - static methods for cargo operations
 class Cargo:
@@ -68,7 +55,7 @@ class Cargo:
     static fn build(config: BuildConfig) -> BuildResult:
         val profile_str = profile_to_string(config.profile)
         val feature_count = config.features.len()
-        val result_dict = rt_cargo_build(profile_str, config.features, feature_count)
+        val result_dict = cargo_build(profile_str, config.features, feature_count)
         val result = dict_to_build_result(result_dict)
 
         # Copy binary to bin/ on successful build
@@ -84,38 +71,38 @@ class Cargo:
 
     # Run tests
     static fn test(package: text, filter: text) -> TestResult:
-        val result_dict = rt_cargo_test(package, filter)
+        val result_dict = cargo_test(package, filter)
         dict_to_test_result(result_dict)
 
     # Run all workspace tests
     static fn test_workspace() -> TestResult:
-        val result_dict = rt_cargo_test("", "")
+        val result_dict = cargo_test("", "")
         dict_to_test_result(result_dict)
 
     # Run doc-tests only
     static fn test_doc(package: text) -> TestResult:
-        val result_dict = rt_cargo_test_doc(package)
+        val result_dict = cargo_test_doc(package)
         dict_to_test_result(result_dict)
 
     # Run clippy linter
     static fn lint(fix: bool) -> BuildResult:
         val fix_flag = if fix: 1 else: 0
-        val result_dict = rt_cargo_lint(fix_flag)
+        val result_dict = cargo_lint(fix_flag)
         dict_to_build_result(result_dict)
 
     # Run rustfmt
     static fn fmt(check_only: bool) -> BuildResult:
         val check_flag = if check_only: 1 else: 0
-        val result_dict = rt_cargo_fmt(check_flag)
+        val result_dict = cargo_fmt(check_flag)
         dict_to_build_result(result_dict)
 
     # Clean build artifacts
     static fn clean() -> i64:
-        rt_cargo_clean()
+        cargo_clean()
 
     # Check without building
     static fn check() -> BuildResult:
-        val result_dict = rt_cargo_check()
+        val result_dict = cargo_check()
         dict_to_build_result(result_dict)
 
 # Print build result
@@ -147,8 +134,8 @@ fn print_test_result(result: TestResult):
 fn test_all_batched() -> (TestResult, TestResult):
     # Run both test types with a single cargo invocation
     # Returns (rust_result, doc_result)
-    val rust_result = dict_to_test_result(rt_cargo_test("", ""))
-    val doc_result = dict_to_test_result(rt_cargo_test_doc(""))
+    val rust_result = dict_to_test_result(cargo_test("", ""))
+    val doc_result = dict_to_test_result(cargo_test_doc(""))
     (rust_result, doc_result)
 
 # Check if build succeeded

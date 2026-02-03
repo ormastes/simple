@@ -1,15 +1,136 @@
 # Simple CLI - spec-gen command
-# Delegates to Rust runtime via FFI
+# Generates spec documentation from *_spec.spl test files
 
 use app.cli_util (get_cli_args)
-extern fn rt_cli_run_spec_gen(args: [str]) -> i64
+use app.io.mod (file_exists, file_read, file_write, dir_walk, dir_create)
+
+val SPEC_DIR = "doc/spec/generated"
 
 fn print_help():
-    print "Usage: simple spec-gen [options]"
-    print "Generates spec documentation"
+    print "Usage: simple spec-gen [path] [options]"
     print ""
-    print "Run 'simple spec-gen --help' for Rust-level help."
+    print "Generate spec documentation from SSpec test files."
+    print ""
+    print "Arguments:"
+    print "  [path]       Test directory (default: src/std/test/features/)"
+    print ""
+    print "Options:"
+    print "  -h, --help   Show this help"
+
+fn extract_spec_doc(content: text, file_path: text) -> text:
+    val lines = content.split("\n")
+    var doc_lines: [text] = []
+    var in_doc_block = false
+    var doc_block: [text] = []
+
+    for line in lines:
+        val trimmed = line.trim()
+
+        # Triple-quote doc blocks
+        if trimmed == "\"\"\"":
+            if in_doc_block:
+                for dl in doc_block:
+                    doc_lines.push(dl)
+                doc_block = []
+                in_doc_block = false
+            else:
+                in_doc_block = true
+            continue
+
+        if in_doc_block:
+            doc_block.push(trimmed)
+            continue
+
+        # Doc comments
+        if trimmed.starts_with("///"):
+            val comment = trimmed[3:].trim()
+            doc_lines.push(comment)
+            continue
+
+        # Describe blocks -> ##
+        if trimmed.starts_with("describe "):
+            val name = extract_quoted(trimmed)
+            if name != "":
+                doc_lines.push("")
+                doc_lines.push("## {name}")
+                doc_lines.push("")
+            continue
+
+        # Context blocks -> ###
+        if trimmed.starts_with("context "):
+            val name = extract_quoted(trimmed)
+            if name != "":
+                doc_lines.push("")
+                doc_lines.push("### {name}")
+                doc_lines.push("")
+            continue
+
+        # It/test blocks -> bullet points
+        if trimmed.starts_with("it ") or trimmed.starts_with("test "):
+            val name = extract_quoted(trimmed)
+            if name != "":
+                doc_lines.push("- {name}")
+            continue
+
+    doc_lines.join("\n")
+
+fn extract_quoted(line: text) -> text:
+    val q1 = line.index_of("\"") ?? -1
+    if q1 < 0:
+        return ""
+    val after = line[q1 + 1:]
+    val q2 = after.index_of("\"") ?? -1
+    if q2 < 0:
+        return ""
+    after[:q2]
+
+fn spec_name_from_path(file_path: text) -> text:
+    val parts = file_path.split("/")
+    val filename = parts[-1]
+    if filename.ends_with("_spec.spl"):
+        return filename[:-9]
+    if filename.ends_with(".spl"):
+        return filename[:-4]
+    filename
 
 fn main() -> i64:
     val args = get_cli_args()
-    rt_cli_run_spec_gen(args)
+
+    var search_path = "src/std/test/features"
+
+    for arg in args:
+        if arg == "-h" or arg == "--help":
+            print_help()
+            return 0
+        elif not arg.starts_with("-"):
+            search_path = arg
+
+    if not file_exists(search_path):
+        print "error: path not found: {search_path}"
+        return 1
+
+    dir_create(SPEC_DIR, true)
+
+    val files = dir_walk(search_path)
+    var generated = 0
+
+    for file in files:
+        if not file.ends_with("_spec.spl"):
+            continue
+
+        val content = file_read(file)
+        val doc = extract_spec_doc(content, file)
+
+        if doc.trim() == "":
+            continue
+
+        val name = spec_name_from_path(file)
+        val out_path = "{SPEC_DIR}/{name}.md"
+
+        var header = "# {name}\n\n"
+        header = header + "_Generated from `{file}`_\n\n"
+        file_write(out_path, header + doc + "\n")
+        generated = generated + 1
+
+    print "Generated {generated} spec documents in {SPEC_DIR}/"
+    0

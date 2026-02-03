@@ -1,0 +1,134 @@
+# Shared Error Explanations
+#
+# Provides detailed explanations for error codes in
+# machine-readable format for LLM tools.
+#
+# Used by:
+#   - src/compiler/error_explanations.spl (re-exports)
+#   - src/app/interpreter/ (error reporting)
+#
+# Port of rust/compiler/src/error_explanations.rs (284 lines)
+
+export ErrorExplanation, ErrorRegistry
+
+# ============================================================================
+# Types
+# ============================================================================
+
+struct ErrorExplanation:
+    code: text
+    title: text
+    description: text
+    causes: [text]
+    fixes: [text]
+    example_bad: text?
+    example_good: text?
+    related: [text]
+
+impl ErrorExplanation:
+    static fn create(code: text, title: text) -> ErrorExplanation:
+        ErrorExplanation(code: code, title: title, description: "",
+                         causes: [], fixes: [],
+                         example_bad: nil, example_good: nil, related: [])
+
+# ============================================================================
+# Error Registry
+# ============================================================================
+
+class ErrorRegistry:
+    """Registry of all error code explanations."""
+    explanations: {text: ErrorExplanation}
+
+impl ErrorRegistry:
+    static fn create() -> ErrorRegistry:
+        var reg = ErrorRegistry(explanations: {})
+        reg.register_all()
+        reg
+
+    fn get(code: text) -> ErrorExplanation?:
+        if self.explanations.contains_key(code):
+            Some(self.explanations[code])
+        else:
+            nil
+
+    me register(exp: ErrorExplanation):
+        self.explanations[exp.code] = exp
+
+    me register_all():
+        # E1001: Undefined Variable
+        self.register(ErrorExplanation(
+            code: "E1001", title: "Undefined Variable",
+            description: "Attempted to use a variable that hasn't been declared",
+            causes: ["Variable name was misspelled", "Variable was used before declaration", "Variable is out of scope"],
+            fixes: ["Check the spelling of the variable name", "Declare the variable before using it", "Ensure the variable is in scope"],
+            example_bad: Some("fn main():\n    print(count)  # Error: count not defined"),
+            example_good: Some("fn main():\n    val count = 0\n    print(count)  # OK"),
+            related: ["E1002"]))
+
+        # E1002: Undefined Function
+        self.register(ErrorExplanation(
+            code: "E1002", title: "Undefined Function",
+            description: "Attempted to call a function that doesn't exist",
+            causes: ["Function name was misspelled", "Function not imported", "Function defined after use"],
+            fixes: ["Check the spelling of the function name", "Import the function from the correct module"],
+            example_bad: Some("fn main():\n    result = calcualte(42)  # Typo!"),
+            example_good: Some("fn main():\n    result = calculate(42)  # Correct"),
+            related: ["E1001", "E1010"]))
+
+        # E1003: Type Mismatch
+        self.register(ErrorExplanation(
+            code: "E1003", title: "Type Mismatch",
+            description: "Expression has incompatible type",
+            causes: ["Wrong type provided to function", "Cannot convert between types", "Return type doesn't match declaration"],
+            fixes: ["Convert the value to the expected type", "Change the function signature", "Use type casting if appropriate"],
+            example_bad: Some("fn add(x: i64, y: i64) -> i64:\n    return x + y\n\nadd(\"5\", 10)  # Error!"),
+            example_good: Some("fn add(x: i64, y: i64) -> i64:\n    return x + y\n\nadd(5, 10)  # OK"),
+            related: ["E1004"]))
+
+        # E1101: Break Outside Loop
+        self.register(ErrorExplanation(
+            code: "E1101", title: "Break Outside Loop",
+            description: "Break statement can only be used inside loops",
+            causes: ["Break used in non-loop context"],
+            fixes: ["Move break inside a loop", "Remove the break statement"],
+            example_bad: Some("fn main():\n    if true:\n        break  # Error!"),
+            example_good: Some("fn main():\n    for i in 0..10:\n        if i > 5:\n            break  # OK"),
+            related: ["E1102"]))
+
+        # E1102: Continue Outside Loop
+        self.register(ErrorExplanation(
+            code: "E1102", title: "Continue Outside Loop",
+            description: "Continue statement can only be used inside loops",
+            causes: ["Continue used in non-loop context"],
+            fixes: ["Move continue inside a loop", "Remove the continue statement"],
+            example_bad: nil, example_good: nil,
+            related: ["E1101"]))
+
+        # E3001: Division by Zero
+        self.register(ErrorExplanation(
+            code: "E3001", title: "Division by Zero",
+            description: "Attempted to divide by zero at runtime",
+            causes: ["Divisor is zero", "Variable evaluated to zero"],
+            fixes: ["Check if divisor is zero before dividing", "Use checked_div() for safe division"],
+            example_bad: Some("val x = 10 / 0  # Runtime error!"),
+            example_good: Some("val divisor = 0\nif divisor != 0:\n    val x = 10 / divisor"),
+            related: ["E3002"]))
+
+        # E3002: Index Out of Bounds
+        self.register(ErrorExplanation(
+            code: "E3002", title: "Index Out of Bounds",
+            description: "Attempted to access array index that doesn't exist",
+            causes: ["Index is negative", "Index >= array length"],
+            fixes: ["Check array bounds before accessing", "Use .get() method for safe access"],
+            example_bad: Some("val arr = [1, 2, 3]\nval x = arr[10]  # Error!"),
+            example_good: Some("val arr = [1, 2, 3]\nif 10 < arr.len():\n    val x = arr[10]"),
+            related: ["E3001"]))
+
+    fn to_sdn() -> text:
+        """Export all explanations as SDN."""
+        var lines: [text] = ["error_explanations |code, title, description, causes, fixes|"]
+        for (code, exp) in self.explanations:
+            val causes = exp.causes.join("; ")
+            val fixes = exp.fixes.join("; ")
+            lines = lines.push("    {code}, \"{exp.title}\", \"{exp.description}\", \"{causes}\", \"{fixes}\"")
+        lines.join("\n")

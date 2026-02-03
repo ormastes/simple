@@ -4,12 +4,7 @@
 use app.package.registry.types (PackageInfo, VersionEntry, VersionDependency, IndexEntry, SearchResult)
 use app.package.registry.config (default_config, index_entry_url, listing_url, index_path_for, RegistryConfig)
 
-extern fn rt_process_run(cmd: text, args: [text]) -> i64
-extern fn rt_process_output(cmd: text, args: [text]) -> text
-extern fn rt_file_exists(path: text) -> bool
-extern fn rt_file_read_text(path: text) -> text
-extern fn rt_file_write_text(path: text, content: text) -> bool
-extern fn rt_dir_create(path: text, recursive: bool) -> bool
+use app.io.mod (process_run, process_output, file_exists, file_read, file_write, dir_create)
 
 # Fetch and parse an index entry for a package
 fn fetch_index_entry(config: RegistryConfig, name: text) -> IndexEntry:
@@ -17,12 +12,12 @@ fn fetch_index_entry(config: RegistryConfig, name: text) -> IndexEntry:
     val cache_path = "{config.cache_dir}/index/{index_path_for(name)}"
 
     # Try cache first
-    if rt_file_exists(cache_path):
-        val content = rt_file_read_text(cache_path)
+    if file_exists(cache_path):
+        val content = file_read(cache_path)
         return parse_index_entry(content)
 
     # Fetch from remote
-    val content = rt_process_output("curl", ["-sL", url])
+    val content = process_output("curl", ["-sL", url])
     if content == "":
         return IndexEntry(
             package: PackageInfo(name: name, description: "", homepage: "", license: "", repository: ""),
@@ -32,8 +27,8 @@ fn fetch_index_entry(config: RegistryConfig, name: text) -> IndexEntry:
 
     # Cache the result
     val dir = cache_path[:cache_path.rfind("/")]
-    rt_dir_create(dir, true)
-    rt_file_write_text(cache_path, content)
+    dir_create(dir, true)
+    file_write(cache_path, content)
 
     parse_index_entry(content)
 
@@ -126,7 +121,7 @@ fn find_version(entry: IndexEntry, version: text) -> VersionEntry:
 # Search packages by name/description
 fn search_packages(config: RegistryConfig, query: text, limit: i64) -> [SearchResult]:
     val url = listing_url(config)
-    val content = rt_process_output("curl", ["-sL", url])
+    val content = process_output("curl", ["-sL", url])
     if content == "":
         return []
 
@@ -153,4 +148,5 @@ fn search_packages(config: RegistryConfig, query: text, limit: i64) -> [SearchRe
 
 # Clear the local index cache
 fn clear_cache(config: RegistryConfig) -> bool:
-    rt_process_run("rm", ["-rf", "{config.cache_dir}/index"]) == 0
+    val (_, _, exit_code) = process_run("rm", ["-rf", "{config.cache_dir}/index"])
+    exit_code == 0

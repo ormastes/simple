@@ -1,0 +1,122 @@
+# Architecture Rules Engine
+#
+# Enforces dependency constraints using the unified predicate system.
+# Rules can forbid or allow specific dependencies, imports, or type usage.
+#
+# Port of rust/compiler/src/arch_rules.rs (671 lines)
+
+export RuleAction, ArchRule, ArchRulesConfig
+export DependencyKind, Dependency, ArchViolation, ArchRulesEngine
+
+use predicate.*
+use predicate_parser.*
+
+# ============================================================================
+# Rule Types
+# ============================================================================
+
+enum RuleAction:
+    Forbid
+    Allow
+
+struct ArchRule:
+    action: RuleAction
+    predicate: Predicate
+    priority: i64
+    message: text?
+
+struct ArchRulesConfig:
+    enabled: bool
+    rules: [ArchRule]
+
+impl ArchRulesConfig:
+    static fn disabled() -> ArchRulesConfig:
+        ArchRulesConfig(enabled: false, rules: [])
+
+    static fn from_rules(rules: [ArchRule]) -> ArchRulesConfig:
+        ArchRulesConfig(enabled: rules.?, rules: rules)
+
+# ============================================================================
+# Dependencies
+# ============================================================================
+
+enum DependencyKind:
+    Import(from: text, to: text)
+    Depend(from: text, to: text)
+    Use(type_name: text, location: text)
+
+struct Dependency:
+    kind: DependencyKind
+    source_file: text
+    line: i64
+
+impl Dependency:
+    fn to_match_context() -> MatchContext:
+        match self.kind:
+            case Import(from, to):
+                MatchContext(type_name: Some(to), module_path: Some(from),
+                             attrs: [], signature: nil, effects: [])
+            case Depend(from, to):
+                MatchContext(type_name: Some(to), module_path: Some(from),
+                             attrs: [], signature: nil, effects: [])
+            case Use(type_name, location):
+                MatchContext(type_name: Some(type_name), module_path: Some(location),
+                             attrs: [], signature: nil, effects: [])
+
+# ============================================================================
+# Violations
+# ============================================================================
+
+struct ArchViolation:
+    rule: ArchRule
+    dependency: Dependency
+    message: text
+
+# ============================================================================
+# Architecture Rules Engine
+# ============================================================================
+
+class ArchRulesEngine:
+    """Validates dependencies against architecture rules."""
+    config: ArchRulesConfig
+
+impl ArchRulesEngine:
+    static fn create(config: ArchRulesConfig) -> ArchRulesEngine:
+        ArchRulesEngine(config: config)
+
+    fn validate(dependencies: [Dependency]) -> [ArchViolation]:
+        """Check all dependencies against rules."""
+        if not self.config.enabled:
+            return []
+
+        var violations: [ArchViolation] = []
+        for dep in dependencies:
+            val ctx = dep.to_match_context()
+            var is_forbidden = false
+            var forbid_rule: ArchRule? = nil
+            var max_allow_priority: i64 = -1
+
+            # Evaluate rules by priority
+            for rule in self.config.rules:
+                if rule.predicate.matches(ctx):
+                    match rule.action:
+                        case Forbid:
+                            if not is_forbidden or rule.priority > forbid_rule.unwrap().priority:
+                                is_forbidden = true
+                                forbid_rule = Some(rule)
+                        case Allow:
+                            if rule.priority > max_allow_priority:
+                                max_allow_priority = rule.priority
+
+            # Violation if forbidden and no higher-priority allow
+            if is_forbidden and forbid_rule.?:
+                val fr = forbid_rule.unwrap()
+                if max_allow_priority <= fr.priority:
+                    val msg = fr.message ?? "Architecture rule violation"
+                    violations = violations.push(ArchViolation(
+                        rule: fr, dependency: dep, message: msg))
+
+        violations
+
+    fn is_enabled() -> bool:
+        self.config.enabled

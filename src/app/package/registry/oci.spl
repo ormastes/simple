@@ -4,14 +4,12 @@
 use app.package.registry.types (PublishResult)
 use app.package.registry.auth (get_token)
 
-extern fn rt_process_run(cmd: text, args: [text]) -> i64
-extern fn rt_process_output(cmd: text, args: [text]) -> text
-extern fn rt_file_exists(path: text) -> bool
-extern fn rt_env_get(name: text) -> text
+use app.io.mod (process_run, process_output, file_exists, env_get)
 
 # Check if oras CLI is available
 fn oras_available() -> bool:
-    rt_process_run("oras", ["version"]) == 0
+    val (_, _, exit_code) = process_run("oras", ["version"])
+    exit_code == 0
 
 fn print_oras_install_help():
     print "error: 'oras' CLI not found"
@@ -34,11 +32,11 @@ fn push(spk_path: text, oci_ref: text) -> PublishResult:
     if token == "":
         return PublishResult(success: false, message: "not authenticated", oci_ref: "", checksum: "")
 
-    if not rt_file_exists(spk_path):
+    if not file_exists(spk_path):
         return PublishResult(success: false, message: "file not found: {spk_path}", oci_ref: "", checksum: "")
 
     # Login to GHCR
-    val login_result = rt_process_run("oras", [
+    val (_, _, login_result) = process_run("oras", [
         "login", "ghcr.io",
         "--username", "simple-lang",
         "--password", token
@@ -47,7 +45,7 @@ fn push(spk_path: text, oci_ref: text) -> PublishResult:
         return PublishResult(success: false, message: "GHCR login failed", oci_ref: "", checksum: "")
 
     # Push the artifact
-    val push_result = rt_process_run("oras", [
+    val (_, _, push_result) = process_run("oras", [
         "push", oci_ref,
         spk_path,
         "--artifact-type", "application/vnd.simple.package.v1+tar"
@@ -56,7 +54,7 @@ fn push(spk_path: text, oci_ref: text) -> PublishResult:
         return PublishResult(success: false, message: "push failed", oci_ref: oci_ref, checksum: "")
 
     # Get the digest
-    val digest = rt_process_output("oras", ["manifest", "fetch", oci_ref, "--descriptor"])
+    val digest = process_output("oras", ["manifest", "fetch", oci_ref, "--descriptor"])
 
     PublishResult(success: true, message: "published", oci_ref: oci_ref, checksum: "")
 
@@ -73,15 +71,16 @@ fn pull(oci_ref: text, output_dir: text) -> bool:
 
     if token != "":
         # Login first if we have a token
-        rt_process_run("oras", [
+        process_run("oras", [
             "login", "ghcr.io",
             "--username", "simple-lang",
             "--password", token
         ])
 
-    rt_process_run("oras", args) == 0
+    val (_, _, exit_code) = process_run("oras", args)
+    exit_code == 0
 
 # Check if a specific version exists in GHCR
 fn version_exists(oci_ref: text) -> bool:
-    val result = rt_process_run("oras", ["manifest", "fetch", oci_ref])
-    result == 0
+    val (_, _, exit_code) = process_run("oras", ["manifest", "fetch", oci_ref])
+    exit_code == 0

@@ -6,13 +6,12 @@
 # - Module caching and hot-reload support
 # - Symbol resolution with type inference
 #
-# Uses:
-# - compiler.type_infer.HmInferContext for runtime type inference
-# - ObjTaker for object extraction and instantiation
-# - JitInstantiator for JIT compilation
-# - SmfReaderImpl for reading SMF files
+# Uses compiler FFI (compiler_ffi module) for:
+# - Type inference (compiler_ctx.infer_types)
+# - Template instantiation (compiler_ctx.instantiate)
+# Benefits: No circular dependency, clean separation
 
-use ../type_infer.*
+use ../loader/compiler_ffi.*
 use ../linker/obj_taker.*
 use ../linker/smf_reader.*
 use ./jit_instantiator.*
@@ -93,8 +92,8 @@ impl ModuleLoaderConfig:
 
 struct ModuleLoader:
     """Runtime module loader with JIT instantiation support."""
-    # Shared inference context
-    infer_ctx: HmInferContext
+    # Shared compiler context (FFI handle)
+    compiler_ctx: CompilerContext
     # ObjTaker for extraction and instantiation
     obj_taker: ObjTaker
     # JIT instantiator
@@ -109,7 +108,7 @@ struct ModuleLoader:
 impl ModuleLoader:
     static fn new(config: ModuleLoaderConfig) -> ModuleLoader:
         """Create a new module loader."""
-        val infer_ctx = HmInferContext.with_builtins()
+        val compiler_ctx = CompilerContext.create()  # FFI handle
         val obj_taker_config = ObjTakerConfig(
             enable_caching: config.enable_cache,
             max_cache_size: config.max_cache_size,
@@ -124,8 +123,8 @@ impl ModuleLoader:
         )
 
         ModuleLoader(
-            infer_ctx: infer_ctx,
-            obj_taker: ObjTaker.with_inference_context(infer_ctx, obj_taker_config),
+            compiler_ctx: compiler_ctx,
+            obj_taker: ObjTaker.with_compiler_context(compiler_ctx, obj_taker_config),
             jit: JitInstantiator.new(jit_config),
             modules: {},
             global_symbols: {},
@@ -278,7 +277,7 @@ impl ModuleLoader:
 
         SymbolResult.NotFound(name: name)
 
-    me resolve_generic(name: text, type_args: [HirType]) -> SymbolResult:
+    me resolve_generic(name: text, type_args: [TypeInfo]) -> SymbolResult:
         """Resolve a generic symbol with explicit type arguments."""
         val mangled = mangle_name(name, type_args)
 
@@ -352,24 +351,13 @@ struct LoaderStats:
 # Helper Functions
 # ============================================================================
 
-fn mangle_name(base: text, type_args: [HirType]) -> text:
+fn mangle_name(base: text, type_args: [TypeInfo]) -> text:
     """Mangle a generic name with type arguments."""
     if type_args.is_empty():
         return base
 
-    val args_str = type_args.map(\t: type_to_string(t)).join("_")
+    val args_str = type_args.map(\t: compiler_ffi.type_to_string(t)).join("_")
     "{base}${args_str}"
-
-fn type_to_string(ty: HirType) -> text:
-    """Convert type to string for mangling."""
-    match ty.kind:
-        case Int(bits, signed):
-            if signed: "i{bits}" else: "u{bits}"
-        case Float(bits): "f{bits}"
-        case Bool: "bool"
-        case String: "str"
-        case Named(name, _): name
-        case _: "unknown"
 
 fn current_time() -> i64:
     """Get current timestamp."""

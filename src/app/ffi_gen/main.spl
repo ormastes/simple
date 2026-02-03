@@ -27,14 +27,8 @@ import type_mapping
 import builder
 import intern_codegen
 
-# FFI for file I/O and process execution
-extern fn rt_file_read_text(path: text) -> text
-extern fn rt_file_write_text(path: text, content: text) -> bool
-extern fn rt_file_exists(path: text) -> bool
-extern fn rt_dir_create(path: text, recursive: bool) -> bool
-extern fn rt_dir_remove(path: text, recursive: bool) -> bool
-extern fn rt_env_cwd() -> text
-extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+# I/O imports
+use app.io.mod (file_read, file_write, file_exists, dir_create, dir_remove, cwd, process_run)
 
 # ============================================================================
 # Rust Build Environment Config (from simple.sdn)
@@ -64,10 +58,10 @@ fn read_rust_config(project_root: text) -> RustEnvConfig:
     var config = RustEnvConfig.default()
 
     val sdn_path = "{project_root}/simple.sdn"
-    if not rt_file_exists(sdn_path):
+    if not file_exists(sdn_path):
         return config
 
-    val content = rt_file_read_text(sdn_path)
+    val content = file_read(sdn_path)
     if content == "":
         return config
 
@@ -238,9 +232,9 @@ fn ensure_rust_env(project_root: text, rust_config: RustEnvConfig, verbose: bool
     val build_rust = "{project_root}/build/rust"
 
     # Create build/rust/ if missing
-    if not rt_file_exists(build_rust):
+    if not file_exists(build_rust):
         log_info("Creating build/rust/ environment...", verbose)
-        if not rt_dir_create(build_rust, true):
+        if not dir_create(build_rust, true):
             print_error("Failed to create {build_rust}")
             return 1
 
@@ -255,23 +249,23 @@ fn ensure_rust_env(project_root: text, rust_config: RustEnvConfig, verbose: bool
 
     # Only write if changed (avoid unnecessary rustup invocations)
     var needs_write = true
-    if rt_file_exists(toolchain_path):
-        val existing = rt_file_read_text(toolchain_path)
+    if file_exists(toolchain_path):
+        val existing = file_read(toolchain_path)
         if existing == toolchain_content:
             needs_write = false
             log_info("Rust environment already up to date", verbose)
 
     if needs_write:
         log_info("Writing {toolchain_path} (channel: {rust_config.channel})", verbose)
-        if not rt_file_write_text(toolchain_path, toolchain_content):
+        if not file_write(toolchain_path, toolchain_content):
             print_error("Failed to write {toolchain_path}")
             return 1
         log_step("Rust env configured: channel={rust_config.channel}")
 
     # Ensure ffi_gen/ subdir exists
     val ffi_dir = "{build_rust}/ffi_gen"
-    if not rt_file_exists(ffi_dir):
-        if not rt_dir_create(ffi_dir, true):
+    if not file_exists(ffi_dir):
+        if not dir_create(ffi_dir, true):
             print_error("Failed to create {ffi_dir}")
             return 1
 
@@ -280,9 +274,9 @@ fn ensure_rust_env(project_root: text, rust_config: RustEnvConfig, verbose: bool
 # Clean and re-setup build/rust/ from scratch
 fn clean_rust_env(project_root: text, verbose: bool) -> i64:
     val build_rust = "{project_root}/build/rust"
-    if rt_file_exists(build_rust):
+    if file_exists(build_rust):
         log_info("Removing {build_rust}...", verbose)
-        if not rt_dir_remove(build_rust, true):
+        if not dir_remove(build_rust, true):
             print_error("Failed to remove {build_rust}")
             return 1
         log_step("Cleaned build/rust/")
@@ -296,7 +290,7 @@ fn generate_for_file(input_path: text, opts: CliOptions, rust_config: RustEnvCon
     log_info("Reading {input_path}", opts.verbose)
 
     # Read source file
-    val source = rt_file_read_text(input_path)
+    val source = file_read(input_path)
     if source == "":
         print_error("Failed to read or empty file: {input_path}")
         return 1
@@ -356,19 +350,19 @@ fn generate_rust_wrappers(specs: [parser.LibExternSpec], opts: CliOptions, rust_
 
     # Write files to build/rust/ffi_gen/
     val out_dir = opts.output_dir
-    if not rt_dir_create(out_dir, true):
+    if not dir_create(out_dir, true):
         print_error("Failed to create output directory: {out_dir}")
         return 1
-    if not rt_dir_create("{out_dir}/src", true):
+    if not dir_create("{out_dir}/src", true):
         print_error("Failed to create src directory: {out_dir}/src")
         return 1
 
-    if not rt_file_write_text("{out_dir}/Cargo.toml", cargo_toml):
+    if not file_write("{out_dir}/Cargo.toml", cargo_toml):
         print_error("Failed to write Cargo.toml")
         return 1
     log_step("Wrote {out_dir}/Cargo.toml")
 
-    if not rt_file_write_text("{out_dir}/src/lib.rs", rust_source):
+    if not file_write("{out_dir}/src/lib.rs", rust_source):
         print_error("Failed to write src/lib.rs")
         return 1
     log_step("Wrote {out_dir}/src/lib.rs")
@@ -393,7 +387,7 @@ fn generate_rust_wrappers(specs: [parser.LibExternSpec], opts: CliOptions, rust_
 fn generate_intern(spec_path: text, opts: CliOptions) -> i64:
     log_info("Reading intern spec: {spec_path}", opts.verbose)
 
-    val source = rt_file_read_text(spec_path)
+    val source = file_read(spec_path)
     if source == "":
         print_error("Failed to read or empty file: {spec_path}")
         return 1
@@ -429,18 +423,18 @@ fn generate_intern(spec_path: text, opts: CliOptions) -> i64:
 
     # Write to output dir
     val out_dir = opts.output_dir
-    if not rt_dir_create(out_dir, true):
+    if not dir_create(out_dir, true):
         print_error("Failed to create output directory: {out_dir}")
         return 1
 
     val module_path = "{out_dir}/{category}.rs"
-    if not rt_file_write_text(module_path, module_source):
+    if not file_write(module_path, module_source):
         print_error("Failed to write {module_path}")
         return 1
     log_step("Wrote {module_path}")
 
     val dispatch_path = "{out_dir}/{category}_dispatch.rs"
-    if not rt_file_write_text(dispatch_path, dispatch):
+    if not file_write(dispatch_path, dispatch):
         print_error("Failed to write {dispatch_path}")
         return 1
     log_step("Wrote {dispatch_path}")
@@ -460,7 +454,7 @@ fn main() -> i64:
         print_help()
         return 0
 
-    val project_root = rt_env_cwd()
+    val project_root = cwd()
     val rust_config = read_rust_config(project_root)
 
     # Handle --clean: remove build/rust/ and re-setup
@@ -483,7 +477,7 @@ fn main() -> i64:
         print_help()
         return 1
 
-    if not rt_file_exists(opts.input_file):
+    if not file_exists(opts.input_file):
         print_error("File not found: {opts.input_file}")
         return 1
 
