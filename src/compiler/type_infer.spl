@@ -58,6 +58,9 @@ struct HmInferContext:
     dim_check_mode: DimCheckMode
     # Trait solver for trait resolution
     trait_solver: TraitSolver
+    # Function metadata: maps symbol ID to trait bounds
+    # Stores trait bounds for each function to generate obligations during calls
+    function_bounds: Dict<i64, [HirTraitBound]>
 
 impl HmInferContext:
     static fn new() -> HmInferContext:
@@ -74,7 +77,8 @@ impl HmInferContext:
             dim_solver: DimSolver.new(),
             runtime_checks: DimCheckGenerator.new(DimCheckMode.Assert),
             dim_check_mode: DimCheckMode.Assert,
-            trait_solver: TraitSolver.create()
+            trait_solver: TraitSolver.create(),
+            function_bounds: {}
         )
 
     static fn with_dim_check_mode(mode: DimCheckMode) -> HmInferContext:
@@ -88,7 +92,8 @@ impl HmInferContext:
             dim_solver: DimSolver.new(),
             runtime_checks: DimCheckGenerator.new(mode),
             dim_check_mode: mode,
-            trait_solver: TraitSolver.create()
+            trait_solver: TraitSolver.create(),
+            function_bounds: {}
         )
 
     static fn with_builtins() -> HmInferContext:
@@ -225,6 +230,75 @@ impl HmInferContext:
             methods: [],  # TODO: Resolve from module.functions via method symbols
             span: hir_impl.span
         )
+
+    # =========================================================================
+    # Obligation Generation (Phase B.2)
+    # =========================================================================
+
+    me generate_obligation_for_bound(ty: HirType, bound: HirTraitBound, span: Span):
+        """Generate an obligation from a trait bound.
+
+        When we have a type `T` and a bound `T: Trait`, create an obligation
+        that must be proven by finding an impl block.
+        """
+        # Extract trait symbol from bound
+        var trait_symbol: SymbolId? = nil
+        match bound.trait_.kind:
+            case Named(symbol, _):
+                trait_symbol = Some(symbol)
+            case _: pass
+
+        if trait_symbol.?:
+            val cause = ObligationCause.TraitBound(bound.type_param)
+            self.trait_solver.add_obligation(ty, trait_symbol.unwrap(), cause, span)
+
+    me generate_obligations_for_function_call(callee_ty: HirType, type_args: [HirType], span: Span):
+        """Generate obligations from a function call with trait-bounded type parameters.
+
+        When calling `fn foo<T: Display>(x: T)`, we need to prove `T: Display`
+        for whatever type T is instantiated with.
+
+        For now, this is a simplified implementation that will be enhanced when
+        we have function metadata available in the type inference context.
+        """
+        # TODO: Look up function definition to get trait bounds
+        # For now, skip obligation generation for function calls
+        # This will be implemented when we integrate function metadata
+        pass
+
+    me generate_obligation_for_method_call(receiver_ty: HirType, method_name: text, span: Span):
+        """Generate obligations for a method call.
+
+        When calling `receiver.method_name()`, we need to check:
+        1. If it's an instance method, no trait obligation needed
+        2. If it's a trait method, generate obligation `receiver_ty: Trait`
+
+        For now, this is a simplified implementation.
+        """
+        # TODO: Determine which trait defines this method
+        # Look up in trait solver to find trait that has this method
+        # Generate obligation: receiver_ty must implement that trait
+
+        # Simplified: For common trait methods, generate obligations
+        match method_name:
+            case "to_string":
+                # Assume Display trait (would need to look this up properly)
+                # For now, skip - will be enhanced in Phase C (method resolution)
+                pass
+            case "clone":
+                # Assume Clone trait
+                pass
+            case _:
+                pass
+
+    me generate_obligations_for_type(ty: HirType, bounds: [HirTraitBound], span: Span):
+        """Generate obligations for all trait bounds on a type.
+
+        Given a type and its bounds, create obligations for each bound.
+        Used when instantiating generic functions or types.
+        """
+        for bound in bounds:
+            self.generate_obligation_for_bound(ty, bound, span)
 
     # =========================================================================
     # Level Management
