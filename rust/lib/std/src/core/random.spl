@@ -1,0 +1,164 @@
+# Random - Random number generation for Simple
+# Provides random integers, floats, and choice operations
+# Uses runtime FFI for global state management
+
+use core.math.{log, cos, PI}
+
+# Local sqrt implementation to avoid abs conflict
+fn sqrt(x: f32) -> f32:
+    if x < 0.0:
+        return 0.0
+    if x == 0.0:
+        return 0.0
+    var guess = x
+    var iterations = 0
+    val max_iterations = 20
+    while iterations < max_iterations:
+        val next_guess = (guess + x / guess) / 2.0
+        val diff = if next_guess > guess: next_guess - guess else: guess - next_guess
+        if diff < 0.000001:
+            return next_guess
+        guess = next_guess
+        iterations = iterations + 1
+    return guess
+
+# Extern declarations for random FFI
+extern fn rt_random_seed(s: i32)
+extern fn rt_random_getstate() -> i32
+extern fn rt_random_setstate(s: i32)
+extern fn rt_random_next() -> i32
+extern fn rt_random_randint(min: i32, max: i32) -> i32
+extern fn rt_random_random() -> f32
+extern fn rt_random_uniform(min: f32, max: f32) -> f32
+
+# Initialize random state with seed
+pub fn seed(s: i32):
+    rt_random_seed(s)
+
+# Generate random integer in range [a, b] (inclusive)
+pub fn randint(a: i32, b: i32) -> i32:
+    return rt_random_randint(min=a, max=b)
+
+# Generate random f32 in range [0.0, 1.0)
+pub fn random() -> f32:
+    return rt_random_random()
+
+# Generate random f32 in range [a, b)
+pub fn uniform(a: f32, b: f32) -> f32:
+    return rt_random_uniform(min=a, max=b)
+
+# Choose random element from list
+pub fn choice(items: List) -> Option:
+    if items.len() == 0:
+        return nil
+
+    val index = randint(a=0, b=items.len() - 1)
+    return Some(items[index])
+
+# Choose N random elements from list (with replacement)
+pub fn choices(items: List, k: i32) -> List:
+    var result = []
+
+    for _ in 0..k:
+        val item_opt = choice(items)
+        if item_opt.is_some():
+            result.append(item_opt.unwrap())
+
+    return result
+
+# Shuffle list in place
+pub fn shuffle(items: List):
+    val n = items.len()
+
+    # Fisher-Yates shuffle
+    var i = n - 1
+    while i >= 0:
+        val j = randint(a=0, b=i)
+
+        # Swap items[i] and items[j]
+        val temp = items[i]
+        items[i] = items[j]
+        items[j] = temp
+
+        i = i - 1
+
+# Sample N elements without replacement
+pub fn sample(items: List, k: i32) -> List:
+    if k > items.len():
+        return items  # Can't sample more than available
+
+    # Create a copy and shuffle
+    var copy = []
+    for item in items:
+        copy.append(item)
+
+    shuffle(copy)
+
+    # Take first k elements
+    var result = []
+    for i in 0..k:
+        result.append(copy[i])
+
+    return result
+
+# Generate random bytes
+pub fn randbytes(n: i32) -> List:
+    var result = []
+
+    for _ in 0..n:
+        result.append(randint(a=0, b=255))
+
+    return result
+
+# Random boolean
+pub fn randbool() -> bool:
+    return randint(a=0, b=1) == 1
+
+# Random from normal distribution (Box-Muller transform)
+pub fn gauss(mu: f32, sigma: f32) -> f32:
+    # Box-Muller transform
+    val u1 = random()
+    val u2 = random()
+
+    # Avoid log(0)
+    val u1_safe = if u1 < 0.000001: 0.000001 else: u1
+
+    val z0 = sqrt(-2.0 * log(u1_safe)) * cos(2.0 * PI() * u2)
+
+    return mu + z0 * sigma
+
+# Random from exponential distribution
+pub fn expovariate(lambd: f32) -> f32:
+    val u = random()
+
+    # Avoid log(0)
+    val u_safe = if u < 0.000001: 0.000001 else: u
+
+    return -log(u_safe) / lambd
+
+# Generate random range
+pub fn randrange(start: i32, stop: i32, step: i32 = 1) -> i32:
+    if step == 1:
+        return randint(a=start, b=stop - 1)
+
+    val n = (stop - start) / step
+    val index = randint(a=0, b=n - 1)
+    return start + index * step
+
+# Random seed from bytes
+pub fn seed_bytes(bytes: List):
+    # Combine bytes into integer seed
+    var s = 0
+    for b in bytes:
+        s = (s * 256 + b) % 4294967296
+
+    seed(s)
+
+# Get random state for saving/restoring
+pub fn getstate() -> i32:
+    return rt_random_getstate()
+
+# Restore random state
+pub fn setstate(state: i32):
+    rt_random_setstate(state)
+

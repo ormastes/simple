@@ -1,0 +1,676 @@
+# Terminal I/O - Async terminal input/output operations
+# Provides cross-platform terminal handling with ANSI support
+
+use units.size.*
+use core.*
+use host.common.io.term_types.*
+use host.common.io.term_ffi.*
+
+# Terminal handle for I/O operations
+pub struct Terminal:
+    stdin: RawHandle
+    stdout: RawHandle
+    stderr: RawHandle
+    is_tty: bool
+    raw_mode: bool
+
+impl Terminal:
+    # Get the default terminal
+    @io
+    pub fn default() -> Terminal:
+        return Terminal(stdin: native_stdin(), stdout: native_stdout(), stderr: native_stderr(), is_tty: native_is_tty(native_stdout()), raw_mode: false)
+
+    # Check if stdout is a TTY
+    @pure
+    pub fn is_tty(self) -> bool:
+        return self.is_tty
+
+    # Check if raw mode is enabled
+    @pure
+    pub fn is_raw_mode(self) -> bool:
+        return self.raw_mode
+
+    # Enable raw mode (no line buffering, no echo)
+    @io
+    pub fn enable_raw_mode(self) -> Result<(), TermError>:
+        if self.raw_mode:
+            return Ok(())
+        match native_enable_raw_mode(self.stdin):
+            case 0:
+                self.raw_mode = true
+                return Ok(())
+            case e: return Err(TermError.from_code(e))
+
+    # Disable raw mode (restore normal terminal)
+    @io
+    pub fn disable_raw_mode(self) -> Result<(), TermError>:
+        if not self.raw_mode:
+            return Ok(())
+        match native_disable_raw_mode(self.stdin):
+            case 0:
+                self.raw_mode = false
+                return Ok(())
+            case e: return Err(TermError.from_code(e))
+
+    # Get terminal size
+    @io
+    pub fn size(self) -> Result<TermSize, TermError>:
+        var rows: u16 = 0
+        var cols: u16 = 0
+        match native_get_term_size(self.stdout, &mut rows, &mut cols):
+            case 0: return Ok(TermSize(rows: rows, cols: cols))
+            case e: return Err(TermError.from_code(e))
+
+    # Write string to stdout
+    @io
+    pub fn write(self, s: &str) -> Result<ByteCount, TermError>:
+        val written = native_term_write(self.stdout, s.as_ptr(), s.len())
+        if written < 0:
+            return Err(TermError.from_code(written as i32))
+        return Ok(ByteCount.from_u64(written as u64))
+
+    # Write line to stdout (with newline)
+    @io
+    pub fn writeln(self, s: &str) -> Result<ByteCount, TermError>:
+        val total = self.write(s)?
+        val nl = self.write("\n")?
+        return Ok(total + nl)
+
+    # Write to stderr
+    @io
+    pub fn write_err(self, s: &str) -> Result<ByteCount, TermError>:
+        val written = native_term_write(self.stderr, s.as_ptr(), s.len())
+        if written < 0:
+            return Err(TermError.from_code(written as i32))
+        return Ok(ByteCount.from_u64(written as u64))
+
+    # Flush stdout
+    @io
+    pub fn flush(self) -> Result<(), TermError>:
+        match native_term_flush(self.stdout):
+            case 0: return Ok(())
+            case e: return Err(TermError.from_code(e))
+
+    # Read a single byte from stdin
+    @io
+    pub fn read_byte(self) -> Result<u8, TermError>:
+        var buf: [u8; 1] = [0]
+        val n = native_term_read(self.stdin, &mut buf[0], 1)
+        if n < 0:
+            return Err(TermError.from_code(n as i32))
+        if n == 0:
+            return Err(TermError.Eof)
+        return Ok(buf[0])
+
+    # Read bytes into buffer
+    @io
+    pub fn read(self, buf: &mut [u8]) -> Result<ByteCount, TermError>:
+        val n = native_term_read(self.stdin, buf.as_mut_ptr(), buf.len())
+        if n < 0:
+            return Err(TermError.from_code(n as i32))
+        return Ok(ByteCount.from_u64(n as u64))
+
+    # Read a line from stdin
+    @io
+    pub fn read_line(self) -> Result<text, TermError>:
+        var line = text.new()
+        loop:
+            val byte = self.read_byte()?
+            if byte == '\n' as u8:
+                break
+            if byte == '\r' as u8:
+                # Handle CRLF
+                continue
+            line.push(byte as char)
+        return Ok(line)
+
+    # Read with timeout (milliseconds)
+    @io
+    pub fn read_timeout(self, buf: &mut [u8], timeout_ms: u64) -> Result<ByteCount, TermError>:
+        val n = native_term_read_timeout(self.stdin, buf.as_mut_ptr(), buf.len(), timeout_ms)
+        if n < 0:
+            return Err(TermError.from_code(n as i32))
+        return Ok(ByteCount.from_u64(n as u64))
+
+    # Check if input is available (non-blocking)
+    @io
+    pub fn poll_input(self, timeout_ms: u64) -> Result<bool, TermError>:
+        match native_term_poll(self.stdin, timeout_ms):
+            case 1: return Ok(true)
+            case 0: return Ok(false)
+            case e: return Err(TermError.from_code(e))
+
+    # Clear screen
+    @io
+    pub fn clear(self) -> Result<(), TermError>:
+        return self.write(" + chr(27) +[2J + chr(27) +[H").map(|_| ())
+
+    # Clear line
+    @io
+    pub fn clear_line(self) -> Result<(), TermError>:
+        return self.write(" + chr(27) +[2K").map(|_| ())
+
+    # Move cursor to position (1-indexed)
+    @io
+    pub fn move_to(self, row: u16, col: u16) -> Result<(), TermError>:
+        return self.write(" + chr(27) +[{row};{col}H").map(|_| ())
+
+    # Move cursor up
+    @io
+    pub fn move_up(self, n: u16) -> Result<(), TermError>:
+        if n > 0:
+            return self.write(" + chr(27) +[{n}A").map(|_| ())
+        return Ok(())
+
+    # Move cursor down
+    @io
+    pub fn move_down(self, n: u16) -> Result<(), TermError>:
+        if n > 0:
+            return self.write(" + chr(27) +[{n}B").map(|_| ())
+        return Ok(())
+
+    # Move cursor right
+    @io
+    pub fn move_right(self, n: u16) -> Result<(), TermError>:
+        if n > 0:
+            return self.write(" + chr(27) +[{n}C").map(|_| ())
+        return Ok(())
+
+    # Move cursor left
+    @io
+    pub fn move_left(self, n: u16) -> Result<(), TermError>:
+        if n > 0:
+            return self.write(" + chr(27) +[{n}D").map(|_| ())
+        return Ok(())
+
+    # Hide cursor
+    @io
+    pub fn hide_cursor(self) -> Result<(), TermError>:
+        return self.write(" + chr(27) +[?25l").map(|_| ())
+
+    # Show cursor
+    @io
+    pub fn show_cursor(self) -> Result<(), TermError>:
+        return self.write(" + chr(27) +[?25h").map(|_| ())
+
+    # Save cursor position
+    @io
+    pub fn save_cursor(self) -> Result<(), TermError>:
+        return self.write(" + chr(27) +[s").map(|_| ())
+
+    # Restore cursor position
+    @io
+    pub fn restore_cursor(self) -> Result<(), TermError>:
+        return self.write(" + chr(27) +[u").map(|_| ())
+
+    # Get cursor position
+    @io
+    pub fn cursor_position(self) -> Result<CursorPos, TermError>:
+        # Send position query
+        self.write(" + chr(27) +[6n")?
+        self.flush()?
+
+        # Read response: ESC [ rows ; cols R
+        var buf: [u8; 32] = [0; 32]
+        var idx: u64 = 0
+
+        # Read until 'R'
+        loop:
+            val byte = self.read_byte()?
+            if idx >= 32:
+                return Err(TermError.InvalidResponse)
+            buf[idx] = byte
+            idx = idx + 1
+            if byte == 'R' as u8:
+                break
+
+        # Parse response
+        return parse_cursor_response(&buf[0..idx])
+
+    # Set terminal title
+    @io
+    pub fn set_title(self, title: &str) -> Result<(), TermError>:
+        return self.write(" + chr(27) +]0;{title}" + chr(7) + "").map(|_| ())
+
+    # Ring bell
+    @io
+    pub fn bell(self) -> Result<(), TermError>:
+        return self.write("" + chr(7) + "").map(|_| ())
+
+    # Drop - restore terminal state
+    fn drop():
+        if self.raw_mode:
+            native_disable_raw_mode(self.stdin)
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    @pure
+    pub fn is_interactive(self) -> bool:
+        """Check if terminal is interactive (alias for is_tty).
+
+        Returns:
+            true if terminal is TTY
+
+        Example:
+            terminal.is_interactive()  # → true
+        """
+        return self.is_tty()
+
+    @pure
+    pub fn has_raw_mode(self) -> bool:
+        """Check if raw mode is enabled (alias for is_raw_mode).
+
+        Returns:
+            true if raw mode enabled
+
+        Example:
+            terminal.has_raw_mode()  # → false
+        """
+        return self.is_raw_mode()
+
+    @pure
+    pub fn can_use_ansi(self) -> bool:
+        """Check if terminal supports ANSI escape codes.
+
+        Returns:
+            true if ANSI supported (same as is_tty)
+
+        Example:
+            terminal.can_use_ansi()  # → true
+        """
+        return self.is_tty
+
+    @pure
+    pub fn is_piped(self) -> bool:
+        """Check if output is piped (not a TTY).
+
+        Returns:
+            true if piped
+
+        Example:
+            terminal.is_piped()  # → false
+        """
+        return not self.is_tty
+
+    @pure
+    pub fn supports_color(self) -> bool:
+        """Check if terminal likely supports color output.
+
+        Returns:
+            true if color supported
+
+        Example:
+            terminal.supports_color()  # → true
+        """
+        return self.is_tty
+
+    @io
+    pub fn width(self) -> Result<u16, TermError>:
+        """Get terminal width in columns.
+
+        Returns:
+            Column count
+
+        Example:
+            terminal.width()  # → Ok(80)
+        """
+        val size = self.size()?
+        return Ok(size.cols)
+
+    @io
+    pub fn height(self) -> Result<u16, TermError>:
+        """Get terminal height in rows.
+
+        Returns:
+            Row count
+
+        Example:
+            terminal.height()  # → Ok(24)
+        """
+        val size = self.size()?
+        return Ok(size.rows)
+
+    @io
+    pub fn area(self) -> Result<u32, TermError>:
+        """Get terminal area (width * height).
+
+        Returns:
+            Total character cells
+
+        Example:
+            terminal.area()  # → Ok(1920)
+        """
+        val size = self.size()?
+        return Ok((size.rows as u32) * (size.cols as u32))
+
+    @io
+    pub fn print(self, s: &str) -> Result<(), TermError>:
+        """Print string to stdout and flush (convenience method).
+
+        Args:
+            s: text to print
+
+        Returns:
+            Ok on success
+
+        Example:
+            terminal.print("Hello")
+        """
+        self.write(s)?
+        return self.flush()
+    @io
+    pub fn print_err(self, s: &str) -> Result<(), TermError>:
+        """Print string to stderr (convenience method).
+
+        Args:
+            s: text to print
+
+        Returns:
+            Ok on success
+
+        Example:
+            terminal.print_err("Error message")
+        """
+        return self.write_err(s).map(|_| ())
+
+    @pure
+    pub fn summary(self) -> text:
+        """Get terminal summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            terminal.summary()
+            # → "Terminal: tty, raw_mode=false"
+        """
+        val tty_str = if self.is_tty { "tty" } else { "piped" }
+        val raw_str = if self.raw_mode { "true" } else { "false" }
+        return "Terminal: {tty_str}, raw_mode={raw_str}"
+
+# Parse cursor position response
+fn parse_cursor_response(buf: &[u8]) -> Result<CursorPos, TermError>:
+    # Format: ESC [ rows ; cols R
+    if buf.len() < 6:
+        return Err(TermError.InvalidResponse)
+
+    # Find positions
+    var row: u16 = 0
+    var col: u16 = 0
+    var parsing_row = true
+
+    for i in 2..buf.len():  # Skip ESC [
+        val c = buf[i]
+        if c == ';' as u8:
+            parsing_row = false
+        else if c == 'R' as u8:
+            break
+        else if c >= '0' as u8 and c <= '9' as u8:
+            val digit = (c - '0' as u8) as u16
+            if parsing_row:
+                row = row * 10 + digit
+            else:
+                col = col * 10 + digit
+
+    return Ok(CursorPos { row: row, col: col })
+
+# Read and parse a key event
+@io
+pub fn read_key(term: &mut Terminal) -> Result<KeyEvent, TermError>:
+    val byte = term.read_byte()?
+
+    # Escape sequence
+    if byte == 0x1b:
+        # Check if more bytes available
+        if term.poll_input(50)? == false:
+            return Ok(KeyEvent {
+                code: KeyCode.Escape,
+                modifiers: KeyModifiers.none()
+            })
+
+        val byte2 = term.read_byte()?
+        if byte2 == '[' as u8:
+            return parse_csi_sequence(term)        else if byte2 == 'O' as u8:
+            return parse_ss3_sequence(term)        else:
+            # Alt + key
+            return Ok(KeyEvent {
+                code: KeyCode.Char(byte2 as char),
+                modifiers: KeyModifiers.alt()
+            })
+
+    # Ctrl characters
+    if byte < 32:
+        match byte:
+            case 0: return Ok(KeyEvent { code: KeyCode.Null, modifiers: KeyModifiers.none() })
+            case 9: return Ok(KeyEvent { code: KeyCode.Tab, modifiers: KeyModifiers.none() })
+            case 10: return Ok(KeyEvent { code: KeyCode.Enter, modifiers: KeyModifiers.none() })
+            case 13: return Ok(KeyEvent { code: KeyCode.Enter, modifiers: KeyModifiers.none() })
+            case 27: return Ok(KeyEvent { code: KeyCode.Escape, modifiers: KeyModifiers.none() })
+            case _:
+                # Ctrl+A through Ctrl+Z
+                val ch = ('a' as u8 + byte - 1) as char
+                return Ok(KeyEvent {
+                    code: KeyCode.Char(ch),
+                    modifiers: KeyModifiers.ctrl()
+                })
+
+    # Backspace
+    if byte == 127:
+        return Ok(KeyEvent { code: KeyCode.Backspace, modifiers: KeyModifiers.none() })
+
+    # Regular character
+    return Ok(KeyEvent {
+        code: KeyCode.Char(byte as char),
+        modifiers: KeyModifiers.none()
+    })
+
+# Parse CSI (Control Sequence Introducer) sequence: ESC [
+fn parse_csi_sequence(term: &mut Terminal) -> Result<KeyEvent, TermError>:
+    val byte = term.read_byte()?
+
+    match byte:
+        case 'A' as u8: return Ok(KeyEvent { code: KeyCode.Up, modifiers: KeyModifiers.none() })
+        case 'B' as u8: return Ok(KeyEvent { code: KeyCode.Down, modifiers: KeyModifiers.none() })
+        case 'C' as u8: return Ok(KeyEvent { code: KeyCode.Right, modifiers: KeyModifiers.none() })
+        case 'D' as u8: return Ok(KeyEvent { code: KeyCode.Left, modifiers: KeyModifiers.none() })
+        case 'H' as u8: return Ok(KeyEvent { code: KeyCode.Home, modifiers: KeyModifiers.none() })
+        case 'F' as u8: return Ok(KeyEvent { code: KeyCode.End, modifiers: KeyModifiers.none() })
+        case '1' as u8:
+            val next = term.read_byte()?
+            if next == '~' as u8:
+                return Ok(KeyEvent { code: KeyCode.Home, modifiers: KeyModifiers.none() })
+            # F1-F4: ESC [ 1 1 ~ through ESC [ 1 4 ~
+            if next >= '1' as u8 and next <= '5' as u8:
+                term.read_byte()?  # Read ~
+                val fn_num = next - '0' as u8
+                return Ok(KeyEvent { code: KeyCode.F(fn_num), modifiers: KeyModifiers.none() })
+            return Ok(KeyEvent { code: KeyCode.Null, modifiers: KeyModifiers.none() })
+        case '2' as u8:
+            val next = term.read_byte()?
+            if next == '~' as u8:
+                return Ok(KeyEvent { code: KeyCode.Insert, modifiers: KeyModifiers.none() })
+            # F9-F12: ESC [ 2 0 ~ through ESC [ 2 4 ~
+            return Ok(KeyEvent { code: KeyCode.Null, modifiers: KeyModifiers.none() })
+        case '3' as u8:
+            term.read_byte()?  # Read ~
+            return Ok(KeyEvent { code: KeyCode.Delete, modifiers: KeyModifiers.none() })
+        case '4' as u8:
+            term.read_byte()?  # Read ~
+            return Ok(KeyEvent { code: KeyCode.End, modifiers: KeyModifiers.none() })
+        case '5' as u8:
+            term.read_byte()?  # Read ~
+            return Ok(KeyEvent { code: KeyCode.PageUp, modifiers: KeyModifiers.none() })
+        case '6' as u8:
+            term.read_byte()?  # Read ~
+            return Ok(KeyEvent { code: KeyCode.PageDown, modifiers: KeyModifiers.none() })
+        case _:
+            return Ok(KeyEvent { code: KeyCode.Null, modifiers: KeyModifiers.none() })
+
+# Parse SS3 sequence: ESC O
+fn parse_ss3_sequence(term: &mut Terminal) -> Result<KeyEvent, TermError>:
+    val byte = term.read_byte()?
+
+    match byte:
+        case 'P' as u8: return Ok(KeyEvent { code: KeyCode.F(1), modifiers: KeyModifiers.none() })
+        case 'Q' as u8: return Ok(KeyEvent { code: KeyCode.F(2), modifiers: KeyModifiers.none() })
+        case 'R' as u8: return Ok(KeyEvent { code: KeyCode.F(3), modifiers: KeyModifiers.none() })
+        case 'S' as u8: return Ok(KeyEvent { code: KeyCode.F(4), modifiers: KeyModifiers.none() })
+        case 'H' as u8: return Ok(KeyEvent { code: KeyCode.Home, modifiers: KeyModifiers.none() })
+        case 'F' as u8: return Ok(KeyEvent { code: KeyCode.End, modifiers: KeyModifiers.none() })
+        case _: return Ok(KeyEvent { code: KeyCode.Null, modifiers: KeyModifiers.none() })
+
+# ============================================================================
+# Print Functions - Python-style print (parentheses optional at statement level)
+# ============================================================================
+# Usage (parentheses optional):
+#   print "hello"           # prints: hello (no newline)
+#   print("hello")          # same as above
+#   println "hello"         # prints: hello\n
+#   println("hello")        # same as above
+#   print "a", "b", "c"     # prints: a b c
+#   println "x =", x        # prints: x = 42\n
+# ============================================================================
+
+# Print to stdout (no newline)
+@io
+pub fn print(args: ..any):
+    val stdout = native_stdout()
+    var first = true
+    for arg in args:
+        if not first:
+            native_term_write(stdout, " ".as_ptr(), 1)
+        native_term_write(stdout, arg.to_string().as_ptr(), arg.to_string().len())
+        first = false
+    native_term_flush(stdout)
+
+# Print to stdout with newline
+@io
+pub fn println(args: ..any):
+    val stdout = native_stdout()
+    var first = true
+    for arg in args:
+        if not first:
+            native_term_write(stdout, " ".as_ptr(), 1)
+        native_term_write(stdout, arg.to_string().as_ptr(), arg.to_string().len())
+        first = false
+    native_term_write(stdout, "\n".as_ptr(), 1)
+    native_term_flush(stdout)
+
+# Print to stderr (no newline)
+@io
+pub fn eprint(args: ..any):
+    val stderr = native_stderr()
+    var first = true
+    for arg in args:
+        if not first:
+            native_term_write(stderr, " ".as_ptr(), 1)
+        native_term_write(stderr, arg.to_string().as_ptr(), arg.to_string().len())
+        first = false
+    native_term_flush(stderr)
+
+# Print to stderr with newline
+@io
+pub fn eprintln(args: ..any):
+    val stderr = native_stderr()
+    var first = true
+    for arg in args:
+        if not first:
+            native_term_write(stderr, " ".as_ptr(), 1)
+        native_term_write(stderr, arg.to_string().as_ptr(), arg.to_string().len())
+        first = false
+    native_term_write(stderr, "\n".as_ptr(), 1)
+    native_term_flush(stderr)
+
+# Print with custom separator
+@io
+pub fn print_sep(sep: &str, args: ..any):
+    val stdout = native_stdout()
+    var first = true
+    for arg in args:
+        if not first:
+            native_term_write(stdout, sep.as_ptr(), sep.len())
+        native_term_write(stdout, arg.to_string().as_ptr(), arg.to_string().len())
+        first = false
+    native_term_flush(stdout)
+
+# Print with custom separator and newline
+@io
+pub fn println_sep(sep: &str, args: ..any):
+    val stdout = native_stdout()
+    var first = true
+    for arg in args:
+        if not first:
+            native_term_write(stdout, sep.as_ptr(), sep.len())
+        native_term_write(stdout, arg.to_string().as_ptr(), arg.to_string().len())
+        first = false
+    native_term_write(stdout, "\n".as_ptr(), 1)
+    native_term_flush(stdout)
+
+# Debug print with location info (like Rust's dbg!)
+pub macro dbg(expr: Any) -> (returns result: Any):
+    emit result:
+        val val = expr
+        eprintln "[{__FILE__}:{__LINE__}] {stringify!(expr)} = {val}"
+        return val
+
+# Read line from stdin (like Python's input())
+@io
+pub fn input(prompt: &str = "") -> text:
+    if prompt.len() > 0:
+        print prompt
+    val stdin = native_stdin()
+    var line = text.new()
+    var buf: [u8; 1] = [0]
+    loop:
+        val n = native_term_read(stdin, &mut buf[0], 1)
+        if n <= 0:
+            break
+        val byte = buf[0]
+        if byte == '\n' as u8:
+            break
+        if byte == '\r' as u8:
+            continue
+        line.push(byte as char)
+    return line
+
+# Read line with default value
+@io
+pub fn input_or(prompt: &str, default: &str) -> text:
+    val result = input(prompt)
+    if result.is_empty():
+        return default.to_string()
+    return result
+
+# Read integer from stdin
+@io
+pub fn input_int(prompt: &str = "") -> Result<i64, ParseError>:
+    val s = input(prompt)
+    return s.parse_int()
+
+# Read f32 from stdin
+@io
+pub fn input_float(prompt: &str = "") -> Result<f64, ParseError>:
+    val s = input(prompt)
+    return s.parse_float()
+
+# Yes/No prompt
+@io
+pub fn confirm(prompt: &str, default: Option<bool> = None) -> bool:
+    val suffix = match default:
+        case Some(true): " [Y/n] "
+        case Some(false): " [y/N] "
+        case None: " [y/n] "
+
+    loop:
+        val response = input(prompt + suffix).trim().lower()
+        if response.is_empty():
+            match default:
+                case Some(val): return val
+                case None: continue
+        if response == "y" or response == "yes":
+            return true
+        if response == "n" or response == "no":
+            return false
+        println "Please enter 'y' or 'n'"

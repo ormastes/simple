@@ -1,0 +1,138 @@
+# HTTP Client Module
+#
+# Simple HTTP client for POST requests to webhooks and APIs.
+# Provides synchronous POST functionality for integration with external services.
+
+# =========================================================================
+# HTTP Request/Response Types
+# =========================================================================
+
+class HttpRequest:
+    """HTTP request builder."""
+    url: text
+    headers: Dict<text, text>
+    body: text
+
+    static fn new(url: text) -> HttpRequest:
+        return HttpRequest {
+            url: url,
+            headers: Dict.new(),
+            body: ""
+        }
+
+    fn with_header(key: text, value: text) -> HttpRequest:
+        """Add a header to the request."""
+        self.headers.insert(key, value)
+        return self
+
+    fn with_body(body: text) -> HttpRequest:
+        """Set request body."""
+        self.body = body
+        return self
+
+    fn with_json(data: text) -> HttpRequest:
+        """Set JSON body and content-type header."""
+        self.body = data
+        self.headers.insert("Content-Type", "application/json")
+        return self
+
+class HttpResponse:
+    """HTTP response from server."""
+    status_code: i32
+    body: text
+    headers: Dict<text, text>
+
+    static fn new(status_code: i32, body: text) -> HttpResponse:
+        return HttpResponse {
+            status_code: status_code,
+            body: body,
+            headers: Dict.new()
+        }
+
+    fn is_success() -> bool:
+        """Check if response is 2xx."""
+        return self.status_code >= 200 and self.status_code < 300
+
+    fn is_error() -> bool:
+        """Check if response is 4xx or 5xx."""
+        return self.status_code >= 400
+
+    fn get_header(key: text) -> Option<text>:
+        """Get a response header."""
+        if self.headers.contains(key):
+            return Some(self.headers[key])
+        return nil
+
+# =========================================================================
+# HTTP Client Functions
+# =========================================================================
+
+fn post(url: text, body: text) -> Result<HttpResponse, text>:
+    """Send POST request with text body.
+
+    Args:
+        url: Target URL
+        body: Request body as text
+
+    Returns:
+        HttpResponse if successful, error message otherwise
+    """
+    return post_with_headers(url=url, body=body, headers=Dict.new())
+
+fn post_with_headers(url: text, body: text, headers: Dict<text, text>) -> Result<HttpResponse, text>:
+    """Send POST request with headers.
+
+    Args:
+        url: Target URL
+        body: Request body as text
+        headers: Custom headers
+
+    Returns:
+        HttpResponse if successful, error message otherwise
+    """
+    # Ensure Content-Type is set
+    if not headers.contains("Content-Type"):
+        headers.insert("Content-Type", "application/x-www-form-urlencoded")
+
+    # FFI call to send HTTP POST
+    # Returns: status_code (positive) or error code (negative)
+    val status_code = _http_post(url.ptr(), url.len(), body.ptr(), body.len())
+
+    if status_code < 0:
+        return Err("HTTP request failed with code {status_code}")
+
+    # Capture response body from FFI buffer
+    # The FFI layer stores response body in a thread-local buffer
+    val response_body = _http_get_response_body()
+
+    # Build response with captured body and status code
+    val response = HttpResponse.new(status_code, response_body)
+    return Ok(response)
+
+fn post_json(url: text, json_body: text) -> Result<HttpResponse, text>:
+    """Send POST request with JSON body.
+
+    Args:
+        url: Target URL
+        json_body: JSON string as request body
+
+    Returns:
+        HttpResponse if successful, error message otherwise
+    """
+    var headers: Dict<text, text> = Dict.new()
+    headers.insert("Content-Type", "application/json")
+    return post_with_headers(url=url, body=json_body, headers=headers)
+
+# =========================================================================
+# FFI Declarations
+# =========================================================================
+
+extern fn _http_post(url_ptr: &u8, url_len: u64, body_ptr: &u8, body_len: u64) -> i32
+extern fn _http_get_response_body() -> text
+
+# =========================================================================
+# Exports
+# =========================================================================
+
+export HttpRequest, HttpResponse
+export post, post_with_headers, post_json

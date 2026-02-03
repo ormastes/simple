@@ -1,0 +1,404 @@
+# Camera - 3D camera with projection and view matrices
+#
+# Provides Camera type for perspective and orthographic projections,
+# view matrix computation, and FPS camera controller.
+#
+# Based on: doc/plans/floating-booping-coral.md (3D Graphics Library)
+
+use core.*
+use graphics.math.*
+use units.graphics.*
+
+# =============================================================================
+# Projection - Camera projection type
+# =============================================================================
+
+pub enum Projection:
+    Perspective(fov: Radians, aspect: f32, near: f32, far: f32)
+    Orthographic(left: f32, right: f32, bottom: f32, top: f32, near: f32, far: f32)
+
+impl Projection:
+    # Perspective projection helpers
+    pub fn perspective_fov(fov_degrees: Degrees, aspect: f32, near: f32, far: f32) -> Projection:
+        return Projection.Perspective(fov_degrees.to_rad(), aspect, near, far)
+
+    pub fn perspective_standard(aspect: f32) -> Projection:
+        # Standard 90 degree FOV, near=0.1, far=100.0
+        return Projection.Perspective(90.0_deg.to_rad(), aspect, 0.1, 100.0)
+
+    # Orthographic projection helpers
+    pub fn orthographic_symmetric(width: f32, height: f32, near: f32, far: f32) -> Projection:
+        val half_w = width / 2.0
+        val half_h = height / 2.0
+        return Projection.Orthographic(-half_w, half_w, -half_h, half_h, near, far)
+
+    pub fn orthographic_standard(width: f32, height: f32) -> Projection:
+        # Standard orthographic with near=0.1, far=100.0
+        return Projection.orthographic_symmetric(width, height, 0.1, 100.0)
+
+    # Get projection matrix
+    pub fn to_matrix(self) -> Mat4:
+        match self:
+            case Projection.Perspective(fov, aspect, near, far):
+                return Mat4.perspective(fov.to_f32(), aspect, near, far)
+            case Projection.Orthographic(left, right, bottom, top, near, far):
+                return Mat4.orthographic(left, right, bottom, top, near, far)
+
+    # Update aspect ratio (for window resize)
+    pub fn set_aspect(mut self, aspect: f32):
+        match self:
+            case Projection.Perspective(fov, _, near, far):
+                self = Projection.Perspective(fov, aspect, near, far)
+            case Projection.Orthographic(_, _, _, _, _, _):
+                # Orthographic projection doesn't use aspect ratio
+                pass
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    pub fn is_perspective(self) -> bool:
+        """Check if projection is perspective.
+
+        Returns:
+            true for Perspective variant
+
+        Example:
+            Projection.perspective_standard(1.0).is_perspective()  # → true
+        """
+        match self:
+            case Projection.Perspective(_, _, _, _): true
+            case _: false
+
+    pub fn is_orthographic(self) -> bool:
+        """Check if projection is orthographic.
+
+        Returns:
+            true for Orthographic variant
+
+        Example:
+            Projection.orthographic_standard(800.0, 600.0).is_orthographic()  # → true
+        """
+        match self:
+            case Projection.Orthographic(_, _, _, _, _, _): true
+            case _: false
+
+    pub fn get_near(self) -> f32:
+        """Get near clipping plane distance.
+
+        Returns:
+            Near plane distance
+
+        Example:
+            Projection.perspective_standard(1.0).get_near()  # → 0.1
+        """
+        match self:
+            case Projection.Perspective(_, _, near, _): near
+            case Projection.Orthographic(_, _, _, _, near, _): near
+
+    pub fn get_far(self) -> f32:
+        """Get far clipping plane distance.
+
+        Returns:
+            Far plane distance
+
+        Example:
+            Projection.perspective_standard(1.0).get_far()  # → 100.0
+        """
+        match self:
+            case Projection.Perspective(_, _, _, far): far
+            case Projection.Orthographic(_, _, _, _, _, far): far
+
+    pub fn to_string(self) -> text:
+        """Convert projection to string.
+
+        Returns:
+            Projection type name
+
+        Example:
+            Projection.perspective_standard(1.0).to_string()  # → "perspective"
+        """
+        match self:
+            case Projection.Perspective(_, _, _, _): "perspective"
+            case Projection.Orthographic(_, _, _, _, _, _): "orthographic"
+
+    pub fn description(self) -> text:
+        """Get projection description.
+
+        Returns:
+            Human-readable description
+
+        Example:
+            Projection.perspective_standard(1.0).description()
+            # → "Perspective projection with depth"
+        """
+        match self:
+            case Projection.Perspective(_, _, _, _): "Perspective projection with depth"
+            case Projection.Orthographic(_, _, _, _, _, _): "Orthographic projection (parallel)"
+
+    pub fn summary(self) -> text:
+        """Get projection summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            Projection.perspective_standard(1.0).summary()
+            # → "Projection: perspective (near=0.1, far=100.0)"
+        """
+        val name = self.to_string()
+        val near = self.get_near()
+        val far = self.get_far()
+        return "Projection: {name} (near={near}, far={far})"
+
+# =============================================================================
+# Camera - 3D camera with position, rotation, and projection
+# =============================================================================
+
+pub struct Camera:
+    projection: Projection
+    transform: Transform  # Camera transform (position and rotation)
+    view_cache: Option<Mat4>
+    proj_cache: Option<Mat4>
+
+impl Camera:
+    # Constructors
+    pub fn new(projection: Projection) -> Camera:
+        return Camera {
+            projection: projection,
+            transform: Transform.identity(),
+            view_cache: None,
+            proj_cache: None
+        }
+
+    pub fn perspective(fov: Radians, aspect: f32, near: f32, far: f32) -> Camera:
+        return Camera.new(Projection.Perspective(fov, aspect, near, far))
+
+    pub fn orthographic(left: f32, right: f32, bottom: f32, top: f32, near: f32, far: f32) -> Camera:
+        return Camera.new(Projection.Orthographic(left, right, bottom, top, near, far))
+
+    # Standard camera presets
+    pub fn perspective_standard(aspect: f32) -> Camera:
+        return Camera.new(Projection.perspective_standard(aspect))
+
+    pub fn orthographic_standard(width: f32, height: f32) -> Camera:
+        return Camera.new(Projection.orthographic_standard(width, height))
+
+    # Projection access
+    pub fn get_projection(self) -> Projection:
+        return self.projection
+
+    pub fn set_projection(mut self, projection: Projection):
+        self.projection = projection
+        self.proj_cache = None
+
+    pub fn get_projection_matrix(mut self) -> Mat4:
+        if self.proj_cache.is_some():
+            return self.proj_cache.unwrap()
+
+        val matrix = self.projection.to_matrix()
+        self.proj_cache = Some(matrix)
+        return matrix
+
+    # Transform access
+    pub fn get_transform(self) -> Transform:
+        return self.transform
+
+    pub fn set_transform(mut self, transform: Transform):
+        self.transform = transform
+        self.view_cache = None
+
+    pub fn get_position(self) -> Vec3:
+        return self.transform.get_position()
+
+    pub fn set_position(mut self, position: Vec3):
+        self.transform.set_position(position)
+        self.view_cache = None
+
+    pub fn get_rotation(self) -> Quaternion:
+        return self.transform.get_rotation()
+
+    pub fn set_rotation(mut self, rotation: Quaternion):
+        self.transform.set_rotation(rotation)
+        self.view_cache = None
+
+    # View matrix (inverse of camera transform)
+    pub fn get_view_matrix(mut self) -> Mat4:
+        if self.view_cache.is_some():
+            return self.view_cache.unwrap()
+
+        val matrix = self.transform.inverse().to_matrix()
+        self.view_cache = Some(matrix)
+        return matrix
+
+    # Combined view-projection matrix
+    pub fn get_view_projection_matrix(mut self) -> Mat4:
+        return self.get_projection_matrix() * self.get_view_matrix()
+
+    # Direction vectors (world space)
+    pub fn forward(self) -> Vec3:
+        return self.transform.forward()
+
+    pub fn right(self) -> Vec3:
+        return self.transform.right()
+
+    pub fn up(self) -> Vec3:
+        return self.transform.up()
+
+    # Look-at helper
+    pub fn look_at(mut self, target: Vec3, up: Vec3):
+        self.transform = self.transform.look_at(target, up)
+        self.view_cache = None
+
+    # Movement helpers
+    pub fn translate(mut self, offset: Vec3):
+        self.transform = self.transform.translate(offset)
+        self.view_cache = None
+
+    pub fn rotate(mut self, rotation: Quaternion):
+        self.transform = self.transform.rotate(rotation)
+        self.view_cache = None
+
+    pub fn rotate_euler(mut self, pitch: f32, yaw: f32, roll: f32):
+        self.transform = self.transform.rotate_euler(pitch, yaw, roll)
+        self.view_cache = None
+
+    # Aspect ratio update (for window resize)
+    pub fn set_aspect_ratio(mut self, aspect: f32):
+        self.projection.set_aspect(aspect)
+        self.proj_cache = None
+
+# =============================================================================
+# FpsCamera - First-person camera controller
+# =============================================================================
+
+pub struct FpsCamera:
+    camera: Camera
+    move_speed: f32      # Units per second
+    look_sensitivity: f32  # Radians per pixel
+    pitch: f32           # Current pitch angle (radians)
+    yaw: f32             # Current yaw angle (radians)
+    min_pitch: f32       # Minimum pitch (radians, default -89 degrees)
+    max_pitch: f32       # Maximum pitch (radians, default +89 degrees)
+
+impl FpsCamera:
+    # Constructor
+    pub fn new(camera: Camera) -> FpsCamera:
+        return FpsCamera {
+            camera: camera,
+            move_speed: 5.0,
+            look_sensitivity: 0.002,
+            pitch: 0.0,
+            yaw: 0.0,
+            min_pitch: -1.553,  # -89 degrees
+            max_pitch: 1.553    # +89 degrees
+        }
+
+    pub fn with_settings(camera: Camera, move_speed: f32, look_sensitivity: f32) -> FpsCamera:
+        return FpsCamera {
+            camera: camera,
+            move_speed: move_speed,
+            look_sensitivity: look_sensitivity,
+            pitch: 0.0,
+            yaw: 0.0,
+            min_pitch: -1.553,
+            max_pitch: 1.553
+        }
+
+    # Camera access
+    pub fn get_camera(self) -> Camera:
+        return self.camera
+
+    pub fn get_camera_mut(mut self) -> Camera:
+        return self.camera
+
+    # Settings
+    pub fn set_move_speed(mut self, speed: f32):
+        self.move_speed = speed
+
+    pub fn set_look_sensitivity(mut self, sensitivity: f32):
+        self.look_sensitivity = sensitivity
+
+    pub fn set_pitch_limits(mut self, min_pitch: f32, max_pitch: f32):
+        self.min_pitch = min_pitch
+        self.max_pitch = max_pitch
+
+    # Movement (WASD + QE)
+    pub fn move_forward(mut self, delta_time: f32):
+        val offset = self.camera.forward() * (self.move_speed * delta_time)
+        self.camera.translate(offset)
+
+    pub fn move_backward(mut self, delta_time: f32):
+        val offset = self.camera.forward() * (-self.move_speed * delta_time)
+        self.camera.translate(offset)
+
+    pub fn move_right(mut self, delta_time: f32):
+        val offset = self.camera.right() * (self.move_speed * delta_time)
+        self.camera.translate(offset)
+
+    pub fn move_left(mut self, delta_time: f32):
+        val offset = self.camera.right() * (-self.move_speed * delta_time)
+        self.camera.translate(offset)
+
+    pub fn move_up(mut self, delta_time: f32):
+        val offset = Vec3.unit_y() * (self.move_speed * delta_time)
+        self.camera.translate(offset)
+
+    pub fn move_down(mut self, delta_time: f32):
+        val offset = Vec3.unit_y() * (-self.move_speed * delta_time)
+        self.camera.translate(offset)
+
+    # Mouse look
+    pub fn look(mut self, delta_x: f32, delta_y: f32):
+        # Update yaw and pitch
+        self.yaw = self.yaw + delta_x * self.look_sensitivity
+        self.pitch = self.pitch - delta_y * self.look_sensitivity
+
+        # Clamp pitch to prevent camera flip
+        if self.pitch < self.min_pitch:
+            self.pitch = self.min_pitch
+        if self.pitch > self.max_pitch:
+            self.pitch = self.max_pitch
+
+        # Apply rotation
+        val rotation = Quaternion.from_euler(self.pitch, self.yaw, 0.0)
+        self.camera.set_rotation(rotation)
+
+    # Update method (call every frame)
+    pub fn update(mut self, delta_time: f32, input: CameraInput):
+        # Movement
+        if input.forward:
+            self.move_forward(delta_time)
+        if input.backward:
+            self.move_backward(delta_time)
+        if input.right:
+            self.move_right(delta_time)
+        if input.left:
+            self.move_left(delta_time)
+        if input.up:
+            self.move_up(delta_time)
+        if input.down:
+            self.move_down(delta_time)
+
+        # Look
+        if input.mouse_delta_x != 0.0 or input.mouse_delta_y != 0.0:
+            self.look(input.mouse_delta_x, input.mouse_delta_y)
+
+# Camera input state
+pub struct CameraInput:
+    forward: bool
+    backward: bool
+    left: bool
+    right: bool
+    up: bool
+    down: bool
+    mouse_delta_x: f32
+    mouse_delta_y: f32
+
+impl CameraInput:
+    pub fn new() -> CameraInput:
+        return CameraInput {forward: false, backward: false, left: false, right: false, up: false, down: false, mouse_delta_x: 0.0, mouse_delta_y: 0.0}
+
+    pub fn clear_deltas(mut self):
+        self.mouse_delta_x = 0.0
+        self.mouse_delta_y = 0.0

@@ -1,0 +1,169 @@
+# PBR Common - Shared PBR BRDF functions and lighting calculations
+#
+# Implements Cook-Torrance BRDF functions used by both basic PBR
+# and PBR with IBL shaders.
+#
+# Based on: doc/spec/graphics_3d.md (Part 4.2: PBR Material)
+
+use graphics.math.*
+use graphics.shaders.shader_constants.{PI, EPSILON}
+use graphics.shaders.shader_math.*
+use units.graphics.*
+
+# =============================================================================
+# PBR Lighting Uniforms (shared structure)
+# =============================================================================
+
+pub struct PBRLightingUniforms:
+    # Directional light
+    dir_light_direction: Vec3
+    dir_light_color: Vec3
+    dir_light_intensity: Intensity
+
+    # Point lights (up to 4)
+    point_light_positions: [Vec3; 4]
+    point_light_colors: [Vec3; 4]
+    point_light_intensities: [Intensity; 4]
+    point_light_ranges: [f32; 4]
+    point_light_count: i32
+
+    # Environment
+    ambient_color: Vec3
+    ambient_intensity: Intensity
+
+# =============================================================================
+# PBR BRDF Functions
+# =============================================================================
+
+# Normal Distribution Function (GGX/Trowbridge-Reitz)
+pub fn distribution_ggx(N: Vec3, H: Vec3, roughness: Roughness) -> f32:
+    val r = roughness.value()
+    val a = r * r
+    val a2 = a * a
+    val NdotH = max(dot(a=N, b=H), 0.0)
+    val NdotH2 = NdotH * NdotH
+
+    val nom = a2
+    val denom = (NdotH2 * (a2 - 1.0) + 1.0)
+    val denom = PI * denom * denom
+
+    return nom / denom
+
+# Geometry Function (Schlick-GGX)
+pub fn geometry_schlick_ggx(NdotV: f32, roughness: Roughness) -> f32:
+    val r = roughness.value()
+    val r = r + 1.0
+    val k = (r * r) / 8.0
+
+    val nom = NdotV
+    val denom = NdotV * (1.0 - k) + k
+
+    return nom / denom
+
+# Smith's method for geometry obstruction
+pub fn geometry_smith(N: Vec3, V: Vec3, L: Vec3, roughness: Roughness) -> f32:
+    val NdotV = max(dot(a=N, b=V), 0.0)
+    val NdotL = max(dot(a=N, b=L), 0.0)
+    val ggx2 = geometry_schlick_ggx(NdotV, roughness)
+    val ggx1 = geometry_schlick_ggx(NdotL, roughness)
+
+    return ggx1 * ggx2
+
+# Fresnel equation (Schlick approximation)
+pub fn fresnel_schlick(cos_theta: f32, F0: Vec3) -> Vec3:
+    return F0 + (Vec3.one() - F0) * pow(1.0 - cos_theta, 5.0)
+
+# Fresnel with roughness (for IBL)
+pub fn fresnel_schlick_roughness(cos_theta: f32, F0: Vec3, roughness: Roughness) -> Vec3:
+    val r = roughness.value()
+    val one_minus_roughness = Vec3.new(1.0 - r, 1.0 - r, 1.0 - r)
+    return F0 + (max_vec3(one_minus_roughness, F0) - F0) * pow(1.0 - cos_theta, 5.0)
+
+# =============================================================================
+# Lighting Calculations
+# =============================================================================
+
+# Calculate radiance from directional light
+pub fn calculate_directional_light(
+    N: Vec3,
+    V: Vec3,
+    albedo: Vec3,
+    metallic: Metallic,
+    roughness: Roughness,
+    F0: Vec3,
+    light: PBRLightingUniforms
+) -> Vec3:
+    if light.dir_light_intensity.value() <= 0.0:
+        return Vec3.zero()
+
+    val L = -light.dir_light_direction.normalize()
+    val H = (V + L).normalize()
+
+    val radiance = light.dir_light_color * light.dir_light_intensity.value()
+
+    # Cook-Torrance BRDF
+    val NDF = distribution_ggx(N=N, H=H, roughness)
+    val G = geometry_smith(N=N, V=V, L=L, roughness)
+    val F = fresnel_schlick(max(dot(a=H, b=V), 0.0), F0)
+
+    val numerator = NDF * G * F
+    val denominator = 4.0 * max(dot(a=N, b=V), 0.0) * max(dot(a=N, b=L), 0.0) + EPSILON
+    val specular = numerator / denominator
+
+    # Energy conservation
+    val kS = F
+    var kD = Vec3.one() - kS
+    kD = kD * (1.0 - metallic.value())
+
+    val NdotL = max(dot(a=N, b=L), 0.0)
+    return (kD * albedo / PI + specular) * radiance * NdotL
+
+# Calculate radiance from point light
+pub fn calculate_point_light(
+    position_world: Vec3,
+    N: Vec3,
+    V: Vec3,
+    albedo: Vec3,
+    metallic: Metallic,
+    roughness: Roughness,
+    F0: Vec3,
+    light_pos: Vec3,
+    light_color: Vec3,
+    light_intensity: Intensity,
+    light_range: f32
+) -> Vec3:
+    val L = (light_pos - position_world).normalize()
+    val H = (V + L).normalize()
+
+    # Attenuation
+    val distance = (light_pos - position_world).length()
+    val attenuation = 1.0 / (distance * distance)
+    val attenuation = attenuation * clamp((light_range - distance) / light_range, 0.0, 1.0)
+
+    val radiance = light_color * light_intensity.value() * attenuation
+
+    # Cook-Torrance BRDF
+    val NDF = distribution_ggx(N=N, H=H, roughness)
+    val G = geometry_smith(N=N, V=V, L=L, roughness)
+    val F = fresnel_schlick(max(dot(a=H, b=V), 0.0), F0)
+
+    val numerator = NDF * G * F
+    val denominator = 4.0 * max(dot(a=N, b=V), 0.0) * max(dot(a=N, b=L), 0.0) + EPSILON
+    val specular = numerator / denominator
+
+    # Energy conservation
+    val kS = F
+    var kD = Vec3.one() - kS
+    kD = kD * (1.0 - metallic.value())
+
+    val NdotL = max(dot(a=N, b=L), 0.0)
+    return (kD * albedo / PI + specular) * radiance * NdotL
+
+# =============================================================================
+# F0 Calculation
+# =============================================================================
+
+# Calculate F0 (reflectance at normal incidence)
+pub fn calculate_f0(albedo: Vec3, metallic: Metallic) -> Vec3:
+    val dielectric_f0 = Vec3.new(0.04, 0.04, 0.04)
+    return lerp_vec3(dielectric_f0, albedo, metallic.value())

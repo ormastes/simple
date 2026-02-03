@@ -1,0 +1,231 @@
+# glTF JSON - JSON parsing implementation
+use core.*
+use graphics.math.*
+use graphics.scene.*
+
+# =============================================================================
+# JSON Parsing
+# =============================================================================
+
+impl GltfLoader:
+    fn parse_json(json: JsonValue) -> Result<GltfFile, text>:
+        val obj = json.as_object()
+            .ok_or("glTF root must be an object")?
+
+        # Parse asset (required)
+        val asset = obj.get("asset")
+            .ok_or("glTF missing required 'asset' field")?
+        val asset_parsed = GltfLoader.parse_asset(asset)?
+
+        # Parse arrays
+        val scenes = GltfLoader.parse_scenes(obj.get("scenes"))?
+        val nodes = GltfLoader.parse_nodes(obj.get("nodes"))?
+        val meshes = GltfLoader.parse_meshes(obj.get("meshes"))?
+        val materials = GltfLoader.parse_materials(obj.get("materials"))?
+        val textures = GltfLoader.parse_textures(obj.get("textures"))?
+        val images = GltfLoader.parse_images(obj.get("images"))?
+        val buffers = GltfLoader.parse_buffers(obj.get("buffers"))?
+        val buffer_views = GltfLoader.parse_buffer_views(obj.get("bufferViews"))?
+        val accessors = GltfLoader.parse_accessors(obj.get("accessors"))?
+
+        # Default scene
+        val default_scene = obj.get("scene")
+            .and_then(|v| v.as_i32())
+            .unwrap_or(-1)
+
+        return Ok(GltfFile {asset: asset_parsed, scenes: scenes, nodes: nodes, meshes: meshes, materials: materials, textures: textures, images: images, buffers: buffers, buffer_views: buffer_views, accessors: accessors, default_scene: default_scene})
+
+    fn parse_asset(json: JsonValue) -> Result<GltfAsset, text>:
+        val obj = json.as_object()
+            .ok_or("asset must be an object")?
+
+        val version = obj.get("version")
+            .and_then(|v| v.as_string())
+            .ok_or("asset missing 'version'")?
+
+        if version != "2.0":
+            return Err("Unsupported glTF version: " + version)
+
+        return Ok(GltfAsset {
+            version: version,
+            generator: obj.get("generator").and_then(|v| v.as_string()).unwrap_or(""),
+            copyright: obj.get("copyright").and_then(|v| v.as_string()).unwrap_or("")
+        })
+
+    fn parse_scenes(json_opt: Option<JsonValue>) -> Result<Array<GltfScene>, text>:
+        val array = match json_opt:
+            case Some(json):
+                json.as_array().ok_or("scenes must be an array")?
+            case None:
+                return Ok(Array.new())
+
+        var scenes = Array<GltfScene>.new()
+        for item in array:
+            val obj = item.as_object().ok_or("scene must be an object")?
+            val name = obj.get("name").and_then(|v| v.as_string()).unwrap_or("")
+            val nodes = obj.get("nodes")
+                .and_then(|v| v.as_array())
+                .map(|arr| arr.iter().filter_map(|n| n.as_i32()).collect())
+                .unwrap_or(Array.new())
+
+            scenes.push(GltfScene { name: name, nodes: nodes })
+
+        return Ok(scenes)
+
+    fn parse_nodes(json_opt: Option<JsonValue>) -> Result<Array<GltfNode>, text>:
+        val array = match json_opt:
+            case Some(json):
+                json.as_array().ok_or("nodes must be an array")?
+            case None:
+                return Ok(Array.new())
+
+        var nodes = Array<GltfNode>.new()
+        for item in array:
+            val obj = item.as_object().ok_or("node must be an object")?
+
+            val name = obj.get("name").and_then(|v| v.as_string()).unwrap_or("")
+            val mesh = obj.get("mesh").and_then(|v| v.as_i32()).unwrap_or(-1)
+            val children = obj.get("children")
+                .and_then(|v| v.as_array())
+                .map(|arr| arr.iter().filter_map(|n| n.as_i32()).collect())
+                .unwrap_or(Array.new())
+
+            # Parse TRS or matrix
+            val translation = GltfLoader.parse_vec3(obj.get("translation"), Vec3.zero())
+            val rotation = GltfLoader.parse_quat(obj.get("rotation"), Quat.identity())
+            val scale = GltfLoader.parse_vec3(obj.get("scale"), Vec3.new(1.0, 1.0, 1.0))
+            val matrix = obj.get("matrix").and_then(|v| GltfLoader.parse_mat4(v))
+
+            nodes.push(GltfNode {
+                name: name,
+                mesh: mesh,
+                children: children,
+                translation: translation,
+                rotation: rotation,
+                scale: scale,
+                matrix: matrix
+            })
+
+        return Ok(nodes)
+
+    fn parse_meshes(json_opt: Option<JsonValue>) -> Result<Array<GltfMesh>, text>:
+        val array = match json_opt:
+            case Some(json):
+                json.as_array().ok_or("meshes must be an array")?
+            case None:
+                return Ok(Array.new())
+
+        var meshes = Array<GltfMesh>.new()
+        for item in array:
+            val obj = item.as_object().ok_or("mesh must be an object")?
+            val name = obj.get("name").and_then(|v| v.as_string()).unwrap_or("")
+
+            val primitives_json = obj.get("primitives")
+                .ok_or("mesh missing 'primitives'")?
+                .as_array()
+                .ok_or("primitives must be an array")?
+
+            var primitives = Array<GltfPrimitive>.new()
+            for prim_json in primitives_json:
+                val prim_obj = prim_json.as_object().ok_or("primitive must be an object")?
+
+                # Parse attributes
+                val attrs_json = prim_obj.get("attributes")
+                    .ok_or("primitive missing 'attributes'")?
+                    .as_object()
+                    .ok_or("attributes must be an object")?
+
+                val attributes = GltfAttributes {
+                    position: attrs_json.get("POSITION").and_then(|v| v.as_i32()).unwrap_or(-1),
+                    normal: attrs_json.get("NORMAL").and_then(|v| v.as_i32()).unwrap_or(-1),
+                    tangent: attrs_json.get("TANGENT").and_then(|v| v.as_i32()).unwrap_or(-1),
+                    texcoord_0: attrs_json.get("TEXCOORD_0").and_then(|v| v.as_i32()).unwrap_or(-1),
+                    color_0: attrs_json.get("COLOR_0").and_then(|v| v.as_i32()).unwrap_or(-1)
+                }
+
+                primitives.push(GltfPrimitive {
+                    attributes: attributes,
+                    indices: prim_obj.get("indices").and_then(|v| v.as_i32()).unwrap_or(-1),
+                    material: prim_obj.get("material").and_then(|v| v.as_i32()).unwrap_or(-1),
+                    mode: prim_obj.get("mode").and_then(|v| v.as_i32()).unwrap_or(4)  # 4 = TRIANGLES
+                })
+
+            meshes.push(GltfMesh { name: name, primitives: primitives })
+
+        return Ok(meshes)
+
+    fn parse_materials(json_opt: Option<JsonValue>) -> Result<Array<GltfMaterial>, text>:
+        # Placeholder - simplified material parsing
+        return Ok(Array.new())
+
+    fn parse_textures(json_opt: Option<JsonValue>) -> Result<Array<GltfTexture>, text>:
+        # Placeholder - simplified texture parsing
+        return Ok(Array.new())
+
+    fn parse_images(json_opt: Option<JsonValue>) -> Result<Array<GltfImage>, text>:
+        # Placeholder - simplified image parsing
+        return Ok(Array.new())
+
+    fn parse_buffers(json_opt: Option<JsonValue>) -> Result<Array<GltfBuffer>, text>:
+        val array = match json_opt:
+            case Some(json):
+                json.as_array().ok_or("buffers must be an array")?
+            case None:
+                return Ok(Array.new())
+
+        var buffers = Array<GltfBuffer>.new()
+        for item in array:
+            val obj = item.as_object().ok_or("buffer must be an object")?
+
+            buffers.push(GltfBuffer {
+                uri: obj.get("uri").and_then(|v| v.as_string()).unwrap_or(""),
+                byte_length: obj.get("byteLength").and_then(|v| v.as_i32()).unwrap_or(0),
+                data: Array.new()  # Loaded later
+            })
+
+        return Ok(buffers)
+
+    fn parse_buffer_views(json_opt: Option<JsonValue>) -> Result<Array<GltfBufferView>, text>:
+        val array = match json_opt:
+            case Some(json):
+                json.as_array().ok_or("bufferViews must be an array")?
+            case None:
+                return Ok(Array.new())
+
+        var views = Array<GltfBufferView>.new()
+        for item in array:
+            val obj = item.as_object().ok_or("bufferView must be an object")?
+
+            views.push(GltfBufferView {
+                buffer: obj.get("buffer").and_then(|v| v.as_i32()).ok_or("bufferView missing 'buffer'")?,
+                byte_offset: obj.get("byteOffset").and_then(|v| v.as_i32()).unwrap_or(0),
+                byte_length: obj.get("byteLength").and_then(|v| v.as_i32()).ok_or("bufferView missing 'byteLength'")?,
+                byte_stride: obj.get("byteStride").and_then(|v| v.as_i32()).unwrap_or(0),
+                target: obj.get("target").and_then(|v| v.as_i32()).unwrap_or(0)
+            })
+
+        return Ok(views)
+
+    fn parse_accessors(json_opt: Option<JsonValue>) -> Result<Array<GltfAccessor>, text>:
+        val array = match json_opt:
+            case Some(json):
+                json.as_array().ok_or("accessors must be an array")?
+            case None:
+                return Ok(Array.new())
+
+        var accessors = Array<GltfAccessor>.new()
+        for item in array:
+            val obj = item.as_object().ok_or("accessor must be an object")?
+
+            accessors.push(GltfAccessor {
+                buffer_view: obj.get("bufferView").and_then(|v| v.as_i32()).ok_or("accessor missing 'bufferView'")?,
+                byte_offset: obj.get("byteOffset").and_then(|v| v.as_i32()).unwrap_or(0),
+                component_type: obj.get("componentType").and_then(|v| v.as_i32()).ok_or("accessor missing 'componentType'")?,
+                count: obj.get("count").and_then(|v| v.as_i32()).ok_or("accessor missing 'count'")?,
+                type_name: obj.get("type").and_then(|v| v.as_string()).ok_or("accessor missing 'type'")?,
+                min: Array.new(),  # Simplified
+                max: Array.new()   # Simplified
+            })
+
+        return Ok(accessors)
+

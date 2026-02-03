@@ -1,0 +1,248 @@
+# Lean 4 Invocation and Proof Checking
+#
+# This module handles:
+# - Writing generated Lean files to disk
+# - Invoking Lean to check proofs
+# - Parsing Lean output for errors
+# - Tracking proof status
+
+use io.fs as fs
+use host.process as process
+
+# Result of running Lean on a file
+class LeanCheckResult:
+    file: text
+    success: bool
+    stdout: text
+    stderr: text
+    goals_solved: i32
+    goals_remaining: i32
+    exit_code: Option<i32>
+
+    static fn new(file: text) -> LeanCheckResult:
+        LeanCheckResult(file, false, "", "", 0, 0, nil)
+
+    # Check if this result has unproven theorems
+    fn has_unproven() -> bool:
+        self.goals_remaining > 0
+
+    # Check if this result is fully proven
+    fn is_fully_proven() -> bool:
+        self.success and self.goals_remaining == 0
+
+    # Check if check passed (may have sorrys)
+    fn passed() -> bool:
+        self.success
+
+    # Format as a human-readable string
+    fn format() -> text:
+        var status = "PASSED"
+        if not self.success:
+            status = "FAILED"
+
+        var result = "[{status}] {self.file}\n"
+
+        if self.goals_solved > 0:
+            result = result + "  Goals solved: {self.goals_solved}\n"
+
+        if self.goals_remaining > 0:
+            result = result + "  Goals remaining (sorry): {self.goals_remaining}\n"
+
+        if self.stderr.len() > 0:
+            result = result + "  Errors:\n"
+            for line in self.stderr.split("\n"):
+                if line.len() > 0:
+                    result = result + "    {line}\n"
+
+        result
+
+# Lean runner for proof checking
+class LeanRunner:
+    lean_path: text
+    output_dir: text
+    generate_stubs: bool
+    verbose: bool
+
+    static fn new(lean_path: text, output_dir: text) -> LeanRunner:
+        LeanRunner(lean_path, output_dir, true, false)
+
+    # Create with default paths
+    static fn default() -> LeanRunner:
+        LeanRunner.new("lean", "build/lean")
+
+    me with_stubs(generate: bool) -> LeanRunner:
+        self.generate_stubs = generate
+        self
+
+    me with_verbose(verbose: bool) -> LeanRunner:
+        self.verbose = verbose
+        self
+
+    # Ensure the output directory exists
+    fn ensure_output_dir():
+        fs.create_dir_all(self.output_dir)
+
+    # Write a Lean file to the output directory
+    fn write_lean_file(name: text, content: text) -> text:
+        self.ensure_output_dir()
+        val file_path = "{self.output_dir}/{name}.lean"
+        fs.write_text(file_path, content)
+        if self.verbose:
+            print("[lean] Wrote {file_path}")
+        file_path
+
+    # Check if Lean is available
+    fn is_lean_available() -> bool:
+        val result = process.run(self.lean_path, ["--version"])
+        result.success
+
+    # Get Lean version
+    fn lean_version() -> Option<text>:
+        val result = process.run(self.lean_path, ["--version"])
+        if result.success:
+            Some(result.stdout.trim())
+        else:
+            nil
+
+    # Run Lean on a file to check proofs
+    fn check_file(file: text) -> LeanCheckResult:
+        if self.verbose:
+            print("[lean] Checking {file}")
+
+        val result = process.run(self.lean_path, [file])
+        self.parse_output(file, result)
+
+    # Run Lean on generated content
+    fn check_content(name: text, content: text) -> LeanCheckResult:
+        val file_path = self.write_lean_file(name, content)
+        self.check_file(file_path)
+
+    # Parse Lean output
+    fn parse_output(file: text, result: process.ProcessResult) -> LeanCheckResult:
+        val stdout = result.stdout
+        val stderr = result.stderr
+
+        # Count sorry occurrences as remaining goals
+        val goals_remaining = count_occurrences(haystack=stdout, needle="sorry") + count_occurrences(haystack=stderr, needle="sorry")
+
+        # Count solved goals from Lean output
+        val goals_solved = count_solved_goals(stdout, stderr)
+
+        LeanCheckResult(file, result.success, stdout, stderr, goals_solved, goals_remaining, Some(result.exit_code))
+
+    # Check multiple files
+    fn check_files(files: List<text>) -> List<LeanCheckResult>:
+        var results: List<LeanCheckResult> = []
+        for file in files:
+            results = results + [self.check_file(file)]
+        results
+
+    # Run Lake build on a project
+    fn run_lake_build(project_dir: text) -> bool:
+        if self.verbose:
+            print("[lean] Running lake build in {project_dir}")
+
+        val result = process.run("lake", ["build"], project_dir)
+        if not result.success and self.verbose:
+            print("[lean] Lake build failed:")
+            print(result.stderr)
+        result.success
+
+# Count occurrences of a substring
+fn count_occurrences(haystack: text, needle: text) -> i32:
+    var count = 0
+    var pos = 0
+    while pos < haystack.len():
+        val idx = haystack.find(needle, pos)
+        if idx >= 0:
+            count = count + 1
+            pos = idx + needle.len()
+        else:
+            break
+    count
+
+# Count solved goals from Lean output
+fn count_solved_goals(stdout: text, stderr: text) -> i32:
+    val combined = stdout + "\n" + stderr
+    val accomplished = count_occurrences(haystack=combined, needle="goals accomplished")
+    val no_goals = count_occurrences(haystack=combined, needle="no goals")
+    accomplished + no_goals
+
+# Summary of verification results
+class VerificationSummary:
+    files_checked: i32
+    files_passed: i32
+    files_failed: i32
+    total_theorems: i32
+    proven_theorems: i32
+    unproven_theorems: i32
+    errors: List<text>
+
+    static fn empty() -> VerificationSummary:
+        VerificationSummary(0, 0, 0, 0, 0, 0, [])
+
+    # Create a summary from check results
+    static fn from_results(results: List<LeanCheckResult>) -> VerificationSummary:
+        var summary = VerificationSummary.empty()
+
+        for result in results:
+            summary.files_checked = summary.files_checked + 1
+            if result.success:
+                summary.files_passed = summary.files_passed + 1
+            else:
+                summary.files_failed = summary.files_failed + 1
+                if result.stderr.len() > 0:
+                    summary.errors = summary.errors + [result.stderr]
+
+            summary.proven_theorems = summary.proven_theorems + result.goals_solved
+            summary.unproven_theorems = summary.unproven_theorems + result.goals_remaining
+
+        summary.total_theorems = summary.proven_theorems + summary.unproven_theorems
+        summary
+
+    # Check if verification was successful
+    fn is_success() -> bool:
+        self.files_failed == 0
+
+    # Check if all theorems are proven
+    fn is_fully_proven() -> bool:
+        self.is_success() and self.unproven_theorems == 0
+
+    # Format as a human-readable string
+    fn format() -> text:
+        var out = "Verification Summary:\n"
+        out = out + "  Files: {self.files_passed}/{self.files_checked} passed\n"
+
+        if self.total_theorems > 0:
+            out = out + "  Theorems: {self.proven_theorems}/{self.total_theorems} proven\n"
+
+        if self.unproven_theorems > 0:
+            out = out + "  Unproven (sorry): {self.unproven_theorems}\n"
+
+        if self.errors.len() > 0:
+            out = out + "  Errors: {self.errors.len()}\n"
+
+        out
+
+# Quick check functions
+
+# Check if Lean is installed
+fn is_lean_installed() -> bool:
+    val runner = LeanRunner.default()
+    runner.is_lean_available()
+
+# Check a single Lean file
+fn check_lean_file(file: text) -> LeanCheckResult:
+    val runner = LeanRunner.default()
+    runner.check_file(file)
+
+# Check and summarize multiple files
+fn check_and_summarize(files: List<text>) -> VerificationSummary:
+    val runner = LeanRunner.default()
+    val results = runner.check_files(files)
+    VerificationSummary.from_results(results)
+
+# Export public API
+export LeanCheckResult, LeanRunner, VerificationSummary
+export count_occurrences, count_solved_goals
+export is_lean_installed, check_lean_file, check_and_summarize

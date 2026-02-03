@@ -1,0 +1,312 @@
+# Diagram Filter Module
+# Provides include/exclude filtering for diagram generation
+#
+# Supports:
+# - Glob patterns (*, **, ?)
+# - Exact string matching
+# - Multiple patterns (comma-separated)
+# - Exclude takes precedence over include
+
+use core.{Option, List, regex}
+use recorder.{CallEvent}
+
+# Filter mode
+enum FilterMode:
+    Include  # Only include matching items
+    Exclude  # Exclude matching items
+
+impl FilterMode:
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    fn is_include() -> bool:
+        """Check if this is Include mode.
+
+        Returns:
+            true for Include
+
+        Example:
+            FilterMode.Include.is_include()  # → true
+        """
+        match self:
+            case FilterMode.Include: true
+            case _: false
+
+    fn is_exclude() -> bool:
+        """Check if this is Exclude mode.
+
+        Returns:
+            true for Exclude
+
+        Example:
+            FilterMode.Exclude.is_exclude()  # → true
+        """
+        match self:
+            case FilterMode.Exclude: true
+            case _: false
+
+    fn is_whitelist() -> bool:
+        """Check if mode is whitelist-style (include only matched).
+
+        Returns:
+            true for Include
+
+        Example:
+            FilterMode.Include.is_whitelist()  # → true
+        """
+        return self.is_include()
+
+    fn is_blacklist() -> bool:
+        """Check if mode is blacklist-style (exclude matched).
+
+        Returns:
+            true for Exclude
+
+        Example:
+            FilterMode.Exclude.is_blacklist()  # → true
+        """
+        return self.is_exclude()
+
+    fn is_positive() -> bool:
+        """Check if mode uses positive matching (include).
+
+        Returns:
+            true for Include
+
+        Example:
+            FilterMode.Include.is_positive()  # → true
+        """
+        return self.is_include()
+
+    fn is_negative() -> bool:
+        """Check if mode uses negative matching (exclude).
+
+        Returns:
+            true for Exclude
+
+        Example:
+            FilterMode.Exclude.is_negative()  # → true
+        """
+        return self.is_exclude()
+
+    fn inverted() -> FilterMode:
+        """Get opposite filter mode.
+
+        Returns:
+            Opposite mode (Include ↔ Exclude)
+
+        Example:
+            FilterMode.Include.inverted()  # → FilterMode.Exclude
+            FilterMode.Exclude.inverted()  # → FilterMode.Include
+        """
+        match self:
+            case FilterMode.Include: FilterMode.Exclude
+            case FilterMode.Exclude: FilterMode.Include
+
+    fn to_string() -> text:
+        """Convert filter mode to string.
+
+        Returns:
+            Mode name
+
+        Example:
+            FilterMode.Include.to_string()  # → "include"
+        """
+        match self:
+            case FilterMode.Include: "include"
+            case FilterMode.Exclude: "exclude"
+
+    fn description() -> text:
+        """Get filter mode description.
+
+        Returns:
+            Human-readable description
+
+        Example:
+            FilterMode.Include.description()
+            # → "Only include matching items"
+        """
+        match self:
+            case FilterMode.Include: "Only include matching items"
+            case FilterMode.Exclude: "Exclude matching items"
+
+    fn summary() -> text:
+        """Get summary of filter mode.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            FilterMode.Include.summary()
+            # → "FilterMode: include (whitelist, positive matching)"
+        """
+        val name = self.to_string()
+        val style = if self.is_whitelist(): "whitelist" else: "blacklist"
+        val matching = if self.is_positive(): "positive matching" else: "negative matching"
+        return "FilterMode: " + name + " (" + style + ", " + matching + ")"
+
+# Single pattern for matching
+struct FilterPattern:
+    raw: text           # Original pattern string
+    regex: regex.Regex    # Compiled regex for matching
+    mode: FilterMode      # Include or exclude
+
+impl FilterPattern:
+    # Create pattern from glob-style string
+    static fn from_glob(pattern: text, mode: FilterMode) -> FilterPattern:
+        # Convert glob to regex
+        val regex_str = glob_to_regex(pattern)
+        return FilterPattern {
+            raw: pattern,
+            regex: regex.compile(regex_str),
+            mode: mode,
+        }
+
+    # Check if a string matches this pattern
+    fn matches(value: text) -> bool:
+        return self.regex.is_match(value)
+
+# Convert glob pattern to regex
+fn glob_to_regex(glob: text) -> text:
+    val result = "^"
+    val chars = glob.chars()
+    val i = 0
+
+    while i < chars.len():
+        val c = chars[i]
+        match c:
+            case '*':
+                # Check for **
+                if i + 1 < chars.len() and chars[i + 1] == '*':
+                    result = result + ".*"
+                    i += 1
+                else:
+                    result = result + "[^.]*"
+            case '?':
+                result = result + "."
+            case '.':
+                result = result + "\\."
+            case '(':
+                result = result + "\\("
+            case ')':
+                result = result + "\\)"
+            case '[':
+                result = result + "\\["
+            case ']':
+                result = result + "\\]"
+            case '{':
+                result = result + "\\{"
+            case '}':
+                result = result + "\\}"
+            case '^':
+                result = result + "\\^"
+            case '$':
+                result = result + "\\$"
+            case '|':
+                result = result + "\\|"
+            case '\\':
+                result = result + "\\\\"
+            case _:
+                result = result + c
+        i += 1
+
+    return result + "$"
+
+# Filter configuration
+class DiagramFilter:
+    include_patterns: List<FilterPattern>
+    exclude_patterns: List<FilterPattern>
+
+impl DiagramFilter:
+    static fn new() -> DiagramFilter:
+        return DiagramFilter {
+            include_patterns: [],
+            exclude_patterns: [],
+        }
+
+    # Add an include pattern
+    fn add_include(pattern: text) -> void:
+        self.include_patterns.push(FilterPattern.from_glob(pattern, FilterMode.Include))
+
+    # Add multiple include patterns (comma-separated)
+    fn add_includes(patterns: text) -> void:
+        for pattern in patterns.split(","):
+            val trimmed = pattern.trim()
+            if not trimmed.is_empty():
+                self.add_include(trimmed)
+
+    # Add an exclude pattern
+    fn add_exclude(pattern: text) -> void:
+        self.exclude_patterns.push(FilterPattern.from_glob(pattern, FilterMode.Exclude))
+
+    # Add multiple exclude patterns (comma-separated)
+    fn add_excludes(patterns: text) -> void:
+        for pattern in patterns.split(","):
+            val trimmed = pattern.trim()
+            if not trimmed.is_empty():
+                self.add_exclude(trimmed)
+
+    # Check if a name should be included
+    # Rules:
+    # 1. If excluded by any pattern -> false
+    # 2. If no include patterns -> true (include all by default)
+    # 3. If include patterns exist -> must match at least one
+    fn should_include(name: text) -> bool:
+        # Check excludes first (they take precedence)
+        for pattern in self.exclude_patterns:
+            if pattern.matches(name):
+                return false
+
+        # If no include patterns, include everything
+        if self.include_patterns.is_empty():
+            return true
+
+        # Must match at least one include pattern
+        for pattern in self.include_patterns:
+            if pattern.matches(name):
+                return true
+
+        return false
+
+    # Filter a call event based on caller and callee
+    fn should_include_event(event: CallEvent) -> bool:
+        val caller = event.get_caller_participant()
+        val callee = event.get_callee_participant()
+
+        # Both caller and callee must pass filter
+        return self.should_include(caller) and self.should_include(callee)
+
+    # Filter a list of events
+    fn filter_events(events: List<CallEvent>) -> List<CallEvent>:
+        val result: List<CallEvent> = []
+        for event in events:
+            if self.should_include_event(event):
+                result.push(event)
+        return result
+
+    # Check if filter has any patterns
+    fn is_empty() -> bool:
+        return self.include_patterns.is_empty() and self.exclude_patterns.is_empty()
+
+    # Get pattern count
+    fn pattern_count() -> u32:
+        return (self.include_patterns.len() + self.exclude_patterns.len()) as u32
+
+# Builder pattern for filter creation
+fn filter() -> DiagramFilter:
+    return DiagramFilter.new()
+
+fn include(pattern: text) -> DiagramFilter:
+    val f = DiagramFilter.new()
+    f.add_include(pattern)
+    return f
+
+fn exclude(pattern: text) -> DiagramFilter:
+    val f = DiagramFilter.new()
+    f.add_exclude(pattern)
+    return f
+
+# Exports
+export FilterMode, FilterPattern, DiagramFilter
+export glob_to_regex, filter, include, exclude
