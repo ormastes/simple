@@ -131,6 +131,32 @@ pub const PRELUDE_EXTERN_FUNCTIONS: &[&str] = &[
     "default_memory_limit",
     "format_bytes",
     "parse_memory_size",
+    // Allocator functions
+    "sys_malloc",
+    "sys_free",
+    "sys_realloc",
+    // RC box operations (non-atomic)
+    "rc_box_size",
+    "rc_box_init",
+    "rc_box_get_value",
+    "rc_box_drop_value",
+    "rc_box_strong_count",
+    "rc_box_weak_count",
+    "rc_box_inc_strong",
+    "rc_box_dec_strong",
+    "rc_box_inc_weak",
+    "rc_box_dec_weak",
+    // Arc box operations (atomic)
+    "arc_box_size",
+    "arc_box_init",
+    "arc_box_get_value",
+    "arc_box_drop_value",
+    "arc_box_strong_count",
+    "arc_box_weak_count",
+    "arc_box_inc_strong",
+    "arc_box_dec_strong",
+    "arc_box_inc_weak",
+    "arc_box_dec_weak",
 ];
 
 /// Main module evaluation implementation.

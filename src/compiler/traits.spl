@@ -117,9 +117,107 @@ impl ImplBlock:
         None
 
     fn matches_type(ty: HirType) -> bool:
-        """Check if this impl matches the given type (ignoring generics for now)."""
-        # TODO: Handle generic type matching
-        self.for_type == ty
+        """Check if this impl matches the given type.
+
+        Handles generic matching:
+        - impl<T> Display for Vec<T> matches Vec<i64>
+        - impl Display for Point matches Point
+
+        Returns true if the impl can be instantiated to match ty.
+        """
+        match_types(self.for_type, ty)
+
+# ============================================================================
+# Generic Type Matching (Phase B.3.1)
+# ============================================================================
+
+fn match_types(pattern: HirType, concrete: HirType) -> bool:
+    """Check if a type pattern matches a concrete type.
+
+    Handles generic matching where pattern may contain type parameters.
+
+    Examples:
+    - match_types(Vec<T>, Vec<i64>) → true (T can be i64)
+    - match_types(Point, Point) → true
+    - match_types(Vec<T>, Point) → false
+
+    Algorithm:
+    - If pattern is TypeParam, always matches (can be anything)
+    - If both are Named, check name matches and recursively check args
+    - Otherwise, check structural equality
+    """
+    match pattern.kind:
+        case TypeParam(_, _):
+            # Type parameter matches any concrete type
+            true
+
+        case Named(pattern_symbol, pattern_args):
+            match concrete.kind:
+                case Named(concrete_symbol, concrete_args):
+                    # Check if symbols match
+                    if pattern_symbol != concrete_symbol:
+                        return false
+
+                    # Check if argument counts match
+                    if pattern_args.len() != concrete_args.len():
+                        return false
+
+                    # Recursively check each type argument
+                    for i in 0..pattern_args.len():
+                        if not match_types(pattern_args[i], concrete_args[i]):
+                            return false
+
+                    true
+                case _:
+                    false
+
+        case Function(pattern_params, pattern_ret, _):
+            match concrete.kind:
+                case Function(concrete_params, concrete_ret, _):
+                    # Check parameter count
+                    if pattern_params.len() != concrete_params.len():
+                        return false
+
+                    # Check each parameter
+                    for i in 0..pattern_params.len():
+                        if not match_types(pattern_params[i], concrete_params[i]):
+                            return false
+
+                    # Check return type
+                    match_types(pattern_ret, concrete_ret)
+                case _:
+                    false
+
+        case Tuple(pattern_elems):
+            match concrete.kind:
+                case Tuple(concrete_elems):
+                    if pattern_elems.len() != concrete_elems.len():
+                        return false
+
+                    for i in 0..pattern_elems.len():
+                        if not match_types(pattern_elems[i], concrete_elems[i]):
+                            return false
+
+                    true
+                case _:
+                    false
+
+        case Array(pattern_elem, pattern_size):
+            match concrete.kind:
+                case Array(concrete_elem, concrete_size):
+                    # Check sizes match (if both specified)
+                    if pattern_size.? and concrete_size.?:
+                        if pattern_size.unwrap() != concrete_size.unwrap():
+                            return false
+
+                    # Check element types match
+                    match_types(pattern_elem, concrete_elem)
+                case _:
+                    false
+
+        case _:
+            # For other types, use structural equality
+            pattern.kind == concrete.kind
 
 # ============================================================================
 # Trait Bound
@@ -336,11 +434,12 @@ impl TraitSolver:
     me solve_obligation(obligation: Obligation) -> Result<(), TraitError>:
         """Solve a single obligation.
 
-        Algorithm:
+        Algorithm (Phase B.3.3 enhanced with supertrait resolution):
         1. Check cache for previously solved
         2. Search for matching impl block
         3. Recursively check where clauses
-        4. Cache result
+        4. Recursively check supertrait obligations
+        5. Cache result
         """
         val ty = obligation.type_
         val trait_ = obligation.trait_
@@ -363,6 +462,14 @@ impl TraitSolver:
                             self.cache[cache_key] = false
                             return Err(e)
                         case _: pass
+
+                # NEW (Phase B.3.3): Check supertrait obligations
+                # When T: Ord, must also prove T: Eq (if Ord: Eq)
+                match self.check_supertraits(ty, trait_, obligation.span):
+                    case Err(e):
+                        self.cache[cache_key] = false
+                        return Err(e)
+                    case _: pass
 
                 # Success - cache it
                 self.cache[cache_key] = true
@@ -405,6 +512,45 @@ impl TraitSolver:
         # Will be solved in next solve_all() call
         Ok(())
 
+    me check_supertraits(ty: HirType, trait_: Symbol, span: Span) -> Result<(), TraitError>:
+        """Check that type implements all supertraits of the given trait (Phase B.3.3).
+
+        When checking T: Ord, if Ord: Eq (supertrait), we must also check T: Eq.
+
+        Algorithm:
+        1. Look up trait definition
+        2. For each supertrait, create obligation
+        3. Recursively solve obligations
+
+        Example:
+        trait Eq:
+            fn eq(other: Self) -> bool
+
+        trait Ord: Eq:  # Eq is a supertrait
+            fn cmp(other: Self) -> Ordering
+
+        When proving Point: Ord, must also prove Point: Eq
+        """
+        # Look up the trait definition
+        if not self.traits[trait_].?:
+            return Ok(())  # Trait not found - skip supertrait check
+
+        val trait_def = self.traits[trait_]
+
+        # Check each supertrait recursively
+        for supertrait_symbol in trait_def.supertraits:
+            # Create obligation for the supertrait
+            val cause = ObligationCause.TraitBound(trait_)  # Caused by trait bound
+            val supertrait_obligation = Obligation.create(ty, supertrait_symbol, cause, span)
+
+            # Recursively solve the supertrait obligation
+            match self.solve_obligation(supertrait_obligation):
+                case Err(e):
+                    return Err(e)
+                case _: pass
+
+        Ok(())
+
     fn get_trait(name: Symbol) -> TraitDef?:
         """Get trait definition by name."""
         self.traits[name]
@@ -445,18 +591,109 @@ impl TraitSolver:
     me check_coherence():
         """Check coherence rules (no overlapping impls).
 
-        For now, just checks no duplicate impls for same (trait, type) pair.
-        Full coherence checking requires more sophisticated overlap detection.
+        Coherence ensures that for any concrete type and trait, there is
+        at most one applicable impl. This prevents ambiguity.
+
+        Examples of violations:
+        - impl Display for Vec<i64>
+        - impl<T> Display for Vec<T>
+        These overlap because both match Vec<i64>.
+
+        Algorithm (Phase B.3.2):
+        For each trait, check all pairs of impls for potential overlap.
+        Two impls overlap if there exists a concrete type that matches both.
         """
         for (trait_name, impl_list) in self.impls:
-            var seen: [HirType] = []
-            for impl_block in impl_list:
-                val ty = impl_block.for_type
-                if seen.contains(ty):
-                    val error = TraitError.Overlapping(trait_name, ty, impl_block.span)
-                    self.errors = self.errors.push(error)
-                else:
-                    seen = seen.push(ty)
+            # Check all pairs of impls for overlap
+            for i in 0..impl_list.len():
+                for j in (i + 1)..impl_list.len():
+                    val impl1 = impl_list[i]
+                    val impl2 = impl_list[j]
+
+                    if impls_overlap(impl1, impl2):
+                        # Found overlapping impls - this is an error
+                        val error = TraitError.Overlapping(
+                            trait_name,
+                            impl1.for_type,
+                            impl2.span
+                        )
+                        self.errors = self.errors.push(error)
+
+fn impls_overlap(impl1: ImplBlock, impl2: ImplBlock) -> bool:
+    """Check if two impl blocks could overlap (Phase B.3.2).
+
+    Two impls overlap if there exists a concrete type that matches both.
+
+    Examples:
+    - impl Display for Vec<i64> and impl<T> Display for Vec<T> → overlap
+    - impl Display for Point and impl Display for Vec<T> → no overlap
+    - impl<T> Display for Vec<T> and impl<U> Clone for Vec<U> → no overlap (different traits)
+
+    Simplified overlap detection:
+    - If either impl has no generics, check if types are equal
+    - If both have generics, check if base types could unify
+    - Full overlap detection is complex (requires unification)
+    """
+    val ty1 = impl1.for_type
+    val ty2 = impl2.for_type
+
+    # Check if both types could match a common concrete type
+    # For a conservative approximation:
+    match ty1.kind:
+        case Named(symbol1, args1):
+            match ty2.kind:
+                case Named(symbol2, args2):
+                    # If different base types, no overlap
+                    if symbol1 != symbol2:
+                        return false
+
+                    # Same base type - could overlap
+                    # Examples:
+                    # - Vec<i64> and Vec<T> → overlap (T=i64)
+                    # - Vec<i64> and Vec<u32> → no overlap (concrete types differ)
+
+                    # If both are fully concrete (no type params), check equality
+                    val has_params1 = type_has_params(ty1)
+                    val has_params2 = type_has_params(ty2)
+
+                    if not has_params1 and not has_params2:
+                        # Both concrete - overlap only if equal
+                        return ty1 == ty2
+
+                    # At least one has type parameters - conservative: assume overlap
+                    # Full unification would be needed for precise check
+                    true
+                case _:
+                    # Different type kinds
+                    false
+        case _:
+            # For non-Named types, use simple equality check
+            ty1 == ty2
+
+fn type_has_params(ty: HirType) -> bool:
+    """Check if a type contains type parameters."""
+    match ty.kind:
+        case TypeParam(_, _):
+            true
+        case Named(_, args):
+            for arg in args:
+                if type_has_params(arg):
+                    return true
+            false
+        case Function(params, ret, _):
+            for param in params:
+                if type_has_params(param):
+                    return true
+            type_has_params(ret)
+        case Tuple(elems):
+            for elem in elems:
+                if type_has_params(elem):
+                    return true
+            false
+        case Array(elem, _):
+            type_has_params(elem)
+        case _:
+            false
 
 # ============================================================================
 # Trait Errors
