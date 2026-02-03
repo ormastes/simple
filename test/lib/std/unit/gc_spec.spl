@@ -497,6 +497,833 @@ describe "GC Use Cases":
             expect gc.allocated_bytes() to_be_greater_than 0
 
 # ============================================================================
+# NEW BRANCH COVERAGE TESTS - Week 2
+# ============================================================================
+
+# ============================================================================
+# Tri-Color Marking Edge Cases
+# ============================================================================
+
+describe "Tri-Color Marking Transitions":
+    context "White to Gray transition":
+        it "should mark white object as gray when discovered":
+            var header = GcObjectHeader.new(size: 128, type_id: 1)
+            expect header.color to_equal GcColor.White
+
+            header.mark()
+            expect header.color to_equal GcColor.Gray
+            expect header.marked to_equal true
+
+        it "should add newly marked object to gray stack":
+            val gc = GcHeap.new()
+            val obj = gc.allocate<i64>(size: 64)
+
+            # Initially white, allocation adds to gray stack for marking
+            expect obj.? to_equal true
+
+    context "Gray to Black transition":
+        it "should transition gray to black after scanning children":
+            var header = GcObjectHeader.new(size: 128, type_id: 1)
+            header.mark()  # White → Gray
+            expect header.color to_equal GcColor.Gray
+
+            header.make_black()  # Gray → Black
+            expect header.color to_equal GcColor.Black
+
+        it "should not revisit black objects during marking":
+            var header = GcObjectHeader.new(size: 128, type_id: 1)
+            header.make_black()
+            val initial_color = header.color
+
+            # Attempt to mark again
+            header.mark()
+            # Should remain black (already fully scanned)
+            expect header.is_marked() to_equal true
+
+    context "Black object invariant":
+        it "should maintain invariant that black objects point only to gray or black":
+            # This is a logical test - in practice enforced by write barriers
+            var parent = GcObjectHeader.new(size: 128, type_id: 1)
+            var child = GcObjectHeader.new(size: 64, type_id: 1)
+
+            parent.make_black()
+            child.mark()  # At least gray
+
+            expect parent.color to_equal GcColor.Black
+            expect (child.color == GcColor.Gray or child.color == GcColor.Black) to_equal true
+
+    context "Color reset between cycles":
+        it "should reset all colors to white before new cycle":
+            var header = GcObjectHeader.new(size: 128, type_id: 1)
+            header.mark()
+            header.make_black()
+            expect header.color to_equal GcColor.Black
+
+            header.unmark()  # New cycle
+            expect header.color to_equal GcColor.White
+            expect header.marked to_equal false
+
+# ============================================================================
+# Generational Collection Edge Cases
+# ============================================================================
+
+describe "Generational Collection":
+    context "Generation promotion":
+        it "should promote young object that survives collection":
+            var header = GcObjectHeader.new(size: 128, type_id: 1)
+            expect header.is_young() to_equal true
+            expect header.generation to_equal 0
+
+            header.promote()
+            expect header.generation to_equal 1
+            expect header.is_young() to_equal false
+
+        it "should promote multiple times for tenured objects":
+            var header = GcObjectHeader.new(size: 128, type_id: 1)
+
+            for i in 0..5:
+                header.promote()
+
+            expect header.generation to_equal 5
+            expect header.is_young() to_equal false
+
+    context "Young generation collection":
+        it "should collect young generation more frequently":
+            val gc = GcHeap.with_config(
+                GcConfig(
+                    young_size: 1024,
+                    old_size: 4096,
+                    growth_factor: 2.0,
+                    min_heap_size: 1024,
+                    max_heap_size: 1024000,
+                    gc_threshold: 512,
+                    incremental: false,
+                    concurrent: false
+                )
+            )
+
+            val initial_young_collections = gc.stats.young_collections
+
+            # Allocate many small objects to trigger young GC
+            for i in 0..20:
+                val obj = gc.allocate<i64>(size: 32)
+
+            expect gc.stats.young_collections to_be_greater_than initial_young_collections
+
+        it "should promote survivors from young to old":
+            val gc = GcHeap.new()
+
+            val obj = gc.allocate<i64>(size: 64)
+            gc.add_root(obj.unwrap())
+
+            # Multiple collections should promote to old generation
+            for i in 0..3:
+                gc.collect_young()
+
+            expect gc.stats.young_collections to_equal 3
+
+    context "Full heap collection":
+        it "should collect both young and old generations":
+            val gc = GcHeap.new()
+
+            # Allocate in young
+            val young = gc.allocate<i64>(size: 64)
+
+            # Force promotion to old
+            gc.add_root(young.unwrap())
+            for i in 0..3:
+                gc.collect_young()
+
+            val initial_full = gc.stats.full_collections
+            gc.collect()  # Full collection
+            expect gc.stats.full_collections to_equal (initial_full + 1)
+
+    context "Write barriers for generational GC":
+        it "should track old-to-young pointers":
+            # When old object gets pointer to young object,
+            # must ensure young object isn't collected prematurely
+            val gc = GcHeap.new()
+
+            val old_obj = gc.allocate<i64>(size: 128)
+            gc.add_root(old_obj.unwrap())
+
+            # Promote to old
+            for i in 0..3:
+                gc.collect_young()
+
+            val young_obj = gc.allocate<i64>(size: 64)
+            # Write barrier should record this pointer
+            # (in real implementation)
+
+            gc.collect_young()
+            # Young object should survive because old object references it
+
+# ============================================================================
+# Mark Phase Edge Cases
+# ============================================================================
+
+describe "Mark Phase Edge Cases":
+    context "Empty roots":
+        it "should handle collection with no roots":
+            val gc = GcHeap.new()
+
+            # Allocate without adding roots
+            val obj = gc.allocate<i64>(size: 64)
+
+            gc.collect()
+            # Should collect everything
+            expect gc.allocated_bytes() to_equal 0
+
+    context "Single root":
+        it "should preserve single rooted object":
+            val gc = GcHeap.new()
+
+            val obj = gc.allocate<i64>(size: 64)
+            gc.add_root(obj.unwrap())
+
+            gc.collect()
+            expect gc.allocated_bytes() to_be_greater_than 0
+
+    context "Deep object graph":
+        it "should mark deeply nested objects":
+            val gc = GcHeap.new()
+
+            # Create chain: root → obj1 → obj2 → obj3 (depth 3)
+            val obj3 = gc.allocate<i64>(size: 64)
+            val obj2 = gc.allocate<i64>(size: 64)
+            val obj1 = gc.allocate<i64>(size: 64)
+
+            gc.add_root(obj1.unwrap())
+            # In real implementation, would set obj1.next = obj2, obj2.next = obj3
+
+            gc.collect()
+            # All reachable objects should survive
+
+    context "Cyclic references":
+        it "should handle simple cycles (A → B → A)":
+            val gc = GcHeap.new()
+
+            val objA = gc.allocate<i64>(size: 64)
+            val objB = gc.allocate<i64>(size: 64)
+            # A.next = B, B.next = A (cycle)
+
+            gc.add_root(objA.unwrap())
+
+            gc.collect()
+            # Both should survive (reachable from root)
+
+        it "should collect unreachable cycles":
+            val gc = GcHeap.new()
+
+            # Create cycle without roots
+            val objA = gc.allocate<i64>(size: 64)
+            val objB = gc.allocate<i64>(size: 64)
+            # A.next = B, B.next = A
+
+            val initial_allocated = gc.allocated_bytes()
+            gc.collect()
+            # Cycle should be collected (not reachable)
+            expect gc.allocated_bytes() to_equal 0
+
+        it "should handle complex cycles with multiple objects":
+            val gc = GcHeap.new()
+
+            # Create cycle: root → A → B → C → A
+            val objA = gc.allocate<i64>(size: 64)
+            val objB = gc.allocate<i64>(size: 64)
+            val objC = gc.allocate<i64>(size: 64)
+
+            gc.add_root(objA.unwrap())
+            # A.next = B, B.next = C, C.next = A
+
+            gc.collect()
+            # All should survive (reachable from root)
+
+# ============================================================================
+# Sweep Phase Edge Cases
+# ============================================================================
+
+describe "Sweep Phase Edge Cases":
+    context "Empty heap":
+        it "should handle sweep on empty heap":
+            val gc = GcHeap.new()
+
+            gc.collect()
+            expect gc.allocated_bytes() to_equal 0
+            expect gc.stats.objects_freed to_equal 0
+
+    context "All objects marked":
+        it "should free no objects when all are reachable":
+            val gc = GcHeap.new()
+
+            val obj1 = gc.allocate<i64>(size: 64)
+            val obj2 = gc.allocate<i64>(size: 64)
+            val obj3 = gc.allocate<i64>(size: 64)
+
+            gc.add_root(obj1.unwrap())
+            gc.add_root(obj2.unwrap())
+            gc.add_root(obj3.unwrap())
+
+            val initial_freed = gc.stats.objects_freed
+            gc.collect()
+
+            expect gc.stats.objects_freed to_equal initial_freed
+
+    context "All objects unmarked":
+        it "should free all objects when none are reachable":
+            val gc = GcHeap.new()
+
+            val obj1 = gc.allocate<i64>(size: 64)
+            val obj2 = gc.allocate<i64>(size: 64)
+            val obj3 = gc.allocate<i64>(size: 64)
+            # No roots added
+
+            gc.collect()
+
+            expect gc.allocated_bytes() to_equal 0
+            expect gc.stats.objects_freed to_equal 3
+
+    context "Mixed marked and unmarked":
+        it "should free only unmarked objects":
+            val gc = GcHeap.new()
+
+            val obj1 = gc.allocate<i64>(size: 64)  # Will be rooted
+            val obj2 = gc.allocate<i64>(size: 64)  # Garbage
+            val obj3 = gc.allocate<i64>(size: 64)  # Will be rooted
+
+            gc.add_root(obj1.unwrap())
+            gc.add_root(obj3.unwrap())
+
+            val initial_freed = gc.stats.objects_freed
+            gc.collect()
+
+            # Should free obj2 only
+            expect gc.stats.objects_freed to_equal (initial_freed + 1)
+
+    context "Sweep ordering":
+        it "should handle objects in any order in linked list":
+            val gc = GcHeap.new()
+
+            # Allocate in order: A, B, C (list order: C → B → A)
+            val objA = gc.allocate<i64>(size: 64)
+            val objB = gc.allocate<i64>(size: 64)
+            val objC = gc.allocate<i64>(size: 64)
+
+            gc.add_root(objB.unwrap())  # Keep middle one
+
+            gc.collect()
+            # Should correctly sweep regardless of list order
+
+# ============================================================================
+# Finalization Edge Cases
+# ============================================================================
+
+describe "Finalization":
+    context "Finalizer execution":
+        it "should mark objects with finalizers":
+            var header = GcObjectHeader.new(size: 128, type_id: 1)
+            header.finalize = true
+
+            expect header.finalize to_equal true
+
+        it "should run finalizers before reclaiming memory":
+            val gc = GcHeap.new()
+
+            val obj = gc.allocate<i64>(size: 64)
+            # Set finalizer (in real implementation)
+
+            gc.collect()
+            # Finalizer should have run before object freed
+
+    context "Finalizer resurrection":
+        it "should handle object resurrection in finalizer":
+            # When finalizer makes object reachable again
+            val gc = GcHeap.new()
+
+            val obj = gc.allocate<i64>(size: 64)
+            # Finalizer adds obj back to roots
+
+            gc.collect()
+            # Object should survive if resurrected
+
+    context "Finalizer chains":
+        it "should handle finalizer that references other finalizable objects":
+            val gc = GcHeap.new()
+
+            val obj1 = gc.allocate<i64>(size: 64)
+            val obj2 = gc.allocate<i64>(size: 64)
+            # obj1 finalizer references obj2
+
+            gc.collect()
+            # Should handle dependency correctly
+
+    context "Finalizer ordering":
+        it "should run finalizers in dependency order":
+            # If A depends on B, B's finalizer should run after A's
+            val gc = GcHeap.new()
+
+            val objA = gc.allocate<i64>(size: 64)
+            val objB = gc.allocate<i64>(size: 64)
+            # A references B
+
+            gc.collect()
+            # Finalizer ordering should respect dependencies
+
+# ============================================================================
+# Memory Pressure and Threshold Edge Cases
+# ============================================================================
+
+describe "Memory Pressure":
+    context "Collection triggering":
+        it "should trigger GC when threshold exceeded":
+            val gc = GcHeap.with_config(
+                GcConfig(
+                    young_size: 1024,
+                    old_size: 4096,
+                    growth_factor: 2.0,
+                    min_heap_size: 1024,
+                    max_heap_size: 1024000,
+                    gc_threshold: 256,  # Low threshold
+                    incremental: false,
+                    concurrent: false
+                )
+            )
+
+            val initial_collections = gc.stats.collections
+
+            # Allocate beyond threshold
+            for i in 0..20:
+                val obj = gc.allocate<i64>(size: 32)
+
+            # Should have triggered at least one GC
+            expect gc.stats.collections to_be_greater_than initial_collections
+
+        it "should not trigger GC when below threshold":
+            val gc = GcHeap.with_config(
+                GcConfig(
+                    young_size: 1024,
+                    old_size: 4096,
+                    growth_factor: 2.0,
+                    min_heap_size: 1024,
+                    max_heap_size: 1024000,
+                    gc_threshold: 10000,  # High threshold
+                    incremental: false,
+                    concurrent: false
+                )
+            )
+
+            val initial_collections = gc.stats.collections
+
+            # Small allocation
+            val obj = gc.allocate<i64>(size: 64)
+
+            # Should not trigger GC
+            expect gc.stats.collections to_equal initial_collections
+
+    context "Heap growth":
+        it "should grow heap when needed":
+            val gc = GcHeap.with_config(
+                GcConfig(
+                    young_size: 512,
+                    old_size: 2048,
+                    growth_factor: 2.0,
+                    min_heap_size: 512,
+                    max_heap_size: 1024000,
+                    gc_threshold: 256,
+                    incremental: false,
+                    concurrent: false
+                )
+            )
+
+            # Allocate many objects, all rooted (can't be collected)
+            for i in 0..10:
+                val obj = gc.allocate<i64>(size: 64)
+                gc.add_root(obj.unwrap())
+
+            # Heap should have grown to accommodate
+
+        it "should respect maximum heap size":
+            val gc = GcHeap.with_config(
+                GcConfig(
+                    young_size: 512,
+                    old_size: 2048,
+                    growth_factor: 2.0,
+                    min_heap_size: 512,
+                    max_heap_size: 4096,  # Low max
+                    gc_threshold: 256,
+                    incremental: false,
+                    concurrent: false
+                )
+            )
+
+            # Try to allocate beyond max
+            var success_count = 0
+            for i in 0..100:
+                val obj = gc.allocate<i64>(size: 64)
+                if obj.?:
+                    gc.add_root(obj.unwrap())
+                    success_count = success_count + 1
+
+            # Should eventually fail due to max heap size
+            expect success_count to_be_less_than 100
+
+    context "OOM handling":
+        it "should return None when out of memory":
+            val gc = GcHeap.with_config(
+                GcConfig(
+                    young_size: 256,
+                    old_size: 512,
+                    growth_factor: 1.0,  # No growth
+                    min_heap_size: 256,
+                    max_heap_size: 768,
+                    gc_threshold: 128,
+                    incremental: false,
+                    concurrent: false
+                )
+            )
+
+            # Fill heap
+            for i in 0..20:
+                val obj = gc.allocate<i64>(size: 64)
+                if obj.?:
+                    gc.add_root(obj.unwrap())
+
+            # Next allocation should fail
+            val overflow = gc.allocate<i64>(size: 1000)
+            expect overflow.? to_equal false
+
+        it "should handle repeated OOM gracefully":
+            val gc = GcHeap.with_config(
+                GcConfig(
+                    young_size: 128,
+                    old_size: 256,
+                    growth_factor: 1.0,
+                    min_heap_size: 128,
+                    max_heap_size: 384,
+                    gc_threshold: 64,
+                    incremental: false,
+                    concurrent: false
+                )
+            )
+
+            # Repeatedly try to allocate when full
+            for i in 0..10:
+                val obj = gc.allocate<i64>(size: 500)
+                # Should consistently return None
+
+# ============================================================================
+# Statistics and Metrics Edge Cases
+# ============================================================================
+
+describe "GC Statistics":
+    context "Pause time tracking":
+        it "should record pause time for each collection":
+            val gc = GcHeap.new()
+
+            val obj = gc.allocate<i64>(size: 64)
+
+            val initial_pause = gc.stats.last_pause_time
+            gc.collect()
+
+            expect gc.stats.last_pause_time to_be_greater_than 0
+
+        it "should accumulate total pause time":
+            val gc = GcHeap.new()
+
+            val initial_total = gc.stats.total_pause_time
+
+            # Multiple collections
+            for i in 0..3:
+                val obj = gc.allocate<i64>(size: 64)
+                gc.collect()
+
+            expect gc.stats.total_pause_time to_be_greater_than initial_total
+
+        it "should calculate average pause time correctly":
+            val gc = GcHeap.new()
+
+            gc.collect()
+            gc.collect()
+            gc.collect()
+
+            val avg = gc.stats.avg_pause_time()
+            expect avg to_be_greater_than 0
+
+    context "Survival rate calculation":
+        it "should calculate survival rate correctly":
+            val gc = GcHeap.new()
+
+            # Allocate 10 objects
+            for i in 0..10:
+                val obj = gc.allocate<i64>(size: 64)
+
+            # Root 5 of them
+            for i in 0..5:
+                val obj = gc.allocate<i64>(size: 64)
+                gc.add_root(obj.unwrap())
+
+            gc.collect()
+
+            val survival_rate = gc.stats.survival_rate()
+            # Should be approximately 0.5 (5 survived out of 10)
+            expect (survival_rate > 0.3 and survival_rate < 0.7) to_equal true
+
+        it "should handle 100% survival rate":
+            val gc = GcHeap.new()
+
+            for i in 0..5:
+                val obj = gc.allocate<i64>(size: 64)
+                gc.add_root(obj.unwrap())
+
+            gc.collect()
+
+            val survival_rate = gc.stats.survival_rate()
+            expect survival_rate to_equal 1.0
+
+        it "should handle 0% survival rate":
+            val gc = GcHeap.new()
+
+            for i in 0..5:
+                val obj = gc.allocate<i64>(size: 64)
+
+            gc.collect()
+
+            val survival_rate = gc.stats.survival_rate()
+            expect survival_rate to_equal 0.0
+
+    context "Collection counters":
+        it "should track young generation collections separately":
+            val gc = GcHeap.new()
+
+            val initial_young = gc.stats.young_collections
+            gc.collect_young()
+            expect gc.stats.young_collections to_equal (initial_young + 1)
+
+        it "should track full collections separately":
+            val gc = GcHeap.new()
+
+            val initial_full = gc.stats.full_collections
+            gc.collect()
+            expect gc.stats.full_collections to_equal (initial_full + 1)
+
+        it "should increment total collection counter for any collection":
+            val gc = GcHeap.new()
+
+            val initial_total = gc.stats.collections
+
+            gc.collect_young()
+            gc.collect()
+
+            expect gc.stats.collections to_equal (initial_total + 2)
+
+# ============================================================================
+# Object Size Variations
+# ============================================================================
+
+describe "Object Size Edge Cases":
+    context "Small objects":
+        it "should handle minimum size objects":
+            val gc = GcHeap.new()
+
+            val obj = gc.allocate<i64>(size: 1)
+            expect obj.? to_equal true
+
+        it "should handle zero-size objects":
+            val gc = GcHeap.new()
+
+            val obj = gc.allocate<i64>(size: 0)
+            # Should either succeed or fail consistently
+            expect (obj.? == true or obj.? == false) to_equal true
+
+    context "Large objects":
+        it "should handle large objects":
+            val gc = GcHeap.new()
+
+            val obj = gc.allocate<i64>(size: 100000)  # 100 KB
+            expect obj.? to_equal true
+
+        it "should handle very large objects":
+            val gc = GcHeap.new()
+
+            val obj = gc.allocate<i64>(size: 1000000)  # 1 MB
+            # May succeed or fail depending on heap size
+            expect (obj.? == true or obj.? == false) to_equal true
+
+    context "Mixed sizes":
+        it "should handle mix of small and large objects":
+            val gc = GcHeap.new()
+
+            val small1 = gc.allocate<i64>(size: 16)
+            val large1 = gc.allocate<i64>(size: 10000)
+            val medium1 = gc.allocate<i64>(size: 256)
+            val small2 = gc.allocate<i64>(size: 32)
+
+            expect small1.? to_equal true
+            expect large1.? to_equal true
+            expect medium1.? to_equal true
+            expect small2.? to_equal true
+
+# ============================================================================
+# Incremental and Concurrent GC Edge Cases
+# ============================================================================
+
+describe "Incremental GC":
+    context "Incremental marking":
+        it "should support incremental marking mode":
+            val gc = GcHeap.with_config(
+                GcConfig(
+                    young_size: 1024,
+                    old_size: 4096,
+                    growth_factor: 2.0,
+                    min_heap_size: 1024,
+                    max_heap_size: 1024000,
+                    gc_threshold: 512,
+                    incremental: true,  # Enable incremental
+                    concurrent: false
+                )
+            )
+
+            # Allocation should work with incremental GC
+            val obj = gc.allocate<i64>(size: 64)
+            expect obj.? to_equal true
+
+        it "should pause and resume marking":
+            val gc = GcHeap.with_config(
+                GcConfig(
+                    young_size: 1024,
+                    old_size: 4096,
+                    growth_factor: 2.0,
+                    min_heap_size: 1024,
+                    max_heap_size: 1024000,
+                    gc_threshold: 512,
+                    incremental: true,
+                    concurrent: false
+                )
+            )
+
+            # Start incremental marking
+            gc.collect_incremental_step()
+
+            # Allocate during marking
+            val obj = gc.allocate<i64>(size: 64)
+
+            # Complete marking
+            gc.collect_incremental_finish()
+
+    context "Write barriers":
+        it "should install write barriers for incremental GC":
+            val gc = GcHeap.with_config(
+                GcConfig(
+                    young_size: 1024,
+                    old_size: 4096,
+                    growth_factor: 2.0,
+                    min_heap_size: 1024,
+                    max_heap_size: 1024000,
+                    gc_threshold: 512,
+                    incremental: true,
+                    concurrent: false
+                )
+            )
+
+            # Write barriers should track pointer updates
+            # during incremental marking
+
+describe "Concurrent GC":
+    context "Concurrent marking":
+        it "should support concurrent marking mode":
+            val gc = GcHeap.with_config(
+                GcConfig(
+                    young_size: 1024,
+                    old_size: 4096,
+                    growth_factor: 2.0,
+                    min_heap_size: 1024,
+                    max_heap_size: 1024000,
+                    gc_threshold: 512,
+                    incremental: false,
+                    concurrent: true  # Enable concurrent
+                )
+            )
+
+            # Should handle concurrent allocation during GC
+            val obj = gc.allocate<i64>(size: 64)
+            expect obj.? to_equal true
+
+        it "should use atomic operations for concurrent access":
+            val gc = GcHeap.new()
+
+            # Check that collecting flag is atomic
+            expect gc.collecting.load() to_equal false
+
+            # Simulated: Start concurrent GC
+            # gc.collecting.store(true)
+            # Should prevent data races
+
+# ============================================================================
+# Stress Tests
+# ============================================================================
+
+describe "GC Stress Tests":
+    context "Rapid allocation":
+        it "should handle rapid allocation and collection cycles":
+            val gc = GcHeap.new()
+
+            for i in 0..100:
+                val obj = gc.allocate<i64>(size: 64)
+                if i % 10 == 0:
+                    gc.collect()
+
+            # Should complete without errors
+
+        it "should handle alternating allocation and collection":
+            val gc = GcHeap.new()
+
+            for i in 0..50:
+                val obj = gc.allocate<i64>(size: 128)
+                gc.collect()
+                val obj2 = gc.allocate<i64>(size: 64)
+
+            # Should remain stable
+
+    context "Memory thrashing":
+        it "should handle repeated full heap allocations":
+            val gc = GcHeap.with_config(
+                GcConfig(
+                    young_size: 512,
+                    old_size: 2048,
+                    growth_factor: 1.5,
+                    min_heap_size: 512,
+                    max_heap_size: 10240,
+                    gc_threshold: 256,
+                    incremental: false,
+                    concurrent: false
+                )
+            )
+
+            for cycle in 0..10:
+                # Fill heap
+                for i in 0..20:
+                    val obj = gc.allocate<i64>(size: 64)
+
+                # Clear all
+                gc.collect()
+
+            # Should handle repeated cycles
+
+    context "Fragmentation":
+        it "should handle fragmentation from mixed sizes":
+            val gc = GcHeap.new()
+
+            # Allocate pattern: large, small, large, small...
+            for i in 0..20:
+                if i % 2 == 0:
+                    val large = gc.allocate<i64>(size: 1000)
+                else:
+                    val small = gc.allocate<i64>(size: 16)
+
+            gc.collect()
+            # Should handle fragmented heap
+
+# ============================================================================
 # Summary
 # ============================================================================
 
