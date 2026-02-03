@@ -4,41 +4,22 @@
 # preconditions, postconditions, invariants, and old() value capture.
 #
 # Port of rust/compiler/src/interpreter_contract.rs
+#
+# Uses shared contract types from src/shared/contracts.spl:
+# - ContractMode: Controls when contract checks are enabled
+# - ContractKind: Precondition, Postcondition, Invariant
+# - ContractViolation: Structured violation information
 
 from eval import {Interpreter, Value, InterpreterError}
+from shared.contracts import {ContractMode, ContractKind, ContractViolation}
 
-export OldValueCapture, ContractViolation
+export OldValueCapture
 export check_contract, capture_old_values
 export check_entry_contracts, check_exit_contracts
+export ContractMode, ContractKind, ContractViolation
 
-# ============================================================================
-# Contract Violation Error
-# ============================================================================
-
-enum ContractViolation:
-    """Type of contract violation."""
-    Precondition(func_name: text, message: text?)
-    Postcondition(func_name: text, message: text?)
-    Invariant(func_name: text, message: text?, is_exit: bool)
-
-fn violation_message(v: ContractViolation) -> text:
-    match v:
-        case Precondition(func, msg):
-            if msg.?:
-                "Precondition violation in function '{func}': {msg.unwrap()}"
-            else:
-                "Precondition violation in function '{func}': contract condition failed"
-        case Postcondition(func, msg):
-            if msg.?:
-                "Postcondition violation in function '{func}': {msg.unwrap()}"
-            else:
-                "Postcondition violation in function '{func}': contract condition failed"
-        case Invariant(func, msg, is_exit):
-            val phase = if is_exit: "Exit" else: "Entry"
-            if msg.?:
-                "{phase} invariant violation in function '{func}': {msg.unwrap()}"
-            else:
-                "{phase} invariant violation in function '{func}': contract condition failed"
+# Re-export shared types for backward compatibility
+# (consumers can import from either location)
 
 # ============================================================================
 # Old Value Capture
@@ -66,17 +47,21 @@ impl OldValueCapture:
 # Core Contract Checking
 # ============================================================================
 
-fn check_contract(condition: bool, kind: text, func_name: text, message: text?) -> Result<(), text>:
-    """Check a contract condition. Returns Err with violation message if false."""
+fn check_contract(condition: bool, kind: ContractKind, func_name: text, message: text?) -> Result<(), ContractViolation>:
+    """Check a contract condition. Returns Err with violation info if false."""
     if not condition:
-        if message.?:
-            Err("{kind} violation in function '{func_name}': {message.unwrap()}")
-        else:
-            Err("{kind} violation in function '{func_name}': contract condition failed")
+        Err(ContractViolation(
+            kind: kind,
+            func_name: func_name,
+            expression: "",
+            message: message,
+            source_file: nil,
+            source_line: nil
+        ))
     else:
         Ok(())
 
-fn check_clause(interp: Interpreter, condition: Expr, kind: text,
+fn check_clause(interp: Interpreter, condition: Expr, kind: ContractKind,
                 func_name: text, message: text?) -> Result<(), InterpreterError>:
     """Evaluate a contract clause condition and check the result."""
     val result = interp.eval_expr(condition)?
@@ -84,11 +69,15 @@ fn check_clause(interp: Interpreter, condition: Expr, kind: text,
         return Err(InterpreterError.TypeError(
             "contract condition must evaluate to bool, got {result.type_name()}"))
     if not result.as_bool():
-        val msg = if message.?:
-            "{kind} violation in function '{func_name}': {message.unwrap()}"
-        else:
-            "{kind} violation in function '{func_name}': contract condition failed"
-        return Err(InterpreterError.RuntimeError(msg))
+        val violation = ContractViolation(
+            kind: kind,
+            func_name: func_name,
+            expression: condition.to_string(),
+            message: message,
+            source_file: nil,
+            source_line: nil
+        )
+        return Err(InterpreterError.RuntimeError(violation.format()))
     Ok(())
 
 # ============================================================================
@@ -151,11 +140,11 @@ fn check_entry_contracts(interp: Interpreter, contract: ContractBlock,
     """Check preconditions and entry invariants before function execution."""
     # 1. Preconditions
     for clause in contract.preconditions:
-        check_clause(interp, clause.condition, "Precondition", func_name, clause.message)?
+        check_clause(interp, clause.condition, ContractKind.Precondition, func_name, clause.message)?
 
     # 2. Entry invariants
     for clause in contract.invariants:
-        check_clause(interp, clause.condition, "Entry invariant", func_name, clause.message)?
+        check_clause(interp, clause.condition, ContractKind.Invariant, func_name, clause.message)?
 
     Ok(())
 
@@ -171,7 +160,7 @@ fn check_exit_contracts(interp: Interpreter, contract: ContractBlock,
 
     # 1. Exit invariants
     for clause in contract.invariants:
-        check_clause(interp, clause.condition, "Exit invariant", func_name, clause.message)?
+        check_clause(interp, clause.condition, ContractKind.Invariant, func_name, clause.message)?
 
     # 2. Postconditions (with result binding and old() substitution)
     interp.env.push_scope()
@@ -180,7 +169,7 @@ fn check_exit_contracts(interp: Interpreter, contract: ContractBlock,
     for clause in contract.postconditions:
         # Substitute old() expressions with captured values
         val condition = substitute_old_exprs(clause.condition, old_captures)
-        check_clause(interp, condition, "Postcondition", func_name, clause.message)?
+        check_clause(interp, condition, ContractKind.Postcondition, func_name, clause.message)?
 
     interp.env.pop_scope()
     Ok(())

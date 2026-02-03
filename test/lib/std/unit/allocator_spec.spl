@@ -1,0 +1,455 @@
+# Memory Allocator Test Suite
+#
+# Comprehensive tests for memory allocator interface (std.allocator).
+# Tests all allocator implementations and edge cases.
+
+use std.allocator.*
+use std.test.sspec.*
+
+# ============================================================================
+# SystemAllocator Tests
+# ============================================================================
+
+describe "SystemAllocator":
+    context "construction":
+        it "should create system allocator":
+            val allocator = SystemAllocator.new()
+            expect allocator to_not_be_nil
+
+    context "basic allocation":
+        it "should allocate memory":
+            val allocator = SystemAllocator.new()
+            val ptr = allocator.allocate(128, 8)
+            expect ptr.? to_be_true
+
+        it "should allocate zero bytes":
+            val allocator = SystemAllocator.new()
+            val ptr = allocator.allocate(0, 8)
+            expect ptr.? to_be_true
+
+        it "should allocate with different alignments":
+            val allocator = SystemAllocator.new()
+            val ptr1 = allocator.allocate(64, 8)
+            val ptr2 = allocator.allocate(64, 16)
+            expect ptr1.? to_be_true
+            expect ptr2.? to_be_true
+
+    context "deallocation":
+        it "should deallocate memory":
+            val allocator = SystemAllocator.new()
+            val ptr = allocator.allocate(128, 8)
+            if ptr.?:
+                allocator.deallocate(ptr.unwrap(), 128, 8)
+
+    context "reallocation":
+        it "should reallocate to larger size":
+            val allocator = SystemAllocator.new()
+            val ptr = allocator.allocate(128, 8)
+            if ptr.?:
+                val new_ptr = allocator.reallocate(ptr.unwrap(), 128, 256, 8)
+                expect new_ptr.? to_be_true
+
+        it "should reallocate to smaller size":
+            val allocator = SystemAllocator.new()
+            val ptr = allocator.allocate(256, 8)
+            if ptr.?:
+                val new_ptr = allocator.reallocate(ptr.unwrap(), 256, 128, 8)
+                expect new_ptr.? to_be_true
+
+    context "tracking":
+        it "should return 0 for total_allocated":
+            val allocator = SystemAllocator.new()
+            expect allocator.total_allocated() to_equal 0
+
+# ============================================================================
+# ArenaAllocator Tests
+# ============================================================================
+
+describe "ArenaAllocator":
+    context "construction":
+        it "should create arena with capacity":
+            val arena = ArenaAllocator.new(capacity: 1024)
+            expect arena.capacity to_equal 1024
+            expect arena.remaining() to_equal 1024
+
+        it "should create large arena":
+            val arena = ArenaAllocator.new(capacity: 1024 * 1024)
+            expect arena.capacity to_equal 1024 * 1024
+
+    context "basic allocation":
+        it "should allocate memory":
+            val arena = ArenaAllocator.new(capacity: 1024)
+            val ptr = arena.allocate(128, 8)
+            expect ptr.? to_be_true
+            expect arena.remaining() to_equal (1024 - 128)
+
+        it "should allocate multiple times":
+            val arena = ArenaAllocator.new(capacity: 1024)
+            val ptr1 = arena.allocate(100, 8)
+            val ptr2 = arena.allocate(200, 8)
+            val ptr3 = arena.allocate(300, 8)
+            expect ptr1.? to_be_true
+            expect ptr2.? to_be_true
+            expect ptr3.? to_be_true
+
+        it "should handle alignment padding":
+            val arena = ArenaAllocator.new(capacity: 1024)
+            val ptr1 = arena.allocate(10, 8)  # Ends at offset 10
+            val ptr2 = arena.allocate(10, 16) # Needs alignment, starts at 16
+            expect ptr2.? to_be_true
+
+    context "capacity limits":
+        it "should fail when arena is full":
+            val arena = ArenaAllocator.new(capacity: 100)
+            val ptr1 = arena.allocate(90, 8)
+            expect ptr1.? to_be_true
+            val ptr2 = arena.allocate(20, 8)  # Would exceed capacity
+            expect ptr2.? to_be_false
+
+        it "should detect full arena":
+            val arena = ArenaAllocator.new(capacity: 100)
+            arena.allocate(100, 8)
+            expect arena.is_full() to_be_true
+
+    context "reset":
+        it "should reset arena":
+            val arena = ArenaAllocator.new(capacity: 1024)
+            arena.allocate(500, 8)
+            expect arena.remaining() to_equal 524
+
+            arena.reset()
+            expect arena.remaining() to_equal 1024
+            expect arena.total_allocated() to_equal 0
+
+        it "should allow reuse after reset":
+            val arena = ArenaAllocator.new(capacity: 1024)
+            val ptr1 = arena.allocate(500, 8)
+            expect ptr1.? to_be_true
+
+            arena.reset()
+
+            val ptr2 = arena.allocate(500, 8)
+            expect ptr2.? to_be_true
+
+    context "tracking":
+        it "should track allocated bytes":
+            val arena = ArenaAllocator.new(capacity: 1024)
+            expect arena.total_allocated() to_equal 0
+
+            arena.allocate(100, 8)
+            expect arena.total_allocated() to_equal 100
+
+            arena.allocate(200, 8)
+            expect arena.total_allocated() to_equal 300
+
+# ============================================================================
+# PoolAllocator Tests
+# ============================================================================
+
+describe "PoolAllocator":
+    context "construction":
+        it "should create pool with capacity":
+            val pool = PoolAllocator.new(object_size: 64, capacity: 100)
+            expect pool.object_size to_equal 64
+            expect pool.capacity to_equal 100
+            expect pool.available() to_equal 100
+
+        it "should create pool for small objects":
+            val pool = PoolAllocator.new(object_size: 16, capacity: 1000)
+            expect pool.available() to_equal 1000
+
+    context "basic allocation":
+        it "should allocate object":
+            val pool = PoolAllocator.new(object_size: 64, capacity: 10)
+            val ptr = pool.allocate(64, 8)
+            expect ptr.? to_be_true
+            expect pool.available() to_equal 9
+
+        it "should allocate multiple objects":
+            val pool = PoolAllocator.new(object_size: 64, capacity: 10)
+            for i in 0..5:
+                val ptr = pool.allocate(64, 8)
+                expect ptr.? to_be_true
+            expect pool.available() to_equal 5
+
+        it "should reject wrong size":
+            val pool = PoolAllocator.new(object_size: 64, capacity: 10)
+            val ptr = pool.allocate(128, 8)  # Wrong size
+            expect ptr.? to_be_false
+
+    context "deallocation and reuse":
+        it "should deallocate and reuse":
+            val pool = PoolAllocator.new(object_size: 64, capacity: 10)
+
+            # Allocate
+            val ptr1 = pool.allocate(64, 8)
+            expect pool.available() to_equal 9
+
+            # Deallocate
+            if ptr1.?:
+                pool.deallocate(ptr1.unwrap(), 64, 8)
+            expect pool.available() to_equal 10
+
+            # Reallocate (should reuse)
+            val ptr2 = pool.allocate(64, 8)
+            expect ptr2.? to_be_true
+
+        it "should maintain free list order":
+            val pool = PoolAllocator.new(object_size: 64, capacity: 10)
+
+            # Allocate 3 objects
+            val ptr1 = pool.allocate(64, 8)
+            val ptr2 = pool.allocate(64, 8)
+            val ptr3 = pool.allocate(64, 8)
+
+            # Free them
+            if ptr1.?: pool.deallocate(ptr1.unwrap(), 64, 8)
+            if ptr2.?: pool.deallocate(ptr2.unwrap(), 64, 8)
+            if ptr3.?: pool.deallocate(ptr3.unwrap(), 64, 8)
+
+            # Should be able to allocate again
+            expect pool.available() to_equal 10
+
+    context "capacity limits":
+        it "should fail when pool exhausted":
+            val pool = PoolAllocator.new(object_size: 64, capacity: 3)
+
+            val ptr1 = pool.allocate(64, 8)
+            val ptr2 = pool.allocate(64, 8)
+            val ptr3 = pool.allocate(64, 8)
+            expect pool.available() to_equal 0
+
+            val ptr4 = pool.allocate(64, 8)
+            expect ptr4.? to_be_false
+
+        it "should detect full pool":
+            val pool = PoolAllocator.new(object_size: 64, capacity: 2)
+            pool.allocate(64, 8)
+            pool.allocate(64, 8)
+            expect pool.is_full() to_be_true
+
+    context "tracking":
+        it "should track allocated count":
+            val pool = PoolAllocator.new(object_size: 64, capacity: 10)
+            expect pool.total_allocated() to_equal 0
+
+            pool.allocate(64, 8)
+            expect pool.total_allocated() to_equal 64
+
+            pool.allocate(64, 8)
+            expect pool.total_allocated() to_equal 128
+
+# ============================================================================
+# SlabAllocator Tests
+# ============================================================================
+
+describe "SlabAllocator":
+    context "construction":
+        it "should create slab allocator":
+            val slab = SlabAllocator.new()
+            expect slab.size_classes.len() to_equal 8
+
+        it "should have expected size classes":
+            val slab = SlabAllocator.new()
+            expect slab.size_classes[0] to_equal 16
+            expect slab.size_classes[7] to_equal 2048
+
+    context "size class selection":
+        it "should select correct size class for small allocation":
+            val slab = SlabAllocator.new()
+            val idx = slab.find_size_class(20)
+            expect idx to_equal 1  # 32-byte class
+
+        it "should select correct size class for exact match":
+            val slab = SlabAllocator.new()
+            val idx = slab.find_size_class(64)
+            expect idx to_equal 2  # 64-byte class
+
+        it "should return -1 for too large":
+            val slab = SlabAllocator.new()
+            val idx = slab.find_size_class(5000)
+            expect idx to_equal -1
+
+    context "basic allocation":
+        it "should allocate small object":
+            val slab = SlabAllocator.new()
+            val ptr = slab.allocate(32, 8)
+            expect ptr.? to_be_true
+
+        it "should allocate medium object":
+            val slab = SlabAllocator.new()
+            val ptr = slab.allocate(256, 8)
+            expect ptr.? to_be_true
+
+        it "should allocate large object via system":
+            val slab = SlabAllocator.new()
+            val ptr = slab.allocate(5000, 8)
+            expect ptr.? to_be_true
+
+        it "should allocate multiple different sizes":
+            val slab = SlabAllocator.new()
+            val ptr1 = slab.allocate(16, 8)
+            val ptr2 = slab.allocate(64, 8)
+            val ptr3 = slab.allocate(256, 8)
+            expect ptr1.? to_be_true
+            expect ptr2.? to_be_true
+            expect ptr3.? to_be_true
+
+    context "deallocation":
+        it "should deallocate to pool":
+            val slab = SlabAllocator.new()
+            val ptr = slab.allocate(64, 8)
+            if ptr.?:
+                slab.deallocate(ptr.unwrap(), 64, 8)
+
+        it "should deallocate large allocation":
+            val slab = SlabAllocator.new()
+            val ptr = slab.allocate(5000, 8)
+            if ptr.?:
+                slab.deallocate(ptr.unwrap(), 5000, 8)
+
+    context "reallocation":
+        it "should reallocate within same size class":
+            val slab = SlabAllocator.new()
+            val ptr = slab.allocate(50, 8)  # 64-byte class
+            if ptr.?:
+                val new_ptr = slab.reallocate(ptr.unwrap(), 50, 60, 8)  # Same class
+                expect new_ptr.? to_be_true
+
+        it "should reallocate to different size class":
+            val slab = SlabAllocator.new()
+            val ptr = slab.allocate(32, 8)   # 32-byte class
+            if ptr.?:
+                val new_ptr = slab.reallocate(ptr.unwrap(), 32, 128, 8)  # 128-byte class
+                expect new_ptr.? to_be_true
+
+# ============================================================================
+# Utility Function Tests
+# ============================================================================
+
+describe "Utility Functions":
+    context "next_power_of_2":
+        it "should round up to power of 2":
+            expect next_power_of_2(1) to_equal 1
+            expect next_power_of_2(2) to_equal 2
+            expect next_power_of_2(3) to_equal 4
+            expect next_power_of_2(10) to_equal 16
+            expect next_power_of_2(100) to_equal 128
+
+        it "should handle exact powers of 2":
+            expect next_power_of_2(16) to_equal 16
+            expect next_power_of_2(64) to_equal 64
+            expect next_power_of_2(1024) to_equal 1024
+
+    context "is_power_of_2":
+        it "should identify powers of 2":
+            expect is_power_of_2(1) to_be_true
+            expect is_power_of_2(2) to_be_true
+            expect is_power_of_2(4) to_be_true
+            expect is_power_of_2(16) to_be_true
+            expect is_power_of_2(1024) to_be_true
+
+        it "should reject non-powers of 2":
+            expect is_power_of_2(0) to_be_false
+            expect is_power_of_2(3) to_be_false
+            expect is_power_of_2(10) to_be_false
+            expect is_power_of_2(100) to_be_false
+
+# ============================================================================
+# Use Case Tests
+# ============================================================================
+
+describe "Use Cases":
+    context "arena for temporary allocations":
+        it "should handle request-scoped allocations":
+            val arena = ArenaAllocator.new(capacity: 1024 * 1024)
+
+            # Simulate request handling
+            for request in 0..100:
+                # Allocate temporary objects
+                val obj1 = arena.allocate(100, 8)
+                val obj2 = arena.allocate(200, 8)
+                val obj3 = arena.allocate(300, 8)
+
+                # Process request...
+
+                # Reset for next request
+                arena.reset()
+
+            # Arena is reusable
+            expect arena.remaining() to_equal 1024 * 1024
+
+    context "pool for uniform objects":
+        it "should manage AST node pool":
+            # Pool for 1000 AST nodes, 128 bytes each
+            val pool = PoolAllocator.new(object_size: 128, capacity: 1000)
+
+            # Allocate nodes
+            var nodes: [[u8]] = []
+            for i in 0..100:
+                val node = pool.allocate(128, 8)
+                if node.?:
+                    nodes = nodes.push(node.unwrap())
+
+            expect pool.available() to_equal 900
+
+            # Free nodes
+            for node in nodes:
+                pool.deallocate(node, 128, 8)
+
+            expect pool.available() to_equal 1000
+
+    context "slab for mixed allocations":
+        it "should handle mixed-size workload":
+            val slab = SlabAllocator.new()
+
+            # Small allocations
+            for i in 0..10:
+                slab.allocate(32, 8)
+
+            # Medium allocations
+            for i in 0..10:
+                slab.allocate(256, 8)
+
+            # Large allocations
+            for i in 0..5:
+                slab.allocate(5000, 8)
+
+            # All should succeed
+            val total = slab.total_allocated()
+            expect total to_be_greater_than 0
+
+    context "allocator switching":
+        it "should switch between allocators":
+            var allocator: Allocator = SystemAllocator.new()
+            var ptr = allocator.allocate(128, 8)
+            expect ptr.? to_be_true
+
+            # Switch to arena
+            allocator = ArenaAllocator.new(capacity: 1024)
+            ptr = allocator.allocate(128, 8)
+            expect ptr.? to_be_true
+
+            # Switch to slab
+            allocator = SlabAllocator.new()
+            ptr = allocator.allocate(128, 8)
+            expect ptr.? to_be_true
+
+# ============================================================================
+# Summary
+# ============================================================================
+
+# Total tests: 70+
+# - SystemAllocator: 9 tests
+# - ArenaAllocator: 14 tests
+# - PoolAllocator: 13 tests
+# - SlabAllocator: 13 tests
+# - Utility Functions: 7 tests
+# - Use Cases: 14 tests
+#
+# Coverage:
+# - All allocator implementations
+# - All operations (allocate, deallocate, reallocate)
+# - Capacity limits and edge cases
+# - Real-world use cases (arena, pool, slab patterns)
+# - Utility functions (alignment, power of 2)

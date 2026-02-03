@@ -1,83 +1,86 @@
-# JIT Compilation Context
+# JIT Compilation Context (FFI-based)
 #
-# CompilationContext implementation for load-time JIT instantiation.
-# Templates come from SMF TemplateCode sections.
+# Simplified JIT context that uses compiler FFI instead of deep integration.
+# Templates come from SMF TemplateCode sections and are passed to compiler via FFI.
 
-use ../compilation_context.{CompilationContext, InstantiationMode, ContractMode, GenericTemplate, ConcreteType, TypeRegistry}
-use ../backend_types.CompiledUnit
-use ../di.DiContainer
-use ../aop.AopWeaver
-use ../pipeline_fn.compile_specialized_template
-use ../monomorphize/note_sdn.InstantiationEntry
+use ../loader/compiler_ffi.*
 
 # ============================================================================
 # JitCompilationContext
 # ============================================================================
 
-class JitCompilationContext(CompilationContext):
-    """JIT loads templates from SMF TemplateCode sections."""
-    smf_templates: Dict<text, GenericTemplate>
-    smf_aop_config: AopWeaver?
-    smf_di_config: DiContainer?
-    type_reg: TypeRegistry
-    recorded: [InstantiationEntry]
+struct JitCompilationContext:
+    """JIT context that holds templates and uses compiler FFI."""
+    compiler_ctx: CompilerContext  # FFI handle
+    smf_templates: Dict<text, TemplateBytes>  # Templates from SMF
+    recorded: [InstantiationRecord]  # Recorded instantiations
 
-    fn load_template(name: text) -> Result<GenericTemplate, text>:
+struct InstantiationRecord:
+    """Record of a JIT instantiation."""
+    template_name: text
+    type_args: [TypeInfo]
+    mangled_name: text
+    success: bool
+    error: text?
+
+impl JitCompilationContext:
+    static fn from_smf(templates: Dict<text, TemplateBytes>) -> JitCompilationContext:
+        """Create JIT context from SMF templates.
+
+        Args:
+            templates: Map of template name to template bytes
+
+        Returns:
+            New JIT context with FFI compiler handle
+        """
+        JitCompilationContext(
+            compiler_ctx: CompilerContext.create(),
+            smf_templates: templates,
+            recorded: []
+        )
+
+    fn load_template(name: text) -> Result<TemplateBytes, text>:
+        """Load a template by name."""
         if self.smf_templates.contains_key(name):
             Ok(self.smf_templates[name])
         else:
             Err("Template not in SMF: {name}")
 
     fn has_template(name: text) -> bool:
+        """Check if template exists."""
         self.smf_templates.contains_key(name)
 
-    fn type_registry() -> TypeRegistry:
-        self.type_reg
+    fn compile_template(template: TemplateBytes, type_args: [TypeInfo]) -> Result<[u8], text>:
+        """Compile template with type arguments via FFI.
 
-    fn contract_mode() -> ContractMode:
-        # JIT uses lighter contracts (boundary only)
-        ContractMode.Boundary
+        Args:
+            template: Template bytes from SMF
+            type_args: Concrete type arguments
 
-    fn di_container() -> DiContainer?:
-        self.smf_di_config
+        Returns:
+            Ok(code) - Compiled machine code
+            Err(message) - Compilation error
+        """
+        self.compiler_ctx.instantiate(template, type_args)
 
-    fn aop_weaver() -> AopWeaver?:
-        self.smf_aop_config
-
-    fn coverage_enabled() -> bool:
-        false
-
-    fn compile_template(template: GenericTemplate, type_args: [ConcreteType]) -> Result<CompiledUnit, text>:
-        compile_specialized_template(
-            template, type_args,
-            ContractMode.Boundary,
-            self.smf_di_config,
-            self.smf_aop_config,
-            false
+    me record_instantiation(template_name: text, type_args: [TypeInfo], mangled_name: text, success: bool, error: text?):
+        """Record an instantiation attempt."""
+        val record = InstantiationRecord(
+            template_name: template_name,
+            type_args: type_args,
+            mangled_name: mangled_name,
+            success: success,
+            error: error
         )
+        self.recorded = self.recorded.push(record)
 
-    fn instantiation_mode() -> InstantiationMode:
-        InstantiationMode.JitTime
-
-    me record_instantiation(entry: InstantiationEntry):
-        self.recorded = self.recorded.push(entry)
-
-impl JitCompilationContext:
-    static fn from_smf(
-        templates: Dict<text, GenericTemplate>,
-        aop: AopWeaver?,
-        di: DiContainer?
-    ) -> JitCompilationContext:
-        JitCompilationContext(
-            smf_templates: templates,
-            smf_aop_config: aop,
-            smf_di_config: di,
-            type_reg: TypeRegistry.empty(),
-            recorded: []
-        )
+    fn get_recorded() -> [InstantiationRecord]:
+        """Get all recorded instantiations."""
+        self.recorded
 
 # ============================================================================
 # Exports
 # ============================================================================
 
 export JitCompilationContext
+export InstantiationRecord
