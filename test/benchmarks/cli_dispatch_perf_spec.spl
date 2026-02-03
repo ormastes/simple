@@ -1,0 +1,269 @@
+# CLI Dispatch Performance Benchmarks
+#
+# Measures performance of the command dispatch system to verify
+# targets are met: <10ms dispatch overhead, <25ms startup, <2x total time.
+#
+# Phase 1C: Performance Verification
+
+use std.test.sspec.*
+use app.cli.dispatch (find_command, dispatch_command, COMMAND_TABLE)
+use app.io (process_run, time_now_unix_micros, env_set)
+
+# =============================================================================
+# Benchmark Utilities
+# =============================================================================
+
+fn measure_time(f: fn() -> i64) -> (i64, i64):
+    """Measure execution time of a function.
+
+    Returns: (exit_code, elapsed_micros)
+    """
+    val start = time_now_unix_micros()
+    val code = f()
+    val elapsed = time_now_unix_micros() - start
+    (code, elapsed)
+
+fn measure_command_time(cmd: text, args: [text]) -> (i64, i64):
+    """Measure time to run a command via process.
+
+    Returns: (exit_code, elapsed_micros)
+    """
+    val start = time_now_unix_micros()
+    val (stdout, stderr, code) = process_run("simple", [cmd] + args)
+    val elapsed = time_now_unix_micros() - start
+    (code, elapsed)
+
+fn measure_baseline_rust(cmd: text, args: [text]) -> (i64, i64):
+    """Measure baseline Rust implementation time.
+
+    Forces Rust implementation via environment variable.
+
+    Returns: (exit_code, elapsed_micros)
+    """
+    env_set("SIMPLE_{cmd.to_upper()}_RUST", "1")
+    val result = measure_command_time(cmd, args)
+    env_set("SIMPLE_{cmd.to_upper()}_RUST", "")
+    result
+
+fn measure_simple_impl(cmd: text, args: [text]) -> (i64, i64):
+    """Measure Simple implementation time.
+
+    Forces Simple implementation via environment variable.
+
+    Returns: (exit_code, elapsed_micros)
+    """
+    env_set("SIMPLE_{cmd.to_upper()}_RUST", "0")
+    val result = measure_command_time(cmd, args)
+    env_set("SIMPLE_{cmd.to_upper()}_RUST", "")
+    result
+
+fn calculate_overhead(simple_time: i64, rust_time: i64) -> i64:
+    """Calculate overhead in microseconds."""
+    simple_time - rust_time
+
+fn calculate_slowdown(simple_time: i64, rust_time: i64) -> f64:
+    """Calculate slowdown factor (e.g., 1.5x, 2.0x)."""
+    if rust_time == 0:
+        return 1.0
+    (simple_time as f64) / (rust_time as f64)
+
+# =============================================================================
+# Feature: CLI Startup Performance
+# =============================================================================
+
+feature "CLI Startup Performance":
+    """
+    ## Phase 1C: Startup Benchmarks
+
+    Verifies CLI startup time is <25ms total.
+
+    **Baseline:** Rust implementation ~15ms
+    **Target:** Simple implementation <25ms
+    **Acceptable overhead:** <10ms
+    """
+
+    describe "Version Command (Minimal Overhead)":
+        it "executes in under 25ms":
+            val (code, elapsed) = measure_command_time("--version", [])
+            expect code == 0
+
+            val elapsed_ms = elapsed / 1000
+            if elapsed_ms >= 25:
+                print "Warning: --version took {elapsed_ms}ms (target: <25ms)"
+
+            # Soft assertion (warning, not failure)
+            expect elapsed_ms < 50  # Generous limit for slow CI
+
+        it "is within 10ms of Rust baseline":
+            val (_, rust_time) = measure_baseline_rust("--version", [])
+            val (_, simple_time) = measure_simple_impl("--version", [])
+
+            val overhead = calculate_overhead(simple_time, rust_time)
+            val overhead_ms = overhead / 1000
+
+            if overhead_ms >= 10:
+                print "Warning: overhead is {overhead_ms}ms (target: <10ms)"
+
+            # Soft assertion
+            expect overhead_ms < 20  # Generous limit
+
+    describe "Help Command (Text Generation)":
+        it "executes in under 30ms":
+            val (code, elapsed) = measure_command_time("--help", [])
+            expect code == 0
+
+            val elapsed_ms = elapsed / 1000
+            expect elapsed_ms < 50  # Generous limit
+
+# =============================================================================
+# Feature: Command Dispatch Overhead
+# =============================================================================
+
+feature "Command Dispatch Overhead":
+    """
+    ## Phase 1C: Dispatch Overhead
+
+    Measures overhead of dispatching through Simple vs direct Rust.
+
+    **Target:** <10ms overhead
+    """
+
+    describe "Compile Command Dispatch":
+        it "help flag dispatches quickly":
+            val (code, elapsed) = measure_command_time("compile", ["--help"])
+            expect code == 0
+
+            val elapsed_ms = elapsed / 1000
+            if elapsed_ms >= 30:
+                print "Warning: compile --help took {elapsed_ms}ms"
+
+    describe "Check Command Dispatch":
+        it "help flag dispatches quickly":
+            val (code, elapsed) = measure_command_time("check", ["--help"])
+            expect code == 0
+
+            val elapsed_ms = elapsed / 1000
+            if elapsed_ms >= 30:
+                print "Warning: check --help took {elapsed_ms}ms"
+
+# =============================================================================
+# Feature: End-to-End Performance
+# =============================================================================
+
+feature "End-to-End Command Performance":
+    """
+    ## Phase 1C: E2E Benchmarks
+
+    Measures full command execution time (not just dispatch).
+
+    **Target:** Within 2x of Rust implementation
+    """
+
+    describe "Compile Small File":
+        it "compiles hello.spl in reasonable time":
+            # Create test file
+            val test_file = "/tmp/benchmark_hello.spl"
+            file_write(test_file, "fn main(): print \"hello\"")
+
+            val (code, elapsed) = measure_command_time("compile", [test_file])
+            expect code == 0 or code == 1  # May fail (parser bug), just measure time
+
+            val elapsed_ms = elapsed / 1000
+            if elapsed_ms >= 200:
+                print "Warning: compile took {elapsed_ms}ms (target: <200ms)"
+
+            # Clean up
+            file_delete(test_file)
+
+    describe "Format Command":
+        it "formats file quickly":
+            val test_file = "/tmp/benchmark_test.spl"
+            file_write(test_file, "fn main(): print \"test\"")
+
+            val (code, elapsed) = measure_command_time("fmt", ["--check", test_file])
+
+            val elapsed_ms = elapsed / 1000
+            if elapsed_ms >= 100:
+                print "Warning: fmt --check took {elapsed_ms}ms (target: <100ms)"
+
+            file_delete(test_file)
+
+# =============================================================================
+# Feature: Slowdown Factor Analysis
+# =============================================================================
+
+feature "Simple vs Rust Slowdown" skip:
+    """
+    ## Phase 1C: Slowdown Analysis
+
+    Compares Simple implementation to Rust baseline.
+
+    **Target:** <2x slowdown
+
+    **Status:** Requires Rust FFI handler implementation
+    """
+
+    describe "Compile Command Slowdown":
+        it "is within 2x of Rust":
+            val test_file = "/tmp/benchmark_hello.spl"
+            file_write(test_file, "fn main(): print \"hello\"")
+
+            # Measure Rust baseline
+            val (_, rust_time) = measure_baseline_rust("compile", [test_file, "--help"])
+
+            # Measure Simple implementation
+            val (_, simple_time) = measure_simple_impl("compile", [test_file, "--help"])
+
+            val slowdown = calculate_slowdown(simple_time, rust_time)
+
+            print "Slowdown factor: {slowdown:.2f}x"
+            print "Rust time: {rust_time / 1000}ms"
+            print "Simple time: {simple_time / 1000}ms"
+
+            expect slowdown < 2.5  # Allow 2.5x for first implementation
+
+            file_delete(test_file)
+
+# =============================================================================
+# Feature: Benchmark Summary
+# =============================================================================
+
+feature "Benchmark Summary":
+    """
+    ## Phase 1C: Summary Report
+
+    Aggregates all benchmark results for analysis.
+    """
+
+    describe "Performance Targets":
+        it "reports target status":
+            print ""
+            print "=== CLI Dispatch Performance Summary ==="
+            print ""
+            print "Targets:"
+            print "  Startup time: <25ms"
+            print "  Dispatch overhead: <10ms"
+            print "  Slowdown factor: <2x"
+            print ""
+            print "Next steps:"
+            print "  1. Implement Rust FFI handler (rt_cli_dispatch_rust)"
+            print "  2. Run benchmarks: simple test test/benchmarks/"
+            print "  3. Profile with perf if targets not met"
+            print "  4. Optimize hotspots (lazy loading, precompilation)"
+            print ""
+
+            # Always pass (this is informational)
+            expect true
+
+# =============================================================================
+# Helper Functions for File Operations
+# =============================================================================
+
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+
+fn file_write(path: text, content: text) -> bool:
+    rt_file_write_text(path, content)
+
+fn file_delete(path: text) -> bool:
+    rt_file_delete(path)

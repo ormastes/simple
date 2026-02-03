@@ -26,7 +26,18 @@ const UPX_RELEASES_BASE: &str = "https://github.com/upx/upx/releases/download";
 ///
 /// Returns: ~/.simple/tools/upx/
 pub fn get_upx_cache_dir() -> Result<PathBuf, String> {
-    let home = dirs_next::home_dir().ok_or_else(|| "Cannot determine home directory".to_string())?;
+    // Use syscall instead of dirs-next crate
+    use std::ffi::CStr;
+    let home = unsafe {
+        let ptr = crate::syscalls_ffi::rt_env_home();
+        if ptr.is_null() {
+            return Err("Cannot determine home directory".to_string());
+        }
+        let c_str = CStr::from_ptr(ptr);
+        let home_str = c_str.to_string_lossy().into_owned();
+        libc::free(ptr as *mut libc::c_void);
+        PathBuf::from(home_str)
+    };
 
     let cache_dir = home.join(".simple").join("tools").join("upx");
 

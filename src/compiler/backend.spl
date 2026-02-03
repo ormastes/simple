@@ -10,6 +10,7 @@ use compiler.hir.*
 use compiler.mir.*
 use compiler.lexer.Span
 use backend_types.*
+use compiler.ffi_minimal as ffi  # NEW: FFI wrappers for RuntimeValue
 
 struct EvalContext:
     """Context for expression evaluation."""
@@ -184,6 +185,9 @@ impl Backend for InterpreterBackendImpl:
         BackendKind.Interpreter
 
     fn process_module(module: HirModule) -> Result<BackendResult, BackendError>:
+        # Initialize GC for RuntimeValue FFI operations
+        ffi.gc_init()
+
         # Create evaluation context
         val env = Environment.new()
         val ctx = EvalContext(env: env, module: module, backend: self)
@@ -377,8 +381,18 @@ impl InterpreterBackendImpl:
         match op:
             case Add:
                 match (left, right):
-                    case (Int(l), Int(r)): Ok(Value.int(l + r))
-                    case (Float(l), Float(r)): Ok(Value.float(l + r))
+                    case (Int(_), Int(_)):
+                        # Use FFI for arithmetic operations
+                        val left_ptr = self.value_to_runtime_ptr(left)
+                        val right_ptr = self.value_to_runtime_ptr(right)
+                        val result_ptr = ffi.value_add(left_ptr, right_ptr)
+                        Ok(self.runtime_ptr_to_value(result_ptr))
+                    case (Float(_), Float(_)):
+                        # Use FFI for float arithmetic
+                        val left_ptr = self.value_to_runtime_ptr(left)
+                        val right_ptr = self.value_to_runtime_ptr(right)
+                        val result_ptr = ffi.value_add(left_ptr, right_ptr)
+                        Ok(self.runtime_ptr_to_value(result_ptr))
                     case (Int(l), Float(r)): Ok(Value.float(l.to_f64() + r))
                     case (Float(l), Int(r)): Ok(Value.float(l + r.to_f64()))
                     case (String(l), String(r)): Ok(Value.string(l + r))
@@ -386,14 +400,32 @@ impl InterpreterBackendImpl:
 
             case Sub:
                 match (left, right):
-                    case (Int(l), Int(r)): Ok(Value.int(l - r))
-                    case (Float(l), Float(r)): Ok(Value.float(l - r))
+                    case (Int(_), Int(_)):
+                        # Use FFI for subtraction
+                        val left_ptr = self.value_to_runtime_ptr(left)
+                        val right_ptr = self.value_to_runtime_ptr(right)
+                        val result_ptr = ffi.value_sub(left_ptr, right_ptr)
+                        Ok(self.runtime_ptr_to_value(result_ptr))
+                    case (Float(_), Float(_)):
+                        val left_ptr = self.value_to_runtime_ptr(left)
+                        val right_ptr = self.value_to_runtime_ptr(right)
+                        val result_ptr = ffi.value_sub(left_ptr, right_ptr)
+                        Ok(self.runtime_ptr_to_value(result_ptr))
                     case _: Err(BackendError.type_error("invalid operands for -", Some(span)))
 
             case Mul:
                 match (left, right):
-                    case (Int(l), Int(r)): Ok(Value.int(l * r))
-                    case (Float(l), Float(r)): Ok(Value.float(l * r))
+                    case (Int(_), Int(_)):
+                        # Use FFI for multiplication
+                        val left_ptr = self.value_to_runtime_ptr(left)
+                        val right_ptr = self.value_to_runtime_ptr(right)
+                        val result_ptr = ffi.value_mul(left_ptr, right_ptr)
+                        Ok(self.runtime_ptr_to_value(result_ptr))
+                    case (Float(_), Float(_)):
+                        val left_ptr = self.value_to_runtime_ptr(left)
+                        val right_ptr = self.value_to_runtime_ptr(right)
+                        val result_ptr = ffi.value_mul(left_ptr, right_ptr)
+                        Ok(self.runtime_ptr_to_value(result_ptr))
                     case _: Err(BackendError.type_error("invalid operands for *", Some(span)))
 
             case Div:
@@ -402,8 +434,16 @@ impl InterpreterBackendImpl:
                         if r == 0:
                             Err(BackendError.runtime_error("division by zero", Some(span)))
                         else:
-                            Ok(Value.int(l / r))
-                    case (Float(l), Float(r)): Ok(Value.float(l / r))
+                            # Use FFI for division
+                            val left_ptr = self.value_to_runtime_ptr(left)
+                            val right_ptr = self.value_to_runtime_ptr(right)
+                            val result_ptr = ffi.value_div(left_ptr, right_ptr)
+                            Ok(self.runtime_ptr_to_value(result_ptr))
+                    case (Float(_), Float(_)):
+                        val left_ptr = self.value_to_runtime_ptr(left)
+                        val right_ptr = self.value_to_runtime_ptr(right)
+                        val result_ptr = ffi.value_div(left_ptr, right_ptr)
+                        Ok(self.runtime_ptr_to_value(result_ptr))
                     case _: Err(BackendError.type_error("invalid operands for /", Some(span)))
 
             case Mod:
@@ -416,34 +456,97 @@ impl InterpreterBackendImpl:
                     case _: Err(BackendError.type_error("invalid operands for %", Some(span)))
 
             case Eq:
-                Ok(Value.bool(self.values_equal(left, right)))
+                # Use FFI for equality comparison (Phase 3)
+                match (left, right):
+                    case (Int(_), Int(_)):
+                        val left_ptr = self.value_to_runtime_ptr(left)
+                        val right_ptr = self.value_to_runtime_ptr(right)
+                        val result = ffi.value_eq(left_ptr, right_ptr)
+                        Ok(Value.bool(result))
+                    case (Float(_), Float(_)):
+                        val left_ptr = self.value_to_runtime_ptr(left)
+                        val right_ptr = self.value_to_runtime_ptr(right)
+                        val result = ffi.value_eq(left_ptr, right_ptr)
+                        Ok(Value.bool(result))
+                    case _:
+                        # Fallback to Simple comparison for complex types
+                        Ok(Value.bool(self.values_equal(left, right)))
 
             case NotEq:
-                Ok(Value.bool(not self.values_equal(left, right)))
+                # Use FFI for inequality
+                match (left, right):
+                    case (Int(_), Int(_)):
+                        val left_ptr = self.value_to_runtime_ptr(left)
+                        val right_ptr = self.value_to_runtime_ptr(right)
+                        val result = ffi.value_eq(left_ptr, right_ptr)
+                        Ok(Value.bool(not result))
+                    case (Float(_), Float(_)):
+                        val left_ptr = self.value_to_runtime_ptr(left)
+                        val right_ptr = self.value_to_runtime_ptr(right)
+                        val result = ffi.value_eq(left_ptr, right_ptr)
+                        Ok(Value.bool(not result))
+                    case _:
+                        Ok(Value.bool(not self.values_equal(left, right)))
 
             case Lt:
                 match (left, right):
-                    case (Int(l), Int(r)): Ok(Value.bool(l < r))
-                    case (Float(l), Float(r)): Ok(Value.bool(l < r))
+                    case (Int(_), Int(_)):
+                        # Use FFI for less-than comparison
+                        val left_ptr = self.value_to_runtime_ptr(left)
+                        val right_ptr = self.value_to_runtime_ptr(right)
+                        val result = ffi.value_lt(left_ptr, right_ptr)
+                        Ok(Value.bool(result))
+                    case (Float(_), Float(_)):
+                        val left_ptr = self.value_to_runtime_ptr(left)
+                        val right_ptr = self.value_to_runtime_ptr(right)
+                        val result = ffi.value_lt(left_ptr, right_ptr)
+                        Ok(Value.bool(result))
                     case (String(l), String(r)): Ok(Value.bool(l < r))
                     case _: Err(BackendError.type_error("invalid operands for <", Some(span)))
 
             case LtEq:
                 match (left, right):
-                    case (Int(l), Int(r)): Ok(Value.bool(l <= r))
-                    case (Float(l), Float(r)): Ok(Value.bool(l <= r))
+                    case (Int(_), Int(_)):
+                        # a <= b = not (b < a) using FFI
+                        val left_ptr = self.value_to_runtime_ptr(left)
+                        val right_ptr = self.value_to_runtime_ptr(right)
+                        val result = ffi.value_lt(right_ptr, left_ptr)  # b < a
+                        Ok(Value.bool(not result))
+                    case (Float(_), Float(_)):
+                        val left_ptr = self.value_to_runtime_ptr(left)
+                        val right_ptr = self.value_to_runtime_ptr(right)
+                        val result = ffi.value_lt(right_ptr, left_ptr)  # b < a
+                        Ok(Value.bool(not result))
                     case _: Err(BackendError.type_error("invalid operands for <=", Some(span)))
 
             case Gt:
                 match (left, right):
-                    case (Int(l), Int(r)): Ok(Value.bool(l > r))
-                    case (Float(l), Float(r)): Ok(Value.bool(l > r))
+                    case (Int(_), Int(_)):
+                        # a > b = b < a using FFI
+                        val left_ptr = self.value_to_runtime_ptr(left)
+                        val right_ptr = self.value_to_runtime_ptr(right)
+                        val result = ffi.value_lt(right_ptr, left_ptr)  # b < a
+                        Ok(Value.bool(result))
+                    case (Float(_), Float(_)):
+                        val left_ptr = self.value_to_runtime_ptr(left)
+                        val right_ptr = self.value_to_runtime_ptr(right)
+                        val result = ffi.value_lt(right_ptr, left_ptr)  # b < a
+                        Ok(Value.bool(result))
                     case _: Err(BackendError.type_error("invalid operands for >", Some(span)))
 
             case GtEq:
                 match (left, right):
-                    case (Int(l), Int(r)): Ok(Value.bool(l >= r))
-                    case (Float(l), Float(r)): Ok(Value.bool(l >= r))
+                    case (Int(_), Int(_)):
+                        # a >= b = not (a < b) using FFI
+                        val left_ptr = self.value_to_runtime_ptr(left)
+                        val right_ptr = self.value_to_runtime_ptr(right)
+                        val result = ffi.value_lt(left_ptr, right_ptr)  # a < b
+                        Ok(Value.bool(not result))
+                    case (Float(_), Float(_)):
+                        val left_ptr = self.value_to_runtime_ptr(left)
+                        val right_ptr = self.value_to_runtime_ptr(right)
+                        val result = ffi.value_lt(left_ptr, right_ptr)  # a < b
+                        Ok(Value.bool(not result))
                     case _: Err(BackendError.type_error("invalid operands for >=", Some(span)))
 
             case And:
@@ -558,15 +661,37 @@ impl InterpreterBackendImpl:
         match name:
             case "print":
                 if args.len() > 0:
-                    val msg = self.value_to_string(args[0])
-                    print msg
+                    # Try FFI printing for RuntimeValue types
+                    val arg = args[0]
+                    match arg:
+                        case RuntimeValue(ptr):
+                            ffi.value_print(ptr)
+                        case Int(_), Float(_), Bool(_), Nil:
+                            # Use FFI for primitive types
+                            val ptr = self.value_to_runtime_ptr(arg)
+                            ffi.value_print(ptr)
+                        case _:
+                            # Fallback to Simple printing for complex types
+                            val msg = self.value_to_string(arg)
+                            print msg
                 else:
                     print ""
                 Some(Ok(Value.Unit))
             case "println":
                 if args.len() > 0:
-                    val msg = self.value_to_string(args[0])
-                    print msg
+                    # Try FFI printing for RuntimeValue types
+                    val arg = args[0]
+                    match arg:
+                        case RuntimeValue(ptr):
+                            ffi.value_println(ptr)
+                        case Int(_), Float(_), Bool(_), Nil:
+                            # Use FFI for primitive types
+                            val ptr = self.value_to_runtime_ptr(arg)
+                            ffi.value_println(ptr)
+                        case _:
+                            # Fallback to Simple printing for complex types
+                            val msg = self.value_to_string(arg)
+                            print msg
                 else:
                     print ""
                 Some(Ok(Value.Unit))
@@ -575,8 +700,187 @@ impl InterpreterBackendImpl:
                     Some(Ok(Value.string(self.value_to_string(args[0]))))
                 else:
                     Some(Ok(Value.string("")))
+
+            case "type_of":
+                if args.len() > 0:
+                    val arg = args[0]
+                    match arg:
+                        case RuntimeValue(ptr):
+                            # Use FFI to get runtime type
+                            val type_tag = ffi.value_type(ptr)
+                            val type_name = match type_tag:
+                                case ValueType.Nil: "nil"
+                                case ValueType.Bool: "bool"
+                                case ValueType.Int: "int"
+                                case ValueType.Float: "float"
+                                case ValueType.String: "string"
+                                case ValueType.Array: "array"
+                                case ValueType.Dict: "dict"
+                                case ValueType.Object: "object"
+                                case ValueType.Function: "function"
+                                case _: "unknown"
+                            Some(Ok(Value.string(type_name)))
+                        case _:
+                            # Use Simple type_name() method
+                            Some(Ok(Value.string(arg.type_name())))
+                else:
+                    Some(Err(BackendError.runtime_error("type_of requires value argument", nil)))
+
+            case "clone":
+                if args.len() > 0:
+                    val arg = args[0]
+                    match arg:
+                        case RuntimeValue(ptr):
+                            # Use FFI to clone RuntimeValue
+                            val cloned_ptr = ffi.value_clone(ptr)
+                            Some(Ok(Value.RuntimeValue(cloned_ptr)))
+                        case _:
+                            # For Simple values, just return the value (they're immutable)
+                            Some(Ok(arg))
+                else:
+                    Some(Err(BackendError.runtime_error("clone requires value argument", nil)))
+
+            # Memory management operations (Phase 6)
+            case "gc_collect":
+                # Trigger garbage collection
+                ffi.gc_collect()
+                Some(Ok(Value.Unit))
+
+            case "gc_malloc":
+                if args.len() > 0:
+                    match args[0]:
+                        case Int(size):
+                            # Allocate memory via GC
+                            val ptr = ffi.gc_malloc(size)
+                            Some(Ok(Value.Int(ptr)))
+                        case _:
+                            Some(Err(BackendError.type_error("gc_malloc requires int size", nil)))
+                else:
+                    Some(Err(BackendError.runtime_error("gc_malloc requires size argument", nil)))
+
+            # File I/O operations (Phase 4)
+            case "file_exists":
+                if args.len() > 0:
+                    match args[0]:
+                        case String(path):
+                            # TODO: Proper string ptr+len conversion
+                            # For now, use placeholder (requires FFI enhancement)
+                            val result = ffi.file_exists_ptr(0, path.len())
+                            Some(Ok(Value.bool(result)))
+                        case _:
+                            Some(Err(BackendError.type_error("file_exists requires string path", nil)))
+                else:
+                    Some(Err(BackendError.runtime_error("file_exists requires path argument", nil)))
+
+            case "file_read":
+                if args.len() > 0:
+                    match args[0]:
+                        case String(path):
+                            # TODO: Proper string ptr+len conversion
+                            # For now, use placeholder (requires FFI enhancement)
+                            val ptr = ffi.file_read_text_ptr(0, path.len())
+                            if ptr == 0:
+                                Some(Ok(Value.string("")))
+                            else:
+                                # TODO: Convert ptr to Simple string
+                                Some(Ok(Value.string("<file_content>")))
+                        case _:
+                            Some(Err(BackendError.type_error("file_read requires string path", nil)))
+                else:
+                    Some(Err(BackendError.runtime_error("file_read requires path argument", nil)))
+
+            case "file_write":
+                if args.len() >= 2:
+                    match (args[0], args[1]):
+                        case (String(path), String(content)):
+                            # TODO: Proper string ptr+len conversion
+                            val result = ffi.file_write_text_ptr(0, path.len(), 0, content.len())
+                            Some(Ok(Value.bool(result)))
+                        case _:
+                            Some(Err(BackendError.type_error("file_write requires string path and content", nil)))
+                else:
+                    Some(Err(BackendError.runtime_error("file_write requires path and content arguments", nil)))
+
+            case "file_delete":
+                if args.len() > 0:
+                    match args[0]:
+                        case String(path):
+                            # TODO: Proper string ptr+len conversion
+                            val result = ffi.file_delete_ptr(0, path.len())
+                            Some(Ok(Value.bool(result)))
+                        case _:
+                            Some(Err(BackendError.type_error("file_delete requires string path", nil)))
+                else:
+                    Some(Err(BackendError.runtime_error("file_delete requires path argument", nil)))
+
+            # Environment variable operations (Phase 4)
+            case "env_get":
+                if args.len() > 0:
+                    match args[0]:
+                        case String(name):
+                            # TODO: Proper string ptr+len conversion
+                            val ptr = ffi.env_get_ptr(0, name.len())
+                            if ptr == 0:
+                                Some(Ok(Value.string("")))
+                            else:
+                                # TODO: Convert ptr to Simple string
+                                Some(Ok(Value.string("<env_value>")))
+                        case _:
+                            Some(Err(BackendError.type_error("env_get requires string name", nil)))
+                else:
+                    Some(Err(BackendError.runtime_error("env_get requires name argument", nil)))
+
+            case "env_set":
+                if args.len() >= 2:
+                    match (args[0], args[1]):
+                        case (String(name), String(value)):
+                            # TODO: Proper string ptr+len conversion
+                            val result = ffi.env_set_ptr(0, name.len(), 0, value.len())
+                            Some(Ok(Value.bool(result)))
+                        case _:
+                            Some(Err(BackendError.type_error("env_set requires string name and value", nil)))
+                else:
+                    Some(Err(BackendError.runtime_error("env_set requires name and value arguments", nil)))
+
             case _:
                 nil
+
+    # ========================================================================
+    # FFI RuntimeValue Conversion Helpers
+    # ========================================================================
+
+    fn value_to_runtime_ptr(value: Value) -> i64:
+        """Convert Simple Value to RuntimeValue pointer for FFI operations."""
+        match value:
+            case Int(i): ffi.value_int(i)
+            case Float(f): ffi.value_float(f)
+            case Bool(b): ffi.value_bool(b)
+            case Nil: ffi.value_nil()
+            case RuntimeValue(ptr): ptr  # Already a pointer
+            case String(s):
+                # TODO: Proper string conversion (ptr + len)
+                ffi.value_string(0, 0)
+            case _:
+                # Complex types: keep as Simple Value for now
+                # TODO: Implement full conversion for Array, Dict, etc.
+                ffi.value_nil()
+
+    fn runtime_ptr_to_value(ptr: i64) -> Value:
+        """Convert RuntimeValue pointer to Simple Value."""
+        if ffi.value_is_int(ptr):
+            val i = ffi.value_as_int(ptr)
+            Value.int(i)
+        elif ffi.value_is_float(ptr):
+            val f = ffi.value_as_float(ptr)
+            Value.float(f)
+        elif ffi.value_is_bool(ptr):
+            val b = ffi.value_as_bool(ptr)
+            Value.bool(b)
+        elif ffi.value_is_nil(ptr):
+            Value.Nil
+        else:
+            # Keep as opaque RuntimeValue for complex types
+            Value.RuntimeValue(ptr)
 
     fn value_to_string(value: Value) -> text:
         """Convert a Value to its string representation."""
@@ -593,6 +897,7 @@ impl InterpreterBackendImpl:
                 for elem in elements:
                     parts = parts.push(self.value_to_string(elem))
                 "[{parts.join(\", \")}]"
+            case RuntimeValue(_): "<runtime_value>"
             case _: "<{value.type_name()}>"
 
 # ============================================================================

@@ -56,6 +56,7 @@ pub extern "C" fn native_mmap_create_shared(handle: i64, size: u64) -> RuntimeVa
 
     #[cfg(not(target_family = "unix"))]
     {
+        // Windows/other platforms - not yet implemented
         RuntimeValue::NIL // Error - not supported
     }
 }
@@ -102,7 +103,7 @@ pub extern "C" fn native_mmap_create(handle: i64, size: u64) -> RuntimeValue {
 
     #[cfg(not(target_family = "unix"))]
     {
-        // Windows/other platforms - use memmap2 crate
+        // Windows/other platforms - not yet implemented
         RuntimeValue::NIL // Error - not supported
     }
 }

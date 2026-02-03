@@ -1,90 +1,69 @@
-use std::sync::{Arc, Mutex};
+// NoGC allocator stub for compatibility
+//
+// The actual GC implementation has been migrated to Simple (src/app/gc/)
+// This is a minimal stub to maintain API compatibility.
 
-use simple_common::gc::{AllocResult, GcAllocator, MemoryLimitConfig, MemoryTracker};
+use std::sync::Mutex;
+use simple_common::gc::{GcAllocator, MemoryLimitConfig};
 
-/// Minimal allocator that satisfies the `GcAllocator` contract without tracing.
-///
-/// This is the "GC-off" profile: allocations are backed by boxed buffers that live
-/// for the lifetime of the allocator. `collect` is a no-op.
-/// Now supports configurable memory limits (default: 1 GB).
-#[derive(Clone)]
+/// A no-GC allocator that tracks allocations but doesn't collect
 pub struct NoGcAllocator {
-    allocations: Arc<Mutex<Vec<Box<[u8]>>>>,
-    memory_tracker: Arc<MemoryTracker>,
-}
-
-impl Default for NoGcAllocator {
-    fn default() -> Self {
-        Self::new()
-    }
+    allocations: Mutex<Vec<Box<[u8]>>>,
+    limit: usize,
 }
 
 impl NoGcAllocator {
-    /// Create with default memory limit (1 GB)
+    /// Create a new NoGcAllocator
     pub fn new() -> Self {
-        Self::with_memory_config(MemoryLimitConfig::default())
-    }
-
-    /// Create with unlimited memory
-    pub fn unlimited() -> Self {
-        Self::with_memory_config(MemoryLimitConfig::unlimited())
-    }
-
-    /// Create with custom memory configuration
-    pub fn with_memory_config(config: MemoryLimitConfig) -> Self {
         Self {
-            allocations: Arc::new(Mutex::new(Vec::new())),
-            memory_tracker: Arc::new(MemoryTracker::with_config(config)),
+            allocations: Mutex::new(Vec::new()),
+            limit: 512 * 1024 * 1024,
         }
     }
 
-    /// Create with specific memory limit in bytes
-    pub fn with_memory_limit(limit_bytes: usize) -> Self {
-        Self::with_memory_config(MemoryLimitConfig::with_limit(limit_bytes))
+    /// Create with memory limit
+    pub fn with_memory_limit(limit: usize) -> Self {
+        Self {
+            allocations: Mutex::new(Vec::new()),
+            limit,
+        }
     }
 
-    /// Create with memory limit in megabytes
-    pub fn with_memory_limit_mb(limit_mb: usize) -> Self {
-        Self::with_memory_config(MemoryLimitConfig::with_limit_mb(limit_mb))
+    /// Create with memory config
+    pub fn with_memory_config(config: MemoryLimitConfig) -> Self {
+        Self::with_memory_limit(config.limit_bytes)
     }
 
-    /// Create with memory limit in gigabytes
-    pub fn with_memory_limit_gb(limit_gb: usize) -> Self {
-        Self::with_memory_config(MemoryLimitConfig::with_limit_gb(limit_gb))
-    }
-
-    /// Get current memory usage in bytes
-    pub fn memory_usage(&self) -> usize {
-        self.memory_tracker.current_bytes()
-    }
-
-    /// Get memory limit in bytes (0 if unlimited)
-    pub fn memory_limit(&self) -> usize {
-        self.memory_tracker.limit_bytes()
+    /// Get the count of allocations
+    pub fn allocation_count(&self) -> usize {
+        self.allocations.lock().unwrap().len()
     }
 }
 
 impl GcAllocator for NoGcAllocator {
     fn alloc_bytes(&self, bytes: &[u8]) -> usize {
-        match self.try_alloc_bytes(bytes) {
-            Ok(ptr) => ptr,
-            Err(e) => panic!("{}", e),
-        }
+        super::alloc_bytes_tracked(bytes, &self.allocations)
     }
 
-    fn try_alloc_bytes(&self, bytes: &[u8]) -> AllocResult<usize> {
-        super::alloc_bytes_tracked_with_limit(bytes, &self.allocations, &self.memory_tracker)
-    }
-
-    fn collect(&self) {
-        // No GC in this profile.
+    fn allocation_count(&self) -> usize {
+        self.allocations.lock().unwrap().len()
     }
 
     fn memory_usage(&self) -> usize {
-        self.memory_tracker.current_bytes()
+        0 // Stub implementation
     }
 
     fn memory_limit(&self) -> usize {
-        self.memory_tracker.limit_bytes()
+        self.limit
+    }
+
+    fn collect(&self) -> usize {
+        0 // No-op: no GC
+    }
+}
+
+impl Default for NoGcAllocator {
+    fn default() -> Self {
+        Self::new()
     }
 }

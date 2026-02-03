@@ -19,7 +19,7 @@ For detailed guidance, invoke with `/skill-name`:
 | `todo` | TODO/FIXME comment format |
 | `doc` | Documentation writing: specs (SSpec), research, design, guides |
 | `deeplearning` | **Deep learning**: Pipeline operators, dimension checking, NN layers |
-| `ffi` | **FFI wrappers**: Two-tier pattern (`extern fn` + wrapper), type conversions |
+| `sffi` | **SFFI wrappers**: Two-tier pattern (`extern fn` + wrapper), Simple FFI wrappers vs raw FFI |
 
 Skills located in `.claude/skills/`.
 
@@ -330,12 +330,12 @@ See `/coding` skill for full details.
 ### Scripts
 - ❌ **NEVER write Python/Bash** - use Simple (`.spl`) only
 
-### Rust Files and FFI
+### Rust Files and SFFI (Simple FFI)
 - ❌ **NEVER write `.rs` files manually** - all FFI is Simple-first
-- ❌ **NEVER manually create Rust FFI implementations** - use `simple ffi-gen`
+- ❌ **NEVER manually create Rust FFI implementations** - use `simple sffi-gen`
 - ✅ **Write FFI specs in Simple** at `src/app/ffi_gen/specs/*.spl`
-- ✅ **Generate Rust code**: `simple ffi-gen --gen-all` or `simple ffi-gen --gen-intern <spec.spl>`
-- ✅ **Write FFI wrappers in Simple** using the two-tier pattern:
+- ✅ **Generate Rust code**: `simple sffi-gen --gen-all` or `simple sffi-gen --gen-intern <spec.spl>`
+- ✅ **Write SFFI wrappers in Simple** using the two-tier pattern:
   ```simple
   # Tier 1: Extern declaration (in src/app/io/mod.spl)
   extern fn rt_file_read_text(path: text) -> text
@@ -344,9 +344,9 @@ See `/coding` skill for full details.
   fn file_read(path: text) -> text:
       rt_file_read_text(path)
   ```
-- ✅ **Main FFI module**: `src/app/io/mod.spl` (all extern fn declarations)
-- ✅ **FFI specs location**: `src/app/ffi_gen/specs/` (generates `build/rust/ffi_gen/src/`)
-- 📖 **FFI Skill**: See `/ffi` for complete patterns and type conversions
+- ✅ **Main SFFI module**: `src/app/io/mod.spl` (all extern fn declarations)
+- ✅ **SFFI specs location**: `src/app/ffi_gen/specs/` (generates `build/rust/ffi_gen/src/`)
+- 📖 **SFFI Skill**: See `/sffi` for complete patterns and type conversions
 
 ### Tests
 - ❌ **NEVER add `#[ignore]`** without user approval
@@ -875,9 +875,15 @@ Projects in `verification/`: borrow checker, GC safety, effects, SC-DRF.
 
 ---
 
-## FFI Wrappers (Simple-First Approach)
+## SFFI Wrappers (Simple FFI - Simple-First Approach)
 
-**All FFI wrappers are written in Simple using the two-tier pattern.**
+**All SFFI wrappers are written in Simple using the two-tier pattern.**
+
+**Terminology:**
+- **SFFI (Simple FFI)**: FFI wrappers written in Simple using the two-tier pattern
+- **Raw FFI**: Direct `extern fn` declarations or Rust FFI code
+- **SFFI wrapper**: The Simple wrapper function that calls `extern fn`
+- **SFFI-gen**: Tool to generate Rust FFI code from Simple specs
 
 ### Two-Tier Pattern
 
@@ -894,9 +900,9 @@ fn file_read(path: text) -> text:
 - `extern fn` - Raw binding to runtime, prefixed with `rt_`
 - Wrapper `fn` - Clean API for Simple users, handles type conversions
 
-### Main FFI Module
+### Main SFFI Module
 
-All FFI declarations live in `src/app/io/mod.spl`:
+All SFFI declarations live in `src/app/io/mod.spl`:
 
 | Category | Prefix | Examples |
 |----------|--------|----------|
@@ -908,7 +914,7 @@ All FFI declarations live in `src/app/io/mod.spl`:
 | System | `rt_getpid`, `rt_hostname` | pid, hostname, cpu_count |
 | CLI | `rt_cli_` | run_file, run_tests, run_lint |
 
-### Adding New FFI Functions
+### Adding New SFFI Functions
 
 1. **Add extern declaration** in `src/app/io/mod.spl`:
    ```simple
@@ -939,7 +945,7 @@ All FFI declarations live in `src/app/io/mod.spl`:
 | `(text, text, i64)` | Tuple | Multiple returns |
 | `[text]?` | `Option<Vec<String>>` | Optional |
 
-### Error Handling Patterns
+### SFFI Error Handling Patterns
 
 ```simple
 # Pattern 1: Boolean return
@@ -957,9 +963,9 @@ fn env_get(key: text) -> text:
 
 ### See Also
 
-- `/ffi` skill - Complete FFI patterns and examples
-- `src/app/io/mod.spl` - Main FFI wrapper module
-- `doc/guide/ffi_gen_guide.md` - Legacy FFI generation (for reference)
+- `/sffi` skill - Complete SFFI patterns and examples
+- `src/app/io/mod.spl` - Main SFFI wrapper module
+- `doc/guide/sffi_gen_guide.md` - SFFI generation guide (formerly ffi_gen_guide.md)
 
 ---
 

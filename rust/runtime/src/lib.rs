@@ -12,6 +12,7 @@ pub mod loader;
 pub mod aop;
 pub mod async_runtime;
 pub mod bytecode;
+// pub mod cli;  // Temporarily disabled - creates cyclic dependency
 pub mod compress;
 pub mod concurrency;
 pub mod concurrent;
@@ -48,6 +49,7 @@ fn init_monoio() {
 }
 pub mod parallel;
 pub mod sandbox;
+pub mod syscalls_ffi;  // Syscall-based FFI declarations (minimal, no-std)
 pub mod value;
 
 // Re-export executor types and functions

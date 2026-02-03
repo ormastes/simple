@@ -193,7 +193,9 @@ impl AsyncFileThreadPool {
 // Global thread pool for async file operations (lazy initialization)
 lazy_static::lazy_static! {
     static ref ASYNC_FILE_POOL: AsyncFileThreadPool = {
-        let num_workers = num_cpus::get().max(4);
+        // Use syscall instead of num_cpus crate
+        let cpu_count = unsafe { crate::syscalls_ffi::rt_system_cpu_count() as usize };
+        let num_workers = cpu_count.max(4);
         AsyncFileThreadPool::new(num_workers)
     };
 }
