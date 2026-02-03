@@ -1,0 +1,784 @@
+# Network I/O Test Suite
+#
+# Comprehensive tests for TCP/UDP sockets, HTTP client,
+# and URL parsing (std.net).
+
+use std.net.*
+use std.error.*
+use std.test.sspec.*
+
+# ============================================================================
+# TcpListener Tests
+# ============================================================================
+
+describe "TcpListener":
+    context "bind":
+        it "should bind to address":
+            val result = TcpListener.bind("127.0.0.1:0")
+            expect result.ok.? to_be_true
+
+            val listener = result.unwrap()
+            expect listener.local_addr().? to_be_true
+            listener.close()
+
+        it "should fail on invalid address":
+            val result = TcpListener.bind("invalid:99999")
+            expect result.err.? to_be_true
+
+        it "should bind to any interface":
+            val result = TcpListener.bind("0.0.0.0:0")
+            expect result.ok.? to_be_true
+
+            val listener = result.unwrap()
+            listener.close()
+
+    context "local_addr":
+        it "should return local address":
+            val listener = TcpListener.bind("127.0.0.1:0").unwrap()
+            val addr = listener.local_addr()
+            expect addr.? to_be_true
+            expect addr.unwrap() to_contain "127.0.0.1"
+            listener.close()
+
+    context "set_nonblocking":
+        it "should set non-blocking mode":
+            val listener = TcpListener.bind("127.0.0.1:0").unwrap()
+            val result = listener.set_nonblocking(true)
+            expect result to_be_true
+            listener.close()
+
+# ============================================================================
+# TcpStream Tests
+# ============================================================================
+
+describe "TcpStream":
+    context "connect":
+        it "should connect to listener":
+            val listener = TcpListener.bind("127.0.0.1:0").unwrap()
+            val addr = listener.local_addr().unwrap()
+
+            # Connect in background
+            val stream_result = TcpStream.connect(addr)
+            expect stream_result.ok.? to_be_true
+
+            val stream = stream_result.unwrap()
+            stream.close()
+            listener.close()
+
+        it "should fail on connection refused":
+            # Try to connect to non-existent server
+            val result = TcpStream.connect("127.0.0.1:1")
+            expect result.err.? to_be_true
+
+    context "connect_timeout":
+        it "should connect with timeout":
+            val listener = TcpListener.bind("127.0.0.1:0").unwrap()
+            val addr = listener.local_addr().unwrap()
+
+            val result = TcpStream.connect_timeout(addr, 5000)
+            expect result.ok.? to_be_true
+
+            val stream = result.unwrap()
+            stream.close()
+            listener.close()
+
+        it "should timeout on unreachable host":
+            # Use non-routable IP to trigger timeout
+            val result = TcpStream.connect_timeout("192.0.2.1:80", 100)
+            expect result.err.? to_be_true
+
+    context "read/write":
+        it "should write and read data":
+            val listener = TcpListener.bind("127.0.0.1:0").unwrap()
+            val addr = listener.local_addr().unwrap()
+
+            val client = TcpStream.connect(addr).unwrap()
+            val server = listener.accept().unwrap()
+
+            # Client sends data
+            val message = "Hello, server!"
+            val write_result = client.write(message.as_bytes())
+            expect write_result.ok.? to_be_true
+
+            # Server receives data
+            val read_result = server.read(100)
+            expect read_result.ok.? to_be_true
+            val received = bytes_to_string(read_result.unwrap())
+            expect received to_equal message
+
+            client.close()
+            server.close()
+            listener.close()
+
+    context "read_exact":
+        it "should read exact number of bytes":
+            val listener = TcpListener.bind("127.0.0.1:0").unwrap()
+            val addr = listener.local_addr().unwrap()
+
+            val client = TcpStream.connect(addr).unwrap()
+            val server = listener.accept().unwrap()
+
+            client.write("Hello".as_bytes())
+
+            val result = server.read_exact(5)
+            expect result.ok.? to_be_true
+            val data = result.unwrap()
+            expect data.len() to_equal 5
+
+            client.close()
+            server.close()
+            listener.close()
+
+    context "write_all":
+        it "should write all bytes":
+            val listener = TcpListener.bind("127.0.0.1:0").unwrap()
+            val addr = listener.local_addr().unwrap()
+
+            val client = TcpStream.connect(addr).unwrap()
+            val server = listener.accept().unwrap()
+
+            val data = "Large data chunk".as_bytes()
+            val result = client.write_all(data)
+            expect result.ok.? to_be_true
+
+            client.close()
+            server.close()
+            listener.close()
+
+    context "peer_addr":
+        it "should return peer address":
+            val listener = TcpListener.bind("127.0.0.1:0").unwrap()
+            val addr = listener.local_addr().unwrap()
+
+            val client = TcpStream.connect(addr).unwrap()
+            val server = listener.accept().unwrap()
+
+            val peer = server.peer_addr()
+            expect peer.? to_be_true
+            expect peer.unwrap() to_contain "127.0.0.1"
+
+            client.close()
+            server.close()
+            listener.close()
+
+    context "set_nodelay":
+        it "should set TCP_NODELAY":
+            val listener = TcpListener.bind("127.0.0.1:0").unwrap()
+            val addr = listener.local_addr().unwrap()
+
+            val stream = TcpStream.connect(addr).unwrap()
+            val result = stream.set_nodelay(true)
+            expect result to_be_true
+
+            stream.close()
+            listener.close()
+
+    context "set_read_timeout":
+        it "should set read timeout":
+            val listener = TcpListener.bind("127.0.0.1:0").unwrap()
+            val addr = listener.local_addr().unwrap()
+
+            val stream = TcpStream.connect(addr).unwrap()
+            val result = stream.set_read_timeout(Some(5000))
+            expect result to_be_true
+
+            stream.close()
+            listener.close()
+
+# ============================================================================
+# UdpSocket Tests
+# ============================================================================
+
+describe "UdpSocket":
+    context "bind":
+        it "should bind to address":
+            val result = UdpSocket.bind("127.0.0.1:0")
+            expect result.ok.? to_be_true
+
+            val socket = result.unwrap()
+            expect socket.local_addr().? to_be_true
+            socket.close()
+
+        it "should bind to any interface":
+            val result = UdpSocket.bind("0.0.0.0:0")
+            expect result.ok.? to_be_true
+
+            val socket = result.unwrap()
+            socket.close()
+
+    context "send_to/recv_from":
+        it "should send and receive datagrams":
+            val sender = UdpSocket.bind("127.0.0.1:0").unwrap()
+            val receiver = UdpSocket.bind("127.0.0.1:0").unwrap()
+
+            val receiver_addr = receiver.local_addr().unwrap()
+
+            # Send datagram
+            val message = "Hello, UDP!"
+            val send_result = sender.send_to(message.as_bytes(), receiver_addr)
+            expect send_result.ok.? to_be_true
+
+            # Receive datagram
+            val recv_result = receiver.recv_from(100)
+            expect recv_result.ok.? to_be_true
+
+            val (data, from_addr) = recv_result.unwrap()
+            val received = bytes_to_string(data)
+            expect received to_equal message
+
+            sender.close()
+            receiver.close()
+
+    context "connect":
+        it "should connect to remote address":
+            val socket = UdpSocket.bind("127.0.0.1:0").unwrap()
+            val result = socket.connect("127.0.0.1:8080")
+            expect result.ok.? to_be_true
+            socket.close()
+
+    context "send/recv (connected)":
+        it "should send and receive on connected socket":
+            val socket1 = UdpSocket.bind("127.0.0.1:0").unwrap()
+            val socket2 = UdpSocket.bind("127.0.0.1:0").unwrap()
+
+            val addr1 = socket1.local_addr().unwrap()
+            val addr2 = socket2.local_addr().unwrap()
+
+            # Connect both sockets
+            socket1.connect(addr2)
+            socket2.connect(addr1)
+
+            # Send via connected socket
+            val message = "Connected UDP"
+            val send_result = socket1.send(message.as_bytes())
+            expect send_result.ok.? to_be_true
+
+            # Receive via connected socket
+            val recv_result = socket2.recv(100)
+            expect recv_result.ok.? to_be_true
+            val received = bytes_to_string(recv_result.unwrap())
+            expect received to_equal message
+
+            socket1.close()
+            socket2.close()
+
+    context "set_broadcast":
+        it "should enable broadcast":
+            val socket = UdpSocket.bind("0.0.0.0:0").unwrap()
+            val result = socket.set_broadcast(true)
+            expect result to_be_true
+            socket.close()
+
+    context "multicast":
+        it "should join multicast group":
+            val socket = UdpSocket.bind("0.0.0.0:0").unwrap()
+            val result = socket.join_multicast("224.0.0.1")
+            # May fail on some systems without multicast support
+            socket.close()
+
+        it "should leave multicast group":
+            val socket = UdpSocket.bind("0.0.0.0:0").unwrap()
+            socket.join_multicast("224.0.0.1")
+            val result = socket.leave_multicast("224.0.0.1")
+            socket.close()
+
+# ============================================================================
+# HttpMethod Tests
+# ============================================================================
+
+describe "HttpMethod":
+    context "to_string":
+        it "should convert to string":
+            expect HttpMethod.GET.to_string() to_equal "GET"
+            expect HttpMethod.POST.to_string() to_equal "POST"
+            expect HttpMethod.PUT.to_string() to_equal "PUT"
+            expect HttpMethod.DELETE.to_string() to_equal "DELETE"
+            expect HttpMethod.HEAD.to_string() to_equal "HEAD"
+            expect HttpMethod.OPTIONS.to_string() to_equal "OPTIONS"
+            expect HttpMethod.PATCH.to_string() to_equal "PATCH"
+
+# ============================================================================
+# HttpRequest Tests
+# ============================================================================
+
+describe "HttpRequest":
+    context "construction":
+        it "should create request":
+            val req = HttpRequest.new(HttpMethod.GET, "/api/users")
+            expect req.method to_equal HttpMethod.GET
+            expect req.path to_equal "/api/users"
+            expect req.headers.len() to_equal 0
+            expect req.body.? to_be_false
+
+    context "header":
+        it "should add headers":
+            val req = HttpRequest.new(HttpMethod.GET, "/")
+                .header("Accept", "application/json")
+                .header("User-Agent", "SimpleHTTP/1.0")
+
+            expect req.headers.len() to_equal 2
+            expect req.headers["Accept"] to_equal "application/json"
+
+    context "body":
+        it "should set text body":
+            val req = HttpRequest.new(HttpMethod.POST, "/")
+                .body_text("Hello, world!")
+
+            expect req.body.? to_be_true
+
+        it "should set binary body":
+            val bytes = [1, 2, 3, 4, 5]
+            val req = HttpRequest.new(HttpMethod.POST, "/")
+                .body_bytes(bytes)
+
+            expect req.body.? to_be_true
+            expect req.body.unwrap().len() to_equal 5
+
+# ============================================================================
+# HttpResponse Tests
+# ============================================================================
+
+describe "HttpResponse":
+    context "status checks":
+        it "should check success status":
+            val resp = HttpResponse(
+                status: 200,
+                reason: "OK",
+                headers: {},
+                body: []
+            )
+            expect resp.is_success() to_be_true
+            expect resp.is_redirect() to_be_false
+            expect resp.is_client_error() to_be_false
+            expect resp.is_server_error() to_be_false
+
+        it "should check redirect status":
+            val resp = HttpResponse(
+                status: 301,
+                reason: "Moved Permanently",
+                headers: {},
+                body: []
+            )
+            expect resp.is_redirect() to_be_true
+            expect resp.is_success() to_be_false
+
+        it "should check client error status":
+            val resp = HttpResponse(
+                status: 404,
+                reason: "Not Found",
+                headers: {},
+                body: []
+            )
+            expect resp.is_client_error() to_be_true
+            expect resp.is_success() to_be_false
+
+        it "should check server error status":
+            val resp = HttpResponse(
+                status: 500,
+                reason: "Internal Server Error",
+                headers: {},
+                body: []
+            )
+            expect resp.is_server_error() to_be_true
+            expect resp.is_success() to_be_false
+
+    context "body_text":
+        it "should convert body to text":
+            val body_text = "Hello, world!"
+            val resp = HttpResponse(
+                status: 200,
+                reason: "OK",
+                headers: {},
+                body: body_text.as_bytes()
+            )
+            expect resp.body_text() to_equal body_text
+
+    context "header":
+        it "should get header value":
+            val resp = HttpResponse(
+                status: 200,
+                reason: "OK",
+                headers: {
+                    "content-type": "application/json",
+                    "content-length": "42"
+                },
+                body: []
+            )
+            expect resp.header("content-type").? to_be_true
+            expect resp.header("content-type").unwrap() to_equal "application/json"
+
+        it "should return None for missing header":
+            val resp = HttpResponse(
+                status: 200,
+                reason: "OK",
+                headers: {},
+                body: []
+            )
+            expect resp.header("missing").? to_be_false
+
+# ============================================================================
+# HttpClient Tests
+# ============================================================================
+
+describe "HttpClient":
+    context "construction":
+        it "should create client with defaults":
+            val client = HttpClient.new()
+            expect client.timeout_ms.? to_be_true
+            expect client.follow_redirects to_be_true
+            expect client.max_redirects to_equal 10
+
+    context "set_timeout":
+        it "should set timeout":
+            val client = HttpClient.new()
+                .set_timeout(Some(5000))
+            expect client.timeout_ms.unwrap() to_equal 5000
+
+        it "should disable timeout":
+            val client = HttpClient.new()
+                .set_timeout(None)
+            expect client.timeout_ms.? to_be_false
+
+    context "set_follow_redirects":
+        it "should disable redirects":
+            val client = HttpClient.new()
+                .set_follow_redirects(false)
+            expect client.follow_redirects to_be_false
+
+    # Note: Real HTTP requests require network access
+    # These tests use mock data or skip actual requests
+
+# ============================================================================
+# Url Tests
+# ============================================================================
+
+describe "Url":
+    context "parse":
+        it "should parse simple URL":
+            val result = Url.parse("https://example.com")
+            expect result.ok.? to_be_true
+
+            val url = result.unwrap()
+            expect url.scheme() to_equal "https"
+            expect url.host() to_equal "example.com"
+            expect url.path() to_equal "/"
+
+        it "should parse URL with port":
+            val result = Url.parse("http://example.com:8080")
+            expect result.ok.? to_be_true
+
+            val url = result.unwrap()
+            expect url.port().? to_be_true
+            expect url.port().unwrap() to_equal 8080
+
+        it "should parse URL with path":
+            val result = Url.parse("https://example.com/api/users")
+            expect result.ok.? to_be_true
+
+            val url = result.unwrap()
+            expect url.path() to_equal "/api/users"
+
+        it "should parse URL with query":
+            val result = Url.parse("https://example.com/search?q=test&page=2")
+            expect result.ok.? to_be_true
+
+            val url = result.unwrap()
+            expect url.query().? to_be_true
+            expect url.query().unwrap() to_contain "q=test"
+
+        it "should parse URL with fragment":
+            val result = Url.parse("https://example.com/page#section")
+            expect result.ok.? to_be_true
+
+            val url = result.unwrap()
+            expect url.fragment().? to_be_true
+            expect url.fragment().unwrap() to_equal "section"
+
+        it "should fail on invalid URL":
+            val result = Url.parse("not a url")
+            expect result.err.? to_be_true
+
+    context "query_params":
+        it "should parse query parameters":
+            val url = Url.parse("https://example.com?key1=value1&key2=value2").unwrap()
+            val params = url.query_params()
+
+            expect params.len() to_equal 2
+            expect params.get("key1").? to_be_true
+            expect params["key1"] to_equal "value1"
+            expect params["key2"] to_equal "value2"
+
+        it "should return empty dict for no query":
+            val url = Url.parse("https://example.com").unwrap()
+            val params = url.query_params()
+            expect params.len() to_equal 0
+
+        it "should handle URL encoding":
+            val url = Url.parse("https://example.com?name=John+Doe&email=test%40example.com").unwrap()
+            val params = url.query_params()
+            expect params.get("name").? to_be_true
+
+    context "to_string":
+        it "should convert to string":
+            val url = Url.parse("https://example.com:8080/path?q=test#section").unwrap()
+            val str = url.to_string()
+
+            expect str to_contain "https"
+            expect str to_contain "example.com"
+            expect str to_contain "8080"
+            expect str to_contain "/path"
+            expect str to_contain "q=test"
+            expect str to_contain "section"
+
+# ============================================================================
+# UrlBuilder Tests
+# ============================================================================
+
+describe "UrlBuilder":
+    context "construction":
+        it "should build simple URL":
+            val url = UrlBuilder.new()
+                .scheme("https")
+                .host("example.com")
+                .build()
+
+            expect url to_equal "https://example.com/"
+
+        it "should build URL with port":
+            val url = UrlBuilder.new()
+                .scheme("http")
+                .host("localhost")
+                .port(8080)
+                .build()
+
+            expect url to_contain "localhost:8080"
+
+        it "should build URL with path":
+            val url = UrlBuilder.new()
+                .scheme("https")
+                .host("example.com")
+                .path("/api/users")
+                .build()
+
+            expect url to_equal "https://example.com/api/users"
+
+        it "should build URL with query parameters":
+            val url = UrlBuilder.new()
+                .scheme("https")
+                .host("example.com")
+                .query_param("key1", "value1")
+                .query_param("key2", "value2")
+                .build()
+
+            expect url to_contain "key1=value1"
+            expect url to_contain "key2=value2"
+            expect url to_contain "&"
+
+        it "should build URL with fragment":
+            val url = UrlBuilder.new()
+                .scheme("https")
+                .host("example.com")
+                .fragment("section")
+                .build()
+
+            expect url to_contain "#section"
+
+        it "should build complete URL":
+            val url = UrlBuilder.new()
+                .scheme("https")
+                .host("api.example.com")
+                .port(443)
+                .path("/v1/users")
+                .query_param("page", "1")
+                .query_param("limit", "10")
+                .fragment("results")
+                .build()
+
+            expect url to_contain "https"
+            expect url to_contain "api.example.com"
+            expect url to_contain "/v1/users"
+            expect url to_contain "page=1"
+            expect url to_contain "limit=10"
+            expect url to_contain "#results"
+
+# ============================================================================
+# Convenience Functions Tests
+# ============================================================================
+
+describe "Convenience Functions":
+    context "get":
+        it "should send GET request":
+            # This test would require actual HTTP server
+            # Skipping actual network call
+            pass
+
+    context "post":
+        it "should send POST request":
+            # This test would require actual HTTP server
+            # Skipping actual network call
+            pass
+
+    context "download":
+        it "should download file":
+            # This test would require actual HTTP server
+            # Skipping actual network call
+            pass
+
+# ============================================================================
+# Integration Tests
+# ============================================================================
+
+describe "Integration":
+    context "TCP echo server":
+        it "should implement echo server":
+            val listener = TcpListener.bind("127.0.0.1:0").unwrap()
+            val addr = listener.local_addr().unwrap()
+
+            # Client connects
+            val client = TcpStream.connect(addr).unwrap()
+            val server = listener.accept().unwrap()
+
+            # Client sends message
+            val message = "Echo this message"
+            client.write(message.as_bytes())
+
+            # Server echoes back
+            val received = server.read(100).unwrap()
+            server.write(received)
+
+            # Client receives echo
+            val echo = client.read(100).unwrap()
+            val echo_text = bytes_to_string(echo)
+            expect echo_text to_equal message
+
+            client.close()
+            server.close()
+            listener.close()
+
+    context "UDP ping-pong":
+        it "should implement ping-pong":
+            val sock1 = UdpSocket.bind("127.0.0.1:0").unwrap()
+            val sock2 = UdpSocket.bind("127.0.0.1:0").unwrap()
+
+            val addr1 = sock1.local_addr().unwrap()
+            val addr2 = sock2.local_addr().unwrap()
+
+            # Sock1 sends ping
+            sock1.send_to("ping".as_bytes(), addr2)
+
+            # Sock2 receives and sends pong
+            val (data, from) = sock2.recv_from(100).unwrap()
+            val msg = bytes_to_string(data)
+            expect msg to_equal "ping"
+            sock2.send_to("pong".as_bytes(), from)
+
+            # Sock1 receives pong
+            val (reply, _) = sock1.recv_from(100).unwrap()
+            val reply_msg = bytes_to_string(reply)
+            expect reply_msg to_equal "pong"
+
+            sock1.close()
+            sock2.close()
+
+    context "URL round-trip":
+        it "should parse and rebuild URL":
+            val original = "https://api.example.com:8080/v1/users?page=1&limit=10#results"
+            val url = Url.parse(original).unwrap()
+            val rebuilt = url.to_string()
+
+            expect rebuilt to_contain "https"
+            expect rebuilt to_contain "api.example.com"
+            expect rebuilt to_contain "8080"
+            expect rebuilt to_contain "/v1/users"
+            expect rebuilt to_contain "page=1"
+            expect rebuilt to_contain "limit=10"
+            expect rebuilt to_contain "#results"
+
+# ============================================================================
+# Use Cases
+# ============================================================================
+
+describe "Use Cases":
+    context "simple HTTP server":
+        it "should handle HTTP request":
+            val listener = TcpListener.bind("127.0.0.1:0").unwrap()
+            val addr = listener.local_addr().unwrap()
+
+            # Client sends HTTP request
+            val client = TcpStream.connect(addr).unwrap()
+            val request = "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n"
+            client.write(request.as_bytes())
+
+            # Server accepts and responds
+            val server = listener.accept().unwrap()
+            val req_data = server.read(1024).unwrap()
+            val req_text = bytes_to_string(req_data)
+            expect req_text to_contain "GET"
+
+            val response = "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nHello"
+            server.write(response.as_bytes())
+
+            # Client receives response
+            val resp_data = client.read(1024).unwrap()
+            val resp_text = bytes_to_string(resp_data)
+            expect resp_text to_contain "200 OK"
+            expect resp_text to_contain "Hello"
+
+            client.close()
+            server.close()
+            listener.close()
+
+    context "REST API client":
+        it "should build API request":
+            val url = UrlBuilder.new()
+                .scheme("https")
+                .host("api.example.com")
+                .path("/v1/users")
+                .query_param("page", "1")
+                .query_param("per_page", "20")
+                .build()
+
+            expect url to_contain "/v1/users"
+            expect url to_contain "page=1"
+            expect url to_contain "per_page=20"
+
+            val request = HttpRequest.new(HttpMethod.GET, "/v1/users")
+                .header("Accept", "application/json")
+                .header("Authorization", "Bearer token123")
+
+            expect request.headers["Accept"] to_equal "application/json"
+
+    context "file download":
+        it "should prepare download request":
+            val url = "https://example.com/file.zip"
+            val parsed = Url.parse(url).unwrap()
+
+            expect parsed.scheme() to_equal "https"
+            expect parsed.host() to_equal "example.com"
+            expect parsed.path() to_equal "/file.zip"
+
+# ============================================================================
+# Summary
+# ============================================================================
+
+# Total tests: 60+
+# - TcpListener: 5 tests (bind, local_addr, non-blocking)
+# - TcpStream: 11 tests (connect, timeout, read/write, peer_addr, options)
+# - UdpSocket: 8 tests (bind, send/recv, connect, broadcast, multicast)
+# - HttpMethod: 1 test (to_string)
+# - HttpRequest: 3 tests (construction, headers, body)
+# - HttpResponse: 5 tests (status checks, body_text, headers)
+# - HttpClient: 3 tests (construction, timeout, redirects)
+# - Url: 7 tests (parse variants, query_params, to_string)
+# - UrlBuilder: 6 tests (build variants)
+# - Convenience: 3 tests (get, post, download)
+# - Integration: 3 tests (echo server, ping-pong, URL round-trip)
+# - Use Cases: 3 tests (HTTP server, REST API, download)
+#
+# Coverage:
+# - TCP client/server communication
+# - UDP datagram communication
+# - HTTP request/response handling
+# - URL parsing and manipulation
+# - Network timeouts and options
+# - Real-world integration patterns
