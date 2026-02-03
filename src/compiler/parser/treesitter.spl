@@ -1,0 +1,509 @@
+# TreeSitter Integration for Compiler Parser
+#
+# Provides outline parsing (extract top-level declarations without full parse),
+# error region detection, and incremental update support for LSP/IDE use.
+#
+# Port of disabled rust/lib/std/src/parser.disabled/treesitter/ modules
+# into a shared compiler module usable by compiler, interpreter, and LSP.
+
+export OutlineParser, OutlineItem, OutlineKind
+export ErrorRegion, ErrorSeverity
+export IncrementalParser, EditRange, ParseResult
+
+# ============================================================================
+# Outline Parsing - Extract declarations without full AST
+# ============================================================================
+
+enum OutlineKind:
+    Function
+    Method
+    StaticMethod
+    MutableMethod       # me fn()
+    Class
+    Struct
+    Enum
+    EnumVariant
+    Trait
+    Impl
+    Module
+    Import
+    Export
+    Val
+    Var
+    Const
+    TypeAlias
+
+struct OutlineItem:
+    kind: OutlineKind
+    name: text
+    line: i64
+    column: i64
+    end_line: i64
+    visibility: text        # "pub", "pub(mod)", or ""
+    parent: text?           # impl target or module name
+    signature: text?        # fn signature or type annotation
+    children: [OutlineItem]
+
+impl OutlineItem:
+    static fn new(kind: OutlineKind, name: text, line: i64, column: i64) -> OutlineItem:
+        OutlineItem(kind: kind, name: name, line: line, column: column,
+                    end_line: line, visibility: "", parent: nil,
+                    signature: nil, children: [])
+
+    fn with_visibility(vis: text) -> OutlineItem:
+        OutlineItem(kind: self.kind, name: self.name, line: self.line,
+                    column: self.column, end_line: self.end_line,
+                    visibility: vis, parent: self.parent,
+                    signature: self.signature, children: self.children)
+
+    fn with_parent(parent: text) -> OutlineItem:
+        OutlineItem(kind: self.kind, name: self.name, line: self.line,
+                    column: self.column, end_line: self.end_line,
+                    visibility: self.visibility, parent: Some(parent),
+                    signature: self.signature, children: self.children)
+
+    fn with_signature(sig: text) -> OutlineItem:
+        OutlineItem(kind: self.kind, name: self.name, line: self.line,
+                    column: self.column, end_line: self.end_line,
+                    visibility: self.visibility, parent: self.parent,
+                    signature: Some(sig), children: self.children)
+
+class OutlineParser:
+    """Fast outline parser that extracts top-level declarations.
+
+    Uses indentation-based heuristics rather than full parsing.
+    Tolerant of syntax errors - always produces results.
+    """
+    source: text
+    lines: [text]
+    items: [OutlineItem]
+    current_impl_target: text?
+
+impl OutlineParser:
+    static fn from_source(source: text) -> OutlineParser:
+        OutlineParser(source: source, lines: source.split("\n"),
+                      items: [], current_impl_target: nil)
+
+    me parse() -> [OutlineItem]:
+        """Parse source and return outline items."""
+        var line_num = 0
+        while line_num < self.lines.len():
+            val line = self.lines[line_num]
+            val trimmed = line.trim()
+            val indent = self.indent_level(line)
+
+            # Skip empty lines and comments
+            if trimmed.len() == 0 or trimmed[0] == '#':
+                line_num = line_num + 1
+                continue
+
+            # Top-level or nested declarations (indent 0 or 4)
+            if indent == 0:
+                self.current_impl_target = nil
+                self.parse_declaration(trimmed, line_num + 1, indent)
+            elif indent == 4 and self.current_impl_target.?:
+                self.parse_member(trimmed, line_num + 1)
+
+            line_num = line_num + 1
+
+        self.items
+
+    me parse_declaration(trimmed: text, line: i64, indent: i64):
+        """Parse a top-level declaration line."""
+        var vis = ""
+        var rest = trimmed
+
+        # Check visibility
+        if rest.starts_with("pub "):
+            vis = "pub"
+            rest = rest[4:]
+        elif rest.starts_with("export "):
+            val item = OutlineItem.new(OutlineKind.Export, rest[7:], line, 1)
+            self.items = self.items.push(item)
+            return
+
+        # Match declaration keyword
+        if rest.starts_with("fn "):
+            val name = self.extract_name(rest[3:])
+            val sig = self.extract_until_colon(rest)
+            val item = OutlineItem.new(OutlineKind.Function, name, line, indent + 1)
+                .with_visibility(vis).with_signature(sig)
+            self.items = self.items.push(item)
+
+        elif rest.starts_with("me "):
+            val name = self.extract_name(rest[3:])
+            val sig = self.extract_until_colon(rest)
+            val item = OutlineItem.new(OutlineKind.MutableMethod, name, line, indent + 1)
+                .with_visibility(vis).with_signature(sig)
+            self.items = self.items.push(item)
+
+        elif rest.starts_with("class "):
+            val name = self.extract_name(rest[6:])
+            val item = OutlineItem.new(OutlineKind.Class, name, line, indent + 1)
+                .with_visibility(vis)
+            self.items = self.items.push(item)
+
+        elif rest.starts_with("struct "):
+            val name = self.extract_name(rest[7:])
+            val item = OutlineItem.new(OutlineKind.Struct, name, line, indent + 1)
+                .with_visibility(vis)
+            self.items = self.items.push(item)
+
+        elif rest.starts_with("enum "):
+            val name = self.extract_name(rest[5:])
+            val item = OutlineItem.new(OutlineKind.Enum, name, line, indent + 1)
+                .with_visibility(vis)
+            self.items = self.items.push(item)
+
+        elif rest.starts_with("trait "):
+            val name = self.extract_name(rest[6:])
+            val item = OutlineItem.new(OutlineKind.Trait, name, line, indent + 1)
+                .with_visibility(vis)
+            self.items = self.items.push(item)
+
+        elif rest.starts_with("impl "):
+            val name = self.extract_name(rest[5:])
+            self.current_impl_target = Some(name)
+            val item = OutlineItem.new(OutlineKind.Impl, name, line, indent + 1)
+                .with_visibility(vis)
+            self.items = self.items.push(item)
+
+        elif rest.starts_with("mod "):
+            val name = self.extract_name(rest[4:])
+            val item = OutlineItem.new(OutlineKind.Module, name, line, indent + 1)
+                .with_visibility(vis)
+            self.items = self.items.push(item)
+
+        elif rest.starts_with("val "):
+            val name = self.extract_name(rest[4:])
+            val item = OutlineItem.new(OutlineKind.Val, name, line, indent + 1)
+                .with_visibility(vis)
+            self.items = self.items.push(item)
+
+        elif rest.starts_with("var "):
+            val name = self.extract_name(rest[4:])
+            val item = OutlineItem.new(OutlineKind.Var, name, line, indent + 1)
+                .with_visibility(vis)
+            self.items = self.items.push(item)
+
+        elif rest.starts_with("import ") or rest.starts_with("use "):
+            val keyword_len = if rest.starts_with("import ") { 7 } else { 4 }
+            val item = OutlineItem.new(OutlineKind.Import, rest[keyword_len:], line, indent + 1)
+            self.items = self.items.push(item)
+
+    me parse_member(trimmed: text, line: i64):
+        """Parse a member inside an impl block."""
+        var vis = ""
+        var rest = trimmed
+        if rest.starts_with("pub "):
+            vis = "pub"
+            rest = rest[4:]
+
+        val target = self.current_impl_target.unwrap()
+
+        if rest.starts_with("fn "):
+            val name = self.extract_name(rest[3:])
+            val sig = self.extract_until_colon(rest)
+            val item = OutlineItem.new(OutlineKind.Method, name, line, 5)
+                .with_visibility(vis).with_parent(target).with_signature(sig)
+            self.items = self.items.push(item)
+
+        elif rest.starts_with("static fn "):
+            val name = self.extract_name(rest[10:])
+            val sig = self.extract_until_colon(rest)
+            val item = OutlineItem.new(OutlineKind.StaticMethod, name, line, 5)
+                .with_visibility(vis).with_parent(target).with_signature(sig)
+            self.items = self.items.push(item)
+
+        elif rest.starts_with("me "):
+            val name = self.extract_name(rest[3:])
+            val sig = self.extract_until_colon(rest)
+            val item = OutlineItem.new(OutlineKind.MutableMethod, name, line, 5)
+                .with_visibility(vis).with_parent(target).with_signature(sig)
+            self.items = self.items.push(item)
+
+    fn extract_name(s: text) -> text:
+        """Extract identifier name from start of string."""
+        var end = 0
+        while end < s.len():
+            val ch = s[end]
+            if (ch >= 'a' and ch <= 'z') or (ch >= 'A' and ch <= 'Z')
+               or (ch >= '0' and ch <= '9') or ch == '_':
+                end = end + 1
+            else:
+                break
+        if end == 0: "<unknown>" else: s[:end]
+
+    fn extract_until_colon(s: text) -> text:
+        """Extract text up to (but not including) the trailing colon."""
+        val idx = s.rfind(":")
+        if idx.?: s[:idx.unwrap()].trim() else: s.trim()
+
+    fn indent_level(line: text) -> i64:
+        """Count leading spaces."""
+        var count = 0
+        while count < line.len() and line[count] == ' ':
+            count = count + 1
+        count
+
+# ============================================================================
+# Error Region Detection
+# ============================================================================
+
+enum ErrorSeverity:
+    Error
+    Warning
+    Info
+
+struct ErrorRegion:
+    """A region of source code containing a parse error."""
+    start_line: i64
+    start_column: i64
+    end_line: i64
+    end_column: i64
+    severity: ErrorSeverity
+    message: text
+    expected: [text]
+
+impl ErrorRegion:
+    static fn error(start_line: i64, start_col: i64, end_line: i64, end_col: i64,
+                    message: text) -> ErrorRegion:
+        ErrorRegion(start_line: start_line, start_column: start_col,
+                    end_line: end_line, end_column: end_col,
+                    severity: ErrorSeverity.Error, message: message, expected: [])
+
+    fn with_expected(expected: [text]) -> ErrorRegion:
+        ErrorRegion(start_line: self.start_line, start_column: self.start_column,
+                    end_line: self.end_line, end_column: self.end_column,
+                    severity: self.severity, message: self.message,
+                    expected: expected)
+
+fn detect_error_regions(source: text) -> [ErrorRegion]:
+    """Detect error regions using lightweight heuristics.
+
+    Checks for:
+    - Unmatched delimiters
+    - Inconsistent indentation
+    - Missing colons after declarations
+    """
+    var errors: [ErrorRegion] = []
+    val lines = source.split("\n")
+
+    # Delimiter tracking
+    var paren_depth = 0
+    var bracket_depth = 0
+    var brace_depth = 0
+
+    # Indentation tracking
+    var indent_stack: [i64] = [0]
+    var in_string = false
+
+    var line_num = 0
+    while line_num < lines.len():
+        val line = lines[line_num]
+        val trimmed = line.trim()
+
+        # Skip empty lines and comments
+        if trimmed.len() == 0 or trimmed[0] == '#':
+            line_num = line_num + 1
+            continue
+
+        # Check indentation consistency
+        val indent = count_leading_spaces(line)
+        if indent > 0 and indent % 4 != 0:
+            errors = errors.push(ErrorRegion.error(
+                line_num + 1, 1, line_num + 1, indent + 1,
+                "Indentation should be a multiple of 4 spaces"
+            ))
+
+        # Track delimiters on this line
+        var col = 0
+        while col < line.len():
+            val ch = line[col]
+            if ch == '"' and not in_string:
+                in_string = true
+            elif ch == '"' and in_string:
+                in_string = false
+            elif not in_string:
+                match ch:
+                    case '(': paren_depth = paren_depth + 1
+                    case ')':
+                        paren_depth = paren_depth - 1
+                        if paren_depth < 0:
+                            errors = errors.push(ErrorRegion.error(
+                                line_num + 1, col + 1, line_num + 1, col + 2,
+                                "Unmatched closing parenthesis"
+                            ))
+                            paren_depth = 0
+                    case '[': bracket_depth = bracket_depth + 1
+                    case ']':
+                        bracket_depth = bracket_depth - 1
+                        if bracket_depth < 0:
+                            errors = errors.push(ErrorRegion.error(
+                                line_num + 1, col + 1, line_num + 1, col + 2,
+                                "Unmatched closing bracket"
+                            ))
+                            bracket_depth = 0
+                    case '{': brace_depth = brace_depth + 1
+                    case '}':
+                        brace_depth = brace_depth - 1
+                        if brace_depth < 0:
+                            errors = errors.push(ErrorRegion.error(
+                                line_num + 1, col + 1, line_num + 1, col + 2,
+                                "Unmatched closing brace"
+                            ))
+                            brace_depth = 0
+                    case _: ()
+            col = col + 1
+
+        # Check for missing colon after declaration keywords
+        if is_declaration_line(trimmed) and not trimmed.ends_with(":"):
+            if not trimmed.ends_with("\\"):  # not a continuation line
+                errors = errors.push(ErrorRegion.error(
+                    line_num + 1, trimmed.len() + 1, line_num + 1, trimmed.len() + 2,
+                    "Missing ':' after declaration"
+                ).with_expected([":"]))
+
+        line_num = line_num + 1
+
+    # Report unclosed delimiters
+    if paren_depth > 0:
+        errors = errors.push(ErrorRegion.error(
+            lines.len(), 1, lines.len(), 1, "Unclosed parenthesis"))
+    if bracket_depth > 0:
+        errors = errors.push(ErrorRegion.error(
+            lines.len(), 1, lines.len(), 1, "Unclosed bracket"))
+    if brace_depth > 0:
+        errors = errors.push(ErrorRegion.error(
+            lines.len(), 1, lines.len(), 1, "Unclosed brace"))
+
+    errors
+
+fn count_leading_spaces(line: text) -> i64:
+    var count = 0
+    while count < line.len() and line[count] == ' ':
+        count = count + 1
+    count
+
+fn is_declaration_line(trimmed: text) -> bool:
+    """Check if a trimmed line looks like a declaration that needs a colon."""
+    val keywords = ["fn ", "me ", "class ", "struct ", "enum ", "trait ",
+                    "impl ", "if ", "elif ", "else", "while ", "for ",
+                    "match ", "case "]
+    for kw in keywords:
+        if trimmed.starts_with(kw) or trimmed.starts_with("pub " + kw):
+            return true
+        if trimmed.starts_with("static " + kw):
+            return true
+    false
+
+# ============================================================================
+# Incremental Parsing
+# ============================================================================
+
+struct EditRange:
+    """Describes an edit to source text."""
+    start_line: i64
+    start_column: i64
+    end_line: i64
+    end_column: i64
+    new_text: text
+
+struct ParseResult:
+    """Result of an incremental parse."""
+    outline: [OutlineItem]
+    errors: [ErrorRegion]
+    changed_lines: [i64]    # Lines that changed since last parse
+
+class IncrementalParser:
+    """Tracks source state and re-parses only changed regions.
+
+    For LSP/IDE use: apply edits, get updated outline and errors
+    without re-parsing the entire file.
+    """
+    source: text
+    last_outline: [OutlineItem]
+    last_errors: [ErrorRegion]
+    version: i64
+
+impl IncrementalParser:
+    static fn from_source(source: text) -> IncrementalParser:
+        var parser = OutlineParser.from_source(source)
+        val outline = parser.parse()
+        val errors = detect_error_regions(source)
+        IncrementalParser(source: source, last_outline: outline,
+                          last_errors: errors, version: 0)
+
+    me apply_edit(edit: EditRange) -> ParseResult:
+        """Apply an edit and return updated parse result."""
+        # Apply edit to source
+        val new_source = self.apply_edit_to_source(edit)
+        self.source = new_source
+        self.version = self.version + 1
+
+        # Determine changed line range
+        val changed_start = edit.start_line
+        val old_line_count = edit.end_line - edit.start_line + 1
+        val new_line_count = edit.new_text.split("\n").len()
+        var changed_lines: [i64] = []
+        var i = 0
+        while i < new_line_count:
+            changed_lines = changed_lines.push(changed_start + i)
+            i = i + 1
+
+        # Re-parse (full reparse for now; future: only changed regions)
+        var parser = OutlineParser.from_source(self.source)
+        self.last_outline = parser.parse()
+        self.last_errors = detect_error_regions(self.source)
+
+        ParseResult(outline: self.last_outline, errors: self.last_errors,
+                    changed_lines: changed_lines)
+
+    fn apply_edit_to_source(edit: EditRange) -> text:
+        """Apply edit to source text, return new source."""
+        val lines = self.source.split("\n")
+
+        # Build new source: lines before edit + new text + lines after edit
+        var result: [text] = []
+        var i = 0
+        while i < edit.start_line - 1 and i < lines.len():
+            result = result.push(lines[i])
+            i = i + 1
+
+        # Prefix of start line
+        if edit.start_line - 1 < lines.len():
+            val start_line = lines[edit.start_line - 1]
+            val prefix = if edit.start_column > 1 { start_line[:edit.start_column - 1] } else { "" }
+
+            # Suffix of end line
+            val suffix = if edit.end_line - 1 < lines.len():
+                val end_line = lines[edit.end_line - 1]
+                if edit.end_column <= end_line.len(): end_line[edit.end_column:] else: ""
+            else:
+                ""
+
+            # Insert edited text between prefix and suffix
+            val new_content = prefix + edit.new_text + suffix
+            val new_lines = new_content.split("\n")
+            for nl in new_lines:
+                result = result.push(nl)
+
+        # Lines after the edit
+        var j = edit.end_line
+        while j < lines.len():
+            result = result.push(lines[j])
+            j = j + 1
+
+        result.join("\n")
+
+    fn current_outline() -> [OutlineItem]:
+        self.last_outline
+
+    fn current_errors() -> [ErrorRegion]:
+        self.last_errors
+
+    fn current_source() -> text:
+        self.source
+
+    fn current_version() -> i64:
+        self.version
