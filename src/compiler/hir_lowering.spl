@@ -366,6 +366,30 @@ impl HirLowering:
             result = result.push(self.lower_struct_field(field))
         result
 
+    me lower_trait_bound(bound: TraitBound) -> HirTraitBound:
+        """Lower trait bound to HIR.
+
+        Converts AST trait bound (T: Trait) to HIR representation.
+        """
+        # Lookup the type parameter symbol
+        val type_param_symbol = self.symbols.lookup(bound.type_param).unwrap()
+
+        # Lower the trait type
+        val trait_type = self.lower_type(bound.trait_)
+
+        HirTraitBound(
+            type_param: type_param_symbol,
+            trait_: trait_type,
+            span: bound.span
+        )
+
+    me lower_trait_bounds(bounds: [TraitBound]) -> [HirTraitBound]:
+        """Lower a list of trait bounds to HIR."""
+        var result: [HirTraitBound] = []
+        for b in bounds:
+            result = result.push(self.lower_trait_bound(b))
+        result
+
     me lower_type(t: Type) -> HirType:
         """Lower type expression."""
         val kind = match t.kind:
@@ -570,9 +594,27 @@ impl HirLowering:
         for tp in trait_.type_params:
             type_params = type_params.push(self.lower_type_param(tp))
 
-        var methods: [HirFunction] = []
+        # Lower supertraits
+        var supertraits: [HirType] = []
+        for st in trait_.super_traits:
+            supertraits = supertraits.push(self.lower_type(st))
+
+        # Lower where clause
+        var where_clause: [HirTraitBound] = []
+        for bound in trait_.where_clause:
+            where_clause = where_clause.push(self.lower_trait_bound(bound))
+
+        # Separate methods into abstract (no body) and defaults (with body)
+        var abstract_methods: [HirFunction] = []
+        var defaults: [HirFunction] = []
         for m in trait_.methods:
-            methods = methods.push(self.lower_function(m))
+            val hir_fn = self.lower_function(m)
+            # Check if method has a body (default implementation)
+            # Function.body is a Block, check if it has statements
+            if m.body.stmts.is_empty() and m.body.value.is_none():
+                abstract_methods = abstract_methods.push(hir_fn)
+            else:
+                defaults = defaults.push(hir_fn)
 
         self.symbols.pop_scope()
 
@@ -580,7 +622,10 @@ impl HirLowering:
             symbol: symbol,
             name: trait_.name,
             type_params: type_params,
-            methods: methods,
+            methods: abstract_methods,
+            supertraits: supertraits,
+            defaults: defaults,
+            where_clause: where_clause,
             is_public: trait_.is_public,
             doc_comment: trait_.doc_comment,
             span: trait_.span,
@@ -592,6 +637,16 @@ impl HirLowering:
     me lower_impl(impl_: Impl) -> HirImpl:
         """Lower impl block to HIR."""
         self.symbols.push_scope(ScopeKind.Impl)
+
+        # Lower generic type parameters
+        var type_params: [HirTypeParam] = []
+        for tp in impl_.type_params:
+            type_params = type_params.push(self.lower_type_param(tp))
+
+        # Lower where clause
+        var where_clause: [HirTraitBound] = []
+        for bound in impl_.where_clause:
+            where_clause = where_clause.push(self.lower_trait_bound(bound))
 
         val type_ = self.lower_type(impl_.type_)
         val trait_ = impl_.trait_.map(\t: self.lower_type(t))
@@ -607,6 +662,8 @@ impl HirLowering:
         HirImpl(
             type_: type_,
             trait_: trait_,
+            type_params: type_params,
+            where_clause: where_clause,
             methods: methods,
             span: impl_.span
         )
