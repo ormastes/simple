@@ -15,6 +15,10 @@ use compiler.treesitter.*
 use compiler.backend.*
 use compiler.type_infer.*
 use compiler.ffi.*
+use compiler.monomorphize_integration.*
+use compiler.mir_opt_integration.{OptimizationConfig, optimize_mir_module}
+use compiler.async_integration.{AsyncIntegration, AsyncStateMachine, process_async_mir}
+use compiler.borrow_check.*
 use blocks.*
 use config.*
 use driver_types.*
@@ -83,6 +87,14 @@ class CompilerDriver:
                     return CompileResult.ResolveError(self.ctx.errors)
             return CompileResult.TypeError(self.ctx.errors)
         log.debug("phase 3 done")
+
+        # Phase 4: Monomorphization (specialize generic functions)
+        log.debug("phase 4: monomorphization...")
+        val mono_ok = self.monomorphize_impl()
+        if not mono_ok:
+            log.error("phase 4 FAILED")
+            return CompileResult.TypeError(self.ctx.errors)
+        log.debug("phase 4 done")
 
         # Phase 5: Mode-specific processing
         log.debug("phase 5: mode-specific processing...")
@@ -273,6 +285,36 @@ class CompilerDriver:
         (ctx, ctx.errors.len() == 0)
 
     # --------------------------------------------------------------------------
+    # Phase 4: Monomorphization
+    # --------------------------------------------------------------------------
+
+    me monomorphize_impl() -> bool:
+        """Run monomorphization pass on all HIR modules.
+
+        This creates specialized versions of generic functions, structs, and
+        classes by substituting concrete type arguments. Call sites are
+        rewritten to use the mangled names of specialized definitions.
+        """
+        val log = self.ctx.logger
+        log.debug("running monomorphization on {self.ctx.hir_modules.keys().len()} modules")
+
+        # Run the monomorphization pass
+        val (updated_modules, stats) = run_monomorphization(self.ctx.hir_modules)
+
+        # Update context with modified modules
+        self.ctx.hir_modules = updated_modules
+
+        # Log statistics
+        log.debug("monomorphization stats:")
+        log.debug("  generic functions: {stats.generic_functions_found}")
+        log.debug("  generic structs: {stats.generic_structs_found}")
+        log.debug("  generic classes: {stats.generic_classes_found}")
+        log.debug("  call sites: {stats.call_sites_found}")
+        log.debug("  specializations created: {stats.specializations_created}")
+
+        not self.ctx.has_errors()
+
+    # --------------------------------------------------------------------------
     # Mode: SDN (Data only)
     # --------------------------------------------------------------------------
 
@@ -329,6 +371,16 @@ class CompilerDriver:
         if not self.lower_to_mir():
             return CompileResult.CodegenError(self.ctx.errors.first() ?? "MIR lowering failed")
 
+        # Borrow checking
+        if not self.borrow_check():
+            return CompileResult.BorrowError(self.ctx.errors)
+
+        # Process async functions (generate state machines for await/yield)
+        val _async_state_machines = self.process_async()
+
+        # Optimize MIR (speed optimization for JIT)
+        self.optimize_mir(OptimizationConfig.speed())
+
         # JIT compile
         var pipeline = CodegenPipeline()
 
@@ -362,6 +414,25 @@ class CompilerDriver:
                 log.error("MIR error: {err}")
             return CompileResult.CodegenError(self.ctx.errors.first() ?? "MIR lowering failed")
         log.debug("MIR done, {self.ctx.mir_modules.keys().len()} modules")
+
+        # Borrow checking
+        log.debug("AOT: running borrow check...")
+        if not self.borrow_check():
+            for err in self.ctx.errors:
+                log.error("Borrow error: {err}")
+            return CompileResult.BorrowError(self.ctx.errors)
+        log.debug("borrow check done")
+
+        # Process async functions (generate state machines for await/yield)
+        log.debug("AOT: processing async functions")
+        val async_state_machines = self.process_async()
+        log.debug("async processing done, {async_state_machines.keys().len()} state machines")
+
+        # Optimize MIR (use optimization level from options)
+        val opt_config = self.get_optimization_config()
+        log.debug("AOT: optimizing MIR (level: {opt_config.level})")
+        self.optimize_mir(opt_config)
+        log.debug("MIR optimization done")
 
         # Determine output file
         val output = self.ctx.options.output_file ?? "a.out"
@@ -499,6 +570,99 @@ class CompilerDriver:
             self.ctx.mir_modules[name] = mir_module
 
         not self.ctx.has_errors()
+
+    # --------------------------------------------------------------------------
+    # Borrow Checking
+    # --------------------------------------------------------------------------
+
+    me borrow_check() -> bool:
+        """Run borrow checking on all MIR modules."""
+        val log = self.ctx.logger
+
+        if self.ctx.options.no_borrow_check:
+            log.debug("borrow checking disabled")
+            return true
+
+        log.debug("borrow checking {self.ctx.mir_modules.keys().len()} modules")
+
+        var checker = BorrowChecker.create()
+        var has_errors = false
+
+        for name in self.ctx.mir_modules.keys():
+            val mir_module = self.ctx.mir_modules[name]
+
+            for fn_symbol in mir_module.functions.keys():
+                val mir_fn = mir_module.functions[fn_symbol]
+                val body = MirBody.from_function(mir_fn)
+                match checker.check_function(body):
+                    case Errors(errors):
+                        for err in errors:
+                            self.ctx.add_error(self.format_borrow_error(err))
+                        has_errors = true
+                    case Ok:
+                        pass
+
+        not has_errors
+
+    fn format_borrow_error(err: NLLError) -> text:
+        """Format a borrow error for display."""
+        var msg = "error[E0502]: {err.message}"
+        if err.help.?:
+            msg = "{msg}\n  = help: {err.help.unwrap()}"
+        msg
+
+    # --------------------------------------------------------------------------
+    # Async Processing
+    # --------------------------------------------------------------------------
+
+    me process_async() -> Dict<text, AsyncStateMachine>:
+        """Process async functions and generate state machines.
+
+        This is called after MIR lowering to analyze and transform async functions.
+        State machines are used by codegen for async execution.
+        """
+        val log = self.ctx.logger
+        log.debug("processing async functions in {self.ctx.mir_modules.keys().len()} modules")
+
+        val state_machines = process_async_mir(self.ctx.mir_modules)
+
+        log.debug("generated {state_machines.keys().len()} async state machines")
+        state_machines
+
+    # --------------------------------------------------------------------------
+    # MIR Optimization
+    # --------------------------------------------------------------------------
+
+    me optimize_mir(config: OptimizationConfig):
+        """Apply MIR optimization passes to all modules."""
+        val log = self.ctx.logger
+        log.debug("optimizing {self.ctx.mir_modules.keys().len()} MIR modules")
+
+        for name in self.ctx.mir_modules.keys():
+            val mir_module = self.ctx.mir_modules[name]
+            val optimized = optimize_mir_module(mir_module, config)
+            # Direct mutation (avoids copy-modify-reassign bug in compiled mode)
+            self.ctx.mir_modules[name] = optimized
+
+    fn get_optimization_config() -> OptimizationConfig:
+        """Get optimization config from compiler options."""
+        # Check for explicit optimization level
+        if self.ctx.options.opt_level.?:
+            val level = self.ctx.options.opt_level.unwrap()
+            if level == 0:
+                return OptimizationConfig.debug()
+            elif level == 1:
+                return OptimizationConfig.size()
+            elif level == 2:
+                return OptimizationConfig.speed()
+            elif level >= 3:
+                return OptimizationConfig.aggressive()
+
+        # Check for release mode or optimize flag
+        if self.ctx.options.release or self.ctx.options.optimize:
+            OptimizationConfig.speed()
+        else:
+            OptimizationConfig.debug()
 
 # ------------------------------------------------------------------------------
 # Runtime Library Discovery

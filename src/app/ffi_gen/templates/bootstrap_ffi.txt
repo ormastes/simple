@@ -1,0 +1,293 @@
+//! Bootstrap FFI - All FFI functions in one file
+//!
+//! This is the embedded bootstrap FFI source that provides all extern functions
+//! needed by the Simple runtime. Generated from FFI specs.
+
+use std::ffi::CString;
+use std::os::raw::c_char;
+use std::process::{Command, Stdio};
+use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::path::Path;
+use std::fs;
+use std::env;
+
+// =============================================================================
+// Process Execution
+// =============================================================================
+
+#[no_mangle]
+pub unsafe extern "C" fn rt_process_run(
+    cmd_ptr: *const c_char, cmd_len: usize, _args_ptr: *const c_char,
+) -> *mut c_char {
+    if cmd_ptr.is_null() { return std::ptr::null_mut(); }
+    let cmd = String::from_utf8_lossy(std::slice::from_raw_parts(cmd_ptr as *const u8, cmd_len));
+    match Command::new(cmd.as_ref()).stdout(Stdio::piped()).stderr(Stdio::piped()).output() {
+        Ok(o) => CString::new(String::from_utf8_lossy(&o.stdout).to_string()).ok().map(|c| c.into_raw()).unwrap_or(std::ptr::null_mut()),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rt_process_run_timeout(
+    cmd_ptr: *const c_char, cmd_len: usize, args_ptr: *const c_char, _timeout_ms: i64,
+) -> *mut c_char { rt_process_run(cmd_ptr, cmd_len, args_ptr) }
+
+#[no_mangle]
+pub unsafe extern "C" fn rt_process_run_with_limits(
+    cmd_ptr: *const c_char, cmd_len: usize, args_ptr: *const c_char,
+    _timeout_ms: i64, _memory_bytes: i64, _cpu_seconds: i64, _max_fds: i64, _max_procs: i64,
+) -> *mut c_char { rt_process_run(cmd_ptr, cmd_len, args_ptr) }
+
+#[no_mangle]
+pub unsafe extern "C" fn rt_process_output(
+    cmd_ptr: *const c_char, cmd_len: usize, args_ptr: *const c_char,
+) -> *mut c_char { rt_process_run(cmd_ptr, cmd_len, args_ptr) }
+
+#[no_mangle]
+pub unsafe extern "C" fn rt_shell(cmd_ptr: *const c_char, cmd_len: usize) -> *mut c_char {
+    if cmd_ptr.is_null() { return std::ptr::null_mut(); }
+    let cmd = String::from_utf8_lossy(std::slice::from_raw_parts(cmd_ptr as *const u8, cmd_len));
+    match Command::new("sh").arg("-c").arg(cmd.as_ref()).stdout(Stdio::piped()).stderr(Stdio::piped()).output() {
+        Ok(o) => CString::new(String::from_utf8_lossy(&o.stdout).to_string()).ok().map(|c| c.into_raw()).unwrap_or(std::ptr::null_mut()),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rt_shell_exec(cmd_ptr: *const c_char, cmd_len: usize) -> i64 {
+    if cmd_ptr.is_null() { return -1; }
+    let cmd = String::from_utf8_lossy(std::slice::from_raw_parts(cmd_ptr as *const u8, cmd_len));
+    Command::new("sh").arg("-c").arg(cmd.as_ref()).status().map(|s| s.code().unwrap_or(-1) as i64).unwrap_or(-1)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rt_eprintln(msg_ptr: *const c_char, msg_len: usize) {
+    if !msg_ptr.is_null() {
+        let msg = String::from_utf8_lossy(std::slice::from_raw_parts(msg_ptr as *const u8, msg_len));
+        eprintln!("{}", msg);
+    }
+}
+
+// =============================================================================
+// Time Operations
+// =============================================================================
+
+#[no_mangle] pub extern "C" fn rt_time_now_unix_micros() -> i64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_micros() as i64).unwrap_or(0)
+}
+#[no_mangle] pub extern "C" fn _current_time_unix() -> i64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
+}
+#[no_mangle] pub extern "C" fn rt_current_time_ms() -> i64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
+}
+
+fn micros_to_ymd_hms(micros: i64) -> (i32,i32,i32,i32,i32,i32) {
+    let secs = micros / 1_000_000; let days = secs / 86400; let tod = secs % 86400;
+    let h = (tod/3600) as i32; let m = ((tod%3600)/60) as i32; let s = (tod%60) as i32;
+    let mut y = 1970i32; let mut rd = days as i32;
+    loop { let diy = if (y%4==0&&y%100!=0)||(y%400==0) {366} else {365}; if rd < diy { break; } rd -= diy; y += 1; }
+    let mut mo = 1i32;
+    loop { let dim = match mo { 1|3|5|7|8|10|12=>31, 4|6|9|11=>30, 2=>if (y%4==0&&y%100!=0)||(y%400==0) {29} else {28}, _=>30 }; if rd < dim { break; } rd -= dim; mo += 1; }
+    (y, mo, rd+1, h, m, s)
+}
+#[no_mangle] pub extern "C" fn rt_timestamp_get_year(micros: i64) -> i32 { micros_to_ymd_hms(micros).0 }
+#[no_mangle] pub extern "C" fn rt_timestamp_get_month(micros: i64) -> i32 { micros_to_ymd_hms(micros).1 }
+#[no_mangle] pub extern "C" fn rt_timestamp_get_day(micros: i64) -> i32 { micros_to_ymd_hms(micros).2 }
+#[no_mangle] pub extern "C" fn rt_timestamp_get_hour(micros: i64) -> i32 { micros_to_ymd_hms(micros).3 }
+#[no_mangle] pub extern "C" fn rt_timestamp_get_minute(micros: i64) -> i32 { micros_to_ymd_hms(micros).4 }
+#[no_mangle] pub extern "C" fn rt_timestamp_get_second(micros: i64) -> i32 { micros_to_ymd_hms(micros).5 }
+
+// =============================================================================
+// System Operations
+// =============================================================================
+
+#[no_mangle] pub extern "C" fn rt_getpid() -> i64 { std::process::id() as i64 }
+#[no_mangle] pub extern "C" fn rt_hostname() -> *mut c_char {
+    hostname::get().ok().and_then(|n| CString::new(n.to_string_lossy().to_string()).ok()).map(|c| c.into_raw()).unwrap_or_else(|| CString::new("unknown").unwrap().into_raw())
+}
+#[no_mangle] pub extern "C" fn rt_system_cpu_count() -> i64 { std::thread::available_parallelism().map(|n| n.get() as i64).unwrap_or(1) }
+
+#[no_mangle]
+pub unsafe extern "C" fn rt_path_basename(path_ptr: *const c_char, path_len: usize) -> *mut c_char {
+    if path_ptr.is_null() { return std::ptr::null_mut(); }
+    let p = String::from_utf8_lossy(std::slice::from_raw_parts(path_ptr as *const u8, path_len));
+    Path::new(p.as_ref()).file_name().and_then(|s| CString::new(s.to_string_lossy().to_string()).ok()).map(|c| c.into_raw()).unwrap_or(std::ptr::null_mut())
+}
+
+#[no_mangle] pub extern "C" fn sys_get_args() -> *mut c_char {
+    CString::new(env::args().collect::<Vec<_>>().join("\n")).ok().map(|c| c.into_raw()).unwrap_or(std::ptr::null_mut())
+}
+#[no_mangle] pub extern "C" fn rt_cli_get_args() -> *mut c_char { sys_get_args() }
+#[no_mangle] pub extern "C" fn sys_exit(code: i64) { std::process::exit(code as i32); }
+#[no_mangle] pub extern "C" fn rt_cli_exit(code: i64) { sys_exit(code); }
+
+#[no_mangle]
+pub unsafe extern "C" fn rt_cli_file_exists(path_ptr: *const c_char, path_len: usize) -> bool {
+    if path_ptr.is_null() { return false; }
+    let p = String::from_utf8_lossy(std::slice::from_raw_parts(path_ptr as *const u8, path_len));
+    Path::new(p.as_ref()).exists()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rt_cli_read_file(path_ptr: *const c_char, path_len: usize) -> *mut c_char {
+    if path_ptr.is_null() { return std::ptr::null_mut(); }
+    let p = String::from_utf8_lossy(std::slice::from_raw_parts(path_ptr as *const u8, path_len));
+    fs::read_to_string(p.as_ref()).ok().and_then(|c| CString::new(c).ok()).map(|c| c.into_raw()).unwrap_or(std::ptr::null_mut())
+}
+
+// =============================================================================
+// Directory Operations
+// =============================================================================
+
+#[no_mangle]
+pub unsafe extern "C" fn rt_dir_list(path_ptr: *const c_char, path_len: usize) -> *mut c_char {
+    if path_ptr.is_null() { return std::ptr::null_mut(); }
+    let p = String::from_utf8_lossy(std::slice::from_raw_parts(path_ptr as *const u8, path_len));
+    fs::read_dir(p.as_ref()).ok().map(|e| e.filter_map(|e| e.ok()).map(|e| e.file_name().to_string_lossy().to_string()).collect::<Vec<_>>().join("\n"))
+        .and_then(|s| CString::new(s).ok()).map(|c| c.into_raw()).unwrap_or(std::ptr::null_mut())
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rt_dir_walk(path_ptr: *const c_char, path_len: usize) -> *mut c_char {
+    if path_ptr.is_null() { return std::ptr::null_mut(); }
+    let p = String::from_utf8_lossy(std::slice::from_raw_parts(path_ptr as *const u8, path_len));
+    fn walk(dir: &Path, r: &mut Vec<String>) {
+        if let Ok(e) = fs::read_dir(dir) { for e in e.filter_map(|e| e.ok()) { let p = e.path(); r.push(p.to_string_lossy().to_string()); if p.is_dir() { walk(&p, r); } } }
+    }
+    let mut r = Vec::new(); walk(Path::new(p.as_ref()), &mut r);
+    CString::new(r.join("\n")).ok().map(|c| c.into_raw()).unwrap_or(std::ptr::null_mut())
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rt_dir_remove(path_ptr: *const c_char, path_len: usize) -> bool {
+    if path_ptr.is_null() { return false; }
+    let p = String::from_utf8_lossy(std::slice::from_raw_parts(path_ptr as *const u8, path_len));
+    fs::remove_dir(p.as_ref()).is_ok()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rt_package_remove_dir_all(path_ptr: *const c_char, path_len: usize) -> bool {
+    if path_ptr.is_null() { return false; }
+    let p = String::from_utf8_lossy(std::slice::from_raw_parts(path_ptr as *const u8, path_len));
+    fs::remove_dir_all(p.as_ref()).is_ok()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rt_package_is_dir(path_ptr: *const c_char, path_len: usize) -> bool {
+    if path_ptr.is_null() { return false; }
+    let p = String::from_utf8_lossy(std::slice::from_raw_parts(path_ptr as *const u8, path_len));
+    Path::new(p.as_ref()).is_dir()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rt_package_file_size(path_ptr: *const c_char, path_len: usize) -> i64 {
+    if path_ptr.is_null() { return -1; }
+    let p = String::from_utf8_lossy(std::slice::from_raw_parts(path_ptr as *const u8, path_len));
+    fs::metadata(p.as_ref()).map(|m| m.len() as i64).unwrap_or(-1)
+}
+
+// =============================================================================
+// Glob
+// =============================================================================
+
+#[no_mangle]
+pub unsafe extern "C" fn rt_glob(pattern_ptr: *const c_char, pattern_len: usize) -> *mut c_char {
+    if pattern_ptr.is_null() { return std::ptr::null_mut(); }
+    let p = String::from_utf8_lossy(std::slice::from_raw_parts(pattern_ptr as *const u8, pattern_len));
+    glob::glob(&p).ok().map(|ps| ps.filter_map(|p| p.ok()).map(|p| p.to_string_lossy().to_string()).collect::<Vec<_>>().join("\n"))
+        .and_then(|s| CString::new(s).ok()).map(|c| c.into_raw()).unwrap_or(std::ptr::null_mut())
+}
+
+// =============================================================================
+// Cargo Operations
+// =============================================================================
+
+fn esc(s: &str) -> String { s.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n").replace('\r', "\\r").replace('\t', "\\t") }
+
+#[no_mangle]
+pub unsafe extern "C" fn rt_cargo_build(_profile_ptr: *const c_char, _profile_len: usize, _features_ptr: *const c_char, _feature_count: i64) -> *mut c_char {
+    match Command::new("cargo").arg("build").stdout(Stdio::piped()).stderr(Stdio::piped()).output() {
+        Ok(o) => CString::new(format!("{{\"success\":{},\"stdout\":\"{}\",\"stderr\":\"{}\"}}", o.status.success(), esc(&String::from_utf8_lossy(&o.stdout)), esc(&String::from_utf8_lossy(&o.stderr)))).unwrap().into_raw(),
+        Err(e) => CString::new(format!("{{\"success\":false,\"error\":\"{}\"}}", e)).unwrap().into_raw(),
+    }
+}
+
+#[no_mangle] pub extern "C" fn rt_cargo_check() -> *mut c_char {
+    match Command::new("cargo").arg("check").stdout(Stdio::piped()).stderr(Stdio::piped()).output() {
+        Ok(o) => CString::new(format!("{{\"success\":{},\"stdout\":\"{}\",\"stderr\":\"{}\"}}", o.status.success(), esc(&String::from_utf8_lossy(&o.stdout)), esc(&String::from_utf8_lossy(&o.stderr)))).unwrap().into_raw(),
+        Err(e) => CString::new(format!("{{\"success\":false,\"error\":\"{}\"}}", e)).unwrap().into_raw(),
+    }
+}
+
+#[no_mangle] pub extern "C" fn rt_cargo_clean() -> i64 { Command::new("cargo").arg("clean").status().map(|s| s.code().unwrap_or(-1) as i64).unwrap_or(-1) }
+
+#[no_mangle]
+pub unsafe extern "C" fn rt_cargo_test(_package_ptr: *const c_char, _package_len: usize, _filter_ptr: *const c_char, _filter_len: usize) -> *mut c_char {
+    match Command::new("cargo").arg("test").stdout(Stdio::piped()).stderr(Stdio::piped()).output() {
+        Ok(o) => CString::new(format!("{{\"success\":{},\"stdout\":\"{}\",\"stderr\":\"{}\"}}", o.status.success(), esc(&String::from_utf8_lossy(&o.stdout)), esc(&String::from_utf8_lossy(&o.stderr)))).unwrap().into_raw(),
+        Err(e) => CString::new(format!("{{\"success\":false,\"error\":\"{}\"}}", e)).unwrap().into_raw(),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rt_cargo_test_doc(_package_ptr: *const c_char, _package_len: usize) -> *mut c_char {
+    match Command::new("cargo").args(["test", "--doc"]).stdout(Stdio::piped()).stderr(Stdio::piped()).output() {
+        Ok(o) => CString::new(format!("{{\"success\":{},\"stdout\":\"{}\",\"stderr\":\"{}\"}}", o.status.success(), esc(&String::from_utf8_lossy(&o.stdout)), esc(&String::from_utf8_lossy(&o.stderr)))).unwrap().into_raw(),
+        Err(e) => CString::new(format!("{{\"success\":false,\"error\":\"{}\"}}", e)).unwrap().into_raw(),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rt_cargo_lint(fix: i64) -> *mut c_char {
+    let mut cmd = Command::new("cargo"); cmd.arg("clippy"); if fix != 0 { cmd.arg("--fix"); }
+    match cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).output() {
+        Ok(o) => CString::new(format!("{{\"success\":{},\"stdout\":\"{}\",\"stderr\":\"{}\"}}", o.status.success(), esc(&String::from_utf8_lossy(&o.stdout)), esc(&String::from_utf8_lossy(&o.stderr)))).unwrap().into_raw(),
+        Err(e) => CString::new(format!("{{\"success\":false,\"error\":\"{}\"}}", e)).unwrap().into_raw(),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rt_cargo_fmt(check_only: i64) -> *mut c_char {
+    let mut cmd = Command::new("cargo"); cmd.arg("fmt"); if check_only != 0 { cmd.arg("--check"); }
+    match cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).output() {
+        Ok(o) => CString::new(format!("{{\"success\":{},\"stdout\":\"{}\",\"stderr\":\"{}\"}}", o.status.success(), esc(&String::from_utf8_lossy(&o.stdout)), esc(&String::from_utf8_lossy(&o.stderr)))).unwrap().into_raw(),
+        Err(e) => CString::new(format!("{{\"success\":false,\"error\":\"{}\"}}", e)).unwrap().into_raw(),
+    }
+}
+
+// =============================================================================
+// CLI Stubs
+// =============================================================================
+
+macro_rules! cli_stub { ($name:ident) => { #[no_mangle] pub extern "C" fn $name(_args: *const c_char) -> i64 { eprintln!("error: {} not supported in interpreter mode", stringify!($name)); 1 } }; }
+cli_stub!(rt_cli_run_code); cli_stub!(rt_cli_run_file); cli_stub!(rt_cli_watch_file); cli_stub!(rt_cli_run_repl); cli_stub!(rt_cli_handle_run);
+cli_stub!(rt_cli_run_tests); cli_stub!(rt_cli_run_lint); cli_stub!(rt_cli_run_fmt); cli_stub!(rt_cli_run_fix); cli_stub!(rt_cli_run_verify); cli_stub!(rt_cli_run_check);
+cli_stub!(rt_cli_run_migrate); cli_stub!(rt_cli_run_mcp); cli_stub!(rt_cli_run_diff); cli_stub!(rt_cli_run_query);
+cli_stub!(rt_cli_run_spec_coverage); cli_stub!(rt_cli_run_gen_lean); cli_stub!(rt_cli_run_feature_gen); cli_stub!(rt_cli_run_task_gen);
+cli_stub!(rt_cli_run_spec_gen); cli_stub!(rt_cli_run_sspec_docgen); cli_stub!(rt_cli_run_todo_gen); cli_stub!(rt_cli_run_todo_scan);
+cli_stub!(rt_cli_run_lex); cli_stub!(rt_cli_run_brief); cli_stub!(rt_cli_run_ffi_gen); cli_stub!(rt_cli_run_i18n); cli_stub!(rt_cli_run_info);
+cli_stub!(rt_cli_handle_web); cli_stub!(rt_cli_handle_diagram); cli_stub!(rt_cli_handle_compile); cli_stub!(rt_cli_run_replay); cli_stub!(rt_cli_run_constr);
+#[no_mangle] pub extern "C" fn rt_cli_handle_linkers() -> i64 { println!("Available linkers: mold, lld, ld"); 0 }
+#[no_mangle] pub unsafe extern "C" fn rt_context_generate(_: *const c_char, _: usize, _: *const c_char, _: usize, _: *const c_char, _: usize) -> *mut c_char { std::ptr::null_mut() }
+#[no_mangle] pub unsafe extern "C" fn rt_context_stats(_: *const c_char, _: usize, _: *const c_char, _: usize) -> *mut c_char { std::ptr::null_mut() }
+#[no_mangle] pub extern "C" fn rt_settlement_main() -> i64 { 0 }
+
+// =============================================================================
+// Coverage & Fault
+// =============================================================================
+
+static mut COVERAGE_ENABLED: bool = false;
+#[no_mangle] pub extern "C" fn rt_coverage_enabled() -> bool { unsafe { COVERAGE_ENABLED } }
+#[no_mangle] pub extern "C" fn rt_coverage_clear() {}
+#[no_mangle] pub unsafe extern "C" fn rt_coverage_dump_sdn(_: *const c_char, _: usize) -> bool { false }
+
+static STACK_OVF: AtomicBool = AtomicBool::new(false);
+static MAX_REC: AtomicI64 = AtomicI64::new(0);
+static TIMEOUT: AtomicI64 = AtomicI64::new(0);
+static EXEC_LIM: AtomicI64 = AtomicI64::new(0);
+#[no_mangle] pub extern "C" fn rt_fault_set_stack_overflow_detection(e: bool) { STACK_OVF.store(e, Ordering::SeqCst); }
+#[no_mangle] pub extern "C" fn rt_fault_set_max_recursion_depth(d: i64) { MAX_REC.store(d, Ordering::SeqCst); }
+#[no_mangle] pub extern "C" fn rt_fault_set_timeout(t: i64) { TIMEOUT.store(t, Ordering::SeqCst); }
+#[no_mangle] pub extern "C" fn rt_fault_set_execution_limit(l: i64) { EXEC_LIM.store(l, Ordering::SeqCst); }

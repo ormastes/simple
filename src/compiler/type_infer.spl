@@ -788,6 +788,132 @@ impl HmInferContext:
         self.errors = self.errors.push(err)
 
     # =========================================================================
+    # Bidirectional Type Checking
+    # =========================================================================
+    #
+    # Bidirectional type checking combines two modes:
+    # - Synthesize: Infer type from expression structure (bottom-up)
+    # - Check: Validate expression against expected type (top-down)
+    #
+    # The key advantage is propagating type information into lambdas:
+    #   val f: fn(i64) -> i64 = \x: x + 1   # x inferred as i64
+    #
+    # Reference: "Complete and Easy Bidirectional Typechecking for Higher-Rank Polymorphism"
+    #            by Joshua Dunfield and Neelakantan R. Krishnaswami
+
+    me synthesize_expr(expr: HirExpr) -> Result<HirType, TypeInferError>:
+        """Synthesize (infer) the type of an expression.
+
+        Bottom-up type inference: determines type from expression structure.
+        Used when no expected type is available.
+
+        Examples:
+            synthesize(42)         => i64
+            synthesize(true)       => bool
+            synthesize(\x: x + 1)  => fn(Infer) -> Infer  (params not known)
+        """
+        self.infer_expr(expr)
+
+    me check_expr(expr: HirExpr, expected: HirType) -> Result<(), TypeInferError>:
+        """Check that an expression has the expected type.
+
+        Top-down type checking: propagates expected type into expression.
+        This enables better inference for lambdas and other constructs.
+
+        Examples:
+            check(\x: x + 1, fn(i64) -> i64) => Ok (x inferred as i64)
+            check(42, text)                  => Err (type mismatch)
+        """
+        val span = expr.span
+
+        # Special case: Lambda with expected function type
+        # Propagate parameter types from expected into lambda
+        match expr.kind:
+            case Closure(params, body, captures):
+                match expected.kind:
+                    case Function(param_types, return_type, effects):
+                        # Check arity matches
+                        if params.len() != param_types.len():
+                            return Err(TypeInferError.Mismatch(
+                                expected: expected,
+                                found: HirType(kind: HirTypeKind.Function([], HirType(kind: HirTypeKind.Unit, span: span), []), span: span),
+                                span: span
+                            ))
+
+                        # Enter new level for lambda scope
+                        self.enter_level()
+
+                        # Bind parameters with expected types
+                        var i = 0
+                        while i < params.len():
+                            val param = params[i]
+                            val expected_param_ty = param_types[i]
+
+                            # Use expected type, or fresh var if expected is Infer
+                            val param_ty = match expected_param_ty.kind:
+                                case Infer(_, _): self.fresh_var(param.span)
+                                case _: expected_param_ty
+
+                            self.bind_mono(param.name, param_ty)
+                            i = i + 1
+
+                        # Check body against expected return type
+                        match self.check_expr(body, return_type):
+                            case Ok(_):
+                                self.exit_level()
+                                Ok(())
+                            case Err(e):
+                                self.exit_level()
+                                Err(e)
+
+                    case _:
+                        # Expected is not a function type, fall back to synthesize
+                        match self.synthesize_expr(expr):
+                            case Ok(inferred):
+                                self.unify(inferred, expected).map(\x: ())
+                            case Err(e): Err(e)
+
+            # For all other expressions, synthesize and unify
+            case _:
+                match self.synthesize_expr(expr):
+                    case Ok(inferred):
+                        self.unify(inferred, expected).map(\x: ())
+                    case Err(e): Err(e)
+
+    me infer_expr_bidir(expr: HirExpr, mode: InferMode) -> Result<HirType, TypeInferError>:
+        """Infer expression type using bidirectional type checking.
+
+        Dispatches to check_expr or synthesize_expr based on mode.
+        Returns the resulting type in both cases.
+
+        Args:
+            expr: Expression to type check
+            mode: Synthesize or Check(expected_type)
+
+        Returns:
+            The type of the expression
+        """
+        match mode:
+            case InferMode.Synthesize:
+                self.synthesize_expr(expr)
+
+            case InferMode.Check(expected):
+                match self.check_expr(expr, expected):
+                    case Ok(_):
+                        # Return the expected type after successful check
+                        Ok(expected)
+                    case Err(e): Err(e)
+
+    me check_subsumes(inferred: HirType, expected: HirType) -> Result<(), TypeInferError>:
+        """Check that inferred type subsumes (is at least as general as) expected type.
+
+        Used in bidirectional type checking for subtyping relationships.
+        For now, this is equivalent to unification. Can be extended for
+        subtyping with variance.
+        """
+        self.unify(inferred, expected).map(\x: ())
+
+    # =========================================================================
     # Type Inference (Algorithm W)
     # =========================================================================
 
@@ -920,16 +1046,48 @@ impl HmInferContext:
                         self.infer_unary_op(op, operand_ty, span)
                     case Err(e): Err(e)
 
-            # Function calls
+            # Function calls (with bidirectional type checking for lambda arguments)
             case Call(callee, args, type_args):
                 match self.infer_expr(callee):
                     case Ok(callee_ty):
-                        # Infer argument types
+                        # Resolve callee type to get expected parameter types
+                        val resolved_callee = self.resolve(callee_ty)
+
+                        # Try to extract parameter types for bidirectional checking
+                        val expected_params = match resolved_callee.kind:
+                            case Function(params, _, _): Some(params)
+                            case _: None
+
+                        # Infer/check argument types with bidirectional mode
                         var arg_types: [HirType] = []
+                        var i = 0
                         for arg in args:
-                            match self.infer_expr(arg.value):
+                            # Use bidirectional checking if we know the expected param type
+                            val arg_result = if expected_params.? and i < expected_params.unwrap().len():
+                                val expected_param = expected_params.unwrap()[i]
+                                # Use check mode for lambdas to propagate param types
+                                match arg.value.kind:
+                                    case Closure(_, _, _):
+                                        match self.check_expr(arg.value, expected_param):
+                                            case Ok(_): Ok(expected_param)
+                                            case Err(e): Err(e)
+                                    case _:
+                                        # For non-lambdas, synthesize then unify
+                                        match self.infer_expr(arg.value):
+                                            case Ok(ty):
+                                                match self.unify(ty, expected_param):
+                                                    case Ok(_): Ok(self.resolve(ty))
+                                                    case Err(e): Err(e)
+                                            case Err(e): Err(e)
+                            else:
+                                # No expected type, just synthesize
+                                self.infer_expr(arg.value)
+
+                            match arg_result:
                                 case Ok(ty): arg_types = arg_types.push(ty)
                                 case Err(e): return Err(e)
+
+                            i = i + 1
 
                         val ret_ty = self.fresh_var(span)
                         val expected_fn_ty = HirType(
@@ -1620,15 +1778,34 @@ impl HmInferContext:
 
             case Let(symbol, type_, init):
                 self.enter_level()
-                match self.infer_expr(init):
+
+                # Use bidirectional checking: if there's a type annotation,
+                # use check mode to propagate types into lambdas
+                val has_annotation = type_.? and type_.unwrap().kind != HirTypeKind.Infer(0, 0)
+
+                val init_result = if has_annotation:
+                    val expected = type_.unwrap()
+                    # For lambdas, use check mode to propagate expected param types
+                    match init.kind:
+                        case Closure(_, _, _):
+                            match self.check_expr(init, expected):
+                                case Ok(_): Ok(expected)
+                                case Err(e): Err(e)
+                        case _:
+                            # For non-lambdas, synthesize then unify
+                            match self.infer_expr(init):
+                                case Ok(init_ty):
+                                    match self.unify(init_ty, expected):
+                                        case Ok(_): Ok(self.resolve(init_ty))
+                                        case Err(e): Err(e)
+                                case Err(e): Err(e)
+                else:
+                    # No type annotation, just synthesize
+                    self.infer_expr(init)
+
+                match init_result:
                     case Ok(init_ty):
                         self.exit_level()
-
-                        # If there's a type annotation, unify with it
-                        if type_.? and type_.unwrap().kind != HirTypeKind.Infer(0, 0):
-                            match self.unify(init_ty, type_.unwrap()):
-                                case Err(e): return Err(e)
-                                case _: pass
 
                         # Generalize the type for let-polymorphism
                         val scheme = self.generalize(init_ty)

@@ -154,6 +154,11 @@ enum MirTypeKind:
     Never              # !
     Opaque(name: text) # Foreign type
 
+    # Async types
+    Promise(inner: MirType)    # Promise<T> - async computation result
+    Generator(yield_: MirType, return_: MirType)  # Generator yielding and returning types
+    Actor(message: MirType)    # Actor handling message type
+
 impl MirType:
     static fn i64() -> MirType:
         MirType(kind: MirTypeKind.I64)
@@ -169,6 +174,18 @@ impl MirType:
 
     static fn ptr(pointee: MirType, mutable: bool) -> MirType:
         MirType(kind: MirTypeKind.Ptr(pointee, mutable))
+
+    static fn promise(inner: MirType) -> MirType:
+        """Create Promise<T> type for async computations."""
+        MirType(kind: MirTypeKind.Promise(inner))
+
+    static fn generator(yield_ty: MirType, return_ty: MirType) -> MirType:
+        """Create Generator<Y, R> type for generators."""
+        MirType(kind: MirTypeKind.Generator(yield_ty, return_ty))
+
+    static fn actor(message_ty: MirType) -> MirType:
+        """Create Actor<M> type for actors."""
+        MirType(kind: MirTypeKind.Actor(message_ty))
 
     fn primitive_size() -> i64?:
         """Get size for primitive types, nil for composite types."""
@@ -289,6 +306,95 @@ enum MirInstKind:
     # Debug
     DebugValue(local: LocalId, name: text)
     Nop
+
+    # Async/Await Operations
+    # Creates a Promise<T> from an async expression body
+    CreatePromise(dest: LocalId, body: LocalId, result_type: MirType)
+    # Awaits a Promise, suspending until resolved
+    Await(dest: LocalId, promise: MirOperand)
+    # Yields a value from a generator, suspending execution
+    Yield(value: MirOperand?)
+    # Spawns an async task/actor
+    Spawn(dest: LocalId, handler: MirOperand, args: [MirOperand])
+    # Sends a message to an actor
+    Send(actor: MirOperand, message: MirOperand)
+    # Receives a message from mailbox (blocking with optional timeout)
+    Receive(dest: LocalId, timeout: MirOperand?)
+
+    # Borrow checking instructions
+    Ref(dest: LocalId, borrow_kind: MirBorrowKind, place: MirPlace)
+
+# ============================================================================
+# Borrow Checking Support Types
+# ============================================================================
+
+"""Borrow kind for borrow checking."""
+enum MirBorrowKind:
+    Shared      # &T - immutable borrow
+    Mutable     # &mut T - exclusive mutable borrow
+
+"""Memory place for borrow checking."""
+struct MirPlace:
+    local: LocalId
+    projection: [MirProjection]
+
+impl MirPlace:
+    static fn local_place(id: LocalId) -> MirPlace:
+        """Create a place referring to a local variable."""
+        MirPlace(local: id, projection: [])
+
+    fn deref() -> MirPlace:
+        """Add a dereference projection."""
+        MirPlace(local: self.local, projection: self.projection.push(MirProjection.Deref))
+
+    fn field(idx: i64) -> MirPlace:
+        """Add a field projection."""
+        MirPlace(local: self.local, projection: self.projection.push(MirProjection.Field(idx)))
+
+    fn index(local: LocalId) -> MirPlace:
+        """Add an index projection."""
+        MirPlace(local: self.local, projection: self.projection.push(MirProjection.Index(local)))
+
+    fn downcast(variant: i64) -> MirPlace:
+        """Add a downcast projection."""
+        MirPlace(local: self.local, projection: self.projection.push(MirProjection.Downcast(variant)))
+
+    fn to_text() -> text:
+        """Convert place to text representation."""
+        var result = "_l{self.local.id}"
+        for proj in self.projection:
+            match proj:
+                case Deref: result = "(*{result})"
+                case Field(idx): result = "{result}.{idx}"
+                case Index(local): result = "{result}[_l{local.id}]"
+                case Downcast(variant): result = "{result} as v{variant}"
+        result
+
+"""Place projection for borrow checking."""
+enum MirProjection:
+    Deref               # *place
+    Field(idx: i64)     # place.field_idx
+    Index(local: LocalId) # place[idx_local]
+    Downcast(variant: i64) # place as Variant
+
+"""Function body wrapper for borrow checking."""
+struct MirBody:
+    name: text
+    blocks: [MirBlock]
+    locals: [MirLocal]
+    arg_count: i64
+    return_ty: MirType
+
+impl MirBody:
+    static fn from_function(func: MirFunction) -> MirBody:
+        """Create MirBody from MirFunction for borrow checking."""
+        MirBody(
+            name: func.name,
+            blocks: func.blocks,
+            locals: func.locals,
+            arg_count: func.signature.params.len(),
+            return_ty: func.signature.return_type
+        )
 
 """Binary operation."""
 enum MirBinOp:
@@ -751,3 +857,6 @@ export MirOperand, MirOperandKind
 export MirTerminator
 export MirBuilder
 export mir_operand_copy, mir_operand_move, mir_operand_const_int, mir_operand_const_float, mir_operand_const_bool
+
+# Borrow checking support types
+export MirBorrowKind, MirPlace, MirProjection, MirBody

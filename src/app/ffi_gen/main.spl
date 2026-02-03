@@ -16,6 +16,9 @@
 #   --verbose         Enable verbose logging
 #   --lang=<lang>     Filter to specific language (rust, c)
 #   --clean           Clean build/rust/ and re-setup from scratch
+#   --gen-all         Generate entire build/rust/ from all full specs
+#   --gen-module      Generate a single module from a full spec file
+#   --verify          Verify generated code compiles (cargo check)
 #   --help            Show this help message
 
 use app.cli_util (get_cli_args)
@@ -27,6 +30,12 @@ use app.ffi_gen.rust_codegen*
 use app.ffi_gen.cargo_gen*
 use app.ffi_gen.builder*
 use app.ffi_gen.intern_codegen*
+
+# New full code generation modules
+use app.ffi_gen.types*
+use app.ffi_gen.module_gen (generate_module_source)
+use app.ffi_gen.workspace_gen (generate_cargo_toml as gen_cargo_full, generate_lib_rs)
+use app.ffi_gen.lib_gen (generate_simple_ffi_lib)
 
 # ============================================================================
 # Rust Build Environment Config (from simple.sdn)
@@ -120,6 +129,9 @@ class CliOptions:
     lang_filter: text
     clean: bool
     gen_intern: bool
+    gen_all: bool
+    gen_module: bool
+    verify: bool
     show_help: bool
 
     static fn default() -> CliOptions:
@@ -131,6 +143,9 @@ class CliOptions:
             lang_filter: "",
             clean: false,
             gen_intern: false,
+            gen_all: false,
+            gen_module: false,
+            verify: false,
             show_help: false
         )
 
@@ -155,6 +170,9 @@ fn print_help():
     print "  --verbose         Verbose logging"
     print "  --lang=<lang>     Filter by language: rust, c"
     print "  --gen-intern      Generate interpreter_extern Rust module from spec"
+    print "  --gen-all         Generate entire build/rust/ from all full specs"
+    print "  --gen-module      Generate a single module from a full spec file"
+    print "  --verify          Verify generated code compiles (cargo check)"
     print "  --clean           Clean build/rust/ and re-setup from scratch"
     print "  -h, --help        Show this help"
     print ""
@@ -172,6 +190,12 @@ fn print_help():
     print "  simple ffi-gen --clean                    # Re-setup build/rust/"
     print "  simple ffi-gen --gen-intern specs/math.spl # Generate interpreter_extern module"
     print "  simple ffi-gen --gen-intern specs/math.spl --dry-run"
+    print ""
+    print "Full Code Generation (NEW):"
+    print "  simple ffi-gen --gen-all                   # Generate all modules to build/rust/"
+    print "  simple ffi-gen --gen-all --dry-run         # Preview all generated code"
+    print "  simple ffi-gen --gen-module spec.spl       # Generate single module from full spec"
+    print "  simple ffi-gen --gen-all --verify          # Generate and verify with cargo check"
     print ""
     print "Annotation format:"
     print "  @Lib(lang: \"rust\", name: \"regex\", version: \"1.10\")"
@@ -200,6 +224,12 @@ fn parse_args(args: [text]) -> CliOptions:
             opts.clean = true
         elif arg == "--gen-intern":
             opts.gen_intern = true
+        elif arg == "--gen-all":
+            opts.gen_all = true
+        elif arg == "--gen-module":
+            opts.gen_module = true
+        elif arg == "--verify":
+            opts.verify = true
         elif arg.starts_with("--output="):
             opts.output_dir = arg[9:]
         elif arg.starts_with("--lang="):
@@ -441,6 +471,191 @@ fn generate_intern(spec_path: text, opts: CliOptions) -> i64:
     return 0
 
 # ============================================================================
+# Full Module Generation (--gen-module mode)
+# ============================================================================
+
+# Generate a single module from a full spec file.
+# The spec file should contain a function that returns a ModuleSpec.
+fn generate_full_module(spec_path: text, opts: CliOptions) -> i64:
+    log_info("Reading full module spec: {spec_path}", opts.verbose)
+
+    # For now, we need to handle the spec files specially
+    # since they contain Simple code that defines ModuleSpec
+    # We'll import and call the spec function directly
+
+    # Determine module name from filename
+    val filename = spec_path.split("/")[-1]
+    val mod_name = filename.replace("_full.spl", "").replace(".spl", "")
+
+    print "Generating module: {mod_name} from {spec_path}"
+
+    # Import the spec module dynamically
+    # For now, we handle known specs explicitly
+    var module_spec: ModuleSpec = ModuleSpec.empty(mod_name)
+
+    if spec_path.contains("runtime_value_full"):
+        # Import the spec function
+        use app.ffi_gen.specs.runtime_value_full (runtime_value_module)
+        module_spec = runtime_value_module()
+    elif spec_path.contains("gc_full"):
+        use app.ffi_gen.specs.gc_full (gc_module)
+        module_spec = gc_module()
+    else:
+        print_error("Unknown full spec file: {spec_path}")
+        print "Supported specs: runtime_value_full.spl, gc_full.spl"
+        return 1
+
+    # Generate the module source
+    val module_source = generate_module_source(module_spec)
+
+    if opts.dry_run:
+        print ""
+        print "=== Generated {mod_name}.rs ==="
+        print module_source
+        return 0
+
+    # Write to output directory
+    val out_dir = opts.output_dir
+    if not dir_create(out_dir, true):
+        print_error("Failed to create output directory: {out_dir}")
+        return 1
+    if not dir_create("{out_dir}/src", true):
+        print_error("Failed to create src directory: {out_dir}/src")
+        return 1
+
+    val module_path = "{out_dir}/src/{mod_name}.rs"
+    if not file_write(module_path, module_source):
+        print_error("Failed to write {module_path}")
+        return 1
+    log_step("Wrote {module_path}")
+
+    print "Done."
+    return 0
+
+# ============================================================================
+# Full Project Generation (--gen-all mode)
+# ============================================================================
+
+# Generate the entire build/rust/ffi_gen/ directory from all full specs.
+fn generate_all_modules(opts: CliOptions, rust_config: RustEnvConfig) -> i64:
+    print "Generating all FFI modules to {opts.output_dir}"
+
+    # List of all full specs to generate
+    val spec_dir = "src/app/ffi_gen/specs"
+    val modules: [text] = ["runtime_value", "gc"]
+
+    # Create output directories
+    val out_dir = opts.output_dir
+    if not dir_create(out_dir, true):
+        print_error("Failed to create output directory: {out_dir}")
+        return 1
+    if not dir_create("{out_dir}/src", true):
+        print_error("Failed to create src directory: {out_dir}/src")
+        return 1
+
+    # Generate each module
+    use app.ffi_gen.specs.runtime_value_full (runtime_value_module)
+    use app.ffi_gen.specs.gc_full (gc_module)
+
+    var all_sources: [{text: text}] = []
+
+    # Runtime Value module
+    val rv_spec = runtime_value_module()
+    val rv_source = generate_module_source(rv_spec)
+    all_sources.push({"runtime_value": rv_source})
+    log_info("Generated runtime_value.rs ({rv_source.len()} bytes)", opts.verbose)
+
+    # GC module
+    val gc_spec = gc_module()
+    val gc_source = generate_module_source(gc_spec)
+    all_sources.push({"gc": gc_source})
+    log_info("Generated gc.rs ({gc_source.len()} bytes)", opts.verbose)
+
+    # Generate lib.rs
+    val lib_source = generate_simple_ffi_lib()
+
+    # Generate Cargo.toml
+    val cargo_spec = CargoSpec.cdylib("simple-ffi-gen", "0.1.0")
+    cargo_spec.description = "Generated FFI wrappers for Simple runtime"
+    cargo_spec.edition = rust_config.edition
+    cargo_spec.dependencies = [
+        CrateDependency.version("bdwgc-alloc", "0.6")
+    ]
+    val cargo_source = gen_cargo_full(cargo_spec)
+
+    if opts.dry_run:
+        print ""
+        print "=== Generated Cargo.toml ==="
+        print cargo_source
+        print ""
+        print "=== Generated src/lib.rs ==="
+        print lib_source
+        print ""
+        for entry in all_sources:
+            for mod_name in entry.keys():
+                val source = entry[mod_name]
+                print "=== Generated src/{mod_name}.rs ({source.len()} bytes) ==="
+                # Only show first 100 lines for dry-run
+                val lines = source.split("\n")
+                var line_count = 0
+                for line in lines:
+                    print line
+                    line_count = line_count + 1
+                    if line_count >= 100:
+                        print "... (truncated, {lines.len() - 100} more lines)"
+                        break
+                print ""
+        return 0
+
+    # Write Cargo.toml
+    if not file_write("{out_dir}/Cargo.toml", cargo_source):
+        print_error("Failed to write Cargo.toml")
+        return 1
+    log_step("Wrote {out_dir}/Cargo.toml")
+
+    # Write lib.rs
+    if not file_write("{out_dir}/src/lib.rs", lib_source):
+        print_error("Failed to write src/lib.rs")
+        return 1
+    log_step("Wrote {out_dir}/src/lib.rs")
+
+    # Write each module
+    for entry in all_sources:
+        for mod_name in entry.keys():
+            val source = entry[mod_name]
+            val mod_path = "{out_dir}/src/{mod_name}.rs"
+            if not file_write(mod_path, source):
+                print_error("Failed to write {mod_path}")
+                return 1
+            log_step("Wrote {mod_path}")
+
+    print "Generated {modules.len()} modules to {out_dir}"
+
+    # Verify if requested
+    if opts.verify:
+        return verify_generated_code(out_dir, opts.verbose)
+
+    return 0
+
+# ============================================================================
+# Verification (--verify)
+# ============================================================================
+
+# Run cargo check on generated code to verify it compiles
+fn verify_generated_code(out_dir: text, verbose: bool) -> i64:
+    print "Verifying generated code..."
+
+    # Run cargo check
+    val result = process_run("cargo", ["check", "--manifest-path", "{out_dir}/Cargo.toml"])
+
+    if result == 0:
+        log_step("Verification successful: cargo check passed")
+    else:
+        print_error("Verification failed: cargo check returned {result}")
+
+    result
+
+# ============================================================================
 # Entry Point
 # ============================================================================
 
@@ -466,6 +681,14 @@ fn main() -> i64:
     if env_result != 0:
         return env_result
 
+    # Handle --gen-all: generate all modules (no input file required)
+    if opts.gen_all:
+        return generate_all_modules(opts, rust_config)
+
+    # Handle --verify alone: verify existing generated code
+    if opts.verify and opts.input_file == "" and not opts.gen_all:
+        return verify_generated_code(opts.output_dir, opts.verbose)
+
     if opts.input_file == "":
         if opts.clean:
             print "build/rust/ environment re-initialized."
@@ -480,7 +703,9 @@ fn main() -> i64:
         return 1
 
     # Dispatch to appropriate generator mode
-    if opts.gen_intern:
+    if opts.gen_module:
+        generate_full_module(opts.input_file, opts)
+    elif opts.gen_intern:
         generate_intern(opts.input_file, opts)
     else:
         generate_for_file(opts.input_file, opts, rust_config)
