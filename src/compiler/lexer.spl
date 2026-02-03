@@ -29,8 +29,8 @@ struct Lexer:
     generic_depth: i64  # Track <> nesting for >> disambiguation
 
     # Block system fields
-    block_registry: BlockRegistry  # Registry of block definitions
-    current_block_kind: text?      # Kind of current block (e.g., "m", "loss", "sh")
+    block_registry: BlockRegistry?  # Registry of block definitions (lazy-loaded)
+    current_block_kind: text?       # Kind of current block (e.g., "m", "loss", "sh")
     current_lexer_mode: LexerMode  # Current lexer mode (Normal, Math, Raw, Custom)
     in_raw_block: bool             # Inside a raw-mode block (sh{}, sql{})
     raw_block_start: i64           # Start position of raw block payload
@@ -52,8 +52,8 @@ impl Lexer:
             prev_token_kind: TokenKind.Eof,
             pending_token: nil,
             generic_depth: 0,
-            # Block system initialization
-            block_registry: block_registry(),  # Use global registry
+            # Block system initialization (lazy-loaded to avoid circular deps)
+            block_registry: nil,  # Loaded on first use via get_block_registry()
             current_block_kind: nil,
             current_lexer_mode: LexerMode.Normal,
             in_raw_block: false,
@@ -77,13 +77,31 @@ impl Lexer:
             prev_token_kind: TokenKind.Eof,
             pending_token: nil,
             generic_depth: 0,
-            block_registry: registry,
+            block_registry: Some(registry),  # Pre-loaded with custom registry
             current_block_kind: nil,
             current_lexer_mode: LexerMode.Normal,
             in_raw_block: false,
             raw_block_start: 0,
             block_brace_depth: 0
         )
+
+    # ========================================================================
+    # Block Registry Access (Lazy Loading)
+    # ========================================================================
+
+    me get_block_registry() -> BlockRegistry:
+        """Get block registry, lazy-loading on first access.
+
+        This avoids circular dependency at module load time:
+        - lexer → blocks → builtin → hir → parser → lexer (cycle!)
+
+        By deferring block_registry() call until runtime, the cycle is broken.
+        """
+        if not self.block_registry.?:
+            # Import happens at runtime, not module load time
+            use blocks.{block_registry}
+            self.block_registry = Some(block_registry())
+        self.block_registry.unwrap()
 
     # ========================================================================
     # Implicit Multiplication (m{} only)
@@ -626,8 +644,8 @@ impl Lexer:
         if peek_pos >= self.source.len() or self.source[peek_pos] != lbrace:
             return None  # Not a block
 
-        # Check if this identifier is a registered block
-        val block_def = self.block_registry.lookup(ident)
+        # Check if this identifier is a registered block (lazy-loads registry)
+        val block_def = self.get_block_registry().lookup(ident)
         if not block_def.?:
             return None  # Not a registered block
 

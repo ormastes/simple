@@ -1,15 +1,15 @@
 # Test Results
 
-**Generated:** 2026-02-01 23:59:38
-**Total Tests:** 6
-**Status:** ⚠️ 2 FAILED
+**Generated:** 2026-02-03 01:51:56
+**Total Tests:** 20
+**Status:** ✅ ALL PASSED
 
 ## Summary
 
 | Status | Count | Percentage |
 |--------|-------|-----------|
-| ✅ Passed | 4 | 66.7% |
-| ❌ Failed | 2 | 33.3% |
+| ✅ Passed | 20 | 100.0% |
+| ❌ Failed | 0 | 0.0% |
 | ⏭️ Skipped | 0 | 0.0% |
 | 🔕 Ignored | 0 | 0.0% |
 | 🔐 Qualified Ignore | 0 | 0.0% |
@@ -20,41 +20,26 @@
 
 | Test | Change | Run |
 |------|--------|-----|
-| works | new_test |  |
-
----
-
-## ❌ Failed Tests (2)
-
-### 🔴 minimal_spec
-
-**File:** `test/tmp/minimal_spec.spl`
-**Category:** Unknown
-**Failed:** 2026-02-01T23:58:25.712937925+00:00
-**Flaky:** No (100.0% failure rate)
-
-**Error:**
-```
-Failed to spawn process: No such file or directory (os error 2)
-Location: test/tmp/minimal_spec.spl
-```
-
----
-
-### 🔴 macro_spec
-
-**File:** `test/specs/macro_spec.spl`
-**Category:** Unknown
-**Failed:** 2026-02-01T23:46:53.635024125+00:00
-**Flaky:** No (100.0% failure rate)
-
-**Error:**
-```
-Test timed out after 120 seconds
-Location: test/specs/macro_spec.spl
-```
-
----
+| creates Ok result | new_test |  |
+| creates Err result | new_test |  |
+| uses is_ok and is_err | new_test |  |
+| unwraps Ok values | new_test |  |
+| provides default on error | new_test |  |
+| maps Ok values | new_test |  |
+| maps Err values | new_test |  |
+| creates Some option | new_test |  |
+| creates None option | new_test |  |
+| uses is_some and is_none | new_test |  |
+| unwraps Some values | new_test |  |
+| provides default on None | new_test |  |
+| maps Some values | new_test |  |
+| filters Some values | new_test |  |
+| propagates errors with ? | new_test |  |
+| short-circuits on first error | new_test |  |
+| chains with ?. operator | new_test |  |
+| returns None on any None in chain | new_test |  |
+| uses ?? for default values | new_test |  |
+| returns value when Some | new_test |  |
 
 ---
 
@@ -63,9 +48,4 @@ Location: test/specs/macro_spec.spl
 ---
 
 ## 🎯 Action Items
-
-### Priority 1: Fix Failing Tests (2)
-
-1. **minimal_spec** - Failed to spawn process: No such file or directory (os error 2)
-2. **macro_spec** - Test timed out after 120 seconds
 
