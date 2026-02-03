@@ -1,0 +1,389 @@
+# Fail-Safe Panic Isolation
+# Catches and converts panics to recoverable errors
+# Prevents crashes from propagating to the entire application
+
+use core.*
+use std.failsafe.core.*
+
+# ============================================================================
+# PANIC CONTEXT
+# ============================================================================
+
+# Information captured from a panic
+pub class PanicInfo:
+    pub message: text
+    pub location: Option<PanicLocation>
+    pub backtrace: Option<text>
+    pub timestamp: i64
+    pub thread_name: Option<text>
+
+    static fn new(message: text) -> PanicInfo:
+        return PanicInfo(
+            message: message,
+            location: nil,
+            backtrace: nil,
+            timestamp: current_time_ms(),
+            thread_name: nil
+        )
+
+    pub fn with_location(self, file: text, line: i64, column: i64) -> PanicInfo:
+        return PanicInfo(
+            message: self.message,
+            location: Some(PanicLocation(file: file, line: line, column: column)),
+            backtrace: self.backtrace,
+            timestamp: self.timestamp,
+            thread_name: self.thread_name
+        )
+
+    pub fn with_backtrace(self, backtrace: text) -> PanicInfo:
+        return PanicInfo(
+            message: self.message,
+            location: self.location,
+            backtrace: Some(backtrace),
+            timestamp: self.timestamp,
+            thread_name: self.thread_name
+        )
+
+    pub fn to_error() -> FailSafeError:
+        var error = FailSafeError.new(ErrorCategory.Panic, self.message)
+            .with_severity(ErrorSeverity.Fatal)
+
+        match self.location:
+            case Some(loc):
+                error = error.with_detail("file", loc.file)
+                error = error.with_detail("line", loc.line.to_string())
+            case nil:
+                pass
+
+        match self.backtrace:
+            case Some(bt):
+                error = error.with_detail("backtrace", bt)
+            case nil:
+                pass
+
+        return error.as_unrecoverable()
+
+    pub fn to_string() -> text:
+        var msg = "panic: {self.message}"
+        match self.location:
+            case Some(loc):
+                msg = msg + " at {loc.file}:{loc.line}"
+            case nil:
+                pass
+        return msg
+
+# Panic location
+pub class PanicLocation:
+    pub file: text
+    pub line: i64
+    pub column: i64
+
+    pub fn to_string() -> text:
+        return "{self.file}:{self.line}:{self.column}"
+
+# ============================================================================
+# PANIC HANDLER
+# ============================================================================
+
+# Panic handler callback type
+pub type PanicCallback = fn(PanicInfo)
+
+# Panic handler registry
+pub class PanicHandler:
+    pub callbacks: List<PanicCallback>
+    pub panic_count: i64
+    pub last_panic: Option<PanicInfo>
+    pub max_panics_before_shutdown: i64
+    pub enabled: bool
+
+    static fn new() -> PanicHandler:
+        return PanicHandler(
+            callbacks: [],
+            panic_count: 0,
+            last_panic: nil,
+            max_panics_before_shutdown: 10,
+            enabled: true
+        )
+
+    pub me register(callback: PanicCallback):
+        self.callbacks.append(callback)
+
+    pub me on_panic(info: PanicInfo):
+        if not self.enabled:
+            return
+
+        self.panic_count = self.panic_count + 1
+        self.last_panic = Some(info)
+
+        # Notify all callbacks
+        for callback in self.callbacks:
+            callback(info)
+
+    pub fn should_shutdown() -> bool:
+        return self.panic_count >= self.max_panics_before_shutdown
+
+    pub me reset():
+        self.panic_count = 0
+        self.last_panic = nil
+
+    pub me disable():
+        self.enabled = false
+
+# Global panic handler (singleton)
+var GLOBAL_PANIC_HANDLER: Option<PanicHandler> = nil
+
+pub fn get_panic_handler() -> PanicHandler:
+    match GLOBAL_PANIC_HANDLER:
+        case Some(h):
+            return h
+        case nil:
+            val handler = PanicHandler.new()
+            GLOBAL_PANIC_HANDLER = Some(handler)
+            return handler
+
+pub fn register_panic_callback(callback: PanicCallback):
+    get_panic_handler().register(callback)
+
+# ============================================================================
+# PANIC GUARD
+# ============================================================================
+
+# Guard that catches panics and converts them to errors
+pub class PanicGuard<T>:
+    pub operation_name: text
+    pub timeout_ms: Option<i64>
+    pub on_panic: Option<PanicCallback>
+
+    static fn new(name: text) -> PanicGuard<T>:
+        return PanicGuard(
+            operation_name: name,
+            timeout_ms: nil,
+            on_panic: nil
+        )
+
+    pub fn with_timeout(self, timeout_ms: i64) -> PanicGuard<T>:
+        return PanicGuard(
+            operation_name: self.operation_name,
+            timeout_ms: Some(timeout_ms),
+            on_panic: self.on_panic
+        )
+
+    pub fn with_callback(self, callback: PanicCallback) -> PanicGuard<T>:
+        return PanicGuard(
+            operation_name: self.operation_name,
+            timeout_ms: self.timeout_ms,
+            on_panic: Some(callback)
+        )
+
+    # Execute operation with panic catching
+    # Returns FailSafeResult with error on panic
+    pub fn execute(operation: fn() -> T) -> FailSafeResult<T>:
+        # Note: In real implementation, this would use actual panic catching
+        # For Simple language, we use the catch_panic FFI
+        val result = catch_panic_ffi(
+            operation,
+            self.operation_name,
+            self.timeout_ms.unwrap_or(0)
+        )
+
+        match result.panic_info:
+            case Some(info):
+                # Notify callbacks
+                match self.on_panic:
+                    case Some(cb):
+                        cb(info)
+                    case nil:
+                        pass
+
+                # Notify global handler
+                get_panic_handler().on_panic(info)
+
+                return FailSafeResult.Err(info.to_error())
+
+            case nil:
+                return FailSafeResult.Ok(result.value)
+
+# Result from FFI panic catch
+pub class CatchPanicResult<T>:
+    pub value: T
+    pub panic_info: Option<PanicInfo>
+
+# ============================================================================
+# SAFE EXECUTION WRAPPERS
+# ============================================================================
+
+# Execute a function safely, catching panics
+pub fn safe_execute<T>(name: text, operation: fn() -> T) -> FailSafeResult<T>:
+    return PanicGuard.new(name).execute(operation)
+
+# Execute with timeout
+pub fn safe_execute_with_timeout<T>(name: text, timeout_ms: i64, operation: fn() -> T) -> FailSafeResult<T>:
+    return PanicGuard.new(name)
+        .with_timeout(timeout_ms)
+        .execute(operation)
+
+# Execute and convert Result to FailSafeResult
+pub fn safe_execute_result<T, E>(
+    name: text,
+    operation: fn() -> Result<T, E>,
+    error_mapper: fn(E) -> FailSafeError
+) -> FailSafeResult<T>:
+    val guard_result = safe_execute(name, operation)
+
+    match guard_result:
+        case FailSafeResult.Ok(result):
+            match result:
+                case Ok(v):
+                    return FailSafeResult.Ok(v)
+                case Err(e):
+                    return FailSafeResult.Err(error_mapper(e))
+        case FailSafeResult.Err(e):
+            return FailSafeResult.Err(e)
+
+# ============================================================================
+# DEFENSIVE OPERATIONS
+# ============================================================================
+
+# Defensive division (prevents divide by zero)
+pub fn safe_div(a: i64, b: i64) -> FailSafeResult<i64>:
+    if b == 0:
+        return FailSafeResult.Err(
+            FailSafeError.new(ErrorCategory.DivisionByZero, "Division by zero")
+                .with_detail("numerator", a.to_string())
+        )
+    return FailSafeResult.Ok(a / b)
+
+pub fn safe_div_f64(a: f64, b: f64) -> FailSafeResult<f64>:
+    if b == 0.0:
+        return FailSafeResult.Err(
+            FailSafeError.new(ErrorCategory.DivisionByZero, "Division by zero")
+        )
+    return FailSafeResult.Ok(a / b)
+
+# Defensive array access
+pub fn safe_get<T>(arr: List<T>, index: i64) -> FailSafeResult<T>:
+    if index < 0 or index >= arr.len():
+        return FailSafeResult.Err(
+            FailSafeError.new(ErrorCategory.Overflow, "Index out of bounds")
+                .with_detail("index", index.to_string())
+                .with_detail("length", arr.len().to_string())
+        )
+    return FailSafeResult.Ok(arr[index])
+
+# Defensive string slicing
+pub fn safe_substring(s: text, start: i64, end: i64) -> FailSafeResult<text>:
+    if start < 0 or end < 0 or start > s.len() or end > s.len() or start > end:
+        return FailSafeResult.Err(
+            FailSafeError.new(ErrorCategory.Overflow, "Invalid substring range")
+                .with_detail("start", start.to_string())
+                .with_detail("end", end.to_string())
+                .with_detail("length", s.len().to_string())
+        )
+    return FailSafeResult.Ok(s.substring(start, end))
+
+# ============================================================================
+# ASSERTION UTILITIES
+# ============================================================================
+
+# Soft assertion that returns error instead of panicking
+pub fn soft_assert(condition: bool, message: text) -> FailSafeResult<()>:
+    if not condition:
+        return FailSafeResult.Err(
+            FailSafeError.new(ErrorCategory.Validation, "Assertion failed: {message}")
+        )
+    return FailSafeResult.Ok(())
+
+# Soft assertion with category
+pub fn soft_assert_cat(condition: bool, category: ErrorCategory, message: text) -> FailSafeResult<()>:
+    if not condition:
+        return FailSafeResult.Err(
+            FailSafeError.new(category, message)
+        )
+    return FailSafeResult.Ok(())
+
+# Assert not null (for Option types)
+pub fn assert_some<T>(opt: Option<T>, message: text) -> FailSafeResult<T>:
+    match opt:
+        case Some(v):
+            return FailSafeResult.Ok(v)
+        case nil:
+            return FailSafeResult.Err(
+                FailSafeError.new(ErrorCategory.Validation, message)
+            )
+
+# ============================================================================
+# RECOVERY UTILITIES
+# ============================================================================
+
+# Retry operation with exponential backoff
+pub fn retry_with_backoff<T>(
+    name: text,
+    max_attempts: i64,
+    initial_delay_ms: i64,
+    operation: fn() -> FailSafeResult<T>
+) -> FailSafeResult<T>:
+    var delay = initial_delay_ms
+    var last_error: Option<FailSafeError> = nil
+
+    for attempt in 0..max_attempts:
+        match operation():
+            case FailSafeResult.Ok(v):
+                return FailSafeResult.Ok(v)
+            case FailSafeResult.Err(e):
+                last_error = Some(e)
+
+                # Check if error is recoverable
+                if not e.recoverable:
+                    return FailSafeResult.Err(e)
+
+                # Wait before retry (except on last attempt)
+                if attempt < max_attempts - 1:
+                    sleep_ms(delay)
+                    delay = delay * 2  # Exponential backoff
+
+    # All attempts failed
+    match last_error:
+        case Some(e):
+            return FailSafeResult.Err(
+                FailSafeError.new(ErrorCategory.Exhausted, "All {max_attempts} retry attempts failed for {name}")
+                    .with_cause(e)
+            )
+        case nil:
+            return FailSafeResult.Err(
+                FailSafeError.new(ErrorCategory.Internal, "Retry loop completed without result")
+            )
+
+# Fallback on error
+pub fn with_fallback<T>(
+    primary: fn() -> FailSafeResult<T>,
+    fallback: fn() -> FailSafeResult<T>
+) -> FailSafeResult<T>:
+    match primary():
+        case FailSafeResult.Ok(v):
+            return FailSafeResult.Ok(v)
+        case FailSafeResult.Err(_):
+            return fallback()
+
+# Default on error
+pub fn with_default<T>(
+    operation: fn() -> FailSafeResult<T>,
+    default: T
+) -> T:
+    match operation():
+        case FailSafeResult.Ok(v): v
+        case FailSafeResult.Err(_): default
+
+# ============================================================================
+# HELPER FUNCTIONS
+# ============================================================================
+
+fn current_time_ms() -> i64:
+    return time_now_ms()
+
+fn sleep_ms(ms: i64):
+    thread_sleep_ms(ms)
+
+# FFI for panic catching (implementation dependent on runtime)
+extern fn catch_panic_ffi<T>(operation: fn() -> T, name: text, timeout_ms: i64) -> CatchPanicResult<T>
+extern fn time_now_ms() -> i64
+extern fn thread_sleep_ms(ms: i64)

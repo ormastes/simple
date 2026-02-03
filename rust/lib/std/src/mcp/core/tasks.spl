@@ -1,0 +1,702 @@
+# MCP Task Lifecycle Management
+# Async task tracking with progress notifications
+# Follows MCP specification 2025-11-25
+
+use core.*
+use std.mcp.core.error_handler.*
+use std.mcp.core.logger.*
+
+# Task status
+pub enum TaskStatus:
+    Pending
+    Running
+    Completed
+    Failed
+    Cancelled
+    TimedOut
+
+    pub fn to_string() -> text:
+        match self:
+            case Pending: "pending"
+            case Running: "running"
+            case Completed: "completed"
+            case Failed: "failed"
+            case Cancelled: "cancelled"
+            case TimedOut: "timed_out"
+
+    pub fn is_terminal() -> bool:
+        match self:
+            case Completed: true
+            case Failed: true
+            case Cancelled: true
+            case TimedOut: true
+            case _: false
+
+# Task priority
+pub enum TaskPriority:
+    Low
+    Normal
+    High
+    Critical
+
+    pub fn to_string() -> text:
+        match self:
+            case Low: "low"
+            case Normal: "normal"
+            case High: "high"
+            case Critical: "critical"
+
+    pub fn to_i64() -> i64:
+        match self:
+            case Low: 0
+            case Normal: 1
+            case High: 2
+            case Critical: 3
+
+# Task progress
+pub class TaskProgress:
+    pub current: i64
+    pub total: Option<i64>
+    pub message: Option<text>
+    pub percentage: Option<f64>
+
+    static fn new(current: i64) -> TaskProgress:
+        return TaskProgress(
+            current: current,
+            total: nil,
+            message: nil,
+            percentage: nil
+        )
+
+    pub fn with_total(self, total: i64) -> TaskProgress:
+        val pct = if total > 0:
+            (self.current as f64 / total as f64) * 100.0
+        else:
+            0.0
+
+        return TaskProgress(
+            current: self.current,
+            total: Some(total),
+            message: self.message,
+            percentage: Some(pct)
+        )
+
+    pub fn with_message(self, msg: text) -> TaskProgress:
+        return TaskProgress(
+            current: self.current,
+            total: self.total,
+            message: Some(msg),
+            percentage: self.percentage
+        )
+
+    pub fn to_dict() -> Dict<text, Any>:
+        var result: Dict<text, Any> = {"current": self.current}
+
+        match self.total:
+            case Some(t):
+                result.set("total", t)
+            case nil:
+                pass
+
+        match self.message:
+            case Some(m):
+                result.set("message", m)
+            case nil:
+                pass
+
+        match self.percentage:
+            case Some(p):
+                result.set("percentage", p)
+            case nil:
+                pass
+
+        return result
+
+# Task error
+pub class TaskError:
+    pub code: text
+    pub message: text
+    pub details: Option<text>
+    pub retryable: bool
+
+    static fn new(code: text, message: text) -> TaskError:
+        return TaskError(
+            code: code,
+            message: message,
+            details: nil,
+            retryable: false
+        )
+
+    pub fn with_details(self, details: text) -> TaskError:
+        return TaskError(
+            code: self.code,
+            message: self.message,
+            details: Some(details),
+            retryable: self.retryable
+        )
+
+    pub fn as_retryable(self) -> TaskError:
+        return TaskError(
+            code: self.code,
+            message: self.message,
+            details: self.details,
+            retryable: true
+        )
+
+    pub fn to_mcp_error() -> McpError:
+        return McpError.new(
+            ErrorCategory.Tool,
+            "{self.code}: {self.message}",
+            -32603
+        )
+
+# Task definition
+pub class Task:
+    pub id: text
+    pub operation: text
+    pub status: TaskStatus
+    pub priority: TaskPriority
+    pub progress: Option<TaskProgress>
+    pub result: Option<Any>
+    pub error: Option<TaskError>
+    pub created_at: i64
+    pub started_at: Option<i64>
+    pub completed_at: Option<i64>
+    pub timeout_ms: Option<i64>
+    pub metadata: Dict<text, Any>
+
+    static fn new(id: text, operation: text) -> Task:
+        return Task(
+            id: id,
+            operation: operation,
+            status: TaskStatus.Pending,
+            priority: TaskPriority.Normal,
+            progress: nil,
+            result: nil,
+            error: nil,
+            created_at: current_time_ms(),
+            started_at: nil,
+            completed_at: nil,
+            timeout_ms: nil,
+            metadata: {}
+        )
+
+    pub fn with_priority(self, priority: TaskPriority) -> Task:
+        return Task(
+            id: self.id,
+            operation: self.operation,
+            status: self.status,
+            priority: priority,
+            progress: self.progress,
+            result: self.result,
+            error: self.error,
+            created_at: self.created_at,
+            started_at: self.started_at,
+            completed_at: self.completed_at,
+            timeout_ms: self.timeout_ms,
+            metadata: self.metadata
+        )
+
+    pub fn with_timeout(self, timeout_ms: i64) -> Task:
+        return Task(
+            id: self.id,
+            operation: self.operation,
+            status: self.status,
+            priority: self.priority,
+            progress: self.progress,
+            result: self.result,
+            error: self.error,
+            created_at: self.created_at,
+            started_at: self.started_at,
+            completed_at: self.completed_at,
+            timeout_ms: Some(timeout_ms),
+            metadata: self.metadata
+        )
+
+    pub fn is_running() -> bool:
+        return self.status == TaskStatus.Running
+
+    pub fn is_complete() -> bool:
+        return self.status.is_terminal()
+
+    pub fn is_timed_out() -> bool:
+        if not self.is_running():
+            return false
+
+        match self.timeout_ms:
+            case Some(timeout):
+                match self.started_at:
+                    case Some(start):
+                        return (current_time_ms() - start) >= timeout
+                    case nil:
+                        return false
+            case nil:
+                return false
+
+    pub fn duration_ms() -> Option<i64>:
+        match self.started_at:
+            case Some(start):
+                match self.completed_at:
+                    case Some(end):
+                        return Some(end - start)
+                    case nil:
+                        return Some(current_time_ms() - start)
+            case nil:
+                return nil
+
+    pub fn to_dict() -> Dict<text, Any>:
+        var result: Dict<text, Any> = {
+            "id": self.id,
+            "operation": self.operation,
+            "status": self.status.to_string(),
+            "priority": self.priority.to_string(),
+            "createdAt": self.created_at
+        }
+
+        match self.progress:
+            case Some(p):
+                result.set("progress", p.to_dict())
+            case nil:
+                pass
+
+        match self.started_at:
+            case Some(t):
+                result.set("startedAt", t)
+            case nil:
+                pass
+
+        match self.completed_at:
+            case Some(t):
+                result.set("completedAt", t)
+            case nil:
+                pass
+
+        match self.error:
+            case Some(e):
+                result.set("error", {"code": e.code, "message": e.message})
+            case nil:
+                pass
+
+        return result
+
+# Task listener for progress notifications
+pub trait TaskListener:
+    # Called when task starts
+    fn on_task_started(task_id: text)
+
+    # Called when progress updates
+    fn on_progress_updated(task_id: text, progress: TaskProgress)
+
+    # Called when task completes
+    fn on_task_completed(task_id: text, result: Any)
+
+    # Called when task fails
+    fn on_task_failed(task_id: text, error: TaskError)
+
+    # Called when task is cancelled
+    fn on_task_cancelled(task_id: text)
+
+# Task manager
+pub class TaskManager:
+    pub tasks: Dict<text, Task>
+    pub listeners: List<TaskListener>
+    pub next_task_id: i64
+    pub max_concurrent_tasks: i64
+    pub running_count: i64
+    pub debug_mode: bool
+
+    static fn new() -> TaskManager:
+        return TaskManager(
+            tasks: {},
+            listeners: [],
+            next_task_id: 1,
+            max_concurrent_tasks: 10,
+            running_count: 0,
+            debug_mode: false
+        )
+
+    pub me enable_debug():
+        self.debug_mode = true
+
+    fn log_debug(msg: text):
+        if self.debug_mode:
+            log_debug("TaskManager: {msg}")
+
+    # Generate unique task ID
+    fn generate_task_id() -> text:
+        val id = self.next_task_id
+        self.next_task_id = self.next_task_id + 1
+        return "task_{id}_{current_time_ms()}"
+
+    # Create a new task
+    pub me create_task(operation: text) -> text:
+        val task_id = self.generate_task_id()
+        val task = Task.new(task_id, operation)
+        self.tasks.set(task_id, task)
+        self.log_debug("Created task: {task_id} for {operation}")
+        return task_id
+
+    # Create a task with priority and timeout
+    pub me create_task_with_options(operation: text, priority: TaskPriority, timeout_ms: Option<i64>) -> text:
+        val task_id = self.generate_task_id()
+        var task = Task.new(task_id, operation).with_priority(priority)
+
+        match timeout_ms:
+            case Some(t):
+                task = task.with_timeout(t)
+            case nil:
+                pass
+
+        self.tasks.set(task_id, task)
+        self.log_debug("Created task: {task_id} with priority {priority.to_string()}")
+        return task_id
+
+    # Start a task
+    pub me start_task(task_id: text) -> Result<(), McpError>:
+        match self.tasks.get(task_id):
+            case Some(task):
+                if task.status != TaskStatus.Pending:
+                    return Err(McpError.new(
+                        ErrorCategory.Validation,
+                        "Task is not pending: {task.status.to_string()}",
+                        -32602
+                    ))
+
+                if self.running_count >= self.max_concurrent_tasks:
+                    return Err(McpError.new(
+                        ErrorCategory.RateLimit,
+                        "Max concurrent tasks reached",
+                        -32001
+                    ))
+
+                val updated = Task(
+                    id: task.id,
+                    operation: task.operation,
+                    status: TaskStatus.Running,
+                    priority: task.priority,
+                    progress: task.progress,
+                    result: task.result,
+                    error: task.error,
+                    created_at: task.created_at,
+                    started_at: Some(current_time_ms()),
+                    completed_at: task.completed_at,
+                    timeout_ms: task.timeout_ms,
+                    metadata: task.metadata
+                )
+                self.tasks.set(task_id, updated)
+                self.running_count = self.running_count + 1
+
+                self.log_debug("Started task: {task_id}")
+                self.notify_started(task_id)
+                return Ok(())
+
+            case nil:
+                return Err(McpError.new(
+                    ErrorCategory.Resource,
+                    "Task not found: {task_id}",
+                    -32602
+                ))
+
+    # Update task progress
+    pub me update_progress(task_id: text, current: i64, total: i64) -> Result<(), McpError>:
+        match self.tasks.get(task_id):
+            case Some(task):
+                if task.status != TaskStatus.Running:
+                    return Err(McpError.new(
+                        ErrorCategory.Validation,
+                        "Task is not running",
+                        -32602
+                    ))
+
+                val progress = TaskProgress.new(current).with_total(total)
+                val updated = Task(
+                    id: task.id,
+                    operation: task.operation,
+                    status: task.status,
+                    priority: task.priority,
+                    progress: Some(progress),
+                    result: task.result,
+                    error: task.error,
+                    created_at: task.created_at,
+                    started_at: task.started_at,
+                    completed_at: task.completed_at,
+                    timeout_ms: task.timeout_ms,
+                    metadata: task.metadata
+                )
+                self.tasks.set(task_id, updated)
+
+                self.log_debug("Updated progress: {task_id} ({current}/{total})")
+                self.notify_progress(task_id, progress)
+                return Ok(())
+
+            case nil:
+                return Err(McpError.new(
+                    ErrorCategory.Resource,
+                    "Task not found: {task_id}",
+                    -32602
+                ))
+
+    # Update progress with message
+    pub me update_progress_with_message(task_id: text, current: i64, total: i64, message: text) -> Result<(), McpError>:
+        match self.tasks.get(task_id):
+            case Some(task):
+                if task.status != TaskStatus.Running:
+                    return Err(McpError.new(
+                        ErrorCategory.Validation,
+                        "Task is not running",
+                        -32602
+                    ))
+
+                val progress = TaskProgress.new(current).with_total(total).with_message(message)
+                val updated = Task(
+                    id: task.id,
+                    operation: task.operation,
+                    status: task.status,
+                    priority: task.priority,
+                    progress: Some(progress),
+                    result: task.result,
+                    error: task.error,
+                    created_at: task.created_at,
+                    started_at: task.started_at,
+                    completed_at: task.completed_at,
+                    timeout_ms: task.timeout_ms,
+                    metadata: task.metadata
+                )
+                self.tasks.set(task_id, updated)
+
+                self.log_debug("Updated progress: {task_id} - {message}")
+                self.notify_progress(task_id, progress)
+                return Ok(())
+
+            case nil:
+                return Err(McpError.new(
+                    ErrorCategory.Resource,
+                    "Task not found: {task_id}",
+                    -32602
+                ))
+
+    # Complete a task
+    pub me complete_task(task_id: text, result: Any) -> Result<(), McpError>:
+        match self.tasks.get(task_id):
+            case Some(task):
+                if task.status != TaskStatus.Running:
+                    return Err(McpError.new(
+                        ErrorCategory.Validation,
+                        "Task is not running",
+                        -32602
+                    ))
+
+                val updated = Task(
+                    id: task.id,
+                    operation: task.operation,
+                    status: TaskStatus.Completed,
+                    priority: task.priority,
+                    progress: task.progress,
+                    result: Some(result),
+                    error: task.error,
+                    created_at: task.created_at,
+                    started_at: task.started_at,
+                    completed_at: Some(current_time_ms()),
+                    timeout_ms: task.timeout_ms,
+                    metadata: task.metadata
+                )
+                self.tasks.set(task_id, updated)
+                self.running_count = self.running_count - 1
+
+                self.log_debug("Completed task: {task_id}")
+                self.notify_completed(task_id, result)
+                return Ok(())
+
+            case nil:
+                return Err(McpError.new(
+                    ErrorCategory.Resource,
+                    "Task not found: {task_id}",
+                    -32602
+                ))
+
+    # Fail a task
+    pub me fail_task(task_id: text, error: TaskError) -> Result<(), McpError>:
+        match self.tasks.get(task_id):
+            case Some(task):
+                if task.status != TaskStatus.Running:
+                    return Err(McpError.new(
+                        ErrorCategory.Validation,
+                        "Task is not running",
+                        -32602
+                    ))
+
+                val updated = Task(
+                    id: task.id,
+                    operation: task.operation,
+                    status: TaskStatus.Failed,
+                    priority: task.priority,
+                    progress: task.progress,
+                    result: task.result,
+                    error: Some(error),
+                    created_at: task.created_at,
+                    started_at: task.started_at,
+                    completed_at: Some(current_time_ms()),
+                    timeout_ms: task.timeout_ms,
+                    metadata: task.metadata
+                )
+                self.tasks.set(task_id, updated)
+                self.running_count = self.running_count - 1
+
+                self.log_debug("Failed task: {task_id} - {error.message}")
+                self.notify_failed(task_id, error)
+                return Ok(())
+
+            case nil:
+                return Err(McpError.new(
+                    ErrorCategory.Resource,
+                    "Task not found: {task_id}",
+                    -32602
+                ))
+
+    # Cancel a task
+    pub me cancel_task(task_id: text) -> Result<(), McpError>:
+        match self.tasks.get(task_id):
+            case Some(task):
+                if task.status.is_terminal():
+                    return Err(McpError.new(
+                        ErrorCategory.Validation,
+                        "Task is already complete",
+                        -32602
+                    ))
+
+                val was_running = task.status == TaskStatus.Running
+
+                val updated = Task(
+                    id: task.id,
+                    operation: task.operation,
+                    status: TaskStatus.Cancelled,
+                    priority: task.priority,
+                    progress: task.progress,
+                    result: task.result,
+                    error: task.error,
+                    created_at: task.created_at,
+                    started_at: task.started_at,
+                    completed_at: Some(current_time_ms()),
+                    timeout_ms: task.timeout_ms,
+                    metadata: task.metadata
+                )
+                self.tasks.set(task_id, updated)
+
+                if was_running:
+                    self.running_count = self.running_count - 1
+
+                self.log_debug("Cancelled task: {task_id}")
+                self.notify_cancelled(task_id)
+                return Ok(())
+
+            case nil:
+                return Err(McpError.new(
+                    ErrorCategory.Resource,
+                    "Task not found: {task_id}",
+                    -32602
+                ))
+
+    # Get task by ID
+    pub fn get_task(task_id: text) -> Option<Task>:
+        return self.tasks.get(task_id)
+
+    # List all tasks
+    pub fn list_tasks() -> List<Task>:
+        var result: List<Task> = []
+        for id in self.tasks.keys():
+            match self.tasks.get(id):
+                case Some(task):
+                    result.append(task)
+                case nil:
+                    pass
+        return result
+
+    # List tasks by status
+    pub fn list_tasks_by_status(status: TaskStatus) -> List<Task>:
+        var result: List<Task> = []
+        for id in self.tasks.keys():
+            match self.tasks.get(id):
+                case Some(task):
+                    if task.status == status:
+                        result.append(task)
+                case nil:
+                    pass
+        return result
+
+    # Check and handle timed out tasks
+    pub me check_timeouts():
+        for id in self.tasks.keys():
+            match self.tasks.get(id):
+                case Some(task):
+                    if task.is_timed_out():
+                        self.log_debug("Task timed out: {id}")
+                        val updated = Task(
+                            id: task.id,
+                            operation: task.operation,
+                            status: TaskStatus.TimedOut,
+                            priority: task.priority,
+                            progress: task.progress,
+                            result: task.result,
+                            error: Some(TaskError.new("timeout", "Task timed out")),
+                            created_at: task.created_at,
+                            started_at: task.started_at,
+                            completed_at: Some(current_time_ms()),
+                            timeout_ms: task.timeout_ms,
+                            metadata: task.metadata
+                        )
+                        self.tasks.set(id, updated)
+                        self.running_count = self.running_count - 1
+                case nil:
+                    pass
+
+    # Register a task listener
+    pub me add_listener(listener: TaskListener):
+        self.listeners.append(listener)
+
+    fn notify_started(task_id: text):
+        for listener in self.listeners:
+            listener.on_task_started(task_id)
+
+    fn notify_progress(task_id: text, progress: TaskProgress):
+        for listener in self.listeners:
+            listener.on_progress_updated(task_id, progress)
+
+    fn notify_completed(task_id: text, result: Any):
+        for listener in self.listeners:
+            listener.on_task_completed(task_id, result)
+
+    fn notify_failed(task_id: text, error: TaskError):
+        for listener in self.listeners:
+            listener.on_task_failed(task_id, error)
+
+    fn notify_cancelled(task_id: text):
+        for listener in self.listeners:
+            listener.on_task_cancelled(task_id)
+
+    # Cleanup old completed tasks
+    pub me cleanup_completed(max_age_ms: i64):
+        val now = current_time_ms()
+        var to_remove: List<text> = []
+
+        for id in self.tasks.keys():
+            match self.tasks.get(id):
+                case Some(task):
+                    if task.status.is_terminal():
+                        match task.completed_at:
+                            case Some(completed):
+                                if (now - completed) >= max_age_ms:
+                                    to_remove.append(id)
+                            case nil:
+                                pass
+                case nil:
+                    pass
+
+        for id in to_remove:
+            self.tasks.remove(id)
+            self.log_debug("Cleaned up task: {id}")
+
+# Helper function
+fn current_time_ms() -> i64:
+    return time_now_ms()
+
+extern fn time_now_ms() -> i64

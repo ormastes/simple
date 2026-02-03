@@ -1,0 +1,572 @@
+# MCP Authentication
+# Authentication provider traits and OAuth2 implementation
+# Follows MCP specification 2025-11-25
+
+use core.*
+use std.mcp.core.protocol.*
+use std.mcp.core.error_handler.*
+use std.mcp.core.logger.*
+
+# Authentication error
+pub enum AuthErrorKind:
+    InvalidCredentials
+    ExpiredToken
+    InvalidToken
+    InsufficientScope
+    MissingToken
+    TokenRefreshFailed
+    AuthorizationFailed
+    InvalidState
+    InvalidCode
+
+    pub fn to_string() -> text:
+        match self:
+            case InvalidCredentials: "invalid_credentials"
+            case ExpiredToken: "expired_token"
+            case InvalidToken: "invalid_token"
+            case InsufficientScope: "insufficient_scope"
+            case MissingToken: "missing_token"
+            case TokenRefreshFailed: "token_refresh_failed"
+            case AuthorizationFailed: "authorization_failed"
+            case InvalidState: "invalid_state"
+            case InvalidCode: "invalid_code"
+
+pub class AuthError:
+    pub kind: AuthErrorKind
+    pub message: text
+    pub details: Option<text>
+
+    static fn new(kind: AuthErrorKind, message: text) -> AuthError:
+        return AuthError(
+            kind: kind,
+            message: message,
+            details: nil
+        )
+
+    pub fn with_details(self, details: text) -> AuthError:
+        return AuthError(
+            kind: self.kind,
+            message: self.message,
+            details: Some(details)
+        )
+
+    pub fn to_mcp_error() -> McpError:
+        return McpError.new(
+            ErrorCategory.Validation,
+            "Authentication error ({self.kind.to_string()}): {self.message}",
+            -32002
+        )
+
+# Authentication context (result of successful auth)
+pub class AuthContext:
+    pub user_id: text
+    pub scopes: List<text>
+    pub token_type: text
+    pub expires_at: Option<i64>
+    pub metadata: Dict<text, text>
+
+    static fn new(user_id: text, scopes: List<text>) -> AuthContext:
+        return AuthContext(
+            user_id: user_id,
+            scopes: scopes,
+            token_type: "bearer",
+            expires_at: nil,
+            metadata: {}
+        )
+
+    pub fn with_expiry(self, expires_at: i64) -> AuthContext:
+        return AuthContext(
+            user_id: self.user_id,
+            scopes: self.scopes,
+            token_type: self.token_type,
+            expires_at: Some(expires_at),
+            metadata: self.metadata
+        )
+
+    pub fn is_expired() -> bool:
+        match self.expires_at:
+            case Some(exp):
+                return current_time_ms() >= exp
+            case nil:
+                return false
+
+    pub fn has_scope(scope: text) -> bool:
+        return self.scopes.contains(scope)
+
+    pub fn has_any_scope(required_scopes: List<text>) -> bool:
+        for scope in required_scopes:
+            if self.scopes.contains(scope):
+                return true
+        return false
+
+    pub fn has_all_scopes(required_scopes: List<text>) -> bool:
+        for scope in required_scopes:
+            if not self.scopes.contains(scope):
+                return false
+        return true
+
+# Authentication provider trait
+pub trait AuthProvider:
+    # Authenticate a request
+    fn authenticate(request: JsonRpcRequest) -> Result<AuthContext, AuthError>
+
+    # Refresh an expired token
+    fn refresh_token(context: AuthContext) -> Result<AuthContext, AuthError>
+
+    # Validate a token
+    fn validate_token(token: text) -> Result<AuthContext, AuthError>
+
+    # Get provider name
+    fn name() -> text
+
+# OAuth2 token
+pub class OAuth2Token:
+    pub access_token: text
+    pub token_type: text
+    pub expires_in: Option<i64>
+    pub refresh_token: Option<text>
+    pub scope: Option<text>
+    pub issued_at: i64
+
+    static fn new(access_token: text) -> OAuth2Token:
+        return OAuth2Token(
+            access_token: access_token,
+            token_type: "bearer",
+            expires_in: nil,
+            refresh_token: nil,
+            scope: nil,
+            issued_at: current_time_ms()
+        )
+
+    pub fn with_refresh_token(self, refresh_token: text) -> OAuth2Token:
+        return OAuth2Token(
+            access_token: self.access_token,
+            token_type: self.token_type,
+            expires_in: self.expires_in,
+            refresh_token: Some(refresh_token),
+            scope: self.scope,
+            issued_at: self.issued_at
+        )
+
+    pub fn with_expiry(self, expires_in: i64) -> OAuth2Token:
+        return OAuth2Token(
+            access_token: self.access_token,
+            token_type: self.token_type,
+            expires_in: Some(expires_in),
+            refresh_token: self.refresh_token,
+            scope: self.scope,
+            issued_at: self.issued_at
+        )
+
+    pub fn is_expired() -> bool:
+        match self.expires_in:
+            case Some(exp):
+                val expiry_time = self.issued_at + (exp * 1000)
+                return current_time_ms() >= expiry_time
+            case nil:
+                return false
+
+    pub fn get_scopes() -> List<text>:
+        match self.scope:
+            case Some(s):
+                return s.split(" ")
+            case nil:
+                return []
+
+# OAuth2 configuration
+pub class OAuth2Config:
+    pub client_id: text
+    pub client_secret: Option<text>
+    pub authorization_endpoint: text
+    pub token_endpoint: text
+    pub redirect_uri: text
+    pub scopes: List<text>
+    pub use_pkce: bool
+
+    static fn new(
+        client_id: text,
+        authorization_endpoint: text,
+        token_endpoint: text,
+        redirect_uri: text
+    ) -> OAuth2Config:
+        return OAuth2Config(
+            client_id: client_id,
+            client_secret: nil,
+            authorization_endpoint: authorization_endpoint,
+            token_endpoint: token_endpoint,
+            redirect_uri: redirect_uri,
+            scopes: [],
+            use_pkce: true
+        )
+
+    pub fn with_secret(self, secret: text) -> OAuth2Config:
+        return OAuth2Config(
+            client_id: self.client_id,
+            client_secret: Some(secret),
+            authorization_endpoint: self.authorization_endpoint,
+            token_endpoint: self.token_endpoint,
+            redirect_uri: self.redirect_uri,
+            scopes: self.scopes,
+            use_pkce: self.use_pkce
+        )
+
+    pub fn with_scopes(self, scopes: List<text>) -> OAuth2Config:
+        return OAuth2Config(
+            client_id: self.client_id,
+            client_secret: self.client_secret,
+            authorization_endpoint: self.authorization_endpoint,
+            token_endpoint: self.token_endpoint,
+            redirect_uri: self.redirect_uri,
+            scopes: scopes,
+            use_pkce: self.use_pkce
+        )
+
+# PKCE (Proof Key for Code Exchange) challenge
+pub class PkceChallenge:
+    pub code_verifier: text
+    pub code_challenge: text
+    pub code_challenge_method: text
+
+    static fn generate() -> PkceChallenge:
+        val verifier = generate_random_string(43)
+        val challenge = sha256_base64url(verifier)
+        return PkceChallenge(
+            code_verifier: verifier,
+            code_challenge: challenge,
+            code_challenge_method: "S256"
+        )
+
+# OAuth2 authorization request
+pub class AuthorizationRequest:
+    pub config: OAuth2Config
+    pub state: text
+    pub pkce: Option<PkceChallenge>
+
+    static fn new(config: OAuth2Config) -> AuthorizationRequest:
+        val state = generate_random_string(32)
+        var pkce: Option<PkceChallenge> = nil
+
+        if config.use_pkce:
+            pkce = Some(PkceChallenge.generate())
+
+        return AuthorizationRequest(
+            config: config,
+            state: state,
+            pkce: pkce
+        )
+
+    pub fn get_authorization_url() -> text:
+        var url = self.config.authorization_endpoint
+        url = url + "?response_type=code"
+        url = url + "&client_id=" + url_encode(self.config.client_id)
+        url = url + "&redirect_uri=" + url_encode(self.config.redirect_uri)
+        url = url + "&state=" + url_encode(self.state)
+
+        if self.config.scopes.len() > 0:
+            val scope = self.config.scopes.join(" ")
+            url = url + "&scope=" + url_encode(scope)
+
+        match self.pkce:
+            case Some(p):
+                url = url + "&code_challenge=" + url_encode(p.code_challenge)
+                url = url + "&code_challenge_method=" + p.code_challenge_method
+            case nil:
+                pass
+
+        return url
+
+# OAuth2 provider
+pub class OAuth2Provider:
+    pub config: OAuth2Config
+    pub pending_requests: Dict<text, AuthorizationRequest>  # state -> request
+    pub tokens: Dict<text, OAuth2Token>                     # user_id -> token
+    pub debug_mode: bool
+
+    static fn new(config: OAuth2Config) -> OAuth2Provider:
+        return OAuth2Provider(
+            config: config,
+            pending_requests: {},
+            tokens: {},
+            debug_mode: false
+        )
+
+    pub me enable_debug():
+        self.debug_mode = true
+
+    fn log_debug(msg: text):
+        if self.debug_mode:
+            log_debug("OAuth2Provider: {msg}")
+
+    # Start authorization flow
+    pub me start_authorization() -> AuthorizationRequest:
+        val request = AuthorizationRequest.new(self.config)
+        self.pending_requests.set(request.state, request)
+        self.log_debug("Started authorization, state={request.state}")
+        return request
+
+    # Exchange authorization code for token
+    pub me exchange_code(code: text, state: text) -> Result<OAuth2Token, AuthError>:
+        self.log_debug("Exchanging code for token, state={state}")
+
+        # Verify state
+        match self.pending_requests.get(state):
+            case Some(request):
+                # Remove pending request
+                self.pending_requests.remove(state)
+
+                # Exchange code for token
+                match self.token_request(code, request):
+                    case Ok(token):
+                        self.log_debug("Token exchange successful")
+                        return Ok(token)
+                    case Err(e):
+                        return Err(e)
+
+            case nil:
+                return Err(AuthError.new(
+                    AuthErrorKind.InvalidState,
+                    "Invalid or expired state parameter"
+                ))
+
+    # Token request (would use HTTP in real impl)
+    fn token_request(code: text, request: AuthorizationRequest) -> Result<OAuth2Token, AuthError>:
+        # Build token request
+        var params = "grant_type=authorization_code"
+        params = params + "&code=" + url_encode(code)
+        params = params + "&redirect_uri=" + url_encode(self.config.redirect_uri)
+        params = params + "&client_id=" + url_encode(self.config.client_id)
+
+        match self.config.client_secret:
+            case Some(secret):
+                params = params + "&client_secret=" + url_encode(secret)
+            case nil:
+                pass
+
+        match request.pkce:
+            case Some(p):
+                params = params + "&code_verifier=" + url_encode(p.code_verifier)
+            case nil:
+                pass
+
+        # Would make HTTP POST request here
+        # For now, return error indicating not implemented
+        return Err(AuthError.new(
+            AuthErrorKind.AuthorizationFailed,
+            "Token exchange not implemented - requires HTTP client"
+        ))
+
+    # Refresh an access token
+    pub me refresh_access_token(refresh_token: text) -> Result<OAuth2Token, AuthError>:
+        self.log_debug("Refreshing access token")
+
+        var params = "grant_type=refresh_token"
+        params = params + "&refresh_token=" + url_encode(refresh_token)
+        params = params + "&client_id=" + url_encode(self.config.client_id)
+
+        match self.config.client_secret:
+            case Some(secret):
+                params = params + "&client_secret=" + url_encode(secret)
+            case nil:
+                pass
+
+        # Would make HTTP POST request here
+        return Err(AuthError.new(
+            AuthErrorKind.TokenRefreshFailed,
+            "Token refresh not implemented - requires HTTP client"
+        ))
+
+    # Store a token for a user
+    pub me store_token(user_id: text, token: OAuth2Token):
+        self.tokens.set(user_id, token)
+        self.log_debug("Stored token for user: {user_id}")
+
+    # Get stored token for a user
+    pub fn get_token(user_id: text) -> Option<OAuth2Token>:
+        return self.tokens.get(user_id)
+
+    # Remove token for a user (logout)
+    pub me remove_token(user_id: text):
+        self.tokens.remove(user_id)
+        self.log_debug("Removed token for user: {user_id}")
+
+impl AuthProvider for OAuth2Provider:
+    fn authenticate(request: JsonRpcRequest) -> Result<AuthContext, AuthError>:
+        # Extract token from request headers/params
+        match request.params.get("_authorization"):
+            case Some(auth):
+                match auth:
+                    case text as token:
+                        return self.validate_token(token)
+                    case _:
+                        return Err(AuthError.new(
+                            AuthErrorKind.InvalidToken,
+                            "Invalid authorization format"
+                        ))
+            case nil:
+                return Err(AuthError.new(
+                    AuthErrorKind.MissingToken,
+                    "No authorization token provided"
+                ))
+
+    fn refresh_token(context: AuthContext) -> Result<AuthContext, AuthError>:
+        # Get stored token for user
+        match self.tokens.get(context.user_id):
+            case Some(token):
+                match token.refresh_token:
+                    case Some(refresh):
+                        match self.refresh_access_token(refresh):
+                            case Ok(new_token):
+                                self.store_token(context.user_id, new_token)
+                                return Ok(AuthContext.new(context.user_id, new_token.get_scopes()))
+                            case Err(e):
+                                return Err(e)
+                    case nil:
+                        return Err(AuthError.new(
+                            AuthErrorKind.TokenRefreshFailed,
+                            "No refresh token available"
+                        ))
+            case nil:
+                return Err(AuthError.new(
+                    AuthErrorKind.InvalidToken,
+                    "No stored token for user"
+                ))
+
+    fn validate_token(token: text) -> Result<AuthContext, AuthError>:
+        # Would validate token with OAuth2 server
+        # For now, return error
+        return Err(AuthError.new(
+            AuthErrorKind.InvalidToken,
+            "Token validation not implemented - requires HTTP client"
+        ))
+
+    fn name() -> text:
+        return "oauth2"
+
+# API key authentication provider
+pub class ApiKeyProvider:
+    pub api_keys: Dict<text, ApiKeyInfo>
+    pub debug_mode: bool
+
+    static fn new() -> ApiKeyProvider:
+        return ApiKeyProvider(
+            api_keys: {},
+            debug_mode: false
+        )
+
+    pub me enable_debug():
+        self.debug_mode = true
+
+    fn log_debug(msg: text):
+        if self.debug_mode:
+            log_debug("ApiKeyProvider: {msg}")
+
+    pub me register_key(key: text, info: ApiKeyInfo):
+        self.api_keys.set(key, info)
+        self.log_debug("Registered API key: {info.name}")
+
+    pub me revoke_key(key: text):
+        self.api_keys.remove(key)
+        self.log_debug("Revoked API key")
+
+impl AuthProvider for ApiKeyProvider:
+    fn authenticate(request: JsonRpcRequest) -> Result<AuthContext, AuthError>:
+        match request.params.get("_api_key"):
+            case Some(key):
+                match key:
+                    case text as k:
+                        return self.validate_token(k)
+                    case _:
+                        return Err(AuthError.new(
+                            AuthErrorKind.InvalidToken,
+                            "Invalid API key format"
+                        ))
+            case nil:
+                return Err(AuthError.new(
+                    AuthErrorKind.MissingToken,
+                    "No API key provided"
+                ))
+
+    fn refresh_token(context: AuthContext) -> Result<AuthContext, AuthError>:
+        # API keys don't need refresh
+        return Ok(context)
+
+    fn validate_token(token: text) -> Result<AuthContext, AuthError>:
+        match self.api_keys.get(token):
+            case Some(info):
+                if info.is_expired():
+                    return Err(AuthError.new(
+                        AuthErrorKind.ExpiredToken,
+                        "API key has expired"
+                    ))
+                return Ok(AuthContext.new(info.user_id, info.scopes))
+            case nil:
+                return Err(AuthError.new(
+                    AuthErrorKind.InvalidToken,
+                    "Invalid API key"
+                ))
+
+    fn name() -> text:
+        return "api_key"
+
+# API key info
+pub class ApiKeyInfo:
+    pub name: text
+    pub user_id: text
+    pub scopes: List<text>
+    pub expires_at: Option<i64>
+    pub created_at: i64
+
+    static fn new(name: text, user_id: text, scopes: List<text>) -> ApiKeyInfo:
+        return ApiKeyInfo(
+            name: name,
+            user_id: user_id,
+            scopes: scopes,
+            expires_at: nil,
+            created_at: current_time_ms()
+        )
+
+    pub fn with_expiry(self, expires_at: i64) -> ApiKeyInfo:
+        return ApiKeyInfo(
+            name: self.name,
+            user_id: self.user_id,
+            scopes: self.scopes,
+            expires_at: Some(expires_at),
+            created_at: self.created_at
+        )
+
+    pub fn is_expired() -> bool:
+        match self.expires_at:
+            case Some(exp):
+                return current_time_ms() >= exp
+            case nil:
+                return false
+
+# Helper functions
+fn current_time_ms() -> i64:
+    return time_now_ms()
+
+fn generate_random_string(length: i64) -> text:
+    # Would use secure random in real implementation
+    val chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+    var result = ""
+    for _ in 0..length:
+        val idx = random_int(0, chars.len() - 1)
+        result = result + chars.char_at(idx)
+    return result
+
+fn sha256_base64url(input: text) -> text:
+    # Would use actual SHA256 in real implementation
+    return "sha256_" + input.substring(0, 20)
+
+fn url_encode(input: text) -> text:
+    var result = ""
+    for ch in input:
+        if ch.is_alphanumeric() or ch == "-" or ch == "_" or ch == "." or ch == "~":
+            result = result + ch
+        else:
+            # Would properly encode in real implementation
+            result = result + "%" + ch.ord().to_hex()
+    return result
+
+extern fn time_now_ms() -> i64
+extern fn random_int(min: i64, max: i64) -> i64

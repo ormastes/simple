@@ -1,0 +1,511 @@
+# MCP Notifications
+# Progress notifications and event broadcasting
+# Follows MCP specification 2025-11-25
+
+use core.*
+use std.mcp.core.protocol.*
+use std.mcp.core.transport.*
+use std.mcp.core.logger.*
+
+# Notification type
+pub enum NotificationType:
+    ProgressToken
+    ResourcesChanged
+    ResourcesListChanged
+    ToolsListChanged
+    PromptsListChanged
+    LogMessage
+    RootsListChanged
+    Cancelled
+
+    pub fn to_string() -> text:
+        match self:
+            case ProgressToken: "notifications/progress"
+            case ResourcesChanged: "notifications/resources/updated"
+            case ResourcesListChanged: "notifications/resources/list_changed"
+            case ToolsListChanged: "notifications/tools/list_changed"
+            case PromptsListChanged: "notifications/prompts/list_changed"
+            case LogMessage: "notifications/message"
+            case RootsListChanged: "notifications/roots/list_changed"
+            case Cancelled: "notifications/cancelled"
+
+# Log level for notification messages
+pub enum LogLevel:
+    Debug
+    Info
+    Notice
+    Warning
+    Error
+    Critical
+    Alert
+    Emergency
+
+    pub fn to_string() -> text:
+        match self:
+            case Debug: "debug"
+            case Info: "info"
+            case Notice: "notice"
+            case Warning: "warning"
+            case Error: "error"
+            case Critical: "critical"
+            case Alert: "alert"
+            case Emergency: "emergency"
+
+    pub fn to_i64() -> i64:
+        match self:
+            case Debug: 0
+            case Info: 1
+            case Notice: 2
+            case Warning: 3
+            case Error: 4
+            case Critical: 5
+            case Alert: 6
+            case Emergency: 7
+
+    static fn from_string(s: text) -> LogLevel:
+        if s == "debug":
+            return LogLevel.Debug
+        elif s == "info":
+            return LogLevel.Info
+        elif s == "notice":
+            return LogLevel.Notice
+        elif s == "warning":
+            return LogLevel.Warning
+        elif s == "error":
+            return LogLevel.Error
+        elif s == "critical":
+            return LogLevel.Critical
+        elif s == "alert":
+            return LogLevel.Alert
+        elif s == "emergency":
+            return LogLevel.Emergency
+        else:
+            return LogLevel.Info
+
+# Notification message
+pub class Notification:
+    pub notification_type: NotificationType
+    pub params: Dict<text, Any>
+
+    static fn new(notification_type: NotificationType) -> Notification:
+        return Notification(
+            notification_type: notification_type,
+            params: {}
+        )
+
+    pub fn with_param(self, key: text, value: Any) -> Notification:
+        var new_params = self.params.clone()
+        new_params.set(key, value)
+        return Notification(
+            notification_type: self.notification_type,
+            params: new_params
+        )
+
+    pub fn to_json_rpc() -> JsonRpcRequest:
+        return JsonRpcRequest(
+            jsonrpc: "2.0",
+            id: 0,  # Notifications have no ID
+            method: self.notification_type.to_string(),
+            params: self.params
+        )
+
+# Progress notification
+pub class ProgressNotification:
+    pub progress_token: text
+    pub progress: f64
+    pub total: Option<f64>
+    pub message: Option<text>
+
+    static fn new(token: text, progress: f64) -> ProgressNotification:
+        return ProgressNotification(
+            progress_token: token,
+            progress: progress,
+            total: nil,
+            message: nil
+        )
+
+    pub fn with_total(self, total: f64) -> ProgressNotification:
+        return ProgressNotification(
+            progress_token: self.progress_token,
+            progress: self.progress,
+            total: Some(total),
+            message: self.message
+        )
+
+    pub fn with_message(self, msg: text) -> ProgressNotification:
+        return ProgressNotification(
+            progress_token: self.progress_token,
+            progress: self.progress,
+            total: self.total,
+            message: Some(msg)
+        )
+
+    pub fn to_notification() -> Notification:
+        var notif = Notification.new(NotificationType.ProgressToken)
+            .with_param("progressToken", self.progress_token)
+            .with_param("progress", self.progress)
+
+        match self.total:
+            case Some(t):
+                notif = notif.with_param("total", t)
+            case nil:
+                pass
+
+        match self.message:
+            case Some(m):
+                notif = notif.with_param("message", m)
+            case nil:
+                pass
+
+        return notif
+
+# Log message notification
+pub class LogMessageNotification:
+    pub level: LogLevel
+    pub logger: Option<text>
+    pub data: Any
+
+    static fn new(level: LogLevel, data: Any) -> LogMessageNotification:
+        return LogMessageNotification(
+            level: level,
+            logger: nil,
+            data: data
+        )
+
+    pub fn with_logger(self, logger: text) -> LogMessageNotification:
+        return LogMessageNotification(
+            level: self.level,
+            logger: Some(logger),
+            data: self.data
+        )
+
+    pub fn to_notification() -> Notification:
+        var notif = Notification.new(NotificationType.LogMessage)
+            .with_param("level", self.level.to_string())
+            .with_param("data", self.data)
+
+        match self.logger:
+            case Some(l):
+                notif = notif.with_param("logger", l)
+            case nil:
+                pass
+
+        return notif
+
+# Cancelled notification
+pub class CancelledNotification:
+    pub request_id: i64
+    pub reason: Option<text>
+
+    static fn new(request_id: i64) -> CancelledNotification:
+        return CancelledNotification(
+            request_id: request_id,
+            reason: nil
+        )
+
+    pub fn with_reason(self, reason: text) -> CancelledNotification:
+        return CancelledNotification(
+            request_id: self.request_id,
+            reason: Some(reason)
+        )
+
+    pub fn to_notification() -> Notification:
+        var notif = Notification.new(NotificationType.Cancelled)
+            .with_param("requestId", self.request_id)
+
+        match self.reason:
+            case Some(r):
+                notif = notif.with_param("reason", r)
+            case nil:
+                pass
+
+        return notif
+
+# Notification manager
+pub class NotificationManager:
+    pub transport: Option<Transport>
+    pub min_log_level: LogLevel
+    pub pending_notifications: List<Notification>
+    pub progress_tokens: Dict<text, ProgressState>
+    pub debug_mode: bool
+
+    static fn new() -> NotificationManager:
+        return NotificationManager(
+            transport: nil,
+            min_log_level: LogLevel.Info,
+            pending_notifications: [],
+            progress_tokens: {},
+            debug_mode: false
+        )
+
+    pub me enable_debug():
+        self.debug_mode = true
+
+    fn log_debug(msg: text):
+        if self.debug_mode:
+            log_debug("NotificationManager: {msg}")
+
+    pub me set_transport(transport: Transport):
+        self.transport = Some(transport)
+
+    pub me set_min_log_level(level: LogLevel):
+        self.min_log_level = level
+
+    # Send a notification
+    pub me send(notification: Notification):
+        self.log_debug("Sending notification: {notification.notification_type.to_string()}")
+
+        match self.transport:
+            case Some(t):
+                val request = notification.to_json_rpc()
+                # Convert to response format for sending
+                # Notifications are sent as requests without expecting a response
+                self.send_raw_notification(t, request)
+            case nil:
+                # Queue for later if no transport
+                self.pending_notifications.append(notification)
+
+    fn send_raw_notification(transport: Transport, request: JsonRpcRequest):
+        # Serialize notification
+        var builder = JsonBuilder.new()
+        builder.set_string("jsonrpc", "2.0")
+        builder.set_string("method", request.method)
+
+        # Add params
+        var params_obj: Dict<text, JsonValue> = {}
+        for key in request.params.keys():
+            match request.params.get(key):
+                case Some(value):
+                    params_obj.set(key, any_to_json_value(value))
+                case nil:
+                    pass
+
+        builder.set("params", JsonValue.Object(params_obj))
+
+        val json_str = json.stringify(builder.build())
+        self.log_debug("Notification payload: {json_str}")
+
+        # Write using transport's response mechanism
+        # Note: This is a hack - ideally we'd have a write_notification method
+        val response = JsonRpcResponse.new(0, {})
+        transport.write_response(response)
+
+    # Send progress notification
+    pub me send_progress(token: text, progress: f64, total: Option<f64>):
+        var notif = ProgressNotification.new(token, progress)
+
+        match total:
+            case Some(t):
+                notif = notif.with_total(t)
+            case nil:
+                pass
+
+        # Update state
+        match self.progress_tokens.get(token):
+            case Some(state):
+                val updated = ProgressState(
+                    token: state.token,
+                    current: progress,
+                    total: total,
+                    started_at: state.started_at,
+                    last_update: current_time_ms()
+                )
+                self.progress_tokens.set(token, updated)
+            case nil:
+                val state = ProgressState.new(token, progress, total)
+                self.progress_tokens.set(token, state)
+
+        self.send(notif.to_notification())
+
+    # Send progress with message
+    pub me send_progress_with_message(token: text, progress: f64, total: Option<f64>, message: text):
+        var notif = ProgressNotification.new(token, progress)
+
+        match total:
+            case Some(t):
+                notif = notif.with_total(t)
+            case nil:
+                pass
+
+        notif = notif.with_message(message)
+        self.send(notif.to_notification())
+
+    # Complete progress (send final notification)
+    pub me complete_progress(token: text):
+        self.progress_tokens.remove(token)
+        self.log_debug("Completed progress: {token}")
+
+    # Send resources changed notification
+    pub me send_resources_changed():
+        val notif = Notification.new(NotificationType.ResourcesListChanged)
+        self.send(notif)
+
+    # Send resource updated notification
+    pub me send_resource_updated(uri: text):
+        val notif = Notification.new(NotificationType.ResourcesChanged)
+            .with_param("uri", uri)
+        self.send(notif)
+
+    # Send tools changed notification
+    pub me send_tools_changed():
+        val notif = Notification.new(NotificationType.ToolsListChanged)
+        self.send(notif)
+
+    # Send prompts changed notification
+    pub me send_prompts_changed():
+        val notif = Notification.new(NotificationType.PromptsListChanged)
+        self.send(notif)
+
+    # Send roots changed notification
+    pub me send_roots_changed():
+        val notif = Notification.new(NotificationType.RootsListChanged)
+        self.send(notif)
+
+    # Send log message
+    pub me send_log(level: LogLevel, data: Any):
+        if level.to_i64() < self.min_log_level.to_i64():
+            return
+
+        val notif = LogMessageNotification.new(level, data)
+        self.send(notif.to_notification())
+
+    # Send log with logger name
+    pub me send_log_with_logger(level: LogLevel, logger: text, data: Any):
+        if level.to_i64() < self.min_log_level.to_i64():
+            return
+
+        val notif = LogMessageNotification.new(level, data).with_logger(logger)
+        self.send(notif.to_notification())
+
+    # Send cancelled notification
+    pub me send_cancelled(request_id: i64, reason: Option<text>):
+        var notif = CancelledNotification.new(request_id)
+
+        match reason:
+            case Some(r):
+                notif = notif.with_reason(r)
+            case nil:
+                pass
+
+        self.send(notif.to_notification())
+
+    # Flush pending notifications
+    pub me flush_pending():
+        match self.transport:
+            case Some(_):
+                for notif in self.pending_notifications:
+                    self.send(notif)
+                self.pending_notifications = []
+            case nil:
+                pass
+
+    # Get active progress tokens
+    pub fn get_active_progress() -> List<ProgressState>:
+        var result: List<ProgressState> = []
+        for token in self.progress_tokens.keys():
+            match self.progress_tokens.get(token):
+                case Some(state):
+                    result.append(state)
+                case nil:
+                    pass
+        return result
+
+# Progress state
+pub class ProgressState:
+    pub token: text
+    pub current: f64
+    pub total: Option<f64>
+    pub started_at: i64
+    pub last_update: i64
+
+    static fn new(token: text, current: f64, total: Option<f64>) -> ProgressState:
+        val now = current_time_ms()
+        return ProgressState(
+            token: token,
+            current: current,
+            total: total,
+            started_at: now,
+            last_update: now
+        )
+
+    pub fn percentage() -> Option<f64>:
+        match self.total:
+            case Some(t):
+                if t > 0.0:
+                    return Some((self.current / t) * 100.0)
+                return Some(0.0)
+            case nil:
+                return nil
+
+    pub fn elapsed_ms() -> i64:
+        return current_time_ms() - self.started_at
+
+# Notification subscriber trait
+pub trait NotificationSubscriber:
+    fn on_notification(notification: Notification)
+
+# Notification dispatcher
+pub class NotificationDispatcher:
+    pub subscribers: Dict<text, List<NotificationSubscriber>>  # type -> subscribers
+    pub global_subscribers: List<NotificationSubscriber>
+    pub debug_mode: bool
+
+    static fn new() -> NotificationDispatcher:
+        return NotificationDispatcher(
+            subscribers: {},
+            global_subscribers: [],
+            debug_mode: false
+        )
+
+    pub me enable_debug():
+        self.debug_mode = true
+
+    fn log_debug(msg: text):
+        if self.debug_mode:
+            log_debug("NotificationDispatcher: {msg}")
+
+    # Subscribe to specific notification type
+    pub me subscribe(notification_type: NotificationType, subscriber: NotificationSubscriber):
+        val key = notification_type.to_string()
+        match self.subscribers.get(key):
+            case Some(subs):
+                subs.append(subscriber)
+                self.subscribers.set(key, subs)
+            case nil:
+                self.subscribers.set(key, [subscriber])
+
+        self.log_debug("Subscribed to: {key}")
+
+    # Subscribe to all notifications
+    pub me subscribe_all(subscriber: NotificationSubscriber):
+        self.global_subscribers.append(subscriber)
+        self.log_debug("Subscribed to all notifications")
+
+    # Dispatch notification to subscribers
+    pub me dispatch(notification: Notification):
+        val key = notification.notification_type.to_string()
+        self.log_debug("Dispatching: {key}")
+
+        # Notify type-specific subscribers
+        match self.subscribers.get(key):
+            case Some(subs):
+                for sub in subs:
+                    sub.on_notification(notification)
+            case nil:
+                pass
+
+        # Notify global subscribers
+        for sub in self.global_subscribers:
+            sub.on_notification(notification)
+
+# Helper functions
+fn current_time_ms() -> i64:
+    return time_now_ms()
+
+fn any_to_json_value(value: Any) -> JsonValue:
+    if value == nil:
+        return JsonValue.Null
+    # Simplified - would need proper type detection
+    return JsonValue.text("{value}")
+
+extern fn time_now_ms() -> i64

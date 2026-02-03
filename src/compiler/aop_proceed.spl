@@ -5,8 +5,9 @@
 # - Forgetting to call proceed() (blocks execution)
 # - Calling proceed() multiple times (duplicate execution)
 
-export ProceedError, ProceedContext, AroundAdviceContext
-export verify_proceed_called, create_proceed_context
+export ProceedError, ProceedContext, AroundAdviceContext, ConditionalProceedContext
+export verify_proceed_called, create_proceed_context, create_proceed_context_internal
+export create_around_advice_context, create_conditional_proceed_context
 
 # ============================================================================
 # Error Types
@@ -40,15 +41,16 @@ class ProceedContext:
     has_error: bool
     allow_multiple: bool    # For special cases (usually false)
 
+fn create_proceed_context_internal(advice_name: text) -> ProceedContext:
+    """Create a new proceed context for advice execution."""
+    ProceedContext(
+        advice_name: advice_name,
+        proceed_count: 0,
+        has_error: false,
+        allow_multiple: false
+    )
+
 impl ProceedContext:
-    static fn create(advice_name: text) -> ProceedContext:
-        """Create a new proceed context for advice execution."""
-        ProceedContext(
-            advice_name: advice_name,
-            proceed_count: 0,
-            has_error: false,
-            allow_multiple: false
-        )
 
     me mark_proceed_called():
         """Record that proceed() was called."""
@@ -93,19 +95,20 @@ class AroundAdviceContext:
     This wraps the execution of around advice and tracks proceed() calls.
     """
     proceed_ctx: ProceedContext
-    target_fn: fn() -> Any
+    target_fn: Any  # Function: () -> Any
     before_proceed: Any?
     after_proceed: Any?
 
+fn create_around_advice_context(advice_name: text, target_fn: fn() -> Any) -> AroundAdviceContext:
+    """Create context for around advice execution."""
+    AroundAdviceContext(
+        proceed_ctx: create_proceed_context_internal(advice_name),
+        target_fn: target_fn,
+        before_proceed: nil,
+        after_proceed: nil
+    )
+
 impl AroundAdviceContext:
-    static fn create(advice_name: text, target_fn: fn() -> Any) -> AroundAdviceContext:
-        """Create context for around advice execution."""
-        AroundAdviceContext(
-            proceed_ctx: ProceedContext.create(advice_name),
-            target_fn: target_fn,
-            before_proceed: nil,
-            after_proceed: nil
-        )
 
     me proceed() -> Any:
         """Call the original function (wrapped join point).
@@ -128,11 +131,11 @@ impl AroundAdviceContext:
 
         result
 
-    me set_before_proceed(hook: fn()):
+    me set_before_proceed(hook: Any):
         """Set hook to execute before proceed() calls target."""
         self.before_proceed = Some(hook)
 
-    me set_after_proceed(hook: fn()):
+    me set_after_proceed(hook: Any):
         """Set hook to execute after proceed() calls target."""
         self.after_proceed = Some(hook)
 
@@ -165,7 +168,7 @@ fn verify_proceed_called(ctx: AroundAdviceContext) -> Result<(), text>:
 
 fn create_proceed_context(advice_name: text, target_fn: fn() -> Any) -> AroundAdviceContext:
     """Create a proceed context for around advice execution."""
-    AroundAdviceContext.create(advice_name, target_fn)
+    create_around_advice_context(advice_name, target_fn)
 
 # ============================================================================
 # Runtime Integration Example
@@ -201,18 +204,19 @@ class ConditionalProceedContext:
     - Authorization: Skip proceed if not authorized
     """
     base_ctx: AroundAdviceContext
-    condition_fn: fn() -> bool
-    fallback_fn: fn() -> Any
+    condition_fn: Any  # Function: () -> bool
+    fallback_fn: Any   # Function: () -> Any
+
+fn create_conditional_proceed_context(advice_name: text, target_fn: fn() -> Any,
+                                     condition_fn: fn() -> bool,
+                                     fallback_fn: fn() -> Any) -> ConditionalProceedContext:
+    ConditionalProceedContext(
+        base_ctx: create_around_advice_context(advice_name, target_fn),
+        condition_fn: condition_fn,
+        fallback_fn: fallback_fn
+    )
 
 impl ConditionalProceedContext:
-    static fn create(advice_name: text, target_fn: fn() -> Any,
-                    condition_fn: fn() -> bool,
-                    fallback_fn: fn() -> Any) -> ConditionalProceedContext:
-        ConditionalProceedContext(
-            base_ctx: AroundAdviceContext.create(advice_name, target_fn),
-            condition_fn: condition_fn,
-            fallback_fn: fallback_fn
-        )
 
     me proceed_if_allowed() -> Any:
         """Call proceed() only if condition is true, otherwise use fallback."""
