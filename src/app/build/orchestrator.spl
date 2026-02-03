@@ -1,9 +1,46 @@
 # Build Orchestrator
 #
 # Orchestrates build operations with proper sequencing
+#
+# Build pipeline:
+# 1. Run FFI generator to create Rust code in build/rust/ffi_gen/
+# 2. Run cargo build on the generated workspace
 
 use app.build.types (BuildConfig, BuildResult, BuildProfile)
 use app.build.cargo (Cargo, print_build_result)
+use app.io.mod (file_exists, process_run)
+
+# Run FFI generator to create Rust workspace
+fn run_ffi_generator(verbose: bool) -> bool:
+    if verbose:
+        print "Running FFI generator..."
+
+    # Check if ffi_gen workspace already exists and is up to date
+    if file_exists("build/rust/ffi_gen/src/lib.rs"):
+        if verbose:
+            print "FFI workspace exists, checking if regeneration needed..."
+        # For now, always regenerate to ensure consistency
+        # TODO: Add incremental check based on spec file timestamps
+
+    # Run the FFI generator directly via runtime with the script path
+    # This avoids interpreter mode limitations by running as a subprocess
+    var args: [text] = ["src/app/ffi_gen/main.spl", "--gen-all"]
+    if verbose:
+        args = args.push("--verbose")
+
+    val (stdout, stderr, exit_code) = process_run("./bin/simple_runtime", args)
+
+    if exit_code == 0:
+        if verbose:
+            print "FFI generation complete"
+            if stdout.len() > 0:
+                print stdout
+        true
+    else:
+        print "FFI generation failed with exit code {exit_code}"
+        if stderr.len() > 0:
+            print stderr
+        false
 
 # Orchestrate a build
 fn orchestrate_build(config: BuildConfig) -> BuildResult:
@@ -13,7 +50,17 @@ fn orchestrate_build(config: BuildConfig) -> BuildResult:
         if config.features.len() > 0:
             print "Features: {config.features}"
 
-    # Execute build
+    # Step 1: Run FFI generator to create Rust code
+    if not run_ffi_generator(config.verbose):
+        return BuildResult(
+            success: false,
+            exit_code: 1,
+            stdout: "",
+            stderr: "FFI generation failed",
+            duration_ms: 0
+        )
+
+    # Step 2: Execute cargo build
     val result = Cargo.build(config)
 
     # Print result

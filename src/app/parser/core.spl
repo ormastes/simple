@@ -5,7 +5,7 @@
 
 from token import {Span, Token, TokenKind}
 from lexer import {Lexer}
-from ast import {Module, Node, Block, Parameter, Type, Visibility, Mutability}
+from ast import {Module, Node, Block, Parameter, Type, Visibility, Mutability, UnfoldStmt}
 from error import {ParseError}
 
 export Parser, ParserMode, DebugMode, MAX_LOOP_ITERATIONS
@@ -214,6 +214,8 @@ class Parser:
                 self.parse_export_stmt()
             case TokenKind.Common:
                 self.parse_common_use()
+            case TokenKind.Unfold:
+                self.parse_unfold_stmt()
             case TokenKind.If:
                 self.parse_if_stmt()
             case TokenKind.Match:
@@ -402,6 +404,50 @@ class Parser:
         Err(ParseError.syntax_error("parse_export_stmt not yet implemented", self.current.span.line, self.current.span.column))
     me parse_common_use() -> Result<Node, ParseError>:
         Err(ParseError.syntax_error("parse_common_use not yet implemented", self.current.span.line, self.current.span.column))
+    me parse_unfold_stmt() -> Result<Node, ParseError>:
+        # Parse: unfold {subpkg1, subpkg2, ...}
+        val start_span = self.current.span
+        self.expect(TokenKind.Unfold)?
+        self.expect(TokenKind.LBrace)?
+
+        var subpackages: [text] = []
+        var seen_names: {text: bool} = {}
+
+        while not self.check(TokenKind.RBrace):
+            # Get identifier for subpackage name
+            val name = self.expect_path_segment()?
+
+            # Check for duplicates
+            if seen_names.contains_key(name):
+                return Err(ParseError.syntax_error(
+                    "duplicate subpackage '{name}' in unfold declaration",
+                    self.previous.span.line,
+                    self.previous.span.column))
+
+            seen_names[name] = true
+            subpackages = subpackages + [name]
+
+            # Handle comma separator
+            if not self.check(TokenKind.RBrace):
+                self.expect(TokenKind.Comma)?
+                # Allow trailing comma
+                if self.check(TokenKind.RBrace):
+                    break
+
+        # Error on empty unfold
+        if subpackages.len() == 0:
+            return Err(ParseError.syntax_error(
+                "unfold requires at least one subpackage",
+                start_span.line,
+                start_span.column))
+
+        self.expect(TokenKind.RBrace)?
+
+        val end_span = self.previous.span
+        Ok(Node.UnfoldStmtNode(UnfoldStmt(
+            span: Span(start: start_span.start, end: end_span.end, line: start_span.line, column: start_span.column),
+            subpackages: subpackages
+        )))
     me parse_if_stmt() -> Result<Node, ParseError>:
         Err(ParseError.syntax_error("parse_if_stmt not yet implemented", self.current.span.line, self.current.span.column))
     me parse_match_stmt() -> Result<Node, ParseError>:

@@ -3,7 +3,7 @@
 # Usage: simple_lint <file.spl> [--deny-all] [--warn-all]
 
 # I/O imports
-use app.io.mod (file_read, file_exists, file_write, get_args)
+use app.io.mod (file_read, file_exists, file_write, get_args, is_dir)
 
 # Import EasyFix data types from stdlib
 use std.tooling.easy_fix.*
@@ -170,6 +170,14 @@ class Linter:
         lints.push(Lint.new("T004", LintLevel.Deny, LintCategory.Style,
             "P0/critical TODO must have issue number"))
 
+        # Import/Module lints (I00x rules)
+        lints.push(Lint.new("I001", LintLevel.Deny, LintCategory.Correctness,
+            "Unfold subpackage directory does not exist"))
+        lints.push(Lint.new("I002", LintLevel.Deny, LintCategory.Correctness,
+            "Unfold subpackage missing __init__.spl"))
+        lints.push(Lint.new("I003", LintLevel.Deny, LintCategory.Correctness,
+            "Unfold declaration in non-directory module"))
+
         Linter(lints: lints, results: [])
     
     async fn lint_file(self, path: String) -> Result<List<LintResult>, String>:
@@ -235,6 +243,10 @@ class Linter:
 
         # Check TODO/FIXME format
         self.check_todo_format(path, line_num, trimmed)
+
+        # Check unfold declaration (only in __init__.spl files)
+        if trimmed.starts_with("unfold ") and trimmed.contains("{"):
+            self.check_unfold_declaration(path, line_num, trimmed)
     
     fn extract_function_name(line: String) -> String:
         # Extract function name from "fn name(...)" pattern
@@ -363,6 +375,73 @@ class Linter:
                     "P0/critical TODO must have issue number")
                     .with_fix("Add issue: {keyword}: [{area}][{priority}] description [#123]")
                 self.results.push(LintResult.new(path, line_num, idx, lint))
+
+    me check_unfold_declaration(path: String, line_num: Int, line: String):
+        # Validate unfold declaration: unfold {subpkg1, subpkg2, ...}
+        # Check that:
+        # 1. File is __init__.spl (directory module)
+        # 2. Each subpackage exists as a directory
+        # 3. Each subpackage has __init__.spl
+
+        # Check if this is a directory module (__init__.spl)
+        if not path.ends_with("__init__.spl"):
+            val lint = Lint.new("I003", LintLevel.Deny, LintCategory.Correctness,
+                "unfold declaration only allowed in __init__.spl (directory modules)")
+                .with_fix("Move unfold declaration to the package's __init__.spl file")
+            self.results.push(LintResult.new(path, line_num, 0, lint))
+            return
+
+        # Get base directory of this module
+        val base_dir = get_parent_directory(path)
+
+        # Extract subpackages from "unfold {a, b, c}"
+        val subpackages = extract_unfold_subpackages(line)
+
+        # Validate each subpackage
+        for subpkg in subpackages:
+            val subpkg_dir = "{base_dir}/{subpkg}"
+            val init_file = "{subpkg_dir}/__init__.spl"
+
+            if not is_dir(subpkg_dir):
+                val lint = Lint.new("I001", LintLevel.Deny, LintCategory.Correctness,
+                    "unfold subpackage '{subpkg}' directory does not exist: {subpkg_dir}")
+                    .with_fix("Create directory: mkdir -p {subpkg_dir}")
+                self.results.push(LintResult.new(path, line_num, 0, lint))
+            elif not file_exists(init_file):
+                val lint = Lint.new("I002", LintLevel.Deny, LintCategory.Correctness,
+                    "unfold subpackage '{subpkg}' missing __init__.spl in {subpkg_dir}")
+                    .with_fix("Create file: touch {init_file}")
+                self.results.push(LintResult.new(path, line_num, 0, lint))
+
+
+# Helper: Get parent directory from file path
+fn get_parent_directory(path: String) -> String:
+    val last_slash = path.rfind("/")
+    if last_slash >= 0:
+        return path.slice(0, last_slash)
+    "."
+
+# Helper: Extract subpackage names from "unfold {a, b, c}"
+fn extract_unfold_subpackages(line: String) -> List<String>:
+    var subpackages: List<String> = []
+
+    val start = line.find("{")
+    val end = line.find("}")
+
+    if start < 0 or end < 0 or end <= start:
+        return subpackages
+
+    val content = line.slice(start + 1, end).trim()
+    if content.is_empty():
+        return subpackages
+
+    val parts = content.split(",")
+    for part in parts:
+        val trimmed = part.trim()
+        if not trimmed.is_empty():
+            subpackages.push(trimmed)
+
+    subpackages
 
 
 async fn main() -> Int:
