@@ -1,0 +1,249 @@
+# Monomorphization Engine
+#
+# Core engine for specializing generic functions, structs, and classes
+# with concrete type arguments. Iteratively processes pending specializations.
+#
+# Port of rust/compiler/src/monomorphize/engine.rs (662 lines)
+
+export ConcreteType, PointerKind, SpecializationKey
+export MonomorphizationTable, Monomorphizer
+
+# ============================================================================
+# Concrete Types
+# ============================================================================
+
+enum PointerKind:
+    Unique
+    Shared
+    Weak
+    Handle
+    Borrow
+    BorrowMut
+    RawConst
+    RawMut
+
+enum ConcreteType:
+    """A concrete (non-generic) type after substitution."""
+    Int
+    Float
+    Bool
+    String
+    Nil
+    Named(text)
+    Array(ConcreteType)
+    Tuple([ConcreteType])
+    Dict(key: ConcreteType, value: ConcreteType)
+    Function(params: [ConcreteType], ret: ConcreteType)
+    Optional(ConcreteType)
+    Specialized(name: text, args: [ConcreteType])
+
+impl ConcreteType:
+    fn to_mangled() -> text:
+        match self:
+            case Int: "Int"
+            case Float: "Float"
+            case Bool: "Bool"
+            case String: "String"
+            case Nil: "Nil"
+            case Named(n): n
+            case Array(e): "Array_{e.to_mangled()}"
+            case Tuple(es): "Tuple_{es.map(\e: e.to_mangled()).join(\"_\")}"
+            case Dict(k, v): "Dict_{k.to_mangled()}_{v.to_mangled()}"
+            case Function(ps, r): "Fn_{ps.map(\p: p.to_mangled()).join(\"_\")}_{r.to_mangled()}"
+            case Optional(i): "Opt_{i.to_mangled()}"
+            case Specialized(n, as_): "{n}_{as_.map(\a: a.to_mangled()).join(\"_\")}"
+
+# ============================================================================
+# Specialization Key
+# ============================================================================
+
+struct SpecializationKey:
+    """Unique key for a specialization: name + type args."""
+    name: text
+    type_args: [ConcreteType]
+
+impl SpecializationKey:
+    fn mangled_name() -> text:
+        if self.type_args.len() == 0:
+            return self.name
+        val args = self.type_args.map(\t: t.to_mangled()).join("_")
+        "{self.name}${args}"
+
+    fn matches(other: SpecializationKey) -> bool:
+        self.name == other.name and self.mangled_name() == other.mangled_name()
+
+# ============================================================================
+# Monomorphization Table
+# ============================================================================
+
+class MonomorphizationTable:
+    """Tracks pending and completed specializations."""
+    pending_functions: [(SpecializationKey, Any)]
+    pending_structs: [(SpecializationKey, Any)]
+    pending_classes: [(SpecializationKey, Any)]
+    specialized_functions: {text: Any}     # mangled_name -> specialized def
+    specialized_structs: {text: Any}
+    specialized_classes: {text: Any}
+    processed: [text]                       # mangled names already processed
+
+impl MonomorphizationTable:
+    static fn create() -> MonomorphizationTable:
+        MonomorphizationTable(
+            pending_functions: [], pending_structs: [], pending_classes: [],
+            specialized_functions: {}, specialized_structs: {},
+            specialized_classes: {}, processed: [])
+
+    me request_function(name: text, type_args: [ConcreteType], original: Any) -> text:
+        val key = SpecializationKey(name: name, type_args: type_args)
+        val mangled = key.mangled_name()
+        if not self.processed.contains(mangled) and not self.specialized_functions.contains_key(mangled):
+            self.pending_functions = self.pending_functions.push((key, original))
+        mangled
+
+    me request_struct(name: text, type_args: [ConcreteType], original: Any) -> text:
+        val key = SpecializationKey(name: name, type_args: type_args)
+        val mangled = key.mangled_name()
+        if not self.processed.contains(mangled) and not self.specialized_structs.contains_key(mangled):
+            self.pending_structs = self.pending_structs.push((key, original))
+        mangled
+
+    me request_class(name: text, type_args: [ConcreteType], original: Any) -> text:
+        val key = SpecializationKey(name: name, type_args: type_args)
+        val mangled = key.mangled_name()
+        if not self.processed.contains(mangled) and not self.specialized_classes.contains_key(mangled):
+            self.pending_classes = self.pending_classes.push((key, original))
+        mangled
+
+    fn has_pending() -> bool:
+        self.pending_functions.? or self.pending_structs.? or self.pending_classes.?
+
+    me pop_pending_function() -> (SpecializationKey, Any)?:
+        if not self.pending_functions.?:
+            return nil
+        val item = self.pending_functions[0]
+        self.pending_functions = self.pending_functions[1:]
+        Some(item)
+
+    me pop_pending_struct() -> (SpecializationKey, Any)?:
+        if not self.pending_structs.?:
+            return nil
+        val item = self.pending_structs[0]
+        self.pending_structs = self.pending_structs[1:]
+        Some(item)
+
+    me pop_pending_class() -> (SpecializationKey, Any)?:
+        if not self.pending_classes.?:
+            return nil
+        val item = self.pending_classes[0]
+        self.pending_classes = self.pending_classes[1:]
+        Some(item)
+
+    me mark_processed(key: SpecializationKey):
+        self.processed = self.processed.push(key.mangled_name())
+
+    me add_specialized_function(key: SpecializationKey, func: Any):
+        self.specialized_functions[key.mangled_name()] = func
+
+    me add_specialized_struct(key: SpecializationKey, s: Any):
+        self.specialized_structs[key.mangled_name()] = s
+
+    me add_specialized_class(key: SpecializationKey, c: Any):
+        self.specialized_classes[key.mangled_name()] = c
+
+    fn get_specialized_function(name: text) -> Any?:
+        if self.specialized_functions.contains_key(name):
+            Some(self.specialized_functions[name])
+        else:
+            nil
+
+# ============================================================================
+# Monomorphizer
+# ============================================================================
+
+class Monomorphizer:
+    """Core monomorphization engine.
+
+    Collects generic definitions, processes specialization requests,
+    and produces concrete specialized versions.
+    """
+    generic_functions: {text: Any}
+    generic_structs: {text: Any}
+    generic_classes: {text: Any}
+    table: MonomorphizationTable
+
+impl Monomorphizer:
+    static fn create() -> Monomorphizer:
+        Monomorphizer(generic_functions: {}, generic_structs: {},
+                      generic_classes: {}, table: MonomorphizationTable.create())
+
+    me register_generic_function(name: text, def: Any):
+        self.generic_functions[name] = def
+
+    me register_generic_struct(name: text, def: Any):
+        self.generic_structs[name] = def
+
+    me register_generic_class(name: text, def: Any):
+        self.generic_classes[name] = def
+
+    fn is_generic_function(name: text) -> bool:
+        self.generic_functions.contains_key(name)
+
+    fn is_generic_struct(name: text) -> bool:
+        self.generic_structs.contains_key(name)
+
+    fn is_generic_class(name: text) -> bool:
+        self.generic_classes.contains_key(name)
+
+    me specialize_function_call(name: text, type_args: [ConcreteType]) -> text?:
+        if not self.generic_functions.contains_key(name):
+            return nil
+        val func = self.generic_functions[name]
+        Some(self.table.request_function(name, type_args, func))
+
+    me process_pending(specialize_fn: fn(Any, SpecializationKey) -> Any):
+        """Process all pending specializations iteratively."""
+        while self.table.has_pending():
+            # Functions
+            while true:
+                val pending = self.table.pop_pending_function()
+                if not pending.?:
+                    break
+                val (key, func) = pending.unwrap()
+                if self.table.processed.contains(key.mangled_name()):
+                    continue
+                val specialized = specialize_fn(func, key)
+                self.table.mark_processed(key)
+                self.table.add_specialized_function(key, specialized)
+
+            # Structs
+            while true:
+                val pending = self.table.pop_pending_struct()
+                if not pending.?:
+                    break
+                val (key, s) = pending.unwrap()
+                if self.table.processed.contains(key.mangled_name()):
+                    continue
+                val specialized = specialize_fn(s, key)
+                self.table.mark_processed(key)
+                self.table.add_specialized_struct(key, specialized)
+
+            # Classes
+            while true:
+                val pending = self.table.pop_pending_class()
+                if not pending.?:
+                    break
+                val (key, c) = pending.unwrap()
+                if self.table.processed.contains(key.mangled_name()):
+                    continue
+                val specialized = specialize_fn(c, key)
+                self.table.mark_processed(key)
+                self.table.add_specialized_class(key, specialized)
+
+    fn table() -> MonomorphizationTable:
+        self.table
+
+    fn stats() -> (i64, i64, i64):
+        """Returns (functions, structs, classes) count of specializations."""
+        (self.table.specialized_functions.len(),
+         self.table.specialized_structs.len(),
+         self.table.specialized_classes.len())

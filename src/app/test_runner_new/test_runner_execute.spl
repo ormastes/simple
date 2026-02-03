@@ -298,7 +298,68 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
     make_result_from_output(file_path, stdout, stderr, exit_code, duration_ms, options.timeout)
 
 # =========================================================================
-# Output Formatting
+# G1: Safe mode execution with resource limits
+# =========================================================================
+
+fn run_test_file_safe_mode(file_path: text, options: TestOptions) -> TestFileResult:
+    val binary = find_simple_binary()
+    val start = rt_time_now_unix_micros()
+    val timeout_ms = options.timeout * 1000
+    val memory_bytes = 512 * 1024 * 1024
+    val cpu_seconds = 30
+    val max_fds = 256
+    val max_procs = 64
+
+    var run_args: List<text> = [file_path]
+    if options.gc_log:
+        run_args.push("--gc-log")
+    if options.gc_off:
+        run_args.push("--gc=off")
+
+    val (stdout, stderr, exit_code) = rt_process_run_with_limits(
+        binary, run_args, timeout_ms, memory_bytes, cpu_seconds, max_fds, max_procs
+    )
+    val end = rt_time_now_unix_micros()
+    val duration_ms = (end - start) / 1000
+
+    make_result_from_output(file_path, stdout, stderr, exit_code, duration_ms, options.timeout)
+
+# =========================================================================
+# G3: Static test listing (parse source without execution)
+# =========================================================================
+
+fn list_tests_static(files: List<text>) -> List<text>:
+    var test_names: List<text> = []
+    for file_path in files:
+        val content = read_file_content(file_path)
+        if content == "":
+            continue
+        val lines = content.split("\n")
+        for line in lines:
+            val trimmed = line.trim()
+            # Match: it "...", slow_it "...", test "..."
+            val name = extract_static_test_name(trimmed)
+            if name != "":
+                test_names.push("{file_path}::{name}")
+    test_names
+
+fn extract_static_test_name(line: text) -> text:
+    # it "description"
+    if line.starts_with("it \""):
+        val end = line.index_of("\"", 4) ?? -1
+        if end > 4:
+            return line[4:end]
+    # slow_it "description"
+    if line.starts_with("slow_it \""):
+        val end = line.index_of("\"", 9) ?? -1
+        if end > 9:
+            return "[slow] " + line[9:end]
+    # test "description"
+    if line.starts_with("test \""):
+        val end = line.index_of("\"", 6) ?? -1
+        if end > 6:
+            return line[6:end]
+    ""
 
 # =========================================================================
 # Exports
@@ -310,3 +371,5 @@ export build_child_args, make_result_from_output
 export run_test_file_interpreter, run_test_file_smf
 export run_test_file_native_old, run_test_file_native
 export preprocess_sspec_file
+export run_test_file_safe_mode
+export list_tests_static, extract_static_test_name
