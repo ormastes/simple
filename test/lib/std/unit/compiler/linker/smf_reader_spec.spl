@@ -1,0 +1,511 @@
+"""
+# SMF Reader Specification
+
+**Feature IDs:** #1001-1010
+**Category:** Tooling
+**Difficulty:** 4/5
+**Status:** In Progress
+
+## Overview
+
+SmfReader provides reading capabilities for Simple Module Format (SMF) files.
+It handles binary file parsing, symbol table extraction, template loading,
+and metadata (note.sdn) reading for both concrete and generic symbols.
+
+## Key Features
+
+- Binary SMF file reading via Rust FFI
+- Header parsing (magic, version, platform, arch)
+- Symbol table loading and lookup
+- Template code section extraction
+- note.sdn metadata parsing
+- String table management
+
+## Implementation
+
+File: `/home/ormastes/dev/pub/simple/src/compiler/linker/smf_reader.spl`
+"""
+
+import std.spec
+
+
+# ============================================================================
+# Test Group 1: Header Parsing
+# ============================================================================
+
+describe "SmfReader Header Parsing":
+    """
+    ## Header Parsing
+
+    Validates correct parsing of SMF file headers including:
+    - Magic number validation
+    - Version extraction
+    - Platform and architecture detection
+    - Flag parsing (executable, reloadable, etc.)
+    - Compression detection
+    """
+
+    context "when parsing valid v1.1 header":
+        """
+        ### Scenario: Valid SMF v1.1 Header
+
+        Tests parsing of a well-formed SMF v1.1 header with trailer format.
+        """
+
+        it "parses magic number correctly":
+            val raw = SmfHeaderRaw(
+                magic: [83, 77, 70, 0],  # "SMF\0"
+                version_major: 1,
+                version_minor: 1,
+                platform: 1,
+                arch: 1,
+                flags: 0x01,
+                compression: 0,
+                section_count: 4,
+                section_table_offset: 1024,
+                symbol_table_offset: 2048,
+                symbol_count: 10,
+                exported_count: 5,
+                entry_point: 0,
+                stub_size: 0,
+                smf_data_offset: 128,
+                module_hash: 0x1234567890abcdef,
+                source_hash: 0xfedcba0987654321,
+                app_type: 0
+            )
+
+            val header = SmfHeader.from_raw(raw)
+
+            expect(header.version).to(eq((1, 1)))
+            expect(header.is_v1_1()).to(be_true())
+
+    context "when parsing platform types":
+        """
+        ### Scenario: Platform Detection
+
+        Validates correct parsing of platform byte to Platform enum.
+        """
+
+        it "parses Linux platform":
+            val platform = parse_platform(1)
+            expect(platform).to(eq(Platform.Linux))
+
+        it "parses Windows platform":
+            val platform = parse_platform(2)
+            expect(platform).to(eq(Platform.Windows))
+
+        it "parses MacOS platform":
+            val platform = parse_platform(3)
+            expect(platform).to(eq(Platform.MacOS))
+
+        it "parses FreeBSD platform":
+            val platform = parse_platform(4)
+            expect(platform).to(eq(Platform.FreeBSD))
+
+        it "handles unknown platform":
+            val platform = parse_platform(99)
+            expect(platform).to(eq(Platform.Unknown))
+
+    context "when parsing architecture types":
+        """
+        ### Scenario: Architecture Detection
+
+        Validates correct parsing of arch byte to Architecture enum.
+        """
+
+        it "parses x86_64 architecture":
+            val arch = parse_arch(1)
+            expect(arch).to(eq(Architecture.X86_64))
+
+        it "parses aarch64 architecture":
+            val arch = parse_arch(2)
+            expect(arch).to(eq(Architecture.Aarch64))
+
+        it "parses riscv64 architecture":
+            val arch = parse_arch(3)
+            expect(arch).to(eq(Architecture.RiscV64))
+
+        it "parses wasm32 architecture":
+            val arch = parse_arch(4)
+            expect(arch).to(eq(Architecture.Wasm32))
+
+        it "handles unknown architecture":
+            val arch = parse_arch(99)
+            expect(arch).to(eq(Architecture.Unknown))
+
+    context "when parsing compression types":
+        """
+        ### Scenario: Compression Detection
+
+        Validates parsing of compression byte.
+        """
+
+        it "detects no compression":
+            val comp = parse_compression(0)
+            expect(comp).to(eq(Compression.None))
+
+        it "detects zstd compression":
+            val comp = parse_compression(1)
+            expect(comp).to(eq(Compression.Zstd))
+
+        it "detects lz4 compression":
+            val comp = parse_compression(2)
+            expect(comp).to(eq(Compression.Lz4))
+
+        it "defaults to none for unknown":
+            val comp = parse_compression(99)
+            expect(comp).to(eq(Compression.None))
+
+    context "when parsing flags":
+        """
+        ### Scenario: Flag Bit Parsing
+
+        Validates correct extraction of boolean flags from flags u32.
+        """
+
+        it "parses executable flag":
+            val flags = parse_flags(0x01)
+            expect(flags.executable).to(be_true())
+            expect(flags.reloadable).to(be_false())
+
+        it "parses reloadable flag":
+            val flags = parse_flags(0x02)
+            expect(flags.executable).to(be_false())
+            expect(flags.reloadable).to(be_true())
+
+        it "parses debug_info flag":
+            val flags = parse_flags(0x04)
+            expect(flags.debug_info).to(be_true())
+
+        it "parses pic flag":
+            val flags = parse_flags(0x08)
+            expect(flags.pic).to(be_true())
+
+        it "parses has_stub flag":
+            val flags = parse_flags(0x10)
+            expect(flags.has_stub).to(be_true())
+
+        it "parses multiple flags":
+            val flags = parse_flags(0x01 | 0x04 | 0x08)  # executable | debug | pic
+            expect(flags.executable).to(be_true())
+            expect(flags.debug_info).to(be_true())
+            expect(flags.pic).to(be_true())
+            expect(flags.reloadable).to(be_false())
+
+        it "detects has_templates flag":
+            val raw = SmfHeaderRaw(
+                magic: [83, 77, 70, 0],
+                version_major: 1,
+                version_minor: 1,
+                platform: 1,
+                arch: 1,
+                flags: 0x10,  # has_templates bit
+                compression: 0,
+                section_count: 4,
+                section_table_offset: 0,
+                symbol_table_offset: 0,
+                symbol_count: 0,
+                exported_count: 0,
+                entry_point: 0,
+                stub_size: 0,
+                smf_data_offset: 0,
+                module_hash: 0,
+                source_hash: 0,
+                app_type: 0
+            )
+
+            val header = SmfHeader.from_raw(raw)
+            expect(header.has_templates).to(be_true())
+
+        it "detects has_note_sdn flag":
+            val raw = SmfHeaderRaw(
+                magic: [83, 77, 70, 0],
+                version_major: 1,
+                version_minor: 1,
+                platform: 1,
+                arch: 1,
+                flags: 0x20,  # has_note_sdn bit
+                compression: 0,
+                section_count: 4,
+                section_table_offset: 0,
+                symbol_table_offset: 0,
+                symbol_count: 0,
+                exported_count: 0,
+                entry_point: 0,
+                stub_size: 0,
+                smf_data_offset: 0,
+                module_hash: 0,
+                source_hash: 0,
+                app_type: 0
+            )
+
+            val header = SmfHeader.from_raw(raw)
+            expect(header.has_note_sdn).to(be_true())
+
+
+# ============================================================================
+# Test Group 2: Symbol Parsing
+# ============================================================================
+
+describe "SmfReader Symbol Parsing":
+    """
+    ## Symbol Parsing
+
+    Validates symbol table parsing including:
+    - Symbol type detection (Function, Data, Type, etc.)
+    - Symbol binding (Local, Global, Weak)
+    - Generic template flags
+    - Name extraction from string table
+    """
+
+    context "when parsing symbol types":
+        """
+        ### Scenario: Symbol Type Parsing
+
+        Tests conversion from u8 type ID to SymbolType enum.
+        """
+
+        it "parses Function symbol type":
+            val ty = parse_symbol_type(0)
+            expect(ty).to(eq(SymbolType.Function))
+
+        it "parses Data symbol type":
+            val ty = parse_symbol_type(1)
+            expect(ty).to(eq(SymbolType.Data))
+
+        it "parses Type symbol type":
+            val ty = parse_symbol_type(2)
+            expect(ty).to(eq(SymbolType.Type))
+
+        it "parses Trait symbol type":
+            val ty = parse_symbol_type(3)
+            expect(ty).to(eq(SymbolType.Trait))
+
+        it "parses Actor symbol type":
+            val ty = parse_symbol_type(4)
+            expect(ty).to(eq(SymbolType.Actor))
+
+        it "parses Constant symbol type":
+            val ty = parse_symbol_type(5)
+            expect(ty).to(eq(SymbolType.Constant))
+
+        it "handles unknown symbol type":
+            val ty = parse_symbol_type(99)
+            expect(ty).to(eq(SymbolType.Unknown))
+
+    context "when parsing symbol binding":
+        """
+        ### Scenario: Symbol Binding Parsing
+
+        Tests conversion from u8 binding ID to SymbolBinding enum.
+        """
+
+        it "parses Local binding":
+            val binding = parse_symbol_binding(0)
+            expect(binding).to(eq(SymbolBinding.Local))
+
+        it "parses Global binding":
+            val binding = parse_symbol_binding(1)
+            expect(binding).to(eq(SymbolBinding.Global))
+
+        it "parses Weak binding":
+            val binding = parse_symbol_binding(2)
+            expect(binding).to(eq(SymbolBinding.Weak))
+
+        it "defaults to Local for unknown":
+            val binding = parse_symbol_binding(99)
+            expect(binding).to(eq(SymbolBinding.Local))
+
+    context "when checking symbol properties":
+        """
+        ### Scenario: Symbol Property Checks
+
+        Validates helper methods on SmfSymbol.
+        """
+
+        it "identifies function symbols":
+            val symbol = SmfSymbol(
+                name: "test_fn",
+                section_index: 0,
+                offset: 0,
+                size: 100,
+                ty: SymbolType.Function,
+                binding: SymbolBinding.Global,
+                is_generic_template: false,
+                template_param_count: 0,
+                template_offset: 0
+            )
+
+            expect(symbol.is_function()).to(be_true())
+
+        it "identifies non-function symbols":
+            val symbol = SmfSymbol(
+                name: "test_data",
+                section_index: 0,
+                offset: 0,
+                size: 8,
+                ty: SymbolType.Data,
+                binding: SymbolBinding.Global,
+                is_generic_template: false,
+                template_param_count: 0,
+                template_offset: 0
+            )
+
+            expect(symbol.is_function()).to(be_false())
+
+        it "identifies exported global symbols":
+            val symbol = SmfSymbol(
+                name: "exported_fn",
+                section_index: 0,
+                offset: 0,
+                size: 50,
+                ty: SymbolType.Function,
+                binding: SymbolBinding.Global,
+                is_generic_template: false,
+                template_param_count: 0,
+                template_offset: 0
+            )
+
+            expect(symbol.is_exported()).to(be_true())
+
+        it "identifies exported weak symbols":
+            val symbol = SmfSymbol(
+                name: "weak_fn",
+                section_index: 0,
+                offset: 0,
+                size: 50,
+                ty: SymbolType.Function,
+                binding: SymbolBinding.Weak,
+                is_generic_template: false,
+                template_param_count: 0,
+                template_offset: 0
+            )
+
+            expect(symbol.is_exported()).to(be_true())
+
+        it "identifies non-exported local symbols":
+            val symbol = SmfSymbol(
+                name: "local_fn",
+                section_index: 0,
+                offset: 0,
+                size: 50,
+                ty: SymbolType.Function,
+                binding: SymbolBinding.Local,
+                is_generic_template: false,
+                template_param_count: 0,
+                template_offset: 0
+            )
+
+            expect(symbol.is_exported()).to(be_false())
+
+
+# ============================================================================
+# Test Group 3: String Table Operations
+# ============================================================================
+
+describe "SmfReader String Table":
+    """
+    ## String Table Operations
+
+    Validates string extraction from the string table including:
+    - Null-terminated string reading
+    - Offset handling
+    - Byte-to-char conversion
+    """
+
+    context "when reading strings from table":
+        """
+        ### Scenario: String Table Reading
+
+        Tests extraction of null-terminated strings at various offsets.
+        """
+
+        it "reads string at offset 0":
+            val table: [u8] = [104, 101, 108, 108, 111, 0, 119, 111, 114, 108, 100, 0]  # "hello\0world\0"
+            val str = read_string_from_table(table, 0)
+            expect(str).to(eq("hello"))
+
+        it "reads string at non-zero offset":
+            val table: [u8] = [104, 101, 108, 108, 111, 0, 119, 111, 114, 108, 100, 0]  # "hello\0world\0"
+            val str = read_string_from_table(table, 6)
+            expect(str).to(eq("world"))
+
+        it "handles empty string":
+            val table: [u8] = [0, 104, 101, 108, 108, 111, 0]  # "\0hello\0"
+            val str = read_string_from_table(table, 0)
+            expect(str).to(eq(""))
+
+        it "stops at null terminator":
+            val table: [u8] = [97, 98, 99, 0, 100, 101, 102]  # "abc\0def"
+            val str = read_string_from_table(table, 0)
+            expect(str).to(eq("abc"))
+            expect(str.len()).to(eq(3))
+
+    context "when converting bytes to strings":
+        """
+        ### Scenario: Byte Array to String Conversion
+
+        Tests full byte array to string conversion.
+        """
+
+        it "converts simple byte array":
+            val bytes: [u8] = [104, 105, 0]  # "hi\0"
+            val str = bytes_to_string(bytes)
+            expect(str).to(eq("hi"))
+
+        it "stops at first null byte":
+            val bytes: [u8] = [97, 98, 0, 99, 100]  # "ab\0cd"
+            val str = bytes_to_string(bytes)
+            expect(str).to(eq("ab"))
+
+        it "handles empty byte array":
+            val bytes: [u8] = []
+            val str = bytes_to_string(bytes)
+            expect(str).to(eq(""))
+
+
+# ============================================================================
+# Test Group 4: Section Operations (Stub Tests)
+# ============================================================================
+
+describe "SmfReader Section Operations":
+    """
+    ## Section Operations
+
+    Note: These are stub tests for section finding operations.
+    Full integration tests require actual SMF file loading.
+    """
+
+    context "when finding sections by type":
+        """
+        ### Scenario: Section Type Lookup
+
+        Tests hardcoded section index mapping (TODO: implement proper section table).
+        """
+
+        it "finds Code section (type 1)":
+            # TODO: This test requires SmfReaderImpl instance with FFI
+            # For now, test the mapping logic directly
+            pass
+
+        it "finds Data section (type 2)":
+            pass
+
+        it "finds TemplateCode section (type 12)":
+            pass
+
+        it "finds TemplateMeta section (type 13)":
+            pass
+
+        it "returns -1 for unknown section type":
+            pass
+
+
+# ============================================================================
+# Helper Code
+# ============================================================================
+
+# Note: Most SmfReader functionality requires Rust FFI integration
+# which cannot be easily mocked in pure Simple tests.
+# These tests focus on the Simple-side parsing logic.
+# Integration tests with real SMF files should be added separately.

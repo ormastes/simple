@@ -5,12 +5,11 @@
 
 use app.build.types (BuildProfile)
 use app.build.cargo (Cargo, BuildConfig)
-
-extern fn rt_file_read_lines(path: text) -> [text]?
+use app.io.mod (file_read_lines, file_exists, file_size_raw, file_copy, dir_create, process_run, file_hash_sha256)
 
 # Read project version from simple.sdn
 fn read_project_version() -> text:
-    if val Some(lines) = rt_file_read_lines("simple.sdn"):
+    if val Some(lines) = file_read_lines("simple.sdn"):
         for line in lines:
             val trimmed = line.trim()
             if trimmed.starts_with("version:"):
@@ -47,14 +46,6 @@ impl PackageResult:
             "✓ Package created: {self.package_path} ({self.package_size} bytes)"
         else:
             "✗ Package creation failed"
-
-# FFI for file operations
-extern fn rt_file_exists(path: text) -> bool
-extern fn rt_file_size(path: text) -> i64
-extern fn rt_file_copy(src: text, dst: text) -> bool
-extern fn rt_dir_create(path: text) -> bool
-extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
-extern fn rt_file_hash_sha256(path: text) -> text
 
 # Package class
 class Package:
@@ -115,17 +106,17 @@ fn create_bootstrap_package(config: PackageConfig) -> PackageResult:
     # Step 2: Create package directory structure
     print "\nStep 2: Creating package structure..."
     val pkg_dir = "package_tmp"
-    rt_dir_create(pkg_dir)
-    rt_dir_create("{pkg_dir}/bin")
-    rt_dir_create("{pkg_dir}/lib")
-    rt_dir_create("{pkg_dir}/lib/simple")
+    dir_create(pkg_dir, false)
+    dir_create("{pkg_dir}/bin", false)
+    dir_create("{pkg_dir}/lib", false)
+    dir_create("{pkg_dir}/lib/simple", false)
 
     # Step 3: Copy runtime binary
     print "\nStep 3: Copying runtime binary..."
     val runtime_src = "bin/bootstrap/simple_runtime"
     val runtime_dst = "{pkg_dir}/bin/simple_runtime"
 
-    if not rt_file_copy(runtime_src, runtime_dst):
+    if not file_copy(runtime_src, runtime_dst):
         print "✗ Failed to copy runtime binary"
         return PackageResult(
             success: false,
@@ -149,7 +140,7 @@ fn create_bootstrap_package(config: PackageConfig) -> PackageResult:
     else:
         package_name
 
-    val (stdout, stderr, exit_code) = rt_process_run("tar", [
+    val (stdout, stderr, exit_code) = process_run("tar", [
         "-czf", output_path,
         "-C", pkg_dir,
         "."
@@ -166,8 +157,8 @@ fn create_bootstrap_package(config: PackageConfig) -> PackageResult:
         )
 
     # Step 6: Calculate checksum
-    val package_size = rt_file_size(output_path)
-    val checksum = rt_file_hash_sha256(output_path)
+    val package_size = file_size_raw(output_path)
+    val checksum = file_hash_sha256(output_path)
 
     # Cleanup temporary directory
     cleanup_package_dir(pkg_dir)
@@ -208,7 +199,7 @@ fn create_full_package(config: PackageConfig) -> PackageResult:
     # Include sources
     args = args.merge(["."])
 
-    val (stdout, stderr, exit_code) = rt_process_run("tar", args)
+    val (stdout, stderr, exit_code) = process_run("tar", args)
 
     if exit_code != 0:
         print "✗ Failed to create archive"
@@ -220,8 +211,8 @@ fn create_full_package(config: PackageConfig) -> PackageResult:
             build_duration_ms: current_time_ms() - start_time
         )
 
-    val package_size = rt_file_size(output_path)
-    val checksum = rt_file_hash_sha256(output_path)
+    val package_size = file_size_raw(output_path)
+    val checksum = file_hash_sha256(output_path)
 
     print "✓ Package created successfully"
 
@@ -250,7 +241,7 @@ fn create_custom_package(config: PackageConfig) -> PackageResult:
 fn copy_stdlib(pkg_dir: text):
     # TODO: Implement stdlib copy
     # For now, just create the directory
-    rt_dir_create("{pkg_dir}/lib/simple/std")
+    dir_create("{pkg_dir}/lib/simple/std", false)
     print "  (stdlib copy placeholder)"
 
 # Cleanup package temporary directory

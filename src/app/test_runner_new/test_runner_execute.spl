@@ -4,25 +4,26 @@
 
 use test_runner_types.*
 use test_runner_files.{strip_ansi, read_file_content}
+use app.io.mod (file_exists, env_get, time_now_unix_micros, process_run_timeout, process_run_with_limits, file_write, eprintln)
 
 # =========================================================================
 # Binary Location Discovery
 # =========================================================================
 
 fn find_simple_new_binary() -> text:
-    if rt_file_exists("./rust/target/bootstrap/simple_new1_"):
+    if file_exists("./rust/target/bootstrap/simple_new1_"):
         return "./rust/target/bootstrap/simple_new1_"
-    if rt_file_exists("./rust/target/bootstrap/simple_new1"):
+    if file_exists("./rust/target/bootstrap/simple_new1"):
         return "./rust/target/bootstrap/simple_new1"
     ""
 
 fn find_runtime_lib_dir() -> text:
-    val env_path = rt_env_get("SIMPLE_RUNTIME_PATH")
+    val env_path = env_get("SIMPLE_RUNTIME_PATH")
     if env_path != "" and env_path != nil:
         return env_path
-    if rt_file_exists("rust/target/debug/libsimple_compiler.so"):
+    if file_exists("rust/target/debug/libsimple_compiler.so"):
         return "rust/target/debug"
-    if rt_file_exists("rust/target/release/libsimple_compiler.so"):
+    if file_exists("rust/target/release/libsimple_compiler.so"):
         return "rust/target/release"
     "rust/target/debug"
 
@@ -36,7 +37,7 @@ fn find_simple_binary() -> text:
     ]
 
     for candidate in candidates:
-        if rt_file_exists(candidate):
+        if file_exists(candidate):
             return candidate
 
     # Fallback to debug (will fail if it doesn't exist, but that's expected)
@@ -129,28 +130,28 @@ fn run_test_file_interpreter(file_path: text, options: TestOptions) -> TestFileR
     val binary = find_simple_binary()
     val child_args = build_child_args(file_path, options)
     val timeout_ms = options.timeout * 1000
-    val start = rt_time_now_unix_micros()
-    val (stdout, stderr, exit_code) = rt_process_run_timeout(binary, child_args, timeout_ms)
-    val end = rt_time_now_unix_micros()
+    val start = time_now_unix_micros()
+    val (stdout, stderr, exit_code) = process_run_timeout(binary, child_args, timeout_ms)
+    val end = time_now_unix_micros()
     val duration_ms = (end - start) / 1000
     make_result_from_output(file_path, stdout, stderr, exit_code, duration_ms, options.timeout)
 
 fn run_test_file_smf(file_path: text, options: TestOptions) -> TestFileResult:
     val binary = find_simple_binary()
     val smf_path = file_path.replace(".spl", ".smf")
-    val start = rt_time_now_unix_micros()
+    val start = time_now_unix_micros()
     val timeout_ms = options.timeout * 1000
 
     # Check if pre-compiled .smf bytecode exists
-    if rt_file_exists(smf_path):
+    if file_exists(smf_path):
         # Run pre-compiled SMF bytecode directly (no "test" command to avoid recursion)
         var run_args: List<text> = [smf_path]
         if options.gc_log:
             run_args.push("--gc-log")
         if options.gc_off:
             run_args.push("--gc=off")
-        val (stdout, stderr, exit_code) = rt_process_run_timeout(binary, run_args, timeout_ms)
-        val end = rt_time_now_unix_micros()
+        val (stdout, stderr, exit_code) = process_run_timeout(binary, run_args, timeout_ms)
+        val end = time_now_unix_micros()
         val duration_ms = (end - start) / 1000
         return make_result_from_output(file_path, stdout, stderr, exit_code, duration_ms, options.timeout)
 
@@ -163,18 +164,18 @@ fn run_test_file_smf(file_path: text, options: TestOptions) -> TestFileResult:
         run_args.push("--gc=off")
 
     # Debug: Check if binary exists
-    if not rt_file_exists(binary):
-        rt_eprintln("ERROR: Binary not found: " + binary)
+    if not file_exists(binary):
+        eprintln("ERROR: Binary not found: " + binary)
 
-    val (stdout, stderr, exit_code) = rt_process_run_timeout(binary, run_args, timeout_ms)
-    val end = rt_time_now_unix_micros()
+    val (stdout, stderr, exit_code) = process_run_timeout(binary, run_args, timeout_ms)
+    val end = time_now_unix_micros()
     val duration_ms = (end - start) / 1000
 
     make_result_from_output(file_path, stdout, stderr, exit_code, duration_ms, options.timeout)
 
 fn run_test_file_native_old(file_path: text, options: TestOptions) -> TestFileResult:
     val binary = find_simple_binary()
-    val start = rt_time_now_unix_micros()
+    val start = time_now_unix_micros()
     val timeout_ms = options.timeout * 1000
 
     # Run file directly instead of "test" command to avoid infinite recursion
@@ -183,8 +184,8 @@ fn run_test_file_native_old(file_path: text, options: TestOptions) -> TestFileRe
         run_args.push("--gc-log")
     if options.gc_off:
         run_args.push("--gc=off")
-    val (stdout, stderr, exit_code) = rt_process_run_timeout(binary, run_args, timeout_ms)
-    val end = rt_time_now_unix_micros()
+    val (stdout, stderr, exit_code) = process_run_timeout(binary, run_args, timeout_ms)
+    val end = time_now_unix_micros()
     val duration_ms = (end - start) / 1000
 
     make_result_from_output(file_path, stdout, stderr, exit_code, duration_ms, options.timeout)
@@ -276,12 +277,12 @@ fn preprocess_sspec_file(file_path: text) -> text:
 
     val wrapped = imports + "\n" + top_level + "\nfn main():\n" + body
     val tmp_path = "/tmp/sspec_wrapped_" + file_path.replace("/", "_")
-    rt_file_write_text(tmp_path, wrapped)
+    file_write(tmp_path, wrapped)
     tmp_path
 
 fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult:
     val binary = find_simple_binary()
-    val start = rt_time_now_unix_micros()
+    val start = time_now_unix_micros()
 
     # Native mode: Run test file directly WITHOUT "test" command to avoid recursion
     # The test will execute as a standalone program
@@ -291,8 +292,8 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
         run_args.push("--gc-log")
     if options.gc_off:
         run_args.push("--gc=off")
-    val (stdout, stderr, exit_code) = rt_process_run_timeout(binary, run_args, timeout_ms)
-    val end = rt_time_now_unix_micros()
+    val (stdout, stderr, exit_code) = process_run_timeout(binary, run_args, timeout_ms)
+    val end = time_now_unix_micros()
     val duration_ms = (end - start) / 1000
 
     make_result_from_output(file_path, stdout, stderr, exit_code, duration_ms, options.timeout)
@@ -303,7 +304,7 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
 
 fn run_test_file_safe_mode(file_path: text, options: TestOptions) -> TestFileResult:
     val binary = find_simple_binary()
-    val start = rt_time_now_unix_micros()
+    val start = time_now_unix_micros()
     val timeout_ms = options.timeout * 1000
     val memory_bytes = 512 * 1024 * 1024
     val cpu_seconds = 30
@@ -316,10 +317,10 @@ fn run_test_file_safe_mode(file_path: text, options: TestOptions) -> TestFileRes
     if options.gc_off:
         run_args.push("--gc=off")
 
-    val (stdout, stderr, exit_code) = rt_process_run_with_limits(
+    val (stdout, stderr, exit_code) = process_run_with_limits(
         binary, run_args, timeout_ms, memory_bytes, cpu_seconds, max_fds, max_procs
     )
-    val end = rt_time_now_unix_micros()
+    val end = time_now_unix_micros()
     val duration_ms = (end - start) / 1000
 
     make_result_from_output(file_path, stdout, stderr, exit_code, duration_ms, options.timeout)

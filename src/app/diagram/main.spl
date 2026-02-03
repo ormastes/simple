@@ -1,15 +1,247 @@
 # Simple CLI - diagram command
-# Delegates to Rust runtime via FFI
+# Generate Mermaid diagrams from profile data
 
 use app.cli_util (get_cli_args)
-extern fn rt_cli_handle_diagram(args: [str]) -> i64
+use app.io.mod (file_exists, file_read, file_write, dir_create)
 
 fn print_help():
     print "Usage: simple diagram [options]"
-    print "Generates UML diagrams"
     print ""
-    print "Run 'simple diagram --help' for Rust-level help."
+    print "Generate Mermaid diagrams from execution profile data."
+    print ""
+    print "Options:"
+    print "  -s, --seq-diagram      Generate sequence diagram"
+    print "  -c, --class-diagram    Generate class diagram"
+    print "  -a, --arch-diagram     Generate architecture diagram"
+    print "  -A, --diagram-all      Generate all diagram types"
+    print "  -f, --from-file <f>    Load profile from file"
+    print "  -o, --output <dir>     Output directory (default: target/diagrams)"
+    print "  -n, --name <name>      Base filename (default: diagram)"
+    print "  --max-events <N>       Max events to process (default: 1000)"
+    print "  --no-timing            Exclude timing info"
+    print "  --no-args              Exclude argument info"
+    print "  --no-returns           Exclude return values"
+    print "  -h, --help             Show this help"
+
+struct ProfileEvent:
+    timestamp: i64
+    event_type: text
+    caller: text
+    callee: text
+    args: text
+    result: text
+    duration_us: i64
+
+fn parse_profile_events(content: text) -> [ProfileEvent]:
+    # Parse simple line-based profile format:
+    # timestamp|type|caller|callee|args|result|duration
+    val lines = content.split("\n")
+    var events: [ProfileEvent] = []
+
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed == "" or trimmed.starts_with("#"):
+            continue
+        val parts = trimmed.split("|")
+        if parts.len() >= 7:
+            events.push(ProfileEvent(
+                timestamp: parts[0].trim().to_int_or(0),
+                event_type: parts[1].trim(),
+                caller: parts[2].trim(),
+                callee: parts[3].trim(),
+                args: parts[4].trim(),
+                result: parts[5].trim(),
+                duration_us: parts[6].trim().to_int_or(0)
+            ))
+
+    events
+
+fn generate_sequence_diagram(events: [ProfileEvent], include_timing: bool, include_args: bool, include_returns: bool) -> text:
+    var lines: [text] = []
+    lines.push("```mermaid")
+    lines.push("sequenceDiagram")
+
+    # Collect unique participants
+    var participants: Dict<text, bool> = {}
+    for e in events:
+        if e.caller != "" and not participants.contains_key(e.caller):
+            lines.push("    participant {e.caller}")
+            participants[e.caller] = true
+        if e.callee != "" and not participants.contains_key(e.callee):
+            lines.push("    participant {e.callee}")
+            participants[e.callee] = true
+
+    lines.push("")
+
+    for e in events:
+        if e.caller == "" or e.callee == "":
+            continue
+        val label = if include_args and e.args != "": "{e.event_type}({e.args})" else: e.event_type
+        val timing = if include_timing and e.duration_us > 0: " [{e.duration_us}us]" else: ""
+        lines.push("    {e.caller}->>+{e.callee}: {label}{timing}")
+        if include_returns and e.result != "":
+            lines.push("    {e.callee}-->>-{e.caller}: {e.result}")
+
+    lines.push("```")
+    lines.join("\n")
+
+fn generate_class_diagram(events: [ProfileEvent]) -> text:
+    var lines: [text] = []
+    lines.push("```mermaid")
+    lines.push("classDiagram")
+
+    # Extract classes and methods from events
+    var classes: Dict<text, [text]> = {}
+    for e in events:
+        if e.callee.contains("."):
+            val parts = e.callee.split(".")
+            val class_name = parts[0]
+            val method = if parts.len() > 1: parts[1] else: ""
+            if not classes.contains_key(class_name):
+                classes[class_name] = []
+            if method != "":
+                classes[class_name].push(method)
+
+    for class_name in classes.keys():
+        lines.push("    class {class_name} {")
+        var seen_methods: Dict<text, bool> = {}
+        for method in classes[class_name]:
+            if not seen_methods.contains_key(method):
+                lines.push("        +{method}()")
+                seen_methods[method] = true
+        lines.push("    }")
+
+    # Extract relationships from caller->callee patterns
+    var relationships: Dict<text, bool> = {}
+    for e in events:
+        if e.caller.contains(".") and e.callee.contains("."):
+            val from_class = e.caller.split(".")[0]
+            val to_class = e.callee.split(".")[0]
+            if from_class != to_class:
+                val rel = "{from_class} --> {to_class}"
+                if not relationships.contains_key(rel):
+                    lines.push("    {rel}")
+                    relationships[rel] = true
+
+    lines.push("```")
+    lines.join("\n")
+
+fn generate_arch_diagram(events: [ProfileEvent]) -> text:
+    var lines: [text] = []
+    lines.push("```mermaid")
+    lines.push("graph TD")
+
+    # Group by module/component
+    var modules: Dict<text, [text]> = {}
+    for e in events:
+        val module = if e.callee.contains("."): e.callee.split(".")[0] else: e.callee
+        if not modules.contains_key(module):
+            modules[module] = []
+        modules[module].push(e.callee)
+
+    for module in modules.keys():
+        lines.push("    {module}[\"{module}\"]")
+
+    # Edges from caller modules to callee modules
+    var edges: Dict<text, bool> = {}
+    for e in events:
+        val from_mod = if e.caller.contains("."): e.caller.split(".")[0] else: e.caller
+        val to_mod = if e.callee.contains("."): e.callee.split(".")[0] else: e.callee
+        if from_mod != "" and to_mod != "" and from_mod != to_mod:
+            val edge = "{from_mod} --> {to_mod}"
+            if not edges.contains_key(edge):
+                lines.push("    {edge}")
+                edges[edge] = true
+
+    lines.push("```")
+    lines.join("\n")
 
 fn main() -> i64:
     val args = get_cli_args()
-    rt_cli_handle_diagram(args)
+
+    var gen_seq = false
+    var gen_class = false
+    var gen_arch = false
+    var from_file = ""
+    var output_dir = "target/diagrams"
+    var base_name = "diagram"
+    var max_events = 1000
+    var include_timing = true
+    var include_args = true
+    var include_returns = true
+
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg == "-h" or arg == "--help":
+            print_help()
+            return 0
+        elif arg == "-s" or arg == "--seq-diagram":
+            gen_seq = true
+        elif arg == "-c" or arg == "--class-diagram":
+            gen_class = true
+        elif arg == "-a" or arg == "--arch-diagram":
+            gen_arch = true
+        elif arg == "-A" or arg == "--diagram-all":
+            gen_seq = true
+            gen_class = true
+            gen_arch = true
+        elif (arg == "-f" or arg == "--from-file") and i + 1 < args.len():
+            i = i + 1
+            from_file = args[i]
+        elif (arg == "-o" or arg == "--output") and i + 1 < args.len():
+            i = i + 1
+            output_dir = args[i]
+        elif (arg == "-n" or arg == "--name") and i + 1 < args.len():
+            i = i + 1
+            base_name = args[i]
+        elif arg == "--max-events" and i + 1 < args.len():
+            i = i + 1
+            max_events = args[i].to_int_or(1000)
+        elif arg == "--no-timing":
+            include_timing = false
+        elif arg == "--no-args":
+            include_args = false
+        elif arg == "--no-returns":
+            include_returns = false
+        i = i + 1
+
+    if not gen_seq and not gen_class and not gen_arch:
+        gen_seq = true
+
+    if from_file == "":
+        print "error: --from-file required (provide profile data file)"
+        return 1
+
+    if not file_exists(from_file):
+        print "error: profile file not found: {from_file}"
+        return 1
+
+    val content = file_read(from_file)
+    var events = parse_profile_events(content)
+
+    # Limit events
+    if events.len() > max_events:
+        events = events[:max_events]
+
+    dir_create(output_dir, true)
+
+    if gen_seq:
+        val seq = generate_sequence_diagram(events, include_timing, include_args, include_returns)
+        val path = "{output_dir}/{base_name}_sequence.md"
+        file_write(path, seq)
+        print "Generated sequence diagram: {path}"
+
+    if gen_class:
+        val cls = generate_class_diagram(events)
+        val path = "{output_dir}/{base_name}_class.md"
+        file_write(path, cls)
+        print "Generated class diagram: {path}"
+
+    if gen_arch:
+        val arch = generate_arch_diagram(events)
+        val path = "{output_dir}/{base_name}_architecture.md"
+        file_write(path, arch)
+        print "Generated architecture diagram: {path}"
+
+    0

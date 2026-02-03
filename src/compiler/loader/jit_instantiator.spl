@@ -5,10 +5,8 @@
 #
 # Phase 5: Load-Time JIT Instantiation
 
-use ../monomorphize/note_loader.*
-use ../compilation_context.{GenericTemplate, ConcreteType}
-use ../instantiation.{TemplateInstantiator, mangle}
-use jit_context.JitCompilationContext
+use ../loader/compiler_ffi.*
+use ./jit_context.JitCompilationContext
 
 # ============================================================================
 # Result Types
@@ -56,13 +54,40 @@ impl JitInstantiatorConfig:
         )
 
 # ============================================================================
+# Simplified Metadata Types (FFI-friendly)
+# ============================================================================
+
+struct LoadedMetadata:
+    """Simplified metadata for FFI (no complex compiler types)."""
+    possible: [PossibleInstantiation]
+    instantiations: [InstantiationRecord]
+
+struct PossibleInstantiation:
+    """A possible generic instantiation."""
+    template: text
+    type_args: text
+    mangled_name: text
+
+struct InstantiationRecord:
+    """A recorded instantiation."""
+    id: i32
+    template: text
+    type_args: text
+    mangled_name: text
+    from_file: text
+    from_loc: text
+    to_obj: text
+    status: text
+
+# ============================================================================
 # JIT Instantiator
 # ============================================================================
 
 struct JitInstantiator:
     """JIT instantiator for load-time template instantiation."""
     config: JitInstantiatorConfig
-    loaded_metadata: Dict<text, LoadedNoteSdn>
+    compiler_ctx: CompilerContext  # FFI handle
+    loaded_metadata: Dict<text, LoadedMetadata>  # Simplified metadata
     in_progress: Set<text>
     depth: i32
     jit_cache: Dict<text, ([u8], i64)>
@@ -73,6 +98,7 @@ impl JitInstantiator:
         """Create a new JIT instantiator."""
         JitInstantiator(
             config: config,
+            compiler_ctx: CompilerContext.create(),  # FFI handle
             loaded_metadata: {},
             in_progress: {},
             depth: 0,
@@ -86,11 +112,11 @@ impl JitInstantiator:
         self.loaded_metadata[smf_path] = metadata
         Ok(())
 
-    fn read_note_sdn_from_file(smf_path: text) -> Result<LoadedNoteSdn, text>:
+    fn read_note_sdn_from_file(smf_path: text) -> Result<LoadedMetadata, text>:
         """Read note.sdn section from SMF file."""
         # TODO: Implement proper SMF section parsing
         # For now, placeholder implementation
-        Ok(LoadedNoteSdn.new())
+        Ok(LoadedMetadata(possible: [], instantiations: []))
 
     fn can_jit_instantiate(symbol: text) -> bool:
         """Check if a symbol can be JIT-instantiated."""
@@ -103,7 +129,7 @@ impl JitInstantiator:
                     return true
         false
 
-    fn find_possible(symbol: text) -> (text, LoadedPossible)?:
+    fn find_possible(symbol: text) -> (text, PossibleInstantiation)?:
         """Find possible instantiation for a symbol."""
         for (path, metadata) in self.loaded_metadata:
             for entry in metadata.possible:
@@ -158,31 +184,25 @@ impl JitInstantiator:
 
         result
 
-    me do_jit_compile(entry: LoadedPossible, smf_path: text) -> JitInstantiationResult:
-        """Perform JIT compilation through unified CompilationContext pipeline."""
-        # Build JIT compilation context from loaded SMF metadata
-        # TODO: Load actual templates from SMF TemplateCode section
-        var smf_templates: Dict<text, GenericTemplate> = {}
-        smf_templates[entry.template] = GenericTemplate(
+    me do_jit_compile(entry: PossibleInstantiation, smf_path: text) -> JitInstantiationResult:
+        """Perform JIT compilation via FFI."""
+        # TODO: Load actual template bytes from SMF TemplateCode section
+        # For now, placeholder with empty template bytes
+        val template_bytes = TemplateBytes(
+            bytes: [],  # TODO: Load from SMF
             name: entry.template,
-            type_params: entry.type_args.split(",").map(\s: s.trim()),
-            ast_data: nil
+            param_count: entry.type_args.split(",").len() as i32
         )
 
-        val jit_ctx = JitCompilationContext.from_smf(smf_templates, nil, nil)
-        var instantiator = TemplateInstantiator(
-            context: jit_ctx,
-            in_progress: {},
-            cache: {}
-        )
+        # Parse type args from string to TypeInfo
+        val type_args = entry.type_args.split(",")
+            .map(\s: type_from_string(s.trim()))
 
-        # Parse type args from the entry
-        val type_args = entry.type_args.split(",").map(\s: ConcreteType(name: s.trim()))
+        # Compile via FFI
+        val code_result = self.compiler_ctx.instantiate(template_bytes, type_args)
 
-        # Compile through unified pipeline
-        match instantiator.instantiate(entry.template, type_args):
-            case Ok(unit):
-                val compiled_code = unit.code
+        match code_result:
+            case Ok(compiled_code):
                 val address: i64 = 0  # TODO: Allocate executable memory and get real address
 
                 # Cache the result
@@ -209,7 +229,7 @@ impl JitInstantiator:
             case Err(msg):
                 JitInstantiationResult.CompilationError(msg)
 
-    me update_smf_note_sdn(smf_path: text, entry: LoadedPossible) -> Result<(), text>:
+    me update_smf_note_sdn(smf_path: text, entry: PossibleInstantiation) -> Result<(), text>:
         """Update note.sdn in SMF file after JIT compilation."""
         # TODO: Implement proper SMF update
         if self.config.verbose:
@@ -223,7 +243,7 @@ impl JitInstantiator:
             metadata.possible = metadata.possible.filter(\p: p.mangled_name != entry.mangled_name)
 
             # Add to instantiations
-            val new_inst = LoadedInstantiation(
+            val new_inst = InstantiationRecord(
                 id: metadata.instantiations.len() as i32,
                 template: entry.template,
                 type_args: entry.type_args,

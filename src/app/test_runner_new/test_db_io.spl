@@ -2,11 +2,7 @@
 #
 # Atomic read/write operations with backup creation for the test database.
 
-extern fn rt_file_exists(path: text) -> bool
-extern fn rt_file_read_text(path: text) -> text
-extern fn rt_file_atomic_write(path: text, content: text) -> bool
-extern fn rt_file_copy(src: text, dst: text) -> bool
-
+use app.io.mod (file_exists, file_read, file_atomic_write, file_copy)
 use test_db_lock.FileLock
 
 # =========================================================================
@@ -23,9 +19,9 @@ val MAX_FILE_SIZE = 500 * 1024 * 1024  # 500 MB
 # =========================================================================
 
 fn read_db_file(path: text) -> Result<text, text>:
-    if not rt_file_exists(path):
+    if not file_exists(path):
         return Ok("")
-    val content = rt_file_read_text(path)
+    val content = file_read(path)
     if content.len() > MAX_FILE_SIZE:
         return Err("Database file {path} exceeds 500 MB limit")
     Ok(content)
@@ -43,19 +39,19 @@ fn write_db_file_locked(path: text, content: text) -> Result<(), text>:
     val lock = lock_result.unwrap()
 
     # Guard against overwriting non-empty with empty
-    if content.trim() == "" and rt_file_exists(path):
-        val existing = rt_file_read_text(path)
+    if content.trim() == "" and file_exists(path):
+        val existing = file_read(path)
         if existing.trim() != "":
             lock.release()
             return Err("Refusing to overwrite non-empty {path} with empty content")
 
     # Create backup if file exists
-    if rt_file_exists(path):
+    if file_exists(path):
         val backup_path = "{path}.bak"
-        rt_file_copy(path, backup_path)
+        file_copy(path, backup_path)
 
     # Atomic write
-    val success = rt_file_atomic_write(path, content)
+    val success = file_atomic_write(path, content)
     lock.release()
 
     if success:
@@ -75,16 +71,16 @@ fn update_db_file(path: text, updater: fn(text) -> text) -> Result<(), text>:
     val lock = lock_result.unwrap()
 
     var content = ""
-    if rt_file_exists(path):
-        content = rt_file_read_text(path)
+    if file_exists(path):
+        content = file_read(path)
 
     val new_content = updater(content)
 
     # Backup before write
-    if rt_file_exists(path):
-        rt_file_copy(path, "{path}.bak")
+    if file_exists(path):
+        file_copy(path, "{path}.bak")
 
-    val success = rt_file_atomic_write(path, new_content)
+    val success = file_atomic_write(path, new_content)
     lock.release()
 
     if success:
