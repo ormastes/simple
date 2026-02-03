@@ -4,6 +4,8 @@
 
 extern fn rt_process_run_timeout(cmd: text, args: List<text>, timeout_ms: i64) -> (text, text, i32)
 
+use test_db_types.TestStatus
+
 # =========================================================================
 # Rust Test Results
 # =========================================================================
@@ -124,8 +126,35 @@ fn extract_count(line: text, keyword: text) -> i64:
                     return num
     0
 
+# =========================================================================
+# G2: Update test database from Rust test results
+# =========================================================================
+
+fn update_rust_test_database(db, rust_result: RustTestResult, is_doc_test: bool):
+    val category = if is_doc_test: "RustDoc" else: "RustUnit"
+    # Parse individual test lines from output
+    val lines = rust_result.output.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.starts_with("test ") and (trimmed.ends_with("... ok") or trimmed.ends_with("... FAILED") or trimmed.ends_with("... ignored")):
+            val name_end = trimmed.index_of(" ... ") ?? -1
+            if name_end > 5:
+                val test_name = trimmed[5:name_end]
+                val status_str = trimmed[name_end + 5:]
+                val status = if status_str == "ok": "passed" elif status_str == "FAILED": "failed" else: "ignored"
+                # Store as file-level update (Rust tests don't have per-file granularity here)
+                db.update_test_result(
+                    test_name,
+                    "rust/Cargo.toml",
+                    category,
+                    category,
+                    if status == "passed": TestStatus.Passed elif status == "failed": TestStatus.Failed else: TestStatus.Ignored,
+                    0.0
+                )
+
 export RustTestResult
 export run_rust_tests, run_rust_tests_crate
 export run_rust_doc_tests, run_rust_doc_tests_crate
 export list_ignored_rust_tests
 export parse_cargo_test_output
+export update_rust_test_database

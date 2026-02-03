@@ -13,6 +13,8 @@ extern fn rt_time_now_unix_micros() -> i64
 
 use test_db_types.*
 use test_db_core.TestDatabase
+use test_stats.{detect_flaky_test, has_significant_change}
+use test_db_validation.{needs_qualification, count_unqualified_ignores}
 use feature_db.{FeatureDatabase, FeatureRecord}
 
 # =========================================================================
@@ -51,16 +53,20 @@ fn generate_test_result_md(db: TestDatabase) -> text:
     lines.push("| Skipped | {skipped} |")
     lines.push("")
 
-    # Flaky tests section
+    # D2: Flaky tests section (improved algorithm)
     var flaky_tests: List<text> = []
     for c in db.counters:
-        if c.flaky_count > 0:
+        val is_flaky = detect_flaky_test(c.total_runs, c.last_10_runs, c.failure_rate_pct)
+        if is_flaky or c.flaky_count > 0:
             val name = db.interner.get(c.test_id)
-            flaky_tests.push("- {name} (flipped {c.flaky_count} times)")
+            val rate_str = "{c.failure_rate_pct}"
+            flaky_tests.push("| {name} | {c.flaky_count} | {rate_str}% | {c.last_10_runs} |")
 
     if flaky_tests.len() > 0:
         lines.push("## Flaky Tests")
         lines.push("")
+        lines.push("| Test | Flips | Failure Rate | Recent Runs |")
+        lines.push("|------|-------|--------------|-------------|")
         for entry in flaky_tests:
             lines.push(entry)
         lines.push("")
@@ -93,6 +99,76 @@ fn generate_test_result_md(db: TestDatabase) -> text:
         lines.push("| Test | Last (ms) | p50 | p90 | p95 | Baseline |")
         lines.push("|------|-----------|-----|-----|-----|----------|")
         for entry in timing_entries:
+            lines.push(entry)
+        lines.push("")
+
+    # F1: Slowest tests (p95 > 1000ms)
+    var slow_entries: List<text> = []
+    for t in db.timing:
+        if t.p95 > 1000.0:
+            val name = db.interner.get(t.test_id)
+            slow_entries.push("| {name} | {t.p95} | {t.p50} | {t.mean} |")
+
+    if slow_entries.len() > 0:
+        lines.push("## Slowest Tests (p95 > 1s)")
+        lines.push("")
+        lines.push("| Test | p95 (ms) | p50 (ms) | Mean (ms) |")
+        lines.push("|------|----------|----------|-----------|")
+        var slow_count = 0
+        for entry in slow_entries:
+            if slow_count >= 20:
+                break
+            lines.push(entry)
+            slow_count = slow_count + 1
+        lines.push("")
+
+    # F2: Recent changes (last 20)
+    if db.changes.len() > 0:
+        lines.push("## Recent Changes")
+        lines.push("")
+        lines.push("| Test | Change | Run ID |")
+        lines.push("|------|--------|--------|")
+        var change_count = 0
+        var ci = db.changes.len() - 1
+        while ci >= 0 and change_count < 20:
+            val ch = db.changes[ci]
+            val name = db.interner.get(ch.test_id)
+            lines.push("| {name} | {ch.change_type} | {ch.run_id} |")
+            change_count = change_count + 1
+            ci = ci - 1
+        lines.push("")
+
+    # F3: Qualified ignores
+    var qualified_entries: List<text> = []
+    for t in db.tests:
+        if t.qualified_by != "":
+            val name = db.interner.get(t.name_str)
+            qualified_entries.push("| {name} | {t.qualified_by} | {t.qualified_at} | {t.qualified_reason} |")
+
+    if qualified_entries.len() > 0:
+        lines.push("## Qualified Ignores")
+        lines.push("")
+        lines.push("| Test | Qualified By | Date | Reason |")
+        lines.push("|------|-------------|------|--------|")
+        for entry in qualified_entries:
+            lines.push(entry)
+        lines.push("")
+
+    # F4: Regression warnings (> 20% above baseline)
+    var regression_entries: List<text> = []
+    for t in db.timing:
+        if t.baseline_median > 0.001:
+            if has_significant_change(t.last_ms, t.baseline_median, 20.0):
+                val name = db.interner.get(t.test_id)
+                val pct_change = (t.last_ms - t.baseline_median) / t.baseline_median * 100.0
+                regression_entries.push("| {name} | {t.last_ms} | {t.baseline_median} | {pct_change}% |")
+
+    if regression_entries.len() > 0:
+        lines.push("## Regression Warnings")
+        lines.push("")
+        lines.push("| Test | Last (ms) | Baseline (ms) | Change |")
+        lines.push("|------|-----------|---------------|--------|")
+        for entry in regression_entries:
             lines.push(entry)
         lines.push("")
 

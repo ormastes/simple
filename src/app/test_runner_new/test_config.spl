@@ -10,7 +10,7 @@ extern fn rt_file_read_text(path: text) -> text
 # Config Paths
 # =========================================================================
 
-val CONFIG_PATH = "simple.test.sdn"
+val CONFIG_FILENAME = "simple.test.sdn"
 
 # =========================================================================
 # Test Config
@@ -25,6 +25,9 @@ struct TestConfig:
     parallel: bool
     fail_fast: bool
     slow_threshold_ms: i64
+    cpu_threshold: f64
+    memory_threshold: f64
+    throttle_enabled: bool
 
 impl TestConfig:
     static fn defaults() -> TestConfig:
@@ -36,15 +39,19 @@ impl TestConfig:
             max_procs: 64,
             parallel: false,
             fail_fast: false,
-            slow_threshold_ms: 5000
+            slow_threshold_ms: 5000,
+            cpu_threshold: 80.0,
+            memory_threshold: 80.0,
+            throttle_enabled: false
         )
 
     static fn load() -> TestConfig:
         val config = TestConfig.defaults()
-        if not rt_file_exists(CONFIG_PATH):
+        val config_path = find_config_file()
+        if config_path == "":
             return config
 
-        val content = rt_file_read_text(CONFIG_PATH)
+        val content = rt_file_read_text(config_path)
         val lines = content.split("\n")
 
         for line in lines:
@@ -76,8 +83,30 @@ impl TestConfig:
                     config.fail_fast = value == "true"
                 case "slow_threshold_ms":
                     config.slow_threshold_ms = value.to_int_or(config.slow_threshold_ms)
+                case "cpu_threshold":
+                    config.cpu_threshold = value.to_float_or(config.cpu_threshold)
+                case "memory_threshold":
+                    config.memory_threshold = value.to_float_or(config.memory_threshold)
+                case "throttle_enabled":
+                    config.throttle_enabled = value == "true"
                 case _: ()
 
         config
 
-export TestConfig, CONFIG_PATH
+# =========================================================================
+# H1: Multi-level config file search
+# =========================================================================
+
+fn find_config_file() -> text:
+    # Search current, parent, grandparent directories
+    val candidates = [
+        CONFIG_FILENAME,
+        "../{CONFIG_FILENAME}",
+        "../../{CONFIG_FILENAME}"
+    ]
+    for candidate in candidates:
+        if rt_file_exists(candidate):
+            return candidate
+    ""
+
+export TestConfig, CONFIG_FILENAME, find_config_file

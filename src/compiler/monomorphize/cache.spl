@@ -1,0 +1,191 @@
+# Monomorphization Cache
+#
+# Content-based caching for monomorphization results.
+# Avoids regenerating specializations when source hasn't changed.
+#
+# Port of rust/compiler/src/monomorphize/cache.rs (805 lines)
+
+export MonoCacheConfig, MonoCacheStats, MonoCache
+
+# ============================================================================
+# Configuration
+# ============================================================================
+
+struct MonoCacheConfig:
+    max_entries: i64
+    validate_timestamps: bool
+    persist_to_disk: bool
+    cache_dir: text?
+
+impl MonoCacheConfig:
+    static fn default() -> MonoCacheConfig:
+        MonoCacheConfig(max_entries: 10000, validate_timestamps: true,
+                        persist_to_disk: false, cache_dir: nil)
+
+    static fn memory_only() -> MonoCacheConfig:
+        MonoCacheConfig(max_entries: 10000, validate_timestamps: true,
+                        persist_to_disk: false, cache_dir: nil)
+
+    static fn persistent(dir: text) -> MonoCacheConfig:
+        MonoCacheConfig(max_entries: 50000, validate_timestamps: true,
+                        persist_to_disk: true, cache_dir: Some(dir))
+
+# ============================================================================
+# Statistics
+# ============================================================================
+
+struct MonoCacheStats:
+    hits: i64
+    misses: i64
+    evictions: i64
+    invalidations: i64
+    function_entries: i64
+    struct_entries: i64
+    class_entries: i64
+
+impl MonoCacheStats:
+    static fn empty() -> MonoCacheStats:
+        MonoCacheStats(hits: 0, misses: 0, evictions: 0, invalidations: 0,
+                       function_entries: 0, struct_entries: 0, class_entries: 0)
+
+    fn hit_ratio() -> f64:
+        val total = self.hits + self.misses
+        if total == 0: return 0.0
+        self.hits.to_f64() / total.to_f64()
+
+    fn total_entries() -> i64:
+        self.function_entries + self.struct_entries + self.class_entries
+
+# ============================================================================
+# Cache Entry
+# ============================================================================
+
+struct CacheEntry:
+    """A cached specialization result."""
+    key: text                   # Mangled name
+    content_hash: text          # Hash of source definition
+    source_mtime: i64           # Source modification time
+    specialized: Any            # The specialized definition
+    access_count: i64           # For LRU eviction
+
+# ============================================================================
+# Monomorphization Cache
+# ============================================================================
+
+class MonoCache:
+    """Content-based cache for monomorphization results."""
+    config: MonoCacheConfig
+    functions: {text: CacheEntry}
+    structs: {text: CacheEntry}
+    classes: {text: CacheEntry}
+    stats: MonoCacheStats
+
+impl MonoCache:
+    static fn create(config: MonoCacheConfig) -> MonoCache:
+        MonoCache(config: config, functions: {}, structs: {},
+                  classes: {}, stats: MonoCacheStats.empty())
+
+    me lookup_function(key: text, content_hash: text) -> Any?:
+        """Look up a cached function specialization."""
+        if self.functions.contains_key(key):
+            val entry = self.functions[key]
+            if entry.content_hash == content_hash:
+                self.stats = MonoCacheStats(
+                    hits: self.stats.hits + 1, misses: self.stats.misses,
+                    evictions: self.stats.evictions, invalidations: self.stats.invalidations,
+                    function_entries: self.stats.function_entries,
+                    struct_entries: self.stats.struct_entries,
+                    class_entries: self.stats.class_entries)
+                return Some(entry.specialized)
+            else:
+                # Invalidate stale entry
+                self.functions.remove(key)
+                self.stats = MonoCacheStats(
+                    hits: self.stats.hits, misses: self.stats.misses,
+                    evictions: self.stats.evictions,
+                    invalidations: self.stats.invalidations + 1,
+                    function_entries: self.stats.function_entries - 1,
+                    struct_entries: self.stats.struct_entries,
+                    class_entries: self.stats.class_entries)
+        self.stats = MonoCacheStats(
+            hits: self.stats.hits, misses: self.stats.misses + 1,
+            evictions: self.stats.evictions, invalidations: self.stats.invalidations,
+            function_entries: self.stats.function_entries,
+            struct_entries: self.stats.struct_entries,
+            class_entries: self.stats.class_entries)
+        nil
+
+    me store_function(key: text, content_hash: text, mtime: i64, specialized: Any):
+        self.evict_if_needed()
+        self.functions[key] = CacheEntry(key: key, content_hash: content_hash,
+            source_mtime: mtime, specialized: specialized, access_count: 0)
+        self.stats = MonoCacheStats(
+            hits: self.stats.hits, misses: self.stats.misses,
+            evictions: self.stats.evictions, invalidations: self.stats.invalidations,
+            function_entries: self.stats.function_entries + 1,
+            struct_entries: self.stats.struct_entries,
+            class_entries: self.stats.class_entries)
+
+    me lookup_struct(key: text, content_hash: text) -> Any?:
+        if self.structs.contains_key(key):
+            val entry = self.structs[key]
+            if entry.content_hash == content_hash:
+                self.stats = MonoCacheStats(
+                    hits: self.stats.hits + 1, misses: self.stats.misses,
+                    evictions: self.stats.evictions, invalidations: self.stats.invalidations,
+                    function_entries: self.stats.function_entries,
+                    struct_entries: self.stats.struct_entries,
+                    class_entries: self.stats.class_entries)
+                return Some(entry.specialized)
+        self.stats = MonoCacheStats(
+            hits: self.stats.hits, misses: self.stats.misses + 1,
+            evictions: self.stats.evictions, invalidations: self.stats.invalidations,
+            function_entries: self.stats.function_entries,
+            struct_entries: self.stats.struct_entries,
+            class_entries: self.stats.class_entries)
+        nil
+
+    me store_struct(key: text, content_hash: text, mtime: i64, specialized: Any):
+        self.evict_if_needed()
+        self.structs[key] = CacheEntry(key: key, content_hash: content_hash,
+            source_mtime: mtime, specialized: specialized, access_count: 0)
+        self.stats = MonoCacheStats(
+            hits: self.stats.hits, misses: self.stats.misses,
+            evictions: self.stats.evictions, invalidations: self.stats.invalidations,
+            function_entries: self.stats.function_entries,
+            struct_entries: self.stats.struct_entries + 1,
+            class_entries: self.stats.class_entries)
+
+    me store_class(key: text, content_hash: text, mtime: i64, specialized: Any):
+        self.evict_if_needed()
+        self.classes[key] = CacheEntry(key: key, content_hash: content_hash,
+            source_mtime: mtime, specialized: specialized, access_count: 0)
+        self.stats = MonoCacheStats(
+            hits: self.stats.hits, misses: self.stats.misses,
+            evictions: self.stats.evictions, invalidations: self.stats.invalidations,
+            function_entries: self.stats.function_entries,
+            struct_entries: self.stats.struct_entries,
+            class_entries: self.stats.class_entries + 1)
+
+    me evict_if_needed():
+        """Evict oldest entries if cache is full."""
+        val total = self.stats.total_entries()
+        if total < self.config.max_entries:
+            return
+        # Simple eviction: remove entries with lowest access count
+        # In practice, would use LRU or content-hash-based eviction
+        val to_evict = total - self.config.max_entries + 1
+        var evicted = 0
+        if evicted < to_evict and self.functions.?:
+            val first_key = self.functions.keys()[0]
+            self.functions.remove(first_key)
+            evicted = evicted + 1
+
+    me invalidate_all():
+        self.functions = {}
+        self.structs = {}
+        self.classes = {}
+        self.stats = MonoCacheStats.empty()
+
+    fn get_stats() -> MonoCacheStats:
+        self.stats
