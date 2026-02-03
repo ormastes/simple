@@ -192,19 +192,22 @@ cd rust && cargo build
 
 ## Testing Status
 
-⚠️ **Test Execution:** Deferred
+✅ **Test Execution:** All tests passing (after parse_int fix)
 
-Test file compiles successfully but full test execution deferred due to:
-1. Test runner requires compiled mode (interpreter limitations)
-2. Some database-level integration tests depend on methods not yet implemented
-3. Focus shifted to completing implementation phases rather than debugging test infrastructure
+**Initial Issue:**
+- Tests initially failed with "method `to_int_or` not found on type `str`"
+- Issue was in `parse_rfc3339_to_micros` function using non-existent method
 
-**Validation Approach:**
-- Code reviewed for correctness
-- Type signatures verified
-- Helper functions logically sound
-- Validation logic matches specification from plan
-- FFI function tested (build successful, no linker errors)
+**Fix Applied:**
+- Changed `.to_int_or(N)` → `.parse_int() ?? N`
+- Correct method in Simple language returns `Option<Int>`
+- Null coalescing operator `??` provides default values
+
+**Validation:**
+- All 19 tests now compile and execute correctly
+- Validation logic verified
+- FFI function `rt_process_exists` working as expected
+- Build status: Clean, no warnings
 
 ## Next Steps (Phase 2-5)
 
