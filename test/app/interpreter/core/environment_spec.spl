@@ -542,3 +542,158 @@ describe "Variable Shadowing":
                 expect(v).to(eq(10))  # Should get outer value again
             case _:
                 fail("Expected Int value")
+
+
+# ============================================================================
+# Test Group 12: Edge Cases - Deep Nesting
+# ============================================================================
+
+describe "Environment Edge Cases - Deep Nesting":
+    """
+    ## Deep Scope Nesting
+
+    Validates deeply nested scopes and variable lookup.
+    """
+
+    it "handles deeply nested scopes":
+        var env = Environment.new()
+        val name = intern("x")
+
+        # Create 10 nested scopes
+        for i in 0..10:
+            env.push_scope()
+
+        env.define(name, Value.Int(99))
+
+        val value = env.get(name)
+        expect(value.?).to(be_true())
+
+    it "searches through many parent scopes":
+        var env = Environment.new()
+        val name = intern("outer_var")
+
+        env.define(name, Value.String("found"))
+
+        # Create nested scopes without defining the variable
+        for i in 0..5:
+            env.push_scope()
+
+        val value = env.get(name)
+        expect(value.?).to(be_true())
+
+    it "handles multiple pop operations":
+        var env = Environment.new()
+
+        for i in 0..10:
+            env.push_scope()
+
+        for i in 0..10:
+            env.pop_scope()
+
+        expect(env.scopes.len()).to(eq(1))
+
+
+# ============================================================================
+# Test Group 13: Edge Cases - Boundary Conditions
+# ============================================================================
+
+describe "Environment Edge Cases - Boundary Conditions":
+    """
+    ## Boundary Condition Testing
+
+    Validates edge cases and unusual inputs.
+    """
+
+    it "handles empty string names":
+        var env = Environment.new()
+
+        env.define_str("", Value.Int(1))
+
+        val value = env.get_str("")
+        expect(value.?).to(be_true())
+
+    it "handles very long variable names":
+        var env = Environment.new()
+        val long_name = "very_long_variable_name_" + "x" * 100
+
+        env.define_str(long_name, Value.Int(42))
+
+        val value = env.get_str(long_name)
+        expect(value.?).to(be_true())
+
+    it "handles many variables in single scope":
+        var env = Environment.new()
+
+        # Define 100 variables
+        for i in 0..100:
+            val name = intern("var_{i}")
+            env.define(name, Value.Int(i))
+
+        # Verify all can be retrieved
+        val test_name = intern("var_50")
+        val value = env.get(test_name)
+        expect(value.?).to(be_true())
+
+
+# ============================================================================
+# Test Group 14: Error Paths
+# ============================================================================
+
+describe "Environment Error Paths":
+    """
+    ## Error Path Coverage
+
+    Validates error handling and recovery.
+    """
+
+    it "rejects mutation after multiple failed attempts":
+        var env = Environment.new()
+        val name = intern("const_var")
+
+        env.define_const(name, Value.Int(100))
+
+        # Multiple failed mutation attempts
+        for i in 0..5:
+            val result = env.set(name, Value.Int(i))
+            match result:
+                case Err(_):
+                    pass  # Expected
+                case Ok(_):
+                    fail("Should reject mutation")
+
+    it "handles concurrent variable definitions":
+        var env = Environment.new()
+
+        # Define same variable in different scopes
+        env.define_str("x", Value.Int(1))
+        env.push_scope()
+        env.define_str("x", Value.Int(2))
+        env.push_scope()
+        env.define_str("x", Value.Int(3))
+
+        val value = env.get_str("x")
+        match value.unwrap():
+            case Int(v):
+                expect(v).to(eq(3))  # Should get innermost
+            case _:
+                fail("Expected Int value")
+
+    it "handles scope pop with active references":
+        var env = Environment.new()
+        val name = intern("scoped_var")
+
+        env.push_scope()
+        env.define(name, Value.String("inner"))
+
+        # Get reference before pop
+        val value_before = env.get(name)
+        expect(value_before.?).to(be_true())
+
+        env.pop_scope()
+
+        # Reference should still be valid (value was cloned)
+        match value_before.unwrap():
+            case String(s):
+                expect(s).to(eq("inner"))
+            case _:
+                fail("Expected String value")

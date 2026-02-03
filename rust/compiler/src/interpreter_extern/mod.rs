@@ -677,6 +677,7 @@ pub(crate) fn call_extern_function(
         "rt_file_unlock" => file_io::rt_file_unlock(&evaluated),
         // System info
         "rt_getpid" => file_io::rt_getpid(&evaluated),
+        "rt_process_exists" => file_io::rt_process_exists(&evaluated),
         "rt_hostname" => file_io::rt_hostname(&evaluated),
         "rt_system_cpu_count" => file_io::rt_system_cpu_count(&evaluated),
         "rt_time_now_monotonic_ms" => file_io::rt_time_now_monotonic_ms(&evaluated),
