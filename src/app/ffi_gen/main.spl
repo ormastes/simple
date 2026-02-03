@@ -135,13 +135,14 @@ class CliOptions:
     gen_intern: bool
     gen_all: bool
     gen_module: bool
+    gen_workspace: bool
     verify: bool
     show_help: bool
 
     static fn default() -> CliOptions:
         CliOptions(
             input_file: "",
-            output_dir: "build/rust/ffi_gen",
+            output_dir: "build/rust",
             dry_run: false,
             verbose: false,
             lang_filter: "",
@@ -149,6 +150,7 @@ class CliOptions:
             gen_intern: false,
             gen_all: false,
             gen_module: false,
+            gen_workspace: false,
             verify: false,
             show_help: false
         )
@@ -169,13 +171,14 @@ fn print_help():
     print "  simple ffi-gen <file.spl> [OPTIONS]"
     print ""
     print "Options:"
-    print "  --output=<dir>    Output directory (default: build/rust/ffi_gen/)"
+    print "  --output=<dir>    Output directory (default: build/rust/)"
     print "  --dry-run         Print generated code without writing"
     print "  --verbose         Verbose logging"
     print "  --lang=<lang>     Filter by language: rust, c"
     print "  --gen-intern      Generate interpreter_extern Rust module from spec"
     print "  --gen-all         Generate entire build/rust/ from all full specs"
     print "  --gen-module      Generate a single module from a full spec file"
+    print "  --gen-workspace   Generate multi-crate workspace (16 FFI crates)"
     print "  --verify          Verify generated code compiles (cargo check)"
     print "  --clean           Clean build/rust/ and re-setup from scratch"
     print "  -h, --help        Show this help"
@@ -232,6 +235,8 @@ fn parse_args(args: [text]) -> CliOptions:
             opts.gen_all = true
         elif arg == "--gen-module":
             opts.gen_module = true
+        elif arg == "--gen-workspace":
+            opts.gen_workspace = true
         elif arg == "--verify":
             opts.verify = true
         elif arg.starts_with("--output="):
@@ -658,6 +663,249 @@ fn verify_generated_code(out_dir: text, verbose: bool) -> i64:
     result
 
 # ============================================================================
+# Workspace Generation (--gen-workspace mode)
+# ============================================================================
+
+# Generate multi-crate workspace with all FFI crates
+fn generate_workspace(opts: CliOptions, rust_config: RustEnvConfig) -> i64:
+    print "Generating multi-crate workspace at {opts.output_dir}"
+
+    # Define all crates in the workspace
+    val crate_names = [
+        "ffi_core",
+        "ffi_io",
+        "ffi_process",
+        "ffi_time",
+        "ffi_crypto",
+        "ffi_archive",
+        "ffi_system",
+        "ffi_codegen",
+        "ffi_data",
+        "ffi_serde",
+        "ffi_concurrent",
+        "ffi_cli",
+        "ffi_net"
+    ]
+
+    val optional_crates = [
+        "ffi_torch",
+        "ffi_cuda",
+        "ffi_vulkan"
+    ]
+
+    # Create output directory
+    val out_dir = opts.output_dir
+    if not dir_create(out_dir, true):
+        print_error("Failed to create {out_dir}")
+        return 1
+
+    # Generate workspace root Cargo.toml
+    log_info("Generating workspace Cargo.toml", opts.verbose)
+    val workspace_toml = generate_workspace_root_toml(crate_names, optional_crates, rust_config)
+
+    if opts.dry_run:
+        print ""
+        print "=== Workspace Cargo.toml ==="
+        print workspace_toml
+        print ""
+        print "Would generate {crate_names.len()} crates:"
+        for name in crate_names:
+            print "  - {name}/"
+        print ""
+        print "Optional crates (feature-gated):"
+        for name in optional_crates:
+            print "  - {name}/"
+        return 0
+
+    # Write workspace Cargo.toml
+    if not file_write("{out_dir}/Cargo.toml", workspace_toml):
+        print_error("Failed to write workspace Cargo.toml")
+        return 1
+    log_step("Wrote {out_dir}/Cargo.toml")
+
+    # Generate each crate
+    var generated_count = 0
+    for crate_name in crate_names:
+        val result = generate_single_crate(crate_name, out_dir, opts, rust_config)
+        if result != 0:
+            print_error("Failed to generate {crate_name}")
+            return result
+        generated_count = generated_count + 1
+
+    print "Generated {generated_count} FFI crates to {out_dir}"
+
+    # Verify if requested
+    if opts.verify:
+        return verify_workspace(out_dir, opts.verbose)
+
+    return 0
+
+# Generate workspace root Cargo.toml
+fn generate_workspace_root_toml(members: [text], optional: [text], rust_config: RustEnvConfig) -> text:
+    var toml = "[workspace]\n"
+    toml = toml + "resolver = \"2\"\n"
+    toml = toml + "members = [\n"
+
+    for member in members:
+        toml = toml + "    \"{member}\",\n"
+
+    toml = toml + "]\n\n"
+
+    # Optional members (feature-gated)
+    if optional.len() > 0:
+        toml = toml + "# Optional members (enable with features)\n"
+        toml = toml + "# Uncomment to include GPU/ML crates:\n"
+        for opt in optional:
+            toml = toml + "# \"{opt}\",\n"
+        toml = toml + "\n"
+
+    # Workspace-level dependencies
+    toml = toml + "[workspace.dependencies]\n"
+    toml = toml + "libc = \"0.2\"\n"
+    toml = toml + "thiserror = \"1.0\"\n"
+    toml = toml + "\n"
+
+    # Workspace package info
+    toml = toml + "[workspace.package]\n"
+    toml = toml + "version = \"0.1.0\"\n"
+    toml = toml + "edition = \"{rust_config.edition}\"\n"
+    toml = toml + "authors = [\"Simple Language Team\"]\n"
+    toml = toml + "license = \"MIT\"\n"
+
+    toml
+
+# Generate a single crate in the workspace
+fn generate_single_crate(crate_name: text, workspace_dir: text, opts: CliOptions, rust_config: RustEnvConfig) -> i64:
+    val crate_dir = "{workspace_dir}/{crate_name}"
+
+    # Create crate directory structure
+    if not dir_create("{crate_dir}/src", true):
+        print_error("Failed to create {crate_dir}/src")
+        return 1
+
+    # Generate Cargo.toml for this crate
+    val cargo_toml = generate_crate_cargo_toml(crate_name, rust_config)
+    if not file_write("{crate_dir}/Cargo.toml", cargo_toml):
+        print_error("Failed to write {crate_dir}/Cargo.toml")
+        return 1
+
+    # Generate lib.rs stub
+    val lib_rs = generate_crate_lib_stub(crate_name)
+    if not file_write("{crate_dir}/src/lib.rs", lib_rs):
+        print_error("Failed to write {crate_dir}/src/lib.rs")
+        return 1
+
+    log_step("Generated {crate_name}")
+    return 0
+
+# Generate Cargo.toml for a specific crate
+fn generate_crate_cargo_toml(crate_name: text, rust_config: RustEnvConfig) -> text:
+    var toml = "[package]\n"
+    toml = toml + "name = \"{crate_name}\"\n"
+    toml = toml + "version.workspace = true\n"
+    toml = toml + "edition.workspace = true\n"
+    toml = toml + "authors.workspace = true\n"
+    toml = toml + "license.workspace = true\n"
+    toml = toml + "\n"
+
+    toml = toml + "[lib]\n"
+    toml = toml + "crate-type = [\"cdylib\", \"rlib\"]\n"
+    toml = toml + "\n"
+
+    toml = toml + "[dependencies]\n"
+
+    # Add dependencies based on crate name
+    if crate_name == "ffi_core":
+        toml = toml + "bdwgc-alloc = \"0.6\"\n"
+        toml = toml + "libc.workspace = true\n"
+    elif crate_name == "ffi_io":
+        toml = toml + "glob = \"0.3\"\n"
+        toml = toml + "fs2 = \"0.4\"\n"
+        toml = toml + "memmap2 = \"0.9\"\n"
+        toml = toml + "dirs-next = \"2.0\"\n"
+    elif crate_name == "ffi_process":
+        toml = toml + "rlimit = \"0.10\"\n"
+        toml = toml + "[target.'cfg(unix)'.dependencies]\n"
+        toml = toml + "nix = { version = \"0.29\", features = [\"process\", \"resource\", \"signal\"] }\n"
+    elif crate_name == "ffi_time":
+        toml = toml + "chrono = \"0.4\"\n"
+    elif crate_name == "ffi_crypto":
+        toml = toml + "sha1 = \"0.10\"\n"
+        toml = toml + "sha2 = \"0.10\"\n"
+        toml = toml + "xxhash-rust = { version = \"0.8\", features = [\"xxh3\"] }\n"
+        toml = toml + "ahash = \"0.8\"\n"
+        toml = toml + "argon2 = \"0.5\"\n"
+    elif crate_name == "ffi_archive":
+        toml = toml + "tar = \"0.4\"\n"
+        toml = toml + "flate2 = \"1.0\"\n"
+        toml = toml + "xz2 = \"0.1\"\n"
+    elif crate_name == "ffi_system":
+        toml = toml + "hostname = \"0.4\"\n"
+        toml = toml + "num_cpus = \"1.16\"\n"
+        toml = toml + "sysinfo = \"0.32\"\n"
+    elif crate_name == "ffi_codegen":
+        toml = toml + "cranelift-codegen = \"0.110\"\n"
+        toml = toml + "cranelift-object = \"0.110\"\n"
+        toml = toml + "cranelift-module = \"0.110\"\n"
+        toml = toml + "cranelift-frontend = \"0.110\"\n"
+        toml = toml + "target-lexicon = \"0.13\"\n"
+    elif crate_name == "ffi_data":
+        toml = toml + "regex = \"1.10\"\n"
+        toml = toml + "lasso = { version = \"0.7\", features = [\"multi-threaded\"] }\n"
+        toml = toml + "typed-arena = \"2.0\"\n"
+        toml = toml + "dashmap = \"6.1\"\n"
+        toml = toml + "indexmap = \"2.7\"\n"
+    elif crate_name == "ffi_serde":
+        toml = toml + "serde = { version = \"1.0\", features = [\"derive\"] }\n"
+        toml = toml + "serde_json = \"1.0\"\n"
+        toml = toml + "toml = \"0.8\"\n"
+        toml = toml + "serde_yaml = \"0.9\"\n"
+        toml = toml + "bincode = \"1.3\"\n"
+    elif crate_name == "ffi_concurrent":
+        toml = toml + "rayon = \"1.10\"\n"
+        toml = toml + "crossbeam = \"0.8\"\n"
+        toml = toml + "parking_lot = \"0.12\"\n"
+        toml = toml + "dashmap = \"6.1\"\n"
+    elif crate_name == "ffi_cli":
+        toml = toml + "rustyline = \"14\"\n"
+        toml = toml + "notify = \"6\"\n"
+        toml = toml + "ctrlc = \"3.4\"\n"
+        toml = toml + "rpassword = \"7.3\"\n"
+    elif crate_name == "ffi_net":
+        toml = toml + "socket2 = \"0.5\"\n"
+        toml = toml + "ureq = \"2.10\"\n"
+
+    toml
+
+# Generate lib.rs stub for a crate
+fn generate_crate_lib_stub(crate_name: text) -> text:
+    var code = "//! {crate_name} - FFI wrapper crate\n"
+    code = code + "//!\n"
+    code = code + "//! Auto-generated by: simple ffi-gen --gen-workspace\n"
+    code = code + "//! Do not edit manually - regenerate from specs.\n"
+    code = code + "\n"
+    code = code + "#![allow(unused)]\n"
+    code = code + "\n"
+    code = code + "// TODO: Implement FFI functions for {crate_name}\n"
+    code = code + "// See doc/design/ffi_wrapper_plan.md for specifications\n"
+    code
+
+# Verify workspace compiles
+fn verify_workspace(workspace_dir: text, verbose: bool) -> i64:
+    print "Verifying workspace..."
+
+    val (stdout, stderr, exit_code) = process_run("cargo", ["check", "--workspace", "--manifest-path", "{workspace_dir}/Cargo.toml"])
+
+    if exit_code == 0:
+        log_step("Verification successful: cargo check --workspace passed")
+        return 0
+    else:
+        print_error("Verification failed: cargo check returned {exit_code}")
+        if stderr != "":
+            print stderr
+        return exit_code
+
+# ============================================================================
 # Entry Point
 # ============================================================================
 
@@ -686,6 +934,10 @@ fn main() -> i64:
     # Handle --gen-all: generate all modules (no input file required)
     if opts.gen_all:
         return generate_all_modules(opts, rust_config)
+
+    # Handle --gen-workspace: generate multi-crate workspace
+    if opts.gen_workspace:
+        return generate_workspace(opts, rust_config)
 
     # Handle --verify alone: verify existing generated code
     if opts.verify and opts.input_file == "" and not opts.gen_all:
