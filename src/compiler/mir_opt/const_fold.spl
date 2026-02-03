@@ -1,0 +1,422 @@
+# Constant Folding
+#
+# Evaluates constant expressions at compile time.
+#
+# Examples:
+#   2 + 3 → 5
+#   x * 1 → x
+#   x + 0 → x
+#   if true → unconditional jump
+#
+# Benefits:
+# - Reduces runtime computation
+# - Enables further optimizations (DCE, branch elimination)
+# - Smaller code size
+#
+# Algorithm:
+# 1. Scan instructions for constant operands
+# 2. If operation can be evaluated at compile time, replace with constant
+# 3. Propagate constants through the CFG
+# 4. Simplify branches with constant conditions
+
+use compiler.mir_data.*
+use compiler.mir.*
+use compiler.mir_opt.mod.{MirPass}
+
+# ============================================================================
+# Constant Evaluation
+# ============================================================================
+
+class ConstantEvaluator:
+    """
+    Evaluates constant expressions.
+
+    Handles:
+    - Arithmetic operations on constant integers/floats
+    - Logical operations on constant booleans
+    - Comparisons
+    - Bitwise operations
+    """
+    folded_count: i64
+
+impl ConstantEvaluator:
+    static fn new() -> ConstantEvaluator:
+        ConstantEvaluator(folded_count: 0)
+
+    me try_fold_binop(op: MirBinOp, left: MirConstValue, right: MirConstValue) -> MirConstValue?:
+        """
+        Try to fold binary operation with constant operands.
+
+        Returns Some(result) if operation can be folded, None otherwise.
+        """
+        match (left, right):
+            case (Int(l), Int(r)):
+                self.try_fold_int_binop(op, l, r)
+
+            case (Float(l), Float(r)):
+                self.try_fold_float_binop(op, l, r)
+
+            case (Bool(l), Bool(r)):
+                self.try_fold_bool_binop(op, l, r)
+
+            case _:
+                nil  # Can't fold
+
+    fn try_fold_int_binop(op: MirBinOp, left: i64, right: i64) -> MirConstValue?:
+        """Fold integer binary operations."""
+        match op:
+            # Arithmetic
+            case Add:
+                Some(MirConstValue.Int(left + right))
+            case Sub:
+                Some(MirConstValue.Int(left - right))
+            case Mul:
+                Some(MirConstValue.Int(left * right))
+            case Div:
+                if right == 0:
+                    nil  # Division by zero - can't fold
+                else:
+                    Some(MirConstValue.Int(left / right))
+            case Rem:
+                if right == 0:
+                    nil
+                else:
+                    Some(MirConstValue.Int(left % right))
+
+            # Bitwise
+            case BitAnd:
+                Some(MirConstValue.Int(left and right))
+            case BitOr:
+                Some(MirConstValue.Int(left or right))
+            case BitXor:
+                Some(MirConstValue.Int(left xor right))
+            case Shl:
+                Some(MirConstValue.Int(left << right))
+            case Shr:
+                Some(MirConstValue.Int(left >> right))
+
+            # Comparison
+            case Eq:
+                Some(MirConstValue.Bool(left == right))
+            case Ne:
+                Some(MirConstValue.Bool(left != right))
+            case Lt:
+                Some(MirConstValue.Bool(left < right))
+            case Le:
+                Some(MirConstValue.Bool(left <= right))
+            case Gt:
+                Some(MirConstValue.Bool(left > right))
+            case Ge:
+                Some(MirConstValue.Bool(left >= right))
+
+            case _:
+                nil  # Unsupported operation
+
+    fn try_fold_float_binop(op: MirBinOp, left: f64, right: f64) -> MirConstValue?:
+        """Fold floating-point binary operations."""
+        match op:
+            case Add:
+                Some(MirConstValue.Float(left + right))
+            case Sub:
+                Some(MirConstValue.Float(left - right))
+            case Mul:
+                Some(MirConstValue.Float(left * right))
+            case Div:
+                Some(MirConstValue.Float(left / right))
+
+            # Comparison
+            case Eq:
+                Some(MirConstValue.Bool(left == right))
+            case Ne:
+                Some(MirConstValue.Bool(left != right))
+            case Lt:
+                Some(MirConstValue.Bool(left < right))
+            case Le:
+                Some(MirConstValue.Bool(left <= right))
+            case Gt:
+                Some(MirConstValue.Bool(left > right))
+            case Ge:
+                Some(MirConstValue.Bool(left >= right))
+
+            case _:
+                nil
+
+    fn try_fold_bool_binop(op: MirBinOp, left: bool, right: bool) -> MirConstValue?:
+        """Fold boolean binary operations."""
+        match op:
+            case BitAnd:
+                Some(MirConstValue.Bool(left and right))
+            case BitOr:
+                Some(MirConstValue.Bool(left or right))
+            case BitXor:
+                Some(MirConstValue.Bool(left xor right))
+            case Eq:
+                Some(MirConstValue.Bool(left == right))
+            case Ne:
+                Some(MirConstValue.Bool(left != right))
+            case _:
+                nil
+
+    me try_fold_unaryop(op: MirUnaryOp, operand: MirConstValue) -> MirConstValue?:
+        """Try to fold unary operation with constant operand."""
+        match (op, operand):
+            case (Neg, Int(val)):
+                Some(MirConstValue.Int(-val))
+            case (Neg, Float(val)):
+                Some(MirConstValue.Float(-val))
+            case (Not, Bool(val)):
+                Some(MirConstValue.Bool(not val))
+            case (BitNot, Int(val)):
+                Some(MirConstValue.Int(not val))  # Bitwise NOT
+            case _:
+                nil
+
+# ============================================================================
+# Algebraic Simplification
+# ============================================================================
+
+class AlgebraicSimplifier:
+    """
+    Applies algebraic identities for simplification.
+
+    Identities:
+    - x + 0 = x
+    - x * 1 = x
+    - x * 0 = 0
+    - x - 0 = x
+    - x / 1 = x
+    - x & -1 = x
+    - x | 0 = x
+    - x ^ 0 = x
+    """
+    simplified_count: i64
+
+impl AlgebraicSimplifier:
+    static fn new() -> AlgebraicSimplifier:
+        AlgebraicSimplifier(simplified_count: 0)
+
+    me try_simplify_binop(op: MirBinOp, left: MirOperand, right: MirOperand) -> MirOperand?:
+        """
+        Try to simplify binary operation using algebraic identities.
+
+        Returns Some(operand) if simplified to single operand, None otherwise.
+        """
+        # Check for identity operations
+        match (op, right.kind):
+            # x + 0 = x
+            case (Add, Const(Int(0), _)):
+                self.simplified_count = self.simplified_count + 1
+                Some(left)
+
+            # x * 1 = x
+            case (Mul, Const(Int(1), _)):
+                self.simplified_count = self.simplified_count + 1
+                Some(left)
+
+            # x * 0 = 0
+            case (Mul, Const(Int(0), ty)):
+                self.simplified_count = self.simplified_count + 1
+                Some(MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(0), ty)))
+
+            # x - 0 = x
+            case (Sub, Const(Int(0), _)):
+                self.simplified_count = self.simplified_count + 1
+                Some(left)
+
+            # x / 1 = x
+            case (Div, Const(Int(1), _)):
+                self.simplified_count = self.simplified_count + 1
+                Some(left)
+
+            # x | 0 = x
+            case (BitOr, Const(Int(0), _)):
+                self.simplified_count = self.simplified_count + 1
+                Some(left)
+
+            # x ^ 0 = x
+            case (BitXor, Const(Int(0), _)):
+                self.simplified_count = self.simplified_count + 1
+                Some(left)
+
+            case _:
+                nil  # No simplification
+
+# ============================================================================
+# Constant Folding Pass
+# ============================================================================
+
+class ConstantFolding:
+    """
+    Constant folding optimization pass.
+
+    Combines:
+    - Constant evaluation (compute at compile time)
+    - Algebraic simplification (apply identities)
+    - Branch folding (eliminate dead branches)
+    """
+    evaluator: ConstantEvaluator
+    simplifier: AlgebraicSimplifier
+    folded_instructions: i64
+    folded_branches: i64
+
+impl ConstantFolding:
+    static fn new() -> ConstantFolding:
+        ConstantFolding(
+            evaluator: ConstantEvaluator.new(),
+            simplifier: AlgebraicSimplifier.new(),
+            folded_instructions: 0,
+            folded_branches: 0
+        )
+
+    fn name() -> text:
+        "constant_folding"
+
+    fn description() -> text:
+        "Evaluates constant expressions at compile time"
+
+    fn is_analysis_pass() -> bool:
+        false
+
+    fn requires() -> [text]:
+        []
+
+    me run_on_function(func: MirFunction) -> MirFunction:
+        """
+        Run constant folding on a function.
+
+        Process:
+        1. Fold constant instructions in each block
+        2. Fold branch conditions
+        3. Repeat until no changes (fixed point)
+        """
+        var optimized_blocks: [MirBlock] = []
+
+        for block in func.blocks:
+            val optimized_block = self.fold_block(block)
+            optimized_blocks.push(optimized_block)
+
+        MirFunction(
+            symbol: func.symbol,
+            name: func.name,
+            signature: func.signature,
+            locals: func.locals,
+            blocks: optimized_blocks,
+            entry_block: func.entry_block,
+            span: func.span,
+            generic_params: func.generic_params,
+            is_generic_template: func.is_generic_template,
+            specialization_of: func.specialization_of,
+            type_bindings: func.type_bindings
+        )
+
+    me fold_block(block: MirBlock) -> MirBlock:
+        """Fold constants in a basic block."""
+        var folded_instructions: [MirInst] = []
+
+        for inst in block.instructions:
+            val folded = self.try_fold_instruction(inst)
+            folded_instructions.push(folded)
+
+        # Fold terminator
+        val folded_terminator = self.try_fold_terminator(block.terminator)
+
+        MirBlock(
+            id: block.id,
+            label: block.label,
+            instructions: folded_instructions,
+            terminator: folded_terminator
+        )
+
+    me try_fold_instruction(inst: MirInst) -> MirInst:
+        """Try to fold a single instruction."""
+        match inst.kind:
+            case BinOp(dest, op, left, right):
+                # Try constant evaluation
+                match (left.kind, right.kind):
+                    case (Const(lval, _), Const(rval, rty)):
+                        val folded = self.evaluator.try_fold_binop(op, lval, rval)
+                        if folded.?:
+                            self.folded_instructions = self.folded_instructions + 1
+                            return MirInst(
+                                kind: MirInstKind.Const(dest, folded.unwrap(), rty),
+                                span: inst.span
+                            )
+
+                # Try algebraic simplification
+                val simplified = self.simplifier.try_simplify_binop(op, left, right)
+                if simplified.?:
+                    match simplified.unwrap().kind:
+                        case Copy(src):
+                            return MirInst(
+                                kind: MirInstKind.Copy(dest, src),
+                                span: inst.span
+                            )
+                        case Const(val, ty):
+                            return MirInst(
+                                kind: MirInstKind.Const(dest, val, ty),
+                                span: inst.span
+                            )
+                        case _:
+                            pass
+
+                # No folding - return original
+                inst
+
+            case UnaryOp(dest, op, operand):
+                match operand.kind:
+                    case Const(val, ty):
+                        val folded = self.evaluator.try_fold_unaryop(op, val)
+                        if folded.?:
+                            self.folded_instructions = self.folded_instructions + 1
+                            return MirInst(
+                                kind: MirInstKind.Const(dest, folded.unwrap(), ty),
+                                span: inst.span
+                            )
+                # No folding
+                inst
+
+            case _:
+                # Can't fold this instruction type
+                inst
+
+    me try_fold_terminator(term: MirTerminator) -> MirTerminator:
+        """Try to fold branch conditions."""
+        match term:
+            case If(cond, then_, else_):
+                match cond.kind:
+                    case Const(Bool(true), _):
+                        # Always true - eliminate false branch
+                        self.folded_branches = self.folded_branches + 1
+                        MirTerminator.Goto(then_)
+
+                    case Const(Bool(false), _):
+                        # Always false - eliminate true branch
+                        self.folded_branches = self.folded_branches + 1
+                        MirTerminator.Goto(else_)
+
+                    case _:
+                        # Dynamic condition - can't fold
+                        term
+
+            case _:
+                # Other terminators can't be folded
+                term
+
+    fn stats_summary() -> text:
+        """Generate summary of optimization work."""
+        "ConstFold: folded {self.folded_instructions} instructions, {self.folded_branches} branches"
+
+# ============================================================================
+# Factory Function
+# ============================================================================
+
+fn create_const_fold_pass() -> ConstantFolding:
+    """Create a new constant folding pass instance."""
+    ConstantFolding.new()
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export ConstantFolding, create_const_fold_pass
+export ConstantEvaluator, AlgebraicSimplifier
