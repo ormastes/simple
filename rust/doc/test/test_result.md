@@ -1,6 +1,6 @@
 # Test Results
 
-**Generated:** 2026-02-04 22:55:32
+**Generated:** 2026-02-04 22:55:58
 **Total Tests:** 1
 **Status:** ⚠️ 1 FAILED
 
@@ -30,14 +30,8 @@
 
 **File:** `test/lib/std/unit/tooling/string_utils_spec.spl`
 **Category:** Unit
-**Failed:** 2026-02-04T22:55:32.771925827+00:00
+**Failed:** 
 **Flaky:** No (100.0% failure rate)
-
-**Error:**
-```
-failed to read test/lib/std/unit/tooling/string_utils_spec.spl: No such file or directory (os error 2)
-Location: test/lib/std/unit/tooling/string_utils_spec.spl
-```
 
 ---
 
@@ -51,5 +45,5 @@ Location: test/lib/std/unit/tooling/string_utils_spec.spl
 
 ### Priority 1: Fix Failing Tests (1)
 
-1. **string_utils_spec** - failed to read test/lib/std/unit/tooling/string_utils_spec.spl: No such file or directory (os error 2)
+1. **string_utils_spec** - 
 

@@ -81,6 +81,7 @@ pub mod env_ffi;
 pub mod error_ffi;
 pub mod span_ffi;
 pub mod rc;
+pub mod compiler_context;
 
 // Import parent interpreter types
 type Enums = HashMap<String, EnumDef>;
@@ -681,6 +682,22 @@ pub(crate) fn call_extern_function(
         "rt_hostname" => file_io::rt_hostname(&evaluated),
         "rt_system_cpu_count" => file_io::rt_system_cpu_count(&evaluated),
         "rt_time_now_monotonic_ms" => file_io::rt_time_now_monotonic_ms(&evaluated),
+
+        // ====================================================================
+        // Compiler Context Operations (6 functions)
+        // ====================================================================
+        "rt_compiler_create_context" => compiler_context::rt_compiler_create_context(&evaluated),
+        "compiler_create_context" => compiler_context::rt_compiler_create_context(&evaluated),
+        "rt_compiler_destroy_context" => compiler_context::rt_compiler_destroy_context(&evaluated),
+        "compiler_destroy_context" => compiler_context::rt_compiler_destroy_context(&evaluated),
+        "rt_compiler_infer_types" => compiler_context::rt_compiler_infer_types(&evaluated),
+        "compiler_infer_types" => compiler_context::rt_compiler_infer_types(&evaluated),
+        "rt_compiler_check_types" => compiler_context::rt_compiler_check_types(&evaluated),
+        "compiler_check_types" => compiler_context::rt_compiler_check_types(&evaluated),
+        "rt_compiler_instantiate_template" => compiler_context::rt_compiler_instantiate_template(&evaluated),
+        "compiler_instantiate_template" => compiler_context::rt_compiler_instantiate_template(&evaluated),
+        "rt_compiler_get_stats" => compiler_context::rt_compiler_get_stats(&evaluated),
+        "compiler_get_stats" => compiler_context::rt_compiler_get_stats(&evaluated),
 
         // ====================================================================
         // Collections FFI Operations (HashMap, HashSet, BTree)
