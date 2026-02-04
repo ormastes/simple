@@ -5,6 +5,7 @@ import sys
 import dap.protocol as protocol
 import dap.transport as transport
 import dap.breakpoints as breakpoints
+from ffi.debug import {debug_stack_trace, debug_locals, debug_continue, debug_pause, debug_set_step_mode, debug_set_step_start_depth, debug_stack_depth}
 
 # Launch configuration parsed from DAP launch request
 class LaunchConfig:
@@ -275,29 +276,45 @@ impl DapServer:
 
     # Handle stackTrace request
     fn handle_stack_trace(request_seq: Int, command: String, arguments: Option<Dict>) -> Result<Nil, String>:
-        # Build stack frames from debug context
+        # Get real stack trace from debug FFI
+        val stack_json = debug_stack_trace()
+
+        # Parse JSON array of stack frames
+        # Format: ["file:line:column:function_name", ...]
         var stack_frames: List<Dict> = []
         var frame_id = self.current_frame_id
 
-        # Use actual call stack from debug context
-        if self.debug_context.call_stack.len() > 0:
-            for entry in self.debug_context.call_stack:
+        # TODO: Proper JSON parsing - for now split by lines
+        val lines = stack_json.split("\n")
+        for line in lines:
+            if line.len() == 0:
+                continue
+
+            # Parse format: "file:line:column:function_name"
+            val parts = line.split(":")
+            if parts.len() >= 4:
+                val file = parts[0]
+                val line_num = parts[1].parse_int() ?? 1
+                val column_num = parts[2].parse_int() ?? 0
+                val func_name = parts[3]
+
                 val frame = protocol.StackFrame.new(
                     frame_id,
-                    entry.name,
-                    entry.line,
-                    entry.column
-                ).with_source(entry.source_path)
+                    func_name,
+                    line_num,
+                    column_num
+                ).with_source(file)
 
                 stack_frames.push(frame.to_json())
                 frame_id = frame_id + 1
-        else:
-            # Fallback: create entry frame from launch config
+
+        # Fallback if no frames
+        if stack_frames.len() == 0:
             val frame = protocol.StackFrame.new(
                 frame_id,
                 "main",
-                self.debug_context.current_line,
-                self.debug_context.current_column
+                1,
+                0
             ).with_source(self.debug_context.source_path)
             stack_frames.push(frame.to_json())
 
@@ -339,44 +356,44 @@ impl DapServer:
 
                 # Variables reference 1 = local scope, 2 = global scope
                 if variables_reference == 1:
-                    # Return local variables from debug context
-                    for (name, info) in self.debug_context.local_variables.items():
-                        val var = protocol.Variable.new(name, info.value)
-                            .with_type(info.type_name)
-                        if info.variables_reference > 0:
-                            var = var.with_variables_reference(info.variables_reference)
-                        variables.push(var.to_json())
+                    # Get real local variables from debug FFI
+                    val locals_json = debug_locals()
 
-                    # If no local variables in context, show placeholder
+                    # Parse JSON: "name1:value1\nname2:value2\n..."
+                    val lines = locals_json.split("\n")
+                    for line in lines:
+                        if line.len() == 0:
+                            continue
+
+                        # Parse format: "name:value"
+                        val parts = line.split(":")
+                        if parts.len() >= 2:
+                            val name = parts[0]
+                            val value = parts[1]  # Rest is the value
+
+                            val var = protocol.Variable.new(name, value).with_type("any")
+                            variables.push(var.to_json())
+
+                    # Placeholder if no variables
                     if variables.len() == 0:
-                        # NOTE: When interpreter integration is complete,
-                        # this will show actual local variables
                         val placeholder = protocol.Variable.new(
                             "(no local variables)",
-                            "",
-                        ).with_type("")
-                        variables.push(placeholder.to_json())
-
-                elif variables_reference == 2:
-                    # Return global variables from debug context
-                    for (name, info) in self.debug_context.global_variables.items():
-                        val var = protocol.Variable.new(name, info.value)
-                            .with_type(info.type_name)
-                        if info.variables_reference > 0:
-                            var = var.with_variables_reference(info.variables_reference)
-                        variables.push(var.to_json())
-
-                    # If no global variables in context, show placeholder
-                    if variables.len() == 0:
-                        val placeholder = protocol.Variable.new(
-                            "(no global variables)",
                             ""
                         ).with_type("")
                         variables.push(placeholder.to_json())
 
+                elif variables_reference == 2:
+                    # Global variables would use a similar FFI call
+                    # For now, show placeholder
+                    val placeholder = protocol.Variable.new(
+                        "(global variables not yet implemented)",
+                        ""
+                    ).with_type("")
+                    variables.push(placeholder.to_json())
+
                 else:
                     # Nested variable inspection (for objects, arrays, etc.)
-                    # NOTE: Expand child variables when interpreter provides them
+                    # Will be implemented when needed
                     pass
 
                 val body = {
@@ -391,7 +408,8 @@ impl DapServer:
     fn handle_continue(request_seq: Int, command: String, arguments: Option<Dict>) -> Result<Nil, String>:
         transport.log_debug("Handling continue request")
 
-        # Clear any step mode
+        # Clear any step mode (mode 0 = Continue)
+        debug_set_step_mode(0)
         self.step_mode = None
 
         # Update state
@@ -403,7 +421,8 @@ impl DapServer:
 
         transport.write_response(request_seq, true, command, Some(body))?
 
-        # Continue execution until next breakpoint
+        # Resume execution via FFI
+        debug_continue()
         # NOTE: When interpreter integration is complete, this will:
         # 1. Resume interpreter execution
         # 2. Check breakpoints at each step
@@ -415,6 +434,9 @@ impl DapServer:
     # Handle pause request
     fn handle_pause(request_seq: Int, command: String, arguments: Option<Dict>) -> Result<Nil, String>:
         transport.log_debug("Handling pause request")
+
+        # Pause execution via FFI
+        debug_pause()
 
         # Send response
         transport.write_response(request_seq, true, command, None)?
@@ -428,14 +450,17 @@ impl DapServer:
     fn handle_next(request_seq: Int, command: String, arguments: Option<Dict>) -> Result<Nil, String>:
         transport.log_debug("Handling next (step over) request")
 
-        # Set step mode to step over
+        # Set step mode to step over (mode 1)
+        val current_depth = debug_stack_depth()
+        debug_set_step_mode(1)
+        debug_set_step_start_depth(current_depth)
         self.step_mode = Some(StepMode.StepOver)
 
         # Send response
         transport.write_response(request_seq, true, command, None)?
 
-        # Execute single step
-        self.execute_step()?
+        # Continue execution - will break at next line at same or lower depth
+        debug_continue()
 
         Ok(nil)
 
@@ -443,13 +468,14 @@ impl DapServer:
     fn handle_step_in(request_seq: Int, command: String, arguments: Option<Dict>) -> Result<Nil, String>:
         transport.log_debug("Handling stepIn request")
 
-        # Set step mode to step in
+        # Set step mode to step in (mode 2)
+        debug_set_step_mode(2)
         self.step_mode = Some(StepMode.StepIn)
 
         transport.write_response(request_seq, true, command, None)?
 
-        # Execute single step, entering function calls
-        self.execute_step()?
+        # Continue execution - will break at next line (any depth)
+        debug_continue()
 
         Ok(nil)
 
@@ -457,13 +483,16 @@ impl DapServer:
     fn handle_step_out(request_seq: Int, command: String, arguments: Option<Dict>) -> Result<Nil, String>:
         transport.log_debug("Handling stepOut request")
 
-        # Set step mode to step out
+        # Set step mode to step out (mode 3)
+        val current_depth = debug_stack_depth()
+        debug_set_step_mode(3)
+        debug_set_step_start_depth(current_depth)
         self.step_mode = Some(StepMode.StepOut)
 
         transport.write_response(request_seq, true, command, None)?
 
-        # Execute until current function returns
-        self.execute_step()?
+        # Continue execution - will break when stack depth < start depth
+        debug_continue()
 
         Ok(nil)
 
