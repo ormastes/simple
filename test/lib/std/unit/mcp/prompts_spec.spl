@@ -1,0 +1,318 @@
+# SSpec tests for MCP PromptManager
+
+import app.mcp.prompts
+
+describe "PromptManager":
+    it "creates with project root":
+        val mgr = PromptManager.create("/test/project")
+        assert mgr.project_root == "/test/project"
+
+    it "lists default prompts":
+        val mgr = PromptManager.create(".")
+        val prompt_list = mgr.list_prompts()
+
+        # Should have at least 12 default prompts
+        assert prompt_list.length >= 12
+
+        # Check for expected prompt categories
+        var has_refactor = false
+        var has_generate = false
+        var has_docs = false
+        var has_analyze = false
+
+        for prompt_info in prompt_list:
+            if prompt_info.name.starts_with("refactor-"):
+                has_refactor = true
+            elif prompt_info.name.starts_with("generate-"):
+                has_generate = true
+            elif prompt_info.name.starts_with("docs-"):
+                has_docs = true
+            elif prompt_info.name.starts_with("analyze-"):
+                has_analyze = true
+
+        assert has_refactor
+        assert has_generate
+        assert has_docs
+        assert has_analyze
+
+    it "retrieves prompt by name":
+        val mgr = PromptManager.create(".")
+
+        val args = {
+            "old_name": "foo",
+            "new_name": "bar",
+        }
+
+        val result = mgr.get_prompt("refactor-rename", args)
+
+        assert result.ok.?
+        val prompt_data = result.unwrap()
+        assert prompt_data.description.contains("Rename")
+        assert prompt_data.messages.length > 0
+
+    it "returns error for unknown prompt":
+        val mgr = PromptManager.create(".")
+
+        val result = mgr.get_prompt("unknown-prompt", {})
+
+        assert result.err.?
+
+    it "validates required arguments":
+        val mgr = PromptManager.create(".")
+
+        # Missing required 'old_name' and 'new_name'
+        val result = mgr.get_prompt("refactor-rename", {})
+
+        assert result.err.?
+        assert result.err.unwrap().contains("required")
+
+    it "registers custom prompts":
+        val mgr = PromptManager.create(".")
+
+        mgr.register_prompt(
+            name: "custom-test",
+            description: "A test prompt",
+            arguments: [
+                PromptArgument(name: "input", description: "Test input", required: true),
+            ],
+            template_fn: \args:
+                PromptResult(
+                    description: "Test prompt",
+                    messages: [
+                        PromptMessage(
+                            role: PromptRole.User,
+                            content: "Test: {args[\"input\"]}",
+                        ),
+                    ],
+                ),
+        )
+
+        val result = mgr.get_prompt("custom-test", {"input": "hello"})
+
+        assert result.ok.?
+        val prompt_data = result.unwrap()
+        assert prompt_data.description == "Test prompt"
+
+describe "Refactoring Prompts":
+    it "generates rename prompt":
+        val mgr = PromptManager.create(".")
+
+        val args = {
+            "old_name": "oldFunc",
+            "new_name": "newFunc",
+            "file": "test.spl",
+        }
+
+        val result = mgr.get_prompt("refactor-rename", args)
+
+        assert result.ok.?
+        val prompt_data = result.unwrap()
+        assert prompt_data.messages[0].content.contains("oldFunc")
+        assert prompt_data.messages[0].content.contains("newFunc")
+
+    it "generates extract function prompt":
+        val mgr = PromptManager.create(".")
+
+        val args = {
+            "code": "val x = 42\nprint(x)",
+            "function_name": "printNumber",
+            "file": "test.spl",
+        }
+
+        val result = mgr.get_prompt("refactor-extract-function", args)
+
+        assert result.ok.?
+        val prompt_data = result.unwrap()
+        assert prompt_data.messages[0].content.contains("printNumber")
+        assert prompt_data.messages[0].content.contains("val x = 42")
+
+    it "generates inline prompt":
+        val mgr = PromptManager.create(".")
+
+        val args = {
+            "name": "helperFunc",
+            "file": "test.spl",
+        }
+
+        val result = mgr.get_prompt("refactor-inline", args)
+
+        assert result.ok.?
+        val prompt_data = result.unwrap()
+        assert prompt_data.messages[0].content.contains("helperFunc")
+
+describe "Code Generation Prompts":
+    it "generates test generation prompt":
+        val mgr = PromptManager.create(".")
+
+        val args = {
+            "target": "MyClass",
+            "file": "src/my_class.spl",
+        }
+
+        val result = mgr.get_prompt("generate-tests", args)
+
+        assert result.ok.?
+        val prompt_data = result.unwrap()
+        assert prompt_data.messages[0].content.contains("MyClass")
+        assert prompt_data.messages[0].content.contains("SSpec")
+
+    it "generates trait implementation prompt":
+        val mgr = PromptManager.create(".")
+
+        val args = {
+            "class_name": "MyClass",
+            "trait_name": "Serializable",
+            "file": "src/my_class.spl",
+        }
+
+        val result = mgr.get_prompt("generate-trait-impl", args)
+
+        assert result.ok.?
+        val prompt_data = result.unwrap()
+        assert prompt_data.messages[0].content.contains("MyClass")
+        assert prompt_data.messages[0].content.contains("Serializable")
+
+    it "generates constructor prompt":
+        val mgr = PromptManager.create(".")
+
+        val args = {
+            "class_name": "Point",
+            "file": "src/point.spl",
+        }
+
+        val result = mgr.get_prompt("generate-constructor", args)
+
+        assert result.ok.?
+        val prompt_data = result.unwrap()
+        assert prompt_data.messages[0].content.contains("Point")
+        assert prompt_data.messages[0].content.contains("static fn")
+
+describe "Documentation Prompts":
+    it "generates add docstrings prompt":
+        val mgr = PromptManager.create(".")
+
+        val args = {
+            "file": "src/utils.spl",
+        }
+
+        val result = mgr.get_prompt("docs-add-docstrings", args)
+
+        assert result.ok.?
+        val prompt_data = result.unwrap()
+        assert prompt_data.messages[0].content.contains("utils.spl")
+        assert prompt_data.messages[0].content.contains("documentation")
+
+    it "generates explain code prompt with code":
+        val mgr = PromptManager.create(".")
+
+        val args = {
+            "code": "fn factorial(n: i64) -> i64: if n <= 1: 1 else: n * factorial(n - 1)",
+        }
+
+        val result = mgr.get_prompt("docs-explain-code", args)
+
+        assert result.ok.?
+        val prompt_data = result.unwrap()
+        assert prompt_data.messages[0].content.contains("factorial")
+
+    it "generates explain code prompt with file":
+        val mgr = PromptManager.create(".")
+
+        val args = {
+            "file": "src/parser.spl",
+        }
+
+        val result = mgr.get_prompt("docs-explain-code", args)
+
+        assert result.ok.?
+        val prompt_data = result.unwrap()
+        assert prompt_data.messages[0].content.contains("parser.spl")
+
+    it "generates README generation prompt":
+        val mgr = PromptManager.create(".")
+
+        val result = mgr.get_prompt("docs-generate-readme", {})
+
+        assert result.ok.?
+        val prompt_data = result.unwrap()
+        assert prompt_data.messages[0].content.contains("README")
+
+describe "Analysis Prompts":
+    it "generates find bugs prompt":
+        val mgr = PromptManager.create(".")
+
+        val args = {
+            "file": "src/parser.spl",
+        }
+
+        val result = mgr.get_prompt("analyze-find-bugs", args)
+
+        assert result.ok.?
+        val prompt_data = result.unwrap()
+        assert prompt_data.messages[0].content.contains("bugs")
+        assert prompt_data.messages[0].content.contains("parser.spl")
+
+    it "generates suggest improvements prompt":
+        val mgr = PromptManager.create(".")
+
+        val args = {
+            "file": "src/utils.spl",
+        }
+
+        val result = mgr.get_prompt("analyze-suggest-improvements", args)
+
+        assert result.ok.?
+        val prompt_data = result.unwrap()
+        assert prompt_data.messages[0].content.contains("improvements")
+        assert prompt_data.messages[0].content.contains("utils.spl")
+
+    it "generates performance analysis prompt":
+        val mgr = PromptManager.create(".")
+
+        val args = {
+            "file": "src/compiler.spl",
+        }
+
+        val result = mgr.get_prompt("analyze-performance", args)
+
+        assert result.ok.?
+        val prompt_data = result.unwrap()
+        assert prompt_data.messages[0].content.contains("performance")
+        assert prompt_data.messages[0].content.contains("compiler.spl")
+
+describe "PromptMessage":
+    it "stores role and content":
+        val msg = PromptMessage(
+            role: PromptRole.User,
+            content: "Test message",
+        )
+
+        assert msg.role == PromptRole.User
+        assert msg.content == "Test message"
+
+describe "PromptArgument":
+    it "stores argument metadata":
+        val arg = PromptArgument(
+            name: "file_path",
+            description: "Path to the file",
+            required: true,
+        )
+
+        assert arg.name == "file_path"
+        assert arg.description == "Path to the file"
+        assert arg.required
+
+describe "PromptResult":
+    it "contains description and messages":
+        val result = PromptResult(
+            description: "Test prompt result",
+            messages: [
+                PromptMessage(role: PromptRole.User, content: "Hello"),
+                PromptMessage(role: PromptRole.Assistant, content: "Hi there"),
+            ],
+        )
+
+        assert result.description == "Test prompt result"
+        assert result.messages.length == 2
+        assert result.messages[0].role == PromptRole.User
+        assert result.messages[1].role == PromptRole.Assistant

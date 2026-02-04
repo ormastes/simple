@@ -49,6 +49,9 @@
 //! ## Phase 12: Regular Expressions ✅
 //! - `regex` - Regular expression operations (match, find, capture, replace, split)
 //!
+//! ## Phase 17: JSON Parsing and Serialization ✅
+//! - `json` - JSON operations (parse, serialize, pretty-print, parse_int)
+//!
 //! ## Refactoring Complete! ✅
 //! All FFI functions have been extracted from ffi_legacy.rs into organized, tested modules.
 //!

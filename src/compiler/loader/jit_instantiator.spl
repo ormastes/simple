@@ -6,6 +6,8 @@
 # Phase 5: Load-Time JIT Instantiation
 
 use compiler.loader.compiler_ffi.*
+use compiler.loader.smf_cache (SmfCache, MappedSmf)
+use app.io.mod (alloc_exec_memory, write_exec_memory, flush_icache, get_function_pointer)
 
 # ============================================================================
 # Result Types
@@ -91,18 +93,29 @@ struct JitInstantiator:
     depth: i32
     jit_cache: Dict<text, ([u8], i64)>
     symbol_table: Dict<text, i64>
+    smf_cache: SmfCache  # Memory-mapped SMF file cache
 
 impl JitInstantiator:
     static fn new(config: JitInstantiatorConfig) -> JitInstantiator:
         """Create a new JIT instantiator."""
         JitInstantiator(
             config: config,
-            compiler_ctx: CompilerContext.create(),  # FFI handle
+            compiler_ctx: create_compiler_context(),  # Helper function to create context
             loaded_metadata: {},
             in_progress: {},
             depth: 0,
             jit_cache: {},
-            symbol_table: {}
+            symbol_table: {},
+            smf_cache: SmfCache(
+                cached_files: {},
+                enabled: true,
+                stats: CacheStats(
+                    total_files: 0,
+                    total_memory: 0,
+                    cache_hits: 0,
+                    cache_misses: 0
+                )
+            )
         )
 
     me load_smf_metadata(smf_path: text) -> Result<(), text>:
@@ -120,11 +133,39 @@ impl JitInstantiator:
         self.jit_cache[symbol] = (code, address)
         self.symbol_table[symbol] = address
 
-    fn read_note_sdn_from_file(smf_path: text) -> Result<LoadedMetadata, text>:
-        """Read note.sdn section from SMF file."""
-        # TODO: Implement proper SMF section parsing
-        # For now, placeholder implementation
-        Ok(LoadedMetadata(possible: [], instantiations: []))
+    me read_note_sdn_from_file(smf_path: text) -> Result<LoadedMetadata, text>:
+        """Read note.sdn section from SMF file using mmap cache."""
+        # Get mapped SMF file from cache (auto-loads if not cached)
+        var mapped_smf = self.smf_cache.get(smf_path)?
+
+        # Read note.sdn metadata
+        val metadata = mapped_smf.read_note_sdn()?
+
+        # Convert NoteSdnMetadata to LoadedMetadata
+        var possible: [PossibleInstantiation] = []
+        for entry in metadata.possible:
+            possible = possible.push(PossibleInstantiation(
+                template_name: entry.template,
+                type_args: entry.type_args,
+                mangled_name: entry.mangled_name
+            ))
+
+        var instantiations: [InstantiationRecord] = []
+        var id = 0
+        for entry in metadata.instantiations:
+            instantiations = instantiations.push(InstantiationRecord(
+                id: id,
+                template_name: entry.template,
+                type_args: entry.type_args,
+                mangled_name: entry.mangled_name,
+                from_file: entry.from_file,
+                from_loc: entry.from_loc,
+                to_obj: entry.output_file,
+                status: entry.status.as_str()
+            ))
+            id = id + 1
+
+        Ok(LoadedMetadata(possible: possible, instantiations: instantiations))
 
     fn can_jit_instantiate(symbol: text) -> bool:
         """Check if a symbol can be JIT-instantiated."""
@@ -215,13 +256,33 @@ impl JitInstantiator:
 
         match code_result:
             case Ok(compiled_code):
-                val address: i64 = 0  # TODO: Allocate executable memory and get real address
+                # Allocate executable memory
+                val code_size = compiled_code.len() as i64
+                val exec_address = alloc_exec_memory(code_size)
+
+                if exec_address == 0:
+                    return JitInstantiationResult.CompilationError(
+                        "Failed to allocate executable memory"
+                    )
+
+                # Write code to executable memory
+                val bytes_written = write_exec_memory(exec_address, compiled_code, 0)
+                if bytes_written != code_size:
+                    return JitInstantiationResult.CompilationError(
+                        "Failed to write code to executable memory"
+                    )
+
+                # Flush instruction cache (required on ARM/RISC-V)
+                flush_icache(exec_address, code_size)
+
+                # Get function pointer
+                val fn_pointer = get_function_pointer(exec_address)
 
                 # Cache the result
-                self.jit_cache[entry.mangled_name] = (compiled_code, address)
+                self.jit_cache[entry.mangled_name] = (compiled_code, fn_pointer)
 
                 # Register in symbol table
-                self.symbol_table[entry.mangled_name] = address
+                self.symbol_table[entry.mangled_name] = fn_pointer
 
                 # Update SMF file if configured
                 if self.config.update_smf:
@@ -235,7 +296,7 @@ impl JitInstantiator:
                 JitInstantiationResult.Success(
                     code: compiled_code,
                     symbol: entry.mangled_name,
-                    address: Some(address)
+                    address: Some(fn_pointer)
                 )
 
             case Err(msg):
@@ -273,9 +334,14 @@ impl JitInstantiator:
 
     fn stats() -> JitStats:
         """Get JIT statistics."""
+        val cache_stats = self.smf_cache.get_stats()
         JitStats(
             cached_count: self.jit_cache.len(),
-            loaded_smf_count: self.loaded_metadata.len()
+            loaded_smf_count: self.loaded_metadata.len(),
+            smf_cache_hits: cache_stats.cache_hits,
+            smf_cache_misses: cache_stats.cache_misses,
+            smf_files_mapped: cache_stats.total_files,
+            smf_memory_mapped: cache_stats.total_memory
         )
 
 # ============================================================================
@@ -286,6 +352,10 @@ struct JitStats:
     """JIT instantiation statistics."""
     cached_count: i32
     loaded_smf_count: i32
+    smf_cache_hits: i32
+    smf_cache_misses: i32
+    smf_files_mapped: i32
+    smf_memory_mapped: i64
 
 # ============================================================================
 # Symbol Resolver

@@ -13,6 +13,9 @@ use std::fs;
 use std::env;
 use std::collections::HashMap;
 
+// libc for mmap syscalls
+use libc::{c_int, c_void, size_t, mmap, munmap, mprotect, madvise, msync, mlock, munlock, open, close, sysconf};
+
 // Cranelift imports for compiler
 use cranelift_codegen::ir::{AbiParam, InstBuilder, UserFuncName};
 use cranelift_codegen::ir::types::I64;
@@ -323,6 +326,230 @@ pub unsafe extern "C" fn rt_read_file(path_ptr: *const c_char, path_len: usize) 
 #[no_mangle]
 pub unsafe extern "C" fn rt_write_file(path_ptr: *const c_char, path_len: usize, content_ptr: *const c_char, content_len: usize) -> bool {
     rt_file_write_text(path_ptr, path_len, content_ptr, content_len)
+}
+
+// =============================================================================
+// Memory Mapping (mmap) - Minimal Syscall Wrappers
+// =============================================================================
+
+/// Map memory (libc mmap) - 1-line wrapper
+#[no_mangle]
+pub extern "C" fn rt_mmap(
+    addr: i64,
+    length: i64,
+    prot: c_int,
+    flags: c_int,
+    fd: c_int,
+    offset: i64,
+) -> i64 {
+    unsafe {
+        mmap(addr as *mut c_void, length as size_t, prot, flags, fd, offset) as i64
+    }
+}
+
+/// Unmap memory (libc munmap) - 1-line wrapper
+#[no_mangle]
+pub extern "C" fn rt_munmap(addr: i64, length: i64) -> c_int {
+    unsafe { munmap(addr as *mut c_void, length as size_t) }
+}
+
+/// Change protection (libc mprotect) - 1-line wrapper
+#[no_mangle]
+pub extern "C" fn rt_mprotect(addr: i64, length: i64, prot: c_int) -> c_int {
+    unsafe { mprotect(addr as *mut c_void, length as size_t, prot) }
+}
+
+/// Memory advice (libc madvise) - 1-line wrapper
+#[no_mangle]
+pub extern "C" fn rt_madvise(addr: i64, length: i64, advice: c_int) -> c_int {
+    unsafe { madvise(addr as *mut c_void, length as size_t, advice) }
+}
+
+/// Sync to disk (libc msync) - 1-line wrapper
+#[no_mangle]
+pub extern "C" fn rt_msync(addr: i64, length: i64, flags: c_int) -> c_int {
+    unsafe { msync(addr as *mut c_void, length as size_t, flags) }
+}
+
+/// Lock in RAM (libc mlock) - 1-line wrapper
+#[no_mangle]
+pub extern "C" fn rt_mlock(addr: i64, length: i64) -> c_int {
+    unsafe { mlock(addr as *const c_void, length as size_t) }
+}
+
+/// Unlock memory (libc munlock) - 1-line wrapper
+#[no_mangle]
+pub extern "C" fn rt_munlock(addr: i64, length: i64) -> c_int {
+    unsafe { munlock(addr as *const c_void, length as size_t) }
+}
+
+/// Get page size (libc sysconf) - 1-line wrapper
+#[no_mangle]
+pub extern "C" fn rt_page_size() -> i64 {
+    unsafe { sysconf(libc::_SC_PAGESIZE) }
+}
+
+/// Open file (libc open) - direct wrapper
+#[no_mangle]
+pub unsafe extern "C" fn rt_open_fd(path: *const i8, flags: c_int, mode: c_int) -> c_int {
+    open(path, flags, mode as libc::mode_t)
+}
+
+/// Close file (libc close) - 1-line wrapper
+#[no_mangle]
+pub extern "C" fn rt_close_fd(fd: c_int) -> c_int {
+    unsafe { close(fd) }
+}
+
+// =============================================================================
+// High-Level mmap Functions (using raw syscalls above)
+// =============================================================================
+
+/// Map file into memory - opens, mmaps, closes fd
+#[no_mangle]
+pub unsafe extern "C" fn rt_mmap_file(
+    path_ptr: *const c_char,
+    path_len: usize,
+    prot: c_int,
+    flags: c_int,
+    offset: i64,
+    length: i64,
+) -> (i64, i64) {
+    if path_ptr.is_null() {
+        return (0, 0);
+    }
+
+    // Convert path to CString
+    let path_slice = std::slice::from_raw_parts(path_ptr as *const u8, path_len);
+    let path_cstr = match CString::new(path_slice) {
+        Ok(s) => s,
+        Err(_) => return (0, 0),
+    };
+
+    // Open file
+    let fd = open(path_cstr.as_ptr() as *const i8, libc::O_RDONLY, 0);
+    if fd < 0 {
+        return (0, 0);
+    }
+
+    // Get file size if length == 0
+    let actual_length = if length == 0 {
+        let stat_result = libc::fstat(fd, &mut std::mem::zeroed());
+        if stat_result != 0 {
+            close(fd);
+            return (0, 0);
+        }
+        let mut stat: libc::stat = std::mem::zeroed();
+        libc::fstat(fd, &mut stat);
+        stat.st_size
+    } else {
+        length
+    };
+
+    // Call mmap
+    let addr = mmap(
+        std::ptr::null_mut(),
+        actual_length as size_t,
+        prot,
+        flags,
+        fd,
+        offset,
+    ) as i64;
+
+    // Close fd (mmap keeps reference)
+    close(fd);
+
+    // Check for error
+    if addr == -1 {
+        return (0, 0);
+    }
+
+    (addr, actual_length)
+}
+
+/// Read bytes from mapped memory
+#[no_mangle]
+pub unsafe extern "C" fn rt_mmap_read_bytes(
+    address: i64,
+    offset: i64,
+    length: i64,
+) -> *mut u8 {
+    if address == 0 || length == 0 {
+        return std::ptr::null_mut();
+    }
+
+    let src = (address + offset) as *const u8;
+    let mut result = Vec::with_capacity(length as usize);
+    std::ptr::copy_nonoverlapping(src, result.as_mut_ptr(), length as usize);
+    result.set_len(length as usize);
+
+    // Convert to heap-allocated slice
+    let boxed = result.into_boxed_slice();
+    Box::into_raw(boxed) as *mut u8
+}
+
+/// Read string from mapped memory
+#[no_mangle]
+pub unsafe extern "C" fn rt_mmap_read_string(
+    address: i64,
+    offset: i64,
+    max_length: i64,
+) -> *mut c_char {
+    if address == 0 {
+        return std::ptr::null_mut();
+    }
+
+    let ptr = (address + offset) as *const u8;
+    let max_len = if max_length == 0 { 4096 } else { max_length as usize };
+
+    // Find string length (until null terminator or max_length)
+    let mut len = 0;
+    while len < max_len {
+        if *ptr.add(len) == 0 {
+            break;
+        }
+        len += 1;
+    }
+
+    // Create slice and convert to string
+    let slice = std::slice::from_raw_parts(ptr, len);
+    match String::from_utf8_lossy(slice).into_owned() {
+        s => CString::new(s).ok().map(|c| c.into_raw()).unwrap_or(std::ptr::null_mut()),
+    }
+}
+
+/// Get file size for mmap
+#[no_mangle]
+pub unsafe extern "C" fn rt_file_size_for_mmap(path_ptr: *const c_char, path_len: usize) -> i64 {
+    if path_ptr.is_null() {
+        return -1;
+    }
+
+    let path_slice = std::slice::from_raw_parts(path_ptr as *const u8, path_len);
+    let path_cstr = match CString::new(path_slice) {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
+
+    let mut stat: libc::stat = std::mem::zeroed();
+    if libc::stat(path_cstr.as_ptr() as *const i8, &mut stat) == 0 {
+        stat.st_size
+    } else {
+        -1
+    }
+}
+
+/// Get page size (wrapper for rt_page_size)
+#[no_mangle]
+pub extern "C" fn rt_get_page_size() -> i64 {
+    rt_page_size()
+}
+
+/// Memory sync (wrapper)
+#[no_mangle]
+pub extern "C" fn rt_msync_wrapper(address: i64, size: i64, is_async: bool) -> bool {
+    let flags = if is_async { libc::MS_ASYNC } else { libc::MS_SYNC };
+    rt_msync(address, size, flags) == 0
 }
 
 // =============================================================================

@@ -1,0 +1,487 @@
+# Module-Level Type Checking
+#
+# Implements two-pass type checking for complete modules:
+# Pass 1: Register all top-level definitions (functions, classes, structs, etc.)
+# Pass 2: Type check all definition bodies
+#
+# This module extends TypeChecker with module-level orchestration.
+
+from inference.types import {Type, TypeVarId, TypeScheme, TypeEnv}
+from inference.infer import {InferenceEngine}
+from ast import {Node, Module, FunctionDef, StructDef, ClassDef, EnumDef}
+from ast import {TraitDef, ImplBlock, TypeAliasDef, ConstStmt, StaticStmt}
+from ast import {Parameter, Field, EnumVariant, GenericParam, Block}
+from compiler.type_system.checker import {TypeError, TypeChecker}
+from compiler.type_system.expr_infer import {infer_expr}
+from compiler.type_system.stmt_check import {check_block, bind_pattern}
+
+# ============================================================================
+# Module Checking
+# ============================================================================
+
+fn check_module(checker: TypeChecker, module: Module) -> Result<(), TypeError>:
+    """Type check a complete module using two-pass algorithm.
+
+    Pass 1: Register all top-level names with signatures
+    Pass 2: Type check all bodies
+    """
+
+    # Pass 1: Register all definitions
+    for item in module.items:
+        register_definition(checker, item)?
+
+    # Pass 2: Check all bodies
+    for item in module.items:
+        check_definition(checker, item)?
+
+    Ok(())
+
+# ============================================================================
+# Pass 1: Definition Registration
+# ============================================================================
+
+fn register_definition(checker: TypeChecker, item: Node) -> Result<(), TypeError>:
+    """Register a top-level definition (name + type signature only).
+
+    This allows forward references and mutual recursion.
+    """
+    match item:
+        case Function(func):
+            register_function_signature(checker, func)
+
+        case Struct(struct_def):
+            register_struct(checker, struct_def)
+
+        case Class(class_def):
+            register_class(checker, class_def)
+
+        case Enum(enum_def):
+            register_enum(checker, enum_def)
+
+        case Trait(trait_def):
+            register_trait(checker, trait_def)
+
+        case Impl(impl_block):
+            register_impl_signature(checker, impl_block)
+
+        case TypeAlias(alias):
+            register_type_alias(checker, alias)
+
+        case Const(const_stmt):
+            register_const(checker, const_stmt)
+
+        case Static(static_stmt):
+            register_static(checker, static_stmt)
+
+        case _:
+            # Other items (imports, exports, etc.) don't need registration
+            Ok(())
+
+# ----------------------------------------------------------------------------
+# Function Registration
+# ----------------------------------------------------------------------------
+
+fn register_function_signature(checker: TypeChecker, func: FunctionDef) -> Result<(), TypeError>:
+    """Register function name with its type signature.
+
+    Creates function type: fn(params...) -> ret
+    """
+
+    # Collect parameter types
+    var param_types: [Type] = []
+    for param in func.params:
+        val param_ty = if param.ty.?:
+            # TODO: Convert AST Type to inference Type
+            checker.fresh_var()
+        else:
+            checker.fresh_var()
+
+        param_types = param_types.push(param_ty)
+
+    # Get return type
+    val ret_ty = if func.return_type.?:
+        # TODO: Convert AST Type to inference Type
+        checker.fresh_var()
+    else:
+        Type.Unit  # No return type annotation → Unit
+
+    # Create function type
+    val func_ty = Type.Function(params: param_types, ret: ret_ty)
+
+    # Register in environment
+    checker.env[func.name] = func_ty
+
+    Ok(())
+
+# ----------------------------------------------------------------------------
+# Struct Registration
+# ----------------------------------------------------------------------------
+
+fn register_struct(checker: TypeChecker, struct_def: StructDef) -> Result<(), TypeError>:
+    """Register struct type and constructor."""
+
+    # Create struct type
+    val struct_ty = Type.Named(struct_def.name)
+
+    # Register type name
+    checker.env[struct_def.name] = struct_ty
+
+    # Register constructor function
+    # Constructor takes field types as parameters, returns struct
+    var field_types: [Type] = []
+    for field in struct_def.fields:
+        val field_ty = if field.ty.?:
+            # TODO: Convert AST Type to inference Type
+            checker.fresh_var()
+        else:
+            checker.fresh_var()
+
+        field_types = field_types.push(field_ty)
+
+    val constructor_ty = Type.Function(params: field_types, ret: struct_ty)
+    checker.env[struct_def.name] = constructor_ty
+
+    Ok(())
+
+# ----------------------------------------------------------------------------
+# Class Registration
+# ----------------------------------------------------------------------------
+
+fn register_class(checker: TypeChecker, class_def: ClassDef) -> Result<(), TypeError>:
+    """Register class type and methods."""
+
+    # Create class type
+    val class_ty = Type.Named(class_def.name)
+
+    # Register type name
+    checker.env[class_def.name] = class_ty
+
+    # Register constructor (similar to struct)
+    var field_types: [Type] = []
+    for field in class_def.fields:
+        val field_ty = checker.fresh_var()
+        field_types = field_types.push(field_ty)
+
+    val constructor_ty = Type.Function(params: field_types, ret: class_ty)
+    checker.env[class_def.name] = constructor_ty
+
+    # Register method signatures
+    for method in class_def.methods:
+        # Methods are registered with class prefix for now
+        val method_name = "{class_def.name}.{method.name}"
+        register_function_signature(checker, method)?
+
+    Ok(())
+
+# ----------------------------------------------------------------------------
+# Enum Registration
+# ----------------------------------------------------------------------------
+
+fn register_enum(checker: TypeChecker, enum_def: EnumDef) -> Result<(), TypeError>:
+    """Register enum type and variant constructors."""
+
+    # Create enum type
+    val enum_ty = Type.Named(enum_def.name)
+
+    # Register type name
+    checker.env[enum_def.name] = enum_ty
+
+    # Register each variant as a constructor
+    for variant in enum_def.variants:
+        val variant_name = "{enum_def.name}.{variant.name}"
+
+        # Variant constructor type
+        val variant_ty = if variant.fields.?:
+            # Variant with fields → function that returns enum
+            var field_types: [Type] = []
+            for field in variant.fields.unwrap():
+                field_types = field_types.push(checker.fresh_var())
+
+            Type.Function(params: field_types, ret: enum_ty)
+        else:
+            # Unit variant → just the enum type
+            enum_ty
+
+        checker.env[variant_name] = variant_ty
+
+    Ok(())
+
+# ----------------------------------------------------------------------------
+# Trait Registration
+# ----------------------------------------------------------------------------
+
+fn register_trait(checker: TypeChecker, trait_def: TraitDef) -> Result<(), TypeError>:
+    """Register trait and method signatures."""
+
+    # Register trait name (as a type)
+    val trait_ty = Type.DynTrait(trait_def.name)
+    checker.env[trait_def.name] = trait_ty
+
+    # Register method signatures
+    for method in trait_def.methods:
+        val method_name = "{trait_def.name}.{method.name}"
+        register_function_signature(checker, method)?
+
+    Ok(())
+
+# ----------------------------------------------------------------------------
+# Impl Block Registration
+# ----------------------------------------------------------------------------
+
+fn register_impl_signature(checker: TypeChecker, impl_block: ImplBlock) -> Result<(), TypeError>:
+    """Register impl block methods."""
+
+    # Determine if this is a trait impl or inherent impl
+    val prefix = if impl_block.trait_name.?:
+        # Trait impl: Target.Trait.method
+        "{impl_block.target}.{impl_block.trait_name.unwrap()}"
+    else:
+        # Inherent impl: Target.method
+        impl_block.target
+
+    # Register trait implementation for coherence checking
+    if impl_block.trait_name.?:
+        val trait_name = impl_block.trait_name.unwrap()
+        val is_blanket = impl_block.target == "T"  # Simple blanket detection
+        checker.register_trait_impl(trait_name, impl_block.target, is_blanket, false)?
+
+    # Register each method
+    for method in impl_block.methods:
+        val method_name = "{prefix}.{method.name}"
+        register_function_signature(checker, method)?
+
+    Ok(())
+
+# ----------------------------------------------------------------------------
+# Type Alias Registration
+# ----------------------------------------------------------------------------
+
+fn register_type_alias(checker: TypeChecker, alias: TypeAliasDef) -> Result<(), TypeError>:
+    """Register type alias."""
+
+    # TODO: Convert target AST Type to inference Type
+    val target_ty = checker.fresh_var()
+
+    checker.env[alias.name] = target_ty
+
+    Ok(())
+
+# ----------------------------------------------------------------------------
+# Const/Static Registration
+# ----------------------------------------------------------------------------
+
+fn register_const(checker: TypeChecker, const_stmt: ConstStmt) -> Result<(), TypeError>:
+    """Register const binding (signature only)."""
+
+    val const_ty = if const_stmt.ty.?:
+        # TODO: Convert AST Type to inference Type
+        checker.fresh_var()
+    else:
+        checker.fresh_var()
+
+    checker.env[const_stmt.name] = const_ty
+
+    Ok(())
+
+fn register_static(checker: TypeChecker, static_stmt: StaticStmt) -> Result<(), TypeError>:
+    """Register static binding (signature only)."""
+
+    val static_ty = if static_stmt.ty.?:
+        # TODO: Convert AST Type to inference Type
+        checker.fresh_var()
+    else:
+        checker.fresh_var()
+
+    checker.env[static_stmt.name] = static_ty
+
+    Ok(())
+
+# ============================================================================
+# Pass 2: Definition Body Checking
+# ============================================================================
+
+fn check_definition(checker: TypeChecker, item: Node) -> Result<(), TypeError>:
+    """Type check a definition body (after all signatures are registered)."""
+
+    match item:
+        case Function(func):
+            check_function_body(checker, func)
+
+        case Class(class_def):
+            # Check method bodies
+            for method in class_def.methods:
+                check_function_body(checker, method)?
+            Ok(())
+
+        case Impl(impl_block):
+            # Check method bodies
+            for method in impl_block.methods:
+                check_function_body(checker, method)?
+            Ok(())
+
+        case Const(const_stmt):
+            check_const_body(checker, const_stmt)
+
+        case Static(static_stmt):
+            check_static_body(checker, static_stmt)
+
+        case _:
+            # Other items don't have bodies to check
+            Ok(())
+
+# ----------------------------------------------------------------------------
+# Function Body Checking
+# ----------------------------------------------------------------------------
+
+fn check_function_body(checker: TypeChecker, func: FunctionDef) -> Result<(), TypeError>:
+    """Type check a function body against its signature.
+
+    1. Create scope with parameters
+    2. Check body
+    3. Verify body type matches return type
+    """
+
+    # Get function return type
+    val ret_ty = if func.return_type.?:
+        # TODO: Convert AST Type to inference Type
+        checker.fresh_var()
+    else:
+        Type.Unit
+
+    # Create scope with parameters
+    var func_env = checker.env
+
+    for param in func.params:
+        val param_ty = if param.ty.?:
+            # TODO: Convert AST Type to inference Type
+            checker.fresh_var()
+        else:
+            checker.fresh_var()
+
+        # Bind parameter based on pattern
+        # For now, assume simple identifier
+        func_env[param.name] = param_ty
+
+    # Check function body
+    # Need to create engine from checker state
+    var engine = InferenceEngine(
+        unifier: checker.unifier,
+        env: TypeEnv.empty(),  # TODO: Convert func_env to TypeEnv
+        deferred: [],
+        errors: []
+    )
+
+    val body_ty = check_block(engine, func.body, func_env, Some(ret_ty))?
+
+    # Unify body type with return type
+    engine.unify(body_ty, ret_ty)?
+
+    Ok(())
+
+# ----------------------------------------------------------------------------
+# Const/Static Body Checking
+# ----------------------------------------------------------------------------
+
+fn check_const_body(checker: TypeChecker, const_stmt: ConstStmt) -> Result<(), TypeError>:
+    """Type check const initializer."""
+
+    # Create engine
+    var engine = InferenceEngine(
+        unifier: checker.unifier,
+        env: TypeEnv.empty(),
+        deferred: [],
+        errors: []
+    )
+
+    # Infer initializer type
+    val value_ty = infer_expr(engine, const_stmt.value, checker.env)?
+
+    # Check against annotation (if present)
+    if const_stmt.ty.?:
+        val ann_ty = checker.fresh_var()  # TODO: Convert AST Type
+        engine.unify(value_ty, ann_ty)?
+
+    Ok(())
+
+fn check_static_body(checker: TypeChecker, static_stmt: StaticStmt) -> Result<(), TypeError>:
+    """Type check static initializer."""
+
+    # Create engine
+    var engine = InferenceEngine(
+        unifier: checker.unifier,
+        env: TypeEnv.empty(),
+        deferred: [],
+        errors: []
+    )
+
+    # Infer initializer type
+    val value_ty = infer_expr(engine, static_stmt.value, checker.env)?
+
+    # Check against annotation (if present)
+    if static_stmt.ty.?:
+        val ann_ty = checker.fresh_var()  # TODO: Convert AST Type
+        engine.unify(value_ty, ann_ty)?
+
+    Ok(())
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+fn ast_type_to_inference_type(ast_ty: ast.Type, checker: TypeChecker) -> Type:
+    """Convert AST type to inference type.
+
+    TODO: Full implementation
+    """
+    match ast_ty:
+        case Simple(name):
+            match name:
+                case "i64": Type.Int(bits: 64, signed: true)
+                case "i32": Type.Int(bits: 32, signed: true)
+                case "f64": Type.Float(bits: 64)
+                case "f32": Type.Float(bits: 32)
+                case "bool": Type.Bool
+                case "text": Type.Str
+                case "()": Type.Unit
+                case _: Type.Named(name)
+
+        case Generic(name, args):
+            val arg_types = args.map(\a: ast_type_to_inference_type(a, checker))
+            Type.Generic(base: name, args: arg_types)
+
+        case Optional(inner):
+            val inner_ty = ast_type_to_inference_type(inner, checker)
+            Type.Optional(inner: inner_ty)
+
+        case Array(elem, size):
+            val elem_ty = ast_type_to_inference_type(elem, checker)
+            # TODO: Handle size expression
+            Type.Array(elem: elem_ty, size: nil)
+
+        case Tuple(elems):
+            val elem_types = elems.map(\e: ast_type_to_inference_type(e, checker))
+            Type.Tuple(elements: elem_types)
+
+        case Function(params, ret):
+            val param_types = params.map(\p: ast_type_to_inference_type(p, checker))
+            val ret_ty = if ret.?:
+                ast_type_to_inference_type(ret.unwrap(), checker)
+            else:
+                Type.Unit
+            Type.Function(params: param_types, ret: ret_ty)
+
+        case _:
+            # Unsupported type - return fresh variable
+            checker.fresh_var()
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export check_module
+export register_definition, check_definition
+export register_function_signature, register_struct, register_class
+export register_enum, register_trait, register_impl_signature
+export register_type_alias, register_const, register_static
+export check_function_body, check_const_body, check_static_body
+export ast_type_to_inference_type

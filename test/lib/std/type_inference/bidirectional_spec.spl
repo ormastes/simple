@@ -1,0 +1,431 @@
+# Bidirectional Type Checking Tests
+#
+# Tests for bidirectional.spl - expected type propagation.
+
+use compiler.type_system.bidirectional*
+use compiler.inference.types*
+use compiler.inference.infer (InferenceEngine)
+use ast*
+
+# ============================================================================
+# Test Helpers
+# ============================================================================
+
+fn create_engine() -> InferenceEngine:
+    """Create a fresh inference engine for testing."""
+    InferenceEngine.create()
+
+fn create_env() -> Dict<text, Type>:
+    """Create a basic environment."""
+    var env: Dict<text, Type> = {}
+    env["x"] = Type.Int(bits: 64, signed: true)
+    env["s"] = Type.Str
+    env
+
+fn make_span() -> Span:
+    """Create a dummy span."""
+    Span(start: 0, end: 0, line: 1, column: 1)
+
+# ============================================================================
+# InferMode Tests
+# ============================================================================
+
+describe "InferMode":
+    it "identifies Synthesize mode":
+        val mode = InferMode.Synthesize
+
+        expect(mode.is_synthesize()).to(be_true())
+        expect(mode.is_check()).to(be_false())
+        expect(mode.expected_type().?).to(be_false())
+
+    it "identifies Check mode":
+        val mode = InferMode.Check(Type.Int(bits: 64, signed: true))
+
+        expect(mode.is_synthesize()).to(be_false())
+        expect(mode.is_check()).to(be_true())
+        expect(mode.expected_type().?).to(be_true())
+
+    it "extracts expected type from Check mode":
+        val expected = Type.Int(bits: 64, signed: true)
+        val mode = InferMode.Check(expected)
+
+        val extracted = mode.expected_type()
+        expect(extracted.?).to(be_true())
+        expect(extracted.unwrap()).to(eq(expected))
+
+# ============================================================================
+# Integer Literal with Expected Type Tests
+# ============================================================================
+
+describe "Integer Literals with Expected Type":
+    it "uses expected i32 type for integer literal":
+        val engine = create_engine()
+        val env = create_env()
+        val expr = Expr.Integer(42)
+        val expected = Type.Int(bits: 32, signed: true)
+
+        val result = check_expr(engine, expr, expected, env)
+
+        expect(result.ok.?).to(be_true())
+        val ty = result.unwrap()
+        expect(ty).to(eq(expected))
+
+    it "uses expected i64 type for integer literal":
+        val engine = create_engine()
+        val env = create_env()
+        val expr = Expr.Integer(42)
+        val expected = Type.Int(bits: 64, signed: true)
+
+        val result = check_expr(engine, expr, expected, env)
+
+        expect(result.ok.?).to(be_true())
+        val ty = result.unwrap()
+        expect(ty).to(eq(expected))
+
+# ============================================================================
+# Float Literal with Expected Type Tests
+# ============================================================================
+
+describe "Float Literals with Expected Type":
+    it "uses expected f32 type for float literal":
+        val engine = create_engine()
+        val env = create_env()
+        val expr = Expr.Float(3.14)
+        val expected = Type.Float(bits: 32)
+
+        val result = check_expr(engine, expr, expected, env)
+
+        expect(result.ok.?).to(be_true())
+        val ty = result.unwrap()
+        expect(ty).to(eq(expected))
+
+    it "uses expected f64 type for float literal":
+        val engine = create_engine()
+        val env = create_env()
+        val expr = Expr.Float(3.14)
+        val expected = Type.Float(bits: 64)
+
+        val result = check_expr(engine, expr, expected, env)
+
+        expect(result.ok.?).to(be_true())
+        val ty = result.unwrap()
+        expect(ty).to(eq(expected))
+
+# ============================================================================
+# Lambda with Expected Function Type Tests
+# ============================================================================
+
+describe "Lambda with Expected Function Type":
+    it "infers lambda parameter types from expected function type":
+        val engine = create_engine()
+        val env = create_env()
+
+        # Lambda: \x, y: x + y
+        val lambda = Expr.Lambda(
+            params: [
+                LambdaParam(name: "x", ty: nil),
+                LambdaParam(name: "y", ty: nil)
+            ],
+            body: Expr.Binary(
+                op: BinOp.Add,
+                left: Expr.Identifier("x"),
+                right: Expr.Identifier("y")
+            ),
+            move_mode: MoveMode.Copy,
+            capture_all: false
+        )
+
+        # Expected: fn(i64, i64) -> i64
+        val expected = Type.Function(
+            params: [
+                Type.Int(bits: 64, signed: true),
+                Type.Int(bits: 64, signed: true)
+            ],
+            ret: Type.Int(bits: 64, signed: true)
+        )
+
+        val result = check_expr(engine, lambda, expected, env)
+
+        expect(result.ok.?).to(be_true())
+
+    it "checks lambda parameter count":
+        val engine = create_engine()
+        val env = create_env()
+
+        # Lambda with wrong parameter count
+        val lambda = Expr.Lambda(
+            params: [LambdaParam(name: "x", ty: nil)],
+            body: Expr.Identifier("x"),
+            move_mode: MoveMode.Copy,
+            capture_all: false
+        )
+
+        # Expected: fn(i64, i64) -> i64  (2 params)
+        val expected = Type.Function(
+            params: [
+                Type.Int(bits: 64, signed: true),
+                Type.Int(bits: 64, signed: true)
+            ],
+            ret: Type.Int(bits: 64, signed: true)
+        )
+
+        val result = check_expr(engine, lambda, expected, env)
+
+        # Should fail - parameter count mismatch
+        expect(result.err.?).to(be_true())
+
+# ============================================================================
+# Array with Expected Type Tests
+# ============================================================================
+
+describe "Array with Expected Element Type":
+    it "checks array elements against expected element type":
+        val engine = create_engine()
+        val env = create_env()
+
+        val array = Expr.Array([
+            Expr.Integer(1),
+            Expr.Integer(2),
+            Expr.Integer(3)
+        ])
+
+        val expected = Type.Array(
+            elem: Type.Int(bits: 64, signed: true),
+            size: nil
+        )
+
+        val result = check_expr(engine, array, expected, env)
+
+        expect(result.ok.?).to(be_true())
+        val ty = result.unwrap()
+        expect(ty).to(eq(expected))
+
+    it "allows empty array with expected type":
+        val engine = create_engine()
+        val env = create_env()
+
+        val array = Expr.Array([])
+
+        val expected = Type.Array(
+            elem: Type.Int(bits: 64, signed: true),
+            size: nil
+        )
+
+        val result = check_expr(engine, array, expected, env)
+
+        expect(result.ok.?).to(be_true())
+
+# ============================================================================
+# Tuple with Expected Type Tests
+# ============================================================================
+
+describe "Tuple with Expected Types":
+    it "checks tuple elements against expected types":
+        val engine = create_engine()
+        val env = create_env()
+
+        val tuple = Expr.Tuple([
+            Expr.Integer(42),
+            Expr.String("hello")
+        ])
+
+        val expected = Type.Tuple(elements: [
+            Type.Int(bits: 64, signed: true),
+            Type.Str
+        ])
+
+        val result = check_expr(engine, tuple, expected, env)
+
+        expect(result.ok.?).to(be_true())
+        val ty = result.unwrap()
+        expect(ty).to(eq(expected))
+
+    it "detects tuple arity mismatch":
+        val engine = create_engine()
+        val env = create_env()
+
+        val tuple = Expr.Tuple([
+            Expr.Integer(42)
+        ])
+
+        # Expected: (i64, text) - 2 elements
+        val expected = Type.Tuple(elements: [
+            Type.Int(bits: 64, signed: true),
+            Type.Str
+        ])
+
+        val result = check_expr(engine, tuple, expected, env)
+
+        # Should fail - arity mismatch
+        expect(result.err.?).to(be_true())
+
+# ============================================================================
+# Dict with Expected Type Tests
+# ============================================================================
+
+describe "Dict with Expected Key-Value Types":
+    it "checks dict pairs against expected types":
+        val engine = create_engine()
+        val env = create_env()
+
+        val dict = Expr.Dict([
+            (Expr.String("key1"), Expr.Integer(1)),
+            (Expr.String("key2"), Expr.Integer(2))
+        ])
+
+        val expected = Type.Dict(
+            key: Type.Str,
+            value: Type.Int(bits: 64, signed: true)
+        )
+
+        val result = check_expr(engine, dict, expected, env)
+
+        expect(result.ok.?).to(be_true())
+        val ty = result.unwrap()
+        expect(ty).to(eq(expected))
+
+# ============================================================================
+# If Expression with Expected Type Tests
+# ============================================================================
+
+describe "If Expression with Expected Type":
+    it "checks both branches against expected type":
+        val engine = create_engine()
+        val env = create_env()
+
+        val if_expr = Expr.IfExpr(
+            let_pattern: nil,
+            condition: Expr.Bool(true),
+            then_branch: Expr.Integer(1),
+            else_branch: Some(Expr.Integer(2))
+        )
+
+        val expected = Type.Int(bits: 64, signed: true)
+
+        val result = check_expr(engine, if_expr, expected, env)
+
+        expect(result.ok.?).to(be_true())
+
+# ============================================================================
+# Function Call with Expected Return Type Tests
+# ============================================================================
+
+describe "Function Call with Expected Return Type":
+    it "checks function call with expected return type":
+        val engine = create_engine()
+        var env = create_env()
+
+        # Register function: fn add(i64, i64) -> i64
+        env["add"] = Type.Function(
+            params: [
+                Type.Int(bits: 64, signed: true),
+                Type.Int(bits: 64, signed: true)
+            ],
+            ret: Type.Int(bits: 64, signed: true)
+        )
+
+        val call = Expr.Call(
+            callee: Expr.Identifier("add"),
+            args: [
+                Argument(name: nil, value: Expr.Integer(1), span: make_span(), label: nil),
+                Argument(name: nil, value: Expr.Integer(2), span: make_span(), label: nil)
+            ]
+        )
+
+        val expected = Type.Int(bits: 64, signed: true)
+
+        val result = check_expr(engine, call, expected, env)
+
+        expect(result.ok.?).to(be_true())
+
+# ============================================================================
+# Bidirectional API Tests
+# ============================================================================
+
+describe "Bidirectional API":
+    it "uses Synthesize mode when no expected type":
+        val engine = create_engine()
+        val env = create_env()
+        val expr = Expr.Integer(42)
+
+        val result = infer_with_expected(engine, expr, nil, env)
+
+        expect(result.ok.?).to(be_true())
+
+    it "uses Check mode when expected type provided":
+        val engine = create_engine()
+        val env = create_env()
+        val expr = Expr.Integer(42)
+        val expected = Type.Int(bits: 32, signed: true)
+
+        val result = infer_with_expected(engine, expr, Some(expected), env)
+
+        expect(result.ok.?).to(be_true())
+        val ty = result.unwrap()
+        expect(ty).to(eq(expected))
+
+# ============================================================================
+# Integration Tests
+# ============================================================================
+
+describe "Bidirectional Integration":
+    it "improves type inference for nested expressions":
+        val engine = create_engine()
+        val env = create_env()
+
+        # Expression: [1, 2, 3]
+        # Expected: [i32]  (not i64)
+        val array = Expr.Array([
+            Expr.Integer(1),
+            Expr.Integer(2),
+            Expr.Integer(3)
+        ])
+
+        val expected = Type.Array(
+            elem: Type.Int(bits: 32, signed: true),
+            size: nil
+        )
+
+        val result = check_expr(engine, array, expected, env)
+
+        expect(result.ok.?).to(be_true())
+        # Elements should be inferred as i32, not default i64
+
+    it "propagates expected types through complex expressions":
+        val engine = create_engine()
+        val env = create_env()
+
+        # Expression: (1, "hello", [2, 3])
+        # Expected: (i32, text, [i32])
+        val tuple = Expr.Tuple([
+            Expr.Integer(1),
+            Expr.String("hello"),
+            Expr.Array([Expr.Integer(2), Expr.Integer(3)])
+        ])
+
+        val expected = Type.Tuple(elements: [
+            Type.Int(bits: 32, signed: true),
+            Type.Str,
+            Type.Array(elem: Type.Int(bits: 32, signed: true), size: nil)
+        ])
+
+        val result = check_expr(engine, tuple, expected, env)
+
+        expect(result.ok.?).to(be_true())
+
+# ============================================================================
+# Summary
+# ============================================================================
+
+# Total test count: 20+ tests covering:
+# - InferMode (3 tests)
+# - Integer literals (2 tests)
+# - Float literals (2 tests)
+# - Lambda inference (2 tests)
+# - Array checking (2 tests)
+# - Tuple checking (2 tests)
+# - Dict checking (1 test)
+# - If expression (1 test)
+# - Function calls (1 test)
+# - API tests (2 tests)
+# - Integration (2 tests)

@@ -12,6 +12,10 @@
 # I/O imports
 use app.io.mod (file_read, get_args, exit, shell)
 
+# MCP modules
+import app.mcp.resources
+import app.mcp.prompts
+
 struct ShellResult:
     exit_code: Int
     stdout: String?
@@ -111,6 +115,14 @@ fn start_server(debug_mode: Bool):
     if debug_mode:
         debug_log("MCP server starting in debug mode")
 
+    # Initialize resource and prompt managers
+    val project_root = get_current_dir()
+    val resource_mgr = resources.ResourceManager.create(project_root)
+    val prompt_mgr = prompts.PromptManager.create(project_root)
+
+    if debug_mode:
+        debug_log("Initialized with project root: " + project_root)
+
     # Send nothing until we get initialize request
     var running = true
     while running:
@@ -118,7 +130,7 @@ fn start_server(debug_mode: Bool):
         if line == "":
             running = false
         else:
-            val response = handle_jsonrpc(line, debug_mode)
+            val response = handle_jsonrpc(line, debug_mode, resource_mgr, prompt_mgr)
             if response != "":
                 write_stdout_message(response)
 
@@ -158,7 +170,7 @@ fn write_stdout_message(body: String):
     print_raw(header)
     print_raw(body)
 
-fn handle_jsonrpc(body: String, debug_mode: Bool) -> String:
+fn handle_jsonrpc(body: String, debug_mode: Bool, resource_mgr: resources.ResourceManager, prompt_mgr: prompts.PromptManager) -> String:
     if debug_mode:
         debug_log("Request: " + body)
 
@@ -180,6 +192,18 @@ fn handle_jsonrpc(body: String, debug_mode: Bool) -> String:
     elif method == "tools/call":
         val tool_name = extract_nested_string(body, "params", "name")
         return handle_tool_call(id, tool_name, body, debug_mode)
+    elif method == "resources/list":
+        return handle_resources_list(id, resource_mgr, debug_mode)
+    elif method == "resources/read":
+        val uri = extract_nested_string(body, "params", "uri")
+        return handle_resources_read(id, uri, resource_mgr, debug_mode)
+    elif method == "resources/templates/list":
+        return handle_resources_templates_list(id, resource_mgr, debug_mode)
+    elif method == "prompts/list":
+        return handle_prompts_list(id, prompt_mgr, debug_mode)
+    elif method == "prompts/get":
+        val prompt_name = extract_nested_string(body, "params", "name")
+        return handle_prompts_get(id, prompt_name, body, prompt_mgr, debug_mode)
     else:
         if debug_mode:
             debug_log("Unknown method: " + method)
@@ -224,8 +248,15 @@ fn jo3(p1: String, p2: String, p3: String) -> String:
     r
 
 fn make_initialize_response(id: String) -> String:
-    val server_info = jo2(jp("name", js("simple-mcp")), jp("version", js("1.0.0")))
-    val caps = jo1(jp("tools", jo1("")))
+    val server_info = jo2(jp("name", js("simple-mcp")), jp("version", js("2.0.0")))
+    # Capabilities: tools, resources, prompts
+    var caps = LB()
+    caps = caps + jp("tools", jo1(""))
+    caps = caps + ","
+    caps = caps + jp("resources", jo1(""))
+    caps = caps + ","
+    caps = caps + jp("prompts", jo1(""))
+    caps = caps + RB()
     val result = jo3(jp("protocolVersion", js("2024-11-05")), jp("capabilities", caps), jp("serverInfo", server_info))
     jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", result))
 
@@ -390,6 +421,202 @@ fn escape_json(text: String) -> String:
     result = result.replace("\r", "\\r")
     result = result.replace("\t", "\\t")
     result
+
+# --- Resource and Prompt handlers ---
+
+fn handle_resources_list(id: String, resource_mgr: resources.ResourceManager, debug_mode: Bool) -> String:
+    if debug_mode:
+        debug_log("Listing resources")
+
+    val resource_list = resource_mgr.list_resources()
+    var resources_json = "["
+
+    var first = true
+    for res_info in resource_list:
+        if not first:
+            resources_json = resources_json + ","
+        first = false
+
+        var res_obj = LB()
+        res_obj = res_obj + jp("uri", js(res_info.uri))
+        res_obj = res_obj + ","
+        res_obj = res_obj + jp("name", js(res_info.name))
+
+        if res_info.description.?:
+            res_obj = res_obj + ","
+            res_obj = res_obj + jp("description", js(res_info.description.unwrap()))
+
+        if res_info.mime_type.?:
+            res_obj = res_obj + ","
+            res_obj = res_obj + jp("mimeType", js(res_info.mime_type.unwrap()))
+
+        res_obj = res_obj + RB()
+        resources_json = resources_json + res_obj
+
+    resources_json = resources_json + "]"
+
+    val result = jo1(jp("resources", resources_json))
+    jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", result))
+
+fn handle_resources_read(id: String, uri: String, resource_mgr: resources.ResourceManager, debug_mode: Bool) -> String:
+    if debug_mode:
+        debug_log("Reading resource: " + uri)
+
+    val read_result = resource_mgr.read_resource(uri)
+
+    if read_result.err.?:
+        return make_error_response(id, -32602, read_result.err.unwrap())
+
+    val content = read_result.unwrap()
+    val escaped = escape_json(content.contents)
+
+    var res_obj = LB()
+    res_obj = res_obj + jp("uri", js(content.uri))
+    res_obj = res_obj + ","
+    res_obj = res_obj + jp("contents", js(escaped))
+
+    if content.mime_type.?:
+        res_obj = res_obj + ","
+        res_obj = res_obj + jp("mimeType", js(content.mime_type.unwrap()))
+
+    res_obj = res_obj + RB()
+
+    val result = jo1(jp("resource", res_obj))
+    jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", result))
+
+fn handle_resources_templates_list(id: String, resource_mgr: resources.ResourceManager, debug_mode: Bool) -> String:
+    if debug_mode:
+        debug_log("Listing resource templates")
+
+    val templates = resource_mgr.list_templates()
+    var templates_json = "["
+
+    var first = true
+    for template in templates:
+        if not first:
+            templates_json = templates_json + ","
+        first = false
+
+        var templ_obj = LB()
+        templ_obj = templ_obj + jp("uriTemplate", js(template.uri_template))
+        templ_obj = templ_obj + ","
+        templ_obj = templ_obj + jp("name", js(template.name))
+
+        if template.description.?:
+            templ_obj = templ_obj + ","
+            templ_obj = templ_obj + jp("description", js(template.description.unwrap()))
+
+        if template.mime_type.?:
+            templ_obj = templ_obj + ","
+            templ_obj = templ_obj + jp("mimeType", js(template.mime_type.unwrap()))
+
+        templ_obj = templ_obj + RB()
+        templates_json = templates_json + templ_obj
+
+    templates_json = templates_json + "]"
+
+    val result = jo1(jp("resourceTemplates", templates_json))
+    jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", result))
+
+fn handle_prompts_list(id: String, prompt_mgr: prompts.PromptManager, debug_mode: Bool) -> String:
+    if debug_mode:
+        debug_log("Listing prompts")
+
+    val prompt_list = prompt_mgr.list_prompts()
+    var prompts_json = "["
+
+    var first = true
+    for prompt_info in prompt_list:
+        if not first:
+            prompts_json = prompts_json + ","
+        first = false
+
+        # Build arguments array
+        var args_json = "["
+        var first_arg = true
+        for arg in prompt_info.arguments:
+            if not first_arg:
+                args_json = args_json + ","
+            first_arg = false
+
+            var arg_obj = LB()
+            arg_obj = arg_obj + jp("name", js(arg.name))
+            arg_obj = arg_obj + ","
+            arg_obj = arg_obj + jp("description", js(arg.description))
+            arg_obj = arg_obj + ","
+            val req_str = if arg.required: "true" else: "false"
+            arg_obj = arg_obj + jp("required", req_str)
+            arg_obj = arg_obj + RB()
+
+            args_json = args_json + arg_obj
+
+        args_json = args_json + "]"
+
+        var prompt_obj = LB()
+        prompt_obj = prompt_obj + jp("name", js(prompt_info.name))
+        prompt_obj = prompt_obj + ","
+        prompt_obj = prompt_obj + jp("description", js(prompt_info.description))
+        prompt_obj = prompt_obj + ","
+        prompt_obj = prompt_obj + jp("arguments", args_json)
+        prompt_obj = prompt_obj + RB()
+
+        prompts_json = prompts_json + prompt_obj
+
+    prompts_json = prompts_json + "]"
+
+    val result = jo1(jp("prompts", prompts_json))
+    jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", result))
+
+fn handle_prompts_get(id: String, prompt_name: String, body: String, prompt_mgr: prompts.PromptManager, debug_mode: Bool) -> String:
+    if debug_mode:
+        debug_log("Getting prompt: " + prompt_name)
+
+    # Extract arguments from request
+    # TODO: Implement proper JSON argument extraction
+    val arguments = {}  # Empty for now
+
+    val prompt_result = prompt_mgr.get_prompt(prompt_name, arguments)
+
+    if prompt_result.err.?:
+        return make_error_response(id, -32602, prompt_result.err.unwrap())
+
+    val prompt_data = prompt_result.unwrap()
+
+    # Build messages array
+    var messages_json = "["
+    var first_msg = true
+    for msg in prompt_data.messages:
+        if not first_msg:
+            messages_json = messages_json + ","
+        first_msg = false
+
+        val role_str = match msg.role:
+            prompts.PromptRole.User: "user"
+            prompts.PromptRole.Assistant: "assistant"
+
+        var msg_obj = LB()
+        msg_obj = msg_obj + jp("role", js(role_str))
+        msg_obj = msg_obj + ","
+        msg_obj = msg_obj + jp("content", js(escape_json(msg.content)))
+        msg_obj = msg_obj + RB()
+
+        messages_json = messages_json + msg_obj
+
+    messages_json = messages_json + "]"
+
+    var result_obj = LB()
+    result_obj = result_obj + jp("description", js(prompt_data.description))
+    result_obj = result_obj + ","
+    result_obj = result_obj + jp("messages", messages_json)
+    result_obj = result_obj + RB()
+
+    val result = jo1(jp("prompt", result_obj))
+    jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", result))
+
+# Get current directory
+fn get_current_dir() -> String:
+    # TODO: Use actual getcwd FFI when available
+    "."
 
 # --- CLI mode handlers ---
 

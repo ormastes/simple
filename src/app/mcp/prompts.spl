@@ -1,0 +1,523 @@
+# MCP Prompt Manager
+#
+# Manages prompt templates for the MCP server.
+# Prompts provide pre-built interaction templates for common tasks:
+# - Refactoring prompts (rename, extract function, etc.)
+# - Code generation prompts (implement trait, add tests, etc.)
+# - Documentation prompts (add docstrings, explain code, etc.)
+# - Analysis prompts (find bugs, suggest improvements, etc.)
+#
+# Prompts can have arguments that are filled in by the user.
+
+import app.io
+
+# --- Prompt Types ---
+
+# Prompt argument definition
+struct PromptArgument:
+    name: text
+    description: text
+    required: bool
+
+# Prompt information returned by prompts/list
+struct PromptInfo:
+    name: text
+    description: text
+    arguments: [PromptArgument]
+
+# Prompt message (user or assistant)
+enum PromptRole:
+    User
+    Assistant
+
+struct PromptMessage:
+    role: PromptRole
+    content: text
+
+# Prompt result returned by prompts/get
+struct PromptResult:
+    description: text
+    messages: [PromptMessage]
+
+# --- Prompt Manager ---
+
+class PromptManager:
+    # Registered prompts (name -> template function)
+    prompts: Dict<text, fn(Dict<text, text>) -> PromptResult>
+
+    # Prompt metadata (name -> info)
+    prompt_info: Dict<text, PromptInfo>
+
+    # Project root directory
+    project_root: text
+
+    # Create a new prompt manager
+    static fn create(project_root: text) -> PromptManager:
+        val manager = PromptManager(
+            prompts: {},
+            prompt_info: {},
+            project_root: project_root,
+        )
+
+        # Register default prompts
+        manager.register_default_prompts()
+
+        manager
+
+    # --- Registration ---
+
+    # Register a prompt template
+    me register_prompt(
+        name: text,
+        description: text,
+        arguments: [PromptArgument],
+        template_fn: fn(Dict<text, text>) -> PromptResult,
+    ):
+        self.prompts[name] = template_fn
+        self.prompt_info[name] = PromptInfo(
+            name: name,
+            description: description,
+            arguments: arguments,
+        )
+
+    # Register default prompts
+    me register_default_prompts():
+        # --- Refactoring Prompts ---
+
+        self.register_prompt(
+            name: "refactor-rename",
+            description: "Rename a symbol throughout the codebase",
+            arguments: [
+                PromptArgument(name: "old_name", description: "Current symbol name", required: true),
+                PromptArgument(name: "new_name", description: "New symbol name", required: true),
+                PromptArgument(name: "file", description: "File containing the symbol", required: false),
+            ],
+            template_fn: self.prompt_refactor_rename,
+        )
+
+        self.register_prompt(
+            name: "refactor-extract-function",
+            description: "Extract code into a new function",
+            arguments: [
+                PromptArgument(name: "code", description: "Code to extract", required: true),
+                PromptArgument(name: "function_name", description: "Name for new function", required: true),
+                PromptArgument(name: "file", description: "File containing the code", required: true),
+            ],
+            template_fn: self.prompt_refactor_extract_function,
+        )
+
+        self.register_prompt(
+            name: "refactor-inline",
+            description: "Inline a function or variable",
+            arguments: [
+                PromptArgument(name: "name", description: "Symbol to inline", required: true),
+                PromptArgument(name: "file", description: "File containing the symbol", required: true),
+            ],
+            template_fn: self.prompt_refactor_inline,
+        )
+
+        # --- Code Generation Prompts ---
+
+        self.register_prompt(
+            name: "generate-tests",
+            description: "Generate SSpec tests for a function or class",
+            arguments: [
+                PromptArgument(name: "target", description: "Function or class name", required: true),
+                PromptArgument(name: "file", description: "File containing the target", required: true),
+            ],
+            template_fn: self.prompt_generate_tests,
+        )
+
+        self.register_prompt(
+            name: "generate-trait-impl",
+            description: "Generate trait implementation for a class",
+            arguments: [
+                PromptArgument(name: "class_name", description: "Class name", required: true),
+                PromptArgument(name: "trait_name", description: "Trait name", required: true),
+                PromptArgument(name: "file", description: "File containing the class", required: true),
+            ],
+            template_fn: self.prompt_generate_trait_impl,
+        )
+
+        self.register_prompt(
+            name: "generate-constructor",
+            description: "Generate constructor for a class",
+            arguments: [
+                PromptArgument(name: "class_name", description: "Class name", required: true),
+                PromptArgument(name: "file", description: "File containing the class", required: true),
+            ],
+            template_fn: self.prompt_generate_constructor,
+        )
+
+        # --- Documentation Prompts ---
+
+        self.register_prompt(
+            name: "docs-add-docstrings",
+            description: "Add documentation comments to functions and classes",
+            arguments: [
+                PromptArgument(name: "target", description: "Function or class name", required: false),
+                PromptArgument(name: "file", description: "File to document", required: true),
+            ],
+            template_fn: self.prompt_docs_add_docstrings,
+        )
+
+        self.register_prompt(
+            name: "docs-explain-code",
+            description: "Explain how code works",
+            arguments: [
+                PromptArgument(name: "code", description: "Code to explain", required: false),
+                PromptArgument(name: "file", description: "File containing the code", required: false),
+            ],
+            template_fn: self.prompt_docs_explain_code,
+        )
+
+        self.register_prompt(
+            name: "docs-generate-readme",
+            description: "Generate README.md for the project",
+            arguments: [],
+            template_fn: self.prompt_docs_generate_readme,
+        )
+
+        # --- Analysis Prompts ---
+
+        self.register_prompt(
+            name: "analyze-find-bugs",
+            description: "Analyze code for potential bugs",
+            arguments: [
+                PromptArgument(name: "file", description: "File to analyze", required: true),
+            ],
+            template_fn: self.prompt_analyze_find_bugs,
+        )
+
+        self.register_prompt(
+            name: "analyze-suggest-improvements",
+            description: "Suggest code improvements",
+            arguments: [
+                PromptArgument(name: "file", description: "File to analyze", required: true),
+            ],
+            template_fn: self.prompt_analyze_suggest_improvements,
+        )
+
+        self.register_prompt(
+            name: "analyze-performance",
+            description: "Analyze code for performance issues",
+            arguments: [
+                PromptArgument(name: "file", description: "File to analyze", required: true),
+            ],
+            template_fn: self.prompt_analyze_performance,
+        )
+
+    # --- List Prompts ---
+
+    # List all available prompts
+    fn list_prompts() -> [PromptInfo]:
+        var prompts = []
+        for name, info in self.prompt_info:
+            prompts.push(info)
+        prompts
+
+    # --- Get Prompt ---
+
+    # Get a prompt by name with arguments
+    fn get_prompt(name: text, arguments: Dict<text, text>) -> Result<PromptResult, text>:
+        if not self.prompts.contains(name):
+            return Err("Prompt not found: {name}")
+
+        # Validate required arguments
+        val info = self.prompt_info[name]
+        for arg in info.arguments:
+            if arg.required and not arguments.contains(arg.name):
+                return Err("Missing required argument: {arg.name}")
+
+        # Generate prompt
+        val template_fn = self.prompts[name]
+        val result = template_fn(arguments)
+
+        Ok(result)
+
+    # --- Prompt Templates ---
+
+    # Refactor: Rename
+    fn prompt_refactor_rename(args: Dict<text, text>) -> PromptResult:
+        val old_name = args["old_name"]
+        val new_name = args["new_name"]
+        val file = args.get("file") ?? "the codebase"
+
+        PromptResult(
+            description: "Rename symbol '{old_name}' to '{new_name}'",
+            messages: [
+                PromptMessage(
+                    role: PromptRole.User,
+                    content: "Rename the symbol '{old_name}' to '{new_name}' in {file}. Please:
+1. Find all occurrences of '{old_name}'
+2. Rename to '{new_name}' while preserving functionality
+3. Update any documentation or comments
+4. Ensure no naming conflicts are introduced",
+                ),
+            ],
+        )
+
+    # Refactor: Extract Function
+    fn prompt_refactor_extract_function(args: Dict<text, text>) -> PromptResult:
+        val code = args["code"]
+        val function_name = args["function_name"]
+        val file = args["file"]
+
+        PromptResult(
+            description: "Extract code into function '{function_name}'",
+            messages: [
+                PromptMessage(
+                    role: PromptRole.User,
+                    content: "Extract the following code from {file} into a new function named '{function_name}':
+
+```simple
+{code}
+```
+
+Please:
+1. Create a new function with appropriate parameters
+2. Infer parameter types from usage
+3. Determine the return type
+4. Replace the original code with a call to the new function
+5. Add appropriate documentation comments",
+                ),
+            ],
+        )
+
+    # Refactor: Inline
+    fn prompt_refactor_inline(args: Dict<text, text>) -> PromptResult:
+        val name = args["name"]
+        val file = args["file"]
+
+        PromptResult(
+            description: "Inline symbol '{name}'",
+            messages: [
+                PromptMessage(
+                    role: PromptRole.User,
+                    content: "Inline the symbol '{name}' in {file}. Please:
+1. Find the definition of '{name}'
+2. Replace all usages with the inline code
+3. Remove the original definition
+4. Ensure the code still works correctly",
+                ),
+            ],
+        )
+
+    # Generate: Tests
+    fn prompt_generate_tests(args: Dict<text, text>) -> PromptResult:
+        val target = args["target"]
+        val file = args["file"]
+
+        PromptResult(
+            description: "Generate SSpec tests for '{target}'",
+            messages: [
+                PromptMessage(
+                    role: PromptRole.User,
+                    content: "Generate comprehensive SSpec tests for '{target}' in {file}. Please:
+1. Read the implementation of '{target}'
+2. Identify edge cases and important scenarios
+3. Write tests using the SSpec framework (it/describe blocks)
+4. Include positive and negative test cases
+5. Test boundary conditions
+6. Follow Simple's testing conventions in CLAUDE.md",
+                ),
+            ],
+        )
+
+    # Generate: Trait Implementation
+    fn prompt_generate_trait_impl(args: Dict<text, text>) -> PromptResult:
+        val class_name = args["class_name"]
+        val trait_name = args["trait_name"]
+        val file = args["file"]
+
+        PromptResult(
+            description: "Implement trait '{trait_name}' for '{class_name}'",
+            messages: [
+                PromptMessage(
+                    role: PromptRole.User,
+                    content: "Implement the trait '{trait_name}' for the class '{class_name}' in {file}. Please:
+1. Find the trait definition for '{trait_name}'
+2. Find the class definition for '{class_name}'
+3. Implement all required trait methods
+4. Use idiomatic Simple code
+5. Add documentation comments for each method",
+                ),
+            ],
+        )
+
+    # Generate: Constructor
+    fn prompt_generate_constructor(args: Dict<text, text>) -> PromptResult:
+        val class_name = args["class_name"]
+        val file = args["file"]
+
+        PromptResult(
+            description: "Generate constructor for '{class_name}'",
+            messages: [
+                PromptMessage(
+                    role: PromptRole.User,
+                    content: "Generate a constructor (static factory method) for the class '{class_name}' in {file}. Please:
+1. Read the class definition
+2. Create a static fn with appropriate parameters for all fields
+3. Use the direct construction pattern: ClassName(field: value, ...)
+4. Add parameter validation if needed
+5. Add documentation comments
+6. Follow Simple's constructor conventions (prefer direct construction, use named factories)",
+                ),
+            ],
+        )
+
+    # Docs: Add Docstrings
+    fn prompt_docs_add_docstrings(args: Dict<text, text>) -> PromptResult:
+        val target = args.get("target") ?? "all functions and classes"
+        val file = args["file"]
+
+        PromptResult(
+            description: "Add documentation to {target} in {file}",
+            messages: [
+                PromptMessage(
+                    role: PromptRole.User,
+                    content: "Add documentation comments to {target} in {file}. Please:
+1. For each function/method: describe what it does, parameters, and return value
+2. For each class: describe its purpose and usage
+3. Use clear, concise language
+4. Include examples where helpful
+5. Follow Simple's documentation style",
+                ),
+            ],
+        )
+
+    # Docs: Explain Code
+    fn prompt_docs_explain_code(args: Dict<text, text>) -> PromptResult:
+        val code = args.get("code")
+        val file = args.get("file")
+
+        val content = if code.?:
+            "Explain the following Simple code:
+
+```simple
+{code.unwrap()}
+```
+
+Please provide:
+1. A high-level summary of what the code does
+2. An explanation of key logic and algorithms
+3. Any notable patterns or techniques used
+4. Potential improvements or concerns"
+        else if file.?:
+            "Explain the code in {file.unwrap()}. Please provide:
+1. An overview of the file's purpose
+2. Key functions and classes
+3. How different parts interact
+4. The overall architecture"
+        else:
+            "Please provide code to explain via the 'code' or 'file' argument"
+
+        PromptResult(
+            description: "Explain Simple code",
+            messages: [
+                PromptMessage(role: PromptRole.User, content: content),
+            ],
+        )
+
+    # Docs: Generate README
+    fn prompt_docs_generate_readme(args: Dict<text, text>) -> PromptResult:
+        PromptResult(
+            description: "Generate README.md for the project",
+            messages: [
+                PromptMessage(
+                    role: PromptRole.User,
+                    content: "Generate a comprehensive README.md for this Simple project. Please:
+1. Read the project structure and main files
+2. Identify the project's purpose
+3. Include sections for:
+   - Project description
+   - Installation instructions
+   - Usage examples
+   - API documentation (if applicable)
+   - Testing instructions
+   - Contributing guidelines
+4. Use clear, professional language
+5. Include code examples where appropriate",
+                ),
+            ],
+        )
+
+    # Analyze: Find Bugs
+    fn prompt_analyze_find_bugs(args: Dict<text, text>) -> PromptResult:
+        val file = args["file"]
+
+        PromptResult(
+            description: "Analyze {file} for potential bugs",
+            messages: [
+                PromptMessage(
+                    role: PromptRole.User,
+                    content: "Analyze {file} for potential bugs. Please look for:
+1. Off-by-one errors
+2. Null/None dereferences
+3. Resource leaks
+4. Race conditions (if concurrent)
+5. Logic errors
+6. Type mismatches
+7. Unhandled error cases
+
+For each issue found, explain:
+- What the bug is
+- Where it occurs (line number)
+- Why it's problematic
+- How to fix it",
+                ),
+            ],
+        )
+
+    # Analyze: Suggest Improvements
+    fn prompt_analyze_suggest_improvements(args: Dict<text, text>) -> PromptResult:
+        val file = args["file"]
+
+        PromptResult(
+            description: "Suggest improvements for {file}",
+            messages: [
+                PromptMessage(
+                    role: PromptRole.User,
+                    content: "Analyze {file} and suggest improvements. Consider:
+1. Code clarity and readability
+2. Performance optimizations
+3. Better error handling
+4. Idiomatic Simple patterns
+5. Code duplication (DRY principle)
+6. Function/class design
+7. Documentation quality
+
+For each suggestion:
+- Explain the current issue
+- Propose a specific improvement
+- Explain why it's better",
+                ),
+            ],
+        )
+
+    # Analyze: Performance
+    fn prompt_analyze_performance(args: Dict<text, text>) -> PromptResult:
+        val file = args["file"]
+
+        PromptResult(
+            description: "Analyze {file} for performance issues",
+            messages: [
+                PromptMessage(
+                    role: PromptRole.User,
+                    content: "Analyze {file} for performance issues. Look for:
+1. Inefficient algorithms (wrong time complexity)
+2. Unnecessary allocations
+3. Redundant computations
+4. Inefficient data structures
+5. Missing caching opportunities
+6. Unnecessary copying
+7. Blocking operations that could be async
+
+For each issue:
+- Identify the performance problem
+- Estimate the impact (complexity analysis)
+- Suggest an optimized alternative
+- Explain the trade-offs",
+                ),
+            ],
+        )

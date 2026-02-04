@@ -16,6 +16,9 @@ import lsp.handlers.references as references
 import lsp.handlers.completion as completion
 import lsp.handlers.verification as verification
 
+# NEW: Import Compiler Query API
+import compiler.query_api.{CompilerQueryContext, Position as QueryPosition}
+
 # Server state
 enum ServerState:
     Uninitialized
@@ -70,7 +73,14 @@ class LspServer:
     metrics: optimize.PerformanceMetrics  # Performance tracking
     lean_output_dir: Option<String>  # Lean artifact output directory
 
+    # NEW: Compiler Query Context for code intelligence
+    compiler_query_ctx: CompilerQueryContext
+    project_root: String
+
     static fn new() -> LspServer:
+        # Get current working directory as project root
+        val project_root = get_current_dir()
+
         LspServer(
             state: ServerState.Uninitialized,
             documents: {},
@@ -78,8 +88,17 @@ class LspServer:
             query_cache: optimize.QueryCache.new(100),  # Cache 100 query results
             debouncer: optimize.Debouncer.new(300),  # 300ms debounce delay
             metrics: optimize.PerformanceMetrics.new(),
-            lean_output_dir: Some("build/lean")  # Default Lean output directory
+            lean_output_dir: Some("build/lean"),  # Default Lean output directory
+
+            # NEW: Initialize compiler query context
+            compiler_query_ctx: CompilerQueryContext.create(project_root),
+            project_root: project_root,
         )
+
+# Helper: Get current directory
+fn get_current_dir() -> String:
+    # TODO: Use actual getcwd when available
+    "."
 
     # Handle initialize request
     fn handle_initialize(id: Int, params: Option<Dict>) -> Result<Nil, String>:
@@ -194,6 +213,10 @@ class LspServer:
                     # Clear query cache on document change
                     self.query_cache.clear()
 
+                    # NEW: Invalidate compiler query cache for this file
+                    val file_path = uri_to_file_path(versioned_doc.uri)
+                    self.compiler_query_ctx.invalidate_file(file_path)
+
                     # Run diagnostics
                     self.publish_diagnostics(versioned_doc.uri)?
                 else:
@@ -267,27 +290,52 @@ class LspServer:
                         )?
                         Ok(nil)
                     case Some(doc_info):
-                        # Use completion handler
-                        match doc_info.tree:
-                            case None:
-                                # No tree - return empty completions
-                                transport.write_response(id, [])?
-                                Ok(nil)
-                            case Some(tree):
-                                val completion_result = completion.handle_completion(
-                                    tree,
-                                    doc_info.text,
-                                    position.line,
-                                    position.character
-                                )?
+                        # NEW: Use Compiler Query API for completions
+                        val file_path = uri_to_file_path(doc_id.uri)
+                        val query_pos = QueryPosition(line: position.line, column: position.character)
 
-                                match completion_result:
-                                    case None:
-                                        transport.write_response(id, [])?
-                                    case Some(items):
-                                        transport.write_response(id, items)?
+                        val completions = self.compiler_query_ctx.completions_at(file_path, query_pos)
 
-                                Ok(nil)
+                        # Convert to LSP completion items
+                        var items = []
+                        for comp in completions:
+                            val item = {
+                                "label": comp.label,
+                                "kind": completion_kind_to_lsp(comp.kind),
+                                "detail": comp.detail,
+                                "documentation": comp.documentation,
+                                "insertText": comp.insert_text,
+                                "sortText": format_sort_text(comp.sort_priority),
+                            }
+                            items.push(item)
+
+                        transport.write_response(id, items)?
+                        Ok(nil)
+
+# Helper: Convert completion kind to LSP kind
+fn completion_kind_to_lsp(kind: query_api.CompletionKind) -> Int:
+    match kind:
+        query_api.CompletionKind.Variable: 6      # Variable
+        query_api.CompletionKind.Function: 3      # Function
+        query_api.CompletionKind.Method: 2        # Method
+        query_api.CompletionKind.Keyword: 14      # Keyword
+        query_api.CompletionKind.Module: 9        # Module
+        query_api.CompletionKind.Type: 7          # Class
+        query_api.CompletionKind.Field: 5         # Field
+        query_api.CompletionKind.EnumVariant: 20  # EnumMember
+
+# Helper: Format sort priority for LSP
+fn format_sort_text(priority: i64) -> String:
+    # LSP sorts alphabetically, so pad numbers
+    val padded = priority.to_string().pad_left(5, '0')
+    padded
+
+# Helper: Convert URI to file path
+fn uri_to_file_path(uri: String) -> String:
+    # Remove file:// prefix
+    if uri.starts_with("file://"):
+        return uri[7:]
+    uri
 
     # Handle textDocument/references request
     fn handle_references(id: Int, params: Option<Dict>) -> Result<Nil, String>:
@@ -373,29 +421,46 @@ class LspServer:
                         )?
                         Ok(nil)
                     case Some(doc_info):
-                        # Use definition handler
-                        match doc_info.tree:
+                        # NEW: Use Compiler Query API for definition
+                        val file_path = uri_to_file_path(doc_id.uri)
+                        val query_pos = QueryPosition(line: position.line, column: position.character)
+
+                        val def_result = self.compiler_query_ctx.find_definition(file_path, query_pos)
+
+                        match def_result:
                             case None:
-                                # No tree - return null
                                 transport.write_response(id, nil)?
-                                Ok(nil)
-                            case Some(tree):
-                                val def_result = definition.handle_definition(
-                                    tree,
-                                    doc_info.text,
-                                    position.line,
-                                    position.character
-                                )?
+                            case Some(result):
+                                # Convert locations to LSP format
+                                var lsp_locations = []
+                                for loc in result.locations:
+                                    val lsp_loc = {
+                                        "uri": file_path_to_uri(loc.file),
+                                        "range": {
+                                            "start": {
+                                                "line": loc.start.line,
+                                                "character": loc.start.column,
+                                            },
+                                            "end": {
+                                                "line": loc.end.line,
+                                                "character": loc.end.column,
+                                            },
+                                        },
+                                    }
+                                    lsp_locations.push(lsp_loc)
 
-                                match def_result:
-                                    case None:
-                                        transport.write_response(id, nil)?
-                                    case Some(location):
-                                        # Add URI to location
-                                        location["uri"] = doc_id.uri
-                                        transport.write_response(id, location)?
+                                # Return first location (or array if multiple)
+                                if lsp_locations.length == 1:
+                                    transport.write_response(id, lsp_locations[0])?
+                                else:
+                                    transport.write_response(id, lsp_locations)?
 
-                                Ok(nil)
+                        Ok(nil)
+
+# Helper: Convert file path to URI
+fn file_path_to_uri(file_path: String) -> String:
+    # Add file:// prefix
+    "file://" + file_path
 
     # Handle textDocument/hover request
     fn handle_hover(id: Int, params: Option<Dict>) -> Result<Nil, String>:
@@ -420,27 +485,36 @@ class LspServer:
                         )?
                         Ok(nil)
                     case Some(doc_info):
-                        # Use hover handler
-                        match doc_info.tree:
+                        # NEW: Use Compiler Query API for hover
+                        val file_path = uri_to_file_path(doc_id.uri)
+                        val query_pos = QueryPosition(line: position.line, column: position.character)
+
+                        val hover_info = self.compiler_query_ctx.hover_at(file_path, query_pos)
+
+                        match hover_info:
                             case None:
-                                # No tree - return null hover
                                 transport.write_response(id, nil)?
-                                Ok(nil)
-                            case Some(tree):
-                                val hover_result = hover.handle_hover(
-                                    tree,
-                                    doc_info.text,
-                                    position.line,
-                                    position.character
-                                )?
+                            case Some(info):
+                                # Convert to LSP hover response
+                                val hover_data = {
+                                    "contents": {
+                                        "kind": "markdown",
+                                        "value": info.contents,
+                                    },
+                                    "range": {
+                                        "start": {
+                                            "line": info.range.start.line,
+                                            "character": info.range.start.column,
+                                        },
+                                        "end": {
+                                            "line": info.range.end.line,
+                                            "character": info.range.end.column,
+                                        },
+                                    },
+                                }
+                                transport.write_response(id, hover_data)?
 
-                                match hover_result:
-                                    case None:
-                                        transport.write_response(id, nil)?
-                                    case Some(hover_data):
-                                        transport.write_response(id, hover_data)?
-
-                                Ok(nil)
+                        Ok(nil)
 
     # Handle textDocument/semanticTokens/full request
     fn handle_semantic_tokens_full(id: Int, params: Option<Dict>) -> Result<Nil, String>:
