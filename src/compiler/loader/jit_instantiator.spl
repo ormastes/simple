@@ -5,8 +5,7 @@
 #
 # Phase 5: Load-Time JIT Instantiation
 
-use ./compiler_ffi.*
-use ./jit_context.JitCompilationContext
+use compiler.loader.compiler_ffi.*
 
 # ============================================================================
 # Result Types
@@ -112,6 +111,15 @@ impl JitInstantiator:
         self.loaded_metadata[smf_path] = metadata
         Ok(())
 
+    me set_metadata_for_test(smf_path: text, metadata: LoadedMetadata):
+        """Set metadata directly (for testing only)."""
+        self.loaded_metadata[smf_path] = metadata
+
+    me set_cache_for_test(symbol: text, code: [u8], address: i64):
+        """Set cache entry directly (for testing only)."""
+        self.jit_cache[symbol] = (code, address)
+        self.symbol_table[symbol] = address
+
     fn read_note_sdn_from_file(smf_path: text) -> Result<LoadedMetadata, text>:
         """Read note.sdn section from SMF file."""
         # TODO: Implement proper SMF section parsing
@@ -135,7 +143,7 @@ impl JitInstantiator:
             for entry in metadata.possible:
                 if entry.mangled_name == symbol:
                     return Some((path, entry))
-        None
+        nil
 
     me try_jit_instantiate(symbol: text) -> JitInstantiationResult:
         """Try to JIT-instantiate a missing symbol."""
@@ -159,7 +167,11 @@ impl JitInstantiator:
 
         # Check for cycle
         if self.in_progress.contains(symbol):
-            val cycle = self.in_progress.to_list()
+            # Convert set to list by iterating
+            var cycle: [text] = []
+            for sym in self.in_progress:
+                cycle = cycle.push(sym)
+            cycle = cycle.push(symbol)  # Add current symbol to show cycle
             return JitInstantiationResult.CircularDependency(cycle)
 
         # Find possible entry
@@ -188,7 +200,7 @@ impl JitInstantiator:
         """Perform JIT compilation via FFI."""
         # TODO: Load actual template bytes from SMF TemplateCode section
         # For now, placeholder with empty template bytes
-        val template_bytes = TemplateBytes(
+        val tmpl_bytes = TemplateBytes(
             bytes: [],  # TODO: Load from SMF
             name: entry.template_name,
             param_count: entry.type_args.split(",").len() as i32
@@ -199,7 +211,7 @@ impl JitInstantiator:
             .map(\s: type_from_string(s.trim()))
 
         # Compile via FFI
-        val code_result = self.compiler_ctx.instantiate(template_bytes, type_args)
+        val code_result = self.compiler_ctx.instantiate(tmpl_bytes, type_args)
 
         match code_result:
             case Ok(compiled_code):
@@ -309,13 +321,17 @@ impl JitSymbolResolver:
                 if address.?:
                     self.symbols[symbol] = address.unwrap()
                     return address
-                None
+                nil
             case _:
-                None
+                nil
 
     me load_smf(path: text) -> Result<(), text>:
         """Load metadata from SMF file."""
         self.jit.load_smf_metadata(path)
+
+    me set_jit_cache_for_test(symbol: text, code: [u8], address: i64):
+        """Set JIT cache entry directly (for testing only)."""
+        self.jit.set_cache_for_test(symbol, code, address)
 
 # ============================================================================
 # Exports
