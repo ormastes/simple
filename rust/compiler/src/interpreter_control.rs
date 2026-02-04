@@ -70,7 +70,7 @@ use super::interpreter_call::exec_block_value;
 use super::interpreter_patterns::{is_catch_all_pattern, pattern_matches};
 
 // Import coverage helpers
-use super::coverage_helpers::{record_decision_coverage_ffi, decision_id_from_span};
+use super::coverage_helpers::{is_coverage_enabled, record_decision_coverage_ffi, decision_id_from_span};
 
 /// Handle loop control flow result. Returns Some if we should exit the loop.
 #[inline]
@@ -198,6 +198,8 @@ pub(super) fn exec_while(
 
     // Normal while loop
     // For while~ (is_suspend), await the condition value before checking truthiness
+    // OPTIMIZATION: Check coverage enablement once outside the loop to avoid per-iteration overhead
+    let coverage_enabled = is_coverage_enabled();
     loop {
         check_interrupt!();
         check_execution_limit!();
@@ -211,13 +213,16 @@ pub(super) fn exec_while(
 
         let decision_result = cond_val.truthy();
 
-        // COVERAGE: Record decision for while condition on each iteration
-        record_decision_coverage_ffi(
-            "<source>",
-            while_stmt.span.line,
-            while_stmt.span.column,
-            decision_result,
-        );
+        // COVERAGE: Record decision for while condition (only if coverage enabled)
+        // NOTE: Checking once before loop avoids per-iteration overhead
+        if coverage_enabled {
+            record_decision_coverage_ffi(
+                "<source>",
+                while_stmt.span.line,
+                while_stmt.span.column,
+                decision_result,
+            );
+        }
 
         if !decision_result {
             break;
