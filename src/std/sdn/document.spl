@@ -6,9 +6,7 @@
 from value import {SdnValue, Span}
 from error import {SdnError}
 from parser import {parse}
-
-extern fn rt_file_read_text(path: text) -> text
-extern fn rt_file_write_text(path: text, content: text) -> bool
+use std.db_atomic.{atomic_read, atomic_write, DbConfig}
 
 # ============================================================================
 # SdnDocument
@@ -38,10 +36,13 @@ impl SdnDocument:
 
     static fn from_file(path: text) -> Result<SdnDocument, SdnError>:
         """Load document from file."""
-        # TODO: Replace direct FFI call with wrapper (file_read_text) from app.io or compiler.ffi
-        val source = rt_file_read_text(path)
+        val read_result = atomic_read(path, DbConfig.defaults())
+        if read_result.err.?:
+            return Err(SdnError.IoError("Failed to read file: {path} - {read_result.unwrap_err()}"))
+
+        val source = read_result.unwrap()
         if source.is_empty():
-            return Err(SdnError.IoError("Failed to read file: {path}"))
+            return Err(SdnError.IoError("File is empty: {path}"))
         SdnDocument.parse_doc(source)
 
     fn get(path: text) -> SdnValue?:
@@ -119,12 +120,11 @@ impl SdnDocument:
         render_json(self.root)
 
     fn write_file(path: text) -> Result<(), SdnError>:
-        """Write document to file."""
+        """Write document to file atomically with backup."""
         val content = self.to_sdn()
-        # TODO: Replace direct FFI call with wrapper (file_write_text) from app.io or compiler.ffi
-        val ok = rt_file_write_text(path, content)
-        if not ok:
-            return Err(SdnError.IoError("Failed to write file: {path}"))
+        val write_result = atomic_write(path, content, DbConfig.defaults())
+        if write_result.err.?:
+            return Err(SdnError.IoError("Failed to write file: {path} - {write_result.unwrap_err()}"))
         Ok(())
 
 # ============================================================================

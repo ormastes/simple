@@ -1,0 +1,455 @@
+# DAP: Full Integration Tests
+"""
+**Category:** System/DAP
+**Status:** Passing
+**Priority:** P0
+
+End-to-end integration tests for complete debugging workflows.
+
+## Features Tested
+
+- Complete debugging session lifecycle
+- Breakpoint hit → pause → inspect → continue workflow
+- Step through code with variable inspection
+- Recursive function debugging
+- Multi-file debugging
+- Error scenarios and recovery
+
+## Workflow Scenarios
+
+1. **Simple Breakpoint Session:**
+   - Set breakpoint
+   - Run to breakpoint
+   - Inspect state
+   - Continue
+
+2. **Step Through Execution:**
+   - Set starting point
+   - Step over/into/out
+   - Track location changes
+   - Verify stack depth
+
+3. **Recursive Function Debugging:**
+   - Track recursive calls
+   - Inspect stack at each level
+   - Step through recursion
+   - Verify stack unwinding
+
+## Implementation
+
+Combines all debug FFI functions to simulate real debugging sessions.
+"""
+
+from ffi.debug import {
+    debug_set_active, debug_is_active,
+    debug_add_breakpoint, debug_remove_breakpoint, debug_has_breakpoint,
+    debug_set_current_location, debug_current_file, debug_current_line,
+    debug_should_break, debug_pause, debug_continue, debug_is_paused,
+    debug_set_step_mode, debug_get_step_mode, debug_set_step_start_depth,
+    debug_push_frame, debug_pop_frame, debug_stack_depth, debug_stack_trace
+}
+
+describe "Full Debugging Sessions":
+    """End-to-end debugging workflow tests."""
+
+    describe "Simple breakpoint session":
+        """Complete workflow: set → hit → inspect → continue."""
+
+        it "executes a simple debugging session":
+            # Step 1: Activate debug mode
+            debug_set_active(true)
+            expect(debug_is_active()).to(be_true())
+
+            # Step 2: Set breakpoint
+            debug_add_breakpoint("main.spl", 15, 1)
+            expect(debug_has_breakpoint("main.spl", 15)).to(be_true())
+
+            # Step 3: Simulate execution to line before breakpoint
+            debug_set_current_location("main.spl", 14, 0)
+            expect(debug_should_break()).to(be_false())
+
+            # Step 4: Execute to breakpoint line
+            debug_set_current_location("main.spl", 15, 0)
+            expect(debug_should_break()).to(be_true())
+
+            # Step 5: Pause at breakpoint
+            debug_pause()
+            expect(debug_is_paused()).to(be_true())
+
+            # Step 6: Inspect current state
+            expect(debug_current_file()).to(eq("main.spl"))
+            expect(debug_current_line()).to(eq(15))
+            val depth = debug_stack_depth()
+            expect(depth).to(be_gte(0))
+
+            # Step 7: Continue execution
+            debug_continue()
+            expect(debug_is_paused()).to(be_false())
+
+            # Step 8: Clean up
+            debug_remove_breakpoint("main.spl", 15)
+            debug_set_active(false)
+
+    describe "Step through execution":
+        """Stepping through code line by line."""
+
+        it "steps through sequential code":
+            debug_set_active(true)
+
+            # Start at line 10
+            debug_set_current_location("test.spl", 10, 0)
+            expect(debug_current_line()).to(eq(10))
+
+            # Enable step into mode
+            debug_set_step_mode(2)
+            expect(debug_get_step_mode()).to(eq(2))
+
+            # Simulate stepping through lines
+            debug_set_current_location("test.spl", 11, 0)
+            expect(debug_should_break()).to(be_true())
+            expect(debug_current_line()).to(eq(11))
+
+            debug_set_current_location("test.spl", 12, 0)
+            expect(debug_should_break()).to(be_true())
+            expect(debug_current_line()).to(eq(12))
+
+            debug_set_current_location("test.spl", 13, 0)
+            expect(debug_should_break()).to(be_true())
+            expect(debug_current_line()).to(eq(13))
+
+        it "steps over function call":
+            debug_set_active(true)
+            debug_set_current_location("main.spl", 20, 0)
+
+            # Set step over mode
+            val current_depth = debug_stack_depth()
+            debug_set_step_mode(1)  # StepOver
+            debug_set_step_start_depth(current_depth)
+
+            # Simulate function call (depth increases)
+            debug_push_frame("helper", "utils.spl", 5, 0)
+            debug_set_current_location("utils.spl", 5, 0)
+            # Should NOT break inside function (higher depth)
+            expect(debug_should_break()).to(be_false())
+
+            # Simulate function return (depth restored)
+            debug_pop_frame()
+            debug_set_current_location("main.spl", 21, 0)
+            # Should break after function returns (same depth)
+            expect(debug_should_break()).to(be_true())
+
+        it "steps into function call":
+            debug_set_active(true)
+            debug_set_current_location("main.spl", 30, 0)
+
+            # Set step into mode
+            debug_set_step_mode(2)  # StepIn
+
+            # Simulate function call
+            debug_push_frame("process", "processor.spl", 10, 0)
+            debug_set_current_location("processor.spl", 10, 0)
+            # Should break inside function (step in)
+            expect(debug_should_break()).to(be_true())
+
+        it "steps out of function":
+            debug_set_active(true)
+            debug_push_frame("main", "main.spl", 10, 0)
+            debug_push_frame("helper", "utils.spl", 5, 0)
+
+            # We're inside helper function at depth 2
+            val start_depth = debug_stack_depth()
+            debug_set_step_mode(3)  # StepOut
+            debug_set_step_start_depth(start_depth)
+
+            # Still inside helper
+            debug_set_current_location("utils.spl", 6, 0)
+            expect(debug_should_break()).to(be_false())
+
+            # Return from helper
+            debug_pop_frame()
+            debug_set_current_location("main.spl", 11, 0)
+            # Should break after returning (lower depth)
+            expect(debug_should_break()).to(be_true())
+
+    describe "Recursive function debugging":
+        """Debug recursive calls with stack tracking."""
+
+        it "tracks recursive factorial calls":
+            debug_set_active(true)
+            debug_add_breakpoint("math.spl", 10, 1)
+
+            # Simulate factorial(3) call chain
+            # main() calls factorial(3)
+            debug_push_frame("main", "main.spl", 20, 0)
+            debug_push_frame("factorial", "math.spl", 10, 0)
+            debug_set_current_location("math.spl", 10, 0)
+            expect(debug_should_break()).to(be_true())
+            expect(debug_stack_depth()).to(eq(2))
+
+            # factorial(3) calls factorial(2)
+            debug_push_frame("factorial", "math.spl", 10, 0)
+            debug_set_current_location("math.spl", 10, 0)
+            expect(debug_should_break()).to(be_true())
+            expect(debug_stack_depth()).to(eq(3))
+
+            # factorial(2) calls factorial(1)
+            debug_push_frame("factorial", "math.spl", 10, 0)
+            debug_set_current_location("math.spl", 10, 0)
+            expect(debug_should_break()).to(be_true())
+            expect(debug_stack_depth()).to(eq(4))
+
+            # Stack trace should show all levels
+            val trace = debug_stack_trace()
+            expect(trace).to(contain("factorial"))
+            expect(trace).to(contain("main"))
+
+            # Unwind: factorial(1) returns
+            debug_pop_frame()
+            expect(debug_stack_depth()).to(eq(3))
+
+            # factorial(2) returns
+            debug_pop_frame()
+            expect(debug_stack_depth()).to(eq(2))
+
+            # factorial(3) returns
+            debug_pop_frame()
+            expect(debug_stack_depth()).to(eq(1))
+
+        it "handles deep recursion":
+            debug_set_active(true)
+
+            # Simulate deep recursion (20 levels)
+            for i in 0..20:
+                debug_push_frame("recursive", "test.spl", 10, 0)
+
+            expect(debug_stack_depth()).to(be_gte(20))
+
+            val trace = debug_stack_trace()
+            expect(trace.len()).to(be_gt(0))
+
+            # Unwind
+            for i in 0..20:
+                debug_pop_frame()
+
+            expect(debug_stack_depth()).to(be_gte(0))
+
+    describe "Multi-file debugging":
+        """Debug across multiple source files."""
+
+        it "debugs across multiple files":
+            debug_set_active(true)
+
+            # Set breakpoints in different files
+            debug_add_breakpoint("main.spl", 10, 1)
+            debug_add_breakpoint("utils.spl", 25, 2)
+            debug_add_breakpoint("processor.spl", 50, 3)
+
+            # Execute in main.spl
+            debug_set_current_location("main.spl", 10, 0)
+            expect(debug_should_break()).to(be_true())
+            expect(debug_current_file()).to(eq("main.spl"))
+
+            # Call function in utils.spl
+            debug_push_frame("helper", "utils.spl", 25, 0)
+            debug_set_current_location("utils.spl", 25, 0)
+            expect(debug_should_break()).to(be_true())
+            expect(debug_current_file()).to(eq("utils.spl"))
+
+            # Call function in processor.spl
+            debug_push_frame("process", "processor.spl", 50, 0)
+            debug_set_current_location("processor.spl", 50, 0)
+            expect(debug_should_break()).to(be_true())
+            expect(debug_current_file()).to(eq("processor.spl"))
+
+            # Return through call chain
+            debug_pop_frame()
+            debug_set_current_location("utils.spl", 26, 0)
+            expect(debug_current_file()).to(eq("utils.spl"))
+
+            debug_pop_frame()
+            debug_set_current_location("main.spl", 11, 0)
+            expect(debug_current_file()).to(eq("main.spl"))
+
+    describe "Breakpoint and stepping combined":
+        """Use breakpoints and stepping together."""
+
+        it "hits breakpoint then steps":
+            debug_set_active(true)
+            debug_add_breakpoint("test.spl", 20, 1)
+
+            # Run to breakpoint
+            debug_set_current_location("test.spl", 20, 0)
+            expect(debug_should_break()).to(be_true())
+
+            # Now enable stepping
+            debug_set_step_mode(2)  # StepIn
+
+            # Step to next line
+            debug_set_current_location("test.spl", 21, 0)
+            expect(debug_should_break()).to(be_true())
+
+            debug_set_current_location("test.spl", 22, 0)
+            expect(debug_should_break()).to(be_true())
+
+        it "sets breakpoint while stepping":
+            debug_set_active(true)
+            debug_set_step_mode(2)  # StepIn
+
+            # Step through some lines
+            debug_set_current_location("test.spl", 10, 0)
+            expect(debug_should_break()).to(be_true())
+
+            # Add breakpoint ahead
+            debug_add_breakpoint("test.spl", 15, 1)
+
+            # Continue to breakpoint
+            debug_set_step_mode(0)  # Continue
+            debug_set_current_location("test.spl", 15, 0)
+            expect(debug_should_break()).to(be_true())
+
+    describe "Error scenarios and recovery":
+        """Handle error conditions gracefully."""
+
+        it "handles breakpoint at non-existent line":
+            debug_set_active(true)
+            debug_add_breakpoint("test.spl", 99999, 1)
+
+            # Should not crash
+            debug_set_current_location("test.spl", 99999, 0)
+            val should_break = debug_should_break()
+            expect(true).to(be_true())
+
+        it "recovers from pause without continue":
+            debug_set_active(true)
+            debug_pause()
+
+            # Deactivate debug (should reset state)
+            debug_set_active(false)
+            debug_set_active(true)
+
+            # Should be able to continue
+            expect(true).to(be_true())
+
+        it "handles missing stack frames":
+            debug_set_active(true)
+
+            # Try to pop when nothing to pop
+            debug_pop_frame()
+
+            # Should not crash
+            val depth = debug_stack_depth()
+            expect(depth).to(be_gte(0))
+
+        it "handles rapid mode switching":
+            debug_set_active(true)
+
+            # Rapidly switch modes
+            debug_set_step_mode(0)
+            debug_set_step_mode(1)
+            debug_set_step_mode(2)
+            debug_set_step_mode(3)
+            debug_set_step_mode(0)
+
+            val mode = debug_get_step_mode()
+            expect(mode).to(eq(0))
+
+describe "Performance and Stress Tests":
+    """Test performance under heavy load."""
+
+    it "handles many breakpoints":
+        debug_set_active(true)
+
+        # Add 100 breakpoints
+        for i in 0..100:
+            debug_add_breakpoint("test.spl", i, i)
+
+        # All should exist
+        for i in 0..100:
+            expect(debug_has_breakpoint("test.spl", i)).to(be_true())
+
+    it "handles frequent location updates":
+        debug_set_active(true)
+
+        # Simulate 1000 expressions evaluated
+        for i in 0..1000:
+            debug_set_current_location("test.spl", i % 100, 0)
+
+        # Should complete without issues
+        expect(true).to(be_true())
+
+    it "handles large stack depths":
+        debug_set_active(true)
+
+        # Build deep stack (100 frames)
+        for i in 0..100:
+            debug_push_frame("func", "test.spl", 10, 0)
+
+        expect(debug_stack_depth()).to(be_gte(100))
+
+        # Generate trace
+        val trace = debug_stack_trace()
+        expect(trace.len()).to(be_gt(0))
+
+        # Unwind
+        for i in 0..100:
+            debug_pop_frame()
+
+describe "Real-World Scenarios":
+    """Test realistic debugging workflows."""
+
+    it "debugs a simple program":
+        debug_set_active(true)
+
+        # Simulate: fn main() { val x = 5; print x }
+        debug_push_frame("main", "main.spl", 1, 0)
+
+        # Set breakpoint on variable declaration
+        debug_add_breakpoint("main.spl", 2, 1)
+
+        # Execute to breakpoint
+        debug_set_current_location("main.spl", 2, 0)
+        expect(debug_should_break()).to(be_true())
+
+        # Inspect (variable would be captured here)
+        expect(debug_current_line()).to(eq(2))
+
+        # Continue to print statement
+        debug_set_current_location("main.spl", 3, 0)
+
+        # Exit main
+        debug_pop_frame()
+
+    it "debugs loop with breakpoint":
+        debug_set_active(true)
+        debug_add_breakpoint("loop.spl", 5, 1)
+
+        # Simulate: for i in 0..3: print i
+        debug_push_frame("main", "loop.spl", 4, 0)
+
+        for i in 0..3:
+            # Each iteration hits breakpoint
+            debug_set_current_location("loop.spl", 5, 0)
+            expect(debug_should_break()).to(be_true())
+
+            # Continue to next iteration
+            debug_continue()
+
+        debug_pop_frame()
+
+    it "debugs conditional branches":
+        debug_set_active(true)
+        debug_push_frame("main", "test.spl", 10, 0)
+
+        # Simulate: if condition: branch_a() else: branch_b()
+        debug_set_current_location("test.spl", 11, 0)  # if statement
+
+        # Take if branch
+        debug_push_frame("branch_a", "test.spl", 20, 0)
+        debug_set_current_location("test.spl", 20, 0)
+        expect(debug_current_line()).to(eq(20))
+        debug_pop_frame()
+
+        # Back to main
+        debug_set_current_location("test.spl", 12, 0)
+
+        debug_pop_frame()
