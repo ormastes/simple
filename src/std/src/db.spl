@@ -2,14 +2,16 @@
 #
 # Provides a simple table abstraction for storing records in SDN format.
 # Used by todo_db, feature_db, bug_db and other database modules.
+#
+# NOTE: This module now uses atomic operations from std.db_atomic for thread safety.
 
-# FFI declarations (from sdn_ffi)
+use std.db_atomic.{atomic_read, atomic_write, DbConfig}
+
+# FFI declarations (from sdn_ffi) - deprecated, use db_atomic instead
 extern fn rt_sdn_check(path: str) -> i64
 extern fn rt_sdn_to_json(path: str) -> str
 extern fn rt_sdn_get(path: str, key: str) -> str
 extern fn rt_sdn_set(path: str, key: str, value: str) -> i64
-extern fn rt_file_read(path: str) -> str
-extern fn rt_file_write(path: str, content: str) -> i64
 extern fn rt_file_exists(path: str) -> bool
 
 # ============================================================================
@@ -59,8 +61,9 @@ impl Table:
 
     # Load table from SDN file
     static fn load(path: text, table_name: text) -> Table:
-        # TODO: Replace direct FFI call with wrapper (file_read) from app.io or compiler.ffi
-        val content = rt_file_read(path)
+        # Use atomic read for thread safety
+        val read_result = atomic_read(path, DbConfig.defaults())
+        val content = if read_result.ok.?: read_result.unwrap() else: ""
         if content == "":
             return Table.empty(table_name, [])
 
@@ -141,10 +144,10 @@ impl Table:
     me delete_row(index: i64):
         self.rows.remove(index)
 
-    # Save to SDN file
-    fn save() -> i64:
+    # Save to SDN file atomically
+    fn save() -> bool:
         if self.path == "":
-            return 1
+            return false
 
         var content = "{self.name} |{self.columns.join(\", \")}|\n"
         for row in self.rows:
@@ -156,8 +159,9 @@ impl Table:
             )
             content = content + "    {values.join(\", \")}\n"
 
-        # TODO: Replace direct FFI call with wrapper (file_write) from app.io or compiler.ffi
-        rt_file_write(self.path, content)
+        # Use atomic write for thread safety and data integrity
+        val write_result = atomic_write(self.path, content, DbConfig.defaults())
+        write_result.ok.?
 
     # Convert to markdown
     fn to_markdown() -> text:
