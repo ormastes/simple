@@ -1,0 +1,149 @@
+# @pending
+# Time Module Specification
+# Tests for std.time module functionality
+
+import std.spec
+import time
+
+"""
+Test suite for the std.time module, verifying time measurement and sleep functionality.
+
+This specification covers:
+- Time retrieval functions (now, now_ms, now_micros, now_nanos)
+- Sleep functions for pausing execution (sleep, sleep_ms, sleep_micros)
+- Time unit conversions and monotonicity guarantees
+- Edge cases like zero-duration sleeps and rapid successive calls
+
+All time functions return positive values representing elapsed time since
+the Unix epoch. The tests verify both correctness and reasonable timing
+tolerances accounting for OS scheduler variations.
+"""
+
+describe "Time Module":
+    """
+    Tests for time measurement and sleep operations in Simple.
+
+    The time module provides high-resolution time retrieval at various
+    granularities (seconds, milliseconds, microseconds, nanoseconds) and
+    sleep functions for pausing execution. Tests verify:
+
+    - now() returns positive floating-point seconds
+    - now_ms() returns positive milliseconds as integers
+    - now_micros() returns positive microseconds as integers
+    - now_nanos() returns positive nanoseconds as integers
+    - sleep(duration) pauses for the specified seconds
+    - sleep_ms(ms) pauses for the specified milliseconds
+    - Time values are monotonically increasing
+    - Unit conversions are consistent (1ms = 1000us = 1000000ns)
+    """
+    context "Time measurement":
+        it "now_micros returns positive microseconds":
+            val micros = time.now_micros()
+            expect micros > 0
+
+        it "now_nanos returns positive nanoseconds":
+            val nanos = time.now_nanos()
+            expect nanos > 0
+
+        it "now_ms returns positive milliseconds":
+            val ms = time.now_ms()
+            expect ms > 0
+
+        it "now returns positive seconds":
+            val secs = time.now()
+            expect secs > 0.0
+
+        it "nanos is approximately micros * 1000":
+            val micros = time.now_micros()
+            val nanos = time.now_nanos()
+            # Should be within same millisecond (allowing for execution time)
+            val diff = (nanos / 1000) - micros
+            expect diff.abs() < 1000  # Within 1ms
+
+        it "ms is approximately micros / 1000":
+            val micros = time.now_micros()
+            val ms = time.now_ms()
+            val diff = micros / 1000 - ms
+            expect diff.abs() < 2  # Within 2ms
+
+        it "elapsed time increases":
+            val start = time.now_micros()
+            # Busy wait a bit
+            var x = 0
+            for i in 0..1000:
+                x = x + i
+            val end = time.now_micros()
+            expect end > start
+
+        it "elapsed time is measurable":
+            val start = time.now()
+            # Busy wait
+            var x = 0
+            for i in 0..10000:
+                x = x + i
+            val elapsed = time.now() - start
+            expect elapsed > 0.0
+
+    context "Sleep functions":
+        it "sleep pauses execution for specified duration":
+            val start = time.now()
+            time.sleep(0.1)  # Sleep 100ms
+            val elapsed = time.now() - start
+            # Should be at least 100ms (0.1s)
+            # Allow up to 150ms due to OS scheduler
+            expect elapsed >= 0.09
+            expect elapsed <= 0.2
+
+        it "sleep_ms pauses for milliseconds":
+            val start = time.now_ms()
+            time.sleep_ms(50)
+            val elapsed = time.now_ms() - start
+            expect elapsed >= 45  # At least 45ms
+            expect elapsed <= 100  # At most 100ms
+
+        it "sleep with zero duration does not crash":
+            time.sleep(0.0)
+            # Should complete without error
+
+        it "sleep_micros with small duration works":
+            val start = time.now_micros()
+            time.sleep_micros(1000)  # 1ms
+            val elapsed = time.now_micros() - start
+            expect elapsed >= 500  # At least 0.5ms
+            expect elapsed <= 5000  # At most 5ms
+
+    context "Time conversions":
+        it "microseconds to milliseconds conversion":
+            val micros: i64 = 1000000  # 1 million microseconds
+            val ms = micros / 1000
+            expect ms == 1000  # 1000 milliseconds
+
+        it "milliseconds to seconds conversion":
+            val ms: i64 = 5000
+            val secs = ms as f64 / 1000.0
+            expect secs == 5.0
+
+        it "nanoseconds to microseconds approximation":
+            val nanos: i64 = 1000000  # 1 million nanoseconds
+            val micros = nanos / 1000
+            expect micros == 1000
+
+    context "Edge cases":
+        it "now functions work multiple times":
+            val t1 = time.now_micros()
+            val t2 = time.now_micros()
+            val t3 = time.now_micros()
+            expect t3 >= t2
+            expect t2 >= t1
+
+        it "time values are monotonic":
+            var prev = time.now_micros()
+            for _ in 0..10:
+                val curr = time.now_micros()
+                expect curr >= prev
+                prev = curr
+
+        it "very short sleep does not panic":
+            time.sleep(0.001)  # 1ms
+            time.sleep_micros(100)  # 100 microseconds
+            # Should complete without error

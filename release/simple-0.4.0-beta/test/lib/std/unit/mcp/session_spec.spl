@@ -1,0 +1,253 @@
+# @pending
+"""
+MCP Debug Session Manager Tests
+Feature: Debug Session Management
+Category: MCP, Debug
+Status: In Progress
+
+Tests for the SessionManager, DebugSession, and SessionBreakpoint types
+used by the unified MCP debug server.
+"""
+
+
+# Since we can't import the app modules directly in test,
+# we define the types inline to test the logic patterns.
+
+# ----------- Inline type definitions for testing -----------
+
+enum SessionState:
+    Created
+    Running
+    Paused
+    Terminated
+
+enum TargetType:
+    Interpreter
+    Smf
+    Native
+
+class SessionBreakpoint:
+    id: Int
+    file: String
+    line: Int
+    condition: Option<String>
+    enabled: Bool
+    hit_count: Int
+
+    static fn at_line(id: Int, file: String, line: Int) -> SessionBreakpoint:
+        SessionBreakpoint(
+            id: id,
+            file: file,
+            line: line,
+            condition: None,
+            enabled: true,
+            hit_count: 0
+        )
+
+class DebugSession:
+    id: String
+    target_type: TargetType
+    program_path: String
+    state: SessionState
+    breakpoints: List<SessionBreakpoint>
+    args: List<String>
+
+    static fn create(id: String, target_type: TargetType, program_path: String) -> DebugSession:
+        DebugSession(
+            id: id,
+            target_type: target_type,
+            program_path: program_path,
+            state: SessionState.Created,
+            breakpoints: [],
+            args: []
+        )
+
+class SessionManager:
+    sessions: Dict<String, DebugSession>
+    next_session_id: Int
+    next_bp_id: Int
+
+    static fn empty() -> SessionManager:
+        SessionManager(
+            sessions: {},
+            next_session_id: 1,
+            next_bp_id: 1
+        )
+
+impl SessionManager:
+    me create_session(target_type: TargetType, program_path: String) -> String:
+        val id = "session_{self.next_session_id}"
+        self.next_session_id = self.next_session_id + 1
+        val session = DebugSession.create(id, target_type, program_path)
+        self.sessions[id] = session
+        id
+
+    fn get_session(id: String) -> Option<DebugSession>:
+        self.sessions.get(id)
+
+    fn list_sessions() -> List<DebugSession>:
+        var result: List<DebugSession> = []
+        for (_, session) in self.sessions.items():
+            result.push(session)
+        result
+
+    me remove_session(id: String) -> Bool:
+        match self.sessions.get(id):
+            case Some(_):
+                self.sessions.remove(id)
+                true
+            case None:
+                false
+
+    me add_breakpoint(session_id: String, file: String, line: Int) -> Option<Int>:
+        match self.sessions.get(session_id):
+            case Some(session):
+                val bp_id = self.next_bp_id
+                self.next_bp_id = self.next_bp_id + 1
+                val bp = SessionBreakpoint.at_line(bp_id, file, line)
+                session.breakpoints.push(bp)
+                Some(bp_id)
+            case None:
+                None
+
+    fn remove_breakpoint(session_id: String, bp_id: Int) -> Bool:
+        match self.sessions.get(session_id):
+            case Some(session):
+                val initial_len = session.breakpoints.len()
+                session.breakpoints = session.breakpoints.filter(\bp: bp.id != bp_id)
+                session.breakpoints.len() < initial_len
+            case None:
+                false
+
+# ----------- Tests -----------
+
+describe "SessionState":
+    it "creates all states":
+        val created = SessionState.Created
+        val running = SessionState.Running
+        val paused = SessionState.Paused
+        val terminated = SessionState.Terminated
+        expect(true)
+
+describe "TargetType":
+    it "creates all target types":
+        val interp = TargetType.Interpreter
+        val smf = TargetType.Smf
+        val native = TargetType.Native
+        expect(true)
+
+describe "SessionBreakpoint":
+    it "creates breakpoint at line":
+        val bp = SessionBreakpoint.at_line(1, "test.spl", 42)
+        expect(bp.id == 1)
+        expect(bp.file == "test.spl")
+        expect(bp.line == 42)
+        expect(bp.enabled)
+        expect(bp.hit_count == 0)
+
+    it "creates breakpoint with no condition":
+        val bp = SessionBreakpoint.at_line(5, "main.spl", 10)
+        match bp.condition:
+            case None: expect(true)
+            case Some(_): expect(false)
+
+describe "DebugSession":
+    it "creates session with correct defaults":
+        val session = DebugSession.create("s1", TargetType.Interpreter, "test.spl")
+        expect(session.id == "s1")
+        expect(session.program_path == "test.spl")
+        expect(session.breakpoints.len() == 0)
+        expect(session.args.len() == 0)
+
+    it "starts in Created state":
+        val session = DebugSession.create("s2", TargetType.Smf, "prog.smf")
+        match session.state:
+            case SessionState.Created: expect(true)
+            case _: expect(false)
+
+describe "SessionManager":
+    context "session creation":
+        it "creates sessions with unique ids":
+            var mgr = SessionManager.empty()
+            val id1 = mgr.create_session(TargetType.Interpreter, "a.spl")
+            val id2 = mgr.create_session(TargetType.Smf, "b.smf")
+            expect(id1 != id2)
+            expect(id1 == "session_1")
+            expect(id2 == "session_2")
+
+        it "stores sessions retrievably":
+            var mgr = SessionManager.empty()
+            val id = mgr.create_session(TargetType.Native, "prog")
+            match mgr.get_session(id):
+                case Some(session):
+                    expect(session.program_path == "prog")
+                case None:
+                    expect(false)
+
+    context "session listing":
+        it "lists all sessions":
+            var mgr = SessionManager.empty()
+            mgr.create_session(TargetType.Interpreter, "a.spl")
+            mgr.create_session(TargetType.Interpreter, "b.spl")
+            val sessions = mgr.list_sessions()
+            expect(sessions.len() == 2)
+
+        it "returns empty list when no sessions":
+            var mgr = SessionManager.empty()
+            expect(mgr.list_sessions().len() == 0)
+
+    context "session removal":
+        it "removes existing session":
+            var mgr = SessionManager.empty()
+            val id = mgr.create_session(TargetType.Interpreter, "a.spl")
+            expect(mgr.remove_session(id))
+            match mgr.get_session(id):
+                case None: expect(true)
+                case Some(_): expect(false)
+
+        it "returns false for non-existent session":
+            var mgr = SessionManager.empty()
+            expect(not mgr.remove_session("nonexistent"))
+
+    context "breakpoint management":
+        it "adds breakpoint to session":
+            var mgr = SessionManager.empty()
+            val sid = mgr.create_session(TargetType.Interpreter, "test.spl")
+            match mgr.add_breakpoint(sid, "test.spl", 10):
+                case Some(bp_id):
+                    expect(bp_id == 1)
+                case None:
+                    expect(false)
+
+        it "tracks breakpoints in session":
+            var mgr = SessionManager.empty()
+            val sid = mgr.create_session(TargetType.Interpreter, "test.spl")
+            mgr.add_breakpoint(sid, "test.spl", 10)
+            mgr.add_breakpoint(sid, "test.spl", 20)
+            match mgr.get_session(sid):
+                case Some(session):
+                    expect(session.breakpoints.len() == 2)
+                case None:
+                    expect(false)
+
+        it "removes breakpoint by id":
+            var mgr = SessionManager.empty()
+            val sid = mgr.create_session(TargetType.Interpreter, "test.spl")
+            mgr.add_breakpoint(sid, "test.spl", 10)
+            expect(mgr.remove_breakpoint(sid, 1))
+            match mgr.get_session(sid):
+                case Some(session):
+                    expect(session.breakpoints.len() == 0)
+                case None:
+                    expect(false)
+
+        it "returns false removing non-existent breakpoint":
+            var mgr = SessionManager.empty()
+            val sid = mgr.create_session(TargetType.Interpreter, "test.spl")
+            expect(not mgr.remove_breakpoint(sid, 999))
+
+        it "returns None adding breakpoint to non-existent session":
+            var mgr = SessionManager.empty()
+            match mgr.add_breakpoint("fake_id", "test.spl", 10):
+                case None: expect(true)
+                case Some(_): expect(false)

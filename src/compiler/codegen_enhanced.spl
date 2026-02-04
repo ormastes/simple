@@ -1,0 +1,592 @@
+# Enhanced Codegen - Intelligence in Simple Layer
+#
+# Full codegen logic implemented in Simple, using FFI as thin translation layer.
+# This module adds:
+# - Type analysis and tracking
+# - Constant folding and propagation
+# - Dead code elimination
+# - Instruction validation
+# - Better error messages
+#
+# Architecture:
+#   MIR -> Optimization (Simple) -> Validation (Simple) -> FFI (thin IR emit)
+
+use mir_data.*
+use hir.SymbolId
+use lexer.Span
+
+export CodegenEnhanced, CodegenStats, OptimizationPass
+
+# ============================================================================
+# Enhanced Codegen State
+# ============================================================================
+
+class CodegenEnhanced:
+    """
+    Enhanced code generator with optimization in Simple.
+
+    FFI layer is used ONLY for IR emission - all logic here.
+    """
+    # Cranelift state (from FFI)
+    module_handle: i64
+    current_ctx: i64
+
+    # Simple-side intelligence
+    type_map: {i64: MirType}          # LocalId -> inferred type
+    const_map: {i64: MirConstValue}   # LocalId -> known constant
+    use_count: {i64: i64}             # LocalId -> number of uses
+    dead_locals: [i64]                # Dead code locals
+
+    # Value tracking (FFI handles)
+    local_values: {i64: i64}          # LocalId -> Cranelift value
+    block_map: {i64: i64}             # BlockId -> Cranelift block
+    function_map: {text: i64}         # name -> function id
+    symbol_map: {i64: text}           # SymbolId -> function name
+
+    # Optimization state
+    optimizations_enabled: bool
+    opt_stats: CodegenStats
+
+    # Error tracking
+    errors: [CodegenError]
+
+struct CodegenStats:
+    """Statistics from optimization passes."""
+    constants_folded: i64
+    dead_code_removed: i64
+    instructions_simplified: i64
+    type_casts_eliminated: i64
+
+struct CodegenError:
+    """Enhanced error with context."""
+    message: text
+    instruction: text?
+    local_id: i64?
+    span: Span?
+
+impl CodegenEnhanced:
+    static fn create(enable_opts: bool) -> CodegenEnhanced:
+        """Create enhanced codegen with optimization control."""
+        CodegenEnhanced(
+            module_handle: 0,
+            current_ctx: 0,
+            type_map: {},
+            const_map: {},
+            use_count: {},
+            dead_locals: [],
+            local_values: {},
+            block_map: {},
+            function_map: {},
+            symbol_map: {},
+            optimizations_enabled: enable_opts,
+            opt_stats: CodegenStats(
+                constants_folded: 0,
+                dead_code_removed: 0,
+                instructions_simplified: 0,
+                type_casts_eliminated: 0
+            ),
+            errors: []
+        )
+
+    # ========================================================================
+    # Optimization Passes (Pure Simple Logic)
+    # ========================================================================
+
+    me analyze_function(func: MirFunction):
+        """
+        Analyze function before codegen.
+
+        Builds:
+        - Type map (infer types for all locals)
+        - Constant map (track known constants)
+        - Use counts (find dead code)
+        """
+        # Initialize type map from locals
+        for local in func.locals:
+            self.type_map[local.id.id] = local.type_
+
+        # Analyze all blocks
+        for block in func.blocks:
+            self.analyze_block(block)
+
+    me analyze_block(block: MirBlock):
+        """Analyze a single block."""
+        for inst in block.instructions:
+            self.analyze_instruction(inst)
+
+    me analyze_instruction(inst: MirInst):
+        """
+        Analyze single instruction.
+
+        Tracks:
+        - Type propagation
+        - Constant values
+        - Use counts
+        """
+        match inst.kind:
+            case Const(dest, value, type_):
+                # Track constant value
+                self.const_map[dest.id] = value
+                self.type_map[dest.id] = type_
+
+            case Copy(dest, src) | Move(dest, src):
+                # Propagate type
+                if self.type_map.contains_key(src.id):
+                    self.type_map[dest.id] = self.type_map[src.id]
+                # Propagate constant
+                if self.const_map.contains_key(src.id):
+                    self.const_map[dest.id] = self.const_map[src.id]
+                # Track use
+                self.increment_use(src.id)
+
+            case BinOp(dest, op, left, right):
+                # Track operand uses
+                self.track_operand_use(left)
+                self.track_operand_use(right)
+                # Try constant folding
+                val folded = self.try_fold_binop(op, left, right)
+                if folded.?:
+                    self.const_map[dest.id] = folded.unwrap()
+                    self.opt_stats.constants_folded = self.opt_stats.constants_folded + 1
+
+            case UnaryOp(dest, op, operand):
+                self.track_operand_use(operand)
+                val folded = self.try_fold_unaryop(op, operand)
+                if folded.?:
+                    self.const_map[dest.id] = folded.unwrap()
+                    self.opt_stats.constants_folded = self.opt_stats.constants_folded + 1
+
+            case Load(dest, ptr):
+                self.track_operand_use(ptr)
+
+            case Store(ptr, value):
+                self.track_operand_use(ptr)
+                self.track_operand_use(value)
+
+            case Cast(dest, operand, target):
+                self.track_operand_use(operand)
+                # Check if cast is no-op (same type)
+                val src_type = self.get_operand_type(operand)
+                if src_type.? and self.types_equal(src_type.unwrap(), target):
+                    # No-op cast - just copy
+                    self.opt_stats.type_casts_eliminated = self.opt_stats.type_casts_eliminated + 1
+
+            case Call(dest, func, args):
+                self.track_operand_use(func)
+                for arg in args:
+                    self.track_operand_use(arg)
+
+            case _:
+                # Generic handling for other instructions
+                pass
+
+    me try_fold_binop(op: MirBinOp, left: MirOperand, right: MirOperand) -> MirConstValue?:
+        """
+        Try to fold binary operation at compile time.
+
+        Returns Some(value) if both operands are constants.
+        """
+        if not self.optimizations_enabled:
+            return nil
+
+        val left_const = self.get_operand_const(left)
+        val right_const = self.get_operand_const(right)
+
+        if not left_const.? or not right_const.?:
+            return nil
+
+        # Both are constants - try to fold
+        match (left_const.unwrap(), right_const.unwrap()):
+            case (Int(l), Int(r)):
+                val result = match op:
+                    case Add: l + r
+                    case Sub: l - r
+                    case Mul: l * r
+                    case Div: if r != 0: l / r else: return nil
+                    case Rem: if r != 0: l % r else: return nil
+                    case Pow: l ** r
+                    case BitAnd: l & r
+                    case BitOr: l | r
+                    case BitXor: l xor r
+                    case Shl: l << (r & 63)
+                    case Shr: l >> (r & 63)
+                    case Eq: if l == r: 1 else: 0
+                    case Ne: if l != r: 1 else: 0
+                    case Lt: if l < r: 1 else: 0
+                    case Le: if l <= r: 1 else: 0
+                    case Gt: if l > r: 1 else: 0
+                    case Ge: if l >= r: 1 else: 0
+                    case _: return nil
+                Some(MirConstValue.Int(result))
+
+            case (Float(l), Float(r)):
+                val result = match op:
+                    case Add: l + r
+                    case Sub: l - r
+                    case Mul: l * r
+                    case Div: if r != 0.0: l / r else: return nil
+                    case Pow: l ** r
+                    case _: return nil
+                Some(MirConstValue.Float(result))
+
+            case _:
+                nil
+
+    me try_fold_unaryop(op: MirUnaryOp, operand: MirOperand) -> MirConstValue?:
+        """Try to fold unary operation at compile time."""
+        if not self.optimizations_enabled:
+            return nil
+
+        val const_val = self.get_operand_const(operand)
+        if not const_val.?:
+            return nil
+
+        match const_val.unwrap():
+            case Int(v):
+                val result = match op:
+                    case Neg: -v
+                    case Not: if v == 0: 1 else: 0
+                    case BitNot: ~v
+                    case _: return nil
+                Some(MirConstValue.Int(result))
+
+            case Float(v):
+                val result = match op:
+                    case Neg: -v
+                    case _: return nil
+                Some(MirConstValue.Float(result))
+
+            case _:
+                nil
+
+    # ========================================================================
+    # Type Analysis Helpers
+    # ========================================================================
+
+    fn get_operand_type(operand: MirOperand) -> MirType?:
+        """Get type of an operand."""
+        match operand.kind:
+            case Copy(local) | Move(local):
+                if self.type_map.contains_key(local.id):
+                    Some(self.type_map[local.id])
+                else:
+                    nil
+            case Const(value, type_):
+                Some(type_)
+
+    fn get_operand_const(operand: MirOperand) -> MirConstValue?:
+        """Get constant value if operand is constant."""
+        match operand.kind:
+            case Const(value, _):
+                Some(value)
+            case Copy(local) | Move(local):
+                if self.const_map.contains_key(local.id):
+                    Some(self.const_map[local.id])
+                else:
+                    nil
+
+    fn types_equal(a: MirType, b: MirType) -> bool:
+        """Check if two types are equal."""
+        # Simple structural equality for now
+        a.kind == b.kind
+
+    # ========================================================================
+    # Use Tracking
+    # ========================================================================
+
+    me track_operand_use(operand: MirOperand):
+        """Track operand use for dead code analysis."""
+        match operand.kind:
+            case Copy(local) | Move(local):
+                self.increment_use(local.id)
+            case Const(_, _):
+                pass
+
+    me increment_use(local_id: i64):
+        """Increment use count for a local."""
+        val current = self.use_count[local_id] ?? 0
+        self.use_count[local_id] = current + 1
+
+    fn is_dead_local(local_id: i64) -> bool:
+        """Check if a local is never used (dead code)."""
+        val uses = self.use_count[local_id] ?? 0
+        uses == 0
+
+    # ========================================================================
+    # Validation (Before FFI)
+    # ========================================================================
+
+    fn validate_binop(op: MirBinOp, left: MirOperand, right: MirOperand) -> CodegenError?:
+        """
+        Validate binary operation before emitting IR.
+
+        Checks:
+        - Type compatibility
+        - Division by zero (if constant)
+        - Overflow risks
+        """
+        val left_type = self.get_operand_type(left)
+        val right_type = self.get_operand_type(right)
+
+        # Check type compatibility
+        if left_type.? and right_type.?:
+            if not self.types_compatible_for_binop(op, left_type.unwrap(), right_type.unwrap()):
+                return Some(CodegenError(
+                    message: "Type mismatch in binary operation",
+                    instruction: Some("BinOp({op})"),
+                    local_id: nil,
+                    span: nil
+                ))
+
+        # Check for division by zero (constant)
+        if op == MirBinOp.Div or op == MirBinOp.Rem:
+            val right_const = self.get_operand_const(right)
+            if right_const.?:
+                match right_const.unwrap():
+                    case Int(0):
+                        return Some(CodegenError(
+                            message: "Division by zero (constant)",
+                            instruction: Some("BinOp({op})"),
+                            local_id: nil,
+                            span: nil
+                        ))
+                    case Float(v) if v == 0.0:
+                        return Some(CodegenError(
+                            message: "Division by zero (constant)",
+                            instruction: Some("BinOp({op})"),
+                            local_id: nil,
+                            span: nil
+                        ))
+                    case _:
+                        pass
+
+        nil
+
+    fn types_compatible_for_binop(op: MirBinOp, left: MirType, right: MirType) -> bool:
+        """Check if types are compatible for binary operation."""
+        # For now, allow same kind or both numeric
+        if self.types_equal(left, right):
+            return true
+
+        # Allow int + float mixing for some ops
+        val left_numeric = self.is_numeric_type(left)
+        val right_numeric = self.is_numeric_type(right)
+
+        if left_numeric and right_numeric:
+            match op:
+                case Add | Sub | Mul | Div | Pow:
+                    true
+                case _:
+                    false
+        else:
+            false
+
+    fn is_numeric_type(type_: MirType) -> bool:
+        """Check if type is numeric (int or float)."""
+        match type_.kind:
+            case I8 | I16 | I32 | I64 | U8 | U16 | U32 | U64 | F32 | F64:
+                true
+            case _:
+                false
+
+    # ========================================================================
+    # Enhanced Instruction Compilation
+    # ========================================================================
+
+    me compile_instruction_validated(inst: MirInst) -> CodegenError?:
+        """
+        Compile instruction with validation.
+
+        Flow:
+        1. Validate instruction
+        2. Apply optimizations
+        3. Emit FFI call
+        """
+        match inst.kind:
+            case BinOp(dest, op, left, right):
+                # Validate first
+                val error = self.validate_binop(op, left, right)
+                if error.?:
+                    return error
+
+                # Check if already folded
+                if self.const_map.contains_key(dest.id):
+                    # Already folded during analysis
+                    val const_val = self.const_map[dest.id]
+                    val cl_value = self.emit_const_ffi(const_val, self.type_map[dest.id])
+                    self.local_values[dest.id] = cl_value
+                    return nil
+
+                # Emit normal binop
+                val lv = self.compile_operand_ffi(left)
+                val rv = self.compile_operand_ffi(right)
+                val result = self.emit_binop_ffi(op, lv, rv)
+                self.local_values[dest.id] = result
+                nil
+
+            case UnaryOp(dest, op, operand):
+                # Check if folded
+                if self.const_map.contains_key(dest.id):
+                    val const_val = self.const_map[dest.id]
+                    val cl_value = self.emit_const_ffi(const_val, self.type_map[dest.id])
+                    self.local_values[dest.id] = cl_value
+                    return nil
+
+                # Emit normal unaryop
+                val v = self.compile_operand_ffi(operand)
+                val result = self.emit_unaryop_ffi(op, v)
+                self.local_values[dest.id] = result
+                nil
+
+            case Cast(dest, operand, target):
+                # Check if cast was eliminated
+                val src_type = self.get_operand_type(operand)
+                if src_type.? and self.types_equal(src_type.unwrap(), target):
+                    # No-op cast - just copy value
+                    val v = self.compile_operand_ffi(operand)
+                    self.local_values[dest.id] = v
+                    return nil
+
+                # Emit real cast
+                val v = self.compile_operand_ffi(operand)
+                val result = self.emit_cast_ffi(v, target)
+                self.local_values[dest.id] = result
+                nil
+
+            case _:
+                # Default: just emit FFI
+                nil
+
+    # ========================================================================
+    # FFI Emission Layer (Thin Wrapper)
+    # ========================================================================
+
+    me emit_const_ffi(value: MirConstValue, type_: MirType) -> i64:
+        """Emit constant via FFI - THIN WRAPPER."""
+        match value:
+            case Int(v):
+                val cl_type = self.mir_type_to_cl(type_)
+                cranelift_iconst(self.current_ctx, cl_type, v)
+            case Float(v):
+                val cl_type = self.mir_type_to_cl(type_)
+                cranelift_fconst(self.current_ctx, cl_type, v)
+            case Bool(v):
+                cranelift_bconst(self.current_ctx, v)
+            case _:
+                cranelift_iconst(self.current_ctx, CL_TYPE_I64, 0)
+
+    me emit_binop_ffi(op: MirBinOp, left: i64, right: i64) -> i64:
+        """Emit binop via FFI - THIN WRAPPER."""
+        match op:
+            case Add: cranelift_iadd(self.current_ctx, left, right)
+            case Sub: cranelift_isub(self.current_ctx, left, right)
+            case Mul: cranelift_imul(self.current_ctx, left, right)
+            case Div: cranelift_sdiv(self.current_ctx, left, right)
+            case Rem: cranelift_srem(self.current_ctx, left, right)
+            case BitAnd: cranelift_band(self.current_ctx, left, right)
+            case BitOr: cranelift_bor(self.current_ctx, left, right)
+            case BitXor: cranelift_bxor(self.current_ctx, left, right)
+            case Shl: cranelift_ishl(self.current_ctx, left, right)
+            case Shr: cranelift_sshr(self.current_ctx, left, right)
+            case Eq: cranelift_icmp(self.current_ctx, CL_CMP_EQ, left, right)
+            case Ne: cranelift_icmp(self.current_ctx, CL_CMP_NE, left, right)
+            case Lt: cranelift_icmp(self.current_ctx, CL_CMP_SLT, left, right)
+            case Le: cranelift_icmp(self.current_ctx, CL_CMP_SLE, left, right)
+            case Gt: cranelift_icmp(self.current_ctx, CL_CMP_SGT, left, right)
+            case Ge: cranelift_icmp(self.current_ctx, CL_CMP_SGE, left, right)
+            case _: 0
+
+    me emit_unaryop_ffi(op: MirUnaryOp, operand: i64) -> i64:
+        """Emit unaryop via FFI - THIN WRAPPER."""
+        match op:
+            case Neg:
+                val zero = cranelift_iconst(self.current_ctx, CL_TYPE_I64, 0)
+                cranelift_isub(self.current_ctx, zero, operand)
+            case Not:
+                val one = cranelift_iconst(self.current_ctx, CL_TYPE_I64, 1)
+                cranelift_bxor(self.current_ctx, operand, one)
+            case BitNot:
+                cranelift_bnot(self.current_ctx, operand)
+            case _:
+                0
+
+    me emit_cast_ffi(value: i64, target: MirType) -> i64:
+        """Emit cast via FFI - THIN WRAPPER."""
+        val cl_target = self.mir_type_to_cl(target)
+        cranelift_bitcast(self.current_ctx, cl_target, value)
+
+    me compile_operand_ffi(operand: MirOperand) -> i64:
+        """Compile operand via FFI - THIN WRAPPER."""
+        match operand.kind:
+            case Copy(local) | Move(local):
+                self.local_values[local.id] ?? 0
+            case Const(value, type_):
+                self.emit_const_ffi(value, type_)
+
+    fn mir_type_to_cl(type_: MirType) -> i64:
+        """Convert MIR type to Cranelift type constant."""
+        match type_.kind:
+            case I8: CL_TYPE_I8
+            case I16: CL_TYPE_I16
+            case I32: CL_TYPE_I32
+            case I64: CL_TYPE_I64
+            case F32: CL_TYPE_F32
+            case F64: CL_TYPE_F64
+            case Bool: CL_TYPE_B1
+            case _: CL_TYPE_I64  # Default
+
+# ============================================================================
+# Optimization Pass Enumeration
+# ============================================================================
+
+enum OptimizationPass:
+    """Available optimization passes."""
+    ConstantFolding
+    DeadCodeElimination
+    TypeCastElimination
+    InstructionSimplification
+
+# ============================================================================
+# Constants (Cranelift Type IDs)
+# ============================================================================
+
+val CL_TYPE_I8: i64 = 1
+val CL_TYPE_I16: i64 = 2
+val CL_TYPE_I32: i64 = 3
+val CL_TYPE_I64: i64 = 4
+val CL_TYPE_F32: i64 = 5
+val CL_TYPE_F64: i64 = 6
+val CL_TYPE_B1: i64 = 7
+val CL_TYPE_PTR: i64 = 8
+
+val CL_CMP_EQ: i64 = 0
+val CL_CMP_NE: i64 = 1
+val CL_CMP_SLT: i64 = 2
+val CL_CMP_SLE: i64 = 3
+val CL_CMP_SGT: i64 = 4
+val CL_CMP_SGE: i64 = 5
+
+# ============================================================================
+# FFI Declarations (Thin Layer)
+# ============================================================================
+
+extern fn cranelift_iconst(ctx: i64, type_: i64, value: i64) -> i64
+extern fn cranelift_fconst(ctx: i64, type_: i64, value: f64) -> i64
+extern fn cranelift_bconst(ctx: i64, value: bool) -> i64
+
+extern fn cranelift_iadd(ctx: i64, left: i64, right: i64) -> i64
+extern fn cranelift_isub(ctx: i64, left: i64, right: i64) -> i64
+extern fn cranelift_imul(ctx: i64, left: i64, right: i64) -> i64
+extern fn cranelift_sdiv(ctx: i64, left: i64, right: i64) -> i64
+extern fn cranelift_srem(ctx: i64, left: i64, right: i64) -> i64
+
+extern fn cranelift_band(ctx: i64, left: i64, right: i64) -> i64
+extern fn cranelift_bor(ctx: i64, left: i64, right: i64) -> i64
+extern fn cranelift_bxor(ctx: i64, left: i64, right: i64) -> i64
+extern fn cranelift_bnot(ctx: i64, value: i64) -> i64
+
+extern fn cranelift_ishl(ctx: i64, left: i64, right: i64) -> i64
+extern fn cranelift_sshr(ctx: i64, left: i64, right: i64) -> i64
+
+extern fn cranelift_icmp(ctx: i64, cond: i64, left: i64, right: i64) -> i64
+extern fn cranelift_bitcast(ctx: i64, target_type: i64, value: i64) -> i64

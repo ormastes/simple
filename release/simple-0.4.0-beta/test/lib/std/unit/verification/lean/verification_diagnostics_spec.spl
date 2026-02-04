@@ -1,0 +1,203 @@
+# @pending
+# @skip
+# Verification Diagnostics Tests
+#
+# Tests for verification error codes and diagnostic reporting.
+
+use verification.lean.verification_diagnostics as diag
+
+describe "Verification Diagnostics":
+    """
+    ## Error Code System
+
+    Tests for verification error codes, messages, and diagnostic formatting.
+    """
+
+    context "VerificationErrorCode":
+        """
+        ### Error Code Strings
+
+        Each verification error has a unique code string.
+        """
+
+        it "returns V-AOP-001 for AopNonGhostTargetsVerified":
+            expect(diag.VerificationErrorCode.AopNonGhostTargetsVerified.code()).to(eq("V-AOP-001"))
+
+        it "returns M-INTRO-001 for MacroUndeclaredIntroduction":
+            expect(diag.VerificationErrorCode.MacroUndeclaredIntroduction.code()).to(eq("M-INTRO-001"))
+
+        it "returns V-TERM-001 for MissingTermination":
+            expect(diag.VerificationErrorCode.MissingTermination.code()).to(eq("V-TERM-001"))
+
+        it "returns V-UNSAFE-001 for UnsafeInVerified":
+            expect(diag.VerificationErrorCode.UnsafeInVerified.code()).to(eq("V-UNSAFE-001"))
+
+        it "returns V-EFFECT-001 for IoInVerified":
+            expect(diag.VerificationErrorCode.IoInVerified.code()).to(eq("V-EFFECT-001"))
+
+        it "returns V-GHOST-001 for GhostAccessesNonGhost":
+            expect(diag.VerificationErrorCode.GhostAccessesNonGhost.code()).to(eq("V-GHOST-001"))
+
+    context "Error Messages":
+        """
+        ### Default Messages
+
+        Each error code has a descriptive default message.
+        """
+
+        it "has message for MissingTermination":
+            val msg = diag.VerificationErrorCode.MissingTermination.message()
+            expect(msg).to(contain("decreases"))
+
+        it "has message for UnsafeInVerified":
+            val msg = diag.VerificationErrorCode.UnsafeInVerified.message()
+            expect(msg).to(contain("unsafe"))
+
+        it "has message for IoInVerified":
+            val msg = diag.VerificationErrorCode.IoInVerified.message()
+            expect(msg).to(contain("IO"))
+
+    context "Help Text":
+        """
+        ### Help Messages
+
+        Each error provides actionable help text.
+        """
+
+        it "has help for MissingTermination":
+            val help = diag.VerificationErrorCode.MissingTermination.help()
+            expect(help).to(contain("decreases"))
+
+        it "has help for FfiInVerified":
+            val help = diag.VerificationErrorCode.FfiInVerified.help()
+            expect(help).to(contain("@trusted"))
+
+    context "Span":
+        """
+        ### Source Location Tracking
+
+        Span represents a source code location.
+        """
+
+        it "creates span with position":
+            val span = diag.Span.new(10, 20, 5, 3)
+            expect(span.start).to(eq(10))
+            expect(span.end).to(eq(20))
+            expect(span.line).to(eq(5))
+            expect(span.column).to(eq(3))
+
+        it "creates empty span":
+            val span = diag.Span.empty()
+            expect(span.start).to(eq(0))
+            expect(span.end).to(eq(0))
+
+    context "VerificationDiagnostic":
+        """
+        ### Diagnostic Creation
+
+        Diagnostics combine error codes with source locations and context.
+        """
+
+        it "creates diagnostic with code and span":
+            val span = diag.Span.new(10, 20, 5, 3)
+            val d = diag.VerificationDiagnostic.new(
+                diag.VerificationErrorCode.MissingTermination,
+                span
+            )
+            expect(d.code.code()).to(eq("V-TERM-001"))
+
+        it "adds context to diagnostic":
+            val span = diag.Span.new(0, 10, 1, 1)
+            var d = diag.VerificationDiagnostic.new(
+                diag.VerificationErrorCode.MissingTermination,
+                span
+            )
+            d = d.with_item("factorial")
+            expect(d.item_name).to(eq(Some("factorial")))
+
+        it "adds file to diagnostic":
+            val span = diag.Span.new(0, 10, 1, 1)
+            var d = diag.VerificationDiagnostic.new(
+                diag.VerificationErrorCode.MissingTermination,
+                span
+            )
+            d = d.with_file("math.spl")
+            expect(d.file).to(eq(Some("math.spl")))
+
+        it "formats diagnostic with all context":
+            val span = diag.Span.new(0, 10, 5, 3)
+            var d = diag.VerificationDiagnostic.new(
+                diag.VerificationErrorCode.MissingTermination,
+                span
+            )
+            d = d.with_item("factorial").with_file("math.spl")
+            val formatted = d.format()
+            expect(formatted).to(contain("V-TERM-001"))
+            expect(formatted).to(contain("factorial"))
+            expect(formatted).to(contain("math.spl"))
+
+    context "VerificationDiagnostics Collector":
+        """
+        ### Collecting Multiple Diagnostics
+
+        The collector aggregates multiple diagnostics for batch reporting.
+        """
+
+        it "starts empty":
+            val collector = diag.VerificationDiagnostics.new()
+            expect(collector.is_empty()).to(be_true())
+            expect(collector.has_errors()).to(be_false())
+
+        it "collects errors":
+            var collector = diag.VerificationDiagnostics.new()
+            val span = diag.Span.new(0, 10, 1, 1)
+
+            collector.push(diag.VerificationDiagnostic.new(
+                diag.VerificationErrorCode.IoInVerified, span
+            ))
+            collector.push(diag.VerificationDiagnostic.new(
+                diag.VerificationErrorCode.FfiInVerified, span
+            ))
+
+            expect(collector.has_errors()).to(be_true())
+            expect(collector.error_count()).to(eq(2))
+
+        it "formats all diagnostics":
+            var collector = diag.VerificationDiagnostics.new()
+            val span = diag.Span.new(0, 10, 1, 1)
+
+            collector.push(diag.VerificationDiagnostic.new(
+                diag.VerificationErrorCode.IoInVerified, span
+            ))
+
+            val formatted = collector.format_all()
+            expect(formatted.len()).to(eq(1))
+            expect(formatted[0]).to(contain("V-EFFECT-001"))
+
+    context "Helper Functions":
+        """
+        ### Convenience Error Constructors
+
+        Helper functions for common error patterns.
+        """
+
+        it "creates missing termination error":
+            val span = diag.Span.new(0, 10, 1, 1)
+            val d = diag.missing_termination_error(span, "factorial")
+            expect(d.code.code()).to(eq("V-TERM-001"))
+            expect(d.item_name).to(eq(Some("factorial")))
+
+        it "creates IO error":
+            val span = diag.Span.new(0, 10, 1, 1)
+            val d = diag.io_in_verified_error(span, "read_file")
+            expect(d.code.code()).to(eq("V-EFFECT-001"))
+
+        it "creates FFI error":
+            val span = diag.Span.new(0, 10, 1, 1)
+            val d = diag.ffi_in_verified_error(span, "call_c_func")
+            expect(d.code.code()).to(eq("V-UNSAFE-003"))
+
+        it "creates ghost access error":
+            val span = diag.Span.new(0, 10, 1, 1)
+            val d = diag.ghost_access_error(span, "counter")
+            expect(d.code.code()).to(eq("V-GHOST-001"))

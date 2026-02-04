@@ -1,0 +1,305 @@
+# @pending
+"""
+# Macro Hygiene Specification
+
+**Feature ID:** #MACRO-001
+**Category:** Language | Macros
+**Status:** Implemented
+
+## Overview
+
+Tests for macro hygiene system that prevents variable capture through
+gensym renaming. Covers variable isolation, nested scopes, gensym uniqueness,
+and pattern matching with hygiene.
+
+## Syntax
+
+```simple
+macro make_ten() -> (returns result: Int):
+    emit result:
+        val x = 10
+        x
+
+val x = 5
+val result = make_ten!()
+# x is still 5, result is 10
+```
+"""
+
+
+
+# ============================================================================
+# Test Group 1: Basic Hygiene
+# ============================================================================
+
+describe "Basic Macro Hygiene":
+    """
+    ## Variable Capture Prevention
+
+    Tests for basic macro variable isolation.
+    """
+
+    it "prevents variable capture":
+        macro make_ten() -> (returns result: Int):
+            emit result:
+                val x = 10
+                x
+        val x = 5
+        val result = make_ten!()
+        expect x + result == 15
+
+    it "isolates macro internal variables":
+        macro increment() -> (returns result: Int):
+            emit result:
+                val temp = 1
+                temp
+        val a = increment!()
+        val b = increment!()
+        expect a + b == 2
+
+    it "preserves outer variable after macro":
+        macro do_nothing() -> (returns result: Int):
+            emit result:
+                val value = 100
+                value
+        val value = 42
+        val _ = do_nothing!()
+        expect value == 42
+
+
+# ============================================================================
+# Test Group 2: Nested Scopes
+# ============================================================================
+
+describe "Nested Scope Hygiene":
+    """
+    ## Nested Scopes in Macros
+
+    Tests for hygiene with nested scopes.
+    """
+
+    it "handles nested scopes in macro":
+        macro nested_scopes() -> (returns result: Int):
+            emit result:
+                val x = 10
+                val inner = if true: 20 else: 0
+                x + inner
+        expect nested_scopes!() == 30
+
+    it "handles nested macro calls":
+        macro inner() -> (returns result: Int):
+            emit result:
+                val x = 5
+                x
+        macro outer() -> (returns result: Int):
+            emit result:
+                val x = 10
+                x + inner!()
+        expect outer!() == 15
+
+    it "handles nested blocks":
+        macro nested_blocks() -> (returns result: Int):
+            emit result:
+                val a = 1
+                val b = if true: 2 + 3 else: 0
+                a + b
+        expect nested_blocks!() == 6
+
+
+# ============================================================================
+# Test Group 3: Gensym Uniqueness
+# ============================================================================
+
+describe "Gensym Uniqueness":
+    """
+    ## Unique Variable Names per Invocation
+
+    Tests for gensym'd variable uniqueness.
+    """
+
+    it "creates unique names across calls":
+        macro counter() -> (returns result: Int):
+            emit result:
+                val count = 1
+                count
+        val first = counter!()
+        val second = counter!()
+        val third = counter!()
+        expect first + second + third == 3
+
+    it "gensyms multiple variables":
+        macro multi_vars() -> (returns result: Int):
+            emit result:
+                val a = 1
+                val b = 2
+                val c = 3
+                a + b + c
+        val x = 10
+        val y = 20
+        val z = 30
+        val result = multi_vars!()
+        expect x + y + z + result == 66
+
+
+# ============================================================================
+# Test Group 4: Pattern Matching
+# ============================================================================
+
+describe "Pattern Matching Hygiene":
+    """
+    ## Pattern Variables in Macros
+
+    Tests for hygiene with pattern matching.
+    """
+
+    it "isolates pattern variables":
+        macro make_pair() -> (returns result: Int):
+            emit result:
+                val (x, y) = (10, 20)
+                x + y
+        val x = 100
+        val y = 200
+        val result = make_pair!()
+        expect x + y + result == 330
+
+    it "isolates tuple destructuring":
+        macro swap_values() -> (returns result: Int):
+            emit result:
+                val (a, b) = (5, 10)
+                b - a
+        val a = 1
+        val b = 2
+        val result = swap_values!()
+        expect a + b + result == 8
+
+    it "isolates array destructuring":
+        macro sum_array() -> (returns result: Int):
+            emit result:
+                val [x, y, z] = [1, 2, 3]
+                x + y + z
+        val x = 10
+        val y = 20
+        val z = 30
+        val result = sum_array!()
+        expect x + y + z + result == 66
+
+
+# ============================================================================
+# Test Group 5: Function Parameters
+# ============================================================================
+
+describe "Function Parameter Hygiene":
+    """
+    ## Function Parameters in Macros
+
+    Tests for hygiene with function definitions.
+    """
+
+    it "isolates function parameters":
+        macro func_test() -> (returns result: Int):
+            emit result:
+                fn add(x: Int, y: Int) -> Int:
+                    return x + y
+                add(3, 7)
+        expect func_test!() == 10
+
+    it "isolates function from outer scope":
+        macro func_macro() -> (returns result: Int):
+            emit result:
+                fn multiplier(x: Int) -> Int:
+                    return x * 2
+                multiplier(5)
+        val x = 100
+        val result = func_macro!()
+        expect x + result == 110
+
+    it "handles nested functions":
+        macro nested_func() -> (returns result: Int):
+            emit result:
+                fn outer(x: Int) -> Int:
+                    fn inner(y: Int) -> Int:
+                        return x + y
+                    return inner(5)
+                outer(10)
+        expect nested_func!() == 15
+
+
+# ============================================================================
+# Test Group 6: Complex Integration
+# ============================================================================
+
+describe "Complex Macro Hygiene":
+    """
+    ## Complex Scenarios
+
+    Tests for complex hygiene scenarios.
+    """
+
+    it "handles complex multi-scope macro":
+        macro complex() -> (returns result: Int):
+            emit result:
+                val temp = 1
+                val sum1 = if true: 2 else: 0
+                val sum2 = if true: 3 else: 0
+                val sum3 = if true: 4 else: 0
+                sum1 + sum2 + sum3 + temp
+        expect complex!() == 10
+
+    it "handles macro parameters":
+        macro use_param(value: Int) -> (returns result: Int):
+            emit result:
+                val x = value + 10
+                x
+        val x = 5
+        val result = use_param!(32)
+        expect x + result == 47
+
+    it "handles nested macros with same names":
+        macro base(n: Int) -> (returns result: Int):
+            emit result:
+                val temp = n * 2
+                temp
+        macro wrapper() -> (returns result: Int):
+            emit result:
+                val temp = 5
+                val a = base!(temp)
+                val b = base!(10)
+                temp + a + b
+        expect wrapper!() == 35
+
+
+# ============================================================================
+# Test Group 7: Edge Cases
+# ============================================================================
+
+describe "Macro Hygiene Edge Cases":
+    """
+    ## Edge Cases
+
+    Tests for edge case scenarios.
+    """
+
+    it "handles empty macro":
+        macro empty() -> (returns result: Int):
+            emit result:
+                0
+        expect empty!() == 0
+
+    it "handles macro with early return":
+        macro early_return(cond: Bool) -> (returns result: Int):
+            emit result:
+                if cond:
+                    return 100
+                val x = 42
+                x
+        expect early_return!(false) == 42
+
+    it "handles variable shadowing":
+        macro shadow_test() -> (returns result: Int):
+            emit result:
+                val x = 10
+                val x = x + 5
+                val x = x * 2
+                x
+        expect shadow_test!() == 30
+

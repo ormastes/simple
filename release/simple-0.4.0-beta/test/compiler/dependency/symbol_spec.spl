@@ -1,0 +1,243 @@
+# @pending
+# Tests for Symbol Table
+# Task #19: Symbol table implementation
+
+use sspec.{describe, it, expect}
+use compiler.dependency.symbol.{SymbolKind, SymbolEntry, SymbolConflictError, SymbolTable}
+use compiler.dependency.visibility.{Visibility}
+
+describe "SymbolKind":
+    context "predicates":
+        it "MacroKind is_macro returns true":
+            val kind = SymbolKind.MacroKind
+            expect kind.is_macro()
+
+        it "Function is_macro returns false":
+            val kind = SymbolKind.Function
+            expect not kind.is_macro()
+
+    context "to_string":
+        it "converts all variants":
+            expect SymbolKind.Function.to_string() == "Function"
+            expect SymbolKind.Type.to_string() == "Type"
+            expect SymbolKind.Constant.to_string() == "Constant"
+            expect SymbolKind.Variable.to_string() == "Variable"
+            expect SymbolKind.MacroKind.to_string() == "Macro"
+            expect SymbolKind.Module.to_string() == "Module"
+
+describe "SymbolEntry":
+    context "local symbols":
+        it "creates local symbol":
+            val entry = SymbolEntry.local(
+                "foo",
+                "mymod.foo",
+                SymbolKind.Function,
+                Visibility.Public,
+                "mymod"
+            )
+
+            expect entry.get_name() == "foo"
+            expect entry.get_qualified_name() == "mymod.foo"
+            expect not entry.is_imported_symbol()
+            expect entry.is_public()
+
+        it "creates private local symbol":
+            val entry = SymbolEntry.local(
+                "internal",
+                "mymod.internal",
+                SymbolKind.Function,
+                Visibility.Private,
+                "mymod"
+            )
+
+            expect not entry.is_public()
+
+    context "imported symbols":
+        it "creates imported symbol":
+            val entry = SymbolEntry.imported(
+                "Bar",
+                "other.Bar",
+                SymbolKind.Type,
+                Visibility.Public,
+                "other"
+            )
+
+            expect entry.is_imported_symbol()
+            expect not entry.is_aliased()
+
+    context "aliased imports":
+        it "creates aliased import":
+            val entry = SymbolEntry.aliased(
+                "MyBar",
+                "Bar",
+                "other.Bar",
+                SymbolKind.Type,
+                Visibility.Public,
+                "other"
+            )
+
+            expect entry.get_name() == "MyBar"
+            expect entry.get_original_name() == "Bar"
+            expect entry.is_aliased()
+            expect entry.is_imported_symbol()
+
+describe "SymbolConflictError":
+    it "formats error message":
+        val err = SymbolConflictError.new("foo", "mod1.foo", "mod2.foo")
+        val msg = err.to_string()
+
+        expect msg.contains("Symbol conflict")
+        expect msg.contains("foo")
+        expect msg.contains("mod1.foo")
+        expect msg.contains("mod2.foo")
+
+describe "SymbolTable":
+    context "construction":
+        it "creates empty table":
+            val table = SymbolTable.new("mymod")
+            expect table.count() == 0
+
+    context "defining symbols":
+        it "defines a symbol":
+            var table = SymbolTable.new("mymod")
+            val entry = SymbolEntry.local(
+                "foo",
+                "mymod.foo",
+                SymbolKind.Function,
+                Visibility.Public,
+                "mymod"
+            )
+
+            val result = table.define(entry)
+            match result:
+                case Some(_):
+                    fail("Expected successful define")
+                case nil:
+                    pass
+
+            expect table.count() == 1
+
+        it "detects symbol conflict":
+            var table = SymbolTable.new("mymod")
+
+            val entry1 = SymbolEntry.local(
+                "foo",
+                "mymod.foo",
+                SymbolKind.Function,
+                Visibility.Public,
+                "mymod"
+            )
+            table.define(entry1)
+
+            val entry2 = SymbolEntry.local(
+                "foo",
+                "mymod.foo2",
+                SymbolKind.Type,
+                Visibility.Public,
+                "mymod"
+            )
+
+            val result = table.define(entry2)
+            match result:
+                case Some(err):
+                    expect err.to_string().contains("Symbol conflict")
+                case nil:
+                    fail("Expected conflict error")
+
+        it "define_or_replace overwrites":
+            var table = SymbolTable.new("mymod")
+
+            val entry1 = SymbolEntry.local(
+                "foo",
+                "mymod.foo",
+                SymbolKind.Function,
+                Visibility.Public,
+                "mymod"
+            )
+            table.define_or_replace(entry1)
+
+            val entry2 = SymbolEntry.local(
+                "foo",
+                "mymod.foo_new",
+                SymbolKind.Type,
+                Visibility.Public,
+                "mymod"
+            )
+            table.define_or_replace(entry2)
+
+            expect table.count() == 1
+
+            val looked_up = table.lookup("foo")
+            match looked_up:
+                case Some(entry):
+                    expect entry.get_qualified_name() == "mymod.foo_new"
+                case nil:
+                    fail("Expected to find symbol")
+
+    context "looking up symbols":
+        it "finds defined symbol":
+            var table = SymbolTable.new("mymod")
+            val entry = SymbolEntry.local(
+                "foo",
+                "mymod.foo",
+                SymbolKind.Function,
+                Visibility.Public,
+                "mymod"
+            )
+            table.define(entry)
+
+            val result = table.lookup("foo")
+            match result:
+                case Some(found):
+                    expect found.get_name() == "foo"
+                case nil:
+                    fail("Expected to find symbol")
+
+        it "returns None for missing symbol":
+            val table = SymbolTable.new("mymod")
+            val result = table.lookup("nonexistent")
+
+            match result:
+                case Some(_):
+                    fail("Expected None for missing symbol")
+                case nil:
+                    pass
+
+    context "listing symbols":
+        it "all_symbols returns all symbols":
+            var table = SymbolTable.new("mymod")
+
+            table.define(SymbolEntry.local("a", "mymod.a", SymbolKind.Function,
+                                          Visibility.Public, "mymod"))
+            table.define(SymbolEntry.local("b", "mymod.b", SymbolKind.Type,
+                                          Visibility.Private, "mymod"))
+            table.define(SymbolEntry.local("c", "mymod.c", SymbolKind.Constant,
+                                          Visibility.Public, "mymod"))
+
+            val all_syms = table.all_symbols()
+            expect all_syms.len() == 3
+
+        it "public_symbols filters private":
+            var table = SymbolTable.new("mymod")
+
+            table.define(SymbolEntry.local("pub1", "mymod.pub1", SymbolKind.Function,
+                                          Visibility.Public, "mymod"))
+            table.define(SymbolEntry.local("priv", "mymod.priv", SymbolKind.Type,
+                                          Visibility.Private, "mymod"))
+            table.define(SymbolEntry.local("pub2", "mymod.pub2", SymbolKind.Constant,
+                                          Visibility.Public, "mymod"))
+
+            val pub_syms = table.public_symbols()
+            expect pub_syms.len() == 2
+
+    context "has_symbol":
+        it "returns true for existing symbol":
+            var table = SymbolTable.new("mymod")
+            table.define(SymbolEntry.local("foo", "mymod.foo", SymbolKind.Function,
+                                          Visibility.Public, "mymod"))
+
+            expect table.has_symbol("foo")
+
+        it "returns false for missing symbol":
+            val table = SymbolTable.new("mymod")
+            expect not table.has_symbol("foo")

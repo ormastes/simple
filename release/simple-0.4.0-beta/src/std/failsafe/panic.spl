@@ -1,0 +1,108 @@
+# Fail-Safe Panic Handler
+# Pure Simple implementation - no FFI dependencies
+
+use core.*
+use std.failsafe.core.*
+
+# ============================================================================
+# PANIC INFO
+# ============================================================================
+
+pub class PanicInfo:
+    pub message: text
+    pub file: text
+    pub line: i64
+
+    static fn new(message: text) -> PanicInfo:
+        return PanicInfo(message, "", 0)
+
+    pub fn with_location(file: text, line: i64) -> PanicInfo:
+        return PanicInfo(self.message, file, line)
+
+    pub fn to_error() -> FailSafeError:
+        return FailSafeError.new(ErrorCategory.Panic, self.message)
+            .as_unrecoverable()
+
+# ============================================================================
+# PANIC HANDLER
+# ============================================================================
+
+pub class PanicHandler:
+    pub panic_count: i64
+    pub max_panics_before_shutdown: i64
+    pub enabled: bool
+    pub last_message: text
+
+    static fn new() -> PanicHandler:
+        return PanicHandler(0, 5, true, "")
+
+    pub me on_panic(info: PanicInfo):
+        if not self.enabled:
+            return
+        self.panic_count = self.panic_count + 1
+        self.last_message = info.message
+
+    pub fn should_shutdown() -> bool:
+        return self.panic_count >= self.max_panics_before_shutdown
+
+    pub me reset():
+        self.panic_count = 0
+        self.last_message = ""
+
+    pub me disable():
+        self.enabled = false
+
+    pub me enable():
+        self.enabled = true
+
+# ============================================================================
+# SAFE OPERATIONS
+# ============================================================================
+
+pub fn safe_div(a: i64, b: i64) -> FailSafeResult<i64>:
+    if b == 0:
+        return FailSafeResult.Err(
+            FailSafeError.new(ErrorCategory.DivisionByZero, "Division by zero")
+        )
+    return FailSafeResult.Ok(a / b)
+
+pub fn safe_get<T>(arr: List<T>, index: i64) -> FailSafeResult<T>:
+    if index < 0 or index >= arr.len():
+        return FailSafeResult.Err(
+            FailSafeError.new(ErrorCategory.Overflow, "Index out of bounds")
+        )
+    return FailSafeResult.Ok(arr[index])
+
+pub fn soft_assert(condition: bool, message: text) -> FailSafeResult<()>:
+    if not condition:
+        return FailSafeResult.Err(
+            FailSafeError.new(ErrorCategory.Validation, message)
+        )
+    return FailSafeResult.Ok(())
+
+pub fn assert_some<T>(opt: Option<T>, message: text) -> FailSafeResult<T>:
+    match opt:
+        case Some(v): return FailSafeResult.Ok(v)
+        case nil: return FailSafeResult.Err(
+            FailSafeError.new(ErrorCategory.Validation, message)
+        )
+
+# ============================================================================
+# FALLBACK OPERATIONS
+# ============================================================================
+
+pub fn with_fallback<T>(
+    primary: fn() -> FailSafeResult<T>,
+    fallback: fn() -> FailSafeResult<T>
+) -> FailSafeResult<T>:
+    match primary():
+        case FailSafeResult.Ok(v): return FailSafeResult.Ok(v)
+        case FailSafeResult.Err(_): return fallback()
+
+pub fn with_default<T>(
+    operation: fn() -> FailSafeResult<T>,
+    default: T
+) -> T:
+    match operation():
+        case FailSafeResult.Ok(v): return v
+        case FailSafeResult.Err(_): return default

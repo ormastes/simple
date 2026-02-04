@@ -1,0 +1,840 @@
+# Actor Scheduler
+#
+# Reductions-based fair scheduling inspired by Erlang's BEAM VM.
+# Each actor gets a timeslice measured in "reductions" (work units)
+# rather than wall-clock time, ensuring fair CPU distribution.
+#
+# Key concepts:
+# - Reduction: One unit of work (function call, loop iteration, etc.)
+# - Timeslice: Number of reductions before preemption (~2000 in Erlang)
+# - Run queue: Priority-based queues of runnable actors
+# - Work stealing: Idle schedulers steal from busy ones
+#
+# References:
+# - Erlang scheduler: https://www.erlang.org/doc/apps/erts/erl_cmd.html
+# - BEAM internals: https://blog.stenmans.org/theBeamBook/
+
+from actor_heap import {ActorHeap, HeapConfig}
+from mailbox import {Mailbox, MailboxConfig, MessageRef, MessagePriority}
+
+export ActorScheduler, SchedulerConfig, ActorContext, RunQueue, SchedulerStats
+
+# ============================================================================
+# Configuration
+# ============================================================================
+
+val DEFAULT_REDUCTIONS_PER_TIMESLICE: i64 = 2000
+val DEFAULT_MAX_RUN_QUEUE_LENGTH: i64 = 10000
+val DEFAULT_SCHEDULER_COUNT: i64 = 4
+
+struct SchedulerConfig:
+    """Configuration for the actor scheduler."""
+    reductions_per_timeslice: i64  # Reductions before preemption
+    max_run_queue_length: i64      # Max actors in run queue
+    scheduler_count: i64           # Number of scheduler threads
+    work_stealing_enabled: bool    # Enable work stealing
+    priority_scheduling: bool      # Enable priority-based scheduling
+
+impl SchedulerConfig:
+    static fn default() -> SchedulerConfig:
+        SchedulerConfig(
+            reductions_per_timeslice: DEFAULT_REDUCTIONS_PER_TIMESLICE,
+            max_run_queue_length: DEFAULT_MAX_RUN_QUEUE_LENGTH,
+            scheduler_count: DEFAULT_SCHEDULER_COUNT,
+            work_stealing_enabled: true,
+            priority_scheduling: true
+        )
+
+    static fn single_threaded() -> SchedulerConfig:
+        """Single scheduler for testing/debugging."""
+        SchedulerConfig(
+            reductions_per_timeslice: DEFAULT_REDUCTIONS_PER_TIMESLICE,
+            max_run_queue_length: DEFAULT_MAX_RUN_QUEUE_LENGTH,
+            scheduler_count: 1,
+            work_stealing_enabled: false,
+            priority_scheduling: true
+        )
+
+    static fn low_latency() -> SchedulerConfig:
+        """Smaller timeslices for lower latency."""
+        SchedulerConfig(
+            reductions_per_timeslice: 500,
+            max_run_queue_length: DEFAULT_MAX_RUN_QUEUE_LENGTH,
+            scheduler_count: DEFAULT_SCHEDULER_COUNT,
+            work_stealing_enabled: true,
+            priority_scheduling: true
+        )
+
+    static fn high_throughput() -> SchedulerConfig:
+        """Larger timeslices for higher throughput."""
+        SchedulerConfig(
+            reductions_per_timeslice: 8000,
+            max_run_queue_length: DEFAULT_MAX_RUN_QUEUE_LENGTH,
+            scheduler_count: DEFAULT_SCHEDULER_COUNT,
+            work_stealing_enabled: true,
+            priority_scheduling: false
+        )
+
+# ============================================================================
+# Actor Priority
+# ============================================================================
+
+enum ActorPriority:
+    """Priority level for actor scheduling."""
+    Max         # System actors, critical tasks
+    High        # Time-sensitive actors
+    Normal      # Default priority
+    Low         # Background work
+
+impl ActorPriority:
+    fn to_i64() -> i64:
+        match self:
+            case Max: 0
+            case High: 1
+            case Normal: 2
+            case Low: 3
+
+    static fn from_i64(n: i64) -> ActorPriority:
+        match n:
+            case 0: ActorPriority.Max
+            case 1: ActorPriority.High
+            case 2: ActorPriority.Normal
+            case _: ActorPriority.Low
+
+impl Ord for ActorPriority:
+    fn cmp(other: ActorPriority) -> i64:
+        self.to_i64() - other.to_i64()
+
+# ============================================================================
+# Actor State
+# ============================================================================
+
+enum ActorState:
+    """Runtime state of an actor."""
+    Runnable    # Ready to execute
+    Running     # Currently executing
+    Waiting     # Blocked on receive
+    Suspended   # Explicitly suspended
+    Exiting     # Shutting down
+    Dead        # Terminated
+
+impl ActorState:
+    fn is_alive() -> bool:
+        match self:
+            case Dead: false
+            case Exiting: false
+            case _: true
+
+    fn can_run() -> bool:
+        match self:
+            case Runnable: true
+            case _: false
+
+impl Display for ActorState:
+    fn fmt() -> text:
+        match self:
+            case Runnable: "runnable"
+            case Running: "running"
+            case Waiting: "waiting"
+            case Suspended: "suspended"
+            case Exiting: "exiting"
+            case Dead: "dead"
+
+# ============================================================================
+# Actor Context
+# ============================================================================
+
+struct ActorContext:
+    """Runtime context for a single actor.
+
+    Contains all actor-specific state including:
+    - Identity and priority
+    - Heap for memory allocation
+    - Mailbox for messages
+    - Reduction counter for scheduling
+    - Links and monitors for fault tolerance
+    """
+    id: i64
+    name: text?
+    priority: ActorPriority
+    state: ActorState
+
+    # Memory and messages
+    heap: ActorHeap
+    mailbox: Mailbox
+
+    # Scheduling
+    reductions_left: i64
+    total_reductions: i64
+    timeslice_count: i64
+
+    # Fault tolerance
+    trap_exit: bool
+    links: [i64]           # Linked actor IDs
+    monitors: [i64]        # Monitoring actor IDs
+    monitored_by: [i64]    # Actors monitoring this one
+
+    # Timing
+    created_at: i64
+    last_scheduled: i64
+
+impl ActorContext:
+    static fn new(
+        id: i64,
+        name: text?,
+        priority: ActorPriority,
+        heap_config: HeapConfig,
+        mailbox_config: MailboxConfig,
+        reductions_per_timeslice: i64
+    ) -> ActorContext:
+        ActorContext(
+            id: id,
+            name: name,
+            priority: priority,
+            state: ActorState.Runnable,
+            heap: ActorHeap.new(heap_config),
+            mailbox: Mailbox.new(mailbox_config),
+            reductions_left: reductions_per_timeslice,
+            total_reductions: 0,
+            timeslice_count: 0,
+            trap_exit: false,
+            links: [],
+            monitors: [],
+            monitored_by: [],
+            created_at: current_time_ms(),
+            last_scheduled: 0
+        )
+
+    static fn with_defaults(id: i64, name: text?, reductions_per_timeslice: i64) -> ActorContext:
+        ActorContext.new(
+            id,
+            name,
+            ActorPriority.Normal,
+            HeapConfig.default(),
+            MailboxConfig.default(),
+            reductions_per_timeslice
+        )
+
+    # --------------------------------------------------------------------------
+    # Reduction management
+    # --------------------------------------------------------------------------
+
+    me consume_reductions(count: i64) -> bool:
+        """Consume reductions. Returns true if timeslice exhausted."""
+        self.reductions_left = self.reductions_left - count
+        self.total_reductions = self.total_reductions + count
+        self.reductions_left <= 0
+
+    me reset_reductions(timeslice: i64):
+        """Reset reductions for new timeslice."""
+        self.reductions_left = timeslice
+        self.timeslice_count = self.timeslice_count + 1
+
+    fn reductions_exhausted() -> bool:
+        self.reductions_left <= 0
+
+    # --------------------------------------------------------------------------
+    # State transitions
+    # --------------------------------------------------------------------------
+
+    me set_running():
+        self.state = ActorState.Running
+        self.last_scheduled = current_time_ms()
+
+    me set_runnable():
+        self.state = ActorState.Runnable
+
+    me set_waiting():
+        self.state = ActorState.Waiting
+
+    me set_suspended():
+        self.state = ActorState.Suspended
+
+    me set_exiting():
+        self.state = ActorState.Exiting
+
+    me set_dead():
+        self.state = ActorState.Dead
+        self.mailbox.close()
+
+    # --------------------------------------------------------------------------
+    # Fault tolerance
+    # --------------------------------------------------------------------------
+
+    me link(other_id: i64):
+        """Create bidirectional link with another actor."""
+        if not self.links.contains(other_id):
+            self.links = self.links.push(other_id)
+
+    me unlink(other_id: i64):
+        """Remove link with another actor."""
+        self.links = self.links.filter(\id: id != other_id)
+
+    me monitor(other_id: i64):
+        """Start monitoring another actor."""
+        if not self.monitors.contains(other_id):
+            self.monitors = self.monitors.push(other_id)
+
+    me demonitor(other_id: i64):
+        """Stop monitoring another actor."""
+        self.monitors = self.monitors.filter(\id: id != other_id)
+
+    me add_monitored_by(other_id: i64):
+        """Record that another actor is monitoring us."""
+        if not self.monitored_by.contains(other_id):
+            self.monitored_by = self.monitored_by.push(other_id)
+
+    me remove_monitored_by(other_id: i64):
+        """Remove from monitored_by list."""
+        self.monitored_by = self.monitored_by.filter(\id: id != other_id)
+
+impl Display for ActorContext:
+    fn fmt() -> text:
+        val name_str = self.name ?? "<anonymous>"
+        "Actor({name_str}, id={self.id}, state={self.state}, reductions={self.total_reductions})"
+
+# ============================================================================
+# Run Queue
+# ============================================================================
+
+struct RunQueue:
+    """Priority-based run queue for actors.
+
+    Actors are scheduled from highest to lowest priority.
+    Within a priority level, scheduling is FIFO (fair).
+    """
+    max_queue: [i64]      # Max priority actors
+    high_queue: [i64]     # High priority actors
+    normal_queue: [i64]   # Normal priority actors
+    low_queue: [i64]      # Low priority actors
+
+    # Stats
+    total_enqueued: i64
+    total_dequeued: i64
+
+impl RunQueue:
+    static fn new() -> RunQueue:
+        RunQueue(
+            max_queue: [],
+            high_queue: [],
+            normal_queue: [],
+            low_queue: [],
+            total_enqueued: 0,
+            total_dequeued: 0
+        )
+
+    me enqueue(actor_id: i64, priority: ActorPriority):
+        """Add actor to run queue at given priority."""
+        match priority:
+            case Max:
+                self.max_queue = self.max_queue.push(actor_id)
+            case High:
+                self.high_queue = self.high_queue.push(actor_id)
+            case Normal:
+                self.normal_queue = self.normal_queue.push(actor_id)
+            case Low:
+                self.low_queue = self.low_queue.push(actor_id)
+
+        self.total_enqueued = self.total_enqueued + 1
+
+    me dequeue() -> i64?:
+        """Get next actor to run (highest priority first)."""
+        # Check queues in priority order
+        if self.max_queue.len() > 0:
+            val id = self.max_queue[0]
+            self.max_queue = self.max_queue[1:]
+            self.total_dequeued = self.total_dequeued + 1
+            return Some(id)
+
+        if self.high_queue.len() > 0:
+            val id = self.high_queue[0]
+            self.high_queue = self.high_queue[1:]
+            self.total_dequeued = self.total_dequeued + 1
+            return Some(id)
+
+        if self.normal_queue.len() > 0:
+            val id = self.normal_queue[0]
+            self.normal_queue = self.normal_queue[1:]
+            self.total_dequeued = self.total_dequeued + 1
+            return Some(id)
+
+        if self.low_queue.len() > 0:
+            val id = self.low_queue[0]
+            self.low_queue = self.low_queue[1:]
+            self.total_dequeued = self.total_dequeued + 1
+            return Some(id)
+
+        nil
+
+    me remove(actor_id: i64):
+        """Remove actor from queue (if present)."""
+        self.max_queue = self.max_queue.filter(\id: id != actor_id)
+        self.high_queue = self.high_queue.filter(\id: id != actor_id)
+        self.normal_queue = self.normal_queue.filter(\id: id != actor_id)
+        self.low_queue = self.low_queue.filter(\id: id != actor_id)
+
+    fn len() -> i64:
+        """Total actors in queue."""
+        self.max_queue.len() + self.high_queue.len() + self.normal_queue.len() + self.low_queue.len()
+
+    fn is_empty() -> bool:
+        self.len() == 0
+
+    fn len_by_priority(priority: ActorPriority) -> i64:
+        match priority:
+            case Max: self.max_queue.len()
+            case High: self.high_queue.len()
+            case Normal: self.normal_queue.len()
+            case Low: self.low_queue.len()
+
+# ============================================================================
+# Scheduler Statistics
+# ============================================================================
+
+struct SchedulerStats:
+    """Statistics for scheduler performance monitoring."""
+    # Actor counts
+    total_actors_created: i64
+    total_actors_terminated: i64
+    current_actor_count: i64
+    peak_actor_count: i64
+
+    # Scheduling
+    total_context_switches: i64
+    total_reductions_executed: i64
+    total_timeslices: i64
+
+    # Work stealing
+    steal_attempts: i64
+    steal_successes: i64
+
+    # Timing
+    total_run_time_ms: i64
+    total_idle_time_ms: i64
+
+impl SchedulerStats:
+    static fn new() -> SchedulerStats:
+        SchedulerStats(
+            total_actors_created: 0,
+            total_actors_terminated: 0,
+            current_actor_count: 0,
+            peak_actor_count: 0,
+            total_context_switches: 0,
+            total_reductions_executed: 0,
+            total_timeslices: 0,
+            steal_attempts: 0,
+            steal_successes: 0,
+            total_run_time_ms: 0,
+            total_idle_time_ms: 0
+        )
+
+    fn utilization() -> f64:
+        """CPU utilization percentage."""
+        val total = self.total_run_time_ms + self.total_idle_time_ms
+        if total == 0:
+            0.0
+        else:
+            (self.total_run_time_ms as f64) / (total as f64) * 100.0
+
+    fn steal_success_rate() -> f64:
+        """Work stealing success rate."""
+        if self.steal_attempts == 0:
+            0.0
+        else:
+            (self.steal_successes as f64) / (self.steal_attempts as f64) * 100.0
+
+    fn avg_reductions_per_timeslice() -> f64:
+        """Average reductions per timeslice."""
+        if self.total_timeslices == 0:
+            0.0
+        else:
+            (self.total_reductions_executed as f64) / (self.total_timeslices as f64)
+
+impl Display for SchedulerStats:
+    fn fmt() -> text:
+        "SchedulerStats(actors={self.current_actor_count}, switches={self.total_context_switches}, util={self.utilization()}%)"
+
+# ============================================================================
+# Actor Scheduler
+# ============================================================================
+
+struct ActorScheduler:
+    """Reductions-based fair scheduler for actors.
+
+    Implements Erlang-style preemptive scheduling where each actor
+    gets a fixed number of "reductions" (work units) before being
+    preempted. This ensures fair CPU distribution regardless of
+    what actors are doing.
+
+    Example:
+        val scheduler = ActorScheduler.new(SchedulerConfig.default())
+
+        # Spawn actors
+        val id1 = scheduler.spawn_actor("worker1")
+        val id2 = scheduler.spawn_actor("worker2")
+
+        # Run scheduler loop
+        while scheduler.has_runnable():
+            scheduler.run_one_timeslice()
+    """
+    config: SchedulerConfig
+    stats: SchedulerStats
+
+    # Actor storage
+    actors: Dict<i64, ActorContext>
+    next_actor_id: i64
+
+    # Run queues (one per scheduler thread in multi-threaded impl)
+    run_queues: [RunQueue]
+    current_scheduler: i64
+
+    # Currently running actor
+    current_actor_id: i64?
+
+    # State
+    is_running: bool
+
+impl ActorScheduler:
+    static fn new(config: SchedulerConfig) -> ActorScheduler:
+        # Create run queues for each scheduler
+        var queues: [RunQueue] = []
+        for _ in 0..config.scheduler_count:
+            queues = queues.push(RunQueue.new())
+
+        ActorScheduler(
+            config: config,
+            stats: SchedulerStats.new(),
+            actors: {},
+            next_actor_id: 0,
+            run_queues: queues,
+            current_scheduler: 0,
+            current_actor_id: nil,
+            is_running: false
+        )
+
+    static fn default() -> ActorScheduler:
+        ActorScheduler.new(SchedulerConfig.default())
+
+    # --------------------------------------------------------------------------
+    # Actor lifecycle
+    # --------------------------------------------------------------------------
+
+    me spawn_actor(name: text?) -> i64:
+        """Spawn a new actor, returning its ID."""
+        self.spawn_with_priority(name, ActorPriority.Normal)
+
+    me spawn_with_priority(name: text?, priority: ActorPriority) -> i64:
+        """Spawn actor with specific priority."""
+        val id = self.next_actor_id
+        self.next_actor_id = self.next_actor_id + 1
+
+        val context = ActorContext.with_defaults(
+            id,
+            name,
+            self.config.reductions_per_timeslice
+        )
+
+        self.actors[id] = context
+
+        # Add to run queue
+        val queue_idx = id % self.config.scheduler_count
+        self.run_queues[queue_idx].enqueue(id, priority)
+
+        # Update stats
+        self.stats.total_actors_created = self.stats.total_actors_created + 1
+        self.stats.current_actor_count = self.stats.current_actor_count + 1
+        if self.stats.current_actor_count > self.stats.peak_actor_count:
+            self.stats.peak_actor_count = self.stats.current_actor_count
+
+        id
+
+    me terminate(actor_id: i64):
+        """Terminate an actor."""
+        val act = self.actors.get(actor_id)
+        if act.?:
+            var ctx = act.unwrap()
+            ctx.set_dead()
+
+            # Remove from run queue
+            for queue in self.run_queues:
+                queue.remove(actor_id)
+
+            # Notify linked actors
+            self.notify_links(actor_id, ctx.links)
+
+            # Notify monitors
+            self.notify_monitors(actor_id, ctx.monitored_by)
+
+            # Update stats
+            self.stats.total_actors_terminated = self.stats.total_actors_terminated + 1
+            self.stats.current_actor_count = self.stats.current_actor_count - 1
+
+    me notify_links(dead_id: i64, links: [i64]):
+        """Notify linked actors of termination."""
+        for link_id in links:
+            val linked = self.actors.get(link_id)
+            if linked.?:
+                var ctx = linked.unwrap()
+                ctx.unlink(dead_id)
+
+                # If not trapping exits, terminate linked actor too
+                if not ctx.trap_exit:
+                    self.terminate(link_id)
+                # else: send exit message (TODO)
+
+    me notify_monitors(dead_id: i64, monitors: [i64]):
+        """Notify monitoring actors of termination."""
+        for monitor_id in monitors:
+            val monitoring = self.actors.get(monitor_id)
+            if monitoring.?:
+                var ctx = monitoring.unwrap()
+                ctx.demonitor(dead_id)
+                # TODO: send DOWN message
+
+    # --------------------------------------------------------------------------
+    # Scheduling
+    # --------------------------------------------------------------------------
+
+    me run_one_timeslice() -> bool:
+        """Run one actor for one timeslice. Returns true if work was done."""
+        # Get next runnable actor
+        val actor_id = self.select_next_actor()
+        if not actor_id.?:
+            return false
+
+        val id = actor_id.unwrap()
+        val act = self.actors.get(id)
+        if not act.?:
+            return false
+
+        var ctx = act.unwrap()
+
+        # Context switch
+        self.current_actor_id = Some(id)
+        ctx.set_running()
+        self.stats.total_context_switches = self.stats.total_context_switches + 1
+
+        # Run until reductions exhausted or actor yields
+        # (In real impl, this would execute actor code)
+        val reductions_used = self.config.reductions_per_timeslice
+        ctx.consume_reductions(reductions_used)
+        self.stats.total_reductions_executed = self.stats.total_reductions_executed + reductions_used
+        self.stats.total_timeslices = self.stats.total_timeslices + 1
+
+        # Re-queue if still runnable
+        if ctx.state.is_alive() and not ctx.state == ActorState.Waiting:
+            ctx.set_runnable()
+            ctx.reset_reductions(self.config.reductions_per_timeslice)
+            val queue_idx = id % self.config.scheduler_count
+            self.run_queues[queue_idx].enqueue(id, ctx.priority)
+
+        self.current_actor_id = nil
+        true
+
+    me select_next_actor() -> i64?:
+        """Select next actor to run using priority scheduling."""
+        # Try current scheduler's queue first
+        val result = self.run_queues[self.current_scheduler].dequeue()
+        if result.?:
+            return result
+
+        # Work stealing: try other queues
+        if self.config.work_stealing_enabled:
+            self.stats.steal_attempts = self.stats.steal_attempts + 1
+
+            for i in 0..self.config.scheduler_count:
+                if i != self.current_scheduler:
+                    val stolen = self.run_queues[i].dequeue()
+                    if stolen.?:
+                        self.stats.steal_successes = self.stats.steal_successes + 1
+                        return stolen
+
+        nil
+
+    me wake_actor(actor_id: i64):
+        """Wake a waiting actor (e.g., when message arrives)."""
+        val act = self.actors.get(actor_id)
+        if act.?:
+            var ctx = act.unwrap()
+            if ctx.state == ActorState.Waiting:
+                ctx.set_runnable()
+                val queue_idx = actor_id % self.config.scheduler_count
+                self.run_queues[queue_idx].enqueue(actor_id, ctx.priority)
+
+    me suspend_actor(actor_id: i64):
+        """Suspend an actor (remove from run queue)."""
+        val act = self.actors.get(actor_id)
+        if act.?:
+            var ctx = act.unwrap()
+            ctx.set_suspended()
+            for queue in self.run_queues:
+                queue.remove(actor_id)
+
+    me resume_actor(actor_id: i64):
+        """Resume a suspended actor."""
+        val act = self.actors.get(actor_id)
+        if act.?:
+            var ctx = act.unwrap()
+            if ctx.state == ActorState.Suspended:
+                ctx.set_runnable()
+                val queue_idx = actor_id % self.config.scheduler_count
+                self.run_queues[queue_idx].enqueue(actor_id, ctx.priority)
+
+    # --------------------------------------------------------------------------
+    # Messaging
+    # --------------------------------------------------------------------------
+
+    me send_message(to_id: i64, data_ptr: i64, size: i64, from_id: i64?) -> bool:
+        """Send message to an actor."""
+        val act = self.actors.get(to_id)
+        if not act.?:
+            return false
+
+        var ctx = act.unwrap()
+        val result = ctx.mailbox.send_normal(data_ptr, size, from_id)
+
+        if result.is_success():
+            # Wake actor if waiting for messages
+            if ctx.state == ActorState.Waiting:
+                self.wake_actor(to_id)
+            return true
+
+        false
+
+    me send_high_priority(to_id: i64, data_ptr: i64, size: i64, from_id: i64?) -> bool:
+        """Send high priority message (system messages, timeouts)."""
+        val act = self.actors.get(to_id)
+        if not act.?:
+            return false
+
+        var ctx = act.unwrap()
+        val result = ctx.mailbox.send_high(data_ptr, size, from_id)
+
+        if result.is_success():
+            if ctx.state == ActorState.Waiting:
+                self.wake_actor(to_id)
+            return true
+
+        false
+
+    # --------------------------------------------------------------------------
+    # Linking and monitoring
+    # --------------------------------------------------------------------------
+
+    me link_actors(id1: i64, id2: i64):
+        """Create bidirectional link between actors."""
+        val act1 = self.actors.get(id1)
+        val act2 = self.actors.get(id2)
+
+        if act1.? and act2.?:
+            var ctx1 = act1.unwrap()
+            var ctx2 = act2.unwrap()
+            ctx1.link(id2)
+            ctx2.link(id1)
+
+    me unlink_actors(id1: i64, id2: i64):
+        """Remove link between actors."""
+        val act1 = self.actors.get(id1)
+        val act2 = self.actors.get(id2)
+
+        if act1.?:
+            var ctx1 = act1.unwrap()
+            ctx1.unlink(id2)
+
+        if act2.?:
+            var ctx2 = act2.unwrap()
+            ctx2.unlink(id1)
+
+    me monitor_actor(monitor_id: i64, target_id: i64):
+        """Set up monitoring (unidirectional)."""
+        val monitor = self.actors.get(monitor_id)
+        val target = self.actors.get(target_id)
+
+        if monitor.? and target.?:
+            var mon_ctx = monitor.unwrap()
+            var tgt_ctx = target.unwrap()
+            mon_ctx.monitor(target_id)
+            tgt_ctx.add_monitored_by(monitor_id)
+
+    me demonitor_actor(monitor_id: i64, target_id: i64):
+        """Remove monitoring."""
+        val monitor = self.actors.get(monitor_id)
+        val target = self.actors.get(target_id)
+
+        if monitor.?:
+            var mon_ctx = monitor.unwrap()
+            mon_ctx.demonitor(target_id)
+
+        if target.?:
+            var tgt_ctx = target.unwrap()
+            tgt_ctx.remove_monitored_by(monitor_id)
+
+    # --------------------------------------------------------------------------
+    # Queries
+    # --------------------------------------------------------------------------
+
+    fn has_runnable() -> bool:
+        """Check if any actors are runnable."""
+        for queue in self.run_queues:
+            if not queue.is_empty():
+                return true
+        false
+
+    fn total_runnable() -> i64:
+        """Count of runnable actors."""
+        var count: i64 = 0
+        for queue in self.run_queues:
+            count = count + queue.len()
+        count
+
+    fn get_actor(id: i64) -> ActorContext?:
+        """Get actor context by ID."""
+        self.actors.get(id)
+
+    fn get_stats() -> SchedulerStats:
+        """Get scheduler statistics."""
+        self.stats
+
+    fn actor_count() -> i64:
+        """Current number of actors."""
+        self.stats.current_actor_count
+
+    # --------------------------------------------------------------------------
+    # Scheduler control
+    # --------------------------------------------------------------------------
+
+    me start():
+        """Start the scheduler."""
+        self.is_running = true
+
+    me stop():
+        """Stop the scheduler."""
+        self.is_running = false
+
+    me run_until_idle():
+        """Run until no more runnable actors."""
+        while self.has_runnable() and self.is_running:
+            self.run_one_timeslice()
+
+    me run_n_timeslices(n: i64):
+        """Run exactly n timeslices (for testing)."""
+        for _ in 0..n:
+            if not self.has_runnable():
+                break
+            self.run_one_timeslice()
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+fn current_time_ms() -> i64:
+    """Get current time in milliseconds (placeholder)."""
+    0
+
+# ============================================================================
+# Display
+# ============================================================================
+
+impl Display for ActorScheduler:
+    fn fmt() -> text:
+        "ActorScheduler(actors={self.actor_count()}, runnable={self.total_runnable()})"

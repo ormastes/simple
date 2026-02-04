@@ -1,0 +1,117 @@
+# Fail-Safe Timeout Manager
+# Pure Simple implementation - no FFI dependencies
+
+use core.*
+use std.failsafe.core.*
+
+# ============================================================================
+# TIMEOUT CONFIG
+# ============================================================================
+
+pub class TimeoutConfig:
+    pub default_timeout_ms: i64
+    pub max_timeout_ms: i64
+
+    static fn default() -> TimeoutConfig:
+        return TimeoutConfig(30000, 300000)
+
+    static fn strict() -> TimeoutConfig:
+        return TimeoutConfig(5000, 30000)
+
+    static fn permissive() -> TimeoutConfig:
+        return TimeoutConfig(60000, 600000)
+
+# ============================================================================
+# TIMEOUT TOKEN
+# ============================================================================
+
+pub class TimeoutToken:
+    pub id: text
+    pub operation_name: text
+    pub timeout_ms: i64
+    pub cancelled: bool
+    pub completed: bool
+
+    static fn new(id: text, timeout_ms: i64, operation_name: text) -> TimeoutToken:
+        return TimeoutToken(id, operation_name, timeout_ms, false, false)
+
+    pub fn is_active() -> bool:
+        return not self.cancelled and not self.completed
+
+    pub me cancel():
+        self.cancelled = true
+
+    pub me complete():
+        self.completed = true
+
+# ============================================================================
+# TIMEOUT MANAGER
+# ============================================================================
+
+pub class TimeoutManager:
+    pub config: TimeoutConfig
+    pub next_id: i64
+    pub stats: TimeoutStats
+
+    static fn new(config: TimeoutConfig) -> TimeoutManager:
+        return TimeoutManager(config, 0, TimeoutStats.new())
+
+    static fn default() -> TimeoutManager:
+        return TimeoutManager.new(TimeoutConfig.default())
+
+    pub me start_timeout(operation_name: text) -> TimeoutToken:
+        return self.start_timeout_ms(operation_name, self.config.default_timeout_ms)
+
+    pub me start_timeout_ms(operation_name: text, timeout_ms: i64) -> TimeoutToken:
+        val id = "timeout_{self.next_id}"
+        self.next_id = self.next_id + 1
+        self.stats.started = self.stats.started + 1
+        return TimeoutToken.new(id, timeout_ms, operation_name)
+
+    pub me complete_timeout(token_id: text):
+        self.stats.completed = self.stats.completed + 1
+
+    pub me cancel_timeout(token_id: text):
+        self.stats.cancelled = self.stats.cancelled + 1
+
+# ============================================================================
+# TIMEOUT STATS
+# ============================================================================
+
+pub class TimeoutStats:
+    pub started: i64
+    pub completed: i64
+    pub timed_out: i64
+    pub cancelled: i64
+
+    static fn new() -> TimeoutStats:
+        return TimeoutStats(0, 0, 0, 0)
+
+    pub fn completion_rate() -> f64:
+        if self.started == 0:
+            return 0.0
+        return self.completed as f64 / self.started as f64
+
+# ============================================================================
+# DEADLINE
+# ============================================================================
+
+pub class Deadline:
+    pub timeout_ms: i64
+    pub operations_started: i64
+    pub operations_completed: i64
+
+    static fn new(timeout_ms: i64) -> Deadline:
+        return Deadline(timeout_ms, 0, 0)
+
+    pub fn remaining_ms() -> i64:
+        return self.timeout_ms
+
+    pub me start_operation():
+        self.operations_started = self.operations_started + 1
+
+    pub me complete_operation():
+        self.operations_completed = self.operations_completed + 1
+
+    pub fn check() -> FailSafeResult<()>:
+        return FailSafeResult.Ok(())

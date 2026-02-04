@@ -1,0 +1,1047 @@
+# FFI Wrapper Generator - Main Entry Point
+#
+# Generates Rust/C wrapper code from @Lib annotated extern class declarations.
+# The generated wrappers expose extern "C" functions callable by the Simple runtime.
+#
+# The Rust build environment lives at build/rust/ and is set up from simple.sdn
+# config. It persists across runs to avoid repeated toolchain setup overhead.
+# Generated FFI crates go under build/rust/ffi_gen/.
+#
+# Usage:
+#   simple ffi-gen <file.spl> [OPTIONS]
+#
+# Options:
+#   --output=<dir>    Output directory for generated code (default: build/rust/ffi_gen/)
+#   --dry-run         Print generated code without writing files
+#   --verbose         Enable verbose logging
+#   --lang=<lang>     Filter to specific language (rust, c)
+#   --clean           Clean build/rust/ and re-setup from scratch
+#   --gen-all         Generate entire build/rust/ from all full specs
+#   --gen-module      Generate a single module from a full spec file
+#   --verify          Verify generated code compiles (cargo check)
+#   --help            Show this help message
+
+use app.cli_util (get_cli_args)
+use app.io.mod (file_read, file_write, file_exists, dir_create, dir_remove, cwd, process_run)
+
+# Local module imports (using fully qualified paths)
+use app.ffi_gen.parser*
+use app.ffi_gen.rust_codegen*
+use app.ffi_gen.cargo_gen*
+use app.ffi_gen.builder*
+use app.ffi_gen.intern_codegen*
+
+# New full code generation modules
+use app.ffi_gen.types*
+use app.ffi_gen.module_gen (generate_module_source)
+use app.ffi_gen.workspace_gen (generate_cargo_toml, generate_lib_rs)
+use app.ffi_gen.lib_gen (generate_simple_ffi_lib)
+
+# Spec modules for --gen-all
+use app.ffi_gen.specs.runtime_value_full (runtime_value_module)
+use app.ffi_gen.specs.gc_full (gc_module)
+use app.ffi_gen.specs.io_full (io_module)
+use app.ffi_gen.specs.process_mod (process_module)
+use app.ffi_gen.specs.time_mod (time_module)
+use app.ffi_gen.specs.crypto_mod (crypto_module)
+use app.ffi_gen.specs.archive_mod (archive_module)
+use app.ffi_gen.specs.system_mod (system_module)
+use app.ffi_gen.specs.codegen_mod (codegen_module)
+use app.ffi_gen.specs.data_mod (data_module)
+use app.ffi_gen.specs.serde_mod (serde_module)
+use app.ffi_gen.specs.concurrent_mod (concurrent_module)
+use app.ffi_gen.specs.cli_mod (cli_module)
+use app.ffi_gen.specs.net_mod (net_module)
+use app.ffi_gen.specs.cranelift_core (cranelift_module)
+
+# ============================================================================
+# Rust Build Environment Config (from simple.sdn)
+# ============================================================================
+
+# Configuration for the build/rust/ environment
+class RustEnvConfig:
+    channel: text       # "stable", "nightly", "1.78.0", etc.
+    edition: text       # "2021", "2024", etc.
+    components: [text]  # ["rustfmt", "clippy"]
+
+    static fn default() -> RustEnvConfig:
+        RustEnvConfig(
+            channel: "stable",
+            edition: "2021",
+            components: []
+        )
+
+# Read ffi.rust config from simple.sdn
+# Expected format in simple.sdn:
+#   ffi:
+#     rust:
+#       channel: stable
+#       edition: 2021
+#       components: [rustfmt, clippy]
+fn read_rust_config(project_root: text) -> RustEnvConfig:
+    var config = RustEnvConfig.default()
+
+    val sdn_path = "{project_root}/simple.sdn"
+    if not file_exists(sdn_path):
+        return config
+
+    val content = file_read(sdn_path)
+    if content == "":
+        return config
+
+    # Simple line-based parsing for ffi.rust section
+    val lines = content.split("\n")
+    var in_ffi = false
+    var in_rust = false
+
+    for line in lines:
+        val trimmed = line.trim()
+
+        # Track section nesting
+        if trimmed == "ffi:" or trimmed.starts_with("ffi:"):
+            in_ffi = true
+            in_rust = false
+        elif in_ffi and (trimmed == "rust:" or trimmed.starts_with("rust:")):
+            in_rust = true
+        elif not line.starts_with(" ") and not line.starts_with("\t") and trimmed != "":
+            # Top-level key resets
+            if not trimmed.starts_with("#"):
+                in_ffi = false
+                in_rust = false
+
+        # Parse values in ffi.rust section
+        if in_rust:
+            if trimmed.starts_with("channel:"):
+                val val_str = trimmed[8:].trim()
+                if val_str != "":
+                    config.channel = val_str
+            elif trimmed.starts_with("edition:"):
+                val val_str = trimmed[8:].trim()
+                if val_str != "":
+                    config.edition = val_str
+            elif trimmed.starts_with("components:"):
+                val val_str = trimmed[11:].trim()
+                # Parse [item1, item2] format
+                if val_str.starts_with("[") and val_str.ends_with("]"):
+                    val inner = val_str[1:-1]
+                    val parts = inner.split(",")
+                    var comps: [text] = []
+                    for part in parts:
+                        val comp = part.trim()
+                        if comp != "":
+                            comps.push(comp)
+                    config.components = comps
+
+    config
+
+# ============================================================================
+# CLI Options
+# ============================================================================
+
+class CliOptions:
+    input_file: text
+    output_dir: text
+    dry_run: bool
+    verbose: bool
+    lang_filter: text
+    clean: bool
+    gen_intern: bool
+    gen_all: bool
+    gen_module: bool
+    gen_workspace: bool
+    verify: bool
+    show_help: bool
+
+    static fn default() -> CliOptions:
+        CliOptions(
+            input_file: "",
+            output_dir: "build/rust",
+            dry_run: false,
+            verbose: false,
+            lang_filter: "",
+            clean: false,
+            gen_intern: false,
+            gen_all: false,
+            gen_module: false,
+            gen_workspace: false,
+            verify: false,
+            show_help: false
+        )
+
+# ============================================================================
+# Help
+# ============================================================================
+
+fn print_help():
+    print "FFI Wrapper Generator"
+    print "====================="
+    print ""
+    print "Generates Rust/C wrapper code from @Lib annotated extern class declarations."
+    print "The Rust build environment is set up at build/rust/ from simple.sdn config"
+    print "and persists across runs to avoid toolchain setup overhead."
+    print ""
+    print "Usage:"
+    print "  simple ffi-gen <file.spl> [OPTIONS]"
+    print ""
+    print "Options:"
+    print "  --output=<dir>    Output directory (default: build/rust/)"
+    print "  --dry-run         Print generated code without writing"
+    print "  --verbose         Verbose logging"
+    print "  --lang=<lang>     Filter by language: rust, c"
+    print "  --gen-intern      Generate interpreter_extern Rust module from spec"
+    print "  --gen-all         Generate entire build/rust/ from all full specs"
+    print "  --gen-module      Generate a single module from a full spec file"
+    print "  --gen-workspace   Generate multi-crate workspace (16 FFI crates)"
+    print "  --verify          Verify generated code compiles (cargo check)"
+    print "  --clean           Clean build/rust/ and re-setup from scratch"
+    print "  -h, --help        Show this help"
+    print ""
+    print "Config (in simple.sdn):"
+    print "  ffi:"
+    print "    rust:"
+    print "      channel: stable       # Rust toolchain channel"
+    print "      edition: 2021         # Cargo edition"
+    print "      components: [clippy]  # Extra rustup components"
+    print ""
+    print "Examples:"
+    print "  simple ffi-gen src/my_lib.spl"
+    print "  simple ffi-gen src/my_lib.spl --verbose"
+    print "  simple ffi-gen src/my_lib.spl --dry-run"
+    print "  simple ffi-gen --clean                    # Re-setup build/rust/"
+    print "  simple ffi-gen --gen-intern specs/math.spl # Generate interpreter_extern module"
+    print "  simple ffi-gen --gen-intern specs/math.spl --dry-run"
+    print ""
+    print "Full Code Generation (NEW):"
+    print "  simple ffi-gen --gen-all                   # Generate all modules to build/rust/"
+    print "  simple ffi-gen --gen-all --dry-run         # Preview all generated code"
+    print "  simple ffi-gen --gen-module spec.spl       # Generate single module from full spec"
+    print "  simple ffi-gen --gen-all --verify          # Generate and verify with cargo check"
+    print ""
+    print "Annotation format:"
+    print "  @Lib(lang: \"rust\", name: \"regex\", version: \"1.10\")"
+    print "  extern class Regex:"
+    print "      static fn new(pattern: text) -> Regex"
+    print "      fn is_match(input: text) -> bool"
+
+fn print_error(msg: text):
+    print "error: {msg}"
+
+# ============================================================================
+# Argument Parsing
+# ============================================================================
+
+fn parse_args(args: [text]) -> CliOptions:
+    var opts = CliOptions.default()
+
+    for arg in args:
+        if arg == "-h" or arg == "--help":
+            opts.show_help = true
+        elif arg == "--dry-run":
+            opts.dry_run = true
+        elif arg == "--verbose":
+            opts.verbose = true
+        elif arg == "--clean":
+            opts.clean = true
+        elif arg == "--gen-intern":
+            opts.gen_intern = true
+        elif arg == "--gen-all":
+            opts.gen_all = true
+        elif arg == "--gen-module":
+            opts.gen_module = true
+        elif arg == "--gen-workspace":
+            opts.gen_workspace = true
+        elif arg == "--verify":
+            opts.verify = true
+        elif arg.starts_with("--output="):
+            opts.output_dir = arg[9:]
+        elif arg.starts_with("--lang="):
+            opts.lang_filter = arg[7:]
+        elif not arg.starts_with("--") and not arg.starts_with("-"):
+            opts.input_file = arg
+
+    opts
+
+# ============================================================================
+# Logging
+# ============================================================================
+
+fn log_info(msg: text, verbose: bool):
+    if verbose:
+        print "[ffi-gen] {msg}"
+
+fn log_step(msg: text):
+    print "  {msg}"
+
+# ============================================================================
+# Build Environment Setup
+# ============================================================================
+
+# Ensure build/rust/ exists and has a rust-toolchain.toml matching simple.sdn config.
+# Only writes files if they're missing or config has changed. Returns 0 on success.
+fn ensure_rust_env(project_root: text, rust_config: RustEnvConfig, verbose: bool) -> i64:
+    val build_rust = "{project_root}/build/rust"
+
+    # Create build/rust/ if missing
+    if not file_exists(build_rust):
+        log_info("Creating build/rust/ environment...", verbose)
+        if not dir_create(build_rust, true):
+            print_error("Failed to create {build_rust}")
+            return 1
+
+    # Generate rust-toolchain.toml content
+    var toolchain_content = "[toolchain]\n"
+    toolchain_content = toolchain_content + "channel = \"{rust_config.channel}\"\n"
+    if rust_config.components.len() > 0:
+        val comps = rust_config.components.map(\c: "\"{c}\"").join(", ")
+        toolchain_content = toolchain_content + "components = [{comps}]\n"
+
+    val toolchain_path = "{build_rust}/rust-toolchain.toml"
+
+    # Only write if changed (avoid unnecessary rustup invocations)
+    var needs_write = true
+    if file_exists(toolchain_path):
+        val existing = file_read(toolchain_path)
+        if existing == toolchain_content:
+            needs_write = false
+            log_info("Rust environment already up to date", verbose)
+
+    if needs_write:
+        log_info("Writing {toolchain_path} (channel: {rust_config.channel})", verbose)
+        if not file_write(toolchain_path, toolchain_content):
+            print_error("Failed to write {toolchain_path}")
+            return 1
+        log_step("Rust env configured: channel={rust_config.channel}")
+
+    # Ensure ffi_gen/ subdir exists
+    val ffi_dir = "{build_rust}/ffi_gen"
+    if not file_exists(ffi_dir):
+        if not dir_create(ffi_dir, true):
+            print_error("Failed to create {ffi_dir}")
+            return 1
+
+    0
+
+# Clean and re-setup build/rust/ from scratch
+fn clean_rust_env(project_root: text, verbose: bool) -> i64:
+    val build_rust = "{project_root}/build/rust"
+    if file_exists(build_rust):
+        log_info("Removing {build_rust}...", verbose)
+        if not dir_remove(build_rust, true):
+            print_error("Failed to remove {build_rust}")
+            return 1
+        log_step("Cleaned build/rust/")
+    0
+
+# ============================================================================
+# Generation Pipeline
+# ============================================================================
+
+fn generate_for_file(input_path: text, opts: CliOptions, rust_config: RustEnvConfig) -> i64:
+    log_info("Reading {input_path}", opts.verbose)
+
+    # Read source file
+    val source = file_read(input_path)
+    if source == "":
+        print_error("Failed to read or empty file: {input_path}")
+        return 1
+
+    # Parse @Lib annotations and extern class declarations
+    log_info("Parsing @Lib annotations...", opts.verbose)
+    val lib_specs = parse_lib_externs(source, input_path)
+
+    if lib_specs.len() == 0:
+        print "No @Lib annotations found in {input_path}"
+        return 0
+
+    print "Found {lib_specs.len()} @Lib extern class(es):"
+    for spec in lib_specs:
+        log_step("{spec.class_name} -> {spec.lib_lang}:{spec.lib_name} v{spec.lib_version}")
+
+    # Filter by language if specified
+    var specs = lib_specs
+    if opts.lang_filter != "":
+        specs = lib_specs.filter(\s: s.lib_lang == opts.lang_filter)
+        if specs.len() == 0:
+            print "No @Lib annotations match lang={opts.lang_filter}"
+            return 0
+
+    # Generate code per language backend
+    var rust_specs = specs.filter(\s: s.lib_lang == "rust")
+    var c_specs = specs.filter(\s: s.lib_lang == "c" or s.lib_lang == "cpp")
+
+    if rust_specs.len() > 0:
+        val result = generate_rust_wrappers(rust_specs, opts, rust_config)
+        if result != 0:
+            return result
+
+    if c_specs.len() > 0:
+        print "warning: C/C++ codegen not yet implemented, skipping {c_specs.len()} spec(s)"
+
+    print "Done."
+    return 0
+
+fn generate_rust_wrappers(specs: [LibExternSpec], opts: CliOptions, rust_config: RustEnvConfig) -> i64:
+    log_info("Generating Rust wrappers...", opts.verbose)
+
+    # Generate Rust source
+    val rust_source = generate_rust_code(specs)
+
+    # Generate Cargo.toml (with edition from config)
+    val cargo_toml = generate_cargo_toml(specs, rust_config.edition)
+
+    if opts.dry_run:
+        print ""
+        print "=== Generated Cargo.toml ==="
+        print cargo_toml
+        print ""
+        print "=== Generated src/lib.rs ==="
+        print rust_source
+        return 0
+
+    # Write files to build/rust/ffi_gen/
+    val out_dir = opts.output_dir
+    if not dir_create(out_dir, true):
+        print_error("Failed to create output directory: {out_dir}")
+        return 1
+    if not dir_create("{out_dir}/src", true):
+        print_error("Failed to create src directory: {out_dir}/src")
+        return 1
+
+    if not file_write("{out_dir}/Cargo.toml", cargo_toml):
+        print_error("Failed to write Cargo.toml")
+        return 1
+    log_step("Wrote {out_dir}/Cargo.toml")
+
+    if not file_write("{out_dir}/src/lib.rs", rust_source):
+        print_error("Failed to write src/lib.rs")
+        return 1
+    log_step("Wrote {out_dir}/src/lib.rs")
+
+    # Build the generated crate (cargo will use build/rust/rust-toolchain.toml)
+    log_info("Building generated crate...", opts.verbose)
+    val build_result = build_crate(out_dir, opts.verbose)
+    if build_result != 0:
+        print_error("Failed to build generated crate")
+        return 1
+
+    log_step("Build successful")
+    return 0
+
+# ============================================================================
+# Intern FFI Generation (--gen-intern mode)
+# ============================================================================
+
+# Generate interpreter_extern Rust module from a spec file.
+# The spec file must export a function returning [InternFnSpec].
+# Output: Rust module source + dispatch entries.
+fn generate_intern(spec_path: text, opts: CliOptions) -> i64:
+    log_info("Reading intern spec: {spec_path}", opts.verbose)
+
+    val source: text = file_read(spec_path)
+    if source == "":
+        print_error("Failed to read or empty file: {spec_path}")
+        return 1
+
+    # Parse the spec file to extract InternFnSpec declarations.
+    # The spec is a Simple source file that defines functions returning specs.
+    # For now we parse it as structured text declarations.
+    val specs: [InternFnSpec] = parse_intern_specs(source)
+
+    if specs.len() == 0:
+        print "No intern specs found in {spec_path}"
+        return 0
+
+    # Determine category from specs
+    val category = specs[0].category
+
+    print "Generating interpreter_extern/{category}.rs ({specs.len()} functions)"
+
+    # Generate module source
+    val module_source = generate_module(category, specs)
+
+    # Generate dispatch entries
+    val dispatch = generate_dispatch_entries(specs)
+
+    if opts.dry_run:
+        print ""
+        print "=== Generated {category}.rs ==="
+        print module_source
+        print ""
+        print "=== Dispatch entries for mod.rs ==="
+        print dispatch
+        return 0
+
+    # Write to output dir
+    val out_dir = opts.output_dir
+    if not dir_create(out_dir, true):
+        print_error("Failed to create output directory: {out_dir}")
+        return 1
+
+    val module_path = "{out_dir}/{category}.rs"
+    if not file_write(module_path, module_source):
+        print_error("Failed to write {module_path}")
+        return 1
+    log_step("Wrote {module_path}")
+
+    val dispatch_path = "{out_dir}/{category}_dispatch.rs"
+    if not file_write(dispatch_path, dispatch):
+        print_error("Failed to write {dispatch_path}")
+        return 1
+    log_step("Wrote {dispatch_path}")
+
+    print "Done. Copy the generated files to rust/compiler/src/interpreter_extern/"
+    return 0
+
+# ============================================================================
+# Full Module Generation (--gen-module mode)
+# ============================================================================
+
+# Generate a single module from a full spec file.
+# The spec file should contain a function that returns a ModuleSpec.
+fn generate_full_module(spec_path: text, opts: CliOptions) -> i64:
+    log_info("Reading full module spec: {spec_path}", opts.verbose)
+
+    # For now, we need to handle the spec files specially
+    # since they contain Simple code that defines ModuleSpec
+    # We'll import and call the spec function directly
+
+    # Determine module name from filename
+    val filename = spec_path.split("/")[-1]
+    val mod_name = filename.replace("_full.spl", "").replace(".spl", "")
+
+    print "Generating module: {mod_name} from {spec_path}"
+
+    # Import the spec module dynamically
+    # For now, we handle known specs explicitly
+    var module_spec: ModuleSpec = ModuleSpec.empty(mod_name)
+
+    if spec_path.contains("runtime_value_full"):
+        module_spec = runtime_value_module()
+    elif spec_path.contains("gc_full"):
+        module_spec = gc_module()
+    elif spec_path.contains("cranelift_core"):
+        module_spec = cranelift_module()
+    else:
+        print_error("Unknown full spec file: {spec_path}")
+        print "Supported specs: runtime_value_full.spl, gc_full.spl, cranelift_core.spl"
+        return 1
+
+    # Generate the module source
+    val module_source = generate_module_source(module_spec)
+
+    if opts.dry_run:
+        print ""
+        print "=== Generated {mod_name}.rs ==="
+        print module_source
+        return 0
+
+    # Write to output directory
+    val out_dir = opts.output_dir
+    if not dir_create(out_dir, true):
+        print_error("Failed to create output directory: {out_dir}")
+        return 1
+    if not dir_create("{out_dir}/src", true):
+        print_error("Failed to create src directory: {out_dir}/src")
+        return 1
+
+    val module_path = "{out_dir}/src/{mod_name}.rs"
+    if not file_write(module_path, module_source):
+        print_error("Failed to write {module_path}")
+        return 1
+    log_step("Wrote {module_path}")
+
+    print "Done."
+    return 0
+
+# ============================================================================
+# Full Project Generation (--gen-all mode)
+# ============================================================================
+
+# Generate the entire build/rust/ffi_gen/ directory from all full specs.
+fn generate_all_modules(opts: CliOptions, rust_config: RustEnvConfig) -> i64:
+    print "Generating all FFI modules to {opts.output_dir}"
+
+    # List of all full specs to generate
+    val spec_dir = "src/app/ffi_gen/specs"
+    val modules: [text] = ["runtime_value", "gc"]
+
+    # Create output directories (ignore errors if already exist)
+    val out_dir = opts.output_dir
+    dir_create(out_dir, true)
+    dir_create("{out_dir}/src", true)
+    # Continue even if creation "failed" - directory might already exist
+
+    # Generate each module (imports are at module level)
+    var all_sources: [{text: text}] = []
+
+    # Runtime Value module
+    val rv_spec = runtime_value_module()
+    val rv_source = generate_module_source(rv_spec)
+    all_sources.push({"runtime_value": rv_source})
+    log_info("Generated runtime_value.rs ({rv_source.len()} bytes)", opts.verbose)
+
+    # GC module
+    val gc_spec = gc_module()
+    val gc_source = generate_module_source(gc_spec)
+    all_sources.push({"gc": gc_source})
+    log_info("Generated gc.rs ({gc_source.len()} bytes)", opts.verbose)
+
+    # Generate lib.rs
+    val lib_source = generate_simple_ffi_lib()
+
+    # Generate Cargo.toml
+    val cargo_spec = CargoSpec.cdylib("simple-ffi-wrapper", "0.1.0")
+    cargo_spec.description = "Generated FFI wrappers for Simple runtime"
+    cargo_spec.edition = rust_config.edition
+    cargo_spec.dependencies = [
+        CrateDependency.version("bdwgc-alloc", "0.6"),
+        CrateDependency.version("libc", "0.2"),
+        CrateDependency.version("glob", "0.3"),
+        CrateDependency.version("hostname", "0.4"),
+        CrateDependency.version("cranelift-codegen", "0.110"),
+        CrateDependency.version("cranelift-object", "0.110"),
+        CrateDependency.version("cranelift-module", "0.110"),
+        CrateDependency.version("cranelift-frontend", "0.110")
+    ]
+    val cargo_source = generate_cargo_toml(cargo_spec)
+
+    if opts.dry_run:
+        print ""
+        print "=== Generated Cargo.toml ==="
+        print cargo_source
+        print ""
+        print "=== Generated src/lib.rs ==="
+        print lib_source
+        print ""
+        for entry in all_sources:
+            for mod_name in entry.keys():
+                val source = entry[mod_name]
+                print "=== Generated src/{mod_name}.rs ({source.len()} bytes) ==="
+                # Only show first 100 lines for dry-run
+                val lines = source.split("\n")
+                var line_count = 0
+                for line in lines:
+                    print line
+                    line_count = line_count + 1
+                    if line_count >= 100:
+                        print "... (truncated, {lines.len() - 100} more lines)"
+                        break
+                print ""
+        return 0
+
+    # Write Cargo.toml
+    if not file_write("{out_dir}/Cargo.toml", cargo_source):
+        print_error("Failed to write Cargo.toml")
+        return 1
+    log_step("Wrote {out_dir}/Cargo.toml")
+
+    # Write lib.rs
+    if not file_write("{out_dir}/src/lib.rs", lib_source):
+        print_error("Failed to write src/lib.rs")
+        return 1
+    log_step("Wrote {out_dir}/src/lib.rs")
+
+    # Write each module
+    for entry in all_sources:
+        for mod_name in entry.keys():
+            val source = entry[mod_name]
+            val mod_path = "{out_dir}/src/{mod_name}.rs"
+            if not file_write(mod_path, source):
+                print_error("Failed to write {mod_path}")
+                return 1
+            log_step("Wrote {mod_path}")
+
+    print "Generated {modules.len()} modules to {out_dir}"
+
+    # Verify if requested
+    if opts.verify:
+        return verify_generated_code(out_dir, opts.verbose)
+
+    return 0
+
+# ============================================================================
+# Verification (--verify)
+# ============================================================================
+
+# Run cargo check on generated code to verify it compiles
+fn verify_generated_code(out_dir: text, verbose: bool) -> i64:
+    print "Verifying generated code..."
+
+    # Run cargo check
+    val result = process_run("cargo", ["check", "--manifest-path", "{out_dir}/Cargo.toml"])
+
+    if result == 0:
+        log_step("Verification successful: cargo check passed")
+    else:
+        print_error("Verification failed: cargo check returned {result}")
+
+    result
+
+# ============================================================================
+# Workspace Generation (--gen-workspace mode)
+# ============================================================================
+
+# Generate multi-crate workspace with all FFI crates
+fn generate_workspace(opts: CliOptions, rust_config: RustEnvConfig) -> i64:
+    print "Generating multi-crate workspace at {opts.output_dir}"
+
+    # Define all crates in the workspace
+    val crate_names = [
+        "ffi_core",
+        "ffi_io",
+        "ffi_process",
+        "ffi_time",
+        "ffi_crypto",
+        "ffi_archive",
+        "ffi_system",
+        "ffi_codegen",
+        "ffi_data",
+        "ffi_serde",
+        "ffi_concurrent",
+        "ffi_cli",
+        "ffi_net"
+    ]
+
+    val optional_crates = [
+        "ffi_torch",
+        "ffi_cuda",
+        "ffi_vulkan"
+    ]
+
+    # Create output directory (should already exist from ensure_rust_env)
+    val out_dir = opts.output_dir
+    if not file_exists(out_dir):
+        if not dir_create(out_dir, true):
+            print_error("Failed to create {out_dir}")
+            return 1
+
+    # Generate workspace root Cargo.toml
+    log_info("Generating workspace Cargo.toml", opts.verbose)
+    val workspace_toml = generate_workspace_root_toml(crate_names, optional_crates, rust_config)
+
+    if opts.dry_run:
+        print ""
+        print "=== Workspace Cargo.toml ==="
+        print workspace_toml
+        print ""
+        print "Would generate {crate_names.len()} crates:"
+        for name in crate_names:
+            print "  - {name}/"
+        print ""
+        print "Optional crates (feature-gated):"
+        for name in optional_crates:
+            print "  - {name}/"
+        return 0
+
+    # Write workspace Cargo.toml
+    if not file_write("{out_dir}/Cargo.toml", workspace_toml):
+        print_error("Failed to write workspace Cargo.toml")
+        return 1
+    log_step("Wrote {out_dir}/Cargo.toml")
+
+    # Generate each crate
+    var generated_count = 0
+    for crate_name in crate_names:
+        val result = generate_single_crate(crate_name, out_dir, opts, rust_config)
+        if result != 0:
+            print_error("Failed to generate {crate_name}")
+            return result
+        generated_count = generated_count + 1
+
+    print "Generated {generated_count} FFI crates to {out_dir}"
+
+    # Verify if requested
+    if opts.verify:
+        return verify_workspace(out_dir, opts.verbose)
+
+    return 0
+
+# Generate workspace root Cargo.toml
+fn generate_workspace_root_toml(members: [text], optional: [text], rust_config: RustEnvConfig) -> text:
+    var toml = "[workspace]\n"
+    toml = toml + "resolver = \"2\"\n"
+    toml = toml + "members = [\n"
+
+    for member in members:
+        toml = toml + "    \"{member}\",\n"
+
+    toml = toml + "]\n\n"
+
+    # Optional members (feature-gated)
+    if optional.len() > 0:
+        toml = toml + "# Optional members (enable with features)\n"
+        toml = toml + "# Uncomment to include GPU/ML crates:\n"
+        for opt in optional:
+            toml = toml + "# \"{opt}\",\n"
+        toml = toml + "\n"
+
+    # Workspace-level dependencies
+    toml = toml + "[workspace.dependencies]\n"
+    toml = toml + "libc = \"0.2\"\n"
+    toml = toml + "thiserror = \"1.0\"\n"
+    toml = toml + "\n"
+
+    # Workspace package info
+    toml = toml + "[workspace.package]\n"
+    toml = toml + "version = \"0.1.0\"\n"
+    toml = toml + "edition = \"{rust_config.edition}\"\n"
+    toml = toml + "authors = [\"Simple Language Team\"]\n"
+    toml = toml + "license = \"MIT\"\n"
+
+    toml
+
+# Generate a single crate in the workspace
+fn generate_single_crate(crate_name: text, workspace_dir: text, opts: CliOptions, rust_config: RustEnvConfig) -> i64:
+    val crate_dir = "{workspace_dir}/{crate_name}"
+
+    # Create crate directory structure (use dir_create_all for recursive creation)
+    if not dir_create_all("{crate_dir}/src"):
+        print_error("Failed to create {crate_dir}/src")
+        return 1
+
+    # Generate Cargo.toml for this crate
+    val cargo_toml = generate_crate_cargo_toml(crate_name, rust_config)
+    if not file_write("{crate_dir}/Cargo.toml", cargo_toml):
+        print_error("Failed to write {crate_dir}/Cargo.toml")
+        return 1
+
+    # Generate lib.rs stub
+    val lib_rs = generate_crate_lib_stub(crate_name)
+    if not file_write("{crate_dir}/src/lib.rs", lib_rs):
+        print_error("Failed to write {crate_dir}/src/lib.rs")
+        return 1
+
+    log_step("Generated {crate_name}")
+    return 0
+
+# Generate Cargo.toml for a specific crate
+fn generate_crate_cargo_toml(crate_name: text, rust_config: RustEnvConfig) -> text:
+    var toml = "[package]\n"
+    toml = toml + "name = \"{crate_name}\"\n"
+    toml = toml + "version.workspace = true\n"
+    toml = toml + "edition.workspace = true\n"
+    toml = toml + "authors.workspace = true\n"
+    toml = toml + "license.workspace = true\n"
+    toml = toml + "\n"
+
+    toml = toml + "[lib]\n"
+    toml = toml + "crate-type = [\"cdylib\", \"rlib\"]\n"
+    toml = toml + "\n"
+
+    toml = toml + "[dependencies]\n"
+
+    # Add dependencies based on crate name
+    if crate_name == "ffi_core":
+        toml = toml + "bdwgc-alloc = \"0.6\"\n"
+        toml = toml + "libc.workspace = true\n"
+    elif crate_name == "ffi_io":
+        toml = toml + "glob = \"0.3\"\n"
+        toml = toml + "fs2 = \"0.4\"\n"
+        toml = toml + "memmap2 = \"0.9\"\n"
+        toml = toml + "dirs-next = \"2.0\"\n"
+    elif crate_name == "ffi_process":
+        toml = toml + "rlimit = \"0.10\"\n"
+        toml = toml + "[target.'cfg(unix)'.dependencies]\n"
+        toml = toml + "nix = { version = \"0.29\", features = [\"process\", \"resource\", \"signal\"] }\n"
+    elif crate_name == "ffi_time":
+        toml = toml + "chrono = \"0.4\"\n"
+    elif crate_name == "ffi_crypto":
+        toml = toml + "sha1 = \"0.10\"\n"
+        toml = toml + "sha2 = \"0.10\"\n"
+        toml = toml + "xxhash-rust = { version = \"0.8\", features = [\"xxh3\"] }\n"
+        toml = toml + "ahash = \"0.8\"\n"
+        toml = toml + "argon2 = \"0.5\"\n"
+    elif crate_name == "ffi_archive":
+        toml = toml + "tar = \"0.4\"\n"
+        toml = toml + "flate2 = \"1.0\"\n"
+        toml = toml + "xz2 = \"0.1\"\n"
+    elif crate_name == "ffi_system":
+        toml = toml + "hostname = \"0.4\"\n"
+        toml = toml + "num_cpus = \"1.16\"\n"
+        toml = toml + "sysinfo = \"0.32\"\n"
+    elif crate_name == "ffi_codegen":
+        toml = toml + "cranelift-codegen = \"0.110\"\n"
+        toml = toml + "cranelift-object = \"0.110\"\n"
+        toml = toml + "cranelift-module = \"0.110\"\n"
+        toml = toml + "cranelift-frontend = \"0.110\"\n"
+        toml = toml + "target-lexicon = \"0.13\"\n"
+    elif crate_name == "ffi_data":
+        toml = toml + "regex = \"1.10\"\n"
+        toml = toml + "lasso = { version = \"0.7\", features = [\"multi-threaded\"] }\n"
+        toml = toml + "typed-arena = \"2.0\"\n"
+        toml = toml + "dashmap = \"6.1\"\n"
+        toml = toml + "indexmap = \"2.7\"\n"
+    elif crate_name == "ffi_serde":
+        toml = toml + "serde = { version = \"1.0\", features = [\"derive\"] }\n"
+        toml = toml + "serde_json = \"1.0\"\n"
+        toml = toml + "toml = \"0.8\"\n"
+        toml = toml + "serde_yaml = \"0.9\"\n"
+        toml = toml + "bincode = \"1.3\"\n"
+    elif crate_name == "ffi_concurrent":
+        toml = toml + "rayon = \"1.10\"\n"
+        toml = toml + "crossbeam = \"0.8\"\n"
+        toml = toml + "parking_lot = \"0.12\"\n"
+        toml = toml + "dashmap = \"6.1\"\n"
+    elif crate_name == "ffi_cli":
+        toml = toml + "rustyline = \"14\"\n"
+        toml = toml + "notify = \"6\"\n"
+        toml = toml + "ctrlc = \"3.4\"\n"
+        toml = toml + "rpassword = \"7.3\"\n"
+    elif crate_name == "ffi_net":
+        toml = toml + "socket2 = \"0.5\"\n"
+        toml = toml + "ureq = \"2.10\"\n"
+
+    toml
+
+# Generate lib.rs stub for a crate
+fn generate_crate_lib_stub(crate_name: text) -> text:
+    # For ffi_core, use the gc_full spec to generate real code
+    if crate_name == "ffi_core":
+        val gc_spec = gc_module()
+        return generate_module_source(gc_spec)
+
+    # For ffi_io, use the io_full spec
+    if crate_name == "ffi_io":
+        val io_spec = io_module()
+        return generate_module_source(io_spec)
+
+    # For ffi_process, use the process_mod spec
+    if crate_name == "ffi_process":
+        val process_spec = process_module()
+        return generate_module_source(process_spec)
+
+    # For ffi_time, use the time_mod spec
+    if crate_name == "ffi_time":
+        val time_spec = time_module()
+        return generate_module_source(time_spec)
+
+    # For ffi_crypto, use the crypto_mod spec
+    if crate_name == "ffi_crypto":
+        val crypto_spec = crypto_module()
+        return generate_module_source(crypto_spec)
+
+    # For ffi_archive, use the archive_mod spec
+    if crate_name == "ffi_archive":
+        val archive_spec = archive_module()
+        return generate_module_source(archive_spec)
+
+    # For ffi_system, use the system_mod spec
+    if crate_name == "ffi_system":
+        val system_spec = system_module()
+        return generate_module_source(system_spec)
+
+    # For ffi_codegen, use the codegen_mod spec
+    if crate_name == "ffi_codegen":
+        val codegen_spec = codegen_module()
+        return generate_module_source(codegen_spec)
+
+    # For ffi_data, use the data_mod spec
+    if crate_name == "ffi_data":
+        val data_spec = data_module()
+        return generate_module_source(data_spec)
+
+    # For ffi_serde, use the serde_mod spec
+    if crate_name == "ffi_serde":
+        val serde_spec = serde_module()
+        return generate_module_source(serde_spec)
+
+    # For ffi_concurrent, use the concurrent_mod spec
+    if crate_name == "ffi_concurrent":
+        val concurrent_spec = concurrent_module()
+        return generate_module_source(concurrent_spec)
+
+    # For ffi_cli, use the cli_mod spec
+    if crate_name == "ffi_cli":
+        val cli_spec = cli_module()
+        return generate_module_source(cli_spec)
+
+    # For ffi_net, use the net_mod spec
+    if crate_name == "ffi_net":
+        val net_spec = net_module()
+        return generate_module_source(net_spec)
+
+    # For other crates, generate stub for now
+    var code = "//! {crate_name} - FFI wrapper crate\n"
+    code = code + "//!\n"
+    code = code + "//! Auto-generated by: simple ffi-gen --gen-workspace\n"
+    code = code + "//! Do not edit manually - regenerate from specs.\n"
+    code = code + "\n"
+    code = code + "#![allow(unused)]\n"
+    code = code + "\n"
+    code = code + "// TODO: Implement FFI functions for {crate_name}\n"
+    code = code + "// See doc/design/ffi_wrapper_plan.md for specifications\n"
+    code
+
+# Verify workspace compiles
+fn verify_workspace(workspace_dir: text, verbose: bool) -> i64:
+    print "Verifying workspace..."
+
+    val (stdout, stderr, exit_code) = process_run("cargo", ["check", "--workspace", "--manifest-path", "{workspace_dir}/Cargo.toml"])
+
+    if exit_code == 0:
+        log_step("Verification successful: cargo check --workspace passed")
+        return 0
+    else:
+        print_error("Verification failed: cargo check returned {exit_code}")
+        if stderr != "":
+            print stderr
+        return exit_code
+
+# ============================================================================
+# Entry Point
+# ============================================================================
+
+fn main() -> i64:
+    val args = get_cli_args()
+    val opts = parse_args(args)
+
+    if opts.show_help:
+        print_help()
+        return 0
+
+    val project_root = cwd()
+    val rust_config = read_rust_config(project_root)
+
+    # Handle --clean: remove build/rust/ and re-setup
+    if opts.clean:
+        val clean_result = clean_rust_env(project_root, opts.verbose)
+        if clean_result != 0:
+            return clean_result
+
+    # Ensure build/rust/ environment is set up (persists across runs)
+    val env_result = ensure_rust_env(project_root, rust_config, opts.verbose)
+    if env_result != 0:
+        return env_result
+
+    # Handle --gen-all: generate all modules (no input file required)
+    if opts.gen_all:
+        return generate_all_modules(opts, rust_config)
+
+    # Handle --gen-workspace: generate multi-crate workspace
+    if opts.gen_workspace:
+        return generate_workspace(opts, rust_config)
+
+    # Handle --verify alone: verify existing generated code
+    if opts.verify and opts.input_file == "" and not opts.gen_all:
+        return verify_generated_code(opts.output_dir, opts.verbose)
+
+    if opts.input_file == "":
+        if opts.clean:
+            print "build/rust/ environment re-initialized."
+            return 0
+        print_error("No input file specified")
+        print ""
+        print_help()
+        return 1
+
+    if not file_exists(opts.input_file):
+        print_error("File not found: {opts.input_file}")
+        return 1
+
+    # Dispatch to appropriate generator mode
+    if opts.gen_module:
+        generate_full_module(opts.input_file, opts)
+    elif opts.gen_intern:
+        generate_intern(opts.input_file, opts)
+    else:
+        generate_for_file(opts.input_file, opts, rust_config)

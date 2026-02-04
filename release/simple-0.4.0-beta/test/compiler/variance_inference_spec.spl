@@ -1,0 +1,224 @@
+# @Feature 806: Variance Inference - Phase 6B Tests
+# @Description: Test variance inference algorithm for type parameters
+
+# Import variance inference implementation
+use compiler.variance_phase6b.*
+
+# ============================================================================
+# Test Group 1: Basic Variance Inference
+# ============================================================================
+
+describe "Variance Inference - Covariant Types":
+    it "infers Box<T> as covariant":
+        val infer = VarianceInference.empty()
+
+        # struct Box<T>:
+        #     value: T
+        val box_def = TypeDef(
+            name: "Box",
+            type_param_count: 1,
+            fields: [
+                FieldDef(name: "value", ty: HirType.TypeParam(id: 0))
+            ],
+            methods: []
+        )
+
+        infer.add_type_def(box_def)
+        val variances = infer.infer_variance("Box")
+
+        expect variances.len() == 1
+        expect variances[0].to_string() == "+"
+
+describe "Variance Inference - Invariant Types":
+    it "infers Cell<T> as invariant via mut":
+        val infer = VarianceInference.empty()
+
+        # struct Cell<T>:
+        #     value: mut T
+        val cell_def = TypeDef(
+            name: "Cell",
+            type_param_count: 1,
+            fields: [
+                FieldDef(
+                    name: "value",
+                    ty: HirType.MutRef(inner: HirType.TypeParam(id: 0))
+                )
+            ],
+            methods: []
+        )
+
+        infer.add_type_def(cell_def)
+        val variances = infer.infer_variance("Cell")
+
+        expect variances.len() == 1
+        expect variances[0].to_string() == "="
+
+# ============================================================================
+# Test Group 2: Function Type Variance
+# ============================================================================
+
+describe "Variance Inference - Function Types":
+    it "infers fn(T) -> U as (contravariant, covariant)":
+        val infer = VarianceInference.empty()
+
+        # type Fn<T, U> = fn(T) -> U
+        val fn_def = TypeDef(
+            name: "Fn",
+            type_param_count: 2,
+            fields: [
+                FieldDef(
+                    name: "call",
+                    ty: HirType.Arrow(
+                        from: HirType.TypeParam(id: 0),  # T
+                        to: HirType.TypeParam(id: 1)     # U
+                    )
+                )
+            ],
+            methods: []
+        )
+
+        infer.add_type_def(fn_def)
+        val variances = infer.infer_variance("Fn")
+
+        expect variances.len() == 2
+        expect variances[0].to_string() == "-"  # T is contravariant
+        expect variances[1].to_string() == "+"  # U is covariant
+
+# ============================================================================
+# Test Group 3: Nested Variance
+# ============================================================================
+
+describe "Variance Inference - Nested Contexts":
+    it "infers nested variance in Processor<T>":
+        val infer = VarianceInference.empty()
+
+        # struct Processor<T>:
+        #     handler: fn(T) -> ()
+        val processor_def = TypeDef(
+            name: "Processor",
+            type_param_count: 1,
+            fields: [
+                FieldDef(
+                    name: "handler",
+                    ty: HirType.Arrow(
+                        from: HirType.TypeParam(id: 0),  # T
+                        to: HirType.Int                  # () represented as Int
+                    )
+                )
+            ],
+            methods: []
+        )
+
+        infer.add_type_def(processor_def)
+        val variances = infer.infer_variance("Processor")
+
+        # T appears in field (covariant context)
+        # But inside fn(T) -> () (contravariant position)
+        # Result: covariant ∘ contravariant = contravariant
+        expect variances.len() == 1
+        expect variances[0].to_string() == "-"
+
+# ============================================================================
+# Test Group 4: Multiple Uses
+# ============================================================================
+
+describe "Variance Inference - Multiple Uses":
+    it "infers Container<T> with both covariant and contravariant uses as invariant":
+        val infer = VarianceInference.empty()
+
+        # struct Container<T>:
+        #     get_value: fn() -> T      # T covariant (return)
+        #     set_value: fn(T) -> ()    # T contravariant (param)
+        val container_def = TypeDef(
+            name: "Container",
+            type_param_count: 1,
+            fields: [],
+            methods: [
+                MethodDef(
+                    name: "get_value",
+                    params: [],
+                    return_ty: HirType.TypeParam(id: 0)  # T covariant
+                ),
+                MethodDef(
+                    name: "set_value",
+                    params: [HirType.TypeParam(id: 0)],  # T contravariant
+                    return_ty: HirType.Int
+                )
+            ]
+        )
+
+        infer.add_type_def(container_def)
+        val variances = infer.infer_variance("Container")
+
+        # T appears in both covariant and contravariant positions
+        # Combine: Covariant + Contravariant = Invariant
+        expect variances.len() == 1
+        expect variances[0].to_string() == "="
+
+# ============================================================================
+# Test Group 5: Generic Composition
+# ============================================================================
+
+describe "Variance Inference - Generic Composition":
+    it "infers variance through generic type composition":
+        val infer = VarianceInference.empty()
+
+        # First define Box<T> (covariant)
+        val box_def = TypeDef(
+            name: "Box",
+            type_param_count: 1,
+            fields: [FieldDef(name: "value", ty: HirType.TypeParam(id: 0))],
+            methods: []
+        )
+        infer.add_type_def(box_def)
+
+        # Then define Wrapper<T>:
+        #     boxed: Box<T>
+        val wrapper_def = TypeDef(
+            name: "Wrapper",
+            type_param_count: 1,
+            fields: [
+                FieldDef(
+                    name: "boxed",
+                    ty: HirType.Generic(
+                        name: "Box",
+                        args: [HirType.TypeParam(id: 0)]
+                    )
+                )
+            ],
+            methods: []
+        )
+        infer.add_type_def(wrapper_def)
+
+        val wrapper_variances = infer.infer_variance("Wrapper")
+
+        # T in Wrapper appears in Box<T>
+        # Box<T> is covariant, so T in Wrapper is covariant
+        expect wrapper_variances.len() == 1
+        expect wrapper_variances[0].to_string() == "+"
+
+# ============================================================================
+# Test Group 6: Bivariant (Unused Parameters)
+# ============================================================================
+
+describe "Variance Inference - Bivariant Types":
+    it "infers unused type parameter as bivariant":
+        val infer = VarianceInference.empty()
+
+        # struct Marker<T>:
+        #     # T not used
+        #     marker: i32
+        val marker_def = TypeDef(
+            name: "Marker",
+            type_param_count: 1,
+            fields: [
+                FieldDef(name: "marker", ty: HirType.Int)
+            ],
+            methods: []
+        )
+
+        infer.add_type_def(marker_def)
+        val variances = infer.infer_variance("Marker")
+
+        expect variances.len() == 1
+        expect variances[0].to_string() == "±"  # Bivariant (unused)

@@ -1,0 +1,288 @@
+# Pattern Parser
+#
+# Parsing for all pattern types used in match/if-let/for/destructuring.
+# Port of rust/parser/src/parser_patterns.rs
+
+from token import {Span, Token, TokenKind}
+from ast import {Pattern, Expr, Type}
+from error import {ParseError}
+
+export PatternParser
+
+# Parse a pattern, including or-patterns (pattern1 | pattern2 | ...)
+fn parse_pattern(self) -> Result<Pattern, ParseError>:
+    val first = self.parse_single_pattern()
+
+    # Check for or patterns: pattern1 | pattern2
+    # Support multi-line patterns where pipe continues on next line
+    if self.check(TokenKind.Pipe) or self.peek_through_newlines_and_indents_is(TokenKind.Pipe):
+        self.pattern_indent_count = self.pattern_indent_count + self.skip_newlines_and_indents_for_pattern()
+
+        if self.check(TokenKind.Pipe):
+            var patterns = [first]
+            while self.check(TokenKind.Pipe):
+                self.advance()
+                self.pattern_indent_count = self.pattern_indent_count + self.skip_newlines_and_indents_for_pattern()
+                patterns.append(self.parse_single_pattern())
+                # Check if there's another pipe (possibly on next line)
+                if self.peek_through_newlines_and_indents_is(TokenKind.Pipe):
+                    self.pattern_indent_count = self.pattern_indent_count + self.skip_newlines_and_indents_for_pattern()
+            return Ok(Pattern.Or(patterns))
+
+    Ok(first)
+
+# Skip newlines and indents for pattern continuation.
+# Returns the number of Indent tokens skipped.
+fn skip_newlines_and_indents_for_pattern(self) -> i64:
+    var indent_count = 0
+    while self.check(TokenKind.Newline) or self.check(TokenKind.Indent):
+        if self.check(TokenKind.Indent):
+            indent_count = indent_count + 1
+        self.advance()
+    indent_count
+
+# Parse a single pattern (no or-composition)
+fn parse_single_pattern(self) -> Result<Pattern, ParseError>:
+    match self.current.kind:
+        # Wildcard: _
+        TokenKind.Underscore:
+            self.advance()
+            Ok(Pattern.Wildcard)
+
+        # Mutable binding: mut name
+        TokenKind.Mut:
+            self.advance()
+            val name = self.expect_identifier()
+            Ok(Pattern.MutIdentifier(name))
+
+        # Move binding: move name, or Move(...) enum variant
+        TokenKind.Move:
+            self.advance()
+            if self.is_identifier():
+                val name = self.expect_identifier()
+                Ok(Pattern.MoveIdentifier(name))
+            elif self.check(TokenKind.LParen):
+                # Move(...) as enum variant
+                self.advance()
+                var patterns = []
+                while not self.check(TokenKind.RParen):
+                    patterns.append(self.parse_pattern())
+                    if not self.check(TokenKind.RParen):
+                        self.expect(TokenKind.Comma)
+                self.expect(TokenKind.RParen)
+                Ok(Pattern.Enum(name: "_", variant: "Move", payload: Some(patterns)))
+            else:
+                Ok(Pattern.Identifier("move"))
+
+        # Keywords allowed as identifier patterns
+        TokenKind.New:
+            self.advance()
+            Ok(Pattern.Identifier("new"))
+        TokenKind.Old:
+            self.advance()
+            Ok(Pattern.Identifier("old"))
+        TokenKind.Type:
+            self.advance()
+            Ok(Pattern.Identifier("type"))
+        TokenKind.Examples:
+            self.advance()
+            Ok(Pattern.Identifier("examples"))
+        TokenKind.From:
+            self.advance()
+            Ok(Pattern.Identifier("from"))
+        TokenKind.Val:
+            self.advance()
+            Ok(Pattern.Identifier("val"))
+        TokenKind.Var:
+            self.advance()
+            Ok(Pattern.Identifier("var"))
+        TokenKind.Gen:
+            self.advance()
+            Ok(Pattern.Identifier("gen"))
+        TokenKind.Kernel:
+            self.advance()
+            Ok(Pattern.Identifier("kernel"))
+        TokenKind.Impl:
+            self.advance()
+            Ok(Pattern.Identifier("impl"))
+        TokenKind.Out:
+            self.advance()
+            Ok(Pattern.Identifier("out"))
+        TokenKind.OutErr:
+            self.advance()
+            Ok(Pattern.Identifier("out_err"))
+        TokenKind.Result:
+            self.advance()
+            Ok(Pattern.Identifier("result"))
+        TokenKind.To:
+            self.advance()
+            Ok(Pattern.Identifier("to"))
+        TokenKind.NotTo:
+            self.advance()
+            Ok(Pattern.Identifier("not_to"))
+        TokenKind.Context:
+            self.advance()
+            Ok(Pattern.Identifier("context"))
+        TokenKind.Feature:
+            self.advance()
+            Ok(Pattern.Identifier("feature"))
+        TokenKind.Scenario:
+            self.advance()
+            Ok(Pattern.Identifier("scenario"))
+        TokenKind.Given:
+            self.advance()
+            Ok(Pattern.Identifier("given"))
+        TokenKind.When:
+            self.advance()
+            Ok(Pattern.Identifier("when"))
+        TokenKind.Then:
+            self.advance()
+            Ok(Pattern.Identifier("then"))
+        TokenKind.Common:
+            self.advance()
+            Ok(Pattern.Identifier("common"))
+        TokenKind.Outline:
+            self.advance()
+            Ok(Pattern.Identifier("outline"))
+        TokenKind.Bounds:
+            self.advance()
+            Ok(Pattern.Identifier("bounds"))
+        TokenKind.Alias:
+            self.advance()
+            Ok(Pattern.Identifier("alias"))
+        TokenKind.Default:
+            self.advance()
+            Ok(Pattern.Identifier("default"))
+
+        # Identifier: name, struct pattern, enum variant, or typed pattern
+        TokenKind.Identifier(name, _):
+            self.advance()
+
+            # Struct pattern: Name { field: pattern, ... }
+            if self.check(TokenKind.LBrace):
+                self.advance()
+                var fields = []
+                while not self.check(TokenKind.RBrace):
+                    val field_name = self.expect_identifier()
+                    val pattern = if self.check(TokenKind.Colon):
+                        self.advance()
+                        self.parse_pattern()
+                    else:
+                        Pattern.Identifier(field_name)
+                    fields.append((field_name, pattern))
+                    if not self.check(TokenKind.RBrace):
+                        self.expect(TokenKind.Comma)
+                self.expect(TokenKind.RBrace)
+                return Ok(Pattern.Struct(name: name, fields: fields))
+
+            # Enum variant: Name::Variant or Name.Variant (qualified paths)
+            if self.check(TokenKind.DoubleColon) or self.check(TokenKind.Dot):
+                var path = [name]
+                while self.check(TokenKind.DoubleColon) or self.check(TokenKind.Dot):
+                    self.advance()
+                    path.append(self.expect_identifier())
+
+                val variant = path.pop()
+                val enum_name = path.join(".")
+
+                val payload = if self.check(TokenKind.LParen):
+                    self.advance()
+                    var patterns = []
+                    while not self.check(TokenKind.RParen):
+                        patterns.append(self.parse_pattern())
+                        if not self.check(TokenKind.RParen):
+                            self.expect(TokenKind.Comma)
+                    self.expect(TokenKind.RParen)
+                    Some(patterns)
+                else:
+                    None
+                return Ok(Pattern.Enum(name: enum_name, variant: variant, payload: payload))
+
+            # Unit enum variant: None
+            if name == "None":
+                return Ok(Pattern.Enum(name: "Option", variant: "None", payload: None))
+
+            # Enum variant with parens: Some(...), Ok(...), Err(...), UserVariant(...)
+            if self.check(TokenKind.LParen):
+                val enum_name = match name:
+                    "Some": "Option"
+                    "Ok": "Result"
+                    "Err": "Result"
+                    _: "_"
+                val variant = name
+
+                self.advance()  # consume LParen
+                var patterns = []
+                while not self.check(TokenKind.RParen):
+                    patterns.append(self.parse_pattern())
+                    if not self.check(TokenKind.RParen):
+                        self.expect(TokenKind.Comma)
+                self.expect(TokenKind.RParen)
+                return Ok(Pattern.Enum(name: enum_name, variant: variant, payload: Some(patterns)))
+
+            # Typed pattern: name: Type (for union type discrimination)
+            # Distinguish from match arm separator (colon followed by Newline/Indent)
+            if self.check(TokenKind.Colon):
+                if self.peek_is_type_start():
+                    self.advance()
+                    val ty = self.parse_type()
+                    return Ok(Pattern.Typed(
+                        pattern: Pattern.Identifier(name),
+                        ty: ty,
+                    ))
+
+            Ok(Pattern.Identifier(name))
+
+        # Literal patterns: integers, floats, strings, bools, nil
+        # Also handles range patterns: start..end or start..=end
+        TokenKind.Integer(_)
+        | TokenKind.TypedInteger(_, _)
+        | TokenKind.Float(_)
+        | TokenKind.TypedFloat(_, _)
+        | TokenKind.String(_)
+        | TokenKind.RawString(_)
+        | TokenKind.FString(_)
+        | TokenKind.Bool(_)
+        | TokenKind.Nil:
+            val expr = self.parse_primary()
+            # Range pattern: start..end
+            if self.check(TokenKind.DoubleDot):
+                self.advance()
+                val end_expr = self.parse_primary()
+                return Ok(Pattern.Range(start: expr, end: end_expr, inclusive: false))
+            # Inclusive range: start..=end
+            if self.check(TokenKind.DoubleDotEq):
+                self.advance()
+                val end_expr = self.parse_primary()
+                return Ok(Pattern.Range(start: expr, end: end_expr, inclusive: true))
+            Ok(Pattern.Literal(expr))
+
+        # Tuple pattern: (p1, p2, ...)
+        TokenKind.LParen:
+            self.advance()
+            var patterns = []
+            while not self.check(TokenKind.RParen):
+                patterns.append(self.parse_pattern())
+                if not self.check(TokenKind.RParen):
+                    self.expect(TokenKind.Comma)
+            self.expect(TokenKind.RParen)
+            Ok(Pattern.Tuple(patterns))
+
+        # Array pattern: [p1, p2, ...rest]
+        TokenKind.LBracket:
+            self.advance()
+            var patterns = []
+            while not self.check(TokenKind.RBracket):
+                if self.check(TokenKind.Ellipsis):
+                    self.advance()
+                    patterns.append(Pattern.Rest)
+                else:
+                    patterns.append(self.parse_pattern())
+                if not self.check(TokenKind.RBracket):
+                    self.expect(TokenKind.Comma)
+            self.expect(TokenKind.RBracket)
+            Ok(Pattern.Array(patterns))
+
+        _:
+            Err(ParseError.unexpected_token(
+                "pattern", "{self.current.kind}", self.current.span))

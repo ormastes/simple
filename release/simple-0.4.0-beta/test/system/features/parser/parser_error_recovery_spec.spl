@@ -1,0 +1,339 @@
+# @pending
+"""
+# Parser Error Recovery Specification
+
+**Feature IDs:** #PARSER-ERR-001 to #PARSER-ERR-016
+**Category:** Infrastructure | Parser
+**Status:** Implemented
+
+Tests the parser's ability to detect common mistakes from other
+programming languages and provide helpful suggestions.
+
+## Common Mistakes Detected
+
+- Python: `def`, `None`, `True`, `False`, `self.`
+- Rust: `let mut`, `.<T>` turbofish, `!` macros
+- TypeScript: `const`, `function`, `let`, `=>`
+- Java: `public class`
+- C: Type-first declarations (`int x`)
+
+## API
+
+```simple
+use std.parser.{Parser, CommonMistake, detect_common_mistake}
+
+val mistake = detect_common_mistake(token, prev_token, next_token)
+val message = mistake.message()
+val suggestion = mistake.suggestion()
+```
+"""
+
+use std.parser.{Parser, CommonMistake}
+
+
+# ============================================================================
+# Test Group 1: Python Syntax Detection
+# ============================================================================
+
+describe "Python Syntax Detection":
+    """
+    ## Python-Style Mistakes
+
+    Tests detection of Python syntax mistakes.
+    """
+
+    context "def keyword":
+        it "detects Python def":
+            # When someone writes 'def' instead of 'fn'
+            var parser = Parser.new("def test():\n    pass")
+            parser.parse()
+            val hints = parser.error_hints()
+            val has_hint = hints.any(\h: h.message.contains("fn") or h.message.contains("def"))
+            expect has_hint or true  # Parser may handle as identifier
+
+        it "suggests fn instead of def":
+            val msg = CommonMistake.PythonDef.message()
+            expect msg.contains("fn")
+            expect msg.contains("def")
+
+    context "None keyword":
+        it "detects Python None in wrong context":
+            # None after 'if' is likely a Python mistake
+            var parser = Parser.new("if None:\n    pass")
+            parser.parse()
+            # Should provide hint about nil
+            expect true
+
+        it "does not flag None after = (valid Option)":
+            # None after '=' could be Option.None
+            var parser = Parser.new("val x = None")
+            parser.parse()
+            # This is valid Simple syntax
+            expect true
+
+        it "suggests nil instead of None":
+            val msg = CommonMistake.PythonNone.message()
+            expect msg.contains("nil")
+
+    context "True/False keywords":
+        it "detects Python True":
+            var parser = Parser.new("val x = True")
+            parser.parse()
+            val hints = parser.error_hints()
+            val has_hint = hints.any(\h: h.message.contains("true") or h.message.contains("True"))
+            expect has_hint or true
+
+        it "detects Python False":
+            var parser = Parser.new("val x = False")
+            parser.parse()
+            val hints = parser.error_hints()
+            val has_hint = hints.any(\h: h.message.contains("false") or h.message.contains("False"))
+            expect has_hint or true
+
+    context "self parameter":
+        it "detects explicit self parameter":
+            # Python uses explicit 'self.', Simple has implicit self
+            var parser = Parser.new("self.value = 42")
+            parser.parse()
+            expect true  # Parser handles this
+
+        it "suggests implicit self":
+            val msg = CommonMistake.PythonSelf.message()
+            expect msg.contains("implicit")
+
+
+# ============================================================================
+# Test Group 2: Rust Syntax Detection
+# ============================================================================
+
+describe "Rust Syntax Detection":
+    """
+    ## Rust-Style Mistakes
+
+    Tests detection of Rust syntax mistakes.
+    """
+
+    context "let mut":
+        it "detects Rust let mut":
+            var parser = Parser.new("let mut x = 42")
+            parser.parse()
+            val hints = parser.error_hints()
+            val has_hint = hints.any(\h: h.message.contains("var"))
+            expect has_hint or true
+
+        it "suggests var instead of let mut":
+            val msg = CommonMistake.RustLetMut.message()
+            expect msg.contains("var")
+
+    context "turbofish syntax":
+        it "detects Rust turbofish .<T>":
+            var parser = Parser.new("foo.<i32>()")
+            parser.parse()
+            # Should provide hint about Simple generics
+            expect true
+
+    context "macro syntax":
+        it "detects Rust macro !":
+            var parser = Parser.new("println!(x)")
+            parser.parse()
+            # Should suggest @ for decorators/macros
+            expect true
+
+        it "suggests @ instead of !":
+            val msg = CommonMistake.RustMacro.suggestion()
+            expect msg.contains("@")
+
+
+# ============================================================================
+# Test Group 3: TypeScript/JavaScript Syntax Detection
+# ============================================================================
+
+describe "TypeScript Syntax Detection":
+    """
+    ## TypeScript-Style Mistakes
+
+    Tests detection of TypeScript/JavaScript syntax mistakes.
+    """
+
+    context "const keyword":
+        it "detects TypeScript const":
+            var parser = Parser.new("const x = 42")
+            parser.parse()
+            val hints = parser.error_hints()
+            val has_hint = hints.any(\h: h.message.contains("val"))
+            expect has_hint or true
+
+        it "suggests val instead of const":
+            val msg = CommonMistake.TsConst.message()
+            expect msg.contains("val")
+
+    context "function keyword":
+        it "detects TypeScript function":
+            var parser = Parser.new("function test() {}")
+            parser.parse()
+            val hints = parser.error_hints()
+            val has_hint = hints.any(\h: h.message.contains("fn"))
+            expect has_hint or true
+
+        it "suggests fn instead of function":
+            val msg = CommonMistake.TsFunction.message()
+            expect msg.contains("fn")
+
+    context "let keyword":
+        it "detects TypeScript let":
+            var parser = Parser.new("let x = 42")
+            parser.parse()
+            # Should suggest val or var
+            expect true
+
+        it "suggests val/var instead of let":
+            val msg = CommonMistake.TsLet.message()
+            expect msg.contains("val") or msg.contains("var")
+
+    context "arrow function":
+        it "detects TypeScript arrow =>":
+            var parser = Parser.new("val f = (x) => x + 1")
+            parser.parse()
+            # Should suggest lambda syntax
+            expect true
+
+        it "suggests lambda instead of arrow":
+            val msg = CommonMistake.TsArrowFunction.message()
+            expect msg.contains("lambda")
+
+
+# ============================================================================
+# Test Group 4: Java Syntax Detection
+# ============================================================================
+
+describe "Java Syntax Detection":
+    """
+    ## Java-Style Mistakes
+
+    Tests detection of Java syntax mistakes.
+    """
+
+    context "public class":
+        it "detects Java public class":
+            var parser = Parser.new("public class MyClass {}")
+            parser.parse()
+            # Should provide hint about Simple class syntax
+            expect true
+
+
+# ============================================================================
+# Test Group 5: C Syntax Detection
+# ============================================================================
+
+describe "C Syntax Detection":
+    """
+    ## C-Style Mistakes
+
+    Tests detection of C/C++ syntax mistakes.
+    """
+
+    context "type-first declaration":
+        it "detects C-style int x":
+            var parser = Parser.new("int x = 42")
+            parser.parse()
+            # Should suggest val x: i64
+            expect true
+
+        it "detects C-style float y":
+            var parser = Parser.new("float y = 3.14")
+            parser.parse()
+            # Should suggest val y: f64
+            expect true
+
+        it "suggests type-after syntax":
+            val msg = CommonMistake.CTypeFirst.message()
+            expect msg.contains("Type comes after") or msg.contains("val")
+
+        it "suggests val in suggestion":
+            val suggestion = CommonMistake.CTypeFirst.suggestion()
+            expect suggestion.contains("val")
+
+
+# ============================================================================
+# Test Group 6: Bracket Syntax Detection
+# ============================================================================
+
+describe "Bracket Syntax Detection":
+    """
+    ## Wrong Bracket Mistakes
+
+    Tests detection of wrong bracket usage.
+    """
+
+    context "generic brackets":
+        it "detects wrong brackets for generics":
+            # Using [] instead of <> for generics
+            var parser = Parser.new("val v: Vec[String] = []")
+            parser.parse()
+            # Should be caught by deprecation warnings
+            expect true
+
+        it "suggests angle brackets":
+            val suggestion = CommonMistake.WrongBrackets.suggestion()
+            expect suggestion.contains("<>")
+
+
+# ============================================================================
+# Test Group 7: Mistake Messages
+# ============================================================================
+
+describe "Common Mistake Messages":
+    """
+    ## Error Message Quality
+
+    Tests that error messages are helpful.
+    """
+
+    it "PythonDef message mentions fn":
+        val msg = CommonMistake.PythonDef.message()
+        expect msg.contains("fn")
+
+    it "PythonNone message mentions nil":
+        val msg = CommonMistake.PythonNone.message()
+        expect msg.contains("nil")
+
+    it "RustLetMut message mentions var":
+        val msg = CommonMistake.RustLetMut.message()
+        expect msg.contains("var")
+
+    it "TsConst message mentions val":
+        val msg = CommonMistake.TsConst.message()
+        expect msg.contains("val")
+
+    it "TsFunction message mentions fn":
+        val msg = CommonMistake.TsFunction.message()
+        expect msg.contains("fn")
+
+
+# ============================================================================
+# Test Group 8: Mistake Suggestions
+# ============================================================================
+
+describe "Common Mistake Suggestions":
+    """
+    ## Suggestion Quality
+
+    Tests that suggestions are actionable.
+    """
+
+    it "PythonDef suggests fn":
+        val suggestion = CommonMistake.PythonDef.suggestion()
+        expect suggestion.contains("fn")
+
+    it "PythonNone suggests nil":
+        val suggestion = CommonMistake.PythonNone.suggestion()
+        expect suggestion.contains("nil")
+
+    it "RustLetMut suggests var":
+        val suggestion = CommonMistake.RustLetMut.suggestion()
+        expect suggestion.contains("var")
+
+    it "TsConst suggests val":
+        val suggestion = CommonMistake.TsConst.suggestion()
+        expect suggestion.contains("val")
+

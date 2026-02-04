@@ -1,0 +1,335 @@
+# Manifest Parser - SSpec Tests
+# @skip
+import std.spec
+
+use package.types
+use package.semver
+use package.manifest
+
+describe "Manifest Parsing":
+
+    describe "Basic package info":
+
+        it "parses minimal manifest":
+            val sdn_content = """
+            package:
+              name: myapp
+              version: 1.0.0
+            """
+
+            val manifest = parse_manifest_string(sdn_content)
+            expect(manifest.is_ok()).to_be(true)
+
+            val m = manifest.unwrap()
+            expect(m.package.name).to_equal("myapp")
+            expect(m.package.version.to_string()).to_equal("1.0.0")
+
+        it "parses full package metadata":
+            val sdn_content = """
+            package:
+              name: http-client
+              version: 2.1.0
+              description: HTTP client library
+              authors: [Alice <alice@example.com>, Bob]
+              license: MIT
+              repository: https://github.com/simple/http
+              homepage: https://simple-lang.org/http
+            """
+
+            val manifest = parse_manifest_string(sdn_content)
+            expect(manifest.is_ok()).to_be(true)
+
+            val m = manifest.unwrap()
+            expect(m.package.name).to_equal("http-client")
+            expect(m.package.description.unwrap()).to_equal("HTTP client library")
+            expect(m.package.authors.length).to_equal(2)
+            expect(m.package.license.unwrap()).to_equal("MIT")
+
+    describe "Registry dependencies":
+
+        it "parses simple version constraint":
+            val sdn_content = """
+            package:
+              name: myapp
+              version: 1.0.0
+
+            dependencies:
+              http: ^1.0
+            """
+
+            val manifest = parse_manifest_string(sdn_content)
+            expect(manifest.is_ok()).to_be(true)
+
+            val m = manifest.unwrap()
+            expect(m.dependencies.length).to_equal(1)
+
+            val dep = m.dependencies[0]
+            expect(dep.name).to_equal("http")
+            # Should have Caret constraint for ^1.0
+
+        it "parses multiple dependencies":
+            val sdn_content = """
+            package:
+              name: myapp
+              version: 1.0.0
+
+            dependencies:
+              http: ^1.0
+              json: ~2.0.0
+              url: >=1.0.0, <2.0.0
+            """
+
+            val manifest = parse_manifest_string(sdn_content)
+            expect(manifest.is_ok()).to_be(true)
+
+            val m = manifest.unwrap()
+            expect(m.dependencies.length).to_equal(3)
+
+            # Check names
+            expect(m.dependencies[0].name).to_equal("http")
+            expect(m.dependencies[1].name).to_equal("json")
+            expect(m.dependencies[2].name).to_equal("url")
+
+        it "parses exact version":
+            val sdn_content = """
+            package:
+              name: myapp
+              version: 1.0.0
+
+            dependencies:
+              http: 1.2.3
+            """
+
+            val manifest = parse_manifest_string(sdn_content)
+            val dep = manifest.unwrap().dependencies[0]
+
+            # Should have Exact constraint
+
+    describe "Git dependencies":
+
+        it "parses git dependency with tag":
+            val sdn_content = """
+            package:
+              name: myapp
+              version: 1.0.0
+
+            dependencies:
+              mylib:
+                git: https://github.com/alice/mylib
+                tag: v1.2.3
+            """
+
+            val manifest = parse_manifest_string(sdn_content)
+            expect(manifest.is_ok()).to_be(true)
+
+            val dep = manifest.unwrap().dependencies[0]
+            expect(dep.name).to_equal("mylib")
+
+            # Should have Git source with tag ref
+
+        it "parses git dependency with branch":
+            val sdn_content = """
+            package:
+              name: myapp
+              version: 1.0.0
+
+            dependencies:
+              mylib:
+                git: https://github.com/alice/mylib
+                branch: main
+            """
+
+            val manifest = parse_manifest_string(sdn_content)
+            val dep = manifest.unwrap().dependencies[0]
+
+            # Should have Git source with branch ref
+
+        it "parses git dependency with commit":
+            val sdn_content = """
+            package:
+              name: myapp
+              version: 1.0.0
+
+            dependencies:
+              mylib:
+                git: https://github.com/alice/mylib
+                commit: abc1234567890
+            """
+
+            val manifest = parse_manifest_string(sdn_content)
+            val dep = manifest.unwrap().dependencies[0]
+
+            # Should have Git source with commit ref
+
+    describe "Path dependencies":
+
+        it "parses path dependency":
+            val sdn_content = """
+            package:
+              name: myapp
+              version: 1.0.0
+
+            dependencies:
+              utils:
+                path: ../utils
+            """
+
+            val manifest = parse_manifest_string(sdn_content)
+            expect(manifest.is_ok()).to_be(true)
+
+            val dep = manifest.unwrap().dependencies[0]
+            expect(dep.name).to_equal("utils")
+
+            # Should have Path source
+
+        it "parses absolute path":
+            val sdn_content = """
+            package:
+              name: myapp
+              version: 1.0.0
+
+            dependencies:
+              utils:
+                path: /home/user/projects/utils
+            """
+
+            val manifest = parse_manifest_string(sdn_content)
+            val dep = manifest.unwrap().dependencies[0]
+
+            # Should accept absolute path
+
+    describe "Optional dependencies":
+
+        it "parses optional dependency":
+            val sdn_content = """
+            package:
+              name: myapp
+              version: 1.0.0
+
+            dependencies:
+              tls:
+                version: ^2.0
+                optional: true
+            """
+
+            val manifest = parse_manifest_string(sdn_content)
+            val dep = manifest.unwrap().dependencies[0]
+
+            expect(dep.name).to_equal("tls")
+            expect(dep.optional).to_be(true)
+
+    describe "Dev dependencies":
+
+        it "parses dev dependencies":
+            val sdn_content = """
+            package:
+              name: myapp
+              version: 1.0.0
+
+            dependencies:
+              http: ^1.0
+
+            dev_dependencies:
+              test_framework: ^1.0
+              mock: ^2.0
+            """
+
+            val manifest = parse_manifest_string(sdn_content)
+            expect(manifest.is_ok()).to_be(true)
+
+            val m = manifest.unwrap()
+            expect(m.dependencies.length).to_equal(1)
+            expect(m.dev_dependencies.length).to_equal(2)
+
+        it "all_dependencies includes both":
+            val sdn_content = """
+            package:
+              name: myapp
+              version: 1.0.0
+
+            dependencies:
+              http: ^1.0
+
+            dev_dependencies:
+              test: ^1.0
+            """
+
+            val manifest = parse_manifest_string(sdn_content)
+            val m = manifest.unwrap()
+
+            val all_deps = m.all_dependencies()
+            expect(all_deps.length).to_equal(2)
+
+    describe "Manifest validation":
+
+        it "rejects missing package name":
+            val sdn_content = """
+            package:
+              version: 1.0.0
+            """
+
+            val manifest = parse_manifest_string(sdn_content)
+            expect(manifest.is_err()).to_be(true)
+
+        it "rejects missing version":
+            val sdn_content = """
+            package:
+              name: myapp
+            """
+
+            val manifest = parse_manifest_string(sdn_content)
+            expect(manifest.is_err()).to_be(true)
+
+        it "rejects invalid version":
+            val sdn_content = """
+            package:
+              name: myapp
+              version: not-a-version
+            """
+
+            val manifest = parse_manifest_string(sdn_content)
+            expect(manifest.is_err()).to_be(true)
+
+        it "rejects invalid package name":
+            val sdn_content = """
+            package:
+              name: My App With Spaces
+              version: 1.0.0
+            """
+
+            val manifest = parse_manifest_string(sdn_content)
+            expect(manifest.is_err()).to_be(true)
+
+    describe "Manifest utilities":
+
+        it "checks for dependency existence":
+            val sdn_content = """
+            package:
+              name: myapp
+              version: 1.0.0
+
+            dependencies:
+              http: ^1.0
+              json: ^2.0
+            """
+
+            val manifest = parse_manifest_string(sdn_content).unwrap()
+
+            expect(manifest.has_dependency("http")).to_be(true)
+            expect(manifest.has_dependency("json")).to_be(true)
+            expect(manifest.has_dependency("nonexistent")).to_be(false)
+
+describe "Manifest File Operations":
+
+    describe "Reading from file":
+
+        it "reads manifest from file path":
+            # This test requires actual file I/O
+            # For now, we test the parsing logic with strings
+            pass
+
+    describe "Writing manifest":
+
+        it "serializes manifest to SDN":
+            # Future: implement manifest serialization
+            pass

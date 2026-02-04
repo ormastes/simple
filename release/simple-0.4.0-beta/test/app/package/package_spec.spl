@@ -1,0 +1,386 @@
+# Package Management System Specification
+# Tests for package build, install, uninstall, verify, upgrade
+
+# @skip
+import std.testing
+import std.fs
+import std.process
+import std.package_ffi
+
+describe "Package Management System":
+
+    describe "Package Building":
+
+        it "builds bootstrap package with correct structure":
+            # Create test directory
+            val test_dir = "/tmp/simple-package-test-build"
+            if fs.exists(test_dir):
+                fs.remove_dir_all(test_dir)
+            fs.create_dir_all(test_dir)
+
+            # Build package (would need to mock or use real build)
+            # For now, verify the build script exists
+            expect(fs.exists("script/build-bootstrap.sh")).to_be(true)
+
+            # Cleanup
+            fs.remove_dir_all(test_dir)
+
+        it "generates valid SDN manifest":
+            val manifest = PackageManifest.generate_bootstrap("0.3.0", "linux-x86_64")
+
+            expect(manifest.name).to_equal("simple-bootstrap")
+            expect(manifest.version).to_equal("0.3.0")
+            expect(manifest.package_type).to_equal("bootstrap")
+            expect(manifest.platform).to_equal("linux-x86_64")
+            expect(manifest.app_dirs.length).to_equal(5)
+
+        it "includes essential apps in bootstrap":
+            val manifest = PackageManifest.generate_bootstrap("0.3.0", "linux-x86_64")
+            val apps = manifest.app_dirs
+
+            expect(apps.contains("cli")).to_be(true)
+            expect(apps.contains("run")).to_be(true)
+            expect(apps.contains("compile")).to_be(true)
+            expect(apps.contains("check")).to_be(true)
+            expect(apps.contains("repl")).to_be(true)
+
+    describe "Path Resolution":
+
+        it "resolves user-local paths correctly":
+            val paths = PackagePaths(
+                prefix: "/home/user/.local",
+                is_system: false,
+                platform: "linux-x86_64"
+            )
+
+            expect(paths.bin_dir()).to_equal("/home/user/.local/bin")
+            expect(paths.lib_dir()).to_equal("/home/user/.local/lib/simple")
+            expect(paths.runtime_path()).to_equal("/home/user/.local/lib/simple/simple_runtime")
+
+        it "resolves system paths correctly":
+            val paths = PackagePaths(
+                prefix: "/usr/local",
+                is_system: true,
+                platform: "linux-x86_64"
+            )
+
+            expect(paths.bin_dir()).to_equal("/usr/local/bin")
+            expect(paths.lib_dir()).to_equal("/usr/local/lib/simple")
+            expect(paths.config_dir()).to_equal("/etc/simple")
+
+        it "detects platform correctly":
+            val platform = detect_platform()
+
+            # Should be in format: os-arch
+            expect(platform.contains("-")).to_be(true)
+
+            val parts = platform.split("-")
+            expect(parts.length).to_equal(2)
+
+            # First part should be OS
+            val os = parts[0]
+            expect(["linux", "darwin", "windows"].contains(os)).to_be(true)
+
+            # Second part should be architecture
+            val arch = parts[1]
+            expect(["x86_64", "arm64"].contains(arch)).to_be(true)
+
+    describe "Manifest Operations":
+
+        it "parses SDN manifest correctly":
+            # Create test manifest
+            val test_manifest = """
+package:
+  name: simple-bootstrap
+  version: 0.3.0
+  type: bootstrap
+  platform: linux-x86_64
+
+runtime:
+  binary: simple_runtime
+  size: 15602000
+  checksum: sha256:abc123
+
+contents:
+  stdlib: [core.spl, io.spl]
+  apps: [cli, run]
+"""
+
+            # Write to temp file
+            val temp_file = "/tmp/test-manifest.sdn"
+            fs.write_file(temp_file, test_manifest)
+
+            # Parse
+            val manifest = PackageManifest.from_file(temp_file)
+
+            expect(manifest.name).to_equal("simple-bootstrap")
+            expect(manifest.version).to_equal("0.3.0")
+            expect(manifest.package_type).to_equal("bootstrap")
+            expect(manifest.runtime_size).to_equal(15602000)
+
+            # Cleanup
+            fs.remove_file(temp_file)
+
+        it "generates SDN manifest with correct format":
+            val manifest = PackageManifest.generate_bootstrap("0.3.0", "linux-x86_64")
+            manifest.runtime_size = 15602000
+            manifest.runtime_checksum = "sha256:abc123"
+
+            val sdn = manifest.to_sdn()
+
+            expect(sdn.contains("package:")).to_be(true)
+            expect(sdn.contains("name: simple-bootstrap")).to_be(true)
+            expect(sdn.contains("version: 0.3.0")).to_be(true)
+            expect(sdn.contains("runtime:")).to_be(true)
+            expect(sdn.contains("contents:")).to_be(true)
+
+    describe "Package Installation":
+
+        it "creates installation directories":
+            val test_prefix = "/tmp/simple-install-test"
+            if fs.exists(test_prefix):
+                fs.remove_dir_all(test_prefix)
+
+            val paths = PackagePaths(
+                prefix: test_prefix,
+                is_system: false,
+                platform: "linux-x86_64"
+            )
+
+            # Create directories
+            create_install_dirs(paths, false)
+
+            expect(fs.exists(paths.bin_dir())).to_be(true)
+            expect(fs.exists(paths.lib_dir())).to_be(true)
+            expect(fs.exists(paths.stdlib_dir())).to_be(true)
+            expect(fs.exists(paths.app_dir())).to_be(true)
+
+            # Cleanup
+            fs.remove_dir_all(test_prefix)
+
+        it "handles dry-run mode without creating files":
+            val test_prefix = "/tmp/simple-install-dryrun"
+            if fs.exists(test_prefix):
+                fs.remove_dir_all(test_prefix)
+
+            val paths = PackagePaths(
+                prefix: test_prefix,
+                is_system: false,
+                platform: "linux-x86_64"
+            )
+
+            # Dry run should not create directories
+            create_install_dirs(paths, true)
+
+            expect(fs.exists(test_prefix)).to_be(false)
+
+    describe "Package Verification":
+
+        it "validates package structure":
+            # Test that verification checks for required files
+            # This would need a test package
+            expect(true).to_be(true)  # Placeholder
+
+        it "calculates checksums correctly":
+            # Create test file
+            val test_file = "/tmp/checksum-test.txt"
+            fs.write_file(test_file, "Hello, World!")
+
+            # Calculate checksum (via FFI)
+            val checksum = calculate_checksum(test_file)
+
+            # SHA256 of "Hello, World!" is known
+            val expected = "sha256:dffd6021bb2bd5b0af676290809ec3a53191dd81c7f70a4b28688a362182986f"
+            expect(checksum).to_equal(expected)
+
+            # Cleanup
+            fs.remove_file(test_file)
+
+    describe "Package Upgrade":
+
+        it "preserves configuration during upgrade":
+            # Test upgrade workflow
+            # This would need mock packages
+            expect(true).to_be(true)  # Placeholder
+
+        it "detects version changes correctly":
+            val current = PackageManifest.generate_bootstrap("0.3.0", "linux-x86_64")
+            val new_manifest = PackageManifest.generate_bootstrap("0.3.1", "linux-x86_64")
+
+            expect(new_manifest.version).not_to_equal(current.version)
+            expect(new_manifest.version).to_equal("0.3.1")
+
+    describe "FFI Package Operations":
+
+        it "creates and extracts tarballs correctly":
+            # Create test directory structure
+            val source_dir = "/tmp/tarball-test-source"
+            val tarball_path = "/tmp/test.tar.gz"
+            val extract_dir = "/tmp/tarball-test-extract"
+
+            # Cleanup
+            if fs.exists(source_dir):
+                fs.remove_dir_all(source_dir)
+            if fs.exists(extract_dir):
+                fs.remove_dir_all(extract_dir)
+            if fs.exists(tarball_path):
+                fs.remove_file(tarball_path)
+
+            # Create source
+            fs.create_dir_all(source_dir)
+            fs.write_file(source_dir + "/test.txt", "test content")
+
+            # Create tarball (via FFI)
+            val result = rt_package_create_tarball(source_dir, tarball_path)
+            expect(result).to_equal(0)  # Success
+            expect(fs.exists(tarball_path)).to_be(true)
+
+            # Extract tarball
+            fs.create_dir_all(extract_dir)
+            val extract_result = rt_package_extract_tarball(tarball_path, extract_dir)
+            expect(extract_result).to_equal(0)  # Success
+
+            # Verify extracted content
+            val extracted_file = extract_dir + "/test.txt"
+            expect(fs.exists(extracted_file)).to_be(true)
+            val content = fs.read_file(extracted_file)
+            expect(content).to_equal("test content")
+
+            # Cleanup
+            fs.remove_dir_all(source_dir)
+            fs.remove_dir_all(extract_dir)
+            fs.remove_file(tarball_path)
+
+        it "calculates SHA256 checksums via FFI":
+            # Create test file
+            val test_file = "/tmp/sha256-test.txt"
+            fs.write_file(test_file, "Hello, World!")
+
+            # Calculate via FFI
+            val checksum = rt_package_sha256(test_file)
+
+            # Verify format
+            expect(checksum.starts_with("sha256:")).to_be(true)
+
+            # Verify correct hash
+            val expected = "sha256:dffd6021bb2bd5b0af676290809ec3a53191dd81c7f70a4b28688a362182986f"
+            expect(checksum).to_equal(expected)
+
+            # Cleanup
+            fs.remove_file(test_file)
+            rt_package_free_string(checksum)
+
+        it "gets file sizes correctly":
+            val test_file = "/tmp/size-test.txt"
+            fs.write_file(test_file, "1234567890")  # 10 bytes
+
+            val size = rt_package_file_size(test_file)
+            expect(size).to_equal(10)
+
+            fs.remove_file(test_file)
+
+        it "creates and removes directories":
+            val test_dir = "/tmp/mkdir-test/nested/deep"
+
+            # Remove if exists
+            if fs.exists("/tmp/mkdir-test"):
+                rt_package_remove_dir_all("/tmp/mkdir-test")
+
+            # Create nested directories
+            val result = rt_package_mkdir_all(test_dir)
+            expect(result).to_equal(0)
+            expect(fs.exists(test_dir)).to_be(true)
+
+            # Remove
+            val remove_result = rt_package_remove_dir_all("/tmp/mkdir-test")
+            expect(remove_result).to_equal(0)
+            expect(fs.exists("/tmp/mkdir-test")).to_be(false)
+
+        it "creates symbolic links":
+            val target = "/tmp/symlink-target.txt"
+            val link = "/tmp/symlink-link.txt"
+
+            # Cleanup
+            if fs.exists(target):
+                fs.remove_file(target)
+            if fs.exists(link):
+                fs.remove_file(link)
+
+            # Create target file
+            fs.write_file(target, "target content")
+
+            # Create symlink
+            val result = rt_package_create_symlink(target, link)
+            expect(result).to_equal(0)
+
+            # Verify symlink works
+            expect(fs.exists(link)).to_be(true)
+            val content = fs.read_file(link)
+            expect(content).to_equal("target content")
+
+            # Cleanup
+            fs.remove_file(target)
+            fs.remove_file(link)
+
+        it "checks path existence":
+            val existing = "/tmp"
+            val nonexistent = "/tmp/this-does-not-exist-12345"
+
+            expect(rt_package_exists(existing)).to_equal(1)
+            expect(rt_package_exists(nonexistent)).to_equal(0)
+
+        it "checks if path is directory":
+            val dir = "/tmp"
+            val file = "/tmp/is-dir-test.txt"
+            fs.write_file(file, "test")
+
+            expect(rt_package_is_dir(dir)).to_equal(1)
+            expect(rt_package_is_dir(file)).to_equal(0)
+
+            fs.remove_file(file)
+
+    describe "Integration Tests":
+
+        slow_it "builds and verifies complete bootstrap package":
+            # This is a slow integration test
+            # Build actual package
+            val result = process.run("./script/build-bootstrap.sh")
+            expect(result.exit_code).to_equal(0)
+
+            # Verify package exists
+            val packages = fs.glob("simple-bootstrap-*.spk")
+            expect(packages.length).to_be_greater_than(0)
+
+            val package_path = packages[0]
+            expect(fs.exists(package_path)).to_be(true)
+
+            # Verify package is not empty
+            val size = fs.file_size(package_path)
+            expect(size).to_be_greater_than(1000000)  # > 1MB
+
+        slow_it "extracts and verifies package contents":
+            # Extract to temp location
+            val extract_dir = "/tmp/simple-package-verify"
+            if fs.exists(extract_dir):
+                fs.remove_dir_all(extract_dir)
+            fs.create_dir_all(extract_dir)
+
+            val packages = fs.glob("simple-bootstrap-*.spk")
+            if packages.length > 0:
+                val package_path = packages[0]
+
+                # Extract
+                process.run("tar -xzf {package_path} -C {extract_dir}")
+
+                # Verify structure
+                expect(fs.exists(extract_dir + "/bin/simple_runtime")).to_be(true)
+                expect(fs.exists(extract_dir + "/lib/simple/app")).to_be(true)
+                expect(fs.exists(extract_dir + "/manifest.sdn")).to_be(true)
+
+                # Verify runtime is executable
+                val runtime = extract_dir + "/bin/simple_runtime"
+                # Check if executable bit is set (on Unix)
+                expect(fs.is_executable(runtime)).to_be(true)
+
+                # Cleanup
+                fs.remove_dir_all(extract_dir)

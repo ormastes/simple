@@ -1,0 +1,253 @@
+# Database Module - SDN-backed table storage
+#
+# Provides a simple table abstraction for storing records in SDN format.
+# Used by todo_db, feature_db, bug_db and other database modules.
+
+# FFI declarations (from sdn_ffi)
+extern fn rt_sdn_check(path: str) -> i64
+extern fn rt_sdn_to_json(path: str) -> str
+extern fn rt_sdn_get(path: str, key: str) -> str
+extern fn rt_sdn_set(path: str, key: str, value: str) -> i64
+extern fn rt_file_read(path: str) -> str
+extern fn rt_file_write(path: str, content: str) -> i64
+extern fn rt_file_exists(path: str) -> bool
+
+# ============================================================================
+# Row Types
+# ============================================================================
+
+struct TodoRow:
+    id: text
+    keyword: text
+    area: text
+    priority: text
+    description: text
+    file: text
+    line: i64
+    status: text
+
+struct FeatureRow:
+    id: text
+    name: text
+    category: text
+    status: text
+    description: text
+    test_file: text
+
+struct BugRow:
+    id: text
+    title: text
+    severity: text
+    status: text
+    description: text
+    test_case: text
+
+# ============================================================================
+# Table Structure
+# ============================================================================
+
+struct Table:
+    name: text
+    columns: [text]
+    rows: [[text]]
+    path: text
+
+impl Table:
+    # Create empty table
+    static fn empty(name: text, columns: [text]) -> Table:
+        Table(name: name, columns: columns, rows: [], path: "")
+
+    # Load table from SDN file
+    static fn load(path: text, table_name: text) -> Table:
+        # TODO: Replace direct FFI call with wrapper (file_read) from app.io or compiler.ffi
+        val content = rt_file_read(path)
+        if content == "":
+            return Table.empty(table_name, [])
+
+        # Parse SDN content (simplified - assumes table format)
+        var columns: [text] = []
+        var rows: [[text]] = []
+        var in_table = false
+        var found_table = false
+
+        for line in content.split("\n"):
+            val trimmed = line.trim()
+
+            # Look for table header: "table_name |col1, col2, col3|"
+            if trimmed.starts_with(table_name) and "|" in trimmed:
+                in_table = true
+                found_table = true
+                # Extract columns from between pipes
+                val pipe_start = trimmed.find("|")
+                val pipe_end = trimmed.rfind("|")
+                if pipe_start >= 0 and pipe_end > pipe_start:
+                    val cols_str = trimmed[pipe_start + 1:pipe_end]
+                    columns = cols_str.split(",").map(\c: c.trim())
+            elif in_table:
+                if trimmed == "" or not trimmed.starts_with(" "):
+                    in_table = false
+                else:
+                    # Parse row: "    value1, value2, value3"
+                    val values = trimmed.split(",").map(\v: v.trim().trim_quotes())
+                    rows.push(values)
+
+        Table(name: table_name, columns: columns, rows: rows, path: path)
+
+    # Get number of rows
+    fn len() -> i64:
+        self.rows.len()
+
+    # Check if empty
+    fn is_empty() -> bool:
+        self.rows.len() == 0
+
+    # Get row by index
+    fn get(index: i64) -> [text]:
+        self.rows[index]
+
+    # Get column index
+    fn column_index(name: text) -> i64:
+        var i = 0
+        for col in self.columns:
+            if col == name:
+                return i
+            i = i + 1
+        -1
+
+    # Get value at row, column
+    fn get_value(row_idx: i64, col_name: text) -> text:
+        val col_idx = self.column_index(col_name)
+        if col_idx < 0:
+            return ""
+        self.rows[row_idx][col_idx]
+
+    # Filter rows by predicate
+    fn filter(pred: fn([text]) -> bool) -> Table:
+        var filtered: [[text]] = []
+        for row in self.rows:
+            if pred(row):
+                filtered.push(row)
+        Table(name: self.name, columns: self.columns, rows: filtered, path: self.path)
+
+    # Add a row
+    me add_row(row: [text]):
+        self.rows.push(row)
+
+    # Update row at index
+    me update_row(index: i64, row: [text]):
+        self.rows[index] = row
+
+    # Delete row at index
+    me delete_row(index: i64):
+        self.rows.remove(index)
+
+    # Save to SDN file
+    fn save() -> i64:
+        if self.path == "":
+            return 1
+
+        var content = "{self.name} |{self.columns.join(\", \")}|\n"
+        for row in self.rows:
+            val values = row.map(\v:
+                if "," in v or " " in v:
+                    "\"{v}\""
+                else:
+                    v
+            )
+            content = content + "    {values.join(\", \")}\n"
+
+        # TODO: Replace direct FFI call with wrapper (file_write) from app.io or compiler.ffi
+        rt_file_write(self.path, content)
+
+    # Convert to markdown
+    fn to_markdown() -> text:
+        if self.columns.len() == 0:
+            return ""
+
+        # Header
+        var md = "| {self.columns.join(\" | \")} |\n"
+        md = md + "|{self.columns.map(\\_: \"---\").join(\"|\")}|\n"
+
+        # Rows
+        for row in self.rows:
+            md = md + "| {row.join(\" | \")} |\n"
+
+        md
+
+    # Count rows matching predicate
+    fn count_where(pred: fn([text]) -> bool) -> i64:
+        var count = 0
+        for row in self.rows:
+            if pred(row):
+                count = count + 1
+        count
+
+    # Group by column
+    fn group_by(col_name: text) -> Dict<text, [[text]]>:
+        val col_idx = self.column_index(col_name)
+        if col_idx < 0:
+            return {}
+
+        var groups: Dict<text, [[text]]> = {}
+        for row in self.rows:
+            val key = row[col_idx]
+            if key not in groups:
+                groups[key] = []
+            groups[key].push(row)
+        groups
+
+# ============================================================================
+# TodoTable (specialized for todo records)
+# ============================================================================
+
+struct TodoTable:
+    table: Table
+
+impl TodoTable:
+    static fn load(path: text) -> TodoTable:
+        TodoTable(table: Table.load(path, "todos"))
+
+    fn len() -> i64:
+        self.table.len()
+
+    fn by_status(status: text) -> [[text]]:
+        self.table.filter(\row: row[self.table.column_index("status")] == status).rows
+
+    fn by_priority(priority: text) -> [[text]]:
+        self.table.filter(\row: row[self.table.column_index("priority")] == priority).rows
+
+    fn count_by_status(status: text) -> i64:
+        self.table.count_where(\row: row[self.table.column_index("status")] == status)
+
+    fn to_markdown() -> text:
+        self.table.to_markdown()
+
+# ============================================================================
+# FeatureTable (specialized for feature records)
+# ============================================================================
+
+struct FeatureTable:
+    table: Table
+
+impl FeatureTable:
+    static fn load(path: text) -> FeatureTable:
+        FeatureTable(table: Table.load(path, "features"))
+
+    fn len() -> i64:
+        self.table.len()
+
+    fn by_status(status: text) -> [[text]]:
+        self.table.filter(\row: row[self.table.column_index("status")] == status).rows
+
+    fn by_category(category: text) -> [[text]]:
+        self.table.filter(\row: row[self.table.column_index("category")] == category).rows
+
+    fn to_markdown() -> text:
+        self.table.to_markdown()
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export Table, TodoTable, FeatureTable
+export TodoRow, FeatureRow, BugRow

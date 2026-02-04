@@ -1,0 +1,569 @@
+# JSON - JavaScript Object Notation
+#
+# JSON parser and serializer with query support.
+# Provides JSON encoding/decoding for data interchange.
+#
+# Components:
+# - JsonValue: JSON value representation
+# - JsonParser: Parse JSON text to JsonValue
+# - JsonSerializer: Serialize JsonValue to text
+# - JsonPath: Query nested JSON data
+# - Pretty printing: Formatted JSON output
+#
+# Usage:
+#   val json = JsonValue.parse(text)?
+#   val user = json["user"]["name"].as_string()?
+#
+# Architecture:
+# - Recursive descent parser
+# - Type-safe value representation
+# - Path-based queries
+# - Streaming serialization
+
+use std.error.*
+
+# ============================================================================
+# JsonValue - JSON Value Representation
+# ============================================================================
+
+enum JsonValue:
+    """JSON value type.
+
+    Represents any valid JSON value.
+
+    Example:
+        val obj = JsonValue.Object({
+            "name": JsonValue.String("Alice"),
+            "age": JsonValue.Number(30)
+        })
+    """
+    Object({text: JsonValue})      # JSON object
+    Array([JsonValue])              # JSON array
+    String(text)                    # JSON string
+    Number(f64)                     # JSON number
+    Bool(bool)                      # JSON boolean
+    Null                            # JSON null
+
+impl JsonValue:
+    static fn parse(text: text) -> Result<JsonValue, SimpleError>:
+        """Parse JSON text.
+
+        Args:
+            text: JSON text
+
+        Returns:
+            Some(JsonValue) or error
+
+        Example:
+            val json = JsonValue.parse('{"key": "value"}')?
+        """
+        json_parse(text)
+
+    fn serialize() -> text:
+        """Serialize to JSON text.
+
+        Returns:
+            JSON text
+
+        Example:
+            val text = json.serialize()
+        """
+        json_serialize(self)
+
+    fn pretty() -> text:
+        """Serialize to pretty JSON (indented).
+
+        Returns:
+            Formatted JSON text
+
+        Example:
+            val text = json.pretty()
+        """
+        json_pretty(self, 2)
+
+    fn get(key: text) -> JsonValue?:
+        """Get object field by key.
+
+        Args:
+            key: Object key
+
+        Returns:
+            Some(value) or None
+
+        Example:
+            val name = json.get("name")?
+        """
+        match self:
+            case JsonValue.Object(map):
+                map.get(key)
+            case _:
+                None
+
+    fn get_index(index: usize) -> JsonValue?:
+        """Get array element by index.
+
+        Args:
+            index: Array index
+
+        Returns:
+            Some(value) or None
+
+        Example:
+            val first = json.get_index(0)?
+        """
+        match self:
+            case JsonValue.Array(arr):
+                if index < arr.len():
+                    Some(arr[index])
+                else:
+                    None
+            case _:
+                None
+
+    fn as_object() -> {text: JsonValue}?:
+        """Extract as object.
+
+        Returns:
+            Some(object) or None
+        """
+        match self:
+            case JsonValue.Object(obj): Some(obj)
+            case _: None
+
+    fn as_array() -> [JsonValue]?:
+        """Extract as array.
+
+        Returns:
+            Some(array) or None
+        """
+        match self:
+            case JsonValue.Array(arr): Some(arr)
+            case _: None
+
+    fn as_string() -> text?:
+        """Extract as string.
+
+        Returns:
+            Some(string) or None
+        """
+        match self:
+            case JsonValue.String(s): Some(s)
+            case _: None
+
+    fn as_number() -> f64?:
+        """Extract as number.
+
+        Returns:
+            Some(number) or None
+        """
+        match self:
+            case JsonValue.Number(n): Some(n)
+            case _: None
+
+    fn as_bool() -> bool?:
+        """Extract as boolean.
+
+        Returns:
+            Some(bool) or None
+        """
+        match self:
+            case JsonValue.Bool(b): Some(b)
+            case _: None
+
+    fn is_null() -> bool:
+        """Check if value is null.
+
+        Returns:
+            true if null, false otherwise
+        """
+        match self:
+            case JsonValue.Null: true
+            case _: false
+
+    fn type_name() -> text:
+        """Get JSON type name.
+
+        Returns:
+            Type name string
+        """
+        match self:
+            case JsonValue.Object(_): "object"
+            case JsonValue.Array(_): "array"
+            case JsonValue.String(_): "string"
+            case JsonValue.Number(_): "number"
+            case JsonValue.Bool(_): "boolean"
+            case JsonValue.Null: "null"
+
+# ============================================================================
+# JsonPath - JSON Path Query
+# ============================================================================
+
+class JsonPath:
+    """Query JSON with path expressions.
+
+    Supports dot notation for nested access.
+
+    Example:
+        val path = JsonPath.new("user.address.city")
+        val city = path.query(json)?
+    """
+    path: text
+
+    static fn new(path: text) -> JsonPath:
+        """Create JSON path query.
+
+        Args:
+            path: Path expression (dot-separated)
+
+        Returns:
+            JsonPath
+        """
+        JsonPath(path: path)
+
+    fn query(value: JsonValue) -> JsonValue?:
+        """Query JSON value with path.
+
+        Args:
+            value: JSON value to query
+
+        Returns:
+            Some(result) or None
+
+        Example:
+            JsonPath.new("user.name").query(json)
+        """
+        val parts = self.path.split(".")
+        var current = Some(value)
+
+        for part in parts:
+            if not current.?:
+                return None
+
+            val val_current = current.unwrap()
+
+            # Try array index
+            if val Some(idx) = parse_int(part):
+                current = val_current.get_index(idx as usize)
+            else:
+                # Object key
+                current = val_current.get(part)
+
+        current
+
+# ============================================================================
+# JsonBuilder - Builder Pattern for JSON
+# ============================================================================
+
+class JsonBuilder:
+    """Builder for constructing JSON objects.
+
+    Example:
+        val json = JsonBuilder.new()
+            .put("name", JsonValue.String("Alice"))
+            .put("age", JsonValue.Number(30))
+            .build()
+    """
+    object: {text: JsonValue}
+
+    static fn new() -> JsonBuilder:
+        """Create new JSON object builder."""
+        JsonBuilder(object: {})
+
+    me put(key: text, value: JsonValue) -> JsonBuilder:
+        """Add key-value pair.
+
+        Args:
+            key: Object key
+            value: JSON value
+
+        Returns:
+            Builder (for chaining)
+        """
+        self.object[key] = value
+        self
+
+    me put_string(key: text, value: text) -> JsonBuilder:
+        """Add string value.
+
+        Args:
+            key: Object key
+            value: String value
+
+        Returns:
+            Builder
+        """
+        self.put(key, JsonValue.String(value))
+
+    me put_number(key: text, value: f64) -> JsonBuilder:
+        """Add number value.
+
+        Args:
+            key: Object key
+            value: Number value
+
+        Returns:
+            Builder
+        """
+        self.put(key, JsonValue.Number(value))
+
+    me put_bool(key: text, value: bool) -> JsonBuilder:
+        """Add boolean value.
+
+        Args:
+            key: Object key
+            value: Boolean value
+
+        Returns:
+            Builder
+        """
+        self.put(key, JsonValue.Bool(value))
+
+    me put_null(key: text) -> JsonBuilder:
+        """Add null value.
+
+        Args:
+            key: Object key
+
+        Returns:
+            Builder
+        """
+        self.put(key, JsonValue.Null)
+
+    fn build() -> JsonValue:
+        """Build JSON object.
+
+        Returns:
+            JsonValue object
+        """
+        JsonValue.Object(self.object)
+
+# ============================================================================
+# JsonArray - Builder for JSON Arrays
+# ============================================================================
+
+class JsonArray:
+    """Builder for JSON arrays.
+
+    Example:
+        val arr = JsonArray.new()
+            .push(JsonValue.Number(1))
+            .push(JsonValue.Number(2))
+            .build()
+    """
+    array: [JsonValue]
+
+    static fn new() -> JsonArray:
+        """Create new JSON array builder."""
+        JsonArray(array: [])
+
+    me push(value: JsonValue) -> JsonArray:
+        """Add value to array.
+
+        Args:
+            value: JSON value
+
+        Returns:
+            Builder (for chaining)
+        """
+        self.array = self.array.push(value)
+        self
+
+    me push_string(value: text) -> JsonArray:
+        """Add string to array."""
+        self.push(JsonValue.String(value))
+
+    me push_number(value: f64) -> JsonArray:
+        """Add number to array."""
+        self.push(JsonValue.Number(value))
+
+    me push_bool(value: bool) -> JsonArray:
+        """Add boolean to array."""
+        self.push(JsonValue.Bool(value))
+
+    me push_null() -> JsonArray:
+        """Add null to array."""
+        self.push(JsonValue.Null)
+
+    fn build() -> JsonValue:
+        """Build JSON array.
+
+        Returns:
+            JsonValue array
+        """
+        JsonValue.Array(self.array)
+
+# ============================================================================
+# JSON Serialization Traits
+# ============================================================================
+
+trait ToJson:
+    """Trait for types that can be converted to JSON.
+
+    Example:
+        impl ToJson for User:
+            fn to_json() -> JsonValue:
+                JsonBuilder.new()
+                    .put_string("name", self.name)
+                    .put_number("age", self.age)
+                    .build()
+    """
+    fn to_json() -> JsonValue
+
+# trait FromJson:
+#     """Trait for types that can be parsed from JSON.
+#
+#     Example:
+#         impl FromJson for User:
+#             static fn from_json(json: JsonValue) -> User?:
+#                 val name = json.get("name")?.as_string()?
+#                 val age = json.get("age")?.as_number()?
+#                 Some(User(name: name, age: age as i64))
+#     """
+#     static fn from_json(json: JsonValue) -> Self?
+
+# ============================================================================
+# Convenience Functions
+# ============================================================================
+
+fn parse_json(text: text) -> Result<JsonValue, SimpleError>:
+    """Parse JSON text.
+
+    Args:
+        text: JSON string
+
+    Returns:
+        Result with JsonValue or error
+    """
+    JsonValue.parse(text)
+
+fn to_json_string(value: JsonValue) -> text:
+    """Serialize JSON value to string.
+
+    Args:
+        value: JSON value
+
+    Returns:
+        JSON string
+    """
+    value.serialize()
+
+fn to_json_pretty(value: JsonValue) -> text:
+    """Serialize JSON value to pretty string.
+
+    Args:
+        value: JSON value
+
+    Returns:
+        Formatted JSON string
+    """
+    value.pretty()
+
+fn object(pairs: [(text, JsonValue)]) -> JsonValue:
+    """Create JSON object from pairs.
+
+    Args:
+        pairs: Key-value pairs
+
+    Returns:
+        JSON object
+
+    Example:
+        val obj = object([
+            ("name", JsonValue.String("Alice")),
+            ("age", JsonValue.Number(30))
+        ])
+    """
+    var map: {text: JsonValue} = {}
+    for (key, value) in pairs:
+        map[key] = value
+    JsonValue.Object(map)
+
+fn array(values: [JsonValue]) -> JsonValue:
+    """Create JSON array from values.
+
+    Args:
+        values: Array values
+
+    Returns:
+        JSON array
+
+    Example:
+        val arr = array([
+            JsonValue.Number(1),
+            JsonValue.Number(2),
+            JsonValue.Number(3)
+        ])
+    """
+    JsonValue.Array(values)
+
+# ============================================================================
+# MessagePack Support
+# ============================================================================
+
+# class MsgPack:
+#     """MessagePack binary serialization.
+#
+#     Compact binary format for data interchange.
+#
+#     Example:
+#         val data = JsonValue.Object(...)
+#         val bytes = MsgPack.encode(data)
+#         val decoded = MsgPack.decode(bytes)?
+#     """
+#
+#     static fn encode(value: JsonValue) -> [u8]:
+#         """Encode JSON value to MessagePack.
+#
+#         Args:
+#             value: JSON value
+#
+#         Returns:
+#             MessagePack bytes
+#         """
+#         msgpack_encode(value)
+#
+#     static fn decode(bytes: [u8]) -> JsonValue?:
+#         """Decode MessagePack to JSON value.
+#
+#         Args:
+#             bytes: MessagePack bytes
+#
+#         Returns:
+#             Some(JsonValue) or None on error
+#         """
+#         msgpack_decode(bytes)
+
+# ============================================================================
+# FFI Functions
+# ============================================================================
+
+# JSON parsing and serialization
+extern fn json_parse(text: text) -> Result<JsonValue, SimpleError>
+extern fn json_serialize(value: JsonValue) -> text
+extern fn json_pretty(value: JsonValue, indent: usize) -> text
+
+# MessagePack
+extern fn msgpack_encode(value: JsonValue) -> [u8]
+extern fn msgpack_decode(bytes: [u8]) -> JsonValue?
+
+# Utilities
+extern fn parse_int(text: text) -> i64?
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export JsonValue
+export JsonPath
+export JsonValue
+export JsonPath
+export JsonBuilder
+export JsonArray
+export ToJson
+# export FromJson
+export parse_json
+export to_json_string
+export to_json_pretty
+export object
+export array
+# export MsgPack

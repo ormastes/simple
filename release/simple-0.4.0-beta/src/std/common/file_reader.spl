@@ -1,0 +1,130 @@
+# File Reader
+#
+# Configurable file reading with strategy selection.
+# Memory-mapped reading delegates to Rust FFI; regular reading uses Simple.
+#
+# Port of rust/common/src/file_reader.rs
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_read_bytes(path: text) -> [i64]
+extern fn rt_file_mmap_read_text(path: text) -> text
+extern fn rt_file_mmap_read_bytes(path: text) -> [i64]
+extern fn rt_file_size(path: text) -> i64
+
+# ============================================================================
+# Read Strategy
+# ============================================================================
+
+val MMAP_THRESHOLD: i64 = 32768  # 32 KB
+
+enum ReadStrategy:
+    """Strategy for reading files."""
+    Regular
+    Mmap
+    Auto
+
+# ============================================================================
+# Standalone Functions
+# ============================================================================
+
+fn read_to_string(path: text) -> Result<text, text>:
+    """Read file to string using auto strategy."""
+    val reader = FileReader(strategy: ReadStrategy.Auto)
+    reader.read_to_string(path)
+
+fn read_to_bytes(path: text) -> Result<[i64], text>:
+    """Read file to bytes using auto strategy."""
+    val reader = FileReader(strategy: ReadStrategy.Auto)
+    reader.read_to_bytes(path)
+
+# ============================================================================
+# MappedFile
+# ============================================================================
+
+struct MappedFile:
+    """Zero-copy file access via memory mapping (backed by FFI)."""
+    path: text
+    content: text
+    size: i64
+
+impl MappedFile:
+    static fn open(path: text) -> Result<MappedFile, text>:
+        """Open a memory-mapped file."""
+        # TODO: Replace direct FFI call with wrapper (file_mmap_read_text) from app.io or compiler.ffi
+        val content = rt_file_mmap_read_text(path)
+        if not content.?:
+            return Err("Failed to mmap file: {path}")
+        Ok(MappedFile(path: path, content: content, size: content.len()))
+
+    fn as_str() -> text:
+        self.content
+
+    fn as_bytes() -> [i64]:
+        # TODO: Replace direct FFI call with wrapper (file_mmap_read_bytes) from app.io or compiler.ffi
+        rt_file_mmap_read_bytes(self.path)
+
+    fn len() -> i64:
+        self.size
+
+    fn is_empty() -> bool:
+        self.size == 0
+
+# ============================================================================
+# FileReader
+# ============================================================================
+
+struct FileReader:
+    """Configurable file reader with strategy selection."""
+    strategy: ReadStrategy
+
+impl FileReader:
+    static fn auto() -> FileReader:
+        FileReader(strategy: ReadStrategy.Auto)
+
+    fn read_to_string(path: text) -> Result<text, text>:
+        """Read file as string using configured strategy."""
+        val use_mmap = match self.strategy:
+            case Regular: false
+            case Mmap: true
+            case Auto:
+                # TODO: Replace direct FFI call with wrapper (file_size) from app.io or compiler.ffi
+                val size = rt_file_size(path)
+                size >= MMAP_THRESHOLD
+
+        if use_mmap:
+            # TODO: Replace direct FFI call with wrapper (file_mmap_read_text) from app.io or compiler.ffi
+            val content = rt_file_mmap_read_text(path)
+            if not content.?:
+                return Err("Failed to read file: {path}")
+            Ok(content)
+        else:
+            # TODO: Replace direct FFI call with wrapper (file_read_text) from app.io or compiler.ffi
+            val content = rt_file_read_text(path)
+            if not content.?:
+                return Err("Failed to read file: {path}")
+            Ok(content)
+
+    fn read_to_bytes(path: text) -> Result<[i64], text>:
+        """Read file as bytes using configured strategy."""
+        val use_mmap = match self.strategy:
+            case Regular: false
+            case Mmap: true
+            case Auto:
+                # TODO: Replace direct FFI call with wrapper (file_size) from app.io or compiler.ffi
+                val size = rt_file_size(path)
+                size >= MMAP_THRESHOLD
+
+        if use_mmap:
+            # TODO: Replace direct FFI call with wrapper (file_mmap_read_bytes) from app.io or compiler.ffi
+            Ok(rt_file_mmap_read_bytes(path))
+        else:
+            # TODO: Replace direct FFI call with wrapper (file_read_bytes) from app.io or compiler.ffi
+            Ok(rt_file_read_bytes(path))
+
+    fn open_mapped(path: text) -> Result<MappedFile, text>:
+        """Open file as memory-mapped."""
+        MappedFile.open(path)
+
+export ReadStrategy, MMAP_THRESHOLD
+export read_to_string, read_to_bytes
+export MappedFile, FileReader
