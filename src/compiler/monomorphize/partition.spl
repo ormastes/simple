@@ -12,6 +12,7 @@ export GenericTemplates
 export SpecializedInstances
 export partition_generic_constructs
 export build_monomorphization_metadata
+export build_monomorphization_metadata_from_constructs
 
 use parser.ast (Module, Node, FunctionDef, StructDef, ClassDef, EnumDef, TraitDef)
 use compiler.monomorphize.metadata (MonomorphizationMetadata, GenericFunctionMeta, GenericStructMeta)
@@ -46,6 +47,10 @@ impl GenericTemplates:
             traits: []
         )
 
+    static fn empty() -> GenericTemplates:
+        """Create an empty template set (alias for new)."""
+        GenericTemplates.new()
+
     fn is_empty() -> bool:
         """Check if there are no templates."""
         self.functions.is_empty() and
@@ -61,6 +66,10 @@ impl GenericTemplates:
         self.classes.len() +
         self.enums.len() +
         self.traits.len()
+
+    fn count() -> i64:
+        """Total number of templates (alias for total_count)."""
+        self.total_count()
 
 # ============================================================================
 # Specialized Instances
@@ -87,12 +96,20 @@ impl SpecializedInstances:
             enums: []
         )
 
+    static fn empty() -> SpecializedInstances:
+        """Create an empty instance set (alias for new)."""
+        SpecializedInstances.new()
+
     fn total_count() -> i64:
         """Total number of specialized instances."""
         self.functions.len() +
         self.structs.len() +
         self.classes.len() +
         self.enums.len()
+
+    fn count() -> i64:
+        """Total number of specialized instances (alias for total_count)."""
+        self.total_count()
 
 # ============================================================================
 # Partition Generic Constructs
@@ -367,6 +384,153 @@ fn build_monomorphization_metadata(module: Module) -> MonomorphizationMetadata:
     ROBUSTNESS: Complete metadata for all constructs.
     """
     val (_, _, metadata) = partition_generic_constructs(module)
+    metadata
+
+fn build_monomorphization_metadata_from_constructs(
+    templates: GenericTemplates,
+    specialized: SpecializedInstances
+) -> MonomorphizationMetadata:
+    """Build monomorphization metadata from pre-partitioned constructs.
+
+    Takes already-separated templates and specialized instances and builds
+    metadata tracking their relationships.
+
+    Args:
+        templates: Generic template constructs
+        specialized: Specialized instance constructs
+
+    Returns:
+        Metadata with tracking information
+
+    ROBUSTNESS: Processes all constructs and builds complete metadata.
+    """
+    var metadata = MonomorphizationMetadata.new()
+
+    # Process templates
+    for func in templates.functions:
+        if not metadata.functions.contains_key(func.name):
+            metadata.functions[func.name] = GenericFunctionMeta.new(
+                func.name.clone(),
+                func.generic_params.clone()
+            )
+
+    for struct_def in templates.structs:
+        if not metadata.structs.contains_key(struct_def.name):
+            metadata.structs[struct_def.name] = GenericStructMeta.new(
+                struct_def.name.clone(),
+                struct_def.generic_params.clone()
+            )
+
+    for class_def in templates.classes:
+        if not metadata.classes.contains_key(class_def.name):
+            metadata.classes[class_def.name] = GenericClassMeta.new(
+                class_def.name.clone(),
+                class_def.generic_params.clone()
+            )
+
+    for enum_def in templates.enums:
+        if not metadata.enums.contains_key(enum_def.name):
+            metadata.enums[enum_def.name] = GenericEnumMeta.new(
+                enum_def.name.clone(),
+                enum_def.generic_params.clone()
+            )
+
+    for trait_def in templates.traits:
+        if not metadata.traits.contains_key(trait_def.name):
+            metadata.traits[trait_def.name] = GenericTraitMeta.new(
+                trait_def.name.clone(),
+                trait_def.generic_params.clone()
+            )
+
+    # Process specializations
+    for func in specialized.functions:
+        if val Some(base_name) = func.specialization_of:
+            # Ensure base template exists in metadata
+            if not metadata.functions.contains_key(base_name):
+                metadata.functions[base_name] = GenericFunctionMeta.new(base_name.clone(), [])
+
+            val meta = metadata.functions[base_name]
+
+            # Extract type args from bindings
+            var type_args: [ConcreteType] = []
+            for (_, ast_type) in func.type_bindings.items():
+                type_args.push(ConcreteType.Named(ast_type.to_string()))
+
+            # Convert type bindings
+            var concrete_bindings: TypeBindings = {}
+            for (param, ast_type) in func.type_bindings.items():
+                concrete_bindings[param] = ConcreteType.Named(ast_type.to_string())
+
+            # Add specialization entry
+            meta.specializations.push(SpecializationEntry.new(
+                type_args,
+                func.name.clone(),
+                concrete_bindings
+            ))
+
+    for struct_def in specialized.structs:
+        if val Some(base_name) = struct_def.specialization_of:
+            if not metadata.structs.contains_key(base_name):
+                metadata.structs[base_name] = GenericStructMeta.new(base_name.clone(), [])
+
+            val meta = metadata.structs[base_name]
+
+            var type_args: [ConcreteType] = []
+            for (_, ast_type) in struct_def.type_bindings.items():
+                type_args.push(ConcreteType.Named(ast_type.to_string()))
+
+            var concrete_bindings: TypeBindings = {}
+            for (param, ast_type) in struct_def.type_bindings.items():
+                concrete_bindings[param] = ConcreteType.Named(ast_type.to_string())
+
+            meta.specializations.push(SpecializationEntry.new(
+                type_args,
+                struct_def.name.clone(),
+                concrete_bindings
+            ))
+
+    for class_def in specialized.classes:
+        if val Some(base_name) = class_def.specialization_of:
+            if not metadata.classes.contains_key(base_name):
+                metadata.classes[base_name] = GenericClassMeta.new(base_name.clone(), [])
+
+            val meta = metadata.classes[base_name]
+
+            var type_args: [ConcreteType] = []
+            for (_, ast_type) in class_def.type_bindings.items():
+                type_args.push(ConcreteType.Named(ast_type.to_string()))
+
+            var concrete_bindings: TypeBindings = {}
+            for (param, ast_type) in class_def.type_bindings.items():
+                concrete_bindings[param] = ConcreteType.Named(ast_type.to_string())
+
+            meta.specializations.push(SpecializationEntry.new(
+                type_args,
+                class_def.name.clone(),
+                concrete_bindings
+            ))
+
+    for enum_def in specialized.enums:
+        if val Some(base_name) = enum_def.specialization_of:
+            if not metadata.enums.contains_key(base_name):
+                metadata.enums[base_name] = GenericEnumMeta.new(base_name.clone(), [])
+
+            val meta = metadata.enums[base_name]
+
+            var type_args: [ConcreteType] = []
+            for (_, ast_type) in enum_def.type_bindings.items():
+                type_args.push(ConcreteType.Named(ast_type.to_string()))
+
+            var concrete_bindings: TypeBindings = {}
+            for (param, ast_type) in enum_def.type_bindings.items():
+                concrete_bindings[param] = ConcreteType.Named(ast_type.to_string())
+
+            meta.specializations.push(SpecializationEntry.new(
+                type_args,
+                enum_def.name.clone(),
+                concrete_bindings
+            ))
+
     metadata
 
 # ============================================================================

@@ -1,0 +1,126 @@
+# CompilerFFI Smoke Test - Pure Simple Implementation
+#
+# Basic sanity checks for the Pure Simple CompilerFFI
+
+import compiler.loader.compiler_ffi
+
+fn main():
+    print "=== CompilerFFI Smoke Test ==="
+    print ""
+
+    test_context_lifecycle()
+    test_type_inference_simple()
+    test_template_instantiation()
+    test_caching()
+    test_context_wrapper()
+
+    print ""
+    print "✅ All smoke tests passed!"
+
+fn test_context_lifecycle():
+    print "1. Context lifecycle..."
+
+    val handle = compiler_create_context()
+    if handle <= 0:
+        error "Failed to create context, got handle: {handle}"
+
+    print "   ✓ Created context with handle: {handle}"
+
+    compiler_destroy_context(handle)
+    print "   ✓ Destroyed context"
+
+fn test_type_inference_simple():
+    print "2. Type inference (simple)..."
+
+    val handle = compiler_create_context()
+
+    val template_json = '{"name":"id","type_params":["T"]}'
+    val hints_json = '[{"source":"call_site","param_index":0,"ty":{"kind":"int","bits":64,"signed":true}}]'
+
+    val result = compiler_infer_types(handle, template_json, hints_json)
+
+    if not result.contains("int"):
+        error "Expected result to contain 'int', got: {result}"
+
+    print "   ✓ Inferred types: {result.substring(0, 50)}..."
+
+    compiler_destroy_context(handle)
+
+fn test_template_instantiation():
+    print "3. Template instantiation..."
+
+    val handle = compiler_create_context()
+
+    val template_json = '{"name":"my_fn","type_params":["T"]}'
+    val types_json = '[{"kind":"int","bits":64,"signed":true}]'
+
+    val result = compiler_instantiate_template(handle, template_json, types_json)
+
+    if not result.contains('"success":true'):
+        error "Expected success:true, got: {result}"
+
+    print "   ✓ Instantiated template: {result.substring(0, 50)}..."
+
+    compiler_destroy_context(handle)
+
+fn test_caching():
+    print "4. Caching behavior..."
+
+    val handle = compiler_create_context()
+
+    val template_json = '{"name":"cached_fn","type_params":["T"]}'
+    val types_json = '[{"kind":"int","bits":32,"signed":true}]'
+
+    # First call - cache miss
+    compiler_instantiate_template(handle, template_json, types_json)
+
+    # Second call - cache hit
+    compiler_instantiate_template(handle, template_json, types_json)
+
+    val stats = compiler_get_stats(handle)
+
+    if not stats.contains('"cache_hits":1'):
+        error "Expected cache_hits:1, got: {stats}"
+
+    if not stats.contains('"cache_misses":1'):
+        error "Expected cache_misses:1, got: {stats}"
+
+    print "   ✓ Caching works: {stats}"
+
+    compiler_destroy_context(handle)
+
+fn test_context_wrapper():
+    print "5. CompilerContext wrapper..."
+
+    val ctx = CompilerContext.create()
+
+    if ctx.handle <= 0:
+        error "Failed to create context wrapper"
+
+    print "   ✓ Created wrapper with handle: {ctx.handle}"
+
+    # Test methods
+    val template_json = '{"name":"test","type_params":["T"]}'
+    val hints_json = '[{"source":"call_site","ty":{"kind":"int","bits":64}}]'
+    val types_json = '[{"kind":"int","bits":64}]'
+
+    val inferred = ctx.infer_types_json(template_json, hints_json)
+    if not inferred.contains("int"):
+        error "Wrapper infer_types failed"
+
+    print "   ✓ infer_types_json() works"
+
+    val instantiated = ctx.instantiate_json(template_json, types_json)
+    if not instantiated.contains("success"):
+        error "Wrapper instantiate failed"
+
+    print "   ✓ instantiate_json() works"
+
+    val stats = ctx.get_stats()
+    if not stats.contains("type_inferences"):
+        error "Wrapper get_stats failed"
+
+    print "   ✓ get_stats() works"
+
+    ctx.destroy()
+    print "   ✓ Destroyed wrapper context"

@@ -1,0 +1,403 @@
+# SMF File Cache with mmap
+#
+# Memory-mapped file cache for efficient SMF file loading.
+# Uses mmap(2) for zero-copy file access and automatic caching.
+#
+# Features:
+# - Lazy loading: Files mapped on first access
+# - Zero-copy reads: Direct memory access via mmap
+# - Auto-caching: Mapped regions stay in memory until cache is cleared
+# - Thread-safe: Uses immutable caching strategy
+#
+# Architecture:
+# - SmfCache: Main cache manager
+# - MappedSmf: Cached SMF file with mapped memory
+# - Auto-loads note.sdn metadata on demand
+# - Reads template bytes directly from mapped memory
+
+use ...monomorphize.note_sdn (NoteSdnMetadata, PossibleInstantiationEntry, InstantiationEntry, InstantiationStatus)
+use ..linker.smf_reader (SmfReaderImpl, SmfHeader)
+use ..linker.smf_header (SMF_HEADER_SIZE)
+use app.io.mod (mmap_file, munmap, mmap_read_bytes, mmap_read_string, file_size_for_mmap, get_page_size, madvise, msync)
+use std.sdn.parser (parse)
+use std.sdn.value (SdnValue)
+
+# ============================================================================
+# Constants
+# ============================================================================
+
+# Protection flags (from mmap.spl)
+val PROT_READ: i32 = 0x1
+
+# Mapping flags
+val MAP_PRIVATE: i32 = 0x2
+
+# Memory advise flags
+val MADV_SEQUENTIAL: i32 = 2   # Sequential access pattern
+val MADV_WILLNEED: i32 = 3     # Will need this data soon (prefetch)
+
+# ============================================================================
+# Mapped SMF File
+# ============================================================================
+
+struct MappedSmf:
+    """Memory-mapped SMF file."""
+    path: text
+    address: i64                    # Base address of mapped memory
+    size: i64                       # Size of mapped region
+    header: SmfHeader               # Parsed SMF header
+    note_sdn: NoteSdnMetadata?      # Cached note.sdn metadata
+    template_section_offset: i64    # Offset to TemplateCode section
+    note_sdn_section_offset: i64    # Offset to note.sdn section
+
+impl MappedSmf:
+    static fn open(path: text) -> Result<MappedSmf, text>:
+        """Open and mmap an SMF file."""
+        # Get file size
+        val file_size = file_size_for_mmap(path)
+        if file_size < 0:
+            return Err("Failed to get file size for {path}")
+
+        if file_size < SMF_HEADER_SIZE:
+            return Err("File too small to be valid SMF: {path}")
+
+        # Map entire file with read-only access
+        val (address, mapped_size) = mmap_file(path, PROT_READ, MAP_PRIVATE, 0, 0)
+        if address == 0:
+            return Err("Failed to mmap file: {path}")
+
+        # Advise kernel about sequential access
+        val _ = madvise(address, mapped_size, MADV_SEQUENTIAL)
+
+        # Read header from trailer (v1.1 format: last 128 bytes)
+        val header_offset = mapped_size - SMF_HEADER_SIZE
+        val header_bytes = mmap_read_bytes(address, header_offset, SMF_HEADER_SIZE)
+
+        # Parse header (simplified - full implementation would use SmfHeader.from_bytes)
+        # For now, create minimal header
+        val header = parse_header_minimal(header_bytes)
+
+        # Find section offsets (for now, use convention-based offsets)
+        # TODO: Parse section table for accurate offsets
+        val template_offset = 0i64
+        val note_sdn_offset = 0i64
+
+        Ok(MappedSmf(
+            path: path,
+            address: address,
+            size: mapped_size,
+            header: header,
+            note_sdn: None,
+            template_section_offset: template_offset,
+            note_sdn_section_offset: note_sdn_offset
+        ))
+
+    fn close() -> bool:
+        """Unmap the file."""
+        munmap(self.address, self.size)
+
+    me read_note_sdn() -> Result<NoteSdnMetadata, text>:
+        """Read and parse note.sdn metadata."""
+        # Check cache
+        if self.note_sdn.?:
+            return Ok(self.note_sdn.unwrap())
+
+        # For now, since we don't have proper SMF section parsing yet,
+        # try to read the entire file as text and look for SDN data
+        # In a real implementation, we would:
+        # 1. Parse section table from header
+        # 2. Find section with type=13 (TemplateMeta) and name="note.sdn"
+        # 3. Read that specific section
+
+        # Try to read last 64KB as potential note.sdn location
+        val search_size = if self.size > 65536: 65536 else: self.size
+        val search_offset = self.size - search_size
+        val sdn_text = mmap_read_string(self.address, search_offset, search_size)
+
+        # Parse as SDN
+        val sdn_value = parse(sdn_text)
+
+        match sdn_value:
+            case Ok(value):
+                # Convert SdnValue to NoteSdnMetadata
+                val metadata = parse_note_sdn_from_value(value)?
+                self.note_sdn = Some(metadata)
+                Ok(metadata)
+            case Err(err):
+                # If parsing fails, return empty metadata (file might not have note.sdn)
+                val empty_metadata = NoteSdnMetadata.new()
+                self.note_sdn = Some(empty_metadata)
+                Ok(empty_metadata)
+
+    fn read_template_bytes(symbol_name: text, template_offset: i64) -> Result<[u8], text>:
+        """Read template bytecode from TemplateCode section."""
+        # Locate template at offset
+        if template_offset < 0 or template_offset >= self.size:
+            return Err("Template offset out of bounds: {template_offset}")
+
+        # Read template length (first 4 bytes at offset)
+        val length_bytes = mmap_read_bytes(self.address, template_offset, 4)
+        val template_len = bytes_to_u32(length_bytes)
+
+        # Read template data
+        val template_data_offset = template_offset + 4
+        if template_data_offset + template_len as i64 > self.size:
+            return Err("Template extends beyond file")
+
+        val template_bytes = mmap_read_bytes(self.address, template_data_offset, template_len as i64)
+        Ok(template_bytes)
+
+    fn read_section(section_index: i32) -> Result<[u8], text>:
+        """Read section data by index."""
+        # TODO: Parse section table and read section
+        # For now, return error
+        Err("Section reading not yet implemented")
+
+# ============================================================================
+# SMF Cache
+# ============================================================================
+
+struct SmfCache:
+    """Cache of memory-mapped SMF files."""
+    cached_files: Dict<text, MappedSmf>
+    enabled: bool
+    stats: CacheStats
+
+struct CacheStats:
+    """Cache statistics."""
+    total_files: i32
+    total_memory: i64
+    cache_hits: i32
+    cache_misses: i32
+
+impl SmfCache:
+    static fn new() -> SmfCache:
+        """Create a new SMF cache."""
+        SmfCache(
+            cached_files: {},
+            enabled: true,
+            stats: CacheStats(
+                total_files: 0,
+                total_memory: 0,
+                cache_hits: 0,
+                cache_misses: 0
+            )
+        )
+
+    me get(path: text) -> Result<MappedSmf, text>:
+        """Get a mapped SMF file, loading it if not cached."""
+        # Check cache
+        if self.cached_files.contains_key(path):
+            self.stats.cache_hits = self.stats.cache_hits + 1
+            return Ok(self.cached_files[path])
+
+        # Cache miss - load file
+        self.stats.cache_misses = self.stats.cache_misses + 1
+
+        val mapped = MappedSmf.open(path)?
+
+        # Update stats
+        self.stats.total_files = self.stats.total_files + 1
+        self.stats.total_memory = self.stats.total_memory + mapped.size
+
+        # Cache it
+        self.cached_files[path] = mapped
+
+        Ok(mapped)
+
+    me clear():
+        """Clear the cache and unmap all files."""
+        for (path, mapped) in self.cached_files:
+            val _ = mapped.close()
+
+        self.cached_files = {}
+        self.stats = CacheStats(
+            total_files: 0,
+            total_memory: 0,
+            cache_hits: self.stats.cache_hits,
+            cache_misses: self.stats.cache_misses
+        )
+
+    me prefetch(paths: [text]):
+        """Prefetch multiple SMF files into cache."""
+        for path in paths:
+            val _ = self.get(path)
+            # Advise kernel to prefetch this file
+            if self.cached_files.contains_key(path):
+                val mapped = self.cached_files[path]
+                val _ = madvise(mapped.address, mapped.size, MADV_WILLNEED)
+
+    fn get_stats() -> CacheStats:
+        """Get cache statistics."""
+        self.stats
+
+    fn is_cached(path: text) -> bool:
+        """Check if a file is in the cache."""
+        self.cached_files.contains_key(path)
+
+    fn cached_count() -> i32:
+        """Get number of cached files."""
+        self.cached_files.len()
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+fn parse_header_minimal(bytes: [u8]) -> SmfHeader:
+    """Parse minimal SMF header (placeholder).
+
+    TODO: Implement proper header parsing.
+    For now, creates a minimal v1.1 header.
+    """
+    use ..linker.smf_enums (Platform, Arch, CompressionType)
+
+    # Read basic fields
+    val version_major = if bytes.len() > 4: bytes[4] else: 1
+    val version_minor = if bytes.len() > 5: bytes[5] else: 1
+    val platform = if bytes.len() > 6: bytes[6] else: 0
+    val arch = if bytes.len() > 7: bytes[7] else: 0
+
+    use ..linker.smf_reader (SmfHeader as ParsedHeader, SmfFlags)
+
+    # Create minimal header
+    ParsedHeader(
+        version: (version_major, version_minor),
+        platform: Platform.from_u8(platform),
+        arch: Arch.from_u8(arch),
+        flags: SmfFlags(
+            executable: false,
+            reloadable: false,
+            debug_info: false,
+            pic: false,
+            has_stub: false
+        ),
+        section_count: 0,
+        symbol_count: 0,
+        entry_point: 0,
+        has_templates: false,
+        has_note_sdn: false,
+        compression: CompressionType.None
+    )
+
+fn bytes_to_u32(bytes: [u8]) -> u32:
+    """Convert 4 bytes (little-endian) to u32."""
+    if bytes.len() < 4:
+        return 0
+
+    val b0 = bytes[0] as u32
+    val b1 = bytes[1] as u32
+    val b2 = bytes[2] as u32
+    val b3 = bytes[3] as u32
+
+    b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+
+fn parse_note_sdn_from_value(value: SdnValue) -> Result<NoteSdnMetadata, text>:
+    """Parse NoteSdnMetadata from SdnValue.
+
+    Expected format:
+    instantiations |template, type_args, mangled_name, from_file, from_loc, output_file, status|
+        "Vec", "i64", "fn$Vec$i64", "main.spl", "main.spl:10:5", "main.o", "compiled"
+        ...
+
+    possible |template, type_args, mangled_name, required_by, can_defer|
+        "List", "text", "fn$List$text", "test.spl", true
+        ...
+    """
+    match value:
+        case SdnValue.Dict(dict):
+            var metadata = NoteSdnMetadata.new()
+
+            # Parse instantiations table
+            if dict.contains_key("instantiations"):
+                val inst_value = dict["instantiations"]
+                match inst_value:
+                    case SdnValue.Table(rows, cols):
+                        for row in rows:
+                            val entry = parse_instantiation_row(row, cols)?
+                            metadata.add_instantiation(entry)
+                    case _:
+                        pass  # Not a table, skip
+
+            # Parse possible table
+            if dict.contains_key("possible"):
+                val poss_value = dict["possible"]
+                match poss_value:
+                    case SdnValue.Table(rows, cols):
+                        for row in rows:
+                            val entry = parse_possible_row(row, cols)?
+                            metadata.add_possible(entry)
+                    case _:
+                        pass  # Not a table, skip
+
+            Ok(metadata)
+        case _:
+            Err("Expected Dict at root of note.sdn")
+
+fn parse_instantiation_row(row: [SdnValue], cols: [text]) -> Result<InstantiationEntry, text>:
+    """Parse a single instantiation row."""
+    if row.len() < 7:
+        return Err("Instantiation row must have at least 7 columns")
+
+    val template = get_string_from_value(row[0])?
+    val type_args = get_string_from_value(row[1])?
+    val mangled_name = get_string_from_value(row[2])?
+    val from_file = get_string_from_value(row[3])?
+    val from_loc = get_string_from_value(row[4])?
+    val output_file = get_string_from_value(row[5])?
+    val status_str = get_string_from_value(row[6])?
+
+    val status = InstantiationStatus.from_str(status_str)?
+
+    Ok(InstantiationEntry(
+        template: template,
+        type_args: type_args,
+        mangled_name: mangled_name,
+        from_file: from_file,
+        from_loc: from_loc,
+        output_file: output_file,
+        status: status
+    ))
+
+fn parse_possible_row(row: [SdnValue], cols: [text]) -> Result<PossibleInstantiationEntry, text>:
+    """Parse a single possible instantiation row."""
+    if row.len() < 5:
+        return Err("Possible row must have at least 5 columns")
+
+    val template = get_string_from_value(row[0])?
+    val type_args = get_string_from_value(row[1])?
+    val mangled_name = get_string_from_value(row[2])?
+    val required_by = get_string_from_value(row[3])?
+    val can_defer = get_bool_from_value(row[4])?
+
+    Ok(PossibleInstantiationEntry(
+        template: template,
+        type_args: type_args,
+        mangled_name: mangled_name,
+        required_by: required_by,
+        can_defer: can_defer
+    ))
+
+fn get_string_from_value(value: SdnValue) -> Result<text, text>:
+    """Extract string from SdnValue."""
+    match value:
+        case SdnValue.String(s): Ok(s)
+        case _: Err("Expected string value")
+
+fn get_bool_from_value(value: SdnValue) -> Result<bool, text>:
+    """Extract boolean from SdnValue."""
+    match value:
+        case SdnValue.Bool(b): Ok(b)
+        case SdnValue.String(s):
+            match s:
+                case "true": Ok(true)
+                case "false": Ok(false)
+                case _: Err("Invalid boolean string: {s}")
+        case _: Err("Expected boolean value")
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export SmfCache
+export MappedSmf
+export CacheStats

@@ -103,15 +103,47 @@ fn main():
     # Step 3: Build optimized runtime
     print "Step 1/7: Building optimized runtime..."
     val cwd = rt_env_cwd()
-    var cargo_args = ["build", "--profile", "release-opt", "--quiet", "--manifest-path", "{cwd}/rust/Cargo.toml"]
+
+    # Check if we have a previous Simple runtime to use (self-hosting build)
+    val prev_runtime_env = rt_env_get("SIMPLE_RUNTIME")
+    var use_simple_build = false
+    var prev_runtime_path = ""
+
+    if val Some(runtime) = prev_runtime_env:
+        if runtime.trim() != "":
+            prev_runtime_path = runtime.trim()
+            if rt_file_exists(prev_runtime_path):
+                print "Using previous Simple runtime for self-hosting build"
+                print "  Runtime: {prev_runtime_path}"
+                use_simple_build = true
 
     var runtime_path = "rust/target/release-opt/simple_runtime"
     if val Some(target) = target_env:
         if target.trim() != "":
-            cargo_args = cargo_args.merge(["--target", target.trim()])
             runtime_path = "rust/target/{target.trim()}/release-opt/simple_runtime"
 
-    run_or_fail("cargo", cargo_args)
+    if use_simple_build:
+        # Self-hosting build using Simple build system
+        print "Building with Simple (self-hosting)..."
+        val (_, stderr, code) = run(prev_runtime_path, ["src/app/build/main.spl", "--bootstrap", "--quiet"])
+
+        if code != 0:
+            print "⚠ Self-hosting build failed, falling back to cargo"
+            print "  stderr: {stderr}"
+            use_simple_build = false
+        else:
+            print "✓ Self-hosting build succeeded"
+
+    if not use_simple_build:
+        # Fallback to cargo build (bootstrap from scratch)
+        print "Building with cargo (bootstrap from scratch)..."
+        var cargo_args = ["build", "--profile", "release-opt", "--quiet", "--manifest-path", "{cwd}/rust/Cargo.toml"]
+
+        if val Some(target) = target_env:
+            if target.trim() != "":
+                cargo_args = cargo_args.merge(["--target", target.trim()])
+
+        run_or_fail("cargo", cargo_args)
 
     if not rt_file_exists(runtime_path):
         print "Error: Runtime binary not found at {runtime_path}"

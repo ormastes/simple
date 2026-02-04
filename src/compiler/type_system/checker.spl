@@ -10,6 +10,12 @@
 
 from inference.types import {Type, TypeVarId, Constraint, UnifyError}
 from inference.unify import {Unifier}
+from inference.infer import {InferenceEngine}
+from compiler.type_system.expr_infer import {infer_expr}
+from compiler.type_system.stmt_check import {check_stmt, check_block}
+from compiler.type_system.module_check import {check_module as module_check_impl}
+from compiler.type_system.bidirectional import {infer_with_expected, InferMode}
+from ast import {Module, Node, Expr}
 
 # ============================================================================
 # Type Checker Error
@@ -297,5 +303,55 @@ impl TypeChecker:
             Some(m.unwrap())
         else:
             nil
+
+    # ========================================================================
+    # Integrated Type Inference (Full System)
+    # ========================================================================
+
+    me check_module(module: Module) -> Result<(), TypeError>:
+        """Type check a complete module using full inference system.
+
+        Integrates all phases:
+        - Phase 1: Expression inference
+        - Phase 2: Statement checking
+        - Phase 3: Module checking (two-pass)
+        - Phase 4: Bidirectional inference
+        """
+        module_check_impl(self, module)
+
+    me infer_expr_with_context(expr: Expr, expected: Type?) -> Result<Type, TypeError>:
+        """Infer expression type with optional expected type (bidirectional).
+
+        If expected type is provided, uses Check mode (top-down).
+        Otherwise uses Synthesize mode (bottom-up).
+        """
+        infer_with_expected(self.create_engine(), expr, expected, self.env)
+
+    me infer_expr_simple(expr: Expr) -> Result<Type, TypeError>:
+        """Infer expression type without expected type (bottom-up only)."""
+        infer_expr(self.create_engine(), expr, self.env)
+
+    me check_stmt_integrated(stmt: Node, current_fn_ret_type: Type?) -> Result<(), TypeError>:
+        """Type check a statement and update environment."""
+        val new_env = check_stmt(self.create_engine(), stmt, self.env, current_fn_ret_type)?
+        self.env = new_env
+        Ok(())
+
+    me check_block_integrated(block: ast.Block, current_fn_ret_type: Type?) -> Result<Type, TypeError>:
+        """Type check a block of statements."""
+        check_block(self.create_engine(), block, self.env, current_fn_ret_type)
+
+    # ========================================================================
+    # Helper: Create Inference Engine
+    # ========================================================================
+
+    fn create_engine() -> InferenceEngine:
+        """Create inference engine from current type checker state."""
+        var engine = InferenceEngine.create()
+        engine.unifier = self.unifier
+        # Copy environment to engine
+        # Note: InferenceEngine uses TypeEnv, we use Dict<text, Type>
+        # For now, pass dict directly to inference functions
+        engine
 
 export TypeError, TraitImplRegistry, MixinInfo, TypeChecker

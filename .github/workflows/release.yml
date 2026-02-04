@@ -83,12 +83,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential
 
-      - name: Build optimized runtime
-        run: |
-          cd rust
-          cargo build --profile release-opt --target ${{ matrix.target }}
-
-      - name: Download previous Simple runtime
+      - name: Download previous Simple runtime (for self-hosting build)
         run: |
           # Determine which platform's bootstrap to download for the runner
           RUNNER_OS=$(uname -s | tr '[:upper:]' '[:lower:]')
@@ -115,26 +110,49 @@ jobs:
           BOOTSTRAP_SPK=$(ls /tmp/bootstrap-dl/*.spk 2>/dev/null | head -1)
 
           if [ -n "$BOOTSTRAP_SPK" ] && [ -s "$BOOTSTRAP_SPK" ]; then
-            echo "Found previous release: $BOOTSTRAP_SPK"
+            echo "✓ Found previous release: $BOOTSTRAP_SPK"
             mkdir -p /tmp/simple-prev
             tar -xzf "$BOOTSTRAP_SPK" -C /tmp/simple-prev
             SIMPLE_RUNTIME=/tmp/simple-prev/bin/simple_runtime
             chmod +x "$SIMPLE_RUNTIME"
+            echo "SIMPLE_RUNTIME=$SIMPLE_RUNTIME" >> $GITHUB_ENV
+            echo "HAVE_PREVIOUS_RELEASE=true" >> $GITHUB_ENV
+            echo "Will use self-hosting build with Simple runtime"
           else
-            echo "No previous release found, using freshly built runtime"
-            SIMPLE_RUNTIME=rust/target/${{ matrix.target }}/release-opt/simple_runtime
+            echo "No previous release found"
+            echo "HAVE_PREVIOUS_RELEASE=false" >> $GITHUB_ENV
+            echo "Will bootstrap from scratch with cargo"
           fi
-          echo "SIMPLE_RUNTIME=$SIMPLE_RUNTIME" >> $GITHUB_ENV
         env:
           GH_TOKEN: ${{ github.token }}
 
+      - name: Build Rust runtime (bootstrap from scratch if no previous release)
+        if: env.HAVE_PREVIOUS_RELEASE == 'false'
+        run: |
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "Building with cargo (bootstrap from scratch)"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          cd rust
+          cargo build --profile release-opt --target ${{ matrix.target }}
+          cd ..
+          SIMPLE_RUNTIME="rust/target/${{ matrix.target }}/release-opt/simple_runtime"
+          chmod +x "$SIMPLE_RUNTIME"
+          echo "SIMPLE_RUNTIME=$SIMPLE_RUNTIME" >> $GITHUB_ENV
+          echo "✓ Bootstrap runtime built with cargo"
+
       - name: Build bootstrap package
         run: |
-          if ! $SIMPLE_RUNTIME script/build-bootstrap.ssh; then
-            echo "Previous runtime failed, falling back to freshly built runtime"
-            SIMPLE_RUNTIME=rust/target/${{ matrix.target }}/release-opt/simple_runtime
-            $SIMPLE_RUNTIME script/build-bootstrap.ssh
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          if [ "$HAVE_PREVIOUS_RELEASE" = "true" ]; then
+            echo "Building with Simple (self-hosting)"
+          else
+            echo "Building with cargo-built runtime"
           fi
+          echo "Using runtime: $SIMPLE_RUNTIME"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+          # Run the build script (it will auto-detect if self-hosting is possible)
+          $SIMPLE_RUNTIME script/build-bootstrap.ssh
         env:
           TARGET: ${{ matrix.target }}
 

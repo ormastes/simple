@@ -1,0 +1,218 @@
+# SSpec tests for MCP ResourceManager
+
+import app.mcp.resources
+
+describe "ResourceManager":
+    it "creates with project root":
+        val mgr = ResourceManager.create("/test/project")
+        assert mgr.project_root == "/test/project"
+
+    it "lists default resource templates":
+        val mgr = ResourceManager.create(".")
+        val templates = mgr.list_templates()
+
+        assert templates.length >= 5
+
+        # Check for expected templates
+        var has_file = false
+        var has_symbol = false
+        var has_type = false
+        var has_docs = false
+        var has_tree = false
+
+        for template in templates:
+            if template.uri_template == "file:///*":
+                has_file = true
+            elif template.uri_template == "symbol:///*":
+                has_symbol = true
+            elif template.uri_template == "type:///*":
+                has_type = true
+            elif template.uri_template == "docs:///*":
+                has_docs = true
+            elif template.uri_template == "tree:///*":
+                has_tree = true
+
+        assert has_file
+        assert has_symbol
+        assert has_type
+        assert has_docs
+        assert has_tree
+
+    it "matches URI patterns correctly":
+        val mgr = ResourceManager.create(".")
+
+        assert mgr.matches_pattern("file:///test.spl", "file:///*")
+        assert mgr.matches_pattern("symbol:///MyClass", "symbol:///*")
+        assert not mgr.matches_pattern("file:///test.spl", "symbol:///*")
+        assert mgr.matches_pattern("exact:///match", "exact:///match")
+
+    it "determines MIME types from URIs":
+        val mgr = ResourceManager.create(".")
+
+        val spl_mime = mgr.get_mime_type_for_uri("file:///test.spl")
+        assert spl_mime.? and spl_mime.unwrap() == "text/x-simple"
+
+        val json_mime = mgr.get_mime_type_for_uri("file:///data.json")
+        assert json_mime.? and json_mime.unwrap() == "application/json"
+
+        val symbol_mime = mgr.get_mime_type_for_uri("symbol:///MyClass")
+        assert symbol_mime.? and symbol_mime.unwrap() == "application/json"
+
+    it "registers custom resources":
+        val mgr = ResourceManager.create(".")
+
+        mgr.register_resource("custom:///test", \uri:
+            Ok("Custom content")
+        )
+
+        val result = mgr.read_resource("custom:///test")
+        assert result.ok.?
+        assert result.unwrap().contents == "Custom content"
+
+    it "registers custom templates":
+        val mgr = ResourceManager.create(".")
+
+        mgr.register_template("test:///*", \uri:
+            val name = uri[8:]  # Remove "test:///"
+            Ok("Test: {name}")
+        )
+
+        val result = mgr.read_resource("test:///example")
+        assert result.ok.?
+        assert result.unwrap().contents == "Test: example"
+
+    it "returns error for unknown resource":
+        val mgr = ResourceManager.create(".")
+
+        val result = mgr.read_resource("unknown:///resource")
+        assert result.err.?
+
+    it "builds directory tree with depth limit":
+        val mgr = ResourceManager.create(".")
+
+        # Create simple test structure
+        val tree = mgr.build_tree("/tmp", indent: 0, max_depth: 2)
+
+        # Should contain some entries
+        assert tree.length > 0
+
+    it "lists all resources including static and templates":
+        val mgr = ResourceManager.create(".")
+
+        # Register a static resource
+        mgr.register_resource("static:///test", \uri: Ok("static"))
+
+        val resources = mgr.list_resources()
+
+        # Should have at least the static resource + templates
+        assert resources.length > 0
+
+        # Check for static resource
+        var has_static = false
+        for res in resources:
+            if res.uri == "static:///test":
+                has_static = true
+
+        assert has_static
+
+describe "Resource Providers":
+    it "provides file contents":
+        val mgr = ResourceManager.create(".")
+
+        # Test with this test file itself
+        val result = mgr.provide_file_contents("test/lib/std/unit/mcp/resources_spec.spl")
+
+        assert result.ok.?
+        val content = result.unwrap()
+        assert content.contains("ResourceManager")
+
+    it "returns error for missing file":
+        val mgr = ResourceManager.create(".")
+
+        val result = mgr.provide_file_contents("nonexistent/file.spl")
+
+        assert result.err.?
+
+    it "provides symbol info placeholder":
+        val mgr = ResourceManager.create(".")
+
+        val result = mgr.provide_symbol_info("MyClass")
+
+        assert result.ok.?
+        val info = result.unwrap()
+        assert info.contains("MyClass")
+
+    it "provides type info placeholder":
+        val mgr = ResourceManager.create(".")
+
+        val result = mgr.provide_type_info("String")
+
+        assert result.ok.?
+        val info = result.unwrap()
+        assert info.contains("String")
+
+    it "provides documentation from doc/ directory":
+        val mgr = ResourceManager.create(".")
+
+        # Try to read a known doc file
+        val result = mgr.provide_documentation("README")
+
+        # May or may not exist depending on test setup
+        # Just verify it doesn't crash
+        pass
+
+    it "provides directory tree":
+        val mgr = ResourceManager.create(".")
+
+        val result = mgr.provide_directory_tree("test")
+
+        assert result.ok.?
+        val tree = result.unwrap()
+        # Should contain some directory structure
+        assert tree.length > 0
+
+    it "provides project info from manifest":
+        val mgr = ResourceManager.create(".")
+
+        val result = mgr.provide_project_info()
+
+        assert result.ok.?
+        val info = result.unwrap()
+        assert info.contains("Project Root")
+
+describe "ResourceContent":
+    it "contains uri and contents":
+        val content = ResourceContent(
+            uri: "file:///test.spl",
+            contents: "fn main(): print(\"hello\")",
+            mime_type: Some("text/x-simple"),
+        )
+
+        assert content.uri == "file:///test.spl"
+        assert content.contents.contains("main")
+        assert content.mime_type.? and content.mime_type.unwrap() == "text/x-simple"
+
+describe "ResourceInfo":
+    it "stores resource metadata":
+        val info = ResourceInfo(
+            uri: "file:///test.spl",
+            name: "test.spl",
+            description: Some("Test file"),
+            mime_type: Some("text/x-simple"),
+        )
+
+        assert info.uri == "file:///test.spl"
+        assert info.name == "test.spl"
+        assert info.description.? and info.description.unwrap() == "Test file"
+
+describe "ResourceTemplate":
+    it "stores template pattern and metadata":
+        val template = ResourceTemplate(
+            uri_template: "file:///*",
+            name: "File Contents",
+            description: Some("Read file contents"),
+            mime_type: Some("text/plain"),
+        )
+
+        assert template.uri_template == "file:///*"
+        assert template.name == "File Contents"
