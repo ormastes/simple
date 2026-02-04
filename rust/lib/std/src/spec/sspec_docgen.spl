@@ -1,0 +1,173 @@
+# SSpec Documentation Generator
+#
+# Generates human-readable documentation from SSpec test specifications.
+# Converts test hierarchies (describe/context/it blocks) into markdown or HTML docs.
+
+use spec.runner.executor.{ExecutionResults, TestResult}
+use spec.registry.{ExampleGroup}
+use io.fs_helpers
+
+# =========================================================================
+# Documentation Generator
+# =========================================================================
+
+class SSpecDocGenerator:
+    """Generates documentation from SSpec test files."""
+    output_dir: text
+    format: text  # "markdown" or "html"
+
+    static fn new(output_dir: text) -> SSpecDocGenerator:
+        return SSpecDocGenerator {output_dir: output_dir, format: "markdown"}
+
+    static fn with_format(output_dir: text, format: text) -> SSpecDocGenerator:
+        return SSpecDocGenerator {
+            output_dir: output_dir,
+            format: format
+        }
+
+    fn generate_from_results(results: ExecutionResults) -> Result<text, text>:
+        """Generate documentation from test execution results."""
+        var markdown = "# Test Specification Documentation\n\n"
+        markdown = "{markdown}Generated from SSpec test execution\n\n"
+
+        # Group results by file/describe block
+        var current_group: Option<text> = None
+        var group_results: List<TestResult> = []
+
+        for result in results.results:
+            val group_name = result.group.full_description()
+
+            # Check if new group
+            match current_group:
+                Some(group):
+                    if group != group_name:
+                        # Process previous group
+                        markdown = "{markdown}{format_group_results(group, group_results)}\n"
+                        group_results = []
+                        current_group = Some(group_name)
+                    group_results.append(result)
+                nil:
+                    current_group = Some(group_name)
+                    group_results.append(result)
+
+        # Process final group
+        match current_group:
+            Some(group):
+                markdown = "{markdown}{format_group_results(group, group_results)}\n"
+            nil: pass
+
+        markdown = "{markdown}\n## Summary\n"
+        markdown = "{markdown}- Total tests: {results.total_count()}\n"
+        markdown = "{markdown}- Passed: {results.passed_count()}\n"
+        markdown = "{markdown}- Failed: {results.failed_count()}\n"
+        markdown = "{markdown}- Pending: {results.pending_count()}\n"
+
+        # Write to file if output_dir specified
+        if not self.output_dir.is_empty():
+            match write_documentation(self.output_dir, "test-spec", markdown):
+                Ok(_) => return Ok(markdown)
+                Err(e) => return Err("Failed to write documentation: {e}")
+
+        return Ok(markdown)
+
+# =========================================================================
+# Formatting Functions
+# =========================================================================
+
+fn format_group_results(group_name: text, results: List<TestResult>) -> text:
+    """Format a group of test results as markdown."""
+    var output = "## {group_name}\n\n"
+
+    # Count by status
+    var passed = 0
+    var failed = 0
+    var pending = 0
+
+    for result in results:
+        match result.status:
+            Passed => passed = passed + 1
+            Failed(_) => failed = failed + 1
+            Pending => pending = pending + 1
+            Skipped => pending = pending + 1
+
+    # Summary line
+    output = "{output}**Status:** "
+    if failed > 0:
+        output = "{output}❌ {failed} failed"
+    elif passed > 0:
+        output = "{output}✅ {passed} passed"
+    else:
+        output = "{output}⏳ {pending} pending"
+
+    output = "{output}\n\n"
+
+    # Individual tests
+    for result in results:
+        val status_icon = match result.status:
+            Passed => "✅"
+            Failed(_) => "❌"
+            Pending => "⏳"
+            Skipped => "⏭️"
+
+        val duration = if result.duration_ms > 0.0:
+            " ({result.duration_ms}ms)"
+        else:
+            ""
+
+        output = "{output}- {status_icon} {result.example.description}{duration}\n"
+
+        # Include failure message if present
+        match result.failure_message:
+            Some(msg):
+                output = "{output}  - Error: {msg}\n"
+            nil: pass
+
+    output = "{output}\n"
+    return output
+
+# =========================================================================
+# File I/O
+# =========================================================================
+
+fn write_documentation(output_dir: text, filename: text, content: text) -> Result<(), text>:
+    """Write documentation to file."""
+    # Ensure directory exists
+    match ensure_dir(output_dir):
+        Err(e) => return Err("Failed to create output directory: {e}")
+        Ok(_) => pass
+
+    # Write file
+    val file_path = "{output_dir}/{filename}.md"
+    match fs_helpers.write_file(file_path, content):
+        Ok(_):
+            print "✓ Documentation written to {file_path}"
+            Ok(())
+        Err(e):
+            Err("Failed to write file: {e}")
+
+fn ensure_dir(path: text) -> Result<(), text>:
+    """Ensure directory exists."""
+    # This would use fs_helpers.create_dir_all in Phase 2
+    # For now, assume parent directories exist
+    Ok(())
+
+# =========================================================================
+# Convenience Functions
+# =========================================================================
+
+fn generate_test_documentation(results: ExecutionResults) -> Result<text, text>:
+    """Generate documentation from test results."""
+    val generator = SSpecDocGenerator.new("docs")
+    return generator.generate_from_results(results)
+
+fn generate_test_documentation_to_file(results: ExecutionResults, output_dir: text) -> Result<text, text>:
+    """Generate documentation and write to specified directory."""
+    val generator = SSpecDocGenerator.with_format(output_dir, "markdown")
+    return generator.generate_from_results(results)
+
+# =========================================================================
+# Exports
+# =========================================================================
+
+export SSpecDocGenerator
+export generate_test_documentation, generate_test_documentation_to_file

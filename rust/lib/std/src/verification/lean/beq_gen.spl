@@ -1,0 +1,198 @@
+# BEq Instance Generator for Lean Code Generation
+#
+# Generates Lean BEq instances and reflexivity proofs for inductive types.
+# Part of Phase 7.3: Auto-generation of BEq instances.
+#
+# Pattern: For an inductive type, generates:
+#   - Custom `beq` function definition
+#   - `BEq` instance
+#   - Reflexivity proof: `theorem X_beq_refl (x : X) : (x == x) = true`
+#
+# Key principle: Generate scaffolding, not proofs. Never introduce `sorry` or `axiom`.
+# Reflexivity proofs are fully provable structurally without sorry.
+
+use verification.lean.naming as naming
+
+# Inductive variant for BEq generation
+class BeqVariant:
+    name: text               # Constructor name
+    params: List<text>       # Parameter types
+    has_recursive: bool      # True if any param is of the inductive type itself
+
+    static fn new(name: text, params: List<text>) -> BeqVariant:
+        BeqVariant(name, params, false)
+
+    me with_recursive() -> BeqVariant:
+        self.has_recursive = true
+        self
+
+# Inductive type definition for BEq generation
+class BeqTypeDef:
+    type_name: text
+    variants: List<BeqVariant>
+    has_mutual_recursion: bool  # True if involves mutual recursion
+
+    static fn new(type_name: text) -> BeqTypeDef:
+        BeqTypeDef(type_name, [], false)
+
+    me add_variant(variant: BeqVariant) -> BeqTypeDef:
+        self.variants = self.variants + [variant]
+        self
+
+    me with_mutual_recursion() -> BeqTypeDef:
+        self.has_mutual_recursion = true
+        self
+
+# BEq instance generator
+class BeqGenerator:
+    generated_beq_functions: List<text>
+    generated_instances: List<text>
+
+    static fn new() -> BeqGenerator:
+        BeqGenerator([], [])
+
+    # Generate a custom beq function for an inductive type
+    # Example output for a simple enum:
+    # def Effect.beq : Effect -> Effect -> Bool
+    #   | .pure, .pure => true
+    #   | .io, .io => true
+    #   | .async, .async => true
+    #   | _, _ => false
+    me generate_beq_function(type_def: BeqTypeDef) -> text:
+        val pascal_name = naming.to_pascal_case(type_def.type_name)
+        val func_name = "{pascal_name}.beq"
+
+        self.generated_beq_functions = self.generated_beq_functions + [func_name]
+
+        var out = "def {func_name} : {pascal_name} -> {pascal_name} -> Bool\n"
+
+        for variant in type_def.variants:
+            val ctor_name = naming.to_camel_case(variant.name)
+            if variant.params.len() == 0:
+                # Unit constructor: | .name, .name => true
+                out = out + "  | .{ctor_name}, .{ctor_name} => true\n"
+            else:
+                # Constructor with params: compare each param
+                var left_params: List<text> = []
+                var right_params: List<text> = []
+                var comparisons: List<text> = []
+
+                for i in 0..variant.params.len():
+                    val left = "l{i}"
+                    val right = "r{i}"
+                    left_params = left_params + [left]
+                    right_params = right_params + [right]
+                    comparisons = comparisons + ["{left} == {right}"]
+
+                val left_str = left_params.join(" ")
+                val right_str = right_params.join(" ")
+                val comp_str = comparisons.join(" && ")
+
+                out = out + "  | .{ctor_name} {left_str}, .{ctor_name} {right_str} => {comp_str}\n"
+
+        # Default case for non-matching constructors
+        out = out + "  | _, _ => false\n"
+        out
+
+    # Generate BEq instance
+    # Example:
+    # instance : BEq Effect where
+    #   beq := Effect.beq
+    me generate_beq_instance(type_def: BeqTypeDef) -> text:
+        val pascal_name = naming.to_pascal_case(type_def.type_name)
+
+        self.generated_instances = self.generated_instances + [pascal_name]
+
+        var out = "instance : BEq {pascal_name} where\n"
+        out = out + "  beq := {pascal_name}.beq\n"
+        out
+
+    # Generate reflexivity proof
+    # Example:
+    # theorem effect_beq_refl (e : Effect) : (e == e) = true := by
+    #   cases e <;> rfl
+    me generate_reflexivity_proof(type_def: BeqTypeDef) -> text:
+        val pascal_name = naming.to_pascal_case(type_def.type_name)
+        val camel_name = naming.to_camel_case(type_def.type_name)
+        val theorem_name = "{camel_name}_beq_refl"
+
+        var out = "theorem {theorem_name} ({camel_name} : {pascal_name}) : ({camel_name} == {camel_name}) = true := by\n"
+
+        # Check if any variant has parameters
+        val has_params = type_def.variants.any(\v: v.params.len() > 0)
+
+        if not has_params:
+            # Simple case: all unit constructors
+            out = out + "  cases {camel_name} <;> rfl\n"
+        else if not type_def.has_mutual_recursion:
+            # Case with params but no recursion
+            out = out + "  cases {camel_name} with\n"
+            for variant in type_def.variants:
+                val ctor_name = naming.to_camel_case(variant.name)
+                if variant.params.len() == 0:
+                    out = out + "  | {ctor_name} => rfl\n"
+                else:
+                    var param_names: List<text> = []
+                    for i in 0..variant.params.len():
+                        param_names = param_names + ["p{i}"]
+                    val params_str = param_names.join(" ")
+                    out = out + "  | {ctor_name} {params_str} =>\n"
+                    out = out + "    simp [BEq.beq, {pascal_name}.beq]\n"
+        else:
+            # Complex case with mutual recursion - use termination_by
+            out = out + "  cases {camel_name} with\n"
+            for variant in type_def.variants:
+                val ctor_name = naming.to_camel_case(variant.name)
+                if variant.params.len() == 0:
+                    out = out + "  | {ctor_name} => rfl\n"
+                else:
+                    var param_names: List<text> = []
+                    for i in 0..variant.params.len():
+                        param_names = param_names + ["p{i}"]
+                    val params_str = param_names.join(" ")
+                    out = out + "  | {ctor_name} {params_str} =>\n"
+                    out = out + "    simp [BEq.beq, {pascal_name}.beq]\n"
+            out = out + "termination_by sizeOf {camel_name}\n"
+
+        out
+
+    # Generate complete BEq block (function + instance + reflexivity)
+    me generate_complete_beq(type_def: BeqTypeDef) -> text:
+        var out = "-- BEq for {type_def.type_name}\n"
+        out = out + self.generate_beq_function(type_def) + "\n"
+        out = out + self.generate_beq_instance(type_def) + "\n"
+        out = out + self.generate_reflexivity_proof(type_def) + "\n"
+        out
+
+    # Generate BEq for multiple types
+    me generate_all(type_defs: List<BeqTypeDef>) -> text:
+        var out = "-- Auto-generated BEq instances and reflexivity proofs\n"
+        out = out + "-- Generated by beq_gen.spl\n\n"
+
+        for def in type_defs:
+            out = out + self.generate_complete_beq(def)
+            out = out + "\n"
+
+        out
+
+# Convenience function to generate BEq for a simple enum
+fn generate_simple_enum_beq(type_name: text, variant_names: List<text>) -> text:
+    var def = BeqTypeDef.new(type_name)
+    for name in variant_names:
+        def = def.add_variant(BeqVariant.new(name, []))
+
+    var generator = BeqGenerator.new()
+    generator.generate_complete_beq(def)
+
+# Convenience function to generate BEq for a type with parameterized variants
+fn generate_parameterized_beq(type_name: text, variants: List<(text, List<text>)>) -> text:
+    var def = BeqTypeDef.new(type_name)
+    for (name, params) in variants:
+        def = def.add_variant(BeqVariant.new(name, params))
+
+    var generator = BeqGenerator.new()
+    generator.generate_complete_beq(def)
+
+# Export public API
+export BeqVariant, BeqTypeDef, BeqGenerator
+export generate_simple_enum_beq, generate_parameterized_beq

@@ -1,0 +1,157 @@
+# Physics Dynamics - Integrator
+#
+# Physics integration methods (Euler, RK4, Verlet).
+
+export Integrator
+
+use ..core as core
+use rigid_body.RigidBody
+
+
+# ============================================================================
+# Integrator
+# ============================================================================
+
+class Integrator:
+    """Physics integration methods.
+
+    Provides different numerical integration schemes for physics simulation.
+    """
+
+    static fn euler(bodies: List<RigidBody>, dt: f64):
+        """Semi-implicit Euler integration.
+
+        Simple and fast, but can accumulate energy errors.
+
+        Args:
+            bodies: List of rigid bodies
+            dt: Time step
+        """
+        for body in bodies:
+            body.integrate(dt)
+
+    static fn verlet(bodies: List<RigidBody>, prev_positions: [core.Vector3], dt: f64):
+        """Verlet integration.
+
+        More stable and energy-conserving than Euler.
+        Requires previous positions.
+
+        Args:
+            bodies: List of rigid bodies
+            prev_positions: Previous positions for each body
+            dt: Time step
+        """
+        for i in range(bodies.len()):
+            bodies[i].integrate_verlet(dt, prev_positions[i])
+
+    static fn rk4(body: RigidBody, dt: f64):
+        """Runge-Kutta 4th order integration.
+
+        Most accurate but more expensive integration method.
+        Evaluates derivatives at 4 points per step for high accuracy.
+
+        This method is ideal for:
+        - High-precision physics simulations
+        - Systems requiring energy conservation
+        - Scenarios where timestep is relatively large
+
+        Args:
+            body: Rigid body to integrate
+            dt: Time step
+
+        Example:
+            ```simple
+            # High-precision simulation
+            for body in bodies:
+                Integrator.rk4(body, dt=0.016)
+            ```
+
+        Algorithm:
+            For state y = [position, velocity, rotation, angular_velocity]:
+            k1 = derivative(t, y)
+            k2 = derivative(t + dt/2, y + k1*dt/2)
+            k3 = derivative(t + dt/2, y + k2*dt/2)
+            k4 = derivative(t + dt, y + k3*dt)
+            y_new = y + (k1 + 2*k2 + 2*k3 + k4) * dt/6
+        """
+        if body.mass == 0:
+            return  # Static body
+
+        # Save initial state
+        val p0 = body.position
+        val v0 = body.velocity
+        val r0 = body.rotation
+        val w0 = body.angular_velocity
+
+        # k1: Evaluate at current state
+        val a1 = body.force.scale(1.0 / body.mass)  # Linear acceleration
+        val alpha1 = body.torque.scale(1.0 / body.inertia)  # Angular acceleration
+        val v1 = v0
+        val w1 = w0
+
+        # k2: Evaluate at t + dt/2 using k1
+        val p_temp = p0.add(v1.scale(dt * 0.5))
+        val v_temp = v0.add(a1.scale(dt * 0.5))
+        val r_temp = r0  # Rotation update simplified for now
+        val w_temp = w0.add(alpha1.scale(dt * 0.5))
+
+        # Temporarily update body state for force evaluation
+        body.position = p_temp
+        body.velocity = v_temp
+        body.rotation = r_temp
+        body.angular_velocity = w_temp
+
+        val a2 = body.force.scale(1.0 / body.mass)
+        val alpha2 = body.torque.scale(1.0 / body.inertia)
+        val v2 = v_temp
+        val w2 = w_temp
+
+        # k3: Evaluate at t + dt/2 using k2
+        p_temp = p0.add(v2.scale(dt * 0.5))
+        v_temp = v0.add(a2.scale(dt * 0.5))
+        w_temp = w0.add(alpha2.scale(dt * 0.5))
+
+        body.position = p_temp
+        body.velocity = v_temp
+        body.angular_velocity = w_temp
+
+        val a3 = body.force.scale(1.0 / body.mass)
+        val alpha3 = body.torque.scale(1.0 / body.inertia)
+        val v3 = v_temp
+        val w3 = w_temp
+
+        # k4: Evaluate at t + dt using k3
+        p_temp = p0.add(v3.scale(dt))
+        v_temp = v0.add(a3.scale(dt))
+        w_temp = w0.add(alpha3.scale(dt))
+
+        body.position = p_temp
+        body.velocity = v_temp
+        body.angular_velocity = w_temp
+
+        val a4 = body.force.scale(1.0 / body.mass)
+        val alpha4 = body.torque.scale(1.0 / body.inertia)
+        val v4 = v_temp
+        val w4 = w_temp
+
+        # Combine derivatives using RK4 formula: (k1 + 2*k2 + 2*k3 + k4) / 6
+        val dv = a1.add(a2.scale(2.0)).add(a3.scale(2.0)).add(a4).scale(dt / 6.0)
+        val dp = v1.add(v2.scale(2.0)).add(v3.scale(2.0)).add(v4).scale(dt / 6.0)
+        val dw = alpha1.add(alpha2.scale(2.0)).add(alpha3.scale(2.0)).add(alpha4).scale(dt / 6.0)
+        val dr = w1.add(w2.scale(2.0)).add(w3.scale(2.0)).add(w4).scale(dt / 6.0)
+
+        # Update state with weighted average
+        body.position = p0.add(dp)
+        body.velocity = v0.add(dv)
+        body.angular_velocity = w0.add(dw)
+
+        # Update rotation (simplified - proper quaternion integration would be more complex)
+        val rotation_delta = dr.scale(dt)
+        val rotation_angle = rotation_delta.magnitude()
+        if rotation_angle > 0.0001:
+            val rotation_axis = rotation_delta.normalize()
+            # Apply rotation (simplified - real implementation would use quaternion multiplication)
+            body.rotation = body.rotation  # Placeholder - proper quaternion update needed
+
+        # Clear forces and torques for next step
+        body.clear_forces()

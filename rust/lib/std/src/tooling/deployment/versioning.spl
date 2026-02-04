@@ -1,0 +1,814 @@
+# Version Management
+# Manage versioning across multi-language projects
+
+use core.result.{Result, Ok, Err}
+use shell.{file, path}
+
+# Semantic version
+pub class SemVer:
+    pub major: i32
+    pub minor: i32
+    pub patch: i32
+    pub prerelease: text
+    pub build_metadata: text
+
+    pub fn new(major: i32, minor: i32, patch: i32) -> SemVer:
+        """Create semantic version.
+
+        Args:
+            major: Major version
+            minor: Minor version
+            patch: Patch version
+
+        Returns:
+            Semantic version
+
+        Example:
+            val v = SemVer.new(1, 2, 3)
+            print(v.to_string())  # → "1.2.3"
+        """
+        SemVer(
+            major: major,
+            minor: minor,
+            patch: patch,
+            prerelease: "",
+            build_metadata: ""
+        )
+
+    pub fn parse(version_str: text) -> Result<SemVer, text>:
+        """Parse version string.
+
+        Args:
+            version_str: Version string (e.g., "1.2.3", "2.0.0-beta.1")
+
+        Returns:
+            Parsed version or error
+
+        Supports:
+        - Basic: "1.2.3"
+        - Prerelease: "1.2.3-beta.1", "1.2.3-alpha"
+        - Build metadata: "1.2.3+20240110"
+        - Combined: "1.2.3-beta.1+build.123"
+
+        Example:
+            match SemVer.parse("1.2.3"):
+                Ok(v):
+                    print("Version: {v.major}.{v.minor}.{v.patch}")
+                Err(e):
+                    print("Parse error: {e}")
+        """
+        # Clean version string
+        val trimmed = version_str.trim()
+
+        # Extract build metadata (after '+')
+        val (core_and_pre, build_meta) = self.split_on_plus(trimmed)
+
+        # Extract prerelease (after '-')
+        val (core, prerelease) = self.split_on_dash(core_and_pre)
+
+        # Parse core version (MAJOR.MINOR.PATCH)
+        val parts = core.split(".")
+        if parts.len() != 3:
+            return Err("Invalid version format: expected MAJOR.MINOR.PATCH, got '" + core + "'")
+
+        # Parse major
+        val major = self.parse_int(parts[0])?
+
+        # Parse minor
+        val minor = self.parse_int(parts[1])?
+
+        # Parse patch
+        val patch = self.parse_int(parts[2])?
+
+        # Build version
+        var version = SemVer.new(major, minor, patch)
+        version.prerelease = prerelease
+        version.build_metadata = build_meta
+
+        Ok(version)
+
+    fn split_on_plus(text: text) -> (text, text):
+        """Split on '+' for build metadata.
+
+        Args:
+            text: Version string
+
+        Returns:
+            (core_and_prerelease, build_metadata)
+        """
+        val plus_idx = text.find("+")
+        if plus_idx >= 0:
+            val before = text[0:plus_idx]
+            val after = text[plus_idx+1:]
+            (before, after)
+        else:
+            (text, "")
+
+    fn split_on_dash(text: text) -> (text, text):
+        """Split on '-' for prerelease.
+
+        Args:
+            text: Version string
+
+        Returns:
+            (core, prerelease)
+        """
+        val dash_idx = text.find("-")
+        if dash_idx >= 0:
+            val before = text[0:dash_idx]
+            val after = text[dash_idx+1:]
+            (before, after)
+        else:
+            (text, "")
+
+    fn parse_int(s: text) -> Result<i32, text>:
+        """Parse integer from string.
+
+        Args:
+            s: text to parse
+
+        Returns:
+            Parsed integer or error
+        """
+        # Simple integer parsing
+        val trimmed = s.trim()
+        if trimmed.is_empty():
+            return Err("Empty string cannot be parsed as integer")
+
+        var result = 0
+        var negative = false
+        var start_idx = 0
+
+        # Check for negative sign
+        if trimmed[0] == '-':
+            negative = true
+            start_idx = 1
+
+        # Parse digits
+        for i in start_idx..trimmed.len():
+            val ch = trimmed[i]
+            if ch >= '0' and ch <= '9':
+                val digit = (ch as i32) - ('0' as i32)
+                result = result * 10 + digit
+            else:
+                return Err("Invalid character in number: '" + ch + "'")
+
+        if negative:
+            result = -result
+
+        Ok(result)
+
+    pub fn to_string(self) -> text:
+        """Convert to string.
+
+        Returns:
+            Version string
+
+        Example:
+            SemVer.new(1, 2, 3).to_string()  # → "1.2.3"
+        """
+        var version = "{self.major}.{self.minor}.{self.patch}"
+
+        if not self.prerelease.is_empty():
+            version += "-{self.prerelease}"
+
+        if not self.build_metadata.is_empty():
+            version += "+{self.build_metadata}"
+
+        version
+
+    pub fn bump_major(self) -> SemVer:
+        """Bump major version.
+
+        Returns:
+            New version with major incremented
+
+        Example:
+            SemVer.new(1, 2, 3).bump_major()  # → 2.0.0
+        """
+        SemVer.new(self.major + 1, 0, 0)
+
+    pub fn bump_minor(self) -> SemVer:
+        """Bump minor version.
+
+        Returns:
+            New version with minor incremented
+
+        Example:
+            SemVer.new(1, 2, 3).bump_minor()  # → 1.3.0
+        """
+        SemVer.new(self.major, self.minor + 1, 0)
+
+    pub fn bump_patch(self) -> SemVer:
+        """Bump patch version.
+
+        Returns:
+            New version with patch incremented
+
+        Example:
+            SemVer.new(1, 2, 3).bump_patch()  # → 1.2.4
+        """
+        SemVer.new(self.major, self.minor, self.patch + 1)
+
+    pub fn bump_prerelease(self) -> SemVer:
+        """Bump prerelease version.
+
+        Returns:
+            New version with prerelease incremented
+
+        Example:
+            SemVer.new(1, 2, 3).bump_prerelease()  # → 1.2.3-alpha.0
+            v.prerelease = "beta.1"
+            v.bump_prerelease()  # → 1.2.3-beta.2
+        """
+        var new_version = SemVer.new(self.major, self.minor, self.patch)
+        new_version.build_metadata = self.build_metadata
+
+        if self.prerelease.is_empty():
+            # No prerelease yet, start with alpha.0
+            new_version.prerelease = "alpha.0"
+        else:
+            # Try to find and increment numeric suffix
+            val dot_idx = self.prerelease.rfind(".")
+            if dot_idx >= 0:
+                # Has a dot, try to parse number after it
+                val prefix = self.prerelease[0:dot_idx]
+                val suffix = self.prerelease[dot_idx+1:]
+
+                # Try to parse suffix as integer
+                val num = self.parse_prerelease_num(suffix)
+                if num >= 0:
+                    # Successfully parsed, increment
+                    new_version.prerelease = "{prefix}.{num + 1}"
+                else:
+                    # Not a number, append .1
+                    new_version.prerelease = "{self.prerelease}.1"
+            else:
+                # No dot, append .1
+                new_version.prerelease = "{self.prerelease}.1"
+
+        new_version
+
+    fn parse_prerelease_num(s: text) -> i32:
+        """Parse prerelease number.
+
+        Args:
+            s: text to parse
+
+        Returns:
+            Parsed number or -1 on error
+        """
+        if s.is_empty():
+            return -1
+
+        var result = 0
+        for i in 0..s.len():
+            val ch = s[i]
+            if ch >= '0' and ch <= '9':
+                val digit = (ch as i32) - ('0' as i32)
+                result = result * 10 + digit
+            else:
+                # Not a valid number
+                return -1
+
+        result
+
+    pub fn is_prerelease(self) -> bool:
+        """Check if this is a prerelease version.
+
+        Returns:
+            True if prerelease tag exists
+
+        Example:
+            SemVer.new(1, 2, 3).is_prerelease()  # → false
+            v.prerelease = "beta.1"
+            v.is_prerelease()  # → true
+        """
+        not self.prerelease.is_empty()
+
+    pub fn is_stable(self) -> bool:
+        """Check if this is a stable release.
+
+        Returns:
+            True if no prerelease tag
+
+        Example:
+            SemVer.new(1, 0, 0).is_stable()  # → true
+        """
+        not self.is_prerelease()
+
+    pub fn compare(self, other: SemVer) -> i32:
+        """Compare two versions.
+
+        Args:
+            other: Version to compare with
+
+        Returns:
+            -1 if self < other, 0 if equal, 1 if self > other
+
+        Example:
+            SemVer.new(1, 2, 3).compare(SemVer.new(1, 2, 4))  # → -1
+            SemVer.new(2, 0, 0).compare(SemVer.new(1, 9, 9))  # → 1
+        """
+        # Compare major
+        if self.major < other.major:
+            return -1
+        elif self.major > other.major:
+            return 1
+
+        # Compare minor
+        if self.minor < other.minor:
+            return -1
+        elif self.minor > other.minor:
+            return 1
+
+        # Compare patch
+        if self.patch < other.patch:
+            return -1
+        elif self.patch > other.patch:
+            return 1
+
+        # Equal
+        0
+
+# Version bump type
+pub enum BumpType:
+    Major
+    Minor
+    Patch
+    PreRelease
+
+    pub fn to_string(self) -> text:
+        """Convert bump type to string.
+
+        Returns:
+            Bump type name
+
+        Example:
+            BumpType.Major.to_string()  # → "major"
+        """
+        match self:
+            BumpType.Major: "major"
+            BumpType.Minor: "minor"
+            BumpType.Patch: "patch"
+            BumpType.PreRelease: "prerelease"
+
+    pub fn description(self) -> text:
+        """Get bump type description.
+
+        Returns:
+            Human-readable description
+        """
+        match self:
+            BumpType.Major: "Major version (breaking changes)"
+            BumpType.Minor: "Minor version (new features)"
+            BumpType.Patch: "Patch version (bug fixes)"
+            BumpType.PreRelease: "Prerelease version"
+
+    pub fn is_major(self) -> bool:
+        """Check if bump type is Major.
+
+        Returns:
+            True if Major variant
+        """
+        match self:
+            BumpType.Major: true
+            _: false
+
+    pub fn is_minor(self) -> bool:
+        """Check if bump type is Minor.
+
+        Returns:
+            True if Minor variant
+        """
+        match self:
+            BumpType.Minor: true
+            _: false
+
+    pub fn is_patch(self) -> bool:
+        """Check if bump type is Patch.
+
+        Returns:
+            True if Patch variant
+        """
+        match self:
+            BumpType.Patch: true
+            _: false
+
+    pub fn is_prerelease(self) -> bool:
+        """Check if bump type is PreRelease.
+
+        Returns:
+            True if PreRelease variant
+        """
+        match self:
+            BumpType.PreRelease: true
+            _: false
+
+    pub fn is_breaking(self) -> bool:
+        """Check if bump introduces breaking changes.
+
+        Returns:
+            True if Major bump
+
+        Example:
+            BumpType.Major.is_breaking()  # → true
+            BumpType.Minor.is_breaking()  # → false
+        """
+        match self:
+            BumpType.Major: true
+            _: false
+
+    pub fn is_stable(self) -> bool:
+        """Check if bump is for stable release (not prerelease).
+
+        Returns:
+            True if not PreRelease
+
+        Example:
+            BumpType.Minor.is_stable()  # → true
+            BumpType.PreRelease.is_stable()  # → false
+        """
+        match self:
+            BumpType.PreRelease: false
+            _: true
+
+    pub fn resets_lower_versions(self) -> bool:
+        """Check if bump resets lower version components.
+
+        Returns:
+            True if Major or Minor
+
+        Example:
+            BumpType.Major.resets_lower_versions()  # → true (resets minor and patch to 0)
+            BumpType.Minor.resets_lower_versions()  # → true (resets patch to 0)
+            BumpType.Patch.resets_lower_versions()  # → false
+        """
+        match self:
+            BumpType.Major: true
+            BumpType.Minor: true
+            _: false
+
+    pub fn summary(self) -> text:
+        """Get bump type summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            BumpType.Major.summary()
+            # → "BumpType: major (Major version (breaking changes), breaking, resets lower)"
+        """
+        val name = self.to_string()
+        val desc = self.description()
+        var props = []
+
+        if self.is_breaking():
+            props.append("breaking")
+        if self.is_stable():
+            props.append("stable")
+        if self.resets_lower_versions():
+            props.append("resets lower")
+
+        if props.len() > 0:
+            val props_str = props.join(", ")
+            "BumpType: {name} ({desc}, {props_str})"
+        else:
+            "BumpType: {name} ({desc})"
+
+# Version manager
+pub class VersionManager:
+    pub root: text
+    pub current_version: SemVer
+    pub verbose: bool
+
+    pub fn new(root: text) -> VersionManager:
+        """Create version manager.
+
+        Args:
+            root: Project root
+
+        Returns:
+            Version manager
+
+        Example:
+            val version = VersionManager.new(".")
+
+            # Current version
+            print("Current: {version.get_current()}")  # → "1.0.0"
+
+            # Bump version
+            version.bump(BumpType.Minor)  # → "1.1.0"
+
+            # Update all version files
+            version.sync_all([
+                "Cargo.toml",
+                "package.json",
+                "pyproject.toml",
+                "simple.sdn"
+            ])
+        """
+        VersionManager(
+            root: root,
+            current_version: SemVer.new(0, 1, 0),
+            verbose: false
+        )
+
+    pub fn set_verbose(self, enabled: bool):
+        """Enable verbose logging."""
+        self.verbose = enabled
+
+    pub fn get_current(self) -> text:
+        """Get current version.
+
+        Returns:
+            Current version string
+
+        Example:
+            val v = version.get_current()  # → "1.0.0"
+        """
+        self.current_version.to_string()
+
+    pub fn bump(self, bump_type: BumpType) -> text:
+        """Bump version.
+
+        Args:
+            bump_type: Type of bump
+
+        Returns:
+            New version string
+
+        Example:
+            version.bump(BumpType.Major)  # 1.0.0 → 2.0.0
+            version.bump(BumpType.Minor)  # 1.0.0 → 1.1.0
+            version.bump(BumpType.Patch)  # 1.0.0 → 1.0.1
+        """
+        self.current_version = match bump_type:
+            BumpType.Major:
+                self.current_version.bump_major()
+            BumpType.Minor:
+                self.current_version.bump_minor()
+            BumpType.Patch:
+                self.current_version.bump_patch()
+            BumpType.PreRelease:
+                self.current_version.bump_prerelease()
+
+        if self.verbose:
+            print("Bumped version to {self.current_version.to_string()}")
+
+        self.current_version.to_string()
+
+    pub fn sync_all(self, files: List<text>) -> Result<(), text>:
+        """Update version in all files.
+
+        Args:
+            files: List of version files
+
+        Returns:
+            Ok if successful
+
+        Updates version in:
+        - Cargo.toml: version = "1.0.0"
+        - package.json: "version": "1.0.0"
+        - pyproject.toml: version = "1.0.0"
+        - simple.sdn: version: 1.0.0
+
+        Example:
+            version.sync_all([
+                "Cargo.toml",
+                "package.json",
+                "simple.sdn"
+            ])
+        """
+        val version_str = self.current_version.to_string()
+
+        if self.verbose:
+            print("Syncing version {version_str} to {files.len()} files")
+
+        for file in files:
+            match self.update_version_file(file, version_str):
+                Ok(_):
+                    if self.verbose:
+                        print("Updated {file}")
+                Err(err):
+                    return Err("Failed to update {file}: {err}")
+
+        Ok(())
+
+    fn update_version_file(file_path: text, version: text) -> Result<(), text>:
+        """Update version in single file.
+
+        Args:
+            file_path: File to update
+            version: New version
+
+        Returns:
+            Ok if successful
+        """
+        # Read file content
+        if not file.exist(file_path):
+            return Err("File not found: {file_path}")
+
+        val content = file.read_text(file_path)
+        val ext = path.ext(file_path)
+        val basename = path.basename(file_path)
+
+        # Update version based on file type
+        val updated_content = match basename:
+            "Cargo.toml":
+                self.update_cargo_toml(content, version)
+            "package.json":
+                self.update_package_json(content, version)
+            "pyproject.toml":
+                self.update_pyproject_toml(content, version)
+            "simple.sdn":
+                self.update_simple_sdn(content, version)
+            "VERSION":
+                version
+            _:
+                match ext:
+                    ".toml":
+                        self.update_generic_toml(content, version)
+                    ".json":
+                        self.update_generic_json(content, version)
+                    _:
+                        return Err("Unknown file type: {file_path}")
+
+        # Write file back
+        file.write_text(file_path, updated_content)
+        Ok(())
+
+    fn update_cargo_toml(content: text, version: text) -> text:
+        """Update version in Cargo.toml.
+
+        Args:
+            content: File content
+            version: New version
+
+        Returns:
+            Updated content
+        """
+        var lines: List<text> = []
+        var in_package = false
+
+        for line in content.lines():
+            if line.trim() == "[package]":
+                in_package = true
+                lines.append(line)
+            elif line.trim().starts_with("[") and line.trim() != "[package]":
+                in_package = false
+                lines.append(line)
+            elif in_package and line.trim().starts_with("version"):
+                lines.append("version = \"{version}\"")
+            else:
+                lines.append(line)
+
+        lines.join("\n")
+
+    fn update_package_json(content: text, version: text) -> text:
+        """Update version in package.json.
+
+        Args:
+            content: File content
+            version: New version
+
+        Returns:
+            Updated content
+        """
+        var lines: List<text> = []
+
+        for line in content.lines():
+            if line.trim().starts_with("\"version\""):
+                val indent = self.get_indent(line)
+                lines.append("{indent}\"version\": \"{version}\",")
+            else:
+                lines.append(line)
+
+        lines.join("\n")
+
+    fn update_pyproject_toml(content: text, version: text) -> text:
+        """Update version in pyproject.toml.
+
+        Args:
+            content: File content
+            version: New version
+
+        Returns:
+            Updated content
+        """
+        var lines: List<text> = []
+        var in_project = false
+
+        for line in content.lines():
+            if line.trim() == "[project]" or line.trim() == "[tool.poetry]":
+                in_project = true
+                lines.append(line)
+            elif line.trim().starts_with("[") and not line.trim().starts_with("[project") and not line.trim().starts_with("[tool.poetry"):
+                in_project = false
+                lines.append(line)
+            elif in_project and line.trim().starts_with("version"):
+                lines.append("version = \"{version}\"")
+            else:
+                lines.append(line)
+
+        lines.join("\n")
+
+    fn update_simple_sdn(content: text, version: text) -> text:
+        """Update version in simple.sdn.
+
+        Args:
+            content: File content
+            version: New version
+
+        Returns:
+            Updated content
+        """
+        var lines: List<text> = []
+
+        for line in content.lines():
+            if line.trim().starts_with("version:"):
+                lines.append("version: {version}")
+            else:
+                lines.append(line)
+
+        lines.join("\n")
+
+    fn update_generic_toml(content: text, version: text) -> text:
+        """Update version in generic TOML file.
+
+        Args:
+            content: File content
+            version: New version
+
+        Returns:
+            Updated content
+        """
+        var lines: List<text> = []
+
+        for line in content.lines():
+            if line.trim().starts_with("version"):
+                lines.append("version = \"{version}\"")
+            else:
+                lines.append(line)
+
+        lines.join("\n")
+
+    fn update_generic_json(content: text, version: text) -> text:
+        """Update version in generic JSON file.
+
+        Args:
+            content: File content
+            version: New version
+
+        Returns:
+            Updated content
+        """
+        var lines: List<text> = []
+
+        for line in content.lines():
+            if line.trim().starts_with("\"version\""):
+                val indent = self.get_indent(line)
+                lines.append("{indent}\"version\": \"{version}\",")
+            else:
+                lines.append(line)
+
+        lines.join("\n")
+
+    fn get_indent(line: text) -> text:
+        """Get leading whitespace from line.
+
+        Args:
+            line: Line to check
+
+        Returns:
+            Leading whitespace
+        """
+        var indent = ""
+        for ch in line.chars():
+            if ch == ' ' or ch == '\t':
+                indent += ch
+            else:
+                break
+        indent
+
+    pub fn validate(self, version: text) -> Result<(), text>:
+        """Validate version string.
+
+        Args:
+            version: Version string
+
+        Returns:
+            Ok if valid SemVer
+
+        Example:
+            match version.validate("1.2.3"):
+                Ok(_):
+                    print("Valid version")
+                Err(err):
+                    print("Invalid: {err}")
+        """
+        match SemVer.parse(version):
+            Ok(_):
+                Ok(())
+            Err(err):
+                Err(err)

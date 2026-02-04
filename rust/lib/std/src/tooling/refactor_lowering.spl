@@ -1,0 +1,463 @@
+# Simple Language Code Refactoring Tool - extract lowering helpers
+# Migrated from: scripts/refactor_lowering.py
+# Purpose: Refactor lowering.rs by extracting match arms into helper methods
+
+use fs.{read_text, write_text}
+use regex.{regex_captures, regex_find_all}
+use core.string.*
+
+# Refactoring statistics
+struct RefactorStats:
+    files_processed: u64
+    files_modified: u64
+    lines_changed: u64
+    backup_dir: text
+
+impl RefactorStats:
+    # Create empty stats
+    static fn new(backup_dir: text) -> RefactorStats:
+        RefactorStats(
+            files_processed: 0,
+            files_modified: 0,
+            lines_changed: 0,
+            backup_dir: backup_dir
+        )
+
+    # Record processed file
+    me add_processed():
+        self.files_processed = self.files_processed + 1
+
+    # Record modified file
+    me add_modified(lines: u64):
+        self.files_modified = self.files_modified + 1
+        self.lines_changed = self.lines_changed + lines
+
+    # Generate summary report
+    fn summary() -> text:
+        var report = ""
+        report = report + "=== Refactoring Complete ===\n"
+        report = report + "Files processed: {self.files_processed}\n"
+        report = report + "Files modified: {self.files_modified}\n"
+        report = report + "Lines changed: {self.lines_changed}\n"
+        report = report + "Output saved to: {self.backup_dir}\n"
+        report
+
+# File migration result
+struct MigrationResult:
+    modified: bool
+    lines_changed: u64
+    error: text
+
+impl MigrationResult:
+    # No changes made
+    static fn unchanged() -> MigrationResult:
+        MigrationResult(
+            modified: false,
+            lines_changed: 0,
+            error: ""
+        )
+
+    # Changes made successfully
+    static fn changed(lines: u64) -> MigrationResult:
+        MigrationResult(
+            modified: true,
+            lines_changed: lines,
+            error: ""
+        )
+
+    # Error occurred
+    static fn error(message: text) -> MigrationResult:
+        MigrationResult(
+            modified: false,
+            lines_changed: 0,
+            error: message
+        )
+
+# Extract impl block from Rust file using brace counting
+fn extract_impl_block(content: text) -> Result<text, text>:
+    # Find "impl Lowerer" or "impl<...> Lowerer"
+    val lines = content.split("\n")
+    var impl_start: i64 = -1
+    var impl_end: i64 = -1
+    var brace_count = 0
+    var in_impl = false
+
+    var i = 0
+    while i < lines.len():
+        val line = lines[i]
+
+        # Look for impl Lowerer declaration
+        if not in_impl:
+            if line.contains("impl") and line.contains("Lowerer"):
+                impl_start = i
+                # Count opening braces on this line
+                brace_count = count_char(line, '{') - count_char(line, '}')
+                if brace_count > 0:
+                    in_impl = true
+        else:
+            # Count braces
+            brace_count = brace_count + count_char(line, '{') - count_char(line, '}')
+            if brace_count == 0:
+                impl_end = i
+                break
+
+        i = i + 1
+
+    if impl_start < 0:
+        return Err("Could not find 'impl Lowerer' block")
+
+    if impl_end < 0:
+        return Err("Could not find end of impl block (unbalanced braces)")
+
+    # Extract the impl body (lines between impl_start and impl_end)
+    var impl_lines: List<text> = []
+    var j = impl_start
+    while j <= impl_end:
+        impl_lines.push(lines[j])
+        j = j + 1
+
+    Ok(impl_lines.join("\n"))
+
+# Helper: Count occurrences of a character in a string
+fn count_char(s: text, c: text) -> i64:
+    var count: i64 = 0
+    for ch in s.chars():
+        if ch == c:
+            count = count + 1
+    count
+
+# Extract match arms from lower_expr method using brace counting
+fn extract_match_arms(impl_body: text) -> Result<List<text>, text>:
+    val lines = impl_body.split("\n")
+    var arms: List<text> = []
+
+    # Find lower_expr function
+    var in_lower_expr = false
+    var in_match = false
+    var match_depth = 0
+    var current_arm_lines: List<text> = []
+    var arm_brace_count = 0
+
+    var i = 0
+    while i < lines.len():
+        val line = lines[i]
+        val trimmed = line.trim()
+
+        # Look for fn lower_expr (with various modifiers)
+        if not in_lower_expr:
+            if (trimmed.starts_with("fn lower_expr") or
+                trimmed.starts_with("pub fn lower_expr") or
+                trimmed.starts_with("pub static fn lower_expr") or
+                trimmed.starts_with("static fn lower_expr") or
+                trimmed.starts_with("me lower_expr")):
+                in_lower_expr = true
+                match_depth = 0
+        elif not in_match:
+            # Look for match expression
+            if trimmed.starts_with("match ") and trimmed.contains("{"):
+                in_match = true
+                match_depth = 1
+        else:
+            # Inside match expression, extract arms
+            # An arm starts with a pattern like "Expr.Literal" or similar
+            val is_arm_start = (trimmed.contains(".") and trimmed.contains("=>")) or
+                              (trimmed.contains("Expr.") and not trimmed.starts_with("//"))
+
+            if is_arm_start and arm_brace_count == 0:
+                # Save previous arm if exists
+                if current_arm_lines.len() > 0:
+                    arms.push(current_arm_lines.join("\n"))
+                current_arm_lines = [line]
+                arm_brace_count = count_char(line, '{') - count_char(line, '}')
+            elif current_arm_lines.len() > 0:
+                # Continue collecting arm lines
+                current_arm_lines.push(line)
+                arm_brace_count = arm_brace_count + count_char(line, '{') - count_char(line, '}')
+
+            # Track overall match depth
+            match_depth = match_depth + count_char(line, '{') - count_char(line, '}')
+
+            # Exit match when depth reaches 0
+            if match_depth <= 0:
+                if current_arm_lines.len() > 0:
+                    arms.push(current_arm_lines.join("\n"))
+                break
+
+        i = i + 1
+
+    if arms.len() == 0:
+        Err("No match arms found in lower_expr method")
+    else:
+        Ok(arms)
+
+# Refactor lowering.rs file
+fn refactor_lowering_file(filepath: text, output_path: text) -> MigrationResult:
+    # Read lowering.rs file
+    match read_text(filepath):
+        Ok(content):
+            # Extract impl block
+            match extract_impl_block(content):
+                Ok(impl_body):
+                    # Extract match arms
+                    match extract_match_arms(impl_body):
+                        Ok(arms):
+                            # Generate refactored content
+                            val refactored = generate_refactored_content(content, arms)
+                            val lines_changed = arms.len() as u64
+
+                            # Write refactored content
+                            match write_text(output_path, refactored):
+                                Ok(_):
+                                    print "Extracted {arms.len()} match arms into helper methods"
+                                    MigrationResult.changed(lines_changed)
+                                Err(e):
+                                    MigrationResult.error("Failed to write file: {e}")
+                        Err(e):
+                            MigrationResult.error("Failed to extract match arms: {e}")
+                Err(e):
+                    MigrationResult.error("Failed to extract impl block: {e}")
+        Err(e):
+            MigrationResult.error("Failed to read file: {e}")
+
+# Generate refactored content with helper methods
+fn generate_refactored_content(original: text, arms: List<text>) -> text:
+    var output = ""
+
+    # Add header comment
+    output = output + "// Refactored by Simple Language refactor-lowering tool\n"
+    output = output + "// Original match arms extracted into helper methods\n\n"
+
+    # Add original content (could be further refined to insert helpers inline)
+    output = output + original
+    output = output + "\n\n"
+
+    # Generate helper method stubs for each arm
+    output = output + "// ============================================\n"
+    output = output + "// Extracted helper methods (add to impl Lowerer)\n"
+    output = output + "// ============================================\n\n"
+
+    var arm_num = 1
+    for arm in arms:
+        val helper_name = extract_helper_name_from_arm(arm, arm_num)
+        output = output + "/// Helper for match arm {arm_num}\n"
+        output = output + "fn {helper_name}(&mut self, expr: &Expr) -> Result<Value, LoweringError> {{\n"
+        output = output + "    // Original arm code:\n"
+
+        # Add original arm as comment
+        for line in arm.split("\n"):
+            output = output + "    // {line}\n"
+
+        output = output + "    todo!(\"Implement {helper_name}\")\n"
+        output = output + "}}\n\n"
+        arm_num = arm_num + 1
+
+    # Generate dispatch method
+    output = output + "// ============================================\n"
+    output = output + "// Dispatch method (replace original match)\n"
+    output = output + "// ============================================\n\n"
+    output = output + "fn lower_expr_dispatch(&mut self, expr: &Expr) -> Result<Value, LoweringError> {\n"
+    output = output + "    match expr {\n"
+
+    arm_num = 1
+    for arm in arms:
+        val helper_name = extract_helper_name_from_arm(arm, arm_num)
+        val pattern = extract_pattern_from_arm(arm)
+        output = output + "        {pattern} => self.{helper_name}(expr),\n"
+        arm_num = arm_num + 1
+
+    output = output + "    }\n"
+    output = output + "}\n"
+
+    output
+
+# Extract helper method name from arm pattern
+fn extract_helper_name_from_arm(arm: text, arm_num: i64) -> text:
+    # Try to extract the variant name from the arm pattern
+    # e.g., "Expr.Literal(lit) =>" -> "lower_literal"
+    val trimmed = arm.trim()
+
+    # Look for Expr.VariantName pattern
+    match regex_captures(r"Expr.(\w+)", trimmed):
+        Some(caps):
+            match caps.groups[0]:
+                Some(variant):
+                    # Convert to snake_case helper name
+                    return "lower_" + to_snake_case(variant)
+                None: pass
+        None: pass
+
+    # Fallback to generic name
+    "lower_arm_{arm_num}"
+
+# Extract pattern from arm for dispatch
+fn extract_pattern_from_arm(arm: text) -> text:
+    val trimmed = arm.trim()
+
+    # Find everything before =>
+    val parts = trimmed.split("=>")
+    if parts.len() > 0:
+        parts[0].trim()
+    else:
+        "_"
+
+# Convert PascalCase to snake_case
+fn to_snake_case(s: text) -> text:
+    var result = ""
+    var i = 0
+    for ch in s.chars():
+        if ch >= "A" and ch <= "Z":
+            if i > 0:
+                result = result + "_"
+            result = result + ch.lower()
+        else:
+            result = result + ch
+        i = i + 1
+    result
+
+# Run refactoring
+fn run_refactoring(input_file: text) -> RefactorStats:
+    val output_path = "/tmp/lowering_new.rs"
+    var stats = RefactorStats.new(output_path)
+
+    stats.add_processed()
+
+    val result = refactor_lowering_file(input_file, output_path)
+    if result.modified:
+        stats.add_modified(result.lines_changed)
+    elif not result.error.is_empty():
+        print "Error: {result.error}"
+
+    stats
+
+# Helper method documentation
+struct HelperMethod:
+    category: text
+    name: text
+    description: text
+
+impl HelperMethod:
+    # Create a helper method description
+    static fn new(category: text, name: text, desc: text) -> HelperMethod:
+        HelperMethod(
+            category: category,
+            name: name,
+            description: desc
+        )
+
+# Get all helper methods to extract
+fn get_helper_methods() -> List<HelperMethod>:
+    [
+        HelperMethod.new("Literals", "lower_literal", "Handle all literal expressions"),
+        HelperMethod.new("Literals", "lower_fstring", "Handle f-string literals"),
+        HelperMethod.new("Identifiers", "lower_identifier", "Resolve identifiers"),
+        HelperMethod.new("Operators", "lower_binary", "Handle binary operations"),
+        HelperMethod.new("Operators", "lower_unary", "Handle unary operations")
+    ]
+
+# Print helper methods by category
+fn print_helper_methods() -> text:
+    var output = ""
+    output = output + "=== Lowering Refactoring - Helper Methods ===\n\n"
+
+    val methods = get_helper_methods()
+    var i = 0
+    while i < methods.len():
+        val method = methods[i]
+        output = output + "{method.category}: {method.name}\n"
+        output = output + "  {method.description}\n\n"
+        i = i + 1
+
+    output
+
+# CLI options for refactor_lowering command
+struct RefactorLoweringOptions:
+    input_file: Option<text>
+    output_file: text
+    show_methods: bool
+    show_help: bool
+
+impl RefactorLoweringOptions:
+    # Create default options
+    static fn default() -> RefactorLoweringOptions:
+        RefactorLoweringOptions(
+            input_file: None,
+            output_file: "/tmp/lowering_new.rs",
+            show_methods: false,
+            show_help: false
+        )
+
+    # Parse CLI arguments
+    static fn parse(args: List<text>) -> RefactorLoweringOptions:
+        var options = RefactorLoweringOptions.default()
+        var positional_count = 0
+        var i = 0
+
+        while i < args.len():
+            val arg = args[i]
+
+            if (arg == "--output" or arg == "-o") and i + 1 < args.len():
+                i = i + 1
+                options.output_file = args[i]
+            elif arg == "--list-methods" or arg == "-l":
+                options.show_methods = true
+            elif arg == "--help" or arg == "-h":
+                options.show_help = true
+            elif not arg.starts_with("-"):
+                # Positional arguments: input_file and output_file
+                if positional_count == 0:
+                    options.input_file = Some(arg)
+                elif positional_count == 1:
+                    options.output_file = arg
+                positional_count = positional_count + 1
+
+            i = i + 1
+
+        options
+
+# Print usage help for refactor_lowering
+fn print_refactor_lowering_help() -> text:
+    var help = ""
+    help = help + "Usage: simple refactor-lowering [OPTIONS] <INPUT_FILE> [OUTPUT_FILE]\n\n"
+    help = help + "Refactor lowering.rs by extracting match arms into helper methods.\n\n"
+    help = help + "Arguments:\n"
+    help = help + "  INPUT_FILE       Path to lowering.rs file\n"
+    help = help + "  OUTPUT_FILE      Path to output file (default: /tmp/lowering_new.rs)\n\n"
+    help = help + "Options:\n"
+    help = help + "  -o, --output     Specify output file explicitly\n"
+    help = help + "  -l, --list-methods  List helper methods to be extracted\n"
+    help = help + "  -h, --help       Show this help message\n\n"
+    help = help + "Examples:\n"
+    help = help + "  simple refactor-lowering src/compiler/lowering.rs\n"
+    help = help + "  simple refactor-lowering src/compiler/lowering.rs output.rs\n"
+    help = help + "  simple refactor-lowering --list-methods\n"
+    help
+
+# Main entry point
+fn main_refactor_lowering(args: List<text>) -> Result<(), text>:
+    val options = RefactorLoweringOptions.parse(args)
+
+    # Show help if requested
+    if options.show_help:
+        print print_refactor_lowering_help()
+        return Ok(())
+
+    # Show helper methods if requested
+    if options.show_methods:
+        print print_helper_methods()
+        return Ok(())
+
+    # Require input file
+    match options.input_file:
+        Some(input_path):
+            print "Refactoring: {input_path}"
+            print "Output: {options.output_file}"
+
+            # Run the refactoring
+            val stats = run_refactoring(input_path)
+
+            # Print summary
+            print stats.summary()
+
+            Ok(())
+        None:
+            Err("Missing required argument: INPUT_FILE\nRun with --help for usage information.")

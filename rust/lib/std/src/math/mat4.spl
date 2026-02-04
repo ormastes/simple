@@ -1,0 +1,296 @@
+# Math Mat4 - 4x4 Matrices
+#
+# Mat4 (f32) and Mat4d (f64) for 3D transformations.
+# Column-major storage (GPU/Vulkan standard).
+
+export Mat4, Mat4d
+
+
+# ============================================================================
+# Mat4 - 4x4 Matrix (f32, column-major)
+# ============================================================================
+
+class Mat4:
+    """4x4 matrix for 3D transformations. Column-major storage."""
+    data: [f32; 16]
+
+    fn __init__(data: [f32; 16]):
+        self.data = data
+
+    static fn identity() -> Mat4:
+        Mat4([
+            1.0, 0.0, 0.0, 0.0,
+            0.0, 1.0, 0.0, 0.0,
+            0.0, 0.0, 1.0, 0.0,
+            0.0, 0.0, 0.0, 1.0
+        ])
+
+    static fn translation(x: f32, y: f32, z: f32) -> Mat4:
+        """Create translation matrix (column-major)."""
+        Mat4([
+            1.0, 0.0, 0.0, 0.0,
+            0.0, 1.0, 0.0, 0.0,
+            0.0, 0.0, 1.0, 0.0,
+            x,   y,   z,   1.0
+        ])
+
+    static fn rotation_x(angle: f32) -> Mat4:
+        val c = angle.cos()
+        val s = angle.sin()
+        Mat4([
+            1.0, 0.0, 0.0, 0.0,
+            0.0, c,   s,   0.0,
+            0.0, -s,  c,   0.0,
+            0.0, 0.0, 0.0, 1.0
+        ])
+
+    static fn rotation_y(angle: f32) -> Mat4:
+        val c = angle.cos()
+        val s = angle.sin()
+        Mat4([
+            c,   0.0, -s,  0.0,
+            0.0, 1.0, 0.0, 0.0,
+            s,   0.0, c,   0.0,
+            0.0, 0.0, 0.0, 1.0
+        ])
+
+    static fn rotation_z(angle: f32) -> Mat4:
+        val c = angle.cos()
+        val s = angle.sin()
+        Mat4([
+            c,   s,   0.0, 0.0,
+            -s,  c,   0.0, 0.0,
+            0.0, 0.0, 1.0, 0.0,
+            0.0, 0.0, 0.0, 1.0
+        ])
+
+    static fn scale(sx: f32, sy: f32, sz: f32) -> Mat4:
+        Mat4([
+            sx,  0.0, 0.0, 0.0,
+            0.0, sy,  0.0, 0.0,
+            0.0, 0.0, sz,  0.0,
+            0.0, 0.0, 0.0, 1.0
+        ])
+
+    static fn perspective(fov_y: f32, aspect: f32, near: f32, far: f32) -> Mat4:
+        """Create perspective projection matrix."""
+        val f = 1.0 / (fov_y * 0.5).tan()
+        val nf = 1.0 / (near - far)
+        Mat4([
+            f / aspect, 0.0, 0.0,                    0.0,
+            0.0,        f,   0.0,                    0.0,
+            0.0,        0.0, (far + near) * nf,      -1.0,
+            0.0,        0.0, 2.0 * far * near * nf,  0.0
+        ])
+
+    static fn ortho(left: f32, right: f32, bottom: f32, top: f32, near: f32, far: f32) -> Mat4:
+        """Create orthographic projection matrix."""
+        val rl = 1.0 / (right - left)
+        val tb = 1.0 / (top - bottom)
+        val fn_ = 1.0 / (far - near)
+        Mat4([
+            2.0 * rl,                  0.0,                      0.0,                      0.0,
+            0.0,                       2.0 * tb,                 0.0,                      0.0,
+            0.0,                       0.0,                      -2.0 * fn_,               0.0,
+            -(right + left) * rl,      -(top + bottom) * tb,     -(far + near) * fn_,      1.0
+        ])
+
+    static fn look_at(eye: Vec3, center: Vec3, up: Vec3) -> Mat4:
+        """Create look-at view matrix."""
+        use .vec3.Vec3
+        val f = center.sub(eye).normalize()
+        val s = f.cross(up).normalize()
+        val u = s.cross(f)
+        Mat4([
+            s.x,             u.x,             -f.x,            0.0,
+            s.y,             u.y,             -f.y,            0.0,
+            s.z,             u.z,             -f.z,            0.0,
+            -s.dot(eye),     -u.dot(eye),     f.dot(eye),      1.0
+        ])
+
+    fn mul(other: Mat4) -> Mat4:
+        """Matrix multiplication (self * other)."""
+        var result = [0.0; 16]
+        for col in 0..4:
+            for row in 0..4:
+                var sum: f32 = 0.0
+                for k in 0..4:
+                    sum = sum + self.data[k * 4 + row] * other.data[col * 4 + k]
+                result[col * 4 + row] = sum
+        Mat4(result)
+
+    fn transpose() -> Mat4:
+        var result = [0.0; 16]
+        for col in 0..4:
+            for row in 0..4:
+                result[col * 4 + row] = self.data[row * 4 + col]
+        Mat4(result)
+
+    fn transform_point(p: Vec3) -> Vec3:
+        """Transform a point (w=1)."""
+        use .vec3.Vec3
+        val x = self.data[0] * p.x + self.data[4] * p.y + self.data[8]  * p.z + self.data[12]
+        val y = self.data[1] * p.x + self.data[5] * p.y + self.data[9]  * p.z + self.data[13]
+        val z = self.data[2] * p.x + self.data[6] * p.y + self.data[10] * p.z + self.data[14]
+        Vec3(x, y, z)
+
+    fn transform_vec3(v: Vec3) -> Vec3:
+        """Transform a direction vector (w=0)."""
+        use .vec3.Vec3
+        val x = self.data[0] * v.x + self.data[4] * v.y + self.data[8]  * v.z
+        val y = self.data[1] * v.x + self.data[5] * v.y + self.data[9]  * v.z
+        val z = self.data[2] * v.x + self.data[6] * v.y + self.data[10] * v.z
+        Vec3(x, y, z)
+
+    fn to_mat3() -> Mat3:
+        """Extract upper-left 3x3 submatrix."""
+        use .mat3.Mat3
+        Mat3([
+            self.data[0], self.data[1], self.data[2],
+            self.data[4], self.data[5], self.data[6],
+            self.data[8], self.data[9], self.data[10]
+        ])
+
+    fn inverse() -> Mat4:
+        """Compute matrix inverse using cofactor expansion."""
+        val d = self.data
+        # Compute cofactors for first row
+        val c00 = d[5]*(d[10]*d[15]-d[11]*d[14]) - d[9]*(d[6]*d[15]-d[7]*d[14]) + d[13]*(d[6]*d[11]-d[7]*d[10])
+        val c01 = -(d[1]*(d[10]*d[15]-d[11]*d[14]) - d[9]*(d[2]*d[15]-d[3]*d[14]) + d[13]*(d[2]*d[11]-d[3]*d[10]))
+        val c02 = d[1]*(d[6]*d[15]-d[7]*d[14]) - d[5]*(d[2]*d[15]-d[3]*d[14]) + d[13]*(d[2]*d[7]-d[3]*d[6])
+        val c03 = -(d[1]*(d[6]*d[11]-d[7]*d[10]) - d[5]*(d[2]*d[11]-d[3]*d[10]) + d[9]*(d[2]*d[7]-d[3]*d[6]))
+
+        val det = d[0]*c00 + d[4]*c01 + d[8]*c02 + d[12]*c03
+        if det.abs() < 1e-10:
+            return Mat4.identity()
+
+        val inv_det = 1.0 / det
+
+        # For brevity, return identity if singular; full inverse is complex
+        # TODO: Full 4x4 inverse computation
+        val c10 = -(d[4]*(d[10]*d[15]-d[11]*d[14]) - d[8]*(d[6]*d[15]-d[7]*d[14]) + d[12]*(d[6]*d[11]-d[7]*d[10]))
+        val c11 = d[0]*(d[10]*d[15]-d[11]*d[14]) - d[8]*(d[2]*d[15]-d[3]*d[14]) + d[12]*(d[2]*d[11]-d[3]*d[10])
+        val c12 = -(d[0]*(d[6]*d[15]-d[7]*d[14]) - d[4]*(d[2]*d[15]-d[3]*d[14]) + d[12]*(d[2]*d[7]-d[3]*d[6]))
+        val c13 = d[0]*(d[6]*d[11]-d[7]*d[10]) - d[4]*(d[2]*d[11]-d[3]*d[10]) + d[8]*(d[2]*d[7]-d[3]*d[6])
+
+        val c20 = d[4]*(d[9]*d[15]-d[11]*d[13]) - d[8]*(d[5]*d[15]-d[7]*d[13]) + d[12]*(d[5]*d[11]-d[7]*d[9])
+        val c21 = -(d[0]*(d[9]*d[15]-d[11]*d[13]) - d[8]*(d[1]*d[15]-d[3]*d[13]) + d[12]*(d[1]*d[11]-d[3]*d[9]))
+        val c22 = d[0]*(d[5]*d[15]-d[7]*d[13]) - d[4]*(d[1]*d[15]-d[3]*d[13]) + d[12]*(d[1]*d[7]-d[3]*d[5])
+        val c23 = -(d[0]*(d[5]*d[11]-d[7]*d[9]) - d[4]*(d[1]*d[11]-d[3]*d[9]) + d[8]*(d[1]*d[7]-d[3]*d[5]))
+
+        val c30 = -(d[4]*(d[9]*d[14]-d[10]*d[13]) - d[8]*(d[5]*d[14]-d[6]*d[13]) + d[12]*(d[5]*d[10]-d[6]*d[9]))
+        val c31 = d[0]*(d[9]*d[14]-d[10]*d[13]) - d[8]*(d[1]*d[14]-d[2]*d[13]) + d[12]*(d[1]*d[10]-d[2]*d[9])
+        val c32 = -(d[0]*(d[5]*d[14]-d[6]*d[13]) - d[4]*(d[1]*d[14]-d[2]*d[13]) + d[12]*(d[1]*d[6]-d[2]*d[5]))
+        val c33 = d[0]*(d[5]*d[10]-d[6]*d[9]) - d[4]*(d[1]*d[10]-d[2]*d[9]) + d[8]*(d[1]*d[6]-d[2]*d[5])
+
+        Mat4([
+            c00*inv_det, c01*inv_det, c02*inv_det, c03*inv_det,
+            c10*inv_det, c11*inv_det, c12*inv_det, c13*inv_det,
+            c20*inv_det, c21*inv_det, c22*inv_det, c23*inv_det,
+            c30*inv_det, c31*inv_det, c32*inv_det, c33*inv_det
+        ])
+
+
+# ============================================================================
+# Mat4d - 4x4 Matrix (f64, column-major)
+# ============================================================================
+
+class Mat4d:
+    """4x4 matrix for 3D transformations. Column-major storage, f64 precision."""
+    data: [f64; 16]
+
+    fn __init__(data: [f64; 16]):
+        self.data = data
+
+    static fn identity() -> Mat4d:
+        Mat4d([
+            1.0, 0.0, 0.0, 0.0,
+            0.0, 1.0, 0.0, 0.0,
+            0.0, 0.0, 1.0, 0.0,
+            0.0, 0.0, 0.0, 1.0
+        ])
+
+    static fn translation(x: f64, y: f64, z: f64) -> Mat4d:
+        Mat4d([
+            1.0, 0.0, 0.0, 0.0,
+            0.0, 1.0, 0.0, 0.0,
+            0.0, 0.0, 1.0, 0.0,
+            x,   y,   z,   1.0
+        ])
+
+    static fn rotation_x(angle: f64) -> Mat4d:
+        val c = angle.cos()
+        val s = angle.sin()
+        Mat4d([
+            1.0, 0.0, 0.0, 0.0,
+            0.0, c,   s,   0.0,
+            0.0, -s,  c,   0.0,
+            0.0, 0.0, 0.0, 1.0
+        ])
+
+    static fn rotation_y(angle: f64) -> Mat4d:
+        val c = angle.cos()
+        val s = angle.sin()
+        Mat4d([
+            c,   0.0, -s,  0.0,
+            0.0, 1.0, 0.0, 0.0,
+            s,   0.0, c,   0.0,
+            0.0, 0.0, 0.0, 1.0
+        ])
+
+    static fn rotation_z(angle: f64) -> Mat4d:
+        val c = angle.cos()
+        val s = angle.sin()
+        Mat4d([
+            c,   s,   0.0, 0.0,
+            -s,  c,   0.0, 0.0,
+            0.0, 0.0, 1.0, 0.0,
+            0.0, 0.0, 0.0, 1.0
+        ])
+
+    static fn scale(sx: f64, sy: f64, sz: f64) -> Mat4d:
+        Mat4d([
+            sx,  0.0, 0.0, 0.0,
+            0.0, sy,  0.0, 0.0,
+            0.0, 0.0, sz,  0.0,
+            0.0, 0.0, 0.0, 1.0
+        ])
+
+    fn mul(other: Mat4d) -> Mat4d:
+        var result = [0.0; 16]
+        for col in 0..4:
+            for row in 0..4:
+                var sum: f64 = 0.0
+                for k in 0..4:
+                    sum = sum + self.data[k * 4 + row] * other.data[col * 4 + k]
+                result[col * 4 + row] = sum
+        Mat4d(result)
+
+    fn transpose() -> Mat4d:
+        var result = [0.0; 16]
+        for col in 0..4:
+            for row in 0..4:
+                result[col * 4 + row] = self.data[row * 4 + col]
+        Mat4d(result)
+
+    fn transform_point(p: Vec3d) -> Vec3d:
+        use .vec3.Vec3d
+        val x = self.data[0] * p.x + self.data[4] * p.y + self.data[8]  * p.z + self.data[12]
+        val y = self.data[1] * p.x + self.data[5] * p.y + self.data[9]  * p.z + self.data[13]
+        val z = self.data[2] * p.x + self.data[6] * p.y + self.data[10] * p.z + self.data[14]
+        Vec3d(x, y, z)
+
+    fn transform_vec3(v: Vec3d) -> Vec3d:
+        use .vec3.Vec3d
+        val x = self.data[0] * v.x + self.data[4] * v.y + self.data[8]  * v.z
+        val y = self.data[1] * v.x + self.data[5] * v.y + self.data[9]  * v.z
+        val z = self.data[2] * v.x + self.data[6] * v.y + self.data[10] * v.z
+        Vec3d(x, y, z)
+
+    fn to_mat3() -> Mat3d:
+        use .mat3.Mat3d
+        Mat3d([
+            self.data[0], self.data[1], self.data[2],
+            self.data[4], self.data[5], self.data[6],
+            self.data[8], self.data[9], self.data[10]
+        ])

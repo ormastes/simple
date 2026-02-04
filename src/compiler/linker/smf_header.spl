@@ -1,0 +1,404 @@
+# SMF Header - Complete 128-byte header structure for SMF format
+#
+# This module defines the SmfHeader struct which represents the complete
+# 128-byte header used in Simple Module Format (SMF) v1.1.
+#
+# The header is laid out in a C-compatible repr(C) format with exactly
+# 128 bytes, designed to be written as a trailer at EOF-128 in v1.1 files.
+#
+# Layout (128 bytes total):
+# - Identification (8 bytes): magic, version, platform, arch
+# - Flags (20 bytes): flags, compression, section info
+# - Symbols (16 bytes): symbol table metadata
+# - Execution (16 bytes): entry point, stub info
+# - Hashing (16 bytes): module and source hashes
+# - Hints (12 bytes): app type, window hints, prefetch
+# - Reserved (40 bytes): padding to 128 bytes
+#
+# Ported from: rust/runtime/src/loader/smf/header.rs
+
+use ./smf_enums (Platform, Arch, CompressionType, SmfAppType)
+
+# ============================================================================
+# Constants
+# ============================================================================
+
+val SMF_MAGIC: [u8] = [83, 77, 70, 0]  # "SMF\0"
+val SMF_HEADER_SIZE: i64 = 128
+
+# Flag constants
+val SMF_FLAG_EXECUTABLE: u32 = 0x0001
+val SMF_FLAG_RELOADABLE: u32 = 0x0002
+val SMF_FLAG_DEBUG_INFO: u32 = 0x0004
+val SMF_FLAG_PIC: u32 = 0x0008
+val SMF_FLAG_HAS_STUB: u32 = 0x0010  # v1.1: File has executable stub
+
+# ============================================================================
+# SmfHeader Struct
+# ============================================================================
+
+"""Complete SMF header structure (128 bytes).
+
+The SmfHeader represents the complete header layout for SMF v1.1 files.
+In v1.1, the header is written at EOF-128 as a trailer, allowing for
+executable stubs to be prepended to SMF files.
+
+Structure (128 bytes total):
+- Identification (8): magic[4], version_major, version_minor, platform, arch
+- Flags (20): flags, compression, compression_level, reserved_compression[2],
+              section_count, section_table_offset
+- Symbols (16): symbol_table_offset, symbol_count, exported_count
+- Execution (16): entry_point, stub_size, smf_data_offset
+- Hashing (16): module_hash, source_hash
+- Hints (12): app_type, window_width, window_height, prefetch_hint,
+              prefetch_file_count, reserved[5]
+- Reserved (40): padding to reach 128 bytes
+"""
+struct SmfHeader:
+    # Identification (8 bytes)
+    magic: [u8]              # Magic number "SMF\0" (4 bytes)
+    version_major: u8        # Major version (1)
+    version_minor: u8        # Minor version (1)
+    platform: u8             # Platform identifier
+    arch: u8                 # Architecture identifier
+
+    # Flags and counts (20 bytes) - v1.1 adds compression
+    flags: u32               # Feature flags
+    compression: u8          # v1.1: 0=none, 1=zstd, 2=lz4
+    compression_level: u8    # v1.1: 0=default, 1-22=level
+    reserved_compression: [u8]  # v1.1: 2 bytes reserved
+    section_count: u32       # Number of sections
+    section_table_offset: u64  # Offset to section table
+
+    # Symbol table (16 bytes)
+    symbol_table_offset: u64  # Offset to symbol table
+    symbol_count: u32         # Number of symbols
+    exported_count: u32       # Number of exported symbols
+
+    # Execution (16 bytes) - v1.1 adds stub fields
+    entry_point: u64          # Entry point address
+    stub_size: u32            # v1.1: Size of executable stub (0=pure SMF)
+    smf_data_offset: u32      # v1.1: Offset where SMF data begins
+
+    # Hashing (16 bytes)
+    module_hash: u64          # Hash of module content
+    source_hash: u64          # Hash of source files
+
+    # Startup optimization hints (12 bytes)
+    app_type: u8              # Application type (0=cli, 1=tui, 2=gui, 3=service, 4=repl)
+    window_width: u16         # Window width hint (GUI apps)
+    window_height: u16        # Window height hint (GUI apps)
+    prefetch_hint: u8         # Prefetch hint: 0=no, 1=yes
+    prefetch_file_count: u8   # Expected number of files to prefetch
+    reserved_hints: [u8]      # 5 bytes reserved
+
+    # Reserved (40 bytes) - padding to 128 bytes total
+    reserved: [u8]            # 40 bytes reserved for future use
+
+impl SmfHeader:
+    # ========================================================================
+    # Constructors
+    # ========================================================================
+
+    """Create a new SMF v1.1 header with default values.
+
+    Args:
+        platform: Target platform
+        arch: Target architecture
+
+    Returns:
+        New SmfHeader with v1.1 defaults
+    """
+    static fn new_v1_1(platform: Platform, arch: Arch) -> SmfHeader:
+        SmfHeader(
+            magic: SMF_MAGIC,
+            version_major: 1,
+            version_minor: 1,
+            platform: platform.to_u8(),
+            arch: arch.to_u8(),
+            flags: 0,
+            compression: 0,
+            compression_level: 0,
+            reserved_compression: [0, 0],
+            section_count: 0,
+            section_table_offset: 0,
+            symbol_table_offset: 0,
+            symbol_count: 0,
+            exported_count: 0,
+            entry_point: 0,
+            stub_size: 0,
+            smf_data_offset: 0,
+            module_hash: 0,
+            source_hash: 0,
+            app_type: 0,
+            window_width: 1280,
+            window_height: 720,
+            prefetch_hint: 0,
+            prefetch_file_count: 0,
+            reserved_hints: [0, 0, 0, 0, 0],
+            reserved: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        )
+
+    # ========================================================================
+    # Version Methods
+    # ========================================================================
+
+    """Get the version as (major, minor) tuple."""
+    fn version() -> (u8, u8):
+        (self.version_major, self.version_minor)
+
+    """Check if this is a v1.0 header."""
+    fn is_v1_0() -> bool:
+        self.version_major == 1 and self.version_minor == 0
+
+    """Check if this is a v1.1 header."""
+    fn is_v1_1() -> bool:
+        self.version_major == 1 and self.version_minor == 1
+
+    # ========================================================================
+    # Platform and Architecture Methods
+    # ========================================================================
+
+    """Get the platform from the header."""
+    fn get_platform() -> Platform:
+        Platform.from_u8(self.platform)
+
+    """Set the platform in the header."""
+    me set_platform(platform: Platform):
+        self.platform = platform.to_u8()
+
+    """Get the architecture from the header."""
+    fn get_arch() -> Arch:
+        Arch.from_u8(self.arch)
+
+    """Set the architecture in the header."""
+    me set_arch(arch: Arch):
+        self.arch = arch.to_u8()
+
+    # ========================================================================
+    # Flag Methods
+    # ========================================================================
+
+    """Check if the SMF is executable."""
+    fn is_executable() -> bool:
+        (self.flags & SMF_FLAG_EXECUTABLE) != 0
+
+    """Set the executable flag."""
+    me set_executable(executable: bool):
+        if executable:
+            self.flags = self.flags | SMF_FLAG_EXECUTABLE
+        else:
+            self.flags = self.flags & (~SMF_FLAG_EXECUTABLE)
+
+    """Check if the SMF is reloadable (hot-reload support)."""
+    fn is_reloadable() -> bool:
+        (self.flags & SMF_FLAG_RELOADABLE) != 0
+
+    """Set the reloadable flag."""
+    me set_reloadable(reloadable: bool):
+        if reloadable:
+            self.flags = self.flags | SMF_FLAG_RELOADABLE
+        else:
+            self.flags = self.flags & (~SMF_FLAG_RELOADABLE)
+
+    """Check if the SMF has debug info."""
+    fn has_debug_info() -> bool:
+        (self.flags & SMF_FLAG_DEBUG_INFO) != 0
+
+    """Set the debug info flag."""
+    me set_debug_info(has_debug: bool):
+        if has_debug:
+            self.flags = self.flags | SMF_FLAG_DEBUG_INFO
+        else:
+            self.flags = self.flags & (~SMF_FLAG_DEBUG_INFO)
+
+    """Check if the SMF is position-independent code (PIC)."""
+    fn is_pic() -> bool:
+        (self.flags & SMF_FLAG_PIC) != 0
+
+    """Set the PIC flag."""
+    me set_pic(pic: bool):
+        if pic:
+            self.flags = self.flags | SMF_FLAG_PIC
+        else:
+            self.flags = self.flags & (~SMF_FLAG_PIC)
+
+    """Check if the file has an executable stub (v1.1+)."""
+    fn has_stub() -> bool:
+        (self.flags & SMF_FLAG_HAS_STUB) != 0
+
+    # ========================================================================
+    # Compression Methods (v1.1+)
+    # ========================================================================
+
+    """Check if sections are compressed (v1.1+)."""
+    fn is_compressed() -> bool:
+        self.compression != 0
+
+    """Get the compression algorithm (v1.1+)."""
+    fn get_compression() -> CompressionType:
+        CompressionType.from_u8(self.compression)
+
+    """Set compression settings (v1.1+).
+
+    Args:
+        compression: Compression algorithm
+        level: Compression level (0=default, 1-22=specific level)
+    """
+    me set_compression(compression: CompressionType, level: u8):
+        self.compression = compression.to_u8()
+        self.compression_level = level
+
+    # ========================================================================
+    # Stub Methods (v1.1+)
+    # ========================================================================
+
+    """Get the stub size (v1.1+)."""
+    fn get_stub_size() -> u32:
+        self.stub_size
+
+    """Get the SMF data offset (v1.1+)."""
+    fn get_smf_data_offset() -> u32:
+        self.smf_data_offset
+
+    """Set stub information (v1.1+).
+
+    Automatically sets the HAS_STUB flag if stub_size > 0.
+
+    Args:
+        stub_size: Size of the executable stub in bytes (0=pure SMF)
+        smf_data_offset: Offset where SMF data begins
+    """
+    me set_stub_info(stub_size: u32, smf_data_offset: u32):
+        self.stub_size = stub_size
+        self.smf_data_offset = smf_data_offset
+        if stub_size > 0:
+            self.flags = self.flags | SMF_FLAG_HAS_STUB
+
+    # ========================================================================
+    # App Type and Hints Methods
+    # ========================================================================
+
+    """Get the application type from the header."""
+    fn get_app_type() -> SmfAppType:
+        SmfAppType.from_u8(self.app_type)
+
+    """Set the application type in the header."""
+    me set_app_type(app_type: SmfAppType):
+        self.app_type = app_type.to_u8()
+
+    """Set window hints for GUI applications.
+
+    Args:
+        width: Window width in pixels
+        height: Window height in pixels
+    """
+    me set_window_hints(width: u16, height: u16):
+        self.window_width = width
+        self.window_height = height
+
+    """Check if prefetching is recommended."""
+    fn should_prefetch() -> bool:
+        self.prefetch_hint != 0
+
+    """Enable prefetching and set expected file count.
+
+    Args:
+        enabled: Whether prefetching is enabled
+        file_count: Expected number of files to prefetch
+    """
+    me set_prefetch_hint(enabled: bool, file_count: u8):
+        self.prefetch_hint = if enabled: 1 else: 0
+        self.prefetch_file_count = file_count
+
+    """Get the expected number of files to prefetch."""
+    fn expected_prefetch_count() -> i64:
+        self.prefetch_file_count as i64
+
+    # ========================================================================
+    # Serialization Methods
+    # ========================================================================
+
+    """Serialize the header to bytes (exactly 128 bytes).
+
+    Returns:
+        Byte array containing the serialized header (128 bytes)
+    """
+    fn to_bytes() -> [u8]:
+        var bytes: [u8] = []
+
+        # Identification (8 bytes)
+        bytes.append_all(self.magic)
+        bytes.push(self.version_major)
+        bytes.push(self.version_minor)
+        bytes.push(self.platform)
+        bytes.push(self.arch)
+
+        # Flags and counts (20 bytes)
+        bytes.append_all(u32_to_bytes(self.flags))
+        bytes.push(self.compression)
+        bytes.push(self.compression_level)
+        bytes.append_all(self.reserved_compression)
+        bytes.append_all(u32_to_bytes(self.section_count))
+        bytes.append_all(u64_to_bytes(self.section_table_offset))
+
+        # Symbol table (16 bytes)
+        bytes.append_all(u64_to_bytes(self.symbol_table_offset))
+        bytes.append_all(u32_to_bytes(self.symbol_count))
+        bytes.append_all(u32_to_bytes(self.exported_count))
+
+        # Execution (16 bytes)
+        bytes.append_all(u64_to_bytes(self.entry_point))
+        bytes.append_all(u32_to_bytes(self.stub_size))
+        bytes.append_all(u32_to_bytes(self.smf_data_offset))
+
+        # Hashing (16 bytes)
+        bytes.append_all(u64_to_bytes(self.module_hash))
+        bytes.append_all(u64_to_bytes(self.source_hash))
+
+        # Hints (12 bytes)
+        bytes.push(self.app_type)
+        bytes.append_all(u16_to_bytes(self.window_width))
+        bytes.append_all(u16_to_bytes(self.window_height))
+        bytes.push(self.prefetch_hint)
+        bytes.push(self.prefetch_file_count)
+        bytes.append_all(self.reserved_hints)
+
+        # Reserved (40 bytes)
+        bytes.append_all(self.reserved)
+
+        bytes
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+"""Convert u16 to bytes (little-endian)."""
+fn u16_to_bytes(value: u16) -> [u8]:
+    [
+        (value & 0xFF) as u8,
+        ((value >> 8) & 0xFF) as u8
+    ]
+
+"""Convert u32 to bytes (little-endian)."""
+fn u32_to_bytes(value: u32) -> [u8]:
+    [
+        (value & 0xFF) as u8,
+        ((value >> 8) & 0xFF) as u8,
+        ((value >> 16) & 0xFF) as u8,
+        ((value >> 24) & 0xFF) as u8
+    ]
+
+"""Convert u64 to bytes (little-endian)."""
+fn u64_to_bytes(value: u64) -> [u8]:
+    [
+        (value & 0xFF) as u8,
+        ((value >> 8) & 0xFF) as u8,
+        ((value >> 16) & 0xFF) as u8,
+        ((value >> 24) & 0xFF) as u8,
+        ((value >> 32) & 0xFF) as u8,
+        ((value >> 40) & 0xFF) as u8,
+        ((value >> 48) & 0xFF) as u8,
+        ((value >> 56) & 0xFF) as u8
+    ]

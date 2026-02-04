@@ -1,0 +1,107 @@
+# GC Manual Borrow - GC safety model generation
+# Generates Lean verification for GC with manual borrow checking
+
+use verification.lean.codegen as codegen
+
+fn regenerate_gc_manual_borrow() -> text:
+    gen = codegen.LeanCodegen.create("GcManualBorrow")
+
+    # Namespace
+    gen = gen.add_namespace("GcManualBorrow")
+
+    # Doc comment
+    gen = gen.add_doc_comment("A tiny GC + manual-pointer state: `live` holds objects managed by the GC,\n    `borrowed` tracks outstanding borrows (manual pins) that must stay live.")
+
+    # GcState structure with defaults
+    gc_state = codegen.build_class("GcState", [
+        ("live", codegen.make_list_type(codegen.make_simple_type("Nat"))),
+        ("borrowed", codegen.make_list_type(codegen.make_simple_type("Nat")))
+    ])
+    gen = gen.add_structure(gc_state)
+
+    # safe definition
+    safe_def = codegen.build_function(
+        "safe",
+        [("s", codegen.make_simple_type("GcState"))],
+        codegen.make_simple_type("Prop"),
+        "∀ id, id ∈ s.borrowed → id ∈ s.live"
+    )
+    gen = gen.add_function(safe_def)
+    gen = gen.add_doc_comment("Safety invariant: every borrowed object must still be live.")
+
+    # allocate function
+    allocate_def = codegen.build_function(
+        "allocate",
+        [
+            ("s", codegen.make_simple_type("GcState")),
+            ("id", codegen.make_simple_type("Nat"))
+        ],
+        codegen.make_simple_type("GcState"),
+        "{{ s with live := id . s.live }}"
+    )
+    gen = gen.add_function(allocate_def)
+
+    # borrow function
+    borrow_def = codegen.build_function(
+        "borrow",
+        [
+            ("s", codegen.make_simple_type("GcState")),
+            ("id", codegen.make_simple_type("Nat"))
+        ],
+        codegen.make_simple_type("GcState"),
+        "if h : id ∈ s.live then {{ s with borrowed := id . s.borrowed }} else s"
+    )
+    gen = gen.add_function(borrow_def)
+
+    # release function
+    release_def = codegen.build_function(
+        "release",
+        [
+            ("s", codegen.make_simple_type("GcState")),
+            ("id", codegen.make_simple_type("Nat"))
+        ],
+        codegen.make_simple_type("GcState"),
+        "{{ s with borrowed := s.borrowed.erase id }}"
+    )
+    gen = gen.add_function(release_def)
+
+    # collectSafe function
+    gen = gen.add_doc_comment("GC may drop a live object only when it is not borrowed.")
+    collect_safe_def = codegen.build_function(
+        "collectSafe",
+        [
+            ("s", codegen.make_simple_type("GcState")),
+            ("id", codegen.make_simple_type("Nat"))
+        ],
+        codegen.make_simple_type("GcState"),
+        "if h : id ∈ s.borrowed then s else {{ s with live := s.live.erase id }}"
+    )
+    gen = gen.add_function(collect_safe_def)
+
+    # Theorem: borrow_preserves with full proof
+    borrow_preserves = codegen.build_theorem(
+        "borrow_preserves",
+        [("s", "GcState"), ("id", "Nat"), ("hs", "safe s")],
+        "safe (borrow s id)",
+        "intro x hx\nsimp only [borrow] at hx ⊢\nby_cases hlive : id ∈ s.live\n· simp only [hlive, ↓reduceDIte] at hx ⊢\n  cases hx with\n  | head => exact hlive\n  | tail _ htail => exact hs x htail\n· simp only [hlive, ↓reduceDIte] at hx ⊢\n  exact hs x hx"
+    )
+    gen = gen.add_theorem(borrow_preserves)
+
+    # Theorem: collect_preserves with full proof
+    collect_preserves = codegen.build_theorem(
+        "collect_preserves",
+        [("s", "GcState"), ("id", "Nat"), ("hs", "safe s")],
+        "safe (collectSafe s id)",
+        "intro x hx\nsimp only [collectSafe] at hx ⊢\nby_cases hborrowed : id ∈ s.borrowed\n· simp only [hborrowed, ↓reduceDIte] at hx ⊢\n  exact hs x hx\n· simp only [hborrowed, ↓reduceDIte] at hx ⊢\n  have hlive := hs x hx\n  have hne : x ≠ id := fun heq => hborrowed (heq ▸ hx)\n  exact List.mem_erase_of_ne hne |>.mpr hlive"
+    )
+    gen = gen.add_theorem(collect_preserves)
+
+    # End namespace
+    gen = gen.end_namespace("GcManualBorrow")
+
+    return gen.emit()
+
+# ============================================================================
+# 4. ManualPointerBorrow - Borrow checker model (148 lines)
+# ============================================================================
+

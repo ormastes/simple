@@ -1,0 +1,374 @@
+///
+Module: sdn.document
+
+Editable SDN document API with formatting preservation.
+
+Provides:
+- Document wrapper for parsed SDN
+- Path-based mutation (set, delete, push)
+- Serialization (to_sdn, to_json)
+- File I/O (from_file, write_file)
+- Modification tracking
+
+Usage:
+    use sdn.document
+    val doc = SdnDocument.parse("name: Alice\nage: 30")
+    doc.set("age", SdnValue.i32(31))
+    val sdn_text = doc.to_sdn()
+///
+
+use error.{SdnError, Span}
+use parser.parse
+use value.SdnValue
+use serializer.{to_sdn, to_json}
+
+# File I/O (using FFI temporarily until io.fs is fully implemented)
+extern fn rt_file_read_text(path: str) -> str
+extern fn rt_file_write_text(path: str, content: str) -> i64
+extern fn rt_file_exists(path: str) -> bool
+
+# Public exports
+export SdnDocument
+
+/// Editable SDN document that preserves formatting where possible
+class SdnDocument:
+    source: text           # Original source text
+    root: SdnValue          # Parsed value tree
+    modified: bool          # Track if document has been modified
+
+    static fn parse(source: text) -> Result<SdnDocument, SdnError>:
+        """Parse source into an editable document"""
+        match parse(source):
+            case Ok(root):
+                return Ok(SdnDocument(
+                    source: source,
+                    root: root,
+                    modified: false
+                ))
+            case Err(e):
+                return Err(e)
+
+    static fn from_file(path: text) -> Result<SdnDocument, SdnError>:
+        """Load document from file"""
+        if not rt_file_exists(path):
+            return Err(SdnError.IoError("File not found: {path}"))
+
+        val source = rt_file_read_text(path)
+        if source == "":
+            return Err(SdnError.IoError("Failed to read file: {path}"))
+
+        SdnDocument.parse(source)
+
+    fn root() -> SdnValue:
+        """Get the root value"""
+        return self.root
+
+    me root_mut() -> SdnValue:
+        """Get mutable root value"""
+        self.modified = true
+        return self.root
+
+    fn get(path: text) -> Option<SdnValue>:
+        """Get value at path (e.g., \"server.port\")"""
+        return self.root.get_path(path)
+
+    me get_mut(path: text) -> Option<SdnValue>:
+        """Get mutable value at path"""
+        self.modified = true
+        return self.root.get_path_mut(path)
+
+    me set(path: text, value: SdnValue) -> Result<Nil, SdnError>:
+        """Set value at path"""
+        self.modified = true
+
+        val parts = path.split(".")
+
+        if parts.len == 0:
+            return Err(SdnError.PathNotFound(path))
+
+        if parts.len == 1:
+            # Direct child of root
+            match self.root:
+                case SdnValue.Dict(mut dict):
+                    dict[parts[0]] = value
+                    return Ok(nil)
+                case _:
+                    return Err(SdnError.TypeMismatch("dict", self.root.type_name()))
+
+        # Navigate to parent
+        val parent_path = parts[0..parts.len-1].join(".")
+        val key = parts[parts.len - 1]
+
+        match self.root.get_path_mut(parent_path):
+            case Some(parent):
+                match parent:
+                    case SdnValue.Dict(mut dict):
+                        dict[key] = value
+                        return Ok(nil)
+                    case _:
+                        return Err(SdnError.TypeMismatch("dict", parent.type_name()))
+            case nil:
+                return Err(SdnError.PathNotFound(path))
+
+    me delete(path: text) -> Result<Nil, SdnError>:
+        """Delete value at path"""
+        self.modified = true
+
+        val parts = path.split(".")
+
+        if parts.len == 0:
+            return Err(SdnError.PathNotFound(path))
+
+        if parts.len == 1:
+            # Direct child of root
+            match self.root:
+                case SdnValue.Dict(mut dict):
+                    if dict.contains_key(parts[0]):
+                        dict.remove(parts[0])
+                        return Ok(nil)
+                    else:
+                        return Err(SdnError.PathNotFound(path))
+                case _:
+                    return Err(SdnError.PathNotFound(path))
+
+        # Navigate to parent
+        val parent_path = parts[0..parts.len-1].join(".")
+        val key = parts[parts.len - 1]
+
+        match self.root.get_path_mut(parent_path):
+            case Some(parent):
+                match parent:
+                    case SdnValue.Dict(mut dict):
+                        if dict.contains_key(key):
+                            dict.remove(key)
+                            return Ok(nil)
+                        else:
+                            return Err(SdnError.PathNotFound(path))
+                    case _:
+                        return Err(SdnError.PathNotFound(path))
+            case nil:
+                return Err(SdnError.PathNotFound(path))
+
+    me push(path: text, value: SdnValue) -> Result<Nil, SdnError>:
+        """Push value to array at path"""
+        self.modified = true
+
+        match self.root.get_path_mut(path):
+            case Some(mut arr):
+                if arr.push(value):
+                    return Ok(nil)
+                else:
+                    return Err(SdnError.TypeMismatch("array", arr.type_name()))
+            case nil:
+                return Err(SdnError.PathNotFound(path))
+
+    fn is_modified() -> bool:
+        """Check if document was modified"""
+        return self.modified
+
+    fn to_sdn() -> text:
+        """Render document back to SDN string"""
+        return to_sdn(self.root)
+
+    fn to_json() -> text:
+        """Render document as JSON string"""
+        return to_json(self.root)
+
+    fn write_file(path: text) -> Result<Nil, SdnError>:
+        """Write document to file"""
+        val content = self.to_sdn()
+        val result = rt_file_write_text(path, content)
+        if result == 0:
+            Ok(nil)
+        else:
+            Err(SdnError.IoError("Failed to write file: {path}"))
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    fn has_path(path: text) -> bool:
+        """Check if path exists in document.
+
+        Args:
+            path: Dot-separated path
+
+        Returns:
+            true if path exists
+
+        Example:
+            doc.has_path("server.port")  # → true
+        """
+        return self.get(path).is_some()
+
+    fn get_or_default(path: text, default: SdnValue) -> SdnValue:
+        """Get value at path or return default.
+
+        Args:
+            path: Dot-separated path
+            default: Default value
+
+        Returns:
+            Value at path or default
+
+        Example:
+            doc.get_or_default("server.port", SdnValue.i32(8080))
+        """
+        match self.get(path):
+            case Some(v): return v
+            case nil: return default
+
+    fn is_dict() -> bool:
+        """Check if root is a dictionary.
+
+        Returns:
+            true if root is dict
+
+        Example:
+            doc.is_dict()  # → true
+        """
+        match self.root:
+            case SdnValue.Dict(_): return true
+            case _: return false
+
+    fn is_array() -> bool:
+        """Check if root is an array.
+
+        Returns:
+            true if root is array
+
+        Example:
+            doc.is_array()  # → false
+        """
+        match self.root:
+            case SdnValue.Array(_): return true
+            case _: return false
+
+    fn is_empty() -> bool:
+        """Check if document is empty.
+
+        Returns:
+            true if root is empty dict or array
+
+        Example:
+            doc.is_empty()  # → false
+        """
+        match self.root:
+            case SdnValue.Dict(dict): return dict.is_empty()
+            case SdnValue.Array(arr): return arr.is_empty()
+            case _: return false
+
+    me reset_modified():
+        """Reset modification flag.
+
+        Example:
+            doc.reset_modified()
+        """
+        self.modified = false
+
+    fn clone() -> SdnDocument:
+        """Clone the document.
+
+        Returns:
+            New document copy
+
+        Example:
+            new_doc = doc.clone()
+        """
+        return SdnDocument(
+            source: self.source.clone(),
+            root: self.root.clone(),
+            modified: self.modified
+        )
+
+    me merge(other: SdnDocument) -> Result<Nil, SdnError>:
+        """Merge another document into this one.
+
+        Args:
+            other: Document to merge
+
+        Returns:
+            Ok if successful
+
+        Example:
+            doc.merge(other_doc)
+        """
+        match (self.root, other.root):
+            case (SdnValue.Dict(mut dict1), SdnValue.Dict(dict2)):
+                for (key, value) in dict2.items():
+                    dict1[key] = value
+                self.modified = true
+                return Ok(nil)
+            case _:
+                return Err(SdnError.TypeMismatch("dict", self.root.type_name()))
+
+    fn keys() -> Result<List<text>, SdnError>:
+        """Get all keys if root is dict.
+
+        Returns:
+            List of keys
+
+        Example:
+            doc.keys()  # → ["name", "age"]
+        """
+        match self.root:
+            case SdnValue.Dict(dict):
+                return Ok(dict.keys().collect())
+            case _:
+                return Err(SdnError.TypeMismatch("dict", self.root.type_name()))
+
+    fn len() -> usize:
+        """Get length of root collection.
+
+        Returns:
+            Number of elements
+
+        Example:
+            doc.len()  # → 5
+        """
+        match self.root:
+            case SdnValue.Dict(dict): return dict.len()
+            case SdnValue.Array(arr): return arr.len()
+            case _: return 0
+
+    fn contains_key(key: text) -> bool:
+        """Check if root dict contains key.
+
+        Args:
+            key: Key to check
+
+        Returns:
+            true if key exists
+
+        Example:
+            doc.contains_key("name")  # → true
+        """
+        match self.root:
+            case SdnValue.Dict(dict): return dict.contains_key(key)
+            case _: return false
+
+    fn get_type() -> text:
+        """Get root value type name.
+
+        Returns:
+            Type name string
+
+        Example:
+            doc.get_type()  # → "dict"
+        """
+        return self.root.type_name()
+
+    fn summary() -> text:
+        """Get summary of document.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            doc.summary()
+            # → "SdnDocument: dict with 5 keys (modified)"
+        """
+        val type_name = self.get_type()
+        val len = self.len()
+        val mod_str = if self.modified: " (modified)" else: ""
+        return "SdnDocument: {type_name} with {len} items{mod_str}"

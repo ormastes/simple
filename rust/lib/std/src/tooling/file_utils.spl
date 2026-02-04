@@ -1,0 +1,174 @@
+# File utilities for tooling and migration
+# Purpose: Common file operations for migration tools
+
+use fs.{glob}
+
+# Directories to exclude from file discovery
+fn get_excluded_dirs() -> List<text>:
+    [
+        "target",
+        ".git",
+        ".migration_backup",
+        ".simple",
+        "node_modules",
+        ".cache",
+        "build",
+        "dist",
+        ".pytest_cache",
+        "__pycache__"
+    ]
+
+# Check if a path contains any excluded directory
+fn is_excluded_path(path: text) -> bool:
+    val excluded = get_excluded_dirs()
+    var i = 0
+    while i < excluded.len():
+        val excluded_dir = excluded[i]
+        # Check if path contains "/excluded_dir/" or starts with "excluded_dir/"
+        if path.contains("/{excluded_dir}/") or path.starts_with("{excluded_dir}/"):
+            return true
+        i = i + 1
+    false
+
+# Filter a list of paths to remove excluded directories
+fn filter_excluded_paths(paths: List<text>) -> List<text>:
+    var result: List<text> = []
+    var i = 0
+    while i < paths.len():
+        val path = paths[i]
+        if not is_excluded_path(path):
+            result.append(path)
+        i = i + 1
+    result
+
+# Find all .spl files in a directory, excluding common build/cache directories
+fn find_spl_files(root_dir: text) -> List<text>:
+    match glob(root_dir, "**/*.spl"):
+        Ok(files):
+            filter_excluded_paths(files)
+        Err(_):
+            []
+
+# Count lines in a text
+fn count_lines(content: text) -> u64:
+    if content.is_empty():
+        return 0
+
+    var count: u64 = 1  # Start at 1 since even empty line is one line
+    var i = 0
+    while i < content.len():
+        if content.char_at(i) == '\n':
+            count = count + 1
+        i = i + 1
+    count
+
+# Count lines that differ between two texts
+fn count_changed_lines(old_content: text, new_content: text) -> u64:
+    # Split into lines
+    val old_lines = old_content.split("\n")
+    val new_lines = new_content.split("\n")
+
+    # Simple diff: count lines that are added or removed
+    var changed: u64 = 0
+
+    # Count removed lines (in old but not in new)
+    val max_len = if old_lines.len() > new_lines.len():
+        old_lines.len()
+    else:
+        new_lines.len()
+
+    var i = 0
+    while i < max_len:
+        # If we have both lines, compare them
+        if i < old_lines.len() and i < new_lines.len():
+            if old_lines[i] != new_lines[i]:
+                changed = changed + 1
+        else:
+            # Line added or removed
+            changed = changed + 1
+        i = i + 1
+
+    changed
+
+# Calculate simple diff statistics
+struct DiffStats:
+    lines_added: u64
+    lines_removed: u64
+    lines_changed: u64
+    total_changed: u64
+
+impl DiffStats:
+    static fn new() -> DiffStats:
+        DiffStats(
+            lines_added: 0,
+            lines_removed: 0,
+            lines_changed: 0,
+            total_changed: 0
+        )
+
+    static fn calculate(old_content: text, new_content: text) -> DiffStats:
+        val old_lines = old_content.split("\n")
+        val new_lines = new_content.split("\n")
+
+        var stats = DiffStats.new()
+
+        # Simple calculation
+        if old_lines.len() > new_lines.len():
+            stats.lines_removed = old_lines.len() - new_lines.len()
+        elif new_lines.len() > old_lines.len():
+            stats.lines_added = new_lines.len() - old_lines.len()
+
+        stats.lines_changed = count_changed_lines(old_content, new_content)
+        stats.total_changed = stats.lines_added + stats.lines_removed + stats.lines_changed
+
+        stats
+
+    fn summary() -> text:
+        var summary = ""
+        if self.lines_added > 0:
+            summary = summary + "+{self.lines_added} "
+        if self.lines_removed > 0:
+            summary = summary + "-{self.lines_removed} "
+        if self.lines_changed > 0:
+            summary = summary + "~{self.lines_changed} "
+        if summary.is_empty():
+            "no changes"
+        else:
+            summary.trim()
+
+# Common file patterns for different languages
+fn get_file_patterns() -> List<(text, text)>:
+    [
+        ("simple", "**/*.spl"),
+        ("rust", "**/*.rs"),
+        ("python", "**/*.py"),
+        ("javascript", "**/*.js"),
+        ("typescript", "**/*.ts"),
+        ("markdown", "**/*.md")
+    ]
+
+# Find files by language
+fn find_files_by_language(root_dir: text, language: text) -> List<text>:
+    val patterns = get_file_patterns()
+    var pattern = "**/*.spl"  # Default to Simple files
+
+    # Find matching pattern
+    var i = 0
+    while i < patterns.len():
+        val (lang, pat) = patterns[i]
+        if lang == language:
+            pattern = pat
+        i = i + 1
+
+    # Find files and filter
+    match glob(root_dir, pattern):
+        Ok(files):
+            filter_excluded_paths(files)
+        Err(_):
+            []
+
+# Export functions
+export find_spl_files, filter_excluded_paths, is_excluded_path
+export count_lines, count_changed_lines, DiffStats
+export find_files_by_language, get_file_patterns
+export get_excluded_dirs

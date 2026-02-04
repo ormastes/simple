@@ -1,0 +1,578 @@
+# Multi-Level Mode Configuration (#2051)
+# Configuration hierarchy: Test → Block → File → Directory → Project
+
+use execution_mode.{ExecutionMode, ModeSet, string_to_mode}
+
+## Failure Strategy
+enum FailureStrategy:
+    # Continue with next mode on failure (default)
+    SkipRemaining
+
+    # Stop all modes if any mode fails
+    FailAll
+
+    # Run all modes, report all failures at end
+    CollectAll
+
+impl FailureStrategy:
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    fn is_skip_remaining() -> bool:
+        """Check if strategy is SkipRemaining."""
+        match self:
+            case SkipRemaining: true
+            case _: false
+
+    fn is_fail_all() -> bool:
+        """Check if strategy is FailAll."""
+        match self:
+            case FailAll: true
+            case _: false
+
+    fn is_collect_all() -> bool:
+        """Check if strategy is CollectAll."""
+        match self:
+            case CollectAll: true
+            case _: false
+
+    fn should_stop_on_failure() -> bool:
+        """Check if should stop execution on first failure."""
+        return self.is_fail_all()
+
+    fn should_continue_on_failure() -> bool:
+        """Check if should continue despite failures."""
+        return not self.should_stop_on_failure()
+
+    fn to_string() -> text:
+        """Convert to string representation."""
+        return failure_strategy_to_string(self)
+
+    fn summary() -> text:
+        """Get summary of failure strategy."""
+        val name = self.to_string()
+        var behavior = "collect all failures"
+        if self.is_skip_remaining():
+            behavior = "skip remaining modes on failure"
+        elif self.is_fail_all():
+            behavior = "stop all modes on failure"
+        return "FailureStrategy: " + name + " (" + behavior + ")"
+
+## Mode Configuration
+struct ModeConfig:
+    modes: Option<ModeSet>
+    skip_modes: Option<ModeSet>
+    only_modes: Option<ModeSet>
+    failure_strategy: Option<FailureStrategy>
+    parent: Option<ModeConfig>
+    source: text  # Where this config came from (project, directory, file, test)
+
+## ModeConfig Implementation
+impl ModeConfig:
+    static fn new() -> ModeConfig:
+        ModeConfig(
+            modes: None,
+            skip_modes: None,
+            only_modes: None,
+            failure_strategy: None,
+            parent: None,
+            source: "default"
+        )
+
+    static fn with_source(source: text) -> ModeConfig:
+        ModeConfig(
+            modes: None,
+            skip_modes: None,
+            only_modes: None,
+            failure_strategy: None,
+            parent: None,
+            source: source
+        )
+
+    fn get_effective_source() -> text:
+        """Get the source of the effective mode configuration.
+
+        Walks up the parent chain to find which level set the modes.
+        """
+        if self.modes.is_some() or self.only_modes.is_some():
+            return self.source
+
+        match self.parent:
+            case Some(p): return p.get_effective_source()
+            case None: return self.source
+
+    fn with_parent(parent: ModeConfig) -> ModeConfig:
+        var config = ModeConfig.new()
+        config.parent = Some(parent)
+        return config
+
+    me set_modes(modes: ModeSet) -> ModeConfig:
+        self.modes = Some(modes)
+        return self
+
+    me set_skip_modes(modes: ModeSet) -> ModeConfig:
+        self.skip_modes = Some(modes)
+        return self
+
+    me set_only_modes(modes: ModeSet) -> ModeConfig:
+        self.only_modes = Some(modes)
+        return self
+
+    me set_failure_strategy(strategy: FailureStrategy) -> ModeConfig:
+        self.failure_strategy = Some(strategy)
+        return self
+
+    fn resolve_modes() -> ModeSet:
+        if self.only_modes.is_some():
+            return self.only_modes.unwrap()
+
+        var effective_modes = ModeSet.all()
+        if self.modes.is_some():
+            effective_modes = self.modes.unwrap()
+        elif self.parent.is_some():
+            effective_modes = self.parent.unwrap().resolve_modes()
+
+        val skip = self.resolve_skip_modes()
+        effective_modes = effective_modes.difference(skip)
+        return effective_modes
+
+    fn resolve_skip_modes() -> ModeSet:
+        var skip = ModeSet.new([])
+        if self.skip_modes.is_some():
+            skip = self.skip_modes.unwrap()
+
+        if self.parent.is_some():
+            val parent_skip = self.parent.unwrap().resolve_skip_modes()
+            skip = skip.union_with(parent_skip)
+
+        return skip
+
+    fn resolve_failure_strategy() -> FailureStrategy:
+        if self.failure_strategy.is_some():
+            return self.failure_strategy.unwrap()
+
+        if self.parent.is_some():
+            return self.parent.unwrap().resolve_failure_strategy()
+
+        return FailureStrategy.SkipRemaining
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    fn has_modes() -> bool:
+        """Check if modes are explicitly set."""
+        return self.modes.is_some()
+
+    fn has_skip_modes() -> bool:
+        """Check if skip modes are set."""
+        return self.skip_modes.is_some()
+
+    fn has_only_modes() -> bool:
+        """Check if only modes are set."""
+        return self.only_modes.is_some()
+
+    fn has_failure_strategy() -> bool:
+        """Check if failure strategy is explicitly set."""
+        return self.failure_strategy.is_some()
+
+    fn has_parent() -> bool:
+        """Check if config has a parent."""
+        return self.parent.is_some()
+
+    fn is_root_config() -> bool:
+        """Check if this is a root config (no parent)."""
+        return not self.has_parent()
+
+    fn uses_only_modes() -> bool:
+        """Check if using only_modes restriction."""
+        return self.has_only_modes()
+
+    fn is_inherited() -> bool:
+        """Check if config inherits from parent."""
+        return self.has_parent() and not self.has_modes() and not self.has_only_modes()
+
+    fn is_override() -> bool:
+        """Check if config overrides parent."""
+        return self.has_parent() and (self.has_modes() or self.has_only_modes())
+
+    fn get_effective_modes() -> ModeSet:
+        """Get the effective mode set after resolution."""
+        return self.resolve_modes()
+
+    fn get_effective_strategy() -> FailureStrategy:
+        """Get the effective failure strategy after resolution."""
+        return self.resolve_failure_strategy()
+
+    fn summary() -> text:
+        """Get summary of mode configuration."""
+        val modes = self.resolve_modes()
+        val strategy = self.resolve_failure_strategy()
+        val mode_count = modes.size()
+        var has_parent_str = "root"
+        if self.has_parent():
+            has_parent_str = "inherited"
+        return "ModeConfig: " + mode_count.to_string() + " modes, " + strategy.to_string() + " strategy (" + has_parent_str + ")"
+
+## Configuration Levels
+enum ConfigLevel:
+    Project
+    Directory
+    File
+    Block
+    Test
+
+impl ConfigLevel:
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    fn is_project() -> bool:
+        """Check if this is Project level."""
+        match self:
+            case Project: true
+            case _: false
+
+    fn is_directory() -> bool:
+        """Check if this is Directory level."""
+        match self:
+            case Directory: true
+            case _: false
+
+    fn is_file() -> bool:
+        """Check if this is File level."""
+        match self:
+            case File: true
+            case _: false
+
+    fn is_block() -> bool:
+        """Check if this is Block level."""
+        match self:
+            case Block: true
+            case _: false
+
+    fn is_test() -> bool:
+        """Check if this is Test level."""
+        match self:
+            case Test: true
+            case _: false
+
+    fn specificity() -> i32:
+        """Get specificity level (higher is more specific)."""
+        match self:
+            case Project: 0
+            case Directory: 1
+            case File: 2
+            case Block: 3
+            case Test: 4
+
+    fn is_more_specific_than(other: ConfigLevel) -> bool:
+        """Check if this level is more specific than another."""
+        return self.specificity() > other.specificity()
+
+    fn is_less_specific_than(other: ConfigLevel) -> bool:
+        """Check if this level is less specific than another."""
+        return self.specificity() < other.specificity()
+
+    fn to_string() -> text:
+        """Convert to string representation."""
+        match self:
+            case Project: "project"
+            case Directory: "directory"
+            case File: "file"
+            case Block: "block"
+            case Test: "test"
+
+    fn summary() -> text:
+        """Get summary of config level."""
+        val name = self.to_string()
+        val spec = self.specificity()
+        return "ConfigLevel: " + name + " (specificity=" + spec.to_string() + ")"
+
+struct ConfigSource:
+    level: ConfigLevel
+    path: Option<text>
+    name: Option<text>
+
+impl ConfigSource:
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    fn has_path() -> bool:
+        """Check if path is set."""
+        return self.path.is_some()
+
+    fn has_name() -> bool:
+        """Check if name is set."""
+        return self.name.is_some()
+
+    fn is_project_level() -> bool:
+        """Check if source is at project level."""
+        return self.level.is_project()
+
+    fn is_directory_level() -> bool:
+        """Check if source is at directory level."""
+        return self.level.is_directory()
+
+    fn is_file_level() -> bool:
+        """Check if source is at file level."""
+        return self.level.is_file()
+
+    fn is_block_level() -> bool:
+        """Check if source is at block level."""
+        return self.level.is_block()
+
+    fn is_test_level() -> bool:
+        """Check if source is at test level."""
+        return self.level.is_test()
+
+    fn get_specificity() -> i32:
+        """Get specificity level of this source."""
+        return self.level.specificity()
+
+    fn summary() -> text:
+        """Get summary of config source."""
+        val level_str = self.level.to_string()
+        var path_str = "no path"
+        if self.has_path():
+            path_str = self.path.unwrap()
+        var name_str = "no name"
+        if self.has_name():
+            name_str = self.name.unwrap()
+        return "ConfigSource: " + level_str + " level - path=" + path_str + ", name=" + name_str
+
+## Project-Level Configuration
+struct ProjectConfig:
+    default_modes: ModeSet
+    mode_failure_strategy: FailureStrategy
+
+impl ProjectConfig:
+    static fn default() -> ProjectConfig:
+        ProjectConfig(
+            default_modes: ModeSet.all(),
+            mode_failure_strategy: FailureStrategy.SkipRemaining
+        )
+
+    fn to_mode_config() -> ModeConfig:
+        var config = ModeConfig.new()
+        config = config.set_modes(self.default_modes)
+        config = config.set_failure_strategy(self.mode_failure_strategy)
+        return config
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    fn uses_all_modes() -> bool:
+        """Check if using all available modes."""
+        return self.default_modes.equals(ModeSet.all())
+
+    fn mode_count() -> i32:
+        """Get number of default modes."""
+        return self.default_modes.size()
+
+    fn uses_skip_remaining() -> bool:
+        """Check if using SkipRemaining strategy."""
+        return self.mode_failure_strategy.is_skip_remaining()
+
+    fn uses_fail_all() -> bool:
+        """Check if using FailAll strategy."""
+        return self.mode_failure_strategy.is_fail_all()
+
+    fn uses_collect_all() -> bool:
+        """Check if using CollectAll strategy."""
+        return self.mode_failure_strategy.is_collect_all()
+
+    fn summary() -> text:
+        """Get summary of project configuration."""
+        val mode_count = self.mode_count()
+        val strategy = self.mode_failure_strategy.to_string()
+        return "ProjectConfig: " + mode_count.to_string() + " modes, " + strategy + " strategy"
+
+## Directory-Level Configuration
+struct DirectoryConfig:
+    modes: Option<ModeSet>
+    skip_modes: Option<ModeSet>
+    mode_failure_strategy: Option<FailureStrategy>
+
+impl DirectoryConfig:
+    static fn new() -> DirectoryConfig:
+        DirectoryConfig(
+            modes: None,
+            skip_modes: None,
+            mode_failure_strategy: None
+        )
+
+    fn to_mode_config(parent: ModeConfig) -> ModeConfig:
+        var config = ModeConfig.with_parent(parent)
+
+        if self.modes.is_some():
+            config = config.set_modes(self.modes.unwrap())
+
+        if self.skip_modes.is_some():
+            config = config.set_skip_modes(self.skip_modes.unwrap())
+
+        if self.mode_failure_strategy.is_some():
+            config = config.set_failure_strategy(self.mode_failure_strategy.unwrap())
+
+        return config
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    fn has_modes() -> bool:
+        """Check if modes are explicitly set."""
+        return self.modes.is_some()
+
+    fn has_skip_modes() -> bool:
+        """Check if skip modes are set."""
+        return self.skip_modes.is_some()
+
+    fn has_failure_strategy() -> bool:
+        """Check if failure strategy is set."""
+        return self.mode_failure_strategy.is_some()
+
+    fn is_empty() -> bool:
+        """Check if config has no settings."""
+        return not self.has_modes() and not self.has_skip_modes() and not self.has_failure_strategy()
+
+    fn has_any_settings() -> bool:
+        """Check if config has any settings."""
+        return not self.is_empty()
+
+    fn summary() -> text:
+        """Get summary of directory configuration."""
+        val parts = []
+        if self.has_modes():
+            parts.push("modes set")
+        if self.has_skip_modes():
+            parts.push("skip modes set")
+        if self.has_failure_strategy():
+            parts.push("strategy set")
+        if parts.is_empty():
+            return "DirectoryConfig: empty"
+        return "DirectoryConfig: " + parts.join(", ")
+
+## File-Level Configuration
+struct FileConfig:
+    modes: Option<ModeSet>
+    skip_modes: Option<ModeSet>
+    only_modes: Option<ModeSet>
+    mode_failure_strategy: Option<FailureStrategy>
+
+impl FileConfig:
+    static fn new() -> FileConfig:
+        FileConfig(
+            modes: None,
+            skip_modes: None,
+            only_modes: None,
+            mode_failure_strategy: None
+        )
+
+    fn to_mode_config(parent: ModeConfig) -> ModeConfig:
+        var config = ModeConfig.with_parent(parent)
+
+        if self.modes.is_some():
+            config = config.set_modes(self.modes.unwrap())
+
+        if self.skip_modes.is_some():
+            config = config.set_skip_modes(self.skip_modes.unwrap())
+
+        if self.only_modes.is_some():
+            config = config.set_only_modes(self.only_modes.unwrap())
+
+        if self.mode_failure_strategy.is_some():
+            config = config.set_failure_strategy(self.mode_failure_strategy.unwrap())
+
+        return config
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    fn has_modes() -> bool:
+        """Check if modes are explicitly set."""
+        return self.modes.is_some()
+
+    fn has_skip_modes() -> bool:
+        """Check if skip modes are set."""
+        return self.skip_modes.is_some()
+
+    fn has_only_modes() -> bool:
+        """Check if only modes are set."""
+        return self.only_modes.is_some()
+
+    fn has_failure_strategy() -> bool:
+        """Check if failure strategy is set."""
+        return self.mode_failure_strategy.is_some()
+
+    fn is_empty() -> bool:
+        """Check if config has no settings."""
+        return not self.has_modes() and not self.has_skip_modes() and not self.has_only_modes() and not self.has_failure_strategy()
+
+    fn has_any_settings() -> bool:
+        """Check if config has any settings."""
+        return not self.is_empty()
+
+    fn uses_only_modes() -> bool:
+        """Check if using only_modes restriction."""
+        return self.has_only_modes()
+
+    fn summary() -> text:
+        """Get summary of file configuration."""
+        val parts = []
+        if self.has_modes():
+            parts.push("modes set")
+        if self.has_skip_modes():
+            parts.push("skip modes set")
+        if self.has_only_modes():
+            parts.push("only modes set")
+        if self.has_failure_strategy():
+            parts.push("strategy set")
+        if parts.is_empty():
+            return "FileConfig: empty"
+        return "FileConfig: " + parts.join(", ")
+
+## Helper Functions
+
+fn string_to_failure_strategy(s: text) -> Option<FailureStrategy>:
+    match s:
+        case "skip_remaining" => Some(FailureStrategy.SkipRemaining)
+        case "fail_all" => Some(FailureStrategy.FailAll)
+        case "collect_all" => Some(FailureStrategy.CollectAll)
+        case _ => nil
+
+fn failure_strategy_to_string(strategy: FailureStrategy) -> text:
+    match strategy:
+        case FailureStrategy.SkipRemaining => "skip_remaining"
+        case FailureStrategy.FailAll => "fail_all"
+        case FailureStrategy.CollectAll => "collect_all"
+
+fn parse_mode_list(mode_names: List<text>) -> Option<ModeSet>:
+    var modes = []
+    var valid = true
+
+    for name in mode_names:
+        match string_to_mode(name):
+            case Some(mode) => modes.push(mode)
+            case nil => valid = false
+
+    if valid:
+        return Some(ModeSet.new(modes))
+    else:
+        return nil
+
+## Exports
+export FailureStrategy
+export ModeConfig
+export ProjectConfig
+export DirectoryConfig
+export FileConfig
+export ConfigLevel
+export ConfigSource
+export string_to_failure_strategy
+export failure_strategy_to_string
+export parse_mode_list

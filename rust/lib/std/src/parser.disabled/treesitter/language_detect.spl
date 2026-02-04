@@ -1,0 +1,293 @@
+# Language Detection for Tree-sitter
+# Automatically detect which grammar to use based on file extension, shebang, or content
+
+use core.string as string
+use core.collections as collections
+
+# Language detection result
+class DetectionResult:
+    language: text
+    confidence: f32  # 0.0 to 1.0
+
+    fn new(language: text, confidence: f32) -> DetectionResult:
+        DetectionResult(
+            language: language,
+            confidence: confidence
+        )
+
+# Language detector
+class LanguageDetector:
+    # Extension to language mapping
+    extension_map: Dict<text, text>
+    # Shebang patterns to language mapping
+    shebang_patterns: List<(text, text)>  # (pattern, language)
+
+    static fn new() -> LanguageDetector:
+        var detector = LanguageDetector(
+            extension_map: {},
+            shebang_patterns: []
+        )
+
+        # Initialize default mappings
+        detector.init_extension_map()
+        detector.init_shebang_patterns()
+
+        detector
+
+    # Initialize file extension mappings
+    me init_extension_map():
+        # Simple language
+        self.extension_map[".spl"] = "simple"
+        self.extension_map[".simple"] = "simple"
+
+        # Rust
+        self.extension_map[".rs"] = "rust"
+
+        # Python
+        self.extension_map[".py"] = "python"
+        self.extension_map[".pyw"] = "python"
+        self.extension_map[".pyi"] = "python"
+
+        # Ruby
+        self.extension_map[".rb"] = "ruby"
+        self.extension_map[".rbw"] = "ruby"
+        self.extension_map[".rake"] = "ruby"
+        self.extension_map[".gemspec"] = "ruby"
+
+        # Erlang
+        self.extension_map[".erl"] = "erlang"
+        self.extension_map[".hrl"] = "erlang"
+
+        # JavaScript/TypeScript
+        self.extension_map[".js"] = "javascript"
+        self.extension_map[".mjs"] = "javascript"
+        self.extension_map[".cjs"] = "javascript"
+        self.extension_map[".jsx"] = "javascript"
+        self.extension_map[".ts"] = "typescript"
+        self.extension_map[".tsx"] = "typescript"
+        self.extension_map[".mts"] = "typescript"
+        self.extension_map[".cts"] = "typescript"
+
+        # Go
+        self.extension_map[".go"] = "go"
+
+        # C/C++
+        self.extension_map[".c"] = "c"
+        self.extension_map[".h"] = "c"
+        self.extension_map[".cpp"] = "cpp"
+        self.extension_map[".cc"] = "cpp"
+        self.extension_map[".cxx"] = "cpp"
+        self.extension_map[".hpp"] = "cpp"
+        self.extension_map[".hh"] = "cpp"
+        self.extension_map[".hxx"] = "cpp"
+
+        # Additional common languages
+        self.extension_map[".java"] = "java"
+        self.extension_map[".scala"] = "scala"
+        self.extension_map[".kt"] = "kotlin"
+        self.extension_map[".swift"] = "swift"
+        self.extension_map[".sh"] = "bash"
+        self.extension_map[".bash"] = "bash"
+        self.extension_map[".zsh"] = "zsh"
+        self.extension_map[".fish"] = "fish"
+
+    # Initialize shebang pattern mappings
+    me init_shebang_patterns():
+        # Python
+        self.shebang_patterns.push(("python", "python"))
+        self.shebang_patterns.push(("python2", "python"))
+        self.shebang_patterns.push(("python3", "python"))
+
+        # Ruby
+        self.shebang_patterns.push(("ruby", "ruby"))
+
+        # Shell
+        self.shebang_patterns.push(("bash", "bash"))
+        self.shebang_patterns.push(("sh", "bash"))
+        self.shebang_patterns.push(("zsh", "zsh"))
+        self.shebang_patterns.push(("fish", "fish"))
+
+        # Node.js
+        self.shebang_patterns.push(("node", "javascript"))
+
+    # Detect language from file path
+    fn detect_from_path(file_path: text) -> Option<DetectionResult>:
+        # Extract file extension
+        val parts = file_path.split(".")
+        if parts.len() < 2:
+            return None
+
+        val extension = "." + parts[parts.len() - 1]
+
+        # Look up in extension map
+        match self.extension_map.get(extension):
+            case Some(language):
+                return Some(DetectionResult.new(language, 1.0))  # High confidence
+            case None:
+                return None
+
+    # Detect language from shebang line
+    fn detect_from_shebang(shebang: text) -> Option<DetectionResult>:
+        # Remove leading #! and whitespace
+        var line = shebang.trim()
+        if line.starts_with("#!"):
+            line = line.substring(2).trim()
+        else:
+            return None
+
+        # Check each shebang pattern
+        for (pattern, language) in self.shebang_patterns:
+            if line.contains(pattern):
+                return Some(DetectionResult.new(language, 0.9))  # High confidence
+
+        None
+
+    # Detect language from file content heuristics
+    fn detect_from_content(content: text) -> Option<DetectionResult>:
+        # Check first line for shebang
+        val lines = content.split("\n")
+        if lines.len() > 0:
+            val first_line = lines[0]
+            match self.detect_from_shebang(first_line):
+                case Some(result):
+                    return Some(result)
+                case None:
+                    ()
+
+        # Content-based heuristics
+        # Simple: Look for "fn ", "class ", "import "
+        if content.contains("fn ") and content.contains("import "):
+            val has_simple_syntax = content.contains(":") and not content.contains(";")
+            if has_simple_syntax:
+                return Some(DetectionResult.new("simple", 0.7))  # Medium confidence
+
+        # Rust: Look for "fn ", "impl ", "pub "
+        if content.contains("fn ") and content.contains("impl "):
+            if content.contains("pub ") or content.contains("use "):
+                return Some(DetectionResult.new("rust", 0.7))
+
+        # Python: Look for "def ", "import ", significant whitespace
+        if content.contains("def ") and content.contains("import "):
+            val has_python_syntax = content.contains("    ") or content.contains("\t")
+            if has_python_syntax:
+                return Some(DetectionResult.new("python", 0.7))
+
+        # Go: Look for "package ", "func ", "import "
+        if content.contains("package ") and content.contains("func "):
+            return Some(DetectionResult.new("go", 0.7))
+
+        # JavaScript: Look for "function ", "const ", "=>"
+        if content.contains("function ") or content.contains("=>"):
+            if content.contains("const ") or content.contains("val "):
+                return Some(DetectionResult.new("javascript", 0.6))  # Lower confidence
+
+        # C/C++: Look for "#include", "i32 main", "{"
+        if content.contains("#include"):
+            if content.contains("std.") or content.contains("namespace"):
+                return Some(DetectionResult.new("cpp", 0.7))
+            else:
+                return Some(DetectionResult.new("c", 0.7))
+
+        None
+
+    # Detect language with multiple strategies
+    fn detect(file_path: Option<text>, content: Option<text>) -> Option<DetectionResult>:
+        var results: List<DetectionResult> = []
+
+        # Try path-based detection first (highest confidence)
+        match file_path:
+            case Some(path):
+                match self.detect_from_path(path):
+                    case Some(result):
+                        return Some(result)  # Return immediately for high confidence
+                    case None:
+                        ()
+            case None:
+                ()
+
+        # Try content-based detection
+        match content:
+            case Some(text):
+                match self.detect_from_content(text):
+                    case Some(result):
+                        results.push(result)
+                    case None:
+                        ()
+            case None:
+                ()
+
+        # Return best result (highest confidence)
+        if results.len() > 0:
+            var best = results[0]
+            for result in results:
+                if result.confidence > best.confidence:
+                    best = result
+            return Some(best)
+
+        None
+
+    # Add custom extension mapping
+    me add_extension(extension: text, language: text):
+        self.extension_map[extension] = language
+
+    # Add custom shebang pattern
+    me add_shebang_pattern(pattern: text, language: text):
+        self.shebang_patterns.push((pattern, language))
+
+    # Get all supported languages
+    fn get_supported_languages() -> List<text>:
+        var languages: List<text> = []
+        var seen: Dict<text, bool> = {}
+
+        # Collect from extension map
+        for (_, language) in self.extension_map.items():
+            if not seen.contains_key(language):
+                languages.push(language)
+                seen[language] = true
+
+        # Collect from shebang patterns
+        for (_, language) in self.shebang_patterns:
+            if not seen.contains_key(language):
+                languages.push(language)
+                seen[language] = true
+
+        languages
+
+    # Check if language is supported
+    fn is_supported(language: text) -> bool:
+        val languages = self.get_supported_languages()
+        languages.contains(language)
+
+# Convenience functions
+
+# Detect language from file path
+fn detect_language_from_path(file_path: text) -> Option<text>:
+    val detector = LanguageDetector.new()
+    match detector.detect_from_path(file_path):
+        case Some(result):
+            return Some(result.language)
+        case None:
+            return None
+
+# Detect language from content
+fn detect_language_from_content(content: text) -> Option<text>:
+    val detector = LanguageDetector.new()
+    match detector.detect_from_content(content):
+        case Some(result):
+            return Some(result.language)
+        case None:
+            return None
+
+# Detect language using all available information
+fn detect_language(file_path: Option<text>, content: Option<text>) -> Option<text>:
+    val detector = LanguageDetector.new()
+    match detector.detect(file_path=file_path, content=content):
+        case Some(result):
+            return Some(result.language)
+        case None:
+            return None
+
+# Get list of all supported languages
+fn get_supported_languages() -> List<text>:
+    val detector = LanguageDetector.new()
+    detector.get_supported_languages()

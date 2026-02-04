@@ -1,0 +1,145 @@
+# SmallMap - Stack-allocated small map
+#
+# A map that stores small numbers of key-value pairs inline on the stack,
+# only spilling to heap allocation when capacity is exceeded.
+
+# Entry in the small map
+struct SmallMapEntry<K, V>:
+    key: K
+    value: V
+    occupied: bool
+
+# Small map with inline storage for up to N entries
+struct SmallMap<K, V, const N: i32>:
+    inline_data: [SmallMapEntry<K, V>; N]
+    heap_data: Option<Map<K, V>>
+    len: i32
+    inline_capacity: i32
+
+    static fn new() -> SmallMap<K, V, N>:
+        return SmallMap(
+            inline_data: [SmallMapEntry<K, V>; N].default(),
+            heap_data: Option.none(),
+            len: 0,
+            inline_capacity: N
+        )
+
+    fn len(self) -> i32:
+        return self.len
+
+    fn is_empty(self) -> bool:
+        return self.len == 0
+
+    fn is_inline(self) -> bool:
+        return self.heap_data.is_none()
+
+    fn contains_key(self, key: K) -> bool:
+        match self.heap_data:
+            Option.Some(map):
+                return map.contains_key(key)
+            nil:
+                for i in 0..self.inline_capacity:
+                    val entry = self.inline_data[i]
+                    if entry.occupied and entry.key == key:
+                        return true
+                return false
+
+    fn get(self, key: K) -> Option<V>:
+        match self.heap_data:
+            Option.Some(map):
+                return map.get(key)
+            nil:
+                for i in 0..self.inline_capacity:
+                    val entry = self.inline_data[i]
+                    if entry.occupied and entry.key == key:
+                        return Option.some(entry.value)
+                return Option.none()
+
+    me insert(self, key: K, value: V) -> Option<V>:
+        match self.heap_data:
+            Option.Some(map):
+                return map.insert(key, value)
+            nil:
+                # Check if key already exists
+                for i in 0..self.inline_capacity:
+                    val entry = self.inline_data[i]
+                    if entry.occupied and entry.key == key:
+                        val old = entry.value
+                        self.inline_data[i].value = value
+                        return Option.some(old)
+
+                # Find empty slot
+                for i in 0..self.inline_capacity:
+                    if not self.inline_data[i].occupied:
+                        self.inline_data[i] = SmallMapEntry(
+                            key: key,
+                            value: value,
+                            occupied: true
+                        )
+                        self.len = self.len + 1
+                        return Option.none()
+
+                # Spill to heap
+                var map: Map<K, V> = {}
+                for i in 0..self.inline_capacity:
+                    val entry = self.inline_data[i]
+                    if entry.occupied:
+                        map.insert(entry.key, entry.value)
+                map.insert(key, value)
+                self.heap_data = Option.some(map)
+                self.len = self.len + 1
+                return Option.none()
+
+    me remove(self, key: K) -> Option<V>:
+        match self.heap_data:
+            Option.Some(map):
+                val result = map.remove(key)
+                if result.is_some():
+                    self.len = self.len - 1
+                return result
+            nil:
+                for i in 0..self.inline_capacity:
+                    val entry = self.inline_data[i]
+                    if entry.occupied and entry.key == key:
+                        val old = entry.value
+                        self.inline_data[i].occupied = false
+                        self.len = self.len - 1
+                        return Option.some(old)
+                return Option.none()
+
+    me clear(self):
+        self.len = 0
+        self.heap_data = Option.none()
+        for i in 0..self.inline_capacity:
+            self.inline_data[i].occupied = false
+
+    fn keys(self) -> List<K>:
+        var result: List<K> = []
+        match self.heap_data:
+            Option.Some(map):
+                return map.keys()
+            nil:
+                for i in 0..self.inline_capacity:
+                    val entry = self.inline_data[i]
+                    if entry.occupied:
+                        result.push(entry.key)
+        return result
+
+    fn values(self) -> List<V>:
+        var result: List<V> = []
+        match self.heap_data:
+            Option.Some(map):
+                return map.values()
+            nil:
+                for i in 0..self.inline_capacity:
+                    val entry = self.inline_data[i]
+                    if entry.occupied:
+                        result.push(entry.value)
+        return result
+
+# Common type aliases
+type SmallMap4<K, V> = SmallMap<K, V, 4>
+type SmallMap8<K, V> = SmallMap<K, V, 8>
+type SmallMap16<K, V> = SmallMap<K, V, 16>
+
+export SmallMapEntry, SmallMap, SmallMap4, SmallMap8, SmallMap16

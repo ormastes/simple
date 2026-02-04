@@ -1,0 +1,369 @@
+# Dashboard Custom Alert Rules
+#
+# Allows users to define custom alert rules with simple DSL:
+#   coverage < 75.0
+#   todos.p0 > 10
+#   features.complete < 80%
+#   tests.failed > 5
+
+use tooling.dashboard.types
+use io.fs_helpers
+
+# =========================================================================
+# Alert Rule Types
+# =========================================================================
+
+enum ComparisonOp:
+    LessThan
+    GreaterThan
+    LessEqual
+    GreaterEqual
+    Equal
+    NotEqual
+
+enum RuleLevel:
+    Info
+    Warning
+    Critical
+
+class AlertRule:
+    """Custom alert rule."""
+    id: i32
+    metric: text
+    operator: ComparisonOp
+    threshold: f64
+    level: RuleLevel
+    enabled: bool
+    description: text
+
+    static fn new(
+        id: i32,
+        metric: text,
+        operator: ComparisonOp,
+        threshold: f64,
+        level: RuleLevel
+    ) -> AlertRule:
+        return AlertRule {id: id, metric: metric, operator: operator, threshold: threshold, level: level, enabled: true, description: ""}
+
+    fn with_description(desc: text) -> AlertRule:
+        self.description = desc
+        return self
+
+    fn evaluate(value: f64) -> bool:
+        """Evaluate if this rule is triggered."""
+        if not self.enabled:
+            return false
+
+        match self.operator:
+            | ComparisonOp ->:LessThan: value < self.threshold
+            | ComparisonOp ->:GreaterThan: value > self.threshold
+            | ComparisonOp ->:LessEqual: value <= self.threshold
+            | ComparisonOp ->:GreaterEqual: value >= self.threshold
+            | ComparisonOp ->:Equal: value == self.threshold
+            | ComparisonOp ->:NotEqual: value != self.threshold
+
+    fn to_string() -> text:
+        var s = "#{self.id}: "
+        s = "{s}{self.metric} "
+        s = "{s}{operator_to_string(self.operator)} "
+        s = "{s}{self.threshold} "
+        s = "{s}({level_to_string(self.level)})"
+        if not self.description.is_empty():
+            s = "{s} - {self.description}"
+        return s
+
+# =========================================================================
+# Rule Parser
+# =========================================================================
+
+fn parse_rule(rule_str: text, id: i32) -> Result<AlertRule, text>:
+    """Parse rule from simple DSL string.
+
+    Examples:
+        "coverage < 75.0"
+        "todos.p0 > 10"
+        "features < 80%"
+    """
+    val parts = rule_str.trim().split(" ")
+
+    if parts.len() < 3:
+        return Err("Invalid rule format. Expected: <metric> <op> <value>")
+
+    val metric = parts[0]
+    val op_str = parts[1]
+    val threshold_str = parts[2]
+
+    # Parse operator
+    val operator = match op_str:
+        | "<" -> ComparisonOp.LessThan
+        | ">" -> ComparisonOp.GreaterThan
+        | "<=" -> ComparisonOp.LessEqual
+        | ">=" -> ComparisonOp.GreaterEqual
+        | "==" -> ComparisonOp.Equal
+        | "!=" -> ComparisonOp.NotEqual
+        | _ -> ComparisonOp.LessThan  # Default to avoid Err type issue
+
+    # Parse threshold (strip % if present)
+    var threshold_value = threshold_str
+    if threshold_str.ends_with("%"):
+        threshold_value = threshold_str.slice(0, threshold_str.len() - 1)
+
+    val threshold = parse_f64(threshold_value)?
+
+    return Ok(AlertRule.new(id, metric, operator, threshold, RuleLevel.Warning))
+
+# =========================================================================
+# Rule Storage
+# =========================================================================
+
+class AlertRuleStore:
+    """In-memory store for alert rules."""
+    rules: List<AlertRule>
+    next_id: i32
+
+    static fn new() -> AlertRuleStore:
+        return AlertRuleStore {
+            rules: [],
+            next_id: 1
+        }
+
+    fn add_rule(metric: text, operator: ComparisonOp, threshold: f64, level: RuleLevel) -> AlertRule:
+        """Add a new alert rule."""
+        val rule = AlertRule.new(self.next_id, metric, operator, threshold, level)
+        self.rules.append(rule)
+        self.next_id = self.next_id + 1
+        return rule
+
+    fn remove_rule(id: i32) -> Result<(), text>:
+        """Remove an alert rule by ID."""
+        for i in 0..self.rules.len():
+            if self.rules[i].id == id:
+                self.rules.remove(i)
+                Ok(())
+        return Err("Rule not found: {id}")
+
+    fn get_rule(id: i32) -> Option<AlertRule>:
+        """Get a rule by ID."""
+        for rule in self.rules:
+            if rule.id == id:
+                Some(rule)
+        return nil
+
+    fn list_rules() -> List<AlertRule>:
+        """Get all rules."""
+        return self.rules
+
+    fn enable_rule(id: i32) -> Result<(), text>:
+        """Enable a rule."""
+        match self.get_rule(id):
+            | Some(rule) ->
+                rule.enabled = true
+                return Ok(())
+            | nil -> return Err("Rule not found: {id}")
+
+    fn disable_rule(id: i32) -> Result<(), text>:
+        """Disable a rule."""
+        match self.get_rule(id):
+            | Some(rule) ->
+                rule.enabled = false
+                return Ok(())
+            | nil -> return Err("Rule not found: {id}")
+
+# =========================================================================
+# Rule Evaluation
+# =========================================================================
+
+fn evaluate_rules(
+    rules: List<AlertRule>,
+    data: DashboardData
+) -> List<tuple<AlertRule, bool>>:
+    """Evaluate all rules against dashboard data.
+
+    Returns list of (rule, triggered) tuples.
+    """
+    var results: List<tuple<AlertRule, bool>> = []
+
+    for rule in rules:
+        if not rule.enabled:
+            continue
+
+        # Get metric value from data
+        val value = get_metric_value(rule.metric, data)
+
+        # Evaluate rule
+        val triggered = rule.evaluate(value)
+        results.append((rule, triggered))
+
+    return results
+
+fn get_metric_value(metric_name: text, data: DashboardData) -> f64:
+    """Extract metric value from dashboard data."""
+    match metric_name:
+        | "coverage" -> return data.overall_coverage()
+        | "features" -> return data.features_completion_percent()
+        | "todos" -> return data.total_todos() as f64
+        | "todos.p0" -> return data.critical_todos() as f64
+        | "tests" -> return data.sspec_tests.len() as f64
+        | _ -> return 0.0
+
+fn features_completion_percent(data: DashboardData) -> f64:
+    """Calculate feature completion percentage."""
+    if data.total_features() == 0:
+        return 0.0
+    return ((data.completed_features() as f64) / (data.total_features() as f64)) * 100.0
+
+# =========================================================================
+# Persistence Functions
+# =========================================================================
+
+val RULES_DB_FILE: text = "doc/dashboard/tables/alert_rules.sdn"
+
+fn save_rules(store: AlertRuleStore) -> Result<(), text>:
+    """Save alert rules to SDN file."""
+    var content = "# Custom Alert Rules\n"
+    content = "{content}# Format: id | metric | operator | threshold | level | enabled\n\n"
+    content = "{content}[rules]\n"
+
+    for rule in store.list_rules():
+        val op_str = operator_to_string(rule.operator)
+        val level_str = level_to_string(rule.level)
+        val enabled_str = if rule.enabled: "true" else: "false"
+        content = "{content}{rule.id}|{rule.metric}|{op_str}|{rule.threshold}|{level_str}|{enabled_str}\n"
+
+    return write_text_file(RULES_DB_FILE, content)
+
+fn load_rules() -> Result<AlertRuleStore, text>:
+    """Load alert rules from SDN file."""
+    var store = AlertRuleStore.new()
+
+    match read_text_file(RULES_DB_FILE):
+        | Ok(content) ->
+            val lines = content.split("\n")
+            var in_rules = false
+
+            for line in lines:
+                val trimmed = line.trim()
+
+                if trimmed == "[rules]":
+                    in_rules = true
+                    continue
+
+                if not in_rules or trimmed.is_empty() or trimmed.starts_with("#"):
+                    continue
+
+                # Parse rule line
+                val parts = trimmed.split("|")
+                if parts.len() < 6:
+                    continue
+
+                val id = parse_i32(parts[0].trim())?
+                val metric = parts[1].trim()
+                val op_str = parts[2].trim()
+                val threshold = parse_f64(parts[3].trim())?
+                val level_str = parts[4].trim()
+                val enabled_str = parts[5].trim()
+
+                val operator = match op_str:
+                    | "<" -> ComparisonOp.LessThan
+                    | ">" -> ComparisonOp.GreaterThan
+                    | "<=" -> ComparisonOp.LessEqual
+                    | ">=" -> ComparisonOp.GreaterEqual
+                    | "==" -> ComparisonOp.Equal
+                    | "!=" -> ComparisonOp.NotEqual
+                    | _ -> ComparisonOp.Equal
+
+                val level = match level_str:
+                    | "critical" -> RuleLevel.Critical
+                    | "info" -> RuleLevel.Info
+                    | _ -> RuleLevel.Warning
+
+                val enabled = enabled_str == "true"
+
+                val rule = AlertRule.new(id, metric, operator, threshold, level)
+                rule.enabled = enabled
+                store.rules.append(rule)
+                if id >= store.next_id:
+                    store.next_id = id + 1
+
+            return Ok(store)
+        | Err(_) ->
+            # File doesn't exist yet, return empty store
+            return Ok(AlertRuleStore.new())
+
+fn delete_rules_file() -> Result<(), text>:
+    """Delete the rules database file."""
+    # Use fs_helpers to delete the file
+    val file_path = get_rules_file_path()
+    match fs_helpers.delete_file(file_path):
+        | Ok(_) ->
+            print "Deleted alert rules file: {file_path}"
+            Ok(())
+        | Err(e) ->
+            # If file doesn't exist, that's also ok
+            if e.contains("does not exist") or e.contains("No such file"):
+                Ok(())
+            else:
+                Err("Failed to delete rules file: {e}")
+
+# =========================================================================
+# Helper Functions
+# =========================================================================
+
+fn operator_to_string(op: ComparisonOp) -> text:
+    match op:
+        | ComparisonOp ->:LessThan: "<"
+        | ComparisonOp ->:GreaterThan: ">"
+        | ComparisonOp ->:LessEqual: "<="
+        | ComparisonOp ->:GreaterEqual: ">="
+        | ComparisonOp ->:Equal: "=="
+        | ComparisonOp ->:NotEqual: "!="
+
+fn level_to_string(level: RuleLevel) -> text:
+    match level:
+        | RuleLevel ->:Info: "info"
+        | RuleLevel ->:Warning: "warning"
+        | RuleLevel ->:Critical: "critical"
+
+fn parse_f64(s: text) -> Result<f64, text>:
+    """Parse floating point number from string."""
+    if s.is_empty():
+        return Err("Cannot parse empty string as float")
+
+    var result: f64 = 0.0
+    var has_dot = false
+    var decimal_places = 0.0
+    var is_negative = false
+    var parsed_any = false
+
+    for i in 0..s.len():
+        val ch = s[i]
+
+        if ch == "-" and i == 0:
+            is_negative = true
+        elif ch == ".":
+            if has_dot:
+                return Err("Multiple decimal points in float")
+            has_dot = true
+        elif ch >= "0" and ch <= "9":
+            val digit = ch.to_i32() - "0".to_i32()
+            parsed_any = true
+            if has_dot:
+                decimal_places = decimal_places + 1.0
+                result = result + (digit as f64) / (10.0 ** decimal_places)
+            else:
+                result = result * 10.0 + (digit as f64)
+        elif ch == " " or ch == "\t":
+            # Skip whitespace at start/end
+            pass
+        else:
+            return Err("Invalid character in float: {ch}")
+
+    if not parsed_any:
+        return Err("No digits found in string")
+
+    return Ok(if is_negative: -result else: result)
+
+# =========================================================================
+# Exports
+# =========================================================================
+
