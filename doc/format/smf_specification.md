@@ -1,10 +1,13 @@
 # Simple Module Format (SMF) Specification
 
-**Version:** 1.1 (with Generic Template Support & Trailer-Based Header)
-**Date:** 2026-01-28
-**Status:** Current
+**Specification Version:** 1.1 (Planned - with Generic Template Support & Trailer-Based Header)
+**Implementation Version:** 0.1 (Current - Basic format with header at offset 0)
+**Date:** 2026-02-04 (Updated)
+**Status:** v0.1 Active, v1.1 Planned
 
-**⭐ New in v1.1**: Trailer-based header design (similar to ZIP format) enables direct execution of SMF files
+⚠️ **Implementation Note:** This specification documents the **planned v1.1 format**. Current implementations generate **v0.1 format** (header at offset 0, no compression/stubs). See `doc/format/smf_implementation_status.md` for detailed status.
+
+**⭐ Planned for v1.1**: Trailer-based header design (similar to ZIP format) to enable direct execution of SMF files
 
 ## Table of Contents
 
@@ -43,9 +46,15 @@ The Simple Module Format (SMF) is a binary executable and library format designe
 
 ## File Structure
 
-### Layout Overview (Trailer-Based Design)
+### Layout Overview
 
-An SMF file uses a **ZIP-style trailer** where the header is located at the **end of the file** (similar to ZIP's central directory). This design enables **direct execution** by allowing an executable stub or shebang at the beginning.
+⚠️ **Version Note:**
+- **v0.1 (Current)**: Header at offset 0, sections follow sequentially
+- **v1.1 (Planned)**: Trailer-based design with header at EOF-128
+
+### v1.1 Layout (Trailer-Based Design - PLANNED)
+
+An SMF v1.1 file uses a **ZIP-style trailer** where the header is located at the **end of the file** (similar to ZIP's central directory). This design enables **direct execution** by allowing an executable stub or shebang at the beginning.
 
 ```
 ┌──────────────────────────────────────┐ ← File Start (Offset 0)
@@ -93,7 +102,52 @@ To read an SMF file:
 - Allows for self-extracting archives (stub + ZIP data)
 - SMF adopts same pattern for same benefits
 
-### Pure SMF vs Executable SMF
+---
+
+### v0.1 Layout (Current Implementation)
+
+The current v0.1 format uses a traditional layout with the header at the beginning:
+
+```
+┌──────────────────────────────────────┐ ← File Start (Offset 0)
+│     SMF Header (128 bytes)           │  Header at start (traditional)
+├──────────────────────────────────────┤
+│        Section Table                 │  Offset specified in header
+│  (64 bytes × section_count)          │
+├──────────────────────────────────────┤
+│        Section Data                  │
+│  - Code Section                      │
+│  - Data Section                      │
+│  - [Other Sections]                  │
+├──────────────────────────────────────┤
+│        Symbol Table                  │  Offset specified in header
+│  (72 bytes × symbol_count)           │
+├──────────────────────────────────────┤
+│        String Table                  │  Null-terminated symbol names
+│  (variable length)                   │
+└──────────────────────────────────────┘ ← File End
+```
+
+**To read a v0.1 SMF file:**
+1. Read SMF Header from offset 0 (128 bytes)
+2. Validate magic number "SMF\0"
+3. Check version (major=0, minor=1)
+4. Use offsets from header to locate sections and symbols
+
+**v0.1 Limitations:**
+- No executable stub support
+- No compression
+- No prefetch hints
+- Header must be at offset 0 (cannot append to other files)
+
+**Migration Path:**
+- v1.1 loaders will try EOF-128 first, fall back to offset 0 for v0.1 files
+- v0.1 files remain valid and loadable by v1.1 loaders
+- No need to rewrite existing v0.1 files
+
+---
+
+### Pure SMF vs Executable SMF (v1.1 Only)
 
 | Type | Structure | Use Case |
 |------|-----------|----------|

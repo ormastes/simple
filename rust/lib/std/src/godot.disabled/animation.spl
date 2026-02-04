@@ -1,0 +1,720 @@
+# Godot Animation System
+#
+# Type-safe wrappers for Godot's animation system
+#
+# Features:
+# - AnimationPlayer (timeline-based animations)
+# - AnimationTree (state machines and blending)
+# - Animation resources
+# - Track management (property, transform, method calls)
+#
+# Based on: https://docs.godotengine.org/en/stable/classes/class_animationplayer.html
+
+use godot.ffi
+use godot.variant
+use godot.node
+use godot.resource
+
+mod animation
+
+# Animation Resource
+# Represents a single animation with tracks
+pub struct Animation:
+    resource: resource.Resource
+
+impl Animation:
+    # Create from resource
+    pub fn from_resource(res: resource.Resource) -> Animation:
+        return Animation(resource: res)
+
+    # Create new empty animation
+    pub fn new() -> Animation:
+        val obj_ptr = ffi.godot_new_object("Animation")
+        val res = resource.Resource.from_ptr(obj_ptr)
+        return Animation.from_resource(res)
+
+    # Get animation length in seconds
+    fn get_length() -> f64:
+        val obj = self.resource.as_object()
+        val result = obj.call0("get_length")
+        return result.as_float()
+
+    # Set animation length
+    pub fn set_length(mut self, time_sec: f64):
+        val obj = self.resource.as_object()
+        val time_var = variant.Variant.from_float(time_sec)
+        obj.call1("set_length", time_var)
+
+    # Get loop mode
+    pub fn get_loop_mode(self) -> LoopMode:
+        val obj = self.resource.as_object()
+        val result = obj.call0("get_loop_mode")
+        val mode_int = result.as_int()
+        return loop_mode_from_int(mode_int as i32)
+
+    # Set loop mode
+    pub fn set_loop_mode(mut self, mode: LoopMode):
+        val obj = self.resource.as_object()
+        val mode_var = variant.Variant.from_int(mode as i64)
+        obj.call1("set_loop_mode", mode_var)
+
+    # Get number of tracks
+    fn get_track_count() -> i32:
+        val obj = self.resource.as_object()
+        val result = obj.call0("get_track_count")
+        return result.as_int() as i32
+
+    # Add a property track (animate node properties)
+    pub fn add_track(mut self, track_type: TrackType) -> i32:
+        val obj = self.resource.as_object()
+        val type_var = variant.Variant.from_int(track_type as i64)
+        val result = obj.call1("add_track", type_var)
+        return result.as_int() as i32
+
+    # Remove a track
+    pub fn remove_track(mut self, track_idx: i32):
+        val obj = self.resource.as_object()
+        val idx_var = variant.Variant.from_int(track_idx as i64)
+        obj.call1("remove_track", idx_var)
+
+    # Set track path (which node/property to animate)
+    pub fn track_set_path(mut self, track_idx: i32, path: text):
+        val obj = self.resource.as_object()
+        val idx_var = variant.Variant.from_int(track_idx as i64)
+        val path_var = variant.Variant.from_string(path)
+        obj.call2("track_set_path", idx_var, path_var)
+
+    # Insert a keyframe
+    pub fn track_insert_key(mut self, track_idx: i32, time: f64, value: variant.Variant):
+        val obj = self.resource.as_object()
+        val idx_var = variant.Variant.from_int(track_idx as i64)
+        val time_var = variant.Variant.from_float(time)
+        obj.call3("track_insert_key", idx_var, time_var, value)
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    fn has_tracks() -> bool:
+        """Check if animation has any tracks.
+
+        Returns:
+            true if tracks exist
+
+        Example:
+            anim.has_tracks()  # → true
+        """
+        return self.get_track_count() > 0
+
+    fn is_empty() -> bool:
+        """Check if animation has no tracks.
+
+        Returns:
+            true if no tracks
+
+        Example:
+            anim.is_empty()  # → false
+        """
+        return self.get_track_count() == 0
+
+    fn is_looping() -> bool:
+        """Check if animation is set to loop.
+
+        Returns:
+            true if loop mode is not None
+
+        Example:
+            anim.is_looping()  # → true
+        """
+        return self.get_loop_mode() != LoopMode.None
+
+    fn summary() -> text:
+        """Get animation summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            anim.summary()
+            # → "Animation: 5.0s, 3 tracks, looping"
+        """
+        val length = self.get_length()
+        val tracks = self.get_track_count()
+        val loop_str = if self.is_looping() { "looping" } else { "one-shot" }
+        return "Animation: {length}s, {tracks} tracks, {loop_str}"
+
+
+# Animation Player
+# Controls playback of animations
+pub struct AnimationPlayer extends godot.node.Node:
+    # Overrides base to extend Node
+
+impl AnimationPlayer:
+    # Create from Godot object pointer
+    pub fn from_ptr(ptr: ffi.GDExtensionObjectPtr) -> AnimationPlayer:
+        return AnimationPlayer(base: godot.node.Node.from_ptr(ptr))
+
+    # Play an animation
+    pub fn play(mut self, name: text = "", custom_blend: f64 = -1.0, custom_speed: f32 = 1.0, from_end: bool = false):
+        val obj = self.base.as_object()
+        val name_var = variant.Variant.from_string(name)
+        val blend_var = variant.Variant.from_float(custom_blend)
+        val speed_var = variant.Variant.from_float(custom_speed as f64)
+        val end_var = variant.Variant.from_bool(from_end)
+        obj.call4("play", name_var, blend_var, speed_var, end_var)
+
+    # Stop animation
+    pub fn stop(mut self, keep_state: bool = false):
+        val obj = self.base.as_object()
+        val keep_var = variant.Variant.from_bool(keep_state)
+        obj.call1("stop", keep_var)
+
+    # Check if playing
+    pub fn is_playing(self) -> bool:
+        val obj = self.base.as_object()
+        val result = obj.call0("is_playing")
+        return result.as_bool()
+
+    # Get current animation name
+    pub fn get_current_animation(self) -> text:
+        val obj = self.base.as_object()
+        val result = obj.call0("get_current_animation")
+        return result.as_string()
+
+    # Set current animation position
+    pub fn seek(mut self, seconds: f64, update: bool = false):
+        val obj = self.base.as_object()
+        val sec_var = variant.Variant.from_float(seconds)
+        val update_var = variant.Variant.from_bool(update)
+        obj.call2("seek", sec_var, update_var)
+
+    # Get current position
+    pub fn get_current_animation_position(self) -> f64:
+        val obj = self.base.as_object()
+        val result = obj.call0("get_current_animation_position")
+        return result.as_float()
+
+    # Get current animation length
+    pub fn get_current_animation_length(self) -> f64:
+        val obj = self.base.as_object()
+        val result = obj.call0("get_current_animation_length")
+        return result.as_float()
+
+    # Queue animation to play after current
+    pub fn queue(mut self, name: text):
+        val obj = self.base.as_object()
+        val name_var = variant.Variant.from_string(name)
+        obj.call1("queue", name_var)
+
+    # Clear animation queue
+    pub fn clear_queue(mut self):
+        val obj = self.base.as_object()
+        obj.call0("clear_queue")
+
+    # Set playback speed scale
+    pub fn set_speed_scale(mut self, speed: f32):
+        val obj = self.base.as_object()
+        val speed_var = variant.Variant.from_float(speed as f64)
+        obj.call1("set_speed_scale", speed_var)
+
+    # Get playback speed scale
+    pub fn get_speed_scale(self) -> f32:
+        val obj = self.base.as_object()
+        val result = obj.call0("get_speed_scale")
+        return result.as_float() as f32
+
+    # Add animation to library
+    pub fn add_animation(mut self, name: text, animation: Animation):
+        val obj = self.base.as_object()
+        val name_var = variant.Variant.from_string(name)
+        val anim_var = variant.Variant.from_object(animation.resource.as_object())
+        obj.call2("add_animation", name_var, anim_var)
+
+    # Remove animation from library
+    pub fn remove_animation(mut self, name: text):
+        val obj = self.base.as_object()
+        val name_var = variant.Variant.from_string(name)
+        obj.call1("remove_animation", name_var)
+
+    # Check if has animation
+    pub fn has_animation(self, name: text) -> bool:
+        val obj = self.base.as_object()
+        val name_var = variant.Variant.from_string(name)
+        val result = obj.call1("has_animation", name_var)
+        return result.as_bool()
+
+    # Get animation
+    pub fn get_animation(self, name: text) -> Option<Animation>:
+        val obj = self.base.as_object()
+        val name_var = variant.Variant.from_string(name)
+        val result = obj.call1("get_animation", name_var)
+
+        if result.is_null():
+            return None
+        else:
+            val res = resource.Resource.from_ptr(result.as_object().ptr())
+            return Some(Animation.from_resource(res))
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    fn has_current_animation() -> bool:
+        """Check if has a current animation playing.
+
+        Returns:
+            true if current animation name is not empty
+
+        Example:
+            player.has_current_animation()  # → true
+        """
+        return self.get_current_animation().len() > 0
+
+    fn get_position() -> f64:
+        """Get current animation position (alias for get_current_animation_position).
+
+        Returns:
+            Position in seconds
+
+        Example:
+            player.get_position()  # → 1.5
+        """
+        return self.get_current_animation_position()
+
+    fn get_length() -> f64:
+        """Get current animation length (alias for get_current_animation_length).
+
+        Returns:
+            Length in seconds
+
+        Example:
+            player.get_length()  # → 3.0
+        """
+        return self.get_current_animation_length()
+
+    fn is_at_end() -> bool:
+        """Check if animation is at or near the end.
+
+        Returns:
+            true if position >= length - 0.01
+
+        Example:
+            player.is_at_end()  # → false
+        """
+        if not self.is_playing():
+            return false
+        val pos = self.get_position()
+        val len = self.get_length()
+        return pos >= (len - 0.01)
+
+    fn progress_percent() -> f32:
+        """Get animation progress as percentage.
+
+        Returns:
+            Progress from 0.0 to 1.0
+
+        Example:
+            player.progress_percent()  # → 0.5
+        """
+        val len = self.get_length()
+        if len == 0.0:
+            return 0.0
+        return (self.get_position() / len) as f32
+
+    fn summary() -> text:
+        """Get animation player summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            player.summary()
+            # → "AnimationPlayer: playing 'walk' at 1.5s/3.0s (50%)"
+        """
+        if not self.is_playing():
+            return "AnimationPlayer: stopped"
+
+        val anim = self.get_current_animation()
+        val pos = self.get_position()
+        val len = self.get_length()
+        val percent = (self.progress_percent() * 100.0) as i32
+        return "AnimationPlayer: playing '{anim}' at {pos}s/{len}s ({percent}%)"
+
+
+# Animation Tree
+# State machine and blending for complex animations
+pub struct AnimationTree extends godot.node.Node:
+
+impl AnimationTree:
+    pub fn from_ptr(ptr: ffi.GDExtensionObjectPtr) -> AnimationTree:
+        return AnimationTree(base: godot.node.Node.from_ptr(ptr))
+
+    # Set active (enable/disable tree)
+    pub fn set_active(mut self, active: bool):
+        val obj = self.base.as_object()
+        val active_var = variant.Variant.from_bool(active)
+        obj.call1("set_active", active_var)
+
+    # Get active state
+    pub fn is_active(self) -> bool:
+        val obj = self.base.as_object()
+        val result = obj.call0("is_active")
+        return result.as_bool()
+
+    # Set parameter value (for blend spaces, state machines)
+    pub fn set_parameter(mut self, name: text, value: variant.Variant):
+        val obj = self.base.as_object()
+        val name_var = variant.Variant.from_string(name)
+        obj.call2("set", name_var, value)
+
+    # Get parameter value
+    pub fn get_parameter(self, name: text) -> variant.Variant:
+        val obj = self.base.as_object()
+        val name_var = variant.Variant.from_string(name)
+        return obj.call1("get", name_var)
+
+    # Advance animation (manual stepping)
+    pub fn advance(mut self, delta: f64):
+        val obj = self.base.as_object()
+        val delta_var = variant.Variant.from_float(delta)
+        obj.call1("advance", delta_var)
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    fn get_active() -> bool:
+        """Get active state (alias for is_active).
+
+        Returns:
+            true if tree is active
+
+        Example:
+            tree.get_active()  # → true
+        """
+        return self.is_active()
+
+    me enable():
+        """Enable the animation tree.
+
+        Example:
+            tree.enable()
+        """
+        self.set_active(true)
+
+    me disable():
+        """Disable the animation tree.
+
+        Example:
+            tree.disable()
+        """
+        self.set_active(false)
+
+    me toggle_active():
+        """Toggle active state.
+
+        Example:
+            tree.toggle_active()
+        """
+        self.set_active(not self.is_active())
+
+    fn summary() -> text:
+        """Get animation tree summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            tree.summary()
+            # → "AnimationTree: active"
+        """
+        val status = if self.is_active() { "active" } else { "inactive" }
+        return "AnimationTree: {status}"
+
+
+# Animation Loop Mode
+pub enum LoopMode:
+    None = 0      # No looping
+    Linear = 1    # Loop from start to end
+    Pingpong = 2  # Loop back and forth
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    fn is_none() -> bool:
+        """Check if loop mode is None.
+
+        Returns:
+            true if no looping
+
+        Example:
+            mode.is_none()  # → true
+        """
+        match self:
+            case None: return true
+            case _: return false
+
+    fn is_linear() -> bool:
+        """Check if loop mode is Linear.
+
+        Returns:
+            true if linear looping
+
+        Example:
+            mode.is_linear()  # → false
+        """
+        match self:
+            case Linear: return true
+            case _: return false
+
+    fn is_pingpong() -> bool:
+        """Check if loop mode is Pingpong.
+
+        Returns:
+            true if pingpong looping
+
+        Example:
+            mode.is_pingpong()  # → false
+        """
+        match self:
+            case Pingpong: return true
+            case _: return false
+
+    fn is_looping() -> bool:
+        """Check if any looping enabled.
+
+        Returns:
+            true if not None
+
+        Example:
+            mode.is_looping()  # → false
+        """
+        return not self.is_none()
+
+    fn to_string() -> text:
+        """Convert to string.
+
+        Returns:
+            text representation
+
+        Example:
+            mode.to_string()  # → "Linear"
+        """
+        match self:
+            case None: return "None"
+            case Linear: return "Linear"
+            case Pingpong: return "Pingpong"
+
+    fn description() -> text:
+        """Get loop mode description.
+
+        Returns:
+            Human-readable description
+
+        Example:
+            LoopMode.Linear.description()
+            # → "Loop linearly (restart from beginning)"
+        """
+        match self:
+            case None: return "No looping (play once)"
+            case Linear: return "Loop linearly (restart from beginning)"
+            case Pingpong: return "Ping-pong loop (reverse direction at end)"
+
+    fn summary() -> text:
+        """Get summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            mode.summary()
+            # → "LoopMode: Linear"
+        """
+        val name = self.to_string()
+        return "LoopMode: {name}"
+
+# Animation Track Type
+pub enum TrackType:
+    Value = 0           # Property animation
+    Position3D = 1      # 3D position track
+    Rotation3D = 2      # 3D rotation track
+    Scale3D = 3         # 3D scale track
+    BlendShape = 4      # Blend shape track
+    Method = 5          # Method call track
+    Bezier = 6          # Bezier curve track
+    Audio = 7           # Audio playback track
+    Animation = 8       # Sub-animation track
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    fn is_transform() -> bool:
+        """Check if track is transform-related (position/rotation/scale).
+
+        Returns:
+            true if Position3D, Rotation3D, or Scale3D
+
+        Example:
+            track.is_transform()  # → true
+        """
+        match self:
+            case Position3D | Rotation3D | Scale3D: return true
+            case _: return false
+
+    fn is_property() -> bool:
+        """Check if track is value/property animation.
+
+        Returns:
+            true if Value variant
+
+        Example:
+            track.is_property()  # → true
+        """
+        match self:
+            case Value: return true
+            case _: return false
+
+    fn to_string() -> text:
+        """Convert to string.
+
+        Returns:
+            text representation
+
+        Example:
+            track.to_string()  # → "Position3D"
+        """
+        match self:
+            case Value: return "Value"
+            case Position3D: return "Position3D"
+            case Rotation3D: return "Rotation3D"
+            case Scale3D: return "Scale3D"
+            case BlendShape: return "BlendShape"
+            case Method: return "Method"
+            case Bezier: return "Bezier"
+            case Audio: return "Audio"
+            case Animation: return "Animation"
+
+    fn description() -> text:
+        """Get track type description.
+
+        Returns:
+            Human-readable description
+
+        Example:
+            TrackType.Position3D.description()
+            # → "3D position/translation track"
+        """
+        match self:
+            case Value: return "Generic property value track"
+            case Position3D: return "3D position/translation track"
+            case Rotation3D: return "3D rotation track"
+            case Scale3D: return "3D scale track"
+            case BlendShape: return "Blend shape/morph target track"
+            case Method: return "Method call track"
+            case Bezier: return "Bezier curve track"
+            case Audio: return "Audio playback track"
+            case Animation: return "Sub-animation playback track"
+
+    fn summary() -> text:
+        """Get summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            track.summary()
+            # → "TrackType: Position3D"
+        """
+        val name = self.to_string()
+        return "TrackType: {name}"
+
+
+# Helper functions
+fn loop_mode_from_int(value: i32) -> LoopMode:
+    if value == 0:
+        return LoopMode.None
+    elif value == 1:
+        return LoopMode.Linear
+    elif value == 2:
+        return LoopMode.Pingpong
+    else:
+        return LoopMode.None
+
+
+# Animation Builder Helper
+# Fluent API for creating animations
+pub struct AnimationBuilder:
+    animation: Animation
+    current_track: i32
+
+impl AnimationBuilder:
+    # Create new builder
+    pub fn new(length: f64) -> AnimationBuilder:
+        var anim = Animation.new()
+        anim.set_length(length)
+        return AnimationBuilder(animation: anim, current_track: -1)
+
+    # Set loop mode
+    pub fn loop_mode(mut self, mode: LoopMode) -> AnimationBuilder:
+        self.animation.set_loop_mode(mode)
+        return self
+
+    # Add property track
+    pub fn add_property_track(mut self, path: text) -> AnimationBuilder:
+        val track_idx = self.animation.add_track(TrackType.Value)
+        self.animation.track_set_path(track_idx, path)
+        self.current_track = track_idx
+        return self
+
+    # Add keyframe to current track
+    pub fn keyframe(mut self, time: f64, value: variant.Variant) -> AnimationBuilder:
+        if self.current_track >= 0:
+            self.animation.track_insert_key(self.current_track, time, value)
+        return self
+
+    # Build final animation
+    pub fn build(self) -> Animation:
+        return self.animation
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    fn has_current_track() -> bool:
+        """Check if a track is currently selected.
+
+        Returns:
+            true if current_track is set
+
+        Example:
+            builder.has_current_track()  # → true
+        """
+        return self.current_track >= 0
+
+    fn get_track_count() -> i32:
+        """Get number of tracks in animation.
+
+        Returns:
+            Track count
+
+        Example:
+            builder.get_track_count()  # → 3
+        """
+        return self.animation.get_track_count()
+
+    fn summary() -> text:
+        """Get builder summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            builder.summary()
+            # → "AnimationBuilder: 5.0s, 3 tracks, current=2"
+        """
+        val length = self.animation.get_length()
+        val tracks = self.get_track_count()
+        val current = self.current_track
+        return "AnimationBuilder: {length}s, {tracks} tracks, current={current}"

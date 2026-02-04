@@ -1,0 +1,692 @@
+# WASM Language Server Protocol
+# Language server implementation compiled to WASM for VSCode
+
+use core.result.{Result, Ok, Err}
+use core.json.{JsonBuilder, JsonValue, stringify}
+use vscode.languages.{TextDocument, Position, Range, CompletionItem, Hover, Diagnostic}
+
+# External FFI declarations for WASM LSP
+extern fn wasm_lsp_initialize(capabilities: text): void
+extern fn wasm_lsp_register_handler(method: text, callback_id: i64): void
+extern fn wasm_lsp_send_notification(method: text, params: text): void
+extern fn wasm_lsp_send_response(request_id: i64, result: text): void
+
+# Global handler storage for callback dispatch
+var completion_handlers: Dict<i64, fn(TextDocument, Position) -> List<CompletionItem>> = {}
+var hover_handlers: Dict<i64, fn(TextDocument, Position) -> Option<Hover>> = {}
+var definition_handlers: Dict<i64, fn(TextDocument, Position) -> Option<Range>> = {}
+var next_callback_id: i64 = 1
+
+fn allocate_callback_id() -> i64:
+    """Allocate unique callback ID."""
+    val id = next_callback_id
+    next_callback_id = next_callback_id + 1
+    id
+
+# WASM LSP server
+pub class WasmLanguageServer:
+    pub capabilities: ServerCapabilities
+    pub handlers: Dict<text, i64>
+    pub documents: Dict<text, TextDocument>
+
+    pub fn new(): WasmLanguageServer =
+        """Create WASM language server.
+
+        Returns:
+            Language server instance
+
+        Example:
+            val server = WasmLanguageServer.new()
+            server.register_completion_handler(fn(doc, pos):
+                return complete_at_position(doc, pos)
+            )
+            server.start()
+        """
+        WasmLanguageServer {
+            capabilities: ServerCapabilities.new(),
+            handlers: {},
+            documents: {}
+        }
+
+    pub fn set_capabilities(capabilities: ServerCapabilities):
+        """Set server capabilities.
+
+        Args:
+            capabilities: Server capabilities
+        """
+        self.capabilities = capabilities
+
+    pub fn register_completion_handler(
+        handler: fn(document: TextDocument, position: Position) -> List<CompletionItem>
+    ):
+        """Register completion handler.
+
+        Args:
+            handler: Completion provider function
+        """
+        val callback_id = allocate_callback_id()
+        completion_handlers[callback_id] = handler
+        self.handlers["textDocument/completion"] = callback_id
+        wasm_lsp_register_handler("textDocument/completion", callback_id)
+        self.capabilities.completion_provider = true
+
+    pub fn register_hover_handler(
+        self,
+        handler: fn(document: TextDocument, position: Position): Option<Hover>
+    ):
+        """Register hover handler.
+
+        Args:
+            handler: Hover provider function
+        """
+        val callback_id = 2
+        wasm_lsp_register_handler("textDocument/hover", callback_id)
+
+    pub fn register_definition_handler(
+        self,
+        handler: fn(document: TextDocument, position: Position): Option<Range>
+    ):
+        """Register go-to-definition handler.
+
+        Args:
+            handler: Definition provider function
+        """
+        val callback_id = 3
+        wasm_lsp_register_handler("textDocument/definition", callback_id)
+
+    pub fn register_references_handler(
+        self,
+        handler: fn(document: TextDocument, position: Position): List<Range>
+    ):
+        """Register references handler.
+
+        Args:
+            handler: References provider function
+        """
+        val callback_id = 4
+        wasm_lsp_register_handler("textDocument/references", callback_id)
+
+    pub fn register_document_symbol_handler(
+        self,
+        handler: fn(document: TextDocument): List<DocumentSymbol>
+    ):
+        """Register document symbol handler.
+
+        Args:
+            handler: Symbol provider function
+        """
+        val callback_id = 5
+        wasm_lsp_register_handler("textDocument/documentSymbol", callback_id)
+
+    pub fn publish_diagnostics(self, uri: text, diagnostics: List<Diagnostic>):
+        """Publish diagnostics for document.
+
+        Args:
+            uri: Document URI
+            diagnostics: List of diagnostics
+
+        Example:
+            val diags = [
+                Diagnostic.new(
+                    Range.new(Position.new(10, 0), Position.new(10, 5)),
+                    "Undefined variable",
+                    DiagnosticSeverity_Error
+                )
+            ]
+            server.publish_diagnostics("file:///path/file.spl", diags)
+        """
+        # Serialize diagnostics to JSON
+        var builder = JsonBuilder.new()
+        builder = builder.set_string("uri", uri)
+
+        # Build diagnostics array
+        var diag_values: List<JsonValue> = []
+        for diag in diagnostics:
+            var diag_obj: Dict<text, JsonValue> = {}
+
+            # Range object
+            var range_obj: Dict<text, JsonValue> = {}
+            var start_obj: Dict<text, JsonValue> = {}
+            start_obj["line"] = JsonValue.Integer(diag.range.start.line)
+            start_obj["character"] = JsonValue.Integer(diag.range.start.character)
+            var end_obj: Dict<text, JsonValue> = {}
+            end_obj["line"] = JsonValue.Integer(diag.range.end.line)
+            end_obj["character"] = JsonValue.Integer(diag.range.end.character)
+            range_obj["start"] = JsonValue.object(start_obj)
+            range_obj["end"] = JsonValue.object(end_obj)
+
+            diag_obj["range"] = JsonValue.object(range_obj)
+            diag_obj["message"] = JsonValue.text(diag.message)
+            diag_obj["severity"] = JsonValue.Integer(diag.severity)
+
+            diag_values.push(JsonValue.object(diag_obj))
+
+        builder = builder.set_array("diagnostics", diag_values)
+        val params = stringify(builder.build())
+        wasm_lsp_send_notification("textDocument/publishDiagnostics", params)
+
+    pub fn start(self):
+        """Start language server.
+
+        Initializes server and registers capabilities with VSCode.
+        """
+        val caps_json = self.capabilities.to_json()
+        wasm_lsp_initialize(caps_json)
+
+    pub fn add_document(self, uri: text, document: TextDocument):
+        """Add opened document.
+
+        Args:
+            uri: Document URI
+            document: Text document
+        """
+        self.documents[uri] = document
+
+    pub fn remove_document(self, uri: text):
+        """Remove closed document.
+
+        Args:
+            uri: Document URI
+        """
+        # Create new dict without the specified key
+        var new_documents: Dict<text, TextDocument> = {}
+        for (key, doc) in self.documents.items():
+            if key != uri:
+                new_documents[key] = doc
+
+        self.documents = new_documents
+
+    pub fn get_document(self, uri: text): Option<TextDocument> =
+        """Get document by URI.
+
+        Args:
+            uri: Document URI
+
+        Returns:
+            Document if found
+        """
+        self.documents.get(uri)
+
+# Server capabilities
+pub class ServerCapabilities:
+    pub completion_provider: bool
+    pub hover_provider: bool
+    pub definition_provider: bool
+    pub references_provider: bool
+    pub document_symbol_provider: bool
+    pub workspace_symbol_provider: bool
+    pub code_action_provider: bool
+    pub document_formatting_provider: bool
+    pub rename_provider: bool
+
+    pub fn new(): ServerCapabilities =
+        """Create default server capabilities."""
+        ServerCapabilities {
+            completion_provider: false,
+            hover_provider: false,
+            definition_provider: false,
+            references_provider: false,
+            document_symbol_provider: false,
+            workspace_symbol_provider: false,
+            code_action_provider: false,
+            document_formatting_provider: false,
+            rename_provider: false
+        }
+
+    pub fn enable_completion(self):
+        """Enable completion support."""
+        self.completion_provider = true
+
+    pub fn enable_hover(self):
+        """Enable hover support."""
+        self.hover_provider = true
+
+    pub fn enable_definition(self):
+        """Enable go-to-definition support."""
+        self.definition_provider = true
+
+    pub fn enable_references(self):
+        """Enable find references support."""
+        self.references_provider = true
+
+    pub fn enable_symbols(self):
+        """Enable document symbols support."""
+        self.document_symbol_provider = true
+
+    pub fn enable_formatting(self):
+        """Enable document formatting support."""
+        self.document_formatting_provider = true
+
+    pub fn enable_all(self):
+        """Enable all capabilities."""
+        self.completion_provider = true
+        self.hover_provider = true
+        self.definition_provider = true
+        self.references_provider = true
+        self.document_symbol_provider = true
+        self.workspace_symbol_provider = true
+        self.code_action_provider = true
+        self.document_formatting_provider = true
+        self.rename_provider = true
+
+    pub fn to_json(): text =
+        """Convert to JSON string.
+
+        Returns:
+            JSON representation with proper escaping
+        """
+        var builder = JsonBuilder.new()
+
+        # Completion provider (can be object with options)
+        if self.completion_provider:
+            var completion_opts: Dict<text, JsonValue> = {}
+            completion_opts["resolveProvider"] = JsonValue.bool(true)
+            builder = builder.set_object("completionProvider", completion_opts)
+
+        builder = builder.set_bool("hoverProvider", self.hover_provider)
+        builder = builder.set_bool("definitionProvider", self.definition_provider)
+        builder = builder.set_bool("referencesProvider", self.references_provider)
+        builder = builder.set_bool("documentSymbolProvider", self.document_symbol_provider)
+        builder = builder.set_bool("workspaceSymbolProvider", self.workspace_symbol_provider)
+        builder = builder.set_bool("codeActionProvider", self.code_action_provider)
+        builder = builder.set_bool("documentFormattingProvider", self.document_formatting_provider)
+        builder = builder.set_bool("renameProvider", self.rename_provider)
+
+        # Text document sync
+        var sync_opts: Dict<text, JsonValue> = {}
+        sync_opts["openClose"] = JsonValue.bool(true)
+        sync_opts["change"] = JsonValue.Integer(2)  # Incremental
+        builder = builder.set_object("textDocumentSync", sync_opts)
+
+        stringify(builder.build())
+
+# Document symbol
+pub class DocumentSymbol:
+    pub name: text
+    pub kind: SymbolKind
+    pub range: Range
+    pub selection_range: Range
+    pub children: List<DocumentSymbol>
+
+    pub fn new(name: text, kind: SymbolKind, range: Range): DocumentSymbol =
+        """Create document symbol.
+
+        Args:
+            name: Symbol name
+            kind: Symbol kind
+            range: Symbol range
+
+        Returns:
+            Document symbol
+        """
+        DocumentSymbol {
+            name: name,
+            kind: kind,
+            range: range,
+            selection_range: range,
+            children: []
+        }
+
+    pub fn add_child(self, child: DocumentSymbol):
+        """Add child symbol.
+
+        Args:
+            child: Child symbol
+        """
+        self.children.append(child)
+
+# Symbol kind
+pub enum SymbolKind:
+    File
+    Module
+    Namespace
+    Package
+    Class
+    Method
+    Property
+    Field
+    Constructor
+    Enum
+    Interface
+    Function
+    Variable
+    Constant
+    text
+    Number
+    Boolean
+    Array
+    Object
+    Key
+    Null
+    EnumMember
+    Struct
+    Event
+    Operator
+    TypeParameter
+
+impl SymbolKind:
+    pub fn to_string(self) -> text:
+        """Convert symbol kind to string."""
+        match self:
+            case File: "file"
+            case Module: "module"
+            case Namespace: "namespace"
+            case Package: "package"
+            case Class: "class"
+            case Method: "method"
+            case Property: "property"
+            case Field: "field"
+            case Constructor: "constructor"
+            case Enum: "enum"
+            case Interface: "interface"
+            case Function: "function"
+            case Variable: "variable"
+            case Constant: "constant"
+            case text: "string"
+            case Number: "number"
+            case Boolean: "boolean"
+            case Array: "array"
+            case Object: "object"
+            case Key: "key"
+            case Null: "null"
+            case EnumMember: "enum-member"
+            case Struct: "struct"
+            case Event: "event"
+            case Operator: "operator"
+            case TypeParameter: "type-parameter"
+
+    pub fn description(self) -> text:
+        """Get symbol kind description."""
+        match self:
+            case File: "File symbol"
+            case Module: "Module definition"
+            case Namespace: "Namespace"
+            case Package: "Package"
+            case Class: "Class definition"
+            case Method: "Method/member function"
+            case Property: "Property"
+            case Field: "Field/member variable"
+            case Constructor: "Constructor"
+            case Enum: "Enumeration type"
+            case Interface: "Interface/trait"
+            case Function: "Function"
+            case Variable: "Variable"
+            case Constant: "Constant"
+            case text: "text literal"
+            case Number: "Number literal"
+            case Boolean: "Boolean literal"
+            case Array: "Array"
+            case Object: "Object"
+            case Key: "Object key"
+            case Null: "Null value"
+            case EnumMember: "Enum variant/member"
+            case Struct: "Struct type"
+            case Event: "Event"
+            case Operator: "Operator"
+            case TypeParameter: "Type parameter/generic"
+
+    pub fn is_type_definition(self) -> bool:
+        """Check if this is a type definition symbol."""
+        match self:
+            case Class: true
+            case Enum: true
+            case Interface: true
+            case Struct: true
+            case _: false
+
+    pub fn is_callable(self) -> bool:
+        """Check if this is a callable symbol."""
+        match self:
+            case Method: true
+            case Function: true
+            case Constructor: true
+            case _: false
+
+    pub fn is_container(self) -> bool:
+        """Check if this can contain other symbols."""
+        match self:
+            case File: true
+            case Module: true
+            case Namespace: true
+            case Package: true
+            case Class: true
+            case Enum: true
+            case Interface: true
+            case Struct: true
+            case _: false
+
+    pub fn is_literal(self) -> bool:
+        """Check if this is a literal value."""
+        match self:
+            case text: true
+            case Number: true
+            case Boolean: true
+            case Null: true
+            case _: false
+
+    pub fn summary(self) -> text:
+        """Get symbol kind summary."""
+        val name = self.to_string()
+        val desc = self.description()
+        var category = if self.is_type_definition():
+            "type"
+        elif self.is_callable():
+            "callable"
+        elif self.is_container():
+            "container"
+        elif self.is_literal():
+            "literal"
+        else:
+            "value"
+        return "SymbolKind: {name} ({desc}, {category})"
+
+# Code action
+pub class CodeAction:
+    pub title: text
+    pub kind: CodeActionKind
+    pub edit: Option<WorkspaceEdit>
+    pub command: Option<Command>
+
+    pub fn new(title: text, kind: CodeActionKind): CodeAction =
+        """Create code action.
+
+        Args:
+            title: Action title
+            kind: Action kind
+
+        Returns:
+            Code action
+        """
+        CodeAction {
+            title: title,
+            kind: kind,
+            edit: none,
+            command: none
+        }
+
+    pub fn set_edit(self, edit: WorkspaceEdit):
+        """Set workspace edit.
+
+        Args:
+            edit: Workspace edit
+        """
+        self.edit = some(edit)
+
+# Code action kind
+pub enum CodeActionKind:
+    QuickFix
+    Refactor
+    RefactorExtract
+    RefactorInline
+    RefactorRewrite
+    Source
+    SourceOrganizeImports
+
+impl CodeActionKind:
+    pub fn to_string(self) -> text:
+        """Convert code action kind to string."""
+        match self:
+            case QuickFix: "quickfix"
+            case Refactor: "refactor"
+            case RefactorExtract: "refactor.extract"
+            case RefactorInline: "refactor.inline"
+            case RefactorRewrite: "refactor.rewrite"
+            case Source: "source"
+            case SourceOrganizeImports: "source.organizeImports"
+
+    pub fn description(self) -> text:
+        """Get code action kind description."""
+        match self:
+            case QuickFix: "Quick fix for errors/warnings"
+            case Refactor: "General refactoring"
+            case RefactorExtract: "Extract code to new element"
+            case RefactorInline: "Inline code"
+            case RefactorRewrite: "Rewrite code structure"
+            case Source: "Source code action"
+            case SourceOrganizeImports: "Organize/sort imports"
+
+    pub fn is_quick_fix(self) -> bool:
+        """Check if action is QuickFix."""
+        match self:
+            case QuickFix: true
+            case _: false
+
+    pub fn is_refactor(self) -> bool:
+        """Check if action is any refactor type."""
+        match self:
+            case Refactor: true
+            case RefactorExtract: true
+            case RefactorInline: true
+            case RefactorRewrite: true
+            case _: false
+
+    pub fn is_source_action(self) -> bool:
+        """Check if action is source-level."""
+        match self:
+            case Source: true
+            case SourceOrganizeImports: true
+            case _: false
+
+    pub fn is_extract(self) -> bool:
+        """Check if action is extract refactoring."""
+        match self:
+            case RefactorExtract: true
+            case _: false
+
+    pub fn is_inline(self) -> bool:
+        """Check if action is inline refactoring."""
+        match self:
+            case RefactorInline: true
+            case _: false
+
+    pub fn summary(self) -> text:
+        """Get code action kind summary."""
+        val name = self.to_string()
+        val desc = self.description()
+        val category = if self.is_quick_fix():
+            "fix"
+        elif self.is_refactor():
+            "refactor"
+        else:
+            "source"
+        return "CodeActionKind: {name} ({desc}, {category})"
+
+# Workspace edit
+pub class WorkspaceEdit:
+    pub changes: Dict<text, List<TextEdit>>
+
+    pub fn new(): WorkspaceEdit =
+        """Create empty workspace edit."""
+        WorkspaceEdit {
+            changes: {}
+        }
+
+    pub fn add_edit(self, uri: text, edit: TextEdit):
+        """Add text edit.
+
+        Args:
+            uri: Document URI
+            edit: Text edit
+        """
+        if not self.changes.contains_key(uri):
+            self.changes[uri] = []
+        self.changes[uri].append(edit)
+
+# Text edit
+pub class TextEdit:
+    pub range: Range
+    pub new_text: text
+
+    pub fn new(range: Range, new_text: text): TextEdit =
+        """Create text edit.
+
+        Args:
+            range: Range to replace
+            new_text: New text
+
+        Returns:
+            Text edit
+        """
+        TextEdit {
+            range: range,
+            new_text: new_text
+        }
+
+# Command
+pub class Command:
+    pub title: text
+    pub command: text
+    pub arguments: List<text>
+
+    pub fn new(title: text, command: text): Command =
+        """Create command.
+
+        Args:
+            title: Command title
+            command: Command identifier
+
+        Returns:
+            Command
+        """
+        Command {
+            title: title,
+            command: command,
+            arguments: []
+        }
+
+# Helper: Create Simple language server
+pub fn create_simple_language_server(): WasmLanguageServer =
+    """Create language server for Simple language.
+
+    Returns:
+        Configured language server
+
+    Example:
+        val server = create_simple_language_server()
+        server.start()
+    """
+    val server = WasmLanguageServer.new()
+
+    # Enable capabilities
+    server.capabilities.enable_completion()
+    server.capabilities.enable_hover()
+    server.capabilities.enable_definition()
+    server.capabilities.enable_references()
+    server.capabilities.enable_symbols()
+    server.capabilities.enable_formatting()
+
+    server
+
+# Helper: Create minimal language server
+pub fn create_minimal_language_server(): WasmLanguageServer =
+    """Create minimal language server (completion + hover only).
+
+    Returns:
+        Minimal language server
+    """
+    val server = WasmLanguageServer.new()
+
+    server.capabilities.enable_completion()
+    server.capabilities.enable_hover()
+
+    server

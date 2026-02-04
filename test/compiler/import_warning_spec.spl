@@ -1,0 +1,181 @@
+# Import Warning Specification
+#
+# Tests for parser warnings on invalid import syntax.
+# These tests validate the parser warning added in parser.spl.
+#
+# Status: READY - Parser warning already implemented
+# See: doc/report/import_path_warning_2026-02-04.md
+
+use testing.{describe, it, expect}
+use compiler.parser (Parser)
+
+describe "Import path warnings":
+    it "warns when slash is used in import path":
+        val code = '''
+        use std/testing (describe, it, expect)
+        '''
+
+        val parser = Parser.new(code)
+        val module = parser.parse()
+
+        # Should have at least one warning
+        expect(parser.errors.len() > 0)
+
+        # Warning should mention "/"
+        val has_slash_warning = parser.errors.any(\e:
+            e.severity == ErrorSeverity.Warning and
+            e.message.contains("/")
+        )
+        expect(has_slash_warning)
+
+    it "provides helpful suggestion":
+        val code = '''
+        use compiler/parser/types.*
+        '''
+
+        val parser = Parser.new(code)
+        val module = parser.parse()
+
+        # Should suggest using "." instead
+        val has_suggestion = parser.errors.any(\e:
+            e.message.contains("compiler.parser.types")
+        )
+        expect(has_suggestion)
+
+    it "does not warn on correct absolute import":
+        val code = '''
+        use testing.helpers
+        use compiler.parser_types.*
+        '''
+
+        val parser = Parser.new(code)
+        val module = parser.parse()
+
+        # Should have no warnings about import paths
+        val has_import_warning = parser.errors.any(\e:
+            e.severity == ErrorSeverity.Warning and
+            e.message.contains("Import path")
+        )
+        expect(not has_import_warning)
+
+    it "does not warn on correct relative import":
+        val code = '''
+        use .smf_enums.*
+        use .obj_taker (SmfSymbol)
+        '''
+
+        val parser = Parser.new(code)
+        val module = parser.parse()
+
+        val has_import_warning = parser.errors.any(\e:
+            e.severity == ErrorSeverity.Warning and
+            e.message.contains("Import path")
+        )
+        expect(not has_import_warning)
+
+    it "does not warn on correct parent import":
+        val code = '''
+        use ..monomorphize.metadata.*
+        use ..ast (FunctionDef)
+        '''
+
+        val parser = Parser.new(code)
+        val module = parser.parse()
+
+        val has_import_warning = parser.errors.any(\e:
+            e.severity == ErrorSeverity.Warning and
+            e.message.contains("Import path")
+        )
+        expect(not has_import_warning)
+
+    it "warns on multiple slash usages":
+        val code = '''
+        use std/testing.*
+        use compiler/parser/types.*
+        use app/main/runner.*
+        '''
+
+        val parser = Parser.new(code)
+        val module = parser.parse()
+
+        # Should have warnings for each import
+        val slash_warnings = parser.errors.filter(\e:
+            e.severity == ErrorSeverity.Warning and
+            e.message.contains("/")
+        )
+        expect(slash_warnings.len() >= 3)
+
+    it "warns on mixed slash and dot":
+        val code = '''
+        use std.collections/map.*
+        '''
+
+        val parser = Parser.new(code)
+        val module = parser.parse()
+
+        val has_slash_warning = parser.errors.any(\e:
+            e.severity == ErrorSeverity.Warning and
+            e.message.contains("/")
+        )
+        expect(has_slash_warning)
+
+describe "Warning message content":
+    it "explains the issue":
+        val code = "use std/testing.*"
+        val parser = Parser.new(code)
+        parser.parse()
+
+        val warning = parser.errors[0]
+        expect(warning.message.contains("should not use '/'"))
+
+    it "suggests dot separator":
+        val code = "use std/testing.*"
+        val parser = Parser.new(code)
+        parser.parse()
+
+        val warning = parser.errors[0]
+        expect(warning.message.contains("."))
+
+    it "mentions relative paths":
+        val code = "use path/to/module.*"
+        val parser = Parser.new(code)
+        parser.parse()
+
+        val warning = parser.errors[0]
+        expect(
+            warning.message.contains("relative") or
+            warning.message.contains("./")
+        )
+
+describe "Warning severity":
+    it "is a warning, not an error":
+        val code = "use std/testing.*"
+        val parser = Parser.new(code)
+        parser.parse()
+
+        # Should be Warning, not Error
+        val warning = parser.errors[0]
+        expect(warning.severity == ErrorSeverity.Warning)
+
+    it "allows compilation to continue":
+        val code = '''
+        use std/testing.*
+
+        fn test():
+            print "hello"
+        '''
+
+        val parser = Parser.new(code)
+        val module = parser.parse()
+
+        # Should still parse the function despite warning
+        expect(module.functions.contains_key("test"))
+
+    it "does not prevent import resolution":
+        val code = "use std/testing.*"
+        val parser = Parser.new(code)
+        val module = parser.parse()
+
+        # Import should still be in the module
+        expect(module.imports.len() == 1)
+        expect(module.imports[0].module == "std/testing")

@@ -1,0 +1,522 @@
+# Godot Hot-Reload Support
+#
+# Live code and resource reloading without restarting the game
+#
+# Features:
+# - File watching and change detection
+# - Simple script recompilation
+# - Resource hot-reloading
+# - State preservation during reload
+# - Development mode controls
+#
+# Based on: Simple's watch system + Godot's resource system
+
+use godot.ffi
+use godot.variant
+use godot.node
+use godot.scene
+use godot.resource
+use sys.fs
+use sys.time
+
+mod hotreload
+
+# Hot Reload Watcher
+# Monitors files and triggers reloads on changes
+pub struct HotReloadWatcher:
+    watched_files: Dict<text, f64>  # path -> last_modified_time
+    reload_callbacks: Array<fn(text)>  # Callbacks to call on reload
+    enabled: bool
+    check_interval: f64  # Seconds between checks
+    last_check: f64      # Last check timestamp
+
+impl HotReloadWatcher:
+    # Create new watcher
+    pub fn new(check_interval: f64 = 0.5) -> HotReloadWatcher:
+        return HotReloadWatcher(
+            watched_files: {},
+            reload_callbacks: [],
+            enabled: true,
+            check_interval: check_interval,
+            last_check: 0.0
+        )
+
+    # Watch a file for changes
+    pub fn watch_file(mut self, path: text):
+        # Get current modification time
+        val mod_time = get_file_modified_time(path)
+        self.watched_files[path] = mod_time
+        
+        println("Watching file: {path}")
+
+    # Watch a directory recursively
+    pub fn watch_directory(mut self, dir_path: text, extension: text = ".spl"):
+        # Get all files in directory with extension
+        val files = get_files_recursive(dir_path, extension)
+        
+        for file in files:
+            self.watch_file(file)
+
+    # Add reload callback
+    pub fn on_reload(mut self, callback: fn(text)):
+        self.reload_callbacks.push(callback)
+
+    # Check for file changes (call from _process)
+    pub fn check_for_changes(mut self, current_time: f64):
+        if not self.enabled:
+            return
+
+        # Rate limiting
+        if current_time - self.last_check < self.check_interval:
+            return
+
+        self.last_check = current_time
+
+        # Check each watched file
+        for (path, last_time) in self.watched_files.items():
+            val current_mod_time = get_file_modified_time(path)
+
+            if current_mod_time > last_time:
+                # File was modified
+                println("File changed: {path}")
+                
+                # Update stored time
+                self.watched_files[path] = current_mod_time
+
+                # Trigger reload
+                self.trigger_reload(path)
+
+    # Trigger reload for a file
+    me trigger_reload(path: text):
+        println("Hot-reloading: {path}")
+
+        # Call all callbacks
+        for callback in self.reload_callbacks:
+            callback(path)
+
+    # Enable/disable watching
+    pub fn set_enabled(mut self, enabled: bool):
+        self.enabled = enabled
+        
+        if enabled:
+            println("Hot-reload enabled")
+        else:
+            println("Hot-reload disabled")
+
+    # Clear all watched files
+    pub fn clear(mut self):
+        self.watched_files.clear()
+        println("Cleared watch list")
+
+
+# Hot Reload Manager for Godot
+# Integrates file watching with Godot's scene tree
+pub struct HotReloadManager extends godot.node.Node:
+    watcher: HotReloadWatcher
+    simple_compiler_path: text  # Path to Simple compiler
+    scene_tree: godot.scene.SceneTree
+
+    # State preservation
+    preserve_state: bool
+    saved_state: Dict<text, variant.Variant>
+
+    pub fn _ready(mut self):
+        println("Hot-Reload Manager ready!")
+
+        # Initialize watcher
+        self.watcher = HotReloadWatcher.new(0.5)
+        self.scene_tree = godot.scene.SceneTree.get_singleton()
+        self.preserve_state = true
+        self.saved_state = {}
+
+        # Set up reload callback
+        self.watcher.on_reload(|path| {
+            self.on_file_changed(path)
+        })
+
+        # Watch project directories
+        self.watch_project_directories()
+
+        println("Hot-reload enabled. Watching for file changes...")
+
+    # Watch common project directories
+    me watch_project_directories():
+        # Watch Simple scripts
+        self.watcher.watch_directory("res://scripts", ".spl")
+        
+        # Watch scenes (for resource reloading)
+        self.watcher.watch_directory("res://scenes", ".tscn")
+
+        println("Watching {self.watcher.watched_files.len()} files")
+
+    # Called every frame
+    pub fn _process(mut self, delta: f64):
+        # Check for file changes
+        val current_time = get_current_time()
+        self.watcher.check_for_changes(current_time)
+
+    # Handle file change event
+    me on_file_changed(path: text):
+        if path.ends_with(".spl"):
+            # Simple script changed - recompile
+            self.reload_simple_script(path)
+        elif path.ends_with(".tscn") or path.ends_with(".tres"):
+            # Scene or resource changed - reload
+            self.reload_godot_resource(path)
+
+    # Recompile and reload Simple script
+    me reload_simple_script(script_path: text):
+        println("Recompiling Simple script: {script_path}")
+
+        # Save current state if enabled
+        if self.preserve_state:
+            self.save_scene_state()
+
+        # Recompile using Simple compiler
+        val compile_result = self.compile_simple_script(script_path)
+
+        if compile_result.is_ok():
+            println("Successfully recompiled: {script_path}")
+
+            # Reload current scene to use new script
+            val reload_result = self.scene_tree.reload_current_scene()
+
+            if reload_result.is_ok():
+                # Restore state after reload
+                if self.preserve_state:
+                    self.restore_scene_state()
+
+                println("Scene reloaded with new script")
+            else:
+                println("Error reloading scene: {reload_result.unwrap_err()}")
+        else:
+            println("Compilation error: {compile_result.unwrap_err()}")
+
+    # Compile Simple script
+    fn compile_simple_script(script_path: text) -> Result<(), text>:
+        # Call Simple compiler for hot-reload compilation
+        @extern("runtime", "rt_process_run")
+        fn _rt_process_run(cmd_ptr: &u8, cmd_len: u64, args_ptr: &u8, args_len: u64) -> (i32, text, text)
+
+        # Build the command - use configured compiler path or default
+        val compiler = if self.simple_compiler_path.is_empty():
+            "simple"
+        else:
+            self.simple_compiler_path
+
+        # Hot-reload compilation: generate .smf in .simple/build/
+        val args = "build --hot-reload {script_path}"
+        val (exit_code, stdout, stderr) = _rt_process_run(
+            compiler.ptr(), compiler.len(),
+            args.ptr(), args.len()
+        )
+
+        if exit_code == 0:
+            return Ok(())
+        else:
+            # Return compilation error message
+            val error_msg = if stderr.is_empty(): stdout else: stderr
+            return Err(error_msg)
+
+    # Reload Godot resource (scene, texture, etc.)
+    me reload_godot_resource(resource_path: text):
+        println("Reloading Godot resource: {resource_path}")
+
+        # Force Godot to reload the resource from disk
+        val loader = godot.resource.ResourceLoader.get_singleton()
+
+        # Clear resource from cache to force reload
+        # Use Godot's ResourceLoader.set_abort_on_missing_resources(false) first
+        val loader_obj = variant.Object.from_ptr(loader.singleton_ptr)
+
+        # Check if resource exists in cache
+        val path_var = variant.Variant.from_string(resource_path)
+        val has_cached = loader_obj.call1("has_cached", path_var)
+
+        if has_cached.as_bool():
+            # Clear cache for this resource by requesting fresh reload
+            # Godot doesn't expose direct cache clear, but we can use
+            # ResourceLoader.load with reload_cache = true parameter
+            val cache_mode_var = variant.Variant.from_int(2)  # CACHE_MODE_REPLACE
+            loader_obj.call3("load", path_var, variant.Variant.null(), cache_mode_var)
+            println("Cleared and reloaded resource cache: {resource_path}")
+
+        # If it's the current scene, reload it
+        if resource_path.ends_with(".tscn"):
+            if self.preserve_state:
+                self.save_scene_state()
+
+            val result = self.scene_tree.reload_current_scene()
+
+            if result.is_ok():
+                if self.preserve_state:
+                    self.restore_scene_state()
+                println("Scene hot-reloaded")
+            else:
+                println("Error reloading scene: {result.unwrap_err()}")
+
+    # Save current scene state (for state preservation)
+    me save_scene_state():
+        println("Saving scene state...")
+
+        # Get current scene root
+        val current = self.scene_tree.get_current_scene()
+
+        if current.is_none():
+            return
+
+        val root = current.unwrap()
+
+        # Walk scene tree and save state for nodes with hot-reload metadata
+        self.saved_state.clear()
+        self.save_node_state_recursive(root, "")
+
+        println("State saved ({self.saved_state.len()} properties)")
+
+    # Recursively save node state
+    me save_node_state_recursive(node: godot.node.Node, path_prefix: text):
+        val node_obj = variant.Object.from_ptr(node.node_ptr)
+
+        # Get node path
+        val name_var = node_obj.call0("get_name")
+        val node_name = name_var.as_string()
+        val node_path = if path_prefix.is_empty():
+            node_name
+        else:
+            "{path_prefix}/{node_name}"
+
+        # Check if node has "hot_reload_preserve" metadata
+        val meta_key = variant.Variant.from_string("hot_reload_preserve")
+        val has_meta = node_obj.call1("has_meta", meta_key)
+
+        if has_meta.as_bool():
+            # Get list of properties to preserve from metadata
+            val props_var = node_obj.call1("get_meta", meta_key)
+            val props = props_var.as_string()
+
+            # Parse comma-separated property names
+            for prop_name in props.split(","):
+                val prop_name_trimmed = prop_name.trim()
+                if prop_name_trimmed.is_empty():
+                    continue
+
+                # Get property value
+                val prop_var = variant.Variant.from_string(prop_name_trimmed)
+                val value = node_obj.call1("get", prop_var)
+
+                # Store with full path key
+                val state_key = "{node_path}:{prop_name_trimmed}"
+                self.saved_state[state_key] = value
+
+        # Recurse into children
+        val child_count_var = node_obj.call0("get_child_count")
+        val child_count = child_count_var.as_int()
+
+        for i in 0..child_count:
+            val idx_var = variant.Variant.from_int(i)
+            val child_var = node_obj.call1("get_child", idx_var)
+            val child_ptr = child_var.as_object_ptr()
+            val child_node = godot.node.Node(node_ptr: child_ptr)
+            self.save_node_state_recursive(child_node, node_path)
+
+    # Restore scene state (after reload)
+    me restore_scene_state():
+        println("Restoring scene state...")
+
+        # Get current scene root after reload
+        val current = self.scene_tree.get_current_scene()
+
+        if current.is_none():
+            println("Warning: No current scene to restore state to")
+            return
+
+        val root = current.unwrap()
+        val root_obj = variant.Object.from_ptr(root.node_ptr)
+
+        # Restore each saved property
+        var restored_count = 0
+        for (state_key, value) in self.saved_state.items():
+            # Parse state key: "NodePath:property_name"
+            val colon_idx = state_key.rfind(":")
+            if colon_idx < 0:
+                continue
+
+            val node_path = state_key[0:colon_idx]
+            val prop_name = state_key[colon_idx + 1:]
+
+            # Find node by path
+            val path_var = variant.Variant.from_string(node_path)
+            val node_var = root_obj.call1("get_node_or_null", path_var)
+
+            if node_var.is_null():
+                println("Warning: Node not found after reload: {node_path}")
+                continue
+
+            # Set property value
+            val target_obj = variant.Object.from_ptr(node_var.as_object_ptr())
+            val prop_var = variant.Variant.from_string(prop_name)
+            target_obj.call2("set", prop_var, value)
+            restored_count = restored_count + 1
+
+        println("State restored ({restored_count} properties)")
+
+    # Enable/disable hot-reload
+    pub fn set_enabled(mut self, enabled: bool):
+        self.watcher.set_enabled(enabled)
+
+    # Toggle state preservation
+    pub fn set_preserve_state(mut self, preserve: bool):
+        self.preserve_state = preserve
+
+        if preserve:
+            println("State preservation enabled")
+        else:
+            println("State preservation disabled")
+
+
+# Helper functions (placeholders)
+
+fn get_file_modified_time(path: text) -> f64:
+    """Get a unique identifier for file state using content hash.
+
+    Since mtime FFI is not available, we use a content-based approach
+    which is actually more reliable for detecting real file changes.
+    The hash is converted to a float to fit the expected interface.
+
+    Args:
+        path: File path to check
+
+    Returns:
+        A float representing the file's current state (based on content hash)
+    """
+    @extern("runtime", "rt_file_read_text")
+    fn _rt_file_read_text(path_ptr: &u8, path_len: u64) -> text
+
+    @extern("runtime", "rt_fnv_hash")
+    fn _rt_fnv_hash(data_ptr: &u8, data_len: u64) -> u64
+
+    # Read file content
+    val content = _rt_file_read_text(path.ptr(), path.len())
+    if content.is_empty():
+        # File doesn't exist or empty - return 0
+        return 0.0
+
+    # Compute FNV-1a hash of content
+    val hash = _rt_fnv_hash(content.ptr(), content.len())
+
+    # Convert hash to float (high bits give us uniqueness)
+    return (hash as f64)
+
+fn get_files_recursive(dir: text, ext: text) -> Array<text>:
+    """Recursively find all files with given extension.
+
+    Args:
+        dir: Directory to search
+        ext: File extension to match (without dot)
+
+    Returns:
+        Array of file paths
+    """
+    @extern("runtime", "rt_dir_list")
+    fn _rt_dir_list(path_ptr: &u8, path_len: u64) -> Any
+
+    @extern("runtime", "rt_file_stat")
+    fn _rt_file_stat(
+        path_ptr: &u8,
+        path_len: u64,
+        out_exists: &mut bool,
+        out_is_file: &mut bool,
+        out_is_dir: &mut bool,
+        out_is_readable: &mut bool,
+        out_is_writable: &mut bool,
+        out_size: &mut i64
+    )
+
+    @extern("runtime", "rt_path_ext")
+    fn _rt_path_ext(path_ptr: &u8, path_len: u64) -> text
+
+    var results: Array<text> = []
+
+    # Get directory entries
+    val entries = _rt_dir_list(dir.ptr(), dir.len())
+    if entries.is_nil():
+        return results
+
+    val entry_array = entries as Array<text>
+    for entry_name in entry_array:
+        # Build full path
+        val full_path = "{dir}/{entry_name}"
+
+        # Get file info
+        var exists = false
+        var is_file = false
+        var is_dir = false
+        var is_readable = false
+        var is_writable = false
+        var size: i64 = 0
+
+        _rt_file_stat(
+            full_path.ptr(),
+            full_path.len(),
+            &mut exists,
+            &mut is_file,
+            &mut is_dir,
+            &mut is_readable,
+            &mut is_writable,
+            &mut size
+        )
+
+        if is_dir:
+            # Recursively search subdirectory
+            val sub_results = get_files_recursive(full_path, ext)
+            for sub_path in sub_results:
+                results.push(sub_path)
+        elif is_file:
+            # Check extension
+            val file_ext = _rt_path_ext(full_path.ptr(), full_path.len())
+            if file_ext == ext:
+                results.push(full_path)
+
+    return results
+
+fn get_current_time() -> f64:
+    # Use actual time API - get current Unix time in seconds
+    @extern("runtime", "rt_time_now_unix_micros")
+    fn _rt_time_now_unix_micros() -> i64
+
+    val micros = _rt_time_now_unix_micros()
+    return (micros as f64) / 1000000.0
+
+fn sleep(seconds: f64):
+    """Sleep for specified seconds.
+
+    Args:
+        seconds: Number of seconds to sleep
+    """
+    @extern("runtime", "rt_thread_sleep")
+    fn _rt_thread_sleep(millis: i64)
+
+    val millis = (seconds * 1000.0) as i64
+    _rt_thread_sleep(millis)
+
+
+# Dict and Array placeholders
+pub struct Dict<K, V>:
+    dummy: i32
+
+impl<K, V> Dict<K, V>:
+    pub fn clear(mut self):
+        pass
+
+    pub fn len(self) -> i32:
+        return 0
+
+    pub fn items(self) -> Array<(K, V)>:
+        return []
+
+pub struct Array<T>:
+    items: Vec<T>
+
+impl<T> Array<T>:
+    pub fn push(mut self, item: T):
+        pass

@@ -1,0 +1,155 @@
+# Plan Collector
+#
+# Scans .claude/plans/*.md files and extracts plan metadata including
+# title, status, steps, and progress.
+
+use io.fs_helpers.{read_text_file, walk_directory}
+use core.time.{now_iso8601}
+use tooling.dashboard.types.{Plan}
+
+# =========================================================================
+# Plan Collector
+# =========================================================================
+
+class PlanCollector:
+    plans_dir: text
+
+    static fn new() -> PlanCollector:
+        return PlanCollector { plans_dir: ".claude/plans" }
+
+    static fn with_dir(dir: text) -> PlanCollector:
+        return PlanCollector { plans_dir: dir }
+
+    # Collect all plans
+    fn collect() -> List<Plan>:
+        var plans: List<Plan> = []
+        var id = 0
+
+        # Find all .md files in plans directory
+        val plan_files = walk_directory(
+            self.plans_dir,
+            ["**/*.md"],
+            []
+        )
+
+        print "  Found {plan_files.len()} plan files"
+
+        for file in plan_files:
+            match self.parse_plan_file(file, id):
+                | Ok(plan) ->
+                    plans.append(plan)
+                    id = id + 1
+                | Err(e) ->
+                    print "    Warning: Failed to parse {file}: {e}"
+
+        return plans
+
+    # Parse a single plan file
+    fn parse_plan_file(file: text, id: i32) -> Result<Plan, text>:
+        match read_text_file(file):
+            | Err(e) -> Err("Failed to read file: {e}")
+            | Ok(content) ->
+                val metadata = parse_plan_metadata(content)
+                Ok(Plan.new(
+                    id,
+                    file,
+                    metadata.title,
+                    metadata.status,
+                    metadata.created,
+                    now_iso8601(),
+                    metadata.total_steps,
+                    metadata.completed_steps,
+                    metadata.blocked
+                ))
+
+# =========================================================================
+# Plan Metadata Parser
+# =========================================================================
+
+class PlanMetadata:
+    title: text
+    status: text
+    created: text
+    total_steps: i32
+    completed_steps: i32
+    blocked: bool
+
+    static fn new() -> PlanMetadata:
+        return PlanMetadata {
+            title: "Unknown",
+            status: "in_progress",
+            created: "",
+            total_steps: 0,
+            completed_steps: 0,
+            blocked: false
+        }
+
+# Parse plan file metadata
+fn parse_plan_metadata(content: text) -> PlanMetadata:
+    var metadata = PlanMetadata.new()
+    val lines = content.split("\n")
+
+    var in_phase = false
+    var phase_count = 0
+    var completed_phase_count = 0
+
+    for line in lines:
+        val trimmed = line.trim()
+
+        # Extract title from first # heading
+        if trimmed.starts_with("# ") and metadata.title == "Unknown":
+            metadata.title = trimmed.slice(2, trimmed.len()).trim()
+
+        # Count phases (## Phase)
+        if trimmed.starts_with("## Phase"):
+            phase_count = phase_count + 1
+            in_phase = true
+
+            # Check if completed
+            if trimmed.contains("Complete") or trimmed.contains("Done"):
+                completed_phase_count = completed_phase_count + 1
+
+        # Look for status indicators
+        if trimmed.contains("[x]") or trimmed.contains("[X]"):
+            metadata.completed_steps = metadata.completed_steps + 1
+            metadata.total_steps = metadata.total_steps + 1
+        elif trimmed.contains("[ ]"):
+            metadata.total_steps = metadata.total_steps + 1
+
+        # Check for blocked status
+        if trimmed.contains("blocked") or trimmed.contains("BLOCKED"):
+            metadata.blocked = true
+
+    # Use phases if no checkboxes found
+    if metadata.total_steps == 0 and phase_count > 0:
+        metadata.total_steps = phase_count
+        metadata.completed_steps = completed_phase_count
+
+    # Determine status
+    if metadata.completed_steps == metadata.total_steps and metadata.total_steps > 0:
+        metadata.status = "completed"
+    elif metadata.blocked:
+        metadata.status = "blocked"
+    else:
+        metadata.status = "in_progress"
+
+    return metadata
+
+# =========================================================================
+# Convenience Functions
+# =========================================================================
+
+# Collect plans from default location
+fn collect_plans() -> List<Plan>:
+    val collector = PlanCollector.new()
+    return collector.collect()
+
+# Collect plans from custom directory
+fn collect_plans_from(dir: text) -> List<Plan>:
+    val collector = PlanCollector.with_dir(dir)
+    return collector.collect()
+
+# =========================================================================
+# Exports
+# =========================================================================
+

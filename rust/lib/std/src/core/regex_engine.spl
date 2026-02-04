@@ -1,0 +1,358 @@
+# ============================================================================
+# Regex Library - Execution Engine
+# ============================================================================
+#
+# Regular expression execution engine using NFA (Thompson's construction).
+#
+# Contains:
+# - NFABuilder: Constructs NFA from AST using Thompson's algorithm
+# - NFAMatcher: Executes NFA to match input strings
+# - CompiledRegex: Wrapper for compiled regex with metadata
+#
+# ============================================================================
+
+class NFABuilder:
+    # Stateless builder - NFA is passed explicitly
+
+    static fn new() -> NFABuilder:
+        return NFABuilder {}
+
+    fn build(ast: RegexNode) -> NFA:
+        var nfa = NFA.new()
+        val (nfa1, frag) = self.build_fragment(nfa, ast)
+
+        # Make the end state accept
+        val nfa2 = nfa1.set_accept(frag.end)
+
+        # Set start state
+        val final_nfa = NFA { states: nfa2.states, start_state: frag.start, num_groups: nfa2.num_groups, char_classes: nfa2.char_classes }
+
+        return final_nfa
+
+    fn build_fragment(mut nfa: NFA, node: RegexNode) -> (NFA, NFAFragment):
+        # Use node_type field for type detection (is and as operators broken)
+
+        # Literal
+        if node.node_type == "literal":
+            val (nfa1, start) = nfa.add_state()
+            val (nfa2, end) = nfa1.add_state()
+
+            if node.char.len() > 0:
+                val nfa3 = nfa2.add_transition_to(start, node.char, end)
+                return (nfa3, NFAFragment.new(start, end))
+            else:
+                # Empty literal - epsilon transition
+                val nfa3 = nfa2.add_epsilon_to(start, end)
+                return (nfa3, NFAFragment.new(start, end))
+
+        # Character class
+        if node.node_type == "charclass":
+            val (nfa1, start) = nfa.add_state()
+            val (nfa2, end) = nfa1.add_state()
+
+            # Store the character class in the NFA and get its index
+            val (nfa3, cc_idx) = nfa2.add_char_class(node)
+
+            # Add a marker transition with the character class index
+            val marker = "__CC_" + cc_idx.to_string() + "__"
+            val nfa4 = nfa3.add_transition_to(start, marker, end)
+
+            return (nfa4, NFAFragment.new(start, end))
+
+        # Concatenation
+        if node.node_type == "concat":
+            val (nfa1, left_frag) = self.build_fragment(nfa, node.left)
+            val (nfa2, right_frag) = self.build_fragment(nfa1, node.right)
+
+            # Connect left end to right start
+            val nfa3 = nfa2.add_epsilon_to(left_frag.end, right_frag.start)
+
+            return (nfa3, NFAFragment.new(left_frag.start, right_frag.end))
+
+        # Alternation
+        if node.node_type == "alt":
+            val (nfa1, left_frag) = self.build_fragment(nfa, node.left)
+            val (nfa2, right_frag) = self.build_fragment(nfa1, node.right)
+
+            val (nfa3, start) = nfa2.add_state()
+            val (nfa4, end) = nfa3.add_state()
+
+            # Split from start to both alternatives
+            val nfa5 = nfa4.add_epsilon_to(start, left_frag.start)
+            val nfa6 = nfa5.add_epsilon_to(start, right_frag.start)
+
+            # Join both ends
+            val nfa7 = nfa6.add_epsilon_to(left_frag.end, end)
+            val nfa8 = nfa7.add_epsilon_to(right_frag.end, end)
+
+            return (nfa8, NFAFragment.new(start, end))
+
+        # Star (zero or more)
+        if node.node_type == "star":
+            val (nfa1, child_frag) = self.build_fragment(nfa, node.child)
+
+            val (nfa2, start) = nfa1.add_state()
+            val (nfa3, end) = nfa2.add_state()
+
+            # Start can skip to end (zero matches)
+            val nfa4 = nfa3.add_epsilon_to(start, child_frag.start)
+            val nfa5 = nfa4.add_epsilon_to(start, end)
+
+            # Child end loops back to start
+            val nfa6 = nfa5.add_epsilon_to(child_frag.end, child_frag.start)
+            val nfa7 = nfa6.add_epsilon_to(child_frag.end, end)
+
+            return (nfa7, NFAFragment.new(start, end))
+
+        # Plus (one or more)
+        if node.node_type == "plus":
+            val (nfa1, child_frag) = self.build_fragment(nfa, node.child)
+
+            val (nfa2, start) = nfa1.add_state()
+            val (nfa3, end) = nfa2.add_state()
+
+            # Must match at least once
+            val nfa4 = nfa3.add_epsilon_to(start, child_frag.start)
+
+            # Child end can loop back or finish
+            val nfa5 = nfa4.add_epsilon_to(child_frag.end, child_frag.start)
+            val nfa6 = nfa5.add_epsilon_to(child_frag.end, end)
+
+            return (nfa6, NFAFragment.new(start, end))
+
+        # Question (zero or one)
+        if node.node_type == "question":
+            val (nfa1, child_frag) = self.build_fragment(nfa, node.child)
+
+            val (nfa2, start) = nfa1.add_state()
+            val (nfa3, end) = nfa2.add_state()
+
+            # Can skip child or match once
+            val nfa4 = nfa3.add_epsilon_to(start, child_frag.start)
+            val nfa5 = nfa4.add_epsilon_to(start, end)
+
+            val nfa6 = nfa5.add_epsilon_to(child_frag.end, end)
+
+            return (nfa6, NFAFragment.new(start, end))
+
+        # Group
+        if node.node_type == "group":
+            val (nfa1, child_frag) = self.build_fragment(nfa, node.child)
+
+            val (nfa2, start) = nfa1.add_state()
+            val (nfa3, end) = nfa2.add_state()
+
+            # Mark group boundaries
+            val nfa4 = nfa3.set_group_start(start, node.group_id)
+            val nfa5 = nfa4.set_group_end(end, node.group_id)
+
+            val nfa6 = nfa5.add_epsilon_to(start, child_frag.start)
+            val nfa7 = nfa6.add_epsilon_to(child_frag.end, end)
+
+            if node.group_id > nfa7.num_groups:
+                val nfa8 = nfa7.set_num_groups(node.group_id)
+                return (nfa8, NFAFragment.new(start, end))
+            else:
+                return (nfa7, NFAFragment.new(start, end))
+
+        # Anchor
+        if node.node_type == "anchor":
+            val (nfa1, start) = nfa.add_state()
+            val (nfa2, end) = nfa1.add_state()
+
+            # Anchors are handled during matching, add epsilon transition
+            val nfa3 = nfa2.add_epsilon_to(start, end)
+
+            return (nfa3, NFAFragment.new(start, end))
+
+        # Default: Unknown node type
+        val (nfa1, start) = nfa.add_state()
+        val (nfa2, end) = nfa1.add_state()
+        val nfa3 = nfa2.add_epsilon_to(start, end)
+        return (nfa3, NFAFragment.new(start, end))
+
+# NFA Matcher - simulates NFA execution
+class NFAMatcher:
+    nfa: NFA
+    text: text
+
+    fn new(nfa_val: NFA, text_val: text) -> NFAMatcher:
+        return NFAMatcher { nfa: nfa_val, text: text_val }
+
+    fn match_at(start_pos: i32) -> Option<Match>:
+        """Try to match starting at the given position."""
+        var current_pos = start_pos
+
+        # Track current states with their group captures
+        var current_states = []
+        val initial_groups = []  # Empty group captures
+        current_states.append((self.nfa.start_state, initial_groups, start_pos))
+
+        # Expand epsilon closures
+        current_states = self.epsilon_closure(current_states)
+
+        var match_pos = -1
+        var match_groups = []
+        var iteration_count = 0
+        val max_iterations = self.text.len() + 100  # Safety limit
+
+        # Process each character
+        while current_pos <= self.text.len() and iteration_count < max_iterations:
+            iteration_count = iteration_count + 1
+
+            # Check if any current state is accepting
+            for state_info in current_states:
+                val state_id = state_info[0]
+                val groups = state_info[1]
+                val state = self.nfa.states[state_id]
+
+                if state.is_accept:
+                    # Found a match
+                    match_pos = current_pos
+                    match_groups = groups
+
+            if current_pos >= self.text.len():
+                break
+
+            if current_states.len() == 0:
+                break  # No active states
+
+            # Get next character
+            val c = self.text[current_pos]
+
+            # Compute next states
+            var next_states = []
+
+            for state_info in current_states:
+                val state_id = state_info[0]
+                val groups = state_info[1]
+                val state = self.nfa.states[state_id]
+
+                # Check transitions
+                for trans in state.transitions:
+                    val trans_char = trans[0]
+                    val target_id = trans[1]
+
+                    # Check for exact match or special markers
+                    if trans_char == c:
+                        next_states.append((target_id, groups, current_pos + 1))
+                    elif trans_char.starts_with("__CC_") and trans_char.ends_with("__"):
+                        # Character class - extract index and use stored char class
+                        val idx_str = trans_char.substring(5, trans_char.len() - 2)
+                        val cc_idx = parse_int(idx_str)
+                        val char_class = self.nfa.char_classes[cc_idx]
+                        if char_class.matches(c):
+                            next_states.append((target_id, groups, current_pos + 1))
+
+            if next_states.len() == 0:
+                break  # No more transitions possible
+
+            # Move to next position
+            current_pos = current_pos + 1
+            current_states = self.epsilon_closure(next_states)
+
+        if match_pos >= 0:
+            val matched_text = self.text.substring(start_pos, match_pos)
+            val m = Match.new(matched_text, start_pos, match_pos)
+            m.groups = match_groups
+            return Some(m)
+
+        return nil
+
+    fn epsilon_closure(states: List<(i32, List<text>, i32)>) -> List<(i32, List<text>, i32)>:
+        """Compute epsilon closure of a set of states using iterative approach."""
+        var result = []
+        var visited = []
+        var work_queue = []
+        var iteration_count = 0
+        val max_iterations = self.nfa.states.len() * 10  # Safety limit
+
+        # Initialize work queue with input states
+        for state_info in states:
+            work_queue.append(state_info)
+
+        # Process work queue iteratively
+        while work_queue.len() > 0 and iteration_count < max_iterations:
+            iteration_count = iteration_count + 1
+
+            val state_info = work_queue[0]
+            work_queue = work_queue[1:]  # Remove first element
+
+            val state_id = state_info[0]
+            val groups = state_info[1]
+            val text_pos = state_info[2]
+
+            # Skip if already visited
+            if visited.contains(state_id):
+                continue
+
+            visited.append(state_id)
+            result.append(state_info)
+
+            val state = self.nfa.states[state_id]
+
+            # Follow epsilon transitions
+            for target_id in state.epsilon_transitions:
+                if not visited.contains(target_id):
+                    work_queue.append((target_id, groups, text_pos))
+
+        return result
+
+# Compiled regex - holds AST and NFA
+class CompiledRegex:
+    ast: RegexNode
+    nfa: NFA
+    pattern_str: text
+
+    fn new(pattern: text) -> CompiledRegex:
+        # Parse pattern to AST
+        val parser = RegexParser.new(pattern)
+        val ast = parser.parse()
+
+        # Build NFA from AST
+        val builder = NFABuilder.new()
+        val nfa = builder.build(ast)
+
+        return CompiledRegex { ast: ast, nfa: nfa, pattern_str: pattern }
+
+    fn match_at(text: text, pos: i32) -> Option<Match>:
+        val matcher = NFAMatcher.new(self.nfa, text)
+        return matcher.match_at(pos)
+
+    fn search(text: text) -> Option<Match>:
+        # Try matching at each position
+        for i in range(0, text.len() + 1):
+            val m = self.match_at(text, i)
+            if m!= nil:
+                return m
+
+        return nil
+
+    fn findall(text: text) -> List<Match>:
+        var results = []
+        var pos = 0
+
+        while pos < text.len():
+            val m = self.match_at(text, pos)
+            if m!= nil:
+                val match_val = m.unwrap()
+                results.append(match_val)
+                # Move past this match
+                val match_start = match_val.start
+                val match_end = match_val.end
+                pos = match_end
+                # Avoid infinite loop on zero-width matches
+                if match_end == match_start:
+                    pos = pos + 1
+            else:
+                pos = pos + 1
+
+        return results
+
+# Regex match result
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export NFABuilder, NFAMatcher, CompiledRegex

@@ -8,7 +8,7 @@ use string_interner.StringInterner
 use test_db_types.*
 use test_db_io.{DB_PATH, RUNS_PATH, read_db_file, write_db_file_locked}
 use test_db_parser.{parse_stable_db, parse_volatile_db, ParsedStableDb, ParsedVolatileDb}
-use test_db_parser_robust.{parse_stable_db_robust, parse_volatile_db_robust}
+# use test_db_parser_robust.{parse_stable_db_robust, parse_volatile_db_robust}
 use test_db_serializer.{serialize_stable_db, serialize_volatile_db}
 use test_stats.{compute_statistics, compute_percentiles, detect_outliers_iqr, sort_f64, percentile_at, abs_f64, detect_flaky_test}
 use test_db_validation.{validate_database, print_validation_warnings}
@@ -19,14 +19,14 @@ use test_db_validation.{validate_database, print_validation_warnings}
 
 struct TestDatabase:
     interner: StringInterner
-    files: List<FileRecord>
-    suites: List<SuiteRecord>
-    tests: List<TestRecord>
-    counters: List<CounterRecord>
-    timing: List<TimingSummary>
-    timing_runs: List<TimingRun>
-    changes: List<ChangeEvent>
-    test_runs: List<RunRecord>
+    files: [FileRecord]
+    suites: [SuiteRecord]
+    tests: [TestRecord]
+    counters: [CounterRecord]
+    timing: [TimingSummary]
+    timing_runs: [TimingRun]
+    changes: [ChangeEvent]
+    test_runs: [RunRecord]
     dirty: bool
 
 impl TestDatabase:
@@ -58,20 +58,16 @@ impl TestDatabase:
 
         val stable_content = stable_result.unwrap()
         if stable_content.trim() != "":
-            # Use robust parser with error recovery
-            val parsed = parse_stable_db_robust(stable_content)
+            # Use regular parser
+            val parsed_result = parse_stable_db(stable_content)
+            if parsed_result.err.?:
+                return Err("Database load failed: {parsed_result.unwrap_err()}")
+
+            val parsed = parsed_result.unwrap()
             db.interner = parsed.interner
             db.files = parsed.files
             db.suites = parsed.suites
             db.tests = parsed.tests
-
-            # Report parsing errors if any
-            if parsed.stats.has_errors():
-                eprintln("[WARNING] Database parsing recovered from errors:")
-                eprintln("  {parsed.stats.summary()}")
-                for err in parsed.stats.errors:
-                    eprintln("  - {err}")
-                eprintln("[INFO] Database loaded with error recovery enabled")
 
         # Load volatile data
         val volatile_result = read_db_file(RUNS_PATH)
@@ -81,11 +77,13 @@ impl TestDatabase:
         else:
             val volatile_content = volatile_result.unwrap()
             if volatile_content.trim() != "":
-                # Use robust parser with error recovery
-                val parsed_vol = parse_volatile_db_robust(volatile_content)
-                db.counters = parsed_vol.counters
-                db.timing = parsed_vol.timing
-                db.timing_runs = parsed_vol.timing_runs
+                # Use regular parser
+                val parsed_vol_result = parse_volatile_db(volatile_content)
+                if parsed_vol_result.ok.?:
+                    val parsed_vol = parsed_vol_result.unwrap()
+                    db.counters = parsed_vol.counters
+                    db.timing = parsed_vol.timing
+                    db.timing_runs = parsed_vol.timing_runs
                 db.changes = parsed_vol.changes
                 db.test_runs = parsed_vol.test_runs
 
@@ -379,7 +377,7 @@ impl TestDatabase:
         # If over cap, rebuild list keeping only the newest max_count runs
         if count > max_count:
             var to_skip = count - max_count
-            var new_runs: List<TimingRun> = []
+            var new_runs: [TimingRun] = []
             for tr in self.timing_runs:
                 if tr.test_id == test_id and to_skip > 0:
                     to_skip = to_skip - 1
@@ -387,8 +385,8 @@ impl TestDatabase:
                 new_runs.push(tr)
             self.timing_runs = new_runs
 
-    fn collect_timing_runs(test_id: i64) -> List<f64>:
-        var runs: List<f64> = []
+    fn collect_timing_runs(test_id: i64) -> [f64]:
+        var runs: [f64] = []
         for tr in self.timing_runs:
             if tr.test_id == test_id:
                 runs.push(tr.duration_ms)
@@ -460,7 +458,7 @@ impl TestDatabase:
         if self.test_runs.len() <= keep_count:
             return
         val start = self.test_runs.len() - keep_count
-        var new_runs: List<RunRecord> = []
+        var new_runs: [RunRecord] = []
         var i = start
         while i < self.test_runs.len():
             new_runs.push(self.test_runs[i])
@@ -472,10 +470,10 @@ impl TestDatabase:
     # H3: List runs with status filter
     # -----------------------------------------------------------------
 
-    fn list_runs(status_filter: text) -> List<RunRecord>:
+    fn list_runs(status_filter: text) -> [RunRecord]:
         if status_filter == "" or status_filter == "all":
             return self.test_runs
-        var result: List<RunRecord> = []
+        var result: [RunRecord] = []
         for r in self.test_runs:
             if r.status == status_filter:
                 result.push(r)
@@ -531,7 +529,7 @@ fn append_run_label(existing: text, label: text) -> text:
     if existing == "":
         return label
     val parts = existing.split(",")
-    var trimmed: List<text> = []
+    var trimmed: [text] = []
     for p in parts:
         trimmed.push(p.trim())
     trimmed.push(label)

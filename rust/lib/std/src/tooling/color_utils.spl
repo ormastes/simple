@@ -1,0 +1,385 @@
+# Color utilities
+# RGB, HSL, hex color conversions and manipulations
+
+use super.math_utils.{clamp_i32, clamp_f64, max_f64, min_f64}
+
+# =====================================
+# Color Types
+# =====================================
+
+# RGB color (0-255 for each channel)
+struct RGB:
+    r: i32
+    g: i32
+    b: i32
+
+impl RGB:
+    # Create RGB color with clamping
+    static fn new(r: i32, g: i32, b: i32) -> RGB:
+        RGB(
+            r: clamp_i32(r, 0, 255),
+            g: clamp_i32(g, 0, 255),
+            b: clamp_i32(b, 0, 255)
+        )
+
+    # Create from hex string (e.g., "#FF5733" or "FF5733")
+    static fn from_hex(hex: text) -> Option<RGB>:
+        var h = hex
+        if h.starts_with("#"):
+            h = h.substring(1, h.len())
+
+        if h.len() != 6:
+            return None
+
+        # Parse each component
+        val r_hex = h.substring(0, 2)
+        val g_hex = h.substring(2, 4)
+        val b_hex = h.substring(4, 6)
+
+        match (parse_hex_byte(r_hex), parse_hex_byte(g_hex), parse_hex_byte(b_hex)):
+            case (Some(r), Some(g), Some(b)):
+                return Some(RGB.new(r, g, b))
+            case _:
+                return None
+
+    # Convert to hex string
+    fn to_hex() -> text:
+        val r_hex = byte_to_hex(self.r)
+        val g_hex = byte_to_hex(self.g)
+        val b_hex = byte_to_hex(self.b)
+        "#{r_hex}{g_hex}{b_hex}"
+
+    # Convert to HSL
+    fn to_hsl() -> HSL:
+        rgb_to_hsl(self)
+
+# HSL color (Hue: 0-360, Saturation: 0-100, Lightness: 0-100)
+struct HSL:
+    h: f64  # Hue in degrees (0-360)
+    s: f64  # Saturation in percent (0-100)
+    l: f64  # Lightness in percent (0-100)
+
+impl HSL:
+    # Create HSL color with clamping
+    static fn new(h: f64, s: f64, l: f64) -> HSL:
+        # Wrap hue to 0-360
+        var hue = h
+        while hue < 0.0:
+            hue = hue + 360.0
+        while hue >= 360.0:
+            hue = hue - 360.0
+
+        HSL(
+            h: hue,
+            s: clamp_f64(s, 0.0, 100.0),
+            l: clamp_f64(l, 0.0, 100.0)
+        )
+
+    # Convert to RGB
+    fn to_rgb() -> RGB:
+        hsl_to_rgb(self)
+
+# =====================================
+# Hex Parsing Helpers
+# =====================================
+
+fn parse_hex_byte(hex: text) -> Option<i32>:
+    if hex.len() != 2:
+        return None
+
+    val chars = hex.chars()
+    match (hex_digit_value(chars[0]), hex_digit_value(chars[1])):
+        case (Some(high), Some(low)):
+            return Some(high * 16 + low)
+        case _:
+            return None
+
+fn hex_digit_value(ch: text) -> Option<i32>:
+    if ch.len() != 1:
+        return None
+
+    val c = ch.chars()[0]
+    if c >= "0" and c <= "9":
+        return Some((c as i32) - ("0" as i32))
+    if c >= "A" and c <= "F":
+        return Some((c as i32) - ("A" as i32) + 10)
+    if c >= "a" and c <= "f":
+        return Some((c as i32) - ("a" as i32) + 10)
+
+    None
+
+fn byte_to_hex(value: i32) -> text:
+    val clamped = clamp_i32(value, 0, 255)
+    val high = clamped / 16
+    val low = clamped % 16
+
+    val high_char = hex_char(high)
+    val low_char = hex_char(low)
+
+    "{high_char}{low_char}"
+
+fn hex_char(digit: i32) -> text:
+    if digit < 10:
+        # Convert 0-9 to '0'-'9'
+        val code = ("0" as i32) + digit
+        return (code as text)
+    else:
+        # Convert 10-15 to 'A'-'F'
+        val code = ("A" as i32) + (digit - 10)
+        return (code as text)
+
+# =====================================
+# Color Conversions
+# =====================================
+
+# Convert RGB to HSL
+fn rgb_to_hsl(rgb: RGB) -> HSL:
+    # Normalize RGB to 0-1
+    val r = (rgb.r as f64) / 255.0
+    val g = (rgb.g as f64) / 255.0
+    val b = (rgb.b as f64) / 255.0
+
+    val max_val = max_f64(max_f64(r, g), b)
+    val min_val = min_f64(min_f64(r, g), b)
+    val delta = max_val - min_val
+
+    # Calculate lightness
+    val l = (max_val + min_val) / 2.0
+
+    # Calculate saturation
+    var s = 0.0
+    if delta != 0.0:
+        if l < 0.5:
+            s = delta / (max_val + min_val)
+        else:
+            s = delta / (2.0 - max_val - min_val)
+
+    # Calculate hue
+    var h = 0.0
+    if delta != 0.0:
+        if max_val == r:
+            h = ((g - b) / delta) % 6.0
+        elif max_val == g:
+            h = ((b - r) / delta) + 2.0
+        else:
+            h = ((r - g) / delta) + 4.0
+
+        h = h * 60.0
+        if h < 0.0:
+            h = h + 360.0
+
+    HSL.new(h, s * 100.0, l * 100.0)
+
+# Convert HSL to RGB
+fn hsl_to_rgb(hsl: HSL) -> RGB:
+    val h = hsl.h
+    val s = hsl.s / 100.0
+    val l = hsl.l / 100.0
+
+    if s == 0.0:
+        # Achromatic (gray)
+        val gray = (l * 255.0) as i32
+        return RGB.new(gray, gray, gray)
+
+    var q = 0.0
+    if l < 0.5:
+        q = l * (1.0 + s)
+    else:
+        q = l + s - (l * s)
+
+    val p = 2.0 * l - q
+
+    val r = hue_to_rgb(p, q, h + 120.0)
+    val g = hue_to_rgb(p, q, h)
+    val b = hue_to_rgb(p, q, h - 120.0)
+
+    RGB.new(
+        (r * 255.0) as i32,
+        (g * 255.0) as i32,
+        (b * 255.0) as i32
+    )
+
+fn hue_to_rgb(p: f64, q: f64, t_input: f64) -> f64:
+    var t = t_input
+
+    # Normalize to 0-360
+    while t < 0.0:
+        t = t + 360.0
+    while t >= 360.0:
+        t = t - 360.0
+
+    if t < 60.0:
+        return p + ((q - p) * t / 60.0)
+    if t < 180.0:
+        return q
+    if t < 240.0:
+        return p + ((q - p) * (240.0 - t) / 60.0)
+
+    p
+
+# =====================================
+# Color Manipulations
+# =====================================
+
+# Lighten color by percentage (0-100)
+fn lighten(rgb: RGB, amount: f64) -> RGB:
+    val hsl = rgb.to_hsl()
+    val new_l = clamp_f64(hsl.l + amount, 0.0, 100.0)
+    HSL.new(hsl.h, hsl.s, new_l).to_rgb()
+
+# Darken color by percentage (0-100)
+fn darken(rgb: RGB, amount: f64) -> RGB:
+    val hsl = rgb.to_hsl()
+    val new_l = clamp_f64(hsl.l - amount, 0.0, 100.0)
+    HSL.new(hsl.h, hsl.s, new_l).to_rgb()
+
+# Saturate color by percentage (0-100)
+fn saturate(rgb: RGB, amount: f64) -> RGB:
+    val hsl = rgb.to_hsl()
+    val new_s = clamp_f64(hsl.s + amount, 0.0, 100.0)
+    HSL.new(hsl.h, new_s, hsl.l).to_rgb()
+
+# Desaturate color by percentage (0-100)
+fn desaturate(rgb: RGB, amount: f64) -> RGB:
+    val hsl = rgb.to_hsl()
+    val new_s = clamp_f64(hsl.s - amount, 0.0, 100.0)
+    HSL.new(hsl.h, new_s, hsl.l).to_rgb()
+
+# Convert to grayscale
+fn grayscale(rgb: RGB) -> RGB:
+    val hsl = rgb.to_hsl()
+    HSL.new(hsl.h, 0.0, hsl.l).to_rgb()
+
+# Rotate hue by degrees
+fn rotate_hue(rgb: RGB, degrees: f64) -> RGB:
+    val hsl = rgb.to_hsl()
+    HSL.new(hsl.h + degrees, hsl.s, hsl.l).to_rgb()
+
+# Invert color
+fn invert(rgb: RGB) -> RGB:
+    RGB.new(
+        255 - rgb.r,
+        255 - rgb.g,
+        255 - rgb.b
+    )
+
+# Complement color (rotate hue by 180 degrees)
+fn complement(rgb: RGB) -> RGB:
+    rotate_hue(rgb, 180.0)
+
+# Mix two colors with ratio (0.0 = all color1, 1.0 = all color2)
+fn mix(color1: RGB, color2: RGB, ratio: f64) -> RGB:
+    val t = clamp_f64(ratio, 0.0, 1.0)
+
+    val r = ((color1.r as f64) * (1.0 - t) + (color2.r as f64) * t) as i32
+    val g = ((color1.g as f64) * (1.0 - t) + (color2.g as f64) * t) as i32
+    val b = ((color1.b as f64) * (1.0 - t) + (color2.b as f64) * t) as i32
+
+    RGB.new(r, g, b)
+
+# =====================================
+# Color Schemes
+# =====================================
+
+# Generate complementary color pair
+fn complementary_pair(rgb: RGB) -> (RGB, RGB):
+    (rgb, complement(rgb))
+
+# Generate triadic color scheme (3 colors 120 degrees apart)
+fn triadic_scheme(rgb: RGB) -> (RGB, RGB, RGB):
+    (
+        rgb,
+        rotate_hue(rgb, 120.0),
+        rotate_hue(rgb, 240.0)
+    )
+
+# Generate analogous colors (colors adjacent on color wheel)
+fn analogous_scheme(rgb: RGB, angle: f64) -> (RGB, RGB, RGB):
+    (
+        rotate_hue(rgb, -angle),
+        rgb,
+        rotate_hue(rgb, angle)
+    )
+
+# Generate split complementary (base + 2 colors adjacent to complement)
+fn split_complementary(rgb: RGB, angle: f64) -> (RGB, RGB, RGB):
+    (
+        rgb,
+        rotate_hue(rgb, 180.0 - angle),
+        rotate_hue(rgb, 180.0 + angle)
+    )
+
+# =====================================
+# Color Analysis
+# =====================================
+
+# Calculate relative luminance (WCAG standard)
+fn luminance(rgb: RGB) -> f64:
+    val r = (rgb.r as f64) / 255.0
+    val g = (rgb.g as f64) / 255.0
+    val b = (rgb.b as f64) / 255.0
+
+    # Apply gamma correction
+    val r_linear = if r <= 0.03928:
+        r / 12.92
+    else:
+        ((r + 0.055) / 1.055) ** 2.4
+
+    val g_linear = if g <= 0.03928:
+        g / 12.92
+    else:
+        ((g + 0.055) / 1.055) ** 2.4
+
+    val b_linear = if b <= 0.03928:
+        b / 12.92
+    else:
+        ((b + 0.055) / 1.055) ** 2.4
+
+    # Calculate luminance
+    0.2126 * r_linear + 0.7152 * g_linear + 0.0722 * b_linear
+
+# Calculate contrast ratio between two colors (WCAG)
+fn contrast_ratio(color1: RGB, color2: RGB) -> f64:
+    val l1 = luminance(color1)
+    val l2 = luminance(color2)
+
+    val lighter = max_f64(l1, l2)
+    val darker = min_f64(l1, l2)
+
+    (lighter + 0.05) / (darker + 0.05)
+
+# Check if contrast meets WCAG AA standard (4.5:1)
+fn meets_wcag_aa(foreground: RGB, background: RGB) -> bool:
+    contrast_ratio(foreground, background) >= 4.5
+
+# Check if contrast meets WCAG AAA standard (7:1)
+fn meets_wcag_aaa(foreground: RGB, background: RGB) -> bool:
+    contrast_ratio(foreground, background) >= 7.0
+
+# Determine if color is light or dark
+fn is_light(rgb: RGB) -> bool:
+    luminance(rgb) > 0.5
+
+fn is_dark(rgb: RGB) -> bool:
+    not is_light(rgb)
+
+# =====================================
+# Named Colors
+# =====================================
+
+fn named_color(name: text) -> Option<RGB>:
+    match name.lower():
+        case "red": Some(RGB.new(255, 0, 0))
+        case "green": Some(RGB.new(0, 128, 0))
+        case "blue": Some(RGB.new(0, 0, 255))
+        case "white": Some(RGB.new(255, 255, 255))
+        case "black": Some(RGB.new(0, 0, 0))
+        case "gray" | "grey": Some(RGB.new(128, 128, 128))
+        case "yellow": Some(RGB.new(255, 255, 0))
+        case "cyan": Some(RGB.new(0, 255, 255))
+        case "magenta": Some(RGB.new(255, 0, 255))
+        case "orange": Some(RGB.new(255, 165, 0))
+        case "purple": Some(RGB.new(128, 0, 128))
+        case "pink": Some(RGB.new(255, 192, 203))
+        case "brown": Some(RGB.new(165, 42, 42))
+        case _: None

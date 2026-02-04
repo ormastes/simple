@@ -6,8 +6,7 @@
 # Port of rust/common/src/fix_applicator.rs
 
 from diagnostic import {EasyFix, FixConfidence, Replacement, SourceRegistry, Span}
-
-extern fn rt_file_write_text(path: text, content: text) -> bool
+use std.db_atomic.{atomic_write, DbConfig}
 
 # ============================================================================
 # Errors
@@ -104,10 +103,10 @@ fn apply_to_disk(fixes: [EasyFix], sources: SourceRegistry, dry_run: bool) -> Re
     for (file, content) in new_contents:
         report.modified_files = report.modified_files.push(file)
         if not dry_run:
-            # TODO: Replace direct FFI call with wrapper (file_write_text) from app.io or compiler.ffi
-            val ok = rt_file_write_text(file, content)
-            if not ok:
-                return Err(FixError.IoError("Failed to write {file}"))
+            # Atomically write fixed file with backup (CRITICAL - modifying source code!)
+            val write_result = atomic_write(file, content, DbConfig.defaults())
+            if write_result.err.?:
+                return Err(FixError.IoError("Failed to write {file}: {write_result.unwrap_err()}"))
 
     for fix in fixes:
         report.details = report.details.push("[{fix.id}] {fix.description}")

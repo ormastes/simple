@@ -1,0 +1,264 @@
+# File System Operations
+#
+# Provides Simple wrappers around runtime file I/O FFI functions.
+# This module unblocks 30+ TODOs that were waiting for file I/O.
+
+# ============================================================================
+# FFI Declarations
+# ============================================================================
+
+# File operations
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_copy(src: text, dest: text) -> bool
+extern fn rt_file_remove(path: text) -> bool
+extern fn rt_file_rename(source: text, dest: text) -> bool
+extern fn rt_file_canonicalize(path: text) -> RuntimeValue
+extern fn rt_file_stat(path: text) -> RuntimeValue
+
+# Directory operations
+extern fn rt_dir_create(path: text, recursive: bool) -> bool
+extern fn rt_dir_list(path: text) -> RuntimeValue
+extern fn rt_dir_remove(path: text, recursive: bool) -> bool
+extern fn rt_file_find(dir: text, pattern: text, recursive: bool) -> RuntimeValue
+extern fn rt_dir_glob(dir: text, pattern: text) -> RuntimeValue
+
+# Path operations
+extern fn rt_path_basename(path: text) -> RuntimeValue
+extern fn rt_path_dirname(path: text) -> RuntimeValue
+extern fn rt_path_ext(path: text) -> RuntimeValue
+extern fn rt_path_absolute(path: text) -> RuntimeValue
+extern fn rt_path_separator() -> RuntimeValue
+
+# ============================================================================
+# File Operations
+# ============================================================================
+
+# Check if a file or directory exists
+fn exist(path: text) -> bool:
+    rt_file_exists(path)
+
+# Read entire file as text
+#
+# Returns the file contents as a string, or an error if the file
+# cannot be read.
+fn read_text(path: text) -> Result<text, text>:
+    if not exist(path):
+        return Err("File not found: {path}")
+
+    val result = rt_file_read_text(path)
+    Ok(result.as_text())
+
+# Write text to a file
+#
+# Creates the file if it doesn't exist, overwrites if it does.
+# Returns Ok(()) on success, Err(message) on failure.
+fn write_text(path: text, content: text) -> Result<(), text>:
+    if rt_file_write_text(path, content):
+        Ok(())
+    else:
+        Err("Failed to write file: {path}")
+
+# Append text to a file
+#
+# Creates the file if it doesn't exist.
+fn append_text(path: text, content: text) -> Result<(), text>:
+    val existing = if exist(path):
+        match read_text(path):
+            Ok(text): text
+            Err(_): ""
+    else:
+        ""
+
+    write_text(path, existing + content)
+
+# Copy a file
+fn copy(src: text, dest: text) -> Result<(), text>:
+    if not exist(src):
+        return Err("Source file not found: {src}")
+
+    if rt_file_copy(src, dest):
+        Ok(())
+    else:
+        Err("Failed to copy {src} to {dest}")
+
+# Remove a file
+fn remove(path: text) -> Result<(), text>:
+    if rt_file_remove(path):
+        Ok(())
+    else:
+        Err("Failed to remove file: {path}")
+
+# Rename/move a file
+fn rename(source: text, dest: text) -> Result<(), text>:
+    if rt_file_rename(source, dest):
+        Ok(())
+    else:
+        Err("Failed to rename {source} to {dest}")
+
+# Get canonical absolute path
+fn canonicalize(path: text) -> Result<text, text>:
+    val result = rt_file_canonicalize(path)
+    if result.is_nil():
+        Err("Failed to canonicalize path: {path}")
+    else:
+        Ok(result.as_text())
+
+# ============================================================================
+# Directory Operations
+# ============================================================================
+
+# Create a directory
+#
+# If recursive is true, creates parent directories as needed.
+fn create_dir(path: text, recursive: bool) -> Result<(), text>:
+    if rt_dir_create(path, recursive):
+        Ok(())
+    else:
+        Err("Failed to create directory: {path}")
+
+# List directory contents
+#
+# Returns a list of file/directory names (not full paths).
+fn list_dir(path: text) -> Result<List<text>, text>:
+    if not exist(path):
+        return Err("Directory not found: {path}")
+
+    val result = rt_dir_list(path)
+    Ok(result.as_list())
+
+# Remove a directory
+#
+# If recursive is true, removes directory and all contents.
+fn remove_dir(path: text, recursive: bool) -> Result<(), text>:
+    if rt_dir_remove(path, recursive):
+        Ok(())
+    else:
+        Err("Failed to remove directory: {path}")
+
+# Find files matching a pattern
+#
+# Pattern can be a glob pattern like "*.spl" or a substring.
+# If recursive is true, searches subdirectories.
+fn find(dir: text, pattern: text, recursive: bool) -> Result<List<text>, text>:
+    if not exist(dir):
+        return Err("Directory not found: {dir}")
+
+    val result = rt_file_find(dir, pattern, recursive)
+    Ok(result.as_list())
+
+# Find files using glob pattern
+#
+# More powerful than find() - supports ** for recursive search.
+# Example: "src/**/*.spl" finds all .spl files under src/
+fn glob(dir: text, pattern: text) -> Result<List<text>, text>:
+    val result = rt_dir_glob(dir, pattern)
+    Ok(result.as_list())
+
+# ============================================================================
+# Path Operations
+# ============================================================================
+
+# Get basename (filename) from path
+#
+# Example: "/path/to/file.txt" -> "file.txt"
+fn basename(path: text) -> text:
+    val result = rt_path_basename(path)
+    result.as_text()
+
+# Get directory name from path
+#
+# Example: "/path/to/file.txt" -> "/path/to"
+fn dirname(path: text) -> text:
+    val result = rt_path_dirname(path)
+    result.as_text()
+
+# Get file extension
+#
+# Example: "file.txt" -> "txt"
+fn extension(path: text) -> text:
+    val result = rt_path_ext(path)
+    result.as_text()
+
+# Convert to absolute path
+fn absolute(path: text) -> Result<text, text>:
+    val result = rt_path_absolute(path)
+    if result.is_nil():
+        Err("Failed to get absolute path: {path}")
+    else:
+        Ok(result.as_text())
+
+# Get path separator for current OS
+#
+# Returns "/" on Unix, "\" on Windows
+fn separator() -> text:
+    val result = rt_path_separator()
+    result.as_text()
+
+# Join path components
+fn join(parts: List<text>) -> text:
+    val sep = separator()
+    parts.join(sep)
+
+# ============================================================================
+# Convenience Functions
+# ============================================================================
+
+# Read lines from a file
+fn read_lines(path: text) -> Result<List<text>, text>:
+    match read_text(path):
+        Ok(content):
+            Ok(content.split("\n"))
+        Err(e):
+            Err(e)
+
+# Write lines to a file
+fn write_lines(path: text, lines: List<text>) -> Result<(), text>:
+    val content = lines.join("\n")
+    write_text(path, content)
+
+# Check if path is a file (not a directory)
+fn is_file(path: text) -> bool:
+    if not exist(path):
+        return false
+
+    # Try to list as directory - if it fails, it's a file
+    val result = rt_dir_list(path)
+    result.as_list().len() == 0 and exist(path)
+
+# Check if path is a directory
+fn is_dir(path: text) -> bool:
+    if not exist(path):
+        return false
+
+    # Try to list directory - if successful and has entries or is empty dir, it's a directory
+    val result = rt_dir_list(path)
+    val entries = result.as_list()
+    true  # If rt_dir_list succeeded, it's a directory
+
+# Walk directory tree
+#
+# Calls visitor function for each file/directory found.
+# Returns early if visitor returns false.
+fn walk(dir: text, visitor: fn(text) -> bool) -> Result<(), text>:
+    match list_dir(dir):
+        Ok(entries):
+            for entry in entries:
+                val full_path = join([dir, entry])
+                if not visitor(full_path):
+                    break
+        Err(e):
+            return Err(e)
+
+    Ok(())
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export exist, read_text, write_text, append_text
+export copy, remove, rename, canonicalize
+export create_dir, list_dir, remove_dir, find, glob
+export basename, dirname, extension, absolute, separator, join
+export read_lines, write_lines, is_file, is_dir, walk

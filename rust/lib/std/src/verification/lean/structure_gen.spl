@@ -1,0 +1,293 @@
+# Structure Generator for Lean Code Generation
+#
+# Generates Lean structure definitions from Simple class definitions.
+# Part of Phase 7.1: Auto-generation of domain model scaffolding.
+#
+# Key principle: Generate scaffolding, not proofs. Never introduce `sorry` or `axiom`.
+
+use verification.lean.emitter as emitter
+use verification.lean.naming as naming
+use verification.lean.types as types
+
+# Auto-lean generation mode
+enum AutoLeanMode:
+    Full            # Generate structure + lookups + BEq + reflexivity theorems
+    StructureOnly   # Only generate structure/inductive definitions
+    Skip            # Exclude from generation
+    Determinism     # Generate determinism theorems for Option-returning functions
+
+impl AutoLeanMode:
+    fn generates_structures() -> bool:
+        match self:
+            case AutoLeanMode.Full: true
+            case AutoLeanMode.StructureOnly: true
+            case AutoLeanMode.Skip: false
+            case AutoLeanMode.Determinism: false
+
+    fn generates_lookups() -> bool:
+        match self:
+            case AutoLeanMode.Full: true
+            case _: false
+
+    fn generates_beq() -> bool:
+        match self:
+            case AutoLeanMode.Full: true
+            case _: false
+
+    fn generates_theorems() -> bool:
+        match self:
+            case AutoLeanMode.Full: true
+            case AutoLeanMode.Determinism: true
+            case _: false
+
+# Simple field definition for generation
+class SimpleFieldDef:
+    name: text
+    type_name: text
+    is_optional: bool
+    is_list: bool
+
+    static fn new(name: text, type_name: text) -> SimpleFieldDef:
+        SimpleFieldDef(name, type_name, false, false)
+
+    me with_optional() -> SimpleFieldDef:
+        self.is_optional = true
+        self
+
+    me with_list() -> SimpleFieldDef:
+        self.is_list = true
+        self
+
+    fn to_lean_type() -> text:
+        var ty = self.type_name
+        if self.is_list:
+            ty = "List {ty}"
+        if self.is_optional:
+            ty = "Option ({ty})"
+        ty
+
+# Simple class definition for generation
+class SimpleClassDef:
+    name: text
+    fields: List<SimpleFieldDef>
+    type_params: List<text>
+    auto_lean_mode: AutoLeanMode
+
+    static fn new(name: text) -> SimpleClassDef:
+        SimpleClassDef(name, [], [], AutoLeanMode.Full)
+
+    me add_field(field: SimpleFieldDef) -> SimpleClassDef:
+        self.fields = self.fields + [field]
+        self
+
+    me add_type_param(param: text) -> SimpleClassDef:
+        self.type_params = self.type_params + [param]
+        self
+
+    me with_mode(mode: AutoLeanMode) -> SimpleClassDef:
+        self.auto_lean_mode = mode
+        self
+
+    fn should_generate_structure() -> bool:
+        self.auto_lean_mode.generates_structures()
+
+# Simple enum variant for generation
+class SimpleEnumVariant:
+    name: text
+    params: List<(text, text)>  # (param_name, param_type)
+
+    static fn new(name: text) -> SimpleEnumVariant:
+        SimpleEnumVariant(name, [])
+
+    static fn unit(name: text) -> SimpleEnumVariant:
+        SimpleEnumVariant(name, [])
+
+    me add_param(name: text, ty: text) -> SimpleEnumVariant:
+        self.params = self.params + [(name, ty)]
+        self
+
+# Simple enum definition for generation
+class SimpleEnumDef:
+    name: text
+    variants: List<SimpleEnumVariant>
+    type_params: List<text>
+    auto_lean_mode: AutoLeanMode
+
+    static fn new(name: text) -> SimpleEnumDef:
+        SimpleEnumDef(name, [], [], AutoLeanMode.Full)
+
+    me add_variant(variant: SimpleEnumVariant) -> SimpleEnumDef:
+        self.variants = self.variants + [variant]
+        self
+
+    me add_type_param(param: text) -> SimpleEnumDef:
+        self.type_params = self.type_params + [param]
+        self
+
+    me with_mode(mode: AutoLeanMode) -> SimpleEnumDef:
+        self.auto_lean_mode = mode
+        self
+
+    fn should_generate_inductive() -> bool:
+        self.auto_lean_mode.generates_structures()
+
+# Structure generator
+class StructureGenerator:
+    emit: emitter.LeanEmitter
+    generated_structures: List<text>
+    generated_inductives: List<text>
+
+    static fn new() -> StructureGenerator:
+        StructureGenerator(emitter.LeanEmitter.new(), [], [])
+
+    # Generate a Lean structure from a Simple class definition
+    me generate_structure(class_def: SimpleClassDef) -> text:
+        if not class_def.should_generate_structure():
+            ""
+        else:
+            val lean_name = naming.to_pascal_case(class_def.name)
+            self.generated_structures = self.generated_structures + [lean_name]
+
+            var out = ""
+
+            # Add type parameters if present
+            var type_params_str = ""
+            if class_def.type_params.len() > 0:
+                var params: List<text> = []
+                for tp in class_def.type_params:
+                    params = params + ["({tp} : Type)"]
+                type_params_str = " " + params.join(" ")
+
+            out = out + "structure {lean_name}{type_params_str} where\n"
+
+            # Add fields
+            for field in class_def.fields:
+                val field_name = naming.to_camel_case(field.name)
+                val field_type = translate_type_to_lean(field.type_name, field.is_optional, field.is_list)
+                out = out + "  {field_name} : {field_type}\n"
+
+            # Add deriving clause - Repr is safe, BEq is opt-in via full mode
+            if class_def.auto_lean_mode.generates_beq():
+                out = out + "  deriving Repr, BEq\n"
+            else:
+                out = out + "  deriving Repr\n"
+
+            out
+
+    # Generate a Lean inductive from a Simple enum definition
+    me generate_inductive(enum_def: SimpleEnumDef) -> text:
+        if not enum_def.should_generate_inductive():
+            ""
+        else:
+            val lean_name = naming.to_pascal_case(enum_def.name)
+            self.generated_inductives = self.generated_inductives + [lean_name]
+
+            var out = ""
+
+            # Add type parameters if present
+            var type_params_str = ""
+            if enum_def.type_params.len() > 0:
+                var params: List<text> = []
+                for tp in enum_def.type_params:
+                    params = params + ["({tp} : Type)"]
+                type_params_str = " " + params.join(" ")
+
+            out = out + "inductive {lean_name}{type_params_str} where\n"
+
+            # Add constructors
+            for variant in enum_def.variants:
+                val ctor_name = naming.to_camel_case(variant.name)
+                if variant.params.len() == 0:
+                    out = out + "  | {ctor_name}\n"
+                else:
+                    var param_types: List<text> = []
+                    for (_, ty) in variant.params:
+                        param_types = param_types + [translate_type_to_lean(ty, false, false)]
+                    val arrow = " -> "
+                    out = out + "  | {ctor_name} : " + param_types.join(arrow) + " -> {lean_name}\n"
+
+            # Add deriving clause
+            if enum_def.auto_lean_mode.generates_beq():
+                out = out + "  deriving DecidableEq, Repr, BEq\n"
+            else:
+                out = out + "  deriving DecidableEq, Repr\n"
+
+            out
+
+    # Generate all structures and return combined output
+    me generate_all(classes: List<SimpleClassDef>, enums: List<SimpleEnumDef>) -> text:
+        var out = "-- Auto-generated Lean structures from Simple types\n"
+        out = out + "-- Generated by structure_gen.spl\n\n"
+
+        # Generate inductives first (enums)
+        for enum_def in enums:
+            val inductive_code = self.generate_inductive(enum_def)
+            if inductive_code.len() > 0:
+                out = out + inductive_code + "\n"
+
+        # Generate structures (classes)
+        for class_def in classes:
+            val struct_code = self.generate_structure(class_def)
+            if struct_code.len() > 0:
+                out = out + struct_code + "\n"
+
+        out
+
+    # Get list of generated structure names (for lookup generation)
+    fn get_generated_structures() -> List<text>:
+        self.generated_structures
+
+    # Get list of generated inductive names (for BEq generation)
+    fn get_generated_inductives() -> List<text>:
+        self.generated_inductives
+
+# Translate Simple type to Lean type
+fn translate_type_to_lean(type_name: text, is_optional: bool, is_list: bool) -> text:
+    var lean_type = match type_name:
+        case "i32": "Int"
+        case "i64": "Int"
+        case "u32": "Nat"
+        case "u64": "Nat"
+        case "f32": "Float"
+        case "f64": "Float"
+        case "bool": "Bool"
+        case "text": "String"
+        case "String": "String"
+        case "()": "Unit"
+        case "Nil": "Unit"
+        case _: naming.to_pascal_case(type_name)
+
+    if is_list:
+        lean_type = "List {lean_type}"
+
+    if is_optional:
+        lean_type = "Option ({lean_type})"
+
+    lean_type
+
+# Convenience function to generate a structure from field specifications
+fn generate_structure_from_fields(name: text, fields: List<(text, text)>) -> text:
+    var class_def = SimpleClassDef.new(name)
+    for (field_name, field_type) in fields:
+        val field = SimpleFieldDef.new(field_name, field_type)
+        class_def = class_def.add_field(field)
+
+    var generator = StructureGenerator.new()
+    generator.generate_structure(class_def)
+
+# Convenience function to generate an inductive from variant specifications
+fn generate_inductive_from_variants(name: text, variants: List<(text, List<text>)>) -> text:
+    var enum_def = SimpleEnumDef.new(name)
+    for (variant_name, param_types) in variants:
+        var variant = SimpleEnumVariant.new(variant_name)
+        for (i, ty) in param_types.enumerate():
+            variant = variant.add_param(name="arg{i}", ty=ty)
+        enum_def = enum_def.add_variant(variant)
+
+    var generator = StructureGenerator.new()
+    generator.generate_inductive(enum_def)
+
+# Export public API
+export AutoLeanMode, SimpleFieldDef, SimpleClassDef, SimpleEnumVariant, SimpleEnumDef
+export StructureGenerator, translate_type_to_lean
+export generate_structure_from_fields, generate_inductive_from_variants

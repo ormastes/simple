@@ -1,0 +1,63 @@
+# Memory-Mapped File Types
+#
+# Zero-copy memory-mapped file I/O with kernel optimization hints.
+
+use units.file.*
+use host.common.io.*
+
+export MmapRegion
+export open_mmap, open_mmap_with, open_mmap_sync, open_mmap_sync_with
+
+use file.exist
+
+# Re-export MmapRegion from common module
+export host.common.io.mmap_common.MmapRegion
+
+# ===============================
+# Async Mmap Convenience Functions
+# ===============================
+
+# Open file as memory-mapped region (async, returns immediately)
+pub async fn open_mmap(path: FilePath) -> Result<MmapRegion, IoError>:
+    return open_mmap_with(path, MmapMode.ReadOnly, MmapAdvice.Normal)
+
+# Open file as memory-mapped region with mode and advice (async)
+pub async fn open_mmap_with(path: FilePath, mode: MmapMode, advice: MmapAdvice) -> Result<MmapRegion, IoError>:
+    # Resolve path
+    val resolved_path = native_path_resolve(path)?
+
+    # Check file existence (async)
+    if not await exist(resolved_path):
+        return Err(IoError.NotFound)
+
+    # Open file
+    val open_mode = mmap_mode_to_open_mode(mode)
+    val fd = native_fs_open(resolved_path, open_mode)?
+
+    # Get file size
+    val size = native_file_get_size(fd)?
+
+    # Create memory mapping
+    val mmap_ptr = create_mmap_ptr(fd, size, mode)?
+
+    # Create region
+    val region = create_mmap_region(mmap_ptr, size, mode, fd, resolved_path)
+
+    # Apply advice
+    if advice != MmapAdvice.Normal:
+        region.advise(advice)?
+
+    return Ok(region)
+
+# ===============================
+# Sync Mmap Convenience Functions
+# ===============================
+
+# Open file as memory-mapped region (sync, blocks until ready)
+pub fn open_mmap_sync(path: FilePath) -> Result<MmapRegion, IoError>:
+    return open_mmap_sync_with(path, MmapMode.ReadOnly, MmapAdvice.Normal)
+
+# Open file as memory-mapped region (sync) with mode and advice
+pub fn open_mmap_sync_with(path: FilePath, mode: MmapMode, advice: MmapAdvice) -> Result<MmapRegion, IoError>:
+    return open_mmap_impl(path, mode, advice)
+

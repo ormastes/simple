@@ -5,6 +5,7 @@ import std.package_ffi
 
 use package.types
 use package.semver
+use std.db_atomic.{atomic_write, DbConfig}
 
 # ============================================================================
 # Lockfile Parsing
@@ -158,13 +159,15 @@ fn format_dependencies_array(deps: [text]) -> text:
     "[" + deps.join(", ") + "]"
 
 fn write_lockfile(lockfile: Lockfile, path: text) -> Result<(), text>:
-    """Write lockfile to disk"""
+    """Write lockfile to disk atomically (CRITICAL - dependency management!)"""
     val content = lockfile_to_string(lockfile)
 
-    # TODO: Replace direct FFI call with wrapper (file_write_text) from app.io or compiler.ffi
-    match rt_file_write_text(path, content):
-        0: Ok(())
-        _: Err("Failed to write lockfile to {path}")
+    # Atomic write with backup to prevent lockfile corruption
+    val write_result = atomic_write(path, content, DbConfig.defaults())
+    if write_result.ok.?:
+        Ok(())
+    else:
+        Err("Failed to write lockfile to {path}: {write_result.unwrap_err()}")
 
 # ============================================================================
 # Lockfile Validation

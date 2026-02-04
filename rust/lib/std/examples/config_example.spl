@@ -1,0 +1,227 @@
+# Configuration System Example
+# Demonstrates Simple-native config loading with hierarchical precedence
+
+import config
+
+# ============================================================================
+# Example 1: Basic Config File Parsing
+# ============================================================================
+
+fn example_parse():
+    """Parse Simple-syntax config from string."""
+    val config_text = """
+        port = 8080
+        timeout = 30.5
+        logging = true
+        app_name = "MyApp"
+        mode = PRODUCTION
+    """
+
+    match config.parse_config_file(config_text):
+        case Ok(dict):
+            println("Parsed config:")
+            println("  port: " + str(dict["port"]))
+            println("  timeout: " + str(dict["timeout"]))
+            println("  logging: " + str(dict["logging"]))
+            println("  app_name: " + str(dict["app_name"]))
+            println("  mode: " + str(dict["mode"]))
+        case Err(msg):
+            println("Parse error: " + msg)
+
+
+# ============================================================================
+# Example 2: Loading Config from File
+# ============================================================================
+
+fn example_from_file():
+    """Load config from a .spl file."""
+    match config.from_file("config.spl"):
+        case Ok(cfg):
+            println("Config loaded successfully")
+
+            # Access simple values
+            match cfg.get("port"):
+                case Some(p): println("Port: " + str(p))
+                case None: println("Port not configured")
+
+            # Access nested values with dotted paths
+            match cfg.get("database.host"):
+                case Some(h): println("DB Host: " + str(h))
+                case None: println("DB host not configured")
+
+        case Err(msg):
+            println("Failed to load config: " + msg)
+
+
+# ============================================================================
+# Example 3: Hierarchical Config Loading
+# ============================================================================
+
+fn example_hierarchy():
+    """Load and merge configs from directory hierarchy.
+
+    Given this structure:
+        /project/__init__.spl:
+            port = 8080
+            logging = true
+            project_name = "MyProject"
+
+        /project/subdir/__init__.spl:
+            port = 9000
+            debug = true
+
+    Loading from /project/subdir will merge both configs:
+        port = 9000        # subdir overrides project
+        logging = true     # inherited from project
+        debug = true       # from subdir
+        project_name = "MyProject"  # inherited from project
+    """
+    match config.from_hierarchy("/project/subdir"):
+        case Ok(cfg):
+            println("Hierarchical config loaded")
+
+            match cfg.get("port"):
+                case Some(p): println("Port: " + str(p))  # 9000
+                case None: pass
+
+            match cfg.get("project_name"):
+                case Some(n): println("Project: " + str(n))  # "MyProject"
+                case None: pass
+
+        case Err(msg):
+            println("Failed to load hierarchy: " + msg)
+
+
+# ============================================================================
+# Example 4: Merging Configs Manually
+# ============================================================================
+
+fn example_merge():
+    """Manually merge multiple configs."""
+    # Base config (defaults)
+    val base = config.from_dict({
+        "port": 8080,
+        "timeout": 30.0,
+        "logging": false
+    })
+
+    # Environment-specific config
+    val production = config.from_dict({
+        "port": 80,
+        "logging": true
+    })
+
+    # Merge (production overrides base)
+    val merged = config.merge(base, production)
+
+    match merged.get("port"):
+        case Some(p): println("Port: " + str(p))  # 80
+        case None: pass
+
+    match merged.get("timeout"):
+        case Some(t): println("Timeout: " + str(t))  # 30.0 (from base)
+        case None: pass
+
+
+# ============================================================================
+# Example 5: Complete Application Config Pattern
+# ============================================================================
+
+class AppConfig:
+    """Application configuration with defaults and file loading."""
+    port: i32
+    host: str
+    debug: bool
+    db_host: str
+    db_port: i32
+
+    static fn default() -> AppConfig:
+        """Default configuration."""
+        return AppConfig(
+            port: 8080,
+            host: "localhost",
+            debug: false,
+            db_host: "localhost",
+            db_port: 5432
+        )
+
+    static fn from_file(path: str) -> Result<AppConfig, str>:
+        """Load config from file and merge with defaults."""
+        val defaults = config.from_dict({
+            "port": 8080,
+            "host": "localhost",
+            "debug": false,
+            "database.host": "localhost",
+            "database.port": 5432
+        })
+
+        match config.from_file(path):
+            case Ok(file_cfg):
+                val merged = config.merge(defaults, file_cfg)
+                return AppConfig::from_config(merged)
+            case Err(msg):
+                return Err(msg)
+
+    static fn from_config(cfg: Config) -> Result<AppConfig, str>:
+        """Build AppConfig from Config object."""
+        val port = match cfg.get("port"):
+            case Some(p): p as i32
+            case None: 8080
+
+        val host = match cfg.get("host"):
+            case Some(h): h as str
+            case None: "localhost"
+
+        val debug = match cfg.get("debug"):
+            case Some(d): d as bool
+            case None: false
+
+        val db_host = match cfg.get("database.host"):
+            case Some(h): h as str
+            case None: "localhost"
+
+        val db_port = match cfg.get("database.port"):
+            case Some(p): p as i32
+            case None: 5432
+
+        return Ok(AppConfig(
+            port: port,
+            host: host,
+            debug: debug,
+            db_host: db_host,
+            db_port: db_port
+        ))
+
+
+# ============================================================================
+# Main
+# ============================================================================
+
+fn main():
+    println("=== Configuration System Examples ===\n")
+
+    println("Example 1: Parse config from string")
+    example_parse()
+    println()
+
+    println("Example 2: Load from file")
+    example_from_file()
+    println()
+
+    println("Example 3: Hierarchical loading")
+    example_hierarchy()
+    println()
+
+    println("Example 4: Manual merge")
+    example_merge()
+    println()
+
+    println("Example 5: Application config pattern")
+    match AppConfig::from_file("app_config.spl"):
+        case Ok(cfg):
+            println("App configured:")
+            println("  Server: " + cfg.host + ":" + str(cfg.port))
+            println("  Debug: " + str(cfg.debug))
+            println("  Database: " + cfg.db_host + ":" + str(cfg.db_port))
+        case Err(msg):
+            println("Config error: " + msg)

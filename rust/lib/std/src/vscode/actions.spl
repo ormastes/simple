@@ -1,0 +1,259 @@
+# VSCode Code Actions API
+# Provide quick fixes, refactoring, and code actions
+
+# External FFI declarations
+extern fn vscode_actions_register_provider(language: text, callback_id: i64): i64
+extern fn vscode_actions_create_workspace_edit(): i64
+extern fn vscode_actions_edit_insert(edit_id: i64, uri: text, line: i32, character: i32, text: text): void
+extern fn vscode_actions_edit_delete(edit_id: i64, uri: text, start_line: i32, start_char: i32, end_line: i32, end_char: i32): void
+extern fn vscode_actions_edit_replace(edit_id: i64, uri: text, start_line: i32, start_char: i32, end_line: i32, end_char: i32, text: text): void
+extern fn vscode_actions_apply_edit(edit_id: i64): bool
+
+# Provider callback storage
+var _action_callbacks: Dict<i64, fn(TextDocument, Range, List<Diagnostic>): List<CodeAction>> = {}
+var _next_action_callback_id: i64 = 0
+
+# Import types
+use vscode.languages.TextDocument
+use vscode.languages.Position
+use vscode.languages.Range
+use vscode.languages.Diagnostic
+
+# Code action kind
+pub val CodeActionKind_QuickFix: text = "quickfix"
+pub val CodeActionKind_Refactor: text = "refactor"
+pub val CodeActionKind_RefactorExtract: text = "refactor.extract"
+pub val CodeActionKind_RefactorInline: text = "refactor.inline"
+pub val CodeActionKind_RefactorRewrite: text = "refactor.rewrite"
+pub val CodeActionKind_Source: text = "source"
+pub val CodeActionKind_SourceOrganizeImports: text = "source.organizeImports"
+pub val CodeActionKind_SourceFixAll: text = "source.fixAll"
+
+# Workspace edit (for making changes)
+pub class WorkspaceEdit:
+    pub id: i64
+
+    pub fn new(): WorkspaceEdit =
+        """Create workspace edit.
+
+        Example:
+            edit = WorkspaceEdit.new()
+            edit.insert("file:///path/file.spl", Position.new(0, 0), "use std\n")
+            edit.apply()
+        """
+        val id = vscode_actions_create_workspace_edit()
+        WorkspaceEdit {id: id}
+
+    pub fn insert(self, uri: text, position: Position, text: text):
+        """Insert text at position.
+
+        Args:
+            uri: Document URI
+            position: Insert position
+            text: Text to insert
+
+        Example:
+            edit.insert("file:///main.spl", Position.new(5, 0), "val x = 10\n")
+        """
+        vscode_actions_edit_insert(self.id, uri, position.line, position.character, text)
+
+    pub fn delete(self, uri: text, range: Range):
+        """Delete text in range.
+
+        Args:
+            uri: Document URI
+            range: Range to delete
+
+        Example:
+            edit.delete("file:///main.spl", Range.new(
+                Position.new(5, 0),
+                Position.new(5, 10)
+            ))
+        """
+        vscode_actions_edit_delete(
+            self.id,
+            uri,
+            range.start.line,
+            range.start.character,
+            range.end.line,
+            range.end.character
+        )
+
+    pub fn replace(self, uri: text, range: Range, text: text):
+        """Replace text in range.
+
+        Args:
+            uri: Document URI
+            range: Range to replace
+            text: New text
+
+        Example:
+            edit.replace("file:///main.spl", range, "new_name")
+        """
+        vscode_actions_edit_replace(
+            self.id,
+            uri,
+            range.start.line,
+            range.start.character,
+            range.end.line,
+            range.end.character,
+            text
+        )
+
+    pub fn apply(self): bool =
+        """Apply workspace edit.
+
+        Returns:
+            true if edit was applied successfully
+        """
+        vscode_actions_apply_edit(self.id)
+
+# Code action
+pub class CodeAction:
+    pub title: text
+    pub kind: text
+    pub edit: Option<WorkspaceEdit>
+    pub is_preferred: bool
+    pub diagnostics: List<Diagnostic>
+
+    pub fn new(title: text, kind: text): CodeAction =
+        """Create code action.
+
+        Args:
+            title: Action title shown to user
+            kind: CodeActionKind_* constant
+
+        Example:
+            action = CodeAction.new("Remove unused variable", CodeActionKind_QuickFix)
+            action.edit = WorkspaceEdit.new()
+            action.edit.delete(uri, diagnostic.range)
+        """
+        CodeAction {
+            title: title,
+            kind: kind,
+            edit: none,
+            is_preferred: false,
+            diagnostics: []
+        }
+
+# Code action context
+pub class CodeActionContext:
+    pub diagnostics: List<Diagnostic>
+    pub only: List<text>
+    pub trigger_kind: i32
+
+    pub fn new(): CodeActionContext =
+        """Create code action context."""
+        CodeActionContext {
+            diagnostics: [],
+            only: [],
+            trigger_kind: 1  # Manual = 1, Automatic = 2
+        }
+
+# Code action provider
+pub fn register_code_actions_provider(
+    language: text,
+    provider: fn(document: TextDocument, range: Range, context: CodeActionContext): List<CodeAction>
+): i64 =
+    """Register code actions provider.
+
+    Args:
+        language: Language ID (e.g., "simple")
+        provider: Function that returns list of code actions
+
+    Returns:
+        Subscription ID for disposal
+
+    Example:
+        actions.register_code_actions_provider("simple", fn(doc, range, ctx):
+            val actions: List<CodeAction> = []
+
+            # Quick fix for unused variables
+            for diag in ctx.diagnostics:
+                if diag.code == "unused-variable":
+                    val action = CodeAction.new("Remove unused variable", CodeActionKind_QuickFix)
+                    action.edit = WorkspaceEdit.new()
+                    action.edit.delete(doc.uri, diag.range)
+                    action.is_preferred = true
+                    actions.append(action)
+
+            # Refactor: Extract function
+            if range.start.line != range.end.line:
+                val action = CodeAction.new("Extract function", CodeActionKind_RefactorExtract)
+                actions.append(action)
+
+            # Source action: Organize imports
+            val organize = CodeAction.new("Organize imports", CodeActionKind_SourceOrganizeImports)
+            actions.append(organize)
+
+            return actions
+        )
+    """
+    # Store provider callback
+    val callback_id = _next_action_callback_id
+    _next_action_callback_id = _next_action_callback_id + 1
+    _action_callbacks[callback_id] = provider
+    vscode_actions_register_provider(language, callback_id)
+
+# Helper: Create quick fix for diagnostic
+pub fn create_quick_fix(title: text, diagnostic: Diagnostic, edit: WorkspaceEdit): CodeAction =
+    """Create quick fix action.
+
+    Args:
+        title: Fix title
+        diagnostic: Diagnostic to fix
+        edit: Edit to apply
+
+    Returns:
+        CodeAction ready to be returned from provider
+
+    Example:
+        fix = actions.create_quick_fix(
+            "Add missing import",
+            diagnostic,
+            edit
+        )
+    """
+    val action = CodeAction.new(title, CodeActionKind_QuickFix)
+    action.edit = some(edit)
+    action.diagnostics = [diagnostic]
+    action.is_preferred = true
+    action
+
+# Helper: Create refactoring action
+pub fn create_refactoring(title: text, kind: text): CodeAction =
+    """Create refactoring action.
+
+    Args:
+        title: Refactoring title
+        kind: CodeActionKind_Refactor* constant
+
+    Returns:
+        CodeAction
+
+    Example:
+        refactor = actions.create_refactoring(
+            "Extract to function",
+            CodeActionKind_RefactorExtract
+        )
+    """
+    CodeAction.new(title, kind)
+
+# Helper: Create source action
+pub fn create_source_action(title: text, kind: text): CodeAction =
+    """Create source action.
+
+    Args:
+        title: Action title
+        kind: CodeActionKind_Source* constant
+
+    Returns:
+        CodeAction
+
+    Example:
+        organize = actions.create_source_action(
+            "Organize imports",
+            CodeActionKind_SourceOrganizeImports
+        )
+    """
+    CodeAction.new(title, kind)
