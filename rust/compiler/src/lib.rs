@@ -34,7 +34,8 @@ pub mod incremental;
 pub mod interpreter;
 pub mod interpreter_contract;
 pub mod interpreter_ffi;
-pub mod interpreter_hooks;
+// pub mod interpreter_hooks; // REMOVED: Use Simple implementation in src/runtime/hooks.spl
+// pub mod query_ffi; // REMOVED: Use Simple implementation in src/compiler/query_api.spl
 pub mod interpreter_unit;
 pub mod ir_export;
 pub mod layout_recorder;
