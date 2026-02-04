@@ -1,0 +1,390 @@
+# Dashboard Web Server
+#
+# HTTP server for dashboard web interface with REST API endpoints.
+
+use core.net.tcp.{TcpListener, TcpStream}
+use core.time.{now_iso8601}
+use tooling.dashboard.collector.{collect_dashboard_data}
+use tooling.dashboard.cache.{get_cached_data}
+use tooling.dashboard.trends.{analyze_weekly_trends, analyze_monthly_trends}
+use tooling.dashboard.alerts.{check_alerts_with_trends}
+
+# =========================================================================
+# HTTP Server
+# =========================================================================
+
+class DashboardServer:
+    port: i32
+    auto_refresh_seconds: i32
+
+    static fn new(port: i32) -> DashboardServer:
+        return DashboardServer {
+            port: port,
+            auto_refresh_seconds: 30
+        }
+
+    # Start the server
+    fn start():
+        print "Starting Dashboard Web Server on port {self.port}..."
+        print "Open http://localhost:{self.port} in your browser"
+        print "Press Ctrl+C to stop\n"
+
+        match TcpListener.bind("0.0.0.0", self.port):
+            Err(e) =>
+                print "Error: Failed to bind to port {self.port}: {e}"
+                return
+            Ok(listener) =>
+                self.serve_loop(listener)
+
+    # Main server loop
+    fn serve_loop(listener: TcpListener):
+        loop:
+            match listener.accept():
+                Ok(stream) =>
+                    self.handle_connection(stream)
+                Err(e) =>
+                    print "Error accepting connection: {e}"
+
+    # Handle a single connection
+    fn handle_connection(stream: TcpStream):
+        match stream.read_line():
+            Err(e) =>
+                print "Error reading request: {e}"
+            Ok(request_line) =>
+                val response = self.route_request(request_line)
+                match stream.write_all(response):
+                    Err(e) => print "Error writing response: {e}"
+                    Ok(_) => pass
+
+        stream.close()
+
+    # Route HTTP request
+    fn route_request(request_line: text) -> text:
+        val parts = request_line.split(" ")
+        if parts.len() < 2:
+            return http_error(400, "Bad Request")
+
+        val method = parts[0]
+        val path = parts[1]
+
+        # API routes
+        if path.starts_with("/api/"):
+            return self.handle_api(method, path)
+
+        # Static files
+        if path.starts_with("/static/"):
+            return self.serve_static(path)
+
+        # Default: serve index page
+        return self.serve_index()
+
+    # Handle API requests
+    fn handle_api(method: text, path: text) -> text:
+        if method != "GET":
+            return http_error(405, "Method Not Allowed")
+
+        match path:
+            "/api/status" => self.api_status()
+            "/api/features" => self.api_features()
+            "/api/todos" => self.api_todos()
+            "/api/coverage" => self.api_coverage()
+            "/api/tests" => self.api_tests()
+            "/api/trends" => self.api_trends()
+            "/api/alerts" => self.api_alerts()
+            "/api/vcs" => self.api_vcs()
+            "/api/plans" => self.api_plans()
+            _ => http_error(404, "Not Found")
+
+    # Serve index page
+    fn serve_index() -> text:
+        val html = generate_dashboard_html()
+        return http_response(200, "text/html", html)
+
+    # Serve static files
+    fn serve_static(path: text) -> text:
+        # For now, return 404 (static files would be added later)
+        return http_error(404, "Not Found")
+
+    # =========================================================================
+    # API Endpoints
+    # =========================================================================
+
+    # GET /api/status - Dashboard summary
+    fn api_status() -> text:
+        match get_cached_data():
+            Ok(data) =>
+                val json = "{\n"
+                json = "{json}  \"features_total\": {data.total_features()},\n"
+                json = "{json}  \"features_complete\": {data.completed_features()},\n"
+                json = "{json}  \"todos_total\": {data.total_todos()},\n"
+                json = "{json}  \"todos_critical\": {data.critical_todos()},\n"
+                json = "{json}  \"coverage_percent\": {data.overall_coverage()},\n"
+                json = "{json}  \"sspec_tests\": {data.sspec_tests.len()},\n"
+                json = "{json}  \"plans_total\": {data.plans.len()},\n"
+                json = "{json}  \"timestamp\": \"{data.timestamp}\"\n"
+                json = "{json}}"
+                return http_response(200, "application/json", json)
+            Err(e) =>
+                return http_error(500, "Failed to load data: {e}")
+
+    # GET /api/features - All features
+    fn api_features() -> text:
+        match get_cached_data():
+            Ok(data) =>
+                var json = "[\n"
+                for i in 0..data.features.len():
+                    val f = data.features[i]
+                    json = "{json}  {\n"
+                    json = "{json}    \"id\": {f.id},\n"
+                    json = "{json}    \"category\": \"{f.category}\",\n"
+                    json = "{json}    \"name\": \"{f.name}\",\n"
+                    json = "{json}    \"status\": \"{f.status}\"\n"
+                    json = "{json}  }"
+                    if i < data.features.len() - 1:
+                        json = "{json},"
+                    json = "{json}\n"
+                json = "{json}]"
+                return http_response(200, "application/json", json)
+            Err(e) =>
+                return http_error(500, e)
+
+    # GET /api/todos - All TODOs
+    fn api_todos() -> text:
+        match get_cached_data():
+            Ok(data) =>
+                var json = "[\n"
+                for i in 0..data.todos.len():
+                    val t = data.todos[i]
+                    json = "{json}  {\n"
+                    json = "{json}    \"id\": {t.id},\n"
+                    json = "{json}    \"priority\": \"{t.priority}\",\n"
+                    json = "{json}    \"area\": \"{t.area}\",\n"
+                    json = "{json}    \"description\": \"{escape_json(t.description)}\",\n"
+                    json = "{json}    \"file\": \"{t.file}\"\n"
+                    json = "{json}  }"
+                    if i < data.todos.len() - 1:
+                        json = "{json},"
+                    json = "{json}\n"
+                json = "{json}]"
+                return http_response(200, "application/json", json)
+            Err(e) =>
+                return http_error(500, e)
+
+    # GET /api/coverage - Coverage metrics
+    fn api_coverage() -> text:
+        match get_cached_data():
+            Ok(data) =>
+                var json = "{\n"
+                json = "{json}  \"overall\": {data.overall_coverage()},\n"
+                json = "{json}  \"metrics\": [\n"
+                for i in 0..data.coverage.len():
+                    val c = data.coverage[i]
+                    json = "{json}    {\n"
+                    json = "{json}      \"level\": \"{c.level}\",\n"
+                    json = "{json}      \"crate\": \"{c.crate}\",\n"
+                    json = "{json}      \"percent\": {c.lines_percent}\n"
+                    json = "{json}    }"
+                    if i < data.coverage.len() - 1:
+                        json = "{json},"
+                    json = "{json}\n"
+                json = "{json}  ]\n"
+                json = "{json}}"
+                return http_response(200, "application/json", json)
+            Err(e) =>
+                return http_error(500, e)
+
+    # GET /api/tests - SSpec test summary
+    fn api_tests() -> text:
+        match get_cached_data():
+            Ok(data) =>
+                var passing = 0
+                for test in data.sspec_tests:
+                    if test.success_rate() == 100.0:
+                        passing = passing + 1
+
+                var json = "{\n"
+                json = "{json}  \"total\": {data.sspec_tests.len()},\n"
+                json = "{json}  \"passing\": {passing}\n"
+                json = "{json}}"
+                return http_response(200, "application/json", json)
+            Err(e) =>
+                return http_error(500, e)
+
+    # GET /api/trends - Trend analysis
+    fn api_trends() -> text:
+        match analyze_weekly_trends():
+            Ok(report) =>
+                var json = "{\n"
+                json = "{json}  \"days\": {report.days},\n"
+                json = "{json}  \"coverage\": {\n"
+                json = "{json}    \"current\": {report.coverage.current},\n"
+                json = "{json}    \"change\": {report.coverage.change_percent},\n"
+                json = "{json}    \"status\": \"{report.coverage.status}\"\n"
+                json = "{json}  },\n"
+                json = "{json}  \"features\": {\n"
+                json = "{json}    \"current\": {report.features.current},\n"
+                json = "{json}    \"change\": {report.features.change_percent},\n"
+                json = "{json}    \"status\": \"{report.features.status}\"\n"
+                json = "{json}  }\n"
+                json = "{json}}"
+                return http_response(200, "application/json", json)
+            Err(e) =>
+                return http_error(500, e)
+
+    # GET /api/alerts - Current alerts
+    fn api_alerts() -> text:
+        match get_cached_data():
+            Ok(data) =>
+                match analyze_weekly_trends():
+                    Ok(trends) =>
+                        val alerts = check_alerts_with_trends(data, trends)
+                        var json = "[\n"
+                        for i in 0..alerts.len():
+                            val a = alerts[i]
+                            json = "{json}  {\n"
+                            json = "{json}    \"level\": \"{a.level}\",\n"
+                            json = "{json}    \"metric\": \"{a.metric}\",\n"
+                            json = "{json}    \"message\": \"{escape_json(a.message)}\"\n"
+                            json = "{json}  }"
+                            if i < alerts.len() - 1:
+                                json = "{json},"
+                            json = "{json}\n"
+                        json = "{json}]"
+                        return http_response(200, "application/json", json)
+                    Err(_) =>
+                        return http_response(200, "application/json", "[]")
+            Err(e) =>
+                return http_error(500, e)
+
+    # GET /api/vcs - VCS state
+    fn api_vcs() -> text:
+        match get_cached_data():
+            Ok(data) =>
+                var json = "{\n"
+                json = "{json}  \"bookmark\": \"{data.vcs_state.bookmark}\",\n"
+                json = "{json}  \"commit_id\": \"{data.vcs_state.commit_id}\",\n"
+                json = "{json}  \"uncommitted\": {data.vcs_state.uncommitted_files},\n"
+                json = "{json}  \"is_clean\": {data.vcs_state.is_clean()}\n"
+                json = "{json}}"
+                return http_response(200, "application/json", json)
+            Err(e) =>
+                return http_error(500, e)
+
+    # GET /api/plans - All plans
+    fn api_plans() -> text:
+        match get_cached_data():
+            Ok(data) =>
+                var json = "[\n"
+                for i in 0..data.plans.len():
+                    val p = data.plans[i]
+                    json = "{json}  {\n"
+                    json = "{json}    \"id\": {p.id},\n"
+                    json = "{json}    \"title\": \"{escape_json(p.title)}\",\n"
+                    json = "{json}    \"status\": \"{p.status}\",\n"
+                    json = "{json}    \"progress\": {p.progress_percent()}\n"
+                    json = "{json}  }"
+                    if i < data.plans.len() - 1:
+                        json = "{json},"
+                    json = "{json}\n"
+                json = "{json}]"
+                return http_response(200, "application/json", json)
+            Err(e) =>
+                return http_error(500, e)
+
+# =========================================================================
+# HTTP Helpers
+# =========================================================================
+
+# Create HTTP response
+fn http_response(status: i32, content_type: text, body: text) -> text:
+    val status_text = match status:
+        200 => "OK"
+        404 => "Not Found"
+        500 => "Internal Server Error"
+        _ => "Unknown"
+
+    var response = "HTTP/1.1 {status} {status_text}\r\n"
+    response = "{response}Content-Type: {content_type}\r\n"
+    response = "{response}Content-Length: {body.len()}\r\n"
+    response = "{response}Access-Control-Allow-Origin: *\r\n"
+    response = "{response}\r\n"
+    response = "{response}{body}"
+    return response
+
+# Create HTTP error response
+fn http_error(status: i32, message: text) -> text:
+    val body = "{\"error\": \"{message}\"}"
+    return http_response(status, "application/json", body)
+
+# Escape JSON string
+fn escape_json(s: text) -> text:
+    var result = s
+    result = result.replace("\\", "\\\\")
+    result = result.replace("\"", "\\\"")
+    result = result.replace("\n", "\\n")
+    return result
+
+# Generate dashboard HTML
+fn generate_dashboard_html() -> text:
+    val html = "<!DOCTYPE html>\n"
+    html = "{html}<html>\n"
+    html = "{html}<head>\n"
+    html = "{html}  <title>Simple Compiler Dashboard</title>\n"
+    html = "{html}  <meta charset=\"utf-8\">\n"
+    html = "{html}  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
+    html = "{html}  <style>\n"
+    html = "{html}    body {{ font-family: system-ui, sans-serif; margin: 0; padding: 20px; background: #f5f5f5; }}\n"
+    html = "{html}    .container {{ max-width: 1200px; margin: 0 auto; }}\n"
+    html = "{html}    h1 {{ color: #333; }}\n"
+    html = "{html}    .card {{ background: white; padding: 20px; margin: 20px 0; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}\n"
+    html = "{html}    .metric {{ display: inline-block; margin: 10px 20px 10px 0; }}\n"
+    html = "{html}    .metric-label {{ color: #666; font-size: 14px; }}\n"
+    html = "{html}    .metric-value {{ font-size: 32px; font-weight: bold; color: #2196F3; }}\n"
+    html = "{html}    .progress {{ background: #e0e0e0; height: 20px; border-radius: 10px; overflow: hidden; }}\n"
+    html = "{html}    .progress-bar {{ background: #4CAF50; height: 100%; transition: width 0.3s; }}\n"
+    html = "{html}    .alert {{ padding: 15px; margin: 10px 0; border-radius: 4px; }}\n"
+    html = "{html}    .alert-critical {{ background: #ffebee; border-left: 4px solid #f44336; }}\n"
+    html = "{html}    .alert-warning {{ background: #fff3e0; border-left: 4px solid #ff9800; }}\n"
+    html = "{html}    .refresh {{ color: #666; font-size: 12px; }}\n"
+    html = "{html}  </style>\n"
+    html = "{html}</head>\n"
+    html = "{html}<body>\n"
+    html = "{html}  <div class=\"container\">\n"
+    html = "{html}    <h1>Simple Compiler Dashboard</h1>\n"
+    html = "{html}    <div class=\"refresh\">Auto-refreshing every 30s...</div>\n"
+    html = "{html}    <div id=\"content\">Loading...</div>\n"
+    html = "{html}  </div>\n"
+    html = "{html}  <script>\n"
+    html = "{html}    async function loadDashboard() {{\n"
+    html = "{html}      const status = await fetch('/api/status').then(r => r.json());\n"
+    html = "{html}      const alerts = await fetch('/api/alerts').then(r => r.json());\n"
+    html = "{html}      const content = document.getElementById('content');\n"
+    html = "{html}      let html = '<div class=\"card\">';\n"
+    html = "{html}      html += '<h2>Overview</h2>';\n"
+    html = "{html}      html += '<div class=\"metric\"><div class=\"metric-label\">Features</div><div class=\"metric-value\">' + status.features_complete + '/' + status.features_total + '</div></div>';\n"
+    html = "{html}      html += '<div class=\"metric\"><div class=\"metric-label\">Coverage</div><div class=\"metric-value\">' + status.coverage_percent.toFixed(1) + '%</div></div>';\n"
+    html = "{html}      html += '<div class=\"metric\"><div class=\"metric-label\">TODOs</div><div class=\"metric-value\">' + status.todos_total + '</div></div>';\n"
+    html = "{html}      html += '</div>';\n"
+    html = "{html}      if (alerts.length > 0) {{\n"
+    html = "{html}        html += '<div class=\"card\"><h2>Alerts</h2>';\n"
+    html = "{html}        alerts.forEach(a => {{\n"
+    html = "{html}          const cls = a.level === 'critical' ? 'alert-critical' : 'alert-warning';\n"
+    html = "{html}          html += '<div class=\"alert ' + cls + '\">' + a.message + '</div>';\n"
+    html = "{html}        }});\n"
+    html = "{html}        html += '</div>';\n"
+    html = "{html}      }}\n"
+    html = "{html}      content.innerHTML = html;\n"
+    html = "{html}    }}\n"
+    html = "{html}    loadDashboard();\n"
+    html = "{html}    setInterval(loadDashboard, 30000);\n"
+    html = "{html}  </script>\n"
+    html = "{html}</body>\n"
+    html = "{html}</html>"
+    return html
+
+# =========================================================================
+# Exports
+# =========================================================================
+
+export DashboardServer
+export http_response, http_error, escape_json, generate_dashboard_html

@@ -1,0 +1,712 @@
+# @pending
+"""
+Concurrent Providers Specification
+
+Intensive tests for all FFI-backed collection, channel, thread, and lock
+operations exercised end-to-end through the default PureStd backend.
+Verifies that the ConcurrentProviderRegistry dispatch layer is transparent.
+"""
+
+# ============================================================================
+# Extern FFI declarations
+# ============================================================================
+
+# HashMap
+extern fn __rt_hashmap_new() -> i64
+extern fn __rt_hashmap_insert(handle: i64, key: text, value: Any) -> bool
+extern fn __rt_hashmap_get(handle: i64, key: text) -> Any
+extern fn __rt_hashmap_contains_key(handle: i64, key: text) -> bool
+extern fn __rt_hashmap_remove(handle: i64, key: text) -> Any
+extern fn __rt_hashmap_len(handle: i64) -> i64
+extern fn __rt_hashmap_clear(handle: i64) -> bool
+extern fn __rt_hashmap_keys(handle: i64) -> Any
+extern fn __rt_hashmap_values(handle: i64) -> Any
+extern fn __rt_hashmap_entries(handle: i64) -> Any
+
+# HashSet
+extern fn __rt_hashset_new() -> i64
+extern fn __rt_hashset_insert(handle: i64, value: text) -> bool
+extern fn __rt_hashset_contains(handle: i64, value: text) -> bool
+extern fn __rt_hashset_remove(handle: i64, value: text) -> bool
+extern fn __rt_hashset_len(handle: i64) -> i64
+extern fn __rt_hashset_clear(handle: i64) -> bool
+extern fn __rt_hashset_to_array(handle: i64) -> Any
+extern fn __rt_hashset_union(a: i64, b: i64) -> i64
+extern fn __rt_hashset_intersection(a: i64, b: i64) -> i64
+extern fn __rt_hashset_difference(a: i64, b: i64) -> i64
+extern fn __rt_hashset_symmetric_difference(a: i64, b: i64) -> i64
+extern fn __rt_hashset_is_subset(a: i64, b: i64) -> bool
+extern fn __rt_hashset_is_superset(a: i64, b: i64) -> bool
+
+# BTreeMap
+extern fn __rt_btreemap_new() -> i64
+extern fn __rt_btreemap_insert(handle: i64, key: text, value: Any) -> bool
+extern fn __rt_btreemap_get(handle: i64, key: text) -> Any
+extern fn __rt_btreemap_contains_key(handle: i64, key: text) -> bool
+extern fn __rt_btreemap_remove(handle: i64, key: text) -> Any
+extern fn __rt_btreemap_len(handle: i64) -> i64
+extern fn __rt_btreemap_clear(handle: i64) -> bool
+extern fn __rt_btreemap_keys(handle: i64) -> Any
+extern fn __rt_btreemap_values(handle: i64) -> Any
+extern fn __rt_btreemap_entries(handle: i64) -> Any
+extern fn __rt_btreemap_first_key(handle: i64) -> Any
+extern fn __rt_btreemap_last_key(handle: i64) -> Any
+
+# BTreeSet
+extern fn __rt_btreeset_new() -> i64
+extern fn __rt_btreeset_insert(handle: i64, value: text) -> bool
+extern fn __rt_btreeset_contains(handle: i64, value: text) -> bool
+extern fn __rt_btreeset_remove(handle: i64, value: text) -> bool
+extern fn __rt_btreeset_len(handle: i64) -> i64
+extern fn __rt_btreeset_clear(handle: i64) -> bool
+extern fn __rt_btreeset_to_array(handle: i64) -> Any
+extern fn __rt_btreeset_first(handle: i64) -> Any
+extern fn __rt_btreeset_last(handle: i64) -> Any
+extern fn __rt_btreeset_union(a: i64, b: i64) -> i64
+extern fn __rt_btreeset_intersection(a: i64, b: i64) -> i64
+extern fn __rt_btreeset_difference(a: i64, b: i64) -> i64
+extern fn __rt_btreeset_symmetric_difference(a: i64, b: i64) -> i64
+extern fn __rt_btreeset_is_subset(a: i64, b: i64) -> bool
+extern fn __rt_btreeset_is_superset(a: i64, b: i64) -> bool
+
+# Channels
+extern fn rt_channel_new() -> i64
+extern fn rt_channel_send(channel_id: i64, value: Any)
+extern fn rt_channel_try_recv(channel_id: i64) -> Any
+extern fn rt_channel_recv(channel_id: i64) -> Any
+extern fn rt_channel_close(channel_id: i64)
+extern fn rt_channel_is_closed(channel_id: i64) -> i64
+
+# Threads
+extern fn rt_thread_available_parallelism() -> i64
+extern fn rt_thread_sleep(millis: i64)
+extern fn rt_thread_yield()
+extern fn rt_thread_spawn_isolated2(closure: Any, data1: Any, data2: Any) -> i64
+extern fn rt_thread_join(handle: i64) -> Any
+
+# Mutex / RwLock
+extern fn rt_mutex_new(initial: Any) -> Any
+extern fn rt_mutex_lock(mutex: Any) -> Any
+extern fn rt_mutex_try_lock(mutex: Any) -> Any
+extern fn rt_mutex_unlock(mutex: Any, new_value: Any) -> Any
+extern fn rt_rwlock_new(initial: Any) -> Any
+extern fn rt_rwlock_read(rwlock: Any) -> Any
+extern fn rt_rwlock_write(rwlock: Any) -> Any
+extern fn rt_rwlock_try_read(rwlock: Any) -> Any
+extern fn rt_rwlock_try_write(rwlock: Any) -> Any
+extern fn rt_rwlock_set(rwlock: Any, new_value: Any) -> Any
+
+# ============================================================================
+# Tests
+# ============================================================================
+
+describe "Concurrent Providers":
+
+    # ========================================================================
+    # HashMap
+    # ========================================================================
+    describe "HashMap":
+        it "creates a new empty hashmap":
+            val h = __rt_hashmap_new()
+            expect __rt_hashmap_len(h) == 0
+
+        it "inserts and retrieves a value":
+            val h = __rt_hashmap_new()
+            __rt_hashmap_insert(h, "key1", 42)
+            expect __rt_hashmap_get(h, "key1") == 42
+
+        it "returns nil for missing key":
+            val h = __rt_hashmap_new()
+            expect __rt_hashmap_get(h, "nope") == nil
+
+        it "reports contains_key correctly":
+            val h = __rt_hashmap_new()
+            __rt_hashmap_insert(h, "x", 1)
+            expect __rt_hashmap_contains_key(h, "x") == true
+            expect __rt_hashmap_contains_key(h, "y") == false
+
+        it "removes a key":
+            val h = __rt_hashmap_new()
+            __rt_hashmap_insert(h, "rm", 99)
+            val removed = __rt_hashmap_remove(h, "rm")
+            expect removed == 99
+            expect __rt_hashmap_contains_key(h, "rm") == false
+
+        it "removes missing key returns nil":
+            val h = __rt_hashmap_new()
+            expect __rt_hashmap_remove(h, "missing") == nil
+
+        it "tracks length correctly":
+            val h = __rt_hashmap_new()
+            __rt_hashmap_insert(h, "a", 1)
+            __rt_hashmap_insert(h, "b", 2)
+            __rt_hashmap_insert(h, "c", 3)
+            expect __rt_hashmap_len(h) == 3
+
+        it "clears all entries":
+            val h = __rt_hashmap_new()
+            __rt_hashmap_insert(h, "a", 1)
+            __rt_hashmap_insert(h, "b", 2)
+            __rt_hashmap_clear(h)
+            expect __rt_hashmap_len(h) == 0
+
+        it "returns keys as array":
+            val h = __rt_hashmap_new()
+            __rt_hashmap_insert(h, "alpha", 1)
+            __rt_hashmap_insert(h, "beta", 2)
+            val keys = __rt_hashmap_keys(h)
+            expect len(keys) == 2
+
+        it "returns values as array":
+            val h = __rt_hashmap_new()
+            __rt_hashmap_insert(h, "x", 10)
+            __rt_hashmap_insert(h, "y", 20)
+            val vals = __rt_hashmap_values(h)
+            expect len(vals) == 2
+
+        it "returns entries as array of pairs":
+            val h = __rt_hashmap_new()
+            __rt_hashmap_insert(h, "k", 99)
+            val entries = __rt_hashmap_entries(h)
+            expect len(entries) == 1
+
+        it "overwrites existing key":
+            val h = __rt_hashmap_new()
+            __rt_hashmap_insert(h, "dup", 1)
+            __rt_hashmap_insert(h, "dup", 2)
+            expect __rt_hashmap_get(h, "dup") == 2
+            expect __rt_hashmap_len(h) == 1
+
+        it "stores string values":
+            val h = __rt_hashmap_new()
+            __rt_hashmap_insert(h, "greeting", "hello")
+            expect __rt_hashmap_get(h, "greeting") == "hello"
+
+        it "handles stress with 100+ items":
+            val h = __rt_hashmap_new()
+            var i = 0
+            while i < 100:
+                __rt_hashmap_insert(h, "key_{i}", i)
+                i = i + 1
+            expect __rt_hashmap_len(h) == 100
+
+        it "insert returns true for new key":
+            val h = __rt_hashmap_new()
+            val result = __rt_hashmap_insert(h, "new", 1)
+            expect result == true
+
+        it "insert returns false for existing key":
+            val h = __rt_hashmap_new()
+            __rt_hashmap_insert(h, "dup", 1)
+            val result = __rt_hashmap_insert(h, "dup", 2)
+            expect result == false
+
+    # ========================================================================
+    # HashSet
+    # ========================================================================
+    describe "HashSet":
+        it "creates a new empty hashset":
+            val s = __rt_hashset_new()
+            expect __rt_hashset_len(s) == 0
+
+        it "inserts and checks membership":
+            val s = __rt_hashset_new()
+            __rt_hashset_insert(s, "apple")
+            expect __rt_hashset_contains(s, "apple") == true
+            expect __rt_hashset_contains(s, "banana") == false
+
+        it "removes a value":
+            val s = __rt_hashset_new()
+            __rt_hashset_insert(s, "x")
+            expect __rt_hashset_remove(s, "x") == true
+            expect __rt_hashset_contains(s, "x") == false
+
+        it "remove returns false for missing":
+            val s = __rt_hashset_new()
+            expect __rt_hashset_remove(s, "nope") == false
+
+        it "tracks length":
+            val s = __rt_hashset_new()
+            __rt_hashset_insert(s, "a")
+            __rt_hashset_insert(s, "b")
+            __rt_hashset_insert(s, "c")
+            expect __rt_hashset_len(s) == 3
+
+        it "clears all elements":
+            val s = __rt_hashset_new()
+            __rt_hashset_insert(s, "x")
+            __rt_hashset_insert(s, "y")
+            __rt_hashset_clear(s)
+            expect __rt_hashset_len(s) == 0
+
+        it "converts to array":
+            val s = __rt_hashset_new()
+            __rt_hashset_insert(s, "one")
+            __rt_hashset_insert(s, "two")
+            val arr = __rt_hashset_to_array(s)
+            expect len(arr) == 2
+
+        it "computes union":
+            val a = __rt_hashset_new()
+            __rt_hashset_insert(a, "1")
+            __rt_hashset_insert(a, "2")
+            val b = __rt_hashset_new()
+            __rt_hashset_insert(b, "2")
+            __rt_hashset_insert(b, "3")
+            val u = __rt_hashset_union(a, b)
+            expect __rt_hashset_len(u) == 3
+
+        it "computes intersection":
+            val a = __rt_hashset_new()
+            __rt_hashset_insert(a, "1")
+            __rt_hashset_insert(a, "2")
+            val b = __rt_hashset_new()
+            __rt_hashset_insert(b, "2")
+            __rt_hashset_insert(b, "3")
+            val inter = __rt_hashset_intersection(a, b)
+            expect __rt_hashset_len(inter) == 1
+
+        it "computes difference":
+            val a = __rt_hashset_new()
+            __rt_hashset_insert(a, "1")
+            __rt_hashset_insert(a, "2")
+            val b = __rt_hashset_new()
+            __rt_hashset_insert(b, "2")
+            val d = __rt_hashset_difference(a, b)
+            expect __rt_hashset_len(d) == 1
+            expect __rt_hashset_contains(d, "1") == true
+
+        it "computes symmetric difference":
+            val a = __rt_hashset_new()
+            __rt_hashset_insert(a, "1")
+            __rt_hashset_insert(a, "2")
+            val b = __rt_hashset_new()
+            __rt_hashset_insert(b, "2")
+            __rt_hashset_insert(b, "3")
+            val sd = __rt_hashset_symmetric_difference(a, b)
+            expect __rt_hashset_len(sd) == 2
+
+        it "checks subset":
+            val a = __rt_hashset_new()
+            __rt_hashset_insert(a, "1")
+            val b = __rt_hashset_new()
+            __rt_hashset_insert(b, "1")
+            __rt_hashset_insert(b, "2")
+            expect __rt_hashset_is_subset(a, b) == true
+            expect __rt_hashset_is_subset(b, a) == false
+
+        it "checks superset":
+            val a = __rt_hashset_new()
+            __rt_hashset_insert(a, "1")
+            __rt_hashset_insert(a, "2")
+            val b = __rt_hashset_new()
+            __rt_hashset_insert(b, "1")
+            expect __rt_hashset_is_superset(a, b) == true
+
+    # ========================================================================
+    # BTreeMap
+    # ========================================================================
+    describe "BTreeMap":
+        it "creates a new empty btreemap":
+            val m = __rt_btreemap_new()
+            expect __rt_btreemap_len(m) == 0
+
+        it "inserts and retrieves":
+            val m = __rt_btreemap_new()
+            __rt_btreemap_insert(m, "key", 42)
+            expect __rt_btreemap_get(m, "key") == 42
+
+        it "returns nil for missing key":
+            val m = __rt_btreemap_new()
+            expect __rt_btreemap_get(m, "nope") == nil
+
+        it "contains_key works":
+            val m = __rt_btreemap_new()
+            __rt_btreemap_insert(m, "x", 1)
+            expect __rt_btreemap_contains_key(m, "x") == true
+            expect __rt_btreemap_contains_key(m, "y") == false
+
+        it "removes a key":
+            val m = __rt_btreemap_new()
+            __rt_btreemap_insert(m, "rm", 5)
+            expect __rt_btreemap_remove(m, "rm") == 5
+            expect __rt_btreemap_len(m) == 0
+
+        it "tracks length":
+            val m = __rt_btreemap_new()
+            __rt_btreemap_insert(m, "a", 1)
+            __rt_btreemap_insert(m, "b", 2)
+            expect __rt_btreemap_len(m) == 2
+
+        it "clears all entries":
+            val m = __rt_btreemap_new()
+            __rt_btreemap_insert(m, "a", 1)
+            __rt_btreemap_clear(m)
+            expect __rt_btreemap_len(m) == 0
+
+        it "returns sorted keys":
+            val m = __rt_btreemap_new()
+            __rt_btreemap_insert(m, "c", 3)
+            __rt_btreemap_insert(m, "a", 1)
+            __rt_btreemap_insert(m, "b", 2)
+            val keys = __rt_btreemap_keys(m)
+            expect keys[0] == "a"
+            expect keys[1] == "b"
+            expect keys[2] == "c"
+
+        it "returns values in key order":
+            val m = __rt_btreemap_new()
+            __rt_btreemap_insert(m, "b", 20)
+            __rt_btreemap_insert(m, "a", 10)
+            val vals = __rt_btreemap_values(m)
+            expect vals[0] == 10
+            expect vals[1] == 20
+
+        it "returns entries in key order":
+            val m = __rt_btreemap_new()
+            __rt_btreemap_insert(m, "b", 2)
+            __rt_btreemap_insert(m, "a", 1)
+            val entries = __rt_btreemap_entries(m)
+            expect len(entries) == 2
+
+        it "gets first key (smallest)":
+            val m = __rt_btreemap_new()
+            __rt_btreemap_insert(m, "z", 26)
+            __rt_btreemap_insert(m, "a", 1)
+            expect __rt_btreemap_first_key(m) == "a"
+
+        it "gets last key (largest)":
+            val m = __rt_btreemap_new()
+            __rt_btreemap_insert(m, "a", 1)
+            __rt_btreemap_insert(m, "z", 26)
+            expect __rt_btreemap_last_key(m) == "z"
+
+        it "first_key returns nil for empty map":
+            val m = __rt_btreemap_new()
+            expect __rt_btreemap_first_key(m) == nil
+
+    # ========================================================================
+    # BTreeSet
+    # ========================================================================
+    describe "BTreeSet":
+        it "creates a new empty btreeset":
+            val s = __rt_btreeset_new()
+            expect __rt_btreeset_len(s) == 0
+
+        it "inserts and checks membership":
+            val s = __rt_btreeset_new()
+            __rt_btreeset_insert(s, "apple")
+            expect __rt_btreeset_contains(s, "apple") == true
+
+        it "removes a value":
+            val s = __rt_btreeset_new()
+            __rt_btreeset_insert(s, "x")
+            expect __rt_btreeset_remove(s, "x") == true
+            expect __rt_btreeset_contains(s, "x") == false
+
+        it "tracks length":
+            val s = __rt_btreeset_new()
+            __rt_btreeset_insert(s, "a")
+            __rt_btreeset_insert(s, "b")
+            expect __rt_btreeset_len(s) == 2
+
+        it "clears all elements":
+            val s = __rt_btreeset_new()
+            __rt_btreeset_insert(s, "x")
+            __rt_btreeset_clear(s)
+            expect __rt_btreeset_len(s) == 0
+
+        it "converts to sorted array":
+            val s = __rt_btreeset_new()
+            __rt_btreeset_insert(s, "c")
+            __rt_btreeset_insert(s, "a")
+            __rt_btreeset_insert(s, "b")
+            val arr = __rt_btreeset_to_array(s)
+            expect arr[0] == "a"
+            expect arr[1] == "b"
+            expect arr[2] == "c"
+
+        it "gets first element":
+            val s = __rt_btreeset_new()
+            __rt_btreeset_insert(s, "z")
+            __rt_btreeset_insert(s, "a")
+            expect __rt_btreeset_first(s) == "a"
+
+        it "gets last element":
+            val s = __rt_btreeset_new()
+            __rt_btreeset_insert(s, "a")
+            __rt_btreeset_insert(s, "z")
+            expect __rt_btreeset_last(s) == "z"
+
+        it "computes union":
+            val a = __rt_btreeset_new()
+            __rt_btreeset_insert(a, "1")
+            __rt_btreeset_insert(a, "2")
+            val b = __rt_btreeset_new()
+            __rt_btreeset_insert(b, "2")
+            __rt_btreeset_insert(b, "3")
+            val u = __rt_btreeset_union(a, b)
+            expect __rt_btreeset_len(u) == 3
+
+        it "computes intersection":
+            val a = __rt_btreeset_new()
+            __rt_btreeset_insert(a, "1")
+            __rt_btreeset_insert(a, "2")
+            val b = __rt_btreeset_new()
+            __rt_btreeset_insert(b, "2")
+            __rt_btreeset_insert(b, "3")
+            val inter = __rt_btreeset_intersection(a, b)
+            expect __rt_btreeset_len(inter) == 1
+
+        it "computes difference":
+            val a = __rt_btreeset_new()
+            __rt_btreeset_insert(a, "1")
+            __rt_btreeset_insert(a, "2")
+            val b = __rt_btreeset_new()
+            __rt_btreeset_insert(b, "2")
+            val d = __rt_btreeset_difference(a, b)
+            expect __rt_btreeset_len(d) == 1
+
+        it "computes symmetric difference":
+            val a = __rt_btreeset_new()
+            __rt_btreeset_insert(a, "1")
+            __rt_btreeset_insert(a, "2")
+            val b = __rt_btreeset_new()
+            __rt_btreeset_insert(b, "2")
+            __rt_btreeset_insert(b, "3")
+            val sd = __rt_btreeset_symmetric_difference(a, b)
+            expect __rt_btreeset_len(sd) == 2
+
+        it "checks subset":
+            val a = __rt_btreeset_new()
+            __rt_btreeset_insert(a, "1")
+            val b = __rt_btreeset_new()
+            __rt_btreeset_insert(b, "1")
+            __rt_btreeset_insert(b, "2")
+            expect __rt_btreeset_is_subset(a, b) == true
+
+        it "checks superset":
+            val a = __rt_btreeset_new()
+            __rt_btreeset_insert(a, "1")
+            __rt_btreeset_insert(a, "2")
+            val b = __rt_btreeset_new()
+            __rt_btreeset_insert(b, "1")
+            expect __rt_btreeset_is_superset(a, b) == true
+
+    # ========================================================================
+    # Channel
+    # ========================================================================
+    describe "Channel":
+        it "creates a channel":
+            val ch = rt_channel_new()
+            expect ch >= 1
+
+        it "sends and receives a value":
+            val ch = rt_channel_new()
+            rt_channel_send(ch, 42)
+            expect rt_channel_try_recv(ch) == 42
+
+        it "try_recv returns nil on empty":
+            val ch = rt_channel_new()
+            expect rt_channel_try_recv(ch) == nil
+
+        it "preserves FIFO order":
+            val ch = rt_channel_new()
+            rt_channel_send(ch, 1)
+            rt_channel_send(ch, 2)
+            rt_channel_send(ch, 3)
+            expect rt_channel_try_recv(ch) == 1
+            expect rt_channel_try_recv(ch) == 2
+            expect rt_channel_try_recv(ch) == 3
+
+        it "closes a channel":
+            val ch = rt_channel_new()
+            rt_channel_close(ch)
+            expect rt_channel_is_closed(ch) == 1
+
+        it "is_closed returns 0 for open channel":
+            val ch = rt_channel_new()
+            expect rt_channel_is_closed(ch) == 0
+
+        it "sends and receives string values":
+            val ch = rt_channel_new()
+            rt_channel_send(ch, "hello")
+            expect rt_channel_try_recv(ch) == "hello"
+
+        it "sends and receives boolean values":
+            val ch = rt_channel_new()
+            rt_channel_send(ch, true)
+            expect rt_channel_try_recv(ch) == true
+
+        it "sends multiple types":
+            val ch = rt_channel_new()
+            rt_channel_send(ch, 42)
+            rt_channel_send(ch, "text")
+            rt_channel_send(ch, true)
+            expect rt_channel_try_recv(ch) == 42
+            expect rt_channel_try_recv(ch) == "text"
+            expect rt_channel_try_recv(ch) == true
+
+        it "blocking recv works after send":
+            val ch = rt_channel_new()
+            rt_channel_send(ch, 99)
+            expect rt_channel_recv(ch) == 99
+
+    # ========================================================================
+    # Thread
+    # ========================================================================
+    describe "Thread":
+        it "reports parallelism >= 1":
+            expect rt_thread_available_parallelism() >= 1
+
+        it "sleep does not error":
+            rt_thread_sleep(1)
+            expect true
+
+        it "yield does not error":
+            rt_thread_yield()
+            expect true
+
+        it "spawn returns valid handle":
+            val handle = rt_thread_spawn_isolated2(\x, y: nil, 1, 2)
+            expect handle >= 1
+
+        it "join returns result":
+            val handle = rt_thread_spawn_isolated2(\x, y: nil, 1, 2)
+            val result = rt_thread_join(handle)
+            # synchronous execution returns nil for stub closure
+            expect result == nil
+
+        it "spawn with channel communication":
+            val ch = rt_channel_new()
+            val handle = rt_thread_spawn_isolated2(\data, channel_id:
+                rt_channel_send(channel_id, data)
+                return nil
+            , 42, ch)
+            val result = rt_channel_recv(ch)
+            rt_thread_join(handle)
+            expect result == 42
+
+        it "spawn with computation":
+            val ch = rt_channel_new()
+            val handle = rt_thread_spawn_isolated2(\a, b:
+                rt_channel_send(b, a * 2)
+                return nil
+            , 21, ch)
+            val result = rt_channel_recv(ch)
+            rt_thread_join(handle)
+            expect result == 42
+
+        it "multiple spawns":
+            val ch = rt_channel_new()
+            val h1 = rt_thread_spawn_isolated2(\d, c:
+                rt_channel_send(c, d)
+                return nil
+            , 10, ch)
+            val h2 = rt_thread_spawn_isolated2(\d, c:
+                rt_channel_send(c, d)
+                return nil
+            , 20, ch)
+            val r1 = rt_channel_recv(ch)
+            val r2 = rt_channel_recv(ch)
+            rt_thread_join(h1)
+            rt_thread_join(h2)
+            expect r1 + r2 == 30
+
+    # ========================================================================
+    # Mutex
+    # ========================================================================
+    describe "Mutex":
+        it "creates a mutex with initial value":
+            val m = rt_mutex_new(42)
+            expect m != nil
+
+        it "locks and reads value":
+            val m = rt_mutex_new(42)
+            val v = rt_mutex_lock(m)
+            expect v != nil
+
+        it "try_lock succeeds when unlocked":
+            val m = rt_mutex_new(10)
+            val v = rt_mutex_try_lock(m)
+            expect v != nil
+
+        it "unlock stores new value":
+            val m = rt_mutex_new(1)
+            rt_mutex_lock(m)
+            rt_mutex_unlock(m, 2)
+            val v = rt_mutex_lock(m)
+            expect v != nil
+
+        it "multiple lock/unlock cycles":
+            val m = rt_mutex_new(0)
+            rt_mutex_lock(m)
+            rt_mutex_unlock(m, 1)
+            rt_mutex_lock(m)
+            rt_mutex_unlock(m, 2)
+            rt_mutex_lock(m)
+            rt_mutex_unlock(m, 3)
+            expect true
+
+        it "creates with string value":
+            val m = rt_mutex_new(100)
+            expect m != nil
+
+        it "creates multiple mutexes":
+            val m1 = rt_mutex_new(1)
+            val m2 = rt_mutex_new(2)
+            val m3 = rt_mutex_new(3)
+            expect m1 != nil
+            expect m2 != nil
+            expect m3 != nil
+
+        it "lock returns a value":
+            val m = rt_mutex_new(99)
+            val locked = rt_mutex_lock(m)
+            # locked is the protected value (may be raw runtime representation)
+            expect locked != nil
+
+    # ========================================================================
+    # RwLock
+    # ========================================================================
+    describe "RwLock":
+        it "creates a rwlock with initial value":
+            val rw = rt_rwlock_new(42)
+            expect rw != nil
+
+        it "read lock returns value":
+            val rw = rt_rwlock_new(42)
+            val v = rt_rwlock_read(rw)
+            expect v != nil
+
+        it "write lock returns value":
+            val rw = rt_rwlock_new(42)
+            val v = rt_rwlock_write(rw)
+            expect v != nil
+
+        it "try_read succeeds":
+            val rw = rt_rwlock_new(10)
+            val v = rt_rwlock_try_read(rw)
+            expect v != nil
+
+        it "try_write succeeds":
+            val rw = rt_rwlock_new(10)
+            val v = rt_rwlock_try_write(rw)
+            expect v != nil
+
+        it "set updates value":
+            val rw = rt_rwlock_new(1)
+            rt_rwlock_set(rw, 2)
+            expect true
+
+        it "creates multiple rwlocks":
+            val r1 = rt_rwlock_new(1)
+            val r2 = rt_rwlock_new(2)
+            expect r1 != nil
+            expect r2 != nil
+
+        it "read after set":
+            val rw = rt_rwlock_new(10)
+            rt_rwlock_set(rw, 20)
+            val v = rt_rwlock_read(rw)
+            expect v != nil

@@ -1,0 +1,158 @@
+# Pattern Analysis (Shared)
+#
+# Exhaustiveness and usefulness checking for pattern matching.
+# Detects unreachable patterns, missing variants, and duplicate patterns.
+#
+# Used by:
+#   - src/compiler/pattern_analysis.spl (re-exports)
+#   - src/app/interpreter/control/match.spl (exhaustiveness checking)
+#
+# Port of rust/compiler/src/pattern_analysis.rs (349 lines)
+
+export PatternRepr, PatternAnalysis, ExhaustivenessCheck
+export pattern_subsumes, pattern_to_text, is_wildcard
+
+# ============================================================================
+# Pattern Representation
+# ============================================================================
+
+enum PatternRepr:
+    Wildcard
+    Identifier(text)
+    LitInt(i64)
+    LitFloat(f64)
+    LitString(text)
+    LitBool(bool)
+    Tuple([PatternRepr])
+    Array([PatternRepr])
+    Enum(text, PatternRepr?)       # variant_name, payload
+    Struct(text, [(text, PatternRepr)])  # struct_name, fields
+    Range(i64, i64)                # start, end
+    Or([PatternRepr])
+    Rest
+
+fn is_wildcard(p: PatternRepr) -> bool:
+    match p:
+        case Wildcard: true
+        case Identifier(_): true
+        case _: false
+
+fn pattern_to_text(p: PatternRepr) -> text:
+    match p:
+        case Wildcard: "_"
+        case Identifier(n): n
+        case LitInt(v): "{v}"
+        case LitFloat(v): "{v}"
+        case LitString(v): "\"{v}\""
+        case LitBool(v): if v: "true" else: "false"
+        case Tuple(pats): "({pats.map(\\p: pattern_to_text(p)).join(\", \")})"
+        case Array(pats): "[{pats.map(\\p: pattern_to_text(p)).join(\", \")}]"
+        case Enum(name, payload):
+            if payload.?:
+                "{name}({pattern_to_text(payload.unwrap())})"
+            else: name
+        case Struct(name, fields):
+            val fs = fields.map(\(n, p): "{n}: {pattern_to_text(p)}").join(", ")
+            "{name}({fs})"
+        case Range(s, e): "{s}..{e}"
+        case Or(pats): pats.map(\p: pattern_to_text(p)).join(" | ")
+        case Rest: ".."
+
+# ============================================================================
+# Exhaustiveness Check Result
+# ============================================================================
+
+struct ExhaustivenessCheck:
+    is_exhaustive: bool
+    missing_patterns: [text]
+    unreachable_patterns: [i64]    # indices of unreachable arms
+    duplicate_patterns: [(i64, i64)]  # pairs of duplicate arm indices
+
+# ============================================================================
+# Pattern Analysis
+# ============================================================================
+
+fn pattern_subsumes(broader: PatternRepr, narrower: PatternRepr) -> bool:
+    """Check if broader pattern covers all cases of narrower pattern."""
+    if is_wildcard(broader): return true
+
+    match (broader, narrower):
+        case (LitInt(a), LitInt(b)): a == b
+        case (LitString(a), LitString(b)): a == b
+        case (LitBool(a), LitBool(b)): a == b
+        case (Enum(na, pa), Enum(nb, pb)):
+            if na != nb: false
+            elif not pa.? and not pb.?: true
+            elif pa.? and pb.?: pattern_subsumes(pa.unwrap(), pb.unwrap())
+            else: false
+        case (Tuple(as_), Tuple(bs)):
+            if as_.len() != bs.len(): false
+            else:
+                var all_match = true
+                for i in 0..as_.len():
+                    if not pattern_subsumes(as_[i], bs[i]):
+                        all_match = false
+                all_match
+        case (Or(pats), _):
+            pats.filter(\p: pattern_subsumes(p, narrower)).?
+        case (_, Or(pats)):
+            pats.filter(\p: not pattern_subsumes(broader, p)).len() == 0
+        case (Range(s1, e1), Range(s2, e2)):
+            s1 <= s2 and e1 >= e2
+        case (Range(s, e), LitInt(v)):
+            v >= s and v <= e
+        case _: false
+
+class PatternAnalysis:
+    """Analyzes pattern match arms for exhaustiveness and usefulness."""
+    enum_variants: {text: [text]}    # enum_name -> variant_names
+
+impl PatternAnalysis:
+    static fn create() -> PatternAnalysis:
+        PatternAnalysis(enum_variants: {})
+
+    me register_enum(name: text, variants: [text]):
+        self.enum_variants[name] = variants
+
+    fn analyze_match(scrutinee_type: text, arms: [PatternRepr]) -> ExhaustivenessCheck:
+        """Analyze a match expression for exhaustiveness."""
+        var missing: [text] = []
+        var unreachable: [i64] = []
+        var duplicates: [(i64, i64)] = []
+
+        # Check for unreachable/duplicate patterns
+        for i in 0..arms.len():
+            for j in 0..i:
+                if pattern_subsumes(arms[j], arms[i]):
+                    unreachable = unreachable.push(i)
+                    if pattern_to_text(arms[j]) == pattern_to_text(arms[i]):
+                        duplicates = duplicates.push((j, i))
+
+        # Check exhaustiveness
+        val has_wildcard = arms.filter(\p: is_wildcard(p)).?
+
+        if not has_wildcard:
+            # Check enum variants
+            if self.enum_variants.contains_key(scrutinee_type):
+                val variants = self.enum_variants[scrutinee_type]
+                for v in variants:
+                    val covered = arms.filter(\p:
+                        match p:
+                            case Enum(n, _): n == v
+                            case _: false
+                    ).?
+                    if not covered:
+                        missing = missing.push(v)
+
+            # Check bool exhaustiveness
+            if scrutinee_type == "bool":
+                val has_true = arms.filter(\p: match p: case LitBool(v): v; case _: false).?
+                val has_false = arms.filter(\p: match p: case LitBool(v): not v; case _: false).?
+                if not has_true: missing = missing.push("true")
+                if not has_false: missing = missing.push("false")
+
+        ExhaustivenessCheck(
+            is_exhaustive: not missing.?,
+            missing_patterns: missing,
+            unreachable_patterns: unreachable,
+            duplicate_patterns: duplicates)

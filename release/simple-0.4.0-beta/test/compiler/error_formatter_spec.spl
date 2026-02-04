@@ -1,0 +1,227 @@
+# Rich Error Formatter Tests
+#
+# Tests the rich error formatting system that provides Rust-quality
+# error messages with source context, colors, and helpful hints.
+
+use compiler.error_formatter.*
+use compiler.type_infer_types.*
+use compiler.hir.*
+use compiler.lexer.*
+
+describe "Error Formatter":
+    it "formats type mismatch with source context":
+        """Type mismatch errors should show expected vs found types."""
+        val expected = HirType(kind: HirTypeKind.Int(64, true), span: Span.dummy())
+        val found = HirType(kind: HirTypeKind.Float(64), span: Span.dummy())
+
+        val error = TypeInferError.Mismatch(expected, found, Span.dummy())
+
+        val formatted = format_type_error(error, false)
+
+        # Should contain error label
+        assert formatted.contains("error")
+
+        # Should contain type information
+        assert formatted.contains("expected")
+        assert formatted.contains("found")
+
+    it "provides hints for common type mismatches":
+        """Error formatter should suggest fixes for common mistakes."""
+        val formatter = ErrorFormatter.new(false)
+
+        # Int vs Float - suggest conversion
+        val expected_int = HirType(kind: HirTypeKind.Int(64, true), span: Span.dummy())
+        val found_float = HirType(kind: HirTypeKind.Float(64), span: Span.dummy())
+
+        val hint = formatter.get_type_mismatch_hint(expected_int, found_float)
+        assert hint.?
+        assert hint.unwrap().contains("to_int")
+
+        # Float vs Int - suggest .0 or conversion
+        val expected_float = HirType(kind: HirTypeKind.Float(64), span: Span.dummy())
+        val found_int = HirType(kind: HirTypeKind.Int(64, true), span: Span.dummy())
+
+        val hint2 = formatter.get_type_mismatch_hint(expected_float, found_int)
+        assert hint2.?
+        assert hint2.unwrap().contains("float")
+
+    it "formats occurs check error":
+        """Occurs check errors should explain the infinite type."""
+        val ty = HirType(
+            kind: HirTypeKind.Function(
+                [],
+                HirType(kind: HirTypeKind.Infer(1, 0), span: Span.dummy()),
+                []
+            ),
+            span: Span.dummy()
+        )
+
+        val error = TypeInferError.OccursCheck(1, ty, Span.dummy())
+        val formatted = format_type_error(error, false)
+
+        assert formatted.contains("infinite type")
+        assert formatted.contains("T1")
+
+    it "formats undefined variable error":
+        """Undefined variable errors should suggest fixes."""
+        val error = TypeInferError.Undefined("unknown_var", Span.dummy())
+        val formatted = format_type_error(error, false)
+
+        assert formatted.contains("undefined")
+        assert formatted.contains("unknown_var")
+        assert formatted.contains("help")
+
+    it "formats trait not implemented error":
+        """Trait errors should suggest implementing the trait."""
+        val ty = HirType(kind: HirTypeKind.Int(64, true), span: Span.dummy())
+        val error = TypeInferError.TraitNotImplemented(ty, "Display", Span.dummy())
+
+        val formatted = format_type_error(error, false)
+
+        assert formatted.contains("trait")
+        assert formatted.contains("Display")
+        assert formatted.contains("impl")
+
+    it "formats multiple errors":
+        """Multiple errors should be formatted separately."""
+        val error1 = TypeInferError.Undefined("x", Span.dummy())
+        val error2 = TypeInferError.Undefined("y", Span.dummy())
+
+        val formatted = format_type_errors([error1, error2], false)
+
+        assert formatted.contains("x")
+        assert formatted.contains("y")
+
+    it "uses colors when enabled":
+        """Color formatting should add ANSI codes."""
+        val error = TypeInferError.Undefined("x", Span.dummy())
+
+        val with_colors = format_type_error(error, true)
+        val without_colors = format_type_error(error, false)
+
+        # With colors should have ANSI escape codes
+        assert with_colors.contains("\u001b[")
+
+        # Without colors should not have escape codes
+        assert not without_colors.contains("\u001b[")
+
+    it "disables colors when requested":
+        """Disabled colors should produce plain text."""
+        val colors_disabled = Color.disabled()
+
+        assert colors_disabled.red == ""
+        assert colors_disabled.blue == ""
+        assert colors_disabled.reset == ""
+
+describe "Type Formatting":
+    it "formats primitive types":
+        """Primitive types should have simple names."""
+        val formatter = ErrorFormatter.new(false)
+
+        assert formatter.format_type(
+            HirType(kind: HirTypeKind.Int(64, true), span: Span.dummy())
+        ) == "i64"
+
+        assert formatter.format_type(
+            HirType(kind: HirTypeKind.Float(32), span: Span.dummy())
+        ) == "f32"
+
+        assert formatter.format_type(
+            HirType(kind: HirTypeKind.Bool, span: Span.dummy())
+        ) == "bool"
+
+        assert formatter.format_type(
+            HirType(kind: HirTypeKind.Str, span: Span.dummy())
+        ) == "text"
+
+    it "formats composite types":
+        """Composite types should show structure."""
+        val formatter = ErrorFormatter.new(false)
+
+        # Tuple
+        val tuple_ty = HirType(
+            kind: HirTypeKind.Tuple([
+                HirType(kind: HirTypeKind.Int(64, true), span: Span.dummy()),
+                HirType(kind: HirTypeKind.Bool, span: Span.dummy())
+            ]),
+            span: Span.dummy()
+        )
+        assert formatter.format_type(tuple_ty).contains("(")
+        assert formatter.format_type(tuple_ty).contains("i64")
+        assert formatter.format_type(tuple_ty).contains("bool")
+
+        # Array
+        val array_ty = HirType(
+            kind: HirTypeKind.Array(
+                HirType(kind: HirTypeKind.Int(64, true), span: Span.dummy()),
+                Some(10)
+            ),
+            span: Span.dummy()
+        )
+        assert formatter.format_type(array_ty).contains("[")
+        assert formatter.format_type(array_ty).contains("i64")
+        assert formatter.format_type(array_ty).contains("10")
+
+    it "formats optional and result types":
+        """Optional and Result should use special syntax."""
+        val formatter = ErrorFormatter.new(false)
+
+        # Optional
+        val optional_ty = HirType(
+            kind: HirTypeKind.Optional(
+                HirType(kind: HirTypeKind.Int(64, true), span: Span.dummy())
+            ),
+            span: Span.dummy()
+        )
+        assert formatter.format_type(optional_ty).contains("?")
+
+        # Result
+        val result_ty = HirType(
+            kind: HirTypeKind.Result(
+                HirType(kind: HirTypeKind.Int(64, true), span: Span.dummy()),
+                HirType(kind: HirTypeKind.Str, span: Span.dummy())
+            ),
+            span: Span.dummy()
+        )
+        assert formatter.format_type(result_ty).contains("Result")
+
+    it "formats function types":
+        """Function types should show signature."""
+        val formatter = ErrorFormatter.new(false)
+
+        val fn_ty = HirType(
+            kind: HirTypeKind.Function(
+                [
+                    HirType(kind: HirTypeKind.Int(64, true), span: Span.dummy()),
+                    HirType(kind: HirTypeKind.Bool, span: Span.dummy())
+                ],
+                HirType(kind: HirTypeKind.Str, span: Span.dummy()),
+                []
+            ),
+            span: Span.dummy()
+        )
+
+        val formatted = formatter.format_type(fn_ty)
+
+        assert formatted.contains("fn")
+        assert formatted.contains("i64")
+        assert formatted.contains("bool")
+        assert formatted.contains("text")
+        assert formatted.contains("->")
+
+describe "Error Severity":
+    it "has correct severity levels":
+        """Error severity should distinguish different message types."""
+        assert ErrorSeverity.Error.to_string() == "error"
+        assert ErrorSeverity.Warning.to_string() == "warning"
+        assert ErrorSeverity.Note.to_string() == "note"
+        assert ErrorSeverity.Help.to_string() == "help"
+
+    it "assigns colors to severities":
+        """Each severity should have an associated color."""
+        val colors = Color.new()
+
+        assert ErrorSeverity.Error.color(colors) == colors.red
+        assert ErrorSeverity.Warning.color(colors) == colors.yellow
+        assert ErrorSeverity.Note.color(colors) == colors.cyan
+        assert ErrorSeverity.Help.color(colors) == colors.green

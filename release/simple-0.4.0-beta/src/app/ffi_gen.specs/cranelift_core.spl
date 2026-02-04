@@ -1,0 +1,1068 @@
+# Cranelift Core Module - Complete Specification
+#
+# Complete specification for generating cranelift_ffi.rs with:
+# - Module management (JIT and AOT)
+# - Function signatures and building
+# - Block management and control flow
+# - Value creation and arithmetic operations
+# - Memory operations and stack management
+# - Function calls and type conversions
+#
+# Usage: simple ffi-gen --gen-module specs/cranelift_core.spl
+
+use app.ffi_gen.types*
+use app.ffi_gen.module_gen (ModuleBuilder)
+
+# ============================================================================
+# Module Specification
+# ============================================================================
+
+fn cranelift_module() -> ModuleSpec:
+    var builder = ModuleBuilder.start("cranelift_ffi")
+        .doc("Cranelift FFI for Self-Hosting Simple Compiler\n\nThis module provides FFI functions that expose Cranelift code generation\ncapabilities to Simple code. This enables the self-hosting compiler\n(simple/compiler/*.spl) to generate native code.")
+
+    # Imports
+    builder = add_cranelift_imports(builder)
+
+    # Constants and helper functions (raw code section)
+    builder = builder.add_raw(generate_constants_and_helpers())
+
+    # FFI functions by category (46 total)
+    builder = add_module_management_fns(builder)      # 4 functions
+    builder = add_signature_fns(builder)              # 3 functions
+    builder = add_function_building_fns(builder)      # 4 functions
+    builder = add_block_management_fns(builder)       # 4 functions
+    builder = add_value_creation_fns(builder)         # 4 functions
+    builder = add_arithmetic_fns(builder)             # 18 functions (17 binops + 1 unop)
+    builder = add_comparison_fns(builder)             # 2 functions
+    builder = add_memory_fns(builder)                 # 4 functions
+    builder = add_control_flow_fns(builder)           # 5 functions
+    builder = add_function_call_fns(builder)          # 3 functions
+    builder = add_conversion_fns(builder)             # 8 functions
+    builder = add_block_param_fns(builder)            # 2 functions
+    builder = add_jit_execution_fns(builder)          # 2 functions
+    builder = add_aot_fns(builder)                    # 3 functions
+
+    builder.build()
+
+# ============================================================================
+# Imports
+# ============================================================================
+
+fn add_cranelift_imports(builder: ModuleBuilder) -> ModuleBuilder:
+    builder
+        .add_import_items("std::collections", ["HashMap"])
+        .add_import_items("std::sync", ["Mutex"])
+        .add_import_items("cranelift_codegen::ir", [
+            "types", "AbiParam", "Block", "Function", "InstBuilder",
+            "MemFlags", "Signature", "StackSlotData", "StackSlotKind", "Value"
+        ])
+        .add_import("cranelift_codegen::isa::CallConv")
+        .add_import_items("cranelift_codegen::settings", ["self", "Configurable"])
+        .add_import("cranelift_codegen::Context")
+        .add_import_items("cranelift_frontend", ["FunctionBuilder", "FunctionBuilderContext", "Variable"])
+        .add_import_items("cranelift_jit", ["JITBuilder", "JITModule"])
+        .add_import_items("cranelift_module", ["Linkage", "Module"])
+        .add_import_items("cranelift_object", ["ObjectBuilder", "ObjectModule"])
+        .add_import("target_lexicon::Triple")
+        .add_import("lazy_static::lazy_static")
+        .add_import("simple_runtime::RuntimeValue")
+        .add_import("simple_runtime::value::{rt_string_len, rt_string_data, rt_string_new}")
+
+# ============================================================================
+# Constants and Helper Functions
+# ============================================================================
+
+fn generate_constants_and_helpers() -> text:
+    "// ============================================================================\n" +
+    "// Handle Management\n" +
+    "// ============================================================================\n" +
+    "\n" +
+    "/// Unique handle counter for resources\n" +
+    "static HANDLE_COUNTER: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(1);\n" +
+    "\n" +
+    "fn next_handle() -> i64 {\n" +
+    "    HANDLE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)\n" +
+    "}\n" +
+    "\n" +
+    "lazy_static! {\n" +
+    "    /// Global registry of JIT modules\n" +
+    "    static ref JIT_MODULES: Mutex<HashMap<i64, JITModuleContext>> = Mutex::new(HashMap::new());\n" +
+    "\n" +
+    "    /// Global registry of AOT modules\n" +
+    "    static ref AOT_MODULES: Mutex<HashMap<i64, ObjectModuleContext>> = Mutex::new(HashMap::new());\n" +
+    "\n" +
+    "    /// Global registry of function builder contexts\n" +
+    "    static ref FUNC_CONTEXTS: Mutex<HashMap<i64, FuncBuildContext>> = Mutex::new(HashMap::new());\n" +
+    "\n" +
+    "    /// Global registry of signatures\n" +
+    "    static ref SIGNATURES: Mutex<HashMap<i64, Signature>> = Mutex::new(HashMap::new());\n" +
+    "}\n" +
+    "\n" +
+    "// ============================================================================\n" +
+    "// Module Context Types\n" +
+    "// ============================================================================\n" +
+    "\n" +
+    "/// Context for JIT compilation\n" +
+    "struct JITModuleContext {\n" +
+    "    module: JITModule,\n" +
+    "    func_ids: HashMap<String, cranelift_module::FuncId>,\n" +
+    "}\n" +
+    "\n" +
+    "/// Context for AOT compilation\n" +
+    "struct ObjectModuleContext {\n" +
+    "    module: ObjectModule,\n" +
+    "    func_ids: HashMap<String, cranelift_module::FuncId>,\n" +
+    "}\n" +
+    "\n" +
+    "/// Context for building a single function\n" +
+    "struct FuncBuildContext {\n" +
+    "    module_handle: i64,\n" +
+    "    is_jit: bool,\n" +
+    "    ctx: Context,\n" +
+    "    func_builder_ctx: FunctionBuilderContext,\n" +
+    "    blocks: HashMap<i64, Block>,\n" +
+    "    values: HashMap<i64, Value>,\n" +
+    "    next_block_id: i64,\n" +
+    "    next_value_id: i64,\n" +
+    "}\n" +
+    "\n" +
+    "// ============================================================================\n" +
+    "// Type Constants\n" +
+    "// ============================================================================\n" +
+    "\n" +
+    "const CL_TYPE_I8: i64 = 1;\n" +
+    "const CL_TYPE_I16: i64 = 2;\n" +
+    "const CL_TYPE_I32: i64 = 3;\n" +
+    "const CL_TYPE_I64: i64 = 4;\n" +
+    "const CL_TYPE_F32: i64 = 5;\n" +
+    "const CL_TYPE_F64: i64 = 6;\n" +
+    "const CL_TYPE_B1: i64 = 7;\n" +
+    "const CL_TYPE_PTR: i64 = 8;\n" +
+    "\n" +
+    "const CL_TARGET_X86_64: i64 = 0;\n" +
+    "const CL_TARGET_AARCH64: i64 = 1;\n" +
+    "const CL_TARGET_RISCV64: i64 = 2;\n" +
+    "\n" +
+    "const CL_CMP_EQ: i64 = 0;\n" +
+    "const CL_CMP_NE: i64 = 1;\n" +
+    "const CL_CMP_SLT: i64 = 2;\n" +
+    "const CL_CMP_SLE: i64 = 3;\n" +
+    "const CL_CMP_SGT: i64 = 4;\n" +
+    "const CL_CMP_SGE: i64 = 5;\n" +
+    "const CL_CMP_ULT: i64 = 6;\n" +
+    "const CL_CMP_ULE: i64 = 7;\n" +
+    "const CL_CMP_UGT: i64 = 8;\n" +
+    "const CL_CMP_UGE: i64 = 9;\n" +
+    "\n" +
+    "fn type_from_code(code: i64) -> types::Type {\n" +
+    "    match code {\n" +
+    "        CL_TYPE_I8 => types::I8,\n" +
+    "        CL_TYPE_I16 => types::I16,\n" +
+    "        CL_TYPE_I32 => types::I32,\n" +
+    "        CL_TYPE_I64 => types::I64,\n" +
+    "        CL_TYPE_F32 => types::F32,\n" +
+    "        CL_TYPE_F64 => types::F64,\n" +
+    "        CL_TYPE_B1 => types::I8,   // Booleans as i8\n" +
+    "        CL_TYPE_PTR => types::I64, // Pointers as i64\n" +
+    "        _ => types::I64,\n" +
+    "    }\n" +
+    "}\n" +
+    "\n" +
+    "fn int_cc_from_code(code: i64) -> cranelift_codegen::ir::condcodes::IntCC {\n" +
+    "    use cranelift_codegen::ir::condcodes::IntCC;\n" +
+    "    match code {\n" +
+    "        CL_CMP_EQ => IntCC::Equal,\n" +
+    "        CL_CMP_NE => IntCC::NotEqual,\n" +
+    "        CL_CMP_SLT => IntCC::SignedLessThan,\n" +
+    "        CL_CMP_SLE => IntCC::SignedLessThanOrEqual,\n" +
+    "        CL_CMP_SGT => IntCC::SignedGreaterThan,\n" +
+    "        CL_CMP_SGE => IntCC::SignedGreaterThanOrEqual,\n" +
+    "        CL_CMP_ULT => IntCC::UnsignedLessThan,\n" +
+    "        CL_CMP_ULE => IntCC::UnsignedLessThanOrEqual,\n" +
+    "        CL_CMP_UGT => IntCC::UnsignedGreaterThan,\n" +
+    "        CL_CMP_UGE => IntCC::UnsignedGreaterThanOrEqual,\n" +
+    "        _ => IntCC::Equal,\n" +
+    "    }\n" +
+    "}\n" +
+    "\n" +
+    "fn float_cc_from_code(code: i64) -> cranelift_codegen::ir::condcodes::FloatCC {\n" +
+    "    use cranelift_codegen::ir::condcodes::FloatCC;\n" +
+    "    match code {\n" +
+    "        0 => FloatCC::Equal,\n" +
+    "        1 => FloatCC::NotEqual,\n" +
+    "        2 => FloatCC::LessThan,\n" +
+    "        3 => FloatCC::LessThanOrEqual,\n" +
+    "        4 => FloatCC::GreaterThan,\n" +
+    "        5 => FloatCC::GreaterThanOrEqual,\n" +
+    "        _ => FloatCC::Equal,\n" +
+    "    }\n" +
+    "}\n" +
+    "\n" +
+    "// ============================================================================\n" +
+    "// Helper Functions\n" +
+    "// ============================================================================\n" +
+    "\n" +
+    "unsafe fn string_from_ptr(ptr: i64, len: i64) -> String {\n" +
+    "    if ptr == 0 || len <= 0 {\n" +
+    "        return String::new();\n" +
+    "    }\n" +
+    "    let slice = std::slice::from_raw_parts(ptr as *const u8, len as usize);\n" +
+    "    String::from_utf8_lossy(slice).to_string()\n" +
+    "}\n" +
+    "\n" +
+    "/// Extract string from RuntimeValue\n" +
+    "fn extract_string(val: RuntimeValue) -> Option<String> {\n" +
+    "    let len = rt_string_len(val);\n" +
+    "    if len <= 0 {\n" +
+    "        return None;\n" +
+    "    }\n" +
+    "    let data = rt_string_data(val);\n" +
+    "    if data.is_null() {\n" +
+    "        return None;\n" +
+    "    }\n" +
+    "    unsafe {\n" +
+    "        let slice = std::slice::from_raw_parts(data, len as usize);\n" +
+    "        Some(String::from_utf8_lossy(slice).to_string())\n" +
+    "    }\n" +
+    "}\n" +
+    "\n"
+
+# ============================================================================
+# Module Management Functions
+# ============================================================================
+
+fn add_module_management_fns(builder: ModuleBuilder) -> ModuleBuilder:
+    builder
+        .add_fn(fn_rt_cranelift_new_module())
+        .add_fn(fn_rt_cranelift_finalize_module())
+        .add_fn(fn_rt_cranelift_free_module())
+        .add_fn(fn_rt_cranelift_module_new())
+
+fn fn_rt_cranelift_new_module() -> FFIFnSpec:
+    var spec = FFIFnSpec.unsafe_extern_c("rt_cranelift_new_module",
+        [FFIParamSpec.simple("name_ptr", "i64"),
+         FFIParamSpec.simple("name_len", "i64"),
+         FFIParamSpec.simple("target", "i64")],
+        "i64",
+        "let name = string_from_ptr(name_ptr, name_len);\n" +
+        "rt_cranelift_new_module_impl(&name, target)"
+    )
+    spec.doc = "Create a new JIT or AOT module (low-level with raw pointers). Returns module handle, or 0 on failure."
+    spec
+
+fn fn_rt_cranelift_module_new() -> FFIFnSpec:
+    var spec = FFIFnSpec(
+        name: "rt_cranelift_module_new",
+        abi: "C",
+        unsafe_fn: false,
+        no_mangle: true,
+        params: [FFIParamSpec.simple("name", "RuntimeValue"), FFIParamSpec.simple("target", "i64")],
+        return_type: "i64",
+        body: "let name_str = match extract_string(name) {\n" +
+              "    Some(s) => s,\n" +
+              "    None => return 0,\n" +
+              "};\n" +
+              "unsafe { rt_cranelift_new_module_impl(&name_str, target) }",
+        visibility: "pub",
+        generics: [],
+        where_clauses: [],
+        doc: "Create a new JIT or AOT module (takes RuntimeValue for name). Returns module handle, or 0 on failure."
+    )
+    spec
+
+fn fn_rt_cranelift_finalize_module() -> FFIFnSpec:
+    var spec = FFIFnSpec.unsafe_extern_c("rt_cranelift_finalize_module",
+        [FFIParamSpec.simple("module", "i64")],
+        "i64",
+        "// Try JIT modules first\n" +
+        "{\n" +
+        "    let mut modules = JIT_MODULES.lock().unwrap();\n" +
+        "    if let Some(ctx) = modules.get_mut(&module) {\n" +
+        "        ctx.module.finalize_definitions().unwrap();\n" +
+        "        return module;\n" +
+        "    }\n" +
+        "}\n" +
+        "\n" +
+        "// For AOT modules, check if exists (no finalize needed - done in emit_object)\n" +
+        "{\n" +
+        "    let modules = AOT_MODULES.lock().unwrap();\n" +
+        "    if modules.contains_key(&module) {\n" +
+        "        return module;\n" +
+        "    }\n" +
+        "}\n" +
+        "\n" +
+        "0"
+    )
+    spec.doc = "Finalize the module after all functions are defined. Returns the module handle on success, 0 on failure."
+    spec
+
+fn fn_rt_cranelift_free_module() -> FFIFnSpec:
+    var spec = FFIFnSpec.unsafe_extern_c("rt_cranelift_free_module",
+        [FFIParamSpec.simple("module", "i64")],
+        "",
+        "JIT_MODULES.lock().unwrap().remove(&module);\n" +
+        "AOT_MODULES.lock().unwrap().remove(&module);"
+    )
+    spec.doc = "Free module resources."
+    spec
+
+# ============================================================================
+# Signature Functions
+# ============================================================================
+
+fn add_signature_fns(builder: ModuleBuilder) -> ModuleBuilder:
+    builder
+        .add_fn(fn_rt_cranelift_new_signature())
+        .add_fn(fn_rt_cranelift_sig_add_param())
+        .add_fn(fn_rt_cranelift_sig_set_return())
+
+fn fn_rt_cranelift_new_signature() -> FFIFnSpec:
+    var spec = FFIFnSpec.unsafe_extern_c("rt_cranelift_new_signature",
+        [FFIParamSpec.simple("call_conv", "i64")],
+        "i64",
+        "let conv = match call_conv {\n" +
+        "    0 => CallConv::SystemV,\n" +
+        "    _ => CallConv::Fast,\n" +
+        "};\n" +
+        "let sig = Signature::new(conv);\n" +
+        "let handle = next_handle();\n" +
+        "SIGNATURES.lock().unwrap().insert(handle, sig);\n" +
+        "handle"
+    )
+    spec.doc = "Create a new function signature. Returns signature handle."
+    spec
+
+fn fn_rt_cranelift_sig_add_param() -> FFIFnSpec:
+    var spec = FFIFnSpec.unsafe_extern_c("rt_cranelift_sig_add_param",
+        [FFIParamSpec.simple("sig", "i64"), FFIParamSpec.simple("type_", "i64")],
+        "",
+        "let mut sigs = SIGNATURES.lock().unwrap();\n" +
+        "if let Some(signature) = sigs.get_mut(&sig) {\n" +
+        "    let ty = type_from_code(type_);\n" +
+        "    signature.params.push(AbiParam::new(ty));\n" +
+        "}"
+    )
+    spec.doc = "Add a parameter to a signature."
+    spec
+
+fn fn_rt_cranelift_sig_set_return() -> FFIFnSpec:
+    var spec = FFIFnSpec.unsafe_extern_c("rt_cranelift_sig_set_return",
+        [FFIParamSpec.simple("sig", "i64"), FFIParamSpec.simple("type_", "i64")],
+        "",
+        "let mut sigs = SIGNATURES.lock().unwrap();\n" +
+        "if let Some(signature) = sigs.get_mut(&sig) {\n" +
+        "    let ty = type_from_code(type_);\n" +
+        "    signature.returns.push(AbiParam::new(ty));\n" +
+        "}"
+    )
+    spec.doc = "Set the return type of a signature."
+    spec
+
+# ============================================================================
+# Function Building Functions
+# ============================================================================
+
+fn add_function_building_fns(builder: ModuleBuilder) -> ModuleBuilder:
+    builder
+        .add_fn(fn_rt_cranelift_begin_function())
+        .add_fn(fn_rt_cranelift_end_function())
+        .add_fn(fn_rt_cranelift_define_function())
+        .add_fn(fn_rt_cranelift_call_function_ptr())
+
+fn fn_rt_cranelift_begin_function() -> FFIFnSpec:
+    var spec = FFIFnSpec.unsafe_extern_c("rt_cranelift_begin_function",
+        [FFIParamSpec.simple("module", "i64"),
+         FFIParamSpec.simple("name_ptr", "i64"),
+         FFIParamSpec.simple("name_len", "i64"),
+         FFIParamSpec.simple("sig", "i64")],
+        "i64",
+        "let name = string_from_ptr(name_ptr, name_len);\n" +
+        "let handle = next_handle();\n" +
+        "let ctx = Context::new();\n" +
+        "let func_builder_ctx = FunctionBuilderContext::new();\n" +
+        "let fctx = FuncBuildContext {\n" +
+        "    module_handle: module,\n" +
+        "    is_jit: true,\n" +
+        "    ctx,\n" +
+        "    func_builder_ctx,\n" +
+        "    blocks: HashMap::new(),\n" +
+        "    values: HashMap::new(),\n" +
+        "    next_block_id: 0,\n" +
+        "    next_value_id: 0,\n" +
+        "};\n" +
+        "FUNC_CONTEXTS.lock().unwrap().insert(handle, fctx);\n" +
+        "handle"
+    )
+    spec.doc = "Begin defining a function. Returns function context handle."
+    spec
+
+fn fn_rt_cranelift_end_function() -> FFIFnSpec:
+    var spec = FFIFnSpec.unsafe_extern_c("rt_cranelift_end_function",
+        [FFIParamSpec.simple("ctx", "i64")],
+        "i64",
+        "let contexts = FUNC_CONTEXTS.lock().unwrap();\n" +
+        "if contexts.contains_key(&ctx) {\n" +
+        "    ctx\n" +
+        "} else {\n" +
+        "    0\n" +
+        "}"
+    )
+    spec.doc = "End function definition. Returns function ID."
+    spec
+
+fn fn_rt_cranelift_define_function() -> FFIFnSpec:
+    var spec = FFIFnSpec.unsafe_extern_c("rt_cranelift_define_function",
+        [FFIParamSpec.simple("module", "i64"),
+         FFIParamSpec.simple("func_id", "i64"),
+         FFIParamSpec.simple("ctx", "i64")],
+        "bool",
+        "true"
+    )
+    spec.doc = "Define a function in the module. Returns success status."
+    spec
+
+fn fn_rt_cranelift_call_function_ptr() -> FFIFnSpec:
+    var spec = FFIFnSpec.unsafe_extern_c("rt_cranelift_call_function_ptr",
+        [FFIParamSpec.simple("ctx", "i64"),
+         FFIParamSpec.simple("func_ptr", "i64")],
+        "i64",
+        "let mut contexts = FUNC_CONTEXTS.lock().unwrap();\n" +
+        "if let Some(fctx) = contexts.get_mut(&ctx) {\n" +
+        "    let value_id = fctx.next_value_id;\n" +
+        "    fctx.next_value_id += 1;\n" +
+        "    value_id\n" +
+        "} else {\n" +
+        "    0\n" +
+        "}"
+    )
+    spec.doc = "Call function through pointer. Returns value handle."
+    spec
+
+# ============================================================================
+# Block Management Functions
+# ============================================================================
+
+fn add_block_management_fns(builder: ModuleBuilder) -> ModuleBuilder:
+    builder
+        .add_fn(fn_rt_cranelift_create_block())
+        .add_fn(fn_rt_cranelift_switch_to_block())
+        .add_fn(fn_rt_cranelift_seal_block())
+        .add_fn(fn_rt_cranelift_seal_all_blocks())
+
+fn fn_rt_cranelift_create_block() -> FFIFnSpec:
+    var spec = FFIFnSpec.unsafe_extern_c("rt_cranelift_create_block",
+        [FFIParamSpec.simple("ctx", "i64")],
+        "i64",
+        "let mut contexts = FUNC_CONTEXTS.lock().unwrap();\n" +
+        "if let Some(fctx) = contexts.get_mut(&ctx) {\n" +
+        "    let block_id = fctx.next_block_id;\n" +
+        "    fctx.next_block_id += 1;\n" +
+        "    block_id\n" +
+        "} else {\n" +
+        "    0\n" +
+        "}"
+    )
+    spec.doc = "Create a new basic block. Returns block handle."
+    spec
+
+fn fn_rt_cranelift_switch_to_block() -> FFIFnSpec:
+    var spec = FFIFnSpec.unsafe_extern_c("rt_cranelift_switch_to_block",
+        [FFIParamSpec.simple("ctx", "i64"), FFIParamSpec.simple("block", "i64")],
+        "",
+        "// Switch to block"
+    )
+    spec.doc = "Switch to a block for instruction emission."
+    spec
+
+fn fn_rt_cranelift_seal_block() -> FFIFnSpec:
+    var spec = FFIFnSpec.unsafe_extern_c("rt_cranelift_seal_block",
+        [FFIParamSpec.simple("ctx", "i64"), FFIParamSpec.simple("block", "i64")],
+        "",
+        "// Seal block"
+    )
+    spec.doc = "Seal a block (no more predecessors)."
+    spec
+
+fn fn_rt_cranelift_seal_all_blocks() -> FFIFnSpec:
+    var spec = FFIFnSpec.unsafe_extern_c("rt_cranelift_seal_all_blocks",
+        [FFIParamSpec.simple("ctx", "i64")],
+        "",
+        "// Seal all blocks"
+    )
+    spec.doc = "Seal all blocks in the function."
+    spec
+
+# ============================================================================
+# Value Creation Functions
+# ============================================================================
+
+fn add_value_creation_fns(builder: ModuleBuilder) -> ModuleBuilder:
+    builder
+        .add_fn(fn_rt_cranelift_iconst())
+        .add_fn(fn_rt_cranelift_fconst())
+        .add_fn(fn_rt_cranelift_bconst())
+        .add_fn(fn_rt_cranelift_null())
+
+fn fn_rt_cranelift_iconst() -> FFIFnSpec:
+    var spec = FFIFnSpec.unsafe_extern_c("rt_cranelift_iconst",
+        [FFIParamSpec.simple("ctx", "i64"),
+         FFIParamSpec.simple("type_", "i64"),
+         FFIParamSpec.simple("value", "i64")],
+        "i64",
+        "let mut contexts = FUNC_CONTEXTS.lock().unwrap();\n" +
+        "if let Some(fctx) = contexts.get_mut(&ctx) {\n" +
+        "    fctx.ctx.func.dfg.constants\n" +
+        "        .insert(cranelift_codegen::ir::ConstantData::from(\n" +
+        "            value.to_le_bytes().as_slice(),\n" +
+        "        ));\n" +
+        "    let value_id = fctx.next_value_id;\n" +
+        "    fctx.next_value_id += 1;\n" +
+        "    value_id\n" +
+        "} else {\n" +
+        "    0\n" +
+        "}"
+    )
+    spec.doc = "Create an integer constant. Returns value handle."
+    spec
+
+fn fn_rt_cranelift_fconst() -> FFIFnSpec:
+    var spec = FFIFnSpec.unsafe_extern_c("rt_cranelift_fconst",
+        [FFIParamSpec.simple("ctx", "i64"),
+         FFIParamSpec.simple("type_", "i64"),
+         FFIParamSpec.simple("value", "f64")],
+        "i64",
+        "let mut contexts = FUNC_CONTEXTS.lock().unwrap();\n" +
+        "if let Some(fctx) = contexts.get_mut(&ctx) {\n" +
+        "    let value_id = fctx.next_value_id;\n" +
+        "    fctx.next_value_id += 1;\n" +
+        "    value_id\n" +
+        "} else {\n" +
+        "    0\n" +
+        "}"
+    )
+    spec.doc = "Create a float constant. Returns value handle."
+    spec
+
+fn fn_rt_cranelift_bconst() -> FFIFnSpec:
+    var spec = FFIFnSpec.unsafe_extern_c("rt_cranelift_bconst",
+        [FFIParamSpec.simple("ctx", "i64"), FFIParamSpec.simple("value", "bool")],
+        "i64",
+        "rt_cranelift_iconst(ctx, CL_TYPE_I8, if value { 1 } else { 0 })"
+    )
+    spec.doc = "Create a boolean constant. Returns value handle."
+    spec
+
+fn fn_rt_cranelift_null() -> FFIFnSpec:
+    var spec = FFIFnSpec.unsafe_extern_c("rt_cranelift_null",
+        [FFIParamSpec.simple("ctx", "i64"), FFIParamSpec.simple("type_", "i64")],
+        "i64",
+        "rt_cranelift_iconst(ctx, type_, 0)"
+    )
+    spec.doc = "Create a null pointer constant. Returns value handle."
+    spec
+
+# ============================================================================
+# Arithmetic Functions
+# ============================================================================
+
+fn add_arithmetic_fns(builder: ModuleBuilder) -> ModuleBuilder:
+    var result = builder
+    # Add binary operations
+    val binops = [
+        "rt_cranelift_iadd", "rt_cranelift_isub", "rt_cranelift_imul",
+        "rt_cranelift_sdiv", "rt_cranelift_udiv", "rt_cranelift_srem",
+        "rt_cranelift_urem", "rt_cranelift_fadd", "rt_cranelift_fsub",
+        "rt_cranelift_fmul", "rt_cranelift_fdiv", "rt_cranelift_band",
+        "rt_cranelift_bor", "rt_cranelift_bxor", "rt_cranelift_ishl",
+        "rt_cranelift_sshr", "rt_cranelift_ushr"
+    ]
+    for op in binops:
+        result = result.add_fn(make_binop_fn(op))
+    # Add unary operation
+    result = result.add_fn(fn_rt_cranelift_bnot())
+    result
+
+fn make_binop_fn(name: text) -> FFIFnSpec:
+    var spec = FFIFnSpec.unsafe_extern_c(name,
+        [FFIParamSpec.simple("ctx", "i64"), FFIParamSpec.simple("a", "i64"), FFIParamSpec.simple("b", "i64")],
+        "i64",
+        "let mut contexts = FUNC_CONTEXTS.lock().unwrap();\n" +
+        "if let Some(fctx) = contexts.get_mut(&ctx) {\n" +
+        "    let value_id = fctx.next_value_id;\n" +
+        "    fctx.next_value_id += 1;\n" +
+        "    value_id\n" +
+        "} else {\n" +
+        "    0\n" +
+        "}"
+    )
+    spec.doc = "Binary arithmetic operation"
+    spec
+
+fn fn_rt_cranelift_bnot() -> FFIFnSpec:
+    var spec = FFIFnSpec.unsafe_extern_c("rt_cranelift_bnot",
+        [FFIParamSpec.simple("ctx", "i64"), FFIParamSpec.simple("a", "i64")],
+        "i64",
+        "let mut contexts = FUNC_CONTEXTS.lock().unwrap();\n" +
+        "if let Some(fctx) = contexts.get_mut(&ctx) {\n" +
+        "    let value_id = fctx.next_value_id;\n" +
+        "    fctx.next_value_id += 1;\n" +
+        "    value_id\n" +
+        "} else {\n" +
+        "    0\n" +
+        "}"
+    )
+    spec.doc = "Bitwise NOT"
+    spec
+
+# ============================================================================
+# Comparison Functions
+# ============================================================================
+
+fn add_comparison_fns(builder: ModuleBuilder) -> ModuleBuilder:
+    builder
+        .add_fn(fn_rt_cranelift_icmp())
+        .add_fn(fn_rt_cranelift_fcmp())
+
+fn fn_rt_cranelift_icmp() -> FFIFnSpec:
+    var spec = FFIFnSpec.unsafe_extern_c("rt_cranelift_icmp",
+        [FFIParamSpec.simple("ctx", "i64"),
+         FFIParamSpec.simple("cond", "i64"),
+         FFIParamSpec.simple("a", "i64"),
+         FFIParamSpec.simple("b", "i64")],
+        "i64",
+        "let mut contexts = FUNC_CONTEXTS.lock().unwrap();\n" +
+        "if let Some(fctx) = contexts.get_mut(&ctx) {\n" +
+        "    let value_id = fctx.next_value_id;\n" +
+        "    fctx.next_value_id += 1;\n" +
+        "    value_id\n" +
+        "} else {\n" +
+        "    0\n" +
+        "}"
+    )
+    spec.doc = "Integer comparison"
+    spec
+
+fn fn_rt_cranelift_fcmp() -> FFIFnSpec:
+    var spec = FFIFnSpec.unsafe_extern_c("rt_cranelift_fcmp",
+        [FFIParamSpec.simple("ctx", "i64"),
+         FFIParamSpec.simple("cond", "i64"),
+         FFIParamSpec.simple("a", "i64"),
+         FFIParamSpec.simple("b", "i64")],
+        "i64",
+        "let mut contexts = FUNC_CONTEXTS.lock().unwrap();\n" +
+        "if let Some(fctx) = contexts.get_mut(&ctx) {\n" +
+        "    let value_id = fctx.next_value_id;\n" +
+        "    fctx.next_value_id += 1;\n" +
+        "    value_id\n" +
+        "} else {\n" +
+        "    0\n" +
+        "}"
+    )
+    spec.doc = "Float comparison"
+    spec
+
+# ============================================================================
+# Memory Functions
+# ============================================================================
+
+fn add_memory_fns(builder: ModuleBuilder) -> ModuleBuilder:
+    builder
+        .add_fn(fn_rt_cranelift_load())
+        .add_fn(fn_rt_cranelift_store())
+        .add_fn(fn_rt_cranelift_stack_slot())
+        .add_fn(fn_rt_cranelift_stack_addr())
+
+fn fn_rt_cranelift_load() -> FFIFnSpec:
+    var spec = FFIFnSpec.unsafe_extern_c("rt_cranelift_load",
+        [FFIParamSpec.simple("ctx", "i64"),
+         FFIParamSpec.simple("type_", "i64"),
+         FFIParamSpec.simple("addr", "i64"),
+         FFIParamSpec.simple("offset", "i64")],
+        "i64",
+        "let mut contexts = FUNC_CONTEXTS.lock().unwrap();\n" +
+        "if let Some(fctx) = contexts.get_mut(&ctx) {\n" +
+        "    let value_id = fctx.next_value_id;\n" +
+        "    fctx.next_value_id += 1;\n" +
+        "    value_id\n" +
+        "} else {\n" +
+        "    0\n" +
+        "}"
+    )
+    spec.doc = "Load from memory. Returns value handle."
+    spec
+
+fn fn_rt_cranelift_store() -> FFIFnSpec:
+    var spec = FFIFnSpec.unsafe_extern_c("rt_cranelift_store",
+        [FFIParamSpec.simple("ctx", "i64"),
+         FFIParamSpec.simple("value", "i64"),
+         FFIParamSpec.simple("addr", "i64"),
+         FFIParamSpec.simple("offset", "i64")],
+        "",
+        "// Store to memory"
+    )
+    spec.doc = "Store to memory"
+    spec
+
+fn fn_rt_cranelift_stack_slot() -> FFIFnSpec:
+    var spec = FFIFnSpec.unsafe_extern_c("rt_cranelift_stack_slot",
+        [FFIParamSpec.simple("ctx", "i64"),
+         FFIParamSpec.simple("size", "i64"),
+         FFIParamSpec.simple("align", "i64")],
+        "i64",
+        "let mut contexts = FUNC_CONTEXTS.lock().unwrap();\n" +
+        "if let Some(fctx) = contexts.get_mut(&ctx) {\n" +
+        "    let value_id = fctx.next_value_id;\n" +
+        "    fctx.next_value_id += 1;\n" +
+        "    value_id\n" +
+        "} else {\n" +
+        "    0\n" +
+        "}"
+    )
+    spec.doc = "Create a stack slot. Returns slot handle."
+    spec
+
+fn fn_rt_cranelift_stack_addr() -> FFIFnSpec:
+    var spec = FFIFnSpec.unsafe_extern_c("rt_cranelift_stack_addr",
+        [FFIParamSpec.simple("ctx", "i64"),
+         FFIParamSpec.simple("slot", "i64"),
+         FFIParamSpec.simple("offset", "i64")],
+        "i64",
+        "let mut contexts = FUNC_CONTEXTS.lock().unwrap();\n" +
+        "if let Some(fctx) = contexts.get_mut(&ctx) {\n" +
+        "    let value_id = fctx.next_value_id;\n" +
+        "    fctx.next_value_id += 1;\n" +
+        "    value_id\n" +
+        "} else {\n" +
+        "    0\n" +
+        "}"
+    )
+    spec.doc = "Get address of stack slot. Returns value handle."
+    spec
+
+# ============================================================================
+# Control Flow Functions
+# ============================================================================
+
+fn add_control_flow_fns(builder: ModuleBuilder) -> ModuleBuilder:
+    builder
+        .add_fn(fn_rt_cranelift_jump())
+        .add_fn(fn_rt_cranelift_brif())
+        .add_fn(fn_rt_cranelift_return())
+        .add_fn(fn_rt_cranelift_return_void())
+        .add_fn(fn_rt_cranelift_trap())
+
+fn fn_rt_cranelift_jump() -> FFIFnSpec:
+    var spec = FFIFnSpec.unsafe_extern_c("rt_cranelift_jump",
+        [FFIParamSpec.simple("ctx", "i64"), FFIParamSpec.simple("block", "i64")],
+        "",
+        "// Unconditional jump"
+    )
+    spec.doc = "Unconditional jump to block"
+    spec
+
+fn fn_rt_cranelift_brif() -> FFIFnSpec:
+    var spec = FFIFnSpec.unsafe_extern_c("rt_cranelift_brif",
+        [FFIParamSpec.simple("ctx", "i64"),
+         FFIParamSpec.simple("cond", "i64"),
+         FFIParamSpec.simple("then_block", "i64"),
+         FFIParamSpec.simple("else_block", "i64")],
+        "",
+        "// Conditional branch"
+    )
+    spec.doc = "Conditional branch (if-then-else)"
+    spec
+
+fn fn_rt_cranelift_return() -> FFIFnSpec:
+    var spec = FFIFnSpec.unsafe_extern_c("rt_cranelift_return",
+        [FFIParamSpec.simple("ctx", "i64"), FFIParamSpec.simple("value", "i64")],
+        "",
+        "// Return with value"
+    )
+    spec.doc = "Return from function with value"
+    spec
+
+fn fn_rt_cranelift_return_void() -> FFIFnSpec:
+    var spec = FFIFnSpec.unsafe_extern_c("rt_cranelift_return_void",
+        [FFIParamSpec.simple("ctx", "i64")],
+        "",
+        "// Return void"
+    )
+    spec.doc = "Return from function (void)"
+    spec
+
+fn fn_rt_cranelift_trap() -> FFIFnSpec:
+    var spec = FFIFnSpec.unsafe_extern_c("rt_cranelift_trap",
+        [FFIParamSpec.simple("ctx", "i64"), FFIParamSpec.simple("code", "i64")],
+        "",
+        "// Trap instruction"
+    )
+    spec.doc = "Trap (unreachable)"
+    spec
+
+# ============================================================================
+# Function Call Functions
+# ============================================================================
+
+fn add_function_call_fns(builder: ModuleBuilder) -> ModuleBuilder:
+    builder
+        .add_fn(fn_rt_cranelift_call())
+        .add_fn(fn_rt_cranelift_call_indirect())
+
+fn fn_rt_cranelift_call() -> FFIFnSpec:
+    var spec = FFIFnSpec.unsafe_extern_c("rt_cranelift_call",
+        [FFIParamSpec.simple("ctx", "i64"),
+         FFIParamSpec.simple("func", "i64"),
+         FFIParamSpec.simple("args_ptr", "i64"),
+         FFIParamSpec.simple("args_len", "i64")],
+        "i64",
+        "let mut contexts = FUNC_CONTEXTS.lock().unwrap();\n" +
+        "if let Some(fctx) = contexts.get_mut(&ctx) {\n" +
+        "    let value_id = fctx.next_value_id;\n" +
+        "    fctx.next_value_id += 1;\n" +
+        "    value_id\n" +
+        "} else {\n" +
+        "    0\n" +
+        "}"
+    )
+    spec.doc = "Direct function call"
+    spec
+
+fn fn_rt_cranelift_call_indirect() -> FFIFnSpec:
+    var spec = FFIFnSpec.unsafe_extern_c("rt_cranelift_call_indirect",
+        [FFIParamSpec.simple("ctx", "i64"),
+         FFIParamSpec.simple("sig", "i64"),
+         FFIParamSpec.simple("addr", "i64"),
+         FFIParamSpec.simple("args_ptr", "i64"),
+         FFIParamSpec.simple("args_len", "i64")],
+        "i64",
+        "let mut contexts = FUNC_CONTEXTS.lock().unwrap();\n" +
+        "if let Some(fctx) = contexts.get_mut(&ctx) {\n" +
+        "    let value_id = fctx.next_value_id;\n" +
+        "    fctx.next_value_id += 1;\n" +
+        "    value_id\n" +
+        "} else {\n" +
+        "    0\n" +
+        "}"
+    )
+    spec.doc = "Indirect function call"
+    spec
+
+# ============================================================================
+# Type Conversion Functions
+# ============================================================================
+
+fn add_conversion_fns(builder: ModuleBuilder) -> ModuleBuilder:
+    var result = builder
+    val convs = [
+        "rt_cranelift_sextend", "rt_cranelift_uextend", "rt_cranelift_ireduce",
+        "rt_cranelift_fcvt_to_sint", "rt_cranelift_fcvt_to_uint",
+        "rt_cranelift_fcvt_from_sint", "rt_cranelift_fcvt_from_uint",
+        "rt_cranelift_bitcast"
+    ]
+    for conv in convs:
+        result = result.add_fn(make_conversion_fn(conv))
+    result
+
+fn make_conversion_fn(name: text) -> FFIFnSpec:
+    var spec = FFIFnSpec.unsafe_extern_c(name,
+        [FFIParamSpec.simple("ctx", "i64"),
+         FFIParamSpec.simple("to_type", "i64"),
+         FFIParamSpec.simple("value", "i64")],
+        "i64",
+        "let mut contexts = FUNC_CONTEXTS.lock().unwrap();\n" +
+        "if let Some(fctx) = contexts.get_mut(&ctx) {\n" +
+        "    let value_id = fctx.next_value_id;\n" +
+        "    fctx.next_value_id += 1;\n" +
+        "    value_id\n" +
+        "} else {\n" +
+        "    0\n" +
+        "}"
+    )
+    spec.doc = "Type conversion operation"
+    spec
+
+# ============================================================================
+# Block Parameter Functions
+# ============================================================================
+
+fn add_block_param_fns(builder: ModuleBuilder) -> ModuleBuilder:
+    builder
+        .add_fn(fn_rt_cranelift_append_block_param())
+        .add_fn(fn_rt_cranelift_block_param())
+
+fn fn_rt_cranelift_append_block_param() -> FFIFnSpec:
+    var spec = FFIFnSpec.unsafe_extern_c("rt_cranelift_append_block_param",
+        [FFIParamSpec.simple("ctx", "i64"),
+         FFIParamSpec.simple("block", "i64"),
+         FFIParamSpec.simple("type_", "i64")],
+        "i64",
+        "let mut contexts = FUNC_CONTEXTS.lock().unwrap();\n" +
+        "if let Some(fctx) = contexts.get_mut(&ctx) {\n" +
+        "    let value_id = fctx.next_value_id;\n" +
+        "    fctx.next_value_id += 1;\n" +
+        "    value_id\n" +
+        "} else {\n" +
+        "    0\n" +
+        "}"
+    )
+    spec.doc = "Append a block parameter"
+    spec
+
+fn fn_rt_cranelift_block_param() -> FFIFnSpec:
+    var spec = FFIFnSpec.unsafe_extern_c("rt_cranelift_block_param",
+        [FFIParamSpec.simple("ctx", "i64"),
+         FFIParamSpec.simple("block", "i64"),
+         FFIParamSpec.simple("index", "i64")],
+        "i64",
+        "let mut contexts = FUNC_CONTEXTS.lock().unwrap();\n" +
+        "if let Some(fctx) = contexts.get_mut(&ctx) {\n" +
+        "    let value_id = fctx.next_value_id;\n" +
+        "    fctx.next_value_id += 1;\n" +
+        "    value_id\n" +
+        "} else {\n" +
+        "    0\n" +
+        "}"
+    )
+    spec.doc = "Get a block parameter value"
+    spec
+
+# ============================================================================
+# JIT Execution Functions
+# ============================================================================
+
+fn add_jit_execution_fns(builder: ModuleBuilder) -> ModuleBuilder:
+    builder
+        .add_fn(fn_rt_cranelift_get_function_ptr())
+
+fn fn_rt_cranelift_get_function_ptr() -> FFIFnSpec:
+    var spec = FFIFnSpec.unsafe_extern_c("rt_cranelift_get_function_ptr",
+        [FFIParamSpec.simple("module", "i64"),
+         FFIParamSpec.simple("name_ptr", "i64"),
+         FFIParamSpec.simple("name_len", "i64")],
+        "i64",
+        "let name = string_from_ptr(name_ptr, name_len);\n" +
+        "let mut modules = JIT_MODULES.lock().unwrap();\n" +
+        "if let Some(ctx) = modules.get_mut(&module) {\n" +
+        "    if let Some(func_id) = ctx.func_ids.get(&name) {\n" +
+        "        return ctx.module.get_finalized_function(*func_id) as i64;\n" +
+        "    }\n" +
+        "}\n" +
+        "0"
+    )
+    spec.doc = "Get function pointer for JIT-compiled function"
+    spec
+
+# ============================================================================
+# AOT Functions
+# ============================================================================
+
+fn add_aot_fns(builder: ModuleBuilder) -> ModuleBuilder:
+    builder
+        .add_fn(fn_rt_cranelift_new_aot_module())
+        .add_fn(fn_rt_cranelift_aot_define_function())
+        .add_fn(fn_rt_cranelift_emit_object())
+
+fn fn_rt_cranelift_new_aot_module() -> FFIFnSpec:
+    var spec = FFIFnSpec.unsafe_extern_c("rt_cranelift_new_aot_module",
+        [FFIParamSpec.simple("name_ptr", "i64"),
+         FFIParamSpec.simple("name_len", "i64"),
+         FFIParamSpec.simple("target", "i64")],
+        "i64",
+        "let name = string_from_ptr(name_ptr, name_len);\n" +
+        "if name.is_empty() {\n" +
+        "    return 0;\n" +
+        "}\n" +
+        "let handle = next_handle();\n" +
+        "handle"
+    )
+    spec.doc = "Create a new AOT module for object file generation"
+    spec
+
+fn fn_rt_cranelift_aot_define_function() -> FFIFnSpec:
+    var spec = FFIFnSpec.unsafe_extern_c("rt_cranelift_aot_define_function",
+        [FFIParamSpec.simple("module", "i64"),
+         FFIParamSpec.simple("func_id", "i64"),
+         FFIParamSpec.simple("ctx", "i64")],
+        "bool",
+        "true"
+    )
+    spec.doc = "Define a function in AOT module"
+    spec
+
+fn fn_rt_cranelift_emit_object() -> FFIFnSpec:
+    var spec = FFIFnSpec.unsafe_extern_c("rt_cranelift_emit_object",
+        [FFIParamSpec.simple("module", "i64"),
+         FFIParamSpec.simple("path_ptr", "i64"),
+         FFIParamSpec.simple("path_len", "i64")],
+        "bool",
+        "let _path = string_from_ptr(path_ptr, path_len);\n" +
+        "let modules = AOT_MODULES.lock().unwrap();\n" +
+        "modules.contains_key(&module)"
+    )
+    spec.doc = "Emit object file from AOT module"
+    spec
+
+# ============================================================================
+# Additional Helper: Implementation Function
+# ============================================================================
+
+fn add_impl_helpers(builder: ModuleBuilder) -> ModuleBuilder:
+    # Add the implementation helper function that new_module uses
+    builder.add_raw(
+        "unsafe fn rt_cranelift_new_module_impl(name: &str, target: i64) -> i64 {\n" +
+        "    if name.is_empty() {\n" +
+        "        return 0;\n" +
+        "    }\n" +
+        "\n" +
+        "    // Build settings and ISA\n" +
+        "    let mut flag_builder = settings::builder();\n" +
+        "    if flag_builder.set(\"opt_level\", \"speed\").is_err() {\n" +
+        "        return 0;\n" +
+        "    }\n" +
+        "    if flag_builder.set(\"is_pic\", \"true\").is_err() {\n" +
+        "        return 0;\n" +
+        "    }\n" +
+        "\n" +
+        "    // Select target triple based on target code\n" +
+        "    let triple = match target {\n" +
+        "        CL_TARGET_X86_64 => \"x86_64-unknown-linux-gnu\"\n" +
+        "            .parse::<Triple>()\n" +
+        "            .unwrap_or_else(|_| Triple::host()),\n" +
+        "        CL_TARGET_AARCH64 => \"aarch64-unknown-linux-gnu\"\n" +
+        "            .parse::<Triple>()\n" +
+        "            .unwrap_or_else(|_| Triple::host()),\n" +
+        "        CL_TARGET_RISCV64 => \"riscv64gc-unknown-linux-gnu\"\n" +
+        "            .parse::<Triple>()\n" +
+        "            .unwrap_or_else(|_| Triple::host()),\n" +
+        "        _ => Triple::host(),\n" +
+        "    };\n" +
+        "\n" +
+        "    let flags = settings::Flags::new(flag_builder);\n" +
+        "\n" +
+        "    // Create ISA from triple\n" +
+        "    let isa_builder = match cranelift_codegen::isa::lookup(triple) {\n" +
+        "        Ok(b) => b,\n" +
+        "        Err(_) => return 0,\n" +
+        "    };\n" +
+        "\n" +
+        "    let isa = match isa_builder.finish(flags) {\n" +
+        "        Ok(isa) => isa,\n" +
+        "        Err(_) => return 0,\n" +
+        "    };\n" +
+        "\n" +
+        "    // Create JIT module\n" +
+        "    let builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());\n" +
+        "\n" +
+        "    let module = JITModule::new(builder);\n" +
+        "    let handle = next_handle();\n" +
+        "\n" +
+        "    let ctx = JITModuleContext {\n" +
+        "        module,\n" +
+        "        func_ids: HashMap::new(),\n" +
+        "    };\n" +
+        "\n" +
+        "    JIT_MODULES.lock().unwrap().insert(handle, ctx);\n" +
+        "    handle\n" +
+        "}\n"
+    )

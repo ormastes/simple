@@ -1,0 +1,222 @@
+/// Multi-Mode Test Execution Tests
+/// Tests the multi-mode execution feature (#2050-#2054)
+
+import std.spec
+
+describe "Multi-Mode Test Execution":
+    context "ExecutionMode enum":
+        it "defines interpreter mode":
+            let mode = ExecutionMode.Interpreter
+            expect mode_to_string(mode) == "interpreter"
+
+        it "defines JIT mode":
+            let mode = ExecutionMode.JIT
+            expect mode_to_string(mode) == "jit"
+
+        it "defines SMF Cranelift mode":
+            let mode = ExecutionMode.SMF_Cranelift
+            expect mode_to_string(mode) == "smf_cranelift"
+
+        it "defines SMF LLVM mode":
+            let mode = ExecutionMode.SMF_LLVM
+            expect mode_to_string(mode) == "smf_llvm"
+
+    context "ModeSet operations":
+        it "creates a mode set with all modes":
+            let modes = ModeSet.all()
+            expect modes.size() == 4
+
+        it "creates interpreter-only mode set":
+            let modes = ModeSet.interpreter_only()
+            expect modes.size() == 1
+            expect modes.contains(ExecutionMode.Interpreter)
+
+        it "creates compiled-only mode set":
+            let modes = ModeSet.compiled_only()
+            expect modes.size() == 3
+            expect modes.contains(ExecutionMode.JIT)
+            expect modes.contains(ExecutionMode.SMF_Cranelift)
+            expect modes.contains(ExecutionMode.SMF_LLVM)
+
+        it "checks mode containment":
+            let modes = ModeSet.new([ExecutionMode.Interpreter, ExecutionMode.JIT])
+            expect modes.contains(ExecutionMode.Interpreter)
+            expect modes.contains(ExecutionMode.JIT)
+            expect not modes.contains(ExecutionMode.SMF_Cranelift)
+
+        it "adds modes to set":
+            let mut modes = ModeSet.new([ExecutionMode.Interpreter])
+            modes = modes.add(ExecutionMode.JIT)
+            expect modes.size() == 2
+            expect modes.contains(ExecutionMode.JIT)
+
+        it "removes modes from set":
+            let mut modes = ModeSet.new([ExecutionMode.Interpreter, ExecutionMode.JIT])
+            modes = modes.remove(ExecutionMode.Interpreter)
+            expect modes.size() == 1
+            expect not modes.contains(ExecutionMode.Interpreter)
+
+        it "computes union of mode sets":
+            let modes1 = ModeSet.new([ExecutionMode.Interpreter])
+            let modes2 = ModeSet.new([ExecutionMode.JIT])
+            let combined = modes1.union_with(modes2)
+            expect combined.size() == 2
+            expect combined.contains(ExecutionMode.Interpreter)
+            expect combined.contains(ExecutionMode.JIT)
+
+        it "computes intersection of mode sets":
+            let modes1 = ModeSet.new([ExecutionMode.Interpreter, ExecutionMode.JIT])
+            let modes2 = ModeSet.new([ExecutionMode.JIT, ExecutionMode.SMF_Cranelift])
+            let intersect = modes1.intersect(modes2)
+            expect intersect.size() == 1
+            expect intersect.contains(ExecutionMode.JIT)
+
+        it "computes difference of mode sets":
+            let modes1 = ModeSet.new([ExecutionMode.Interpreter, ExecutionMode.JIT])
+            let modes2 = ModeSet.new([ExecutionMode.JIT])
+            let diff = modes1.difference(modes2)
+            expect diff.size() == 1
+            expect diff.contains(ExecutionMode.Interpreter)
+
+    context "Mode availability":
+        it "marks interpreter as available":
+            expect is_mode_available(ExecutionMode.Interpreter)
+
+        it "marks JIT as available":
+            expect is_mode_available(ExecutionMode.JIT)
+
+        it "marks SMF Cranelift as available":
+            expect is_mode_available(ExecutionMode.SMF_Cranelift)
+
+        it "marks SMF LLVM as not available":
+            expect not is_mode_available(ExecutionMode.SMF_LLVM)
+
+        it "gets available modes":
+            let modes = get_available_modes()
+            expect modes.size() == 3
+            expect modes.contains(ExecutionMode.Interpreter)
+            expect modes.contains(ExecutionMode.JIT)
+            expect modes.contains(ExecutionMode.SMF_Cranelift)
+            expect not modes.contains(ExecutionMode.SMF_LLVM)
+
+    context "ModeConfig":
+        it "creates empty configuration":
+            let config = ModeConfig.new()
+            # Should inherit default modes
+            let modes = config.resolve_modes()
+            expect modes.size() == 4
+
+        it "sets modes on configuration":
+            let mut config = ModeConfig.new()
+            config = config.set_modes(ModeSet.interpreter_only())
+            let modes = config.resolve_modes()
+            expect modes.size() == 1
+            expect modes.contains(ExecutionMode.Interpreter)
+
+        it "sets skip modes":
+            let mut config = ModeConfig.new()
+            config = config.set_skip_modes(ModeSet.new([ExecutionMode.SMF_LLVM]))
+            let modes = config.resolve_modes()
+            expect not modes.contains(ExecutionMode.SMF_LLVM)
+
+        it "sets only modes (highest precedence)":
+            let mut config = ModeConfig.new()
+            config = config.set_modes(ModeSet.all())
+            config = config.set_only_modes(ModeSet.interpreter_only())
+            let modes = config.resolve_modes()
+            expect modes.size() == 1
+            expect modes.contains(ExecutionMode.Interpreter)
+
+        it "inherits modes from parent":
+            let mut parent = ModeConfig.new()
+            parent = parent.set_modes(ModeSet.interpreter_only())
+
+            let child = ModeConfig.with_parent(parent)
+            let modes = child.resolve_modes()
+            expect modes.size() == 1
+            expect modes.contains(ExecutionMode.Interpreter)
+
+        it "overrides parent modes":
+            let mut parent = ModeConfig.new()
+            parent = parent.set_modes(ModeSet.interpreter_only())
+
+            let mut child = ModeConfig.with_parent(parent)
+            child = child.set_modes(ModeSet.compiled_only())
+
+            let modes = child.resolve_modes()
+            expect modes.size() == 3
+            expect not modes.contains(ExecutionMode.Interpreter)
+
+        it "accumulates skip modes from parent":
+            let mut parent = ModeConfig.new()
+            parent = parent.set_skip_modes(ModeSet.new([ExecutionMode.SMF_LLVM]))
+
+            let mut child = ModeConfig.with_parent(parent)
+            child = child.set_skip_modes(ModeSet.new([ExecutionMode.SMF_Cranelift]))
+
+            let modes = child.resolve_modes()
+            expect not modes.contains(ExecutionMode.SMF_LLVM)
+            expect not modes.contains(ExecutionMode.SMF_Cranelift)
+
+    context "FailureStrategy":
+        it "defaults to skip remaining":
+            let config = ModeConfig.new()
+            let strategy = config.resolve_failure_strategy()
+            expect strategy == FailureStrategy.SkipRemaining
+
+        it "sets failure strategy":
+            let mut config = ModeConfig.new()
+            config = config.set_failure_strategy(FailureStrategy.FailAll)
+            let strategy = config.resolve_failure_strategy()
+            expect strategy == FailureStrategy.FailAll
+
+        it "inherits failure strategy from parent":
+            let mut parent = ModeConfig.new()
+            parent = parent.set_failure_strategy(FailureStrategy.CollectAll)
+
+            let child = ModeConfig.with_parent(parent)
+            let strategy = child.resolve_failure_strategy()
+            expect strategy == FailureStrategy.CollectAll
+
+    context "ModeRunner":
+        it "creates a mode runner with configuration":
+            let config = ModeConfig.new()
+            let runner = ModeRunner.new(config)
+            # Runner should be created successfully
+            expect true
+
+        # TODO: Re-enable when inline lambda syntax is supported
+        # it "runs a test in configured modes":
+        #     let mut config = ModeConfig.new()
+        #     config = config.set_modes(ModeSet.interpreter_only())
+        #
+        #     let mut runner = ModeRunner.new(config)
+        #
+        #     # Run a simple test
+        #     let exec_result = runner.run_test("sample test", fn():
+        #         # Test logic
+        #         let x = 1 + 1
+        #         expect x == 2
+        #     )
+        #
+        #     # Should have one result (interpreter only)
+        #     expect exec_result.test_name == "sample test"
+        #     expect exec_result.total_modes >= 1
+
+describe "Multi-Mode Reporting":
+    context "ModeReporter":
+        it "creates a reporter":
+            let reporter = ModeReporter.new(false)
+            expect true
+
+        it "generates a report from results":
+            let reporter = ModeReporter.new(false)
+            # TODO: Add test results and generate report
+            let report = reporter.generate_report()
+            expect true
+
+    context "Mode availability report":
+        it "shows which modes are available":
+            let report = format_mode_availability()
+            # Report should mention all modes
+            expect true

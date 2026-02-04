@@ -1,0 +1,174 @@
+# @pending
+# Static Method Resolution Feature Specification
+#
+# Tests that static method resolution and calling works correctly in interpreter mode.
+# This verifies the HIR/MIR changes are working.
+
+describe "Static Method Resolution":
+    context "Basic static method resolution":
+        it "resolves simple static method call":
+            class TestClass:
+                static fn get_value() -> i64:
+                    42
+
+            val result = TestClass.get_value()
+            expect result == 42
+
+        it "resolves static method with parameters":
+            class Math:
+                static fn add(a: i64, b: i64) -> i64:
+                    a + b
+
+            val result = Math.add(5, 3)
+            expect result == 8
+
+        it "resolves static method returning object":
+            class Point:
+                x: i64
+                y: i64
+
+                static fn origin() -> Point:
+                    Point(x: 0, y: 0)
+
+            val p = Point.origin()
+            expect p.x == 0
+            expect p.y == 0
+
+    context "Static vs instance method distinction":
+        it "correctly resolves static method vs instance method":
+            class Counter:
+                value: i64
+
+                static fn start() -> Counter:
+                    Counter(value: 0)
+
+                fn get() -> i64:
+                    self.value
+
+            val counter = Counter.start()
+            val value = counter.get()
+            expect value == 0
+
+        it "allows same name for static and instance methods":
+            class Dual:
+                name: text
+
+                static fn get_name() -> text:
+                    "Static"
+
+                fn get_name() -> text:
+                    self.name
+
+            val static_result = Dual.get_name()
+            val instance = Dual(name: "Instance")
+            val instance_result = instance.get_name()
+
+            expect static_result == "Static"
+            expect instance_result == "Instance"
+
+    context "Static method chaining":
+        it "chains static method call with instance method":
+            class Builder:
+                value: i64
+
+                static fn new() -> Builder:
+                    Builder(value: 10)
+
+                fn double() -> i64:
+                    self.value * 2
+
+            val result = Builder.new().double()
+            expect result == 20
+
+        it "calls multiple static methods in sequence":
+            class Factory:
+                static fn create_a() -> i64:
+                    1
+
+                static fn create_b() -> i64:
+                    2
+
+            val a = Factory.create_a()
+            val b = Factory.create_b()
+            expect (a + b) == 3
+
+    context "Static methods calling other methods":
+        it "static method calls another static method":
+            class Calculator:
+                static fn square(x: i64) -> i64:
+                    x * x
+
+                static fn sum_of_squares(a: i64, b: i64) -> i64:
+                    Calculator.square(a) + Calculator.square(b)
+
+            val result = Calculator.sum_of_squares(3, 4)
+            expect result == 25
+
+        it "static method creates object and calls instance method":
+            class Point:
+                x: i64
+                y: i64
+
+                static fn from_tuple(t: (i64, i64)) -> Point:
+                    val (x, y) = t
+                    Point(x: x, y: y)
+
+                fn sum() -> i64:
+                    self.x + self.y
+
+            val result = Point.from_tuple((5, 3)).sum()
+            expect result == 8
+
+    context "Static method in structs":
+        it "resolves static method on struct":
+            struct Config:
+                value: i64
+
+                static fn default() -> Config:
+                    Config(value: 100)
+
+            val config = Config.default()
+            expect config.value == 100
+
+        it "resolves multiple static methods on struct":
+            struct Settings:
+                level: i64
+
+                static fn low() -> Settings:
+                    Settings(level: 1)
+
+                static fn medium() -> Settings:
+                    Settings(level: 5)
+
+                static fn high() -> Settings:
+                    Settings(level: 10)
+
+            val l = Settings.low()
+            val m = Settings.medium()
+            val h = Settings.high()
+
+            expect l.level == 1
+            expect m.level == 5
+            expect h.level == 10
+
+    context "Error cases":
+        it "reports error for non-existent static method":
+            class Empty:
+                value: i64
+
+            # This should produce a resolution error
+            # val x = Empty.nonexistent()
+            # Error: no static method 'nonexistent' found for type 'Empty'
+            pass
+
+        it "reports error for calling instance method as static":
+            class HasInstance:
+                value: i64
+
+                fn get() -> i64:
+                    self.value
+
+            # This should produce an error
+            # val x = HasInstance.get()
+            # Error: no static method 'get' found (it's an instance method)
+            pass

@@ -1,0 +1,101 @@
+# Parallel Compilation
+#
+# Dependency-aware parallel build orchestration.
+# Groups source files by dependency level and compiles each level
+# in parallel using rayon FFI.
+#
+# Port of parallel compilation logic from driver
+
+export ParallelConfig, CompileUnit, CompileResult, ParallelScheduler
+
+# ============================================================================
+# Types
+# ============================================================================
+
+struct ParallelConfig:
+    max_threads: i64
+    batch_size: i64
+
+impl ParallelConfig:
+    static fn default_config() -> ParallelConfig:
+        extern fn rt_cpu_count() -> i64
+        # TODO: Replace direct FFI call with wrapper (cpu_count) from app.io or compiler.ffi
+        ParallelConfig(max_threads: rt_cpu_count(), batch_size: 16)
+
+    static fn single_threaded() -> ParallelConfig:
+        ParallelConfig(max_threads: 1, batch_size: 1)
+
+enum CompileResult:
+    Success(text)        # path
+    Failed(text, text)   # path, error
+
+struct CompileUnit:
+    path: text
+    dependencies: [text]
+    priority: i64         # Lower = compile first
+
+# ============================================================================
+# Parallel Scheduler
+# ============================================================================
+
+class ParallelScheduler:
+    """Schedules compilation units respecting dependency order."""
+    config: ParallelConfig
+    units: [CompileUnit]
+    completed: [text]
+    failed: [text]
+
+impl ParallelScheduler:
+    static fn create(config: ParallelConfig) -> ParallelScheduler:
+        ParallelScheduler(config: config, units: [], completed: [], failed: [])
+
+    me add_unit(unit: CompileUnit):
+        self.units = self.units.push(unit)
+
+    fn compute_levels() -> [[CompileUnit]]:
+        """Group units into dependency levels for parallel execution."""
+        var levels: [[CompileUnit]] = []
+        var remaining = self.units
+        var done: [text] = []
+
+        while remaining.?:
+            # Find units whose deps are all satisfied
+            var ready: [CompileUnit] = []
+            var not_ready: [CompileUnit] = []
+
+            for unit in remaining:
+                val all_deps_met = unit.dependencies.filter(\d:
+                    not done.contains(d)).len() == 0
+                if all_deps_met:
+                    ready = ready.push(unit)
+                else:
+                    not_ready = not_ready.push(unit)
+
+            if not ready.?:
+                # Circular dependency or missing dep — force remaining
+                levels = levels.push(not_ready)
+                break
+
+            levels = levels.push(ready)
+            for u in ready:
+                done = done.push(u.path)
+            remaining = not_ready
+
+        levels
+
+    me mark_completed(path: text):
+        if not self.completed.contains(path):
+            self.completed = self.completed.push(path)
+
+    me mark_failed(path: text):
+        if not self.failed.contains(path):
+            self.failed = self.failed.push(path)
+
+    fn all_completed() -> bool:
+        self.completed.len() + self.failed.len() >= self.units.len()
+
+    fn success_count() -> i64:
+        self.completed.len()
+
+    fn failure_count() -> i64:
+        self.failed.len()

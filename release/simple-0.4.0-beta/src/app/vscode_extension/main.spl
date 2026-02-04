@@ -1,0 +1,377 @@
+# VSCode Extension Build CLI
+# Compile Simple code to WASM for VSCode extensions
+#
+# Usage:
+#   simple vscode build [options]
+#   simple vscode build --watch
+#   simple vscode build --release
+
+use host.async_nogc_mut.io.stdio
+use vscode.manifest
+use sys
+import shell.{shell, file, dir, path}
+
+# Build options
+class BuildOptions:
+    pub source_dir: String
+    pub output_dir: String
+    pub release: bool
+    pub watch: bool
+    pub generate_manifest: bool
+    pub extension_name: String
+    pub version: String
+
+    pub fn new(): BuildOptions =
+        BuildOptions {
+            source_dir: "src",
+            output_dir: "out",
+            release: false,
+            watch: false,
+            generate_manifest: true,
+            extension_name: "",
+            version: "1.0.0"
+        }
+
+# Build result
+class BuildResult:
+    pub success: bool
+    pub wasm_path: String
+    pub manifest_path: String
+    pub errors: List<String>
+
+    pub fn new(): BuildResult =
+        BuildResult {
+            success: false,
+            wasm_path: "",
+            manifest_path: "",
+            errors: []
+        }
+
+# VSCode extension builder
+class VsCodeBuilder:
+    pub options: BuildOptions
+
+    pub fn new(options: BuildOptions): VsCodeBuilder =
+        VsCodeBuilder { options: options }
+
+    pub fn build(self): BuildResult =
+        """Build VSCode extension.
+
+        Returns:
+            Build result
+
+        Steps:
+        1. Compile Simple to WASM
+        2. Generate package.json (if needed)
+        3. Generate JavaScript wrapper
+        4. Copy assets
+        """
+        val result = BuildResult.new()
+
+        # Step 1: Compile Simple to WASM
+        stdio.println("Compiling Simple to WASM...")
+        val wasm_result = self.compile_to_wasm()
+
+        if not wasm_result.success:
+            result.errors.extend(wasm_result.errors)
+            return result
+
+        result.wasm_path = wasm_result.path
+
+        # Step 2: Generate manifest
+        if self.options.generate_manifest:
+            stdio.println("Generating package.json...")
+            val manifest_result = self.generate_manifest()
+
+            if manifest_result.success:
+                result.manifest_path = manifest_result.path
+            else:
+                result.errors.extend(manifest_result.errors)
+
+        # Step 3: Generate JS wrapper
+        stdio.println("Generating JavaScript wrapper...")
+        val wrapper_result = self.generate_js_wrapper()
+
+        if not wrapper_result.success:
+            result.errors.extend(wrapper_result.errors)
+            return result
+
+        # Step 4: Copy assets
+        stdio.println("Copying assets...")
+        self.copy_assets()
+
+        result.success = true
+        result
+
+    fn compile_to_wasm(): CompileResult =
+        """Compile Simple code to WASM.
+
+        Returns:
+            Compilation result
+        """
+        # Ensure output directory exists
+        dir.create(self.options.output_dir, true)
+
+        # Build compile command
+        var args: List<String> = ["build", "--target", "wasm32-unknown-unknown"]
+
+        if self.options.release:
+            args.append("--release")
+
+        args.append("--output")
+        val wasm_path = "{self.options.output_dir}/extension.wasm"
+        args.append(wasm_path)
+
+        args.append("{self.options.source_dir}/extension.spl")
+
+        # Execute simple compiler
+        val result = shell.run("simple", args)
+
+        if result.ok():
+            CompileResult {
+                success: true,
+                path: wasm_path,
+                errors: []
+            }
+        else:
+            # Parse errors from stderr
+            val error_lines = result.stderr.split("\n").filter(|line| line.trim().len() > 0)
+            CompileResult {
+                success: false,
+                path: "",
+                errors: error_lines
+            }
+
+    fn generate_manifest(): ManifestResult =
+        """Generate package.json manifest.
+
+        Returns:
+            Manifest generation result
+        """
+        val gen = manifest.ManifestGenerator.new(
+            self.options.extension_name,
+            self.options.version
+        )
+
+        # Scan extension code
+        gen.scan_extension_file("{self.options.source_dir}/extension.spl")
+
+        # Generate JSON
+        val json = gen.generate()
+
+        # Write to file
+        val manifest_path = "package.json"
+        file.write_text(manifest_path, json)
+
+        ManifestResult {
+            success: true,
+            path: manifest_path,
+            errors: []
+        }
+
+    fn generate_js_wrapper(): WrapperResult =
+        """Generate JavaScript wrapper for WASM.
+
+        Returns:
+            Wrapper generation result
+
+        Generates extension.js that:
+        1. Loads WASM module
+        2. Calls activate() export
+        3. Provides VSCode API bridge
+        """
+        val wrapper_code = """// Auto-generated VSCode extension wrapper
+const vscode = require('vscode');
+const fs = require('fs');
+const path = require('path');
+
+// Load WASM module
+val wasmInstance = null;
+
+async function loadWasm() {
+    const wasmPath = path.join(__dirname, 'extension.wasm');
+    const wasmBuffer = fs.readFileSync(wasmPath);
+
+    const importObject = {
+        env: {
+            // VSCode API imports
+            vscode_window_show_information_message: (ptr, len) => {
+                const msg = readString(ptr, len);
+                vscode.window.showInformationMessage(msg);
+            },
+            vscode_commands_register_command: (namePtr, nameLen, callbackId) => {
+                const name = readString(namePtr, nameLen);
+                return vscode.commands.registerCommand(name, (...args) => {
+                    // Call WASM callback
+                    if (wasmInstance.exports.handle_command) {
+                        wasmInstance.exports.handle_command(callbackId, 0, 0);
+                    }
+                });
+            },
+            // ... more VSCode API bindings
+        }
+    };
+
+    const result = await WebAssembly.instantiate(wasmBuffer, importObject);
+    wasmInstance = result.instance;
+}
+
+function readString(ptr, len) {
+    const memory = new Uint8Array(wasmInstance.exports.memory.buffer);
+    const bytes = memory.slice(ptr, ptr + len);
+    return new TextDecoder().decode(bytes);
+}
+
+async function activate(context) {
+    await loadWasm();
+
+    // Call WASM activate function
+    if (wasmInstance.exports.activate) {
+        wasmInstance.exports.activate();
+    }
+}
+
+function deactivate() {
+    // Call WASM deactivate function
+    if (wasmInstance && wasmInstance.exports.deactivate) {
+        wasmInstance.exports.deactivate();
+    }
+}
+
+module.exports = {
+    activate,
+    deactivate
+};
+"""
+
+        # Write wrapper
+        val wrapper_path = "{self.options.output_dir}/extension.js"
+        file.write_text(wrapper_path, wrapper_code)
+
+        WrapperResult {
+            success: true,
+            path: wrapper_path,
+            errors: []
+        }
+
+    fn copy_assets():
+        """Copy assets to output directory.
+
+        Copies standard files like README.md, CHANGELOG.md, LICENSE if they exist.
+        """
+        val assets = ["README.md", "CHANGELOG.md", "LICENSE", "LICENSE.md", "icon.png"]
+
+        for asset in assets:
+            if file.exists(asset):
+                val dest = path.join(self.options.output_dir, asset)
+                file.copy(asset, dest)
+                stdio.println("  Copied {asset}")
+
+# Helper result types
+class CompileResult:
+    pub success: bool
+    pub path: String
+    pub errors: List<String>
+
+class ManifestResult:
+    pub success: bool
+    pub path: String
+    pub errors: List<String>
+
+class WrapperResult:
+    pub success: bool
+    pub path: String
+    pub errors: List<String>
+
+# Parse command-line arguments
+fn parse_args(): BuildOptions =
+    """Parse command-line arguments.
+
+    Returns:
+        Build options
+    """
+    val options = BuildOptions.new()
+    val args = sys.args()
+
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+
+        match arg:
+            "--release":
+                options.release = true
+            "--watch":
+                options.watch = true
+            "--no-manifest":
+                options.generate_manifest = false
+            "--source":
+                i = i + 1
+                if i < args.len():
+                    options.source_dir = args[i]
+            "--output":
+                i = i + 1
+                if i < args.len():
+                    options.output_dir = args[i]
+            "--name":
+                i = i + 1
+                if i < args.len():
+                    options.extension_name = args[i]
+            "--version":
+                i = i + 1
+                if i < args.len():
+                    options.version = args[i]
+            _:
+                pass
+
+        i = i + 1
+
+    options
+
+# Main entry point
+pub fn main():
+    """VSCode extension build CLI entry point.
+
+    Usage:
+        simple vscode build [options]
+
+    Options:
+        --release           Build in release mode
+        --watch             Watch for changes and rebuild
+        --no-manifest       Don't generate package.json
+        --source <dir>      Source directory (default: src)
+        --output <dir>      Output directory (default: out)
+        --name <name>       Extension name
+        --version <ver>     Extension version
+
+    Example:
+        simple vscode build --release --name simple-lang --version 1.0.0
+    """
+    stdio.println("VSCode Extension Builder")
+    stdio.println("========================")
+    stdio.println("")
+
+    # Parse arguments
+    val options = parse_args()
+
+    # Create builder
+    val builder = VsCodeBuilder.new(options)
+
+    # Build
+    val result = builder.build()
+
+    # Report results
+    if result.success:
+        stdio.println("")
+        stdio.println("✓ Build succeeded")
+        stdio.println("  WASM: {result.wasm_path}")
+        if result.manifest_path != "":
+            stdio.println("  Manifest: {result.manifest_path}")
+        stdio.println("")
+        stdio.println("Run 'simple vscode package' to create .vsix file")
+    else:
+        stdio.println("")
+        stdio.println("✗ Build failed:")
+        for error in result.errors:
+            stdio.println("  {error}")
+
+        sys.exit(1)

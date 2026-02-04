@@ -1,0 +1,145 @@
+# Symbol Interning Tests
+#
+# Tests for the SymbolId and SymbolInterner types.
+
+# @skip
+from symbol import {SymbolId, SymbolInterner, GLOBAL_INTERNER, intern, resolve, init_common_symbols}
+
+describe "SymbolId":
+    it "creates valid symbols with non-negative ids":
+        val sym = SymbolId(id: 0)
+        assert sym.is_valid()
+        assert sym.id == 0
+
+    it "creates invalid symbols with negative ids":
+        val sym = SymbolId.invalid()
+        assert not sym.is_valid()
+        assert sym.id == -1
+
+    it "compares equal when ids match":
+        val a = SymbolId(id: 42)
+        val b = SymbolId(id: 42)
+        val c = SymbolId(id: 99)
+        assert a == b
+        assert not (a == c)
+
+    it "uses id as hash":
+        val sym = SymbolId(id: 123)
+        assert sym.hash() == 123
+
+describe "SymbolInterner":
+    it "creates empty interner":
+        val interner = SymbolInterner.new()
+        assert interner.len() == 0
+
+    it "interns strings and returns SymbolId":
+        var interner = SymbolInterner.new()
+        val id = interner.intern("hello")
+        assert id.is_valid()
+        assert id.id == 0
+
+    it "returns same SymbolId for same string":
+        var interner = SymbolInterner.new()
+        val id1 = interner.intern("world")
+        val id2 = interner.intern("world")
+        assert id1 == id2
+
+    it "returns different SymbolId for different strings":
+        var interner = SymbolInterner.new()
+        val id1 = interner.intern("foo")
+        val id2 = interner.intern("bar")
+        assert not (id1 == id2)
+
+    it "resolves SymbolId back to string":
+        var interner = SymbolInterner.new()
+        val id = interner.intern("test_string")
+        val resolved = interner.resolve(id)
+        assert resolved.?
+        assert resolved.unwrap() == "test_string"
+
+    it "returns None for invalid SymbolId":
+        var interner = SymbolInterner.new()
+        val invalid = SymbolId.invalid()
+        assert not interner.resolve(invalid).?
+
+    it "returns None for out-of-range SymbolId":
+        var interner = SymbolInterner.new()
+        interner.intern("only_one")
+        val out_of_range = SymbolId(id: 999)
+        assert not interner.resolve(out_of_range).?
+
+    it "checks if string is interned with contains":
+        var interner = SymbolInterner.new()
+        interner.intern("exists")
+        assert interner.contains("exists")
+        assert not interner.contains("missing")
+
+    it "gets SymbolId without interning with get_or_none":
+        var interner = SymbolInterner.new()
+        interner.intern("present")
+        assert interner.get_or_none("present").?
+        assert not interner.get_or_none("absent").?
+
+    it "tracks count correctly":
+        var interner = SymbolInterner.new()
+        assert interner.len() == 0
+        interner.intern("a")
+        assert interner.len() == 1
+        interner.intern("b")
+        assert interner.len() == 2
+        interner.intern("a")  # Already interned, no new entry
+        assert interner.len() == 2
+
+describe "Global interner":
+    it "provides convenience intern function":
+        val id = intern("global_test")
+        assert id.is_valid()
+
+    it "provides convenience resolve function":
+        val id = intern("resolve_test")
+        val resolved = resolve(id)
+        assert resolved.?
+        assert resolved.unwrap() == "resolve_test"
+
+    it "shares state across intern calls":
+        val id1 = intern("shared")
+        val id2 = intern("shared")
+        assert id1 == id2
+
+describe "Common symbols initialization":
+    it "pre-interns common identifiers":
+        init_common_symbols()
+
+        # These should already be interned
+        assert GLOBAL_INTERNER.contains("self")
+        assert GLOBAL_INTERNER.contains("true")
+        assert GLOBAL_INTERNER.contains("false")
+        assert GLOBAL_INTERNER.contains("nil")
+        assert GLOBAL_INTERNER.contains("new")
+        assert GLOBAL_INTERNER.contains("len")
+
+describe "Performance characteristics":
+    it "handles many unique strings":
+        var interner = SymbolInterner.new()
+
+        # Intern 1000 unique strings
+        for i in 0..1000:
+            interner.intern("string_{i}")
+
+        assert interner.len() == 1000
+
+        # Lookups should be fast (no assertion, just verify it works)
+        for i in 0..1000:
+            val id = interner.get_or_none("string_{i}")
+            assert id.?
+
+    it "benefits from interning repeated lookups":
+        var interner = SymbolInterner.new()
+
+        # First intern
+        val id = interner.intern("repeated_name")
+
+        # Subsequent lookups use integer comparison
+        for _ in 0..1000:
+            val id2 = interner.intern("repeated_name")
+            assert id == id2  # O(1) integer comparison

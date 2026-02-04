@@ -1,0 +1,298 @@
+# Deployment Verification - Smoke Testing
+# Post-deployment health checks with retry logic and reporting
+
+import time
+
+# ============================================================================
+# Configuration
+# ============================================================================
+
+struct SmokeTestConfig:
+    timeout_secs: f64           # Timeout per test
+    retry_attempts: i32         # Number of retry attempts
+    retry_delay_secs: f64       # Delay between retries
+    fail_fast: bool             # Stop on first failure
+
+    static fn default() -> SmokeTestConfig:
+        """Create default smoke test configuration.
+
+        Defaults:
+            timeout_secs: 30.0
+            retry_attempts: 3
+            retry_delay_secs: 5.0
+            fail_fast: true
+
+        Example:
+            val config = SmokeTestConfig.default()
+        """
+        SmokeTestConfig(
+            timeout_secs: 30.0,
+            retry_attempts: 3,
+            retry_delay_secs: 5.0,
+            fail_fast: true
+        )
+
+# ============================================================================
+# Test Results
+# ============================================================================
+
+enum SmokeTestResult:
+    Pass(test_name: text, duration_ms: f64)
+    Fail(test_name: text, error: text, attempt: i32)
+    Timeout(test_name: text)
+
+impl SmokeTestResult:
+    fn is_pass() -> bool:
+        """Check if result is Pass.
+
+        Returns:
+            true if Pass, false otherwise
+
+        Example:
+            if result.is_pass():
+                print "Success!"
+        """
+        match self:
+            Pass(_, _): true
+            _: false
+
+    fn is_fail() -> bool:
+        """Check if result is Fail.
+
+        Returns:
+            true if Fail, false otherwise
+
+        Example:
+            if result.is_fail():
+                rollback()
+        """
+        match self:
+            Fail(_, _, _): true
+            _: false
+
+    fn is_timeout() -> bool:
+        """Check if result is Timeout.
+
+        Returns:
+            true if Timeout, false otherwise
+        """
+        match self:
+            Timeout(_): true
+            _: false
+
+    fn format() -> text:
+        """Format result for display.
+
+        Returns:
+            Formatted string with emoji and details
+
+        Example:
+            print result.format()
+        """
+        match self:
+            Pass(name, duration):
+                "✅ {name} ({duration:.2f}ms)"
+            Fail(name, error, attempt):
+                "❌ {name} (failed after {attempt} attempts)\n   Error: {error}"
+            Timeout(name):
+                "⏱️  {name} (timed out)"
+
+# ============================================================================
+# Smoke Test
+# ============================================================================
+
+struct SmokeTest:
+    name: text
+    func: fn() -> bool
+
+# ============================================================================
+# Smoke Test Suite
+# ============================================================================
+
+class SmokeTestSuite:
+    tests: List<SmokeTest>
+    config: SmokeTestConfig
+
+    static fn new(config: SmokeTestConfig) -> SmokeTestSuite:
+        """Create a new smoke test suite.
+
+        Args:
+            config: Test configuration
+
+        Returns:
+            New test suite
+
+        Example:
+            val suite = SmokeTestSuite.new(SmokeTestConfig.default())
+        """
+        SmokeTestSuite(
+            tests: [],
+            config: config
+        )
+
+    static fn new_default() -> SmokeTestSuite:
+        """Create suite with default configuration.
+
+        Returns:
+            New test suite with defaults
+
+        Example:
+            val suite = SmokeTestSuite.new_default()
+        """
+        SmokeTestSuite.new(SmokeTestConfig.default())
+
+    fn test(name: text, func: fn() -> bool) -> SmokeTestSuite:
+        """Add a test to the suite.
+
+        Args:
+            name: Test name for reporting
+            func: Test function returning true on success
+
+        Returns:
+            Self for chaining
+
+        Example:
+            suite.test("homepage loads", \:
+                http.get("/").status == 200
+            )
+        """
+        self.tests.append(SmokeTest(name: name, func: func))
+        self
+
+    fn run() -> List<SmokeTestResult>:
+        """Run all tests in the suite.
+
+        Executes tests with retry logic and respects fail_fast setting.
+
+        Returns:
+            List of test results
+
+        Example:
+            val results = suite.run()
+            if not suite.all_passed(results):
+                rollback_deployment()
+        """
+        var results = []
+
+        for test in self.tests:
+            val result = run_with_retries(test, self.config)
+            results.append(result)
+
+            # Stop on first failure if fail_fast is true
+            if result.is_fail() and self.config.fail_fast:
+                break
+
+        results
+
+    fn all_passed(results: List<SmokeTestResult>) -> bool:
+        """Check if all tests passed.
+
+        Args:
+            results: List of test results
+
+        Returns:
+            true if all tests passed
+
+        Example:
+            if suite.all_passed(results):
+                print "All smoke tests passed!"
+        """
+        for result in results:
+            if not result.is_pass():
+                return false
+        true
+
+# ============================================================================
+# Test Execution
+# ============================================================================
+
+fn run_with_retries(
+    test: SmokeTest,
+    config: SmokeTestConfig
+) -> SmokeTestResult:
+    """Run a single test with retry logic.
+
+    Args:
+        test: The test to run
+        config: Test configuration
+
+    Returns:
+        Test result
+    """
+    for attempt in 0..config.retry_attempts:
+        val start = time.now_ms()
+
+        # Try to run test with timeout
+        val result = run_with_timeout(test.func, config.timeout_secs)
+
+        val duration = time.now_ms() - start
+
+        match result:
+            Ok(success):
+                if success:
+                    return SmokeTestResult::Pass(
+                        test_name: test.name,
+                        duration_ms: duration
+                    )
+                # Test returned false, will retry
+
+            Err(error):
+                # Last attempt, return failure
+                if attempt == config.retry_attempts - 1:
+                    return SmokeTestResult::Fail(
+                        test_name: test.name,
+                        error: error,
+                        attempt: attempt + 1
+                    )
+
+            Timeout:
+                return SmokeTestResult::Timeout(test_name: test.name)
+
+        # Wait before retry (except on last attempt)
+        if attempt < config.retry_attempts - 1:
+            time.sleep(config.retry_delay_secs)
+
+    # All attempts failed
+    SmokeTestResult::Fail(
+        test_name: test.name,
+        error: "Test returned false",
+        attempt: config.retry_attempts
+    )
+
+fn run_with_timeout(
+    func: fn() -> bool,
+    timeout_secs: f64
+) -> Result<bool, text>:
+    """Run function with timeout.
+
+    Args:
+        func: Function to run
+        timeout_secs: Timeout in seconds
+
+    Returns:
+        Ok(result) if completed
+
+    Note:
+        Simple implementation without threading for now.
+        Cannot catch panics - test functions must not panic.
+        Timeout detection happens AFTER function completes.
+        Production version would use thread isolation.
+    """
+    val start = time.now()
+    val result = func()
+    val elapsed = time.now() - start
+
+    if elapsed > timeout_secs:
+        Err("Timeout: test took {elapsed:.2f}s (limit: {timeout_secs:.2f}s)")
+    else:
+        Ok(result)
+
+# ============================================================================
+# Export
+# ============================================================================
+
+export SmokeTestConfig
+export SmokeTestResult
+export SmokeTest
+export SmokeTestSuite
+export run_with_retries

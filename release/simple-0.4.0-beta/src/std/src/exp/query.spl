@@ -1,0 +1,266 @@
+# Experiment Query - Run comparison, filtering, aggregation
+#
+# Query and compare experiment runs stored in .exp/
+
+use std.exp.storage
+use std.exp.run
+
+# ============================================================================
+# Run Summary (lightweight view for listing)
+# ============================================================================
+
+struct RunSummary:
+    """Lightweight run info for listing."""
+    run_id: text
+    status: text
+    start_time: text
+    end_time: text
+    hostname: text
+    tags: [text]
+    config_hash: text
+
+# ============================================================================
+# Query Filters
+# ============================================================================
+
+struct RunFilter:
+    """Filter criteria for querying runs."""
+    status: text?
+    tag: text?
+    after: text?
+    before: text?
+
+impl RunFilter:
+    static fn all() -> RunFilter:
+        RunFilter(status: nil, tag: nil, after: nil, before: nil)
+
+    static fn by_status(status: text) -> RunFilter:
+        RunFilter(status: Some(status), tag: nil, after: nil, before: nil)
+
+    static fn by_tag(tag: text) -> RunFilter:
+        RunFilter(status: nil, tag: Some(tag), after: nil, before: nil)
+
+    fn matches(summary: RunSummary) -> bool:
+        """Check if a run summary matches this filter."""
+        if self.status.? and summary.status != self.status.unwrap():
+            return false
+        if self.tag.?:
+            val target_tag = self.tag.unwrap()
+            var found = false
+            for t in summary.tags:
+                if t == target_tag:
+                    found = true
+            if not found:
+                return false
+        if self.after.? and summary.start_time < self.after.unwrap():
+            return false
+        if self.before.? and summary.start_time > self.before.unwrap():
+            return false
+        true
+
+# ============================================================================
+# Query Functions
+# ============================================================================
+
+pub fn list_runs(filter: RunFilter) -> [RunSummary]:
+    """List runs matching filter criteria."""
+    val run_ids = list_run_ids()
+    var results: [RunSummary] = []
+    for run_id in run_ids:
+        val meta = read_run_meta(run_id)
+        var tags_raw = meta["tags"] ?? ""
+        var tags: [text] = []
+        if tags_raw.?:
+            val parts = "{tags_raw}".split(", ")
+            tags = parts.filter(\t: t.?)
+
+        val summary = RunSummary(
+            run_id: run_id,
+            status: meta["status"] ?? "unknown",
+            start_time: meta["start_time"] ?? "",
+            end_time: meta["end_time"] ?? "",
+            hostname: meta["hostname"] ?? "",
+            tags: tags,
+            config_hash: meta["config_hash"] ?? ""
+        )
+        if filter.matches(summary):
+            results.push(summary)
+    results
+
+pub fn show_run(run_id: text) -> Result<RunDetail, text>:
+    """Get detailed information about a specific run."""
+    if not run_exists(run_id):
+        return Err("Run not found: {run_id}")
+
+    val meta = read_run_meta(run_id)
+    val events = read_events(run_id)
+
+    # Extract metrics from events
+    var metrics: Dict<text, [MetricPoint]> = {}
+    for event in events:
+        if event.kind == "metric":
+            val name = event.data["name"] ?? ""
+            val value_str = event.data["value"] ?? "0"
+            val step_str = event.data["step"] ?? "0"
+            # TODO: parse float/int properly
+            val point = MetricPoint(name: name, value: 0.0, step: 0, timestamp: event.timestamp)
+            if not metrics.contains_key(name):
+                metrics[name] = []
+            metrics[name].push(point)
+
+    Ok(RunDetail(
+        run_id: run_id,
+        meta: meta,
+        events: events,
+        metrics: metrics
+    ))
+
+# ============================================================================
+# Run Diff
+# ============================================================================
+
+struct DiffResult:
+    """Difference between two runs."""
+    config_diffs: [ConfigDiff]
+    metric_diffs: [MetricDiff]
+
+struct ConfigDiff:
+    """A single config value difference."""
+    key: text
+    value_a: text
+    value_b: text
+
+struct MetricDiff:
+    """A metric comparison between two runs."""
+    name: text
+    last_value_a: f64?
+    last_value_b: f64?
+
+pub fn diff_runs(run_id_a: text, run_id_b: text) -> Result<DiffResult, text>:
+    """Compare two runs: config diff + metric diff."""
+    val detail_a = show_run(run_id_a)
+    if detail_a.is_err():
+        return Err(detail_a.unwrap_err())
+    val detail_b = show_run(run_id_b)
+    if detail_b.is_err():
+        return Err(detail_b.unwrap_err())
+
+    val a = detail_a.unwrap()
+    val b = detail_b.unwrap()
+
+    # Config diff
+    var config_diffs: [ConfigDiff] = []
+    val all_keys = collect_keys(a.meta, b.meta)
+    for key in all_keys:
+        val va = a.meta[key] ?? "<missing>"
+        val vb = b.meta[key] ?? "<missing>"
+        if va != vb:
+            config_diffs.push(ConfigDiff(key: key, value_a: va, value_b: vb))
+
+    # Metric diff
+    var metric_diffs: [MetricDiff] = []
+    val all_metric_names = collect_metric_names(a.metrics, b.metrics)
+    for name in all_metric_names:
+        val last_a = last_metric_value(a.metrics, name)
+        val last_b = last_metric_value(b.metrics, name)
+        metric_diffs.push(MetricDiff(name: name, last_value_a: last_a, last_value_b: last_b))
+
+    Ok(DiffResult(config_diffs: config_diffs, metric_diffs: metric_diffs))
+
+# ============================================================================
+# Aggregation
+# ============================================================================
+
+pub fn best_run(metric_name: text, direction: text) -> RunSummary?:
+    """Find the best run by a specific metric."""
+    val runs = list_runs(RunFilter.by_status("completed"))
+    var best: RunSummary? = nil
+    var best_value: f64? = nil
+
+    for summary in runs:
+        val detail = show_run(summary.run_id)
+        if detail.is_err():
+            continue
+        val d = detail.unwrap()
+        val last = last_metric_value(d.metrics, metric_name)
+        if not last.?:
+            continue
+        val v = last.unwrap()
+        if not best_value.?:
+            best = Some(summary)
+            best_value = Some(v)
+        else:
+            val is_better = match direction:
+                case "minimize": v < best_value.unwrap()
+                case _: v > best_value.unwrap()
+            if is_better:
+                best = Some(summary)
+                best_value = Some(v)
+    best
+
+# ============================================================================
+# Internal Types
+# ============================================================================
+
+struct MetricPoint:
+    """A single metric data point."""
+    name: text
+    value: f64
+    step: i64
+    timestamp: text
+
+struct RunDetail:
+    """Full run details for display."""
+    run_id: text
+    meta: Dict<text, text>
+    events: [Event]
+    metrics: Dict<text, [MetricPoint]>
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn collect_keys(a: Dict<text, text>, b: Dict<text, text>) -> [text]:
+    """Collect all unique keys from two dicts."""
+    var seen: Dict<text, bool> = {}
+    var result: [text] = []
+    for k in a.keys():
+        if not seen.contains_key(k):
+            seen[k] = true
+            result.push(k)
+    for k in b.keys():
+        if not seen.contains_key(k):
+            seen[k] = true
+            result.push(k)
+    result
+
+fn collect_metric_names(a: Dict<text, [MetricPoint]>, b: Dict<text, [MetricPoint]>) -> [text]:
+    """Collect all unique metric names."""
+    var seen: Dict<text, bool> = {}
+    var result: [text] = []
+    for k in a.keys():
+        if not seen.contains_key(k):
+            seen[k] = true
+            result.push(k)
+    for k in b.keys():
+        if not seen.contains_key(k):
+            seen[k] = true
+            result.push(k)
+    result
+
+fn last_metric_value(metrics: Dict<text, [MetricPoint]>, name: text) -> f64?:
+    """Get last metric value for a given name."""
+    if not metrics.contains_key(name):
+        return nil
+    val points = metrics[name]
+    if points.is_empty():
+        return nil
+    Some(points[-1].value)
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export RunSummary, RunFilter, RunDetail, MetricPoint
+export DiffResult, ConfigDiff, MetricDiff
+export list_runs, show_run, diff_runs, best_run

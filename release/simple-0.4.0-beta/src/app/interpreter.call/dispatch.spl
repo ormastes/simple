@@ -1,0 +1,349 @@
+# Call Dispatch
+#
+# Priority-based call dispatch for function/method/constructor calls.
+# Port of rust/compiler/src/interpreter_call/mod.rs
+#
+# Priority order:
+# 1. Extern functions (FFI) — checked via EXTERN_FUNCTIONS registry
+# 2. Built-in functions (print, len, type, etc.)
+# 3. BDD framework functions (describe, it, expect, etc.)
+# 4. Environment values (decorated functions, closures, constructors)
+# 5. Regular functions and class constructors
+
+from ..core import {Interpreter, Value, InterpreterError}
+from ..expr import {evaluate}
+from ..ffi import {call_native}
+from builtins import {eval_builtin, is_builtin}
+from function_exec import {exec_function, exec_function_with_captured_env, exec_lambda}
+from class_instantiation import {instantiate_class}
+
+export evaluate_call, dispatch_method_call
+
+# ================================================================
+# Main Call Dispatcher
+# ================================================================
+
+# Evaluate a function/constructor call with priority-based dispatch
+fn evaluate_call(interp: Interpreter, callee_name: text,
+                 args: [Value], named_args: Dict<text, Value>) -> Result<Value, InterpreterError>:
+
+    # Priority 1: Extern functions (FFI)
+    if interp.is_extern_function(callee_name):
+        return call_extern(interp, callee_name, args, named_args)
+
+    # Priority 2: Built-in functions
+    if is_builtin(callee_name):
+        return eval_builtin(interp, callee_name, args)
+
+    # Priority 3: BDD framework functions
+    if is_bdd_function(callee_name):
+        return eval_bdd_call(interp, callee_name, args)
+
+    # Priority 4: Environment values (decorated functions, closures, generators)
+    val env_value = interp.env.get(callee_name)
+    if env_value.?:
+        val func = env_value.unwrap()
+        return call_value(interp, func, args, named_args)
+
+    # Priority 5: Regular functions
+    val func_def = interp.functions.get(callee_name)
+    if func_def.?:
+        return exec_function(interp, func_def.unwrap(), args, named_args, None)
+
+    # Priority 5b: Class constructors
+    val class_def = interp.classes.get(callee_name)
+    if class_def.?:
+        return instantiate_class(interp, callee_name, class_def.unwrap(), args, named_args)
+
+    # Priority 5c: Context object method dispatch
+    if interp.context_object.?:
+        val ctx = interp.context_object.unwrap()
+        val result = dispatch_method_on_value(interp, ctx, callee_name, args)
+        if result.?:
+            return result.unwrap()
+
+    # Not found - generate helpful error with suggestions
+    val suggestions = find_similar_names(interp, callee_name)
+    if suggestions.len() > 0:
+        Err(InterpreterError.NameError(
+            "undefined function '{callee_name}'. Did you mean: {suggestions.join(\", \")}?"))
+    else:
+        Err(InterpreterError.NameError("undefined function '{callee_name}'"))
+
+# ================================================================
+# Call Value (dispatch on value type)
+# ================================================================
+
+# Call a value as a function
+fn call_value(interp: Interpreter, func: Value, args: [Value],
+              named_args: Dict<text, Value>) -> Result<Value, InterpreterError>:
+    match func:
+        case Value.Function(name, def, captured_env):
+            exec_function_with_captured_env(interp, def, args, named_args, captured_env)
+
+        case Value.Lambda(params, body, captured_env):
+            exec_lambda(interp, params, body, args, captured_env)
+
+        case Value.Constructor(class_name):
+            val class_def = interp.classes.get(class_name)
+            if class_def.?:
+                instantiate_class(interp, class_name, class_def.unwrap(), args, named_args)
+            else:
+                Err(InterpreterError.NameError("unknown class '{class_name}'"))
+
+        case Value.Generator(gen):
+            # Calling a generator advances it
+            gen.next()
+
+        case Value.NativeFunction(native_fn):
+            native_fn.call(args)
+
+        case Value.Object(class, fields):
+            # Support __call__ protocol
+            val call_method = interp.find_method(class, "__call__")
+            if call_method.?:
+                exec_function(interp, call_method.unwrap(), args, named_args, Some(func))
+            else:
+                Err(InterpreterError.TypeError("'{class}' is not callable"))
+
+        case _:
+            Err(InterpreterError.TypeError("value is not callable"))
+
+# ================================================================
+# Method Dispatch
+# ================================================================
+
+# Dispatch a method call on an object
+fn dispatch_method_call(interp: Interpreter, receiver: Value, method_name: text,
+                        args: [Value]) -> Result<Value, InterpreterError>:
+    # Try dispatch on value
+    val result = dispatch_method_on_value(interp, receiver, method_name, args)
+    if result.?:
+        return result.unwrap()
+
+    # Try impl_methods registry
+    val type_name = receiver.type_name()
+    val impl_method = interp.find_method(type_name, method_name)
+    if impl_method.?:
+        return exec_function(interp, impl_method.unwrap(), args, {}, Some(receiver))
+
+    # Try trait methods via blanket impls
+    val trait_method = interp.find_trait_method(type_name, method_name)
+    if trait_method.?:
+        return exec_function(interp, trait_method.unwrap(), args, {}, Some(receiver))
+
+    # Try method_missing protocol
+    val missing_handler = interp.find_method(type_name, "method_missing")
+    if missing_handler.?:
+        val method_name_val = Value.string(method_name)
+        val args_val = Value.array(args)
+        return exec_function(interp, missing_handler.unwrap(), [method_name_val, args_val], {}, Some(receiver))
+
+    Err(InterpreterError.AttributeError(
+        "no method '{method_name}' on type '{type_name}'"))
+
+# Dispatch method directly on a value (built-in methods for primitive types)
+fn dispatch_method_on_value(interp: Interpreter, receiver: Value, method_name: text,
+                            args: [Value]) -> Result<Value, InterpreterError>?:
+    match receiver:
+        case Value.Array(_):
+            val result = eval_array_method(interp, receiver, method_name, args)
+            if result.?: return Some(result.unwrap())
+        case Value.String(_):
+            val result = eval_string_method(interp, receiver, method_name, args)
+            if result.?: return Some(result.unwrap())
+        case Value.Dict(_):
+            val result = eval_dict_method(interp, receiver, method_name, args)
+            if result.?: return Some(result.unwrap())
+        case Value.Int(_):
+            val result = eval_int_method(receiver, method_name, args)
+            if result.?: return Some(result.unwrap())
+        case Value.Object(class, fields):
+            # Look up method in class definition
+            val method = interp.find_method(class, method_name)
+            if method.?:
+                return Some(exec_function(interp, method.unwrap(), args, {}, Some(receiver)))
+        case _:
+            pass
+    None
+
+# ================================================================
+# Built-in Type Methods
+# ================================================================
+
+fn eval_array_method(interp: Interpreter, arr: Value, method: text, args: [Value]) -> Result<Value, InterpreterError>?:
+    match method:
+        case "len": Some(Ok(Value.int(arr.len())))
+        case "is_empty": Some(Ok(Value.bool(arr.len() == 0)))
+        case "push": Some(arr.array_push(args[0]))
+        case "pop": Some(arr.array_pop())
+        case "first": Some(Ok(arr.array_first()))
+        case "last": Some(Ok(arr.array_last()))
+        case "contains": Some(Ok(Value.bool(arr.array_contains(args[0]))))
+        case "reversed": Some(Ok(arr.array_reversed()))
+        case "sorted": Some(Ok(arr.array_sorted()))
+        case "join":
+            val sep = if args.len() > 0: args[0].as_string() ?? "" else: ""
+            Some(Ok(arr.array_join(sep)))
+        case "map":
+            if args.len() > 0:
+                Some(arr.array_map(interp, args[0]))
+            else:
+                Some(Err(InterpreterError.ArityError("map requires a function argument")))
+        case "filter":
+            if args.len() > 0:
+                Some(arr.array_filter(interp, args[0]))
+            else:
+                Some(Err(InterpreterError.ArityError("filter requires a function argument")))
+        case "any":
+            if args.len() > 0:
+                Some(arr.array_any(interp, args[0]))
+            else:
+                Some(Err(InterpreterError.ArityError("any requires a function argument")))
+        case "all":
+            if args.len() > 0:
+                Some(arr.array_all(interp, args[0]))
+            else:
+                Some(Err(InterpreterError.ArityError("all requires a function argument")))
+        case "flatten": Some(Ok(arr.array_flatten()))
+        case "enumerate": Some(Ok(arr.array_enumerate()))
+        case "zip":
+            if args.len() > 0:
+                Some(Ok(arr.array_zip(args[0])))
+            else:
+                Some(Err(InterpreterError.ArityError("zip requires an array argument")))
+        case "dedup": Some(Ok(arr.array_dedup()))
+        case "slice":
+            if args.len() >= 2:
+                val start = args[0].as_int() ?? 0
+                val end = args[1].as_int() ?? arr.len()
+                Some(Ok(arr.array_slice(start, end)))
+            else:
+                None
+        case _: None
+
+fn eval_string_method(interp: Interpreter, s: Value, method: text, args: [Value]) -> Result<Value, InterpreterError>?:
+    match method:
+        case "len": Some(Ok(Value.int(s.string_len())))
+        case "is_empty": Some(Ok(Value.bool(s.string_len() == 0)))
+        case "contains": Some(Ok(Value.bool(s.string_contains(args[0].as_string() ?? ""))))
+        case "starts_with": Some(Ok(Value.bool(s.string_starts_with(args[0].as_string() ?? ""))))
+        case "ends_with": Some(Ok(Value.bool(s.string_ends_with(args[0].as_string() ?? ""))))
+        case "upper": Some(Ok(Value.string(s.string_upper())))
+        case "lower": Some(Ok(Value.string(s.string_lower())))
+        case "trim": Some(Ok(Value.string(s.string_trim())))
+        case "split":
+            val sep = if args.len() > 0: args[0].as_string() ?? " " else: " "
+            Some(Ok(s.string_split(sep)))
+        case "replace":
+            if args.len() >= 2:
+                Some(Ok(s.string_replace(args[0].as_string() ?? "", args[1].as_string() ?? "")))
+            else:
+                None
+        case "chars": Some(Ok(s.string_chars()))
+        case "repeat":
+            if args.len() > 0:
+                Some(Ok(s.string_repeat(args[0].as_int() ?? 1)))
+            else:
+                None
+        case "parse_int": Some(s.string_parse_int())
+        case "parse_float": Some(s.string_parse_float())
+        case _: None
+
+fn eval_dict_method(interp: Interpreter, d: Value, method: text, args: [Value]) -> Result<Value, InterpreterError>?:
+    match method:
+        case "len": Some(Ok(Value.int(d.dict_len())))
+        case "is_empty": Some(Ok(Value.bool(d.dict_len() == 0)))
+        case "has": Some(Ok(Value.bool(d.dict_has(args[0]))))
+        case "keys": Some(Ok(d.dict_keys()))
+        case "values": Some(Ok(d.dict_values()))
+        case "entries": Some(Ok(d.dict_entries()))
+        case "get":
+            if args.len() >= 2:
+                Some(Ok(d.dict_get_or(args[0], args[1])))
+            elif args.len() >= 1:
+                Some(Ok(d.dict_get(args[0])))
+            else:
+                None
+        case "merge":
+            if args.len() > 0:
+                Some(Ok(d.dict_merge(args[0])))
+            else:
+                None
+        case _: None
+
+fn eval_int_method(n: Value, method: text, args: [Value]) -> Result<Value, InterpreterError>?:
+    match method:
+        case "abs": Some(Ok(Value.int(n.as_int().abs())))
+        case "to_float": Some(Ok(Value.float(n.as_int() as f64)))
+        case "to_string": Some(Ok(Value.string(n.as_int().to_string())))
+        case _: None
+
+# ================================================================
+# Extern Function Dispatch
+# ================================================================
+
+fn call_extern(interp: Interpreter, name: text, args: [Value],
+               named_args: Dict<text, Value>) -> Result<Value, InterpreterError>:
+    # Delegate to FFI bridge
+    call_native(name, args)
+
+# ================================================================
+# BDD Functions
+# ================================================================
+
+val BDD_FUNCTIONS = ["describe", "context", "it", "test", "example", "specify",
+                     "expect", "before_each", "after_each", "let_", "subject",
+                     "shared_examples", "include_examples", "pending"]
+
+fn is_bdd_function(name: text) -> bool:
+    BDD_FUNCTIONS.contains(name)
+
+fn eval_bdd_call(interp: Interpreter, name: text, args: [Value]) -> Result<Value, InterpreterError>:
+    # Delegate BDD calls to the extern function dispatcher
+    # BDD functions are implemented in Rust for integration with the test framework
+    call_native(name, args)
+
+# ================================================================
+# Helpers
+# ================================================================
+
+# Find similar names for error messages
+fn find_similar_names(interp: Interpreter, name: text) -> [text]:
+    var suggestions = []
+    val threshold = 2  # Max edit distance
+
+    # Check functions
+    for fn_name in interp.function_names():
+        if edit_distance(name, fn_name) <= threshold:
+            suggestions.push(fn_name)
+
+    # Check env
+    for var_name in interp.env.names():
+        if edit_distance(name, var_name) <= threshold:
+            suggestions.push(var_name)
+
+    suggestions[0..3]  # Return at most 3 suggestions
+
+# Simple Levenshtein edit distance
+fn edit_distance(a: text, b: text) -> i64:
+    val m = a.len()
+    val n = b.len()
+    if m == 0: return n
+    if n == 0: return m
+
+    var prev = [for i in 0..=n: i]
+    var curr = [for _ in 0..=n: 0]
+
+    for i in 1..=m:
+        curr[0] = i
+        for j in 1..=n:
+            val cost = if a[i - 1] == b[j - 1]: 0 else: 1
+            curr[j] = min(
+                prev[j] + 1,        # deletion
+                min(curr[j - 1] + 1, # insertion
+                    prev[j - 1] + cost)) # substitution
+        prev = curr.clone()
+        curr = [for _ in 0..=n: 0]
+
+    prev[n]

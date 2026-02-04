@@ -1,0 +1,179 @@
+# @pending
+"""
+ConfigEnv Specification
+Feature: Configuration and Environment Variable Parsing
+Category: Infrastructure, Configuration
+Status: Complete
+
+Tests for configuration, environment variables, and command-line argument
+parsing including key-value operations, integer/boolean parsing, and merging.
+"""
+
+use infra.config_env.ConfigEnv
+
+describe "ConfigEnv":
+    """
+    Tests for ConfigEnv key-value operations and argument parsing.
+    """
+    context "Basic operations":
+        it "should create an empty ConfigEnv":
+            val config = ConfigEnv.new()
+            expect(config.is_empty())
+            expect(config.len() == 0)
+
+        it "should set and get values":
+            var config = ConfigEnv.new()
+            config.set("key1", "value1")
+            config.set("key2", "value2")
+
+            expect(config.get("key1") == Some("value1"))
+            expect(config.get("key2") == Some("value2"))
+            expect(config.get("nonexistent") == nil)
+
+        it "should get_or with default values":
+            var config = ConfigEnv.new()
+            config.set("existing", "value")
+
+            expect(config.get_or("existing", "default") == "value")
+            expect(config.get_or("missing", "default") == "default")
+
+        it "should check if key exists":
+            var config = ConfigEnv.new()
+            config.set("key", "value")
+
+            expect(config.contains("key"))
+            expect(not config.contains("missing"))
+
+        it "should get all keys":
+            var config = ConfigEnv.new()
+            config.set("a", "1")
+            config.set("b", "2")
+
+            val keys = config.keys()
+            expect(keys.len() == 2)
+            expect(keys.contains("a"))
+            expect(keys.contains("b"))
+
+    context "Integer operations":
+        it "should parse integers":
+            var config = ConfigEnv.new()
+            config.set("port", "8080")
+            config.set("count", "-5")
+            config.set("invalid", "not_a_number")
+
+            expect(config.get_int("port") == Some(8080))
+            expect(config.get_int("count") == Some(-5))
+            # Note: parse_int in Simple may not return None for invalid input
+            expect(config.get_int("missing") == nil)
+
+        it "should get_int_or with default":
+            var config = ConfigEnv.new()
+            config.set("port", "8080")
+
+            expect(config.get_int_or("port", 3000) == 8080)
+            expect(config.get_int_or("missing", 3000) == 3000)
+
+    context "Boolean operations":
+        it "should parse boolean values":
+            var config = ConfigEnv.new()
+            config.set("enabled", "true")
+            config.set("disabled", "false")
+            config.set("yes_val", "yes")
+            config.set("no_val", "no")
+            config.set("one", "1")
+            config.set("zero", "0")
+            config.set("on_val", "ON")
+            config.set("off_val", "OFF")
+            config.set("invalid", "maybe")
+
+            expect(config.get_bool("enabled") == Some(true))
+            expect(config.get_bool("disabled") == Some(false))
+            expect(config.get_bool("yes_val") == Some(true))
+            expect(config.get_bool("no_val") == Some(false))
+            expect(config.get_bool("one") == Some(true))
+            expect(config.get_bool("zero") == Some(false))
+            expect(config.get_bool("on_val") == Some(true))
+            expect(config.get_bool("off_val") == Some(false))
+            expect(config.get_bool("invalid") == nil)
+            expect(config.get_bool("missing") == nil)
+
+        it "should get_bool_or with default":
+            var config = ConfigEnv.new()
+            config.set("flag", "true")
+
+            expect(config.get_bool_or("flag", false))
+            expect(config.get_bool_or("missing", true))
+            expect(not config.get_bool_or("missing", false))
+
+    context "Argument parsing":
+        it "should parse --key=value format":
+            val args = ["--port=8080", "--host=localhost"]
+            val config = ConfigEnv.from_args(args)
+
+            expect(config.get("port") == Some("8080"))
+            expect(config.get("host") == Some("localhost"))
+
+        it "should parse --key value format":
+            val args = ["--port", "8080", "--host", "localhost"]
+            val config = ConfigEnv.from_args(args)
+
+            expect(config.get("port") == Some("8080"))
+            expect(config.get("host") == Some("localhost"))
+
+        it "should parse short flags -k value":
+            val args = ["-p", "8080", "-h", "localhost"]
+            val config = ConfigEnv.from_args(args)
+
+            expect(config.get("p") == Some("8080"))
+            expect(config.get("h") == Some("localhost"))
+
+        it "should parse boolean flags":
+            val args = ["--verbose", "--debug"]
+            val config = ConfigEnv.from_args(args)
+
+            expect(config.get("verbose") == Some("true"))
+            expect(config.get("debug") == Some("true"))
+
+        it "should parse positional arguments":
+            val args = ["input.txt", "output.txt", "--flag"]
+            val config = ConfigEnv.from_args(args)
+
+            expect(config.get("_0") == Some("input.txt"))
+            expect(config.get("_1") == Some("output.txt"))
+            expect(config.get("flag") == Some("true"))
+
+    context "Merging configurations":
+        it "should merge two configs":
+            var config1 = ConfigEnv.new()
+            config1.set("key1", "value1")
+            config1.set("key2", "original")
+
+            var config2 = ConfigEnv.new()
+            config2.set("key2", "overridden")
+            config2.set("key3", "value3")
+
+            config1.merge(config2)
+
+            expect(config1.get("key1") == Some("value1"))
+            expect(config1.get("key2") == Some("overridden"))
+            expect(config1.get("key3") == Some("value3"))
+
+        it "should chain with_args":
+            var config = ConfigEnv.new()
+            config.set("default", "value")
+            config.set("port", "3000")
+
+            val args = ["--port=8080"]
+            config = config.with_args(args)
+
+            expect(config.get("default") == Some("value"))
+            expect(config.get("port") == Some("8080"))  # overridden
+
+    context "Iteration":
+        it "should iterate over key-value pairs":
+            var config = ConfigEnv.new()
+            config.set("a", "1")
+            config.set("b", "2")
+
+            val pairs = config.iter()
+            expect(pairs.len() == 2)

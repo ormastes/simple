@@ -1,0 +1,380 @@
+# Compiler FFI Interface
+#
+# This module provides FFI wrappers for compiler functionality, replacing
+# direct imports of compiler modules. This creates clean separation between
+# the loader/linker (orchestration) and the compiler (code generation).
+#
+# Architecture:
+# - Simple code (loader/linker) calls FFI functions
+# - Rust implements compiler functionality
+# - No circular dependencies
+# - Clean bootstrap process
+
+# ============================================================================
+# Type Serialization Format
+# ============================================================================
+#
+# Types are serialized as JSON strings for FFI boundary crossing:
+#
+# Int type:     {"kind": "int", "bits": 64, "signed": true}
+# Float type:   {"kind": "float", "bits": 64}
+# Bool type:    {"kind": "bool"}
+# String type:  {"kind": "string"}
+# Named type:   {"kind": "named", "name": "Vec", "args": [...]}
+# Array type:   {"kind": "array", "elem": {...}}
+#
+# This avoids complex FFI struct marshalling.
+
+# ============================================================================
+# Compiler Context Handle
+# ============================================================================
+
+struct CompilerContext:
+    """Opaque handle to compiler context (managed by Rust).
+
+    Represents a type inference context with:
+    - Type variable counters
+    - Substitution maps
+    - Constraint sets
+    - Symbol tables
+    """
+    handle: i64
+
+# ============================================================================
+# FFI Function Declarations
+# ============================================================================
+
+extern fn compiler_create_context() -> i64:
+    """Create a new compiler context.
+
+    Returns: Opaque handle to context (managed by Rust side)
+    """
+    ...
+
+extern fn compiler_destroy_context(ctx: i64):
+    """Destroy a compiler context and free resources.
+
+    Args:
+        ctx: Context handle from compiler_create_context()
+    """
+    ...
+
+extern fn compiler_infer_types(
+    ctx: i64,
+    template_name: text,
+    usage_hints_json: text
+) -> text:
+    """Infer type arguments for a generic template.
+
+    Args:
+        ctx: Context handle
+        template_name: Name of template (e.g., "Vec")
+        usage_hints_json: JSON array of usage sites with type hints
+
+    Returns:
+        JSON array of inferred types, or error message
+
+    Example:
+        Input: "Vec", [{"context": "i64"}]
+        Output: {"ok": [{"kind": "int", "bits": 64, "signed": true}]}
+        Error:  {"err": "Cannot infer type for parameter T"}
+    """
+    ...
+
+extern fn compiler_instantiate_template(
+    ctx: i64,
+    template_bytes: [u8],
+    template_len: i64,
+    type_args_json: text
+) -> [u8]:
+    """Instantiate a generic template with concrete type arguments.
+
+    Args:
+        ctx: Context handle
+        template_bytes: Serialized template AST/MIR
+        template_len: Length of template_bytes
+        type_args_json: JSON array of concrete types
+
+    Returns:
+        Compiled machine code bytes, or empty on error
+
+    Process:
+        1. Deserialize template from bytes
+        2. Parse type arguments from JSON
+        3. Type check with substituted types
+        4. Monomorphize template
+        5. Generate code (MIR -> machine code)
+        6. Return compiled bytes
+    """
+    ...
+
+extern fn compiler_check_types(
+    ctx: i64,
+    code_bytes: [u8],
+    code_len: i64
+) -> text:
+    """Type check code and return result.
+
+    Args:
+        ctx: Context handle
+        code_bytes: Code to type check
+        code_len: Length of code_bytes
+
+    Returns:
+        JSON result: {"ok": true} or {"err": "error message"}
+    """
+    ...
+
+extern fn compiler_parse_template(
+    template_bytes: [u8],
+    template_len: i64
+) -> text:
+    """Parse template metadata from serialized bytes.
+
+    Args:
+        template_bytes: Serialized template
+        template_len: Length
+
+    Returns:
+        JSON with template info:
+        {
+            "name": "Vec",
+            "type_params": ["T"],
+            "kind": "struct"
+        }
+    """
+    ...
+
+# ============================================================================
+# Simple Wrapper API
+# ============================================================================
+
+impl CompilerContext:
+    static fn create() -> CompilerContext:
+        """Create a new compiler context."""
+        val handle = compiler_create_context()
+        CompilerContext(handle: handle)
+
+    fn destroy():
+        """Destroy this context and free resources."""
+        compiler_destroy_context(self.handle)
+
+    fn infer_types(template_name: text, usage_hints: [UsageHint]) -> Result<[TypeInfo], text>:
+        """Infer type arguments for a template.
+
+        Args:
+            template_name: Name of template
+            usage_hints: Usage site information for inference
+
+        Returns:
+            Ok([TypeInfo]) - Inferred types
+            Err(message) - Inference failed
+        """
+        val hints_json = serialize_usage_hints(usage_hints)
+        val result_json = compiler_infer_types(self.handle, template_name, hints_json)
+        parse_type_result(result_json)
+
+    fn instantiate(template: TemplateBytes, type_args: [TypeInfo]) -> Result<[u8], text>:
+        """Instantiate template with type arguments.
+
+        Args:
+            template: Serialized template
+            type_args: Concrete types
+
+        Returns:
+            Ok([u8]) - Compiled code
+            Err(message) - Compilation failed
+        """
+        val types_json = serialize_types(type_args)
+        val code = compiler_instantiate_template(
+            self.handle,
+            template.bytes,
+            template.bytes.len() as i64,
+            types_json
+        )
+
+        if code.is_empty():
+            Err("Template instantiation failed")
+        else:
+            Ok(code)
+
+    fn check_types(code: [u8]) -> Result<(), text>:
+        """Type check code.
+
+        Args:
+            code: Code bytes to check
+
+        Returns:
+            Ok(()) - Type check passed
+            Err(message) - Type errors
+        """
+        val result_json = compiler_check_types(self.handle, code, code.len() as i64)
+        parse_check_result(result_json)
+
+# ============================================================================
+# Helper Types
+# ============================================================================
+
+struct TemplateBytes:
+    """Serialized template data."""
+    bytes: [u8]
+    name: text
+    param_count: i32
+
+struct TypeInfo:
+    """Type information (simplified for FFI)."""
+    kind: TypeKind
+    name: text
+    args: [TypeInfo]
+
+enum TypeKind:
+    Int
+    Float
+    Bool
+    String
+    Named
+    Array
+    Unknown
+
+struct UsageHint:
+    """Usage site hint for type inference."""
+    file: text
+    location: text
+    context_type: TypeInfo?
+
+# ============================================================================
+# Serialization Helpers
+# ============================================================================
+
+fn serialize_types(types: [TypeInfo]) -> text:
+    """Serialize types to JSON for FFI.
+
+    Format: [{"kind": "int", "bits": 64, ...}, ...]
+    """
+    var json_parts: [text] = []
+
+    for ty in types:
+        val ty_json = match ty.kind:
+            case Int: "{\"kind\": \"int\", \"bits\": 64, \"signed\": true}"
+            case Float: "{\"kind\": \"float\", \"bits\": 64}"
+            case Bool: "{\"kind\": \"bool\"}"
+            case String: "{\"kind\": \"string\"}"
+            case Named: "{\"kind\": \"named\", \"name\": \"{ty.name}\"}"
+            case Array: "{\"kind\": \"array\"}"
+            case Unknown: "{\"kind\": \"unknown\"}"
+
+        json_parts = json_parts.push(ty_json)
+
+    "[{json_parts.join(\", \")}]"
+
+fn serialize_usage_hints(hints: [UsageHint]) -> text:
+    """Serialize usage hints to JSON.
+
+    Format: [{"file": "...", "location": "...", "context": {...}}, ...]
+    """
+    var json_parts: [text] = []
+
+    for hint in hints:
+        val context_json = if hint.context_type.?:
+            val ctx = hint.context_type.unwrap()
+            serialize_types([ctx])
+        else:
+            "null"
+
+        val hint_json = "{\"file\": \"{hint.file}\", \"location\": \"{hint.location}\", \"context\": {context_json}}"
+        json_parts = json_parts.push(hint_json)
+
+    "[{json_parts.join(\", \")}]"
+
+fn parse_type_result(json: text) -> Result<[TypeInfo], text>:
+    """Parse type inference result from JSON.
+
+    Input: {"ok": [...]} or {"err": "message"}
+    """
+    # TODO: Implement proper JSON parsing
+    # For now, placeholder that assumes success
+    if json.contains("\"err\""):
+        val error_msg = extract_error_message(json)
+        Err(error_msg)
+    else:
+        # Parse types from JSON
+        Ok([])
+
+fn parse_check_result(json: text) -> Result<(), text>:
+    """Parse type check result from JSON.
+
+    Input: {"ok": true} or {"err": "message"}
+    """
+    if json.contains("\"err\""):
+        val error_msg = extract_error_message(json)
+        Err(error_msg)
+    else:
+        Ok(())
+
+fn extract_error_message(json: text) -> text:
+    """Extract error message from JSON error result.
+
+    Input: {"err": "error message"}
+    Output: "error message"
+    """
+    # TODO: Implement proper JSON parsing
+    # For now, simple string extraction
+    json.replace("{\"err\": \"", "").replace("\"}", "")
+
+# ============================================================================
+# Type Conversion Helpers
+# ============================================================================
+
+fn type_from_string(s: text) -> TypeInfo:
+    """Parse type from string name.
+
+    Args:
+        s: Type name ("i64", "f64", "bool", "str", etc.)
+
+    Returns:
+        TypeInfo with appropriate kind
+    """
+    match s:
+        case "i64": TypeInfo(kind: TypeKind.Int, name: "i64", args: [])
+        case "i32": TypeInfo(kind: TypeKind.Int, name: "i32", args: [])
+        case "f64": TypeInfo(kind: TypeKind.Float, name: "f64", args: [])
+        case "bool": TypeInfo(kind: TypeKind.Bool, name: "bool", args: [])
+        case "str": TypeInfo(kind: TypeKind.String, name: "str", args: [])
+        case _: TypeInfo(kind: TypeKind.Named, name: s, args: [])
+
+fn type_to_string(ty: TypeInfo) -> text:
+    """Convert type to string representation.
+
+    Args:
+        ty: Type information
+
+    Returns:
+        String representation ("i64", "Vec<i64>", etc.)
+    """
+    match ty.kind:
+        case Int: ty.name
+        case Float: ty.name
+        case Bool: "bool"
+        case String: "str"
+        case Named:
+            if ty.args.is_empty():
+                ty.name
+            else:
+                val arg_strs = ty.args.map(\a: type_to_string(a)).join(", ")
+                "{ty.name}<{arg_strs}>"
+        case Array: "[{type_to_string(ty.args[0])}]"
+        case Unknown: "unknown"
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export CompilerContext
+export TemplateBytes
+export TypeInfo
+export TypeKind
+export UsageHint
+export type_from_string
+export type_to_string
+export serialize_types
+export serialize_usage_hints

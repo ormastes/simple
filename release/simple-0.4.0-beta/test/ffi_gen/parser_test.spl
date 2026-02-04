@@ -1,0 +1,105 @@
+# @pending
+# FFI Generator - Parser Unit Test
+#
+# Tests that the parser correctly extracts @Lib annotations and extern class declarations.
+# Run: simple test/ffi_gen/parser_test.spl
+
+use app.ffi_gen.parser (parse_lib_externs, parse_lib_annotation, parse_method_line, parse_params)
+
+fn test_parse_simple_lib():
+    val source = "@Lib(lang: \"rust\", name: \"regex\", version: \"1.10\")\nextern class Regex:\n    static fn new(pattern: text) -> Regex\n    fn is_match(input: text) -> bool\n"
+
+    val specs = parse_lib_externs(source, "test.spl")
+
+    assert specs.len() == 1, "Expected 1 spec, got {specs.len()}"
+
+    val spec = specs[0]
+    assert spec.lib_lang == "rust", "Expected lang=rust, got {spec.lib_lang}"
+    assert spec.lib_name == "regex", "Expected name=regex, got {spec.lib_name}"
+    assert spec.lib_version == "1.10", "Expected version=1.10, got {spec.lib_version}"
+    assert spec.class_name == "Regex", "Expected class=Regex, got {spec.class_name}"
+    assert spec.methods.len() == 2, "Expected 2 methods, got {spec.methods.len()}"
+
+    val m0 = spec.methods[0]
+    assert m0.name == "new", "Expected method name=new, got {m0.name}"
+    assert m0.kind == "static", "Expected kind=static, got {m0.kind}"
+    assert m0.return_type == "Regex", "Expected return=Regex, got {m0.return_type}"
+    assert m0.params.len() == 1, "Expected 1 param, got {m0.params.len()}"
+    assert m0.params[0].name == "pattern", "Expected param name=pattern"
+    assert m0.params[0].type_name == "text", "Expected param type=text"
+
+    val m1 = spec.methods[1]
+    assert m1.name == "is_match", "Expected method name=is_match, got {m1.name}"
+    assert m1.kind == "immutable", "Expected kind=immutable, got {m1.kind}"
+    assert m1.return_type == "bool", "Expected return=bool, got {m1.return_type}"
+
+    print "PASS: test_parse_simple_lib"
+
+fn test_parse_lib_with_features():
+    val source = "@Lib(lang: \"rust\", name: \"serde_json\", version: \"1.0\", features: [\"preserve_order\"])\nextern class JsonValue:\n    static fn from_str(s: text) -> JsonValue\n    fn to_string() -> text\n"
+
+    val specs = parse_lib_externs(source, "test.spl")
+    assert specs.len() == 1, "Expected 1 spec"
+
+    val spec = specs[0]
+    assert spec.lib_name == "serde_json", "Expected name=serde_json"
+    assert spec.lib_features.len() == 1, "Expected 1 feature"
+    assert spec.lib_features[0] == "preserve_order", "Expected feature=preserve_order"
+
+    print "PASS: test_parse_lib_with_features"
+
+fn test_parse_c_lib():
+    val source = "@Lib(lang: \"c\", name: \"sqlite3\")\nextern class Sqlite3:\n    static fn open(path: text) -> Sqlite3\n    fn exec(sql: text) -> i32\n    fn close()\n"
+
+    val specs = parse_lib_externs(source, "test.spl")
+    assert specs.len() == 1, "Expected 1 spec"
+
+    val spec = specs[0]
+    assert spec.lib_lang == "c", "Expected lang=c"
+    assert spec.lib_name == "sqlite3", "Expected name=sqlite3"
+    assert spec.methods.len() == 3, "Expected 3 methods"
+
+    val close_method = spec.methods[2]
+    assert close_method.name == "close", "Expected method=close"
+    assert close_method.return_type == "", "Expected empty return type for close"
+
+    print "PASS: test_parse_c_lib"
+
+fn test_parse_mutable_method():
+    val source = "@Lib(lang: \"rust\", name: \"mylib\", version: \"0.1\")\nextern class Buffer:\n    static fn new(capacity: i64) -> Buffer\n    me push(value: i64)\n    fn len() -> i64\n"
+
+    val specs = parse_lib_externs(source, "test.spl")
+    assert specs.len() == 1, "Expected 1 spec"
+
+    val push_method = specs[0].methods[1]
+    assert push_method.name == "push", "Expected method=push"
+    assert push_method.kind == "mutable", "Expected kind=mutable"
+
+    print "PASS: test_parse_mutable_method"
+
+fn test_parse_no_annotations():
+    val source = "fn main():\n    print \"hello\"\n"
+    val specs = parse_lib_externs(source, "test.spl")
+    assert specs.len() == 0, "Expected 0 specs for file without @Lib"
+    print "PASS: test_parse_no_annotations"
+
+fn test_parse_multiple_classes():
+    val source = "@Lib(lang: \"rust\", name: \"regex\", version: \"1.10\")\nextern class Regex:\n    static fn new(pattern: text) -> Regex\n\n@Lib(lang: \"rust\", name: \"serde_json\", version: \"1.0\")\nextern class JsonValue:\n    static fn parse(s: text) -> JsonValue\n"
+
+    val specs = parse_lib_externs(source, "test.spl")
+    assert specs.len() == 2, "Expected 2 specs, got {specs.len()}"
+    assert specs[0].class_name == "Regex", "Expected first class=Regex"
+    assert specs[1].class_name == "JsonValue", "Expected second class=JsonValue"
+
+    print "PASS: test_parse_multiple_classes"
+
+fn main() -> i64:
+    test_parse_simple_lib()
+    test_parse_lib_with_features()
+    test_parse_c_lib()
+    test_parse_mutable_method()
+    test_parse_no_annotations()
+    test_parse_multiple_classes()
+    print ""
+    print "All parser tests passed."
+    0

@@ -1,0 +1,574 @@
+# Simple Language Linter
+# Semantic lints for code quality and safety
+# Usage: simple_lint <file.spl> [--deny-all] [--warn-all]
+
+# I/O imports
+use app.io.mod (file_read, file_exists, file_write, get_args, is_dir)
+
+# Import EasyFix data types from stdlib
+use std.tooling.easy_fix.*
+
+# Async file I/O wrapper
+async fn read_file(path: String) -> Result<String, String>:
+    val file_content = file_read(path)
+    if file_content == "":
+        return Err("Failed to read file: {path}")
+    return Ok(file_content)
+
+# Lint levels
+enum LintLevel:
+    Allow
+    Warn
+    Deny
+
+# Lint categories
+enum LintCategory:
+    Safety      # Memory safety, null checks
+    Correctness # Logic errors, type mismatches
+    Warning     # Potential issues
+    Style       # Code style recommendations
+    Concurrency # Concurrency-related issues
+
+class Lint:
+    code: String
+    level: LintLevel
+    category: LintCategory
+    message: String
+    fix_hint: Option<String>
+    easy_fix: Option<EasyFix>
+
+    fn new(code: String, level: LintLevel, category: LintCategory, message: String) -> Lint:
+        Lint(
+            code: code,
+            level: level,
+            category: category,
+            message: message,
+            fix_hint: nil,
+            easy_fix: nil
+        )
+
+    fn with_fix(hint: String) -> Lint:
+        Lint(
+            code: self.code,
+            level: self.level,
+            category: self.category,
+            message: self.message,
+            fix_hint: Some(hint),
+            easy_fix: self.easy_fix
+        )
+
+    fn with_easy_fix(fix: EasyFix) -> Lint:
+        Lint(
+            code: self.code,
+            level: self.level,
+            category: self.category,
+            message: self.message,
+            fix_hint: self.fix_hint,
+            easy_fix: Some(fix)
+        )
+
+class LintResult:
+    file_path: String
+    line: Int
+    column: Int
+    lint: Lint
+
+    fn new(file_path: String, line: Int, column: Int, lint: Lint) -> LintResult:
+        LintResult(
+            file_path: file_path,
+            line: line,
+            column: column,
+            lint: lint
+        )
+
+    fn format() -> String:
+        var level_str = "unknown"
+        match self.lint.level:
+            case Allow:
+                level_str = "allow"
+            case Warn:
+                level_str = "warning"
+            case Deny:
+                level_str = "error"
+
+        var output = self.file_path + ":" + self.line.to_string() + ":" + self.column.to_string() + ": " + level_str + "[" + self.lint.code + "]: " + self.lint.message
+
+        match self.lint.fix_hint:
+            case Some(hint):
+                output = output + "\n  hint: " + hint
+            case nil:
+                val _ = 0
+
+        match self.lint.easy_fix:
+            case Some(fix):
+                output = output + "\n  fix: available [{fix.id}] ({fix.confidence_str()})"
+            case nil:
+                val _ = 0
+
+        return output
+
+    fn has_easy_fix() -> Bool:
+        self.lint.easy_fix.? == true
+
+# Valid TODO areas and priorities
+val TODO_AREAS = ["runtime", "codegen", "compiler", "parser", "type",
+                  "stdlib", "gpu", "ui", "test", "driver", "loader", "pkg", "sdn"]
+val TODO_PRIORITIES = ["P0", "P1", "P2", "P3", "critical", "high", "medium", "low"]
+
+class Linter:
+    lints: List<Lint>
+    results: List<LintResult>
+
+    static fn new() -> Linter:
+        var lints = []
+        
+        # Safety lints
+        lints.push(Lint.new("S001", LintLevel.Deny, LintCategory.Safety, 
+            "Unused Result type (must use .unwrap(), .expect(), or match)"))
+        lints.push(Lint.new("S002", LintLevel.Deny, LintCategory.Safety,
+            "Potential null pointer dereference"))
+        lints.push(Lint.new("S003", LintLevel.Warn, LintCategory.Safety,
+            "Unsafe block without safety comment"))
+        
+        # Correctness lints
+        lints.push(Lint.new("C001", LintLevel.Deny, LintCategory.Correctness,
+            "Unreachable code after return/break/continue"))
+        lints.push(Lint.new("C002", LintLevel.Warn, LintCategory.Correctness,
+            "Non-exhaustive match (add catch-all case)"))
+        lints.push(Lint.new("C003", LintLevel.Warn, LintCategory.Correctness,
+            "Comparison of incompatible types"))
+        
+        # Warning lints
+        lints.push(Lint.new("W001", LintLevel.Warn, LintCategory.Warning,
+            "Unused variable (prefix with _ to silence)"))
+        lints.push(Lint.new("W002", LintLevel.Warn, LintCategory.Warning,
+            "Unused import"))
+        lints.push(Lint.new("W003", LintLevel.Warn, LintCategory.Warning,
+            "Dead code"))
+        
+        # Style lints
+        lints.push(Lint.new("ST001", LintLevel.Allow, LintCategory.Style,
+            "Function name should be snake_case"))
+        lints.push(Lint.new("ST002", LintLevel.Allow, LintCategory.Style,
+            "Class name should be PascalCase"))
+        lints.push(Lint.new("ST003", LintLevel.Allow, LintCategory.Style,
+            "Constant should be UPPER_SNAKE_CASE"))
+        
+        # Concurrency lints
+        lints.push(Lint.new("CC001", LintLevel.Deny, LintCategory.Concurrency,
+            "Shared mutable state without synchronization"))
+        lints.push(Lint.new("CC002", LintLevel.Warn, LintCategory.Concurrency,
+            "Send type used without thread safety guarantee"))
+
+        # TODO/FIXME format lints (T00x rules)
+        lints.push(Lint.new("T001", LintLevel.Warn, LintCategory.Style,
+            "TODO/FIXME missing [area][priority] format"))
+        lints.push(Lint.new("T002", LintLevel.Warn, LintCategory.Style,
+            "TODO/FIXME has invalid area"))
+        lints.push(Lint.new("T003", LintLevel.Warn, LintCategory.Style,
+            "TODO/FIXME has invalid priority"))
+        lints.push(Lint.new("T004", LintLevel.Deny, LintCategory.Style,
+            "P0/critical TODO must have issue number"))
+
+        # Import/Module lints (I00x rules)
+        lints.push(Lint.new("I001", LintLevel.Deny, LintCategory.Correctness,
+            "Unfold subpackage directory does not exist"))
+        lints.push(Lint.new("I002", LintLevel.Deny, LintCategory.Correctness,
+            "Unfold subpackage missing __init__.spl"))
+        lints.push(Lint.new("I003", LintLevel.Deny, LintCategory.Correctness,
+            "Unfold declaration in non-directory module"))
+
+        Linter(lints: lints, results: [])
+    
+    async fn lint_file(self, path: String) -> Result<List<LintResult>, String>:
+        # Read file using async file I/O
+        val file_content = await read_file(path)
+        match file_content:
+            case Err(e):
+                return Err(e)
+            case Ok(content):
+                # Run simple pattern-based lints
+                val lines = content.split("\n")
+                var line_num = 1
+
+                for line in lines:
+                    self.check_line(path, line_num, line)
+                    line_num = line_num + 1
+
+                # Run shared EasyFix rules and attach as lint results
+                val shared_fixes = check_all_rules(content, path)
+                for fix in shared_fixes:
+                    val rule_id = fix.id.split(":")[1]
+                    val lint = Lint.new(rule_id, LintLevel.Warn, LintCategory.Warning, fix.description)
+                        .with_easy_fix(fix)
+                    # Extract line from first replacement
+                    var fix_line = 1
+                    if fix.replacements.len() > 0:
+                        fix_line = fix.replacements[0].line
+                    self.results.push(LintResult.new(path, fix_line, 0, lint))
+
+                return Ok(self.results)
+    
+    me check_line(path: String, line_num: Int, line: String):
+        val trimmed = line.trim()
+        
+        # Check for unused variables (simple heuristic)
+        if trimmed.starts_with("val ") and not trimmed.contains("="):
+            val lint = Lint.new("W001", LintLevel.Warn, LintCategory.Warning,
+                "Variable declared but never assigned")
+                .with_fix("Remove declaration or assign a value")
+            self.results.push(LintResult.new(path, line_num, 0, lint))
+        
+        # Check for unreachable code
+        if trimmed.starts_with("return "):
+            # Next non-empty line after return is potentially unreachable
+            # (This is oversimplified - needs proper control flow analysis)
+            val _ = 0
+        
+        # Check naming conventions (if enabled)
+        if trimmed.starts_with("fn "):
+            val fn_name = self.extract_function_name(trimmed)
+            if not self.is_snake_case(fn_name):
+                val lint = Lint.new("ST001", LintLevel.Allow, LintCategory.Style,
+                    "Function name '{fn_name}' should be snake_case")
+                    .with_fix("Rename to '{self.to_snake_case(fn_name)}'")
+                self.results.push(LintResult.new(path, line_num, 0, lint))
+        
+        if trimmed.starts_with("class "):
+            val class_name = self.extract_class_name(trimmed)
+            if not self.is_pascal_case(class_name):
+                val lint = Lint.new("ST002", LintLevel.Allow, LintCategory.Style,
+                    "Class name '{class_name}' should be PascalCase")
+                self.results.push(LintResult.new(path, line_num, 0, lint))
+
+        # Check TODO/FIXME format
+        self.check_todo_format(path, line_num, trimmed)
+
+        # Check unfold declaration (only in __init__.spl files)
+        if trimmed.starts_with("unfold ") and trimmed.contains("{"):
+            self.check_unfold_declaration(path, line_num, trimmed)
+    
+    fn extract_function_name(line: String) -> String:
+        # Extract function name from "fn name(...)" pattern
+        val parts = line.split("(")
+        if parts.len() > 0:
+            val name_part = parts[0].replace("fn ", "").trim()
+            return name_part
+        ""
+    
+    fn extract_class_name(line: String) -> String:
+        # Extract class name from "class Name:" pattern
+        val parts = line.replace("class ", "").split(":")
+        if parts.len() > 0:
+            return parts[0].trim()
+        ""
+    
+    fn is_snake_case(name: String) -> Bool:
+        # Simple check: lowercase with underscores
+        name == name.lower() and not name.contains("-")
+    
+    fn is_pascal_case(name: String) -> Bool:
+        # Simple check: starts with uppercase
+        if name.is_empty():
+            return false
+        val first_char = name.chars().first()
+        match first_char:
+            case Some(c): c.is_uppercase()
+            case nil: false
+    
+    fn to_snake_case(name: String) -> String:
+        # Convert to snake_case (simplified)
+        name.lower()
+
+    me check_todo_format(path: String, line_num: Int, line: String):
+        # Check if line contains TODO or FIXME
+        val has_todo = line.contains("TODO")
+        val has_fixme = line.contains("FIXME")
+
+        if not has_todo and not has_fixme:
+            return
+
+        var keyword = "TODO"
+        if has_fixme:
+            keyword = "FIXME"
+        val idx = line.find(keyword)
+        val after_keyword = line.slice(idx + keyword.len()).strip()
+
+        # Check if it starts with : (standard format)
+        if not after_keyword.starts_with(":"):
+            return  # Not a standard comment format
+
+        val content = after_keyword.slice(1).strip()
+
+        # Check for new format: [area][priority]
+        if not content.starts_with("["):
+            # Missing format - provide an EasyFix
+            var fix = EasyFix.create(
+                id: "L:todo_format:{line_num}",
+                description: "add [area][priority] format to {keyword} comment",
+                confidence: FixConfidence.Uncertain
+            )
+            # Insert [runtime][P2] before the description text
+            val colon_pos = line.find(keyword) + keyword.len() + 1
+            fix.add_replacement(Replacement.create(
+                file: path,
+                start: colon_pos + 1,
+                end: colon_pos + 1,
+                line: line_num,
+                column: colon_pos + 2,
+                new_text: "[runtime][P2] "
+            ))
+            val lint = Lint.new("T001", LintLevel.Warn, LintCategory.Style,
+                "TODO/FIXME missing [area][priority] format")
+                .with_fix("Use: {keyword}: [area][P0-P3] description")
+                .with_easy_fix(fix)
+            self.results.push(LintResult.new(path, line_num, idx, lint))
+            return
+
+        # Parse [area][priority]
+        val first_close = content.find("]")
+        if first_close < 0:
+            val lint = Lint.new("T001", LintLevel.Warn, LintCategory.Style,
+                "TODO/FIXME has malformed [area] tag")
+            self.results.push(LintResult.new(path, line_num, idx, lint))
+            return
+
+        val area = content.slice(1, first_close)
+
+        # Validate area
+        if not TODO_AREAS.contains(area):
+            val lint = Lint.new("T002", LintLevel.Warn, LintCategory.Style,
+                "TODO/FIXME has invalid area '{area}'")
+                .with_fix("Valid areas: runtime, codegen, compiler, parser, type, stdlib, gpu, ui, test, driver, loader, pkg, sdn")
+            self.results.push(LintResult.new(path, line_num, idx, lint))
+
+        # Check for priority
+        val after_area = content.slice(first_close + 1).strip()
+        if not after_area.starts_with("["):
+            val lint = Lint.new("T001", LintLevel.Warn, LintCategory.Style,
+                "TODO/FIXME missing [priority] after [area]")
+                .with_fix("Use: {keyword}: [{area}][P0-P3] description")
+            self.results.push(LintResult.new(path, line_num, idx, lint))
+            return
+
+        val second_close = after_area.find("]")
+        if second_close < 0:
+            val lint = Lint.new("T001", LintLevel.Warn, LintCategory.Style,
+                "TODO/FIXME has malformed [priority] tag")
+            self.results.push(LintResult.new(path, line_num, idx, lint))
+            return
+
+        val priority = after_area.slice(1, second_close)
+
+        # Validate priority
+        if not TODO_PRIORITIES.contains(priority):
+            val lint = Lint.new("T003", LintLevel.Warn, LintCategory.Style,
+                "TODO/FIXME has invalid priority '{priority}'")
+                .with_fix("Valid priorities: P0/critical, P1/high, P2/medium, P3/low")
+            self.results.push(LintResult.new(path, line_num, idx, lint))
+
+        # Check P0/critical requires issue number
+        if priority == "P0" or priority == "critical":
+            val rest = after_area.slice(second_close + 1)
+            if not rest.contains("[#"):
+                val lint = Lint.new("T004", LintLevel.Deny, LintCategory.Style,
+                    "P0/critical TODO must have issue number")
+                    .with_fix("Add issue: {keyword}: [{area}][{priority}] description [#123]")
+                self.results.push(LintResult.new(path, line_num, idx, lint))
+
+    me check_unfold_declaration(path: String, line_num: Int, line: String):
+        # Validate unfold declaration: unfold {subpkg1, subpkg2, ...}
+        # Check that:
+        # 1. File is __init__.spl (directory module)
+        # 2. Each subpackage exists as a directory
+        # 3. Each subpackage has __init__.spl
+
+        # Check if this is a directory module (__init__.spl)
+        if not path.ends_with("__init__.spl"):
+            val lint = Lint.new("I003", LintLevel.Deny, LintCategory.Correctness,
+                "unfold declaration only allowed in __init__.spl (directory modules)")
+                .with_fix("Move unfold declaration to the package's __init__.spl file")
+            self.results.push(LintResult.new(path, line_num, 0, lint))
+            return
+
+        # Get base directory of this module
+        val base_dir = get_parent_directory(path)
+
+        # Extract subpackages from "unfold {a, b, c}"
+        val subpackages = extract_unfold_subpackages(line)
+
+        # Validate each subpackage
+        for subpkg in subpackages:
+            val subpkg_dir = "{base_dir}/{subpkg}"
+            val init_file = "{subpkg_dir}/__init__.spl"
+
+            if not is_dir(subpkg_dir):
+                val lint = Lint.new("I001", LintLevel.Deny, LintCategory.Correctness,
+                    "unfold subpackage '{subpkg}' directory does not exist: {subpkg_dir}")
+                    .with_fix("Create directory: mkdir -p {subpkg_dir}")
+                self.results.push(LintResult.new(path, line_num, 0, lint))
+            elif not file_exists(init_file):
+                val lint = Lint.new("I002", LintLevel.Deny, LintCategory.Correctness,
+                    "unfold subpackage '{subpkg}' missing __init__.spl in {subpkg_dir}")
+                    .with_fix("Create file: touch {init_file}")
+                self.results.push(LintResult.new(path, line_num, 0, lint))
+
+
+# Helper: Get parent directory from file path
+fn get_parent_directory(path: String) -> String:
+    val last_slash = path.rfind("/")
+    if last_slash >= 0:
+        return path.slice(0, last_slash)
+    "."
+
+# Helper: Extract subpackage names from "unfold {a, b, c}"
+fn extract_unfold_subpackages(line: String) -> List<String>:
+    var subpackages: List<String> = []
+
+    val start = line.find("{")
+    val end = line.find("}")
+
+    if start < 0 or end < 0 or end <= start:
+        return subpackages
+
+    val content = line.slice(start + 1, end).trim()
+    if content.is_empty():
+        return subpackages
+
+    val parts = content.split(",")
+    for part in parts:
+        val trimmed = part.trim()
+        if not trimmed.is_empty():
+            subpackages.push(trimmed)
+
+    subpackages
+
+
+async fn main() -> Int:
+    val args = get_args()
+
+    if args.len() < 2:
+        print("Usage: simple_lint <file.spl> [options]")
+        print("")
+        print("Options:")
+        print("  --deny-all        Treat all warnings as errors")
+        print("  --warn-all        Enable all style lints")
+        print("  --json            Output in JSON format")
+        print("  --fix             Apply safe auto-fixes")
+        print("  --fix-all         Apply all fixes regardless of confidence")
+        print("  --fix-dry-run     Show what would be fixed without applying")
+        print("  --fix-interactive Prompt for each fix")
+        print("")
+        print("Lint categories:")
+        print("  Safety (S): Memory safety and null checks")
+        print("  Correctness (C): Logic errors")
+        print("  Warning (W): Potential issues")
+        print("  Style (ST): Code style")
+        print("  Concurrency (CC): Thread safety")
+        print("  TODO (T): TODO/FIXME format [area][priority]")
+        return 1
+
+    val file_path = args[1]
+    val deny_all = args.contains("--deny-all")
+    val fix_mode = args.contains("--fix")
+    val fix_all = args.contains("--fix-all")
+    val fix_dry_run = args.contains("--fix-dry-run")
+    val fix_interactive = args.contains("--fix-interactive")
+
+    # Verify file exists
+    if not native_fs_exists(file_path):
+        print("Error: File not found: " + file_path)
+        return 1
+
+    # Run linter
+    val linter = Linter.new()
+
+    val lint_result = await linter.lint_file(file_path)
+    match lint_result:
+        case Ok(results):
+            if results.is_empty():
+                print("No issues found in " + file_path)
+                return 0
+            else:
+                var error_count = 0
+                var warning_count = 0
+                var fix_count = 0
+
+                for lint_item in results:
+                    print(lint_item.format())
+
+                    match lint_item.lint.level:
+                        case Deny:
+                            error_count = error_count + 1
+                        case Warn:
+                            warning_count = warning_count + 1
+                            if deny_all:
+                                error_count = error_count + 1
+                        case Allow:
+                            val _ = 0
+
+                    if lint_item.has_easy_fix():
+                        fix_count = fix_count + 1
+
+                print("")
+                print("Found {error_count} error(s), {warning_count} warning(s), {fix_count} auto-fix(es) available")
+
+                # Apply fixes if requested
+                if (fix_mode or fix_all) and fix_count > 0:
+                    val fixes_to_apply = collect_easy_fixes(results, fix_all)
+                    if not fixes_to_apply.is_empty():
+                        apply_collected_fixes(file_path, fixes_to_apply, fix_dry_run)
+
+                if error_count > 0:
+                    return 1
+                else:
+                    return 0
+
+        case Err(error):
+            print("Error: " + error)
+            return 1
+
+    return 0
+
+fn collect_easy_fixes(results: List<LintResult>, include_all: Bool) -> List<EasyFix>:
+    var fixes: List<EasyFix> = []
+    for result in results:
+        match result.lint.easy_fix:
+            case Some(fix):
+                if include_all or fix.is_safe():
+                    fixes.push(fix)
+            case nil:
+                val _ = 0
+    fixes
+
+fn apply_collected_fixes(file_path: String, fixes: List<EasyFix>, dry_run: Bool):
+    val source_result = native_fs_read_string(file_path)
+    match source_result:
+        case Err(e):
+            print("Error reading file for fix: {e}")
+        case Ok(source):
+            var sources: Dict<String, String> = {}
+            sources[file_path] = source
+
+            # Sort replacements by position descending and apply
+            var all_replacements: List<Replacement> = []
+            for fix in fixes:
+                for rep in fix.replacements:
+                    all_replacements.push(rep)
+
+            all_replacements = all_replacements.sort_by(\a, b: b.start - a.start)
+
+            var new_source = source
+            for rep in all_replacements:
+                if rep.start <= new_source.len() and rep.end <= new_source.len():
+                    new_source = new_source.slice(0, rep.start) + rep.new_text + new_source.slice(rep.end)
+
+            if dry_run:
+                print("\nDry run - would apply {fixes.len()} fix(es):")
+                for fix in fixes:
+                    print("  [{fix.id}] {fix.description}")
+            else:
+                file_write(file_path, new_source)
+                print("\nApplied {fixes.len()} fix(es):")
+                for fix in fixes:
+                    print("  [{fix.id}] {fix.description}")

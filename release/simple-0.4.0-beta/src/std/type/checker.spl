@@ -1,0 +1,319 @@
+# Type Checker
+#
+# Unification-based type checking with let-polymorphism.
+# Port of rust/type/src/checker_builtins.rs, checker_unify.rs,
+# checker_infer.rs, checker_check.rs
+
+from types import {Type, TypeScheme, Substitution, TypeError, FunctionType, MixinInfo}
+
+export TypeChecker
+
+# Type checker with Hindley-Milner style inference
+class TypeChecker:
+    env: Dict<text, Type>
+    next_var: i64
+    type_params: Dict<text, Type>
+    subst: Substitution
+    trait_impls: Dict<text, Dict<text, bool>>  # trait -> {type -> bool, "__blanket__" -> bool}
+    mixins: Dict<text, MixinInfo>
+    interface_bindings: Dict<text, Type>
+    fstring_keys: Dict<text, [text]>
+
+impl TypeChecker:
+    static fn create() -> TypeChecker:
+        var tc = TypeChecker(
+            env: {}, next_var: 0, type_params: {},
+            subst: Substitution.empty(),
+            trait_impls: {}, mixins: {},
+            interface_bindings: {}, fstring_keys: {})
+        tc.add_builtins()
+        tc
+
+    me fresh_var() -> Type:
+        val id = self.next_var
+        self.next_var = self.next_var + 1
+        Type.Var(id: id)
+
+    # Register built-in functions
+    me add_builtins():
+        val generic_fn = self.fresh_var()
+        # Concurrency
+        for name in ["spawn", "spawn_isolated", "async", "future", "await"]:
+            self.env[name] = generic_fn
+        # I/O
+        for name in ["print", "println", "eprint", "eprintln", "input"]:
+            self.env[name] = generic_fn
+        # Common
+        for name in ["len", "range", "Channel", "ThreadPool"]:
+            self.env[name] = generic_fn
+        # Option/Result constructors
+        for name in ["Some", "None", "Ok", "Err"]:
+            self.env[name] = generic_fn
+        # Actor
+        for name in ["send", "recv", "reply", "join"]:
+            self.env[name] = generic_fn
+        # BDD/SSpec
+        for name in ["describe", "context", "it", "test", "example", "specify", "expect", "before_each", "after_each"]:
+            self.env[name] = generic_fn
+        # Generator
+        for name in ["generator", "next", "collect"]:
+            self.env[name] = generic_fn
+        # Math
+        self.env["abs"] = Type.Function(params: [Type.Int], ret: Type.Int)
+        self.env["sqrt"] = Type.Function(params: [Type.Int], ret: Type.Int)
+        self.env["pow"] = Type.Function(params: [Type.Int, Type.Int], ret: Type.Int)
+        self.env["min"] = Type.Function(params: [Type.Int, Type.Int], ret: Type.Int)
+        self.env["max"] = Type.Function(params: [Type.Int, Type.Int], ret: Type.Int)
+        # Conversions
+        self.env["str"] = Type.Function(params: [self.fresh_var()], ret: Type.Str)
+        self.env["int"] = Type.Function(params: [self.fresh_var()], ret: Type.Int)
+        self.env["type"] = Type.Function(params: [self.fresh_var()], ret: Type.Str)
+        self.env["is_ready"] = Type.Function(params: [self.fresh_var()], ret: Type.Bool)
+
+    # ================================================================
+    # Unification
+    # ================================================================
+
+    me unify(t1: Type, t2: Type) -> Result<(), TypeError>:
+        val a = t1.apply_subst(self.subst)
+        val b = t2.apply_subst(self.subst)
+
+        match (a, b):
+            # Same primitive types
+            case (Type.Int, Type.Int) | (Type.Float, Type.Float)
+               | (Type.Bool, Type.Bool) | (Type.Str, Type.Str)
+               | (Type.Nil, Type.Nil):
+                Ok(())
+
+            # Type variable unification
+            case (Type.Var(id1), Type.Var(id2)) if id1 == id2: Ok(())
+            case (Type.Var(id), ty) | (ty, Type.Var(id)):
+                if ty.contains_var(id):
+                    return Err(TypeError.OccursCheck(var_id: id, ty: ty))
+                self.subst.insert(id, ty)
+                Ok(())
+
+            # Named types
+            case (Type.Named(n1), Type.Named(n2)) if n1 == n2: Ok(())
+
+            # Arrays
+            case (Type.Array(e1), Type.Array(e2)):
+                self.unify(e1, e2)
+
+            # Tuples
+            case (Type.Tuple(ts1), Type.Tuple(ts2)) if ts1.len() == ts2.len():
+                for i in 0..ts1.len():
+                    self.unify(ts1[i], ts2[i])?
+                Ok(())
+
+            # Functions
+            case (Type.Function(p1, r1), Type.Function(p2, r2)) if p1.len() == p2.len():
+                for i in 0..p1.len():
+                    self.unify(p1[i], p2[i])?
+                self.unify(r1, r2)
+
+            # Generics
+            case (Type.Generic(n1, a1), Type.Generic(n2, a2)) if n1 == n2 and a1.len() == a2.len():
+                for i in 0..a1.len():
+                    self.unify(a1[i], a2[i])?
+                Ok(())
+
+            # Optional
+            case (Type.Optional(i1), Type.Optional(i2)):
+                self.unify(i1, i2)
+
+            # Dict
+            case (Type.Dict(k1, v1), Type.Dict(k2, v2)):
+                self.unify(k1, k2)?
+                self.unify(v1, v2)
+
+            # TypeParam
+            case (Type.TypeParam(n1), Type.TypeParam(n2)) if n1 == n2: Ok(())
+
+            # Union types
+            case (Type.Union(members), other) | (other, Type.Union(members)):
+                if members.any(\m: self.types_compatible(other, m)):
+                    Ok(())
+                else:
+                    Err(TypeError.Mismatch(expected: a, found: b))
+
+            # Borrow types
+            case (Type.Borrow(i1), Type.Borrow(i2)): self.unify(i1, i2)
+            case (Type.BorrowMut(i1), Type.BorrowMut(i2)): self.unify(i1, i2)
+            case (Type.Borrow(i1), Type.BorrowMut(i2)): self.unify(i1, i2)
+
+            # ConstKeySet
+            case (Type.ConstKeySet(k1), Type.ConstKeySet(k2)):
+                if k1.sorted() == k2.sorted(): Ok(())
+                else: Err(TypeError.Mismatch(expected: a, found: b))
+
+            # DynTrait
+            case (Type.DynTrait(n1), Type.DynTrait(n2)) if n1 == n2: Ok(())
+
+            # Mismatch
+            case _:
+                Err(TypeError.Mismatch(expected: a, found: b))
+
+    # Resolve type by applying substitution
+    fn resolve(ty: Type) -> Type:
+        ty.apply_subst(self.subst)
+
+    # Check if two types are compatible
+    fn types_compatible(t1: Type, t2: Type) -> bool:
+        match (t1, t2):
+            case (Type.Int, Type.Int) | (Type.Float, Type.Float)
+               | (Type.Bool, Type.Bool) | (Type.Str, Type.Str)
+               | (Type.Nil, Type.Nil): true
+            case (Type.Var(_), _) | (_, Type.Var(_)): true
+            case (Type.Named(n1), Type.Named(n2)): n1 == n2
+            case (Type.Array(e1), Type.Array(e2)): self.types_compatible(e1, e2)
+            case (Type.Tuple(t1), Type.Tuple(t2)):
+                t1.len() == t2.len() and
+                    (0..t1.len()).all(\i: self.types_compatible(t1[i], t2[i]))
+            case (Type.Union(members), other) | (other, Type.Union(members)):
+                members.any(\m: self.types_compatible(other, m))
+            case (Type.Generic(n1, a1), Type.Generic(n2, a2)):
+                n1 == n2 and a1.len() == a2.len() and
+                    (0..a1.len()).all(\i: self.types_compatible(a1[i], a2[i]))
+            case (Type.Function(p1, r1), Type.Function(p2, r2)):
+                p1.len() == p2.len() and
+                    (0..p1.len()).all(\i: self.types_compatible(p1[i], p2[i])) and
+                    self.types_compatible(r1, r2)
+            case (Type.Optional(i1), Type.Optional(i2)): self.types_compatible(i1, i2)
+            case (Type.Dict(k1, v1), Type.Dict(k2, v2)):
+                self.types_compatible(k1, k2) and self.types_compatible(v1, v2)
+            case (Type.TypeParam(n1), Type.TypeParam(n2)): n1 == n2
+            case (Type.Borrow(i1), Type.Borrow(i2)): self.types_compatible(i1, i2)
+            case (Type.BorrowMut(i1), Type.BorrowMut(i2)): self.types_compatible(i1, i2)
+            case (Type.Borrow(i1), Type.BorrowMut(i2)): self.types_compatible(i1, i2)
+            case (Type.DynTrait(n1), Type.DynTrait(n2)): n1 == n2
+            case (Type.ConstKeySet(k1), Type.ConstKeySet(k2)):
+                k1.sorted() == k2.sorted()
+            case _: false
+
+    # ================================================================
+    # Type Inference (expression level)
+    # ================================================================
+
+    # Infer type of an expression tag (uses AST FFI handles)
+    # This is a simplified version - the full implementation would use
+    # AST FFI handles from Phase 0 to walk the AST
+    me infer_type(tag: text) -> Type:
+        match tag:
+            case "Integer": Type.Int
+            case "Float": Type.Float
+            case "String": Type.Str
+            case "Bool": Type.Bool
+            case "Nil": Type.Nil
+            case _: self.fresh_var()
+
+    # Look up identifier in environment
+    fn lookup(name: text) -> Result<Type, TypeError>:
+        if self.env.has(name):
+            Ok(self.env[name])
+        else:
+            Err(TypeError.Undefined(name: "undefined identifier: {name}"))
+
+    # ================================================================
+    # Let-Polymorphism (matches Generics.lean)
+    # ================================================================
+
+    me instantiate_scheme(scheme: TypeScheme) -> Type:
+        if scheme.vars.len() == 0:
+            return scheme.ty
+        var var_map = {}
+        for bound_var in scheme.vars:
+            val fresh = self.fresh_var()
+            match fresh:
+                case Type.Var(fresh_id):
+                    var_map[bound_var] = fresh_id
+                case _: pass
+        self.instantiate_type(scheme.ty, var_map)
+
+    fn instantiate_type(ty: Type, var_map: Dict<i64, i64>) -> Type:
+        match ty:
+            case Type.Var(id):
+                if var_map.has(id): Type.Var(id: var_map[id]) else: ty
+            case Type.Function(params, ret):
+                Type.Function(
+                    params: params.map(\p: self.instantiate_type(p, var_map)),
+                    ret: self.instantiate_type(ret, var_map))
+            case Type.Array(elem):
+                Type.Array(element: self.instantiate_type(elem, var_map))
+            case Type.Union(members):
+                Type.Union(members: members.map(\m: self.instantiate_type(m, var_map)))
+            case Type.Generic(name, args):
+                Type.Generic(name: name, args: args.map(\a: self.instantiate_type(a, var_map)))
+            case Type.Tuple(elements):
+                Type.Tuple(elements: elements.map(\e: self.instantiate_type(e, var_map)))
+            case Type.Dict(key, value):
+                Type.Dict(key: self.instantiate_type(key, var_map),
+                          value: self.instantiate_type(value, var_map))
+            case Type.Optional(inner):
+                Type.Optional(inner: self.instantiate_type(inner, var_map))
+            case Type.Borrow(inner):
+                Type.Borrow(inner: self.instantiate_type(inner, var_map))
+            case Type.BorrowMut(inner):
+                Type.BorrowMut(inner: self.instantiate_type(inner, var_map))
+            case Type.Simd(lanes, elem):
+                Type.Simd(lanes: lanes, element: self.instantiate_type(elem, var_map))
+            case _: ty
+
+    # Collect free type variables
+    fn free_vars(ty: Type) -> [i64]:
+        var vars = []
+        self.collect_free_vars(ty, vars)
+        vars.sorted().dedup()
+
+    fn collect_free_vars(ty: Type, vars: mut [i64]):
+        match ty:
+            case Type.Var(id): vars.push(id)
+            case Type.Function(params, ret):
+                for p in params: self.collect_free_vars(p, vars)
+                self.collect_free_vars(ret, vars)
+            case Type.Array(elem): self.collect_free_vars(elem, vars)
+            case Type.Union(members):
+                for m in members: self.collect_free_vars(m, vars)
+            case Type.Generic(_, args):
+                for a in args: self.collect_free_vars(a, vars)
+            case Type.Tuple(elements):
+                for e in elements: self.collect_free_vars(e, vars)
+            case Type.Dict(key, value):
+                self.collect_free_vars(key, vars)
+                self.collect_free_vars(value, vars)
+            case Type.Optional(inner): self.collect_free_vars(inner, vars)
+            case Type.Borrow(inner): self.collect_free_vars(inner, vars)
+            case Type.BorrowMut(inner): self.collect_free_vars(inner, vars)
+            case Type.Simd(_, elem): self.collect_free_vars(elem, vars)
+            case _: pass
+
+    # Generalize a type over free variables not in environment
+    fn generalize(ty: Type) -> TypeScheme:
+        val resolved_ty = ty.apply_subst(self.subst)
+        val ty_free = self.free_vars(resolved_ty)
+
+        # Collect env free vars
+        var env_free = []
+        for name in self.env.keys():
+            val resolved = self.env[name].apply_subst(self.subst)
+            self.collect_free_vars(resolved, env_free)
+        env_free = env_free.sorted().dedup()
+
+        val to_generalize = ty_free.filter(\v: not env_free.contains(v))
+        TypeScheme(vars: to_generalize, ty: resolved_ty)
+
+    # ================================================================
+    # AST type conversion (simplified - maps common type names)
+    # ================================================================
+
+    me ast_type_name_to_type(name: text) -> Type:
+        if self.type_params.has(name):
+            return self.type_params[name]
+        match name:
+            case "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "int" | "Int":
+                Type.Int
+            case "f32" | "f64" | "float" | "Float": Type.Float
+            case "bool" | "Bool": Type.Bool
+            case "str" | "String" | "Str" | "text": Type.Str
+            case "nil" | "Nil" | "None": Type.Nil
+            case _: Type.Named(name: name)

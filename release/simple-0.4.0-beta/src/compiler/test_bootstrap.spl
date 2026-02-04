@@ -1,0 +1,115 @@
+# Bootstrap Test - Minimal Self-Hosting Compiler Test
+#
+# This tests the Cranelift FFI infrastructure by creating a simple
+# function and executing it via JIT.
+
+use compiler.ffi (rt_exec, rt_file_hash)
+
+# FFI declarations for Cranelift (RuntimeValue versions)
+extern fn cranelift_module_new(name: text, target: i64) -> i64
+extern fn rt_cranelift_finalize_module(module: i64) -> i64
+extern fn cranelift_free_module(module: i64)
+extern fn cranelift_new_signature(call_conv: i64) -> i64
+extern fn cranelift_sig_set_return(sig: i64, type_: i64)
+
+# Wrapper functions (two-tier pattern)
+fn cranelift_module_new(name: text, target: i64) -> i64:
+    cranelift_module_new(name, target)
+
+fn cranelift_finalize_module(module: i64) -> i64:
+    # TODO: Replace direct FFI call with wrapper (cranelift_finalize_module) from app.io or compiler.ffi
+    rt_cranelift_finalize_module(module)
+
+fn cranelift_free_module(module: i64):
+    cranelift_free_module(module)
+
+fn cranelift_new_signature(call_conv: i64) -> i64:
+    cranelift_new_signature(call_conv)
+
+fn cranelift_sig_set_return(sig: i64, type_: i64):
+    cranelift_sig_set_return(sig, type_)
+
+fn test_create_module() -> bool:
+    # Type constants
+    val CL_TYPE_I64 = 4
+    val CL_TARGET_X86_64 = 0
+
+    # Test module creation with RuntimeValue name
+    val module = cranelift_module_new("test_module", CL_TARGET_X86_64)
+
+    if module == 0:
+        print "ERROR: Failed to create module"
+        return false
+
+    print "OK: Created module with handle {module}"
+
+    # Test signature creation
+    val sig = cranelift_new_signature(0)  # SystemV calling convention
+    if sig == 0:
+        print "ERROR: Failed to create signature"
+        cranelift_free_module(module)
+        return false
+
+    print "OK: Created signature with handle {sig}"
+
+    # Set return type to i64
+    cranelift_sig_set_return(sig, CL_TYPE_I64)
+    print "OK: Set signature return type"
+
+    # Cleanup
+    cranelift_free_module(module)
+    print "OK: Freed module"
+
+    true
+
+fn test_exec_ffi() -> bool:
+    # Test rt_exec FFI
+    # TODO: Replace direct FFI call with wrapper (exec) from app.io or compiler.ffi
+    val result = rt_exec("echo 'Hello from rt_exec'")
+    print "rt_exec returned: {result}"
+    result == 0
+
+fn test_file_hash_ffi() -> bool:
+    # Test rt_file_hash FFI
+    # TODO: Replace direct FFI call with wrapper (file_hash) from app.io or compiler.ffi
+    val hash = rt_file_hash("/bin/sh")
+    print "Hash of /bin/sh: {hash}"
+    hash.len() > 0
+
+struct TestRunner:
+    """Helper for running tests and tracking results."""
+    passed: i64
+    failed: i64
+
+    static fn create() -> TestRunner:
+        TestRunner(passed: 0, failed: 0)
+
+    me run_test(self, name: text, test_fn: fn() -> bool):
+        """Run a test and update counters."""
+        print name
+        if test_fn():
+            self.passed = self.passed + 1
+        else:
+            self.failed = self.failed + 1
+
+    fn total_failed(self) -> i64:
+        self.failed
+
+fn main() -> i32:
+    print "=== Bootstrap FFI Test ==="
+    print ""
+
+    var runner = TestRunner.create()
+
+    runner.run_test("Test 1: Create module...", test_create_module)
+    print ""
+    runner.run_test("Test 2: rt_exec FFI...", test_exec_ffi)
+    print ""
+    runner.run_test("Test 3: rt_file_hash FFI...", test_file_hash_ffi)
+
+    print ""
+    print "=== Results: {runner.passed} passed, {runner.failed} failed ==="
+
+    if runner.total_failed() > 0:
+        return 1
+    0

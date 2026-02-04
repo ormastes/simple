@@ -1,0 +1,272 @@
+# @pending
+"""
+MCP Server Protocol Tests
+Feature: MCP JSON-RPC Server
+Category: MCP, Protocol
+Status: In Progress
+
+Tests for the MCP server's JSON helpers, tool dispatch, and response formatting.
+"""
+
+
+# ----------- JSON builder helpers (avoid f-string brace issues) -----------
+
+fn LB() -> String:
+    123 as char
+
+fn RB() -> String:
+    125 as char
+
+fn jobj(pairs: List<String>) -> String:
+    var r = LB()
+    var first = true
+    for p in pairs:
+        if not first:
+            r = r + ","
+        r = r + p
+        first = false
+    r + RB()
+
+fn jpair(key: String, val_str: String) -> String:
+    "\"" + key + "\":" + val_str
+
+fn jstr(s: String) -> String:
+    "\"" + s + "\""
+
+# ----------- Inline reimplementations of main.spl helpers -----------
+
+fn unwrap_idx(opt) -> Int:
+    match opt:
+        case Some(i):
+            return i
+        case None:
+            return -1
+
+fn extract_json_string(json: String, key: String) -> String:
+    val search = "\"" + key + "\":"
+    val idx = unwrap_idx(json.index_of(search))
+    if idx < 0:
+        return ""
+    val slen = search.len()
+    val start = idx + slen
+    val after = json.substring(start)
+    val trimmed = after.trim()
+    if trimmed.starts_with("\""):
+        val rest = trimmed.substring(1)
+        val end = unwrap_idx(rest.index_of("\""))
+        if end >= 0:
+            return rest.substring(0, end)
+    ""
+
+fn extract_json_value(json: String, key: String) -> String:
+    val search = "\"" + key + "\":"
+    val idx = unwrap_idx(json.index_of(search))
+    if idx < 0:
+        return "null"
+    val slen = search.len()
+    val start = idx + slen
+    val after = json.substring(start)
+    val trimmed = after.trim()
+    var end = 0
+    for ch in trimmed:
+        if ch == "," or ch == LB() or ch == RB() or ch == "]":
+            break
+        end = end + 1
+    trimmed.substring(0, end).trim()
+
+fn extract_nested_string(json: String, outer_key: String, inner_key: String) -> String:
+    val search = "\"" + outer_key + "\":"
+    val idx = unwrap_idx(json.index_of(search))
+    if idx < 0:
+        return ""
+    val slen = search.len()
+    val start = idx + slen
+    val after = json.substring(start)
+    extract_json_string(after, inner_key)
+
+fn escape_json(text: String) -> String:
+    var result = text
+    result = result.replace("\\", "\\\\")
+    result = result.replace("\"", "\\\"")
+    result = result.replace("\n", "\\n")
+    result = result.replace("\r", "\\r")
+    result = result.replace("\t", "\\t")
+    result
+
+fn has_flag(args: List<String>, flag: String) -> Bool:
+    for arg in args:
+        if arg == flag:
+            return true
+    return false
+
+fn get_file_info(content: String, path: String) -> String:
+    val lines = content.split("\n")
+    var line_count = lines.len()
+    var fn_count = 0
+    var class_count = 0
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.starts_with("fn ") or trimmed.starts_with("me ") or trimmed.starts_with("static fn "):
+            fn_count = fn_count + 1
+        elif trimmed.starts_with("class ") or trimmed.starts_with("struct "):
+            class_count = class_count + 1
+    "File: " + path + "\\nLines: " + line_count.to_string() + "\\nFunctions: " + fn_count.to_string() + "\\nClasses/Structs: " + class_count.to_string()
+
+# ----------- Tests -----------
+
+describe "extract_json_string":
+    it "extracts simple string value":
+        val json = jobj([jpair("method", jstr("initialize")), jpair("id", "1")])
+        expect(extract_json_string(json, "method") == "initialize")
+
+    it "extracts from nested JSON":
+        val inner = jobj([jpair("name", jstr("read_code"))])
+        val json = jobj([jpair("method", jstr("tools/call")), jpair("params", inner)])
+        expect(extract_json_string(json, "method") == "tools/call")
+
+    it "returns empty for missing key":
+        val json = jobj([jpair("method", jstr("test"))])
+        expect(extract_json_string(json, "id") == "")
+
+    it "returns empty for empty string":
+        expect(extract_json_string("", "key") == "")
+
+    it "handles path with slashes":
+        val json = jobj([jpair("path", jstr("/home/user/test.spl"))])
+        expect(extract_json_string(json, "path") == "/home/user/test.spl")
+
+    it "handles empty string value":
+        val json = jobj([jpair("name", jstr(""))])
+        expect(extract_json_string(json, "name") == "")
+
+describe "extract_json_value":
+    it "extracts numeric value":
+        val json = jobj([jpair("id", "42"), jpair("method", jstr("test"))])
+        expect(extract_json_value(json, "id") == "42")
+
+    it "extracts null value":
+        val json = jobj([jpair("result", "null")])
+        expect(extract_json_value(json, "result") == "null")
+
+    it "returns null for missing key":
+        val json = jobj([jpair("a", "1")])
+        expect(extract_json_value(json, "b") == "null")
+
+    it "handles boolean true":
+        val json = jobj([jpair("flag", "true"), jpair("other", "1")])
+        expect(extract_json_value(json, "flag") == "true")
+
+    it "handles boolean false":
+        val json = jobj([jpair("flag", "false")])
+        expect(extract_json_value(json, "flag") == "false")
+
+describe "extract_nested_string":
+    it "extracts nested string from params":
+        val params = jobj([jpair("name", jstr("read_code"))])
+        val json = jobj([jpair("method", jstr("tools/call")), jpair("params", params)])
+        expect(extract_nested_string(json, "params", "name") == "read_code")
+
+    it "returns empty for missing outer key":
+        val json = jobj([jpair("method", jstr("test"))])
+        expect(extract_nested_string(json, "params", "name") == "")
+
+    it "returns empty for missing inner key":
+        val params = jobj([jpair("other", jstr("value"))])
+        val json = jobj([jpair("params", params)])
+        expect(extract_nested_string(json, "params", "name") == "")
+
+describe "escape_json":
+    it "escapes double quotes":
+        expect(escape_json("say \"hello\"") == "say \\\"hello\\\"")
+
+    it "escapes backslashes":
+        expect(escape_json("path\\to\\file") == "path\\\\to\\\\file")
+
+    it "escapes newlines":
+        expect(escape_json("line1\nline2") == "line1\\nline2")
+
+    it "escapes tabs":
+        expect(escape_json("col1\tcol2") == "col1\\tcol2")
+
+    it "handles empty string":
+        expect(escape_json("") == "")
+
+    it "handles string with no special chars":
+        expect(escape_json("hello world") == "hello world")
+
+describe "has_flag":
+    it "finds present flag":
+        expect(has_flag(["cmd", "--debug", "file"], "--debug"))
+
+    it "returns false for missing flag":
+        expect(not has_flag(["cmd", "file"], "--debug"))
+
+    it "handles empty args":
+        expect(not has_flag([], "--flag"))
+
+    it "finds flag at different positions":
+        expect(has_flag(["--first", "--second", "--third"], "--second"))
+        expect(has_flag(["--first", "--second", "--third"], "--first"))
+        expect(has_flag(["--first", "--second", "--third"], "--third"))
+
+describe "get_file_info":
+    it "counts lines":
+        val content = "line1\nline2\nline3"
+        val info = get_file_info(content, "test.spl")
+        expect(info.contains("Lines: 3"))
+
+    it "counts functions":
+        val content = "fn foo():\n    pass\nfn bar():\n    pass"
+        val info = get_file_info(content, "test.spl")
+        expect(info.contains("Functions: 2"))
+
+    it "counts mutable methods":
+        val content = "me update():\n    pass\nfn read():\n    pass"
+        val info = get_file_info(content, "test.spl")
+        expect(info.contains("Functions: 2"))
+
+    it "counts static functions":
+        val content = "static fn create():\n    pass"
+        val info = get_file_info(content, "test.spl")
+        expect(info.contains("Functions: 1"))
+
+    it "counts classes":
+        val content = "class Foo:\n    x: Int\nclass Bar:\n    y: Int"
+        val info = get_file_info(content, "test.spl")
+        expect(info.contains("Classes/Structs: 2"))
+
+    it "counts structs":
+        val content = "struct Point:\n    x: Int\n    y: Int"
+        val info = get_file_info(content, "test.spl")
+        expect(info.contains("Classes/Structs: 1"))
+
+    it "includes file path":
+        val info = get_file_info("hello", "src/main.spl")
+        expect(info.contains("File: src/main.spl"))
+
+    it "handles empty content":
+        val info = get_file_info("", "empty.spl")
+        expect(info.contains("Lines: 1"))
+        expect(info.contains("Functions: 0"))
+        expect(info.contains("Classes/Structs: 0"))
+
+    it "counts mixed definitions":
+        val content = "class Foo:\n    x: Int\n\nfn helper():\n    pass\n\nstruct Bar:\n    y: Int\n\nme update():\n    pass"
+        val info = get_file_info(content, "mixed.spl")
+        expect(info.contains("Functions: 2"))
+        expect(info.contains("Classes/Structs: 2"))
+
+describe "jobj helper":
+    it "creates empty object":
+        val obj = jobj([])
+        expect(obj.starts_with(LB()))
+        expect(obj.ends_with(RB()))
+
+    it "creates single pair object":
+        val obj = jobj([jpair("key", jstr("value"))])
+        expect(obj.contains("\"key\":\"value\""))
+
+    it "creates multi pair object":
+        val obj = jobj([jpair("a", "1"), jpair("b", "2")])
+        expect(obj.contains("\"a\":1"))
+        expect(obj.contains("\"b\":2"))

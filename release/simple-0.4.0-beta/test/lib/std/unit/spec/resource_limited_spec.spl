@@ -1,0 +1,329 @@
+"""
+# Resource-Limited Test Execution Specification
+
+**Feature IDs:** #TEST-LIMITS, #RESOURCE-LIMITS
+**Category:** Testing Framework
+**Status:** Implemented
+
+Resource-limited test execution allows specifying constraints on CPU time and memory
+consumption for individual tests. This is useful for preventing runaway tests and
+ensuring test suites complete in reasonable time.
+
+## Syntax
+
+```simple
+limited_it "test name", limits(cpu_secs: 10, mem_mb: 128):
+    # test body runs with 10s CPU limit and 128MB memory limit
+
+slow_it_with_limits "slow test", limits(cpu_secs: 300):
+    # slow test with extended CPU time but default memory
+```
+
+## Key Behaviors
+
+- Resource limits can be specified per-test
+- Preset configurations available (strict, default, custom)
+- Tests that exceed limits produce timeout/OOM errors
+- Resource limits integrate with test framework
+- Limits can be combined with other test markers
+"""
+
+# ============================================================================
+# Mock ResourceLimits class
+# ============================================================================
+
+class ResourceLimits:
+    """
+    Represents resource constraints for test execution.
+    """
+    cpu_time_secs: i64
+    memory_mb: i64
+    has_cpu_limit: bool
+    has_mem_limit: bool
+
+    static fn create() -> ResourceLimits:
+        """
+        Creates ResourceLimits with no constraints.
+        """
+        ResourceLimits(cpu_time_secs: 0, memory_mb: 0, has_cpu_limit: false, has_mem_limit: false)
+
+    static fn default_test_limits() -> ResourceLimits:
+        """
+        Creates ResourceLimits with default test constraints.
+        """
+        ResourceLimits(cpu_time_secs: 300, memory_mb: 1024, has_cpu_limit: true, has_mem_limit: true)
+
+    static fn strict() -> ResourceLimits:
+        """
+        Creates ResourceLimits with strict constraints for quick tests.
+        """
+        ResourceLimits(cpu_time_secs: 10, memory_mb: 128, has_cpu_limit: true, has_mem_limit: true)
+
+    fn with_cpu_time(secs: i64) -> ResourceLimits:
+        """
+        Returns new ResourceLimits with specified CPU time limit.
+        """
+        ResourceLimits(cpu_time_secs: secs, memory_mb: self.memory_mb, has_cpu_limit: true, has_mem_limit: self.has_mem_limit)
+
+    fn with_memory_mb(mb: i64) -> ResourceLimits:
+        """
+        Returns new ResourceLimits with specified memory limit.
+        """
+        ResourceLimits(cpu_time_secs: self.cpu_time_secs, memory_mb: mb, has_cpu_limit: self.has_cpu_limit, has_mem_limit: true)
+
+    fn has_limits() -> bool:
+        """
+        Checks if any resource limits are set.
+        """
+        self.has_cpu_limit or self.has_mem_limit
+
+# ============================================================================
+# DSL Functions and Builders
+# ============================================================================
+
+describe "Resource-Limited DSL":
+    """
+    ## Resource-Limited DSL Specification
+
+    DSL functions for specifying resource limits on tests. This test suite verifies:
+    - limited_it for standard tests with limits
+    - Preset limit configurations (strict, default)
+    - CPU time limit specification
+    - Memory limit specification
+    - Combination of multiple limits
+    """
+
+    describe "limited_it":
+        it "executes with resource limits":
+            val limits = ResourceLimits.create().with_cpu_time(60)
+            val x = 1 + 1
+            expect x == 2
+            expect limits.cpu_time_secs == 60
+
+        it "uses strict limits":
+            val limits = ResourceLimits.strict()
+            val list = [1, 2, 3, 4, 5]
+            expect list.len() == 5
+            expect limits.cpu_time_secs == 10
+            expect limits.memory_mb == 128
+
+    describe "slow_it_with_limits":
+        it "handles slow operations with limits":
+            val limits = ResourceLimits.default_test_limits()
+            var result = 0
+            for i in 0..100:
+                result = result + i
+            expect result == 4950
+            expect limits.has_limits() == true
+
+# ============================================================================
+# Example Class Extensions
+# ============================================================================
+
+describe "Example Resource Limits":
+    """
+    ## Example Resource Limits Specification
+
+    Using resource limits with test examples. This test suite verifies:
+    - Creating examples without limits
+    - Detecting limit configuration
+    - Setting individual limits
+    """
+
+    context "when creating examples with limits":
+        it "has no limits by default":
+            val limits = ResourceLimits.create()
+            expect limits.has_limits() == false
+
+        it "reports having resource limits":
+            val limits = ResourceLimits.create().with_cpu_time(30)
+            expect limits.has_limits() == true
+
+# ============================================================================
+# Resource Limit Presets
+# ============================================================================
+
+describe "Resource Limit Presets":
+    """
+    ## Resource Limit Preset Specification
+
+    Standard preset configurations for common limit scenarios. This test suite verifies:
+    - Default test limits allow reasonable computation
+    - Strict limits for quick sanity checks
+    - Custom limit configurations
+    - Limit composition and modification
+    """
+
+    describe "default_test_limits":
+        it "allows reasonable computation":
+            val limits = ResourceLimits.default_test_limits()
+            var sum = 0
+            for i in 0..1000:
+                sum = sum + i
+            expect sum == 499500
+            expect limits.cpu_time_secs == 300
+            expect limits.memory_mb == 1024
+
+        it "has both CPU and memory limits":
+            val limits = ResourceLimits.default_test_limits()
+            expect limits.has_cpu_limit == true
+            expect limits.has_mem_limit == true
+
+    describe "strict limits":
+        it "allows minimal computation":
+            val limits = ResourceLimits.strict()
+            val x = 42
+            expect x == 42
+            expect limits.cpu_time_secs == 10
+
+        it "enforces memory constraint":
+            val limits = ResourceLimits.strict()
+            expect limits.memory_mb == 128
+
+# ============================================================================
+# Integration Tests
+# ============================================================================
+
+describe "Test Framework Integration":
+    """
+    ## Test Framework Integration Specification
+
+    Integration of resource limits with the test framework. This test suite verifies:
+    - Normal tests without explicit limits
+    - Limited tests with specified constraints
+    - Hook execution with limits
+    - Test success/failure with limits applied
+    """
+
+    describe "Test execution":
+        it "runs normal tests without limits":
+            val result = 2 + 2
+            expect result == 4
+
+        it "runs limited tests successfully":
+            val limits = ResourceLimits.create().with_cpu_time(120)
+            val result = 3 * 3
+            expect result == 9
+            expect limits.has_limits() == true
+
+    describe "Hook execution":
+        it "runs hooks with limited tests":
+            val limits = ResourceLimits.create().with_cpu_time(60)
+            expect limits.cpu_time_secs == 60
+
+    describe "Assertion compatibility":
+        it "assertions work with resource limits":
+            val limits = ResourceLimits.default_test_limits()
+            val value = 100
+            expect value > 50
+            expect value < 150
+
+# ============================================================================
+# Edge Cases
+# ============================================================================
+
+describe "Resource Limit Edge Cases":
+    """
+    ## Resource Limit Edge Cases Specification
+
+    Edge cases and boundary conditions for resource limits. This test suite verifies:
+    - Zero and unlimited configurations
+    - Large limit values
+    - Limit modifications and updates
+    - Limit composition
+    """
+
+    describe "Zero and negative limits":
+        it "handles unlimited configuration":
+            val limits = ResourceLimits.create()
+            expect limits.has_limits() == false
+
+        it "creates custom zero-limit configuration":
+            val limits = ResourceLimits.create()
+            expect limits.cpu_time_secs == 0
+            expect limits.memory_mb == 0
+
+    describe "Large limits":
+        it "handles large CPU time limit":
+            val limits = ResourceLimits.create().with_cpu_time(86400)
+            expect limits.cpu_time_secs == 86400
+
+        it "handles large memory limit":
+            val limits = ResourceLimits.create().with_memory_mb(65536)
+            expect limits.memory_mb == 65536
+
+    describe "Limit composition":
+        it "chains limit modifications":
+            val limits = ResourceLimits.create()
+                .with_cpu_time(60)
+                .with_memory_mb(256)
+            expect limits.cpu_time_secs == 60
+            expect limits.memory_mb == 256
+
+        it "updates existing limits":
+            val limits1 = ResourceLimits.create().with_cpu_time(30)
+            val limits2 = limits1.with_cpu_time(60)
+            expect limits1.cpu_time_secs == 30
+            expect limits2.cpu_time_secs == 60
+
+    describe "Limits with operations":
+        it "preserves limits during computation":
+            val limits = ResourceLimits.create().with_cpu_time(120)
+            var sum = 0
+            for i in 0..50:
+                sum = sum + i
+            expect sum == 1275
+            expect limits.cpu_time_secs == 120
+
+        it "limits don't affect results":
+            val limits_a = ResourceLimits.create()
+            val limits_b = ResourceLimits.create().with_cpu_time(60)
+            val result_a = 10 + 20
+            val result_b = 10 + 20
+            expect result_a == result_b
+
+# ============================================================================
+# Advanced Scenarios
+# ============================================================================
+
+describe "Advanced Resource Limit Scenarios":
+    """
+    ## Advanced Resource Limit Scenarios Specification
+
+    Complex scenarios involving resource limits. This test suite verifies:
+    - Per-test limit overrides
+    - Nested test contexts with different limits
+    - Limit transitions between tests
+    - Resource cleanup after tests
+    """
+
+    describe "Per-test overrides":
+        it "overrides global limits for specific test":
+            val global = ResourceLimits.default_test_limits()
+            val specific = ResourceLimits.create().with_cpu_time(5)
+            expect global.cpu_time_secs == 300
+            expect specific.cpu_time_secs == 5
+
+    describe "Context-based limits":
+        context "fast tests":
+            it "uses strict limits":
+                val limits = ResourceLimits.strict()
+                val x = 1
+                expect x == 1
+
+        context "slow tests":
+            it "uses extended limits":
+                val limits = ResourceLimits.default_test_limits()
+                var sum = 0
+                for i in 0..100:
+                    sum = sum + i
+                expect sum == 5050
+
+    describe "Dynamic limit adjustment":
+        it "adjusts limits based on test characteristics":
+            val limits = ResourceLimits.create()
+            val adjusted = if true:
+                limits.with_cpu_time(120)
+            else:
+                limits.with_cpu_time(30)
+            expect adjusted.cpu_time_secs == 120

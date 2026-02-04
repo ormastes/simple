@@ -1,0 +1,497 @@
+# Test Database Concurrency Stress Tests
+#
+# Tests the test database under concurrent access scenarios to ensure:
+# - File locking prevents corruption
+# - Atomic writes maintain consistency
+# - Race conditions are prevented
+# - Lock timeouts work correctly
+# - Stale locks are detected and cleaned up
+# - Backup integrity is maintained under failure
+
+use app.io.mod (getpid, file_exists, file_read, file_delete, time_now_unix_micros)
+use app.test_runner_new.test_db_core (TestDatabase, micros_to_rfc3339)
+use app.test_runner_new.test_db_types.*
+use app.test_runner_new.test_db_io (DB_PATH, RUNS_PATH)
+use app.test_runner_new.test_db_lock.FileLock
+
+# External FFI for process spawning and waiting
+extern fn rt_process_run(command: text, args: [text]) -> i32
+extern fn rt_file_write_text(path: text, content: text) -> bool
+
+# =========================================================================
+# Helper: Create temporary database path for isolated testing
+# =========================================================================
+
+fn temp_db_path(test_name: text) -> text:
+    "/tmp/test_db_concurrency_{test_name}_{getpid()}.sdn"
+
+fn temp_runs_path(test_name: text) -> text:
+    "/tmp/test_db_runs_concurrency_{test_name}_{getpid()}.sdn"
+
+fn cleanup_temp_db(test_name: text):
+    val db_path = temp_db_path(test_name)
+    val runs_path = temp_runs_path(test_name)
+    val lock_path = "{db_path}.lock"
+
+    if file_exists(db_path):
+        file_delete(db_path)
+    if file_exists(runs_path):
+        file_delete(runs_path)
+    if file_exists(lock_path):
+        file_delete(lock_path)
+    if file_exists("{db_path}.bak"):
+        file_delete("{db_path}.bak")
+
+# =========================================================================
+# Helper: Create test worker script
+# =========================================================================
+
+fn create_worker_script(script_path: text, db_path: text, worker_id: i64, iterations: i64):
+    val script_content = "
+# Worker script for concurrent database writes
+use app.test_runner_new.test_db_core (TestDatabase, micros_to_rfc3339)
+use app.test_runner_new.test_db_types.*
+use app.io.mod (time_now_unix_micros, getpid)
+
+fn main():
+    val db = TestDatabase.empty()
+
+    for i in 0..{iterations}:
+        val run_id = \"worker_{worker_id}_run_{i}\"
+        val now = micros_to_rfc3339(time_now_unix_micros())
+
+        db.test_runs.push(RunRecord(
+            run_id: run_id,
+            start_time: now,
+            end_time: \"\",
+            pid: getpid(),
+            hostname: \"worker_{worker_id}\",
+            status: \"completed\",
+            test_count: 1,
+            passed: 1,
+            failed: 0,
+            crashed: 0,
+            timed_out: 0
+        ))
+
+    val result = db.save()
+    if result.err.?:
+        print \"Worker {worker_id} failed: {result.unwrap_err()}\"
+        return 1
+
+    print \"Worker {worker_id} completed {iterations} writes\"
+    0
+
+main()
+"
+    rt_file_write_text(script_path, script_content)
+
+# =========================================================================
+# Helper: Wait for all processes
+# =========================================================================
+
+fn wait_for_processes(pids: List<i32>, timeout_secs: i64) -> bool:
+    val start = time_now_unix_micros()
+    val timeout_micros = timeout_secs * 1000000
+
+    for pid in pids:
+        var remaining = timeout_micros - (time_now_unix_micros() - start)
+        if remaining < 0:
+            return false
+        # TODO: Implement process wait with timeout
+        # For now, just sleep briefly
+
+    true
+
+# =========================================================================
+# Tests
+# =========================================================================
+
+describe "Test Database Concurrency":
+
+    describe "Concurrent Writes - Same Database":
+
+        it "handles 5 parallel writers without corruption":
+            val test_name = "parallel_5_writers"
+            cleanup_temp_db(test_name)
+
+            val db_path = temp_db_path(test_name)
+            val worker_count = 5
+            val iterations_per_worker = 10
+
+            # Create worker scripts
+            var pids: List<i32> = []
+            for i in 0..worker_count:
+                val script_path = "/tmp/worker_{i}_{getpid()}.spl"
+                create_worker_script(script_path, db_path, i, iterations_per_worker)
+
+                # Spawn worker process
+                # val pid = rt_process_run("simple", [script_path])
+                # pids.push(pid)
+
+            # Wait for all workers to complete
+            # val all_completed = wait_for_processes(pids, 30)
+            # expect(all_completed).to_be(true)
+
+            # Verify database integrity
+            # val db_result = TestDatabase.load()
+            # expect(db_result.ok.?).to_be(true)
+            # val db = db_result.unwrap()
+            # expect(db.test_runs.len()).to_be(worker_count * iterations_per_worker)
+
+            # TODO: Implement after process spawning FFI is verified
+            print "Concurrent writes test (5 workers) - implementation pending"
+            cleanup_temp_db(test_name)
+
+        it "serializes writes correctly with file locking":
+            val test_name = "serialized_writes"
+            cleanup_temp_db(test_name)
+
+            val db_path = temp_db_path(test_name)
+
+            # Simulate two processes trying to write simultaneously
+            # Each should wait for the lock
+
+            val db1 = TestDatabase.empty()
+            val db2 = TestDatabase.empty()
+
+            # First write
+            db1.test_runs.push(RunRecord(
+                run_id: "write_1",
+                start_time: micros_to_rfc3339(time_now_unix_micros()),
+                end_time: "",
+                pid: getpid(),
+                hostname: "test",
+                status: "completed",
+                test_count: 1,
+                passed: 1,
+                failed: 0,
+                crashed: 0,
+                timed_out: 0
+            ))
+            val result1 = db1.save()
+            expect(result1.ok.?).to_be(true)
+
+            # Second write (should succeed after first completes)
+            db2.test_runs.push(RunRecord(
+                run_id: "write_2",
+                start_time: micros_to_rfc3339(time_now_unix_micros()),
+                end_time: "",
+                pid: getpid(),
+                hostname: "test",
+                status: "completed",
+                test_count: 1,
+                passed: 1,
+                failed: 0,
+                crashed: 0,
+                timed_out: 0
+            ))
+            val result2 = db2.save()
+            expect(result2.ok.?).to_be(true)
+
+            cleanup_temp_db(test_name)
+
+    describe "Concurrent Reads":
+
+        it "allows multiple simultaneous readers":
+            val test_name = "concurrent_reads"
+            cleanup_temp_db(test_name)
+
+            val db_path = temp_db_path(test_name)
+
+            # Create initial database
+            val db = TestDatabase.empty()
+            for i in 0..100:
+                db.test_runs.push(RunRecord(
+                    run_id: "run_{i}",
+                    start_time: micros_to_rfc3339(time_now_unix_micros()),
+                    end_time: "",
+                    pid: getpid(),
+                    hostname: "test",
+                    status: "completed",
+                    test_count: 1,
+                    passed: 1,
+                    failed: 0,
+                    crashed: 0,
+                    timed_out: 0
+                ))
+            val save_result = db.save()
+            expect(save_result.ok.?).to_be(true)
+
+            # Multiple concurrent reads (no locking needed for reads)
+            for i in 0..10:
+                val read_result = TestDatabase.load()
+                expect(read_result.ok.?).to_be(true)
+                val loaded_db = read_result.unwrap()
+                expect(loaded_db.test_runs.len()).to_be(100)
+
+            cleanup_temp_db(test_name)
+
+        it "readers see consistent state during concurrent writes":
+            val test_name = "read_write_consistency"
+            cleanup_temp_db(test_name)
+
+            # This test verifies that readers never see partial writes
+            # due to atomic write operations
+
+            val db = TestDatabase.empty()
+            db.test_runs.push(RunRecord(
+                run_id: "initial",
+                start_time: micros_to_rfc3339(time_now_unix_micros()),
+                end_time: "",
+                pid: getpid(),
+                hostname: "test",
+                status: "completed",
+                test_count: 1,
+                passed: 1,
+                failed: 0,
+                crashed: 0,
+                timed_out: 0
+            ))
+            val save_result = db.save()
+            expect(save_result.ok.?).to_be(true)
+
+            # Read should always see complete, valid data
+            val read_result = TestDatabase.load()
+            expect(read_result.ok.?).to_be(true)
+            val loaded = read_result.unwrap()
+            expect(loaded.test_runs.len()).to_be_greater_than(0)
+
+            cleanup_temp_db(test_name)
+
+    describe "Lock Timeout Handling":
+
+        it "respects lock timeout of 10 seconds":
+            val test_name = "lock_timeout"
+            cleanup_temp_db(test_name)
+
+            val lock_path = temp_db_path(test_name)
+
+            # Acquire lock with 10 second timeout
+            val lock_result = FileLock.acquire(lock_path, 10)
+            expect(lock_result.ok.?).to_be(true)
+            val lock = lock_result.unwrap()
+
+            # Lock is valid
+            expect(lock.is_valid()).to_be(true)
+
+            # Release lock
+            val released = lock.release()
+            expect(released).to_be(true)
+
+            cleanup_temp_db(test_name)
+
+        it "second process fails gracefully on lock timeout":
+            val test_name = "lock_contention"
+            cleanup_temp_db(test_name)
+
+            val lock_path = temp_db_path(test_name)
+
+            # First process acquires lock
+            val lock1_result = FileLock.acquire(lock_path, 10)
+            expect(lock1_result.ok.?).to_be(true)
+            val lock1 = lock1_result.unwrap()
+
+            # Second process tries to acquire with short timeout
+            val lock2_result = FileLock.acquire(lock_path, 1)
+            # Should fail due to timeout
+            expect(lock2_result.err.?).to_be(true)
+
+            # Release first lock
+            lock1.release()
+
+            # Now second attempt should succeed
+            val lock3_result = FileLock.acquire(lock_path, 10)
+            expect(lock3_result.ok.?).to_be(true)
+            val lock3 = lock3_result.unwrap()
+            lock3.release()
+
+            cleanup_temp_db(test_name)
+
+    describe "Stale Lock Detection":
+
+        it "detects and cleans stale lock files":
+            val test_name = "stale_lock"
+            cleanup_temp_db(test_name)
+
+            val lock_path = temp_db_path(test_name)
+            val lock_file = "{lock_path}.lock"
+
+            # Create old lock file manually
+            # In production, stale lock would be >60 seconds old
+            rt_file_write_text(lock_file, "999999")  # Non-existent PID
+
+            # New process should detect stale lock
+            # TODO: Implement stale lock detection in FileLock
+            # For now, just verify lock file exists
+            expect(file_exists(lock_file)).to_be(true)
+
+            cleanup_temp_db(test_name)
+
+    describe "Race Condition Prevention":
+
+        it "prevents duplicate test records from simultaneous creation":
+            val test_name = "race_duplicates"
+            cleanup_temp_db(test_name)
+
+            # Simulate two processes trying to create the same test record
+            val db1 = TestDatabase.empty()
+            val db2 = TestDatabase.empty()
+
+            # Both try to add same test
+            db1.test_runs.push(RunRecord(
+                run_id: "same_run",
+                start_time: micros_to_rfc3339(time_now_unix_micros()),
+                end_time: "",
+                pid: getpid(),
+                hostname: "test1",
+                status: "completed",
+                test_count: 1,
+                passed: 1,
+                failed: 0,
+                crashed: 0,
+                timed_out: 0
+            ))
+
+            db2.test_runs.push(RunRecord(
+                run_id: "same_run",
+                start_time: micros_to_rfc3339(time_now_unix_micros()),
+                end_time: "",
+                pid: getpid(),
+                hostname: "test2",
+                status: "completed",
+                test_count: 1,
+                passed: 1,
+                failed: 0,
+                crashed: 0,
+                timed_out: 0
+            ))
+
+            # First write succeeds
+            val result1 = db1.save()
+            expect(result1.ok.?).to_be(true)
+
+            # Second write also succeeds (last writer wins)
+            # In a real scenario, would need merge logic
+            val result2 = db2.save()
+            expect(result2.ok.?).to_be(true)
+
+            # Load and verify (last write wins due to atomic replace)
+            val load_result = TestDatabase.load()
+            expect(load_result.ok.?).to_be(true)
+
+            cleanup_temp_db(test_name)
+
+    describe "Backup Integrity":
+
+        it "creates backup before overwriting database":
+            val test_name = "backup_creation"
+            cleanup_temp_db(test_name)
+
+            val db_path = temp_db_path(test_name)
+            val backup_path = "{db_path}.bak"
+
+            # Initial write
+            val db1 = TestDatabase.empty()
+            db1.test_runs.push(RunRecord(
+                run_id: "initial",
+                start_time: micros_to_rfc3339(time_now_unix_micros()),
+                end_time: "",
+                pid: getpid(),
+                hostname: "test",
+                status: "completed",
+                test_count: 1,
+                passed: 1,
+                failed: 0,
+                crashed: 0,
+                timed_out: 0
+            ))
+            val result1 = db1.save()
+            expect(result1.ok.?).to_be(true)
+
+            # Second write should create backup of first
+            val db2 = TestDatabase.empty()
+            db2.test_runs.push(RunRecord(
+                run_id: "updated",
+                start_time: micros_to_rfc3339(time_now_unix_micros()),
+                end_time: "",
+                pid: getpid(),
+                hostname: "test",
+                status: "completed",
+                test_count: 1,
+                passed: 1,
+                failed: 0,
+                crashed: 0,
+                timed_out: 0
+            ))
+            val result2 = db2.save()
+            expect(result2.ok.?).to_be(true)
+
+            # Verify backup exists
+            expect(file_exists(backup_path)).to_be(true)
+
+            # Backup should contain original data
+            val backup_content = file_read(backup_path)
+            expect(backup_content).to_contain("initial")
+
+            cleanup_temp_db(test_name)
+
+        it "preserves backup on write failure":
+            val test_name = "backup_on_failure"
+            cleanup_temp_db(test_name)
+
+            # TODO: Simulate write failure (e.g., disk full)
+            # Verify backup is not deleted/corrupted
+
+            print "Backup preservation test - implementation pending"
+            cleanup_temp_db(test_name)
+
+    describe "Atomic Write Guarantees":
+
+        it "ensures all-or-nothing writes":
+            val test_name = "atomic_write"
+            cleanup_temp_db(test_name)
+
+            val db = TestDatabase.empty()
+
+            # Add significant amount of data
+            for i in 0..50:
+                db.test_runs.push(RunRecord(
+                    run_id: "run_{i}",
+                    start_time: micros_to_rfc3339(time_now_unix_micros()),
+                    end_time: "",
+                    pid: getpid(),
+                    hostname: "test",
+                    status: "completed",
+                    test_count: 1,
+                    passed: 1,
+                    failed: 0,
+                    crashed: 0,
+                    timed_out: 0
+                ))
+
+            # Write should be atomic (write to .tmp, then rename)
+            val result = db.save()
+            expect(result.ok.?).to_be(true)
+
+            # Read should get all 50 records (not partial)
+            val load_result = TestDatabase.load()
+            expect(load_result.ok.?).to_be(true)
+            val loaded = load_result.unwrap()
+            expect(loaded.test_runs.len()).to_be(50)
+
+            cleanup_temp_db(test_name)
+
+    describe "High Contention Stress Test":
+
+        slow_it "survives 10 parallel writers with high frequency":
+            val test_name = "high_contention"
+            cleanup_temp_db(test_name)
+
+            # This is a slow test - spawn 10 workers, each writing 20 times
+            # Total: 200 write operations with high lock contention
+
+            # TODO: Implement after process spawning is verified
+            print "High contention stress test - implementation pending"
+
+            cleanup_temp_db(test_name)

@@ -1,0 +1,149 @@
+# Package Build Logic
+# Creates SPK files for distribution
+
+import std.fs
+import std.env
+import std.process
+import std.package_ffi
+
+class PackageBuild:
+    static fn run(args: [text]):
+        var package_type = "bootstrap"
+        var output_path = ""
+        var platform = detect_platform()
+
+        # Parse arguments
+        for arg in args:
+            if arg.starts_with("--type="):
+                package_type = arg[7:]
+            else if arg.starts_with("--output="):
+                output_path = arg[9:]
+            else if arg.starts_with("--platform="):
+                platform = arg[11:]
+
+        # Validate package type
+        if package_type != "bootstrap" and package_type != "full":
+            print "Error: Invalid package type '{package_type}'. Must be 'bootstrap' or 'full'."
+            return
+
+        # Generate default output path if not specified
+        if output_path == "":
+            val version = get_version()
+            output_path = "simple-{package_type}-{version}-{platform}.spk"
+
+        print "Building {package_type} package for {platform}..."
+        print "Output: {output_path}"
+
+        if package_type == "bootstrap":
+            build_bootstrap(output_path, platform)
+        else:
+            build_full(output_path, platform)
+
+        print "Package built successfully: {output_path}"
+
+fn build_bootstrap(output_path: text, platform: text):
+    # Get version
+    val version = get_version()
+
+    # Create temporary directory
+    val tmp_dir = "/tmp/simple-bootstrap-build"
+    fs.remove_dir_all(tmp_dir) if fs.exists(tmp_dir)
+    fs.create_dir_all(tmp_dir)
+
+    # Create directory structure
+    fs.create_dir_all(tmp_dir + "/bin")
+    fs.create_dir_all(tmp_dir + "/lib/simple/stdlib")
+    fs.create_dir_all(tmp_dir + "/lib/simple/app")
+
+    # Copy runtime binary
+    val runtime_src = "rust/target/release-opt/simple_runtime"
+    val runtime_dst = tmp_dir + "/bin/simple_runtime"
+
+    if not fs.exists(runtime_src):
+        print "Error: Runtime binary not found at {runtime_src}"
+        print "Please build with: cd rust && cargo build --profile release-opt"
+        return
+
+    fs.copy_file(runtime_src, runtime_dst)
+    fs.set_permissions(runtime_dst, 0o755)
+
+    # Copy stdlib files (essential subset)
+    val stdlib_files = ["core.spl", "io.spl", "json.spl", "http.spl"]
+    for file in stdlib_files:
+        val src = "src/std/{file}"
+        val dst = tmp_dir + "/lib/simple/stdlib/{file}"
+        if fs.exists(src):
+            fs.copy_file(src, dst)
+        else:
+            print "Warning: stdlib file not found: {src}"
+
+    # Copy essential apps
+    val app_dirs = ["cli", "run", "compile", "check", "repl"]
+    for app in app_dirs:
+        val src = "src/app/{app}"
+        val dst = tmp_dir + "/lib/simple/app/{app}"
+        if fs.exists(src):
+            fs.copy_dir(src, dst)
+        else:
+            print "Warning: app directory not found: {src}"
+
+    # Generate manifest
+    val manifest = PackageManifest.generate_bootstrap(version, platform)
+
+    # Get runtime file info
+    val runtime_size = fs.file_size(runtime_dst)
+    val runtime_checksum = calculate_checksum(runtime_dst)
+
+    manifest.runtime_size = runtime_size
+    manifest.runtime_checksum = runtime_checksum
+
+    # Write manifest
+    val manifest_path = tmp_dir + "/manifest.sdn"
+    fs.write_file(manifest_path, manifest.to_sdn())
+
+    # Create SPK file (for now, just create a tarball)
+    # TODO: Use proper SPK format once FFI is ready
+    print "Creating SPK archive..."
+    val tar_cmd = "tar -czf {output_path} -C {tmp_dir} ."
+    process.run(tar_cmd)
+
+    # Cleanup
+    fs.remove_dir_all(tmp_dir)
+
+fn build_full(output_path: text, platform: text):
+    print "Building full package..."
+
+    # Full package is just a tarball of the entire source tree
+    val version = get_version()
+
+    val tar_cmd = """
+tar -czf {output_path} \
+  --exclude='.git' \
+  --exclude='rust/target' \
+  --exclude='__pycache__' \
+  --exclude='*.pyc' \
+  --exclude='.DS_Store' \
+  --transform='s,^,simple-{version}/,' \
+  .
+"""
+
+    process.run(tar_cmd)
+
+fn get_version() -> text:
+    # Try to read from VERSION file
+    if fs.exists("VERSION"):
+        return fs.read_file("VERSION").trim()
+
+    # Fallback to Cargo.toml
+    if fs.exists("rust/driver/Cargo.toml"):
+        val content = fs.read_file("rust/driver/Cargo.toml")
+        # Simple parsing - look for version = "x.y.z"
+        for line in content.split("\n"):
+            if line.starts_with("version = "):
+                return line.split("\"")[1]
+
+    "0.3.0"  # Fallback
+
+fn calculate_checksum(file_path: text) -> text:
+    # Calculate SHA256 checksum via FFI
+    package_ffi.calculate_checksum(file_path)

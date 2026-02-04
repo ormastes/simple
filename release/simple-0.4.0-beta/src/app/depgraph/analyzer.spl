@@ -1,0 +1,246 @@
+# Dependency Graph Generator - Dependency Analyzer Module
+# Analyzes imports to identify external dependencies and enforce visibility rules
+
+import scanner
+import parser
+
+# Dependency classification
+enum DepKind:
+    Internal     # Within same module tree
+    External     # Outside module tree (stdlib, other packages)
+    Sibling      # Same parent module
+
+# Analyzed dependency
+class Dependency:
+    path: String          # Import path
+    kind: DepKind         # Classification
+    source_file: String   # File that imports this
+    line_number: Int      # Line number of import
+
+    fn new(path: String, kind: DepKind, source: String, line: Int) -> Dependency:
+        return Dependency(
+            path: path,
+            kind: kind,
+            source_file: source,
+            line_number: line
+        )
+
+# Visibility status of a child module
+class ChildVisibility:
+    name: String
+    is_declared_pub: Bool       # Has 'pub mod' in parent
+    has_export_use: Bool        # Has 'export use' in parent
+    exported_symbols: List<String>  # Specific exported symbols
+    is_glob_exported: Bool      # Has 'export use child.*'
+
+    fn new(name: String) -> ChildVisibility:
+        return ChildVisibility(
+            name: name,
+            is_declared_pub: false,
+            has_export_use: false,
+            exported_symbols: [],
+            is_glob_exported: false
+        )
+
+    fn is_externally_visible() -> Bool:
+        # Child is visible externally only if:
+        # 1. Declared as pub mod in parent
+        # 2. Has some export use (explicit or glob)
+        return self.is_declared_pub and (self.has_export_use or self.is_glob_exported)
+
+# Analysis result for a directory
+class AnalysisResult:
+    directory: String
+    module_path: String              # Full module path
+    internal_deps: List<Dependency>  # Internal dependencies
+    external_deps: List<Dependency>  # External dependencies
+    child_modules: List<String>      # All child modules
+    child_visibility: List<ChildVisibility>  # Visibility of each child
+    public_exports: List<String>     # What this module exports
+
+    fn new(directory: String, module_path: String) -> AnalysisResult:
+        return AnalysisResult(
+            directory: directory,
+            module_path: module_path,
+            internal_deps: [],
+            external_deps: [],
+            child_modules: [],
+            child_visibility: [],
+            public_exports: []
+        )
+
+# Check if import path is external to given module tree
+pub fn is_external(import_path: String, module_root: String) -> Bool:
+    # Standard library prefixes are always external
+    if import_path.starts_with("std."):
+        return true
+    if import_path.starts_with("core."):
+        return true
+    if import_path.starts_with("crate.") and not import_path.starts_with("crate." + module_root):
+        return true
+    # If not starting with module root, it's external
+    if not import_path.starts_with(module_root + "."):
+        if import_path != module_root:
+            return true
+    return false
+
+# Check if import is a sibling (same parent)
+pub fn is_sibling(import_path: String, current_path: String) -> Bool:
+    # Extract parent paths
+    val import_parts = import_path.split(".")
+    val current_parts = current_path.split(".")
+
+    if import_parts.len() < 2 or current_parts.len() < 2:
+        return false
+
+    # Compare parent paths (all but last segment)
+    val import_parts_parent = import_parts.take(import_parts.len() - 1)
+    val current_parts_parent = current_parts.take(current_parts.len() - 1)
+    val import_parent = import_parts_parent.join(".")
+    val current_parent = current_parts_parent.join(".")
+
+    return import_parent == current_parent
+
+# Classify a dependency
+pub fn classify_dependency(
+    import_path: String,
+    module_root: String,
+    current_module: String
+) -> DepKind:
+    if is_external(import_path=import_path, module_root=module_root):
+        return DepKind.External
+    if is_sibling(import_path=import_path, current_path=current_module):
+        return DepKind.Sibling
+    return DepKind.Internal
+
+# Analyze a single directory
+pub fn analyze_directory(
+    scan_result: scanner.ScanResult,
+    module_root: String,
+    current_module: String
+) -> Result<AnalysisResult, String>:
+    # Use local lists for collecting - Simple doesn't mutate class fields in place
+    var child_modules: List<String> = []
+    var child_visibility: List<ChildVisibility> = []
+    var internal_deps: List<Dependency> = []
+    var external_deps: List<Dependency> = []
+    var public_exports: List<String> = []
+
+    # Collect child modules from scan (copy child directories)
+    for dir in scan_result.child_dirs:
+        child_modules.push(dir)
+    for file in scan_result.spl_files:
+        val module_name = scanner.get_module_name(file)
+        child_modules.push(module_name)
+
+    # Initialize child visibility
+    for child in child_modules:
+        child_visibility.push(ChildVisibility.new(child))
+
+    # Parse __init__.spl if it exists to get visibility info
+    if scan_result.has_init:
+        val init_path = scan_result.directory + "/__init__.spl"
+        val init_parse = parser.parse_file(init_path)
+        match init_parse:
+            case Err(e):
+                return Err("Failed to parse __init__.spl: {e}")
+            case Ok(init_result):
+                # Update child visibility based on __init__.spl
+                for mod_decl in init_result.mod_decls:
+                    for vis in child_visibility:
+                        if vis.name == mod_decl.name:
+                            vis.is_declared_pub = mod_decl.is_public
+
+                # Process export use statements
+                for exp_entry in init_result.exports:
+                    # Check if it's a child module export
+                    val parts = exp_entry.path.split(".")
+                    if parts.len() >= 1:
+                        val child_name = parts[0]
+                        for vis in child_visibility:
+                            if vis.name == child_name:
+                                vis.has_export_use = true
+                                if exp_entry.is_glob:
+                                    vis.is_glob_exported = true
+
+                # Collect exports for this module
+                for exp_entry in init_result.exports:
+                    public_exports.push(exp_entry.path)
+
+    # Parse each .spl file and analyze imports
+    for file in scan_result.spl_files:
+        val file_path = scan_result.directory + "/" + file
+        val parse_result = parser.parse_file(file_path)
+        match parse_result:
+            case Err(e):
+                # Log warning but continue
+                print("[WARN] Failed to parse {file_path}: {e}")
+            case Ok(parsed):
+                # Analyze each import
+                for import_entry in parsed.imports:
+                    val kind = classify_dependency(
+                        import_path=import_entry.path,
+                        module_root=module_root,
+                        current_module=current_module
+                    )
+                    val dep = Dependency.new(
+                        path=import_entry.path,
+                        kind=kind,
+                        source=file_path,
+                        line=import_entry.line_number
+                    )
+                    match kind:
+                        case DepKind.External:
+                            external_deps.push(dep)
+                        case DepKind.Internal:
+                            internal_deps.push(dep)
+                        case DepKind.Sibling:
+                            internal_deps.push(dep)
+
+    # Construct result using new() and then assigning fields
+    var result = AnalysisResult.new(directory=scan_result.directory, module_path=current_module)
+    result.child_modules = child_modules
+    result.child_visibility = child_visibility
+    result.internal_deps = internal_deps
+    result.external_deps = external_deps
+    result.public_exports = public_exports
+    return Ok(result)
+
+# Get unique external dependency paths
+pub fn get_unique_externals(result: AnalysisResult) -> List<String>:
+    val seen: List<String> = []
+    for dep in result.external_deps:
+        if not seen.contains(dep.path):
+            seen.push(dep.path)
+    seen.sort()
+    return seen
+
+# Get child modules that are externally visible
+pub fn get_visible_children(result: AnalysisResult) -> List<String>:
+    val visible: List<String> = []
+    for vis in result.child_visibility:
+        if vis.is_externally_visible():
+            visible.push(vis.name)
+    return visible
+
+# Get child modules that are blocked (not visible externally)
+pub fn get_blocked_children(result: AnalysisResult) -> List<String>:
+    val blocked: List<String> = []
+    for vis in result.child_visibility:
+        if not vis.is_externally_visible():
+            blocked.push(vis.name)
+    return blocked
+
+# Check if a specific symbol from child is exported
+pub fn is_symbol_exported(
+    result: AnalysisResult,
+    child_name: String,
+    symbol_name: String
+) -> Bool:
+    for vis in result.child_visibility:
+        if vis.name == child_name:
+            if vis.is_glob_exported:
+                return true
+            val full_path = child_name + "." + symbol_name
+            return vis.exported_symbols.contains(full_path)
+    return false

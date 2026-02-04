@@ -1,0 +1,200 @@
+# @pending
+# @skip
+"""
+Diagram Filter Tests
+Feature: Diagram Generation - Include/Exclude Filtering
+Category: Tooling, Diagrams
+Status: Complete
+
+Tests the filtering system for diagram generation including
+glob pattern matching and include/exclude precedence.
+"""
+
+use diagram.{DiagramFilter, FilterPattern, FilterMode, glob_to_regex}
+use diagram.{CallEvent, CallType}
+
+describe "DiagramFilter":
+    """
+    Tests for DiagramFilter class with include/exclude pattern filtering.
+    """
+    context "Empty filter":
+        it "should include everything by default":
+            val filter = DiagramFilter.new()
+            expect filter.should_include("anything") == true
+            expect filter.should_include("SomeClass") == true
+            expect filter.should_include("module.function") == true
+
+        it "should report empty":
+            val filter = DiagramFilter.new()
+            expect filter.is_empty() == true
+
+    context "Include patterns":
+        it "should include matching exact names":
+            val filter = DiagramFilter.new()
+            filter.add_include("UserService")
+
+            expect filter.should_include("UserService") == true
+            expect filter.should_include("OtherService") == false
+
+        it "should support wildcard *":
+            val filter = DiagramFilter.new()
+            filter.add_include("*Service")
+
+            expect filter.should_include("UserService") == true
+            expect filter.should_include("AuthService") == true
+            expect filter.should_include("Repository") == false
+
+        it "should support prefix wildcard":
+            val filter = DiagramFilter.new()
+            filter.add_include("User*")
+
+            expect filter.should_include("UserService") == true
+            expect filter.should_include("UserRepository") == true
+            expect filter.should_include("AuthService") == false
+
+        it "should support multiple wildcards":
+            val filter = DiagramFilter.new()
+            filter.add_include("*User*")
+
+            expect filter.should_include("UserService") == true
+            expect filter.should_include("AdminUserController") == true
+            expect filter.should_include("AuthService") == false
+
+        it "should support ? single char wildcard":
+            val filter = DiagramFilter.new()
+            filter.add_include("User?")
+
+            expect filter.should_include("User1") == true
+            expect filter.should_include("UserA") == true
+            expect filter.should_include("User12") == false
+
+        it "should support multiple include patterns":
+            val filter = DiagramFilter.new()
+            filter.add_includes("UserService,AuthService,*Repository")
+
+            expect filter.should_include("UserService") == true
+            expect filter.should_include("AuthService") == true
+            expect filter.should_include("UserRepository") == true
+            expect filter.should_include("Database") == false
+
+    context "Exclude patterns":
+        it "should exclude matching names":
+            val filter = DiagramFilter.new()
+            filter.add_exclude("Internal*")
+
+            expect filter.should_include("InternalHelper") == false
+            expect filter.should_include("UserService") == true
+
+        it "should exclude with wildcards":
+            val filter = DiagramFilter.new()
+            filter.add_exclude("*Helper")
+
+            expect filter.should_include("InternalHelper") == false
+            expect filter.should_include("DebugHelper") == false
+            expect filter.should_include("UserService") == true
+
+        it "should support multiple exclude patterns":
+            val filter = DiagramFilter.new()
+            filter.add_excludes("*Helper,*Debug*,Internal*")
+
+            expect filter.should_include("InternalService") == false
+            expect filter.should_include("DebugLogger") == false
+            expect filter.should_include("TestHelper") == false
+            expect filter.should_include("UserService") == true
+
+    context "Include and exclude together":
+        it "should exclude takes precedence over include":
+            val filter = DiagramFilter.new()
+            filter.add_include("*Service")
+            filter.add_exclude("InternalService")
+
+            expect filter.should_include("UserService") == true
+            expect filter.should_include("InternalService") == false
+
+        it "should handle overlapping patterns":
+            val filter = DiagramFilter.new()
+            filter.add_include("User*")
+            filter.add_exclude("*Internal*")
+
+            expect filter.should_include("UserService") == true
+            expect filter.should_include("UserInternalHelper") == false
+
+    context "Event filtering":
+        it "should filter call events":
+            val filter = DiagramFilter.new()
+            filter.add_include("*Service")
+
+            val event1 = CallEvent.new_call(
+                0, 100, "caller", "method",
+                Some("UserService"), Some("AuthService"),
+                [], CallType.Method, 0
+            )
+            val event2 = CallEvent.new_call(
+                1, 200, "caller", "method",
+                Some("UserService"), Some("Repository"),
+                [], CallType.Method, 0
+            )
+
+            expect filter.should_include_event(event1) == true
+            expect filter.should_include_event(event2) == false
+
+        it "should filter event list":
+            val filter = DiagramFilter.new()
+            filter.add_include("*Service")
+
+            val events = [
+                CallEvent.new_call(0, 100, "c", "m", Some("UserService"), Some("AuthService"), [], CallType.Method, 0),
+                CallEvent.new_call(1, 200, "c", "m", Some("UserService"), Some("Repository"), [], CallType.Method, 0),
+                CallEvent.new_call(2, 300, "c", "m", Some("AuthService"), Some("UserService"), [], CallType.Method, 0),
+            ]
+
+            val filtered = filter.filter_events(events)
+            expect filtered.len() == 2
+
+    context "Pattern count":
+        it "should count patterns":
+            val filter = DiagramFilter.new()
+            expect filter.pattern_count() == 0
+
+            filter.add_include("A")
+            expect filter.pattern_count() == 1
+
+            filter.add_exclude("B")
+            expect filter.pattern_count() == 2
+
+            filter.add_includes("C,D,E")
+            expect filter.pattern_count() == 5
+
+describe "Glob to Regex":
+    context "Basic conversion":
+        it "should convert exact match":
+            val regex = glob_to_regex("hello")
+            expect regex == "^hello$"
+
+        it "should convert * wildcard":
+            val regex = glob_to_regex("*Service")
+            expect regex.contains("[^.]*") == true
+
+        it "should convert ** double wildcard":
+            val regex = glob_to_regex("a**b")
+            expect regex.contains(".*") == true
+
+        it "should escape special regex chars":
+            val regex = glob_to_regex("a.b")
+            expect regex.contains("\\.") == true
+
+            val regex2 = glob_to_regex("a(b)")
+            expect regex2.contains("\\(") == true
+            expect regex2.contains("\\)") == true
+
+describe "FilterPattern":
+    context "Pattern matching":
+        it "should match with include mode":
+            val pattern = FilterPattern.from_glob("User*", FilterMode.Include)
+            expect pattern.matches("UserService") == true
+            expect pattern.matches("AuthService") == false
+
+        it "should preserve raw pattern":
+            val pattern = FilterPattern.from_glob("*Service", FilterMode.Exclude)
+            expect pattern.raw == "*Service"
+            expect pattern.mode == FilterMode.Exclude
