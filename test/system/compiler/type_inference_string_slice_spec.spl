@@ -1,0 +1,132 @@
+# Type Inference: String Slice Bug Reproduction
+"""
+**Category:** Compiler
+**Status:** Failing
+**Priority:** P0
+
+This test reproduces a critical type inference bug where string slicing
+operations incorrectly infer the result type as enum instead of text,
+causing "method not found on type enum" errors.
+
+## Bug Description
+
+When using string slicing like `text[n:]` or `text[n:m]`, the type
+inference system sometimes incorrectly infers the result as an enum type
+instead of text, leading to method resolution failures.
+
+## Impact
+
+- Blocks build system compilation
+- Affects any code using string slicing followed by string methods
+- Critical blocker for DAP integration
+
+## Root Cause
+
+Type inference for slice operations doesn't properly preserve the base
+type through the slicing operation.
+"""
+
+describe "Type Inference for String Slicing":
+    """
+    Tests that string slicing operations correctly infer as text type
+    and allow subsequent method calls.
+    """
+
+    describe "Basic string slicing":
+        """
+        Tests that sliced strings maintain text type.
+        """
+
+        it "infers sliced string as text":
+            val text = "hello world"
+            val sliced = text[6:]
+
+            # This should work - sliced should be text
+            val result = sliced.split(" ")
+            expect(result).to(be_a("Array"))
+
+        it "allows method calls on sliced strings":
+            val text = "--features=a,b,c"
+            val features_str = text[11:]
+
+            # This should work - features_str should be text
+            val features = features_str.split(",")
+            expect(features.len()).to(eq(3))
+
+        it "infers mid-range slice as text":
+            val text = "abcdefgh"
+            val sliced = text[2:6]
+
+            # Should be able to call text methods
+            val upper = sliced.upper()
+            expect(upper).to(eq("CDEF"))
+
+    describe "String slicing in conditionals":
+        """
+        Tests string slicing within if/match expressions.
+        """
+
+        it "infers correctly in if branches":
+            val arg = "--profile=release"
+
+            if arg.starts_with("--profile="):
+                val profile_str = arg[10:]
+                # Should infer as text, not enum
+                val parts = profile_str.split("=")
+                expect(parts.len()).to(be_gte(1))
+
+        it "infers correctly with variable assignment":
+            val args = ["--opt-level=2", "--features=test"]
+
+            for arg in args:
+                if arg.starts_with("--opt-level="):
+                    val level_str = arg[12:]
+                    # This should work - level_str is text
+                    val is_empty = level_str.len() == 0
+                    expect(is_empty).to(be_false())
+
+    describe "String slicing with enum variables nearby":
+        """
+        Tests that nearby enum usage doesn't contaminate string slice types.
+        """
+
+        enum BuildProfile:
+            Debug
+            Release
+
+        it "doesn't confuse string slice with enum":
+            var profile = BuildProfile.Debug
+            val args = ["--profile=release"]
+
+            for arg in args:
+                if arg.starts_with("--profile="):
+                    val profile_str = arg[10:]
+                    # BUG: Type inference incorrectly infers profile_str as enum
+                    # because of the nearby 'profile' enum variable
+                    val parts = profile_str.split(",")
+                    expect(parts.len()).to(be_gte(1))
+
+        it "handles multiple string operations after slice":
+            var profile = BuildProfile.Release
+            val text = "--features=a,b,c"
+
+            val features_str = text[11:]
+            # Chain multiple string methods
+            val trimmed = features_str.trim()
+            val parts = trimmed.split(",")
+            val joined = parts.join(";")
+
+            expect(joined).to(eq("a;b;c"))
+
+    describe "Type annotation workaround":
+        """
+        Tests that explicit type annotations work around the bug.
+        """
+
+        it "works with explicit type annotation":
+            val arg = "--features=x,y,z"
+            val features_str: text = arg[11:]
+
+            # With explicit annotation, this should work
+            val features = features_str.split(",")
+            expect(features.len()).to(eq(3))
