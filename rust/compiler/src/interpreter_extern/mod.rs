@@ -81,7 +81,6 @@ pub mod env_ffi;
 pub mod error_ffi;
 pub mod span_ffi;
 pub mod rc;
-pub mod json;
 
 // Import parent interpreter types
 type Enums = HashMap<String, EnumDef>;
@@ -1118,12 +1117,9 @@ pub(crate) fn call_extern_function(
         "ffi_regex_split_n" => regex::split_n(&evaluated),
 
         // ====================================================================
-        // JSON Operations (4 functions)
+        // JSON Operations (4 functions) - REMOVED: Use Simple's src/std/json.spl
         // ====================================================================
-        "json_parse" => json::json_parse(&evaluated),
-        "json_serialize" => json::json_serialize(&evaluated),
-        "json_pretty" => json::json_pretty(&evaluated),
-        "parse_int" => json::parse_int(&evaluated),
+        // JSON functions moved to Pure Simple implementation
 
         // ====================================================================
         // AST Node Accessor FFI (28 functions)
