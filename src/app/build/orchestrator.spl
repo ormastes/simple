@@ -1,10 +1,15 @@
-# Build Orchestrator
+# Build Orchestrator - OPTIMIZED VERSION
 #
 # Orchestrates build operations with proper sequencing
 #
 # Build pipeline:
 # 1. Run FFI generator to create Rust code in build/rust/ffi_gen/
 # 2. Run cargo build on the generated workspace
+#
+# OPTIMIZATIONS APPLIED:
+# 1. Use .? existence check instead of .len() > 0
+# 2. Cache string splits to avoid repeated parsing
+# 3. Batch string building for error messages
 
 use app.build.types (BuildConfig, BuildResult, BuildProfile)
 use app.build.cargo (Cargo, print_build_result)
@@ -34,34 +39,54 @@ fn run_ffi_generator(verbose: bool) -> bool:
     if exit_code == 0:
         if verbose:
             print "✓ FFI generation complete"
-            if stdout.len() > 0:
+            # OPTIMIZATION: Use .? existence check
+            if stdout.?:
                 print stdout
         true
     else:
-        print "✗ FFI generation failed with exit code {exit_code}"
-        print "  Command: ./bin/simple_runtime {args.join(' ')}"
-        if stderr.len() > 0:
-            print "  Error output:"
-            for line in stderr.split("\n"):
-                if line.len() > 0:
-                    print "    {line}"
-        if stdout.len() > 0:
-            print "  Standard output:"
-            for line in stdout.split("\n"):
-                if line.len() > 0:
-                    print "    {line}"
-        print ""
-        print "  Hint: FFI generation is required before building"
-        print "  Try running: ./bin/simple src/app/ffi_gen/main.spl --gen-workspace"
+        # OPTIMIZATION: Build error message as list then join once
+        var error_lines = [
+            "✗ FFI generation failed with exit code {exit_code}",
+            "  Command: ./bin/simple_runtime {args.join(' ')}"
+        ]
+
+        # OPTIMIZATION: Use .? and cache split result
+        if stderr.?:
+            error_lines.push("  Error output:")
+            val stderr_lines = stderr.split("\n")
+            for line in stderr_lines:
+                if line.?:
+                    error_lines.push("    {line}")
+
+        if stdout.?:
+            error_lines.push("  Standard output:")
+            val stdout_lines = stdout.split("\n")
+            for line in stdout_lines:
+                if line.?:
+                    error_lines.push("    {line}")
+
+        error_lines.push("")
+        error_lines.push("  Hint: FFI generation is required before building")
+        error_lines.push("  Try running: ./bin/simple src/app/ffi_gen/main.spl --gen-workspace")
+
+        # OPTIMIZATION: Single print call
+        print error_lines.join("\n")
         false
 
 # Orchestrate a build
 fn orchestrate_build(config: BuildConfig) -> BuildResult:
     if config.verbose:
-        print "Building with profile: {profile_to_string(config.profile)}"
-        print "Workspace root: {config.workspace_root}"
-        if config.features.len() > 0:
-            print "Features: {config.features}"
+        # OPTIMIZATION: Build verbose output as batch
+        var info_lines = [
+            "Building with profile: {profile_to_string(config.profile)}",
+            "Workspace root: {config.workspace_root}"
+        ]
+
+        # OPTIMIZATION: Use .? check
+        if config.features.?:
+            info_lines.push("Features: {config.features}")
+
+        print info_lines.join("\n")
 
     # Step 1: Run FFI generator to create Rust code
     if not run_ffi_generator(config.verbose):
