@@ -10,11 +10,12 @@
 # - Resilient: Work with partial/broken code
 # - Thread-safe: Multiple queries can run concurrently
 
-import compiler.parser.parse_util
-import compiler.type_system.checker
-import compiler.inference.infer
-import compiler.dependency.symbol
-import app.io  # For FFI functions
+import compiler.treesitter.{TreeSitter}
+import compiler.treesitter_types.{OutlineModule, ParseError, ErrorSeverity}
+import compiler.dependency.symbol.{SymbolTable, SymbolEntry, SymbolKind as DepSymbolKind}
+import compiler.type_system.checker.{TypeError, TypeChecker}
+import compiler.hir_types.{Scope, ScopeId, HirType}
+import app.io  # For file I/O functions
 
 # --- Core Types ---
 
@@ -216,14 +217,34 @@ class CompilerQueryContext:
 
     # Find all references to a symbol
     fn find_references(file_path: text, symbol: Symbol) -> [Location]:
-        # TODO: Implement multi-file reference search
-        # For now, just search in the same file
-        val symbol_table_result = self.get_symbol_table(file_path)
-        if symbol_table_result.err.?:
-            return []
+        # Determine which files to search based on symbol kind
+        val candidate_files = match symbol.kind:
+            case SymbolKind.Variable, SymbolKind.Parameter:
+                # Variables are file-scoped, only search current file
+                [file_path]
 
-        val symbol_table = symbol_table_result.unwrap()
-        find_symbol_references(symbol_table, symbol.name)
+            case SymbolKind.Function, SymbolKind.Method:
+                # Functions can be imported, search importing files
+                find_files_that_might_import(file_path, self.project_root)
+
+            case SymbolKind.Class, SymbolKind.Struct, SymbolKind.Enum, SymbolKind.Trait:
+                # Types can be used widely, search all files
+                find_source_files(self.project_root)
+
+            case _:
+                # Default: search all files
+                find_source_files(self.project_root)
+
+        # Search each candidate file for references
+        var all_refs = []
+        for file in candidate_files:
+            val symbol_table_result = self.get_symbol_table(file)
+            if symbol_table_result.ok.?:
+                val table = symbol_table_result.unwrap()
+                val refs = find_symbol_references(table, symbol.name)
+                all_refs.extend(refs)
+
+        all_refs
 
     # Find definition of symbol at position
     fn find_definition(file_path: text, pos: Position) -> Option<DefinitionResult>:
@@ -243,12 +264,26 @@ class CompilerQueryContext:
 
     # Get type information at a position
     fn type_at(file_path: text, pos: Position) -> Option<text>:
-        # Check symbol first
+        # Check symbol first (fast path)
         val symbol_opt = self.symbol_at(file_path, pos)
         if symbol_opt.?:
             return symbol_opt.unwrap().type_info
 
-        # TODO: Implement expression type inference for arbitrary positions
+        # Try to infer type from AST
+        val ast_result = self.parse_file(file_path)
+        if ast_result.err.?:
+            return None
+
+        val ast = ast_result.unwrap()
+
+        # For now, return basic type information
+        # TODO: Full expression type inference requires type checker integration
+        # This would involve:
+        # 1. Finding the expression node at the position
+        # 2. Building a type inference context with surrounding scope
+        # 3. Running Hindley-Milner type inference (Algorithm W)
+        # 4. Formatting the inferred type for display
+
         None
 
     # --- Completions ---
@@ -361,9 +396,25 @@ class CompilerQueryContext:
 
     # Search for symbols across the workspace
     fn workspace_symbols(query: text) -> [Symbol]:
-        # TODO: Implement workspace-wide symbol search
-        # This requires indexing all files in the project
-        []
+        # Get all source files in project
+        val files = find_source_files(self.project_root)
+
+        # Search each file for matching symbols
+        var matches = []
+        for file in files:
+            val symbols = self.document_symbols(file)
+            for symbol in symbols:
+                if symbol_matches_query(symbol.name, query):
+                    matches.push(symbol)
+
+        # Rank results by match quality
+        matches.sort_by(\s: rank_symbol_match(s, query))
+
+        # Limit to top 100 results
+        if matches.len() > 100:
+            matches[0:100]
+        else:
+            matches
 
 # --- Helper Functions ---
 
@@ -373,12 +424,17 @@ fn position_to_range(pos: Position) -> Range:
 
 # Convert parse error to diagnostic
 fn parse_error_to_diagnostic(error: ParseError) -> Diagnostic:
+    val severity = match error.severity:
+        case ErrorSeverity.Error: DiagnosticSeverity.Error
+        case ErrorSeverity.Warning: DiagnosticSeverity.Warning
+        case ErrorSeverity.Info: DiagnosticSeverity.Info
+
     Diagnostic(
         range: Range(
-            start: Position(line: error.line, column: error.column),
-            end: Position(line: error.line, column: error.column + 1),
+            start: Position(line: error.span.line, column: error.span.col),
+            end: Position(line: error.span.line, column: error.span.col + 1),
         ),
-        severity: DiagnosticSeverity.Error,
+        severity: severity,
         message: error.message,
         code: Some("E001"),
         source: "simple-parser",
@@ -386,14 +442,17 @@ fn parse_error_to_diagnostic(error: ParseError) -> Diagnostic:
 
 # Convert type error to diagnostic
 fn type_error_to_diagnostic(error: TypeError) -> Diagnostic:
+    # TypeError is an enum, extract message
+    val message = error.message()
+
     Diagnostic(
         range: Range(
-            start: Position(line: error.line, column: error.column),
-            end: Position(line: error.line, column: error.column + error.length),
+            start: Position(line: 0, column: 0),
+            end: Position(line: 0, column: 1),
         ),
         severity: DiagnosticSeverity.Error,
-        message: error.message,
-        code: Some(error.code),
+        message: message,
+        code: Some("T001"),
         source: "simple-type-checker",
     )
 
@@ -450,33 +509,96 @@ fn type_check_ast(ast: AST) -> [TypeError]:
 fn extract_all_symbols(table: SymbolTable) -> [Symbol]:
     io.rt_extract_all_symbols(table)
 
-# --- Placeholder Types (to be defined properly) ---
+# --- Type Aliases for Compiler Types ---
 
-# TODO: Import from actual compiler modules
-struct AST:
-    nodes: [Node]
+# AST is OutlineModule from treesitter
+type AST = OutlineModule
 
-struct ParseError:
-    line: i64
-    column: i64
-    message: text
-
-struct SymbolTable:
-    symbols: Dict<text, Symbol>
-
-struct TypeError:
-    line: i64
-    column: i64
-    length: i64
-    message: text
-    code: text
-
-struct Scope:
-    visible_symbols: [Symbol]
-
+# TypeMap for caching type information
 struct TypeMap:
     types: Dict<text, text>
 
-struct Node:
-    # AST node placeholder
-    data: text
+# --- Workspace Symbol Search Helpers ---
+
+# Find all source files in a directory
+fn find_source_files(root: text) -> [text]:
+    var files = []
+    val entries = io.dir_walk(root)
+
+    for entry in entries:
+        # Only include .spl and .sspec files
+        if entry.ends_with(".spl") or entry.ends_with(".sspec"):
+            # Skip build directories and hidden files
+            if not entry.contains("/target/") and not entry.contains("/."):
+                files.push(entry)
+
+    files
+
+# Check if symbol name matches query (case-insensitive substring)
+fn symbol_matches_query(name: text, query: text) -> bool:
+    val name_lower = name.to_lower()
+    val query_lower = query.to_lower()
+    name_lower.contains(query_lower)
+
+# Rank symbol match quality (lower score = better match)
+fn rank_symbol_match(symbol: Symbol, query: text) -> i64:
+    var score = 0
+
+    # Exact match: highest priority
+    if symbol.name == query:
+        score = -100
+    # Prefix match: high priority
+    elif symbol.name.starts_with(query):
+        score = -50
+    # Contains: lower priority
+    else:
+        score = -20
+
+    # Public symbols get bonus
+    if symbol.is_public:
+        score = score - 10
+
+    score
+
+# Find files that might import the given file
+# Simple heuristic: search all files and check for import statements
+fn find_files_that_might_import(file_path: text, project_root: text) -> [text]:
+    # Extract module name from file path
+    val module_name = extract_module_name(file_path, project_root)
+
+    # Get all source files
+    val all_files = find_source_files(project_root)
+
+    # Search for files that import this module
+    var importing_files = [file_path]  # Always include the file itself
+
+    for file in all_files:
+        if file == file_path:
+            continue
+
+        # Read file and check for import statement
+        if io.file_exists(file):
+            val content = io.file_read(file)
+            if content.contains("import {module_name}") or content.contains("use {module_name}"):
+                importing_files.push(file)
+
+    importing_files
+
+# Extract module name from file path
+fn extract_module_name(file_path: text, project_root: text) -> text:
+    # Remove project root and convert path to module name
+    var module_path = file_path
+
+    if module_path.starts_with(project_root):
+        module_path = module_path[project_root.len():]
+
+    # Remove leading slash
+    if module_path.starts_with("/"):
+        module_path = module_path[1:]
+
+    # Remove .spl extension
+    if module_path.ends_with(".spl"):
+        module_path = module_path[:module_path.len() - 4]
+
+    # Convert path separators to dots
+    module_path.replace("/", ".")
