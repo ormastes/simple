@@ -3,11 +3,12 @@
 # Main TestDatabase class: load, save, update from test results, merge.
 # Manages both stable (test_db.sdn) and volatile (test_db_runs.sdn) data.
 
-use app.io.mod (getpid, hostname, time_now_unix_micros, timestamp_year, timestamp_month, timestamp_day, timestamp_hour, timestamp_minute, timestamp_second)
+use app.io.mod (getpid, hostname, time_now_unix_micros, timestamp_year, timestamp_month, timestamp_day, timestamp_hour, timestamp_minute, timestamp_second, eprintln)
 use string_interner.StringInterner
 use test_db_types.*
 use test_db_io.{DB_PATH, RUNS_PATH, read_db_file, write_db_file_locked}
 use test_db_parser.{parse_stable_db, parse_volatile_db, ParsedStableDb, ParsedVolatileDb}
+use test_db_parser_robust.{parse_stable_db_robust, parse_volatile_db_robust}
 use test_db_serializer.{serialize_stable_db, serialize_volatile_db}
 use test_stats.{compute_statistics, compute_percentiles, detect_outliers_iqr, sort_f64, percentile_at, abs_f64, detect_flaky_test}
 use test_db_validation.{validate_database, print_validation_warnings}
@@ -57,11 +58,20 @@ impl TestDatabase:
 
         val stable_content = stable_result.unwrap()
         if stable_content.trim() != "":
-            val parsed = parse_stable_db(stable_content)
+            # Use robust parser with error recovery
+            val parsed = parse_stable_db_robust(stable_content)
             db.interner = parsed.interner
             db.files = parsed.files
             db.suites = parsed.suites
             db.tests = parsed.tests
+
+            # Report parsing errors if any
+            if parsed.stats.has_errors():
+                eprintln("[WARNING] Database parsing recovered from errors:")
+                eprintln("  {parsed.stats.summary()}")
+                for err in parsed.stats.errors:
+                    eprintln("  - {err}")
+                eprintln("[INFO] Database loaded with error recovery enabled")
 
         # Load volatile data
         val volatile_result = read_db_file(RUNS_PATH)
@@ -71,12 +81,20 @@ impl TestDatabase:
         else:
             val volatile_content = volatile_result.unwrap()
             if volatile_content.trim() != "":
-                val parsed_vol = parse_volatile_db(volatile_content)
+                # Use robust parser with error recovery
+                val parsed_vol = parse_volatile_db_robust(volatile_content)
                 db.counters = parsed_vol.counters
                 db.timing = parsed_vol.timing
                 db.timing_runs = parsed_vol.timing_runs
                 db.changes = parsed_vol.changes
                 db.test_runs = parsed_vol.test_runs
+
+                # Report parsing errors if any
+                if parsed_vol.stats.has_errors():
+                    eprintln("[WARNING] Volatile database parsing recovered from errors:")
+                    eprintln("  {parsed_vol.stats.summary()}")
+                    for err in parsed_vol.stats.errors:
+                        eprintln("  - {err}")
 
         # E1: Validate database on load
         val issues = validate_database(db)
