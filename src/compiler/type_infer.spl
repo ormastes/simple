@@ -1145,15 +1145,49 @@ impl HmInferContext:
                         match self.infer_expr(index):
                             case Ok(idx_ty):
                                 val resolved_base = self.resolve(base_ty)
+
+                                # Check if this is a slice operation (index is a Range)
+                                val is_slice = match index.kind:
+                                    case Range(_, _, _, _): true
+                                    case _: false
+
+                                # BUG FIX: If base is still an inference variable and we're slicing,
+                                # constrain it to be Str to prevent incorrect enum type unification
+                                match resolved_base.kind:
+                                    case Infer(_, _) if is_slice:
+                                        # For slicing on unresolved type, assume Str
+                                        val str_ty = HirType(kind: HirTypeKind.Str, span: span)
+                                        match self.unify(resolved_base, str_ty):
+                                            case Ok(_): return Ok(str_ty)
+                                            case Err(e): return Err(e)
+                                    case _: pass
+
                                 match resolved_base.kind:
                                     case Array(elem, _):
-                                        Ok(elem)
+                                        if is_slice:
+                                            Ok(HirType(kind: HirTypeKind.Slice(elem), span: span))
+                                        else:
+                                            Ok(elem)
                                     case Slice(elem):
-                                        Ok(elem)
+                                        if is_slice:
+                                            Ok(HirType(kind: HirTypeKind.Slice(elem), span: span))
+                                        else:
+                                            Ok(elem)
                                     case Dict(_, value):
-                                        Ok(value)
+                                        Ok(value)  # Dict doesn't support slicing
                                     case Str:
-                                        Ok(HirType(kind: HirTypeKind.Char, span: span))
+                                        if is_slice:
+                                            Ok(HirType(kind: HirTypeKind.Str, span: span))
+                                        else:
+                                            Ok(HirType(kind: HirTypeKind.Char, span: span))
+                                    case Named(sym_id, _):
+                                        # BUG FIX: Handle Named types that might be text/string
+                                        # If it's a Named type, try to resolve it further or default to Str for slicing
+                                        if is_slice:
+                                            Ok(HirType(kind: HirTypeKind.Str, span: span))
+                                        else:
+                                            # For single index, create fresh var (could be Dict-like)
+                                            Ok(self.fresh_var(span))
                                     case _:
                                         Ok(self.fresh_var(span))
                             case Err(e): Err(e)
