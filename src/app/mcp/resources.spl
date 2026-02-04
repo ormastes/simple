@@ -11,6 +11,7 @@
 # Supports both static resources and dynamic resource templates.
 
 import app.io
+import compiler.query_api.{CompilerQueryContext, Position, SymbolKind}
 
 # --- Resource Types ---
 
@@ -50,12 +51,16 @@ class ResourceManager:
     # Project root directory
     project_root: text
 
+    # Compiler Query API for symbol/type information
+    query_context: CompilerQueryContext
+
     # Create a new resource manager
     static fn create(project_root: text) -> ResourceManager:
         val manager = ResourceManager(
             static_resources: {},
             templates: {},
             project_root: project_root,
+            query_context: CompilerQueryContext.create(project_root),
         )
 
         # Register default resources
@@ -245,15 +250,71 @@ class ResourceManager:
 
     # Provide symbol information
     fn provide_symbol_info(symbol_name: text) -> Result<text, text>:
-        # TODO: Integrate with Compiler Query API
-        # For now, return placeholder
-        Ok("Symbol: {symbol_name}\nType: <unknown>\nLocation: <unknown>")
+        # Search for symbol across workspace
+        val symbols = self.query_context.workspace_symbols(symbol_name)
+
+        if symbols.len() == 0:
+            return Ok("Symbol: {symbol_name}\nStatus: Not found")
+
+        # Format first matching symbol
+        val symbol = symbols[0]
+        var info = "Symbol: {symbol.name}\n"
+        info = info + "Kind: {format_symbol_kind(symbol.kind)}\n"
+        info = info + "Location: {symbol.location.file}:{symbol.location.start.line}:{symbol.location.start.column}\n"
+
+        if symbol.type_info.?:
+            info = info + "Type: {symbol.type_info.unwrap()}\n"
+
+        if symbol.doc_comment.?:
+            info = info + "\nDocumentation:\n{symbol.doc_comment.unwrap()}\n"
+
+        info = info + "Visibility: {if symbol.is_public: "public" else: "private"}\n"
+        info = info + "Mutable: {symbol.is_mutable}\n"
+
+        # If multiple matches, show count
+        if symbols.len() > 1:
+            info = info + "\n(Found {symbols.len()} total matches)"
+
+        Ok(info)
 
     # Provide type information
     fn provide_type_info(type_name: text) -> Result<text, text>:
-        # TODO: Integrate with Compiler Query API
-        # For now, return placeholder
-        Ok("Type: {type_name}\nKind: <unknown>\nMethods: <unknown>")
+        # Search for type definitions (Class, Struct, Enum, Trait)
+        val all_symbols = self.query_context.workspace_symbols(type_name)
+
+        # Filter to only type definitions
+        var type_symbols = []
+        for symbol in all_symbols:
+            match symbol.kind:
+                case SymbolKind.Class, SymbolKind.Struct, SymbolKind.Enum, SymbolKind.Trait:
+                    type_symbols.push(symbol)
+                case _:
+                    ()
+
+        if type_symbols.len() == 0:
+            return Ok("Type: {type_name}\nStatus: Not found")
+
+        # Format first matching type
+        val type_symbol = type_symbols[0]
+        var info = "Type: {type_symbol.name}\n"
+        info = info + "Kind: {format_symbol_kind(type_symbol.kind)}\n"
+        info = info + "Location: {type_symbol.location.file}:{type_symbol.location.start.line}\n"
+
+        if type_symbol.type_info.?:
+            info = info + "Type Info: {type_symbol.type_info.unwrap()}\n"
+
+        if type_symbol.doc_comment.?:
+            info = info + "\nDocumentation:\n{type_symbol.doc_comment.unwrap()}\n"
+
+        info = info + "Visibility: {if type_symbol.is_public: "public" else: "private"}\n"
+
+        # TODO: Add methods list by parsing the type definition
+        # This would require deeper AST analysis
+
+        if type_symbols.len() > 1:
+            info = info + "\n(Found {type_symbols.len()} total matches)"
+
+        Ok(info)
 
     # Provide documentation
     fn provide_documentation(path: text) -> Result<text, text>:
@@ -328,6 +389,21 @@ class ResourceManager:
         Ok(project_info + "No manifest found")
 
 # --- Helper Functions ---
+
+# Format symbol kind for display
+fn format_symbol_kind(kind: SymbolKind) -> text:
+    match kind:
+        case SymbolKind.Variable: "Variable"
+        case SymbolKind.Function: "Function"
+        case SymbolKind.Method: "Method"
+        case SymbolKind.Class: "Class"
+        case SymbolKind.Struct: "Struct"
+        case SymbolKind.Enum: "Enum"
+        case SymbolKind.Trait: "Trait"
+        case SymbolKind.Module: "Module"
+        case SymbolKind.Parameter: "Parameter"
+        case SymbolKind.Field: "Field"
+        case SymbolKind.EnumVariant: "Enum Variant"
 
 # Check if file exists (using Simple's built-in io.file_exists)
 fn file_exists_local(path: text) -> bool:
