@@ -55,6 +55,7 @@ struct Function:
     is_method: bool
     is_mutable: bool    # 'me' vs 'fn'
     is_const: bool      # 'const fn' - can be evaluated at compile time
+    is_kernel: bool     # 'kernel fn' - GPU kernel function
     doc_comment: text?
     span: Span
 
@@ -131,6 +132,8 @@ struct Field:
     type_: Type
     default: Expr?
     is_public: bool
+    is_volatile: bool          # @volatile field
+    fixed_address: i64?        # @ address (memory-mapped)
     span: Span
 
 struct Enum:
@@ -238,6 +241,8 @@ struct Const:
     value: Expr
     is_mutable: bool
     is_public: bool
+    is_volatile: bool          # @volatile variable
+    fixed_address: i64?        # @ address (memory-mapped)
     span: Span
 
 struct StaticAssert:
@@ -449,8 +454,39 @@ enum ExprKind:
     # Tensor literals with suffix
     ArrayLitSuffix(elements: [Expr], suffix: TensorSuffix)
 
+    # GPU kernel launch: kernel<<<grid, block>>>(args)
+    KernelLaunch(kernel: Expr, grid_dim: Expr, block_dim: Expr, args: [CallArg])
+
+    # GPU intrinsic functions
+    GpuIntrinsic(intrinsic: GpuIntrinsicKind, args: [Expr])
+
     # Error recovery
     Error
+
+"""GPU intrinsic function kinds."""
+enum GpuIntrinsicKind:
+    # Thread ID accessors
+    GlobalId(dim: i64)      # gpu_global_id(dim)
+    LocalId(dim: i64)       # gpu_local_id(dim)
+    BlockId(dim: i64)       # gpu_block_id(dim)
+    BlockDim(dim: i64)      # gpu_block_dim(dim)
+    GridDim(dim: i64)       # gpu_grid_dim(dim)
+
+    # Synchronization
+    Sync                    # gpu_sync()
+    Barrier                 # gpu_barrier()
+    MemFence                # gpu_mem_fence()
+
+    # Atomic operations
+    AtomicAdd               # gpu_atomic_add(ptr, val)
+    AtomicSub               # gpu_atomic_sub(ptr, val)
+    AtomicMin               # gpu_atomic_min(ptr, val)
+    AtomicMax               # gpu_atomic_max(ptr, val)
+    AtomicAnd               # gpu_atomic_and(ptr, val)
+    AtomicOr                # gpu_atomic_or(ptr, val)
+    AtomicXor               # gpu_atomic_xor(ptr, val)
+    AtomicExchange          # gpu_atomic_exchange(ptr, val)
+    AtomicCas               # gpu_atomic_cas(ptr, expected, desired)
 
 struct Interpolation:
     """String interpolation."""
@@ -539,6 +575,8 @@ enum StmtKind:
     Expr(expr: Expr)
     Val(name: text, type_: Type?, init: Expr)
     Var(name: text, type_: Type?, init: Expr?)
+    SharedVal(name: text, type_: Type, size: Expr?)    # GPU shared memory (immutable)
+    SharedVar(name: text, type_: Type, size: Expr?)    # GPU shared memory (mutable)
     Assign(target: Expr, op: AssignOp?, value: Expr)
     For(var_: text, iter: Expr, body: Block)
     While(cond: Expr, body: Block)
@@ -649,3 +687,4 @@ export Stmt, StmtKind, AssignOp, Block
 export BinOp, UnaryOp
 export Parser
 export DType, Device, Backend, TensorSuffix
+export GpuIntrinsicKind

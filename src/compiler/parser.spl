@@ -338,13 +338,27 @@ impl Parser:
         if outline.default_span.?:
             default_expr = Some(self.parse_expr_at_span(outline.default_span.unwrap()))
 
+        # Parse fixed address if present
+        var fixed_address: i64? = nil
+        if outline.address_span.?:
+            val addr_expr = self.parse_expr_at_span(outline.address_span.unwrap())
+            fixed_address = self.extract_address(addr_expr)
+
         Field(
             name: outline.name,
             type_: self.convert_type(outline.type_),
             default: default_expr,
             is_public: outline.is_public,
+            is_volatile: outline.is_volatile,
+            fixed_address: fixed_address,
             span: outline.span
         )
+
+    fn extract_address(expr: Expr) -> i64?:
+        """Extract integer address from expression."""
+        match expr.kind:
+            case IntLit(value): Some(value)
+            case _: nil
 
     me convert_struct(outline: StructOutline) -> Struct:
         var type_params: [TypeParam] = []
@@ -465,6 +479,7 @@ impl Parser:
             is_method: outline.is_method,
             is_mutable: outline.is_mutable,
             is_const: outline.is_const,
+            is_kernel: outline.is_kernel,
             doc_comment: outline.doc_comment,
             span: outline.span
         )
@@ -529,12 +544,20 @@ impl Parser:
     me parse_const_body(outline: ConstOutline) -> Const:
         val value = self.parse_expr_at_span(outline.value_span)
 
+        # Parse fixed address if present
+        var fixed_address: i64? = nil
+        if outline.address_span.?:
+            val addr_expr = self.parse_expr_at_span(outline.address_span.unwrap())
+            fixed_address = self.extract_address(addr_expr)
+
         Const(
             name: outline.name,
             type_: outline.type_.map(\t: self.convert_type(t)),
             value: value,
             is_mutable: outline.is_mutable,
             is_public: outline.is_public,
+            is_volatile: outline.is_volatile,
+            fixed_address: fixed_address,
             span: outline.span
         )
 
@@ -925,7 +948,20 @@ impl Parser:
         var expr = self.parse_primary_expr()
 
         loop:
-            if self.match_token(TokenKind.LParen):
+            if self.match_token(TokenKind.TripleLess):
+                # Kernel launch: kernel<<<grid, block>>>(args)
+                val grid_dim = self.parse_expr()
+                self.expect(TokenKind.Comma, "expected ',' between grid and block dimensions")
+                val block_dim = self.parse_expr()
+                self.expect(TokenKind.TripleGreater, "expected '>>>' after launch config")
+                self.expect(TokenKind.LParen, "expected '(' for kernel arguments")
+                val args = self.parse_call_args()
+                self.expect(TokenKind.RParen, "expected ')' after kernel arguments")
+                expr = Expr(
+                    kind: ExprKind.KernelLaunch(expr, grid_dim, block_dim, args),
+                    span: expr.span.merge(self.previous.span)
+                )
+            elif self.match_token(TokenKind.LParen):
                 # Function call
                 val args = self.parse_call_args()
                 self.expect(TokenKind.RParen, "expected ')' after arguments")
@@ -1709,6 +1745,8 @@ impl Parser:
                 self.parse_val_stmt()
             case KwVar:
                 self.parse_var_stmt()
+            case KwShared:
+                self.parse_shared_stmt()
             case KwFor:
                 self.parse_for_stmt()
             case KwWhile:
@@ -1804,6 +1842,47 @@ impl Parser:
         self.skip_newlines()
 
         Stmt(kind: StmtKind.Var(name, type_, init), span: start.merge(self.previous.span))
+
+    me parse_shared_stmt() -> Stmt:
+        """Parse shared memory declaration.
+
+        Syntax:
+            shared val name: Type
+            shared val name: [Type; size]
+            shared var name: Type
+            shared var name: [Type; size]
+
+        Used for GPU shared memory in kernel functions.
+        """
+        val start = self.current.span
+        self.advance()  # Consume 'shared'
+
+        val is_mutable = self.check(TokenKind.KwVar)
+        if not self.check(TokenKind.KwVal) and not self.check(TokenKind.KwVar):
+            self.error("expected 'val' or 'var' after 'shared'")
+            return Stmt(
+                kind: StmtKind.Expr(Expr(kind: ExprKind.Error("expected val/var after shared"), span: start)),
+                span: start
+            )
+        self.advance()  # Consume 'val' or 'var'
+
+        val name = self.parse_identifier()
+
+        # Type is required for shared memory
+        self.expect(TokenKind.Colon, "expected ':' after shared variable name")
+        val type_ = self.parse_type()
+
+        # Optional size expression for arrays: [Type; size]
+        var size: Expr? = None
+        if self.match_token(TokenKind.Semicolon):
+            size = Some(self.parse_expr())
+
+        self.skip_newlines()
+
+        if is_mutable:
+            Stmt(kind: StmtKind.SharedVar(name, type_, size), span: start.merge(self.previous.span))
+        else:
+            Stmt(kind: StmtKind.SharedVal(name, type_, size), span: start.merge(self.previous.span))
 
     me parse_for_stmt() -> Stmt:
         """Parse for statement."""

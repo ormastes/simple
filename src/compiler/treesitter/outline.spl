@@ -367,6 +367,20 @@ impl TreeSitter:
                         span: self.current.span,
                         severity: ErrorSeverity.Error
                     ))
+            case KwKernel:
+                self.advance()
+                if self.check(TokenKind.KwFn):
+                    val f = self.parse_function_outline(is_public, false, doc)
+                    f.is_kernel = true
+                    TopLevelItem.Function(f)
+                else:
+                    self.error("expected 'fn' after 'kernel'")
+                    self.synchronize()
+                    TopLevelItem.Error(ParseError(
+                        message: "expected 'fn' after 'kernel'",
+                        span: self.current.span,
+                        severity: ErrorSeverity.Error
+                    ))
             case _:
                 self.error("expected top-level declaration")
                 self.synchronize()
@@ -521,6 +535,7 @@ impl TreeSitter:
             is_method: false,
             is_mutable: is_mutable,
             is_const: false,
+            is_kernel: false,
             doc_comment: doc,
             span: merge_spans(start, self.previous.span),
             body_span: Span.new(body_start, body_end, 0, 0)
@@ -891,12 +906,39 @@ impl TreeSitter:
         )
 
     me parse_field_outline(is_public: bool) -> FieldOutline:
-        """Parse a field definition."""
+        """Parse a field definition.
+
+        Supports:
+        - name: Type
+        - name: Type = default
+        - @volatile name: Type
+        - name: Type @ 0x40020000  (memory-mapped)
+        """
         val start = self.current.span
+
+        # Check for @volatile attribute before field name
+        var is_volatile = false
+        if self.check(TokenKind.At):
+            self.advance()  # consume '@'
+            if self.check(TokenKind.Ident) and self.current.text == "volatile":
+                self.advance()  # consume 'volatile'
+                is_volatile = true
+            else:
+                # Not @volatile, unexpected - rewind not possible, continue
+                self.error("expected 'volatile' after '@' in field")
+
         val name = self.parse_identifier()
 
         self.expect(TokenKind.Colon, "expected ':' after field name")
         val type_ = self.parse_type_outline()
+
+        # Check for @ address syntax: field: Type @ 0x40020000
+        var address_span: Span? = nil
+        if self.check(TokenKind.At):
+            self.advance()  # consume '@'
+            val addr_start = self.current.span.start
+            self.skip_expression()  # Skip the address expression
+            address_span = Some(Span.new(addr_start, self.previous.span.end, 0, 0))
 
         var default_span: Span? = None
         if self.match_token(TokenKind.Assign):
@@ -910,6 +952,8 @@ impl TreeSitter:
             name: name,
             type_: type_,
             is_public: is_public,
+            is_volatile: is_volatile,
+            address_span: address_span,
             default_span: default_span,
             span: merge_spans(start, self.previous.span)
         )
@@ -1276,7 +1320,12 @@ impl TreeSitter:
         )
 
     me parse_const_outline(is_public: bool) -> ConstOutline:
-        """Parse module-level constant."""
+        """Parse module-level constant.
+
+        Supports:
+        - val name: Type = value
+        - @volatile val name: Type @ 0x40020000
+        """
         val start = self.current.span
         val is_mutable = self.check(TokenKind.KwVar)
         self.advance()  # Consume 'val' or 'var'
@@ -1287,11 +1336,23 @@ impl TreeSitter:
         if self.match_token(TokenKind.Colon):
             type_ = Some(self.parse_type_outline())
 
-        self.expect(TokenKind.Assign, "expected '=' in constant declaration")
+        # Check for @ address syntax (memory-mapped variable)
+        var address_span: Span? = nil
+        var is_volatile = false
+        if self.check(TokenKind.At):
+            self.advance()  # consume '@'
+            val addr_start = self.current.span.start
+            self.skip_expression()
+            address_span = Some(Span.new(addr_start, self.previous.span.end, 0, 0))
+            # Memory-mapped variables are implicitly volatile
+            is_volatile = true
 
-        val value_start = self.current.span.start
-        self.skip_expression()
-        val value_span = Span.new(value_start, self.previous.span.end, 0, 0)
+        # Value is optional for memory-mapped variables
+        var value_span = Span.empty()
+        if self.match_token(TokenKind.Assign):
+            val value_start = self.current.span.start
+            self.skip_expression()
+            value_span = Span.new(value_start, self.previous.span.end, 0, 0)
 
         self.skip_newlines()
 
@@ -1300,6 +1361,8 @@ impl TreeSitter:
             type_: type_,
             is_mutable: is_mutable,
             is_public: is_public,
+            is_volatile: is_volatile,
+            address_span: address_span,
             value_span: value_span,
             span: merge_spans(start, self.previous.span)
         )

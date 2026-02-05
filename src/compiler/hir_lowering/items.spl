@@ -24,6 +24,7 @@ impl HirLowering:
         var classes: Dict<SymbolId, HirClass> = {}
         var structs: Dict<SymbolId, HirStruct> = {}
         var enums: Dict<SymbolId, HirEnum> = {}
+        var bitfields: Dict<SymbolId, HirBitfield> = {}
         var traits: Dict<SymbolId, HirTrait> = {}
         var impls: [HirImpl] = []
         var constants: Dict<SymbolId, HirConst> = {}
@@ -47,6 +48,11 @@ impl HirLowering:
             val enum_ = module.enums[name]
             val hir_enum = self.lower_enum(enum_)
             enums[hir_enum.symbol] = hir_enum
+
+        for name in module.bitfields.keys():
+            val bf = module.bitfields[name]
+            val hir_bf = self.lower_bitfield(bf)
+            bitfields[hir_bf.symbol] = hir_bf
 
         for name in module.traits.keys():
             val trait_ = module.traits[name]
@@ -87,6 +93,7 @@ impl HirLowering:
             classes: classes,
             structs: structs,
             enums: enums,
+            bitfields: bitfields,
             traits: traits,
             impls: impls,
             constants: constants,
@@ -116,6 +123,10 @@ impl HirLowering:
         for name in module.enums.keys():
             val enum_ = module.enums[name]
             symbols_table.define(name, SymbolKind.Enum, nil, enum_.span, enum_.is_public, false, mod_name)
+
+        for name in module.bitfields.keys():
+            val bf = module.bitfields[name]
+            symbols_table.define(name, SymbolKind.Struct, nil, bf.span, bf.is_public, false, mod_name)
 
         for name in module.traits.keys():
             val trait_ = module.traits[name]
@@ -334,6 +345,8 @@ impl HirLowering:
             type_: type_,
             default: f.default.map(\e: self.lower_expr(e)),
             is_public: f.is_public,
+            is_volatile: f.is_volatile,
+            fixed_address: f.fixed_address,
             span: f.span
         )
 
@@ -389,6 +402,88 @@ impl HirLowering:
             kind: kind,
             span: v.span
         )
+
+    me lower_bitfield(bf: Bitfield) -> HirBitfield:
+        """Lower bitfield to HIR."""
+        val symbol = self.symbols.lookup(bf.name).unwrap()
+
+        val backing = self.lower_type(bf.backing_type)
+
+        # Lower fields and compute bit offsets
+        var fields: [HirBitfieldField] = []
+        var bit_offset: i64 = 0
+        for f in bf.fields:
+            val hir_field = self.lower_bitfield_field(f, bit_offset)
+            fields = fields.push(hir_field)
+            bit_offset = bit_offset + hir_field.bit_width
+
+        # Compute effective visibility using filename matching
+        val effective_public = self.compute_visibility(bf.name, bf.is_public)
+
+        HirBitfield(
+            symbol: symbol,
+            name: bf.name,
+            backing_type: backing,
+            fields: fields,
+            total_bits: bit_offset,
+            is_public: effective_public,
+            doc_comment: bf.doc_comment,
+            span: bf.span
+        )
+
+    me lower_bitfield_field(f: BitfieldField, offset: i64) -> HirBitfieldField:
+        """Lower bitfield field to HIR."""
+        val symbol = self.symbols.define(f.name, SymbolKind.Field, nil, f.span, false, false, nil)
+
+        # Determine bit width:
+        # 1. Explicit @bits(N) takes precedence
+        # 2. For reserved fields, use explicit bits
+        # 3. For typed fields, infer from type
+        val bit_width = if f.bits.?:
+            f.bits.unwrap()
+        elif f.is_reserved:
+            0  # Reserved without explicit bits = 0
+        else:
+            # Infer from type (use default primitive widths)
+            self.infer_bit_width(f.type_)
+
+        HirBitfieldField(
+            symbol: symbol,
+            name: f.name,
+            type_: f.type_.map(\t: self.lower_type(t)),
+            bit_width: bit_width,
+            bit_offset: offset,
+            is_reserved: f.is_reserved,
+            span: f.span
+        )
+
+    fn infer_bit_width(type_: Type?) -> i64:
+        """Infer bit width from type."""
+        if not type_.?:
+            return 0
+
+        val t = type_.unwrap()
+        match t.kind:
+            case Named(name, _):
+                match name:
+                    case "bool": 1
+                    case "u1" | "i1": 1
+                    case "u2" | "i2": 2
+                    case "u3" | "i3": 3
+                    case "u4" | "i4": 4
+                    case "u5" | "i5": 5
+                    case "u6" | "i6": 6
+                    case "u7" | "i7": 7
+                    case "u8" | "i8": 8
+                    case "u9" | "i9": 9
+                    case "u10" | "i10": 10
+                    case "u11" | "i11": 11
+                    case "u12" | "i12": 12
+                    case "u16" | "i16": 16
+                    case "u32" | "i32": 32
+                    case "u64" | "i64": 64
+                    case _: 0  # Unknown type, require explicit @bits
+            case _: 0  # Complex types require explicit @bits
 
     me lower_trait(trait_: Trait) -> HirTrait:
         """Lower trait to HIR."""

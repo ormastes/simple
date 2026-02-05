@@ -1,0 +1,338 @@
+# CUDA Runtime SFFI Bindings
+#
+# Two-tier SFFI pattern:
+# - Tier 1: extern fn rt_cuda_* - Raw FFI bindings to runtime
+# - Tier 2: Wrapper functions - Idiomatic Simple API
+#
+# These bindings require CUDA toolkit installed on the system.
+
+# ============================================================================
+# Tier 1: Extern Declarations (Raw FFI)
+# ============================================================================
+
+# --- Device Management ---
+extern fn rt_cuda_device_count() -> i64
+extern fn rt_cuda_set_device(id: i64) -> bool
+extern fn rt_cuda_get_device() -> i64
+extern fn rt_cuda_device_name(id: i64) -> text
+extern fn rt_cuda_device_memory(id: i64) -> i64
+extern fn rt_cuda_compute_capability(id: i64) -> (i64, i64)
+extern fn rt_cuda_is_available() -> bool
+
+# --- Memory Management ---
+extern fn rt_cuda_malloc(size: i64) -> i64  # Returns device pointer as i64
+extern fn rt_cuda_free(ptr: i64) -> bool
+extern fn rt_cuda_memcpy_h2d(dst_device: i64, src_host: [u8], size: i64) -> bool
+extern fn rt_cuda_memcpy_d2h(dst_host: [u8], src_device: i64, size: i64) -> bool
+extern fn rt_cuda_memcpy_d2d(dst: i64, src: i64, size: i64) -> bool
+extern fn rt_cuda_memset(ptr: i64, value: i64, size: i64) -> bool
+
+# --- Kernel Compilation and Launch ---
+extern fn rt_cuda_compile_ptx(ptx_source: text) -> i64  # Returns module handle
+extern fn rt_cuda_get_function(module: i64, name: text) -> i64  # Returns function handle
+extern fn rt_cuda_launch_kernel(
+    func: i64,
+    grid_x: i64, grid_y: i64, grid_z: i64,
+    block_x: i64, block_y: i64, block_z: i64,
+    shared_mem: i64,
+    args: [i64]
+) -> bool
+extern fn rt_cuda_unload_module(module: i64) -> bool
+
+# --- Synchronization ---
+extern fn rt_cuda_synchronize() -> bool
+extern fn rt_cuda_stream_create() -> i64  # Returns stream handle
+extern fn rt_cuda_stream_destroy(stream: i64) -> bool
+extern fn rt_cuda_stream_synchronize(stream: i64) -> bool
+
+# --- Error Handling ---
+extern fn rt_cuda_get_last_error() -> text
+extern fn rt_cuda_peek_last_error() -> text
+
+# ============================================================================
+# Tier 2: Simple-Friendly Wrapper Functions
+# ============================================================================
+
+"""
+Check if CUDA is available on this system.
+"""
+fn cuda_available() -> bool:
+    rt_cuda_is_available()
+
+"""
+Get the number of CUDA devices.
+"""
+fn cuda_device_count() -> i64:
+    rt_cuda_device_count()
+
+"""
+Set the current CUDA device.
+Returns true on success.
+"""
+fn cuda_set_device(id: i64) -> bool:
+    rt_cuda_set_device(id)
+
+"""
+Get the current CUDA device ID.
+"""
+fn cuda_get_device() -> i64:
+    rt_cuda_get_device()
+
+"""
+Get device information.
+"""
+struct CudaDeviceInfo:
+    id: i64
+    name: text
+    total_memory: i64
+    compute_capability: (i64, i64)
+
+fn cuda_device_info(id: i64) -> CudaDeviceInfo:
+    CudaDeviceInfo(
+        id: id,
+        name: rt_cuda_device_name(id),
+        total_memory: rt_cuda_device_memory(id),
+        compute_capability: rt_cuda_compute_capability(id)
+    )
+
+"""
+CUDA device memory pointer wrapper.
+Provides safer memory management with automatic type tracking.
+"""
+struct CudaPtr:
+    ptr: i64
+    size: i64
+    is_valid: bool
+
+"""
+Allocate device memory.
+Returns a CudaPtr wrapper.
+"""
+fn cuda_alloc(size: i64) -> CudaPtr:
+    val ptr = rt_cuda_malloc(size)
+    CudaPtr(
+        ptr: ptr,
+        size: size,
+        is_valid: ptr != 0
+    )
+
+"""
+Free device memory.
+"""
+fn cuda_free(mem: CudaPtr) -> bool:
+    if mem.is_valid:
+        rt_cuda_free(mem.ptr)
+    else:
+        true
+
+"""
+Copy data from host to device.
+"""
+fn cuda_copy_to_device(dst: CudaPtr, src: [u8]) -> bool:
+    if not dst.is_valid:
+        false
+    else:
+        rt_cuda_memcpy_h2d(dst.ptr, src, src.len())
+
+"""
+Copy data from device to host.
+"""
+fn cuda_copy_from_device(dst: [u8], src: CudaPtr) -> bool:
+    if not src.is_valid:
+        false
+    else:
+        rt_cuda_memcpy_d2h(dst, src.ptr, dst.len())
+
+"""
+Copy data between device pointers.
+"""
+fn cuda_copy_device_to_device(dst: CudaPtr, src: CudaPtr, size: i64) -> bool:
+    if not dst.is_valid or not src.is_valid:
+        false
+    else:
+        rt_cuda_memcpy_d2d(dst.ptr, src.ptr, size)
+
+"""
+Set device memory to a value.
+"""
+fn cuda_memset(mem: CudaPtr, value: i64) -> bool:
+    if not mem.is_valid:
+        false
+    else:
+        rt_cuda_memset(mem.ptr, value, mem.size)
+
+"""
+CUDA module wrapper (compiled PTX).
+"""
+struct CudaModule:
+    handle: i64
+    is_valid: bool
+
+"""
+Compile PTX source code into a CUDA module.
+"""
+fn cuda_compile(ptx_source: text) -> CudaModule:
+    val handle = rt_cuda_compile_ptx(ptx_source)
+    CudaModule(
+        handle: handle,
+        is_valid: handle != 0
+    )
+
+"""
+Unload a CUDA module.
+"""
+fn cuda_unload(module: CudaModule) -> bool:
+    if module.is_valid:
+        rt_cuda_unload_module(module.handle)
+    else:
+        true
+
+"""
+CUDA kernel function wrapper.
+"""
+struct CudaKernel:
+    handle: i64
+    module: CudaModule
+    name: text
+    is_valid: bool
+
+"""
+Get a kernel function from a compiled module.
+"""
+fn cuda_get_kernel(module: CudaModule, name: text) -> CudaKernel:
+    if not module.is_valid:
+        CudaKernel(handle: 0, module: module, name: name, is_valid: false)
+    else:
+        val handle = rt_cuda_get_function(module.handle, name)
+        CudaKernel(
+            handle: handle,
+            module: module,
+            name: name,
+            is_valid: handle != 0
+        )
+
+"""
+Kernel launch configuration.
+"""
+struct CudaLaunchConfig:
+    grid: (i64, i64, i64)
+    block: (i64, i64, i64)
+    shared_mem: i64
+
+fn cuda_launch_config(grid: (i64, i64, i64), block: (i64, i64, i64)) -> CudaLaunchConfig:
+    CudaLaunchConfig(grid: grid, block: block, shared_mem: 0)
+
+fn cuda_launch_config_1d(grid_size: i64, block_size: i64) -> CudaLaunchConfig:
+    CudaLaunchConfig(
+        grid: (grid_size, 1, 1),
+        block: (block_size, 1, 1),
+        shared_mem: 0
+    )
+
+"""
+Launch a kernel with the given configuration.
+Args should be device pointers as i64.
+"""
+fn cuda_launch(kernel: CudaKernel, config: CudaLaunchConfig, args: [i64]) -> bool:
+    if not kernel.is_valid:
+        false
+    else:
+        val (gx, gy, gz) = config.grid
+        val (bx, by, bz) = config.block
+        rt_cuda_launch_kernel(
+            kernel.handle,
+            gx, gy, gz,
+            bx, by, bz,
+            config.shared_mem,
+            args
+        )
+
+"""
+Synchronize the current device (wait for all operations to complete).
+"""
+fn cuda_sync() -> bool:
+    rt_cuda_synchronize()
+
+"""
+CUDA stream for asynchronous operations.
+"""
+struct CudaStream:
+    handle: i64
+    is_valid: bool
+
+"""
+Create a CUDA stream.
+"""
+fn cuda_stream_create() -> CudaStream:
+    val handle = rt_cuda_stream_create()
+    CudaStream(
+        handle: handle,
+        is_valid: handle != 0
+    )
+
+"""
+Destroy a CUDA stream.
+"""
+fn cuda_stream_destroy(stream: CudaStream) -> bool:
+    if stream.is_valid:
+        rt_cuda_stream_destroy(stream.handle)
+    else:
+        true
+
+"""
+Synchronize a stream.
+"""
+fn cuda_stream_sync(stream: CudaStream) -> bool:
+    if stream.is_valid:
+        rt_cuda_stream_synchronize(stream.handle)
+    else:
+        true
+
+"""
+Get the last CUDA error message.
+"""
+fn cuda_last_error() -> text:
+    rt_cuda_get_last_error()
+
+"""
+Peek at the last CUDA error without clearing it.
+"""
+fn cuda_peek_error() -> text:
+    rt_cuda_peek_last_error()
+
+# ============================================================================
+# High-Level Convenience Functions
+# ============================================================================
+
+"""
+Run a simple 1D kernel launch.
+Calculates grid size automatically based on total elements and block size.
+"""
+fn cuda_run_1d(kernel: CudaKernel, total_elements: i64, block_size: i64, args: [i64]) -> bool:
+    val grid_size = (total_elements + block_size - 1) / block_size
+    val config = cuda_launch_config_1d(grid_size, block_size)
+    cuda_launch(kernel, config, args) and cuda_sync()
+
+"""
+Allocate and initialize device memory from host data.
+"""
+fn cuda_alloc_from_host(data: [u8]) -> CudaPtr:
+    val mem = cuda_alloc(data.len())
+    if mem.is_valid:
+        cuda_copy_to_device(mem, data)
+    mem
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export cuda_available, cuda_device_count, cuda_set_device, cuda_get_device
+export cuda_device_info, CudaDeviceInfo
+export CudaPtr, cuda_alloc, cuda_free, cuda_memset
+export cuda_copy_to_device, cuda_copy_from_device, cuda_copy_device_to_device
+export CudaModule, cuda_compile, cuda_unload
+export CudaKernel, cuda_get_kernel
+export CudaLaunchConfig, cuda_launch_config, cuda_launch_config_1d, cuda_launch
+export cuda_sync, cuda_last_error, cuda_peek_error
+export CudaStream, cuda_stream_create, cuda_stream_destroy, cuda_stream_sync
+export cuda_run_1d, cuda_alloc_from_host
