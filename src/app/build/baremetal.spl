@@ -103,26 +103,143 @@ impl BaremetalBuilder:
 
         val start_time = current_time_ms()
 
-        # Build using cargo/rustc with bare-metal target
+        # Step 1: Compile Simple source → LLVM IR
+        var llvm_ir_files: [text] = []
+        var all_stdout = ""
+        var all_stderr = ""
+
+        for source_file in source_files:
+            match self.compile_to_llvm_ir(source_file):
+                case Ok((ir_file, stdout, stderr)):
+                    llvm_ir_files.push(ir_file)
+                    all_stdout = all_stdout + stdout
+                    all_stderr = all_stderr + stderr
+                case Err((msg, stdout, stderr)):
+                    val end_time = current_time_ms()
+                    return BuildResult(
+                        success: false,
+                        exit_code: 1,
+                        stdout: all_stdout + stdout,
+                        stderr: all_stderr + stderr + "\nFailed to compile {source_file}: {msg}",
+                        duration_ms: end_time - start_time
+                    )
+
+        # Step 2: Compile LLVM IR → object files
+        var object_files: [text] = []
+        for ir_file in llvm_ir_files:
+            match self.compile_to_object(ir_file):
+                case Ok((obj_file, stdout, stderr)):
+                    object_files.push(obj_file)
+                    all_stdout = all_stdout + stdout
+                    all_stderr = all_stderr + stderr
+                case Err((msg, stdout, stderr)):
+                    val end_time = current_time_ms()
+                    return BuildResult(
+                        success: false,
+                        exit_code: 1,
+                        stdout: all_stdout + stdout,
+                        stderr: all_stderr + stderr + "\nFailed to compile {ir_file}: {msg}",
+                        duration_ms: end_time - start_time
+                    )
+
+        # Step 3: Link object files → ELF binary
+        match self.link_to_elf(object_files):
+            case Ok((elf_file, stdout, stderr)):
+                val end_time = current_time_ms()
+                all_stdout = all_stdout + stdout
+                all_stderr = all_stderr + stderr
+                return BuildResult(
+                    success: true,
+                    exit_code: 0,
+                    stdout: all_stdout + "\nBinary: {elf_file}",
+                    stderr: all_stderr,
+                    duration_ms: end_time - start_time
+                )
+            case Err((msg, stdout, stderr)):
+                val end_time = current_time_ms()
+                return BuildResult(
+                    success: false,
+                    exit_code: 1,
+                    stdout: all_stdout + stdout,
+                    stderr: all_stderr + stderr + "\nFailed to link: {msg}",
+                    duration_ms: end_time - start_time
+                )
+
+    # Compile Simple source to LLVM IR
+    fn compile_to_llvm_ir(source_file: text) -> Result<(text, text, text), (text, text, text)>:
+        # Output file: source.spl → source.ll
+        val base_name = source_file.replace(".spl", "")
+        val ir_file = "{self.config.output_dir}/{base_name}.ll"
+
+        # TODO: When simple CLI supports bare-metal compilation, use:
+        #   simple compile --target=baremetal-x86 --emit=llvm-ir source.spl -o output.ll
+        # For now, use simple_runtime to compile with bare-metal flags
         val target_triple = self.config.target.triple()
         var args: [text] = [
-            "build",
+            "compile",
             "--target", target_triple,
-            "--release",
-            "-Zbuild-std=core,alloc",
-            "-Zbuild-std-features=compiler-builtins-mem"
+            "--emit", "llvm-ir",
+            "-o", ir_file,
+            source_file
         ]
 
-        val (stdout, stderr, exit_code) = process_run("cargo", args)
-        val end_time = current_time_ms()
+        val (stdout, stderr, exit_code) = process_run("simple", args)
 
-        BuildResult(
-            success: exit_code == 0,
-            exit_code: exit_code,
-            stdout: stdout,
-            stderr: stderr,
-            duration_ms: end_time - start_time
-        )
+        if exit_code == 0:
+            Ok((ir_file, stdout, stderr))
+        else:
+            Err(("Compilation failed", stdout, stderr))
+
+    # Compile LLVM IR to object file using llc
+    fn compile_to_object(ir_file: text) -> Result<(text, text, text), (text, text, text)>:
+        # Output file: source.ll → source.o
+        val obj_file = ir_file.replace(".ll", ".o")
+
+        # llc flags:
+        #   --filetype=obj - output object file instead of assembly
+        #   --relocation-model=static - no position-independent code (bare-metal)
+        var args: [text] = [
+            "--filetype=obj",
+            "--relocation-model=static",
+            ir_file,
+            "-o", obj_file
+        ]
+
+        val (stdout, stderr, exit_code) = process_run("llc", args)
+
+        if exit_code == 0:
+            Ok((obj_file, stdout, stderr))
+        else:
+            Err(("llc compilation failed", stdout, stderr))
+
+    # Link object files to ELF binary using ld
+    fn link_to_elf(object_files: [text]) -> Result<(text, text, text), (text, text, text)>:
+        val elf_file = "{self.config.output_dir}/kernel.elf"
+
+        # ld flags:
+        #   -T linker.ld - use linker script
+        #   -nostdlib - don't link standard library
+        #   --entry=_start - set entry point
+        var args: [text] = [
+            "-T", self.config.linker_script,
+            "-nostdlib",
+            "--entry={self.config.entry_point}"
+        ]
+
+        # Add all object files
+        for obj_file in object_files:
+            args.push(obj_file)
+
+        # Output file
+        args.push("-o")
+        args.push(elf_file)
+
+        val (stdout, stderr, exit_code) = process_run("ld", args)
+
+        if exit_code == 0:
+            Ok((elf_file, stdout, stderr))
+        else:
+            Err(("Linking failed", stdout, stderr))
 
 # QEMU test runner
 class QemuRunner:

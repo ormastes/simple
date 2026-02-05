@@ -7,6 +7,67 @@ use std::path::Path;
 use std::process::Command;
 use std::time::Instant;
 
+/// Compile Simple source to LLVM IR for bare-metal targets
+///
+/// Callable from Simple as: `rt_compile_to_llvm_ir(source_file, target_triple, bare_metal)`
+///
+/// Returns: (llvm_ir: text, stderr: text, exit_code: i64)
+pub fn rt_compile_to_llvm_ir(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 3 {
+        return Err(CompileError::runtime(
+            "rt_compile_to_llvm_ir requires 3 arguments (source_file, target_triple, bare_metal)",
+        ));
+    }
+
+    let source_file = match &args[0] {
+        Value::Str(s) => s.as_str(),
+        _ => return Err(CompileError::runtime("source_file must be a string")),
+    };
+
+    let _target_triple = match &args[1] {
+        Value::Str(s) => s.as_str(),
+        _ => return Err(CompileError::runtime("target_triple must be a string")),
+    };
+
+    let _bare_metal = match &args[2] {
+        Value::Bool(b) => *b,
+        _ => return Err(CompileError::runtime("bare_metal must be a boolean")),
+    };
+
+    // Check if source file exists
+    if !Path::new(source_file).exists() {
+        let error_msg = format!("Source file not found: {}", source_file);
+        return Ok(Value::Tuple(vec![
+            Value::Str("".into()),
+            Value::Str(error_msg.into()),
+            Value::Int(1),
+        ]));
+    }
+
+    // TODO: Implement LLVM IR generation
+    // This requires:
+    // 1. Parse Simple source file
+    // 2. Lower to HIR
+    // 3. Lower to MIR
+    // 4. Create LlvmBackend (with create_baremetal() if bare_metal=true)
+    // 5. Generate LLVM IR string
+    //
+    // For now, return "not implemented"
+    let error_msg = "LLVM IR generation not yet implemented.\n\
+                     The bare-metal compilation pipeline is complete, but this bridge function\n\
+                     needs to be implemented to connect Simple source parsing to LLVM codegen.\n\
+                     \n\
+                     Estimated implementation time: 4-6 hours\n\
+                     \n\
+                     Workaround: Use Rust for bare-metal code or wait for implementation.";
+
+    Ok(Value::Tuple(vec![
+        Value::Str("".into()),
+        Value::Str(error_msg.into()),
+        Value::Int(1),
+    ]))
+}
+
 /// Compile Simple source to native executable using LLVM backend
 ///
 /// Callable from Simple as: `rt_compile_to_native(source_path, output_path)`

@@ -57,10 +57,10 @@ Skills located in `.claude/skills/`.
   - Query API integration for compiler introspection
   - See: `src/app/mcp/`, `doc/report/mcp_database_integration_2026-02-05.md`
 - **File Extensions**:
-  - `.spl` - Standard Simple source file
-  - `.ssh` - Simple Shell Script (executable with `#!simple` shebang, use for build/install scripts)
-  - `.sspec` - SSpec test/specification file
-  - **Note**: `.ssh` files should start with `#!simple` shebang to be directly executable
+  - `.spl` - Simple source files (modules, libraries, AND executable scripts with `#!/usr/bin/env simple`)
+  - `.sspec` - SSpec test/specification files
+  - `.sh` - Bash scripts (ONLY for bootstrapping when Simple runtime doesn't exist yet)
+  - **Note**: Use `.spl` for everything in Simple. Add `#!/usr/bin/env simple` + `chmod +x` for executable scripts. Don't use `.ssh` (conflicts with SSH)
 - **LLM-Friendly**: IR export, context packs, lint framework (75% complete)
   - **New Lints**: `print_in_test_spec`, `todo_format`
   - **EasyFix Rules** (9 auto-fix rules): See `/coding` skill and `src/app/fix/rules.spl`
@@ -344,7 +344,11 @@ See `/coding` skill for full details.
 - ✅ Always use `jj bookmark set main -r @` then `jj git push --bookmark main`
 
 ### Scripts
-- ❌ **NEVER write Python/Bash** - use Simple (`.spl`) only
+- ❌ **NEVER write Python/Bash** - use Simple (`.spl`) for all scripts
+- ✅ **Exception**: Bash (`.sh`) is ONLY allowed for bootstrapping scripts when Simple runtime doesn't exist:
+  - GitHub Actions first-time builds (`script/build-bootstrap.sh`)
+  - External installer scripts for users without Simple (`script/install.sh`)
+  - These should be minimal wrappers that call Simple scripts when available
 
 ### Rust Files and SFFI (Simple FFI)
 - ❌ **NEVER write `.rs` files manually** - all FFI is Simple-first

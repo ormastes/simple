@@ -29,6 +29,9 @@ struct BuildConfig:
     debug: bool
     verbose: bool
     pie: bool
+    target_cpu: text?           # Target CPU (e.g., "x86-64-v3", "haswell", "native")
+    target_features: [text]     # Target features (e.g., ["+avx2", "+fma"])
+    linker_flags: [text]        # Extra linker flags
 
 impl BuildConfig:
     static fn default(entry: text, output: text) -> BuildConfig:
@@ -41,7 +44,10 @@ impl BuildConfig:
             optimization: 0,
             debug: false,
             verbose: false,
-            pie: true
+            pie: true,
+            target_cpu: nil,
+            target_features: [],
+            linker_flags: []
         )
 
     static fn for_simple_cli() -> BuildConfig:
@@ -58,7 +64,10 @@ impl BuildConfig:
             optimization: 2,
             debug: false,
             verbose: true,
-            pie: true
+            pie: true,
+            target_cpu: Some("x86-64-v3"),      # Default to modern CPUs
+            target_features: [],
+            linker_flags: []
         )
 
 # ============================================================================
@@ -141,6 +150,14 @@ fn build_native(config: BuildConfig) -> BuildResult:
 
     # 3. Link SMFs to native binary
     val link_start = current_time_ms()
+
+    # Build target flags from CPU and features
+    var target_flags: [text] = []
+    if config.target_cpu.?:
+        target_flags.push("-march={config.target_cpu.unwrap()}")
+    for feature in config.target_features:
+        target_flags.push("-m{feature}")
+
     val link_config = LinkConfig(
         output_format: OutputFormat.Native,
         output_path: config.output,
@@ -150,7 +167,9 @@ fn build_native(config: BuildConfig) -> BuildResult:
         debug: config.debug,
         verbose: config.verbose,
         allow_deferred: false,
-        optimization_level: config.optimization
+        optimization_level: config.optimization,
+        target_flags: target_flags,
+        linker_flags: config.linker_flags
     )
 
     var linker = Linker.new(link_config)

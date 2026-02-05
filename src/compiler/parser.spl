@@ -1138,6 +1138,9 @@ impl Parser:
             case KwUnsafe:
                 self.parse_unsafe_block()
 
+            case KwAsm:
+                self.parse_asm_expr()
+
             case BlockStart:
                 # Custom block (sh{}, sql{}, re{}, etc.)
                 val kind = self.current.text
@@ -1408,6 +1411,131 @@ impl Parser:
         self.expect(TokenKind.Colon, "expected ':' after 'unsafe'")
         val body = self.parse_block()
         Expr(kind: ExprKind.UnsafeBlock(body), span: start.merge(self.previous.span))
+
+    me parse_asm_expr() -> Expr:
+        """Parse inline assembly expression.
+
+        Supports two syntaxes:
+        1. Simple: asm "mov eax, ebx"
+        2. Full: asm volatile("mov r0, {op}", op = in(reg) value, clobber_abi("C"))
+
+        Must be within unsafe block (enforced during type checking).
+        """
+        val start = self.current.span
+        self.advance()  # Consume 'asm'
+
+        # Check for 'volatile' keyword
+        val is_volatile = if self.current.kind == TokenKind.Ident and self.current.text == "volatile":
+            self.advance()
+            true
+        else:
+            false
+
+        # Expect opening paren (for both simple and full syntax)
+        if not self.check(TokenKind.LParen):
+            self.error("expected '(' after 'asm'")
+            return Expr(kind: ExprKind.Error, span: start)
+
+        self.advance()  # Consume '('
+
+        # Parse assembly template string
+        if self.current.kind != TokenKind.StringLit:
+            self.error("expected assembly template string")
+            return Expr(kind: ExprKind.Error, span: start)
+
+        val asm_template = self.current.text
+        self.advance()
+
+        # Parse optional constraints
+        var constraints: [AsmConstraint] = []
+        var clobbers: [text] = []
+
+        # If we see a comma, parse constraints
+        while self.current.kind == TokenKind.Comma:
+            self.advance()  # Consume ','
+
+            # Check for clobber_abi("C") special case
+            if self.current.kind == TokenKind.Ident and self.current.text == "clobber_abi":
+                self.advance()  # Consume 'clobber_abi'
+                self.expect(TokenKind.LParen, "expected '(' after 'clobber_abi'")
+                if self.current.kind == TokenKind.StringLit:
+                    # Just consume and ignore for now - we'll add proper handling later
+                    self.advance()
+                else:
+                    self.error("expected ABI string")
+                self.expect(TokenKind.RParen, "expected ')' after ABI")
+                continue
+
+            # Parse constraint: name = kind(location) value
+            if self.current.kind != TokenKind.Ident:
+                self.error("expected constraint name")
+                break
+
+            val constraint_name = self.current.text
+            self.advance()
+
+            self.expect(TokenKind.Assign, "expected '=' after constraint name")
+
+            # Parse constraint kind: in, out, inout, lateout
+            if self.current.kind != TokenKind.Ident:
+                self.error("expected constraint kind (in, out, inout, lateout)")
+                break
+
+            val kind_str = self.current.text
+            val kind = match kind_str:
+                case "in": AsmConstraintKind.In
+                case "out": AsmConstraintKind.Out
+                case "inout": AsmConstraintKind.InOut
+                case "lateout": AsmConstraintKind.LateOut
+                case _:
+                    self.error("invalid constraint kind: {kind_str}")
+                    AsmConstraintKind.In
+
+            self.advance()
+
+            # Parse location: (reg) or (mem) or (imm)
+            self.expect(TokenKind.LParen, "expected '(' after constraint kind")
+
+            if self.current.kind != TokenKind.Ident:
+                self.error("expected location specifier (reg, mem, imm)")
+                break
+
+            val location_str = self.current.text
+            val location = match location_str:
+                case "reg": AsmLocation.Reg
+                case "mem": AsmLocation.Mem
+                case "imm": AsmLocation.Imm
+                case _:
+                    # Specific register like "eax", "r0"
+                    AsmLocation.RegSpec(location_str)
+
+            self.advance()
+            self.expect(TokenKind.RParen, "expected ')' after location")
+
+            # Parse value expression
+            val value = self.parse_expression()
+
+            val constraint = AsmConstraint(
+                name: constraint_name,
+                kind: kind,
+                location: location,
+                value: value,
+                span: start.merge(self.previous.span)
+            )
+            constraints.push(constraint)
+
+        # Expect closing paren
+        self.expect(TokenKind.RParen, "expected ')' after assembly expression")
+
+        val asm_expr = AsmExpr(
+            asm_template: asm_template,
+            is_volatile: is_volatile,
+            constraints: constraints,
+            clobbers: clobbers,
+            span: start.merge(self.previous.span)
+        )
+
+        Expr(kind: ExprKind.AsmBlock(asm_expr), span: start.merge(self.previous.span))
 
     # ========================================================================
     # Custom Block Parsing

@@ -1,0 +1,767 @@
+# Custom Blocks Easy API - SSpec Tests
+#
+# Demonstrates user-friendly API for creating custom blocks
+# with minimal boilerplate.
+
+import compiler.blocks.easy
+import compiler.blocks.builder
+import compiler.blocks.utils
+import std.test
+
+describe "Custom Blocks Easy API":
+
+    # =========================================================================
+    # TIER 1: Minimal Block API - block() function
+    # =========================================================================
+
+    describe "block() - Minimal API":
+
+        it "creates simple heredoc block with raw text":
+            val heredoc = block("heredoc", LexerMode.Raw, \text:
+                Ok(BlockValue.Raw(text.trim()))
+            )
+
+            register_block(heredoc)
+
+            val result = heredoc{
+                Line 1
+                Line 2
+                Line 3
+            }
+
+            assert result == "Line 1\nLine 2\nLine 3"
+            unregister_block("heredoc")
+
+        it "creates comment block that processes lines":
+            val doc_comment = block("doc", LexerMode.Raw, \text:
+                val lines = text.split("\n").map(\l: l.trim())
+                Ok(BlockValue.Custom("DocComment", lines))
+            )
+
+            register_block(doc_comment)
+
+            val result = doc{
+                This is a doc comment
+                with multiple lines
+            }
+
+            assert result.lines.len() == 2
+            assert result.lines[0] == "This is a doc comment"
+            unregister_block("doc")
+
+        it "returns error for invalid syntax":
+            val color = block("color", LexerMode.Raw, \text:
+                val hex = text.trim()
+                if hex.starts_with("#") and hex.len() == 7:
+                    Ok(BlockValue.Custom("Color", hex))
+                else:
+                    Err("Expected #RRGGBB color format")
+            )
+
+            register_block(color)
+
+            # Valid color
+            val bg = color{ #FF5733 }
+            assert bg.hex == "#FF5733"
+
+            # Invalid color - should error
+            val result = try:
+                color{ invalid }
+            catch e:
+                e.message
+
+            assert result.contains("Expected #RRGGBB")
+            unregister_block("color")
+
+    describe "block_with_validation()":
+
+        it "validates block value after parsing":
+            val port = block_with_validation("port", LexerMode.Raw,
+                \text:
+                    val num = text.trim().parse_int()
+                    if num.ok.?:
+                        Ok(BlockValue.Custom("Port", num.unwrap()))
+                    else:
+                        Err("Expected integer")
+                ,
+                \value:
+                    match value:
+                        case Custom("Port", num):
+                            if num < 1 or num > 65535:
+                                ["Port must be between 1 and 65535"]
+                            else:
+                                []
+                        case _:
+                            ["Invalid port value"]
+            )
+
+            register_block(port)
+
+            # Valid port
+            val web = port{ 8080 }
+            assert web.number == 8080
+
+            # Invalid port (out of range)
+            val result = try:
+                port{ 99999 }
+            catch e:
+                e.message
+
+            assert result.contains("between 1 and 65535")
+            unregister_block("port")
+
+    describe "const_block() - Compile-time evaluation":
+
+        it "evaluates regex at compile time":
+            val re = const_block("re", LexerMode.Raw,
+                \pattern:
+                    val compiled = compile_regex(pattern.trim())
+                    if compiled.ok.?:
+                        Ok(BlockValue.Regex(compiled.unwrap()))
+                    else:
+                        Err(compiled.err.unwrap())
+                ,
+                \value:
+                    match value:
+                        case Regex(pattern):
+                            Some(ConstValue.String(pattern.source))
+                        case _:
+                            None
+            )
+
+            register_block(re)
+
+            # Pattern compiled at compile time
+            val email_pattern = re{ ^[a-z]+@[a-z]+\.[a-z]+$ }
+
+            assert email_pattern.matches("test@example.com")
+            assert not email_pattern.matches("invalid")
+            unregister_block("re")
+
+    # =========================================================================
+    # TIER 2: Builder API - BlockBuilder
+    # =========================================================================
+
+    describe "BlockBuilder - Fluent API":
+
+        it "creates block with chained methods":
+            val json = BlockBuilder("json")
+                .raw_text()
+                .simple_parser(\text:
+                    parse_json(text.trim())
+                )
+                .build()
+
+            register_block(json)
+
+            val data = json{
+                {"name": "Alice", "age": 30}
+            }
+
+            assert data.name == "Alice"
+            assert data.age == 30
+            unregister_block("json")
+
+        it "enables math features for tensor block":
+            val tensor = BlockBuilder("tensor")
+                .math_mode()
+                .enable_feature("broadcast_ops")
+                .enable_feature("matrix_mul")
+                .enable_feature("power_caret")
+                .simple_parser(\expr:
+                    parse_tensor_expr(expr)
+                )
+                .build()
+
+            register_block(tensor)
+
+            # Uses math operators
+            val result = tensor{
+                A @ B .+ C^2
+            }
+
+            assert result.ops.contains("matrix_mul")
+            assert result.ops.contains("broadcast_add")
+            assert result.ops.contains("power")
+            unregister_block("tensor")
+
+        it "adds validation with simple_validator":
+            val sql = BlockBuilder("sql")
+                .raw_text()
+                .simple_parser(\text:
+                    parse_sql(text.trim())
+                )
+                .simple_validator(\value:
+                    match value:
+                        case Sql(query):
+                            validate_sql_syntax(query)
+                        case _:
+                            ["Expected SQL query"]
+                )
+                .build()
+
+            register_block(sql)
+
+            # Valid SQL
+            val users = sql{ SELECT * FROM users }
+            assert users.table == "users"
+
+            # Invalid SQL
+            val result = try:
+                sql{ SELCT * FROM users }
+            catch e:
+                e.message
+
+            assert result.contains("Unknown keyword: SELCT")
+            unregister_block("sql")
+
+        it "provides IDE support with highlighter":
+            val graphql = BlockBuilder("graphql")
+                .raw_text()
+                .simple_parser(\text:
+                    parse_graphql(text)
+                )
+                .highlighter(\text:
+                    highlight_graphql_syntax(text)
+                )
+                .completer(\text, cursor:
+                    complete_graphql_fields(text, cursor)
+                )
+                .hover_provider(\text, cursor:
+                    hover_graphql_types(text, cursor)
+                )
+                .build()
+
+            register_block(graphql)
+
+            # IDE features available
+            val tokens = graphql.highlight("query { user { name } }")
+            assert tokens.len() > 0
+
+            val completions = graphql.completions("query { user { n", 17)
+            assert completions.contains("name")
+
+            unregister_block("graphql")
+
+    describe "BlockBuilder - Feature Presets":
+
+        it "enables all math features with preset":
+            val math_custom = BlockBuilder("mathcustom")
+                .math_mode()
+                .enable_all_math()  # All math features at once
+                .simple_parser(\expr:
+                    parse_math_expr(expr)
+                )
+                .build()
+
+            register_block(math_custom)
+
+            # Can use all math operators
+            val result = mathcustom{
+                A' @ B^2 .+ 2*x*y
+            }
+
+            assert result.has_transpose
+            assert result.has_matrix_mul
+            assert result.has_power
+            assert result.has_broadcast
+            assert result.has_implicit_mul
+            unregister_block("mathcustom")
+
+        it "enables pipeline operators with preset":
+            val pipeline = BlockBuilder("pipe")
+                .normal_mode()
+                .enable_pipelines()  # |>, >>, <<
+                .simple_parser(\expr:
+                    parse_pipeline_expr(expr)
+                )
+                .build()
+
+            register_block(pipeline)
+
+            val result = pipe{
+                data |> normalize |> transform
+            }
+
+            assert result.ops[0] == "pipe_forward"
+            assert result.ops[1] == "pipe_forward"
+            unregister_block("pipe")
+
+    describe "BlockBuilder - Smart Defaults":
+
+        it "uses raw text mode by default":
+            val default_block = BlockBuilder("default")
+                .simple_parser(\text:
+                    Ok(BlockValue.Raw(text))
+                )
+                .build()
+
+            assert default_block.lexer_mode() == LexerMode.Raw
+
+        it "has no syntax features enabled by default":
+            val plain = BlockBuilder("plain")
+                .simple_parser(\text: Ok(BlockValue.Raw(text)))
+                .build()
+
+            val features = plain.syntax_features()
+            assert not features.power_caret
+            assert not features.transpose_quote
+            assert not features.implicit_multiplication
+            assert not features.broadcast_ops
+            assert not features.matrix_mul
+
+        it "provides pass-through validator by default":
+            val no_validate = BlockBuilder("novalidate")
+                .simple_parser(\text: Ok(BlockValue.Raw(text)))
+                .build()
+
+            val errors = no_validate.validate(
+                BlockValue.Raw("anything"),
+                BlockContext(span: Span.dummy(), source: "")
+            )
+            assert errors.len() == 0
+
+    # =========================================================================
+    # UTILITIES MODULE
+    # =========================================================================
+
+    describe "compiler.blocks.utils - Pre-built Parsers":
+
+        it "parses JSON with utility function":
+            val result = parse_json('{"key": "value"}')
+            assert result.ok.?
+            assert result.unwrap().key == "value"
+
+        it "parses YAML with utility function":
+            val result = parse_yaml("key: value\nlist:\n  - item1\n  - item2")
+            assert result.ok.?
+            val data = result.unwrap()
+            assert data.key == "value"
+            assert data.list.len() == 2
+
+        it "parses TOML with utility function":
+            val result = parse_toml("[section]\nkey = 'value'")
+            assert result.ok.?
+            assert result.unwrap().section.key == "value"
+
+        it "parses CSV with utility function":
+            val result = parse_csv("name,age\nAlice,30\nBob,25")
+            assert result.ok.?
+            val rows = result.unwrap()
+            assert rows.len() == 2
+            assert rows[0].name == "Alice"
+
+    describe "compiler.blocks.utils - Pre-built Validators":
+
+        it "validates JSON structure":
+            val valid = BlockValue.Json(JsonValue.Object({"key": "value"}))
+            val errors = validate_json(valid)
+            assert errors.len() == 0
+
+            val invalid = BlockValue.Raw("not json")
+            val errors2 = validate_json(invalid)
+            assert errors2.len() > 0
+
+        it "validates regex pattern":
+            val valid = BlockValue.Regex(RegexPattern("^[a-z]+$"))
+            val errors = validate_regex(valid)
+            assert errors.len() == 0
+
+        it "validates SQL with dialect":
+            val query = BlockValue.Sql(SqlQuery("SELECT * FROM users"))
+
+            val ansi_errors = validate_sql(query, dialect: "ansi")
+            assert ansi_errors.len() == 0
+
+            val pg_errors = validate_sql(query, dialect: "postgres")
+            assert pg_errors.len() == 0
+
+    describe "compiler.blocks.utils - Syntax Highlighting":
+
+        it "highlights keywords in text":
+            val keywords = ["SELECT", "FROM", "WHERE"]
+            val text = "SELECT name FROM users WHERE age > 21"
+
+            val tokens = highlight_keywords(text, keywords)
+            assert tokens.len() >= 3
+            assert tokens[0].kind == BlockTokenKind.Keyword
+            assert tokens[0].text == "SELECT"
+
+        it "highlights strings in text":
+            val text = 'name = "Alice" and city = "NYC"'
+            val tokens = highlight_strings(text)
+
+            val string_tokens = tokens.filter(\t: t.kind == BlockTokenKind.StringLit)
+            assert string_tokens.len() == 2
+            assert string_tokens[0].text == '"Alice"'
+
+        it "highlights comments in text":
+            val text = "code(); // line comment\n/* block comment */"
+            val tokens = highlight_comments(text,
+                line_comment: "//",
+                block_comment: ("/*", "*/")
+            )
+
+            val comments = tokens.filter(\t: t.kind == BlockTokenKind.Comment)
+            assert comments.len() == 2
+
+        it "highlights numbers in text":
+            val text = "x = 42 + 3.14 - 0x1F"
+            val tokens = highlight_numbers(text)
+
+            val numbers = tokens.filter(\t: t.kind == BlockTokenKind.Number)
+            assert numbers.len() == 3
+
+    describe "compiler.blocks.utils - Error Helpers":
+
+        it "creates error at specific offset":
+            val ctx = BlockContext(
+                span: Span.new(0, 100),
+                source: "SELECT * FROM users"
+            )
+
+            val err = error_at(ctx, "Missing semicolon", offset: 19)
+            assert err.message == "Missing semicolon"
+            assert err.span.start == 19
+
+        it "creates error with span":
+            val ctx = BlockContext(
+                span: Span.new(0, 100),
+                source: "SELECT * FROM users"
+            )
+
+            val err = error_span(ctx, "Unknown table", span: (14, 19))
+            assert err.message == "Unknown table"
+            assert err.span.start == 14
+            assert err.span.end == 19
+
+        it "converts string errors to BlockError array":
+            val ctx = BlockContext(
+                span: Span.new(0, 100),
+                source: "some block content"
+            )
+
+            val messages = ["Error 1", "Error 2", "Error 3"]
+            val errors = errors_from_strings(ctx, messages)
+
+            assert errors.len() == 3
+            assert errors[0].message == "Error 1"
+
+    describe "compiler.blocks.utils - Common Patterns":
+
+        it "interpolates variables in text":
+            val template = "Hello {name}, you are {age} years old"
+            val vars = {"name": "Alice", "age": "30"}
+
+            val result = interpolate_variables(template, vars)
+            assert result == "Hello Alice, you are 30 years old"
+
+        it "strips common indentation":
+            val text = """
+                Line 1
+                Line 2
+                    Indented
+            """
+
+            val result = strip_indent(text)
+            assert not result.starts_with(" ")
+
+        it "normalizes line endings":
+            val windows = "Line 1\r\nLine 2\r\n"
+            val result = normalize_newlines(windows)
+            assert result == "Line 1\nLine 2\n"
+
+    # =========================================================================
+    # REGISTRATION API
+    # =========================================================================
+
+    describe "Block Registration":
+
+        it "registers and unregisters blocks":
+            val test_block = block("testblock", LexerMode.Raw, \t:
+                Ok(BlockValue.Raw(t))
+            )
+
+            assert not is_block_registered("testblock")
+
+            register_block(test_block)
+            assert is_block_registered("testblock")
+
+            val retrieved = get_block("testblock")
+            assert retrieved.?
+
+            unregister_block("testblock")
+            assert not is_block_registered("testblock")
+
+        it "lists all registered blocks":
+            val before = list_blocks()
+
+            register_block(block("test1", LexerMode.Raw, \t: Ok(BlockValue.Raw(t))))
+            register_block(block("test2", LexerMode.Raw, \t: Ok(BlockValue.Raw(t))))
+
+            val after = list_blocks()
+            assert after.len() == before.len() + 2
+            assert after.contains("test1")
+            assert after.contains("test2")
+
+            unregister_block("test1")
+            unregister_block("test2")
+
+        it "provides scoped registration for testing":
+            assert not is_block_registered("tempblock")
+
+            val result = with_block(
+                block("tempblock", LexerMode.Raw, \t: Ok(BlockValue.Raw(t))),
+                \:
+                    assert is_block_registered("tempblock")
+                    val value = tempblock{ content }
+                    value
+            )
+
+            assert result == "content"
+            assert not is_block_registered("tempblock")  # Auto-unregistered
+
+    # =========================================================================
+    # COMMON RECIPES
+    # =========================================================================
+
+    describe "Recipe: Simple Text Block":
+
+        it "creates heredoc with trimming":
+            register_block(block("heredoc", LexerMode.Raw, \text:
+                Ok(BlockValue.Raw(text.trim()))
+            ))
+
+            val doc = heredoc{
+                First line
+                Second line
+            }
+
+            assert doc == "First line\nSecond line"
+            unregister_block("heredoc")
+
+    describe "Recipe: DSL with Validation":
+
+        it "creates validated SQL block":
+            val sql_block = BlockBuilder("sqlblock")
+                .raw_text()
+                .simple_parser(\payload:
+                    parse_sql(payload.trim())
+                )
+                .simple_validator(\value:
+                    validate_sql(value, dialect: "postgres")
+                )
+                .build()
+
+            register_block(sql_block)
+
+            val query = sqlblock{
+                SELECT name, age FROM users WHERE age > 21
+            }
+
+            assert query.table == "users"
+            assert query.columns.contains("name")
+            unregister_block("sqlblock")
+
+    describe "Recipe: Math-Like Syntax":
+
+        it "creates tensor block with math operators":
+            val tensor_block = BlockBuilder("tensor2")
+                .math_mode()
+                .enable_all_math()
+                .simple_parser(\expr:
+                    parse_tensor_expr(expr)
+                )
+                .build()
+
+            register_block(tensor_block)
+
+            val computation = tensor2{
+                A @ B^2 + C' .* D
+            }
+
+            # Can use: @, ^, ', .*
+            assert computation.contains_matmul
+            assert computation.contains_power
+            assert computation.contains_transpose
+            assert computation.contains_broadcast
+            unregister_block("tensor2")
+
+    describe "Recipe: Compile-Time Constant":
+
+        it "compiles regex at compile time":
+            val regex_block = const_block("re2", LexerMode.Raw,
+                \pattern: compile_regex(pattern.trim()),
+                \value:
+                    match value:
+                        case Regex(p): Some(ConstValue.String(p.source))
+                        case _: None
+            )
+
+            register_block(regex_block)
+
+            # Pattern is compiled during compilation, not runtime
+            val pattern = re2{ ^\d{3}-\d{4}$ }
+
+            assert pattern.matches("123-4567")
+            assert not pattern.matches("invalid")
+            unregister_block("re2")
+
+    describe "Recipe: IDE-Friendly Block":
+
+        it "provides full IDE support":
+            val gql_block = BlockBuilder("gql")
+                .raw_text()
+                .simple_parser(\query: parse_graphql(query))
+                .highlighter(\text: highlight_graphql_syntax(text))
+                .completer(\text, pos: complete_graphql_fields(text, pos))
+                .hover_provider(\text, pos: hover_graphql_types(text, pos))
+                .build()
+
+            register_block(gql_block)
+
+            # Syntax highlighting
+            val tokens = gql_block.highlight("query { user { name } }")
+            assert tokens.?.
+
+            # Completions
+            val completions = gql_block.completions("query { user { ", 15)
+            assert completions.?.
+
+            # Hover
+            val hover = gql_block.hover("query { user { name } }", 8)
+            assert hover.?.
+
+            unregister_block("gql")
+
+    # =========================================================================
+    # PERFORMANCE & EDGE CASES
+    # =========================================================================
+
+    describe "Performance":
+
+        it "builder compiles away at build time":
+            # BlockBuilder should have zero runtime overhead
+            val start = timestamp_now()
+
+            val fast = BlockBuilder("fast")
+                .raw_text()
+                .simple_parser(\t: Ok(BlockValue.Raw(t)))
+                .build()
+
+            val elapsed = timestamp_now() - start
+            # Building should be instant (< 1ms)
+            assert elapsed < 0.001
+
+        it "simple_parser unwraps to full signature":
+            # simple_parser should be as fast as full parser
+            val with_simple = BlockBuilder("s1")
+                .simple_parser(\t: Ok(BlockValue.Raw(t)))
+                .build()
+
+            val with_full = BlockBuilder("s2")
+                .parser(\t, ctx: Ok(BlockValue.Raw(t)))
+                .build()
+
+            # Both should have same performance characteristics
+            # (implementation detail - not directly testable)
+
+    describe "Edge Cases":
+
+        it "handles empty payload":
+            val empty_block = block("empty", LexerMode.Raw, \text:
+                if text.trim().?.  :
+                    Ok(BlockValue.Raw(text))
+                else:
+                    Err("Block cannot be empty")
+            )
+
+            register_block(empty_block)
+
+            val result = try:
+                empty{ }
+            catch e:
+                e.message
+
+            assert result.contains("cannot be empty")
+            unregister_block("empty")
+
+        it "handles unicode in payload":
+            val unicode = block("unicode", LexerMode.Raw, \text:
+                Ok(BlockValue.Raw(text))
+            )
+
+            register_block(unicode)
+
+            val result = unicode{ 你好世界 🌍 }
+            assert result.contains("你好")
+            assert result.contains("🌍")
+            unregister_block("unicode")
+
+        it "handles nested braces in raw mode":
+            val nested = block("nested", LexerMode.Raw, \text:
+                Ok(BlockValue.Raw(text))
+            )
+
+            register_block(nested)
+
+            val result = nested{
+                { "nested": { "braces": true } }
+            }
+
+            assert result.contains("nested")
+            assert result.contains("braces")
+            unregister_block("nested")
+
+    # =========================================================================
+    # DOCUMENTATION EXAMPLES
+    # =========================================================================
+
+    describe "Documentation Examples":
+
+        it "minimal example from README":
+            # From Quick Start guide
+            val my_block = block("myblock", LexerMode.Raw, \payload:
+                Ok(BlockValue.Raw(payload))
+            )
+            register_block(my_block)
+
+            val result = myblock{ Hello, World! }
+            assert result == "Hello, World!"
+            unregister_block("myblock")
+
+        it "builder example from README":
+            # From Getting Started guide
+            val json2 = BlockBuilder("json2")
+                .raw_text()
+                .simple_parser(\text: parse_json(text))
+                .build()
+
+            register_block(json2)
+
+            val data = json2{ {"name": "Alice"} }
+            assert data.name == "Alice"
+            unregister_block("json2")
+
+        it "feature preset example from README":
+            # From Advanced Features guide
+            val math2 = BlockBuilder("math2")
+                .math_mode()
+                .enable_all_math()
+                .simple_parser(\expr: parse_math_expr(expr))
+                .build()
+
+            register_block(math2)
+
+            val result = math2{ x^2 + y^2 }
+            assert result.contains_power
+            unregister_block("math2")
+
+# =========================================================================
+# FEATURE TAGS
+# =========================================================================
+
+tags: [compiler, blocks, api, easy-api, builder, dsl, user-friendly]
+priority: high
+status: planned
+epic: Custom Blocks

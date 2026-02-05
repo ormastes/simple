@@ -3,16 +3,45 @@
 # User-definable custom block interface for Simple language.
 #
 # This module provides:
-# - BlockDefinition trait for defining custom blocks
+# - BlockDefinition trait for defining custom blocks (Tier 3: Full control)
+# - BlockBuilder for fluent API (Tier 2: 5-20 lines)
+# - block() and const_block() helpers (Tier 1: 3 lines)
 # - BlockRegistry for registering and looking up blocks
 # - LexerMode and SyntaxFeatures for configuring block behavior
 # - BlockContext and BlockError for block parsing context
 # - BlockValue for typed block results
-# - Built-in blocks (m, loss, nograd)
+# - Pre-built parsers, validators, and utilities
+# - Testing framework for block validation
+# - Built-in blocks (m, loss, nograd, sh, sql, re, json, md)
 #
-# Example usage:
+# Example usage (Tier 1: Minimal API):
 # ```simple
-# import compiler.blocks.{BlockDefinition, BlockRegistry, BlockValue}
+# use compiler.blocks.{define_block, register_block}
+# use compiler.blocks.modes.{LexerMode}
+# use compiler.blocks.value.{BlockValue}
+#
+# val heredoc = define_block("heredoc", LexerMode.Raw, \text:
+#     Ok(BlockValue.Raw(text.trim()))
+# )
+# register_block(heredoc)
+#
+# # Now use it:
+# val content = heredoc{ text here }
+# ```
+#
+# Example usage (Tier 2: Builder API):
+# ```simple
+# use compiler.blocks.{BlockBuilder}
+#
+# val sql = BlockBuilder("sql")
+#     .raw_text()
+#     .simple_parser(\text: parse_sql(text))
+#     .build()
+# ```
+#
+# Example usage (Tier 3: Full trait):
+# ```simple
+# use compiler.blocks.{BlockDefinition, BlockRegistry, BlockValue}
 #
 # struct MyBlockDef: BlockDefinition:
 #     fn kind() -> text: "myblock"
@@ -34,6 +63,23 @@ export ConstValue, Type, BlockExample from .definition
 
 export BlockRegistry, RegistryBuilder from .registry
 export block_registry, register_block, unregister_block, is_block from .registry
+export with_block, register_blocks from .registry
+
+# Easy API (Tier 1: Minimal) - User-Defined Blocks
+export define_block, define_const_block, validated_block from .easy
+
+# Builder API (Tier 2: Fluent)
+export BlockBuilder from .builder
+
+# Utilities (Pre-built parsers, validators, helpers)
+export parse_json, parse_yaml, parse_toml from .utils
+export validate_json, validate_yaml, validate_toml from .utils
+export parse_number, parse_port, parse_url, parse_email from .utils
+export validate_range, validate_regex from .utils
+
+# Testing Framework
+export BlockTestSuite, BlockTest, TestResult from .testing
+export test_block, assert_parses, assert_fails, assert_const_eval from .testing
 
 export LexerMode, LexerConfig, SyntaxFeatures, Span from .modes
 
@@ -56,12 +102,16 @@ export all_builtin_blocks, builtin_block_kinds from .builtin
 
 # Convenience imports
 use blocks.definition.{BlockDefinition}
-use blocks.registry.{BlockRegistry, block_registry, register_block, is_block}
+use blocks.registry.{BlockRegistry, block_registry, register_block, is_block, with_block}
 use blocks.modes.{LexerMode, LexerConfig, SyntaxFeatures}
 use blocks.context.{BlockContext, BlockError, BlockErrorKind, Diagnostic}
 use blocks.value.{BlockValue, ResolvedBlock}
 use blocks.resolver.{BlockResolver, ResolvedModule, resolve_blocks}
 use blocks.builtin.{register_builtin_blocks, MathBlockDef, LossBlockDef, NogradBlockDef, ShellBlockDef, SqlBlockDef, RegexBlockDef, JsonBlockDef, MarkdownBlockDef}
+use blocks.easy.{define_block, define_const_block, validated_block}
+use blocks.builder.{BlockBuilder}
+use blocks.utils.{parse_json, parse_yaml, parse_toml, validate_json, validate_yaml, validate_toml}
+use blocks.testing.{BlockTestSuite, BlockTest, test_block, assert_parses}
 
 # ============================================================================
 # Module Documentation
@@ -93,9 +143,36 @@ use blocks.builtin.{register_builtin_blocks, MathBlockDef, LossBlockDef, NogradB
 #
 # ## Creating Custom Blocks
 #
-# 1. Implement the BlockDefinition trait
-# 2. Register with the BlockRegistry
-# 3. Your block is now available!
+# Three-tier API for progressive complexity:
+#
+# ### Tier 1: Minimal API (3 lines, 80% of use cases)
+# ```simple
+# val heredoc = define_block("heredoc", LexerMode.Raw, \text:
+#     Ok(BlockValue.Raw(text.trim()))
+# )
+# register_block(heredoc)
+# ```
+#
+# ### Tier 2: Builder API (5-20 lines, 15% of use cases)
+# ```simple
+# val sql = BlockBuilder("sql")
+#     .raw_text()
+#     .simple_parser(\text: parse_sql(text))
+#     .highlighter(\text: highlight_sql(text))
+#     .build()
+# register_block(sql)
+# ```
+#
+# ### Tier 3: Full Trait (60+ lines, 5% of use cases - complete control)
+# ```simple
+# struct MyBlockDef: BlockDefinition:
+#     fn kind() -> text: "myblock"
+#     fn parse_payload(payload, ctx): ...
+#     fn validate(value, ctx): ...
+#     # ... all 20+ methods
+# ```
+#
+# Choose the tier that matches your complexity needs!
 #
 # ## Lexer Modes
 #
