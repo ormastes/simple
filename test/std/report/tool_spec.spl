@@ -1,0 +1,575 @@
+"""
+# Tool Reports Specification
+
+**Feature IDs:** #RPT-007
+**Category:** Infrastructure
+**Difficulty:** 3/5
+**Status:** Implemented
+
+## Overview
+
+Tests for tool-specific reports from the unified reporting system.
+Verifies LintReport, TestReport, BuildReport, and related types.
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| LintReport | Report for linter warnings/errors |
+| TestReport | Report for test results |
+| BuildReport | Report for build status |
+"""
+
+import std.spec
+import std.report
+import std.report.tool
+
+# ============================================================================
+# Test Group 1: LintReport
+# ============================================================================
+
+describe "LintReport":
+    """
+    ## LintReport
+
+    Tests for lint reports.
+    """
+
+    context "creation":
+        """
+        ### Lint Report Creation
+
+        Lint reports can be created with different severities.
+        """
+
+        it "creates warning":
+            val loc = SourceLocation.at("test.spl", 10, 5)
+            val report = LintReport.warning("L:unused", "unused variable", loc)
+            expect(report.severity).to(eq(LintSeverity.Warning))
+            expect(report.rule_id).to(eq("L:unused"))
+
+        it "creates error":
+            val loc = SourceLocation.at("test.spl", 10, 5)
+            val report = LintReport.error("L:security", "security issue", loc)
+            expect(report.severity).to(eq(LintSeverity.Error))
+
+        it "creates info":
+            val loc = SourceLocation.at("test.spl", 10, 5)
+            val report = LintReport.info("L:style", "style suggestion", loc)
+            expect(report.severity).to(eq(LintSeverity.Info))
+
+    context "builder pattern":
+        """
+        ### Builder Pattern
+
+        Lint reports support builder methods.
+        """
+
+        it "adds note":
+            val loc = SourceLocation.at("test.spl", 10, 5)
+            val report = LintReport.warning("L:test", "message", loc)
+                .with_note("additional info")
+            expect(report.notes.len()).to(eq(1))
+
+        it "adds fix suggestion":
+            val loc = SourceLocation.at("test.spl", 10, 5)
+            val suggestion = Suggestion.replace(loc, "new_code", "fix it")
+            val report = LintReport.warning("L:test", "message", loc)
+                .with_suggestion(suggestion)
+            expect(report.suggestion.?).to(be_true())
+
+        it "sets category":
+            val loc = SourceLocation.at("test.spl", 10, 5)
+            val report = LintReport.warning("L:test", "message", loc)
+                .with_category(LintCategory.Style)
+            expect(report.category).to(eq(LintCategory.Style))
+
+    context "conversion":
+        """
+        ### Conversion to Report
+
+        Lint reports can convert to standard reports.
+        """
+
+        it "converts to warning report":
+            val loc = SourceLocation.at("test.spl", 10, 5)
+            val lint = LintReport.warning("L:test", "message", loc)
+            val report = lint.to_report()
+            expect(report.level).to(eq(ReportLevel.Warning))
+            expect(report.code.unwrap()).to(eq("L:test"))
+
+describe "LintRule":
+    """
+    ## LintRule
+
+    Tests for lint rule definitions.
+    """
+
+    context "creation":
+        """
+        ### Rule Creation
+
+        Lint rules define linting behavior.
+        """
+
+        it "creates rule":
+            val rule = LintRule.create("L:unused_var", "detects unused variables")
+            expect(rule.id).to(eq("L:unused_var"))
+            expect(rule.description).to(eq("detects unused variables"))
+
+        it "rule has default severity":
+            val rule = LintRule.create("L:test", "test rule")
+            expect(rule.default_severity).to(eq(LintSeverity.Warning))
+
+        it "creates rule with severity":
+            val rule = LintRule.with_severity(
+                "L:security",
+                "security issue",
+                LintSeverity.Error
+            )
+            expect(rule.default_severity).to(eq(LintSeverity.Error))
+
+    context "category":
+        """
+        ### Rule Categories
+
+        Rules belong to categories.
+        """
+
+        it "sets category":
+            val rule = LintRule.create("L:test", "test")
+                .in_category(LintCategory.Correctness)
+            expect(rule.category).to(eq(LintCategory.Correctness))
+
+describe "LintSummary":
+    """
+    ## LintSummary
+
+    Tests for lint result summaries.
+    """
+
+    context "creation":
+        """
+        ### Summary Creation
+
+        Summaries aggregate lint results.
+        """
+
+        it "creates empty summary":
+            val summary = LintSummary.empty()
+            expect(summary.total()).to(eq(0))
+
+    context "adding results":
+        """
+        ### Adding Results
+
+        Results can be added to summaries.
+        """
+
+        it "adds result":
+            val summary = LintSummary.empty()
+            val loc = SourceLocation.at("test.spl", 10, 5)
+            val result = LintResult.warning("L:test", "message", loc)
+            summary.add_result(result)
+            expect(summary.total()).to(eq(1))
+
+        it "counts warnings":
+            val summary = LintSummary.empty()
+            val loc = SourceLocation.at("test.spl", 10, 5)
+            summary.add_result(LintResult.warning("L:w1", "warning 1", loc))
+            summary.add_result(LintResult.warning("L:w2", "warning 2", loc))
+            summary.add_result(LintResult.error("L:e1", "error 1", loc))
+            expect(summary.warning_count()).to(eq(2))
+
+        it "counts errors":
+            val summary = LintSummary.empty()
+            val loc = SourceLocation.at("test.spl", 10, 5)
+            summary.add_result(LintResult.error("L:e1", "error 1", loc))
+            summary.add_result(LintResult.error("L:e2", "error 2", loc))
+            expect(summary.error_count()).to(eq(2))
+
+    context "formatting":
+        """
+        ### Summary Formatting
+
+        Summaries can be formatted.
+        """
+
+        it "formats with counts":
+            val summary = LintSummary.empty()
+            val loc = SourceLocation.at("test.spl", 10, 5)
+            summary.add_result(LintResult.warning("L:test", "message", loc))
+            val formatted = summary.format(false)  # no colors
+            expect(formatted).to(contain("1"))
+            expect(formatted).to(contain("warning"))
+
+# ============================================================================
+# Test Group 2: TestReport
+# ============================================================================
+
+describe "TestResult":
+    """
+    ## TestResult
+
+    Tests for test result types.
+    """
+
+    context "creation":
+        """
+        ### Result Creation
+
+        Test results indicate pass/fail status.
+        """
+
+        it "creates passed result":
+            val result = TestResult.passed("test_add", 50)  # 50ms
+            expect(result.status).to(eq(TestStatus.Passed))
+            expect(result.name).to(eq("test_add"))
+            expect(result.duration_ms).to(eq(50))
+
+        it "creates failed result":
+            val failure = TestFailure.assertion("expected 5, got 4")
+            val result = TestResult.failed("test_add", 100, failure)
+            expect(result.status).to(eq(TestStatus.Failed))
+            expect(result.failure.?).to(be_true())
+
+        it "creates skipped result":
+            val result = TestResult.skipped("test_slow", "too slow")
+            expect(result.status).to(eq(TestStatus.Skipped))
+
+        it "creates errored result":
+            val result = TestResult.errored("test_crash", "panic occurred")
+            expect(result.status).to(eq(TestStatus.Errored))
+
+    context "predicates":
+        """
+        ### Result Predicates
+
+        Results have predicate methods.
+        """
+
+        it "is_passed returns true for passed":
+            val result = TestResult.passed("test", 50)
+            expect(result.is_passed()).to(be_true())
+
+        it "is_passed returns false for failed":
+            val failure = TestFailure.assertion("failed")
+            val result = TestResult.failed("test", 50, failure)
+            expect(result.is_passed()).to(be_false())
+
+        it "is_failed returns true for failed":
+            val failure = TestFailure.assertion("failed")
+            val result = TestResult.failed("test", 50, failure)
+            expect(result.is_failed()).to(be_true())
+
+describe "TestFailure":
+    """
+    ## TestFailure
+
+    Tests for test failure details.
+    """
+
+    context "creation":
+        """
+        ### Failure Creation
+
+        Failures capture why tests failed.
+        """
+
+        it "creates assertion failure":
+            val failure = TestFailure.assertion("expected 5, got 4")
+            expect(failure.message).to(contain("expected"))
+
+        it "creates timeout failure":
+            val failure = TestFailure.timeout(5000)  # 5s timeout
+            expect(failure.message).to(contain("timeout"))
+
+        it "creates panic failure":
+            val failure = TestFailure.panic("assertion failed: x > 0")
+            expect(failure.message).to(contain("panic"))
+
+    context "location":
+        """
+        ### Failure Location
+
+        Failures can have location info.
+        """
+
+        it "adds location":
+            val failure = TestFailure.assertion("test")
+                .at("test_spec.spl", 42, 10)
+            expect(failure.location.?).to(be_true())
+            expect(failure.location.unwrap().line).to(eq(42))
+
+describe "TestSuite":
+    """
+    ## TestSuite
+
+    Tests for test suite management.
+    """
+
+    context "creation":
+        """
+        ### Suite Creation
+
+        Test suites group related tests.
+        """
+
+        it "creates named suite":
+            val suite = TestSuite.named("math_tests")
+            expect(suite.name).to(eq("math_tests"))
+            expect(suite.count()).to(eq(0))
+
+    context "adding tests":
+        """
+        ### Adding Tests
+
+        Tests can be added to suites.
+        """
+
+        it "adds test result":
+            val suite = TestSuite.named("tests")
+            suite.add(TestResult.passed("test_1", 50))
+            expect(suite.count()).to(eq(1))
+
+        it "adds multiple results":
+            val suite = TestSuite.named("tests")
+            suite.add(TestResult.passed("test_1", 50))
+            suite.add(TestResult.passed("test_2", 75))
+            suite.add(TestResult.failed("test_3", 100, TestFailure.assertion("fail")))
+            expect(suite.count()).to(eq(3))
+
+    context "statistics":
+        """
+        ### Suite Statistics
+
+        Suites track pass/fail counts.
+        """
+
+        it "counts passed":
+            val suite = TestSuite.named("tests")
+            suite.add(TestResult.passed("test_1", 50))
+            suite.add(TestResult.passed("test_2", 50))
+            suite.add(TestResult.failed("test_3", 50, TestFailure.assertion("fail")))
+            expect(suite.passed_count()).to(eq(2))
+
+        it "counts failed":
+            val suite = TestSuite.named("tests")
+            suite.add(TestResult.passed("test_1", 50))
+            suite.add(TestResult.failed("test_2", 50, TestFailure.assertion("fail")))
+            suite.add(TestResult.failed("test_3", 50, TestFailure.assertion("fail")))
+            expect(suite.failed_count()).to(eq(2))
+
+        it "calculates total duration":
+            val suite = TestSuite.named("tests")
+            suite.add(TestResult.passed("test_1", 50))
+            suite.add(TestResult.passed("test_2", 100))
+            suite.add(TestResult.passed("test_3", 150))
+            expect(suite.total_duration_ms()).to(eq(300))
+
+        it "all_passed returns true when all pass":
+            val suite = TestSuite.named("tests")
+            suite.add(TestResult.passed("test_1", 50))
+            suite.add(TestResult.passed("test_2", 50))
+            expect(suite.all_passed()).to(be_true())
+
+        it "all_passed returns false with failures":
+            val suite = TestSuite.named("tests")
+            suite.add(TestResult.passed("test_1", 50))
+            suite.add(TestResult.failed("test_2", 50, TestFailure.assertion("fail")))
+            expect(suite.all_passed()).to(be_false())
+
+describe "TestSummary":
+    """
+    ## TestSummary
+
+    Tests for test summary reports.
+    """
+
+    context "creation":
+        """
+        ### Summary Creation
+
+        Summaries aggregate suite results.
+        """
+
+        it "creates empty summary":
+            val summary = TestSummary.empty()
+            expect(summary.suite_count()).to(eq(0))
+
+    context "adding suites":
+        """
+        ### Adding Suites
+
+        Suites can be added to summaries.
+        """
+
+        it "adds suite":
+            val summary = TestSummary.empty()
+            val suite = TestSuite.named("tests")
+            suite.add(TestResult.passed("test", 50))
+            summary.add_suite(suite)
+            expect(summary.suite_count()).to(eq(1))
+
+    context "totals":
+        """
+        ### Summary Totals
+
+        Summaries provide total counts.
+        """
+
+        it "calculates total tests":
+            val summary = TestSummary.empty()
+            val suite1 = TestSuite.named("suite1")
+            suite1.add(TestResult.passed("test_1", 50))
+            suite1.add(TestResult.passed("test_2", 50))
+            val suite2 = TestSuite.named("suite2")
+            suite2.add(TestResult.passed("test_3", 50))
+            summary.add_suite(suite1)
+            summary.add_suite(suite2)
+            expect(summary.total_tests()).to(eq(3))
+
+# ============================================================================
+# Test Group 3: BuildReport
+# ============================================================================
+
+describe "BuildResult":
+    """
+    ## BuildResult
+
+    Tests for build result types.
+    """
+
+    context "creation":
+        """
+        ### Result Creation
+
+        Build results indicate success/failure.
+        """
+
+        it "creates success result":
+            val result = BuildResult.success(1500)  # 1500ms
+            expect(result.status).to(eq(BuildStatus.Success))
+            expect(result.duration_ms).to(eq(1500))
+
+        it "creates failure result":
+            val result = BuildResult.failure(2000)
+            expect(result.status).to(eq(BuildStatus.Failure))
+
+        it "creates partial result":
+            val result = BuildResult.partial(1000)
+            expect(result.status).to(eq(BuildStatus.Partial))
+
+    context "errors and warnings":
+        """
+        ### Errors and Warnings
+
+        Build results track errors and warnings.
+        """
+
+        it "adds error":
+            val result = BuildResult.failure(1000)
+            val error = BuildError.compile("type mismatch", "main.spl", 10)
+            result.add_error(error)
+            expect(result.errors.len()).to(eq(1))
+
+        it "adds warning":
+            val result = BuildResult.success(1000)
+            val warning = BuildWarning.unused("unused variable 'x'", "main.spl", 5)
+            result.add_warning(warning)
+            expect(result.warnings.len()).to(eq(1))
+
+        it "has_errors returns true with errors":
+            val result = BuildResult.failure(1000)
+            result.add_error(BuildError.compile("error", "file.spl", 1))
+            expect(result.has_errors()).to(be_true())
+
+        it "has_warnings returns true with warnings":
+            val result = BuildResult.success(1000)
+            result.add_warning(BuildWarning.unused("warning", "file.spl", 1))
+            expect(result.has_warnings()).to(be_true())
+
+    context "artifacts":
+        """
+        ### Build Artifacts
+
+        Build results track output artifacts.
+        """
+
+        it "adds artifact":
+            val result = BuildResult.success(1000)
+            result.add_artifact("target/release/myapp")
+            expect(result.artifacts.len()).to(eq(1))
+
+        it "adds multiple artifacts":
+            val result = BuildResult.success(1000)
+            result.add_artifact("target/release/myapp")
+            result.add_artifact("target/release/libmylib.so")
+            expect(result.artifacts.len()).to(eq(2))
+
+describe "BuildError":
+    """
+    ## BuildError
+
+    Tests for build error types.
+    """
+
+    context "creation":
+        """
+        ### Error Creation
+
+        Build errors capture failure details.
+        """
+
+        it "creates compile error":
+            val error = BuildError.compile("type mismatch", "main.spl", 10)
+            expect(error.kind).to(eq("compile"))
+            expect(error.message).to(eq("type mismatch"))
+
+        it "creates link error":
+            val error = BuildError.link("undefined symbol 'foo'")
+            expect(error.kind).to(eq("link"))
+
+        it "creates missing dependency error":
+            val error = BuildError.missing_dependency("libssl")
+            expect(error.kind).to(eq("dependency"))
+            expect(error.message).to(contain("libssl"))
+
+describe "BuildStep":
+    """
+    ## BuildStep
+
+    Tests for build step tracking.
+    """
+
+    context "creation":
+        """
+        ### Step Creation
+
+        Build steps track compilation phases.
+        """
+
+        it "creates step":
+            val step = BuildStep.create("compile", "main.spl")
+            expect(step.name).to(eq("compile"))
+            expect(step.target).to(eq("main.spl"))
+
+    context "completion":
+        """
+        ### Step Completion
+
+        Steps track completion status.
+        """
+
+        it "marks complete":
+            val step = BuildStep.create("compile", "main.spl")
+            step.complete(100)  # 100ms
+            expect(step.is_complete()).to(be_true())
+            expect(step.duration_ms).to(eq(100))
+
+        it "marks failed":
+            val step = BuildStep.create("compile", "main.spl")
+            step.fail("compilation error")
+            expect(step.is_failed()).to(be_true())
+            expect(step.error.?).to(be_true())
+

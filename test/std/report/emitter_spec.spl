@@ -1,0 +1,621 @@
+"""
+# Emitter Specification
+
+**Feature IDs:** #RPT-008
+**Category:** Infrastructure
+**Difficulty:** 3/5
+**Status:** Implemented
+
+## Overview
+
+Tests for output emitters from the unified reporting system.
+Verifies HumanEmitter, JsonEmitter, SarifEmitter, and LspEmitter.
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| HumanEmitter | Terminal output with colors and context |
+| JsonEmitter | Machine-readable JSON output |
+| SarifEmitter | SARIF v2.1.0 compliant output |
+| LspEmitter | LSP diagnostic format |
+"""
+
+import std.spec
+import std.report
+import std.report.emitter
+
+# ============================================================================
+# Test Group 1: HumanEmitter
+# ============================================================================
+
+describe "HumanEmitter":
+    """
+    ## HumanEmitter
+
+    Tests for human-readable terminal output.
+    """
+
+    context "creation":
+        """
+        ### Emitter Creation
+
+        Human emitters can be created with different configurations.
+        """
+
+        it "creates default emitter":
+            val emitter = HumanEmitter.default_emitter()
+            expect(emitter.colors_enabled).to(be_true())
+
+        it "creates no-color emitter":
+            val emitter = HumanEmitter.no_color()
+            expect(emitter.colors_enabled).to(be_false())
+
+        it "creates with style":
+            val style = HumanStyle.compact()
+            val emitter = HumanEmitter.with_style(style)
+            expect(emitter.style.compact).to(be_true())
+
+    context "source registration":
+        """
+        ### Source Registration
+
+        Emitters track source code for context display.
+        """
+
+        it "adds source":
+            val emitter = HumanEmitter.default_emitter()
+            emitter.add_source("test.spl", "val x = 1\nval y = 2")
+            expect(emitter.has_source("test.spl")).to(be_true())
+
+        it "has_source returns false for unregistered":
+            val emitter = HumanEmitter.default_emitter()
+            expect(emitter.has_source("missing.spl")).to(be_false())
+
+    context "emitting reports":
+        """
+        ### Report Emission
+
+        Emitters format reports for display.
+        """
+
+        it "emits error report":
+            val emitter = HumanEmitter.no_color()
+            val report = Report.error("test error")
+            val output = emitter.emit(report)
+            expect(output).to(contain("error"))
+            expect(output).to(contain("test error"))
+
+        it "emits warning report":
+            val emitter = HumanEmitter.no_color()
+            val report = Report.warning("test warning")
+            val output = emitter.emit(report)
+            expect(output).to(contain("warning"))
+
+        it "emits report with code":
+            val emitter = HumanEmitter.no_color()
+            val report = Report.error("message").with_code("E0001")
+            val output = emitter.emit(report)
+            expect(output).to(contain("E0001"))
+
+        it "emits report with location":
+            val emitter = HumanEmitter.no_color()
+            val report = Report.error("message").at("test.spl", 10, 5)
+            val output = emitter.emit(report)
+            expect(output).to(contain("test.spl"))
+            expect(output).to(contain("10"))
+
+    context "source context":
+        """
+        ### Source Context Display
+
+        Emitters show source code context.
+        """
+
+        it "shows source line":
+            val emitter = HumanEmitter.no_color()
+            emitter.add_source("test.spl", "val x = 1")
+            val report = Report.error("message").at("test.spl", 1, 5)
+            val output = emitter.emit(report)
+            expect(output).to(contain("val x = 1"))
+
+        it "shows underline":
+            val emitter = HumanEmitter.no_color()
+            emitter.add_source("test.spl", "val x = 1")
+            val report = Report.error("message")
+                .at("test.spl", 1, 5)
+            val output = emitter.emit(report)
+            expect(output).to(contain("^"))
+
+    context "emitting all":
+        """
+        ### Emitting Multiple Reports
+
+        Emitters can format multiple reports at once.
+        """
+
+        it "emits multiple reports":
+            val emitter = HumanEmitter.no_color()
+            val reports = [
+                Report.error("error 1"),
+                Report.warning("warning 1")
+            ]
+            val output = emitter.emit_all(reports)
+            expect(output).to(contain("error 1"))
+            expect(output).to(contain("warning 1"))
+
+describe "HumanStyle":
+    """
+    ## HumanStyle
+
+    Tests for human emitter styling options.
+    """
+
+    context "creation":
+        """
+        ### Style Creation
+
+        Various style presets are available.
+        """
+
+        it "creates default style":
+            val style = HumanStyle.default_style()
+            expect(style.show_source).to(be_true())
+            expect(style.compact).to(be_false())
+
+        it "creates compact style":
+            val style = HumanStyle.compact()
+            expect(style.compact).to(be_true())
+
+        it "creates verbose style":
+            val style = HumanStyle.verbose()
+            expect(style.show_source).to(be_true())
+            expect(style.show_notes).to(be_true())
+
+describe "TerminalColors":
+    """
+    ## TerminalColors
+
+    Tests for ANSI color code generation.
+    """
+
+    context "color codes":
+        """
+        ### Color Code Generation
+
+        Terminal colors generate ANSI escape codes.
+        """
+
+        it "red contains ANSI code":
+            expect(TerminalColors.red()).to(contain("\x1b["))
+            expect(TerminalColors.red()).to(contain("31"))
+
+        it "yellow contains ANSI code":
+            expect(TerminalColors.yellow()).to(contain("33"))
+
+        it "blue contains ANSI code":
+            expect(TerminalColors.blue()).to(contain("34"))
+
+        it "reset clears formatting":
+            expect(TerminalColors.reset()).to(contain("0m"))
+
+# ============================================================================
+# Test Group 2: JsonEmitter
+# ============================================================================
+
+describe "JsonEmitter":
+    """
+    ## JsonEmitter
+
+    Tests for JSON output format.
+    """
+
+    context "creation":
+        """
+        ### Emitter Creation
+
+        JSON emitters can be pretty or compact.
+        """
+
+        it "creates pretty emitter":
+            val emitter = JsonEmitter.pretty()
+            expect(emitter.style.pretty).to(be_true())
+
+        it "creates compact emitter":
+            val emitter = JsonEmitter.compact()
+            expect(emitter.style.pretty).to(be_false())
+
+    context "emitting reports":
+        """
+        ### Report Emission
+
+        Reports are emitted as JSON objects.
+        """
+
+        it "emits valid JSON":
+            val emitter = JsonEmitter.compact()
+            val report = Report.error("test error")
+            val output = emitter.emit(report)
+            expect(output).to(contain("{"))
+            expect(output).to(contain("}"))
+
+        it "includes level":
+            val emitter = JsonEmitter.compact()
+            val report = Report.error("test error")
+            val output = emitter.emit(report)
+            expect(output).to(contain("\"level\""))
+            expect(output).to(contain("\"error\""))
+
+        it "includes message":
+            val emitter = JsonEmitter.compact()
+            val report = Report.error("test message")
+            val output = emitter.emit(report)
+            expect(output).to(contain("\"message\""))
+            expect(output).to(contain("\"test message\""))
+
+        it "includes code when present":
+            val emitter = JsonEmitter.compact()
+            val report = Report.error("message").with_code("E0001")
+            val output = emitter.emit(report)
+            expect(output).to(contain("\"code\""))
+            expect(output).to(contain("\"E0001\""))
+
+        it "includes location when present":
+            val emitter = JsonEmitter.compact()
+            val report = Report.error("message").at("test.spl", 10, 5)
+            val output = emitter.emit(report)
+            expect(output).to(contain("\"file\""))
+            expect(output).to(contain("\"test.spl\""))
+            expect(output).to(contain("\"line\""))
+
+    context "emitting all as array":
+        """
+        ### Multiple Reports as Array
+
+        Multiple reports become a JSON array.
+        """
+
+        it "emits as array":
+            val emitter = JsonEmitter.compact()
+            val reports = [
+                Report.error("error 1"),
+                Report.warning("warning 1")
+            ]
+            val output = emitter.emit_all(reports)
+            expect(output).to(contain("["))
+            expect(output).to(contain("]"))
+
+    context "NDJSON format":
+        """
+        ### Newline-Delimited JSON
+
+        NDJSON outputs one JSON per line.
+        """
+
+        it "emits as NDJSON":
+            val emitter = JsonEmitter.ndjson()
+            val reports = [
+                Report.error("error 1"),
+                Report.warning("warning 1")
+            ]
+            val output = emitter.emit_all(reports)
+            val lines = output.split("\n")
+            expect(lines.len()).to(be_greater_than(1))
+
+describe "JsonStyle":
+    """
+    ## JsonStyle
+
+    Tests for JSON emitter styling options.
+    """
+
+    context "options":
+        """
+        ### Style Options
+
+        JSON style controls output format.
+        """
+
+        it "pretty includes indentation":
+            val style = JsonStyle.pretty()
+            expect(style.indent.?).to(be_true())
+
+        it "compact has no indentation":
+            val style = JsonStyle.compact()
+            expect(style.indent.?).to(be_false())
+
+        it "include_source option":
+            val style = JsonStyle.pretty()
+            style.include_source = true
+            expect(style.include_source).to(be_true())
+
+# ============================================================================
+# Test Group 3: SarifEmitter
+# ============================================================================
+
+describe "SarifEmitter":
+    """
+    ## SarifEmitter
+
+    Tests for SARIF v2.1.0 output format.
+    """
+
+    context "creation":
+        """
+        ### Emitter Creation
+
+        SARIF emitters output standard format.
+        """
+
+        it "creates default emitter":
+            val emitter = SarifEmitter.default_emitter()
+            expect(emitter.config.version).to(eq("2.1.0"))
+
+        it "creates with config":
+            val config = SarifConfig.default_config()
+            config.tool_name = "my_tool"
+            val emitter = SarifEmitter.with_config(config)
+            expect(emitter.config.tool_name).to(eq("my_tool"))
+
+    context "SARIF structure":
+        """
+        ### SARIF Document Structure
+
+        SARIF output follows the standard structure.
+        """
+
+        it "includes version":
+            val emitter = SarifEmitter.default_emitter()
+            val reports = [Report.error("test")]
+            val output = emitter.emit(reports)
+            expect(output).to(contain("\"version\""))
+            expect(output).to(contain("\"2.1.0\""))
+
+        it "includes schema":
+            val emitter = SarifEmitter.default_emitter()
+            val reports = [Report.error("test")]
+            val output = emitter.emit(reports)
+            expect(output).to(contain("\"$schema\""))
+
+        it "includes runs array":
+            val emitter = SarifEmitter.default_emitter()
+            val reports = [Report.error("test")]
+            val output = emitter.emit(reports)
+            expect(output).to(contain("\"runs\""))
+
+        it "includes tool info":
+            val emitter = SarifEmitter.default_emitter()
+            val reports = [Report.error("test")]
+            val output = emitter.emit(reports)
+            expect(output).to(contain("\"tool\""))
+            expect(output).to(contain("\"driver\""))
+
+    context "results":
+        """
+        ### SARIF Results
+
+        Reports become SARIF results.
+        """
+
+        it "includes results array":
+            val emitter = SarifEmitter.default_emitter()
+            val reports = [Report.error("test error")]
+            val output = emitter.emit(reports)
+            expect(output).to(contain("\"results\""))
+
+        it "maps error level":
+            val emitter = SarifEmitter.default_emitter()
+            val reports = [Report.error("test")]
+            val output = emitter.emit(reports)
+            expect(output).to(contain("\"level\""))
+            expect(output).to(contain("\"error\""))
+
+        it "maps warning level":
+            val emitter = SarifEmitter.default_emitter()
+            val reports = [Report.warning("test")]
+            val output = emitter.emit(reports)
+            expect(output).to(contain("\"warning\""))
+
+describe "SarifConfig":
+    """
+    ## SarifConfig
+
+    Tests for SARIF configuration options.
+    """
+
+    context "defaults":
+        """
+        ### Default Configuration
+
+        Default config has standard values.
+        """
+
+        it "has version 2.1.0":
+            val config = SarifConfig.default_config()
+            expect(config.version).to(eq("2.1.0"))
+
+        it "has default tool name":
+            val config = SarifConfig.default_config()
+            expect(config.tool_name).to(eq("simple"))
+
+# ============================================================================
+# Test Group 4: LspEmitter
+# ============================================================================
+
+describe "LspEmitter":
+    """
+    ## LspEmitter
+
+    Tests for LSP diagnostic output.
+    """
+
+    context "creation":
+        """
+        ### Emitter Creation
+
+        LSP emitters output LSP-compatible diagnostics.
+        """
+
+        it "creates default emitter":
+            val emitter = LspEmitter.default_emitter()
+            expect(emitter.?).to(be_true())
+
+    context "diagnostic conversion":
+        """
+        ### Diagnostic Conversion
+
+        Reports are converted to LSP diagnostics.
+        """
+
+        it "converts error to diagnostic":
+            val emitter = LspEmitter.default_emitter()
+            val report = Report.error("test error").at("test.spl", 10, 5)
+            val diagnostic = emitter.to_diagnostic(report)
+            expect(diagnostic.severity).to(eq(LspDiagnosticSeverity.Error))
+            expect(diagnostic.message).to(eq("test error"))
+
+        it "converts warning to diagnostic":
+            val emitter = LspEmitter.default_emitter()
+            val report = Report.warning("test warning").at("test.spl", 10, 5)
+            val diagnostic = emitter.to_diagnostic(report)
+            expect(diagnostic.severity).to(eq(LspDiagnosticSeverity.Warning))
+
+        it "converts info to diagnostic":
+            val emitter = LspEmitter.default_emitter()
+            val report = Report.info("test info").at("test.spl", 10, 5)
+            val diagnostic = emitter.to_diagnostic(report)
+            expect(diagnostic.severity).to(eq(LspDiagnosticSeverity.Information))
+
+        it "includes range":
+            val emitter = LspEmitter.default_emitter()
+            val report = Report.error("test").at("test.spl", 10, 5)
+            val diagnostic = emitter.to_diagnostic(report)
+            expect(diagnostic.range.start.line).to(eq(9))  # LSP is 0-indexed
+            expect(diagnostic.range.start.character).to(eq(4))
+
+    context "publish diagnostics":
+        """
+        ### Publish Diagnostics Notification
+
+        Emitters can generate publish notifications.
+        """
+
+        it "generates publish notification":
+            val emitter = LspEmitter.default_emitter()
+            val reports = [
+                Report.error("error 1").at("test.spl", 10, 5),
+                Report.warning("warning 1").at("test.spl", 20, 3)
+            ]
+            val notification = emitter.emit_publish_diagnostics("file:///test.spl", reports)
+            expect(notification).to(contain("textDocument/publishDiagnostics"))
+            expect(notification).to(contain("file:///test.spl"))
+
+describe "LspDiagnostic":
+    """
+    ## LspDiagnostic
+
+    Tests for LSP diagnostic structure.
+    """
+
+    context "creation":
+        """
+        ### Diagnostic Creation
+
+        LSP diagnostics capture diagnostic information.
+        """
+
+        it "creates diagnostic":
+            val range = LspRange.at(10, 5, 10, 15)
+            val diagnostic = LspDiagnostic.create(
+                range,
+                "test message",
+                LspDiagnosticSeverity.Error
+            )
+            expect(diagnostic.message).to(eq("test message"))
+            expect(diagnostic.severity).to(eq(LspDiagnosticSeverity.Error))
+
+    context "tags":
+        """
+        ### Diagnostic Tags
+
+        Diagnostics can have tags like deprecated.
+        """
+
+        it "adds deprecated tag":
+            val range = LspRange.at(10, 5, 10, 15)
+            val diagnostic = LspDiagnostic.create(
+                range,
+                "deprecated function",
+                LspDiagnosticSeverity.Warning
+            ).with_tag(LspDiagnosticTag.Deprecated)
+            expect(diagnostic.tags.len()).to(eq(1))
+
+        it "adds unnecessary tag":
+            val range = LspRange.at(10, 5, 10, 15)
+            val diagnostic = LspDiagnostic.create(
+                range,
+                "unused variable",
+                LspDiagnosticSeverity.Warning
+            ).with_tag(LspDiagnosticTag.Unnecessary)
+            expect(diagnostic.tags.len()).to(eq(1))
+
+describe "LspCodeAction":
+    """
+    ## LspCodeAction
+
+    Tests for LSP code action (quick fix) generation.
+    """
+
+    context "creation":
+        """
+        ### Code Action Creation
+
+        Code actions represent quick fixes.
+        """
+
+        it "creates quick fix":
+            val edit = LspTextEdit.replace(
+                LspRange.at(10, 5, 10, 10),
+                "new_text"
+            )
+            val action = LspCodeAction.quick_fix("Fix typo", [edit])
+            expect(action.title).to(eq("Fix typo"))
+            expect(action.kind).to(eq("quickfix"))
+
+        it "creates refactor action":
+            val edit = LspTextEdit.replace(
+                LspRange.at(10, 5, 10, 15),
+                "renamed"
+            )
+            val action = LspCodeAction.refactor("Rename variable", [edit])
+            expect(action.kind).to(eq("refactor"))
+
+describe "LspTextEdit":
+    """
+    ## LspTextEdit
+
+    Tests for LSP text edit specifications.
+    """
+
+    context "creation":
+        """
+        ### Edit Creation
+
+        Text edits specify changes.
+        """
+
+        it "creates replace edit":
+            val range = LspRange.at(10, 5, 10, 15)
+            val edit = LspTextEdit.replace(range, "new_text")
+            expect(edit.new_text).to(eq("new_text"))
+
+        it "creates insert edit":
+            val position = LspPosition.at(10, 5)
+            val edit = LspTextEdit.insert(position, "inserted")
+            expect(edit.range.start).to(eq(edit.range.end))
+
+        it "creates delete edit":
+            val range = LspRange.at(10, 5, 10, 15)
+            val edit = LspTextEdit.delete(range)
+            expect(edit.new_text).to(eq(""))
+

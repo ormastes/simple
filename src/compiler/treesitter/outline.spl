@@ -221,11 +221,60 @@ impl TreeSitter:
                     self.advance()
 
     # ========================================================================
+    # Attribute Parsing
+    # ========================================================================
+
+    me parse_attribute() -> AttributeOutline:
+        """Parse a single attribute: @name or @name(args)."""
+        val start = self.current.span
+        self.advance()  # Consume '@'
+
+        val name = self.parse_identifier()
+        var args_span: Span? = nil
+
+        # Check for arguments: @name(arg1, arg2, ...)
+        if self.match_token(TokenKind.LParen):
+            val args_start = self.previous.span.end
+            # Skip to matching right paren (handles nested parens)
+            var depth = 1
+            while depth > 0 and not self.is_at_end():
+                match self.peek():
+                    case LParen:
+                        depth = depth + 1
+                        self.advance()
+                    case RParen:
+                        depth = depth - 1
+                        if depth > 0:
+                            self.advance()
+                    case _:
+                        self.advance()
+            val args_end = self.current.span.start
+            args_span = Some(Span.new(args_start, args_end, 0, 0))
+            self.expect(TokenKind.RParen, "expected ')' after attribute arguments")
+
+        AttributeOutline(
+            name: name,
+            args_span: args_span,
+            span: merge_spans(start, self.previous.span)
+        )
+
+    me parse_attributes() -> [AttributeOutline]:
+        """Parse a sequence of attributes before a declaration."""
+        var attrs: [AttributeOutline] = []
+        while self.check(TokenKind.At):
+            attrs = attrs.push(self.parse_attribute())
+            self.skip_newlines()
+        attrs
+
+    # ========================================================================
     # Top-Level Parsing
     # ========================================================================
 
     me parse_top_level_item() -> TopLevelItem:
         """Parse a top-level item."""
+        # Parse attributes before the declaration (@repr, @packed, @align, etc.)
+        val attrs = self.parse_attributes()
+
         val doc = self.take_doc_comment()
         var is_public = false
 
@@ -275,11 +324,13 @@ impl TreeSitter:
                         severity: ErrorSeverity.Error
                     ))
             case KwClass:
-                TopLevelItem.Class(self.parse_class_outline(is_public, doc))
+                TopLevelItem.Class(self.parse_class_outline(is_public, doc, attrs))
             case KwStruct:
-                TopLevelItem.Struct(self.parse_struct_outline(is_public, doc))
+                TopLevelItem.Struct(self.parse_struct_outline(is_public, doc, attrs))
             case KwEnum:
                 TopLevelItem.Enum(self.parse_enum_outline(is_public, doc))
+            case KwBitfield:
+                TopLevelItem.Bitfield(self.parse_bitfield_outline(is_public, doc, attrs))
             case KwTrait:
                 TopLevelItem.Trait(self.parse_trait_outline(is_public, doc))
             case KwImpl:
@@ -707,7 +758,7 @@ impl TreeSitter:
     # Class/Struct/Enum Parsing
     # ========================================================================
 
-    me parse_class_outline(is_public: bool, doc: text?) -> ClassOutline:
+    me parse_class_outline(is_public: bool, doc: text?, attrs: [AttributeOutline]) -> ClassOutline:
         """Parse class outline."""
         val start = self.current.span
         self.advance()  # Consume 'class'
@@ -784,11 +835,11 @@ impl TreeSitter:
             methods: methods,
             is_public: is_public,
             doc_comment: final_doc,
-            attributes: [],
+            attributes: attrs,
             span: merge_spans(start, self.previous.span)
         )
 
-    me parse_struct_outline(is_public: bool, doc: text?) -> StructOutline:
+    me parse_struct_outline(is_public: bool, doc: text?, attrs: [AttributeOutline]) -> StructOutline:
         """Parse struct outline."""
         val start = self.current.span
         self.advance()  # Consume 'struct'
@@ -835,7 +886,7 @@ impl TreeSitter:
             fields: fields,
             is_public: is_public,
             doc_comment: final_doc,
-            attributes: [],
+            attributes: attrs,
             span: merge_spans(start, self.previous.span)
         )
 
@@ -945,6 +996,123 @@ impl TreeSitter:
             payload: payload,
             span: merge_spans(start, self.previous.span)
         )
+
+    # ========================================================================
+    # Bitfield Parsing
+    # ========================================================================
+
+    me parse_bitfield_outline(is_public: bool, doc: text?, attrs: [AttributeOutline]) -> BitfieldOutline:
+        """Parse bitfield outline.
+
+        Syntax: bitfield Name(BackingType):
+            field1: Type
+            field2: Type @bits(N)
+            _reserved: N
+        """
+        val start = self.current.span
+        self.advance()  # Consume 'bitfield'
+
+        val name = self.parse_identifier()
+
+        # Parse backing type: bitfield Name(u32):
+        self.expect(TokenKind.LParen, "expected '(' after bitfield name")
+        val backing_type = self.parse_type_outline()
+        self.expect(TokenKind.RParen, "expected ')' after backing type")
+
+        self.expect(TokenKind.Colon, "expected ':' after bitfield declaration")
+        self.skip_newlines()
+        self.expect(TokenKind.Indent, "expected indented bitfield body")
+
+        # Try to parse body docstring
+        val body_doc = self.try_parse_body_docstring()
+        val final_doc = match body_doc:
+            case Some(bd): Some(bd)
+            case None: doc
+
+        var fields: [BitfieldFieldOutline] = []
+
+        while not self.check(TokenKind.Dedent) and not self.is_at_end():
+            self.skip_newlines()
+            if self.check(TokenKind.Dedent):
+                break
+
+            if self.check(TokenKind.Ident):
+                fields = fields.push(self.parse_bitfield_field_outline())
+            else:
+                self.error("expected field in bitfield")
+                self.synchronize()
+
+        self.match_token(TokenKind.Dedent)
+
+        BitfieldOutline(
+            name: name,
+            backing_type: backing_type,
+            fields: fields,
+            is_public: is_public,
+            doc_comment: final_doc,
+            attributes: attrs,
+            span: merge_spans(start, self.previous.span)
+        )
+
+    me parse_bitfield_field_outline() -> BitfieldFieldOutline:
+        """Parse bitfield field.
+
+        Formats:
+        - name: Type              -> regular field (bits inferred)
+        - name: Type @bits(N)     -> field with explicit bit width
+        - _reserved: N            -> reserved bits (no type)
+        """
+        val start = self.current.span
+        val name = self.parse_identifier()
+
+        # Check for reserved field pattern: _reserved: 8
+        val is_reserved = name.starts_with("_")
+
+        self.expect(TokenKind.Colon, "expected ':' after field name")
+
+        var type_: TypeOutline? = nil
+        var bits: i64? = nil
+
+        if is_reserved:
+            # Reserved field: expect just a number
+            if self.check(TokenKind.IntLit):
+                bits = Some(self.parse_int_literal())
+            else:
+                # Allow type for reserved fields too
+                type_ = Some(self.parse_type_outline())
+        else:
+            # Regular field: parse type
+            type_ = Some(self.parse_type_outline())
+
+            # Check for @bits(N) attribute
+            if self.check(TokenKind.At):
+                self.advance()  # consume '@'
+                if self.check(TokenKind.Ident) and self.current.text == "bits":
+                    self.advance()  # consume 'bits'
+                    self.expect(TokenKind.LParen, "expected '(' after @bits")
+                    if self.check(TokenKind.IntLit):
+                        bits = Some(self.parse_int_literal())
+                    self.expect(TokenKind.RParen, "expected ')' after bit count")
+
+        self.skip_newlines()
+
+        BitfieldFieldOutline(
+            name: name,
+            type_: type_,
+            bits: bits,
+            is_reserved: is_reserved,
+            span: merge_spans(start, self.previous.span)
+        )
+
+    me parse_int_literal() -> i64:
+        """Parse integer literal and return its value."""
+        val text = self.current.text
+        self.advance()
+        # Simple integer parsing - handle both decimal and hex
+        if text.starts_with("0x") or text.starts_with("0X"):
+            text[2:].parse_int_radix(16) ?? 0
+        else:
+            text.parse_int() ?? 0
 
     # ========================================================================
     # Trait/Impl Parsing
@@ -1413,6 +1581,7 @@ enum TopLevelItem:
     Class(ClassOutline)
     Struct(StructOutline)
     Enum(EnumOutline)
+    Bitfield(BitfieldOutline)
     Trait(TraitOutline)
     Impl(ImplOutline)
     TypeAlias(TypeAliasOutline)

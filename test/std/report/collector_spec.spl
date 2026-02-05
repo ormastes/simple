@@ -1,0 +1,409 @@
+"""
+# ReportCollector Specification
+
+**Feature IDs:** #RPT-004
+**Category:** Infrastructure
+**Difficulty:** 3/5
+**Status:** Implemented
+
+## Overview
+
+Tests for ReportCollector and SourceRegistry from the unified reporting system.
+Verifies report collection, filtering, source registration, and formatting.
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| ReportCollector | Manages collections of reports with filtering |
+| SourceRegistry | Stores source code for context display |
+"""
+
+import std.spec
+import std.report
+
+# ============================================================================
+# Test Group 1: ReportCollector Basic Operations
+# ============================================================================
+
+describe "ReportCollector":
+    """
+    ## ReportCollector
+
+    Tests for collecting and managing reports.
+    """
+
+    context "creation":
+        """
+        ### Collector Creation
+
+        Collectors can be created with default or custom configuration.
+        """
+
+        it "creates default collector":
+            val collector = ReportCollector.default_collector()
+            expect(collector.count()).to(eq(0))
+            expect(collector.has_errors()).to(be_false())
+
+        it "creates collector with config":
+            val config = ReportConfig.strict()
+            val collector = ReportCollector.with_config(config)
+            expect(collector.config.warnings_as_errors).to(be_true())
+
+        it "creates empty collector":
+            val collector = ReportCollector.empty()
+            expect(collector.count()).to(eq(0))
+
+    context "adding reports":
+        """
+        ### Adding Reports
+
+        Reports can be added individually or in bulk.
+        """
+
+        it "adds single report":
+            val collector = ReportCollector.default_collector()
+            val report = Report.error("test error")
+            collector.add(report)
+            expect(collector.count()).to(eq(1))
+
+        it "adds multiple reports":
+            val collector = ReportCollector.default_collector()
+            collector.add(Report.error("error 1"))
+            collector.add(Report.warning("warning 1"))
+            collector.add(Report.info("info 1"))
+            expect(collector.count()).to(eq(3))
+
+        it "adds report list":
+            val collector = ReportCollector.default_collector()
+            val reports = [
+                Report.error("error 1"),
+                Report.error("error 2")
+            ]
+            collector.add_all(reports)
+            expect(collector.count()).to(eq(2))
+
+    context "error detection":
+        """
+        ### Error Detection
+
+        Collectors track whether errors are present.
+        """
+
+        it "has_errors returns true with errors":
+            val collector = ReportCollector.default_collector()
+            collector.add(Report.error("test error"))
+            expect(collector.has_errors()).to(be_true())
+
+        it "has_errors returns false with only warnings":
+            val collector = ReportCollector.default_collector()
+            collector.add(Report.warning("test warning"))
+            expect(collector.has_errors()).to(be_false())
+
+        it "has_errors returns true with fatal":
+            val collector = ReportCollector.default_collector()
+            collector.add(Report.fatal("test fatal"))
+            expect(collector.has_errors()).to(be_true())
+
+        it "has_warnings returns true with warnings":
+            val collector = ReportCollector.default_collector()
+            collector.add(Report.warning("test warning"))
+            expect(collector.has_warnings()).to(be_true())
+
+        it "has_warnings returns false with only errors":
+            val collector = ReportCollector.default_collector()
+            collector.add(Report.error("test error"))
+            expect(collector.has_warnings()).to(be_false())
+
+    context "counting":
+        """
+        ### Report Counting
+
+        Collectors provide counts by level.
+        """
+
+        it "counts total reports":
+            val collector = ReportCollector.default_collector()
+            collector.add(Report.error("error"))
+            collector.add(Report.warning("warning"))
+            collector.add(Report.info("info"))
+            expect(collector.count()).to(eq(3))
+
+        it "counts errors":
+            val collector = ReportCollector.default_collector()
+            collector.add(Report.error("error 1"))
+            collector.add(Report.error("error 2"))
+            collector.add(Report.warning("warning"))
+            expect(collector.error_count()).to(eq(2))
+
+        it "counts warnings":
+            val collector = ReportCollector.default_collector()
+            collector.add(Report.error("error"))
+            collector.add(Report.warning("warning 1"))
+            collector.add(Report.warning("warning 2"))
+            expect(collector.warning_count()).to(eq(2))
+
+        it "counts by level":
+            val collector = ReportCollector.default_collector()
+            collector.add(Report.debug("debug"))
+            collector.add(Report.info("info"))
+            collector.add(Report.warning("warning"))
+            expect(collector.count_by_level(ReportLevel.Debug)).to(eq(1))
+            expect(collector.count_by_level(ReportLevel.Info)).to(eq(1))
+            expect(collector.count_by_level(ReportLevel.Warning)).to(eq(1))
+
+    context "filtering":
+        """
+        ### Report Filtering
+
+        Reports can be filtered by level and other criteria.
+        """
+
+        it "gets errors only":
+            val collector = ReportCollector.default_collector()
+            collector.add(Report.error("error 1"))
+            collector.add(Report.warning("warning"))
+            collector.add(Report.error("error 2"))
+            val errors = collector.errors()
+            expect(errors.len()).to(eq(2))
+
+        it "gets warnings only":
+            val collector = ReportCollector.default_collector()
+            collector.add(Report.error("error"))
+            collector.add(Report.warning("warning 1"))
+            collector.add(Report.warning("warning 2"))
+            val warnings = collector.warnings()
+            expect(warnings.len()).to(eq(2))
+
+        it "filters by level":
+            val collector = ReportCollector.default_collector()
+            collector.add(Report.debug("debug"))
+            collector.add(Report.info("info"))
+            collector.add(Report.warning("warning"))
+            val infos = collector.filter_by_level(ReportLevel.Info)
+            expect(infos.len()).to(eq(1))
+
+        it "filters by file":
+            val collector = ReportCollector.default_collector()
+            collector.add(Report.error("error 1").at("file1.spl", 10, 5))
+            collector.add(Report.error("error 2").at("file2.spl", 20, 3))
+            collector.add(Report.error("error 3").at("file1.spl", 15, 1))
+            val file1_reports = collector.filter_by_file("file1.spl")
+            expect(file1_reports.len()).to(eq(2))
+
+    context "clearing":
+        """
+        ### Clearing Reports
+
+        Collectors can be cleared or have specific reports removed.
+        """
+
+        it "clears all reports":
+            val collector = ReportCollector.default_collector()
+            collector.add(Report.error("error"))
+            collector.add(Report.warning("warning"))
+            collector.clear()
+            expect(collector.count()).to(eq(0))
+
+        it "clears errors only":
+            val collector = ReportCollector.default_collector()
+            collector.add(Report.error("error"))
+            collector.add(Report.warning("warning"))
+            collector.clear_errors()
+            expect(collector.count()).to(eq(1))
+            expect(collector.has_errors()).to(be_false())
+
+    context "merging":
+        """
+        ### Merging Collectors
+
+        Collectors can be merged together.
+        """
+
+        it "merges two collectors":
+            val collector1 = ReportCollector.default_collector()
+            collector1.add(Report.error("error 1"))
+
+            val collector2 = ReportCollector.default_collector()
+            collector2.add(Report.error("error 2"))
+
+            collector1.merge(collector2)
+            expect(collector1.count()).to(eq(2))
+
+    context "formatting":
+        """
+        ### Report Formatting
+
+        Collectors provide formatted output.
+        """
+
+        it "formats summary":
+            val collector = ReportCollector.default_collector()
+            collector.add(Report.error("error"))
+            collector.add(Report.warning("warning"))
+            val summary = collector.format_summary()
+            expect(summary).to(contain("1 error"))
+            expect(summary).to(contain("1 warning"))
+
+        it "formats all reports":
+            val collector = ReportCollector.default_collector()
+            collector.add(Report.error("test error").with_code("E0001"))
+            val formatted = collector.format(true)  # with colors
+            expect(formatted).to(contain("error"))
+            expect(formatted).to(contain("E0001"))
+
+# ============================================================================
+# Test Group 2: SourceRegistry
+# ============================================================================
+
+describe "SourceRegistry":
+    """
+    ## SourceRegistry
+
+    Tests for source code registration and retrieval.
+    """
+
+    context "creation":
+        """
+        ### Registry Creation
+
+        Registries can be created empty or with sources.
+        """
+
+        it "creates empty registry":
+            val registry = SourceRegistry.empty()
+            expect(registry.count()).to(eq(0))
+
+    context "adding sources":
+        """
+        ### Adding Sources
+
+        Source code can be registered by file path.
+        """
+
+        it "adds source":
+            val registry = SourceRegistry.empty()
+            registry.add("test.spl", "val x = 1")
+            expect(registry.count()).to(eq(1))
+
+        it "adds multiple sources":
+            val registry = SourceRegistry.empty()
+            registry.add("test1.spl", "val x = 1")
+            registry.add("test2.spl", "val y = 2")
+            expect(registry.count()).to(eq(2))
+
+        it "overwrites existing source":
+            val registry = SourceRegistry.empty()
+            registry.add("test.spl", "old content")
+            registry.add("test.spl", "new content")
+            expect(registry.get("test.spl").unwrap()).to(eq("new content"))
+
+    context "retrieving sources":
+        """
+        ### Retrieving Sources
+
+        Source code can be retrieved by file path.
+        """
+
+        it "gets source by path":
+            val registry = SourceRegistry.empty()
+            registry.add("test.spl", "val x = 1")
+            val source = registry.get("test.spl")
+            expect(source.?).to(be_true())
+            expect(source.unwrap()).to(eq("val x = 1"))
+
+        it "returns None for missing source":
+            val registry = SourceRegistry.empty()
+            val source = registry.get("missing.spl")
+            expect(source.?).to(be_false())
+
+        it "has returns true for existing source":
+            val registry = SourceRegistry.empty()
+            registry.add("test.spl", "content")
+            expect(registry.has("test.spl")).to(be_true())
+
+        it "has returns false for missing source":
+            val registry = SourceRegistry.empty()
+            expect(registry.has("missing.spl")).to(be_false())
+
+    context "line extraction":
+        """
+        ### Line Extraction
+
+        Specific lines can be extracted from source.
+        """
+
+        it "gets single line":
+            val registry = SourceRegistry.empty()
+            registry.add("test.spl", "line1\nline2\nline3")
+            val line = registry.get_line("test.spl", 2)
+            expect(line.?).to(be_true())
+            expect(line.unwrap()).to(eq("line2"))
+
+        it "gets line range":
+            val registry = SourceRegistry.empty()
+            registry.add("test.spl", "line1\nline2\nline3\nline4")
+            val lines = registry.get_lines("test.spl", 2, 3)
+            expect(lines.len()).to(eq(2))
+            expect(lines[0]).to(eq("line2"))
+            expect(lines[1]).to(eq("line3"))
+
+        it "returns None for invalid line":
+            val registry = SourceRegistry.empty()
+            registry.add("test.spl", "line1\nline2")
+            val line = registry.get_line("test.spl", 10)
+            expect(line.?).to(be_false())
+
+    context "context extraction":
+        """
+        ### Context Extraction
+
+        Source context around a location can be extracted.
+        """
+
+        it "gets context around line":
+            val registry = SourceRegistry.empty()
+            registry.add("test.spl", "line1\nline2\nline3\nline4\nline5")
+            val context = registry.get_context("test.spl", 3, 1)  # line 3, 1 line context
+            expect(context.len()).to(eq(3))  # lines 2, 3, 4
+
+        it "handles context at file start":
+            val registry = SourceRegistry.empty()
+            registry.add("test.spl", "line1\nline2\nline3")
+            val context = registry.get_context("test.spl", 1, 2)  # line 1, 2 lines context
+            expect(context.len()).to(eq(3))  # lines 1, 2, 3
+
+        it "handles context at file end":
+            val registry = SourceRegistry.empty()
+            registry.add("test.spl", "line1\nline2\nline3")
+            val context = registry.get_context("test.spl", 3, 2)  # line 3, 2 lines context
+            expect(context.len()).to(eq(3))  # lines 1, 2, 3
+
+    context "listing files":
+        """
+        ### Listing Files
+
+        All registered file paths can be listed.
+        """
+
+        it "lists all files":
+            val registry = SourceRegistry.empty()
+            registry.add("a.spl", "content")
+            registry.add("b.spl", "content")
+            registry.add("c.spl", "content")
+            val files = registry.files()
+            expect(files.len()).to(eq(3))
+
+    context "clearing":
+        """
+        ### Clearing Registry
+
+        Registry can be cleared.
+        """
+
+        it "clears all sources":
+            val registry = SourceRegistry.empty()
+            registry.add("test.spl", "content")
+            registry.clear()
+            expect(registry.count()).to(eq(0))
+

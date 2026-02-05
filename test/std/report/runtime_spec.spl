@@ -1,0 +1,531 @@
+"""
+# Runtime Reports Specification
+
+**Feature IDs:** #RPT-006
+**Category:** Infrastructure
+**Difficulty:** 3/5
+**Status:** Implemented
+
+## Overview
+
+Tests for runtime-specific reports from the unified reporting system.
+Verifies PanicReport, Logger, MemoryReport, and related types.
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| PanicReport | Report for runtime panics with stack traces |
+| Logger | Debug logging with levels and targets |
+| MemoryReport | Memory diagnostics and GC statistics |
+"""
+
+import std.spec
+import std.report
+import std.report.runtime
+
+# ============================================================================
+# Test Group 1: PanicReport
+# ============================================================================
+
+describe "PanicReport":
+    """
+    ## PanicReport
+
+    Tests for runtime panic reports.
+    """
+
+    context "creation":
+        """
+        ### Panic Creation
+
+        Panics can be created for various runtime failures.
+        """
+
+        it "creates assertion panic":
+            val panic = PanicReport.assertion("x must be positive")
+            expect(panic.kind).to(eq(PanicKind.Assertion))
+            expect(panic.message).to(contain("x must be positive"))
+
+        it "creates index panic":
+            val panic = PanicReport.index_out_of_bounds(10, 5)
+            expect(panic.kind).to(eq(PanicKind.IndexOutOfBounds))
+            expect(panic.message).to(contain("10"))
+            expect(panic.message).to(contain("5"))
+
+        it "creates null panic":
+            val panic = PanicReport.null_reference("optional_value")
+            expect(panic.kind).to(eq(PanicKind.NullReference))
+
+        it "creates overflow panic":
+            val panic = PanicReport.arithmetic_overflow("addition")
+            expect(panic.kind).to(eq(PanicKind.ArithmeticOverflow))
+
+        it "creates division by zero panic":
+            val panic = PanicReport.division_by_zero()
+            expect(panic.kind).to(eq(PanicKind.DivisionByZero))
+
+        it "creates stack overflow panic":
+            val panic = PanicReport.stack_overflow()
+            expect(panic.kind).to(eq(PanicKind.StackOverflow))
+
+        it "creates out of memory panic":
+            val panic = PanicReport.out_of_memory(1024 * 1024)
+            expect(panic.kind).to(eq(PanicKind.OutOfMemory))
+
+        it "creates unreachable panic":
+            val panic = PanicReport.unreachable("invalid state")
+            expect(panic.kind).to(eq(PanicKind.Unreachable))
+
+    context "builder pattern":
+        """
+        ### Builder Pattern
+
+        Panics support builder pattern for additional info.
+        """
+
+        it "adds location":
+            val panic = PanicReport.assertion("test")
+                .at("main.spl", 42, 10)
+            expect(panic.location.?).to(be_true())
+            expect(panic.location.unwrap().line).to(eq(42))
+
+        it "adds context variable":
+            val panic = PanicReport.assertion("x must be positive")
+                .with_context("x", "-5")
+            expect(panic.context.len()).to(eq(1))
+
+        it "adds multiple context variables":
+            val panic = PanicReport.assertion("invalid range")
+                .with_context("start", "10")
+                .with_context("end", "5")
+            expect(panic.context.len()).to(eq(2))
+
+        it "adds note":
+            val panic = PanicReport.assertion("test")
+                .with_note("this should not happen")
+            expect(panic.notes.len()).to(eq(1))
+
+    context "stack trace":
+        """
+        ### Stack Trace
+
+        Panics can include stack traces.
+        """
+
+        it "adds stack frame":
+            val frame = StackFrame.at("main", "main.spl", 10)
+            val panic = PanicReport.assertion("test")
+                .with_frame(frame)
+            expect(panic.stack_trace.frames.len()).to(eq(1))
+
+        it "adds stack trace":
+            val trace = StackTrace.empty()
+            trace.push(StackFrame.at("inner", "lib.spl", 5))
+            trace.push(StackFrame.at("outer", "main.spl", 10))
+            val panic = PanicReport.assertion("test")
+                .with_stack_trace(trace)
+            expect(panic.stack_trace.frames.len()).to(eq(2))
+
+    context "conversion":
+        """
+        ### Conversion to Report
+
+        Panics can be converted to standard reports.
+        """
+
+        it "converts to fatal report":
+            val panic = PanicReport.assertion("test")
+                .at("main.spl", 10, 5)
+            val report = panic.to_report()
+            expect(report.level).to(eq(ReportLevel.Fatal))
+            expect(report.kind).to(eq(ReportKind.Panic))
+
+    context "panic codes":
+        """
+        ### Panic Codes
+
+        Each panic kind has a unique code.
+        """
+
+        it "assertion has code P0001":
+            val panic = PanicReport.assertion("test")
+            expect(panic.code()).to(eq("P0001"))
+
+        it "index out of bounds has code P0002":
+            val panic = PanicReport.index_out_of_bounds(10, 5)
+            expect(panic.code()).to(eq("P0002"))
+
+        it "null reference has code P0003":
+            val panic = PanicReport.null_reference("x")
+            expect(panic.code()).to(eq("P0003"))
+
+# ============================================================================
+# Test Group 2: StackFrame and StackTrace
+# ============================================================================
+
+describe "StackFrame":
+    """
+    ## StackFrame
+
+    Tests for stack frame information.
+    """
+
+    context "creation":
+        """
+        ### Frame Creation
+
+        Stack frames capture call site information.
+        """
+
+        it "creates frame at location":
+            val frame = StackFrame.at("my_function", "module.spl", 42)
+            expect(frame.function_name).to(eq("my_function"))
+            expect(frame.file).to(eq("module.spl"))
+            expect(frame.line).to(eq(42))
+
+        it "creates frame with column":
+            val frame = StackFrame.full("my_function", "module.spl", 42, 10)
+            expect(frame.column.?).to(be_true())
+            expect(frame.column.unwrap()).to(eq(10))
+
+        it "creates unknown frame":
+            val frame = StackFrame.unknown()
+            expect(frame.function_name).to(eq("<unknown>"))
+
+    context "formatting":
+        """
+        ### Frame Formatting
+
+        Frames can be formatted for display.
+        """
+
+        it "formats as string":
+            val frame = StackFrame.at("my_func", "test.spl", 10)
+            val formatted = frame.format()
+            expect(formatted).to(contain("my_func"))
+            expect(formatted).to(contain("test.spl"))
+            expect(formatted).to(contain("10"))
+
+describe "StackTrace":
+    """
+    ## StackTrace
+
+    Tests for stack trace management.
+    """
+
+    context "operations":
+        """
+        ### Stack Trace Operations
+
+        Stack traces support push, pop, and traversal.
+        """
+
+        it "creates empty trace":
+            val trace = StackTrace.empty()
+            expect(trace.is_empty()).to(be_true())
+
+        it "pushes frames":
+            val trace = StackTrace.empty()
+            trace.push(StackFrame.at("a", "a.spl", 1))
+            trace.push(StackFrame.at("b", "b.spl", 2))
+            expect(trace.depth()).to(eq(2))
+
+        it "pops frames":
+            val trace = StackTrace.empty()
+            trace.push(StackFrame.at("a", "a.spl", 1))
+            trace.push(StackFrame.at("b", "b.spl", 2))
+            val popped = trace.pop()
+            expect(popped.?).to(be_true())
+            expect(popped.unwrap().function_name).to(eq("b"))
+            expect(trace.depth()).to(eq(1))
+
+        it "gets top frame":
+            val trace = StackTrace.empty()
+            trace.push(StackFrame.at("a", "a.spl", 1))
+            trace.push(StackFrame.at("b", "b.spl", 2))
+            val top = trace.top()
+            expect(top.?).to(be_true())
+            expect(top.unwrap().function_name).to(eq("b"))
+
+# ============================================================================
+# Test Group 3: Logger
+# ============================================================================
+
+describe "Logger":
+    """
+    ## Logger
+
+    Tests for debug logging system.
+    """
+
+    context "creation":
+        """
+        ### Logger Creation
+
+        Loggers can be created with names and configurations.
+        """
+
+        it "creates named logger":
+            val logger = Logger.named("my_module")
+            expect(logger.name).to(eq("my_module"))
+
+        it "creates root logger":
+            val logger = Logger.root()
+            expect(logger.name).to(eq("root"))
+
+        it "creates child logger":
+            val parent = Logger.named("parent")
+            val child = parent.child("child")
+            expect(child.name).to(eq("parent.child"))
+
+    context "logging levels":
+        """
+        ### Logging Levels
+
+        Loggers filter messages by level.
+        """
+
+        it "has default level Info":
+            val logger = Logger.named("test")
+            expect(logger.level).to(eq(ReportLevel.Info))
+
+        it "sets level":
+            val logger = Logger.named("test")
+            logger.set_level(ReportLevel.Debug)
+            expect(logger.level).to(eq(ReportLevel.Debug))
+
+        it "should_log returns true for higher levels":
+            val logger = Logger.named("test")
+            logger.set_level(ReportLevel.Warning)
+            expect(logger.should_log(ReportLevel.Error)).to(be_true())
+
+        it "should_log returns false for lower levels":
+            val logger = Logger.named("test")
+            logger.set_level(ReportLevel.Warning)
+            expect(logger.should_log(ReportLevel.Info)).to(be_false())
+
+    context "log entries":
+        """
+        ### Log Entries
+
+        Loggers create entries with metadata.
+        """
+
+        it "creates debug entry":
+            val logger = Logger.named("test")
+            logger.set_level(ReportLevel.Debug)
+            val entry = logger.debug("debug message")
+            expect(entry.level).to(eq(ReportLevel.Debug))
+            expect(entry.message).to(eq("debug message"))
+
+        it "creates info entry":
+            val logger = Logger.named("test")
+            val entry = logger.info("info message")
+            expect(entry.level).to(eq(ReportLevel.Info))
+
+        it "creates warning entry":
+            val logger = Logger.named("test")
+            val entry = logger.warn("warning message")
+            expect(entry.level).to(eq(ReportLevel.Warning))
+
+        it "creates error entry":
+            val logger = Logger.named("test")
+            val entry = logger.error("error message")
+            expect(entry.level).to(eq(ReportLevel.Error))
+
+        it "entry includes logger name":
+            val logger = Logger.named("my_module")
+            val entry = logger.info("test")
+            expect(entry.logger_name).to(eq("my_module"))
+
+describe "LogEntry":
+    """
+    ## LogEntry
+
+    Tests for log entry structure.
+    """
+
+    context "creation":
+        """
+        ### Entry Creation
+
+        Log entries capture logging information.
+        """
+
+        it "creates entry with all fields":
+            val entry = LogEntry.create(
+                ReportLevel.Info,
+                "test message",
+                "my_logger"
+            )
+            expect(entry.level).to(eq(ReportLevel.Info))
+            expect(entry.message).to(eq("test message"))
+            expect(entry.logger_name).to(eq("my_logger"))
+
+    context "formatting":
+        """
+        ### Entry Formatting
+
+        Entries can be formatted for output.
+        """
+
+        it "formats with level":
+            val entry = LogEntry.create(ReportLevel.Info, "test", "logger")
+            val formatted = entry.format()
+            expect(formatted).to(contain("INFO"))
+            expect(formatted).to(contain("test"))
+
+# ============================================================================
+# Test Group 4: MemoryReport
+# ============================================================================
+
+describe "MemoryReport":
+    """
+    ## MemoryReport
+
+    Tests for memory diagnostics.
+    """
+
+    context "creation":
+        """
+        ### Report Creation
+
+        Memory reports track allocations and GC.
+        """
+
+        it "creates empty report":
+            val report = MemoryReport.empty()
+            expect(report.events.len()).to(eq(0))
+
+        it "creates report with capacity":
+            val report = MemoryReport.with_capacity(100)
+            expect(report.events.len()).to(eq(0))
+
+    context "memory events":
+        """
+        ### Memory Events
+
+        Memory reports track allocation/deallocation events.
+        """
+
+        it "records allocation":
+            val report = MemoryReport.empty()
+            report.record_alloc(0x1000, 1024, "MyStruct")
+            expect(report.events.len()).to(eq(1))
+            expect(report.events[0].kind).to(eq(MemoryEventKind.Alloc))
+
+        it "records deallocation":
+            val report = MemoryReport.empty()
+            report.record_free(0x1000, 1024)
+            expect(report.events.len()).to(eq(1))
+            expect(report.events[0].kind).to(eq(MemoryEventKind.Free))
+
+        it "records reallocation":
+            val report = MemoryReport.empty()
+            report.record_realloc(0x1000, 0x2000, 1024, 2048)
+            expect(report.events.len()).to(eq(1))
+            expect(report.events[0].kind).to(eq(MemoryEventKind.Realloc))
+
+    context "leak detection":
+        """
+        ### Leak Detection
+
+        Memory reports can track leaks.
+        """
+
+        it "adds leak info":
+            val report = MemoryReport.empty()
+            val leak = LeakInfo.at_address(0x1000, 1024)
+            report.add_leak(leak)
+            expect(report.leaks.len()).to(eq(1))
+
+        it "has_leaks returns true with leaks":
+            val report = MemoryReport.empty()
+            report.add_leak(LeakInfo.at_address(0x1000, 512))
+            expect(report.has_leaks()).to(be_true())
+
+        it "has_leaks returns false without leaks":
+            val report = MemoryReport.empty()
+            expect(report.has_leaks()).to(be_false())
+
+        it "calculates total leak size":
+            val report = MemoryReport.empty()
+            report.add_leak(LeakInfo.at_address(0x1000, 100))
+            report.add_leak(LeakInfo.at_address(0x2000, 200))
+            expect(report.total_leaked()).to(eq(300))
+
+describe "LeakInfo":
+    """
+    ## LeakInfo
+
+    Tests for memory leak information.
+    """
+
+    context "creation":
+        """
+        ### Leak Info Creation
+
+        Leak info captures allocation details.
+        """
+
+        it "creates leak at address":
+            val leak = LeakInfo.at_address(0x1000, 1024)
+            expect(leak.address).to(eq(0x1000))
+            expect(leak.size).to(eq(1024))
+
+        it "creates leak with type":
+            val leak = LeakInfo.with_type(0x1000, 1024, "MyStruct")
+            expect(leak.type_name.?).to(be_true())
+            expect(leak.type_name.unwrap()).to(eq("MyStruct"))
+
+        it "creates leak with location":
+            val loc = SourceLocation.at("main.spl", 10, 5)
+            val leak = LeakInfo.with_location(0x1000, 1024, loc)
+            expect(leak.location.?).to(be_true())
+
+describe "GCStats":
+    """
+    ## GCStats
+
+    Tests for garbage collection statistics.
+    """
+
+    context "creation":
+        """
+        ### GC Stats Creation
+
+        GC stats track collection metrics.
+        """
+
+        it "creates empty stats":
+            val stats = GCStats.empty()
+            expect(stats.collections).to(eq(0))
+            expect(stats.total_freed).to(eq(0))
+
+    context "updates":
+        """
+        ### Stats Updates
+
+        GC stats are updated after collections.
+        """
+
+        it "records collection":
+            val stats = GCStats.empty()
+            stats.record_collection(1024, 50)  # freed 1024 bytes in 50ms
+            expect(stats.collections).to(eq(1))
+            expect(stats.total_freed).to(eq(1024))
+
+        it "accumulates multiple collections":
+            val stats = GCStats.empty()
+            stats.record_collection(1024, 50)
+            stats.record_collection(2048, 75)
+            expect(stats.collections).to(eq(2))
+            expect(stats.total_freed).to(eq(3072))
+
+        it "tracks average time":
+            val stats = GCStats.empty()
+            stats.record_collection(1000, 50)
+            stats.record_collection(1000, 100)
+            expect(stats.average_time_ms()).to(eq(75))
+

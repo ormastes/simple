@@ -64,6 +64,7 @@ impl Parser:
             classes: {},
             structs: {},
             enums: {},
+            bitfields: {},
             traits: {},
             impls: [],
             type_aliases: {},
@@ -106,6 +107,11 @@ impl Parser:
         for enum_outline in outline.enums:
             val enum_ = self.convert_enum(enum_outline)
             module.enums[enum_.name] = enum_
+
+        # Convert bitfields
+        for bf_outline in outline.bitfields:
+            val bf = self.convert_bitfield(bf_outline)
+            module.bitfields[bf.name] = bf
 
         # Parse trait bodies
         for trait_outline in outline.traits:
@@ -222,6 +228,44 @@ impl Parser:
             result = result.push(self.convert_field(outline))
         result
 
+    # Helper: convert AttributeOutline to Attribute
+    me convert_attribute(outline: AttributeOutline) -> Attribute:
+        """Convert attribute outline to full attribute AST.
+
+        Parses the args_span if present to extract attribute arguments.
+        """
+        var args: [Expr] = []
+        if outline.args_span.?:
+            args = self.parse_attr_args_at_span(outline.args_span.unwrap())
+
+        Attribute(
+            name: outline.name,
+            args: args,
+            span: outline.span
+        )
+
+    # Helper: convert a list of AttributeOutline to [Attribute]
+    me convert_attributes(outlines: [AttributeOutline]) -> [Attribute]:
+        var result: [Attribute] = []
+        for outline in outlines:
+            result = result.push(self.convert_attribute(outline))
+        result
+
+    me parse_attr_args_at_span(span: Span) -> [Expr]:
+        """Parse attribute arguments at a given span."""
+        self.reset_to_span(span)
+
+        # Parse comma-separated expressions
+        var args: [Expr] = []
+        if not self.is_at_end():
+            args = args.push(self.parse_expr())
+            while self.match_token(TokenKind.Comma):
+                if self.is_at_end():
+                    break
+                args = args.push(self.parse_expr())
+
+        args
+
     me convert_import(outline: ImportOutline) -> Import:
         var items: [ImportItem] = []
         for item in outline.items:
@@ -317,7 +361,7 @@ impl Parser:
             fields: fields,
             is_public: outline.is_public,
             doc_comment: outline.doc_comment,
-            attributes: [],  # TODO: Parse from outline.attributes
+            attributes: self.convert_attributes(outline.attributes),
             span: outline.span
         )
 
@@ -361,6 +405,32 @@ impl Parser:
             type_params: type_params,
             type_: self.convert_type(outline.type_),
             is_public: outline.is_public,
+            span: outline.span
+        )
+
+    me convert_bitfield(outline: BitfieldOutline) -> Bitfield:
+        """Convert bitfield outline to bitfield AST."""
+        var fields: [BitfieldField] = []
+        for f in outline.fields:
+            fields = fields.push(self.convert_bitfield_field(f))
+
+        Bitfield(
+            name: outline.name,
+            backing_type: self.convert_type(outline.backing_type),
+            fields: fields,
+            is_public: outline.is_public,
+            doc_comment: outline.doc_comment,
+            attributes: self.convert_attributes(outline.attributes),
+            span: outline.span
+        )
+
+    me convert_bitfield_field(outline: BitfieldFieldOutline) -> BitfieldField:
+        """Convert bitfield field outline to AST."""
+        BitfieldField(
+            name: outline.name,
+            type_: outline.type_.map(\t: self.convert_type(t)),
+            bits: outline.bits,
+            is_reserved: outline.is_reserved,
             span: outline.span
         )
 
@@ -420,7 +490,7 @@ impl Parser:
             methods: methods,
             is_public: outline.is_public,
             doc_comment: outline.doc_comment,
-            attributes: [],  # TODO: Parse from outline.attributes
+            attributes: self.convert_attributes(outline.attributes),
             span: outline.span
         )
 
