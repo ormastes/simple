@@ -1,0 +1,630 @@
+# Common I/O Types
+# Shared across all host variants (async_nogc_mut, async_gc_immut, etc.)
+
+use units.file.*
+use units.size.*
+use units.time.*
+use core.traits.*
+
+# Timestamp (nanoseconds since Unix epoch)
+pub unit Timestamp: u64 as ts
+
+# File metadata - common structure for file information
+pub struct FileMetadata:
+    size: ByteCount
+    modified: Option<Timestamp>
+    created: Option<Timestamp>
+    accessed: Option<Timestamp>
+    file_type: FileType
+    permissions: FileMode
+    readonly: bool
+
+impl FileMetadata:
+    pub fn size(self) -> ByteCount:
+        self.size
+
+    pub fn modified(self) -> Option<Timestamp>:
+        self.modified
+
+    pub fn created(self) -> Option<Timestamp>:
+        self.created
+
+    pub fn accessed(self) -> Option<Timestamp>:
+        self.accessed
+
+    pub fn file_type(self) -> FileType:
+        self.file_type
+
+    pub fn permissions(self) -> FileMode:
+        self.permissions
+
+    pub fn is_readonly(self) -> bool:
+        self.readonly
+
+    pub fn is_file(self) -> bool:
+        match self.file_type:
+            case File: true
+            case _: false
+
+    pub fn is_dir(self) -> bool:
+        match self.file_type:
+            case Directory: true
+            case _: false
+
+    pub fn is_symlink(self) -> bool:
+        match self.file_type:
+            case Symlink: true
+            case _: false
+
+# File type enumeration
+pub enum FileType:
+    File
+    Directory
+    Symlink
+    Other
+
+impl Display for FileType:
+    fn fmt() -> str:
+        match self:
+            case File: "file"
+            case Directory: "directory"
+            case Symlink: "symlink"
+            case Other: "other"
+
+impl FileType:
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    pub fn is_regular(self) -> bool:
+        """Check if type is a regular file or directory.
+
+        Returns:
+            true for File or Directory
+
+        Example:
+            FileType.File.is_regular()  # → true
+            FileType.Symlink.is_regular()  # → false
+        """
+        match self:
+            case File: true
+            case Directory: true
+            case _: false
+
+    pub fn is_special(self) -> bool:
+        """Check if type is special (symlink or other).
+
+        Returns:
+            true for Symlink or Other
+
+        Example:
+            FileType.Symlink.is_special()  # → true
+        """
+        match self:
+            case Symlink: true
+            case Other: true
+            case _: false
+
+    pub fn is_readable_type(self) -> bool:
+        """Check if type typically supports reading.
+
+        Returns:
+            true for File or Symlink
+
+        Example:
+            FileType.File.is_readable_type()  # → true
+        """
+        match self:
+            case File: true
+            case Symlink: true
+            case _: false
+
+    pub fn can_contain_files(self) -> bool:
+        """Check if type can contain other files.
+
+        Returns:
+            true only for Directory
+
+        Example:
+            FileType.Directory.can_contain_files()  # → true
+        """
+        match self:
+            case Directory: true
+            case _: false
+
+    pub fn needs_resolution(self) -> bool:
+        """Check if type needs resolution (symlink).
+
+        Returns:
+            true for Symlink
+
+        Example:
+            FileType.Symlink.needs_resolution()  # → true
+        """
+        match self:
+            case Symlink: true
+            case _: false
+
+    pub fn to_string(self) -> text:
+        """Convert file type to string.
+
+        Returns:
+            File type name
+
+        Example:
+            FileType.Directory.to_string()  # → "directory"
+        """
+        match self:
+            case File: "file"
+            case Directory: "directory"
+            case Symlink: "symlink"
+            case Other: "other"
+
+    pub fn description(self) -> text:
+        """Get file type description.
+
+        Returns:
+            Human-readable description
+
+        Example:
+            FileType.Directory.description()
+            # → "Directory (can contain files)"
+        """
+        match self:
+            case File: "Regular file"
+            case Directory: "Directory (can contain files)"
+            case Symlink: "Symbolic link (requires resolution)"
+            case Other: "Other special file type"
+
+    pub fn summary(self) -> text:
+        """Get summary of file type.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            FileType.File.summary()
+            # → "FileType: file (Regular file)"
+        """
+        val name = self.to_string()
+        val desc = self.description()
+        return "FileType: {name} ({desc})"
+
+# Directory entry - represents a single entry in a directory listing
+pub struct DirEntry:
+    path: FilePath
+    name: FileName
+    file_type: FileType
+
+impl DirEntry:
+    pub fn path(self) -> FilePath:
+        self.path
+
+    pub fn name(self) -> FileName:
+        self.name
+
+    pub fn file_type(self) -> FileType:
+        self.file_type
+
+# Open modes for file operations
+pub enum OpenMode:
+    Read
+    Write
+    Append
+    ReadWrite
+    Create
+    CreateNew
+    Truncate
+
+impl Display for OpenMode:
+    fn fmt() -> str:
+        match self:
+            case Read: "read"
+            case Write: "write"
+            case Append: "append"
+            case ReadWrite: "read-write"
+            case Create: "create"
+            case CreateNew: "create-new"
+            case Truncate: "truncate"
+
+impl OpenMode:
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    pub fn allows_reading(self) -> bool:
+        """Check if mode allows reading.
+
+        Returns:
+            true for Read or ReadWrite
+
+        Example:
+            OpenMode.Read.allows_reading()  # → true
+            OpenMode.Write.allows_reading()  # → false
+        """
+        match self:
+            case Read: true
+            case ReadWrite: true
+            case _: false
+
+    pub fn allows_writing(self) -> bool:
+        """Check if mode allows writing.
+
+        Returns:
+            true for Write, Append, ReadWrite, Create, CreateNew, or Truncate
+
+        Example:
+            OpenMode.Write.allows_writing()  # → true
+        """
+        match self:
+            case Write: true
+            case Append: true
+            case ReadWrite: true
+            case Create: true
+            case CreateNew: true
+            case Truncate: true
+            case _: false
+
+    pub fn creates_file(self) -> bool:
+        """Check if mode creates file if it doesn't exist.
+
+        Returns:
+            true for Create or CreateNew
+
+        Example:
+            OpenMode.Create.creates_file()  # → true
+        """
+        match self:
+            case Create: true
+            case CreateNew: true
+            case _: false
+
+    pub fn is_exclusive(self) -> bool:
+        """Check if mode requires file to not exist.
+
+        Returns:
+            true for CreateNew
+
+        Example:
+            OpenMode.CreateNew.is_exclusive()  # → true
+        """
+        match self:
+            case CreateNew: true
+            case _: false
+
+    pub fn truncates_file(self) -> bool:
+        """Check if mode truncates existing file.
+
+        Returns:
+            true for Truncate
+
+        Example:
+            OpenMode.Truncate.truncates_file()  # → true
+        """
+        match self:
+            case Truncate: true
+            case _: false
+
+    pub fn is_append_mode(self) -> bool:
+        """Check if mode appends to existing content.
+
+        Returns:
+            true for Append
+
+        Example:
+            OpenMode.Append.is_append_mode()  # → true
+        """
+        match self:
+            case Append: true
+            case _: false
+
+    pub fn is_readonly(self) -> bool:
+        """Check if mode is read-only.
+
+        Returns:
+            true only for Read
+
+        Example:
+            OpenMode.Read.is_readonly()  # → true
+        """
+        match self:
+            case Read: true
+            case _: false
+
+    pub fn is_writeonly(self) -> bool:
+        """Check if mode is write-only.
+
+        Returns:
+            true for Write, Append, Create, CreateNew, or Truncate
+
+        Example:
+            OpenMode.Write.is_writeonly()  # → true
+        """
+        match self:
+            case Write: true
+            case Append: true
+            case Create: true
+            case CreateNew: true
+            case Truncate: true
+            case _: false
+
+    pub fn requires_existing_file(self) -> bool:
+        """Check if mode requires file to exist.
+
+        Returns:
+            true for Read, Write, Append, ReadWrite, or Truncate
+
+        Example:
+            OpenMode.Read.requires_existing_file()  # → true
+        """
+        match self:
+            case Read: true
+            case Write: true
+            case Append: true
+            case ReadWrite: true
+            case Truncate: true
+            case _: false
+
+    pub fn modifies_content(self) -> bool:
+        """Check if mode can modify file content.
+
+        Returns:
+            true for Write, Append, ReadWrite, Create, CreateNew, or Truncate
+
+        Example:
+            OpenMode.Write.modifies_content()  # → true
+        """
+        match self:
+            case Write: true
+            case Append: true
+            case ReadWrite: true
+            case Create: true
+            case CreateNew: true
+            case Truncate: true
+            case _: false
+
+    pub fn to_string(self) -> text:
+        """Convert open mode to string.
+
+        Returns:
+            Mode name
+
+        Example:
+            OpenMode.ReadWrite.to_string()  # → "read-write"
+        """
+        match self:
+            case Read: "read"
+            case Write: "write"
+            case Append: "append"
+            case ReadWrite: "read-write"
+            case Create: "create"
+            case CreateNew: "create-new"
+            case Truncate: "truncate"
+
+    pub fn description(self) -> text:
+        """Get open mode description.
+
+        Returns:
+            Human-readable description
+
+        Example:
+            OpenMode.Append.description()
+            # → "Append mode (write to end of file)"
+        """
+        match self:
+            case Read: "Read mode (read-only access)"
+            case Write: "Write mode (overwrite file)"
+            case Append: "Append mode (write to end of file)"
+            case ReadWrite: "Read-write mode (full access)"
+            case Create: "Create mode (create if missing)"
+            case CreateNew: "Create-new mode (must not exist)"
+            case Truncate: "Truncate mode (clear existing content)"
+
+    pub fn summary(self) -> text:
+        """Get summary of open mode.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            OpenMode.ReadWrite.summary()
+            # → "OpenMode: read-write (Read-write mode (full access), allows reading and writing)"
+        """
+        val name = self.to_string()
+        val desc = self.description()
+        val reading = self.allows_reading()
+        val writing = self.allows_writing()
+        val access = if reading and writing:
+            "allows reading and writing"
+        else if reading:
+            "allows reading only"
+        else if writing:
+            "allows writing only"
+        else:
+            "no access"
+        return "OpenMode: {name} ({desc}, {access})"
+
+# Seek position for file operations
+pub enum SeekFrom:
+    Start(u64)
+    End(i64)
+    Current(i64)
+
+impl SeekFrom:
+    pub fn start(pos: u64) -> SeekFrom:
+        SeekFrom.Start(pos)
+
+    pub fn end(pos: i64) -> SeekFrom:
+        SeekFrom.End(pos)
+
+    pub fn current(pos: i64) -> SeekFrom:
+        SeekFrom.Current(pos)
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    pub fn is_absolute(self) -> bool:
+        """Check if seek position is absolute (from start).
+
+        Returns:
+            true for Start variant
+
+        Example:
+            SeekFrom.Start(0).is_absolute()  # → true
+            SeekFrom.Current(5).is_absolute()  # → false
+        """
+        match self:
+            case Start(_): true
+            case _: false
+
+    pub fn is_relative(self) -> bool:
+        """Check if seek position is relative.
+
+        Returns:
+            true for End or Current variants
+
+        Example:
+            SeekFrom.Current(10).is_relative()  # → true
+        """
+        match self:
+            case End(_): true
+            case Current(_): true
+            case _: false
+
+    pub fn is_from_end(self) -> bool:
+        """Check if seek is from end of file.
+
+        Returns:
+            true for End variant
+
+        Example:
+            SeekFrom.End(-10).is_from_end()  # → true
+        """
+        match self:
+            case End(_): true
+            case _: false
+
+    pub fn is_from_current(self) -> bool:
+        """Check if seek is from current position.
+
+        Returns:
+            true for Current variant
+
+        Example:
+            SeekFrom.Current(5).is_from_current()  # → true
+        """
+        match self:
+            case Current(_): true
+            case _: false
+
+    pub fn is_forward(self) -> bool:
+        """Check if seek moves forward.
+
+        Returns:
+            true if offset is positive or zero
+
+        Example:
+            SeekFrom.Current(5).is_forward()  # → true
+            SeekFrom.Current(-5).is_forward()  # → false
+        """
+        match self:
+            case Start(_): true
+            case End(off): off >= 0
+            case Current(off): off >= 0
+
+    pub fn is_backward(self) -> bool:
+        """Check if seek moves backward.
+
+        Returns:
+            true if offset is negative
+
+        Example:
+            SeekFrom.Current(-5).is_backward()  # → true
+        """
+        match self:
+            case Start(_): false
+            case End(off): off < 0
+            case Current(off): off < 0
+
+    pub fn get_offset(self) -> i64:
+        """Get offset value.
+
+        Returns:
+            Offset as i64 (Start positions converted to i64)
+
+        Example:
+            SeekFrom.Current(10).get_offset()  # → 10
+            SeekFrom.Start(5).get_offset()  # → 5
+        """
+        match self:
+            case Start(pos): pos as i64
+            case End(off): off
+            case Current(off): off
+
+    pub fn is_beginning(self) -> bool:
+        """Check if seek is to beginning of file.
+
+        Returns:
+            true for Start(0)
+
+        Example:
+            SeekFrom.Start(0).is_beginning()  # → true
+        """
+        match self:
+            case Start(0): true
+            case _: false
+
+    pub fn to_string(self) -> text:
+        """Convert seek position to string.
+
+        Returns:
+            Position type name
+
+        Example:
+            SeekFrom.Current(10).to_string()  # → "current"
+        """
+        match self:
+            case Start(_): "start"
+            case End(_): "end"
+            case Current(_): "current"
+
+    pub fn description(self) -> text:
+        """Get seek position description.
+
+        Returns:
+            Human-readable description
+
+        Example:
+            SeekFrom.End(-10).description()
+            # → "Seek from end of file"
+        """
+        match self:
+            case Start(_): "Seek from start of file (absolute position)"
+            case End(_): "Seek from end of file"
+            case Current(_): "Seek from current position (relative)"
+
+    pub fn summary(self) -> text:
+        """Get summary of seek position.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            SeekFrom.Current(10).summary()
+            # → "SeekFrom: Current(+10) (relative, forward)"
+        """
+        match self:
+            case Start(pos):
+                return "SeekFrom: Start({pos}) (absolute)"
+            case End(off):
+                val sign = if off >= 0: "+" else: ""
+                val dir = if off >= 0: "forward" else: "backward"
+                return "SeekFrom: End({sign}{off}) (from end, {dir})"
+            case Current(off):
+                val sign = if off >= 0: "+" else: ""
+                val dir = if off >= 0: "forward" else: "backward"
+                return "SeekFrom: Current({sign}{off}) (relative, {dir})"
+
+# Text type (UTF-8 validated string)
+pub unit Text: str as text

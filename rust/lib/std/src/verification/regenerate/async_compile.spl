@@ -1,0 +1,74 @@
+# Async Compile - Effect tracking model generation
+# Generates Lean verification for async/effect tracking
+
+use verification.lean.codegen as codegen
+
+fn regenerate_async_compile() -> text:
+    gen = codegen.LeanCodegen.create("AsyncCompile")
+
+    # Namespace
+    gen = gen.add_namespace("AsyncCompile")
+
+    # Doc comment
+    gen = gen.add_doc_comment("Model a compile-time \"async\" check: a pipeline of effects that must be non-blocking.")
+
+    # Effect inductive
+    effect = codegen.build_enum("Effect", [
+        ("compute", []),
+        ("io", []),
+        ("wait", [])
+    ])
+    gen = gen.add_inductive(effect)
+
+    # is_async function with match
+    is_async_def = codegen.build_function(
+        "is_async",
+        [("e", codegen.make_simple_type("Effect"))],
+        codegen.make_simple_type("bool"),
+        "match e with\n| Effect.wait => false\n-- Explicit: compute and io are async-safe\n| Effect.compute => true\n| Effect.io => true"
+    )
+    gen = gen.add_function(is_async_def)
+
+    # pipelineSafe definition
+    pipeline_safe_def = codegen.build_function(
+        "pipelineSafe",
+        [("es", codegen.make_list_type(codegen.make_simple_type("Effect")))],
+        codegen.make_simple_type("Prop"),
+        "∀ e, e ∈ es → is_async e = true"
+    )
+    gen = gen.add_function(pipeline_safe_def)
+
+    # Theorem: append_safe with full proof
+    append_safe = codegen.build_theorem_implicit(
+        "append_safe",
+        [("a", "List Effect"), ("b", "List Effect")],
+        [],
+        "pipelineSafe a → pipelineSafe b → pipelineSafe (a ++ b)",
+        [
+            "intro ha hb e hmem",
+            "apply List.mem_append.mp hmem |> Or.elim",
+            "· intro h; exact ha _ h",
+            "· intro h; exact hb _ h"
+        ]
+    )
+    gen = gen.add_theorem_implicit(append_safe)
+
+    # Theorem: wait_detected with full proof
+    wait_detected = codegen.build_theorem(
+        "wait_detected",
+        [("e", "Effect")],
+        "pipelineSafe [e] → e ≠ Effect.wait",
+        "intro h\nhave hw : is_async e = true := h _ (by simp)\ncases e <;> simp_all [is_async]"
+    )
+    gen = gen.add_theorem(wait_detected)
+
+    # End namespace
+    gen = gen.end_namespace("AsyncCompile")
+
+    return gen.emit()
+
+
+# ============================================================================
+# 3. GcManualBorrow - GC safety model (51 lines)
+# ============================================================================
+

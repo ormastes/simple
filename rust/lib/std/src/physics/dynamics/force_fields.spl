@@ -1,0 +1,244 @@
+# Physics Dynamics - Force Fields
+#
+# Force fields for applying forces to rigid bodies.
+
+export ForceField, GravityField, WindField, CustomField, DragField
+
+use ..core as core
+use rigid_body.RigidBody
+
+
+# ============================================================================
+# Force Fields
+# ============================================================================
+
+class ForceField:
+    """Base class for force fields.
+
+    Force fields are regions of space that apply forces to rigid bodies.
+    Subclasses implement different types of force fields (gravity, wind, etc.).
+
+    Example:
+        ```simple
+        val gravity = GravityField(core.Vector3(0, -9.81, 0))
+        val wind = WindField(core.Vector3(5, 0, 0), strength=2.0)
+
+        # Apply to body
+        gravity.apply(body, dt)
+        wind.apply(body, dt)
+        ```
+    """
+
+    fn apply(body: RigidBody, dt: f64):
+        """Apply force field to a rigid body.
+
+        Args:
+            body: Rigid body to apply force to
+            dt: Time step (may be used for time-varying fields)
+        """
+        pass
+
+
+class GravityField(ForceField):
+    """Uniform gravitational force field.
+
+    Applies constant gravitational acceleration to all bodies with mass.
+
+    Example:
+        ```simple
+        # Earth gravity
+        val gravity = GravityField(core.Vector3(0, -9.81, 0))
+
+        # Apply to all bodies in a list
+        for body in bodies:
+            gravity.apply(body, dt)
+        ```
+    """
+    acceleration: core.Vector3
+
+    fn __init__(acceleration: core.Vector3):
+        """Initialize gravity field.
+
+        Args:
+            acceleration: Gravitational acceleration vector (m/s²)
+        """
+        self.acceleration = acceleration
+
+    fn apply(body: RigidBody, dt: f64):
+        """Apply gravitational force to body.
+
+        Force = mass * acceleration (F = ma)
+
+        Args:
+            body: Rigid body
+            dt: Time step (unused for constant gravity)
+        """
+        if body.mass > 0:  # Don't apply to static bodies
+            body.add_force(self.acceleration.scale(body.mass))
+
+
+class WindField(ForceField):
+    """Directional wind force field.
+
+    Applies a force in a specified direction with configurable strength.
+    Force magnitude depends on body's cross-sectional area (radius²).
+
+    Example:
+        ```simple
+        # Wind blowing east at 10 m/s
+        val wind = WindField(
+            direction=core.Vector3(1, 0, 0),
+            strength=10.0
+        )
+
+        for body in bodies:
+            wind.apply(body, dt)
+        ```
+    """
+    direction: core.Vector3
+    strength: f64
+
+    fn __init__(direction: core.Vector3, strength: f64?):
+        """Initialize wind field.
+
+        Args:
+            direction: Wind direction (will be normalized)
+            strength: Wind strength multiplier (default: 1.0)
+        """
+        self.direction = direction.normalize()
+        self.strength = strength ?? 1.0
+
+    fn apply(body: RigidBody, dt: f64):
+        """Apply wind force to body.
+
+        Force depends on cross-sectional area: F = strength * π * r²
+
+        Args:
+            body: Rigid body
+            dt: Time step (unused for constant wind)
+        """
+        if body.mass > 0:  # Don't apply to static bodies
+            # Force proportional to cross-sectional area
+            val area = 3.141592653589793 * body.radius * body.radius
+            val force_magnitude = self.strength * area
+            val force = self.direction.scale(force_magnitude)
+            body.add_force(force)
+
+
+class CustomField(ForceField):
+    """Custom force field with user-defined force function.
+
+    Allows arbitrary force calculations based on body properties and position.
+
+    Example:
+        ```simple
+        # Radial force field (pushes away from origin)
+        fn radial_force(body: RigidBody, dt: f64) -> core.Vector3:
+            val direction = body.position.normalize()
+            val distance = body.position.magnitude()
+            val strength = 100.0 / (distance * distance)  # Inverse square
+            return direction.scale(strength)
+
+        val field = CustomField(radial_force)
+        field.apply(body, dt)
+        ```
+    """
+    force_fn: fn(RigidBody, f64) -> core.Vector3
+
+    fn __init__(force_fn: fn(RigidBody, f64) -> core.Vector3):
+        """Initialize custom force field.
+
+        Args:
+            force_fn: Function that computes force vector for a body
+                     Signature: fn(body: RigidBody, dt: f64) -> Vector3
+        """
+        self.force_fn = force_fn
+
+    fn apply(body: RigidBody, dt: f64):
+        """Apply custom force to body.
+
+        Args:
+            body: Rigid body
+            dt: Time step
+        """
+        if body.mass > 0:  # Don't apply to static bodies
+            val force = self.force_fn(body, dt)
+            body.add_force(force)
+
+
+class DragField(ForceField):
+    """Drag force field (air/fluid resistance).
+
+    Applies velocity-dependent drag force that opposes motion.
+    Supports both linear drag (F ∝ v) and quadratic drag (F ∝ v²).
+
+    Linear drag:
+        F = -k * v
+
+    Quadratic drag (more realistic for high speeds):
+        F = -½ * ρ * Cd * A * |v|² * v̂
+
+    Example:
+        ```simple
+        # Linear drag (simple damping)
+        val linear_drag = DragField(coefficient=0.1, mode="linear")
+
+        # Quadratic drag (air resistance)
+        val air_drag = DragField(
+            coefficient=0.47,  # Drag coefficient for sphere
+            fluid_density=1.225,  # Air density kg/m³
+            mode="quadratic"
+        )
+
+        for body in bodies:
+            air_drag.apply(body, dt)
+        ```
+    """
+    coefficient: f64
+    fluid_density: f64
+    mode: str
+
+    fn __init__(coefficient: f64?,
+        fluid_density: f64?,
+        mode: str?
+    ):
+        """Initialize drag field.
+
+        Args:
+            coefficient: Drag coefficient (Cd for quadratic, k for linear)
+                        Sphere Cd ≈ 0.47, Streamlined ≈ 0.04
+            fluid_density: Fluid density in kg/m³ (air: 1.225, water: 1000)
+            mode: Drag mode - "linear" or "quadratic" (default: "quadratic")
+        """
+        self.coefficient = coefficient ?? 0.1
+        self.fluid_density = fluid_density ?? 1.225
+        self.mode = mode ?? "quadratic"
+
+    fn apply(body: RigidBody, dt: f64):
+        """Apply drag force to body.
+
+        Args:
+            body: Rigid body
+            dt: Time step
+        """
+        if body.mass <= 0:  # Don't apply to static bodies
+            return
+
+        val speed = body.velocity.magnitude()
+        if speed < 0.001:  # Skip if nearly stationary
+            return
+
+        val velocity_dir = body.velocity.normalize()
+
+        if self.mode == "linear":
+            # Linear drag: F = -k * v
+            val drag_magnitude = self.coefficient * speed
+            val drag_force = velocity_dir.scale(-drag_magnitude)
+            body.add_force(drag_force)
+        else:
+            # Quadratic drag: F = -½ * ρ * Cd * A * v² * v̂
+            # Cross-sectional area for sphere: A = π * r²
+            val area = 3.141592653589793 * body.radius * body.radius
+            val drag_magnitude = 0.5 * self.fluid_density * self.coefficient * area * speed * speed
+            val drag_force = velocity_dir.scale(-drag_magnitude)
+            body.add_force(drag_force)

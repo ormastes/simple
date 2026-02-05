@@ -1,0 +1,287 @@
+# Async Unified - Runtime-Agnostic Interface
+#
+# This module provides a unified API that works with both embedded and host runtimes.
+# Select runtime at compile time via feature flag or import.
+#
+# Usage:
+#   # For embedded targets:
+#   use std.async_unified { runtime: "embedded" }
+#
+#   # For host targets (default):
+#   use std.async_unified { runtime: "host" }
+#
+#   # Or explicitly:
+#   use std.async_unified as async
+#   val set = async.JoinSet<i64>.new()
+#
+# The API is identical - only implementation differs:
+# - Embedded: Fixed capacity, no heap, polling-based
+# - Host: Dynamic capacity, heap-allocated, waker-based
+
+use std.async_core.*
+
+# ============================================================================
+# Runtime Selection (compile-time)
+# ============================================================================
+
+# Default to host runtime; override with @config(runtime: "embedded")
+@config(runtime: "host")
+
+# ============================================================================
+# Type Aliases - Unified Names
+# ============================================================================
+
+# These aliases point to the appropriate implementation based on config
+# When runtime="embedded", these resolve to Embedded* types
+# When runtime="host", these resolve to Host* types
+
+#if config.runtime == "embedded":
+    use std.async_embedded.*
+
+    type Future<T> = EmbeddedFuture<T>
+    type Promise<T> = EmbeddedPromise<T>
+    type TaskHandle<T> = EmbeddedTaskHandle<T>
+    type JoinSet<T> = EmbeddedJoinSet<T>
+    type FuturesUnordered<T> = EmbeddedFuturesUnordered<T>
+    type Scheduler = EmbeddedScheduler
+
+#else:
+    use std.async_host.*
+
+    type Future<T> = HostFuture<T>
+    type Promise<T> = HostPromise<T>
+    type TaskHandle<T> = HostTaskHandle<T>
+    type JoinSet<T> = HostJoinSet<T>
+    type FuturesUnordered<T> = HostFuturesUnordered<T>
+    type Scheduler = HostScheduler
+    type Runtime = HostRuntime
+
+# ============================================================================
+# Unified Factory Functions
+# ============================================================================
+
+fn future_ready<T>(value: T) -> Future<T>:
+    """Create completed future."""
+    Future<T>.ready(value)
+
+fn future_pending<T>() -> Future<T>:
+    """Create pending future."""
+    Future<T>.pending()
+
+fn promise_new<T>() -> (Future<T>, Promise<T>):
+    """Create future-promise pair."""
+    Promise<T>.new()
+
+fn join_set_new<T>() -> JoinSet<T>:
+    """Create empty join set."""
+    JoinSet<T>.new()
+
+fn futures_unordered_new<T>() -> FuturesUnordered<T>:
+    """Create empty futures collection."""
+    FuturesUnordered<T>.new()
+
+fn scheduler_new() -> Scheduler:
+    """Create new scheduler."""
+    Scheduler.new()
+
+# ============================================================================
+# Unified Combinators
+# ============================================================================
+
+fn join<T>(f1: Future<T>, f2: Future<T>) -> Future<(T, T)>:
+    """Wait for both futures."""
+    if f1.is_ready() and f2.is_ready():
+        Future<(T, T)>.ready((f1.poll().unwrap(), f2.poll().unwrap()))
+    else:
+        Future<(T, T)>.pending()
+
+fn join3<T>(f1: Future<T>, f2: Future<T>, f3: Future<T>) -> Future<(T, T, T)>:
+    """Wait for three futures."""
+    if f1.is_ready() and f2.is_ready() and f3.is_ready():
+        Future<(T, T, T)>.ready((
+            f1.poll().unwrap(),
+            f2.poll().unwrap(),
+            f3.poll().unwrap()
+        ))
+    else:
+        Future<(T, T, T)>.pending()
+
+fn first<T>(futures: [Future<T>]) -> Future<T>:
+    """Return first ready future."""
+    for f in futures:
+        if f.is_ready():
+            return f
+    Future<T>.pending()
+
+# ============================================================================
+# Async Utilities
+# ============================================================================
+
+fn spawn<T>(f: fn() -> T) -> TaskHandle<T>:
+    """Spawn task (uses global scheduler)."""
+    # Note: Requires runtime context
+    # This is a convenience for simple use cases
+    panic("spawn() requires runtime context - use scheduler.spawn() instead")
+
+fn sleep(millis: usize) -> Future<()>:
+    """Sleep for milliseconds."""
+    # Note: Implementation differs by runtime
+    Future<()>.pending()
+
+fn yield_point() -> Future<()>:
+    """Yield to scheduler."""
+    Future<()>.pending()
+
+# ============================================================================
+# Capacity Info (for embedded planning)
+# ============================================================================
+
+fn max_tasks() -> usize:
+    """Maximum concurrent tasks."""
+    #if config.runtime == "embedded":
+        MAX_TASKS
+    #else:
+        usize.MAX  # Unlimited
+
+fn max_futures() -> usize:
+    """Maximum futures in JoinSet/FuturesUnordered."""
+    #if config.runtime == "embedded":
+        MAX_FUTURES
+    #else:
+        usize.MAX  # Unlimited
+
+fn is_embedded() -> bool:
+    """Check if running embedded runtime."""
+    #if config.runtime == "embedded":
+        true
+    #else:
+        false
+
+fn is_host() -> bool:
+    """Check if running host runtime."""
+    not is_embedded()
+
+# ============================================================================
+# Usage Examples in Docstrings
+# ============================================================================
+
+"""
+# Unified Async Usage Examples
+
+## Basic JoinSet (works on both runtimes)
+
+```simple
+use std.async_unified.*
+
+fn parallel_work() -> [i64]:
+    var set = JoinSet<i64>.new()
+
+    # Spawn tasks (up to max_tasks() on embedded)
+    for i in 0..10:
+        set.spawn(\: compute(i))
+
+    # Collect results
+    var results: [i64] = []
+    while val Some((id, value)) = set.try_join_next():
+        results = results.push(value)
+
+    results
+```
+
+## FuturesUnordered
+
+```simple
+use std.async_unified.*
+
+fn stream_results(urls: [text]) -> [Response]:
+    var futs = FuturesUnordered<Response>.new()
+
+    for url in urls:
+        futs.push(fetch(url))
+
+    var results: [Response] = []
+    while val Some(resp) = futs.try_next():
+        results = results.push(resp)
+
+    results
+```
+
+## Checking Completion
+
+```simple
+use std.async_unified.*
+
+fn check_tasks(handles: [TaskHandle<Data>]):
+    for h in handles:
+        if h.is_finished():
+            match h.try_join():
+                case Some(data): process(data)
+                case None: print "No result"
+        else:
+            print "Task {h.id()} still running"
+```
+
+## Embedded vs Host Differences
+
+| Feature | Embedded | Host |
+|---------|----------|------|
+| Max tasks | 16 (configurable) | Unlimited |
+| Max futures | 32 (configurable) | Unlimited |
+| Allocation | Stack/static | Heap |
+| Wake mechanism | Polling | Wakers |
+| Work stealing | No | Yes |
+| Priority | Yes | Yes |
+
+## Switching Runtimes
+
+```simple
+# Embedded (no-std compatible)
+use std.async_unified { runtime: "embedded" }
+
+# Host (full featured)
+use std.async_unified { runtime: "host" }
+
+# Code remains the same!
+var set = JoinSet<i64>.new()
+set.spawn(\: work())
+```
+"""
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export Poll
+export TaskState
+export Priority
+export AsyncError
+export CancellationToken
+
+# Core types (aliased to runtime-specific)
+export Future
+export Promise
+export TaskHandle
+export JoinSet
+export FuturesUnordered
+export Scheduler
+
+# Factory functions
+export future_ready
+export future_pending
+export promise_new
+export join_set_new
+export futures_unordered_new
+export scheduler_new
+
+# Combinators
+export join
+export join3
+export first
+
+# Utilities
+export sleep
+export yield_point
+export max_tasks
+export max_futures
+export is_embedded
+export is_host

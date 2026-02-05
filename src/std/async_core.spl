@@ -1,0 +1,270 @@
+# Async Core - Shared Interface for Embedded and Host Runtimes
+#
+# This module defines the common traits and types shared between:
+# - async_embedded.spl - Lightweight, no-heap, fixed-capacity
+# - async_host.spl - Full-featured, heap-allocated, work-stealing
+#
+# Both implementations use the same grammar and can be swapped at compile time.
+#
+# Usage:
+#   use std.async_core.*           # Shared traits
+#   use std.async_embedded as rt   # Embedded runtime
+#   # OR
+#   use std.async_host as rt       # Host runtime
+
+# ============================================================================
+# Poll - Future Poll Result (shared)
+# ============================================================================
+
+enum Poll<T>:
+    """Result of polling a future.
+
+    Zero-cost abstraction - same representation in both runtimes.
+    """
+    Ready(T)
+    Pending
+
+impl Poll<T>:
+    fn is_ready() -> bool:
+        match self:
+            case Poll.Ready(_): true
+            case Poll.Pending: false
+
+    fn is_pending() -> bool:
+        not self.is_ready()
+
+    fn unwrap() -> T:
+        match self:
+            case Poll.Ready(value): value
+            case Poll.Pending: panic("Poll.unwrap() on Pending")
+
+    fn map<U>(f: fn(T) -> U) -> Poll<U>:
+        match self:
+            case Poll.Ready(v): Poll.Ready(f(v))
+            case Poll.Pending: Poll.Pending
+
+# ============================================================================
+# TaskState - Task Lifecycle (shared)
+# ============================================================================
+
+enum TaskState:
+    """Task execution state.
+
+    Common state machine for both runtimes.
+    """
+    Pending      # Not yet started
+    Running      # Currently executing
+    Suspended    # Waiting for event
+    Completed    # Finished successfully
+    Cancelled    # Cancelled by user
+    Failed       # Failed with error
+
+impl TaskState:
+    fn is_terminal() -> bool:
+        """Check if state is final (no more transitions)."""
+        match self:
+            case Completed: true
+            case Cancelled: true
+            case Failed: true
+            case _: false
+
+    fn is_runnable() -> bool:
+        """Check if task can be scheduled."""
+        match self:
+            case Pending: true
+            case Suspended: true
+            case _: false
+
+# ============================================================================
+# Priority - Task Priority (shared)
+# ============================================================================
+
+enum Priority:
+    """Task scheduling priority.
+
+    Used by both embedded (simple) and host (work-stealing) schedulers.
+    """
+    Critical    # System-critical, never preempted
+    High        # Time-sensitive
+    Normal      # Default
+    Low         # Background work
+    Idle        # Only when nothing else to do
+
+impl Priority:
+    fn to_i32() -> i32:
+        match self:
+            case Critical: 0
+            case High: 1
+            case Normal: 2
+            case Low: 3
+            case Idle: 4
+
+    static fn from_i32(n: i32) -> Priority:
+        match n:
+            case 0: Priority.Critical
+            case 1: Priority.High
+            case 2: Priority.Normal
+            case 3: Priority.Low
+            case _: Priority.Idle
+
+# ============================================================================
+# FutureCore - Core Future Trait (shared)
+# ============================================================================
+
+trait FutureCore<T>:
+    """Core future interface.
+
+    Minimal interface both runtimes implement.
+    """
+    fn poll() -> Poll<T>
+    fn is_ready() -> bool
+
+# ============================================================================
+# TaskHandleCore - Task Handle Trait (shared)
+# ============================================================================
+
+trait TaskHandleCore<T>:
+    """Handle to a spawned task.
+
+    Allows checking completion and retrieving results.
+    """
+    fn id() -> usize
+    fn is_finished() -> bool
+    fn try_join() -> Option<T>
+    fn state() -> TaskState
+
+# ============================================================================
+# JoinSetCore - Task Group Trait (shared)
+# ============================================================================
+
+trait JoinSetCore<T>:
+    """Dynamic group of tasks.
+
+    Spawn tasks and retrieve results as they complete.
+    """
+    fn len() -> usize
+    fn is_empty() -> bool
+    fn try_join_next() -> Option<(usize, T)>
+
+# ============================================================================
+# FuturesUnorderedCore - Future Stream Trait (shared)
+# ============================================================================
+
+trait FuturesUnorderedCore<T>:
+    """Collection of futures yielding as each completes.
+
+    Like FuturesUnordered in Rust's futures crate.
+    """
+    fn len() -> usize
+    fn is_empty() -> bool
+    fn try_next() -> Option<T>
+
+# ============================================================================
+# SchedulerCore - Scheduler Trait (shared)
+# ============================================================================
+
+trait SchedulerCore:
+    """Core scheduler interface.
+
+    Both embedded and host schedulers implement this.
+    """
+    fn has_runnable() -> bool
+    fn run_one() -> bool
+    fn is_idle() -> bool
+
+# ============================================================================
+# CancellationToken - Cancellation (shared)
+# ============================================================================
+
+struct CancellationToken:
+    """Token for cooperative cancellation.
+
+    Lightweight - just a flag. No heap allocation.
+    """
+    cancelled: bool
+
+    static fn new() -> CancellationToken:
+        CancellationToken(cancelled: false)
+
+    me cancel():
+        """Request cancellation."""
+        self.cancelled = true
+
+    fn is_cancelled() -> bool:
+        """Check if cancellation requested."""
+        self.cancelled
+
+    fn check() -> Result<(), text>:
+        """Return Err if cancelled, Ok otherwise."""
+        if self.cancelled:
+            Err("cancelled")
+        else:
+            Ok(())
+
+# ============================================================================
+# WakeReason - Why Task Woke (shared)
+# ============================================================================
+
+enum WakeReason:
+    """Reason a task was woken.
+
+    Useful for debugging and scheduling decisions.
+    """
+    Polled         # Direct poll
+    IoReady        # I/O operation ready
+    TimerExpired   # Timer fired
+    MessageArrived # Message received
+    ChildCompleted # Spawned task finished
+    Cancelled      # Cancellation requested
+    Manual         # Explicit wake call
+
+# ============================================================================
+# AsyncError - Async Errors (shared)
+# ============================================================================
+
+enum AsyncError:
+    """Errors from async operations."""
+    Timeout
+    Cancelled
+    JoinError(text)
+    SpawnError(text)
+    CapacityExceeded
+    AlreadyCompleted
+
+impl AsyncError:
+    fn message() -> text:
+        match self:
+            case Timeout: "operation timed out"
+            case Cancelled: "operation cancelled"
+            case JoinError(msg): "join failed: {msg}"
+            case SpawnError(msg): "spawn failed: {msg}"
+            case CapacityExceeded: "capacity exceeded"
+            case AlreadyCompleted: "already completed"
+
+# ============================================================================
+# Capacity Constants (for embedded)
+# ============================================================================
+
+# Default capacities for embedded runtime (can be overridden)
+val DEFAULT_MAX_TASKS: usize = 16
+val DEFAULT_MAX_FUTURES: usize = 32
+val DEFAULT_STACK_SIZE: usize = 1024
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export Poll
+export TaskState
+export Priority
+export WakeReason
+export AsyncError
+export CancellationToken
+export FutureCore
+export TaskHandleCore
+export JoinSetCore
+export FuturesUnorderedCore
+export SchedulerCore
+export DEFAULT_MAX_TASKS
+export DEFAULT_MAX_FUTURES
+export DEFAULT_STACK_SIZE

@@ -1,0 +1,280 @@
+/// Doctest Discovery
+/// 
+/// Discovers doctests from .spl, .md, and .sdt files
+
+use parser.{DoctestExample, parse_spl_file, parse_sdt_file, parse_docstring}
+
+/// Discovery configuration
+struct DiscoveryConfig:
+    /// Paths to search for doctests
+    search_paths: List<text>
+    /// File patterns to include
+    include_patterns: List<text>
+    /// File patterns to exclude
+    exclude_patterns: List<text>
+    
+    static fn default() -> DiscoveryConfig:
+        return DiscoveryConfig(
+            search_paths: ["lib/", "src/", "doc/"],
+            include_patterns: ["**/*.spl", "**/*.md", "**/test/doctest/**/*.sdt"],
+            exclude_patterns: ["**/target/**", "**/build/**"]
+        )
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    fn add_search_path(self, path: text) -> DiscoveryConfig:
+        """Add a search path to the configuration.
+
+        Args:
+            path: Path to add
+
+        Returns:
+            New DiscoveryConfig with added path
+
+        Example:
+            config.add_search_path("tests/")
+        """
+        var new_paths = self.search_paths.clone()
+        new_paths.push(path)
+        return DiscoveryConfig(
+            search_paths: new_paths,
+            include_patterns: self.include_patterns,
+            exclude_patterns: self.exclude_patterns
+        )
+
+    fn add_include_pattern(self, pattern: text) -> DiscoveryConfig:
+        """Add an include pattern to the configuration.
+
+        Args:
+            pattern: Pattern to add (e.g., "**/*.txt")
+
+        Returns:
+            New DiscoveryConfig with added pattern
+
+        Example:
+            config.add_include_pattern("**/*.rst")
+        """
+        var new_patterns = self.include_patterns.clone()
+        new_patterns.push(pattern)
+        return DiscoveryConfig(
+            search_paths: self.search_paths,
+            include_patterns: new_patterns,
+            exclude_patterns: self.exclude_patterns
+        )
+
+    fn add_exclude_pattern(self, pattern: text) -> DiscoveryConfig:
+        """Add an exclude pattern to the configuration.
+
+        Args:
+            pattern: Pattern to add (e.g., "**/temp/**")
+
+        Returns:
+            New DiscoveryConfig with added pattern
+
+        Example:
+            config.add_exclude_pattern("**/cache/**")
+        """
+        var new_patterns = self.exclude_patterns.clone()
+        new_patterns.push(pattern)
+        return DiscoveryConfig(
+            search_paths: self.search_paths,
+            include_patterns: self.include_patterns,
+            exclude_patterns: new_patterns
+        )
+
+    fn get_search_paths(self) -> List<text>:
+        """Get search paths.
+
+        Returns:
+            List of search paths
+
+        Example:
+            config.get_search_paths()  # → ["lib/", "src/", "doc/"]
+        """
+        return self.search_paths
+
+    fn get_include_patterns(self) -> List<text>:
+        """Get include patterns.
+
+        Returns:
+            List of include patterns
+
+        Example:
+            config.get_include_patterns()  # → ["**/*.spl", "**/*.md"]
+        """
+        return self.include_patterns
+
+    fn get_exclude_patterns(self) -> List<text>:
+        """Get exclude patterns.
+
+        Returns:
+            List of exclude patterns
+
+        Example:
+            config.get_exclude_patterns()  # → ["**/target/**", "**/build/**"]
+        """
+        return self.exclude_patterns
+
+    fn has_search_path(self, path: text) -> bool:
+        """Check if a search path is configured.
+
+        Args:
+            path: Path to check
+
+        Returns:
+            true if path is in search paths
+
+        Example:
+            config.has_search_path("src/")  # → true
+        """
+        return self.search_paths.contains(path)
+
+    fn summary(self) -> text:
+        """Get configuration summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            config.summary()
+            # → "DiscoveryConfig: 3 search paths, 3 include patterns, 2 exclude patterns"
+        """
+        val search_count = self.search_paths.len()
+        val include_count = self.include_patterns.len()
+        val exclude_count = self.exclude_patterns.len()
+        return "DiscoveryConfig: {search_count} search paths, {include_count} include patterns, {exclude_count} exclude patterns"
+
+// ============================================================================
+// FFI Declarations for File I/O
+// ============================================================================
+// These are provided by the runtime (src/runtime/src/value/doctest_io.rs)
+
+extern fn doctest_read_file(path: text) -> text
+extern fn doctest_path_exists(path: text) -> bool
+extern fn doctest_is_file(path: text) -> bool
+extern fn doctest_is_dir(path: text) -> bool
+extern fn doctest_walk_directory(root: text, include_patterns: List<text>, exclude_patterns: List<text>) -> List<text>
+extern fn doctest_path_has_extension(path: text, ext: text) -> bool
+extern fn doctest_path_contains(path: text, pattern: text) -> bool
+
+// ============================================================================
+// Discovery Functions
+// ============================================================================
+
+/// Discover all doctests in configured paths
+fn discover_all(config: DiscoveryConfig = DiscoveryConfig.default()) -> List<DoctestExample>:
+    examples = []
+    
+    for search_path in config.search_paths:
+        if not path_exists(search_path):
+            continue
+        
+        # Walk directory tree
+        files = walk_directory(search_path, config.include_patterns, config.exclude_patterns)
+        
+        for file_path in files:
+            # Apply exclude patterns
+            if should_exclude(file_path, config.exclude_patterns):
+                continue
+            
+            # Apply include patterns
+            if not matches_any_pattern(file_path, config.include_patterns):
+                continue
+            
+            file_examples = discover_file(file_path)
+            examples.extend(file_examples)
+    
+    return examples
+
+/// Discover doctests from a single file
+fn discover_file(path: text) -> List<DoctestExample>:
+    if path.ends_with(".spl"):
+        return parse_spl_file(path)
+    elif path.ends_with(".sdt"):
+        return parse_sdt_file(path)
+    elif path.ends_with(".md"):
+        return parse_markdown_file(path)
+    else:
+        return []
+
+/// Parse doctests from Markdown file
+fn parse_markdown_file(path: text) -> List<DoctestExample>:
+    content = read_file(path)
+    examples = []
+    
+    # State machine to extract ```simple-doctest blocks
+    lines = content.split("\n")
+    in_block = False
+    current_block = []
+    block_start_line = 0
+    
+    for i, line in lines.enumerate():
+        if line.starts_with("```simple-doctest"):
+            in_block = True
+            block_start_line = i + 2  # Line after fence
+            current_block = []
+        elif line.starts_with("```") and in_block:
+            # End of code block
+            in_block = False
+            block_content = current_block.join("\n")
+            block_examples = parse_docstring(block_content, source: path)
+            
+            # Adjust line numbers
+            for ex in block_examples:
+                ex.location.line += block_start_line
+            
+            examples.extend(block_examples)
+            current_block = []
+        elif in_block:
+            current_block.push(line)
+    
+    return examples
+
+// ============================================================================
+// Helper Functions
+// ============================================================================
+
+/// Walk directory tree and return matching files
+fn walk_directory(root: text, include_patterns: List<text>, exclude_patterns: List<text>) -> List<text>:
+    return doctest_walk_directory(root, include_patterns, exclude_patterns)
+
+/// Check if path exists
+fn exist(path: text) -> bool:
+    return doctest_path_exists(path)
+
+/// Read file contents
+fn read_file(path: text) -> text:
+    return doctest_read_file(path)
+
+/// Check if path should be excluded
+fn should_exclude(path: text, exclude_patterns: List<text>) -> bool:
+    for pattern in exclude_patterns:
+        # Simple pattern matching - check if path contains the pattern
+        # Remove leading/trailing ** and *
+        clean_pattern = pattern.replace("**/", "").replace("/**", "").replace("**", "")
+        if doctest_path_contains(path, clean_pattern):
+            return True
+    return False
+
+/// Check if path matches any include pattern
+fn matches_any_pattern(path: text, include_patterns: List<text>) -> bool:
+    for pattern in include_patterns:
+        # Simple pattern matching for extensions
+        if pattern.starts_with("**/*"):
+            # Extract extension like "**/*.spl" -> ".spl"
+            ext = pattern[4:]  # Skip "**/*"
+            if doctest_path_has_extension(path, ext):
+                return True
+        elif pattern.contains("*"):
+            # Other wildcard patterns - for now, just check if path contains non-wildcard parts
+            clean_pattern = pattern.replace("**/", "").replace("/**", "").replace("**", "").replace("*", "")
+            if clean_pattern.len > 0 and doctest_path_contains(path, clean_pattern):
+                return True
+        else:
+            # Exact match
+            if path == pattern or doctest_path_contains(path, pattern):
+                return True
+    return False
+

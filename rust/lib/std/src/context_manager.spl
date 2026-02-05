@@ -1,0 +1,184 @@
+# ContextManager trait for with-statement support
+# Feature #1092: ContextManager trait
+#
+# Provides a standard interface for resources that need setup/teardown
+# Compatible with Python-style context managers
+
+# Extern declarations for FFI
+extern fn rt_time_now_seconds() -> f64
+extern fn rt_file_open(path: text, mode: i32) -> i32
+extern fn rt_file_close(fd: i32)
+
+trait ContextManager:
+    # Protocol for context management (with statement support).
+    #
+    # Implementing this trait allows objects to be used in with statements:
+    # with open("file.txt") as f:
+    #     # f.__enter__() called here
+    #     data = f.read()
+    # # f.__exit__(None, None, None) called here automatically
+
+    fn __enter__(self) -> Any:
+        # Called when entering the with block.
+        # Returns the resource to be bound to the target variable.
+        pass
+
+    fn __exit__(self, exc_type: Option<Type>, exc_value: Option<Any>, traceback: Option<Any>) -> bool:
+        # Called when exiting the with block.
+        #
+        # Parameters:
+        # - exc_type: The exception type if an exception occurred, None otherwise
+        # - exc_value: The exception value if an exception occurred, None otherwise
+        # - traceback: The traceback if an exception occurred, None otherwise
+        #
+        # Returns:
+        # - True to suppress the exception (mark it as handled)
+        # - False to propagate the exception
+        pass
+
+
+# Example: File context manager
+class FileContext:
+    # File context manager that automatically closes files.
+    #
+    # Example:
+    # with FileContext.open("data.txt") as f:
+    #     content = f.read()
+    # # File is automatically closed here
+
+    file_handle: Any
+    path: text
+    mode: text
+    closed: bool
+
+impl FileContext:
+    static fn open(path: text, mode: text = "r") -> FileContext:
+        return FileContext { path: path, mode: mode, closed: false, file_handle: nil }
+
+    fn __enter__() -> Any:
+        # Open the file and return the handle
+        self.file_handle = open_file(self.path, self.mode)
+        return self.file_handle
+
+    fn __exit__(exc_type: Option<Type>, exc_value: Option<Any>, traceback: Option<Any>) -> bool:
+        # Always close the file, even if an exception occurred
+        if not self.closed:
+            close_file(self.file_handle)
+            self.closed = true
+        # Don't suppress exceptions - return false
+        return false
+
+
+# Example: Lock context manager
+class LockContext:
+    # Lock context manager that automatically acquires and releases locks.
+    #
+    # Example:
+    # with LockContext(my_lock) as lock:
+    #     # Critical section - lock is held
+    #     shared_data.update()
+    # # Lock is automatically released here
+
+    lock: Any
+    acquired: bool
+
+impl LockContext:
+    static fn new(lock: Any) -> LockContext:
+        return LockContext { lock: lock, acquired: false }
+
+    fn __enter__() -> Any:
+        self.lock.acquire()
+        self.acquired = true
+        return self.lock
+
+    fn __exit__(exc_type: Option<Type>, exc_value: Option<Any>, traceback: Option<Any>) -> bool:
+        if self.acquired:
+            self.lock.release()
+            self.acquired = false
+        return false
+
+
+# Example: Timer context manager
+class TimerContext:
+    # Timer context manager that measures execution time.
+    #
+    # Example:
+    # with TimerContext("database query") as timer:
+    #     result = db.query("SELECT * FROM users")
+    # # Prints: "database query took 0.123s"
+
+    name: text
+    start_time: f64
+    end_time: f64
+
+impl TimerContext:
+    static fn new(name: text) -> TimerContext:
+        return TimerContext { name: name, start_time: 0.0, end_time: 0.0 }
+
+    fn __enter__() -> TimerContext:
+        self.start_time = time_now()
+        return self
+
+    fn __exit__(exc_type: Option<Type>, exc_value: Option<Any>, traceback: Option<Any>) -> bool:
+        self.end_time = time_now()
+        val elapsed = self.end_time - self.start_time
+        println(self.name + " took " + elapsed.to_string() + "s")
+        return false
+
+    fn elapsed() -> f64:
+        if self.end_time > 0.0:
+            return self.end_time - self.start_time
+        else:
+            return time_now() - self.start_time
+
+
+# Example: Suppress exceptions context manager
+class suppress:
+    # Context manager that suppresses specified exceptions.
+    #
+    # Example:
+    # with suppress(ValueError, KeyError):
+    #     # These exceptions will be silently caught
+    #     risky_operation()
+
+    exceptions: List<Type>
+
+impl suppress:
+    static fn new(exceptions: List<Type>) -> suppress:
+        return suppress { exceptions: exceptions }
+
+    fn __enter__() -> suppress:
+        return self
+
+    fn __exit__(exc_type: Option<Type>, exc_value: Option<Any>, traceback: Option<Any>) -> bool:
+        # Suppress exception if it matches any of our exception types
+        match exc_type:
+            case Some(et):
+                for exception_class in self.exceptions:
+                    if et == exception_class:
+                        return true  # Suppress this exception
+                return false  # Don't suppress
+            case nil:
+                return false  # No exception to suppress
+
+
+# Helper functions for file operations
+fn open_file(path: text, mode: text) -> Any:
+    # Convert mode string to integer
+    # "r" = 0 (ReadOnly), "rw" = 1 (ReadWrite), "w" = 2 (WriteOnly)
+    val mode_int = match mode:
+        "r" => 0
+        "rw" => 1
+        "w" => 2
+        _ => 0  # Default to read-only
+    val fd = rt_file_open(path, mode_int)
+    return fd
+
+fn close_file(handle: Any):
+    # Handle is expected to be a file descriptor (i32)
+    rt_file_close(handle as i32)
+
+fn time_now() -> f64:
+    return rt_time_now_seconds()
+
+export time_now

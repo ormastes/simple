@@ -1,0 +1,383 @@
+# Async Resource Manager
+#
+# Parallel resource loading: textures, fonts, images with FFI integration.
+
+use core.*
+use concurrency.*
+use ui.gui.vulkan_ffi.*
+
+use types.{Image, Buffer, DrawList, DirtyRegion, Vertex}
+
+export AsyncResourceManager, AsyncBufferManager, AsyncTextRenderer
+
+# ============================================================================
+# Async Resource Manager
+# ============================================================================
+
+struct AsyncResourceManager:
+    device_handle: u64
+    textures: Dict<u64, u64>  # texture_id -> image_handle
+    font_atlas: Option<u64>
+    loading_cache: Dict<text, Future<Result<u64, text>>>
+    next_texture_id: u64
+
+impl AsyncResourceManager:
+    fn new(device: &VulkanDevice) -> AsyncResourceManager:
+        return AsyncResourceManager {device_handle: device.handle, textures: Dict.new(), font_atlas: None, loading_cache: Dict.new(), next_texture_id: 1}
+
+    # Load texture asynchronously
+    async fn load_texture_async(self, path: &str) -> Future<Result<u64, text>>:
+        # Check if already loading
+        if val Some(future) = self.loading_cache.get(path):
+            return await future
+
+        val device_h = self.device_handle
+
+        # Start loading
+        val load_future = async {
+            # Read file asynchronously using fs module
+            val image_data = match fs.read_bytes(path):
+                case Ok(data): data
+                case Err(e): return Err("Failed to read file: {e}")
+
+            # Decode image in blocking context (image decoding is CPU-intensive)
+            val decoded = await spawn_blocking(|| {
+                decode_png_simple(&image_data)
+            })
+
+            match decoded:
+                case Err(e): return Err("Failed to decode image: {e}")
+                case Ok(img):
+                    # Create GPU image using FFI
+                    # Format 37 = VK_FORMAT_R8G8B8A8_UNORM
+                    # Usage 0 = texture
+                    val image_handle = rt_vk_image_create_2d(
+                        device_h,
+                        img.width,
+                        img.height,
+                        37,  # VK_FORMAT_R8G8B8A8_UNORM
+                        0    # texture usage
+                    )
+
+                    if image_handle == 0:
+                        return Err("Failed to create GPU image")
+
+                    # Upload pixel data
+                    val upload_result = rt_vk_image_upload(
+                        image_handle,
+                        img.data.as_ptr(),
+                        img.data.len() as u64
+                    )
+
+                    if upload_result != 0:
+                        rt_vk_image_free(image_handle)
+                        return Err("Failed to upload image data")
+
+                    # Cache and return
+                    val texture_id = self.next_texture_id
+                    self.next_texture_id = self.next_texture_id + 1
+                    self.textures.set(texture_id, image_handle)
+
+                    return Ok(texture_id)
+        }
+
+        # Cache the future
+        self.loading_cache.set(path.to_string(), load_future)
+
+        return await load_future
+
+    # Preload all resources in parallel
+    async fn preload_resources_async(self, tree: &ElementTree) -> Future<()>:
+        var load_futures: Array<Future<Result<u64, text>>> = []
+
+        for elem in tree.iter():
+            if val Some(src) = elem.attrs.get("src"):
+                if not self.is_loaded(src):
+                    load_futures.push(self.load_texture_async(src))
+
+        val results = await Future.all(load_futures)
+
+        for result in results:
+            match result:
+                case Err(e):
+                    print "Failed to load resource: {e}"
+                case Ok(_):
+                    pass
+
+        return Future.ready(())
+
+    fn is_loaded(path: &str) -> bool:
+        return self.loading_cache.contains_key(path)
+
+    fn get_texture_handle(texture_id: u64) -> Option<u64>:
+        return self.textures.get(texture_id)
+
+    fn free_all():
+        for (_id, handle) in self.textures:
+            rt_vk_image_free(handle)
+        self.textures.clear()
+        if val Some(atlas) = self.font_atlas:
+            rt_vk_image_free(atlas)
+            self.font_atlas = None
+
+# Simple PNG decoder (minimal implementation)
+struct DecodedImage:
+    width: u32
+    height: u32
+    data: Array<u8>
+
+fn decode_png_simple(data: &Array<u8>) -> Result<DecodedImage, text>:
+    # Basic PNG validation
+    if data.len() < 8:
+        return Err("Invalid PNG: too short")
+
+    # Check PNG signature
+    if data[0] != 0x89 or data[1] != 0x50 or data[2] != 0x4E or data[3] != 0x47:
+        return Err("Invalid PNG signature")
+
+    # For now, return a placeholder 1x1 white texture
+    # Real implementation would parse PNG chunks (IHDR, IDAT, etc.)
+    return Ok(DecodedImage {
+        width: 1,
+        height: 1,
+        data: [255, 255, 255, 255]  # White pixel
+    })
+
+# ============================================================================
+# Async Buffer Manager
+# ============================================================================
+
+struct AsyncBufferManager:
+    device_handle: u64
+    vertex_buffers: Array<u64>
+    index_buffers: Array<u64>
+    uniform_buffers: Array<u64>
+
+impl AsyncBufferManager:
+    fn new(device: &VulkanDevice) -> AsyncBufferManager:
+        var vb: Array<u64> = []
+        var ib: Array<u64> = []
+        var ub: Array<u64> = []
+
+        # Pre-allocate buffers for triple buffering
+        for i in 0..3:
+            val vertex_buf = rt_vk_buffer_alloc(device.handle, 65536)
+            vb.push(vertex_buf)
+            val index_buf = rt_vk_buffer_alloc(device.handle, 16384)
+            ib.push(index_buf)
+            val uniform_buf = rt_vk_buffer_alloc(device.handle, 256)
+            ub.push(uniform_buf)
+
+        return AsyncBufferManager {
+            device_handle: device.handle,
+            vertex_buffers: vb,
+            index_buffers: ib,
+            uniform_buffers: ub
+        }
+
+    async fn upload_draw_list_async(self, draw_list: &DrawList, frame_index: usize)
+        -> Future<()>:
+        val idx = frame_index % 3
+
+        # Upload vertex and index data in parallel
+        val vertex_upload = async {
+            if draw_list.vertices.len() > 0:
+                val vb = self.vertex_buffers[idx]
+                if vb != 0:
+                    val vertex_data = vertices_to_bytes(&draw_list.vertices)
+                    rt_vk_buffer_upload(vb, vertex_data.as_ptr(), vertex_data.len() as u64)
+            ()
+        }
+
+        val index_upload = async {
+            if draw_list.indices.len() > 0:
+                val ib = self.index_buffers[idx]
+                if ib != 0:
+                    val index_data = indices_to_bytes(&draw_list.indices)
+                    rt_vk_buffer_upload(ib, index_data.as_ptr(), index_data.len() as u64)
+            ()
+        }
+
+        await Future.join(vertex_upload, index_upload)
+
+        return Future.ready(())
+
+    async fn update_partial_async(self, draw_list: &DrawList, regions: &Array<DirtyRegion>)
+        -> Future<()>:
+        # For partial updates, we'd calculate byte ranges and upload only changed regions
+        # For now, fall back to full upload
+        await self.upload_draw_list_async(draw_list, 0)
+        return Future.ready(())
+
+    fn get_vertex_buffer(frame_index: usize) -> u64:
+        return self.vertex_buffers[frame_index % 3]
+
+    fn get_index_buffer(frame_index: usize) -> u64:
+        return self.index_buffers[frame_index % 3]
+
+    fn get_uniform_buffer(frame_index: usize) -> u64:
+        return self.uniform_buffers[frame_index % 3]
+
+    fn free_all():
+        for vb in self.vertex_buffers:
+            if vb != 0:
+                rt_vk_buffer_free(vb)
+        for ib in self.index_buffers:
+            if ib != 0:
+                rt_vk_buffer_free(ib)
+        for ub in self.uniform_buffers:
+            if ub != 0:
+                rt_vk_buffer_free(ub)
+        self.vertex_buffers.clear()
+        self.index_buffers.clear()
+        self.uniform_buffers.clear()
+
+# Helper: Convert vertices to bytes
+fn vertices_to_bytes(vertices: &Array<Vertex>) -> Array<u8>:
+    val bytes_per_vertex: usize = 20
+    var data = Array.with_capacity(vertices.len() * bytes_per_vertex)
+
+    for vertex in vertices:
+        data.extend(&f32_to_bytes(vertex.position.0))
+        data.extend(&f32_to_bytes(vertex.position.1))
+        data.extend(&f32_to_bytes(vertex.uv.0))
+        data.extend(&f32_to_bytes(vertex.uv.1))
+        data.extend(&u32_to_bytes(vertex.color))
+
+    return data
+
+# Helper: Convert indices to bytes
+fn indices_to_bytes(indices: &Array<u32>) -> Array<u8>:
+    var data = Array.with_capacity(indices.len() * 4)
+    for index in indices:
+        data.extend(&u32_to_bytes(*index))
+    return data
+
+fn f32_to_bytes(value: f32) -> Array<u8>:
+    val bits = value.to_bits()
+    return u32_to_bytes(bits)
+
+fn u32_to_bytes(value: u32) -> Array<u8>:
+    var bytes = Array.with_capacity(4)
+    bytes.push((value & 0xFF) as u8)
+    bytes.push(((value >> 8) & 0xFF) as u8)
+    bytes.push(((value >> 16) & 0xFF) as u8)
+    bytes.push(((value >> 24) & 0xFF) as u8)
+    return bytes
+
+# ============================================================================
+# Async Text Renderer
+# ============================================================================
+
+struct AsyncTextRenderer:
+    device_handle: u64
+    font_atlas: Option<u64>
+    sampler: Option<u64>
+
+impl AsyncTextRenderer:
+    fn new(device: &VulkanDevice) -> AsyncTextRenderer:
+        return AsyncTextRenderer {
+            device_handle: device.handle,
+            font_atlas: None,
+            sampler: None
+        }
+
+    async fn load_default_font_async(self) -> Future<Result<(), text>>:
+        # Create a simple 16x16 character bitmap font atlas (256 chars)
+        # Each character is 8x16 pixels -> total atlas is 128x256 pixels
+
+        val atlas_width: u32 = 128
+        val atlas_height: u32 = 256
+
+        # Create GPU image for font atlas
+        # Format 37 = VK_FORMAT_R8G8B8A8_UNORM
+        # Usage 0 = texture
+        val atlas_handle = rt_vk_image_create_2d(
+            self.device_handle,
+            atlas_width,
+            atlas_height,
+            37,
+            0
+        )
+
+        if atlas_handle == 0:
+            return Future.ready(Err("Failed to create font atlas image"))
+
+        # Generate simple bitmap font data (white glyphs on black background)
+        val atlas_data = generate_default_font_atlas(atlas_width, atlas_height)
+
+        val upload_result = rt_vk_image_upload(
+            atlas_handle,
+            atlas_data.as_ptr(),
+            atlas_data.len() as u64
+        )
+
+        if upload_result != 0:
+            rt_vk_image_free(atlas_handle)
+            return Future.ready(Err("Failed to upload font atlas"))
+
+        self.font_atlas = Some(atlas_handle)
+
+        # Create sampler (linear filtering, clamp to edge)
+        val sampler_handle = rt_vk_sampler_create(
+            self.device_handle,
+            1,  # linear filter
+            2   # clamp to edge
+        )
+
+        if sampler_handle != 0:
+            self.sampler = Some(sampler_handle)
+
+        return Future.ready(Ok(()))
+
+    fn get_font_atlas() -> Option<u64>:
+        return self.font_atlas
+
+    fn get_sampler() -> Option<u64>:
+        return self.sampler
+
+    fn free():
+        if val Some(atlas) = self.font_atlas:
+            rt_vk_image_free(atlas)
+            self.font_atlas = None
+        if val Some(samp) = self.sampler:
+            rt_vk_sampler_free(samp)
+            self.sampler = None
+
+# Generate a simple default font atlas (placeholder)
+fn generate_default_font_atlas(width: u32, height: u32) -> Array<u8>:
+    val size = (width * height * 4) as usize
+    var data = Array.with_capacity(size)
+
+    # Initialize with black (transparent)
+    for i in 0..size:
+        data.push(0)
+
+    # For a real implementation, this would render each ASCII character
+    # into its corresponding grid cell using a bitmap font
+    # For now, we just create a placeholder that works
+
+    # Draw simple pixel patterns for common characters
+    # This is a minimal placeholder - real implementation would use font rendering
+    for char_code in 32..127:
+        val col = char_code % 16
+        val row = char_code / 16
+        val base_x = col * 8
+        val base_y = row * 16
+
+        # Draw a simple cross pattern for each character
+        for y in 0..16:
+            for x in 0..8:
+                val px = base_x + x
+                val py = base_y + y
+                val idx = ((py * width + px) * 4) as usize
+
+                # Simple pattern: draw character outline
+                if x == 0 or x == 7 or y == 0 or y == 15:
+                    if idx + 3 < data.len():
+                        data[idx] = 255      # R
+                        data[idx + 1] = 255  # G
+                        data[idx + 2] = 255  # B
+                        data[idx + 3] = 255  # A
+
+    return data

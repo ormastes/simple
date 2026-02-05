@@ -1,0 +1,358 @@
+# @pending
+"""
+Async Embedded Runtime Tests
+Feature: Lightweight async runtime for embedded systems
+Category: Runtime
+Status: In Progress
+
+Tests for the embedded async runtime including fixed-capacity
+JoinSet, FuturesUnordered, and cooperative scheduler.
+"""
+
+use std.async_core.*
+use std.async_embedded.*
+
+# ============================================================================
+# EmbeddedFuture Tests
+# ============================================================================
+
+describe "EmbeddedFuture":
+    """Tests for stack-based futures."""
+
+    it "creates ready future":
+        val f = EmbeddedFuture<i64>.ready(42)
+        expect f.is_ready() == true
+        match f.poll():
+            case Poll.Ready(v): expect v == 42
+            case Poll.Pending: expect false
+
+    it "creates pending future":
+        val f = EmbeddedFuture<i64>.pending()
+        expect f.is_ready() == false
+        match f.poll():
+            case Poll.Ready(_): expect false
+            case Poll.Pending: expect true
+
+    it "completes pending future":
+        var f = EmbeddedFuture<i64>.pending()
+        expect f.is_ready() == false
+
+        f.complete(100)
+        expect f.is_ready() == true
+        match f.poll():
+            case Poll.Ready(v): expect v == 100
+            case Poll.Pending: expect false
+
+# ============================================================================
+# EmbeddedTaskHandle Tests
+# ============================================================================
+
+describe "EmbeddedTaskHandle":
+    """Tests for task handle with is_finished()."""
+
+    it "reports finished state":
+        var handle = EmbeddedTaskHandle<i64>(
+            task_id: 1,
+            state: TaskState.Completed,
+            result: Some(42),
+            priority: Priority.Normal
+        )
+        expect handle.is_finished() == true
+
+    it "reports unfinished state":
+        var handle = EmbeddedTaskHandle<i64>(
+            task_id: 1,
+            state: TaskState.Running,
+            result: nil,
+            priority: Priority.Normal
+        )
+        expect handle.is_finished() == false
+
+    it "try_join returns result when finished":
+        var handle = EmbeddedTaskHandle<i64>(
+            task_id: 1,
+            state: TaskState.Completed,
+            result: Some(99),
+            priority: Priority.Normal
+        )
+        match handle.try_join():
+            case Some(v): expect v == 99
+            case None: expect false
+
+    it "try_join returns nil when not finished":
+        var handle = EmbeddedTaskHandle<i64>(
+            task_id: 1,
+            state: TaskState.Pending,
+            result: nil,
+            priority: Priority.Normal
+        )
+        expect handle.try_join().? == false
+
+# ============================================================================
+# EmbeddedJoinSet Tests
+# ============================================================================
+
+describe "EmbeddedJoinSet":
+    """Tests for fixed-capacity task group."""
+
+    it "creates empty set":
+        val set = EmbeddedJoinSet<i64>.new()
+        expect set.is_empty() == true
+        expect set.len() == 0
+
+    it "tracks spawned tasks":
+        var set = EmbeddedJoinSet<i64>.new()
+        val result = set.spawn_with_id(1)
+        match result:
+            case Ok(idx): expect idx == 0
+            case Err(_): expect false
+
+        expect set.len() == 1
+        expect set.is_empty() == false
+
+    it "returns completed results":
+        var set = EmbeddedJoinSet<i64>.new()
+        set.spawn_with_id(1)
+        set.spawn_with_id(2)
+
+        # Mark first as completed
+        set.mark_completed(0, 100)
+
+        match set.try_join_next():
+            case Some((id, val)):
+                expect id == 1
+                expect val == 100
+            case None:
+                expect false
+
+    it "respects capacity limit":
+        var set = EmbeddedJoinSet<i64>.new()
+
+        # Fill to capacity
+        for i in 0..MAX_FUTURES:
+            set.spawn_with_id(i)
+
+        # Should fail on overflow
+        match set.spawn_with_id(9999):
+            case Err(AsyncError.CapacityExceeded): expect true
+            case _: expect false
+
+    it "tracks pending count":
+        var set = EmbeddedJoinSet<i64>.new()
+        set.spawn_with_id(1)
+        set.spawn_with_id(2)
+        set.spawn_with_id(3)
+
+        expect set.pending_count() == 3
+
+        set.mark_completed(0, 10)
+        expect set.pending_count() == 2
+
+        set.mark_completed(1, 20)
+        set.mark_completed(2, 30)
+        expect set.pending_count() == 0
+        expect set.all_completed() == true
+
+# ============================================================================
+# EmbeddedFuturesUnordered Tests
+# ============================================================================
+
+describe "EmbeddedFuturesUnordered":
+    """Tests for fixed-capacity future stream."""
+
+    it "creates empty collection":
+        val futs = EmbeddedFuturesUnordered<i64>.new()
+        expect futs.is_empty() == true
+        expect futs.len() == 0
+
+    it "pushes futures":
+        var futs = EmbeddedFuturesUnordered<i64>.new()
+        val f = EmbeddedFuture<i64>.ready(42)
+
+        match futs.push(f):
+            case Ok(idx): expect idx == 0
+            case Err(_): expect false
+
+        expect futs.len() == 1
+
+    it "returns ready futures":
+        var futs = EmbeddedFuturesUnordered<i64>.new()
+        futs.push(EmbeddedFuture<i64>.ready(10))
+        futs.push(EmbeddedFuture<i64>.ready(20))
+
+        match futs.try_next():
+            case Some(v): expect v == 10 or v == 20
+            case None: expect false
+
+    it "skips pending futures":
+        var futs = EmbeddedFuturesUnordered<i64>.new()
+        futs.push(EmbeddedFuture<i64>.pending())
+        futs.push(EmbeddedFuture<i64>.ready(42))
+
+        match futs.try_next():
+            case Some(v): expect v == 42
+            case None: expect false
+
+    it "respects capacity":
+        var futs = EmbeddedFuturesUnordered<i64>.new()
+
+        for i in 0..MAX_FUTURES:
+            futs.push(EmbeddedFuture<i64>.pending())
+
+        match futs.push(EmbeddedFuture<i64>.pending()):
+            case Err(AsyncError.CapacityExceeded): expect true
+            case _: expect false
+
+# ============================================================================
+# EmbeddedScheduler Tests
+# ============================================================================
+
+describe "EmbeddedScheduler":
+    """Tests for cooperative scheduler."""
+
+    it "creates empty scheduler":
+        val sched = EmbeddedScheduler.new()
+        expect sched.has_runnable() == false
+        expect sched.is_idle() == true
+
+    it "spawns tasks":
+        var sched = EmbeddedScheduler.new()
+
+        match sched.spawn_default(\: Poll.Ready(())):
+            case Ok(id): expect id == 0
+            case Err(_): expect false
+
+        expect sched.has_runnable() == true
+        expect sched.task_count() == 1
+
+    it "runs tasks to completion":
+        var sched = EmbeddedScheduler.new()
+        var counter = 0
+
+        sched.spawn_default(\:
+            counter = counter + 1
+            Poll.Ready(())
+        )
+
+        sched.run()
+        expect sched.is_idle() == true
+
+    it "respects priority":
+        var sched = EmbeddedScheduler.new()
+        var order: [i64] = []
+
+        sched.spawn(Priority.Low, \:
+            order = order.push(3)
+            Poll.Ready(())
+        )
+        sched.spawn(Priority.High, \:
+            order = order.push(1)
+            Poll.Ready(())
+        )
+        sched.spawn(Priority.Normal, \:
+            order = order.push(2)
+            Poll.Ready(())
+        )
+
+        sched.run()
+
+        # High priority should run first
+        expect order[0] == 1
+
+    it "handles cooperative yield":
+        var sched = EmbeddedScheduler.new()
+        var iterations = 0
+
+        sched.spawn_default(\:
+            iterations = iterations + 1
+            if iterations < 3:
+                Poll.Pending  # Yield
+            else:
+                Poll.Ready(())
+        )
+
+        sched.run_n(5)
+        # Task should have run multiple times
+
+    it "respects task capacity":
+        var sched = EmbeddedScheduler.new()
+
+        for i in 0..MAX_TASKS:
+            sched.spawn_default(\: Poll.Ready(()))
+
+        match sched.spawn_default(\: Poll.Ready(())):
+            case Err(AsyncError.CapacityExceeded): expect true
+            case _: expect false
+
+# ============================================================================
+# Integration Tests
+# ============================================================================
+
+describe "Embedded Integration":
+    """Integration tests for embedded runtime."""
+
+    it "runs parallel tasks with JoinSet":
+        var sched = EmbeddedScheduler.new()
+        var set = EmbeddedJoinSet<i64>.new()
+
+        # Simulate spawning tasks
+        for i in 0..5:
+            set.spawn_with_id(i)
+
+        # Mark all completed
+        for i in 0..5:
+            set.mark_completed(i, i * 10)
+
+        # Collect results
+        var sum: i64 = 0
+        while val Some((id, val)) = set.try_join_next():
+            sum = sum + val
+
+        expect sum == 0 + 10 + 20 + 30 + 40
+
+    it "streams results with FuturesUnordered":
+        var futs = EmbeddedFuturesUnordered<i64>.new()
+
+        futs.push(EmbeddedFuture<i64>.ready(1))
+        futs.push(EmbeddedFuture<i64>.ready(2))
+        futs.push(EmbeddedFuture<i64>.ready(3))
+
+        var count = 0
+        while futs.try_next().?:
+            count = count + 1
+
+        expect count == 3
+
+    it "handles mixed ready and pending":
+        var futs = EmbeddedFuturesUnordered<i64>.new()
+
+        futs.push(EmbeddedFuture<i64>.pending())
+        futs.push(EmbeddedFuture<i64>.ready(42))
+        futs.push(EmbeddedFuture<i64>.pending())
+        futs.push(EmbeddedFuture<i64>.ready(99))
+
+        var results: [i64] = []
+        while val Some(v) = futs.try_next():
+            results = results.push(v)
+
+        expect results.len() == 2
+        expect results.contains(42)
+        expect results.contains(99)
+
+# ============================================================================
+# Memory/Capacity Tests
+# ============================================================================
+
+describe "Embedded Memory":
+    """Tests for memory constraints."""
+
+    it "uses fixed capacity":
+        expect MAX_TASKS > 0
+        expect MAX_FUTURES > 0
+
+    it "reports capacity":
+        val set = EmbeddedJoinSet<i64>.new()
+        expect set.capacity() == MAX_FUTURES
+
+        val futs = EmbeddedFuturesUnordered<i64>.new()
+        expect futs.capacity() == MAX_FUTURES

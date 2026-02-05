@@ -1,0 +1,296 @@
+# Lean Contract Translation
+#
+# Translates contracts to Lean propositions and theorems.
+
+use verification.lean.emitter as emit
+
+# Contract clause as Lean proposition
+class LeanProp:
+    name: text
+    params: List<(text, text)>  # (name, type)
+    body: text
+
+    static fn create(name: text, params: List<(text, text)>, body: text) -> LeanProp:
+        LeanProp(name: name, params: params, body: body)
+
+    fn to_lean() -> text:
+        var param_strs: List<text> = []
+        for (n, t) in self.params:
+            param_strs = param_strs + ["({n} : {t})"]
+        val params_str = param_strs.join(" ")
+
+        var sig = "def {self.name}"
+        if self.params.len() > 0:
+            sig = sig + " {params_str}"
+        sig = sig + " : Prop :=\n  {self.body}"
+        sig
+
+    fn emit_to(emitter: emit.LeanEmitter):
+        emitter.emit_prop(self.name, self.params[0][1], self.body)
+
+# Theorem from contract
+class LeanTheorem:
+    name: text
+    params: List<(text, text)>
+    proposition: text
+    proof: text
+
+    static fn create(name: text, params: List<(text, text)>, proposition: text, proof: text) -> LeanTheorem:
+        LeanTheorem(name: name, params: params, proposition: proposition, proof: proof)
+
+    static fn new(name: text, proposition: text) -> LeanTheorem:
+        LeanTheorem(name: name, params: [], proposition: proposition, proof: "sorry")
+
+    me add_param(pname: text, ptype: text) -> LeanTheorem:
+        self.params = self.params + [(pname, ptype)]
+        self
+
+    me with_proof(proof: text) -> LeanTheorem:
+        self.proof = proof
+        self
+
+    fn to_lean() -> text:
+        var param_strs: List<text> = []
+        for (n, t) in self.params:
+            param_strs = param_strs + ["({n} : {t})"]
+        val params_str = param_strs.join(" ")
+
+        var sig = "theorem {self.name}"
+        if self.params.len() > 0:
+            sig = sig + " {params_str}"
+        sig = sig + " :\n  {self.proposition} := by\n  {self.proof}"
+        sig
+
+    fn emit_to(emitter: emit.LeanEmitter, use_sorry: bool):
+        val proof_opt = if self.proof == "sorry":
+            nil
+        else:
+            Some(self.proof)
+        emitter.emit_theorem_data(self.name, self.params, self.proposition, proof_opt, use_sorry)
+
+# Theorem with implicit parameters
+class LeanTheoremImplicit:
+    name: text
+    implicit_params: List<(text, text)>
+    explicit_params: List<(text, text)>
+    proposition: text
+    proof_lines: List<text>
+
+    static fn create(name: text, implicit_params: List<(text, text)>, explicit_params: List<(text, text)>, proposition: text, proof_lines: List<text>) -> LeanTheoremImplicit:
+        LeanTheoremImplicit(name: name, implicit_params: implicit_params, explicit_params: explicit_params, proposition: proposition, proof_lines: proof_lines)
+
+    fn to_lean() -> text:
+        var sig = "theorem {self.name}"
+
+        # Implicit params - rendered as [param : type] for now
+        for (n, t) in self.implicit_params:
+            sig = sig + " [" + n + " : " + t + "]"
+
+        # Explicit params use parentheses
+        for (n, t) in self.explicit_params:
+            sig = sig + " ({n} : {t})"
+
+        sig = sig + " :\n  {self.proposition} := by\n"
+        for line in self.proof_lines:
+            sig = sig + "  {line}\n"
+        sig
+
+    fn emit_to(emitter: emit.LeanEmitter):
+        emitter.emit_theorem_implicit(
+            self.name,
+            self.implicit_params,
+            self.explicit_params,
+            self.proposition,
+            self.proof_lines
+        )
+
+# Translate binary operator to Lean
+fn translate_binop(op: text) -> text:
+    match op:
+        case "+": "+"
+        case "-": "-"
+        case "*": "*"
+        case "/": "/"
+        case "==": "="
+        case "!=": "≠"
+        case "<": "<"
+        case "<=": "≤"
+        case ">": ">"
+        case ">=": "≥"
+        case "&&": "∧"
+        case "||": "∨"
+        case _: op
+
+# Translate unary operator to Lean
+fn translate_unop(op: text) -> text:
+    match op:
+        case "-": "-"
+        case "!": "¬"
+        case "not": "¬"
+        case _: op
+
+# Generate invariant proposition
+fn generate_invariant_prop(type_name: text, invariant_exprs: List<text>) -> LeanProp:
+    var body = "True"
+    if invariant_exprs.len() == 1:
+        body = invariant_exprs[0]
+    else if invariant_exprs.len() > 1:
+        body = invariant_exprs.join(" ∧ ")
+
+    LeanProp.create("inv_{type_name}", [("self", type_name)], body)
+
+# Generate precondition theorem
+fn generate_precondition_theorem(fn_name: text, pre_exprs: List<text>, params: List<(text, text)>) -> Option<LeanTheorem>:
+    if pre_exprs.len() == 0:
+        return nil
+
+    val prop = pre_exprs.join(" ∧ ")
+    Some(LeanTheorem.create("{fn_name}_pre", params, prop, "sorry"))
+
+# Generate postcondition theorem
+fn generate_postcondition_theorem(
+    fn_name: text,
+    post_exprs: List<text>,
+    params: List<(text, text)>,
+    ret_type: text
+) -> Option<LeanTheorem>:
+    if post_exprs.len() == 0:
+        return nil
+
+    # Add result parameter
+    var full_params = params + [("result", ret_type)]
+    val prop = post_exprs.join(" ∧ ")
+
+    Some(LeanTheorem.create("{fn_name}_post", full_params, prop, "sorry"))
+
+# Generate full contract verification theorem
+fn generate_contract_theorem(
+    fn_name: text,
+    pre_exprs: List<text>,
+    post_exprs: List<text>,
+    params: List<(text, text)>,
+    ret_type: text
+) -> LeanTheorem:
+    var pre = "True"
+    if pre_exprs.len() > 0:
+        pre = pre_exprs.join(" ∧ ")
+
+    var post = "True"
+    if post_exprs.len() > 0:
+        post = post_exprs.join(" ∧ ")
+
+    val prop = "{pre} → ∃ result : {ret_type}, {post}"
+
+    LeanTheorem.create("{fn_name}_contract", params, prop, "sorry")
+
+# Contract expression kinds
+enum ContractExprKind:
+    True_
+    False_
+    Var(text)
+    Int(i32)
+    Bool(bool)
+    String(text)
+    Result
+    Old(text)
+    And(text, text)
+    Or(text, text)
+    Not(text)
+    Implies(text, text)
+    Eq(text, text)
+    Ne(text, text)
+    Lt(text, text)
+    Le(text, text)
+    Gt(text, text)
+    Ge(text, text)
+    Add(text, text)
+    Sub(text, text)
+    Mul(text, text)
+    Div(text, text)
+    Call(text, List<text>)
+    Index(text, text)
+    Field(text, text)
+    Len(text)
+
+# Simple contract expression builder
+class ContractExpr:
+    kind: ContractExprKind
+
+    static fn true_() -> ContractExpr:
+        ContractExpr(kind: ContractExprKind.True_)
+
+    static fn false_() -> ContractExpr:
+        ContractExpr(kind: ContractExprKind.False_)
+
+    static fn variable(name: text) -> ContractExpr:
+        ContractExpr(kind: ContractExprKind.Var(name))
+
+    static fn result() -> ContractExpr:
+        ContractExpr(kind: ContractExprKind.Result)
+
+    static fn int_val(n: i32) -> ContractExpr:
+        ContractExpr(kind: ContractExprKind.Int(n))
+
+    static fn and(left: text, right: text) -> ContractExpr:
+        ContractExpr(kind: ContractExprKind.And(left, right))
+
+    static fn or(left: text, right: text) -> ContractExpr:
+        ContractExpr(kind: ContractExprKind.Or(left, right))
+
+    static fn implies(left: text, right: text) -> ContractExpr:
+        ContractExpr(kind: ContractExprKind.Implies(left, right))
+
+    static fn eq(left: text, right: text) -> ContractExpr:
+        ContractExpr(kind: ContractExprKind.Eq(left, right))
+
+    static fn lt(left: text, right: text) -> ContractExpr:
+        ContractExpr(kind: ContractExprKind.Lt(left, right))
+
+    static fn le(left: text, right: text) -> ContractExpr:
+        ContractExpr(kind: ContractExprKind.Le(left, right))
+
+    static fn gt(left: text, right: text) -> ContractExpr:
+        ContractExpr(kind: ContractExprKind.Gt(left, right))
+
+    static fn ge(left: text, right: text) -> ContractExpr:
+        ContractExpr(kind: ContractExprKind.Ge(left, right))
+
+    fn to_lean() -> text:
+        val quote = "\""
+        match self.kind:
+            case ContractExprKind.True_: "True"
+            case ContractExprKind.False_: "False"
+            case ContractExprKind.Var(name): name
+            case ContractExprKind.Int(value): "{value}"
+            case ContractExprKind.Bool(value):
+                if value: "true" else: "false"
+            case ContractExprKind.String(value): "{quote}{value}{quote}"
+            case ContractExprKind.Result: "result"
+            case ContractExprKind.Old(inner): "old_{inner}"
+            case ContractExprKind.And(left, right): "({left} ∧ {right})"
+            case ContractExprKind.Or(left, right): "({left} ∨ {right})"
+            case ContractExprKind.Not(inner): "¬{inner}"
+            case ContractExprKind.Implies(left, right): "({left} → {right})"
+            case ContractExprKind.Eq(left, right): "({left} = {right})"
+            case ContractExprKind.Ne(left, right): "({left} ≠ {right})"
+            case ContractExprKind.Lt(left, right): "({left} < {right})"
+            case ContractExprKind.Le(left, right): "({left} ≤ {right})"
+            case ContractExprKind.Gt(left, right): "({left} > {right})"
+            case ContractExprKind.Ge(left, right): "({left} ≥ {right})"
+            case ContractExprKind.Add(left, right): "({left} + {right})"
+            case ContractExprKind.Sub(left, right): "({left} - {right})"
+            case ContractExprKind.Mul(left, right): "({left} * {right})"
+            case ContractExprKind.Div(left, right): "({left} / {right})"
+            case ContractExprKind.Call(name, args):
+                val space = " "
+                "{name} " + args.join(space)
+            case ContractExprKind.Index(base, idx): "{base}[{idx}]"
+            case ContractExprKind.Field(base, field): "{base}.{field}"
+            case ContractExprKind.Len(inner): "List.length {inner}"
+
+# Export public API
+export LeanProp, LeanTheorem, LeanTheoremImplicit
+export ContractExprKind, ContractExpr
+export translate_binop, translate_unop
+export generate_invariant_prop, generate_precondition_theorem
+export generate_postcondition_theorem, generate_contract_theorem

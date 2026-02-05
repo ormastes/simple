@@ -1,0 +1,665 @@
+# Common Material Abstraction
+#
+# Engine-agnostic material interface
+# Works with both Godot StandardMaterial3D and Unreal UMaterial
+#
+# Features:
+# - Material properties (albedo, roughness, metallic, etc.)
+# - Texture binding
+# - Shader parameters
+# - Material instances
+# - PBR workflow support
+
+use sys.ffi
+
+mod material
+
+# MaterialParameter
+# Generic material parameter value
+pub enum MaterialParameter:
+    f32(f32)
+    Vec2(f32, f32)
+    Vec3(f32, f32, f32)
+    Vec4(f32, f32, f32, f32)
+    Color(f32, f32, f32, f32)
+    Texture(ffi.VoidPtr)
+    bool(bool)
+
+impl MaterialParameter:
+    # =========================================================================
+    # Type Checkers
+    # =========================================================================
+
+    pub fn is_float(self) -> bool:
+        """Check if parameter is f32.
+
+        Returns:
+            true if f32 variant
+        """
+        match self:
+            case f32(_): true
+            case _: false
+
+    pub fn is_vec2(self) -> bool:
+        """Check if parameter is Vec2."""
+        match self:
+            case Vec2(_, _): true
+            case _: false
+
+    pub fn is_vec3(self) -> bool:
+        """Check if parameter is Vec3."""
+        match self:
+            case Vec3(_, _, _): true
+            case _: false
+
+    pub fn is_vec4(self) -> bool:
+        """Check if parameter is Vec4."""
+        match self:
+            case Vec4(_, _, _, _): true
+            case _: false
+
+    pub fn is_color(self) -> bool:
+        """Check if parameter is Color."""
+        match self:
+            case Color(_, _, _, _): true
+            case _: false
+
+    pub fn is_texture(self) -> bool:
+        """Check if parameter is Texture."""
+        match self:
+            case Texture(_): true
+            case _: false
+
+    pub fn is_bool(self) -> bool:
+        """Check if parameter is bool."""
+        match self:
+            case bool(_): true
+            case _: false
+
+    # =========================================================================
+    # Conversion Methods
+    # =========================================================================
+
+    pub fn as_float(self) -> f32:
+        match self:
+            case MaterialParameter.f32(value):
+                value
+            case _:
+                0.0
+
+    pub fn as_vec3(self) -> (f32, f32, f32):
+        match self:
+            case MaterialParameter.Vec3(x, y, z):
+                (x, y, z)
+            case _:
+                (0.0, 0.0, 0.0)
+
+    pub fn as_color(self) -> (f32, f32, f32, f32):
+        match self:
+            case MaterialParameter.Color(r, g, b, a):
+                (r, g, b, a)
+            case _:
+                (0.0, 0.0, 0.0, 1.0)
+
+    pub fn as_texture(self) -> ffi.VoidPtr:
+        match self:
+            case MaterialParameter.Texture(ptr):
+                ptr
+            case _:
+                ffi.null_ptr()
+
+    pub fn to_string(self) -> text:
+        """Convert parameter to string representation."""
+        match self:
+            case f32(v): return "f32({v})"
+            case Vec2(x, y): return "Vec2({x}, {y})"
+            case Vec3(x, y, z): return "Vec3({x}, {y}, {z})"
+            case Vec4(x, y, z, w): return "Vec4({x}, {y}, {z}, {w})"
+            case Color(r, g, b, a): return "Color({r}, {g}, {b}, {a})"
+            case Texture(_): return "Texture(<ptr>)"
+            case bool(b): return "bool({b})"
+
+    pub fn description(self) -> text:
+        """Get material parameter description.
+
+        Returns:
+            Human-readable description
+
+        Example:
+            MaterialParameter.Color(1.0, 0.0, 0.0, 1.0).description()
+            # → "RGBA color value"
+        """
+        match self:
+            case f32(_): "Single floating-point value"
+            case Vec2(_, _): "2D vector (x, y)"
+            case Vec3(_, _, _): "3D vector (x, y, z)"
+            case Vec4(_, _, _, _): "4D vector (x, y, z, w)"
+            case Color(_, _, _, _): "RGBA color value"
+            case Texture(_): "Texture resource pointer"
+            case bool(_): "Boolean flag"
+
+    pub fn is_vector(self) -> bool:
+        """Check if parameter is any vector type.
+
+        Returns:
+            True for Vec2, Vec3, or Vec4
+
+        Example:
+            MaterialParameter.Vec3(1.0, 2.0, 3.0).is_vector()  # → true
+        """
+        match self:
+            case Vec2(_, _): true
+            case Vec3(_, _, _): true
+            case Vec4(_, _, _, _): true
+            case _: false
+
+    pub fn is_numeric(self) -> bool:
+        """Check if parameter is numeric type.
+
+        Returns:
+            True for f32 or any vector type
+
+        Example:
+            MaterialParameter.f32(0.5).is_numeric()  # → true
+        """
+        match self:
+            case f32(_): true
+            case Vec2(_, _): true
+            case Vec3(_, _, _): true
+            case Vec4(_, _, _, _): true
+            case _: false
+
+    pub fn summary(self) -> text:
+        """Get material parameter summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            MaterialParameter.Color(1.0, 0.0, 0.0, 1.0).summary()
+            # → "MaterialParameter: Color(1.0, 0.0, 0.0, 1.0) (RGBA color value, numeric)"
+        """
+        val value_str = self.to_string()
+        val desc = self.description()
+        var props = []
+
+        if self.is_vector():
+            props.push("vector")
+        if self.is_numeric():
+            props.push("numeric")
+        if self.is_texture():
+            props.push("resource")
+        if self.is_bool():
+            props.push("flag")
+
+        if props.len() > 0:
+            val props_str = ", ".join(props)
+            return "MaterialParameter: {value_str} ({desc}, {props_str})"
+        else:
+            return "MaterialParameter: {value_str} ({desc})"
+
+
+# Material trait
+# Common interface for all materials
+pub trait Material:
+    # Properties
+    fn get_parameter(name: text) -> Option<MaterialParameter>
+    me set_parameter(name: text, value: MaterialParameter)
+
+    # PBR properties
+    fn get_albedo() -> (f32, f32, f32, f32)
+    me set_albedo(r: f32, g: f32, b: f32, a: f32)
+    fn get_roughness() -> f32
+    me set_roughness(roughness: f32)
+    fn get_metallic() -> f32
+    me set_metallic(metallic: f32)
+    fn get_emissive() -> (f32, f32, f32)
+    me set_emissive(r: f32, g: f32, b: f32)
+
+    # Textures
+    fn get_albedo_texture() -> Option<ffi.VoidPtr>
+    me set_albedo_texture(texture_ptr: ffi.VoidPtr)
+    fn get_normal_texture() -> Option<ffi.VoidPtr>
+    me set_normal_texture(texture_ptr: ffi.VoidPtr)
+    fn get_roughness_texture() -> Option<ffi.VoidPtr>
+    me set_roughness_texture(texture_ptr: ffi.VoidPtr)
+    fn get_metallic_texture() -> Option<ffi.VoidPtr>
+    me set_metallic_texture(texture_ptr: ffi.VoidPtr)
+
+    # Rendering state
+    fn is_two_sided() -> bool
+    me set_two_sided(two_sided: bool)
+    fn is_transparent() -> bool
+    me set_transparent(transparent: bool)
+
+
+# GodotMaterialAdapter
+# Adapts Godot StandardMaterial3D to Material trait
+pub struct GodotMaterialAdapter:
+    material_ptr: ffi.VoidPtr
+
+impl GodotMaterialAdapter:
+    pub fn new(material_ptr: ffi.VoidPtr) -> GodotMaterialAdapter:
+        return GodotMaterialAdapter(material_ptr: material_ptr)
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    pub fn get_material_ptr(self) -> ffi.VoidPtr:
+        """Get material pointer.
+
+        Returns:
+            Material pointer
+
+        Example:
+            adapter.get_material_ptr()
+        """
+        return self.material_ptr
+
+    pub fn has_material(self) -> bool:
+        """Check if has valid material pointer.
+
+        Returns:
+            true if pointer is not null
+
+        Example:
+            adapter.has_material()  # → true
+        """
+        return not ffi.is_null_ptr(self.material_ptr)
+
+    pub fn has_albedo_texture(self) -> bool:
+        """Check if albedo texture is set.
+
+        Returns:
+            true if albedo texture exists
+
+        Example:
+            adapter.has_albedo_texture()  # → false
+        """
+        return self.get_albedo_texture().is_some()
+
+    pub fn has_normal_texture(self) -> bool:
+        """Check if normal texture is set.
+
+        Returns:
+            true if normal texture exists
+
+        Example:
+            adapter.has_normal_texture()  # → false
+        """
+        return self.get_normal_texture().is_some()
+
+    pub fn summary(self) -> text:
+        """Get Godot material adapter summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            adapter.summary()
+            # → "GodotMaterialAdapter: roughness=0.5, metallic=0.0, transparent"
+        """
+        val rough = self.get_roughness()
+        val metal = self.get_metallic()
+        val transparent_str = if self.is_transparent() { "transparent" } else { "opaque" }
+        val two_sided_str = if self.is_two_sided() { ", two-sided" } else { "" }
+        return "GodotMaterialAdapter: roughness={rough}, metallic={metal}, {transparent_str}{two_sided_str}"
+
+impl Material for GodotMaterialAdapter:
+    fn get_parameter(name: text) -> Option<MaterialParameter>:
+        # Stub - would query parameter
+        return None
+
+    me set_parameter(name: text, value: MaterialParameter):
+        # Stub - would set parameter
+        pass
+
+    fn get_albedo() -> (f32, f32, f32, f32):
+        val r = ffi.alloc_f32()
+        val g = ffi.alloc_f32()
+        val b = ffi.alloc_f32()
+        val a = ffi.alloc_f32()
+
+        godot_material_get_albedo(self.material_ptr, r, g, b, a)
+
+        val result = (ffi.read_f32(r), ffi.read_f32(g), ffi.read_f32(b), ffi.read_f32(a))
+
+        ffi.free(r)
+        ffi.free(g)
+        ffi.free(b)
+        ffi.free(a)
+
+        return result
+
+    me set_albedo(r: f32, g: f32, b: f32, a: f32):
+        godot_material_set_albedo(self.material_ptr, r, g, b, a)
+
+    fn get_roughness() -> f32:
+        return godot_material_get_roughness(self.material_ptr)
+
+    me set_roughness(roughness: f32):
+        godot_material_set_roughness(self.material_ptr, roughness)
+
+    fn get_metallic() -> f32:
+        return godot_material_get_metallic(self.material_ptr)
+
+    me set_metallic(metallic: f32):
+        godot_material_set_metallic(self.material_ptr, metallic)
+
+    fn get_emissive() -> (f32, f32, f32):
+        val r = ffi.alloc_f32()
+        val g = ffi.alloc_f32()
+        val b = ffi.alloc_f32()
+
+        godot_material_get_emissive(self.material_ptr, r, g, b)
+
+        val result = (ffi.read_f32(r), ffi.read_f32(g), ffi.read_f32(b))
+
+        ffi.free(r)
+        ffi.free(g)
+        ffi.free(b)
+
+        return result
+
+    me set_emissive(r: f32, g: f32, b: f32):
+        godot_material_set_emissive(self.material_ptr, r, g, b)
+
+    fn get_albedo_texture() -> Option<ffi.VoidPtr>:
+        val tex_ptr = godot_material_get_albedo_texture(self.material_ptr)
+        if ffi.is_null_ptr(tex_ptr):
+            return None
+        else:
+            return Some(tex_ptr)
+
+    me set_albedo_texture(texture_ptr: ffi.VoidPtr):
+        godot_material_set_albedo_texture(self.material_ptr, texture_ptr)
+
+    fn get_normal_texture() -> Option<ffi.VoidPtr>:
+        val tex_ptr = godot_material_get_normal_texture(self.material_ptr)
+        if ffi.is_null_ptr(tex_ptr):
+            return None
+        else:
+            return Some(tex_ptr)
+
+    me set_normal_texture(texture_ptr: ffi.VoidPtr):
+        godot_material_set_normal_texture(self.material_ptr, texture_ptr)
+
+    fn get_roughness_texture() -> Option<ffi.VoidPtr>:
+        val tex_ptr = godot_material_get_roughness_texture(self.material_ptr)
+        if ffi.is_null_ptr(tex_ptr):
+            return None
+        else:
+            return Some(tex_ptr)
+
+    me set_roughness_texture(texture_ptr: ffi.VoidPtr):
+        godot_material_set_roughness_texture(self.material_ptr, texture_ptr)
+
+    fn get_metallic_texture() -> Option<ffi.VoidPtr>:
+        val tex_ptr = godot_material_get_metallic_texture(self.material_ptr)
+        if ffi.is_null_ptr(tex_ptr):
+            return None
+        else:
+            return Some(tex_ptr)
+
+    me set_metallic_texture(texture_ptr: ffi.VoidPtr):
+        godot_material_set_metallic_texture(self.material_ptr, texture_ptr)
+
+    fn is_two_sided() -> bool:
+        return godot_material_is_two_sided(self.material_ptr)
+
+    me set_two_sided(two_sided: bool):
+        godot_material_set_two_sided(self.material_ptr, two_sided)
+
+    fn is_transparent() -> bool:
+        return godot_material_is_transparent(self.material_ptr)
+
+    me set_transparent(transparent: bool):
+        godot_material_set_transparent(self.material_ptr, transparent)
+
+
+# UnrealMaterialAdapter
+# Adapts Unreal UMaterial to Material trait
+pub struct UnrealMaterialAdapter:
+    material_ptr: ffi.VoidPtr
+
+impl UnrealMaterialAdapter:
+    pub fn new(material_ptr: ffi.VoidPtr) -> UnrealMaterialAdapter:
+        return UnrealMaterialAdapter(material_ptr: material_ptr)
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    pub fn get_material_ptr(self) -> ffi.VoidPtr:
+        """Get material pointer.
+
+        Returns:
+            Material pointer
+
+        Example:
+            adapter.get_material_ptr()
+        """
+        return self.material_ptr
+
+    pub fn has_material(self) -> bool:
+        """Check if has valid material pointer.
+
+        Returns:
+            true if pointer is not null
+
+        Example:
+            adapter.has_material()  # → true
+        """
+        return not ffi.is_null_ptr(self.material_ptr)
+
+    pub fn has_albedo_texture(self) -> bool:
+        """Check if albedo texture is set.
+
+        Returns:
+            true if albedo texture exists
+
+        Example:
+            adapter.has_albedo_texture()  # → false
+        """
+        return self.get_albedo_texture().is_some()
+
+    pub fn has_normal_texture(self) -> bool:
+        """Check if normal texture is set.
+
+        Returns:
+            true if normal texture exists
+
+        Example:
+            adapter.has_normal_texture()  # → false
+        """
+        return self.get_normal_texture().is_some()
+
+    pub fn summary(self) -> text:
+        """Get Unreal material adapter summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            adapter.summary()
+            # → "UnrealMaterialAdapter: roughness=0.5, metallic=0.0, transparent"
+        """
+        val rough = self.get_roughness()
+        val metal = self.get_metallic()
+        val transparent_str = if self.is_transparent() { "transparent" } else { "opaque" }
+        val two_sided_str = if self.is_two_sided() { ", two-sided" } else { "" }
+        return "UnrealMaterialAdapter: roughness={rough}, metallic={metal}, {transparent_str}{two_sided_str}"
+
+impl Material for UnrealMaterialAdapter:
+    fn get_parameter(name: text) -> Option<MaterialParameter>:
+        return None
+
+    me set_parameter(name: text, value: MaterialParameter):
+        pass
+
+    fn get_albedo() -> (f32, f32, f32, f32):
+        val r = ffi.alloc_f32()
+        val g = ffi.alloc_f32()
+        val b = ffi.alloc_f32()
+        val a = ffi.alloc_f32()
+
+        unreal_material_get_base_color(self.material_ptr, r, g, b, a)
+
+        val result = (ffi.read_f32(r), ffi.read_f32(g), ffi.read_f32(b), ffi.read_f32(a))
+
+        ffi.free(r)
+        ffi.free(g)
+        ffi.free(b)
+        ffi.free(a)
+
+        return result
+
+    me set_albedo(r: f32, g: f32, b: f32, a: f32):
+        unreal_material_set_base_color(self.material_ptr, r, g, b, a)
+
+    fn get_roughness() -> f32:
+        return unreal_material_get_roughness(self.material_ptr)
+
+    me set_roughness(roughness: f32):
+        unreal_material_set_roughness(self.material_ptr, roughness)
+
+    fn get_metallic() -> f32:
+        return unreal_material_get_metallic(self.material_ptr)
+
+    me set_metallic(metallic: f32):
+        unreal_material_set_metallic(self.material_ptr, metallic)
+
+    fn get_emissive() -> (f32, f32, f32):
+        val r = ffi.alloc_f32()
+        val g = ffi.alloc_f32()
+        val b = ffi.alloc_f32()
+
+        unreal_material_get_emissive(self.material_ptr, r, g, b)
+
+        val result = (ffi.read_f32(r), ffi.read_f32(g), ffi.read_f32(b))
+
+        ffi.free(r)
+        ffi.free(g)
+        ffi.free(b)
+
+        return result
+
+    me set_emissive(r: f32, g: f32, b: f32):
+        unreal_material_set_emissive(self.material_ptr, r, g, b)
+
+    fn get_albedo_texture() -> Option<ffi.VoidPtr>:
+        val tex_ptr = unreal_material_get_base_color_texture(self.material_ptr)
+        if ffi.is_null_ptr(tex_ptr):
+            return None
+        else:
+            return Some(tex_ptr)
+
+    me set_albedo_texture(texture_ptr: ffi.VoidPtr):
+        unreal_material_set_base_color_texture(self.material_ptr, texture_ptr)
+
+    fn get_normal_texture() -> Option<ffi.VoidPtr>:
+        val tex_ptr = unreal_material_get_normal_texture(self.material_ptr)
+        if ffi.is_null_ptr(tex_ptr):
+            return None
+        else:
+            return Some(tex_ptr)
+
+    me set_normal_texture(texture_ptr: ffi.VoidPtr):
+        unreal_material_set_normal_texture(self.material_ptr, texture_ptr)
+
+    fn get_roughness_texture() -> Option<ffi.VoidPtr>:
+        val tex_ptr = unreal_material_get_roughness_texture(self.material_ptr)
+        if ffi.is_null_ptr(tex_ptr):
+            return None
+        else:
+            return Some(tex_ptr)
+
+    me set_roughness_texture(texture_ptr: ffi.VoidPtr):
+        unreal_material_set_roughness_texture(self.material_ptr, texture_ptr)
+
+    fn get_metallic_texture() -> Option<ffi.VoidPtr>:
+        val tex_ptr = unreal_material_get_metallic_texture(self.material_ptr)
+        if ffi.is_null_ptr(tex_ptr):
+            return None
+        else:
+            return Some(tex_ptr)
+
+    me set_metallic_texture(texture_ptr: ffi.VoidPtr):
+        unreal_material_set_metallic_texture(self.material_ptr, texture_ptr)
+
+    fn is_two_sided() -> bool:
+        return unreal_material_is_two_sided(self.material_ptr)
+
+    me set_two_sided(two_sided: bool):
+        unreal_material_set_two_sided(self.material_ptr, two_sided)
+
+    fn is_transparent() -> bool:
+        return unreal_material_is_transparent(self.material_ptr)
+
+    me set_transparent(transparent: bool):
+        unreal_material_set_transparent(self.material_ptr, transparent)
+
+
+# FFI declarations for Godot materials
+extern "C":
+    fn godot_material_get_albedo(material: ffi.VoidPtr, r: ffi.VoidPtr, g: ffi.VoidPtr, b: ffi.VoidPtr, a: ffi.VoidPtr)
+    fn godot_material_set_albedo(material: ffi.VoidPtr, r: f32, g: f32, b: f32, a: f32)
+    fn godot_material_get_roughness(material: ffi.VoidPtr) -> f32
+    fn godot_material_set_roughness(material: ffi.VoidPtr, roughness: f32)
+    fn godot_material_get_metallic(material: ffi.VoidPtr) -> f32
+    fn godot_material_set_metallic(material: ffi.VoidPtr, metallic: f32)
+    fn godot_material_get_emissive(material: ffi.VoidPtr, r: ffi.VoidPtr, g: ffi.VoidPtr, b: ffi.VoidPtr)
+    fn godot_material_set_emissive(material: ffi.VoidPtr, r: f32, g: f32, b: f32)
+    fn godot_material_get_albedo_texture(material: ffi.VoidPtr) -> ffi.VoidPtr
+    fn godot_material_set_albedo_texture(material: ffi.VoidPtr, texture: ffi.VoidPtr)
+    fn godot_material_get_normal_texture(material: ffi.VoidPtr) -> ffi.VoidPtr
+    fn godot_material_set_normal_texture(material: ffi.VoidPtr, texture: ffi.VoidPtr)
+    fn godot_material_get_roughness_texture(material: ffi.VoidPtr) -> ffi.VoidPtr
+    fn godot_material_set_roughness_texture(material: ffi.VoidPtr, texture: ffi.VoidPtr)
+    fn godot_material_get_metallic_texture(material: ffi.VoidPtr) -> ffi.VoidPtr
+    fn godot_material_set_metallic_texture(material: ffi.VoidPtr, texture: ffi.VoidPtr)
+    fn godot_material_is_two_sided(material: ffi.VoidPtr) -> bool
+    fn godot_material_set_two_sided(material: ffi.VoidPtr, two_sided: bool)
+    fn godot_material_is_transparent(material: ffi.VoidPtr) -> bool
+    fn godot_material_set_transparent(material: ffi.VoidPtr, transparent: bool)
+
+# FFI declarations for Unreal materials
+extern "C":
+    fn unreal_material_get_base_color(material: ffi.VoidPtr, r: ffi.VoidPtr, g: ffi.VoidPtr, b: ffi.VoidPtr, a: ffi.VoidPtr)
+    fn unreal_material_set_base_color(material: ffi.VoidPtr, r: f32, g: f32, b: f32, a: f32)
+    fn unreal_material_get_roughness(material: ffi.VoidPtr) -> f32
+    fn unreal_material_set_roughness(material: ffi.VoidPtr, roughness: f32)
+    fn unreal_material_get_metallic(material: ffi.VoidPtr) -> f32
+    fn unreal_material_set_metallic(material: ffi.VoidPtr, metallic: f32)
+    fn unreal_material_get_emissive(material: ffi.VoidPtr, r: ffi.VoidPtr, g: ffi.VoidPtr, b: ffi.VoidPtr)
+    fn unreal_material_set_emissive(material: ffi.VoidPtr, r: f32, g: f32, b: f32)
+    fn unreal_material_get_base_color_texture(material: ffi.VoidPtr) -> ffi.VoidPtr
+    fn unreal_material_set_base_color_texture(material: ffi.VoidPtr, texture: ffi.VoidPtr)
+    fn unreal_material_get_normal_texture(material: ffi.VoidPtr) -> ffi.VoidPtr
+    fn unreal_material_set_normal_texture(material: ffi.VoidPtr, texture: ffi.VoidPtr)
+    fn unreal_material_get_roughness_texture(material: ffi.VoidPtr) -> ffi.VoidPtr
+    fn unreal_material_set_roughness_texture(material: ffi.VoidPtr, texture: ffi.VoidPtr)
+    fn unreal_material_get_metallic_texture(material: ffi.VoidPtr) -> ffi.VoidPtr
+    fn unreal_material_set_metallic_texture(material: ffi.VoidPtr, texture: ffi.VoidPtr)
+    fn unreal_material_is_two_sided(material: ffi.VoidPtr) -> bool
+    fn unreal_material_set_two_sided(material: ffi.VoidPtr, two_sided: bool)
+    fn unreal_material_is_transparent(material: ffi.VoidPtr) -> bool
+    fn unreal_material_set_transparent(material: ffi.VoidPtr, transparent: bool)
+
+
+# Example usage:
+#
+# # Create material adapter for Godot
+# val godot_mat = GodotMaterialAdapter.new(godot_material_ptr)
+# godot_mat.set_albedo(1.0, 0.0, 0.0, 1.0)  # Red
+# godot_mat.set_roughness(0.5)
+# godot_mat.set_metallic(0.0)
+#
+# # Create material adapter for Unreal
+# val unreal_mat = UnrealMaterialAdapter.new(unreal_material_ptr)
+# unreal_mat.set_albedo(0.0, 1.0, 0.0, 1.0)  # Green
+# unreal_mat.set_roughness(0.3)
+# unreal_mat.set_metallic(1.0)
+#
+# # Both materials use the same trait interface!

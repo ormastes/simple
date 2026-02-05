@@ -1,0 +1,325 @@
+# TCP Networking - Common Implementation
+# Unified async TCP with monoio runtime
+# Shared across all host variants
+#
+# Features:
+# - Monoio-based async I/O (thread-per-core, io_uring)
+# - text convenience API for quick scripts
+# - Semantic type API for type safety
+# - Context manager support (with...as syntax)
+#
+# Quick Start:
+#   use host.common.net as net
+#
+#   # text convenience API
+#   async with await net.TcpStream.connect_str("127.0.0.1:8080") as stream:
+#       await stream.write_all(data)?
+#
+#   # Semantic type API
+#   val addr = SocketAddr.new(IpAddr.v4(127, 0, 0, 1), Port(8080))
+#   async with await net.TcpStream.connect(addr) as stream:
+#       await stream.write_all(data)?
+
+use units.net.*
+use units.size.*
+use units.time.*
+use host.common.io.error.IoError
+use host.common.net.types.Shutdown
+use core.resource.AsyncResource
+use core.leak_tracked.LeakTracked
+
+# TCP Listener - accepts incoming connections
+pub struct TcpListener with LeakTracked:
+    handle: i64
+    local_addr: SocketAddr
+
+impl TcpListener:
+    # Bind to address and start listening (semantic types)
+    pub async fn bind(addr: SocketAddr) -> Result<TcpListener, IoError>:
+        val handle = native_tcp_bind(addr)?
+        var listener = TcpListener {handle: handle, local_addr: addr}
+        # Start leak tracking
+        listener._start_tracking("TcpListener.bind(\"{addr}\")")
+        return Ok(listener)
+
+    # Bind using string address (convenience)
+    # Example: TcpListener.bind_str("127.0.0.1:8080")
+    pub async fn bind_str(addr: text) -> Result<TcpListener, IoError>:
+        # Parse string to SocketAddr
+        val socket_addr = parse_socket_addr(addr)?
+        return TcpListener.bind(socket_addr)
+
+    # Bind to IP and port
+    pub async fn bind_to(ip: IpAddr, port: Port) -> Result<TcpListener, IoError>:
+        return TcpListener.bind(SocketAddr.new(ip, port))
+
+    # Accept incoming connection
+    pub async fn accept(self) -> Result<(TcpStream, SocketAddr), IoError>:
+        val (stream_handle, peer_addr) = native_tcp_accept(self.handle)?
+        var stream = TcpStream {
+            handle: stream_handle,
+            peer_addr: peer_addr,
+            local_addr: self.local_addr
+        }
+        # Start leak tracking for accepted connection
+        stream._start_tracking("TcpListener.accept() -> {peer_addr}")
+        return Ok((stream, peer_addr))
+
+    # Get local address
+    pub fn local_addr(self) -> SocketAddr:
+        return self.local_addr
+
+    # Set connection backlog
+    pub fn set_backlog(self, backlog: u32) -> Result<(), IoError>:
+        return native_tcp_set_backlog(self.handle, backlog)
+
+    # Close listener
+    pub async fn close(self) -> Result<(), IoError>:
+        # Stop leak tracking
+        self._stop_tracking()
+        return native_tcp_close(self.handle)
+
+# TCP Stream - bidirectional connection
+pub struct TcpStream with LeakTracked:
+    handle: i64
+    peer_addr: SocketAddr
+    local_addr: SocketAddr
+
+impl TcpStream:
+    # Connect to remote address (semantic types)
+    pub async fn connect(addr: SocketAddr) -> Result<TcpStream, IoError>:
+        val (handle, local) = native_tcp_connect(addr)?
+        var stream = TcpStream {
+            handle: handle,
+            peer_addr: addr,
+            local_addr: local
+        }
+        # Start leak tracking
+        stream._start_tracking("TcpStream.connect(\"{addr}\")")
+        return Ok(stream)
+
+    # Connect using string address (convenience)
+    # Example: TcpStream.connect_str("127.0.0.1:8080")
+    pub async fn connect_str(addr: text) -> Result<TcpStream, IoError>:
+        val socket_addr = parse_socket_addr(addr)?
+        return TcpStream.connect(socket_addr)
+
+    # Connect to IP and port
+    pub async fn connect_to(ip: IpAddr, port: Port) -> Result<TcpStream, IoError>:
+        return TcpStream.connect(SocketAddr.new(ip, port))
+
+    # Connect with timeout
+    pub async fn connect_timeout(addr: SocketAddr, timeout: Duration) -> Result<TcpStream, IoError>:
+        val (handle, local) = native_tcp_connect_timeout(addr, timeout)?
+        var stream = TcpStream {
+            handle: handle,
+            peer_addr: addr,
+            local_addr: local
+        }
+        # Start leak tracking
+        stream._start_tracking("TcpStream.connect_timeout(\"{addr}\")")
+        return Ok(stream)
+
+    # Read data
+    pub async fn read(self, buf: &mut Bytes) -> Result<ByteCount, IoError>:
+        return native_tcp_read(self.handle, buf)
+
+    # Read exact number of bytes
+    pub async fn read_exact(self, buf: &mut Bytes) -> Result<(), IoError>:
+        var read_total: u64 = 0
+        val target = buf.len()
+        while read_total < target:
+            val chunk = buf.slice_mut(read_total, target)
+            val n = await self.read(&mut slice)?
+            if (n as u64) == 0:
+                return Err(IoError.UnexpectedEof)
+            read_total = read_total + (n as u64)
+        return Ok(())
+
+    # Write data
+    pub async fn write(self, data: &Bytes) -> Result<ByteCount, IoError>:
+        return native_tcp_write(self.handle, data)
+
+    # Write all data
+    pub async fn write_all(self, data: &Bytes) -> Result<(), IoError>:
+        var written: u64 = 0
+        while written < data.len():
+            val n = await self.write(&data.slice(written, data.len()))?
+            written = written + (n as u64)
+        return Ok(())
+
+    # Flush output buffer
+    pub async fn flush(self) -> Result<(), IoError>:
+        return native_tcp_flush(self.handle)
+
+    # Shutdown connection
+    pub async fn shutdown(self, how: Shutdown) -> Result<(), IoError>:
+        return native_tcp_shutdown(self.handle, how)
+
+    # Close connection
+    pub async fn close(self) -> Result<(), IoError>:
+        # Stop leak tracking
+        self._stop_tracking()
+        return native_tcp_close(self.handle)
+
+    # Get peer address
+    pub fn peer_addr(self) -> SocketAddr:
+        return self.peer_addr
+
+    # Get local address
+    pub fn local_addr(self) -> SocketAddr:
+        return self.local_addr
+
+    # Set options
+    pub fn set_nodelay(self, nodelay: bool) -> Result<(), IoError>:
+        return native_tcp_set_nodelay(self.handle, nodelay)
+
+    pub fn set_keepalive(self, keepalive: Option<Duration>) -> Result<(), IoError>:
+        return native_tcp_set_keepalive(self.handle, keepalive)
+
+    pub fn set_read_timeout(self, timeout: Option<Duration>) -> Result<(), IoError>:
+        return native_tcp_set_read_timeout(self.handle, timeout)
+
+    pub fn set_write_timeout(self, timeout: Option<Duration>) -> Result<(), IoError>:
+        return native_tcp_set_write_timeout(self.handle, timeout)
+
+    # Get options
+    pub fn nodelay(self) -> Result<bool, IoError>:
+        return native_tcp_get_nodelay(self.handle)
+
+    # Peek data without consuming
+    pub async fn peek(self, buf: &mut Bytes) -> Result<ByteCount, IoError>:
+        return native_tcp_peek(self.handle, buf)
+
+# Native function declarations
+extern fn native_tcp_bind(addr: SocketAddr) -> Result<i64, IoError>
+extern fn native_tcp_accept(handle: i64) -> Result<(i64, SocketAddr), IoError>
+extern fn native_tcp_connect(addr: SocketAddr) -> Result<(i64, SocketAddr), IoError>
+extern fn native_tcp_connect_timeout(addr: SocketAddr, timeout: Duration) -> Result<(i64, SocketAddr), IoError>
+extern fn native_tcp_read(handle: i64, buf: &mut Bytes) -> Result<ByteCount, IoError>
+extern fn native_tcp_write(handle: i64, data: &Bytes) -> Result<ByteCount, IoError>
+extern fn native_tcp_flush(handle: i64) -> Result<(), IoError>
+extern fn native_tcp_shutdown(handle: i64, how: Shutdown) -> Result<(), IoError>
+extern fn native_tcp_close(handle: i64) -> Result<(), IoError>
+extern fn native_tcp_set_backlog(handle: i64, backlog: u32) -> Result<(), IoError>
+extern fn native_tcp_set_nodelay(handle: i64, nodelay: bool) -> Result<(), IoError>
+extern fn native_tcp_set_keepalive(handle: i64, keepalive: Option<Duration>) -> Result<(), IoError>
+extern fn native_tcp_set_read_timeout(handle: i64, timeout: Option<Duration>) -> Result<(), IoError>
+extern fn native_tcp_set_write_timeout(handle: i64, timeout: Option<Duration>) -> Result<(), IoError>
+extern fn native_tcp_get_nodelay(handle: i64) -> Result<bool, IoError>
+extern fn native_tcp_peek(handle: i64, buf: &mut Bytes) -> Result<ByteCount, IoError>
+
+# ============================================
+# Trait Implementations
+# ============================================
+
+use core.traits.*
+
+impl Read for TcpStream:
+    fn read(buf: &mut [u8]) -> Result<usize, IoError>:
+        var bytes = Bytes.from_slice(buf)
+        match native_tcp_read(self.handle, &mut bytes):
+            case Ok(count):
+                buf.copy_from_slice(&bytes.as_slice())
+                Ok(count as usize)
+            case Err(e): Err(e)
+
+impl Write for TcpStream:
+    fn write(buf: &[u8]) -> Result<usize, IoError>:
+        val bytes = Bytes.from_slice(buf)
+        match native_tcp_write(self.handle, &bytes):
+            case Ok(count): Ok(count as usize)
+            case Err(e): Err(e)
+
+    fn flush() -> Result<(), IoError>:
+        native_tcp_flush(self.handle)
+
+impl Drop for TcpStream:
+    fn drop():
+        native_tcp_close(self.handle)
+
+impl Drop for TcpListener:
+    fn drop():
+        native_tcp_close(self.handle)
+
+# ===============================
+# Context Manager Support (with...as syntax)
+# ===============================
+
+# Async context manager trait
+pub trait AsyncContextManager<T>:
+    async fn __aenter__(self) -> T
+    async fn __aexit__(self, exc: Option<Exception>) -> bool
+
+# Context manager for TcpStream
+# Usage: async with await TcpStream.connect_str("127.0.0.1:8080") as stream:
+impl AsyncContextManager<TcpStream> for TcpStream:
+    async fn __aenter__(self) -> TcpStream:
+        return self
+
+    async fn __aexit__(self, exc: Option<Exception>) -> bool:
+        # Cleanup: close connection
+        val _ = await self.close()
+        return false  # Don't suppress exceptions
+
+# Context manager for TcpListener
+# Usage: async with await TcpListener.bind_str("127.0.0.1:8080") as listener:
+impl AsyncContextManager<TcpListener> for TcpListener:
+    async fn __aenter__(self) -> TcpListener:
+        return self
+
+    async fn __aexit__(self, exc: Option<Exception>) -> bool:
+        # Cleanup: close listener
+        val _ = await self.close()
+        return false  # Don't suppress exceptions
+
+# Exception type for context managers
+pub struct Exception:
+    message: text
+
+impl Exception:
+    pub fn new(message: text) -> Exception:
+        return Exception { message: message }
+
+# ===============================
+# Helper Functions
+# ===============================
+
+# Parse string address to SocketAddr
+# Format: "IP:PORT" e.g., "127.0.0.1:8080"
+fn parse_socket_addr(addr: text) -> Result<SocketAddr, IoError>:
+    # Parse using SocketAddr.from_str
+    match SocketAddr.from_str(addr):
+        case Ok(socket_addr):
+            return Ok(socket_addr)
+        case Err(_):
+            return Err(IoError.InvalidArgument)
+
+# ===============================
+# Resource Trait Implementations
+# ===============================
+
+impl AsyncResource for TcpStream:
+    async fn close():
+        # Stop leak tracking
+        self._stop_tracking()
+        val _ = native_tcp_close(self.handle)
+
+    fn is_open() -> bool:
+        self.handle != -1
+
+    fn resource_name() -> text:
+        "TcpStream({self.peer_addr})"
+
+impl AsyncResource for TcpListener:
+    async fn close():
+        # Stop leak tracking
+        self._stop_tracking()
+        val _ = native_tcp_close(self.handle)
+
+    fn is_open() -> bool:
+        self.handle != -1
+
+    fn resource_name() -> text:
+        "TcpListener({self.local_addr})"
+
