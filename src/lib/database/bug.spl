@@ -1,4 +1,4 @@
-# Bug Database - Domain-specific extension of SdnDatabase
+# Bug Database - Domain-specific extension of mod.SdnDatabase
 #
 # ⚠️ IMPORTANT: This is the ONLY way to update bug_db.sdn
 # ⚠️ Do NOT edit doc/bug/bug_db.sdn manually
@@ -14,14 +14,15 @@
 #
 # For MCP integration, see: src/app/mcp/bugdb_resource.spl
 
-use lib.database.mod.{SdnDatabase, SdnTable, SdnRow}
-use lib.database.query.{QueryBuilder, CompareOp}
-use app.io.{rt_timestamp_now}
+use lib.database.mod
+use lib.database.query
+use app.io
 
 # Exports
 export load_bug_database, create_bug_database
 export BugDatabase, Bug, BugSeverity, BugStatus, BugStats
 export severity_to_string, status_to_string, parse_severity, parse_status
+export bug_to_row
 
 # ============================================================================
 # Enums
@@ -81,14 +82,14 @@ struct BugStats:
 # Helper functions for creating Bug Databases
 
 fn load_bug_database(path: text) -> BugDatabase?:
-    val db = SdnDatabase.load(path)?
+    val db = mod.SdnDatabase.load(path)?
     Some(BugDatabase(db: db))
 
 fn create_bug_database(path: text) -> BugDatabase:
-        val db = SdnDatabase.new(path)
+        val db = mod.SdnDatabase.new(path)
 
         # Create bugs table
-        val bugs_table = SdnTable.new("bugs", [
+        val bugs_table = mod.SdnTable.new("bugs", [
             "id",
             "severity",
             "status",
@@ -103,7 +104,7 @@ fn create_bug_database(path: text) -> BugDatabase:
         db.set_table("bugs", bugs_table)
 
         # Create description table (multiline)
-        val desc_table = SdnTable.new("bug_descriptions", [
+        val desc_table = mod.SdnTable.new("bug_descriptions", [
             "bug_id",
             "line_num",
             "content"
@@ -111,7 +112,7 @@ fn create_bug_database(path: text) -> BugDatabase:
         db.set_table("bug_descriptions", desc_table)
 
         # Create fix_strategy table (multiline)
-        val fix_table = SdnTable.new("bug_fix_strategies", [
+        val fix_table = mod.SdnTable.new("bug_fix_strategies", [
             "bug_id",
             "line_num",
             "content"
@@ -119,7 +120,7 @@ fn create_bug_database(path: text) -> BugDatabase:
         db.set_table("bug_fix_strategies", fix_table)
 
         # Create investigation_log table (multiline)
-        val log_table = SdnTable.new("bug_investigation_logs", [
+        val log_table = mod.SdnTable.new("bug_investigation_logs", [
             "bug_id",
             "line_num",
             "content"
@@ -129,11 +130,11 @@ fn create_bug_database(path: text) -> BugDatabase:
         BugDatabase(db: db)
 
 class BugDatabase:
-    db: SdnDatabase
+    db: mod.SdnDatabase
 
     # Convert bug to SDN row
-    fn bug_to_row(bug: Bug) -> SdnRow:
-        val row = SdnRow.empty()
+    fn bug_to_row(bug: Bug) -> mod.SdnRow:
+        val row = mod.SdnRow.empty()
         row.set("id", bug.id)
         row.set("severity", severity_to_string(bug.severity))
         row.set("status", status_to_string(bug.status))
@@ -167,7 +168,7 @@ class BugDatabase:
 
         var table = table_opt?
         for (i, line) in lines.enumerate():
-            val row = SdnRow.empty()
+            val row = mod.SdnRow.empty()
             row.set("bug_id", bug_id)
             row.set("line_num", "{i}")
             row.set("content", line)
@@ -354,3 +355,27 @@ fn parse_status(s: text) -> BugStatus:
         "Closed": BugStatus.Closed
         "Wontfix": BugStatus.Wontfix
         _: BugStatus.Open
+
+# ============================================================================
+# Standalone bug_to_row function (for external use)
+# ============================================================================
+
+fn bug_to_row(bug: Bug) -> mod.SdnRow:
+    """Convert Bug to mod.SdnRow for database storage.
+
+    This is the standalone function version that can be called from outside
+    the BugDatabase class. Tests and external code should use this.
+    """
+    val row = mod.SdnRow.empty()
+    row.set("id", bug.id)
+    row.set("severity", severity_to_string(bug.severity))
+    row.set("status", status_to_string(bug.status))
+    row.set("title", bug.title)
+    row.set("file", bug.file)
+    row.set("line", "{bug.line}")
+    row.set("reproducible_by", bug.reproducible_by)
+    row.set("created_at", bug.created_at)
+    row.set("updated_at", bug.updated_at)
+    val valid_str = if bug.valid: "true" else: "false"
+    row.set("valid", valid_str)
+    row
