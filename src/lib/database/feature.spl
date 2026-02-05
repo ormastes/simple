@@ -12,6 +12,7 @@
 
 use lib.database.mod.{SdnDatabase, SdnTable, SdnRow}
 use lib.database.query.{QueryBuilder, CompareOp}
+use lib.database.feature_utils.{sort_features_by_id, find_duplicate_ids, mark_orphaned_features}
 use app.io.{rt_timestamp_now}
 
 # ============================================================================
@@ -241,6 +242,49 @@ class FeatureDatabase:
             failed: failed
         )
 
+    # ========================================================================
+    # Utility Methods (from feature_utils)
+    # ========================================================================
+
+    # Sort features by ID using semantic comparison
+    fn sorted_features() -> [Feature]:
+        val features = self.all_features()
+        sort_features_by_id(features)
+
+    # Find duplicate feature IDs
+    fn find_duplicates() -> [text]:
+        val features = self.all_features()
+        find_duplicate_ids(features)
+
+    # Mark features as invalid if their spec files don't exist
+    me mark_orphaned(known_spec_files: [text]):
+        val features = self.all_features()
+        val updated = mark_orphaned_features(features, known_spec_files)
+
+        # Update all features with new valid status
+        for feature in updated:
+            if not feature.valid:
+                # Mark as invalid in database
+                self.update_feature(feature.id, feature)
+
+    # Update feature status by ID (convenience method)
+    me update_feature_status(id: text, status: FeatureStatus) -> bool:
+        val feature_opt = self.get_feature(id)
+        if not feature_opt.?:
+            return false
+
+        var feature = feature_opt?
+        # Update pure status as primary
+        feature.pure_status = status
+        feature.updated_at = rt_timestamp_now().to_string()
+
+        self.update_feature(id, feature)
+
+    # Count features by status (any mode)
+    fn count_by_status(status: FeatureStatus) -> i64:
+        val features = self.features_by_status(status)
+        features.len()
+
     # Save database
     me save() -> bool:
         self.db.save()
@@ -271,3 +315,13 @@ fn mode_to_string(mode: FeatureMode) -> text:
         FeatureMode.Pure: "pure"
         FeatureMode.Hybrid: "hybrid"
         FeatureMode.LLVM: "llvm"
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export FeatureStatus, FeatureMode
+export Feature, CategoryStats
+export FeatureDatabase
+export load_feature_database, create_feature_database
+export status_to_string, parse_status, mode_to_string
