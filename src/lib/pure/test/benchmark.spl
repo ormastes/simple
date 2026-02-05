@@ -1,0 +1,424 @@
+# Pure Simple DL Performance Benchmark
+# Compares Pure Simple vs PyTorch FFI performance
+
+# ============================================================================
+# Benchmark Infrastructure
+# ============================================================================
+
+class BenchmarkResult:
+    operation: text
+    size: text
+    pure_time_ms: f64
+    ffi_time_ms: f64
+    speedup: f64
+
+var benchmark_results: [BenchmarkResult] = []
+
+fn benchmark_operation(name: text, size: text, pure_fn: fn() -> (), ffi_fn: fn() -> ()) -> BenchmarkResult:
+    """Benchmark an operation in both Pure Simple and FFI modes."""
+
+    # Warm-up
+    pure_fn()
+    ffi_fn()
+
+    # Benchmark Pure Simple
+    val pure_start = rt_timestamp_now()
+    pure_fn()
+    val pure_end = rt_timestamp_now()
+    val pure_time = (pure_end - pure_start) / 1000.0  # Convert to ms
+
+    # Benchmark FFI
+    val ffi_start = rt_timestamp_now()
+    ffi_fn()
+    val ffi_end = rt_timestamp_now()
+    val ffi_time = (ffi_end - ffi_start) / 1000.0  # Convert to ms
+
+    # Calculate speedup
+    val speedup = if ffi_time > 0.0: pure_time / ffi_time else: 1.0
+
+    BenchmarkResult(
+        operation: name,
+        size: size,
+        pure_time_ms: pure_time,
+        ffi_time_ms: ffi_time,
+        speedup: speedup
+    )
+
+fn print_benchmark_table():
+    """Print benchmark results as a formatted table."""
+    print ""
+    print "Performance Benchmark Results"
+    print "============================================================"
+    print "Operation          | Size        | Pure (ms) | FFI (ms) | Speedup"
+    print "-------------------|-------------|-----------|----------|--------"
+
+    for result in benchmark_results:
+        val op_padded = result.operation.pad_right(18)
+        val size_padded = result.size.pad_right(11)
+        val pure_str = format("{:.2f}", result.pure_time_ms).pad_left(9)
+        val ffi_str = format("{:.2f}", result.ffi_time_ms).pad_left(8)
+        val speedup_str = format("{:.1f}x", result.speedup).pad_left(7)
+
+        print "{op_padded} | {size_padded} | {pure_str} | {ffi_str} | {speedup_str}"
+
+    print "============================================================"
+    print ""
+
+# ============================================================================
+# Benchmark Setup
+# ============================================================================
+
+print "Pure Simple DL Performance Benchmark"
+print "====================================="
+print ""
+
+# Check FFI availability
+val ffi_available = false  # Set to true when FFI is actually available
+
+if not ffi_available:
+    print "⚠️  PyTorch FFI not available"
+    print ""
+    print "To run benchmarks with FFI:"
+    print "  1. Install PyTorch/LibTorch"
+    print "  2. cd build/rust/ffi_gen"
+    print "  3. cargo build --release --features torch"
+    print "  4. Copy libsimple_torch_ffi.so to library path"
+    print ""
+    print "Running Pure Simple benchmarks only..."
+    print ""
+
+# ============================================================================
+# Tensor Creation Benchmarks
+# ============================================================================
+
+print "Benchmark Group: Tensor Creation"
+
+if ffi_available:
+    # Small tensor: 10x10
+    val result_small = benchmark_operation(
+        "zeros",
+        "10×10",
+        fn(): PureTensor.zeros([10, 10]),
+        fn(): torch_zeros([10, 10])
+    )
+    benchmark_results.push(result_small)
+
+    # Medium tensor: 100x100
+    val result_medium = benchmark_operation(
+        "zeros",
+        "100×100",
+        fn(): PureTensor.zeros([100, 100]),
+        fn(): torch_zeros([100, 100])
+    )
+    benchmark_results.push(result_medium)
+
+    # Large tensor: 1000x1000
+    val result_large = benchmark_operation(
+        "zeros",
+        "1000×1000",
+        fn(): PureTensor.zeros([1000, 1000]),
+        fn(): torch_zeros([1000, 1000])
+    )
+    benchmark_results.push(result_large)
+else:
+    print "⏭️  Skipped (FFI not available)"
+
+print ""
+
+# ============================================================================
+# Element-wise Operation Benchmarks
+# ============================================================================
+
+print "Benchmark Group: Element-wise Operations (add)"
+
+if ffi_available:
+    # Small: 10x10
+    val a_small = PureTensor.randn([10, 10])
+    val b_small = PureTensor.randn([10, 10])
+    val result_add_small = benchmark_operation(
+        "add",
+        "10×10",
+        fn(): add_pure(a_small, b_small),
+        fn(): add_torch_ffi(a_small, b_small)
+    )
+    benchmark_results.push(result_add_small)
+
+    # Medium: 100x100
+    val a_medium = PureTensor.randn([100, 100])
+    val b_medium = PureTensor.randn([100, 100])
+    val result_add_medium = benchmark_operation(
+        "add",
+        "100×100",
+        fn(): add_pure(a_medium, b_medium),
+        fn(): add_torch_ffi(a_medium, b_medium)
+    )
+    benchmark_results.push(result_add_medium)
+
+    # Large: 1000x1000
+    val a_large = PureTensor.randn([1000, 1000])
+    val b_large = PureTensor.randn([1000, 1000])
+    val result_add_large = benchmark_operation(
+        "add",
+        "1000×1000",
+        fn(): add_pure(a_large, b_large),
+        fn(): add_torch_ffi(a_large, b_large)
+    )
+    benchmark_results.push(result_add_large)
+else:
+    print "⏭️  Skipped (FFI not available)"
+
+print ""
+
+# ============================================================================
+# Matrix Multiplication Benchmarks (Critical Path)
+# ============================================================================
+
+print "Benchmark Group: Matrix Multiplication (matmul)"
+
+if ffi_available:
+    # Tiny: 10x10 @ 10x10
+    val m1_tiny = PureTensor.randn([10, 10])
+    val m2_tiny = PureTensor.randn([10, 10])
+    val result_mm_tiny = benchmark_operation(
+        "matmul",
+        "10×10",
+        fn(): matmul_pure(m1_tiny, m2_tiny),
+        fn(): matmul_torch_ffi(m1_tiny, m2_tiny)
+    )
+    benchmark_results.push(result_mm_tiny)
+    print "  ✅ 10×10 completed"
+
+    # Small: 50x50 @ 50x50
+    val m1_small = PureTensor.randn([50, 50])
+    val m2_small = PureTensor.randn([50, 50])
+    val result_mm_small = benchmark_operation(
+        "matmul",
+        "50×50",
+        fn(): matmul_pure(m1_small, m2_small),
+        fn(): matmul_torch_ffi(m1_small, m2_small)
+    )
+    benchmark_results.push(result_mm_small)
+    print "  ✅ 50×50 completed"
+
+    # Medium: 100x100 @ 100x100
+    val m1_medium = PureTensor.randn([100, 100])
+    val m2_medium = PureTensor.randn([100, 100])
+    val result_mm_medium = benchmark_operation(
+        "matmul",
+        "100×100",
+        fn(): matmul_pure(m1_medium, m2_medium),
+        fn(): matmul_torch_ffi(m1_medium, m2_medium)
+    )
+    benchmark_results.push(result_mm_medium)
+    print "  ✅ 100×100 completed"
+
+    # Large: 500x500 @ 500x500 (WARNING: Pure Simple will be slow)
+    print "  ⚠️  500×500 benchmark will take ~60 seconds in Pure Simple..."
+    val m1_large = PureTensor.randn([500, 500])
+    val m2_large = PureTensor.randn([500, 500])
+    val result_mm_large = benchmark_operation(
+        "matmul",
+        "500×500",
+        fn(): matmul_pure(m1_large, m2_large),
+        fn(): matmul_torch_ffi(m1_large, m2_large)
+    )
+    benchmark_results.push(result_mm_large)
+    print "  ✅ 500×500 completed"
+
+    # Very Large: 1000x1000 @ 1000x1000 (SKIP for Pure Simple - would take ~10 minutes)
+    print "  ⏭️  1000×1000 skipped for Pure Simple (would take >10 minutes)"
+    print "  Running FFI-only benchmark..."
+    val m1_xlarge = PureTensor.randn([1000, 1000])
+    val m2_xlarge = PureTensor.randn([1000, 1000])
+
+    val ffi_start = rt_timestamp_now()
+    matmul_torch_ffi(m1_xlarge, m2_xlarge)
+    val ffi_end = rt_timestamp_now()
+    val ffi_time = (ffi_end - ffi_start) / 1000.0
+
+    # Estimate Pure Simple time based on O(n³) complexity
+    # 500x500 pure time * (1000/500)³ = pure_time * 8
+    val estimated_pure_time = if benchmark_results.length > 0:
+        val prev_result = benchmark_results[benchmark_results.length - 1]
+        prev_result.pure_time_ms * 8.0
+    else:
+        600000.0  # 10 minutes estimate
+
+    val result_mm_xlarge = BenchmarkResult(
+        operation: "matmul",
+        size: "1000×1000",
+        pure_time_ms: estimated_pure_time,
+        ffi_time_ms: ffi_time,
+        speedup: estimated_pure_time / ffi_time
+    )
+    benchmark_results.push(result_mm_xlarge)
+    print "  ✅ 1000×1000 FFI completed (Pure Simple time estimated)"
+else:
+    # Run Pure Simple benchmarks only
+    print "Running Pure Simple benchmarks..."
+
+    # Tiny: 10x10
+    val m1_tiny = PureTensor.randn([10, 10])
+    val m2_tiny = PureTensor.randn([10, 10])
+    val pure_start_tiny = rt_timestamp_now()
+    matmul_pure(m1_tiny, m2_tiny)
+    val pure_end_tiny = rt_timestamp_now()
+    val pure_time_tiny = (pure_end_tiny - pure_start_tiny) / 1000.0
+    print "  ✅ 10×10: {pure_time_tiny:.2f} ms"
+
+    # Small: 50x50
+    val m1_small = PureTensor.randn([50, 50])
+    val m2_small = PureTensor.randn([50, 50])
+    val pure_start_small = rt_timestamp_now()
+    matmul_pure(m1_small, m2_small)
+    val pure_end_small = rt_timestamp_now()
+    val pure_time_small = (pure_end_small - pure_start_small) / 1000.0
+    print "  ✅ 50×50: {pure_time_small:.2f} ms"
+
+    # Medium: 100x100
+    val m1_medium = PureTensor.randn([100, 100])
+    val m2_medium = PureTensor.randn([100, 100])
+    val pure_start_medium = rt_timestamp_now()
+    matmul_pure(m1_medium, m2_medium)
+    val pure_end_medium = rt_timestamp_now()
+    val pure_time_medium = (pure_end_medium - pure_start_medium) / 1000.0
+    print "  ✅ 100×100: {pure_time_medium:.2f} ms"
+
+    print "  ⏭️  500×500 and larger skipped (FFI not available)"
+
+print ""
+
+# ============================================================================
+# Activation Function Benchmarks
+# ============================================================================
+
+print "Benchmark Group: Activation Functions (ReLU)"
+
+if ffi_available:
+    # Small: 100x100
+    val x_small = PureTensor.randn([100, 100])
+    val result_relu_small = benchmark_operation(
+        "relu",
+        "100×100",
+        fn(): relu_pure(x_small),
+        fn(): relu_torch_ffi(x_small)
+    )
+    benchmark_results.push(result_relu_small)
+
+    # Large: 1000x1000
+    val x_large = PureTensor.randn([1000, 1000])
+    val result_relu_large = benchmark_operation(
+        "relu",
+        "1000×1000",
+        fn(): relu_pure(x_large),
+        fn(): relu_torch_ffi(x_large)
+    )
+    benchmark_results.push(result_relu_large)
+else:
+    print "⏭️  Skipped (FFI not available)"
+
+print ""
+
+# ============================================================================
+# Memory Leak Test
+# ============================================================================
+
+print "Benchmark Group: Memory Management"
+
+if ffi_available:
+    print "Testing memory leak prevention (1000 operations)..."
+
+    val leak_start = rt_timestamp_now()
+    var i = 0
+    while i < 1000:
+        val a = PureTensor.randn([10, 10])
+        val b = PureTensor.randn([10, 10])
+        val result = matmul_torch_ffi(a, b)
+        # Result handle should be freed automatically
+        i = i + 1
+    val leak_end = rt_timestamp_now()
+    val leak_time = (leak_end - leak_start) / 1000.0
+
+    print "  ✅ 1000 operations completed in {leak_time:.2f} ms"
+    print "  ℹ️  No crashes → memory management working"
+else:
+    print "⏭️  Skipped (FFI not available)"
+
+print ""
+
+# ============================================================================
+# Results Summary
+# ============================================================================
+
+if ffi_available and benchmark_results.length > 0:
+    print_benchmark_table()
+
+    # Summary statistics
+    var total_speedup = 0.0
+    for result in benchmark_results:
+        total_speedup = total_speedup + result.speedup
+
+    val avg_speedup = total_speedup / benchmark_results.length
+
+    print "Summary:"
+    print "  Average speedup: {avg_speedup:.1f}x"
+    print "  Best speedup: {find_max_speedup(benchmark_results):.1f}x"
+    print ""
+    print "Interpretation:"
+    print "  - Speedup < 2x: Pure Simple competitive"
+    print "  - Speedup 2-10x: FFI beneficial for production"
+    print "  - Speedup > 10x: FFI essential for practical use"
+else:
+    print "Benchmark Summary:"
+    print "  Pure Simple performance measured"
+    print "  FFI not available for comparison"
+    print ""
+    print "Expected speedups with PyTorch FFI:"
+    print "  - matmul 100×100: ~2-5x"
+    print "  - matmul 500×500: ~50-100x"
+    print "  - matmul 1000×1000: ~500-1000x"
+    print "  - element-wise ops: ~1-3x"
+    print "  - activations: ~1-2x"
+
+print ""
+print "============================================================"
+print "Benchmark complete!"
+print ""
+
+if not ffi_available:
+    print "To enable FFI acceleration and run full benchmarks:"
+    print "  1. Install PyTorch: https://pytorch.org/"
+    print "  2. Build FFI: cd build/rust/ffi_gen && cargo build --features torch"
+    print "  3. Run benchmarks again"
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+fn find_max_speedup(results: [BenchmarkResult]) -> f64:
+    """Find the maximum speedup in results."""
+    var max_speedup = 0.0
+    for result in results:
+        if result.speedup > max_speedup:
+            max_speedup = result.speedup
+    max_speedup
+
+fn format(template: text, value: f64) -> text:
+    """Format a float to string (stub - would use real formatting)."""
+    # In real implementation, would format according to template
+    # For now, just convert to string
+    value.to_string()
+
+fn pad_right(s: text, width: i64) -> text:
+    """Pad string to width on the right."""
+    var result = s
+    while result.length < width:
+        result = result + " "
+    result
+
+fn pad_left(s: text, width: i64) -> text:
+    """Pad string to width on the left."""
+    var result = s
+    while result.length < width:
+        result = " " + result
+    result

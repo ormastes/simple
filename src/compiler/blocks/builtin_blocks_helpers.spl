@@ -150,6 +150,50 @@ fn parse_sql_query(raw: text) -> SqlQuery:
                 tables = tables.push(words[i + 1].replace("," + "", "" + ""))
         i = i + 1
 
+    # Extract columns based on query kind
+    var columns: [text] = []
+    match kind:
+        case Select:
+            # Extract columns between SELECT and FROM
+            val select_idx = upper.index_of("SELECT")
+            val from_idx = upper.index_of("FROM")
+            if select_idx >= 0 and from_idx > select_idx:
+                val col_section = raw[(select_idx + 6):from_idx].trim()
+                if col_section != "*":
+                    val col_parts = col_section.split(",")
+                    for part in col_parts:
+                        val cleaned = part.trim().split(" ")[0].replace("," + "", "" + "")
+                        if not cleaned.is_empty():
+                            columns = columns.push(cleaned)
+        case Insert:
+            # Extract columns from INSERT INTO table (col1, col2, ...)
+            val paren_start = raw.index_of("(")
+            val paren_end = raw.index_of(")")
+            if paren_start >= 0 and paren_end > paren_start:
+                val col_section = raw[(paren_start + 1):paren_end].trim()
+                val col_parts = col_section.split(",")
+                for part in col_parts:
+                    val cleaned = part.trim()
+                    if not cleaned.is_empty():
+                        columns = columns.push(cleaned)
+        case Update:
+            # Extract columns from SET clause
+            val set_idx = upper.index_of("SET")
+            if set_idx >= 0:
+                val where_idx = upper.index_of("WHERE")
+                val end_idx = if where_idx > set_idx: where_idx else: raw.len()
+                val set_section = raw[(set_idx + 3):end_idx].trim()
+                val assignments = set_section.split(",")
+                for assign in assignments:
+                    val parts = assign.split("=")
+                    if parts.len() > 0:
+                        val col_name = parts[0].trim()
+                        if not col_name.is_empty():
+                            columns = columns.push(col_name)
+        case _:
+            # Other query types - no column extraction
+            ()
+
     # Extract parameters ($1, $2, :name)
     var params: [SqlParam] = []
     var pos = 0
@@ -181,7 +225,7 @@ fn parse_sql_query(raw: text) -> SqlQuery:
         raw: raw,
         kind: kind,
         tables: tables,
-        columns: [],  # TODO: Extract columns
+        columns: columns,
         params: params
     )
 

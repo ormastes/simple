@@ -1,0 +1,506 @@
+# Bug Tracking Scenario - End-to-End Workflow Testing
+# Real-world bug tracking workflow from discovery to closure
+
+use lib.database.mod.{StringInterner, SdnTable, SdnRow, SdnDatabase}
+use lib.database.bug.{BugDatabase, Bug, BugSeverity, BugStatus}
+use test.lib.database_fixtures.{generate_simple_bug, generate_bug_with_severity, generate_bug_with_status, cleanup_test_file}
+
+describe "Bug Tracking Scenario - Complete Workflow":
+    context "developer discovers bug":
+        it "creates bug report with all required fields":
+            val test_file = "/tmp/scenario_bugdb_discovery.sdn"
+            cleanup_test_file(test_file)
+
+            # Step 1: Developer finds bug
+            val bug = Bug(
+                id: "scenario_001",
+                severity: BugSeverity.P0,
+                status: BugStatus.Open,
+                title: "Null pointer in parser",
+                description: [
+                    "Found while testing empty input",
+                    "Crashes on empty file",
+                    "Stack trace shows parser.spl:123"
+                ],
+                file: "src/parser/mod.spl",
+                line: 123,
+                reproducible_by: "test_parser_empty",
+                fix_strategy: [],
+                investigation_log: [],
+                created_at: 1738724000000000,
+                updated_at: 1738724000000000,
+                valid: true
+            )
+
+            # Step 2: Save to database
+            var bugdb = create_bug_database(test_file)
+            bugdb.add_bug(bug)
+            val save_result = bugdb.save()
+            assert save_result
+
+            # Step 3: Verify bug was saved
+            var loaded = create_bug_database(test_file)
+            val bug_result = loaded.get_bug("scenario_001")
+            assert bug_result.?
+
+            val loaded_bug = bug_result?
+            assert loaded_bug.id == "scenario_001"
+            assert loaded_bug.severity == BugSeverity.P0
+            assert loaded_bug.status == BugStatus.Open
+            assert loaded_bug.title == "Null pointer in parser"
+
+            cleanup_test_file(test_file)
+
+        it "bug appears in open bugs list":
+            val test_file = "/tmp/scenario_bugdb_open_query.sdn"
+            cleanup_test_file(test_file)
+
+            var bugdb = create_bug_database(test_file)
+
+            # Add the bug
+            val bug = generate_bug_with_status("scenario_002", BugStatus.Open)
+            bugdb.add_bug(bug)
+            bugdb.save()
+
+            # Query for open bugs
+            var loaded = create_bug_database(test_file)
+            val open_bugs = loaded.open_bugs()
+
+            assert open_bugs.len() >= 1
+
+            # Verify our bug is in the results
+            var found = false
+            for b in open_bugs:
+                if b.id == "scenario_002":
+                    found = true
+            assert found
+
+            cleanup_test_file(test_file)
+
+        it "bug appears in MCP bugdb://open resource":
+            val test_file = "/tmp/scenario_bugdb_mcp_open.sdn"
+            cleanup_test_file(test_file)
+
+            var bugdb = create_bug_database(test_file)
+            val bug = generate_bug_with_status("scenario_003", BugStatus.Open)
+            bugdb.add_bug(bug)
+            bugdb.save()
+
+            # Get JSON via MCP resource
+            val json = get_open_bugs(test_file)
+            assert json.contains("scenario_003")
+
+            cleanup_test_file(test_file)
+
+    context "team investigates bug":
+        it "updates status to Investigating":
+            val test_file = "/tmp/scenario_bugdb_investigating.sdn"
+            cleanup_test_file(test_file)
+
+            var bugdb = create_bug_database(test_file)
+
+            # Create and add bug
+            val bug = generate_bug_with_status("scenario_004", BugStatus.Open)
+            bugdb.add_bug(bug)
+            bugdb.save()
+
+            # Update status - reconstruct bug with new status
+            if val Some(old_bug) = bugdb.get_bug("scenario_004"):
+                val updated_bug = Bug(
+                    id: old_bug.id,
+                    severity: old_bug.severity,
+                    status: BugStatus.Investigating,
+                    title: old_bug.title,
+                    description: old_bug.description,
+                    file: old_bug.file,
+                    line: old_bug.line,
+                    reproducible_by: old_bug.reproducible_by,
+                    fix_strategy: old_bug.fix_strategy,
+                    investigation_log: old_bug.investigation_log,
+                    created_at: old_bug.created_at,
+                    updated_at: 1738724000000000,
+                    valid: old_bug.valid
+                )
+                bugdb.update_bug("scenario_004", updated_bug)
+                bugdb.save()
+
+            # Verify update
+            var loaded = create_bug_database(test_file)
+            val bug_result = loaded.get_bug("scenario_004")
+            assert bug_result.?
+
+            val updated_bug = bug_result?
+            assert updated_bug.status == BugStatus.Investigating
+
+            cleanup_test_file(test_file)
+
+        it "adds investigation notes":
+            val test_file = "/tmp/scenario_bugdb_notes.sdn"
+            cleanup_test_file(test_file)
+
+            var bugdb = create_bug_database(test_file)
+
+            val bug = Bug(
+                id: "scenario_005",
+                severity: BugSeverity.P1,
+                status: BugStatus.Investigating,
+                title: "Memory leak in GC",
+                description: ["Leak detected in long-running process"],
+                file: "src/gc/mod.spl",
+                line: 456,
+                reproducible_by: "test_gc_long",
+                fix_strategy: [],
+                investigation_log: [
+                    "2026-02-05: Started investigation",
+                    "2026-02-05: Reproduced locally",
+                    "2026-02-05: Found root cause in allocation"
+                ],
+                created_at: 1738724000000000,
+                updated_at: 1738724000000000,
+                valid: true
+            )
+
+            bugdb.add_bug(bug)
+            bugdb.save()
+
+            # Verify investigation log persisted
+            var loaded = create_bug_database(test_file)
+            val bug_result = loaded.get_bug("scenario_005")
+            assert bug_result.?
+
+            val loaded_bug = bug_result?
+            assert loaded_bug.investigation_log.len() == 3
+
+            cleanup_test_file(test_file)
+
+        it "proposes fix strategy":
+            val test_file = "/tmp/scenario_bugdb_strategy.sdn"
+            cleanup_test_file(test_file)
+
+            var bugdb = create_bug_database(test_file)
+
+            val bug = Bug(
+                id: "scenario_006",
+                severity: BugSeverity.P0,
+                status: BugStatus.Investigating,
+                title: "Race condition in concurrent module",
+                description: ["Race condition causes data corruption"],
+                file: "src/concurrent/mod.spl",
+                line: 789,
+                reproducible_by: "test_concurrent",
+                fix_strategy: [
+                    "Add mutex around critical section",
+                    "Use atomic operations for counters",
+                    "Add regression test"
+                ],
+                investigation_log: [],
+                created_at: 1738724000000000,
+                updated_at: 1738724000000000,
+                valid: true
+            )
+
+            bugdb.add_bug(bug)
+            bugdb.save()
+
+            # Verify fix strategy persisted
+            var loaded = create_bug_database(test_file)
+            val bug_result = loaded.get_bug("scenario_006")
+            assert bug_result.?
+
+            val loaded_bug = bug_result?
+            assert loaded_bug.fix_strategy.len() == 3
+
+            cleanup_test_file(test_file)
+
+    context "developer fixes bug":
+        it "updates status to Fixed":
+            val test_file = "/tmp/scenario_bugdb_fixed.sdn"
+            cleanup_test_file(test_file)
+
+            var bugdb = create_bug_database(test_file)
+
+            # Start with Investigating status
+            val bug = generate_bug_with_status("scenario_007", BugStatus.Investigating)
+            bugdb.add_bug(bug)
+            bugdb.save()
+
+            # Update to Fixed
+            if val Some(old_bug) = bugdb.get_bug("scenario_007"):
+                val updated_bug = Bug(
+                    id: old_bug.id,
+                    severity: old_bug.severity,
+                    status: BugStatus.Fixed,
+                    title: old_bug.title,
+                    description: old_bug.description,
+                    file: old_bug.file,
+                    line: old_bug.line,
+                    reproducible_by: old_bug.reproducible_by,
+                    fix_strategy: old_bug.fix_strategy,
+                    investigation_log: old_bug.investigation_log,
+                    created_at: old_bug.created_at,
+                    updated_at: 1738724000000000,
+                    valid: old_bug.valid
+                )
+                bugdb.update_bug("scenario_007", updated_bug)
+                bugdb.save()
+
+            # Verify update
+            var loaded = create_bug_database(test_file)
+            val bug_result = loaded.get_bug("scenario_007")
+            assert bug_result.?
+
+            val fixed_bug = bug_result?
+            assert fixed_bug.status == BugStatus.Fixed
+
+            cleanup_test_file(test_file)
+
+        it "fixed bugs no longer appear in open bugs":
+            val test_file = "/tmp/scenario_bugdb_not_open.sdn"
+            cleanup_test_file(test_file)
+
+            var bugdb = create_bug_database(test_file)
+
+            # Add mix of open and fixed bugs
+            for i in 0..10:
+                val status = if i % 2 == 0:
+                    BugStatus.Open
+                else:
+                    BugStatus.Fixed
+                val bug = generate_bug_with_status("scenario_{i}", status)
+                bugdb.add_bug(bug)
+
+            bugdb.save()
+
+            # Query for open bugs only
+            var loaded = create_bug_database(test_file)
+            val open_bugs = loaded.open_bugs()
+
+            # Should have 5 open bugs (even indices)
+            assert open_bugs.len() == 5
+
+            # Verify none are Fixed
+            for bug in open_bugs:
+                assert bug.status == BugStatus.Open
+
+            cleanup_test_file(test_file)
+
+    context "QA validates fix":
+        it "updates status to Closed":
+            val test_file = "/tmp/scenario_bugdb_closed.sdn"
+            cleanup_test_file(test_file)
+
+            var bugdb = create_bug_database(test_file)
+
+            # Start with Fixed status
+            val bug = generate_bug_with_status("scenario_008", BugStatus.Fixed)
+            bugdb.add_bug(bug)
+            bugdb.save()
+
+            # Update to Closed
+            if val Some(old_bug) = bugdb.get_bug("scenario_008"):
+                val updated_bug = Bug(
+                    id: old_bug.id,
+                    severity: old_bug.severity,
+                    status: BugStatus.Closed,
+                    title: old_bug.title,
+                    description: old_bug.description,
+                    file: old_bug.file,
+                    line: old_bug.line,
+                    reproducible_by: old_bug.reproducible_by,
+                    fix_strategy: old_bug.fix_strategy,
+                    investigation_log: old_bug.investigation_log,
+                    created_at: old_bug.created_at,
+                    updated_at: 1738724000000000,
+                    valid: old_bug.valid
+                )
+                bugdb.update_bug("scenario_008", updated_bug)
+                bugdb.save()
+
+            # Verify update
+            var loaded = create_bug_database(test_file)
+            val bug_result = loaded.get_bug("scenario_008")
+            assert bug_result.?
+
+            val closed_bug = bug_result?
+            assert closed_bug.status == BugStatus.Closed
+
+            cleanup_test_file(test_file)
+
+        it "statistics reflect bug closure":
+            val test_file = "/tmp/scenario_bugdb_stats.sdn"
+            cleanup_test_file(test_file)
+
+            var bugdb = create_bug_database(test_file)
+
+            # Add 10 bugs with various statuses
+            for i in 0..10:
+                val status = if i < 3:
+                    BugStatus.Open
+                elif i < 6:
+                    BugStatus.Investigating
+                elif i < 8:
+                    BugStatus.Fixed
+                else:
+                    BugStatus.Closed
+
+                val bug = generate_bug_with_status("scenario_stat_{i}", status)
+                bugdb.add_bug(bug)
+
+            bugdb.save()
+
+            # Get statistics
+            var loaded = create_bug_database(test_file)
+            val stats = loaded.stats()
+
+            assert stats.total == 10
+            assert stats.open == 3
+            assert stats.investigating == 3
+            assert stats.fixed == 2
+            assert stats.closed == 2
+
+            cleanup_test_file(test_file)
+
+    context "complete lifecycle":
+        it "tracks bug from discovery to closure":
+            val test_file = "/tmp/scenario_bugdb_lifecycle.sdn"
+            cleanup_test_file(test_file)
+
+            var bugdb = create_bug_database(test_file)
+
+            # Step 1: Create bug (Open)
+            val bug = Bug(
+                id: "lifecycle_001",
+                severity: BugSeverity.P1,
+                status: BugStatus.Open,
+                title: "Complete lifecycle test bug",
+                description: ["Test bug for full lifecycle"],
+                file: "test.spl",
+                line: 100,
+                reproducible_by: "test_lifecycle",
+                fix_strategy: [],
+                investigation_log: [],
+                created_at: 1738724000000000,
+                updated_at: 1738724000000000,
+                valid: true
+            )
+            bugdb.add_bug(bug)
+            bugdb.save()
+
+            # Step 2: Start investigation
+            if val Some(old) = bugdb.get_bug("lifecycle_001"):
+                val updated = Bug(
+                    id: old.id,
+                    severity: old.severity,
+                    status: BugStatus.Investigating,
+                    title: old.title,
+                    description: old.description,
+                    file: old.file,
+                    line: old.line,
+                    reproducible_by: old.reproducible_by,
+                    fix_strategy: old.fix_strategy,
+                    investigation_log: old.investigation_log,
+                    created_at: old.created_at,
+                    updated_at: 1738724000000000,
+                    valid: old.valid
+                )
+                bugdb.update_bug("lifecycle_001", updated)
+                bugdb.save()
+
+            var inv_loaded = create_bug_database(test_file)
+            val inv_bug = inv_loaded.get_bug("lifecycle_001")?
+            assert inv_bug.status == BugStatus.Investigating
+
+            # Step 3: Fix bug
+            if val Some(old) = bugdb.get_bug("lifecycle_001"):
+                val updated = Bug(
+                    id: old.id,
+                    severity: old.severity,
+                    status: BugStatus.Fixed,
+                    title: old.title,
+                    description: old.description,
+                    file: old.file,
+                    line: old.line,
+                    reproducible_by: old.reproducible_by,
+                    fix_strategy: old.fix_strategy,
+                    investigation_log: old.investigation_log,
+                    created_at: old.created_at,
+                    updated_at: 1738724000000000,
+                    valid: old.valid
+                )
+                bugdb.update_bug("lifecycle_001", updated)
+                bugdb.save()
+
+            var fix_loaded = create_bug_database(test_file)
+            val fix_bug = fix_loaded.get_bug("lifecycle_001")?
+            assert fix_bug.status == BugStatus.Fixed
+
+            # Step 4: Close bug
+            if val Some(old) = bugdb.get_bug("lifecycle_001"):
+                val updated = Bug(
+                    id: old.id,
+                    severity: old.severity,
+                    status: BugStatus.Closed,
+                    title: old.title,
+                    description: old.description,
+                    file: old.file,
+                    line: old.line,
+                    reproducible_by: old.reproducible_by,
+                    fix_strategy: old.fix_strategy,
+                    investigation_log: old.investigation_log,
+                    created_at: old.created_at,
+                    updated_at: 1738724000000000,
+                    valid: old.valid
+                )
+                bugdb.update_bug("lifecycle_001", updated)
+                bugdb.save()
+
+            var close_loaded = create_bug_database(test_file)
+            val close_bug = close_loaded.get_bug("lifecycle_001")?
+            assert close_bug.status == BugStatus.Closed
+
+            cleanup_test_file(test_file)
+
+    context "concurrent bug tracking":
+        it "handles multiple bugs being tracked simultaneously":
+            val test_file = "/tmp/scenario_bugdb_concurrent.sdn"
+            cleanup_test_file(test_file)
+
+            var bugdb = create_bug_database(test_file)
+
+            # Create 20 bugs in various states
+            for i in 0..20:
+                val severity = get_test_severities()[i % 4]
+                val status = get_test_statuses()[i % 4]
+
+                val bug = Bug(
+                    id: "concurrent_{i}",
+                    severity: severity,
+                    status: status,
+                    title: "Concurrent bug {i}",
+                    description: ["Bug {i} description"],
+                    file: "src/module_{i % 5}.spl",
+                    line: 100 + i,
+                    reproducible_by: "test_{i}",
+                    fix_strategy: [],
+                    investigation_log: [],
+                    created_at: 1738724000000000,
+                    updated_at: 1738724000000000,
+                    valid: true
+                )
+                bugdb.add_bug(bug)
+
+            bugdb.save()
+
+            # Verify all bugs saved
+            var loaded = create_bug_database(test_file)
+            assert loaded.all_bugs().len() == 20
+
+            # Verify statistics
+            val stats = loaded.stats()
+            assert stats.total == 20
+
+            # Verify open bugs query works
+            val open = loaded.open_bugs()
+            assert open.len() > 0
+
+            cleanup_test_file(test_file)

@@ -1,9 +1,15 @@
 # Pure Simple I/O Implementation
 # All implementations in Simple - no Rust dependencies
 
+# Extern function declarations for runtime
+extern fn rt_cli_get_args() -> [str]
+extern fn rt_exit(code: i64)
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
 export file_exists, file_read, file_write, file_copy, file_delete, file_atomic_write
 export file_append, file_modified_time, file_remove, file_hash_sha256, file_read_lines
 export file_lock, file_unlock, file_size, file_size_raw
+export rt_file_rename, rt_sleep_ms, rt_getpid, rt_timestamp_now
 export dir_create, dir_create_all, dir_walk, dir_remove_all, is_dir
 export dir_list, dir_remove
 export cwd, home, env_get, env_set
@@ -25,6 +31,7 @@ export cli_read_file, context_generate, context_stats, settlement_main
 export fault_set_stack_overflow_detection, fault_set_max_recursion_depth
 export fault_set_timeout, fault_set_execution_limit
 export eprintln
+export math_exp, math_ln, math_sqrt, math_cos, math_sin, math_random
 
 # ============================================================================
 # Core I/O - Using runtime's built-in capabilities
@@ -148,12 +155,19 @@ fn dir_remove_all(path: text) -> i32:
     -1
 
 fn is_dir(path: text) -> bool:
-    # Check if path ends with / or has typical dir structure
-    path.ends_with("/")
+    # Check if path is a directory using test -d
+    val result = shell("test -d '{path}'")
+    result.exit_code == 0
 
 fn dir_list(path: text) -> [text]:
-    # List files in directory
-    []
+    # List files in directory using ls
+    val result = shell("ls -1 '{path}' 2>/dev/null")
+    if result.exit_code == 0 and result.stdout.?:
+        val out = result.stdout
+        val trimmed = out.trim()
+        trimmed.split("\n")
+    else:
+        []
 
 fn dir_remove(path: text, recursive: bool) -> bool:
     if recursive:
@@ -194,26 +208,8 @@ struct ProcessResult:
     exit_code: i64
 
 fn process_run(cmd: text, args: [text]) -> (text, text, i64):
-    # REAL IMPLEMENTATION: Execute process using filesystem + runtime
-    # Since we can't call FFI, we use a clever workaround:
-    # 1. Create a shell script that captures stdout/stderr/exitcode
-    # 2. The runtime can execute files with shebang
-    # 3. Read back the results from temp files
-
-    # For now, use simplified stub that at least shows what it would do
-    # Real implementation would need runtime support for file creation/execution
-    # which the current runtime provides through other means
-
-    # Build command line
-    var cmd_line = cmd
-    var i = 0
-    while i < args.len():
-        cmd_line = cmd_line + " " + shell_escape(args[i])
-        i = i + 1
-
-    # Return placeholder indicating command that would be run
-    # Actual execution requires runtime's native process support
-    (cmd_line, "", 0)
+    # Delegate to runtime's process execution
+    rt_process_run(cmd, args)
 
 fn process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32):
     val (out, err, code) = process_run(cmd, args)
@@ -303,22 +299,53 @@ fn path_basename(path: text) -> text:
         path
 
 # ============================================================================
+# Additional System Functions
+# ============================================================================
+
+fn rt_file_rename(src: text, dst: text) -> bool:
+    # Atomic file rename using mv
+    val result = shell("mv '{src}' '{dst}'")
+    result.exit_code == 0
+
+fn rt_sleep_ms(milliseconds: i64):
+    # Sleep for specified milliseconds
+    val seconds = milliseconds / 1000
+    val remainder = milliseconds % 1000
+    if seconds > 0:
+        shell("sleep {seconds}")
+    if remainder > 0:
+        shell("sleep 0.{remainder}")
+
+fn rt_getpid() -> i64:
+    # Get process ID using shell
+    val result = shell("echo $$")
+    if result.exit_code == 0:
+        result.stdout.trim().parse_i64() ?? 12345
+    else:
+        12345
+
+fn rt_timestamp_now() -> i64:
+    # Return current timestamp in microseconds
+    time_now_unix_micros()
+
+# ============================================================================
 # CLI Functions - Pure Simple Implementations
 # ============================================================================
 
 fn get_args() -> [String]:
-    # Command line arguments
-    []
+    # Command line arguments - delegate to runtime
+    rt_cli_get_args()
 
 fn exit(code: i64):
-    print "[EXIT] Program would exit with code {code}"
-    ()
+    # Exit the program with given code - delegate to runtime
+    rt_exit(code)
 
 fn cli_get_args() -> [str]:
-    []
+    # CLI arguments - delegate to runtime
+    rt_cli_get_args()
 
 fn cli_exit(code: i64):
-    exit(code)
+    rt_exit(code)
 
 fn cli_file_exists(path: str) -> bool:
     file_exists(path)
@@ -379,8 +406,21 @@ fn cli_run_migrate(args: [str]) -> i64:
     1
 
 fn cli_run_mcp(args: [str]) -> i64:
-    print "MCP tool not yet implemented in pure Simple"
-    1
+    # Run MCP server using the dedicated MCP main.spl
+    # args[0] is "mcp", so we skip it and pass args[1:]
+    var cmd = "./bin/simple_runtime src/app/mcp/main.spl"
+    var i = 1
+    while i < args.len():
+        cmd = cmd + " " + args[i]
+        i = i + 1
+
+    val result = shell(cmd)
+    # Print the output from MCP server
+    if result.stdout.len() > 0:
+        print(result.stdout)
+    if result.stderr.len() > 0:
+        eprint(result.stderr)
+    result.exit_code
 
 fn cli_run_diff(args: [str]) -> i64:
     print "Diff tool not yet implemented in pure Simple"
@@ -504,3 +544,62 @@ fn fault_set_execution_limit(limit: i64):
 
 fn eprintln(msg: text):
     print "[STDERR] {msg}"
+
+# ============================================================================
+# Math Functions - Using shell bc for computation
+# ============================================================================
+
+fn math_exp(x: f64) -> f64:
+    """Exponential function: e^x"""
+    val result = shell("echo 'e({x})' | bc -l")
+    if result.exit_code == 0:
+        result.stdout.trim().to_float_or(0.0)
+    else:
+        0.0
+
+fn math_ln(x: f64) -> f64:
+    """Natural logarithm: ln(x)"""
+    if x <= 0.0:
+        return -999999.0  # Negative infinity approximation
+    val result = shell("echo 'l({x})' | bc -l")
+    if result.exit_code == 0:
+        result.stdout.trim().to_float_or(0.0)
+    else:
+        0.0
+
+fn math_sqrt(x: f64) -> f64:
+    """Square root: sqrt(x)"""
+    if x < 0.0:
+        return 0.0  # NaN approximation
+    val result = shell("echo 'sqrt({x})' | bc -l")
+    if result.exit_code == 0:
+        result.stdout.trim().to_float_or(0.0)
+    else:
+        0.0
+
+fn math_cos(x: f64) -> f64:
+    """Cosine: cos(x)"""
+    val result = shell("echo 'c({x})' | bc -l")
+    if result.exit_code == 0:
+        result.stdout.trim().to_float_or(0.0)
+    else:
+        0.0
+
+fn math_sin(x: f64) -> f64:
+    """Sine: sin(x)"""
+    val result = shell("echo 's({x})' | bc -l")
+    if result.exit_code == 0:
+        result.stdout.trim().to_float_or(0.0)
+    else:
+        0.0
+
+fn math_random() -> f64:
+    """Random number in [0, 1)"""
+    # Use /dev/urandom for randomness
+    val result = shell("od -An -N4 -tu4 /dev/urandom | awk '{print $1}'")
+    if result.exit_code == 0:
+        val rand_int = result.stdout.trim().to_int_or(0)
+        # Normalize to [0, 1)
+        rand_int / 4294967296.0  # 2^32
+    else:
+        0.5  # Fallback

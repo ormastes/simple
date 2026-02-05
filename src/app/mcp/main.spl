@@ -10,11 +10,11 @@
 #   simple mcp json <file.spl>     # Generate JSON output
 
 # I/O imports
-use app.io.mod (file_read, get_args, exit, shell)
+use app.io.mod (file_read, get_args, exit, shell, cwd)
 
 # MCP modules
-import app.mcp.resources
-import app.mcp.prompts
+use app.mcp.resources
+use app.mcp.prompts
 
 struct ShellResult:
     exit_code: Int
@@ -46,15 +46,29 @@ fn unwrap_str(result) -> String:
         case Err(_):
             return ""
 
+# Skip program name and script path to get clean args
+fn get_clean_args(all_args: [String]) -> [String]:
+    var args = []
+    var start_idx = 1
+    # If second arg is the script path (ends with .spl), skip it too
+    if all_args.len() > 1 and all_args[1].ends_with(".spl"):
+        start_idx = 2
+    var i = start_idx
+    while i < all_args.len():
+        args = args + [all_args[i]]
+        i = i + 1
+    args
+
 # Main entry point
 fn main():
-    val args = get_args()
+    val raw_args = get_args()
+    val args = get_clean_args(raw_args)
 
-    if args.len() < 2:
+    if args.len() < 1:
         print_usage()
         exit(1)
 
-    val command = args[1]
+    val command = args[0]
 
     if command == "--help" or command == "-h":
         print_usage()
@@ -492,23 +506,23 @@ fn handle_resources_templates_list(id: String, resource_mgr: resources.ResourceM
     var templates_json = "["
 
     var first = true
-    for template in templates:
+    for tmpl in templates:
         if not first:
             templates_json = templates_json + ","
         first = false
 
         var templ_obj = LB()
-        templ_obj = templ_obj + jp("uriTemplate", js(template.uri_template))
+        templ_obj = templ_obj + jp("uriTemplate", js(tmpl.uri_template))
         templ_obj = templ_obj + ","
-        templ_obj = templ_obj + jp("name", js(template.name))
+        templ_obj = templ_obj + jp("name", js(tmpl.name))
 
-        if template.description.?:
+        if tmpl.description.?:
             templ_obj = templ_obj + ","
-            templ_obj = templ_obj + jp("description", js(template.description.unwrap()))
+            templ_obj = templ_obj + jp("description", js(tmpl.description.unwrap()))
 
-        if template.mime_type.?:
+        if tmpl.mime_type.?:
             templ_obj = templ_obj + ","
-            templ_obj = templ_obj + jp("mimeType", js(template.mime_type.unwrap()))
+            templ_obj = templ_obj + jp("mimeType", js(tmpl.mime_type.unwrap()))
 
         templ_obj = templ_obj + RB()
         templates_json = templates_json + templ_obj
@@ -613,18 +627,18 @@ fn handle_prompts_get(id: String, prompt_name: String, body: String, prompt_mgr:
     val result = jo1(jp("prompt", result_obj))
     jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", result))
 
-# Get current directory (using Simple's built-in io.cwd)
+# Get current directory (using Simple's built-in cwd)
 fn get_current_dir() -> String:
-    io.cwd()
+    cwd()
 
 # --- CLI mode handlers ---
 
 fn handle_read(args: [String]):
-    if args.len() < 3:
+    if args.len() < 2:
         print("Error: Missing file path")
         print("Usage: simple mcp read <file.spl>")
         exit(1)
-    val file_path = args[2]
+    val file_path = args[1]
     val content = file_read(file_path)
     if content == "":
         print("Error reading file: " + file_path)
@@ -632,12 +646,12 @@ fn handle_read(args: [String]):
     print(content)
 
 fn handle_expand(args: [String]):
-    if args.len() < 4:
+    if args.len() < 3:
         print("Error: Missing file path or symbol name")
         print("Usage: simple mcp expand <file.spl> <symbol>")
         exit(1)
-    val file_path = args[2]
-    val symbol_name = args[3]
+    val file_path = args[1]
+    val symbol_name = args[2]
     val content = file_read(file_path)
     if content == "":
         print("Error reading file: " + file_path)
@@ -655,19 +669,19 @@ fn handle_expand(args: [String]):
         print("Symbol not found: " + symbol_name)
 
 fn handle_search(args: [String]):
-    if args.len() < 3:
+    if args.len() < 2:
         print("Error: Missing search query")
         print("Usage: simple mcp search <query>")
         exit(1)
-    val query = args[2]
+    val query = args[1]
     print("Search for '" + query + "' (CLI mode)")
 
 fn handle_json(args: [String]):
-    if args.len() < 3:
+    if args.len() < 2:
         print("Error: Missing file path")
         print("Usage: simple mcp json <file.spl>")
         exit(1)
-    val file_path = args[2]
+    val file_path = args[1]
     val content = file_read(file_path)
     if content == "":
         print("Error reading file: " + file_path)
@@ -680,7 +694,7 @@ fn handle_json(args: [String]):
     print(lb + q + "file" + q + ":" + q + escape_json(file_path) + q + "," + q + "content" + q + ":" + q + escaped + q + rb)
 
 fn handle_default_read(args: [String]):
-    val file_path = args[1]
+    val file_path = args[0]  # After clean_args, first element is the command/file
     val content = file_read(file_path)
     if content == "":
         print("Error reading file: " + file_path)

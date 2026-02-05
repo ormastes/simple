@@ -486,9 +486,12 @@ Part of [Simple Language Grammar](lexer_parser_grammar.md).
       ')',
     ),
 
+    // Both ':' and '=' are supported for argument assignment
+    // with no preference (Pattern A - like 'pass' vs '()').
+    // Examples: Point(x: 5) or Point(x = 5)
     field_argument: $ => seq(
       $.identifier,
-      ':',
+      choice(':', '='),
       $.expression,
     ),
 
@@ -512,9 +515,12 @@ Part of [Simple Language Grammar](lexer_parser_grammar.md).
       $.named_argument,
     ),
 
+    // Both ':' and '=' are supported for argument assignment
+    // with no preference (Pattern A - like 'pass' vs '()').
+    // Examples: func(x: 42) or func(x = 42)
     named_argument: $ => seq(
       $.identifier,
-      ':',
+      choice(':', '='),
       $.expression,
     ),
 
