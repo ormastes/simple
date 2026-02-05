@@ -1,0 +1,245 @@
+# Feature Database MCP Resource
+#
+# Provides MCP access to the unified feature database
+# Supports both read and write operations via JSON API
+
+use lib.database.feature.{create_feature_database, FeatureDatabase, Feature, FeatureStatus, FeatureMode}
+
+export get_all_features, get_features_by_category, get_features_by_status
+export get_feature_stats, get_feature_by_id, add_feature_from_json, update_feature_from_json
+
+# ============================================================================
+# Read Operations
+# ============================================================================
+
+# Get all features from database
+fn get_all_features(db_path: text) -> text:
+    var featuredb = create_feature_database(db_path)
+    val features = featuredb.all_features()
+
+    var json = "{"
+    json = json + "\"total\": {features.len()},"
+    json = json + "\"features\": ["
+
+    var first = true
+    for feature in features:
+        if not first:
+            json = json + ","
+        first = false
+        json = json + feature_to_json(feature)
+
+    json = json + "]"
+    json = json + "}"
+    json
+
+# Get features by category
+fn get_features_by_category(db_path: text, category: text) -> text:
+    var featuredb = create_feature_database(db_path)
+    val features = featuredb.features_by_category(category)
+
+    var json = "{"
+    json = json + "\"category\": \"{category}\","
+    json = json + "\"total\": {features.len()},"
+    json = json + "\"features\": ["
+
+    var first = true
+    for feature in features:
+        if not first:
+            json = json + ","
+        first = false
+        json = json + feature_to_json(feature)
+
+    json = json + "]"
+    json = json + "}"
+    json
+
+# Get features by status
+fn get_features_by_status(db_path: text, status: text) -> text:
+    var featuredb = create_feature_database(db_path)
+    val parsed_status = parse_feature_status(status)
+    val features = featuredb.features_by_status(parsed_status)
+
+    var json = "{"
+    json = json + "\"status\": \"{status}\","
+    json = json + "\"total\": {features.len()},"
+    json = json + "\"features\": ["
+
+    var first = true
+    for feature in features:
+        if not first:
+            json = json + ","
+        first = false
+        json = json + feature_to_json(feature)
+
+    json = json + "]"
+    json = json + "}"
+    json
+
+# Get feature statistics
+fn get_feature_stats(db_path: text) -> text:
+    var featuredb = create_feature_database(db_path)
+    val stats = featuredb.stats()
+
+    var json = "{"
+    json = json + "\"total\": {stats.total},"
+    json = json + "\"done\": {stats.done},"
+    json = json + "\"in_progress\": {stats.in_progress},"
+    json = json + "\"planned\": {stats.planned},"
+    json = json + "\"failed\": {stats.failed},"
+    json = json + "\"completion_rate\": {stats.completion_rate}"
+    json = json + "}"
+    json
+
+# Get feature by ID
+fn get_feature_by_id(db_path: text, feature_id: text) -> text:
+    var featuredb = create_feature_database(db_path)
+    val feature_opt = featuredb.get_feature(feature_id)
+
+    if not feature_opt.?:
+        return "{\"error\": \"Feature not found: {feature_id}\"}"
+
+    val feature = feature_opt.unwrap()
+    feature_to_json(feature)
+
+# ============================================================================
+# Write Operations
+# ============================================================================
+
+# Add a new feature from JSON
+fn add_feature_from_json(db_path: text, json: text) -> text:
+    var featuredb = create_feature_database(db_path)
+
+    val id = extract_json_string(json, "id")
+    val category = extract_json_string(json, "category")
+    val name = extract_json_string(json, "name")
+    val description = extract_json_string(json, "description")
+    val spec_file = extract_json_string(json, "spec_file")
+    val pure_status = extract_json_string(json, "pure_status")
+    val hybrid_status = extract_json_string(json, "hybrid_status")
+    val llvm_status = extract_json_string(json, "llvm_status")
+
+    if id == "":
+        return "{\"error\": \"Missing required field: id\"}"
+    if name == "":
+        return "{\"error\": \"Missing required field: name\"}"
+
+    val feature = Feature(
+        id: id,
+        category: category,
+        name: name,
+        description: description,
+        spec_file: spec_file,
+        pure_status: parse_feature_status(pure_status),
+        hybrid_status: parse_feature_status(hybrid_status),
+        llvm_status: parse_feature_status(llvm_status),
+        created_at: current_timestamp(),
+        updated_at: current_timestamp(),
+        valid: true
+    )
+
+    val success = featuredb.add_feature(feature)
+    if not success:
+        return "{\"error\": \"Failed to add feature\"}"
+
+    val saved = featuredb.save()
+    if not saved:
+        return "{\"error\": \"Failed to save database\"}"
+
+    "{\"success\": true, \"id\": \"{id}\"}"
+
+# Update an existing feature from JSON
+fn update_feature_from_json(db_path: text, feature_id: text, json: text) -> text:
+    var featuredb = create_feature_database(db_path)
+
+    val existing_opt = featuredb.get_feature(feature_id)
+    if not existing_opt.?:
+        return "{\"error\": \"Feature not found: {feature_id}\"}"
+
+    val existing = existing_opt.unwrap()
+
+    val pure_status = extract_json_string(json, "pure_status")
+    val hybrid_status = extract_json_string(json, "hybrid_status")
+    val llvm_status = extract_json_string(json, "llvm_status")
+    val name = extract_json_string(json, "name")
+    val description = extract_json_string(json, "description")
+
+    val updated_feature = Feature(
+        id: feature_id,
+        category: existing.category,
+        name: if name != "": name else: existing.name,
+        description: if description != "": description else: existing.description,
+        spec_file: existing.spec_file,
+        pure_status: if pure_status != "": parse_feature_status(pure_status) else: existing.pure_status,
+        hybrid_status: if hybrid_status != "": parse_feature_status(hybrid_status) else: existing.hybrid_status,
+        llvm_status: if llvm_status != "": parse_feature_status(llvm_status) else: existing.llvm_status,
+        created_at: existing.created_at,
+        updated_at: current_timestamp(),
+        valid: true
+    )
+
+    val success = featuredb.update_feature(feature_id, updated_feature)
+    if not success:
+        return "{\"error\": \"Failed to update feature\"}"
+
+    val saved = featuredb.save()
+    if not saved:
+        return "{\"error\": \"Failed to save database\"}"
+
+    "{\"success\": true, \"id\": \"{feature_id}\"}"
+
+# ============================================================================
+# JSON Helpers
+# ============================================================================
+
+fn feature_to_json(feature: Feature) -> text:
+    var json = "{"
+    json = json + "\"id\": \"{feature.id}\","
+    json = json + "\"category\": \"{feature.category}\","
+    json = json + "\"name\": \"{escape_json(feature.name)}\","
+    json = json + "\"description\": \"{escape_json(feature.description)}\","
+    json = json + "\"spec_file\": \"{feature.spec_file}\","
+    json = json + "\"pure_status\": \"{status_to_string(feature.pure_status)}\","
+    json = json + "\"hybrid_status\": \"{status_to_string(feature.hybrid_status)}\","
+    json = json + "\"llvm_status\": \"{status_to_string(feature.llvm_status)}\""
+    json = json + "}"
+    json
+
+fn status_to_string(status: FeatureStatus) -> text:
+    match status:
+        FeatureStatus.Done: "Done"
+        FeatureStatus.InProgress: "InProgress"
+        FeatureStatus.Planned: "Planned"
+        FeatureStatus.Failed: "Failed"
+        FeatureStatus.Blocked: "Blocked"
+
+fn parse_feature_status(s: text) -> FeatureStatus:
+    match s:
+        "Done" | "done": FeatureStatus.Done
+        "InProgress" | "in_progress": FeatureStatus.InProgress
+        "Planned" | "planned": FeatureStatus.Planned
+        "Failed" | "failed": FeatureStatus.Failed
+        "Blocked" | "blocked": FeatureStatus.Blocked
+        _: FeatureStatus.Planned
+
+fn escape_json(s: text) -> text:
+    var result = s
+    result = result.replace("\\", "\\\\")
+    result = result.replace("\"", "\\\"")
+    result = result.replace("\n", "\\n")
+    result = result.replace("\r", "\\r")
+    result = result.replace("\t", "\\t")
+    result
+
+fn extract_json_string(json: text, key: text) -> text:
+    val pattern = "\"{key}\": \""
+    val start = json.find(pattern)
+    if start < 0:
+        return ""
+    val value_start = start + pattern.len()
+    val value_end = json.find("\"", value_start)
+    if value_end < 0:
+        return ""
+    json.substring(value_start, value_end)
+
+fn current_timestamp() -> text:
+    "2026-02-05T00:00:00Z"

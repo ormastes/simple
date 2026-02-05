@@ -10,6 +10,7 @@ from std.common.target import {Target, TargetArch, TargetOS}
 from app.linker_gen.parser import {parse_board, BoardConfig, QemuConfig}
 from app.linker_gen.main import {generate_linker_script}
 from app.build.types import {BuildResult, BuildConfig, BuildProfile, TestResult}
+from app.io.mod import {dir_create, file_write, process_run, current_time_ms}
 
 export BaremetalConfig, BaremetalBuilder, QemuRunner
 
@@ -66,12 +67,8 @@ impl BaremetalBuilder:
 
     # Build a bare-metal binary
     fn build(source_files: [text]) -> BuildResult:
-        extern fn rt_dir_create(path: text) -> bool
-        extern fn rt_file_write_text(path: text, content: text) -> bool
-        extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
-
         # Create output directory
-        rt_dir_create(self.config.output_dir)
+        dir_create(self.config.output_dir, true)
 
         # Load board and generate linker script
         match self.config.load_board():
@@ -95,7 +92,7 @@ impl BaremetalBuilder:
                     duration_ms: 0
                 )
             case Ok(script):
-                if not rt_file_write_text(self.config.linker_script, script):
+                if not file_write(self.config.linker_script, script):
                     return BuildResult(
                         success: false,
                         exit_code: 1,
@@ -116,7 +113,7 @@ impl BaremetalBuilder:
             "-Zbuild-std-features=compiler-builtins-mem"
         ]
 
-        val (stdout, stderr, exit_code) = rt_process_run("cargo", args)
+        val (stdout, stderr, exit_code) = process_run("cargo", args)
         val end_time = current_time_ms()
 
         BuildResult(
@@ -188,22 +185,26 @@ impl QemuRunner:
         args
 
     # Run kernel in QEMU and capture output
+    # TODO: Add proper timeout support via SFFI when available
     fn run(kernel_path: text) -> TestResult:
-        extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i64, bool)
-
         val qemu = self.qemu_executable()
         val args = self.build_args(kernel_path)
 
         val start_time = current_time_ms()
-        val (stdout, stderr, exit_code, timed_out) = rt_process_run_timeout(qemu, args, self.timeout_ms)
+        # Note: For now, rely on QEMU's own exit mechanism (isa-debug-exit device)
+        # The kernel must call the exit port or QEMU will run indefinitely
+        # TODO: Implement proper rt_process_run_timeout in SFFI
+        val (stdout, stderr, exit_code) = process_run(qemu, args)
         val end_time = current_time_ms()
 
-        if timed_out:
+        # Check if execution took too long (approximate timeout detection)
+        val duration_ms = end_time - start_time
+        if duration_ms > self.timeout_ms:
             return TestResult(
                 success: false,
                 exit_code: -1,
                 stdout: stdout,
-                stderr: "QEMU timed out after {self.timeout_ms}ms",
+                stderr: "QEMU execution exceeded timeout ({duration_ms}ms > {self.timeout_ms}ms)",
                 tests_run: 0,
                 tests_passed: 0,
                 tests_failed: 0
@@ -256,6 +257,3 @@ fn parse_test_output(output: text, exit_code: i64) -> TestResult:
         tests_passed: tests_passed,
         tests_failed: tests_failed
     )
-
-# FFI for time
-extern fn current_time_ms() -> i64

@@ -1,10 +1,12 @@
 # Bug Database MCP Resource
 #
 # Provides MCP access to the unified bug database
+# Supports both read and write operations via JSON API
 
-use lib.database.bug.{create_bug_database, BugDatabase, Bug, BugSeverity, BugStatus}
+use lib.database.bug.{create_bug_database, BugDatabase, Bug, BugSeverity, BugStatus, parse_severity, parse_status}
 
 export get_all_bugs, get_open_bugs, get_critical_bugs, get_bug_stats
+export add_bug_from_json, update_bug_from_json, get_bug_by_id
 
 # ============================================================================
 # Bug Database Resource Provider
@@ -159,3 +161,180 @@ fn status_to_string(status: BugStatus) -> text:
         BugStatus.Fixed: "Fixed"
         BugStatus.Closed: "Closed"
         BugStatus.Wontfix: "Wontfix"
+
+# ============================================================================
+# Write Operations (MCP Tools)
+# ============================================================================
+
+# Get bug by ID
+fn get_bug_by_id(db_path: text, bug_id: text) -> text:
+    var bugdb = create_bug_database(db_path)
+    val bug_opt = bugdb.get_bug(bug_id)
+
+    if not bug_opt.?:
+        return "{\"error\": \"Bug not found: {bug_id}\"}"
+
+    val bug = bug_opt.unwrap()
+    bug_to_json(bug)
+
+# Add a new bug from JSON
+fn add_bug_from_json(db_path: text, json: text) -> text:
+    var bugdb = create_bug_database(db_path)
+
+    # Parse JSON fields
+    val id = extract_json_string(json, "id")
+    val severity_str = extract_json_string(json, "severity")
+    val status_str = extract_json_string(json, "status")
+    val title = extract_json_string(json, "title")
+    val file = extract_json_string(json, "file")
+    val line = extract_json_int(json, "line")
+    val reproducible_by = extract_json_string(json, "reproducible_by")
+    val description = extract_json_array(json, "description")
+
+    if id == "":
+        return "{\"error\": \"Missing required field: id\"}"
+    if title == "":
+        return "{\"error\": \"Missing required field: title\"}"
+
+    val bug = Bug(
+        id: id,
+        severity: parse_severity(severity_str),
+        status: parse_status(status_str),
+        title: title,
+        description: description,
+        file: file,
+        line: line,
+        reproducible_by: reproducible_by,
+        fix_strategy: [],
+        investigation_log: [],
+        created_at: current_timestamp(),
+        updated_at: current_timestamp(),
+        valid: true
+    )
+
+    val success = bugdb.add_bug(bug)
+    if not success:
+        return "{\"error\": \"Failed to add bug\"}"
+
+    val saved = bugdb.save()
+    if not saved:
+        return "{\"error\": \"Failed to save database\"}"
+
+    "{\"success\": true, \"id\": \"{id}\"}"
+
+# Update an existing bug from JSON
+fn update_bug_from_json(db_path: text, bug_id: text, json: text) -> text:
+    var bugdb = create_bug_database(db_path)
+
+    # Get existing bug
+    val existing_opt = bugdb.get_bug(bug_id)
+    if not existing_opt.?:
+        return "{\"error\": \"Bug not found: {bug_id}\"}"
+
+    val existing = existing_opt.unwrap()
+
+    # Parse JSON fields (use existing values as defaults)
+    val severity_str = extract_json_string(json, "severity")
+    val status_str = extract_json_string(json, "status")
+    val title = extract_json_string(json, "title")
+    val file = extract_json_string(json, "file")
+    val line = extract_json_int(json, "line")
+    val reproducible_by = extract_json_string(json, "reproducible_by")
+
+    val updated_bug = Bug(
+        id: bug_id,
+        severity: if severity_str != "": parse_severity(severity_str) else: existing.severity,
+        status: if status_str != "": parse_status(status_str) else: existing.status,
+        title: if title != "": title else: existing.title,
+        description: existing.description,
+        file: if file != "": file else: existing.file,
+        line: if line != 0: line else: existing.line,
+        reproducible_by: if reproducible_by != "": reproducible_by else: existing.reproducible_by,
+        fix_strategy: existing.fix_strategy,
+        investigation_log: existing.investigation_log,
+        created_at: existing.created_at,
+        updated_at: current_timestamp(),
+        valid: true
+    )
+
+    val success = bugdb.update_bug(bug_id, updated_bug)
+    if not success:
+        return "{\"error\": \"Failed to update bug\"}"
+
+    val saved = bugdb.save()
+    if not saved:
+        return "{\"error\": \"Failed to save database\"}"
+
+    "{\"success\": true, \"id\": \"{bug_id}\"}"
+
+# ============================================================================
+# JSON Parsing Helpers
+# ============================================================================
+
+fn extract_json_string(json: text, key: text) -> text:
+    # Simple JSON string extraction
+    val pattern = "\"{key}\": \""
+    val start = json.find(pattern)
+    if start < 0:
+        return ""
+
+    val value_start = start + pattern.len()
+    val value_end = json.find("\"", value_start)
+    if value_end < 0:
+        return ""
+
+    json.substring(value_start, value_end)
+
+fn extract_json_int(json: text, key: text) -> i64:
+    # Simple JSON int extraction
+    val pattern = "\"{key}\": "
+    val start = json.find(pattern)
+    if start < 0:
+        return 0
+
+    val value_start = start + pattern.len()
+    var value_end = value_start
+    while value_end < json.len():
+        val ch = json.char_at(value_end)
+        if ch < '0' or ch > '9':
+            break
+        value_end = value_end + 1
+
+    if value_end == value_start:
+        return 0
+
+    val num_str = json.substring(value_start, value_end)
+    num_str.parse_int() ?? 0
+
+fn extract_json_array(json: text, key: text) -> [text]:
+    # Simple JSON array extraction (for string arrays)
+    val pattern = "\"{key}\": ["
+    val start = json.find(pattern)
+    if start < 0:
+        return []
+
+    val array_start = start + pattern.len()
+    val array_end = json.find("]", array_start)
+    if array_end < 0:
+        return []
+
+    val array_str = json.substring(array_start, array_end)
+
+    # Parse string items
+    var items: [text] = []
+    var pos = 0
+    while pos < array_str.len():
+        val quote_start = array_str.find("\"", pos)
+        if quote_start < 0:
+            break
+        val quote_end = array_str.find("\"", quote_start + 1)
+        if quote_end < 0:
+            break
+        items.push(array_str.substring(quote_start + 1, quote_end))
+        pos = quote_end + 1
+
+    items
+
+fn current_timestamp() -> text:
+    # Return ISO 8601 timestamp
+    "2026-02-05T00:00:00Z"
