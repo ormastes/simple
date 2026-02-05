@@ -1,0 +1,171 @@
+# GPU Standard Library Module
+#
+# Provides unified GPU compute support across CUDA and Vulkan backends.
+#
+# Quick Start:
+#   use std.gpu.*
+#
+#   # Get default GPU
+#   val gpu = gpu_default()
+#   if gpu.is_valid():
+#       print "Using GPU: {gpu.name()}"
+#
+#   # Allocate memory
+#   val buffer = gpu_alloc(gpu, 1024)
+#   gpu_copy_to(buffer, host_data)
+#
+#   # Run computation
+#   gpu_vector_add(gpu, a, b, c, n)
+#
+#   # Sync and cleanup
+#   gpu.sync()
+#   gpu_free(buffer)
+#
+# Submodules:
+#   - gpu.device: Device selection and management
+#   - gpu.memory: Memory allocation and transfer
+#   - gpu.kernels: Built-in compute kernels
+#   - gpu.sync: Synchronization primitives
+
+use gpu.device.*
+use gpu.memory.*
+use gpu.kernels.*
+use gpu.sync.*
+
+# ============================================================================
+# Re-exports from submodules
+# ============================================================================
+
+# Device management (from gpu.device)
+export GpuBackend, detect_backends, preferred_backend
+export Gpu, gpu_default, gpu_cuda, gpu_vulkan
+export GpuDeviceEntry, list_all_gpus, gpu_available, gpu_count
+
+# Memory management (from gpu.memory)
+export GpuBuffer, gpu_alloc, gpu_free
+export gpu_copy_to, gpu_copy_from, gpu_copy_buffer, gpu_memset
+export GpuArray, gpu_array_alloc, gpu_array_free, gpu_array_from
+export gpu_alloc_f32, gpu_alloc_f64, gpu_alloc_i32, gpu_alloc_i64
+export GpuMemoryPool, gpu_pool_create
+
+# Kernels (from gpu.kernels)
+export GpuKernel, kernel_compile_cuda, kernel_compile_vulkan, kernel_destroy
+export KernelLaunch, launch_1d, launch_2d, kernel_run
+export gpu_vector_add, gpu_scalar_mul
+
+# Synchronization (from gpu.sync)
+export gpu_sync, gpu_sync_all
+export GpuStream, gpu_stream_create, gpu_stream_destroy, gpu_stream_sync
+export GpuEvent, gpu_event_create, gpu_event_destroy, gpu_event_wait, gpu_event_reset
+export with_gpu_sync, with_device
+export GpuMemoryScope
+
+# ============================================================================
+# Convenience Functions
+# ============================================================================
+
+"""
+Initialize GPU with the best available backend.
+Returns a GPU device or panics if no GPU is available.
+"""
+fn gpu_init() -> Gpu:
+    val gpu = gpu_default()
+    if not gpu.is_valid():
+        panic("No GPU available")
+    gpu
+
+"""
+Get a summary of available GPU hardware.
+"""
+fn gpu_info() -> text:
+    var info = "GPU Information:\n"
+    info = info + "================\n"
+
+    val devices = list_all_gpus()
+    if devices.len() == 0:
+        info = info + "No GPUs detected.\n"
+    else:
+        for device in devices:
+            val backend_name = match device.backend:
+                case Cuda: "CUDA"
+                case Vulkan: "Vulkan"
+                case None: "Unknown"
+
+            val mem_gb = device.memory / (1024 * 1024 * 1024)
+            info = info + "  [{backend_name}:{device.device_id}] {device.name}\n"
+            info = info + "    Memory: {mem_gb} GB\n"
+
+    info
+
+"""
+Run a simple GPU compute test to verify the setup works.
+Returns true if GPU computation succeeded.
+"""
+fn gpu_test() -> bool:
+    val gpu = gpu_default()
+    if not gpu.is_valid():
+        return false
+
+    # Allocate small test buffers (4 floats = 16 bytes)
+    val size: i64 = 16
+    val a = gpu_alloc(gpu, size)
+    val b = gpu_alloc(gpu, size)
+    val c = gpu_alloc(gpu, size)
+
+    if not a.is_valid or not b.is_valid or not c.is_valid:
+        gpu_free(a)
+        gpu_free(b)
+        gpu_free(c)
+        return false
+
+    # Initialize with test data
+    val data_a: [u8] = [0, 0, 128, 63,   # 1.0f
+                       0, 0, 0, 64,     # 2.0f
+                       0, 0, 64, 64,    # 3.0f
+                       0, 0, 128, 64]   # 4.0f
+
+    val data_b: [u8] = [0, 0, 128, 64,   # 4.0f
+                       0, 0, 64, 64,    # 3.0f
+                       0, 0, 0, 64,     # 2.0f
+                       0, 0, 128, 63]   # 1.0f
+
+    gpu_copy_to(a, data_a)
+    gpu_copy_to(b, data_b)
+
+    # Run vector add
+    val success = gpu_vector_add(gpu, a, b, c, 4)
+
+    # Cleanup
+    gpu_free(a)
+    gpu_free(b)
+    gpu_free(c)
+
+    success
+
+"""
+Check if GPU is available and working.
+"""
+fn gpu_is_ready() -> bool:
+    gpu_available() and gpu_test()
+
+# ============================================================================
+# GPU Tensor Support (Integration with std.tensor)
+# ============================================================================
+
+"""
+Note: Full tensor support requires integration with src/std/src/tensor.spl.
+This provides the foundation for GPU-accelerated tensor operations.
+"""
+
+# Placeholder for future tensor integration
+# struct GpuTensor<T>:
+#     buffer: GpuBuffer
+#     shape: [i64]
+#     strides: [i64]
+#     dtype: DataType
+
+# ============================================================================
+# Additional exports
+# ============================================================================
+
+export gpu_init, gpu_info, gpu_test, gpu_is_ready

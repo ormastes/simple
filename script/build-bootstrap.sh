@@ -99,6 +99,15 @@ if [ -n "$SIMPLE_RUNTIME" ] && [ -f "$SIMPLE_RUNTIME" ]; then
 fi
 
 if [ "$USE_SIMPLE_BUILD" = false ]; then
+    # Check if rust/ directory exists for cargo build
+    if [ ! -d "rust" ]; then
+        echo -e "${RED}Error: Cannot build runtime${NC}"
+        echo "  - Self-hosting build failed (version incompatibility)"
+        echo "  - No rust/ directory for cargo build"
+        echo "  - Cannot proceed without a compatible runtime"
+        exit 1
+    fi
+
     # Fallback to cargo build (bootstrap from scratch)
     echo "Building with cargo (bootstrap from scratch)..."
 

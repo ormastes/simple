@@ -1,0 +1,356 @@
+# GPU Memory Management
+#
+# Unified GPU memory allocation and transfer across CUDA and Vulkan backends.
+
+use gpu.device.*
+use io.cuda_ffi.*
+use io.vulkan_ffi.*
+
+# ============================================================================
+# GPU Buffer Abstraction
+# ============================================================================
+
+"""
+Unified GPU buffer that works across backends.
+"""
+struct GpuBuffer:
+    backend: GpuBackend
+    cuda_ptr: CudaPtr?
+    vulkan_buf: VulkanBuffer?
+    size: i64
+    is_valid: bool
+
+"""
+Allocate a GPU buffer on a specific device.
+"""
+fn gpu_alloc(gpu: Gpu, size: i64) -> GpuBuffer:
+    if not gpu.is_valid():
+        GpuBuffer(
+            backend: GpuBackend.None,
+            cuda_ptr: nil,
+            vulkan_buf: nil,
+            size: 0,
+            is_valid: false
+        )
+    else:
+        match gpu.backend:
+            case Cuda:
+                val ptr = cuda_alloc(size)
+                GpuBuffer(
+                    backend: GpuBackend.Cuda,
+                    cuda_ptr: Some(ptr),
+                    vulkan_buf: nil,
+                    size: size,
+                    is_valid: ptr.is_valid
+                )
+            case Vulkan:
+                val buf = vulkan_alloc_storage(size)
+                GpuBuffer(
+                    backend: GpuBackend.Vulkan,
+                    cuda_ptr: nil,
+                    vulkan_buf: Some(buf),
+                    size: size,
+                    is_valid: buf.is_valid
+                )
+            case None:
+                GpuBuffer(
+                    backend: GpuBackend.None,
+                    cuda_ptr: nil,
+                    vulkan_buf: nil,
+                    size: 0,
+                    is_valid: false
+                )
+
+"""
+Free a GPU buffer.
+"""
+fn gpu_free(buffer: GpuBuffer) -> bool:
+    if not buffer.is_valid:
+        true
+    else:
+        match buffer.backend:
+            case Cuda:
+                match buffer.cuda_ptr:
+                    case Some(ptr): cuda_free(ptr)
+                    case _: true
+            case Vulkan:
+                match buffer.vulkan_buf:
+                    case Some(buf): vulkan_free_buffer(buf)
+                    case _: true
+            case None:
+                true
+
+impl GpuBuffer:
+    """
+    Check if the buffer is valid.
+    """
+    fn valid() -> bool:
+        self.is_valid
+
+    """
+    Get the size of the buffer in bytes.
+    """
+    fn len() -> i64:
+        self.size
+
+    """
+    Get the raw pointer (for CUDA only).
+    Returns 0 for Vulkan buffers.
+    """
+    fn raw_ptr() -> i64:
+        match self.cuda_ptr:
+            case Some(ptr): ptr.ptr
+            case _: 0
+
+    """
+    Get the raw handle (for Vulkan only).
+    Returns 0 for CUDA buffers.
+    """
+    fn raw_handle() -> i64:
+        match self.vulkan_buf:
+            case Some(buf): buf.handle
+            case _: 0
+
+# ============================================================================
+# Data Transfer
+# ============================================================================
+
+"""
+Copy data from host to GPU buffer.
+"""
+fn gpu_copy_to(buffer: GpuBuffer, data: [u8]) -> bool:
+    if not buffer.is_valid:
+        false
+    else:
+        match buffer.backend:
+            case Cuda:
+                match buffer.cuda_ptr:
+                    case Some(ptr): cuda_copy_to_device(ptr, data)
+                    case _: false
+            case Vulkan:
+                match buffer.vulkan_buf:
+                    case Some(buf): vulkan_copy_to(buf, data)
+                    case _: false
+            case None:
+                false
+
+"""
+Copy data from GPU buffer to host.
+"""
+fn gpu_copy_from(data: [u8], buffer: GpuBuffer) -> bool:
+    if not buffer.is_valid:
+        false
+    else:
+        match buffer.backend:
+            case Cuda:
+                match buffer.cuda_ptr:
+                    case Some(ptr): cuda_copy_from_device(data, ptr)
+                    case _: false
+            case Vulkan:
+                match buffer.vulkan_buf:
+                    case Some(buf): vulkan_copy_from(data, buf)
+                    case _: false
+            case None:
+                false
+
+"""
+Copy data between two GPU buffers.
+Both buffers must be on the same backend.
+"""
+fn gpu_copy_buffer(dst: GpuBuffer, src: GpuBuffer, size: i64) -> bool:
+    if not dst.is_valid or not src.is_valid:
+        false
+    elif dst.backend != src.backend:
+        false  # Can't copy between backends
+    else:
+        match dst.backend:
+            case Cuda:
+                match (dst.cuda_ptr, src.cuda_ptr):
+                    case (Some(d), Some(s)): cuda_copy_device_to_device(d, s, size)
+                    case _: false
+            case Vulkan:
+                match (dst.vulkan_buf, src.vulkan_buf):
+                    case (Some(d), Some(s)): vulkan_copy_buffer(d, s, size)
+                    case _: false
+            case None:
+                false
+
+"""
+Fill GPU buffer with a value.
+Note: Only CUDA supports direct memset.
+"""
+fn gpu_memset(buffer: GpuBuffer, value: i64) -> bool:
+    if not buffer.is_valid:
+        false
+    else:
+        match buffer.backend:
+            case Cuda:
+                match buffer.cuda_ptr:
+                    case Some(ptr): cuda_memset(ptr, value)
+                    case _: false
+            case Vulkan:
+                # Vulkan doesn't have direct memset - would need a compute shader
+                false
+            case None:
+                false
+
+# ============================================================================
+# Typed GPU Arrays
+# ============================================================================
+
+"""
+Typed GPU array with element type tracking.
+"""
+struct GpuArray<T>:
+    buffer: GpuBuffer
+    len: i64
+    element_size: i64
+
+"""
+Allocate a typed GPU array.
+"""
+fn gpu_array_alloc<T>(gpu: Gpu, count: i64, element_size: i64) -> GpuArray<T>:
+    val size = count * element_size
+    val buffer = gpu_alloc(gpu, size)
+    GpuArray(
+        buffer: buffer,
+        len: count,
+        element_size: element_size
+    )
+
+"""
+Free a typed GPU array.
+"""
+fn gpu_array_free<T>(arr: GpuArray<T>) -> bool:
+    gpu_free(arr.buffer)
+
+"""
+Allocate and initialize a GPU array from host data.
+"""
+fn gpu_array_from<T>(gpu: Gpu, data: [u8], count: i64, element_size: i64) -> GpuArray<T>:
+    val arr = gpu_array_alloc(gpu, count, element_size)
+    if arr.buffer.is_valid:
+        gpu_copy_to(arr.buffer, data)
+    arr
+
+impl<T> GpuArray<T>:
+    """
+    Check if the array is valid.
+    """
+    fn valid() -> bool:
+        self.buffer.is_valid
+
+    """
+    Get the number of elements.
+    """
+    fn count() -> i64:
+        self.len
+
+    """
+    Get the size in bytes.
+    """
+    fn size_bytes() -> i64:
+        self.len * self.element_size
+
+    """
+    Copy host data to this array.
+    """
+    fn copy_from_host(data: [u8]) -> bool:
+        gpu_copy_to(self.buffer, data)
+
+    """
+    Copy this array to host data.
+    """
+    fn copy_to_host(data: [u8]) -> bool:
+        gpu_copy_from(data, self.buffer)
+
+# ============================================================================
+# Convenience Functions for Common Types
+# ============================================================================
+
+"""
+Allocate a GPU array of f32 values.
+"""
+fn gpu_alloc_f32(gpu: Gpu, count: i64) -> GpuArray<f32>:
+    gpu_array_alloc(gpu, count, 4)  # f32 is 4 bytes
+
+"""
+Allocate a GPU array of f64 values.
+"""
+fn gpu_alloc_f64(gpu: Gpu, count: i64) -> GpuArray<f64>:
+    gpu_array_alloc(gpu, count, 8)  # f64 is 8 bytes
+
+"""
+Allocate a GPU array of i32 values.
+"""
+fn gpu_alloc_i32(gpu: Gpu, count: i64) -> GpuArray<i32>:
+    gpu_array_alloc(gpu, count, 4)  # i32 is 4 bytes
+
+"""
+Allocate a GPU array of i64 values.
+"""
+fn gpu_alloc_i64(gpu: Gpu, count: i64) -> GpuArray<i64>:
+    gpu_array_alloc(gpu, count, 8)  # i64 is 8 bytes
+
+# ============================================================================
+# Memory Pool (Advanced)
+# ============================================================================
+
+"""
+Memory pool for efficient GPU allocations.
+Reduces allocation overhead for many small buffers.
+"""
+struct GpuMemoryPool:
+    gpu: Gpu
+    chunk_size: i64
+    chunks: [GpuBuffer]
+    free_offsets: [i64]
+
+"""
+Create a memory pool with the given chunk size.
+"""
+fn gpu_pool_create(gpu: Gpu, chunk_size: i64) -> GpuMemoryPool:
+    GpuMemoryPool(
+        gpu: gpu,
+        chunk_size: chunk_size,
+        chunks: [],
+        free_offsets: []
+    )
+
+impl GpuMemoryPool:
+    """
+    Allocate from the pool.
+    Note: This is a simple implementation that allocates full chunks.
+    A real implementation would track free regions within chunks.
+    """
+    me alloc(size: i64) -> GpuBuffer:
+        if size > self.chunk_size:
+            # Large allocation: direct allocation
+            gpu_alloc(self.gpu, size)
+        else:
+            # Small allocation: allocate new chunk
+            val chunk = gpu_alloc(self.gpu, self.chunk_size)
+            self.chunks.push(chunk)
+            chunk
+
+    """
+    Release all memory in the pool.
+    """
+    me clear() -> bool:
+        var success = true
+        for chunk in self.chunks:
+            if not gpu_free(chunk):
+                success = false
+        self.chunks = []
+        self.free_offsets = []
+        success
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export GpuBuffer, gpu_alloc, gpu_free
+export gpu_copy_to, gpu_copy_from, gpu_copy_buffer, gpu_memset
+export GpuArray, gpu_array_alloc, gpu_array_free, gpu_array_from
+export gpu_alloc_f32, gpu_alloc_f64, gpu_alloc_i32, gpu_alloc_i64
+export GpuMemoryPool, gpu_pool_create
