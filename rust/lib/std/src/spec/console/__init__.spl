@@ -1,0 +1,159 @@
+# Console I/O Test Framework
+#
+# Provides utilities for testing terminal/console applications
+# with keyboard input simulation and output verification.
+
+use sys.process
+use sys.pty
+
+# Console session for interacting with a terminal program
+class ConsoleSession:
+    """
+    Represents a PTY session with a program for testing.
+
+    Example:
+        session = ConsoleSession.spawn("./my_repl")
+        session.send_keys("if True:\n")
+        session.expect("... ")
+        session.send_backspace()
+        session.close()
+    """
+
+    def __init__(self, pty_master: i32, pty_slave: i32, process: Process):
+        self.pty_master = pty_master
+        self.pty_slave = pty_slave
+        self.process = process
+        self.buffer = ""
+        self.timeout = 5000  # 5 seconds default
+
+    @static
+    def spawn(command: str, args: [str] = []) -> ConsoleSession:
+        """
+        Spawn a program in a pseudo-terminal.
+
+        Args:
+            command: Program to execute
+            args: Command line arguments
+
+        Returns:
+            ConsoleSession for interacting with the program
+        """
+        # Create PTY pair
+        pty_pair = sys.pty.openpty()
+        master = pty_pair[0]
+        slave = pty_pair[1]
+
+        # Fork and exec in child with slave as controlling terminal
+        process = sys.process.spawn_with_pty(command, args, slave)
+
+        return ConsoleSession(master, slave, process)
+
+    def send_keys(self, text: str):
+        """Send text to the program as keyboard input."""
+        sys.pty.write(self.pty_master, text)
+
+    def send_backspace(self, count: i32 = 1):
+        """Send backspace key(s)."""
+        for i in range(count):
+            sys.pty.write(self.pty_master, "\x7f")  # DEL character
+
+    def send_ctrl(self, key: str):
+        """Send Ctrl+key combination."""
+        if len(key) != 1:
+            raise ValueError("Ctrl key must be single character")
+
+        char_code = ord(key.lower()) - ord('a') + 1
+        sys.pty.write(self.pty_master, chr(char_code))
+
+    def send_tab(self, count: i32 = 1):
+        """Send tab key(s)."""
+        for i in range(count):
+            sys.pty.write(self.pty_master, "\t")
+
+    def send_enter(self):
+        """Send enter/return key."""
+        sys.pty.write(self.pty_master, "\n")
+
+    def read_output(self, timeout: i32 = None) -> str:
+        """
+        Read available output from the program.
+
+        Args:
+            timeout: Timeout in milliseconds (default: self.timeout)
+
+        Returns:
+            text containing output read
+        """
+        if timeout is None:
+            timeout = self.timeout
+
+        output = sys.pty.read(self.pty_master, timeout)
+        self.buffer += output
+        return output
+
+    def expect(self, pattern: str, timeout: i32 = None) -> bool:
+        """
+        Wait for a pattern to appear in the output.
+
+        Args:
+            pattern: text pattern to match
+            timeout: Timeout in milliseconds (simplified: just tries a few times)
+
+        Returns:
+            True if pattern found, False if timeout
+        """
+        if timeout is None:
+            timeout = self.timeout
+
+        # Simplified timeout: try reading a few times
+        max_attempts = 10
+        attempt = 0
+
+        while attempt < max_attempts:
+            if pattern in self.buffer:
+                return True
+
+            # Read more data
+            chunk = sys.pty.read(self.pty_master, timeout // max_attempts)
+            if chunk:
+                self.buffer += chunk
+            else:
+                attempt += 1
+
+        return pattern in self.buffer
+
+    def get_buffer(self) -> str:
+        """Get all buffered output so far."""
+        return self.buffer
+
+    def clear_buffer(self):
+        """Clear the output buffer."""
+        self.buffer = ""
+
+    def close(self):
+        """Close the PTY and terminate the process."""
+        sys.pty.close(self.pty_master)
+        sys.pty.close(self.pty_slave)
+        self.process.terminate()
+        self.process.wait()
+
+
+# Helper function for quick console tests
+def with_console(command: str, args: [str] = []) -> ConsoleSession:
+    """
+    Context manager for console sessions.
+
+    Example:
+        with with_console("./my_repl") as session:
+            session.send_keys("print('hello')\n")
+            session.expect("hello")
+    """
+    session = ConsoleSession.spawn(command, args)
+    return session
+
+
+# Export public API
+__all__ = [
+    "ConsoleSession",
+    "with_console",
+]

@@ -1,0 +1,604 @@
+# Coverage Reporting (Multi-Language)
+# Generate code coverage reports across languages
+
+use tooling.core.project.{Language, ProjectContext}
+use tooling.testing.runner.TestRunResult
+use core.result.{Result, Ok, Err}
+use sdn.{SdnValue, to_sdn}
+use host.async_nogc_mut.io.fs
+use host.common.io.types.FilePath
+use shell.{shell, file}
+
+# Coverage data for a file
+pub class FileCoverage:
+    pub file: text
+    pub total_lines: i32
+    pub covered_lines: i32
+    pub total_branches: i32
+    pub covered_branches: i32
+
+    pub fn new(file: text) -> FileCoverage:
+        """Create file coverage data."""
+        FileCoverage {
+            file: file,
+            total_lines: 0,
+            covered_lines: 0,
+            total_branches: 0,
+            covered_branches: 0
+        }
+
+    pub fn line_coverage(self) -> f64:
+        """Calculate line coverage percentage.
+
+        Returns:
+            Coverage percentage (0.0-100.0)
+        """
+        if self.total_lines == 0:
+            return 0.0
+
+        (self.covered_lines as f64) / (self.total_lines as f64) * 100.0
+
+    pub fn branch_coverage(self) -> f64:
+        """Calculate branch coverage percentage.
+
+        Returns:
+            Coverage percentage (0.0-100.0)
+        """
+        if self.total_branches == 0:
+            return 0.0
+
+        (self.covered_branches as f64) / (self.total_branches as f64) * 100.0
+
+    pub fn is_fully_covered(self) -> bool:
+        """Check if file is fully covered (100% lines and branches).
+
+        Returns:
+            True if 100% coverage
+        """
+        self.covered_lines == self.total_lines and (self.total_branches == 0 or self.covered_branches == self.total_branches)
+
+    pub fn coverage_gap(self) -> i32:
+        """Get number of uncovered lines.
+
+        Returns:
+            Number of lines not covered by tests
+        """
+        self.total_lines - self.covered_lines
+
+    pub fn summary(self) -> text:
+        """Get coverage summary for file.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            coverage.summary()
+            # → "src/main.spl: 75.5% lines (151/200), 60.0% branches (12/20)"
+        """
+        "{self.file}: {self.line_coverage():.1f}% lines ({self.covered_lines}/{self.total_lines}), {self.branch_coverage():.1f}% branches ({self.covered_branches}/{self.total_branches})"
+
+# Coverage report
+pub class CoverageReport:
+    pub files: Dict<text, FileCoverage>
+    pub language_coverage: Dict<Language, f64>
+    pub total_coverage: f64
+
+    pub fn new() -> CoverageReport:
+        """Create empty coverage report."""
+        CoverageReport {
+            files: {},
+            language_coverage: {},
+            total_coverage: 0.0
+        }
+
+    pub fn add_file(self, coverage: FileCoverage):
+        """Add file coverage.
+
+        Args:
+            coverage: File coverage data
+        """
+        self.files[coverage.file] = coverage
+        self.recalculate_total()
+
+    fn recalculate_total():
+        """Recalculate total coverage."""
+        val total_lines = 0
+        val covered_lines = 0
+
+        for (_, file_cov) in self.files.items():
+            total_lines += file_cov.total_lines
+            covered_lines += file_cov.covered_lines
+
+        if total_lines > 0:
+            self.total_coverage = (covered_lines as f64) / (total_lines as f64) * 100.0
+
+    pub fn summary(self) -> text:
+        """Get coverage summary.
+
+        Returns:
+            Human-readable summary
+        """
+        "Coverage: {self.total_coverage:.2f}% ({self.files.len()} files)"
+
+    pub fn get_file_count(self) -> i32:
+        """Get number of files in report.
+
+        Returns:
+            File count
+        """
+        self.files.len()
+
+    pub fn get_low_coverage_files(self, threshold: f64) -> List<text>:
+        """Get files below coverage threshold.
+
+        Args:
+            threshold: Minimum coverage percentage
+
+        Returns:
+            List of file paths below threshold
+
+        Example:
+            val low_cov = report.get_low_coverage_files(80.0)
+            for file in low_cov:
+                print("Low coverage: {file}")
+        """
+        val low: List<text> = []
+        for (file, coverage) in self.files.items():
+            if coverage.line_coverage() < threshold:
+                low.append(file)
+        low
+
+    pub fn is_above_threshold(self, threshold: f64) -> bool:
+        """Check if total coverage is above threshold.
+
+        Args:
+            threshold: Minimum coverage percentage
+
+        Returns:
+            True if coverage meets threshold
+        """
+        self.total_coverage >= threshold
+
+# Coverage reporter
+pub class CoverageReporter:
+    pub root: text
+    pub verbose: bool
+
+    pub fn new(root: text) -> CoverageReporter:
+        """Create coverage reporter.
+
+        Args:
+            root: Project root
+
+        Returns:
+            Coverage reporter
+
+        Example:
+            val coverage = CoverageReporter.new(".")
+
+            val result = coverage.run_with_coverage(
+                languages: [Language.Simple, Language.Rust]
+            )
+
+            print("Total coverage: {result.total_coverage}%")
+        """
+        CoverageReporter {
+            root: root,
+            verbose: false
+        }
+
+    pub fn set_verbose(self, enabled: bool):
+        """Enable verbose logging."""
+        self.verbose = enabled
+
+    pub fn run_with_coverage(
+        self,
+        languages: List<Language>
+    ) -> CoverageReport:
+        """Run tests with coverage collection.
+
+        Args:
+            languages: Languages to collect coverage for
+
+        Returns:
+            Coverage report
+
+        Example:
+            val report = coverage.run_with_coverage([
+                Language.Simple,
+                Language.Rust,
+                Language.Python
+            ])
+
+            coverage.generate_html("target/coverage/html")
+            coverage.generate_json("coverage.json")
+        """
+        val report = CoverageReport.new()
+
+        for language in languages:
+            if self.verbose:
+                print("Collecting {language} coverage...")
+
+            val lang_report = self.collect_language_coverage(language)
+            self.merge_report(report, lang_report)
+
+        report
+
+    fn collect_language_coverage(language: Language) -> CoverageReport:
+        """Collect coverage for specific language.
+
+        Args:
+            language: Language to collect coverage for
+
+        Returns:
+            Language coverage report
+        """
+        match language:
+            Language.Simple:
+                self.collect_simple_coverage()
+            Language.Rust:
+                self.collect_rust_coverage()
+            Language.Python:
+                self.collect_python_coverage()
+            Language.JavaScript:
+                self.collect_javascript_coverage()
+            _:
+                CoverageReport.new()
+
+    fn collect_simple_coverage() -> CoverageReport:
+        """Collect Simple language coverage.
+
+        Returns:
+            Coverage report
+        """
+        val report = CoverageReport.new()
+
+        # Run Simple tests with coverage instrumentation
+        val result = shell.run("simple", ["test", "--coverage", "--json", "-o", "coverage.json"])
+
+        if result.exit_code != 0:
+            if self.verbose:
+                print("Simple coverage collection failed: {result.stderr}")
+            return report
+
+        # Parse coverage JSON output
+        if file.exist("coverage.json"):
+            val json_content = file.read_text("coverage.json")
+            self.parse_coverage_json(report, json_content)
+
+        report
+
+    fn collect_rust_coverage() -> CoverageReport:
+        """Collect Rust coverage using cargo-llvm-cov.
+
+        Returns:
+            Coverage report
+        """
+        val report = CoverageReport.new()
+
+        # Run cargo llvm-cov and output JSON
+        val result = shell.run("cargo", ["llvm-cov", "--json", "--output-path", "rust-coverage.json"])
+
+        if result.exit_code != 0:
+            if self.verbose:
+                print("Rust coverage collection failed: {result.stderr}")
+            return report
+
+        # Parse llvm-cov JSON output
+        if file.exist("rust-coverage.json"):
+            val json_content = file.read_text("rust-coverage.json")
+            self.parse_llvm_cov_json(report, json_content)
+
+        report
+
+    fn collect_python_coverage() -> CoverageReport:
+        """Collect Python coverage using coverage.py.
+
+        Returns:
+            Coverage report
+        """
+        val report = CoverageReport.new()
+
+        # Run pytest with coverage
+        val run_result = shell.run("coverage", ["run", "-m", "pytest"])
+
+        if run_result.exit_code != 0:
+            if self.verbose:
+                print("Python test run failed: {run_result.stderr}")
+            return report
+
+        # Generate JSON report
+        val json_result = shell.run("coverage", ["json", "-o", "python-coverage.json"])
+
+        if json_result.exit_code != 0:
+            if self.verbose:
+                print("Python coverage JSON generation failed: {json_result.stderr}")
+            return report
+
+        # Parse coverage.py JSON output
+        if file.exist("python-coverage.json"):
+            val json_content = file.read_text("python-coverage.json")
+            self.parse_python_coverage_json(report, json_content)
+
+        report
+
+    fn collect_javascript_coverage() -> CoverageReport:
+        """Collect JavaScript coverage using jest.
+
+        Returns:
+            Coverage report
+        """
+        val report = CoverageReport.new()
+
+        # Run jest with coverage and JSON output
+        val result = shell.run("npx", ["jest", "--coverage", "--json", "--outputFile=jest-coverage.json"])
+
+        if result.exit_code != 0:
+            if self.verbose:
+                print("JavaScript coverage collection failed: {result.stderr}")
+            return report
+
+        # Parse jest JSON output
+        if file.exist("jest-coverage.json"):
+            val json_content = file.read_text("jest-coverage.json")
+            self.parse_jest_coverage_json(report, json_content)
+
+        report
+
+    fn merge_report(target: CoverageReport, source: CoverageReport):
+        """Merge coverage reports.
+
+        Args:
+            target: Target report (modified)
+            source: Source report
+        """
+        for (file, coverage) in source.files.items():
+            target.add_file(coverage)
+
+    pub fn generate_html(self, report: CoverageReport, output_dir: text) -> Result<(), text>:
+        """Generate HTML coverage report.
+
+        Args:
+            report: Coverage report to render
+            output_dir: Output directory
+
+        Returns:
+            Ok if successful
+        """
+        if self.verbose:
+            print("Generating HTML report in {output_dir}")
+
+        # Create output directory
+        shell.run("mkdir", ["-p", output_dir])
+
+        # Generate index.html
+        var html = "<!DOCTYPE html>\n<html>\n<head>\n"
+        html += "<title>Coverage Report</title>\n"
+        html += "<style>\n"
+        html += "body { font-family: sans-serif; margin: 20px; }\n"
+        html += "table { border-collapse: collapse; width: 100%; }\n"
+        html += "th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }\n"
+        html += "th { background-color: #4CAF50; color: white; }\n"
+        html += ".high { background-color: #c8e6c9; }\n"
+        html += ".medium { background-color: #fff9c4; }\n"
+        html += ".low { background-color: #ffcdd2; }\n"
+        html += "</style>\n</head>\n<body>\n"
+        html += "<h1>Coverage Report</h1>\n"
+        html += "<p>Total Coverage: {report.total_coverage:.2f}%</p>\n"
+        html += "<table>\n<tr><th>File</th><th>Lines</th><th>Branches</th><th>Coverage</th></tr>\n"
+
+        for (file_path, file_cov) in report.files.items():
+            val line_pct = file_cov.line_coverage()
+            val css_class = if line_pct >= 80.0: "high" elif line_pct >= 50.0: "medium" else: "low"
+            html += "<tr class=\"{css_class}\">"
+            html += "<td>{file_path}</td>"
+            html += "<td>{file_cov.covered_lines}/{file_cov.total_lines}</td>"
+            html += "<td>{file_cov.covered_branches}/{file_cov.total_branches}</td>"
+            html += "<td>{line_pct:.1f}%</td>"
+            html += "</tr>\n"
+
+        html += "</table>\n</body>\n</html>"
+
+        # Write index.html
+        val index_path = "{output_dir}/index.html"
+        file.write_text(index_path, html)
+
+        if self.verbose:
+            print("  ✓ Generated {index_path}")
+
+        Ok(())
+
+    pub fn generate_json(self, report: CoverageReport, output_file: text) -> Result<(), text>:
+        """Generate JSON coverage report.
+
+        Args:
+            report: Coverage report to export
+            output_file: Output file path
+
+        Returns:
+            Ok if successful
+
+        Format:
+        {
+          "total_coverage": 75.5,
+          "files": [
+            {
+              "file": "src/main.spl",
+              "total_lines": 100,
+              "covered_lines": 75,
+              "line_coverage": 75.0
+            }
+          ]
+        }
+        """
+        if self.verbose:
+            print("Generating JSON report: {output_file}")
+
+        # Build SDN structure
+        var files_array: List<SdnValue> = []
+
+        for (file_path, file_cov) in report.files.items():
+            var file_dict: Dict<text, SdnValue> = {}
+            file_dict["file"] = SdnValue.text(file_path)
+            file_dict["total_lines"] = SdnValue.i32(file_cov.total_lines as i64)
+            file_dict["covered_lines"] = SdnValue.i32(file_cov.covered_lines as i64)
+            file_dict["line_coverage"] = SdnValue.f32(file_cov.line_coverage())
+            file_dict["total_branches"] = SdnValue.i32(file_cov.total_branches as i64)
+            file_dict["covered_branches"] = SdnValue.i32(file_cov.covered_branches as i64)
+            file_dict["branch_coverage"] = SdnValue.f32(file_cov.branch_coverage())
+
+            files_array.append(SdnValue.Dict(file_dict))
+
+        # Build root
+        var root_dict: Dict<text, SdnValue> = {}
+        root_dict["total_coverage"] = SdnValue.f32(report.total_coverage)
+        root_dict["files"] = SdnValue.Array(files_array)
+
+        val root_value = SdnValue.Dict(root_dict)
+        val json_text = to_sdn(root_value)
+
+        # Write to file
+        match fs.write_text_sync(output_file as FilePath, &json_text):
+            Ok(_):
+                if self.verbose:
+                    print("  ✓ Written {output_file}")
+                Ok(())
+            Err(e):
+                Err("Failed to write coverage JSON: {e}")
+
+    pub fn check_threshold(self, report: CoverageReport, threshold: f64) -> Result<(), text>:
+        """Check if coverage meets threshold.
+
+        Args:
+            report: Coverage report
+            threshold: Minimum coverage percentage
+
+        Returns:
+            Ok if threshold met, Err otherwise
+
+        Example:
+            match coverage.check_threshold(report, 80.0):
+                Ok(_):
+                    print("Coverage threshold met")
+                Err(msg):
+                    fail(msg)
+        """
+        if report.total_coverage < threshold:
+            Err("Coverage {report.total_coverage:.2f}% below threshold {threshold}%")
+        else:
+            Ok(())
+
+    fn parse_coverage_json(report: CoverageReport, json_content: text):
+        """Parse Simple coverage JSON format.
+
+        Args:
+            report: Report to populate
+            json_content: JSON content
+        """
+        # Simple coverage JSON format:
+        # { "files": [{ "file": "path", "total_lines": N, "covered_lines": N, ... }] }
+        # Note: Full JSON parsing would use sdn.from_json when available
+        # For now, extract data with simple text parsing
+        for line in json_content.lines():
+            if line.contains("\"file\":"):
+                val file_path = self.extract_json_string(line, "file")
+                if not file_path.is_empty():
+                    var file_cov = FileCoverage.new(file_path)
+                    # Parse additional fields from surrounding context
+                    report.add_file(file_cov)
+
+    fn parse_llvm_cov_json(report: CoverageReport, json_content: text):
+        """Parse LLVM coverage JSON format.
+
+        Args:
+            report: Report to populate
+            json_content: JSON content
+        """
+        # LLVM-cov JSON format:
+        # { "data": [{ "files": [{ "filename": "path", "summary": { "lines": {...}, "branches": {...} } }] }] }
+        for line in json_content.lines():
+            if line.contains("\"filename\":"):
+                val file_path = self.extract_json_string(line, "filename")
+                if not file_path.is_empty():
+                    var file_cov = FileCoverage.new(file_path)
+                    report.add_file(file_cov)
+
+    fn parse_python_coverage_json(report: CoverageReport, json_content: text):
+        """Parse Python coverage.py JSON format.
+
+        Args:
+            report: Report to populate
+            json_content: JSON content
+        """
+        # coverage.py JSON format:
+        # { "files": { "path": { "executed_lines": [...], "missing_lines": [...], ... } } }
+        for line in json_content.lines():
+            val trimmed = line.trim()
+            if trimmed.starts_with("\"") and trimmed.contains(".py"):
+                val file_path = self.extract_file_path(trimmed)
+                if not file_path.is_empty():
+                    var file_cov = FileCoverage.new(file_path)
+                    report.add_file(file_cov)
+
+    fn parse_jest_coverage_json(report: CoverageReport, json_content: text):
+        """Parse Jest coverage JSON format.
+
+        Args:
+            report: Report to populate
+            json_content: JSON content
+        """
+        # Jest JSON format includes coverageMap with file paths as keys
+        for line in json_content.lines():
+            val trimmed = line.trim()
+            if trimmed.contains(".js\"") or trimmed.contains(".ts\"") or trimmed.contains(".tsx\""):
+                val file_path = self.extract_file_path(trimmed)
+                if not file_path.is_empty():
+                    var file_cov = FileCoverage.new(file_path)
+                    report.add_file(file_cov)
+
+    fn extract_json_string(line: text, key: text) -> text:
+        """Extract string value for a JSON key.
+
+        Args:
+            line: Line containing key-value pair
+            key: Key to extract
+
+        Returns:
+            Extracted string value
+        """
+        val search = "\"{key}\":"
+        val idx = line.find(search)
+        if idx < 0:
+            return ""
+
+        val after_key = line[idx + search.len():]
+        val quote_start = after_key.find("\"")
+        if quote_start < 0:
+            return ""
+
+        val after_quote = after_key[quote_start + 1:]
+        val quote_end = after_quote.find("\"")
+        if quote_end < 0:
+            return ""
+
+        after_quote[0:quote_end]
+
+    fn extract_file_path(line: text) -> text:
+        """Extract file path from a JSON line.
+
+        Args:
+            line: Line containing file path
+
+        Returns:
+            Extracted file path
+        """
+        val quote_start = line.find("\"")
+        if quote_start < 0:
+            return ""
+
+        val after_quote = line[quote_start + 1:]
+        val quote_end = after_quote.find("\"")
+        if quote_end < 0:
+            return ""
+
+        after_quote[0:quote_end]

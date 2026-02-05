@@ -1,0 +1,277 @@
+# Recurrent Neural Network Layers
+#
+# Provides recurrent layer implementations for sequence modeling:
+# - RNN: Vanilla recurrent layer with tanh or ReLU activation
+# - LSTM: Long Short-Term Memory with gating mechanisms
+# - GRU: Gated Recurrent Unit (efficient alternative to LSTM)
+#
+# ## Classes
+# - `RNN`: Vanilla RNN layer
+# - `LSTM`: Long Short-Term Memory layer
+# - `GRU`: Gated Recurrent Unit layer
+#
+# ## Example
+# ```simple
+# import ml.torch as torch
+# import ml.torch.nn as nn
+#
+# # LSTM for sequence classification
+# val lstm = nn.LSTM(input_size=10, hidden_size=20, num_layers=2)
+# val input = torch.randn([seq_len, batch, 10])
+# val output, (hn, cn) = lstm(input)
+# ```
+
+export RNN, LSTM, GRU
+
+use base.{FFIModule}
+
+
+class RNN(FFIModule):
+    """Vanilla Recurrent Neural Network layer.
+
+    Applies RNN with tanh or ReLU activation over input sequence.
+
+    Example:
+        ```simple
+        # Input: [seq_len, batch, input_size]
+        # Output: [seq_len, batch, hidden_size]
+        val rnn = nn.RNN(input_size=10, hidden_size=20, num_layers=2)
+        val output, hidden = rnn(input)
+        ```
+    """
+    input_size: i32
+    hidden_size: i32
+    num_layers: i32
+
+    fn __init__(input_size: i32, hidden_size: i32, num_layers: i32 = 1, nonlinearity: str = "tanh", dropout: f64 = 0.0):
+        """Initialize RNN layer.
+
+        Args:
+            input_size: Size of input features
+            hidden_size: Size of hidden state
+            num_layers: Number of stacked RNN layers (default: 1)
+            nonlinearity: "tanh" or "relu" (default: "tanh")
+            dropout: Dropout probability between layers (default: 0.0)
+        """
+        super().__init__()
+        self.input_size = input_size
+        self.hidden_size = hidden_size
+        self.num_layers = num_layers
+
+        # Convert nonlinearity to i32: 0=tanh, 1=relu
+        val nonlin_code = 0
+        if nonlinearity == "relu":
+            nonlin_code = 1
+
+        # Create module via FFI
+        self.module_handle = @rt_torch_rnn_new(
+            input_size,
+            hidden_size,
+            num_layers,
+            nonlin_code,
+            dropout
+        )
+        self.validate_handle("RNN")
+
+    fn forward(x: Tensor, h0: Tensor = None) -> (Tensor, Tensor):
+        """Apply RNN forward pass.
+
+        Args:
+            x: Input tensor [seq_len, batch, input_size]
+            h0: Initial hidden state [num_layers, batch, hidden_size] (default: zeros)
+
+        Returns:
+            (output, hn): Output tensor and final hidden state
+                output: [seq_len, batch, hidden_size]
+                hn: [num_layers, batch, hidden_size]
+        """
+        val h0_handle = 0u64
+        if h0 is not None:
+            h0_handle = h0.handle
+
+        var out_handle = 0u64
+        var hn_handle = 0u64
+
+        val _ = @rt_torch_rnn_forward(
+            self.module_handle,
+            x.handle,
+            h0_handle,
+            &out_handle,
+            &hn_handle
+        )
+
+        if out_handle == 0 or hn_handle == 0:
+            panic("RNN forward pass failed")
+
+        return (Tensor(out_handle), Tensor(hn_handle))
+
+
+class LSTM(FFIModule):
+    """Long Short-Term Memory recurrent layer.
+
+    Applies LSTM with forget gate, input gate, and output gate over input sequence.
+
+    Example:
+        ```simple
+        # Input: [seq_len, batch, input_size]
+        # Output: [seq_len, batch, hidden_size]
+        val lstm = nn.LSTM(input_size=10, hidden_size=20, num_layers=2)
+        val output, (hn, cn) = lstm(input)
+        ```
+    """
+    input_size: i32
+    hidden_size: i32
+    num_layers: i32
+
+    fn __init__(input_size: i32, hidden_size: i32, num_layers: i32 = 1, dropout: f64 = 0.0):
+        """Initialize LSTM layer.
+
+        Args:
+            input_size: Size of input features
+            hidden_size: Size of hidden state
+            num_layers: Number of stacked LSTM layers (default: 1)
+            dropout: Dropout probability between layers (default: 0.0)
+        """
+        super().__init__()
+        self.input_size = input_size
+        self.hidden_size = hidden_size
+        self.num_layers = num_layers
+
+        # Create module via FFI
+        self.module_handle = @rt_torch_lstm_new(
+            input_size,
+            hidden_size,
+            num_layers,
+            dropout
+        )
+        self.validate_handle("LSTM")
+
+    fn forward(x: Tensor, h0: Tensor = None, c0: Tensor = None) -> (Tensor, (Tensor, Tensor)):
+        """Apply LSTM forward pass.
+
+        Args:
+            x: Input tensor [seq_len, batch, input_size]
+            h0: Initial hidden state [num_layers, batch, hidden_size] (default: zeros)
+            c0: Initial cell state [num_layers, batch, hidden_size] (default: zeros)
+
+        Returns:
+            (output, (hn, cn)): Output tensor, final hidden state, and final cell state
+                output: [seq_len, batch, hidden_size]
+                hn: [num_layers, batch, hidden_size]
+                cn: [num_layers, batch, hidden_size]
+        """
+        val h0_handle = 0u64
+        val c0_handle = 0u64
+        if h0 is not None:
+            h0_handle = h0.handle
+        if c0 is not None:
+            c0_handle = c0.handle
+
+        var out_handle = 0u64
+        var hn_handle = 0u64
+        var cn_handle = 0u64
+
+        val _ = @rt_torch_lstm_forward(
+            self.module_handle,
+            x.handle,
+            h0_handle,
+            c0_handle,
+            &out_handle,
+            &hn_handle,
+            &cn_handle
+        )
+
+        if out_handle == 0 or hn_handle == 0 or cn_handle == 0:
+            panic("LSTM forward pass failed")
+
+        return (Tensor(out_handle), (Tensor(hn_handle), Tensor(cn_handle)))
+
+
+class GRU(FFIModule):
+    """Gated Recurrent Unit layer.
+
+    Applies GRU with update and reset gates over input sequence.
+    More efficient than LSTM with similar performance.
+
+    Example:
+        ```simple
+        # Input: [seq_len, batch, input_size]
+        # Output: [seq_len, batch, hidden_size]
+        val gru = nn.GRU(input_size=10, hidden_size=20, num_layers=2)
+        val output, hidden = gru(input)
+        ```
+    """
+    input_size: i32
+    hidden_size: i32
+    num_layers: i32
+
+    fn __init__(input_size: i32, hidden_size: i32, num_layers: i32 = 1, dropout: f64 = 0.0):
+        """Initialize GRU layer.
+
+        Args:
+            input_size: Size of input features
+            hidden_size: Size of hidden state
+            num_layers: Number of stacked GRU layers (default: 1)
+            dropout: Dropout probability between layers (default: 0.0)
+        """
+        super().__init__()
+        self.input_size = input_size
+        self.hidden_size = hidden_size
+        self.num_layers = num_layers
+
+        # Create module via FFI
+        self.module_handle = @rt_torch_gru_new(
+            input_size,
+            hidden_size,
+            num_layers,
+            dropout
+        )
+        self.validate_handle("GRU")
+
+    fn forward(x: Tensor, h0: Tensor = None) -> (Tensor, Tensor):
+        """Apply GRU forward pass.
+
+        Args:
+            x: Input tensor [seq_len, batch, input_size]
+            h0: Initial hidden state [num_layers, batch, hidden_size] (default: zeros)
+
+        Returns:
+            (output, hn): Output tensor and final hidden state
+                output: [seq_len, batch, hidden_size]
+                hn: [num_layers, batch, hidden_size]
+        """
+        val h0_handle = 0u64
+        if h0 is not None:
+            h0_handle = h0.handle
+
+        var out_handle = 0u64
+        var hn_handle = 0u64
+
+        val _ = @rt_torch_gru_forward(
+            self.module_handle,
+            x.handle,
+            h0_handle,
+            &out_handle,
+            &hn_handle
+        )
+
+        if out_handle == 0 or hn_handle == 0:
+            panic("GRU forward pass failed")
+
+        return (Tensor(out_handle), Tensor(hn_handle))
+
+
+# ============================================================================
+# External FFI Functions
+# ============================================================================
+
+extern fn rt_torch_rnn_new(input_size: i32, hidden_size: i32, num_layers: i32, nonlinearity: i32, dropout: f64) -> u64
+extern fn rt_torch_rnn_forward(module: u64, input: u64, h0: u64, out_ptr: *u64, hn_ptr: *u64) -> i32
+
+extern fn rt_torch_lstm_new(input_size: i32, hidden_size: i32, num_layers: i32, dropout: f64) -> u64
+extern fn rt_torch_lstm_forward(module: u64, input: u64, h0: u64, c0: u64, out_ptr: *u64, hn_ptr: *u64, cn_ptr: *u64) -> i32
+
+extern fn rt_torch_gru_new(input_size: i32, hidden_size: i32, num_layers: i32, dropout: f64) -> u64
+extern fn rt_torch_gru_forward(module: u64, input: u64, h0: u64, out_ptr: *u64, hn_ptr: *u64) -> i32
+
+extern fn rt_torch_module_free(module: u64) -> i32

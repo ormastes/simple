@@ -1,0 +1,724 @@
+//! Interpreter tests - basic
+
+use simple_driver::interpreter::{run_code, Interpreter, RunConfig, RunningType};
+
+#[test]
+fn interpreter_runs_simple_code() {
+    let result = run_code("main = 42", &[], "").unwrap();
+    assert_eq!(result.exit_code, 42);
+}
+
+#[test]
+fn interpreter_returns_zero() {
+    let result = run_code("main = 0", &[], "").unwrap();
+    assert_eq!(result.exit_code, 0);
+}
+
+#[test]
+fn interpreter_with_variables() {
+    let code = r#"
+let x = 10
+let y = 20
+main = x + y
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 30);
+}
+
+#[test]
+fn interpreter_with_variable_expressions() {
+    let code = r#"
+let a = 5
+let b = a * 2
+let c = b + a
+main = c
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 15); // a=5, b=10, c=15
+}
+
+#[test]
+fn interpreter_with_functions() {
+    let code = r#"
+fn add(a, b):
+    return a + b
+main = add(5, 7)
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 12);
+}
+
+#[test]
+fn interpreter_with_nested_function_calls() {
+    let code = r#"
+fn double(x):
+    return x * 2
+fn add_one(x):
+    return x + 1
+main = add_one(double(5))
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 11); // double(5)=10, add_one(10)=11
+}
+
+#[test]
+fn interpreter_with_structs() {
+    let code = r#"
+struct Point:
+    x: i64
+    y: i64
+
+let p = Point { x: 10, y: 20 }
+main = p.x + p.y
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 30);
+}
+
+#[test]
+fn interpreter_with_enums() {
+    let code = r#"
+enum Color:
+    Red
+    Green
+    Blue
+
+let c = Color::Red
+main = if c is Color::Red: 1 else: 0
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 1);
+}
+
+#[test]
+fn interpreter_with_config() {
+    let interpreter = Interpreter::new();
+    let result = interpreter
+        .run(
+            "main = 255",
+            RunConfig {
+                args: vec!["arg1".to_string()],
+                stdin: "input".to_string(),
+                timeout_ms: 0,
+                in_memory: false,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(result.exit_code, 255);
+}
+
+#[test]
+fn interpreter_run_with_stdin() {
+    let interpreter = Interpreter::new();
+    let result = interpreter.run_with_stdin("main = 50", "test input").unwrap();
+    assert_eq!(result.exit_code, 50);
+}
+
+#[test]
+fn interpreter_result_has_empty_stdout_when_no_capture() {
+    // Without capture_output, stdout/stderr are empty
+    let result = run_code("main = 1", &[], "").unwrap();
+    assert!(result.stdout.is_empty());
+    assert!(result.stderr.is_empty());
+}
+
+// ============= Print Output Capture Tests =============
+// Note: print/print/eprint/eprint are now prelude functions - no extern fn needed
+
+#[test]
+fn interpreter_captures_print_output() {
+    let interpreter = Interpreter::new();
+    let code = r#"
+print("hello")
+main = 0
+"#;
+    let result = interpreter
+        .run(
+            code,
+            RunConfig {
+                capture_output: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(result.stdout, "hello\n");
+    assert_eq!(result.exit_code, 0);
+}
+
+#[test]
+fn interpreter_captures_multiple_prints() {
+    let interpreter = Interpreter::new();
+    let code = r#"
+print("a")
+print("b")
+print("c")
+main = 0
+"#;
+    let result = interpreter
+        .run(
+            code,
+            RunConfig {
+                capture_output: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(result.stdout, "a\nb\nc\n");
+}
+
+#[test]
+fn interpreter_captures_print_with_multiple_args() {
+    let interpreter = Interpreter::new();
+    let code = r#"
+print("x", "y", "z")
+main = 0
+"#;
+    let result = interpreter
+        .run(
+            code,
+            RunConfig {
+                capture_output: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(result.stdout, "x y z\n");
+}
+
+#[test]
+fn interpreter_captures_print_with_values() {
+    let interpreter = Interpreter::new();
+    let code = r#"
+val x = 42
+print("value:", x)
+main = 0
+"#;
+    let result = interpreter
+        .run(
+            code,
+            RunConfig {
+                capture_output: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(result.stdout, "value: 42\n");
+}
+
+#[test]
+fn interpreter_captures_stderr() {
+    let interpreter = Interpreter::new();
+    let code = r#"
+eprint("error message")
+main = 0
+"#;
+    let result = interpreter
+        .run(
+            code,
+            RunConfig {
+                capture_output: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(result.stderr, "error message\n");
+    assert_eq!(result.stdout, "");
+}
+
+#[test]
+fn interpreter_captures_mixed_stdout_stderr() {
+    let interpreter = Interpreter::new();
+    let code = r#"
+print("out1")
+eprint("err1")
+print("out2")
+main = 0
+"#;
+    let result = interpreter
+        .run(
+            code,
+            RunConfig {
+                capture_output: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(result.stdout, "out1\nout2\n");
+    assert_eq!(result.stderr, "err1\n");
+}
+
+// ============= Additional Interpreter Print Tests =============
+// Comprehensive tests to ensure print newline behavior is consistent
+
+#[test]
+fn interpreter_print_empty() {
+    let interpreter = Interpreter::new();
+    let code = r#"
+print()
+main = 0
+"#;
+    let result = interpreter
+        .run(
+            code,
+            RunConfig {
+                capture_output: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(result.stdout, "\n", "Empty print() should output just a newline");
+}
+
+#[test]
+fn interpreter_print_consecutive() {
+    let interpreter = Interpreter::new();
+    let code = r#"
+print("Line 1")
+print("Line 2")
+print("Line 3")
+main = 0
+"#;
+    let result = interpreter
+        .run(
+            code,
+            RunConfig {
+                capture_output: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        result.stdout, "Line 1\nLine 2\nLine 3\n",
+        "Each print() should add its own newline"
+    );
+}
+
+#[test]
+fn interpreter_print_multiple_statements() {
+    let interpreter = Interpreter::new();
+    let code = r#"
+print("statement 1")
+print("statement 2")
+main = 0
+"#;
+    let result = interpreter
+        .run(
+            code,
+            RunConfig {
+                capture_output: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        result.stdout, "statement 1\nstatement 2\n",
+        "Multiple print() statements should each add newline"
+    );
+}
+
+#[test]
+fn interpreter_eprint_no_newline() {
+    let interpreter = Interpreter::new();
+    let code = r#"
+eprint("err1")
+eprint("err2")
+main = 0
+"#;
+    let result = interpreter
+        .run(
+            code,
+            RunConfig {
+                capture_output: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        result.stderr, "err1\nerr2\n",
+        "eprint() adds newlines in interpreter mode"
+    );
+}
+
+#[test]
+fn interpreter_eprint_multiple_statements() {
+    let interpreter = Interpreter::new();
+    let code = r#"
+eprint("err1")
+eprint("err2")
+main = 0
+"#;
+    let result = interpreter
+        .run(
+            code,
+            RunConfig {
+                capture_output: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        result.stderr, "err1\nerr2\n",
+        "eprint() in interpreter mode adds newlines"
+    );
+}
+
+// ============= Running Type Tests =============
+
+#[test]
+fn compiler_mode_runs_simple_code() {
+    let interpreter = Interpreter::new();
+    // Compiler mode uses native codegen which requires fn main() -> i64 syntax
+    let code = r#"
+fn main() -> i64:
+    return 42
+"#;
+    let result = interpreter
+        .run(
+            code,
+            RunConfig {
+                running_type: RunningType::Compiler,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(result.exit_code, 42);
+}
+
+#[test]
+fn compiler_mode_with_arithmetic() {
+    let interpreter = Interpreter::new();
+    let code = r#"
+fn main() -> i64:
+    return 10 + 32
+"#;
+    let result = interpreter
+        .run(
+            code,
+            RunConfig {
+                running_type: RunningType::Compiler,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(result.exit_code, 42);
+}
+
+#[test]
+fn compiler_mode_in_memory() {
+    let interpreter = Interpreter::new();
+    let code = r#"
+fn main() -> i64:
+    return 100
+"#;
+    let result = interpreter
+        .run(
+            code,
+            RunConfig {
+                running_type: RunningType::Compiler,
+                in_memory: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(result.exit_code, 100);
+}
+
+// ============= Compiler Mode Print Tests =============
+// These tests verify that print works in native codegen (compiler) mode
+
+#[test]
+fn compiler_mode_captures_print() {
+    let interpreter = Interpreter::new();
+    let code = r#"
+fn main() -> i64:
+    print("hello from compiler")
+    return 0
+"#;
+    let result = interpreter
+        .run(
+            code,
+            RunConfig {
+                running_type: RunningType::Compiler,
+                capture_output: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(result.stdout, "hello from compiler\n");
+    assert_eq!(result.exit_code, 0);
+}
+
+#[test]
+fn compiler_mode_captures_multiple_args() {
+    let interpreter = Interpreter::new();
+    let code = r#"
+fn main() -> i64:
+    print("a", "b", "c")
+    return 0
+"#;
+    let result = interpreter
+        .run(
+            code,
+            RunConfig {
+                running_type: RunningType::Compiler,
+                capture_output: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(result.stdout, "a b c\n");
+    assert_eq!(result.exit_code, 0);
+}
+
+#[test]
+fn compiler_mode_captures_stderr() {
+    let interpreter = Interpreter::new();
+    let code = r#"
+fn main() -> i64:
+    eprint("error from compiler")
+    return 0
+"#;
+    let result = interpreter
+        .run(
+            code,
+            RunConfig {
+                running_type: RunningType::Compiler,
+                capture_output: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(result.stderr, "error from compiler");
+    assert_eq!(result.exit_code, 0);
+}
+
+// ============= Additional Print Newline Tests =============
+// Comprehensive tests to prevent regression of the print newline bug
+// Bug: print() was not adding newlines in native code (fixed in commit 84a8d453)
+
+#[test]
+fn compiler_mode_print_empty() {
+    let interpreter = Interpreter::new();
+    let code = r#"
+fn main() -> i64:
+    print()
+    return 0
+"#;
+    let result = interpreter
+        .run(
+            code,
+            RunConfig {
+                running_type: RunningType::Compiler,
+                capture_output: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(result.stdout, "\n", "Empty print() should output just a newline");
+    assert_eq!(result.exit_code, 0);
+}
+
+#[test]
+fn compiler_mode_print_integers() {
+    let interpreter = Interpreter::new();
+    let code = r#"
+fn main() -> i64:
+    print(42)
+    return 0
+"#;
+    let result = interpreter
+        .run(
+            code,
+            RunConfig {
+                running_type: RunningType::Compiler,
+                capture_output: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(result.stdout, "42\n", "print(integer) should add newline");
+    assert_eq!(result.exit_code, 0);
+}
+
+#[test]
+fn compiler_mode_print_floats() {
+    let interpreter = Interpreter::new();
+    let code = r#"
+fn main() -> i64:
+    print(3.14)
+    return 0
+"#;
+    let result = interpreter
+        .run(
+            code,
+            RunConfig {
+                running_type: RunningType::Compiler,
+                capture_output: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    // Float may have precision issues, just check it contains the number and has newline
+    assert!(
+        result.stdout.starts_with("3.1") && result.stdout.ends_with("\n"),
+        "print(float) should add newline, got: {:?}",
+        result.stdout
+    );
+    assert_eq!(result.exit_code, 0);
+}
+
+#[test]
+fn compiler_mode_print_booleans() {
+    let interpreter = Interpreter::new();
+    let code = r#"
+fn main() -> i64:
+    print(true)
+    print(false)
+    return 0
+"#;
+    let result = interpreter
+        .run(
+            code,
+            RunConfig {
+                running_type: RunningType::Compiler,
+                capture_output: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(result.stdout, "true\nfalse\n", "Each print(bool) should add newline");
+    assert_eq!(result.exit_code, 0);
+}
+
+#[test]
+fn compiler_mode_print_consecutive_calls() {
+    let interpreter = Interpreter::new();
+    let code = r#"
+fn main() -> i64:
+    print("Line 1")
+    print("Line 2")
+    print("Line 3")
+    return 0
+"#;
+    let result = interpreter
+        .run(
+            code,
+            RunConfig {
+                running_type: RunningType::Compiler,
+                capture_output: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        result.stdout, "Line 1\nLine 2\nLine 3\n",
+        "Multiple print() calls should each add newline"
+    );
+    assert_eq!(result.exit_code, 0);
+}
+
+#[test]
+fn compiler_mode_print_mixed_types() {
+    let interpreter = Interpreter::new();
+    let code = r#"
+fn main() -> i64:
+    print("number:", 42, "bool:", true)
+    return 0
+"#;
+    let result = interpreter
+        .run(
+            code,
+            RunConfig {
+                running_type: RunningType::Compiler,
+                capture_output: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        result.stdout, "number: 42 bool: true\n",
+        "print() with multiple mixed types should add newline"
+    );
+    assert_eq!(result.exit_code, 0);
+}
+
+#[test]
+fn compiler_mode_print_multiple_statements() {
+    let interpreter = Interpreter::new();
+    let code = r#"
+fn main() -> i64:
+    print("statement 1")
+    print("statement 2")
+    return 0
+"#;
+    let result = interpreter
+        .run(
+            code,
+            RunConfig {
+                running_type: RunningType::Compiler,
+                capture_output: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        result.stdout, "statement 1\nstatement 2\n",
+        "Multiple print() statements should each add newline"
+    );
+    assert_eq!(result.exit_code, 0);
+}
+
+#[test]
+fn compiler_mode_eprint_adds_newline() {
+    let interpreter = Interpreter::new();
+    let code = r#"
+fn main() -> i64:
+    eprint("error line 1")
+    eprint("error line 2")
+    return 0
+"#;
+    let result = interpreter
+        .run(
+            code,
+            RunConfig {
+                running_type: RunningType::Compiler,
+                capture_output: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    // Note: eprint does NOT add newline (only print does)
+    assert_eq!(
+        result.stderr, "error line 1error line 2",
+        "eprint() should NOT add newline (use eprintln() for that)"
+    );
+    assert_eq!(result.exit_code, 0);
+}
+
+#[test]
+fn compiler_mode_eprint_multiple_statements() {
+    let interpreter = Interpreter::new();
+    let code = r#"
+fn main() -> i64:
+    eprint("error line 1")
+    eprint("error line 2")
+    return 0
+"#;
+    let result = interpreter
+        .run(
+            code,
+            RunConfig {
+                running_type: RunningType::Compiler,
+                capture_output: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    // Note: eprint does NOT add newlines in compiler mode
+    assert_eq!(
+        result.stderr, "error line 1error line 2",
+        "eprint() in compiler mode should NOT add newlines (different from interpreter)"
+    );
+    assert_eq!(result.exit_code, 0);
+}

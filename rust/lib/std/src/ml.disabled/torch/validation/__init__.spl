@@ -1,0 +1,930 @@
+# Runtime Validation System
+#
+# Comprehensive runtime validation with three modes:
+# - check_only: Validate all logic paths without training
+# - train_only: Skip validation, train normally
+# - check_and_train: Validate then train if passed
+#
+# ## Features
+# - Memory validation (model + activation memory)
+# - Shape validation (tensor dimensions through model)
+# - Gradient flow validation (detect dead layers, NaN/Inf)
+# - Numeric stability (NaN/Inf in outputs/loss)
+# - Device placement (model/data consistency)
+# - DataLoader validation (iteration tests)
+# - Optimizer validation (parameter tracking)
+# - Training loop validation (mini-epochs)
+#
+# ## Example
+# ```simple
+# import ml.torch.validation.{RuntimeValidator, ValidationMode}
+#
+# val validator = RuntimeValidator(ValidationMode.CheckAndTrain)
+# val report = validator.validate_all(model, dataloader, optimizer, loss_fn)
+# report.print()
+#
+# if report.has_errors():
+#     sys.exit(1)
+#
+# # Proceed with training
+# train(model, dataloader)
+# ```
+
+export RuntimeValidator, ValidationMode, ValidationReport, ValidationSection
+
+
+# ============================================================================
+# Enums
+# ============================================================================
+
+# Validation execution mode:
+# - CheckOnly: Run checks, no training
+# - TrainOnly: Skip checks, train normally
+# - CheckAndTrain: Run checks then train
+enum ValidationMode:
+    CheckOnly
+    TrainOnly
+    CheckAndTrain
+
+impl ValidationMode:
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    fn is_check_only() -> bool:
+        """Check if this is CheckOnly mode.
+
+        Returns:
+            true for CheckOnly
+
+        Example:
+            ValidationMode.CheckOnly.is_check_only()  # → true
+        """
+        match self:
+            case CheckOnly: true
+            case _: false
+
+    fn is_train_only() -> bool:
+        """Check if this is TrainOnly mode.
+
+        Returns:
+            true for TrainOnly
+
+        Example:
+            ValidationMode.TrainOnly.is_train_only()  # → true
+        """
+        match self:
+            case TrainOnly: true
+            case _: false
+
+    fn is_check_and_train() -> bool:
+        """Check if this is CheckAndTrain mode.
+
+        Returns:
+            true for CheckAndTrain
+
+        Example:
+            ValidationMode.CheckAndTrain.is_check_and_train()  # → true
+        """
+        match self:
+            case CheckAndTrain: true
+            case _: false
+
+    fn runs_validation() -> bool:
+        """Check if mode runs validation checks.
+
+        Returns:
+            true for CheckOnly and CheckAndTrain
+
+        Example:
+            ValidationMode.CheckOnly.runs_validation()  # → true
+            ValidationMode.TrainOnly.runs_validation()  # → false
+        """
+        match self:
+            case CheckOnly: true
+            case CheckAndTrain: true
+            case TrainOnly: false
+
+    fn runs_training() -> bool:
+        """Check if mode runs training.
+
+        Returns:
+            true for TrainOnly and CheckAndTrain
+
+        Example:
+            ValidationMode.TrainOnly.runs_training()  # → true
+            ValidationMode.CheckOnly.runs_training()  # → false
+        """
+        match self:
+            case TrainOnly: true
+            case CheckAndTrain: true
+            case CheckOnly: false
+
+    fn stops_on_error() -> bool:
+        """Check if mode stops training on validation error.
+
+        Returns:
+            true for CheckOnly and CheckAndTrain
+
+        Example:
+            ValidationMode.CheckAndTrain.stops_on_error()  # → true
+        """
+        match self:
+            case CheckOnly: true
+            case CheckAndTrain: true
+            case TrainOnly: false
+
+    fn to_string() -> text:
+        """Convert mode to string.
+
+        Returns:
+            Mode name
+
+        Example:
+            ValidationMode.CheckOnly.to_string()  # → "check_only"
+        """
+        match self:
+            case CheckOnly: "check_only"
+            case TrainOnly: "train_only"
+            case CheckAndTrain: "check_and_train"
+
+    fn description() -> text:
+        """Get mode description.
+
+        Returns:
+            Human-readable description
+
+        Example:
+            ValidationMode.CheckOnly.description()
+            # → "Run checks, no training"
+        """
+        match self:
+            case CheckOnly: "Run checks, no training"
+            case TrainOnly: "Skip checks, train normally"
+            case CheckAndTrain: "Run checks then train"
+
+    fn summary() -> text:
+        """Get summary of validation mode.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            ValidationMode.CheckAndTrain.summary()
+            # → "ValidationMode: check_and_train (runs validation, runs training, stops on error)"
+        """
+        val name = self.to_string()
+        val val = if self.runs_validation(): "runs validation" else: "no validation"
+        val train = if self.runs_training(): "runs training" else: "no training"
+        val stop = if self.stops_on_error(): "stops on error" else: "continues"
+        return "ValidationMode: {name} ({val}, {train}, {stop})"
+
+
+# ============================================================================
+# Validation Section
+# ============================================================================
+
+class ValidationSection:
+    """Single validation section (e.g., "Memory Validation").
+
+    Attributes:
+        name: Section name
+        infos: Info messages
+        warnings: Warning messages
+        errors: Error messages
+        passed: Whether section passed
+    """
+    name: str
+    infos: [str]
+    warnings: [str]
+    errors: [str]
+    passed: bool
+
+    fn __init__(name: str):
+        self.name = name
+        self.infos = []
+        self.warnings = []
+        self.errors = []
+        self.passed = false
+
+    fn add_info(msg: str):
+        """Add info message."""
+        self.infos.append(msg)
+
+    fn add_warning(msg: str):
+        """Add warning message."""
+        self.warnings.append(msg)
+
+    fn add_error(msg: str):
+        """Add error message."""
+        self.errors.append(msg)
+
+    fn add_pass(msg: str):
+        """Mark section as passed."""
+        self.passed = true
+        self.infos.append("✓ {msg}")
+
+    fn has_errors() -> bool:
+        """Check if section has errors."""
+        return self.errors.len() > 0
+
+
+# ============================================================================
+# Validation Report
+# ============================================================================
+
+class ValidationReport:
+    """Validation report containing all sections.
+
+    Attributes:
+        sections: List of validation sections
+        skipped: Whether validation was skipped
+    """
+    sections: [ValidationSection]
+    skipped: bool
+
+    fn __init__(skipped: bool):
+        self.sections = []
+        self.skipped = skipped
+
+    fn add_section(section: ValidationSection):
+        """Add validation section."""
+        self.sections.append(section)
+
+    fn has_errors() -> bool:
+        """Check if any section has errors."""
+        return any(s.has_errors() for s in self.sections)
+
+    fn print():
+        """Print validation report."""
+        if self.skipped:
+            print("Validation skipped (train_only mode)")
+            return
+
+        print("=" * 70)
+        print("RUNTIME VALIDATION REPORT")
+        print("=" * 70)
+
+        for section in self.sections:
+            print(f"\n{section.name}")
+            print("-" * 70)
+
+            for info in section.infos:
+                print(f"  [INFO] {info}")
+
+            for warning in section.warnings:
+                print(f"  [WARN] {warning}")
+
+            for error in section.errors:
+                print(f"  [ERROR] {error}")
+
+        print("\n" + "=" * 70)
+        if self.has_errors():
+            print("VALIDATION FAILED ❌")
+        else:
+            print("VALIDATION PASSED ✓")
+        print("=" * 70)
+
+
+# ============================================================================
+# Runtime Validator
+# ============================================================================
+
+class RuntimeValidator:
+    """Runtime validation system.
+
+    Validates model, data, optimizer, and training loop before training.
+
+    Example:
+        ```simple
+        val validator = RuntimeValidator(ValidationMode.CheckAndTrain)
+        val report = validator.validate_all(
+            model, train_loader, optimizer, loss_fn
+        )
+
+        if report.has_errors():
+            print("Validation failed!")
+            sys.exit(1)
+        ```
+
+    Attributes:
+        mode: Validation mode
+        checks_passed: Whether all checks passed
+        errors: List of validation errors
+    """
+    mode: ValidationMode
+    checks_passed: bool
+    errors: [str]
+
+    fn __init__(mode: ValidationMode):
+        """Initialize validator.
+
+        Args:
+            mode: Validation mode (default: TrainOnly)
+        """
+        self.mode = mode
+        self.checks_passed = false
+        self.errors = []
+
+    fn should_check() -> bool:
+        """Check if validation should run."""
+        return self.mode in <ValidationMode.CheckOnly, ValidationMode.CheckAndTrain>
+
+    fn should_train() -> bool:
+        """Check if training should run."""
+        return self.mode in <ValidationMode.TrainOnly, ValidationMode.CheckAndTrain>
+
+    fn validate_all(model: any,  # torch.nn.Module
+        dataloader: any,  # DataLoader
+        optimizer: any,  # Optimizer
+        loss_fn: any  # Loss function
+    ) -> ValidationReport:
+        """Run all validation checks.
+
+        Args:
+            model: Model to validate
+            dataloader: DataLoader to validate
+            optimizer: Optimizer to validate
+            loss_fn: Loss function
+
+        Returns:
+            Validation report
+
+        Example:
+            ```simple
+            val report = validator.validate_all(
+                model, train_loader, optimizer, loss_fn
+            )
+            report.print()
+            ```
+        """
+        if not self.should_check():
+            return ValidationReport(skipped=true)
+
+        val report = ValidationReport()
+
+        # 1. Memory validation
+        report.add_section(self._check_memory(model, dataloader))
+
+        # 2. Shape validation
+        report.add_section(self._check_shapes(model, dataloader))
+
+        # 3. Gradient flow
+        report.add_section(self._check_gradients(model, dataloader, loss_fn))
+
+        # 4. NaN/Inf detection
+        report.add_section(self._check_numeric_stability(model, dataloader, loss_fn))
+
+        # 5. Device placement
+        report.add_section(self._check_devices(model, dataloader))
+
+        # 6. Data pipeline
+        report.add_section(self._check_dataloader(dataloader))
+
+        # 7. Optimizer state
+        report.add_section(self._check_optimizer(optimizer, model))
+
+        # 8. Training loop
+        report.add_section(self._check_training_loop(
+            model, dataloader, optimizer, loss_fn
+        ))
+
+        self.checks_passed = not report.has_errors()
+        self.errors = [for s in report.sections for e in s.errors: e]
+
+        return report
+
+    # ========================================================================
+    # Validation Methods
+    # ========================================================================
+
+    fn _check_memory(model: any, dataloader: any) -> ValidationSection:
+        """Validate memory usage.
+
+        Checks:
+        - Model parameter memory
+        - Activation memory (forward pass)
+        - GPU memory availability
+
+        Args:
+            model: Model to check
+            dataloader: DataLoader for sample batch
+
+        Returns:
+            Validation section
+        """
+        val section = ValidationSection("Memory Validation")
+
+        # Calculate model parameter memory
+        var total_params: i64 = 0
+        var total_bytes: i64 = 0
+
+        for param in model.parameters():
+            val numel = param.numel()
+            val element_size = param.element_size()
+            total_params += numel
+            total_bytes += numel * element_size
+
+        val model_mb = (total_bytes as f64) / (1024.0 * 1024.0)
+        section.add_info("Model parameters: {total_params} ({model_mb:.2f} MB)")
+
+        # Check GPU memory if available
+        if model.is_cuda():
+            val device = model.device()
+            val allocated = torch.cuda.memory_allocated(device)
+            val reserved = torch.cuda.memory_reserved(device)
+            val total_gpu = torch.cuda.get_device_properties(device).total_memory
+
+            val allocated_mb = (allocated as f64) / (1024.0 * 1024.0)
+            val total_mb = (total_gpu as f64) / (1024.0 * 1024.0)
+
+            section.add_info("GPU memory: {allocated_mb:.1f} MB allocated / {total_mb:.1f} MB total")
+
+            # Check if we have enough memory (estimate activation memory as 2x parameters)
+            val estimated_activation = total_bytes * 2
+            val estimated_total = total_bytes + estimated_activation
+            if estimated_total > (total_gpu * 8 / 10):  # 80% threshold
+                section.add_warning("Estimated memory usage may exceed 80% of GPU memory")
+        else:
+            section.add_info("Model is on CPU")
+
+        section.add_pass("Memory validation completed")
+        return section
+
+    fn _check_shapes(model: any, dataloader: any) -> ValidationSection:
+        """Validate tensor shapes through the model.
+
+        Checks:
+        - Input shape
+        - Output shape
+        - Batch size consistency
+
+        Args:
+            model: Model to check
+            dataloader: DataLoader for sample batch
+
+        Returns:
+            Validation section
+        """
+        val section = ValidationSection("Shape Validation")
+
+        # Get a sample batch from dataloader
+        val batch_iter = iter(dataloader)
+        match next(batch_iter):
+            case Some((inputs, targets)):
+                section.add_info("Input shape: {inputs.shape}")
+                section.add_info("Target shape: {targets.shape}")
+
+                # Run forward pass to check output shape
+                model.eval()
+                with torch.no_grad():
+                    val outputs = model(inputs)
+                    section.add_info("Output shape: {outputs.shape}")
+
+                    # Check batch size consistency
+                    val input_batch = inputs.shape[0]
+                    val output_batch = outputs.shape[0]
+                    val target_batch = targets.shape[0]
+
+                    if input_batch != output_batch:
+                        section.add_error("Batch size mismatch: input={input_batch}, output={output_batch}")
+                    elif input_batch != target_batch:
+                        section.add_error("Batch size mismatch: input={input_batch}, target={target_batch}")
+                    else:
+                        section.add_pass("Batch sizes consistent: {input_batch}")
+
+                    # Check output dimensions match targets for classification
+                    if outputs.dim() >= 2 and targets.dim() >= 1:
+                        val output_classes = outputs.shape[-1]
+                        section.add_info("Output classes: {output_classes}")
+
+            case None:
+                section.add_error("DataLoader is empty - cannot validate shapes")
+
+        return section
+
+    fn _check_gradients(model: any,
+        dataloader: any,
+        loss_fn: any
+    ) -> ValidationSection:
+        """Validate gradient flow.
+
+        Checks:
+        - All parameters have gradients
+        - No NaN/Inf gradients
+        - No zero gradients (potential dead layers)
+
+        Args:
+            model: Model to check
+            dataloader: DataLoader for sample batch
+            loss_fn: Loss function
+
+        Returns:
+            Validation section
+        """
+        val section = ValidationSection("Gradient Flow Validation")
+
+        # Get a sample batch
+        val batch_iter = iter(dataloader)
+        match next(batch_iter):
+            case Some((inputs, targets)):
+                # Run forward and backward pass
+                model.train()
+                model.zero_grad()
+
+                val outputs = model(inputs)
+                val loss = loss_fn(outputs, targets)
+                loss.backward()
+
+                # Check gradients for each parameter
+                var total_params = 0
+                var params_with_grad = 0
+                var params_zero_grad = 0
+                var params_nan_grad = 0
+                var params_inf_grad = 0
+
+                for (name, param) in model.named_parameters():
+                    total_params += 1
+
+                    if param.grad is not None:
+                        params_with_grad += 1
+                        val grad = param.grad
+
+                        # Check for NaN
+                        if torch.isnan(grad).any():
+                            params_nan_grad += 1
+                            section.add_error("NaN gradient in parameter: {name}")
+
+                        # Check for Inf
+                        if torch.isinf(grad).any():
+                            params_inf_grad += 1
+                            section.add_error("Inf gradient in parameter: {name}")
+
+                        # Check for zero gradients (potential dead layers)
+                        if grad.abs().max() < 1e-10:
+                            params_zero_grad += 1
+                            section.add_warning("Near-zero gradient in parameter: {name}")
+                    else:
+                        section.add_warning("No gradient for parameter: {name}")
+
+                section.add_info("Parameters with gradients: {params_with_grad}/{total_params}")
+
+                if params_nan_grad > 0:
+                    section.add_error("{params_nan_grad} parameters have NaN gradients")
+                elif params_inf_grad > 0:
+                    section.add_error("{params_inf_grad} parameters have Inf gradients")
+                elif params_zero_grad > 0:
+                    section.add_warning("{params_zero_grad} parameters have near-zero gradients (possible dead layers)")
+                else:
+                    section.add_pass("All gradients are valid")
+
+            case None:
+                section.add_error("DataLoader is empty - cannot validate gradients")
+
+        return section
+
+    fn _check_numeric_stability(model: any,
+        dataloader: any,
+        loss_fn: any
+    ) -> ValidationSection:
+        """Check for NaN/Inf in outputs and loss.
+
+        Args:
+            model: Model to check
+            dataloader: DataLoader for sample batch
+            loss_fn: Loss function
+
+        Returns:
+            Validation section
+        """
+        val section = ValidationSection("Numeric Stability Validation")
+
+        # Get a sample batch
+        val batch_iter = iter(dataloader)
+        match next(batch_iter):
+            case Some((inputs, targets)):
+                model.eval()
+                with torch.no_grad():
+                    # Check inputs
+                    if torch.isnan(inputs).any():
+                        section.add_error("NaN values in input data")
+                    if torch.isinf(inputs).any():
+                        section.add_error("Inf values in input data")
+
+                    # Run forward pass
+                    val outputs = model(inputs)
+
+                    # Check outputs
+                    if torch.isnan(outputs).any():
+                        section.add_error("NaN values in model output")
+                    elif torch.isinf(outputs).any():
+                        section.add_error("Inf values in model output")
+                    else:
+                        section.add_info("Model outputs are numerically stable")
+
+                    # Check loss
+                    val loss = loss_fn(outputs, targets)
+                    if torch.isnan(loss):
+                        section.add_error("NaN loss value")
+                    elif torch.isinf(loss):
+                        section.add_error("Inf loss value")
+                    else:
+                        section.add_info("Loss value: {loss.item():.6f}")
+
+                    # Check for extreme values
+                    val output_max = outputs.abs().max().item()
+                    val output_min = outputs.abs().min().item()
+                    section.add_info("Output range: [{output_min:.6f}, {output_max:.6f}]")
+
+                    if output_max > 1e6:
+                        section.add_warning("Very large output values detected (max={output_max:.2e})")
+
+                if not section.has_errors():
+                    section.add_pass("Numeric stability check passed")
+
+            case None:
+                section.add_error("DataLoader is empty - cannot validate numeric stability")
+
+        return section
+
+    fn _check_devices(model: any, dataloader: any) -> ValidationSection:
+        """Validate device placement.
+
+        Checks:
+        - Model device
+        - Data device
+        - Consistency between model and data
+
+        Args:
+            model: Model to check
+            dataloader: DataLoader for sample batch
+
+        Returns:
+            Validation section
+        """
+        val section = ValidationSection("Device Validation")
+
+        # Get model device from first parameter
+        var model_device = "cpu"
+        for param in model.parameters():
+            model_device = str(param.device)
+            break
+
+        section.add_info("Model device: {model_device}")
+
+        # Get data device from first batch
+        val batch_iter = iter(dataloader)
+        match next(batch_iter):
+            case Some((inputs, targets)):
+                val input_device = str(inputs.device)
+                val target_device = str(targets.device)
+
+                section.add_info("Input data device: {input_device}")
+                section.add_info("Target data device: {target_device}")
+
+                # Check consistency
+                if model_device != input_device:
+                    section.add_error("Device mismatch: model on {model_device}, input on {input_device}")
+                elif model_device != target_device:
+                    section.add_error("Device mismatch: model on {model_device}, target on {target_device}")
+                else:
+                    section.add_pass("All tensors on same device: {model_device}")
+
+                # Check if CUDA is available when using GPU
+                if "cuda" in model_device:
+                    if not torch.cuda.is_available():
+                        section.add_error("CUDA device specified but CUDA is not available")
+                    else:
+                        val device_name = torch.cuda.get_device_name()
+                        section.add_info("GPU: {device_name}")
+
+            case None:
+                section.add_error("DataLoader is empty - cannot validate device placement")
+
+        return section
+
+    fn _check_dataloader(dataloader: any) -> ValidationSection:
+        """Validate data pipeline.
+
+        Checks:
+        - DataLoader can iterate
+        - Batches are produced correctly
+        - No errors during iteration
+
+        Args:
+            dataloader: DataLoader to check
+
+        Returns:
+            Validation section
+        """
+        val section = ValidationSection("DataLoader Validation")
+
+        # Check DataLoader properties
+        section.add_info("Batch size: {dataloader.batch_size}")
+        section.add_info("Num workers: {dataloader.num_workers}")
+        section.add_info("Shuffle: {dataloader.shuffle}")
+
+        # Try to iterate through a few batches
+        var batch_count = 0
+        var total_samples = 0
+        var first_batch_shape = None
+
+        val batch_iter = iter(dataloader)
+        var batches_to_check = 3  # Check first 3 batches
+
+        while batches_to_check > 0:
+            match next(batch_iter):
+                case Some((inputs, targets)):
+                    batch_count += 1
+                    total_samples += inputs.shape[0]
+
+                    if first_batch_shape is None:
+                        first_batch_shape = inputs.shape
+                    else:
+                        # Check consistency (except last batch which may be smaller)
+                        if inputs.shape[1:] != first_batch_shape[1:]:
+                            section.add_error("Inconsistent feature dimensions across batches")
+
+                    batches_to_check -= 1
+
+                case None:
+                    break
+
+        if batch_count == 0:
+            section.add_error("DataLoader produced no batches")
+        else:
+            section.add_info("Successfully iterated {batch_count} batches ({total_samples} samples)")
+
+            # Estimate total batches
+            val dataset_len = len(dataloader.dataset)
+            val estimated_batches = (dataset_len + dataloader.batch_size - 1) / dataloader.batch_size
+            section.add_info("Dataset size: {dataset_len} samples (~{estimated_batches} batches)")
+
+            section.add_pass("DataLoader iteration successful")
+
+        return section
+
+    fn _check_optimizer(optimizer: any, model: any) -> ValidationSection:
+        """Validate optimizer configuration.
+
+        Checks:
+        - Optimizer has parameters
+        - Parameter count matches model
+        - Learning rate is reasonable
+
+        Args:
+            optimizer: Optimizer to check
+            model: Model
+
+        Returns:
+            Validation section
+        """
+        val section = ValidationSection("Optimizer Validation")
+
+        # Get optimizer type
+        val opt_type = type(optimizer).__name__
+        section.add_info("Optimizer type: {opt_type}")
+
+        # Count optimizer parameters
+        var opt_param_count = 0
+        for param_group in optimizer.param_groups:
+            opt_param_count += len(param_group['params'])
+
+        # Count model parameters
+        var model_param_count = 0
+        for param in model.parameters():
+            if param.requires_grad:
+                model_param_count += 1
+
+        section.add_info("Optimizer parameters: {opt_param_count}")
+        section.add_info("Model trainable parameters: {model_param_count}")
+
+        if opt_param_count == 0:
+            section.add_error("Optimizer has no parameters")
+        elif opt_param_count != model_param_count:
+            section.add_warning("Parameter count mismatch: optimizer has {opt_param_count}, model has {model_param_count}")
+        else:
+            section.add_info("Parameter counts match")
+
+        # Check learning rate
+        for (i, param_group) in enumerate(optimizer.param_groups):
+            val lr = param_group.get('lr', 0.0)
+            section.add_info("Learning rate (group {i}): {lr}")
+
+            if lr <= 0:
+                section.add_error("Learning rate must be positive (got {lr})")
+            elif lr > 1.0:
+                section.add_warning("Very high learning rate: {lr}")
+            elif lr < 1e-8:
+                section.add_warning("Very low learning rate: {lr}")
+
+        # Check for weight decay
+        for (i, param_group) in enumerate(optimizer.param_groups):
+            val wd = param_group.get('weight_decay', 0.0)
+            if wd > 0:
+                section.add_info("Weight decay (group {i}): {wd}")
+
+        if not section.has_errors():
+            section.add_pass("Optimizer configuration valid")
+
+        return section
+
+    fn _check_training_loop(model: any,
+        dataloader: any,
+        optimizer: any,
+        loss_fn: any
+    ) -> ValidationSection:
+        """Run mini training loop to validate all logic paths.
+
+        Runs 2-3 mini-epochs with 2 batches each to ensure:
+        - Forward pass works
+        - Backward pass works
+        - Optimizer step works
+        - No runtime errors
+
+        Args:
+            model: Model to check
+            dataloader: DataLoader
+            optimizer: Optimizer
+            loss_fn: Loss function
+
+        Returns:
+            Validation section
+        """
+        val section = ValidationSection("Training Loop Validation")
+
+        # Save model state to restore after validation
+        val original_state = model.state_dict()
+        val original_opt_state = optimizer.state_dict()
+
+        model.train()
+        var total_batches = 0
+        var total_loss = 0.0
+        var losses: [f64] = []
+
+        # Run 2 mini-epochs with 2 batches each
+        val num_epochs = 2
+        val batches_per_epoch = 2
+
+        for epoch in range(num_epochs):
+            var epoch_loss = 0.0
+            var batch_count = 0
+
+            val batch_iter = iter(dataloader)
+            while batch_count < batches_per_epoch:
+                match next(batch_iter):
+                    case Some((inputs, targets)):
+                        # Forward pass
+                        optimizer.zero_grad()
+                        val outputs = model(inputs)
+                        val loss = loss_fn(outputs, targets)
+
+                        # Check for NaN loss during training
+                        if torch.isnan(loss):
+                            section.add_error("NaN loss during training (epoch {epoch}, batch {batch_count})")
+                            # Restore state and return
+                            model.load_state_dict(original_state)
+                            optimizer.load_state_dict(original_opt_state)
+                            return section
+
+                        # Backward pass
+                        loss.backward()
+
+                        # Optimizer step
+                        optimizer.step()
+
+                        epoch_loss += loss.item()
+                        losses.append(loss.item())
+                        batch_count += 1
+                        total_batches += 1
+
+                    case None:
+                        break
+
+            if batch_count > 0:
+                val avg_epoch_loss = epoch_loss / batch_count
+                section.add_info("Epoch {epoch}: avg loss = {avg_epoch_loss:.6f}")
+
+        if total_batches == 0:
+            section.add_error("No batches processed during training loop validation")
+        else:
+            total_loss = sum(losses) / len(losses)
+            section.add_info("Processed {total_batches} batches, avg loss = {total_loss:.6f}")
+
+            # Check if loss is decreasing (basic sanity check)
+            if len(losses) >= 2:
+                val first_half_avg = sum(losses[:len(losses)//2]) / (len(losses)//2)
+                val second_half_avg = sum(losses[len(losses)//2:]) / (len(losses) - len(losses)//2)
+
+                if second_half_avg < first_half_avg:
+                    section.add_info("Loss is decreasing (good sign)")
+                elif second_half_avg > first_half_avg * 1.5:
+                    section.add_warning("Loss is increasing significantly - potential training instability")
+
+            section.add_pass("Training loop executed successfully")
+
+        # Restore original state
+        model.load_state_dict(original_state)
+        optimizer.load_state_dict(original_opt_state)
+
+        return section

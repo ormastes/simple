@@ -1,0 +1,322 @@
+# Graph Utilities for Control Flow Analysis
+#
+# Pure functional graph algorithms for MIR block analysis.
+# Used by state machine transformations (async/await, generators).
+#
+# Lean-friendly: Pure graph traversal algorithms, provable reachability,
+# deterministic DFS with no side effects
+
+# Block identifier (simple wrapper for clarity)
+struct BlockId:
+    id: i32
+
+impl BlockId:
+    # Create new block ID
+    static fn new(id: i32) -> BlockId:
+        BlockId(id: id)
+
+    # Get underlying ID
+    fn value() -> i32:
+        self.id
+
+    # Check equality
+    fn equals(other: BlockId) -> bool:
+        self.id == other.id
+
+# Virtual register identifier
+struct VReg:
+    id: i32
+
+impl VReg:
+    static fn new(id: i32) -> VReg:
+        VReg(id: id)
+
+    fn equals(other: VReg) -> bool:
+        self.id == other.id
+
+# Simplified terminator representation for graph analysis
+enum Terminator:
+    # Unconditional jump to block
+    Jump(BlockId)
+    # Conditional branch to two blocks
+    Branch(BlockId, BlockId)  # then_block, else_block
+    # Return from function
+    Return
+    # Unreachable code
+    Unreachable
+
+impl Terminator:
+    # Get successor blocks from this terminator
+    fn successors() -> [BlockId]:
+        match self:
+            Terminator.Jump(target) -> [target]
+            Terminator.Branch(then_b, else_b) -> [then_b, else_b]
+            Terminator.Return -> []
+            Terminator.Unreachable -> []
+
+    # Count number of successors
+    fn successor_count() -> i32:
+        self.successors().length()
+
+    # Check if this is a branch (has multiple successors)
+    fn is_branch() -> bool:
+        match self:
+            Terminator.Branch(_, _) -> true
+            _ -> false
+
+    # Check if this terminates control flow
+    fn is_terminal() -> bool:
+        match self:
+            Terminator.Return | Terminator.Unreachable -> true
+            _ -> false
+
+# Simplified block representation for graph analysis
+struct Block:
+    id: BlockId
+    terminator: Terminator
+
+impl Block:
+    # Create new block
+    static fn new(id: BlockId, terminator: Terminator) -> Block:
+        Block(id: id, terminator: terminator)
+
+    # Get successors of this block
+    fn successors() -> [BlockId]:
+        self.terminator.successors()
+
+# Control flow graph representation
+struct ControlFlowGraph:
+    blocks: [Block]
+
+impl ControlFlowGraph:
+    # Create new CFG
+    static fn new(blocks: [Block]) -> ControlFlowGraph:
+        ControlFlowGraph(blocks: blocks)
+
+    # Find block by ID
+    fn find_block(id: BlockId) -> Option<Block>:
+        for block in self.blocks:
+            if block.id.equals(id):
+                return Some(block)
+        None
+
+    # Get all block IDs
+    fn block_ids() -> [BlockId]:
+        [for block in self.blocks: block.id]
+
+# Compute all blocks reachable from a given starting block
+# Uses depth-first search (DFS) with visited set
+#
+# Algorithm:
+# 1. Initialize visited set and stack
+# 2. While stack is not empty:
+#    a. Pop block from stack
+#    b. If already visited, skip
+#    c. Mark as visited
+#    d. Push all successors onto stack
+# 3. Return visited set
+fn reachable_from(cfg: ControlFlowGraph, start: BlockId) -> HashSet<BlockId>:
+    var reachable = HashSet.new()
+    var stack: [BlockId] = [start]
+
+    while stack.length() > 0:
+        val current = stack[stack.length() - 1]
+        stack = stack[0..(stack.length() - 1)]  # Pop
+
+        if reachable.contains(current):
+            continue
+
+        reachable = reachable.insert(current)
+
+        match cfg.find_block(current):
+            Some(block) ->
+                for succ in block.successors():
+                    stack = stack + [succ]
+            None -> ()  # Block not found, skip
+
+    reachable
+
+# Compute reachable blocks from multiple starting points
+fn reachable_from_many(cfg: ControlFlowGraph, starts: [BlockId]) -> HashSet<BlockId>:
+    var reachable = HashSet.new()
+
+    for start in starts:
+        val start_reachable = reachable_from(cfg, start)
+        reachable = reachable.union(start_reachable)
+
+    reachable
+
+# Check if there's a path from source to target
+fn is_reachable(cfg: ControlFlowGraph, source: BlockId, target: BlockId) -> bool:
+    val reachable = reachable_from(cfg, source)
+    reachable.contains(target)
+
+# Compute all blocks that can reach a given block (reverse reachability)
+fn can_reach(cfg: ControlFlowGraph, target: BlockId) -> HashSet<BlockId>:
+    var can_reach_set = HashSet.new()
+
+    for block in cfg.blocks:
+        if is_reachable(cfg, block.id, target):
+            can_reach_set = can_reach_set.insert(block.id)
+
+    can_reach_set
+
+# Compute strongly connected components (blocks that can reach each other)
+# Returns list of SCCs, where each SCC is a set of block IDs
+fn strongly_connected_components(cfg: ControlFlowGraph) -> [HashSet<BlockId>]:
+    var sccs: [HashSet<BlockId>] = []
+    var assigned = HashSet.new()
+
+    for block in cfg.blocks:
+        if assigned.contains(block.id):
+            continue
+
+        # Find all blocks reachable from this block
+        val forward = reachable_from(cfg, block.id)
+
+        # Find all blocks that can reach this block
+        val backward = can_reach(cfg, block.id)
+
+        # SCC is intersection of forward and backward
+        val scc = forward.intersection(backward)
+
+        sccs = sccs + [scc]
+
+        # Mark all blocks in this SCC as assigned
+        for block_id in scc:
+            assigned = assigned.insert(block_id)
+
+    sccs
+
+# Check if CFG has cycles (any non-trivial SCC)
+fn has_cycles(cfg: ControlFlowGraph) -> bool:
+    val sccs = strongly_connected_components(cfg)
+
+    for scc in sccs:
+        if scc.size() > 1:
+            return true
+
+    false
+
+# Compute topological ordering if graph is acyclic
+# Returns None if graph has cycles
+fn topological_order(cfg: ControlFlowGraph) -> Option<[BlockId]>:
+    if has_cycles(cfg):
+        return None
+
+    var order: [BlockId] = []
+    var visited = HashSet.new()
+
+    # DFS with post-order traversal
+    fn visit(cfg: ControlFlowGraph, block_id: BlockId, visited: HashSet<BlockId>, order: [BlockId]) -> (HashSet<BlockId>, [BlockId]):
+        if visited.contains(block_id):
+            return (visited, order)
+
+        var new_visited = visited.insert(block_id)
+        var new_order = order
+
+        match cfg.find_block(block_id):
+            Some(block) ->
+                for succ in block.successors():
+                    val (updated_visited, updated_order) = visit(cfg, succ, new_visited, new_order)
+                    new_visited = updated_visited
+                    new_order = updated_order
+            None -> ()
+
+        # Add to order after visiting children (post-order)
+        new_order = new_order + [block_id]
+
+        (new_visited, new_order)
+
+    # Visit all blocks
+    for block in cfg.blocks:
+        val (updated_visited, updated_order) = visit(cfg, block.id, visited, order)
+        visited = updated_visited
+        order = updated_order
+
+    Some(order.reverse())
+
+# Count number of predecessors for each block
+fn predecessor_counts(cfg: ControlFlowGraph) -> HashMap<BlockId, i32>:
+    var counts = HashMap.new()
+
+    # Initialize all blocks with 0
+    for block in cfg.blocks:
+        counts = counts.insert(block.id, 0)
+
+    # Count predecessors
+    for block in cfg.blocks:
+        for succ in block.successors():
+            val current = counts.get(succ).unwrap_or(0)
+            counts = counts.insert(succ, current + 1)
+
+    counts
+
+# Find entry blocks (blocks with no predecessors)
+fn entry_blocks(cfg: ControlFlowGraph) -> [BlockId]:
+    val counts = predecessor_counts(cfg)
+    var entries: [BlockId] = []
+
+    for (block_id, count) in counts:
+        if count == 0:
+            entries = entries + [block_id]
+
+    entries
+
+# Find exit blocks (blocks that terminate control flow)
+fn exit_blocks(cfg: ControlFlowGraph) -> [BlockId]:
+    var exits: [BlockId] = []
+
+    for block in cfg.blocks:
+        if block.terminator.is_terminal():
+            exits = exits + [block.id]
+
+    exits
+
+# Compute dominator tree (which blocks dominate which)
+# Block A dominates block B if all paths to B go through A
+fn dominators(cfg: ControlFlowGraph, entry: BlockId) -> HashMap<BlockId, HashSet<BlockId>>:
+    var doms = HashMap.new()
+
+    # Entry dominates only itself
+    doms = doms.insert(entry, HashSet.new().insert(entry))
+
+    # All other blocks initially dominated by all blocks
+    val all_blocks = HashSet.from_list(cfg.block_ids())
+    for block in cfg.blocks:
+        if not block.id.equals(entry):
+            doms = doms.insert(block.id, all_blocks)
+
+    # Iterate until fixed point
+    var changed = true
+    while changed:
+        changed = false
+
+        for block in cfg.blocks:
+            if block.id.equals(entry):
+                continue
+
+            # Find predecessors
+            var preds: [BlockId] = []
+            for other_block in cfg.blocks:
+                if other_block.successors().contains(block.id):
+                    preds = preds + [other_block.id]
+
+            if preds.length() == 0:
+                continue
+
+            # Dom(b) = {b} ∪ (∩ Dom(p) for all predecessors p)
+            var new_dom = all_blocks
+            for pred in preds:
+                match doms.get(pred):
+                    Some(pred_dom) -> new_dom = new_dom.intersection(pred_dom)
+                    None -> ()
+
+            new_dom = new_dom.insert(block.id)
+
+            val old_dom = doms.get(block.id).unwrap_or(HashSet.new())
+            if not new_dom.equals(old_dom):
+                doms = doms.insert(block.id, new_dom)
+                changed = true
+
+    doms

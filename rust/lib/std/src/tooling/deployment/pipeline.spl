@@ -1,0 +1,774 @@
+# Deployment Pipeline Integration
+# Integrate with deployment systems (Docker, K8s, etc.)
+
+use core.result.{Result, Ok, Err}
+use shell.shell
+use host.common.net.http.{HttpClient, HttpRequest}
+use host.common.net.types.{HttpUrl, HttpMethod}
+
+# Deployment environment
+pub enum Environment:
+    Development
+    Staging
+    Production
+    Custom(text)
+
+    pub fn to_string(self) -> text:
+        """Convert environment to string.
+
+        Returns:
+            Environment name
+
+        Example:
+            Environment.Production.to_string()  # → "production"
+        """
+        match self:
+            Environment.Development: "development"
+            Environment.Staging: "staging"
+            Environment.Production: "production"
+            Environment.Custom(name): name
+
+    pub fn from_string(name: text) -> Environment:
+        """Parse environment from string.
+
+        Args:
+            name: Environment name
+
+        Returns:
+            Environment
+
+        Example:
+            Environment.from_string("production")
+            # → Environment.Production
+        """
+        match name:
+            "development": Environment.Development
+            "dev": Environment.Development
+            "staging": Environment.Staging
+            "stage": Environment.Staging
+            "production": Environment.Production
+            "prod": Environment.Production
+            _: Environment.Custom(name)
+
+    pub fn is_production(self) -> bool:
+        """Check if this is production environment.
+
+        Returns:
+            True if production
+        """
+        match self:
+            Environment.Production: true
+            _: false
+
+    pub fn description(self) -> text:
+        """Get environment description."""
+        match self:
+            Environment.Development: "Development environment"
+            Environment.Staging: "Staging environment"
+            Environment.Production: "Production environment"
+            Environment.Custom(name): "Custom: {name}"
+
+    pub fn is_development(self) -> bool:
+        """Check if development."""
+        match self:
+            Environment.Development: true
+            _: false
+
+    pub fn is_staging(self) -> bool:
+        """Check if staging."""
+        match self:
+            Environment.Staging: true
+            _: false
+
+    pub fn is_custom(self) -> bool:
+        """Check if custom environment.
+
+        Returns:
+            True for Custom variant
+        """
+        match self:
+            Environment.Custom(_): true
+            _: false
+
+    pub fn is_pre_production(self) -> bool:
+        """Check if pre-production environment (dev or staging).
+
+        Returns:
+            True for Development or Staging
+
+        Example:
+            Environment.Staging.is_pre_production()  # → true
+        """
+        match self:
+            Environment.Development: true
+            Environment.Staging: true
+            _: false
+
+    pub fn requires_extra_safety(self) -> bool:
+        """Check if extra safety checks are required.
+
+        Returns:
+            True for Production
+
+        Example:
+            Environment.Production.requires_extra_safety()  # → true
+        """
+        match self:
+            Environment.Production: true
+            _: false
+
+    pub fn summary(self) -> text:
+        """Get environment summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            Environment.Production.summary()
+            # → "Environment: production (Production environment, requires extra safety)"
+        """
+        val name = self.to_string()
+        val desc = self.description()
+        var props = []
+
+        if self.is_production():
+            props.append("production")
+        if self.is_pre_production():
+            props.append("pre-production")
+        if self.requires_extra_safety():
+            props.append("requires extra safety")
+
+        if props.len() > 0:
+            val props_str = props.join(", ")
+            "Environment: {name} ({desc}, {props_str})"
+        else:
+            "Environment: {name} ({desc})"
+
+# Deployment strategy
+pub enum DeploymentStrategy:
+    BlueGreen      # Zero-downtime deployment
+    Canary         # Gradual rollout
+    Rolling        # Rolling update
+    Recreate       # Stop old, start new
+
+    pub fn to_string(self) -> text:
+        """Convert strategy to string.
+
+        Returns:
+            Strategy name
+
+        Example:
+            DeploymentStrategy.BlueGreen.to_string()  # → "blue-green"
+        """
+        match self:
+            DeploymentStrategy.BlueGreen: "blue-green"
+            DeploymentStrategy.Canary: "canary"
+            DeploymentStrategy.Rolling: "rolling"
+            DeploymentStrategy.Recreate: "recreate"
+
+    pub fn description(self) -> text:
+        """Get strategy description.
+
+        Returns:
+            Human-readable description
+
+        Example:
+            DeploymentStrategy.Canary.description()
+            # → "Gradual rollout with traffic shifting"
+        """
+        match self:
+            DeploymentStrategy.BlueGreen:
+                "Zero-downtime deployment with instant switchover"
+            DeploymentStrategy.Canary:
+                "Gradual rollout with traffic shifting"
+            DeploymentStrategy.Rolling:
+                "Progressive update of instances"
+            DeploymentStrategy.Recreate:
+                "Stop old version, deploy new version"
+
+    pub fn supports_rollback(self) -> bool:
+        """Check if strategy supports instant rollback.
+
+        Returns:
+            True if instant rollback supported
+
+        Example:
+            DeploymentStrategy.BlueGreen.supports_rollback()
+            # → true (can instantly switch back)
+        """
+        match self:
+            DeploymentStrategy.BlueGreen: true
+            DeploymentStrategy.Canary: true
+            DeploymentStrategy.Rolling: false
+            DeploymentStrategy.Recreate: false
+
+    pub fn is_zero_downtime(self) -> bool:
+        """Check if zero-downtime."""
+        match self:
+            DeploymentStrategy.BlueGreen: true
+            DeploymentStrategy.Canary: true
+            DeploymentStrategy.Rolling: true
+            DeploymentStrategy.Recreate: false
+
+    pub fn has_downtime(self) -> bool:
+        """Check if has downtime."""
+        not self.is_zero_downtime()
+
+    pub fn is_blue_green(self) -> bool:
+        """Check if strategy is BlueGreen.
+
+        Returns:
+            True for BlueGreen variant
+        """
+        match self:
+            DeploymentStrategy.BlueGreen: true
+            _: false
+
+    pub fn is_canary(self) -> bool:
+        """Check if strategy is Canary.
+
+        Returns:
+            True for Canary variant
+        """
+        match self:
+            DeploymentStrategy.Canary: true
+            _: false
+
+    pub fn is_rolling(self) -> bool:
+        """Check if strategy is Rolling.
+
+        Returns:
+            True for Rolling variant
+        """
+        match self:
+            DeploymentStrategy.Rolling: true
+            _: false
+
+    pub fn is_recreate(self) -> bool:
+        """Check if strategy is Recreate.
+
+        Returns:
+            True for Recreate variant
+        """
+        match self:
+            DeploymentStrategy.Recreate: true
+            _: false
+
+    pub fn is_gradual(self) -> bool:
+        """Check if deployment is gradual.
+
+        Returns:
+            True for Canary or Rolling
+
+        Example:
+            DeploymentStrategy.Canary.is_gradual()  # → true
+        """
+        match self:
+            DeploymentStrategy.Canary: true
+            DeploymentStrategy.Rolling: true
+            _: false
+
+    pub fn is_instant_switch(self) -> bool:
+        """Check if deployment uses instant switching.
+
+        Returns:
+            True for BlueGreen
+
+        Example:
+            DeploymentStrategy.BlueGreen.is_instant_switch()  # → true
+        """
+        match self:
+            DeploymentStrategy.BlueGreen: true
+            _: false
+
+    pub fn is_production_safe(self) -> bool:
+        """Check if strategy is safe for production.
+
+        Returns:
+            True for zero-downtime strategies
+
+        Example:
+            DeploymentStrategy.BlueGreen.is_production_safe()  # → true
+            DeploymentStrategy.Recreate.is_production_safe()  # → false
+        """
+        self.is_zero_downtime()
+
+    pub fn summary(self) -> text:
+        """Get deployment strategy summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            DeploymentStrategy.BlueGreen.summary()
+            # → "DeploymentStrategy: blue-green (Zero-downtime deployment with instant switchover, zero-downtime, instant switch, rollback support)"
+        """
+        val name = self.to_string()
+        val desc = self.description()
+        var props = []
+
+        if self.is_zero_downtime():
+            props.append("zero-downtime")
+        else:
+            props.append("has downtime")
+        if self.is_gradual():
+            props.append("gradual")
+        if self.is_instant_switch():
+            props.append("instant switch")
+        if self.supports_rollback():
+            props.append("rollback support")
+
+        val props_str = props.join(", ")
+        "DeploymentStrategy: {name} ({desc}, {props_str})"
+
+# Pipeline stage
+pub class PipelineStage:
+    pub name: text
+    pub command: () -> Result<(), text>
+    pub skip_on_failure: bool
+    pub timeout_seconds: i32
+
+    pub fn new(name: text, command: () -> Result<(), text>) -> PipelineStage:
+        """Create pipeline stage.
+
+        Args:
+            name: Stage name
+            command: Stage command
+
+        Returns:
+            Pipeline stage
+        """
+        PipelineStage {
+            name: name,
+            command: command,
+            skip_on_failure: false,
+            timeout_seconds: 600
+        }
+
+    pub fn with_timeout(self, seconds: i32) -> PipelineStage:
+        """Set timeout for this stage.
+
+        Args:
+            seconds: Timeout in seconds
+
+        Returns:
+            Modified stage
+
+        Example:
+            val stage = PipelineStage.new("build", build_fn)
+            stage.with_timeout(300)  # 5 minutes
+        """
+        self.timeout_seconds = seconds
+        self
+
+    pub fn make_optional(self) -> PipelineStage:
+        """Make stage optional (don't fail pipeline on error).
+
+        Returns:
+            Modified stage
+
+        Example:
+            val stage = PipelineStage.new("lint", lint_fn)
+            stage.make_optional()  # Won't stop pipeline if fails
+        """
+        self.skip_on_failure = true
+        self
+
+# Pipeline result
+pub class PipelineResult:
+    pub success: bool
+    pub stages_completed: i32
+    pub stages_failed: i32
+    pub duration_ms: i64
+    pub error_message: text
+
+    pub fn new() -> PipelineResult:
+        """Create pipeline result."""
+        PipelineResult {
+            success: true,
+            stages_completed: 0,
+            stages_failed: 0,
+            duration_ms: 0,
+            error_message: ""
+        }
+
+    pub fn total_stages(self) -> i32:
+        """Get total stages run.
+
+        Returns:
+            Total stages (completed + failed)
+        """
+        self.stages_completed + self.stages_failed
+
+    pub fn duration_seconds(self) -> f64:
+        """Get duration in seconds.
+
+        Returns:
+            Duration in seconds
+        """
+        (self.duration_ms as f64) / 1000.0
+
+    pub fn is_successful(self) -> bool:
+        """Check if pipeline succeeded.
+
+        Returns:
+            True if successful
+        """
+        self.success and self.stages_failed == 0
+
+    pub fn summary(self) -> text:
+        """Get pipeline result summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            result.summary()
+            # → "✓ 5/5 stages completed in 2.3s"
+            # or
+            # → "✗ 3/5 stages completed (2 failed) in 1.5s"
+        """
+        if self.is_successful():
+            "✓ {self.stages_completed}/{self.total_stages()} stages completed in {self.duration_seconds():.1f}s"
+        else:
+            "✗ {self.stages_completed}/{self.total_stages()} stages completed ({self.stages_failed} failed) in {self.duration_seconds():.1f}s"
+
+# Deployment pipeline
+pub class DeploymentPipeline:
+    pub stages: List<PipelineStage>
+    pub environment: Environment
+    pub strategy: DeploymentStrategy
+    pub verbose: bool
+
+    pub fn new() -> DeploymentPipeline:
+        """Create deployment pipeline.
+
+        Returns:
+            Empty pipeline
+
+        Example:
+            val pipeline = DeploymentPipeline.new()
+
+            pipeline.add_stage("build", fn():
+                compiler.compile_all()
+            )
+
+            pipeline.add_stage("test", fn():
+                testing.run_all()
+            )
+
+            pipeline.add_stage("deploy", fn():
+                deploy_to_env(Environment.Production)
+            )
+
+            val result = pipeline.execute()
+            if result.success:
+                print("✓ Deployment succeeded")
+        """
+        DeploymentPipeline {
+            stages: [],
+            environment: Environment.Development,
+            strategy: DeploymentStrategy.Rolling,
+            verbose: false
+        }
+
+    pub fn set_verbose(self, enabled: bool):
+        """Enable verbose logging."""
+        self.verbose = enabled
+
+    pub fn is_verbose(self) -> bool:
+        """Check if verbose."""
+        self.verbose
+
+    pub fn with_verbose(self, enabled: bool) -> DeploymentPipeline:
+        """Set verbose (fluent API)."""
+        self.verbose = enabled
+        self
+
+    pub fn has_stages(self) -> bool:
+        """Check if has stages."""
+        self.stages.len() > 0
+
+    pub fn get_stage_count(self) -> i32:
+        """Get stage count."""
+        self.stages.len()
+
+    pub fn summary(self) -> text:
+        """Get pipeline summary."""
+        val verbose_str = if self.verbose: "true" else: "false"
+        "DeploymentPipeline: {self.environment.to_string()} ({self.get_stage_count()} stages, {self.strategy.to_string()}, verbose: {verbose_str})"
+
+    pub fn set_environment(self, env: Environment):
+        """Set deployment environment.
+
+        Args:
+            env: Target environment
+        """
+        self.environment = env
+
+    pub fn set_strategy(self, strategy: DeploymentStrategy):
+        """Set deployment strategy.
+
+        Args:
+            strategy: Deployment strategy
+        """
+        self.strategy = strategy
+
+    pub fn add_stage(self, name: text, command: () -> Result<(), text>):
+        """Add pipeline stage.
+
+        Args:
+            name: Stage name
+            command: Stage command
+
+        Example:
+            pipeline.add_stage("build", fn():
+                build_all_languages()
+            )
+        """
+        val stage = PipelineStage.new(name, command)
+        self.stages.append(stage)
+
+    pub fn execute(self) -> PipelineResult:
+        """Execute deployment pipeline.
+
+        Returns:
+            Pipeline result
+
+        Executes stages sequentially:
+        1. Run each stage in order
+        2. Stop on failure (unless skip_on_failure)
+        3. Report results
+
+        Example:
+            val result = pipeline.execute()
+
+            if result.success:
+                print("✓ Deployed in {result.duration_ms}ms")
+            else:
+                print("✗ Deployment failed: {result.error_message}")
+        """
+        @extern("runtime", "rt_time_now_unix_micros")
+        fn _rt_time_now_unix_micros() -> i64
+
+        val result = PipelineResult.new()
+        val start_time = _rt_time_now_unix_micros() / 1000  # Convert microseconds to milliseconds
+
+        if self.verbose:
+            print("Starting deployment pipeline ({self.stages.len()} stages)")
+            print("Environment: {self.environment}")
+            print("Strategy: {self.strategy}")
+
+        for stage in self.stages:
+            if self.verbose:
+                print("Running stage: {stage.name}")
+
+            match self.execute_stage(stage):
+                Ok(_):
+                    result.stages_completed += 1
+                    if self.verbose:
+                        print("✓ Stage {stage.name} succeeded")
+                Err(err):
+                    result.stages_failed += 1
+                    result.error_message = err
+
+                    if self.verbose:
+                        print("✗ Stage {stage.name} failed: {err}")
+
+                    if not stage.skip_on_failure:
+                        result.success = false
+                        break
+
+        val end_time = _rt_time_now_unix_micros() / 1000  # Convert microseconds to milliseconds
+        result.duration_ms = end_time - start_time
+
+        result
+
+    fn execute_stage(stage: PipelineStage) -> Result<(), text>:
+        """Execute single pipeline stage.
+
+        Args:
+            stage: Stage to execute
+
+        Returns:
+            Ok if successful
+
+        Note: Timeout is tracked but not enforced at runtime level.
+              Stage implementations should respect their own timeouts.
+        """
+        @extern("runtime", "rt_time_now_unix_micros")
+        fn _rt_time_now_unix_micros() -> i64
+
+        val start_time = _rt_time_now_unix_micros()
+
+        # Execute the stage command
+        val result = stage.command()
+
+        val elapsed_micros = _rt_time_now_unix_micros() - start_time
+        val elapsed_seconds = (elapsed_micros / 1000000) as i32
+
+        # Check if stage exceeded timeout (warn but don't fail)
+        if elapsed_seconds > stage.timeout_seconds:
+            if self.verbose:
+                print("Warning: Stage {stage.name} exceeded timeout ({elapsed_seconds}s > {stage.timeout_seconds}s)")
+
+        result
+
+    pub fn rollback(self) -> Result<(), text>:
+        """Rollback to previous deployment.
+
+        Returns:
+            Ok if successful
+
+        Rollback strategy:
+        - Blue-Green: Switch back to old version
+        - Canary: Redirect all traffic to stable
+        - Rolling: Roll back to previous version
+        """
+        if self.verbose:
+            print("Rolling back deployment...")
+
+        # Get deployment strategy
+        val strategy = self.config.get("strategy").unwrap_or("rolling")
+
+        match strategy:
+            "blue-green" ->
+                # Blue-green: Switch load balancer back to previous version
+                if self.verbose:
+                    print("Switching back to previous version...")
+                self.switch_traffic_to_previous()
+            "canary" ->
+                # Canary: Redirect 100% traffic to stable
+                if self.verbose:
+                    print("Redirecting all traffic to stable...")
+                self.set_traffic_weight(0)  # 0% to canary
+            "rolling" ->
+                # Rolling: Revert pods/instances to previous version
+                if self.verbose:
+                    print("Rolling back instances...")
+                self.rollback_instances()
+            _ ->
+                if self.verbose:
+                    print("Unknown strategy, using default rollback...")
+                self.rollback_instances()
+
+        if self.verbose:
+            print("Rollback complete")
+
+        Ok(())
+
+    fn switch_traffic_to_previous(self):
+        """Switch traffic back to previous version (blue-green)."""
+        import shell
+
+        # Execute traffic switch command
+        val switch_cmd = self.config.get("rollback_command").unwrap_or("kubectl rollout undo")
+        val namespace = self.config.get("namespace").unwrap_or("default")
+        val app = self.config.get("app").unwrap_or("app")
+
+        shell.run("sh", ["-c", "{switch_cmd} deployment/{app} -n {namespace}"])
+
+    fn set_traffic_weight(self, canary_percent: i32):
+        """Set traffic weight for canary deployment."""
+        import shell
+
+        # Use Istio or similar for traffic splitting
+        val namespace = self.config.get("namespace").unwrap_or("default")
+        val app = self.config.get("app").unwrap_or("app")
+        val stable_percent = 100 - canary_percent
+
+        # Update virtual service weights
+        val cmd = "kubectl patch virtualservice {app} -n {namespace} --type=json -p='[{\"op\":\"replace\",\"path\":\"/spec/http/0/route/0/weight\",\"value\":{stable_percent}},{\"op\":\"replace\",\"path\":\"/spec/http/0/route/1/weight\",\"value\":{canary_percent}}]'"
+        shell.run("sh", ["-c", cmd])
+
+    fn rollback_instances(self):
+        """Roll back all instances to previous version."""
+        import shell
+
+        val namespace = self.config.get("namespace").unwrap_or("default")
+        val app = self.config.get("app").unwrap_or("app")
+
+        # Use kubectl rollout undo for Kubernetes
+        shell.run("kubectl", ["rollout", "undo", "deployment/{app}", "-n", namespace])
+
+    pub async fn health_check(self, url: text) -> Result<(), text>:
+        """Perform health check on deployed service.
+
+        Args:
+            url: Health check endpoint
+
+        Returns:
+            Ok if healthy
+
+        Example:
+            match pipeline.health_check("http://localhost:8080/health"):
+                Ok(_):
+                    print("Service is healthy")
+                Err(err):
+                    print("Health check failed: {err}")
+                    pipeline.rollback()
+        """
+        if self.verbose:
+            print("Performing health check: {url}")
+
+        val client = HttpClient.new()
+        val http_url = HttpUrl.parse(url)
+
+        match http_url:
+            Ok(parsed_url):
+                val request = HttpRequest.get(parsed_url)
+
+                match await client.send(request):
+                    Ok(response):
+                        if response.is_success():
+                            if self.verbose:
+                                print("  ✓ Health check passed (status: {response.status()})")
+                            Ok(())
+                        else:
+                            Err("Health check failed: HTTP {response.status()}")
+                    Err(err):
+                        Err("Health check request failed: {err}")
+            Err(err):
+                Err("Invalid URL: {url}")
+
+    pub async fn notify_webhook(self, url: text, message: text) -> Result<(), text>:
+        """Send webhook notification.
+
+        Args:
+            url: Webhook URL
+            message: Message to send
+
+        Returns:
+            Ok if successful
+
+        Example:
+            pipeline.notify_webhook(
+                "https://hooks.slack.com/...",
+                "Deployment to production succeeded!"
+            )
+        """
+        if self.verbose:
+            print("Sending webhook notification to: {url}")
+
+        val client = HttpClient.new()
+        val http_url = HttpUrl.parse(url)
+
+        match http_url:
+            Ok(parsed_url):
+                # Build JSON payload
+                val payload = "{\"text\": \"{message}\"}"
+                val request = HttpRequest.post(parsed_url)
+                    .json_body(payload.to_bytes())
+
+                match await client.send(request):
+                    Ok(response):
+                        if response.is_success():
+                            if self.verbose:
+                                print("  ✓ Webhook notification sent")
+                            Ok(())
+                        else:
+                            Err("Webhook notification failed: HTTP {response.status()}")
+                    Err(err):
+                        Err("Webhook request failed: {err}")
+            Err(err):
+                Err("Invalid webhook URL: {url}")

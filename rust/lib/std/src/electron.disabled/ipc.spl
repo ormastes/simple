@@ -1,0 +1,121 @@
+# Electron IPC (Inter-Process Communication)
+# Communication between main and renderer processes
+
+# External FFI declarations
+extern fn electron_ipc_send(channel: text, data_json: text): void
+extern fn electron_ipc_send_sync(channel: text, data_json: text): text
+extern fn electron_ipc_on(channel: text, callback_id: i64): void
+extern fn electron_ipc_remove_listener(channel: text, callback_id: i64): void
+
+# Callback registry
+val ipc_callbacks: Dict<text, List<fn(data: text): void>> = {}
+val next_callback_id: i64 = 0
+
+# Send asynchronous message
+pub fn send(channel: text, data: text):
+    """Send asynchronous IPC message.
+
+    Args:
+        channel: Channel name
+        data: JSON-serialized data
+
+    Example:
+        ipc.send("window-action", '{"action":"minimize"}')
+    """
+    electron_ipc_send(channel, data)
+
+# Send synchronous message and wait for response
+pub fn send_sync(channel: text, data: text): text =
+    """Send synchronous IPC message and wait for response.
+
+    Args:
+        channel: Channel name
+        data: JSON-serialized data
+
+    Returns:
+        Response from other process (JSON string)
+
+    Example:
+        response = ipc.send_sync("get-config", '{"key":"theme"}')
+        print("Config: {response}")
+    """
+    electron_ipc_send_sync(channel, data)
+
+# Register message handler
+pub fn on(channel: text, handler: fn(data: text): void):
+    """Register handler for IPC messages.
+
+    Args:
+        channel: Channel name to listen on
+        handler: Callback function receiving message data
+
+    Example:
+        ipc.on("process-file", fn(data):
+            # data is JSON string
+            print("Processing: {data}")
+        )
+    """
+    # Store callback
+    if not ipc_callbacks.has_key(channel):
+        ipc_callbacks[channel] = []
+
+    ipc_callbacks[channel].append(handler)
+
+    # Register with native
+    val callback_id = next_callback_id
+    next_callback_id = next_callback_id + 1
+
+    electron_ipc_on(channel, callback_id)
+
+# Remove message handler
+pub fn off(channel: text):
+    """Remove all handlers for a channel.
+
+    Example:
+        ipc.off("process-file")
+    """
+    if ipc_callbacks.has_key(channel):
+        ipc_callbacks.remove(channel)
+
+    # Note: Callback IDs would need tracking for proper removal
+    # Simplified version removes all
+
+# Trigger callback from FFI
+pub fn _trigger_callback(channel: text, callback_id: i64, data: text):
+    """Internal: Called by FFI when message received."""
+    if ipc_callbacks.has_key(channel):
+        handlers = ipc_callbacks[channel]
+        if callback_id < handlers.len():
+            handler = handlers[callback_id]
+            handler(data)
+
+# Convenience wrappers for structured data
+pub fn send_message(channel: text, message_type: text, payload: text):
+    """Send structured message.
+
+    Wraps data in standard format: {"type": ..., "payload": ...}
+    """
+    val json = '{"type":"' + message_type + '","payload":' + payload + '}'
+    send(channel, json)
+
+pub fn on_message(channel: text, handler: fn(message_type: text, payload: text): void):
+    """Register handler for structured messages.
+
+    Expects messages in format: {"type": ..., "payload": ...}
+    """
+    on(channel, fn(data):
+        # Parse message type and payload
+        # Simplified JSON parsing (assumes valid format)
+        if data.contains('"type":"') and data.contains('"payload":'):
+            # Extract type
+            val type_start = data.index_of('"type":"') + 8
+            val type_end = data.index_of('"', type_start)
+            val msg_type = data.substring(type_start, type_end)
+
+            # Extract payload
+            val payload_start = data.index_of('"payload":') + 10
+            val payload_end = data.last_index_of('}')
+            val payload = data.substring(payload_start, payload_end)
+
+            handler(msg_type, payload)
+    )

@@ -1,0 +1,742 @@
+# File System Watcher
+# Cross-platform file watching with debouncing
+
+use host.async_nogc_mut.io.fs
+use core.result.{Result, Ok, Err}
+
+# FFI for file operations
+@extern("runtime", "rt_file_mtime")
+fn _rt_file_mtime(path_ptr: &u8, path_len: u64) -> i64
+
+@extern("runtime", "rt_dir_entries")
+fn _rt_dir_entries(path_ptr: &u8, path_len: u64) -> text
+
+# Track file modification times
+var _file_mtimes: Dict<text, i64> = {}
+
+# File system event type
+pub enum WatchEvent:
+    Created
+    Modified
+    Deleted
+    Renamed
+
+    pub fn to_string(self) -> text:
+        """Convert event to string.
+
+        Returns:
+            Event name
+
+        Example:
+            WatchEvent.Modified.to_string()  # → "modified"
+        """
+        match self:
+            WatchEvent.Created: "created"
+            WatchEvent.Modified: "modified"
+            WatchEvent.Deleted: "deleted"
+            WatchEvent.Renamed: "renamed"
+
+    pub fn description(self) -> text:
+        """Get event description.
+
+        Returns:
+            Human-readable description
+        """
+        match self:
+            WatchEvent.Created: "File created"
+            WatchEvent.Modified: "File modified"
+            WatchEvent.Deleted: "File deleted"
+            WatchEvent.Renamed: "File renamed"
+
+    pub fn is_modification(self) -> bool:
+        """Check if event is a modification (not creation/deletion).
+
+        Returns:
+            True if Modified or Renamed
+        """
+        match self:
+            WatchEvent.Modified: true
+            WatchEvent.Renamed: true
+            WatchEvent.Created: false
+            WatchEvent.Deleted: false
+
+# File change event
+pub class FileChange:
+    pub path: text
+    pub event: WatchEvent
+    pub timestamp: i64
+
+    pub fn new(path: text, event: WatchEvent) -> FileChange:
+        """Create file change event.
+
+        Args:
+            path: File path
+            event: Event type
+
+        Returns:
+            File change event
+        """
+        @extern("runtime", "rt_time_now_unix_micros")
+        fn _rt_time_now_unix_micros() -> i64
+
+        FileChange {
+            path: path,
+            event: event,
+            timestamp: _rt_time_now_unix_micros() / 1000  # Convert microseconds to milliseconds
+        }
+
+    pub fn format(self) -> text:
+        """Format change event for display.
+
+        Returns:
+            Formatted string
+
+        Example:
+            change.format()
+            # → "src/main.spl: modified"
+        """
+        "{self.path}: {self.event.to_string()}"
+
+# Watch configuration
+pub class WatchConfig:
+    pub directories: List<text>
+    pub ignore_patterns: List<text>
+    pub debounce_ms: i32
+    pub recursive: bool
+    pub verbose: bool
+
+    pub fn new() -> WatchConfig:
+        """Create default watch configuration.
+
+        Returns:
+            Default config with common ignores
+        """
+        WatchConfig {
+            directories: ["."],
+            ignore_patterns: [
+                ".git",
+                "node_modules",
+                "target",
+                "__pycache__",
+                ".build_cache",
+                "*.pyc",
+                "*.o",
+                "*.so",
+                "*.dylib",
+                "*.dll"
+            ],
+            debounce_ms: 300,
+            recursive: true,
+            verbose: false
+        }
+
+    pub fn add_directory(self, dir: text):
+        """Add directory to watch list.
+
+        Args:
+            dir: Directory path
+        """
+        self.directories.append(dir)
+
+    pub fn add_ignore_pattern(self, pattern: text):
+        """Add ignore pattern.
+
+        Args:
+            pattern: Glob pattern to ignore
+        """
+        self.ignore_patterns.append(pattern)
+
+    pub fn has_directories(self) -> bool:
+        """Check if directories are configured.
+
+        Returns:
+            True if watch directories exist
+        """
+        self.directories.len() > 0
+
+    pub fn has_ignores(self) -> bool:
+        """Check if ignore patterns are set.
+
+        Returns:
+            True if ignore patterns exist
+        """
+        self.ignore_patterns.len() > 0
+
+    pub fn summary(self) -> text:
+        """Get watch config summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            config.summary()
+            # → "Watching 2 dirs (recursive, debounce 300ms, 10 ignores)"
+        """
+        val recur = if self.recursive: "recursive" else: "non-recursive"
+        "Watching {self.directories.len()} dirs ({recur}, debounce {self.debounce_ms}ms, {self.ignore_patterns.len()} ignores)"
+
+# File system watcher
+pub class Watcher:
+    pub config: WatchConfig
+    pub on_change_callback: (List<text>) -> ()
+    pub running: bool
+    pub pending_changes: Dict<text, FileChange>
+    pub last_trigger: i64
+
+    pub fn new(root: text) -> Watcher:
+        """Create file system watcher.
+
+        Args:
+            root: Directory to watch
+
+        Returns:
+            Watcher with default configuration
+
+        Example:
+            val watcher = Watcher.new(".")
+
+            watcher.on_change(fn(files):
+                print("Files changed: {files}")
+                rebuild_project()
+            )
+
+            watcher.start()  # Blocks
+        """
+        var config = WatchConfig.new()
+        config.directories = [root]
+
+        Watcher {
+            config: config,
+            on_change_callback: fn(files): pass,
+            running: false,
+            pending_changes: {},
+            last_trigger: 0
+        }
+
+    pub fn with_config(config: WatchConfig) -> Watcher:
+        """Create watcher with custom configuration.
+
+        Args:
+            config: Watch configuration
+
+        Returns:
+            Configured watcher
+        """
+        Watcher {
+            config: config,
+            on_change_callback: fn(files): pass,
+            running: false,
+            pending_changes: {},
+            last_trigger: 0
+        }
+
+    pub fn on_change(self, callback: (List<text>) -> ()):
+        """Set change callback function.
+
+        Args:
+            callback: Function to call with list of changed files
+        """
+        self.on_change_callback = callback
+
+    pub fn set_debounce(self, ms: i32):
+        """Set debounce delay.
+
+        Args:
+            ms: Milliseconds to debounce
+        """
+        self.config.debounce_ms = ms
+
+    pub fn add_ignore_pattern(self, pattern: text):
+        """Add ignore pattern.
+
+        Args:
+            pattern: Glob pattern to ignore
+        """
+        self.config.add_ignore_pattern(pattern)
+
+    pub fn start(self):
+        """Start watching for file changes.
+
+        Blocks until stop() is called or process interrupted.
+
+        This is the main event loop:
+        1. Set up OS file watchers
+        2. Receive file change events
+        3. Debounce rapid changes
+        4. Call on_change callback
+        """
+        self.running = true
+
+        if self.config.verbose:
+            print("Starting file watcher...")
+            for dir in self.config.directories:
+                print("  Watching: {dir}")
+
+        # Try to use platform-specific watching, fall back to polling
+        @extern("runtime", "rt_platform_name")
+        fn _rt_platform_name() -> text
+
+        val platform = _rt_platform_name()
+
+        if platform == "linux":
+            self.start_inotify_watch()
+        elif platform == "macos":
+            self.start_fsevents_watch()
+        else:
+            # Fall back to polling on Windows and other platforms
+            self.start_polling_watch()
+
+    fn start_polling_watch(self):
+        """Start polling-based file watching (portable fallback)."""
+        if self.config.verbose:
+            print("Using polling-based file watching")
+
+        while self.running:
+            self.poll_for_changes()
+            self.sleep(100)  # 100ms
+            self.check_and_trigger()
+
+    fn start_inotify_watch(self):
+        """Start inotify-based file watching (Linux).
+
+        Uses the Linux inotify API for efficient file system event notification.
+        Much more efficient than polling for large directory trees.
+        """
+        @extern("runtime", "rt_inotify_init")
+        fn _rt_inotify_init() -> i64
+
+        @extern("runtime", "rt_inotify_add_watch")
+        fn _rt_inotify_add_watch(fd: i64, path_ptr: &u8, path_len: u64, mask: i32) -> i32
+
+        @extern("runtime", "rt_inotify_read")
+        fn _rt_inotify_read(fd: i64, timeout_ms: i32) -> text
+
+        @extern("runtime", "rt_inotify_close")
+        fn _rt_inotify_close(fd: i64)
+
+        if self.config.verbose:
+            print("Using inotify-based file watching (Linux)")
+
+        # Initialize inotify
+        val inotify_fd = _rt_inotify_init()
+        if inotify_fd < 0:
+            # Fallback to polling if inotify init fails
+            if self.config.verbose:
+                print("Warning: inotify init failed, falling back to polling")
+            self.start_polling_watch()
+            return
+
+        # IN_MODIFY | IN_CREATE | IN_DELETE | IN_MOVE
+        val watch_mask: i32 = 2 | 256 | 512 | 64 | 128  # IN_MODIFY | IN_CREATE | IN_DELETE | IN_MOVED_FROM | IN_MOVED_TO
+
+        # Add watches for all directories
+        for dir in self.config.directories:
+            self.add_inotify_watches_recursive(inotify_fd, dir, watch_mask)
+
+        # Main event loop
+        while self.running:
+            # Read events with timeout
+            val events_raw = _rt_inotify_read(inotify_fd, 100)  # 100ms timeout
+
+            if not events_raw.is_empty():
+                # Parse events (format: "path:event_type\n...")
+                self.process_inotify_events(events_raw)
+
+            # Check if we should trigger callback (debouncing)
+            self.check_and_trigger()
+
+        # Clean up
+        _rt_inotify_close(inotify_fd)
+
+    fn add_inotify_watches_recursive(inotify_fd: i64, dir: text, mask: i32):
+        """Recursively add inotify watches to directory tree."""
+        @extern("runtime", "rt_inotify_add_watch")
+        fn _rt_inotify_add_watch(fd: i64, path_ptr: &u8, path_len: u64, mask: i32) -> i32
+
+        import host.async_nogc_mut.io.fs
+        import host.common.io.types.{FileType, DirPath}
+
+        # Add watch for this directory
+        val wd = _rt_inotify_add_watch(inotify_fd, dir.ptr(), dir.len(), mask)
+        if wd < 0 and self.config.verbose:
+            print("Warning: Failed to add watch for {dir}")
+
+        # Recursively add watches for subdirectories
+        if self.config.recursive:
+            match fs.read_dir(dir as DirPath):
+                Ok(entries):
+                    for entry in entries:
+                        val name = entry.name() as text
+                        val path = entry.path() as text
+
+                        if entry.file_type() == FileType.Directory:
+                            if not self.should_ignore(name):
+                                self.add_inotify_watches_recursive(inotify_fd, path, mask)
+                Err(_):
+                    pass
+
+    fn process_inotify_events(events_raw: text):
+        """Process raw inotify events."""
+        for line in events_raw.split("\n"):
+            if line.is_empty():
+                continue
+
+            # Parse event (format: "path:event_type")
+            val parts = line.split(":")
+            if parts.len() >= 2:
+                val path = parts[0]
+                val event_type = parts[1]
+
+                # Skip ignored files
+                if self.should_ignore(path):
+                    continue
+
+                # Map event type to WatchEvent
+                val event = match event_type:
+                    "create": WatchEvent.Created
+                    "modify": WatchEvent.Modified
+                    "delete": WatchEvent.Deleted
+                    "move": WatchEvent.Renamed
+                    _: WatchEvent.Modified
+
+                self.handle_file_change(path, event)
+
+    fn start_fsevents_watch(self):
+        """Start FSEvents-based file watching (macOS).
+
+        Uses the macOS FSEvents API for efficient file system event notification.
+        """
+        @extern("runtime", "rt_fsevents_create")
+        fn _rt_fsevents_create(path_ptr: &u8, path_len: u64) -> i64
+
+        @extern("runtime", "rt_fsevents_read")
+        fn _rt_fsevents_read(handle: i64, timeout_ms: i32) -> text
+
+        @extern("runtime", "rt_fsevents_close")
+        fn _rt_fsevents_close(handle: i64)
+
+        if self.config.verbose:
+            print("Using FSEvents-based file watching (macOS)")
+
+        # Create FSEvents stream for all directories
+        # Note: FSEvents handles recursive watching automatically
+        val paths = self.config.directories.join(":")
+        val fsevents_handle = _rt_fsevents_create(paths.ptr(), paths.len())
+
+        if fsevents_handle < 0:
+            # Fallback to polling if FSEvents init fails
+            if self.config.verbose:
+                print("Warning: FSEvents init failed, falling back to polling")
+            self.start_polling_watch()
+            return
+
+        # Main event loop
+        while self.running:
+            # Read events with timeout
+            val events_raw = _rt_fsevents_read(fsevents_handle, 100)  # 100ms timeout
+
+            if not events_raw.is_empty():
+                # Parse events (format: "path:event_type\n...")
+                self.process_fsevents_events(events_raw)
+
+            # Check if we should trigger callback (debouncing)
+            self.check_and_trigger()
+
+        # Clean up
+        _rt_fsevents_close(fsevents_handle)
+
+    fn process_fsevents_events(events_raw: text):
+        """Process raw FSEvents events."""
+        for line in events_raw.split("\n"):
+            if line.is_empty():
+                continue
+
+            # Parse event (format: "path:event_type")
+            val parts = line.split(":")
+            if parts.len() >= 2:
+                val path = parts[0]
+                val event_type = parts[1]
+
+                # Skip ignored files
+                if self.should_ignore(path):
+                    continue
+
+                # Map event type to WatchEvent
+                val event = match event_type:
+                    "created": WatchEvent.Created
+                    "modified": WatchEvent.Modified
+                    "removed": WatchEvent.Deleted
+                    "renamed": WatchEvent.Renamed
+                    _: WatchEvent.Modified
+
+                self.handle_file_change(path, event)
+
+    pub fn stop(self):
+        """Stop watching."""
+        self.running = false
+
+        if self.config.verbose:
+            print("Stopping file watcher")
+
+    pub fn is_running(self) -> bool:
+        """Check if watcher is running.
+
+        Returns:
+            True if currently watching
+        """
+        self.running
+
+    pub fn has_pending_changes(self) -> bool:
+        """Check if there are pending changes.
+
+        Returns:
+            True if changes are pending
+        """
+        self.pending_changes.len() > 0
+
+    pub fn pending_count(self) -> i32:
+        """Get number of pending changes.
+
+        Returns:
+            Pending change count
+        """
+        self.pending_changes.len()
+
+    fn poll_for_changes():
+        """Poll directories for file changes.
+
+        This is a fallback implementation.
+        Production code should use OS-native file watching.
+        """
+        # Scan directories and check mtimes for changes
+        for dir in self.config.directories:
+            self.scan_directory_for_changes(dir)
+
+    fn scan_directory_for_changes(dir: text):
+        """Scan a directory for file changes by comparing mtimes."""
+        # Get directory entries
+        val entries_raw = _rt_dir_entries(dir.ptr(), dir.len())
+        if entries_raw.is_empty():
+            return
+
+        # Parse entries (newline-separated)
+        for entry in entries_raw.split("\n"):
+            if entry.is_empty():
+                continue
+
+            val path = "{dir}/{entry}"
+
+            # Check if file matches patterns
+            var matches = false
+            for pattern in self.config.patterns:
+                if path.ends_with(pattern.trim_start_matches("*")):
+                    matches = true
+                    break
+
+            if not matches:
+                continue
+
+            # Get current mtime
+            val current_mtime = _rt_file_mtime(path.ptr(), path.len())
+
+            # Check if file is new or modified
+            match _file_mtimes.get(path):
+                case Some(old_mtime):
+                    if current_mtime != old_mtime:
+                        # File was modified
+                        _file_mtimes[path] = current_mtime
+                        self.pending_changes.push(FileChange {
+                            path: path,
+                            event: WatchEvent.Modified,
+                            timestamp: current_mtime
+                        })
+                case None:
+                    # New file
+                    _file_mtimes[path] = current_mtime
+                    self.pending_changes.push(FileChange {
+                        path: path,
+                        event: WatchEvent.Created,
+                        timestamp: current_mtime
+                    })
+
+    fn check_and_trigger():
+        """Check if debounce period elapsed and trigger callback.
+
+        Debouncing algorithm:
+        1. Accumulate file changes in pending_changes
+        2. Wait for debounce_ms milliseconds of quiet
+        3. Trigger callback with all accumulated changes
+        4. Clear pending_changes
+        """
+        if self.pending_changes.len() == 0:
+            return
+
+        @extern("runtime", "rt_time_now_unix_micros")
+        fn _rt_time_now_unix_micros() -> i64
+
+        val now = _rt_time_now_unix_micros() / 1000  # Convert microseconds to milliseconds
+
+        # Check if debounce period elapsed
+        if now - self.last_trigger >= self.config.debounce_ms:
+            # Trigger callback
+            val changed_files = self.get_pending_files()
+
+            if self.config.verbose:
+                print("Triggering rebuild for {changed_files.len()} changed files")
+
+            self.on_change_callback(changed_files)
+
+            # Clear pending changes
+            self.pending_changes = {}
+            self.last_trigger = now
+
+    fn get_pending_files() -> List<text>:
+        """Get list of pending changed files.
+
+        Returns:
+            File paths
+        """
+        val files: List<text> = []
+
+        for (path, _) in self.pending_changes.items():
+            files.append(path)
+
+        files
+
+    fn handle_file_change(path: text, event: WatchEvent):
+        """Handle file change event.
+
+        Args:
+            path: File path
+            event: Change event
+        """
+        # Check if file should be ignored
+        if self.should_ignore(path):
+            return
+
+        # Add to pending changes
+        val change = FileChange.new(path, event)
+        self.pending_changes[path] = change
+
+    fn should_ignore(path: text) -> bool:
+        """Check if file should be ignored.
+
+        Args:
+            path: File path
+
+        Returns:
+            True if file matches ignore pattern
+        """
+        for pattern in self.config.ignore_patterns:
+            if self.matches_pattern(path, pattern):
+                return true
+
+        false
+
+    fn matches_pattern(path: text, pattern: text) -> bool:
+        """Check if path matches glob pattern.
+
+        Args:
+            path: File path
+            pattern: Glob pattern
+
+        Returns:
+            True if matches
+
+        Supports:
+        - *.ext - Files ending with .ext
+        - dir/*.spl - Files in dir ending with .spl
+        - **/*.spl - Any .spl file recursively
+        - **/test_* - Any file starting with test_
+        """
+        # Handle recursive patterns
+        if pattern.starts_with("**/"):
+            # Recursive: match anywhere in path
+            val file_pattern = pattern[3:]
+            return self.matches_simple_glob(self.get_filename(path), file_pattern)
+
+        # Handle directory patterns
+        if pattern.contains("/"):
+            # Path pattern: must match directory structure
+            return self.matches_path_glob(path, pattern)
+
+        # Simple filename pattern
+        return self.matches_simple_glob(self.get_filename(path), pattern)
+
+    fn get_filename(path: text) -> text:
+        """Extract filename from path.
+
+        Args:
+            path: File path
+
+        Returns:
+            Filename
+        """
+        val last_slash = path.rfind("/")
+        if last_slash >= 0:
+            path[last_slash+1:]
+        else:
+            path
+
+    fn matches_simple_glob(name: text, pattern: text) -> bool:
+        """Match simple glob pattern (no paths).
+
+        Args:
+            name: Filename
+            pattern: Glob pattern
+
+        Returns:
+            True if matches
+        """
+        if pattern.starts_with("*") and pattern.ends_with("*"):
+            # *substring*
+            val substr = pattern[1:pattern.len()-1]
+            return name.contains(substr)
+        elif pattern.starts_with("*"):
+            # *suffix
+            val suffix = pattern[1:]
+            return name.ends_with(suffix)
+        elif pattern.ends_with("*"):
+            # prefix*
+            val prefix = pattern[0:pattern.len()-1]
+            return name.starts_with(prefix)
+        else:
+            # Exact match
+            return name == pattern
+
+    fn matches_path_glob(path: text, pattern: text) -> bool:
+        """Match path-based glob pattern.
+
+        Args:
+            path: Full file path
+            pattern: Path pattern (e.g., "src/*.spl")
+
+        Returns:
+            True if matches
+        """
+        # Split pattern into directory and filename parts
+        val last_slash = pattern.rfind("/")
+        if last_slash < 0:
+            return false
+
+        val dir_pattern = pattern[0:last_slash]
+        val file_pattern = pattern[last_slash+1:]
+
+        # Check if path contains the directory pattern
+        if not path.contains(dir_pattern):
+            return false
+
+        # Check if filename matches
+        val filename = self.get_filename(path)
+        return self.matches_simple_glob(filename, file_pattern)
+
+    fn sleep(ms: i32):
+        """Sleep for milliseconds.
+
+        Args:
+            ms: Milliseconds to sleep
+        """
+        @extern("runtime", "rt_thread_sleep")
+        fn _rt_thread_sleep(millis: i64)
+
+        _rt_thread_sleep(ms as i64)

@@ -1,0 +1,87 @@
+# Inverse Kinematics - IK chain solving
+#
+# Two-bone IK chain for limb positioning.
+
+export IKChain
+
+use graphics.math.*
+use skeleton.*
+use animation_utils.*
+
+# =============================================================================
+# Inverse Kinematics (IK) - Two-bone IK chain
+# =============================================================================
+
+pub struct IKChain:
+    joints: Array<i32>                # Joint indices in chain
+    target_position: Vec3             # IK target position
+    pole_vector: Vec3                 # Pole vector for orientation
+    chain_length: f32                 # Total chain length
+
+impl IKChain:
+    # Create two-bone IK chain (e.g., shoulder-elbow-wrist)
+    pub fn two_bone(
+        root_joint: i32,
+        mid_joint: i32,
+        end_joint: i32
+    ) -> IKChain:
+        return IKChain {joints: [root_joint, mid_joint, end_joint].to_array(), target_position: Vec3.zero(), pole_vector: Vec3.new(0.0, 1.0, 0.0), chain_length: 0.0}
+
+    # Solve two-bone IK
+    pub fn solve_two_bone(
+        mut self,
+        skeleton: &Skeleton,
+        target: Vec3,
+        pole: Vec3
+    ) -> (Transform, Transform):
+        # Get joint positions
+        val root_pos = skeleton.joints[self.joints[0] as usize].local_transform.translation
+        val mid_pos = skeleton.joints[self.joints[1] as usize].local_transform.translation
+        val end_pos = skeleton.joints[self.joints[2] as usize].local_transform.translation
+
+        # Bone lengths
+        val upper_length = (mid_pos - root_pos).length()
+        val lower_length = (end_pos - mid_pos).length()
+        val total_length = upper_length + lower_length
+
+        # Vector from root to target
+        val to_target = target - root_pos
+        val target_distance = to_target.length()
+
+        # Clamp to reachable distance
+        val clamped_distance = min_f32(target_distance, total_length * 0.999)
+        val target_dir = to_target.normalize()
+
+        # Law of cosines for angles
+        val cos_angle0 = (
+            upper_length * upper_length +
+            clamped_distance * clamped_distance -
+            lower_length * lower_length
+        ) / (2.0 * upper_length * clamped_distance)
+
+        val cos_angle1 = (
+            upper_length * upper_length +
+            lower_length * lower_length -
+            clamped_distance * clamped_distance
+        ) / (2.0 * upper_length * lower_length)
+
+        val angle0 = acos_f32(clamp_f32(cos_angle0, -1.0, 1.0))
+        val angle1 = acos_f32(clamp_f32(cos_angle1, -1.0, 1.0))
+
+        # Compute rotations
+        val root_rotation = Quat.look_rotation(target_dir, pole)
+        val mid_rotation = Quat.from_axis_angle(pole.normalize(), 3.14159 - angle1)
+
+        val root_transform = Transform.new(
+            root_pos,
+            root_rotation * Quat.from_axis_angle(pole.normalize(), angle0),
+            Vec3.new(1.0, 1.0, 1.0)
+        )
+
+        val mid_transform = Transform.new(
+            mid_pos,
+            mid_rotation,
+            Vec3.new(1.0, 1.0, 1.0)
+        )
+
+        return (root_transform, mid_transform)
