@@ -2,18 +2,41 @@
 #
 # Target architecture abstraction for cross-compilation support.
 # Port of rust/common/src/target.rs
+#
+# Supports 8/16/32/64-bit architectures for bare-metal and hosted environments.
 
-export TargetArch, PointerSize, TargetOS, TargetConfig, Target, WasmRuntime
+export TargetArch, PointerSize, TargetOS, TargetConfig, Target, WasmRuntime, Endian
+
+# Byte order
+enum Endian:
+    Little
+    Big
+
+impl Endian:
+    fn name() -> text:
+        match self:
+            case Endian.Little: "little"
+            case Endian.Big: "big"
 
 # Supported CPU architectures
 enum TargetArch:
-    X86_64      # x86-64 (AMD64)
-    Aarch64     # ARM64
+    # 8-bit architectures
+    AVR         # Atmel AVR (ATmega, ATtiny) - Arduino
+    MCS51       # Intel 8051 family
+
+    # 16-bit architectures
+    MSP430      # TI MSP430 (ultra low power)
+
+    # 32-bit architectures
     X86         # x86 32-bit (i686)
-    Arm         # ARM 32-bit (ARMv7)
-    Riscv64     # RISC-V 64-bit
+    Arm         # ARM 32-bit (ARMv7, Cortex-M)
     Riscv32     # RISC-V 32-bit
     Wasm32      # WebAssembly 32-bit
+
+    # 64-bit architectures
+    X86_64      # x86-64 (AMD64)
+    Aarch64     # ARM64
+    Riscv64     # RISC-V 64-bit
     Wasm64      # WebAssembly 64-bit
 
 impl TargetArch:
@@ -27,81 +50,176 @@ impl TargetArch:
     static fn parse(name: text) -> TargetArch?:
         val lower = name.lower()
         match lower:
+            # 8-bit
+            case "avr" | "atmega" | "attiny": Some(TargetArch.AVR)
+            case "8051" | "mcs51" | "mcs-51": Some(TargetArch.MCS51)
+            # 16-bit
+            case "msp430": Some(TargetArch.MSP430)
+            # 32-bit
+            case "x86" | "i686" | "i386": Some(TargetArch.X86)
+            case "arm" | "armv7" | "arm32" | "thumbv7m" | "cortex-m": Some(TargetArch.Arm)
+            case "riscv32" | "riscv32gc" | "rv32": Some(TargetArch.Riscv32)
+            case "wasm32" | "wasm": Some(TargetArch.Wasm32)
+            # 64-bit
             case "x86_64" | "x86-64" | "amd64" | "x64": Some(TargetArch.X86_64)
             case "aarch64" | "arm64": Some(TargetArch.Aarch64)
-            case "x86" | "i686" | "i386": Some(TargetArch.X86)
-            case "arm" | "armv7" | "arm32": Some(TargetArch.Arm)
-            case "riscv64" | "riscv64gc": Some(TargetArch.Riscv64)
-            case "riscv32" | "riscv32gc": Some(TargetArch.Riscv32)
-            case "wasm32" | "wasm": Some(TargetArch.Wasm32)
+            case "riscv64" | "riscv64gc" | "rv64": Some(TargetArch.Riscv64)
             case "wasm64": Some(TargetArch.Wasm64)
             case _: None
 
+    # Native word size in bits
+    fn bits() -> i64:
+        match self:
+            case TargetArch.AVR | TargetArch.MCS51: 8
+            case TargetArch.MSP430: 16
+            case TargetArch.X86 | TargetArch.Arm | TargetArch.Riscv32 | TargetArch.Wasm32: 32
+            case TargetArch.X86_64 | TargetArch.Aarch64 | TargetArch.Riscv64 | TargetArch.Wasm64: 64
+
     fn pointer_size() -> PointerSize:
         match self:
+            # 8-bit and 16-bit use 16-bit pointers
+            case TargetArch.AVR | TargetArch.MCS51 | TargetArch.MSP430:
+                PointerSize.Bits16
+            # 64-bit
             case TargetArch.X86_64 | TargetArch.Aarch64 | TargetArch.Riscv64 | TargetArch.Wasm64:
                 PointerSize.Bits64
+            # 32-bit (default)
             case _:
                 PointerSize.Bits32
 
+    # Pointer size in bytes (8-bit uses 16-bit pointers for >256 byte addressing)
+    fn pointer_bytes() -> i64:
+        match self:
+            case TargetArch.AVR | TargetArch.MCS51 | TargetArch.MSP430: 2
+            case TargetArch.X86 | TargetArch.Arm | TargetArch.Riscv32 | TargetArch.Wasm32: 4
+            case TargetArch.X86_64 | TargetArch.Aarch64 | TargetArch.Riscv64 | TargetArch.Wasm64: 8
+
     fn is_64bit() -> bool:
-        self.pointer_size() == PointerSize.Bits64
+        self.bits() == 64
 
     fn is_32bit() -> bool:
-        self.pointer_size() == PointerSize.Bits32
+        self.bits() == 32
+
+    fn is_16bit() -> bool:
+        self.bits() == 16
+
+    fn is_8bit() -> bool:
+        self.bits() == 8
 
     fn is_wasm() -> bool:
         match self:
             case TargetArch.Wasm32 | TargetArch.Wasm64: true
             case _: false
 
+    # Stack alignment in bytes
+    fn stack_align() -> i64:
+        match self:
+            case TargetArch.AVR | TargetArch.MCS51: 1
+            case TargetArch.MSP430: 2
+            case TargetArch.X86 | TargetArch.Arm | TargetArch.Riscv32: 4
+            case TargetArch.X86_64 | TargetArch.Aarch64 | TargetArch.Riscv64: 16
+            case TargetArch.Wasm32 | TargetArch.Wasm64: 16
+
+    # Maximum atomic operation width in bits
+    fn max_atomic_width() -> i64:
+        match self:
+            case TargetArch.AVR | TargetArch.MCS51: 8
+            case TargetArch.MSP430: 16
+            case TargetArch.Arm | TargetArch.Riscv32 | TargetArch.Wasm32: 32
+            case TargetArch.X86: 64       # cmpxchg8b
+            case TargetArch.X86_64: 128   # cmpxchg16b
+            case TargetArch.Aarch64 | TargetArch.Riscv64 | TargetArch.Wasm64: 64
+
+    # Has hardware floating point unit
+    fn has_fpu() -> bool:
+        match self:
+            case TargetArch.AVR | TargetArch.MCS51 | TargetArch.MSP430: false
+            case TargetArch.Arm: false  # Cortex-M0/M3 (M4F has FPU but requires feature flag)
+            case _: true
+
+    # Byte order
+    fn endianness() -> Endian:
+        match self:
+            case TargetArch.MCS51: Endian.Big
+            case _: Endian.Little
+
+    # Harvard architecture (separate code/data memory)
+    fn is_harvard() -> bool:
+        match self:
+            case TargetArch.AVR | TargetArch.MCS51: true
+            case _: false
+
     fn name() -> text:
         match self:
-            case TargetArch.X86_64: "x86_64"
-            case TargetArch.Aarch64: "aarch64"
+            # 8-bit
+            case TargetArch.AVR: "avr"
+            case TargetArch.MCS51: "mcs51"
+            # 16-bit
+            case TargetArch.MSP430: "msp430"
+            # 32-bit
             case TargetArch.X86: "i686"
             case TargetArch.Arm: "armv7"
-            case TargetArch.Riscv64: "riscv64"
             case TargetArch.Riscv32: "riscv32"
             case TargetArch.Wasm32: "wasm32"
+            # 64-bit
+            case TargetArch.X86_64: "x86_64"
+            case TargetArch.Aarch64: "aarch64"
+            case TargetArch.Riscv64: "riscv64"
             case TargetArch.Wasm64: "wasm64"
 
     fn triple_str() -> text:
         match self:
-            case TargetArch.X86_64: "x86_64-unknown-linux-gnu"
-            case TargetArch.Aarch64: "aarch64-unknown-linux-gnu"
+            # 8-bit (typically bare-metal only)
+            case TargetArch.AVR: "avr-unknown-unknown"
+            case TargetArch.MCS51: "mcs51-unknown-unknown"
+            # 16-bit
+            case TargetArch.MSP430: "msp430-none-elf"
+            # 32-bit
             case TargetArch.X86: "i686-unknown-linux-gnu"
             case TargetArch.Arm: "armv7-unknown-linux-gnueabihf"
-            case TargetArch.Riscv64: "riscv64gc-unknown-linux-gnu"
             case TargetArch.Riscv32: "riscv32gc-unknown-linux-gnu"
             case TargetArch.Wasm32: "wasm32-unknown-unknown"
+            # 64-bit
+            case TargetArch.X86_64: "x86_64-unknown-linux-gnu"
+            case TargetArch.Aarch64: "aarch64-unknown-linux-gnu"
+            case TargetArch.Riscv64: "riscv64gc-unknown-linux-gnu"
             case TargetArch.Wasm64: "wasm64-unknown-unknown"
 
     # Target triple for bare-metal (no OS) targets
     fn triple_str_baremetal() -> text:
         match self:
-            case TargetArch.X86_64: "x86_64-unknown-none"
-            case TargetArch.Aarch64: "aarch64-unknown-none"
+            # 8-bit (always bare-metal)
+            case TargetArch.AVR: "avr-unknown-unknown"
+            case TargetArch.MCS51: "mcs51-unknown-unknown"
+            # 16-bit
+            case TargetArch.MSP430: "msp430-none-elf"
+            # 32-bit
             case TargetArch.X86: "i686-unknown-none"
             case TargetArch.Arm: "thumbv7m-none-eabi"
-            case TargetArch.Riscv64: "riscv64gc-unknown-none-elf"
             case TargetArch.Riscv32: "riscv32gc-unknown-none-elf"
             case TargetArch.Wasm32: "wasm32-unknown-unknown"
+            # 64-bit
+            case TargetArch.X86_64: "x86_64-unknown-none"
+            case TargetArch.Aarch64: "aarch64-unknown-none"
+            case TargetArch.Riscv64: "riscv64gc-unknown-none-elf"
             case TargetArch.Wasm64: "wasm64-unknown-unknown"
 
-# Pointer size
+# Pointer size (note: 8-bit archs use 16-bit pointers)
 enum PointerSize:
-    Bits32
-    Bits64
+    Bits16      # 8-bit and 16-bit architectures
+    Bits32      # 32-bit architectures
+    Bits64      # 64-bit architectures
 
 impl PointerSize:
     fn bytes() -> i64:
         match self:
+            case PointerSize.Bits16: 2
             case PointerSize.Bits32: 4
             case PointerSize.Bits64: 8
 
     fn bits() -> i64:
         match self:
+            case PointerSize.Bits16: 16
             case PointerSize.Bits32: 32
             case PointerSize.Bits64: 64
 
@@ -174,17 +292,63 @@ struct TargetConfig:
 
 impl TargetConfig:
     static fn for_arch(arch: TargetArch) -> TargetConfig:
-        if arch.is_64bit():
-            TargetConfig(arch: arch, pointer_bytes: 8, value_bytes: 8,
-                         tag_bits: 3, heap_align: 8, is_little_endian: true,
-                         default_stack_size: 8 * 1024 * 1024)
-        else:
-            TargetConfig(arch: arch, pointer_bytes: 4, value_bytes: 8,
-                         tag_bits: 3, heap_align: 8, is_little_endian: true,
-                         default_stack_size: 2 * 1024 * 1024)
+        val is_little = arch.endianness() == Endian.Little
+        match arch.bits():
+            case 8:
+                # 8-bit: AVR, MCS51 - very limited resources
+                TargetConfig(
+                    arch: arch,
+                    pointer_bytes: 2,       # 16-bit pointers
+                    value_bytes: 2,         # 16-bit values max efficient
+                    tag_bits: 0,            # No tag bits (no room)
+                    heap_align: 1,          # Byte-aligned
+                    is_little_endian: is_little,
+                    default_stack_size: 256 # Very small stack
+                )
+            case 16:
+                # 16-bit: MSP430 - low power embedded
+                TargetConfig(
+                    arch: arch,
+                    pointer_bytes: 2,
+                    value_bytes: 2,
+                    tag_bits: 1,            # 1 tag bit possible
+                    heap_align: 2,          # Word-aligned
+                    is_little_endian: is_little,
+                    default_stack_size: 512
+                )
+            case 32:
+                # 32-bit: x86, ARM, RISC-V 32, WASM32
+                TargetConfig(
+                    arch: arch,
+                    pointer_bytes: 4,
+                    value_bytes: 8,         # 64-bit values supported
+                    tag_bits: 2,            # 2 tag bits
+                    heap_align: 4,          # 4-byte aligned
+                    is_little_endian: is_little,
+                    default_stack_size: 2 * 1024 * 1024  # 2 MB
+                )
+            case 64:
+                # 64-bit: x86_64, ARM64, RISC-V 64, WASM64
+                TargetConfig(
+                    arch: arch,
+                    pointer_bytes: 8,
+                    value_bytes: 8,
+                    tag_bits: 3,            # 3 tag bits (8-byte aligned)
+                    heap_align: 8,
+                    is_little_endian: is_little,
+                    default_stack_size: 8 * 1024 * 1024  # 8 MB
+                )
 
     fn tag_mask() -> i64:
         (1 << self.tag_bits) - 1
+
+    # Maximum efficient integer size for this architecture
+    fn native_int_bits() -> i64:
+        self.arch.bits()
+
+    # Alignment for largest native type
+    fn max_align() -> i64:
+        self.arch.stack_align()
 
 # Full target specification
 struct Target:

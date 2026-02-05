@@ -1,0 +1,78 @@
+# Literals
+#
+# Parses all literal expressions including integers, floats, strings,
+# booleans, nil, symbols, f-strings, and custom blocks.
+
+from token import {TokenKind, FStringToken}
+from ast import {Expr, FStringPart, TypeMeta}
+from error import {ParseError}
+
+impl Parser:
+
+    fn parse_primary_literal() -> Expr:
+        match self.current.kind:
+            TokenKind.Integer(n):
+                self.advance()
+                Expr.Integer(n)
+            TokenKind.TypedInteger(n, suffix):
+                self.advance()
+                Expr.TypedInteger(n, suffix)
+            TokenKind.Float(n):
+                self.advance()
+                Expr.Float(n)
+            TokenKind.TypedFloat(n, suffix):
+                self.advance()
+                Expr.TypedFloat(n, suffix)
+            TokenKind.String(s):
+                self.advance()
+                Expr.String(s)
+            TokenKind.RawString(s):
+                self.advance()
+                Expr.String(s)
+            TokenKind.TypedString(s, suffix):
+                self.advance()
+                Expr.TypedString(s, suffix)
+            TokenKind.TypedRawString(s, suffix):
+                self.advance()
+                Expr.TypedString(s, suffix)
+            TokenKind.FString(parts):
+                self.advance()
+                val result_parts = self.parse_fstring_parts(parts)
+                val const_keys = extract_fstring_keys(result_parts)
+                val type_meta = TypeMeta.with_const_keys(const_keys)
+                Expr.FString(parts: result_parts, type_meta: type_meta)
+            TokenKind.Bool(b):
+                self.advance()
+                Expr.Bool(b)
+            TokenKind.Nil:
+                self.advance()
+                Expr.Nil
+            TokenKind.Symbol(s):
+                self.advance()
+                Expr.Symbol(s)
+            TokenKind.CustomBlock(kind, payload, _):
+                self.advance()
+                Expr.BlockExpr(kind: kind, payload: payload)
+            _:
+                raise ParseError.unexpected_token("literal",
+                    "{self.current.kind}", self.current.span)
+
+    fn parse_fstring_parts(parts: [FStringToken]) -> [FStringPart]:
+        var result = []
+        for part in parts:
+            match part:
+                FStringToken.Literal(s):
+                    result.push(FStringPart.Literal(s))
+                FStringToken.Expr(expr_str):
+                    var sub_parser = Parser.expression(expr_str)
+                    match sub_parser.parse_expression():
+                        Ok(expr):
+                            if sub_parser.is_at_end() or match sub_parser.current.kind:
+                                TokenKind.Eof: true
+                                _: false:
+                                result.push(FStringPart.Expr(expr))
+                            else:
+                                result.push(FStringPart.Literal("{" + expr_str + "}"))
+                        Err(_):
+                            result.push(FStringPart.Literal("{" + expr_str + "}"))
+        result
