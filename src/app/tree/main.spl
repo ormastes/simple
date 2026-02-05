@@ -1,8 +1,8 @@
 # Simple CLI - tree command
 # Shows dependency tree
 
-use app.cli_util (get_cli_args)
-use app.io.mod (file_exists, file_read, cwd)
+use app.cli_util (get_cli_args, load_manifest_or_exit, parse_dependency_entry)
+use app.io.mod (file_exists)
 
 fn print_help():
     print "Usage: simple tree [options]"
@@ -13,16 +13,6 @@ fn print_help():
     print "  --depth=N    Maximum tree depth (default: unlimited)"
     print "  --dev        Include dev dependencies"
     print "  -h, --help   Show this help"
-
-fn find_manifest_path() -> text:
-    val cwd = cwd()
-    val sdn_path = "{cwd}/simple.sdn"
-    if file_exists(sdn_path):
-        return sdn_path
-    val toml_path = "{cwd}/simple.toml"
-    if file_exists(toml_path):
-        return toml_path
-    ""
 
 fn parse_deps_section(content: text, section: text) -> [(text, text)]:
     val lines = content.split("\n")
@@ -36,13 +26,8 @@ fn parse_deps_section(content: text, section: text) -> [(text, text)]:
         elif in_section:
             if trimmed == "" or (not line.starts_with("  ") and not line.starts_with("\t")):
                 in_section = false
-            elif trimmed.contains(":"):
-                val parts = trimmed.split(":")
-                if parts.len() >= 2:
-                    val name = parts[0].trim()
-                    val version = parts[1].trim()
-                    if name != "" and not name.contains(" "):
-                        deps.push((name, version))
+            else:
+                deps = parse_dependency_entry(trimmed, deps)
     deps
 
 fn print_tree_node(name: text, version: text, prefix: text, is_last: bool, modules_dir: text, max_depth: i64, current_depth: i64):
@@ -78,12 +63,7 @@ fn main() -> i64:
         elif arg == "--dev":
             include_dev = true
 
-    val manifest_path = find_manifest_path()
-    if manifest_path == "":
-        print "error: no simple.sdn or simple.toml found in current directory"
-        return 1
-
-    val content = file_read(manifest_path)
+    val content = load_manifest_or_exit()
     val deps = parse_deps_section(content, "dependencies")
     val dev_deps = if include_dev: parse_deps_section(content, "dev_dependencies") else: []
 

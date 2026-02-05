@@ -4,6 +4,11 @@
 # Supports both read and write operations via JSON API
 
 use lib.database.bug.{create_bug_database, BugDatabase, Bug, BugSeverity, BugStatus, parse_severity, parse_status}
+use app.mcp.resource_utils.{
+    JsonBuilder, JsonArrayBuilder, escape_json,
+    extract_json_string, extract_json_int, extract_json_array,
+    current_timestamp, error_json, success_json, items_to_json
+}
 
 export get_all_bugs, get_open_bugs, get_critical_bugs, get_bug_stats
 export add_bug_from_json, update_bug_from_json, get_bug_by_id
@@ -16,155 +21,34 @@ export add_bug_from_json, update_bug_from_json, get_bug_by_id
 fn get_all_bugs(db_path: text) -> text:
     var bugdb = create_bug_database(db_path)
     val bugs = bugdb.all_bugs()
-
-    # Convert to JSON
-    var json = "{"
-    json = json + "\"total\": {bugs.len()},"
-    json = json + "\"bugs\": ["
-
-    var first = true
-    for bug in bugs:
-        if not first:
-            json = json + ","
-        first = false
-
-        json = json + bug_to_json(bug)
-
-    json = json + "]"
-    json = json + "}"
-    json
+    bugs_to_json(bugs)
 
 # Get open bugs
 fn get_open_bugs(db_path: text) -> text:
     var bugdb = create_bug_database(db_path)
-    
-        
-
-    
     val bugs = bugdb.open_bugs()
-
-    # Convert to JSON
-    var json = "{"
-    json = json + "\"total\": {bugs.len()},"
-    json = json + "\"bugs\": ["
-
-    var first = true
-    for bug in bugs:
-        if not first:
-            json = json + ","
-        first = false
-
-        json = json + bug_to_json(bug)
-
-    json = json + "]"
-    json = json + "}"
-    json
+    bugs_to_json(bugs)
 
 # Get critical bugs (P0 + P1)
 fn get_critical_bugs(db_path: text) -> text:
     var bugdb = create_bug_database(db_path)
-    
-        
-
-    
     val bugs = bugdb.critical_bugs()
-
-    # Convert to JSON
-    var json = "{"
-    json = json + "\"total\": {bugs.len()},"
-    json = json + "\"bugs\": ["
-
-    var first = true
-    for bug in bugs:
-        if not first:
-            json = json + ","
-        first = false
-
-        json = json + bug_to_json(bug)
-
-    json = json + "]"
-    json = json + "}"
-    json
+    bugs_to_json(bugs)
 
 # Get bug statistics
 fn get_bug_stats(db_path: text) -> text:
     var bugdb = create_bug_database(db_path)
-    
-        
-
-    
     val stats = bugdb.stats()
 
-    var json = "{"
-    json = json + "\"total\": {stats.total},"
-    json = json + "\"open\": {stats.open},"
-    json = json + "\"fixed\": {stats.fixed},"
-    json = json + "\"p0\": {stats.p0},"
-    json = json + "\"p1\": {stats.p1},"
-    json = json + "\"important\": {stats.important},"
-    json = json + "\"health\": \"{stats.health}\""
-    json = json + "}"
-    json
-
-# Convert bug to JSON
-fn bug_to_json(bug: Bug) -> text:
-    var json = "{"
-    json = json + "\"id\": \"{bug.id}\","
-    json = json + "\"severity\": \"{severity_to_string(bug.severity)}\","
-    json = json + "\"status\": \"{status_to_string(bug.status)}\","
-    json = json + "\"title\": \"{escape_json(bug.title)}\","
-    json = json + "\"file\": \"{bug.file}\","
-    json = json + "\"line\": {bug.line},"
-    json = json + "\"reproducible_by\": \"{bug.reproducible_by}\","
-    json = json + "\"description\": "
-    json = json + array_to_json(bug.description)
-    json = json + "}"
-    json
-
-# Convert array to JSON
-fn array_to_json(arr: [text]) -> text:
-    var json = "["
-    var first = true
-    for item in arr:
-        if not first:
-            json = json + ","
-        first = false
-        json = json + "\"{escape_json(item)}\""
-    json = json + "]"
-    json
-
-# Escape JSON string
-fn escape_json(s: text) -> text:
-    var result = s
-    result = result.replace("\\", "\\\\")
-    result = result.replace("\"", "\\\"")
-    result = result.replace("\n", "\\n")
-    result = result.replace("\r", "\\r")
-    result = result.replace("\t", "\\t")
-    result
-
-# Convert severity to string
-fn severity_to_string(severity: BugSeverity) -> text:
-    match severity:
-        BugSeverity.P0: "P0"
-        BugSeverity.P1: "P1"
-        BugSeverity.P2: "P2"
-        BugSeverity.P3: "P3"
-        BugSeverity.Important: "Important"
-
-# Convert status to string
-fn status_to_string(status: BugStatus) -> text:
-    match status:
-        BugStatus.Open: "Open"
-        BugStatus.Investigating: "Investigating"
-        BugStatus.Confirmed: "Confirmed"
-        BugStatus.Fixed: "Fixed"
-        BugStatus.Closed: "Closed"
-        BugStatus.Wontfix: "Wontfix"
-
-# ============================================================================
-# Write Operations (MCP Tools)
-# ============================================================================
+    JsonBuilder.object()
+        .field_int("total", stats.total)
+        .field_int("open", stats.open)
+        .field_int("fixed", stats.fixed)
+        .field_int("p0", stats.p0)
+        .field_int("p1", stats.p1)
+        .field_int("important", stats.important)
+        .field("health", stats.health)
+        .build()
 
 # Get bug by ID
 fn get_bug_by_id(db_path: text, bug_id: text) -> text:
@@ -172,16 +56,19 @@ fn get_bug_by_id(db_path: text, bug_id: text) -> text:
     val bug_opt = bugdb.get_bug(bug_id)
 
     if not bug_opt.?:
-        return "{\"error\": \"Bug not found: {bug_id}\"}"
+        return error_json("Bug not found: {bug_id}")
 
     val bug = bug_opt.unwrap()
     bug_to_json(bug)
+
+# ============================================================================
+# Write Operations (MCP Tools)
+# ============================================================================
 
 # Add a new bug from JSON
 fn add_bug_from_json(db_path: text, json: text) -> text:
     var bugdb = create_bug_database(db_path)
 
-    # Parse JSON fields
     val id = extract_json_string(json, "id")
     val severity_str = extract_json_string(json, "severity")
     val status_str = extract_json_string(json, "status")
@@ -192,9 +79,9 @@ fn add_bug_from_json(db_path: text, json: text) -> text:
     val description = extract_json_array(json, "description")
 
     if id == "":
-        return "{\"error\": \"Missing required field: id\"}"
+        return error_json("Missing required field: id")
     if title == "":
-        return "{\"error\": \"Missing required field: title\"}"
+        return error_json("Missing required field: title")
 
     val bug = Bug(
         id: id,
@@ -212,28 +99,26 @@ fn add_bug_from_json(db_path: text, json: text) -> text:
         valid: true
     )
 
-    val success = bugdb.add_bug(bug)
-    if not success:
-        return "{\"error\": \"Failed to add bug\"}"
+    val added = bugdb.add_bug(bug)
+    if not added:
+        return error_json("Failed to add bug")
 
     val saved = bugdb.save()
     if not saved:
-        return "{\"error\": \"Failed to save database\"}"
+        return error_json("Failed to save database")
 
-    "{\"success\": true, \"id\": \"{id}\"}"
+    success_json(id)
 
 # Update an existing bug from JSON
 fn update_bug_from_json(db_path: text, bug_id: text, json: text) -> text:
     var bugdb = create_bug_database(db_path)
 
-    # Get existing bug
     val existing_opt = bugdb.get_bug(bug_id)
     if not existing_opt.?:
-        return "{\"error\": \"Bug not found: {bug_id}\"}"
+        return error_json("Bug not found: {bug_id}")
 
     val existing = existing_opt.unwrap()
 
-    # Parse JSON fields (use existing values as defaults)
     val severity_str = extract_json_string(json, "severity")
     val status_str = extract_json_string(json, "status")
     val title = extract_json_string(json, "title")
@@ -257,84 +142,52 @@ fn update_bug_from_json(db_path: text, bug_id: text, json: text) -> text:
         valid: true
     )
 
-    val success = bugdb.update_bug(bug_id, updated_bug)
-    if not success:
-        return "{\"error\": \"Failed to update bug\"}"
+    val updated = bugdb.update_bug(bug_id, updated_bug)
+    if not updated:
+        return error_json("Failed to update bug")
 
     val saved = bugdb.save()
     if not saved:
-        return "{\"error\": \"Failed to save database\"}"
+        return error_json("Failed to save database")
 
-    "{\"success\": true, \"id\": \"{bug_id}\"}"
+    success_json(bug_id)
 
 # ============================================================================
-# JSON Parsing Helpers
+# JSON Conversion Helpers
 # ============================================================================
 
-fn extract_json_string(json: text, key: text) -> text:
-    # Simple JSON string extraction
-    val pattern = "\"{key}\": \""
-    val start = json.find(pattern)
-    if start < 0:
-        return ""
+# Convert list of bugs to JSON
+fn bugs_to_json(bugs: [Bug]) -> text:
+    items_to_json(bugs, "bugs", bug_to_json)
 
-    val value_start = start + pattern.len()
-    val value_end = json.find("\"", value_start)
-    if value_end < 0:
-        return ""
+# Convert single bug to JSON
+fn bug_to_json(bug: Bug) -> text:
+    JsonBuilder.object()
+        .field("id", bug.id)
+        .field("severity", severity_to_string(bug.severity))
+        .field("status", status_to_string(bug.status))
+        .field("title", bug.title)
+        .field("file", bug.file)
+        .field_int("line", bug.line)
+        .field("reproducible_by", bug.reproducible_by)
+        .field_array("description", bug.description)
+        .build()
 
-    json.substring(value_start, value_end)
+# Convert severity to string
+fn severity_to_string(severity: BugSeverity) -> text:
+    match severity:
+        case BugSeverity.P0: "P0"
+        case BugSeverity.P1: "P1"
+        case BugSeverity.P2: "P2"
+        case BugSeverity.P3: "P3"
+        case BugSeverity.Important: "Important"
 
-fn extract_json_int(json: text, key: text) -> i64:
-    # Simple JSON int extraction
-    val pattern = "\"{key}\": "
-    val start = json.find(pattern)
-    if start < 0:
-        return 0
-
-    val value_start = start + pattern.len()
-    var value_end = value_start
-    while value_end < json.len():
-        val ch = json.char_at(value_end)
-        if ch < '0' or ch > '9':
-            break
-        value_end = value_end + 1
-
-    if value_end == value_start:
-        return 0
-
-    val num_str = json.substring(value_start, value_end)
-    num_str.parse_int() ?? 0
-
-fn extract_json_array(json: text, key: text) -> [text]:
-    # Simple JSON array extraction (for string arrays)
-    val pattern = "\"{key}\": ["
-    val start = json.find(pattern)
-    if start < 0:
-        return []
-
-    val array_start = start + pattern.len()
-    val array_end = json.find("]", array_start)
-    if array_end < 0:
-        return []
-
-    val array_str = json.substring(array_start, array_end)
-
-    # Parse string items
-    var items: [text] = []
-    var pos = 0
-    while pos < array_str.len():
-        val quote_start = array_str.find("\"", pos)
-        if quote_start < 0:
-            break
-        val quote_end = array_str.find("\"", quote_start + 1)
-        if quote_end < 0:
-            break
-        items.push(array_str.substring(quote_start + 1, quote_end))
-        pos = quote_end + 1
-
-    items
-
-fn current_timestamp() -> text:
-    # Return ISO 8601 timestamp
-    "2026-02-05T00:00:00Z"
+# Convert status to string
+fn status_to_string(status: BugStatus) -> text:
+    match status:
+        case BugStatus.Open: "Open"
+        case BugStatus.Investigating: "Investigating"
+        case BugStatus.Confirmed: "Confirmed"
+        case BugStatus.Fixed: "Fixed"
+        case BugStatus.Closed: "Closed"
+        case BugStatus.Wontfix: "Wontfix"

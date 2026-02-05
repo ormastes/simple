@@ -90,35 +90,38 @@ impl HirLowering:
         # Workaround: Store symbols table in local var to avoid interpreter bug
         var symbols_table = self.symbols
 
+        # Pass module filename for visibility tracking
+        val mod_name = Some(self.module_filename)
+
         for name in module.functions.keys():
             val fn_ = module.functions[name]
-            symbols_table.define(name, SymbolKind.Function, nil, fn_.span, fn_.is_public, false)
+            symbols_table.define(name, SymbolKind.Function, nil, fn_.span, fn_.is_public, false, mod_name)
 
         for name in module.classes.keys():
             val class_ = module.classes[name]
-            symbols_table.define(name, SymbolKind.Class, nil, class_.span, class_.is_public, false)
+            symbols_table.define(name, SymbolKind.Class, nil, class_.span, class_.is_public, false, mod_name)
 
         for name in module.structs.keys():
             val struct_ = module.structs[name]
-            symbols_table.define(name, SymbolKind.Struct, nil, struct_.span, struct_.is_public, false)
+            symbols_table.define(name, SymbolKind.Struct, nil, struct_.span, struct_.is_public, false, mod_name)
 
         for name in module.enums.keys():
             val enum_ = module.enums[name]
-            symbols_table.define(name, SymbolKind.Enum, nil, enum_.span, enum_.is_public, false)
+            symbols_table.define(name, SymbolKind.Enum, nil, enum_.span, enum_.is_public, false, mod_name)
 
         for name in module.traits.keys():
             val trait_ = module.traits[name]
-            symbols_table.define(name, SymbolKind.Trait, nil, trait_.span, trait_.is_public, false)
+            symbols_table.define(name, SymbolKind.Trait, nil, trait_.span, trait_.is_public, false, mod_name)
 
         for name in module.constants.keys():
             val const_ = module.constants[name]
-            symbols_table.define(name, SymbolKind.Const, nil, const_.span, const_.is_public, const_.is_mutable)
+            symbols_table.define(name, SymbolKind.Const, nil, const_.span, const_.is_public, const_.is_mutable, mod_name)
 
         # Declare impl methods
         for impl_ in module.impls:
             for name in impl_.methods.keys():
                 val fn_ = impl_.methods[name]
-                symbols_table.define(name, SymbolKind.Method, nil, fn_.span, fn_.is_public, false)
+                symbols_table.define(name, SymbolKind.Method, nil, fn_.span, fn_.is_public, false, mod_name)
 
         self.symbols = symbols_table
 
@@ -181,6 +184,9 @@ impl HirLowering:
         self.symbols = symbols_table
         self.current_function = None
 
+        # Compute effective visibility using filename matching
+        val effective_public = self.compute_visibility(fn_.name, fn_.is_public)
+
         HirFunction(
             symbol: fn_symbol_id,
             name: fn_.name,
@@ -191,9 +197,10 @@ impl HirLowering:
             effects: [],
             is_async: fn_.is_async,
             is_static: fn_.is_static,
-            is_public: fn_.is_public,
+            is_public: effective_public,
             is_method: fn_.is_method,
             is_mutable: fn_.is_mutable,
+            is_const: false,
             doc_comment: fn_.doc_comment,
             span: fn_.span
         )
@@ -203,7 +210,7 @@ impl HirLowering:
         val type_ = p.type_.map(\t: self.lower_type(t)) ?? HirType(kind: HirTypeKind.Infer(0, 0), span: p.span)
         # Workaround: Store symbols in local var to avoid interpreter bug
         var symbols_table = self.symbols
-        val symbol = symbols_table.define(p.name, SymbolKind.Parameter, Some(type_), p.span, false, false)
+        val symbol = symbols_table.define(p.name, SymbolKind.Parameter, Some(type_), p.span, false, false, nil)
         self.symbols = symbols_table
 
         HirParam(
@@ -241,13 +248,16 @@ impl HirLowering:
         symbols_table.pop_scope()
         self.symbols = symbols_table
 
+        # Compute effective visibility using filename matching
+        val effective_public = self.compute_visibility(class_.name, class_.is_public)
+
         HirClass(
             symbol: symbol,
             name: class_.name,
             type_params: type_params,
             fields: fields,
             methods: methods,
-            is_public: class_.is_public,
+            is_public: effective_public,
             doc_comment: class_.doc_comment,
             span: class_.span,
             is_generic_template: false,
@@ -270,12 +280,15 @@ impl HirLowering:
         for f in struct_.fields:
             fields = fields.push(self.lower_field(f))
 
+        # Compute effective visibility using filename matching
+        val effective_public = self.compute_visibility(struct_.name, struct_.is_public)
+
         HirStruct(
             symbol: symbol,
             name: struct_.name,
             type_params: type_params,
             fields: fields,
-            is_public: struct_.is_public,
+            is_public: effective_public,
             doc_comment: struct_.doc_comment,
             span: struct_.span,
             is_generic_template: false,
@@ -288,7 +301,7 @@ impl HirLowering:
         val type_ = self.lower_type(f.type_)
         # Workaround: Store symbols in local var to avoid interpreter bug
         var symbols_table = self.symbols
-        val symbol = symbols_table.define(f.name, SymbolKind.Field, Some(type_), f.span, f.is_public, false)
+        val symbol = symbols_table.define(f.name, SymbolKind.Field, Some(type_), f.span, f.is_public, false, nil)
         self.symbols = symbols_table
 
         HirField(
@@ -312,12 +325,15 @@ impl HirLowering:
         for v in enum_.variants:
             variants = variants.push(self.lower_variant(v))
 
+        # Compute effective visibility using filename matching
+        val effective_public = self.compute_visibility(enum_.name, enum_.is_public)
+
         HirEnum(
             symbol: symbol,
             name: enum_.name,
             type_params: type_params,
             variants: variants,
-            is_public: enum_.is_public,
+            is_public: effective_public,
             doc_comment: enum_.doc_comment,
             span: enum_.span,
             is_generic_template: false,
@@ -327,7 +343,7 @@ impl HirLowering:
 
     me lower_variant(v: Variant) -> HirVariant:
         """Lower enum variant."""
-        val symbol = self.symbols.define(v.name, SymbolKind.EnumVariant, nil, v.span, true, false)
+        val symbol = self.symbols.define(v.name, SymbolKind.EnumVariant, nil, v.span, true, false, nil)
 
         val kind = match v.kind:
             case Unit:
@@ -384,6 +400,9 @@ impl HirLowering:
 
         self.symbols.pop_scope()
 
+        # Compute effective visibility using filename matching
+        val effective_public = self.compute_visibility(trait_.name, trait_.is_public)
+
         HirTrait(
             symbol: symbol,
             name: trait_.name,
@@ -392,7 +411,7 @@ impl HirLowering:
             supertraits: supertraits,
             defaults: defaults,
             where_clause: where_clause,
-            is_public: trait_.is_public,
+            is_public: effective_public,
             doc_comment: trait_.doc_comment,
             span: trait_.span,
             is_generic_template: false,
@@ -440,12 +459,15 @@ impl HirLowering:
         val type_ = const_.type_.map(\t: self.lower_type(t)) ?? HirType(kind: HirTypeKind.Infer(0, 0), span: const_.span)
         val value = self.lower_expr(const_.value)
 
+        # Compute effective visibility using filename matching
+        val effective_public = self.compute_visibility(const_.name, const_.is_public)
+
         HirConst(
             symbol: symbol,
             name: const_.name,
             type_: type_,
             value: value,
             is_mutable: const_.is_mutable,
-            is_public: const_.is_public,
+            is_public: effective_public,
             span: const_.span
         )

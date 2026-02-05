@@ -8,6 +8,7 @@ use parser.*
 use lexer.Span
 use blocks.{BlockValue, BlockRegistry, block_registry}
 use config.{TypeInferenceConfig, TypeDefault}
+use compiler.visibility.{effective_visibility}
 
 # HIR Lowering Context
 # ============================================================================
@@ -19,6 +20,7 @@ class HirLowering:
     current_function: SymbolId?
     loop_depth: i64
     type_inference_config: TypeInferenceConfig?
+    module_filename: text    # Filename for visibility matching (e.g., "test_case.spl")
 
 struct LoweringError:
     """Error during lowering."""
@@ -42,7 +44,19 @@ impl HirLowering:
             errors: [],
             current_function: nil,
             loop_depth: 0,
-            type_inference_config: nil
+            type_inference_config: nil,
+            module_filename: ""
+        )
+
+    static fn with_filename(filename: text) -> HirLowering:
+        """Create HIR lowering with filename for visibility matching."""
+        HirLowering(
+            symbols: SymbolTable.new(),
+            errors: [],
+            current_function: nil,
+            loop_depth: 0,
+            type_inference_config: nil,
+            module_filename: filename
         )
 
     static fn with_config(config: TypeInferenceConfig) -> HirLowering:
@@ -51,7 +65,8 @@ impl HirLowering:
             errors: [],
             current_function: nil,
             loop_depth: 0,
-            type_inference_config: Some(config)
+            type_inference_config: Some(config),
+            module_filename: ""
         )
 
     me set_type_inference_config(config: TypeInferenceConfig):
@@ -99,6 +114,16 @@ impl HirLowering:
             span: span,
             kind: LoweringErrorKind.Other
         ))
+
+    fn compute_visibility(type_name: text, is_explicitly_public: bool) -> bool:
+        """Compute effective visibility for a declaration.
+
+        Uses filename matching rule:
+        - If explicitly marked `pub` -> always public
+        - If type name matches filename -> auto-public
+        - Otherwise -> private
+        """
+        effective_visibility(type_name, self.module_filename, is_explicitly_public)
 
     me lower_type(t: Type) -> HirType:
         """Lower type expression."""
@@ -169,7 +194,7 @@ impl HirLowering:
         """Lower type parameter."""
         # Workaround: Store symbols in local var to avoid interpreter bug
         var symbols_table = self.symbols
-        val symbol = symbols_table.define(tp.name, SymbolKind.TypeParam, nil, tp.span, false, false)
+        val symbol = symbols_table.define(tp.name, SymbolKind.TypeParam, nil, tp.span, false, false, nil)
         self.symbols = symbols_table
 
         var bounds: [HirType] = []

@@ -14,6 +14,7 @@
 
 use compiler.mir_data.*
 use compiler.backend.backend_api.*
+use compiler.backend.wasm_type_mapper.WasmTypeMapper
 
 # ============================================================================
 # WASM Target
@@ -65,17 +66,23 @@ impl WasmType:
             case FuncRef: "funcref"
             case ExternRef: "externref"
 
-fn mir_type_to_wasm(ty: MirType) -> WasmType:
-    """Convert MIR type to WASM type."""
-    match ty.kind:
-        case I64: WasmType.I64
-        case I32: WasmType.I32
-        case I16 | I8: WasmType.I32
-        case F64: WasmType.F64
-        case F32: WasmType.F32
-        case Bool: WasmType.I32
-        case Ptr(_, _): WasmType.I32  # Pointers are i32 in wasm32
-        case _: WasmType.I64
+fn mir_type_to_wasm(ty: MirType, target: CodegenTarget) -> WasmType:
+    """
+    Convert MIR type to WASM type using shared type mapper.
+
+    Note: For new code, consider using WasmTypeMapper directly for more control.
+    This function provides backwards compatibility with existing code.
+    """
+    val mapper = WasmTypeMapper.create_for_target(target)
+    val type_str = mapper.map_type(ty)
+
+    # Convert text back to WasmType enum for backwards compatibility
+    match type_str:
+        case "i64": WasmType.I64
+        case "i32": WasmType.I32
+        case "f64": WasmType.F64
+        case "f32": WasmType.F32
+        case _: WasmType.I32  # Default for unknown types
 
 # ============================================================================
 # WASM Import/Export
@@ -331,13 +338,17 @@ class WasmBackend:
     opt_level: OptimizationLevel
     memory_pages: i64
     browser_bindings: [BrowserBinding]
+    type_mapper: WasmTypeMapper     # Type mapper for MIR → Wasm types
 
     static fn create(target: WasmTarget) -> WasmBackend:
+        # Default to Wasm32 (most common target)
+        val codegen_target = CodegenTarget.Wasm32
         WasmBackend(
             target: target,
             opt_level: OptimizationLevel.Size,  # Default to size opt for WASM
             memory_pages: 16,
-            browser_bindings: []
+            browser_bindings: [],
+            type_mapper: WasmTypeMapper.create_for_target(codegen_target)
         )
 
     static fn browser() -> WasmBackend:
@@ -370,7 +381,7 @@ class WasmBackend:
 
         # Translate functions
         for name, body in module.functions:
-            self.translate_function(builder, name, body)
+            self.translate_function(builder, name, body, self.type_mapper)
 
         builder.end_module()
 
@@ -394,15 +405,28 @@ class WasmBackend:
             compile_time_ms: 0
         ))
 
-    fn translate_function(builder: WatBuilder, name: text, body: MirBody):
-        """Translate a MIR function to WAT."""
+    fn translate_function(
+        builder: WatBuilder,
+        name: text,
+        body: MirBody,
+        type_mapper: WasmTypeMapper
+    ):
+        """Translate a MIR function to WAT using shared type mapper."""
         var params: [WasmType] = []
         for _ in 0..body.arg_count:
             params = params.push(WasmType.I64)
 
         var results: [WasmType] = []
         if body.return_ty.kind != MirTypeKind.Unit:
-            results = [mir_type_to_wasm(body.return_ty)]
+            # Use type mapper and convert text to WasmType
+            val type_str = type_mapper.map_type(body.return_ty)
+            val wasm_type = match type_str:
+                case "i64": WasmType.I64
+                case "i32": WasmType.I32
+                case "f64": WasmType.F64
+                case "f32": WasmType.F32
+                case _: WasmType.I32
+            results = [wasm_type]
 
         builder.begin_func(name, params, results)
 

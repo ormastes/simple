@@ -1,0 +1,277 @@
+# Test Runner Host Loader
+#
+# Binary loader interface for loading test binaries to targets.
+# Implementations for QEMU, OpenOCD, J-Link, Serial.
+#
+# Loader Types:
+#   LOADER_QEMU=0, LOADER_OPENOCD=1, LOADER_JLINK=2, LOADER_SERIAL=3
+
+# =========================================================================
+# Loader Configuration
+# =========================================================================
+
+class LoaderConfig:
+    loader_type: i32           # LOADER_* constant
+    binary_path: text          # Path to test binary
+    target_arch: text          # "x86", "arm", "riscv32", etc.
+    timeout_ms: i64            # Overall timeout
+    extra_args: text           # Additional loader-specific arguments
+
+fn LoaderConfig_qemu(binary: text, arch: text) -> LoaderConfig:
+    LoaderConfig(
+        loader_type: 0,         # LOADER_QEMU
+        binary_path: binary,
+        target_arch: arch,
+        timeout_ms: 30000,
+        extra_args: ""
+    )
+
+fn LoaderConfig_qemu_with_timeout(binary: text, arch: text, timeout_ms: i64) -> LoaderConfig:
+    LoaderConfig(
+        loader_type: 0,         # LOADER_QEMU
+        binary_path: binary,
+        target_arch: arch,
+        timeout_ms: timeout_ms,
+        extra_args: ""
+    )
+
+fn LoaderConfig_openocd(binary: text, config_file: text) -> LoaderConfig:
+    LoaderConfig(
+        loader_type: 1,         # LOADER_OPENOCD
+        binary_path: binary,
+        target_arch: "arm",
+        timeout_ms: 60000,
+        extra_args: config_file
+    )
+
+fn LoaderConfig_jlink(binary: text, device: text) -> LoaderConfig:
+    LoaderConfig(
+        loader_type: 2,         # LOADER_JLINK
+        binary_path: binary,
+        target_arch: "arm",
+        timeout_ms: 60000,
+        extra_args: device
+    )
+
+fn LoaderConfig_serial(port: text, baudrate: text) -> LoaderConfig:
+    LoaderConfig(
+        loader_type: 3,         # LOADER_SERIAL
+        binary_path: "",
+        target_arch: "",
+        timeout_ms: 30000,
+        extra_args: "{port}:{baudrate}"
+    )
+
+# =========================================================================
+# Loader Result
+# =========================================================================
+
+class LoaderResult:
+    success: bool
+    process_id: i32            # Process ID (for QEMU, etc.)
+    transport_path: text       # Transport path (e.g., "stdio", socket path)
+    error_message: text
+
+fn LoaderResult_success(pid: i32, transport: text) -> LoaderResult:
+    LoaderResult(
+        success: true,
+        process_id: pid,
+        transport_path: transport,
+        error_message: ""
+    )
+
+fn LoaderResult_failure(message: text) -> LoaderResult:
+    LoaderResult(
+        success: false,
+        process_id: 0,
+        transport_path: "",
+        error_message: message
+    )
+
+# =========================================================================
+# Loader Interface
+# =========================================================================
+
+class Loader:
+    config: LoaderConfig
+    result: LoaderResult
+    running: bool
+
+fn Loader_create(config: LoaderConfig) -> Loader:
+    Loader(
+        config: config,
+        result: LoaderResult_failure("Not started"),
+        running: false
+    )
+
+impl Loader:
+    # Start the loader
+    me start() -> LoaderResult:
+        if self.config.loader_type == 0:
+            self.result = qemu_start(self.config)
+        elif self.config.loader_type == 1:
+            self.result = openocd_start(self.config)
+        elif self.config.loader_type == 2:
+            self.result = jlink_start(self.config)
+        elif self.config.loader_type == 3:
+            self.result = serial_start(self.config)
+        else:
+            self.result = LoaderResult_failure("Unknown loader type")
+
+        if self.result.success:
+            self.running = true
+        self.result
+
+    # Stop the loader
+    me stop():
+        if self.running:
+            if self.config.loader_type == 0:
+                qemu_stop(self.result.process_id)
+            elif self.config.loader_type == 1:
+                openocd_stop(self.result.process_id)
+            elif self.config.loader_type == 2:
+                jlink_stop(self.result.process_id)
+            # Serial doesn't need stopping
+            self.running = false
+
+    # Wait for loader to finish
+    fn wait(timeout_ms: i64) -> i32:
+        if self.config.loader_type == 0:
+            qemu_wait(self.result.process_id, timeout_ms)
+        else:
+            0
+
+    fn is_running() -> bool:
+        self.running
+
+    fn get_transport() -> text:
+        self.result.transport_path
+
+    fn get_error() -> text:
+        self.result.error_message
+
+# =========================================================================
+# QEMU Loader Implementation
+# =========================================================================
+
+fn qemu_start(config: LoaderConfig) -> LoaderResult:
+    # Get QEMU command for architecture
+    val qemu_cmd = get_qemu_command(config.target_arch)
+
+    # Build arguments
+    # In real implementation, would use process_run FFI
+    # For now, return simulated result
+
+    # Check if binary exists (would use file_exists FFI)
+    if config.binary_path == "":
+        return LoaderResult_failure("No binary path specified")
+
+    # Simulated success for testing
+    LoaderResult_success(12345, "stdio")
+
+fn qemu_stop(pid: i32):
+    # Would use process_kill FFI
+    pass
+
+fn qemu_wait(pid: i32, timeout_ms: i64) -> i32:
+    # Would use process_wait FFI
+    0
+
+fn get_qemu_command(arch: text) -> text:
+    if arch == "x86" or arch == "i686":
+        "qemu-system-i386"
+    elif arch == "x86_64":
+        "qemu-system-x86_64"
+    elif arch == "arm" or arch == "arm32" or arch == "cortex-m":
+        "qemu-system-arm"
+    elif arch == "arm64" or arch == "aarch64":
+        "qemu-system-aarch64"
+    elif arch == "riscv32":
+        "qemu-system-riscv32"
+    elif arch == "riscv64":
+        "qemu-system-riscv64"
+    else:
+        "qemu-system-i386"  # Default
+
+fn get_qemu_args(config: LoaderConfig) -> [text]:
+    var args: [text] = []
+
+    args.push("-kernel")
+    args.push(config.binary_path)
+
+    # Serial output to stdio
+    args.push("-serial")
+    args.push("stdio")
+
+    # Debug exit device (QEMU x86)
+    if config.target_arch == "x86" or config.target_arch == "i686" or config.target_arch == "x86_64":
+        args.push("-device")
+        args.push("isa-debug-exit,iobase=0xf4,iosize=0x04")
+
+    # No display
+    args.push("-display")
+    args.push("none")
+
+    # Don't reboot on triple fault
+    args.push("-no-reboot")
+
+    args
+
+# =========================================================================
+# OpenOCD Loader Implementation (stub)
+# =========================================================================
+
+fn openocd_start(config: LoaderConfig) -> LoaderResult:
+    # Would start OpenOCD and flash binary
+    LoaderResult_failure("OpenOCD loader not implemented")
+
+fn openocd_stop(pid: i32):
+    pass
+
+# =========================================================================
+# J-Link Loader Implementation (stub)
+# =========================================================================
+
+fn jlink_start(config: LoaderConfig) -> LoaderResult:
+    # Would use J-Link Commander to flash
+    LoaderResult_failure("J-Link loader not implemented")
+
+fn jlink_stop(pid: i32):
+    pass
+
+# =========================================================================
+# Serial Loader Implementation (stub)
+# =========================================================================
+
+fn serial_start(config: LoaderConfig) -> LoaderResult:
+    # Would open serial port
+    LoaderResult_failure("Serial loader not implemented")
+
+# =========================================================================
+# Exit Code Interpretation
+# =========================================================================
+
+class ExitCodeResult:
+    success: bool
+    message: text
+
+fn ExitCodeResult_success(msg: text) -> ExitCodeResult:
+    ExitCodeResult(success: true, message: msg)
+
+fn ExitCodeResult_failure(msg: text) -> ExitCodeResult:
+    ExitCodeResult(success: false, message: msg)
+
+fn qemu_exit_code_to_result(exit_code: i32) -> ExitCodeResult:
+    # QEMU isa-debug-exit encodes: actual_code = (exit_code << 1) | 1
+    # So exit(0) -> QEMU exits with 1
+    #    exit(1) -> QEMU exits with 3
+    if exit_code == 1:
+        ExitCodeResult_success("Tests passed")
+    elif exit_code == 3:
+        ExitCodeResult_failure("Tests failed")
+    elif exit_code == 124:
+        ExitCodeResult_failure("Timeout")
+    elif exit_code == 137:
+        ExitCodeResult_failure("Killed (SIGKILL)")
+    else:
+        ExitCodeResult_failure("Unknown exit code: {exit_code}")
