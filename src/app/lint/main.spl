@@ -160,6 +160,10 @@ class Linter:
         lints.push(Lint.new("CC002", LintLevel.Warn, LintCategory.Concurrency,
             "Send type used without thread safety guarantee"))
 
+        # Database lints (D00x rules)
+        lints.push(Lint.new("D001", LintLevel.Deny, LintCategory.Correctness,
+            "Direct .sdn file write detected. Use lib.database instead."))
+
         # TODO/FIXME format lints (T00x rules)
         lints.push(Lint.new("T001", LintLevel.Warn, LintCategory.Style,
             "TODO/FIXME missing [area][priority] format"))
@@ -247,6 +251,9 @@ class Linter:
         # Check unfold declaration (only in __init__.spl files)
         if trimmed.starts_with("unfold ") and trimmed.contains("{"):
             self.check_unfold_declaration(path, line_num, trimmed)
+
+        # Check for direct .sdn file writes
+        self.check_sdn_write(path, line_num, trimmed)
     
     fn extract_function_name(line: String) -> String:
         # Extract function name from "fn name(...)" pattern
@@ -412,6 +419,40 @@ class Linter:
                     "unfold subpackage '{subpkg}' missing __init__.spl in {subpkg_dir}")
                     .with_fix("Create file: touch {init_file}")
                 self.results.push(LintResult.new(path, line_num, 0, lint))
+
+    me check_sdn_write(path: String, line_num: Int, line: String):
+        # Detect direct database file writes
+        # Specifically checks for writes to:
+        # - doc/bug/bug_db.sdn
+        # - doc/test/test_db.sdn
+        # - doc/feature/feature_db.sdn
+
+        # Skip this check if we're in the database library itself
+        if path.contains("src/lib/database/") or path.contains("src/app/lint/"):
+            return
+
+        # Check for file write function calls
+        val has_file_write = line.contains("file_write(") or line.contains("rt_file_write(") or line.contains("file_atomic_write(")
+
+        if not has_file_write:
+            return
+
+        # Check if the line contains database file paths
+        val is_bug_db = line.contains("bug_db.sdn") or line.contains("doc/bug/")
+        val is_test_db = line.contains("test_db.sdn") or line.contains("doc/test/")
+        val is_feature_db = line.contains("feature_db.sdn") or line.contains("doc/feature/")
+
+        if is_bug_db or is_test_db or is_feature_db:
+            var db_type = "bug"
+            if is_test_db:
+                db_type = "test"
+            elif is_feature_db:
+                db_type = "feature"
+
+            val lint = Lint.new("D001", LintLevel.Deny, LintCategory.Correctness,
+                "Direct database file write detected. Use lib.database.{db_type} instead.")
+                .with_fix("Import: use lib.database.{db_type} (create_{db_type}_database), then use db.save()")
+            self.results.push(LintResult.new(path, line_num, 0, lint))
 
 
 # Helper: Get parent directory from file path
