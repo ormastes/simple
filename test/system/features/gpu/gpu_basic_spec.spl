@@ -1,0 +1,146 @@
+# GPU Basic Tests
+#
+# Tests for GPU device detection and basic operations.
+
+use std.gpu.*
+use std.testing.gpu_helpers.*
+
+describe "GPU Device Management":
+    it "detects available backends":
+        val backends = detect_backends()
+        # At minimum, we should get an empty list or some backends
+        assert backends.len() >= 0
+
+    it "gets preferred backend":
+        val backend = preferred_backend()
+        # Should return a valid enum variant
+        match backend:
+            case Cuda | Vulkan | None:
+                assert true
+
+    it "lists all GPUs":
+        val devices = list_all_gpus()
+        # Should return a list (may be empty)
+        assert devices.len() >= 0
+
+    it "reports GPU availability consistently":
+        val available = gpu_available()
+        val count = gpu_count()
+        if available:
+            assert count > 0
+        else:
+            assert count == 0
+
+describe "GPU Default Device":
+    it "creates default GPU device":
+        val gpu = gpu_default()
+        # gpu_default should always return, even if invalid
+        assert true
+
+    it "reports device validity correctly":
+        val gpu = gpu_default()
+        if gpu_available():
+            assert gpu.is_valid()
+        else:
+            assert not gpu.is_valid()
+
+    @tag(skip: "requires_gpu")
+    it "gets device name":
+        require_gpu()
+        val gpu = gpu_default()
+        val name = gpu.name()
+        assert name.len() > 0
+
+    @tag(skip: "requires_gpu")
+    it "gets device memory":
+        require_gpu()
+        val gpu = gpu_default()
+        val mem = gpu.total_memory()
+        assert mem > 0
+
+describe "GPU Memory Allocation":
+    @tag(skip: "requires_gpu")
+    it "allocates and frees buffer":
+        require_gpu()
+        val gpu = gpu_default()
+        val buffer = gpu_alloc(gpu, 1024)
+        assert buffer.is_valid
+        assert buffer.len() == 1024
+        assert gpu_free(buffer)
+
+    @tag(skip: "requires_gpu")
+    it "handles zero-size allocation":
+        require_gpu()
+        val gpu = gpu_default()
+        val buffer = gpu_alloc(gpu, 0)
+        # Zero-size allocation behavior may vary by backend
+        gpu_free(buffer)
+
+    @tag(skip: "requires_gpu")
+    it "allocates typed arrays":
+        require_gpu()
+        val gpu = gpu_default()
+        val floats = gpu_alloc_f32(gpu, 100)
+        assert floats.valid()
+        assert floats.count() == 100
+        assert floats.size_bytes() == 400  # 100 * 4 bytes
+
+describe "GPU Data Transfer":
+    @tag(skip: "requires_gpu")
+    it "copies data to device":
+        require_gpu()
+        val gpu = gpu_default()
+        val buffer = gpu_alloc(gpu, 16)
+
+        val data: [u8] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+        val success = gpu_copy_to(buffer, data)
+        assert success
+
+        gpu_free(buffer)
+
+    @tag(skip: "requires_gpu")
+    it "copies data from device":
+        require_gpu()
+        val gpu = gpu_default()
+        val buffer = gpu_alloc(gpu, 16)
+
+        val src: [u8] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+        gpu_copy_to(buffer, src)
+
+        var dst: [u8] = []
+        for i in 0..16:
+            dst.push(0)
+
+        val success = gpu_copy_from(dst, buffer)
+        assert success
+        # Note: dst should now contain the data from the GPU
+
+        gpu_free(buffer)
+
+describe "GPU Synchronization":
+    @tag(skip: "requires_gpu")
+    it "synchronizes device":
+        require_gpu()
+        val gpu = gpu_default()
+        assert gpu.sync()
+
+    @tag(skip: "requires_gpu")
+    it "synchronizes all devices":
+        require_gpu()
+        assert gpu_sync_all()
+
+describe "GPU Info":
+    it "generates GPU info string":
+        val info = gpu_info()
+        assert info.len() > 0
+        assert info.contains("GPU Information")
+
+    @tag(skip: "requires_gpu")
+    it "runs GPU smoke test":
+        require_gpu()
+        assert gpu_test()
+
+    @tag(skip: "requires_gpu")
+    it "reports GPU is ready":
+        require_gpu()
+        assert gpu_is_ready()

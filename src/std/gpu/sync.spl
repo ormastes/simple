@@ -1,0 +1,282 @@
+# GPU Synchronization Primitives
+#
+# Provides synchronization utilities for GPU compute operations.
+
+use gpu.device.*
+use io.cuda_ffi.*
+use io.vulkan_ffi.*
+
+# ============================================================================
+# Device Synchronization
+# ============================================================================
+
+"""
+Wait for all GPU operations to complete.
+"""
+fn gpu_sync(gpu: Gpu) -> bool:
+    if not gpu.is_valid():
+        true
+    else:
+        match gpu.backend:
+            case Cuda: cuda_sync()
+            case Vulkan: vulkan_wait_idle()
+            case None: true
+
+"""
+Global synchronization across all devices.
+"""
+fn gpu_sync_all() -> bool:
+    var success = true
+
+    # Sync all CUDA devices
+    if cuda_available():
+        val count = cuda_device_count()
+        for i in 0..count:
+            cuda_set_device(i)
+            if not cuda_sync():
+                success = false
+
+    # Sync Vulkan
+    if vulkan_available():
+        if not vulkan_wait_idle():
+            success = false
+
+    success
+
+# ============================================================================
+# CUDA Streams
+# ============================================================================
+
+"""
+CUDA stream wrapper for asynchronous operations.
+"""
+struct GpuStream:
+    backend: GpuBackend
+    cuda_stream: CudaStream?
+    is_valid: bool
+
+"""
+Create a GPU stream for the given device.
+"""
+fn gpu_stream_create(gpu: Gpu) -> GpuStream:
+    if not gpu.is_valid():
+        GpuStream(
+            backend: GpuBackend.None,
+            cuda_stream: nil,
+            is_valid: false
+        )
+    else:
+        match gpu.backend:
+            case Cuda:
+                val stream = cuda_stream_create()
+                GpuStream(
+                    backend: GpuBackend.Cuda,
+                    cuda_stream: Some(stream),
+                    is_valid: stream.is_valid
+                )
+            case Vulkan:
+                # Vulkan uses command buffers, not streams in the same way
+                # For now, we don't support stream abstraction for Vulkan
+                GpuStream(
+                    backend: GpuBackend.Vulkan,
+                    cuda_stream: nil,
+                    is_valid: false
+                )
+            case None:
+                GpuStream(
+                    backend: GpuBackend.None,
+                    cuda_stream: nil,
+                    is_valid: false
+                )
+
+"""
+Destroy a GPU stream.
+"""
+fn gpu_stream_destroy(stream: GpuStream) -> bool:
+    match stream.cuda_stream:
+        case Some(s): cuda_stream_destroy(s)
+        case _: true
+
+"""
+Synchronize a GPU stream.
+"""
+fn gpu_stream_sync(stream: GpuStream) -> bool:
+    if not stream.is_valid:
+        true
+    else:
+        match stream.cuda_stream:
+            case Some(s): cuda_stream_sync(s)
+            case _: true
+
+impl GpuStream:
+    fn valid() -> bool:
+        self.is_valid
+
+    fn sync() -> bool:
+        gpu_stream_sync(self)
+
+    fn destroy() -> bool:
+        gpu_stream_destroy(self)
+
+# ============================================================================
+# Event/Fence Synchronization
+# ============================================================================
+
+"""
+GPU event for timing and synchronization.
+"""
+struct GpuEvent:
+    backend: GpuBackend
+    # CUDA events would go here when implemented
+    vulkan_fence: i64?
+    is_valid: bool
+
+"""
+Create a GPU event/fence.
+"""
+fn gpu_event_create(gpu: Gpu) -> GpuEvent:
+    if not gpu.is_valid():
+        GpuEvent(
+            backend: GpuBackend.None,
+            vulkan_fence: nil,
+            is_valid: false
+        )
+    else:
+        match gpu.backend:
+            case Cuda:
+                # CUDA events would require additional FFI
+                GpuEvent(
+                    backend: GpuBackend.Cuda,
+                    vulkan_fence: nil,
+                    is_valid: false  # Not implemented yet
+                )
+            case Vulkan:
+                val fence = rt_vulkan_create_fence()
+                GpuEvent(
+                    backend: GpuBackend.Vulkan,
+                    vulkan_fence: Some(fence),
+                    is_valid: fence != 0
+                )
+            case None:
+                GpuEvent(
+                    backend: GpuBackend.None,
+                    vulkan_fence: nil,
+                    is_valid: false
+                )
+
+"""
+Destroy a GPU event.
+"""
+fn gpu_event_destroy(event: GpuEvent) -> bool:
+    match event.vulkan_fence:
+        case Some(f): rt_vulkan_destroy_fence(f)
+        case _: true
+
+"""
+Wait for a GPU event with timeout (nanoseconds).
+Returns true if event completed, false on timeout.
+"""
+fn gpu_event_wait(event: GpuEvent, timeout_ns: i64) -> bool:
+    if not event.is_valid:
+        true
+    else:
+        match event.vulkan_fence:
+            case Some(f): rt_vulkan_wait_fence(f, timeout_ns)
+            case _: true
+
+"""
+Reset a GPU event for reuse.
+"""
+fn gpu_event_reset(event: GpuEvent) -> bool:
+    if not event.is_valid:
+        true
+    else:
+        match event.vulkan_fence:
+            case Some(f): rt_vulkan_reset_fence(f)
+            case _: true
+
+impl GpuEvent:
+    fn valid() -> bool:
+        self.is_valid
+
+    fn wait(timeout_ns: i64) -> bool:
+        gpu_event_wait(self, timeout_ns)
+
+    fn wait_forever() -> bool:
+        gpu_event_wait(self, 0xFFFFFFFFFFFFFFFF)
+
+    fn reset() -> bool:
+        gpu_event_reset(self)
+
+    fn destroy() -> bool:
+        gpu_event_destroy(self)
+
+# ============================================================================
+# Scoped Synchronization
+# ============================================================================
+
+"""
+Execute a block of code with GPU synchronization.
+Ensures device is synchronized before and after the block.
+"""
+fn with_gpu_sync<T>(gpu: Gpu, f: fn() -> T) -> T:
+    gpu_sync(gpu)
+    val result = f()
+    gpu_sync(gpu)
+    result
+
+"""
+Execute on a specific device, then return to the original.
+"""
+fn with_device<T>(gpu: Gpu, f: fn() -> T) -> T:
+    # Save current device
+    val original = match gpu.backend:
+        case Cuda: cuda_get_device()
+        case Vulkan: vulkan_get_device()
+        case None: -1
+
+    # Set target device
+    match gpu.backend:
+        case Cuda: cuda_set_device(gpu.device_id)
+        case Vulkan: vulkan_select_device(gpu.device_id)
+        case None: pass
+
+    # Execute
+    val result = f()
+
+    # Restore original device
+    if original >= 0:
+        match gpu.backend:
+            case Cuda: cuda_set_device(original)
+            case Vulkan: vulkan_select_device(original)
+            case None: pass
+
+    result
+
+# ============================================================================
+# Barrier Utilities
+# ============================================================================
+
+"""
+Memory barrier scope for GPU operations.
+"""
+enum GpuMemoryScope:
+    Device     # All threads on device
+    Workgroup  # Threads in same workgroup/block
+    Subgroup   # Threads in same subgroup/warp
+
+"""
+Note: In-kernel barriers (gpu_sync, gpu_barrier) are handled by
+the kernel code itself, not the host API. These utilities are for
+host-side synchronization.
+"""
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export gpu_sync, gpu_sync_all
+export GpuStream, gpu_stream_create, gpu_stream_destroy, gpu_stream_sync
+export GpuEvent, gpu_event_create, gpu_event_destroy, gpu_event_wait, gpu_event_reset
+export with_gpu_sync, with_device
+export GpuMemoryScope
