@@ -1,0 +1,276 @@
+# Type Layout Computation
+#
+# Computes memory layout for types including:
+# - Size in bytes
+# - Alignment requirements
+# - Field offsets
+# - Padding
+#
+# Supports layout attributes:
+# - @repr("C")   - C-compatible layout
+# - @repr("packed") or @packed - No padding between fields
+# - @repr("transparent") - Same layout as single field
+# - @align(N)    - Minimum alignment (power of 2)
+#
+# Example:
+#   @repr("C")
+#   @align(16)
+#   struct AlignedData:
+#       x: i32
+#       y: i32
+
+from hir_types import {HirType, SymbolId}
+from hir_definitions import {HirStruct, HirClass, HirField}
+
+export TypeLayout, FieldLayout, LayoutAttr, LayoutKind
+export compute_layout, compute_struct_layout, compute_field_offset
+export size_of_type, align_of_type
+
+# Layout kind (from @repr attribute)
+enum LayoutKind:
+    Simple      # Default Simple language layout (like Rust)
+    C           # C ABI compatible layout
+    Packed      # No padding (alignment = 1)
+    Transparent # Same layout as inner type
+
+impl LayoutKind:
+    fn to_text() -> text:
+        match self:
+            case LayoutKind.Simple: "Simple"
+            case LayoutKind.C: "C"
+            case LayoutKind.Packed: "packed"
+            case LayoutKind.Transparent: "transparent"
+
+# Layout attributes for a type
+struct LayoutAttr:
+    layout_kind: LayoutKind   # Layout kind
+    explicit_align: i64?    # @align(N) value if specified
+    is_packed: bool         # @packed shorthand
+
+impl LayoutAttr:
+    static fn default_() -> LayoutAttr:
+        LayoutAttr(
+            layout_kind: LayoutKind.Simple,
+            explicit_align: None,
+            is_packed: false
+        )
+
+    static fn c_repr() -> LayoutAttr:
+        LayoutAttr(
+            layout_kind: LayoutKind.C,
+            explicit_align: None,
+            is_packed: false
+        )
+
+    static fn packed() -> LayoutAttr:
+        LayoutAttr(
+            layout_kind: LayoutKind.Packed,
+            explicit_align: None,
+            is_packed: true
+        )
+
+    fn effective_align(natural_align: i64) -> i64:
+        """Get effective alignment considering all attributes."""
+        if self.is_packed or self.layout_kind == LayoutKind.Packed:
+            return 1
+        if self.explicit_align.?:
+            val explicit = self.explicit_align.unwrap()
+            # Explicit alignment must be >= natural alignment
+            if explicit > natural_align:
+                return explicit
+        natural_align
+
+# Single field layout information
+struct FieldLayout:
+    name: text
+    type_: HirType
+    offset: i64     # Byte offset from struct start
+    size: i64       # Size of field in bytes
+    align: i64      # Alignment of field
+
+impl FieldLayout:
+    fn end_offset() -> i64:
+        self.offset + self.size
+
+# Complete type layout
+struct TypeLayout:
+    size: i64               # Total size in bytes
+    align: i64              # Required alignment
+    fields: [FieldLayout]   # Field layouts (for struct/class)
+    stride: i64             # Size when used in array (size rounded up to align)
+
+impl TypeLayout:
+    fn is_zero_sized() -> bool:
+        self.size == 0
+
+    fn padding_bytes() -> i64:
+        """Calculate total padding in struct."""
+        var field_sizes: i64 = 0
+        for field in self.fields:
+            field_sizes = field_sizes + field.size
+        self.size - field_sizes
+
+# Primitive type sizes (in bytes)
+fn primitive_size(type_name: text) -> i64?:
+    match type_name:
+        case "i8" | "u8" | "bool": Some(1)
+        case "i16" | "u16": Some(2)
+        case "i32" | "u32" | "f32" | "char": Some(4)
+        case "i64" | "u64" | "f64" | "isize" | "usize": Some(8)  # Assuming 64-bit
+        case "i128" | "u128": Some(16)
+        case "()" | "unit" | "void": Some(0)
+        case _: None
+
+# Primitive type alignment (in bytes)
+fn primitive_align(type_name: text) -> i64?:
+    match type_name:
+        case "i8" | "u8" | "bool": Some(1)
+        case "i16" | "u16": Some(2)
+        case "i32" | "u32" | "f32" | "char": Some(4)
+        case "i64" | "u64" | "f64" | "isize" | "usize": Some(8)
+        case "i128" | "u128": Some(16)
+        case "()" | "unit" | "void": Some(1)  # ZST has alignment 1
+        case _: None
+
+# Get size of a type
+fn size_of_type(type_: HirType) -> i64:
+    val name = type_.to_text()
+    primitive_size(name) ?? 8  # Default to pointer size
+
+# Get alignment of a type
+fn align_of_type(type_: HirType) -> i64:
+    val name = type_.to_text()
+    primitive_align(name) ?? 8  # Default to pointer alignment
+
+# Compute layout for a struct
+fn compute_struct_layout(fields: [HirField], attr: LayoutAttr) -> TypeLayout:
+    match attr.layout_kind:
+        case LayoutKind.Packed:
+            compute_packed_layout(fields)
+        case LayoutKind.C:
+            compute_c_layout(fields, attr)
+        case LayoutKind.Transparent:
+            compute_transparent_layout(fields)
+        case LayoutKind.Simple:
+            # Default layout (may reorder fields for optimization)
+            compute_c_layout(fields, attr)  # Use C layout for now
+
+# Packed layout: no padding, alignment = 1
+fn compute_packed_layout(fields: [HirField]) -> TypeLayout:
+    var field_layouts: [FieldLayout] = []
+    var offset: i64 = 0
+
+    for field in fields:
+        val size = size_of_type(field.type_)
+        field_layouts.push(FieldLayout(
+            name: field.name,
+            type_: field.type_,
+            offset: offset,
+            size: size,
+            align: 1
+        ))
+        offset = offset + size
+
+    TypeLayout(
+        size: offset,
+        align: 1,
+        fields: field_layouts,
+        stride: offset
+    )
+
+# C ABI layout: fields in order, each aligned
+fn compute_c_layout(fields: [HirField], attr: LayoutAttr) -> TypeLayout:
+    var field_layouts: [FieldLayout] = []
+    var offset: i64 = 0
+    var max_align: i64 = 1
+
+    for field in fields:
+        val size = size_of_type(field.type_)
+        val align = align_of_type(field.type_)
+
+        # Update max alignment
+        if align > max_align:
+            max_align = align
+
+        # Align offset for this field
+        offset = align_up(offset, align)
+
+        field_layouts.push(FieldLayout(
+            name: field.name,
+            type_: field.type_,
+            offset: offset,
+            size: size,
+            align: align
+        ))
+
+        offset = offset + size
+
+    # Apply explicit alignment
+    val final_align = attr.effective_align(max_align)
+
+    # Pad struct size to alignment
+    val final_size = align_up(offset, final_align)
+
+    TypeLayout(
+        size: final_size,
+        align: final_align,
+        fields: field_layouts,
+        stride: final_size
+    )
+
+# Transparent layout: same as single field
+fn compute_transparent_layout(fields: [HirField]) -> TypeLayout:
+    if fields.len() != 1:
+        # Transparent requires exactly one field
+        # Fall back to default layout
+        return compute_c_layout(fields, LayoutAttr.default_())
+
+    val field = fields[0]
+    val size = size_of_type(field.type_)
+    val align = align_of_type(field.type_)
+
+    TypeLayout(
+        size: size,
+        align: align,
+        fields: [FieldLayout(
+            name: field.name,
+            type_: field.type_,
+            offset: 0,
+            size: size,
+            align: align
+        )],
+        stride: size
+    )
+
+# Compute field offset in a struct
+fn compute_field_offset(struct_fields: [HirField], field_name: text, attr: LayoutAttr) -> i64?:
+    val layout = compute_struct_layout(struct_fields, attr)
+    for field in layout.fields:
+        if field.name == field_name:
+            return Some(field.offset)
+    None
+
+# General layout computation
+fn compute_layout(type_: HirType, attr: LayoutAttr) -> TypeLayout:
+    val size = size_of_type(type_)
+    val align = attr.effective_align(align_of_type(type_))
+    val stride = align_up(size, align)
+
+    TypeLayout(
+        size: size,
+        align: align,
+        fields: [],
+        stride: stride
+    )
+
+# Align value up to alignment boundary
+fn align_up(value: i64, align: i64) -> i64:
+    (value + align - 1) & ~(align - 1)
+
+# Check if value is aligned
+fn is_aligned(value: i64, align: i64) -> bool:
+    (value & (align - 1)) == 0
+
+# Check if alignment is power of 2
+fn is_power_of_two(n: i64) -> bool:
+    n > 0 and (n & (n - 1)) == 0

@@ -1,0 +1,261 @@
+# Bare-Metal Build Module
+#
+# Build commands for bare-metal targets (QEMU, embedded hardware).
+#
+# Usage:
+#   simple build --target=baremetal-x86 --board=qemu_x86
+#   simple test --baremetal --timeout=30000
+
+from std.common.target import {Target, TargetArch, TargetOS}
+from app.linker_gen.parser import {parse_board, BoardConfig, QemuConfig}
+from app.linker_gen.main import {generate_linker_script}
+from app.build.types import {BuildResult, BuildConfig, BuildProfile, TestResult}
+
+export BaremetalConfig, BaremetalBuilder, QemuRunner
+
+# Bare-metal build configuration
+struct BaremetalConfig:
+    target: Target              # Target triple
+    board_file: text            # Path to board SDN file
+    board: BoardConfig?         # Parsed board config
+    output_dir: text            # Output directory
+    linker_script: text         # Generated linker script path
+    entry_point: text           # Kernel entry point
+
+impl BaremetalConfig:
+    # Create default config for QEMU x86
+    static fn qemu_x86() -> BaremetalConfig:
+        val target = Target(
+            arch: TargetArch.X86,
+            os: TargetOS.BareMetal,
+            wasm_runtime: None
+        )
+        BaremetalConfig(
+            target: target,
+            board_file: "boards/qemu_x86.sdn",
+            board: None,
+            output_dir: "build/baremetal",
+            linker_script: "build/baremetal/linker.ld",
+            entry_point: "_start"
+        )
+
+    # Load board configuration
+    me load_board() -> Result<(), text>:
+        val result = parse_board(self.board_file)
+        match result:
+            case Ok(board):
+                self.board = Some(board)
+                Ok(())
+            case Err(e):
+                Err(e.message())
+
+    # Generate linker script from board config
+    me generate_linker() -> Result<text, text>:
+        if not self.board.?:
+            return Err("Board not loaded")
+        val script = generate_linker_script(self.board.unwrap())
+        Ok(script)
+
+# Bare-metal builder
+class BaremetalBuilder:
+    config: BaremetalConfig
+
+impl BaremetalBuilder:
+    static fn new(config: BaremetalConfig) -> BaremetalBuilder:
+        BaremetalBuilder(config: config)
+
+    # Build a bare-metal binary
+    fn build(source_files: [text]) -> BuildResult:
+        extern fn rt_dir_create(path: text) -> bool
+        extern fn rt_file_write_text(path: text, content: text) -> bool
+        extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+        # Create output directory
+        rt_dir_create(self.config.output_dir)
+
+        # Load board and generate linker script
+        match self.config.load_board():
+            case Err(msg):
+                return BuildResult(
+                    success: false,
+                    exit_code: 1,
+                    stdout: "",
+                    stderr: "Failed to load board: {msg}",
+                    duration_ms: 0
+                )
+            case Ok(_): pass
+
+        match self.config.generate_linker():
+            case Err(msg):
+                return BuildResult(
+                    success: false,
+                    exit_code: 1,
+                    stdout: "",
+                    stderr: "Failed to generate linker script: {msg}",
+                    duration_ms: 0
+                )
+            case Ok(script):
+                if not rt_file_write_text(self.config.linker_script, script):
+                    return BuildResult(
+                        success: false,
+                        exit_code: 1,
+                        stdout: "",
+                        stderr: "Failed to write linker script",
+                        duration_ms: 0
+                    )
+
+        val start_time = current_time_ms()
+
+        # Build using cargo/rustc with bare-metal target
+        val target_triple = self.config.target.triple()
+        var args: [text] = [
+            "build",
+            "--target", target_triple,
+            "--release",
+            "-Zbuild-std=core,alloc",
+            "-Zbuild-std-features=compiler-builtins-mem"
+        ]
+
+        val (stdout, stderr, exit_code) = rt_process_run("cargo", args)
+        val end_time = current_time_ms()
+
+        BuildResult(
+            success: exit_code == 0,
+            exit_code: exit_code,
+            stdout: stdout,
+            stderr: stderr,
+            duration_ms: end_time - start_time
+        )
+
+# QEMU test runner
+class QemuRunner:
+    config: BaremetalConfig
+    timeout_ms: i64
+    qemu_path: text
+
+impl QemuRunner:
+    static fn new(config: BaremetalConfig, timeout_ms: i64) -> QemuRunner:
+        QemuRunner(
+            config: config,
+            timeout_ms: timeout_ms,
+            qemu_path: "qemu-system-i386"  # Default for x86
+        )
+
+    # Get QEMU executable for target architecture
+    fn qemu_executable() -> text:
+        match self.config.target.arch:
+            case TargetArch.X86: "qemu-system-i386"
+            case TargetArch.X86_64: "qemu-system-x86_64"
+            case TargetArch.Arm: "qemu-system-arm"
+            case TargetArch.Aarch64: "qemu-system-aarch64"
+            case TargetArch.Riscv32: "qemu-system-riscv32"
+            case TargetArch.Riscv64: "qemu-system-riscv64"
+            case _: "qemu-system-i386"
+
+    # Build QEMU command line arguments
+    fn build_args(kernel_path: text) -> [text]:
+        var args: [text] = []
+
+        if self.config.board.?:
+            val qemu = self.config.board.unwrap().qemu
+            if qemu.?:
+                val q = qemu.unwrap()
+                args.push("-machine")
+                args.push(q.machine)
+                args.push("-cpu")
+                args.push(q.cpu)
+                args.push("-m")
+                args.push(q.memory)
+                args.push("-serial")
+                args.push(q.serial)
+
+                # ISA debug exit device (for test exit codes)
+                if q.isa_debug_exit_enabled:
+                    args.push("-device")
+                    args.push("isa-debug-exit,iobase=0xF4,iosize=0x04")
+
+        # Kernel binary
+        args.push("-kernel")
+        args.push(kernel_path)
+
+        # No display (headless)
+        args.push("-display")
+        args.push("none")
+
+        # Disable default devices
+        args.push("-nodefaults")
+
+        args
+
+    # Run kernel in QEMU and capture output
+    fn run(kernel_path: text) -> TestResult:
+        extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i64, bool)
+
+        val qemu = self.qemu_executable()
+        val args = self.build_args(kernel_path)
+
+        val start_time = current_time_ms()
+        val (stdout, stderr, exit_code, timed_out) = rt_process_run_timeout(qemu, args, self.timeout_ms)
+        val end_time = current_time_ms()
+
+        if timed_out:
+            return TestResult(
+                success: false,
+                exit_code: -1,
+                stdout: stdout,
+                stderr: "QEMU timed out after {self.timeout_ms}ms",
+                tests_run: 0,
+                tests_passed: 0,
+                tests_failed: 0
+            )
+
+        # Parse test results from serial output
+        parse_test_output(stdout, exit_code)
+
+# Parse bare-metal test output from serial
+# Expected format (SSpec-compatible):
+#   [TEST START]
+#   [PASS] test_name
+#   [FAIL] test_name: error message
+#   [TEST END] passed=N failed=M
+fn parse_test_output(output: text, exit_code: i64) -> TestResult:
+    var tests_run: i64 = 0
+    var tests_passed: i64 = 0
+    var tests_failed: i64 = 0
+
+    for line in output.lines():
+        val trimmed = line.trim()
+        if trimmed.starts_with("[PASS]"):
+            tests_run = tests_run + 1
+            tests_passed = tests_passed + 1
+        elif trimmed.starts_with("[FAIL]"):
+            tests_run = tests_run + 1
+            tests_failed = tests_failed + 1
+        elif trimmed.starts_with("[TEST END]"):
+            # Parse final counts if provided
+            # Format: [TEST END] passed=N failed=M
+            val parts = trimmed.split(" ")
+            for part in parts:
+                if part.starts_with("passed="):
+                    tests_passed = part.substring(7).parse_int() ?? tests_passed
+                elif part.starts_with("failed="):
+                    tests_failed = part.substring(7).parse_int() ?? tests_failed
+            tests_run = tests_passed + tests_failed
+
+    # QEMU exit code handling:
+    # isa-debug-exit returns (value << 1) | 1
+    # So exit code 0 becomes 1, exit code 1 becomes 3
+    val adjusted_exit = if exit_code > 0: (exit_code - 1) / 2 else: 0
+
+    TestResult(
+        success: tests_failed == 0 and adjusted_exit == 0,
+        exit_code: adjusted_exit,
+        stdout: output,
+        stderr: "",
+        tests_run: tests_run,
+        tests_passed: tests_passed,
+        tests_failed: tests_failed
+    )
+
+# FFI for time
+extern fn current_time_ms() -> i64

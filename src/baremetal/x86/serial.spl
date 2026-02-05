@@ -1,0 +1,177 @@
+# x86 Serial Port (UART) Driver
+#
+# COM1 serial driver for bare-metal debugging output.
+# Works with QEMU's -serial stdio option.
+#
+# Usage:
+#   serial_init()
+#   serial_print("Hello, QEMU!")
+
+from io import {outb, inb, io_wait}
+
+export serial_init, serial_write, serial_read, serial_print, serial_println
+export Serial, COM1, COM2, COM3, COM4
+
+# Standard COM port base addresses
+val COM1: u16 = 0x3F8
+val COM2: u16 = 0x2F8
+val COM3: u16 = 0x3E8
+val COM4: u16 = 0x2E8
+
+# UART register offsets (relative to base address)
+val UART_DATA: u16 = 0         # Data register (R/W)
+val UART_IER: u16 = 1          # Interrupt Enable Register
+val UART_FCR: u16 = 2          # FIFO Control Register (write only)
+val UART_IIR: u16 = 2          # Interrupt Identification (read only)
+val UART_LCR: u16 = 3          # Line Control Register
+val UART_MCR: u16 = 4          # Modem Control Register
+val UART_LSR: u16 = 5          # Line Status Register
+val UART_MSR: u16 = 6          # Modem Status Register
+val UART_SCRATCH: u16 = 7      # Scratch Register
+
+# When DLAB (Divisor Latch Access Bit) is set:
+val UART_DLL: u16 = 0          # Divisor Latch Low byte
+val UART_DLH: u16 = 1          # Divisor Latch High byte
+
+# Line Status Register bits
+val LSR_DATA_READY: u8 = 1 << 0     # Data ready to read
+val LSR_OVERRUN_ERR: u8 = 1 << 1   # Overrun error
+val LSR_PARITY_ERR: u8 = 1 << 2    # Parity error
+val LSR_FRAMING_ERR: u8 = 1 << 3   # Framing error
+val LSR_BREAK: u8 = 1 << 4         # Break indicator
+val LSR_THRE: u8 = 1 << 5          # Transmit Holding Register Empty
+val LSR_TEMT: u8 = 1 << 6          # Transmitter Empty
+
+# Line Control Register bits
+val LCR_DLAB: u8 = 1 << 7          # Divisor Latch Access Bit
+
+# Common baud rate divisors (for 115200 base clock)
+val BAUD_115200: u16 = 1
+val BAUD_57600: u16 = 2
+val BAUD_38400: u16 = 3
+val BAUD_19200: u16 = 6
+val BAUD_9600: u16 = 12
+
+# Serial port instance
+struct Serial:
+    port: u16
+
+impl Serial:
+    # Create a new serial port instance
+    static fn new(port: u16) -> Serial:
+        Serial(port: port)
+
+    # Initialize the serial port
+    me init(baud_divisor: u16):
+        # Disable interrupts
+        outb(self.port + UART_IER, 0x00)
+
+        # Enable DLAB to set baud rate
+        outb(self.port + UART_LCR, LCR_DLAB)
+
+        # Set baud rate divisor
+        outb(self.port + UART_DLL, (baud_divisor & 0xFF) as u8)
+        outb(self.port + UART_DLH, ((baud_divisor >> 8) & 0xFF) as u8)
+
+        # 8 bits, no parity, one stop bit (8N1)
+        # Also clears DLAB
+        outb(self.port + UART_LCR, 0x03)
+
+        # Enable FIFO, clear them, with 14-byte threshold
+        outb(self.port + UART_FCR, 0xC7)
+
+        # IRQs enabled, RTS/DSR set
+        outb(self.port + UART_MCR, 0x0B)
+
+        # Test serial chip (loopback mode)
+        outb(self.port + UART_MCR, 0x1E)  # Set loopback mode
+        outb(self.port + UART_DATA, 0xAE)  # Send test byte
+
+        # Check if we receive the same byte
+        if inb(self.port + UART_DATA) != 0xAE:
+            # Serial port not working, but continue anyway for QEMU
+            pass
+
+        # Normal operation mode (not loopback)
+        outb(self.port + UART_MCR, 0x0F)
+
+    # Check if transmit buffer is empty
+    fn is_transmit_empty() -> bool:
+        (inb(self.port + UART_LSR) & LSR_THRE) != 0
+
+    # Wait for transmit buffer to be empty
+    me wait_transmit():
+        while not self.is_transmit_empty():
+            pass
+
+    # Check if data is available to read
+    fn has_data() -> bool:
+        (inb(self.port + UART_LSR) & LSR_DATA_READY) != 0
+
+    # Write a single byte
+    me write_byte(byte: u8):
+        self.wait_transmit()
+        outb(self.port + UART_DATA, byte)
+
+    # Read a single byte (blocking)
+    fn read_byte() -> u8:
+        while not self.has_data():
+            pass
+        inb(self.port + UART_DATA)
+
+    # Read a byte if available (non-blocking)
+    fn try_read_byte() -> u8?:
+        if self.has_data():
+            Some(inb(self.port + UART_DATA))
+        else:
+            None
+
+    # Write a string
+    me write_str(s: text):
+        for ch in s.chars():
+            val byte = ch.to_int() as u8
+            # Convert LF to CR+LF for terminal compatibility
+            if byte == 0x0A:  # '\n'
+                self.write_byte(0x0D)  # '\r'
+            self.write_byte(byte)
+
+    # Write a line (string + newline)
+    me write_line(s: text):
+        self.write_str(s)
+        self.write_byte(0x0D)  # '\r'
+        self.write_byte(0x0A)  # '\n'
+
+# Global COM1 instance
+var g_serial: Serial = Serial(port: COM1)
+var g_serial_initialized: bool = false
+
+# Initialize COM1 with default settings (115200 baud)
+fn serial_init():
+    if g_serial_initialized:
+        return
+    g_serial.init(BAUD_115200)
+    g_serial_initialized = true
+
+# Write a single byte to COM1
+fn serial_write(byte: u8):
+    if not g_serial_initialized:
+        serial_init()
+    g_serial.write_byte(byte)
+
+# Read a single byte from COM1 (blocking)
+fn serial_read() -> u8:
+    if not g_serial_initialized:
+        serial_init()
+    g_serial.read_byte()
+
+# Print a string to COM1
+fn serial_print(s: text):
+    if not g_serial_initialized:
+        serial_init()
+    g_serial.write_str(s)
+
+# Print a line to COM1
+fn serial_println(s: text):
+    if not g_serial_initialized:
+        serial_init()
+    g_serial.write_line(s)

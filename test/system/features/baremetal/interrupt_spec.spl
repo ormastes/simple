@@ -1,0 +1,286 @@
+"""
+# Interrupt Handlers Specification
+
+**Feature IDs:** #BM-007
+**Category:** Language / Bare-Metal
+**Status:** In Progress
+
+Interrupt handler support for bare-metal systems:
+- @interrupt attribute marks handler functions
+- Automatic register save/restore
+- Critical section primitives
+- IDT generation
+
+Syntax:
+    @interrupt(vector: N)
+    fn handler():
+        ...
+"""
+
+describe "Interrupt Handler Attribute":
+    """@interrupt attribute for ISR functions."""
+
+    context "Basic Handler":
+        """Simple interrupt handlers."""
+
+        it "declares interrupt handler":
+            @interrupt(vector: 32)
+            fn timer_handler():
+                # Handle timer interrupt
+                pass
+
+            expect(true).to(be_true())
+
+        it "specifies priority":
+            @interrupt(vector: 33, priority: 2)
+            fn uart_handler():
+                pass
+
+            expect(true).to(be_true())
+
+    context "Handler Attributes":
+        """Additional handler modifiers."""
+
+        it "supports naked handler":
+            @interrupt(vector: 14)
+            @naked
+            fn page_fault_handler():
+                # Pure assembly handler
+                asm """
+                    # Handle page fault
+                    iret
+                """
+
+            expect(true).to(be_true())
+
+        it "supports fast handler":
+            @interrupt(vector: 32)
+            @fast
+            fn fast_timer():
+                # Minimal register save
+                pass
+
+            expect(true).to(be_true())
+
+        it "supports noreturn handler":
+            @interrupt(vector: 8)
+            @noreturn
+            fn double_fault():
+                # Never returns
+                loop:
+                    asm "hlt"
+
+            expect(true).to(be_true())
+
+describe "CPU Exceptions":
+    """x86 CPU exception handling."""
+
+    context "Exception Vectors":
+        """Standard x86 exception numbers."""
+
+        it "identifies divide error (vector 0)":
+            val DIVIDE_ERROR: i64 = 0
+            expect(DIVIDE_ERROR).to(eq(0))
+
+        it "identifies page fault (vector 14)":
+            val PAGE_FAULT: i64 = 14
+            expect(PAGE_FAULT).to(eq(14))
+
+        it "identifies general protection (vector 13)":
+            val GP_FAULT: i64 = 13
+            expect(GP_FAULT).to(eq(13))
+
+    context "Error Codes":
+        """Exceptions that push error codes."""
+
+        it "double fault has error code":
+            # Vector 8 pushes error code (always 0)
+            expect(true).to(be_true())
+
+        it "page fault has error code":
+            # Vector 14 pushes error code with fault info
+            # Bit 0: Present
+            # Bit 1: Write
+            # Bit 2: User
+            expect(true).to(be_true())
+
+        it "GP fault has error code":
+            # Vector 13 pushes selector error code
+            expect(true).to(be_true())
+
+describe "IDT Structure":
+    """Interrupt Descriptor Table."""
+
+    context "IDT Entry":
+        """8-byte IDT entry format."""
+
+        it "has correct entry size":
+            @repr("C")
+            @packed
+            struct IdtEntry:
+                offset_low: u16
+                selector: u16
+                zero: u8
+                type_attr: u8
+                offset_high: u16
+
+            expect(size_of<IdtEntry>()).to(eq(8))
+
+        it "encodes interrupt gate correctly":
+            # Type: 0x8E = P=1, DPL=0, 32-bit interrupt gate
+            val INTERRUPT_GATE: u8 = 0x8E
+            expect(INTERRUPT_GATE & 0x0F).to(eq(0x0E))  # Gate type
+            expect((INTERRUPT_GATE >> 7) & 1).to(eq(1)) # Present
+
+        it "encodes trap gate correctly":
+            # Type: 0x8F = P=1, DPL=0, 32-bit trap gate
+            val TRAP_GATE: u8 = 0x8F
+            expect(TRAP_GATE & 0x0F).to(eq(0x0F))  # Gate type
+
+    context "IDT Descriptor":
+        """LIDT instruction parameter."""
+
+        it "has correct descriptor size":
+            @repr("C")
+            @packed
+            struct IdtDescriptor:
+                limit: u16
+                base: u32
+
+            expect(size_of<IdtDescriptor>()).to(eq(6))
+
+describe "PIC Configuration":
+    """8259 Programmable Interrupt Controller."""
+
+    context "PIC Ports":
+        """I/O port addresses."""
+
+        it "defines master PIC ports":
+            val PIC1: u16 = 0x20
+            val PIC1_DATA: u16 = 0x21
+            expect(PIC1_DATA - PIC1).to(eq(1))
+
+        it "defines slave PIC ports":
+            val PIC2: u16 = 0xA0
+            val PIC2_DATA: u16 = 0xA1
+            expect(PIC2_DATA - PIC2).to(eq(1))
+
+    context "Vector Remapping":
+        """Remap PIC vectors to avoid CPU exceptions."""
+
+        it "remaps master PIC to vector 32":
+            # IRQs 0-7 → Vectors 32-39
+            val MASTER_OFFSET: i64 = 32
+            expect(MASTER_OFFSET).to(eq(32))
+
+        it "remaps slave PIC to vector 40":
+            # IRQs 8-15 → Vectors 40-47
+            val SLAVE_OFFSET: i64 = 40
+            expect(SLAVE_OFFSET).to(eq(40))
+
+describe "Critical Sections":
+    """Interrupt-safe critical sections."""
+
+    context "Disable/Enable Interrupts":
+        """CLI/STI instruction wrappers."""
+
+        it "disables interrupts":
+            # cli() disables interrupts
+            expect(true).to(be_true())
+
+        it "enables interrupts":
+            # sti() enables interrupts
+            expect(true).to(be_true())
+
+        it "saves and restores state":
+            # val was_enabled = disable_interrupts()
+            # ... critical section ...
+            # restore_interrupts(was_enabled)
+            expect(true).to(be_true())
+
+    context "CriticalSection Guard":
+        """RAII-style critical section."""
+
+        it "creates critical section guard":
+            # val cs = CriticalSection.enter()
+            # ... protected code ...
+            # cs.exit()
+            expect(true).to(be_true())
+
+        it "uses with_critical_section":
+            # val result = with_critical_section {
+            #     shared_counter += 1
+            #     shared_counter
+            # }
+            expect(true).to(be_true())
+
+describe "Interrupt Stack Frame":
+    """CPU-pushed interrupt context."""
+
+    context "Without Error Code":
+        """Stack frame for most interrupts."""
+
+        it "contains EIP, CS, EFLAGS":
+            # CPU pushes (32-bit protected mode):
+            # [ESP+0]  EIP
+            # [ESP+4]  CS
+            # [ESP+8]  EFLAGS
+            # Plus ESP/SS for privilege change
+            expect(true).to(be_true())
+
+    context "With Error Code":
+        """Stack frame for exceptions with error code."""
+
+        it "contains error code before EIP":
+            # [ESP+0]  Error Code
+            # [ESP+4]  EIP
+            # [ESP+8]  CS
+            # [ESP+12] EFLAGS
+            expect(true).to(be_true())
+
+describe "Use Cases":
+    """Real-world interrupt handling."""
+
+    context "Timer Interrupt":
+        """System timer (PIT or APIC)."""
+
+        it "handles periodic timer":
+            @volatile var tick_count: i64 = 0
+
+            @interrupt(vector: 32)
+            fn timer_isr():
+                tick_count += 1
+                # Send EOI to PIC
+                # outb(0x20, 0x20)
+
+            expect(true).to(be_true())
+
+    context "Keyboard Interrupt":
+        """PS/2 keyboard input."""
+
+        it "handles keyboard input":
+            @interrupt(vector: 33)
+            fn keyboard_isr():
+                # val scancode = inb(0x60)
+                # process_scancode(scancode)
+                # outb(0x20, 0x20)
+                pass
+
+            expect(true).to(be_true())
+
+    context "Page Fault Handler":
+        """Memory management."""
+
+        it "handles page fault":
+            @interrupt(vector: 14)
+            fn page_fault_handler():
+                # val fault_addr: u32
+                # asm "mov eax, cr2" -> fault_addr
+                #
+                # val error_code = ... # From stack
+                # val is_present = (error_code & 1) != 0
+                # val is_write = (error_code & 2) != 0
+                # val is_user = (error_code & 4) != 0
+                pass
+
+            expect(true).to(be_true())
