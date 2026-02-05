@@ -12,6 +12,10 @@
 # - @repr("transparent") - Same layout as single field
 # - @align(N)    - Minimum alignment (power of 2)
 #
+# Architecture-aware sizing:
+# - usize/isize scale with pointer size (8/16/32/64-bit)
+# - Alignment rules vary by architecture
+#
 # Example:
 #   @repr("C")
 #   @align(16)
@@ -21,10 +25,13 @@
 
 from hir_types import {HirType, SymbolId}
 from hir_definitions import {HirStruct, HirClass, HirField}
+from std.common.target import {TargetArch}
 
 export TypeLayout, FieldLayout, LayoutAttr, LayoutKind
 export compute_layout, compute_struct_layout, compute_field_offset
 export size_of_type, align_of_type
+export size_of_type_for_arch, align_of_type_for_arch
+export primitive_size_for_arch, primitive_align_for_arch
 
 # Layout kind (from @repr attribute)
 enum LayoutKind:
@@ -274,3 +281,188 @@ fn is_aligned(value: i64, align: i64) -> bool:
 # Check if alignment is power of 2
 fn is_power_of_two(n: i64) -> bool:
     n > 0 and (n & (n - 1)) == 0
+
+# --- Architecture-Aware Type Sizing ---
+
+# Primitive type sizes for a specific architecture
+fn primitive_size_for_arch(type_name: text, arch: TargetArch) -> i64?:
+    match type_name:
+        # Fixed-size types (same on all architectures)
+        case "i8" | "u8" | "bool": Some(1)
+        case "i16" | "u16": Some(2)
+        case "i32" | "u32" | "f32" | "char": Some(4)
+        case "i64" | "u64" | "f64": Some(8)
+        case "i128" | "u128": Some(16)
+        case "()" | "unit" | "void": Some(0)
+
+        # Pointer-sized types (vary by architecture)
+        case "usize" | "isize":
+            Some(arch.pointer_bytes())
+
+        # Pointer types
+        case _ if type_name.ends_with("*") or type_name.starts_with("&"):
+            Some(arch.pointer_bytes())
+
+        case _: None
+
+# Primitive type alignment for a specific architecture
+fn primitive_align_for_arch(type_name: text, arch: TargetArch) -> i64?:
+    match type_name:
+        # Fixed-alignment types
+        case "i8" | "u8" | "bool": Some(1)
+        case "i16" | "u16": Some(2)
+        case "i32" | "u32" | "f32" | "char": Some(4)
+        case "()" | "unit" | "void": Some(1)
+
+        # 64-bit types: alignment depends on architecture
+        case "i64" | "u64" | "f64":
+            match arch.bits():
+                case 8: Some(1)     # 8-bit: byte aligned
+                case 16: Some(2)    # 16-bit: word aligned
+                case 32: Some(4)    # 32-bit: 4-byte aligned (x86 ABI)
+                case 64: Some(8)    # 64-bit: natural alignment
+
+        # 128-bit types
+        case "i128" | "u128":
+            match arch.bits():
+                case 8 | 16: Some(2)
+                case 32: Some(4)
+                case 64: Some(16)
+
+        # Pointer-sized types
+        case "usize" | "isize":
+            Some(arch.pointer_bytes())
+
+        # Pointer types
+        case _ if type_name.ends_with("*") or type_name.starts_with("&"):
+            Some(arch.pointer_bytes())
+
+        case _: None
+
+# Get size of a type for a specific architecture
+fn size_of_type_for_arch(type_: HirType, arch: TargetArch) -> i64:
+    val name = type_.to_text()
+    primitive_size_for_arch(name, arch) ?? arch.pointer_bytes()
+
+# Get alignment of a type for a specific architecture
+fn align_of_type_for_arch(type_: HirType, arch: TargetArch) -> i64:
+    val name = type_.to_text()
+    primitive_align_for_arch(name, arch) ?? arch.pointer_bytes()
+
+# --- Architecture-Aware Struct Layout ---
+
+# Compute struct layout for a specific architecture
+fn compute_struct_layout_for_arch(fields: [HirField], attr: LayoutAttr, arch: TargetArch) -> TypeLayout:
+    match attr.layout_kind:
+        case LayoutKind.Packed:
+            compute_packed_layout_for_arch(fields, arch)
+        case LayoutKind.C:
+            compute_c_layout_for_arch(fields, attr, arch)
+        case LayoutKind.Transparent:
+            compute_transparent_layout_for_arch(fields, arch)
+        case LayoutKind.Simple:
+            compute_c_layout_for_arch(fields, attr, arch)
+
+fn compute_packed_layout_for_arch(fields: [HirField], arch: TargetArch) -> TypeLayout:
+    var field_layouts: [FieldLayout] = []
+    var offset: i64 = 0
+
+    for field in fields:
+        val size = size_of_type_for_arch(field.type_, arch)
+        field_layouts.push(FieldLayout(
+            name: field.name,
+            type_: field.type_,
+            offset: offset,
+            size: size,
+            align: 1
+        ))
+        offset = offset + size
+
+    TypeLayout(
+        size: offset,
+        align: 1,
+        fields: field_layouts,
+        stride: offset
+    )
+
+fn compute_c_layout_for_arch(fields: [HirField], attr: LayoutAttr, arch: TargetArch) -> TypeLayout:
+    var field_layouts: [FieldLayout] = []
+    var offset: i64 = 0
+    var max_align: i64 = 1
+
+    for field in fields:
+        val size = size_of_type_for_arch(field.type_, arch)
+        val align = align_of_type_for_arch(field.type_, arch)
+
+        if align > max_align:
+            max_align = align
+
+        offset = align_up(offset, align)
+
+        field_layouts.push(FieldLayout(
+            name: field.name,
+            type_: field.type_,
+            offset: offset,
+            size: size,
+            align: align
+        ))
+
+        offset = offset + size
+
+    val final_align = attr.effective_align(max_align)
+    val final_size = align_up(offset, final_align)
+
+    TypeLayout(
+        size: final_size,
+        align: final_align,
+        fields: field_layouts,
+        stride: final_size
+    )
+
+fn compute_transparent_layout_for_arch(fields: [HirField], arch: TargetArch) -> TypeLayout:
+    if fields.len() != 1:
+        return compute_c_layout_for_arch(fields, LayoutAttr.default_(), arch)
+
+    val field = fields[0]
+    val size = size_of_type_for_arch(field.type_, arch)
+    val align = align_of_type_for_arch(field.type_, arch)
+
+    TypeLayout(
+        size: size,
+        align: align,
+        fields: [FieldLayout(
+            name: field.name,
+            type_: field.type_,
+            offset: 0,
+            size: size,
+            align: align
+        )],
+        stride: size
+    )
+
+# --- Type Size Summary by Architecture ---
+
+# Get a summary of sizes for a type across all architectures
+struct TypeSizeSummary:
+    type_name: text
+    size_8bit: i64
+    size_16bit: i64
+    size_32bit: i64
+    size_64bit: i64
+    align_8bit: i64
+    align_16bit: i64
+    align_32bit: i64
+    align_64bit: i64
+
+fn get_type_size_summary(type_name: text) -> TypeSizeSummary:
+    TypeSizeSummary(
+        type_name: type_name,
+        size_8bit: primitive_size_for_arch(type_name, TargetArch.AVR) ?? 1,
+        size_16bit: primitive_size_for_arch(type_name, TargetArch.MSP430) ?? 2,
+        size_32bit: primitive_size_for_arch(type_name, TargetArch.X86) ?? 4,
+        size_64bit: primitive_size_for_arch(type_name, TargetArch.X86_64) ?? 8,
+        align_8bit: primitive_align_for_arch(type_name, TargetArch.AVR) ?? 1,
+        align_16bit: primitive_align_for_arch(type_name, TargetArch.MSP430) ?? 2,
+        align_32bit: primitive_align_for_arch(type_name, TargetArch.X86) ?? 4,
+        align_64bit: primitive_align_for_arch(type_name, TargetArch.X86_64) ?? 8
+    )
