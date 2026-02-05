@@ -131,6 +131,39 @@ impl CodegenTarget:
             case _: nil
 
 # ============================================================================
+# Build Mode
+# ============================================================================
+
+enum BuildMode:
+    """Build mode determines backend selection and optimization strategy."""
+    Debug      # Debug builds: fast compilation (Cranelift), debug symbols
+    Release    # Release builds: optimized runtime (LLVM), stripped
+    Test       # Test mode: no compilation (Interpreter)
+    Bootstrap  # Bootstrap builds: minimal dependencies (Cranelift)
+
+impl BuildMode:
+    fn to_text() -> text:
+        match self:
+            case Debug: "debug"
+            case Release: "release"
+            case Test: "test"
+            case Bootstrap: "bootstrap"
+
+    fn default_optimization() -> OptimizationLevel:
+        """Get default optimization level for build mode."""
+        match self:
+            case Debug: OptimizationLevel.Debug
+            case Release: OptimizationLevel.Speed
+            case Test: OptimizationLevel.None
+            case Bootstrap: OptimizationLevel.Size
+
+    fn prefer_llvm() -> bool:
+        """Whether this mode prefers LLVM over Cranelift."""
+        match self:
+            case Release: true  # LLVM for better optimization
+            case _: false       # Cranelift for fast compilation
+
+# ============================================================================
 # Optimization Level
 # ============================================================================
 
@@ -219,6 +252,18 @@ impl CompileOptions:
             verify_output: self.verify_output
         )
 
+    fn with_optimization(opt_level: OptimizationLevel) -> CompileOptions:
+        """Set optimization level."""
+        CompileOptions(
+            target: self.target,
+            opt_level: opt_level,
+            debug_info: self.debug_info,
+            emit_assembly: self.emit_assembly,
+            emit_llvm_ir: self.emit_llvm_ir,
+            emit_mir: self.emit_mir,
+            verify_output: self.verify_output
+        )
+
 # ============================================================================
 # Compilation Result
 # ============================================================================
@@ -289,19 +334,64 @@ class Backend:
     options: CompileOptions
 
     static fn for_target(target: CodegenTarget) -> Backend:
-        """Create backend for target with automatic backend selection."""
-        val kind = match target:
-            case _ if target.is_wasm():
-                BackendKind.Wasm
-            case _ if target.is_32bit():
-                BackendKind.Llvm  # LLVM for 32-bit
-            case _:
-                BackendKind.Cranelift  # Cranelift for 64-bit
+        """
+        Create backend for target with automatic backend selection (legacy API).
 
+        For new code, prefer for_target_and_mode() which considers build mode.
+        This method assumes Debug mode for backwards compatibility.
+        """
+        val kind = select_backend(target, nil)
         Backend(
             kind: kind,
             options: CompileOptions.default_options().with_target(target)
         )
+
+    static fn for_target_and_mode(target: CodegenTarget, mode: BuildMode) -> Backend:
+        """
+        Create backend for target and build mode with automatic backend selection.
+
+        This is the recommended way to create backends, as it considers both
+        the target architecture and build mode for optimal backend selection.
+
+        Examples:
+            Backend.for_target_and_mode(X86_64, Debug)     # → Cranelift
+            Backend.for_target_and_mode(X86_64, Release)   # → LLVM
+            Backend.for_target_and_mode(X86_64, Test)      # → Interpreter
+            Backend.for_target_and_mode(X86, Release)      # → LLVM (32-bit)
+        """
+        val kind = select_backend_with_mode(target, mode, nil)
+
+        Backend(
+            kind: kind,
+            options: CompileOptions.default_options()
+                .with_target(target)
+                .with_optimization(mode.default_optimization())
+        )
+
+    static fn for_target_mode_and_backend(
+        target: CodegenTarget,
+        mode: BuildMode,
+        backend: BackendKind
+    ) -> Result<Backend, CompileError>:
+        """
+        Create backend with explicit backend selection.
+
+        Validates that the backend supports the target. Use this when the user
+        explicitly specifies a backend via --backend flag.
+
+        Examples:
+            Backend.for_target_mode_and_backend(X86_64, Release, Cranelift) # OK
+            Backend.for_target_mode_and_backend(X86, Release, Cranelift)    # Error (32-bit)
+        """
+        if not backend.supports_target(target):
+            return Err(CompileError.target_unsupported(backend, target))
+
+        Ok(Backend(
+            kind: backend,
+            options: CompileOptions.default_options()
+                .with_target(target)
+                .with_optimization(mode.default_optimization())
+        ))
 
     static fn create(kind: BackendKind, options: CompileOptions) -> Result<Backend, CompileError>:
         """Create backend with explicit backend kind."""
@@ -417,17 +507,78 @@ fn format_mir_module(module: MirModule) -> text:
     output
 
 fn select_backend(target: CodegenTarget, preferred: BackendKind?) -> BackendKind:
-    """Select the best backend for a target."""
+    """
+    Select the best backend for a target (legacy API).
+    For new code, use select_backend_with_mode().
+    """
     if preferred.? and preferred.unwrap().supports_target(target):
         return preferred.unwrap()
 
-    # Auto-select based on target
+    # Auto-select based on target only (no build mode consideration)
     if target.is_wasm():
         BackendKind.Wasm
     elif target.is_32bit():
         BackendKind.Llvm
     else:
         BackendKind.Cranelift
+
+fn select_backend_with_mode(
+    target: CodegenTarget,
+    mode: BuildMode,
+    preferred: BackendKind?
+) -> BackendKind:
+    """
+    Select the best backend for target and build mode.
+
+    Selection strategy:
+    1. User preference (if specified and supported)
+    2. 32-bit targets → LLVM (only backend supporting 32-bit)
+    3. WebAssembly → Wasm backend
+    4. Test mode → Interpreter (no compilation overhead)
+    5. Debug mode → Cranelift (2.5x faster compilation)
+    6. Release mode → LLVM (15-30% faster runtime)
+    7. Bootstrap mode → Cranelift (minimal dependencies)
+
+    Examples:
+        select_backend_with_mode(X86, Release, nil)     # → LLVM (32-bit)
+        select_backend_with_mode(X86_64, Debug, nil)    # → Cranelift (fast compile)
+        select_backend_with_mode(X86_64, Release, nil)  # → LLVM (optimized runtime)
+        select_backend_with_mode(X86_64, Test, nil)     # → Interpreter (no compile)
+    """
+    # 1. User preference overrides everything
+    if preferred.?:
+        val backend = preferred.unwrap()
+        if backend.supports_target(target):
+            return backend
+        else:
+            # User requested unsupported backend, fall through to auto-select
+            ()
+
+    # 2. 32-bit targets always use LLVM (Cranelift doesn't support 32-bit)
+    if target.is_32bit():
+        return BackendKind.Llvm
+
+    # 3. WebAssembly targets use Wasm backend
+    if target.is_wasm():
+        return BackendKind.Wasm
+
+    # 4. Test mode uses Interpreter (no compilation overhead)
+    if mode == BuildMode.Test:
+        return BackendKind.Interpreter
+
+    # 5. For 64-bit targets, choose based on build mode
+    match mode:
+        case Debug:
+            BackendKind.Cranelift  # Fast compilation (2.5x vs LLVM)
+
+        case Release:
+            BackendKind.Llvm       # Better optimization (15-30% faster runtime)
+
+        case Bootstrap:
+            BackendKind.Cranelift  # Minimal dependencies
+
+        case Test:
+            BackendKind.Interpreter  # Already handled above, but included for completeness
 
 fn available_backends() -> [BackendKind]:
     """Get list of available backends."""

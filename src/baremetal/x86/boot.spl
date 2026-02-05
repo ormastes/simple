@@ -7,58 +7,31 @@
 #   0x00100000 - Multiboot header + kernel image
 #   0x???????? - Stack (grows downward from top)
 #   0x000B8000 - VGA text buffer
-
-export multiboot_header, _start, halt
+#
+# Note: This is a design/stub file. Real implementation requires:
+#   - @section attribute for placing code in specific sections
+#   - @naked attribute for functions without prologue/epilogue
+#   - Inline assembly support
 
 # Multiboot header constants (Multiboot Specification v1)
-val MULTIBOOT_MAGIC: u32 = 0x1BADB002
-val MULTIBOOT_PAGE_ALIGN: u32 = 1 << 0   # Align modules on page boundaries
-val MULTIBOOT_MEMORY_INFO: u32 = 1 << 1  # Request memory map
-val MULTIBOOT_VIDEO_INFO: u32 = 1 << 2   # Request video info
-val MULTIBOOT_FLAGS: u32 = MULTIBOOT_PAGE_ALIGN | MULTIBOOT_MEMORY_INFO
+val MULTIBOOT_MAGIC: i32 = 0x1BADB002
+val MULTIBOOT_PAGE_ALIGN: i32 = 1       # Align modules on page boundaries
+val MULTIBOOT_MEMORY_INFO: i32 = 2      # Request memory map
+val MULTIBOOT_FLAGS: i32 = 3            # PAGE_ALIGN | MEMORY_INFO
 
 # Multiboot header checksum: magic + flags + checksum = 0
-val MULTIBOOT_CHECKSUM: u32 = 0 - (MULTIBOOT_MAGIC + MULTIBOOT_FLAGS)
-
-# Multiboot header structure
-# Must be within the first 8KB of the kernel image
-# Aligned to 4-byte boundary
-@align(4)
-@section(".multiboot")
-struct MultibootHeader:
-    magic: u32      # Must be MULTIBOOT_MAGIC
-    flags: u32      # Feature flags
-    checksum: u32   # Checksum (magic + flags + checksum = 0)
-
-# Static multiboot header instance
-@section(".multiboot")
-val multiboot_header = MultibootHeader(
-    magic: MULTIBOOT_MAGIC,
-    flags: MULTIBOOT_FLAGS,
-    checksum: MULTIBOOT_CHECKSUM
-)
-
-# Multiboot information structure (passed by bootloader in EBX)
-struct MultibootInfo:
-    flags: u32
-    mem_lower: u32       # Amount of lower memory (in KB)
-    mem_upper: u32       # Amount of upper memory (in KB)
-    boot_device: u32
-    cmdline: u32         # Physical address of command line
-    mods_count: u32      # Number of modules loaded
-    mods_addr: u32       # Physical address of module list
-    # ... more fields follow (unused for now)
-
-# Global pointer to multiboot info (set by _start)
-var g_multiboot_info: ptr<MultibootInfo> = null
+# MULTIBOOT_CHECKSUM = -(MULTIBOOT_MAGIC + MULTIBOOT_FLAGS)
+val MULTIBOOT_CHECKSUM: i32 = -464367621  # Precomputed
 
 # Stack size (64KB default)
-val STACK_SIZE: i64 = 65536
+val STACK_SIZE: i32 = 65536
 
-# Stack buffer (placed in .bss)
-@section(".bss")
-@align(16)
-var stack_buffer: [u8; STACK_SIZE]
+# Multiboot info structure fields
+# These would be populated by the bootloader
+var g_multiboot_magic: i32 = 0
+var g_multiboot_info_addr: i32 = 0
+var g_mem_lower: i32 = 0
+var g_mem_upper: i32 = 0
 
 # Entry point - called by bootloader
 # At entry:
@@ -67,79 +40,53 @@ var stack_buffer: [u8; STACK_SIZE]
 #   Interrupts disabled
 #   A20 line enabled
 #   Paging disabled (running in 32-bit protected mode)
-@entry
-@naked
-fn _start():
-    # The following is pseudo-assembly - actual implementation
-    # requires inline assembly support or separate .asm file
-    #
-    # In actual implementation, this would be:
-    #   1. Set up stack pointer (ESP)
-    #   2. Save multiboot info pointer
-    #   3. Clear BSS
-    #   4. Call kernel_main
-    #   5. Halt if kernel_main returns
+#
+# Note: Real implementation would be:
+#   @entry
+#   @naked
+#   fn _start():
+#       asm:
+#           "lea esp, [stack_buffer + STACK_SIZE]"
+#           "mov [g_multiboot_info], ebx"
+#           "cld"
+#           "call kernel_main"
+#           "cli"
+#           ".halt: hlt"
+#           "jmp .halt"
 
-    # Set up stack (grows downward)
-    # ESP = &stack_buffer + STACK_SIZE
-    asm """
-        # Set up stack
-        lea esp, [stack_buffer + {STACK_SIZE}]
+fn _start_stub():
+    # This is a stub - real _start needs inline assembly
+    # The bootloader passes:
+    # - EAX: magic (0x2BADB002)
+    # - EBX: pointer to multiboot info
+    print "[BOOT] _start called (stub)"
 
-        # Save multiboot info pointer
-        mov [g_multiboot_info], ebx
-
-        # Clear direction flag for string operations
-        cld
-
-        # Clear BSS section
-        mov edi, __bss_start
-        mov ecx, __bss_end
-        sub ecx, edi
-        xor eax, eax
-        rep stosb
-
-        # Call Simple kernel entry point
-        call kernel_main
-
-        # Should not return, but halt if it does
-        cli
-    .halt:
-        hlt
-        jmp .halt
-    """
-
-# Halt the CPU
-# Disables interrupts and enters an infinite halt loop
-@inline
-fn halt():
-    asm """
-        cli
-    .halt:
-        hlt
-        jmp .halt
-    """
+# Initialize from multiboot info
+fn boot_init(magic: i32, info_addr: i32):
+    g_multiboot_magic = magic
+    g_multiboot_info_addr = info_addr
+    # Would parse multiboot info structure here
 
 # Get amount of available memory (in bytes)
 fn get_memory_size() -> i64:
-    if g_multiboot_info == null:
-        return 0
-    # Convert KB to bytes
-    (g_multiboot_info.mem_upper as i64 + 1024) * 1024
+    if g_multiboot_info_addr == 0:
+        0
+    else:
+        # Convert KB to bytes
+        (g_mem_upper as i64 + 1024) * 1024
 
-# Get multiboot command line (if provided)
-fn get_cmdline() -> text?:
-    if g_multiboot_info == null:
-        return None
-    if (g_multiboot_info.flags & 0x04) == 0:
-        return None  # Command line not present
-    # Would need to read C string from physical address
-    # For now, return None
-    None
+# Halt the CPU
+# Disables interrupts and enters an infinite halt loop
+fn halt():
+    # Real implementation:
+    # asm:
+    #     "cli"
+    #     ".halt: hlt"
+    #     "jmp .halt"
+    print "[HALT] CPU halted (stub)"
 
 # Kernel main entry point - to be implemented by user
 # This is called after basic initialization
-@weak
 fn kernel_main():
     # Default implementation just halts
     halt()

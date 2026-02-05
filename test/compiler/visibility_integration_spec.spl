@@ -1,0 +1,244 @@
+# Integration Tests for Module Visibility System
+
+use compiler.visibility.{filename_to_type_name, type_matches_filename, effective_visibility}
+use compiler.visibility_checker.{VisibilityChecker, VisibilityWarning}
+use compiler.hir_types.{Symbol, SymbolId, SymbolKind, ScopeId}
+use lexer.Span
+
+describe "Module Visibility Integration":
+    """
+    ## End-to-End Visibility System Tests
+
+    Tests the complete visibility system from filename matching
+    through HIR tracking to warning generation.
+    """
+
+    it "computes correct visibility for filename match":
+        # TestCase in test_case.spl should be public
+        val is_public = effective_visibility("TestCase", "test_case.spl", false)
+        expect is_public
+
+    it "computes correct visibility for non-match":
+        # Helper in test_case.spl should be private
+        val is_public = effective_visibility("Helper", "test_case.spl", false)
+        expect not is_public
+
+    it "explicit pub overrides filename match":
+        # Utils doesn't match test_case.spl but has pub keyword
+        val is_public = effective_visibility("Utils", "test_case.spl", true)
+        expect is_public
+
+    it "symbol tracks defining module":
+        # Create a symbol with module info
+        val symbol = Symbol(
+            id: SymbolId(id: 1),
+            name: "TestCase",
+            kind: SymbolKind.Class,
+            type_: nil,
+            scope: ScopeId(id: 0),
+            span: Span.empty(),
+            is_public: true,
+            is_mutable: false,
+            defining_module: Some("test_case.spl")
+        )
+
+        expect symbol.defining_module.?
+        expect symbol.defining_module.unwrap() == "test_case.spl"
+
+    it "visibility checker allows same-module access":
+        val checker = VisibilityChecker.new("test_case.spl")
+
+        val symbol = Symbol(
+            id: SymbolId(id: 1),
+            name: "Helper",
+            kind: SymbolKind.Class,
+            type_: nil,
+            scope: ScopeId(id: 0),
+            span: Span.empty(),
+            is_public: false,
+            is_mutable: false,
+            defining_module: Some("test_case.spl")
+        )
+
+        val warning = checker.check_symbol_access(symbol, "test_case.spl", Span.empty())
+        expect not warning.?
+
+    it "visibility checker allows public cross-module access":
+        val checker = VisibilityChecker.new("other.spl")
+
+        val symbol = Symbol(
+            id: SymbolId(id: 1),
+            name: "TestCase",
+            kind: SymbolKind.Class,
+            type_: nil,
+            scope: ScopeId(id: 0),
+            span: Span.empty(),
+            is_public: true,
+            is_mutable: false,
+            defining_module: Some("test_case.spl")
+        )
+
+        val warning = checker.check_symbol_access(symbol, "test_case.spl", Span.empty())
+        expect not warning.?
+
+    it "visibility checker warns on private cross-module access":
+        val checker = VisibilityChecker.new("other.spl")
+
+        val symbol = Symbol(
+            id: SymbolId(id: 1),
+            name: "Helper",
+            kind: SymbolKind.Class,
+            type_: nil,
+            scope: ScopeId(id: 0),
+            span: Span.empty(),
+            is_public: false,
+            is_mutable: false,
+            defining_module: Some("test_case.spl")
+        )
+
+        val warning = checker.check_symbol_access(symbol, "test_case.spl", Span.empty())
+        expect warning.?
+
+        val w = warning.unwrap()
+        expect w.code == "W0401"
+        expect w.symbol_name == "Helper"
+        expect w.accessing_module == "other.spl"
+        expect w.defining_module == "test_case.spl"
+
+    it "warning formats correctly":
+        val warning = VisibilityWarning.new(
+            "Helper",
+            "other.spl",
+            "test_case.spl",
+            Span.empty()
+        )
+
+        val formatted = warning.format()
+        expect formatted.contains("WARNING[W0401]")
+        expect formatted.contains("Helper")
+        expect formatted.contains("private")
+
+describe "Filename Matching Edge Cases":
+    """
+    ## Comprehensive Filename Matching Tests
+
+    Tests all edge cases for snake_case to PascalCase conversion.
+    """
+
+    it "handles multi-word names":
+        val result = filename_to_type_name("http_client_pool.spl")
+        expect result == "HttpClientPool"
+
+    it "handles single word":
+        val result = filename_to_type_name("io.spl")
+        expect result == "Io"
+
+    it "handles two words":
+        val result = filename_to_type_name("test_case.spl")
+        expect result == "TestCase"
+
+    it "handles without extension":
+        val result = filename_to_type_name("string_interner")
+        expect result == "StringInterner"
+
+    it "matches correctly":
+        expect type_matches_filename("TestCase", "test_case.spl")
+        expect type_matches_filename("HttpClient", "http_client.spl")
+        expect type_matches_filename("Io", "io.spl")
+
+    it "rejects non-matches":
+        expect not type_matches_filename("Helper", "test_case.spl")
+        expect not type_matches_filename("TestCase", "other.spl")
+        expect not type_matches_filename("HttpClient", "test_case.spl")
+
+describe "Visibility Computation":
+    """
+    ## Effective Visibility Computation
+
+    Tests the complete visibility computation logic.
+    """
+
+    it "pub keyword always makes public":
+        # Even if name doesn't match, pub makes it public
+        expect effective_visibility("Helper", "test_case.spl", true)
+        expect effective_visibility("Anything", "other.spl", true)
+
+    it "filename match makes public":
+        # Name matches filename -> public (even without pub)
+        expect effective_visibility("TestCase", "test_case.spl", false)
+        expect effective_visibility("Other", "other.spl", false)
+
+    it "no pub and no match is private":
+        # Doesn't match, no pub -> private
+        expect not effective_visibility("Helper", "test_case.spl", false)
+        expect not effective_visibility("Utils", "other.spl", false)
+
+    it "works for various file patterns":
+        # Various filename patterns
+        expect effective_visibility("HttpClient", "http_client.spl", false)
+        expect effective_visibility("StringInterner", "string_interner.spl", false)
+        expect not effective_visibility("Helper", "http_client.spl", false)
+
+describe "Multi-Module Scenario":
+    """
+    ## Realistic Multi-Module Test
+
+    Simulates a realistic scenario with multiple modules.
+    """
+
+    it "module A can use its own private types":
+        val checker = VisibilityChecker.new("module_a.spl")
+
+        val private_sym = Symbol(
+            id: SymbolId(id: 1),
+            name: "InternalHelper",
+            kind: SymbolKind.Class,
+            type_: nil,
+            scope: ScopeId(id: 0),
+            span: Span.empty(),
+            is_public: false,
+            is_mutable: false,
+            defining_module: Some("module_a.spl")
+        )
+
+        # Same module -> OK
+        val warning = checker.check_symbol_access(private_sym, "module_a.spl", Span.empty())
+        expect not warning.?
+
+    it "module B cannot use module A private types":
+        val checker = VisibilityChecker.new("module_b.spl")
+
+        val private_sym = Symbol(
+            id: SymbolId(id: 1),
+            name: "InternalHelper",
+            kind: SymbolKind.Class,
+            type_: nil,
+            scope: ScopeId(id: 0),
+            span: Span.empty(),
+            is_public: false,
+            is_mutable: false,
+            defining_module: Some("module_a.spl")
+        )
+
+        # Different module, private -> Warning
+        val warning = checker.check_symbol_access(private_sym, "module_a.spl", Span.empty())
+        expect warning.?
+
+    it "module B can use module A public types":
+        val checker = VisibilityChecker.new("module_b.spl")
+
+        val public_sym = Symbol(
+            id: SymbolId(id: 2),
+            name: "PublicAPI",
+            kind: SymbolKind.Class,
+            type_: nil,
+            scope: ScopeId(id: 0),
+            span: Span.empty(),
+            is_public: true,
+            is_mutable: false,
+            defining_module: Some("module_a.spl")
+        )
+
+        # Different module, public -> OK
+        val warning = checker.check_symbol_access(public_sym, "module_a.spl", Span.empty())
+        expect not warning.?

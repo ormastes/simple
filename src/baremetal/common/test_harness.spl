@@ -4,129 +4,104 @@
 # Outputs results via serial port for host parsing.
 #
 # Usage in bare-metal tests:
-#   from baremetal.common.test_harness import {test_harness, test, assert_eq}
-#
-#   fn kernel_main():
-#       test_harness.run():
-#           test("basic arithmetic"):
-#               assert_eq(1 + 1, 2)
-#           test("memory access"):
-#               val x = 42
-#               assert_eq(x, 42)
-
-export TestHarness, test_harness, test, assert_true, assert_false, assert_eq, assert_ne
-export test_pass, test_fail, test_end
-
-# Import serial output
-# Note: This is conditionally compiled - on hosted systems, uses print()
-@cfg("target_os", "none")
-from baremetal.x86.serial import {serial_println, serial_print, serial_init}
-
-@cfg("target_os", "none")
-from baremetal.x86.io import {outb}
+#   test_harness_init()
+#   test_start("my test")
+#   if condition:
+#       test_pass("my test")
+#   else:
+#       test_fail("my test", "error message")
+#   test_end()
 
 # Test result tracking
-struct TestStats:
-    total: i64
-    passed: i64
-    failed: i64
-    current_test: text
-
-var g_stats: TestStats = TestStats(total: 0, passed: 0, failed: 0, current_test: "")
+var g_stats_total: i32 = 0
+var g_stats_passed: i32 = 0
+var g_stats_failed: i32 = 0
+var g_current_test: text = ""
 var g_initialized: bool = false
 
+# Port I/O stub (for QEMU exit)
+fn outb(port: i32, value: i32):
+    pass
+
+# Output a line (uses print for now, would use serial on bare-metal)
+fn output(s: text):
+    print s
+
 # Initialize test harness
-fn init_harness():
+fn test_harness_init():
     if g_initialized:
         return
-    @cfg("target_os", "none"):
-        serial_init()
     g_initialized = true
     output("[TEST START]")
 
-# Output a line (serial on bare-metal, print on hosted)
-fn output(s: text):
-    @cfg("target_os", "none"):
-        serial_println(s)
-    @cfg("not", "target_os", "none"):
-        print s
-
 # Start a test
 fn test_start(name: text):
-    g_stats.current_test = name
-    g_stats.total = g_stats.total + 1
+    g_current_test = name
+    g_stats_total = g_stats_total + 1
 
 # Mark current test as passed
 fn test_pass(name: text):
-    g_stats.passed = g_stats.passed + 1
+    g_stats_passed = g_stats_passed + 1
     output("[PASS] {name}")
 
 # Mark current test as failed
 fn test_fail(name: text, message: text):
-    g_stats.failed = g_stats.failed + 1
+    g_stats_failed = g_stats_failed + 1
     output("[FAIL] {name}: {message}")
 
 # End test run and output summary
 fn test_end():
-    output("[TEST END] passed={g_stats.passed} failed={g_stats.failed}")
+    output("[TEST END] passed={g_stats_passed} failed={g_stats_failed}")
 
     # Exit QEMU with appropriate exit code
-    @cfg("target_os", "none"):
-        # isa-debug-exit: writing to port 0xF4 exits QEMU
-        # Exit code = (value << 1) | 1
-        # So writing 0 gives exit code 1 (success), 1 gives exit code 3 (failure)
-        val exit_value: u8 = if g_stats.failed > 0: 1 else: 0
-        outb(0xF4, exit_value)
+    # isa-debug-exit: writing to port 0xF4 exits QEMU
+    # Exit code = (value << 1) | 1
+    # So writing 0 gives exit code 1 (success), 1 gives exit code 3 (failure)
+    val exit_value = if g_stats_failed > 0: 1 else: 0
+    outb(0xF4, exit_value)
 
 # Assert that a condition is true
-fn assert_true(condition: bool, message: text):
+fn assert_true(condition: bool, message: text) -> bool:
     if not condition:
-        test_fail(g_stats.current_test, "assertion failed: {message}")
-        return false
-    true
+        test_fail(g_current_test, "assertion failed: {message}")
+        false
+    else:
+        true
 
 # Assert that a condition is false
-fn assert_false(condition: bool, message: text):
+fn assert_false(condition: bool, message: text) -> bool:
     assert_true(not condition, "expected false: {message}")
 
-# Assert equality
-fn assert_eq<T>(actual: T, expected: T, message: text) where T: Eq + Show:
+# Assert equality for i32
+fn assert_eq_i32(actual: i32, expected: i32, message: text) -> bool:
     if actual != expected:
-        test_fail(g_stats.current_test, "{message}: expected {expected}, got {actual}")
-        return false
-    true
+        test_fail(g_current_test, "{message}: expected {expected}, got {actual}")
+        false
+    else:
+        true
 
-# Assert inequality
-fn assert_ne<T>(actual: T, expected: T, message: text) where T: Eq + Show:
+# Assert inequality for i32
+fn assert_ne_i32(actual: i32, expected: i32, message: text) -> bool:
     if actual == expected:
-        test_fail(g_stats.current_test, "{message}: expected not equal to {expected}")
-        return false
-    true
+        test_fail(g_current_test, "{message}: expected not equal to {expected}")
+        false
+    else:
+        true
 
-# Test harness class for fluent API
-class TestHarness:
-    name: text
-
-impl TestHarness:
-    static fn new(name: text) -> TestHarness:
-        init_harness()
-        output("# {name}")
-        TestHarness(name: name)
-
-    # Run a test block
-    me run(test_fn: fn()):
-        test_fn()
-        test_end()
-
-# DSL for writing tests
-# Usage:
-#   test "my test":
-#       assert_eq(1 + 1, 2)
-fn test(name: text, body: fn() -> bool):
+# Run a simple test
+fn run_test(name: text, test_passed: bool):
     test_start(name)
-    val result = body()
-    if result:
+    if test_passed:
         test_pass(name)
+    else:
+        test_fail(name, "test returned false")
 
-# Global test harness for convenience
-var test_harness: TestHarness = TestHarness(name: "Bare-Metal Tests")
+# Example test runner
+fn run_all_tests():
+    test_harness_init()
+
+    # Example tests would go here
+    run_test("example_pass", true)
+    run_test("example_fail", false)
+
+    test_end()

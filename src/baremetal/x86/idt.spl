@@ -1,262 +1,157 @@
 # x86 Interrupt Descriptor Table (IDT)
 #
-# Sets up and loads the Interrupt Descriptor Table for x86 protected mode.
-# Handles CPU exceptions and hardware interrupts.
+# Sets up the IDT for interrupt handling.
+# Handles CPU exceptions, hardware interrupts (IRQs), and software interrupts.
 #
-# IDT Structure:
-#   - 256 entries (vectors 0-255)
-#   - Vectors 0-31: CPU exceptions
-#   - Vectors 32-255: Hardware/software interrupts
-#
-# Usage:
-#   idt_init()
-#   idt_set_handler(32, timer_isr_wrapper)
-#   idt_load()
+# Note: This is a stub file. Real implementation requires:
+#   - @repr(C) for struct layout control
+#   - @packed attribute
+#   - Inline assembly for lidt instruction
+#   - @interrupt attribute for handler functions
 
-from io import {outb}
+# IDT Entry structure (8 bytes for 32-bit, 16 bytes for 64-bit)
+# Real implementation would use:
+#   @repr(C)
+#   @packed
+#   struct IdtEntry:
+#       offset_low: u16      # Lower 16 bits of handler address
+#       selector: u16        # Code segment selector
+#       zero: u8             # Reserved, must be zero
+#       type_attr: u8        # Gate type and attributes
+#       offset_high: u16     # Upper 16 bits of handler address
 
-export IdtEntry, IdtDescriptor, idt_init, idt_load, idt_set_handler
-export KERNEL_CODE_SELECTOR
+# IDT Gate types
+val IDT_GATE_TASK: i32 = 0x05       # Task gate
+val IDT_GATE_INT16: i32 = 0x06      # 16-bit interrupt gate
+val IDT_GATE_TRAP16: i32 = 0x07     # 16-bit trap gate
+val IDT_GATE_INT32: i32 = 0x0E      # 32-bit interrupt gate
+val IDT_GATE_TRAP32: i32 = 0x0F     # 32-bit trap gate
 
-# Code segment selector (from GDT)
-val KERNEL_CODE_SELECTOR: u16 = 0x08
+# IDT Attributes
+val IDT_ATTR_PRESENT: i32 = 0x80    # Segment present
+val IDT_ATTR_RING0: i32 = 0x00      # Ring 0 (kernel)
+val IDT_ATTR_RING3: i32 = 0x60      # Ring 3 (user)
 
-# IDT entry types
-val IDT_INTERRUPT_GATE: u8 = 0x8E  # P=1, DPL=0, 32-bit interrupt gate
-val IDT_TRAP_GATE: u8 = 0x8F       # P=1, DPL=0, 32-bit trap gate
-val IDT_USER_INT: u8 = 0xEE        # P=1, DPL=3, 32-bit interrupt gate (user-callable)
+# Exception vectors (CPU-defined)
+val EXCEPTION_DIVIDE_ERROR: i32 = 0
+val EXCEPTION_DEBUG: i32 = 1
+val EXCEPTION_NMI: i32 = 2
+val EXCEPTION_BREAKPOINT: i32 = 3
+val EXCEPTION_OVERFLOW: i32 = 4
+val EXCEPTION_BOUND_RANGE: i32 = 5
+val EXCEPTION_INVALID_OPCODE: i32 = 6
+val EXCEPTION_DEVICE_NOT_AVAIL: i32 = 7
+val EXCEPTION_DOUBLE_FAULT: i32 = 8
+val EXCEPTION_COPROCESSOR_SEG: i32 = 9
+val EXCEPTION_INVALID_TSS: i32 = 10
+val EXCEPTION_SEGMENT_NOT_PRESENT: i32 = 11
+val EXCEPTION_STACK_FAULT: i32 = 12
+val EXCEPTION_GENERAL_PROTECTION: i32 = 13
+val EXCEPTION_PAGE_FAULT: i32 = 14
+val EXCEPTION_X87_FPU: i32 = 16
+val EXCEPTION_ALIGNMENT_CHECK: i32 = 17
+val EXCEPTION_MACHINE_CHECK: i32 = 18
+val EXCEPTION_SIMD_FP: i32 = 19
 
-# Maximum interrupt vectors
-val IDT_ENTRIES: i64 = 256
+# Hardware IRQ vectors (remapped from 8259 PIC)
+val IRQ_BASE: i32 = 32              # First IRQ vector
+val IRQ_TIMER: i32 = 32             # PIT timer
+val IRQ_KEYBOARD: i32 = 33          # PS/2 keyboard
+val IRQ_CASCADE: i32 = 34           # Cascade for slave PIC
+val IRQ_COM2: i32 = 35              # COM2 serial
+val IRQ_COM1: i32 = 36              # COM1 serial
+val IRQ_LPT2: i32 = 37              # LPT2
+val IRQ_FLOPPY: i32 = 38            # Floppy disk
+val IRQ_LPT1: i32 = 39              # LPT1 / spurious
+val IRQ_RTC: i32 = 40               # Real-time clock
+val IRQ_FREE1: i32 = 41             # Free
+val IRQ_FREE2: i32 = 42             # Free
+val IRQ_FREE3: i32 = 43             # Free
+val IRQ_MOUSE: i32 = 44             # PS/2 mouse
+val IRQ_FPU: i32 = 45               # FPU
+val IRQ_ATA_PRIMARY: i32 = 46       # Primary ATA
+val IRQ_ATA_SECONDARY: i32 = 47     # Secondary ATA
 
-# IDT entry structure (8 bytes for 32-bit mode)
-@repr("C")
-@packed
-struct IdtEntry:
-    offset_low: u16      # Offset bits 0-15
-    selector: u16        # Code segment selector
-    zero: u8             # Unused, set to 0
-    type_attr: u8        # Type and attributes
-    offset_high: u16     # Offset bits 16-31
-
-impl IdtEntry:
-    # Create a null (empty) IDT entry
-    static fn null() -> IdtEntry:
-        IdtEntry(
-            offset_low: 0,
-            selector: 0,
-            zero: 0,
-            type_attr: 0,
-            offset_high: 0
-        )
-
-    # Create an interrupt gate entry
-    static fn interrupt_gate(handler: u32, selector: u16, type_attr: u8) -> IdtEntry:
-        IdtEntry(
-            offset_low: (handler & 0xFFFF) as u16,
-            selector: selector,
-            zero: 0,
-            type_attr: type_attr,
-            offset_high: ((handler >> 16) & 0xFFFF) as u16
-        )
-
-    # Check if entry is present
-    fn is_present() -> bool:
-        (self.type_attr & 0x80) != 0
-
-# IDT descriptor (6 bytes) - passed to LIDT instruction
-@repr("C")
-@packed
-struct IdtDescriptor:
-    limit: u16           # Size of IDT - 1
-    base: u32            # Linear address of IDT
-
-# The actual IDT (256 entries)
-@align(8)
-var idt: [IdtEntry; IDT_ENTRIES]
-
-# IDT descriptor
-var idt_desc: IdtDescriptor = IdtDescriptor(limit: 0, base: 0)
-
-# Default handlers for unhandled interrupts
-var default_handlers: [fn(); IDT_ENTRIES]
-
-# Initialize the IDT with default handlers
-fn idt_init():
-    # Clear all entries
-    for i in 0..IDT_ENTRIES:
-        idt[i] = IdtEntry.null()
-
-    # Set up exception handlers (vectors 0-31)
-    setup_exception_handlers()
-
-    # Set up IDT descriptor
-    idt_desc.limit = (size_of<[IdtEntry; IDT_ENTRIES]>() - 1) as u16
-    idt_desc.base = addr_of(idt) as u32
-
-# Load the IDT
-fn idt_load():
-    asm """
-        lidt [idt_desc]
-    """
-
-# Set a handler for a specific interrupt vector
-fn idt_set_handler(vector: i64, handler: u32):
-    if vector < 0 or vector >= IDT_ENTRIES:
-        return
-    idt[vector] = IdtEntry.interrupt_gate(
-        handler,
-        KERNEL_CODE_SELECTOR,
-        IDT_INTERRUPT_GATE
-    )
-
-# Set a user-callable handler (can be invoked from ring 3)
-fn idt_set_user_handler(vector: i64, handler: u32):
-    if vector < 0 or vector >= IDT_ENTRIES:
-        return
-    idt[vector] = IdtEntry.interrupt_gate(
-        handler,
-        KERNEL_CODE_SELECTOR,
-        IDT_USER_INT
-    )
-
-# Setup exception handlers (vectors 0-31)
-fn setup_exception_handlers():
-    # These would be set to actual handler addresses
-    # For now, they point to a generic exception handler
-    #
-    # idt_set_handler(0, exception_divide_error)
-    # idt_set_handler(1, exception_debug)
-    # idt_set_handler(2, exception_nmi)
-    # idt_set_handler(3, exception_breakpoint)
-    # ... etc
+# Port I/O stubs
+fn outb(port: i32, value: i32):
     pass
 
-# Interrupt stack frame (pushed by CPU)
-@repr("C")
-struct InterruptFrame:
-    # Pushed by interrupt stub
-    gs: u32
-    fs: u32
-    es: u32
-    ds: u32
-    edi: u32
-    esi: u32
-    ebp: u32
-    esp_: u32   # Placeholder (pusha pushes esp but it's not useful)
-    ebx: u32
-    edx: u32
-    ecx: u32
-    eax: u32
+# IDT storage (256 entries)
+# Real implementation: val idt_entries: [IdtEntry; 256]
 
-    # Pushed by stub or CPU
-    int_no: u32
-    error_code: u32
+# Initialize IDT
+fn idt_init():
+    # Set up exception handlers (vectors 0-31)
+    # idt_set_entry(EXCEPTION_DIVIDE_ERROR, handler_addr, GDT_CODE_SELECTOR, IDT_GATE_INT32 | IDT_ATTR_PRESENT)
+    # ... for each exception
 
-    # Pushed by CPU
-    eip: u32
-    cs: u32
-    eflags: u32
-    # These are only present on privilege level change
-    user_esp: u32
-    user_ss: u32
+    # Remap PIC (8259) to avoid conflicts with CPU exceptions
+    pic_remap(IRQ_BASE, IRQ_BASE + 8)
 
-# Generic exception handler (called from assembly stubs)
-fn generic_exception_handler(frame: ptr<InterruptFrame>):
-    val int_no = frame.int_no
-    val error = frame.error_code
+    # Set up IRQ handlers (vectors 32-47)
+    # idt_set_entry(IRQ_TIMER, timer_handler, GDT_CODE_SELECTOR, IDT_GATE_INT32 | IDT_ATTR_PRESENT)
+    # ... for each IRQ
 
-    # Handle specific exceptions
-    match int_no:
-        case 0:
-            panic("Division by zero")
-        case 6:
-            panic("Invalid opcode at EIP={frame.eip:#x}")
-        case 8:
-            panic("Double fault!")
-        case 13:
-            panic("General protection fault: error={error:#x}")
-        case 14:
-            # Page fault - get faulting address from CR2
-            var cr2: u32 = 0
-            asm """
-                mov eax, cr2
-                mov {cr2}, eax
-            """
-            panic("Page fault at {cr2:#x}, error={error:#x}")
-        case _:
-            panic("Unhandled exception {int_no}")
+    # Load IDT
+    # idt_load()
+    print "[IDT] Initialized (stub)"
 
-# PIC (8259) constants
-val PIC1: u16 = 0x20         # Master PIC command port
-val PIC1_DATA: u16 = 0x21    # Master PIC data port
-val PIC2: u16 = 0xA0         # Slave PIC command port
-val PIC2_DATA: u16 = 0xA1    # Slave PIC data port
-val PIC_EOI: u8 = 0x20       # End of interrupt
+# Set an IDT entry
+fn idt_set_entry(vector: i32, handler_addr: i32, selector: i32, type_attr: i32):
+    # Would set fields in idt_entries[vector]
+    pass
 
-# Remap the PIC to vectors 32-47
-# (Avoids conflict with CPU exceptions 0-31)
-fn pic_remap():
+# Load the IDT register
+fn idt_load():
+    # Real implementation:
+    # asm:
+    #     "lidt [idt_ptr]"
+    pass
+
+# Remap the 8259 PIC to new interrupt vectors
+fn pic_remap(offset1: i32, offset2: i32):
     # Save masks
-    val mask1 = inb(PIC1_DATA)
-    val mask2 = inb(PIC2_DATA)
+    # val mask1 = inb(0x21)
+    # val mask2 = inb(0xA1)
 
     # Start initialization sequence
-    outb(PIC1, 0x11)  # ICW1: Initialize + ICW4 needed
-    outb(PIC2, 0x11)
-    io_wait()
+    outb(0x20, 0x11)  # ICW1: Initialize + ICW4 needed
+    outb(0xA0, 0x11)
 
-    # Set vector offsets
-    outb(PIC1_DATA, 0x20)  # ICW2: Master PIC vector offset (32)
-    outb(PIC2_DATA, 0x28)  # ICW2: Slave PIC vector offset (40)
-    io_wait()
+    # ICW2: Vector offsets
+    outb(0x21, offset1)  # Master PIC vector offset
+    outb(0xA1, offset2)  # Slave PIC vector offset
 
-    # Configure cascading
-    outb(PIC1_DATA, 0x04)  # ICW3: Tell master about slave at IRQ2
-    outb(PIC2_DATA, 0x02)  # ICW3: Tell slave its cascade identity
-    io_wait()
+    # ICW3: Master/Slave wiring
+    outb(0x21, 0x04)  # Slave on IRQ2
+    outb(0xA1, 0x02)  # Slave ID
 
-    # Set 8086 mode
-    outb(PIC1_DATA, 0x01)  # ICW4: 8086 mode
-    outb(PIC2_DATA, 0x01)
-    io_wait()
+    # ICW4: 8086 mode
+    outb(0x21, 0x01)
+    outb(0xA1, 0x01)
 
-    # Restore masks
-    outb(PIC1_DATA, mask1)
-    outb(PIC2_DATA, mask2)
+    # Restore masks (or unmask all)
+    outb(0x21, 0x00)  # Unmask all on master
+    outb(0xA1, 0x00)  # Unmask all on slave
 
-# Send end-of-interrupt signal
-fn pic_send_eoi(irq: i64):
+# Send End-of-Interrupt to PIC
+fn pic_send_eoi(irq: i32):
     if irq >= 8:
-        outb(PIC2, PIC_EOI)  # Slave PIC
-    outb(PIC1, PIC_EOI)      # Master PIC
+        outb(0xA0, 0x20)  # EOI to slave PIC
+    outb(0x20, 0x20)      # EOI to master PIC
 
-# I/O wait (short delay)
-fn io_wait():
-    outb(0x80, 0)
+# Mask (disable) an IRQ
+fn irq_mask(irq: i32):
+    val port = if irq < 8: 0x21 else: 0xA1
+    val line = if irq < 8: irq else: irq - 8
+    # val mask = inb(port) | (1 << line)
+    # outb(port, mask)
+    pass
 
-# Read byte from port
-fn inb(port: u16) -> u8:
-    var result: u8 = 0
-    asm """
-        mov dx, {port}
-        in al, dx
-        mov {result}, al
-    """
-    result
-
-# Panic function (halts system)
-fn panic(message: text):
-    # Disable interrupts
-    asm """
-        cli
-    """
-
-    # Print message (if serial available)
-    # serial_println("PANIC: {message}")
-
-    # Halt
-    loop:
-        asm """
-            hlt
-        """
+# Unmask (enable) an IRQ
+fn irq_unmask(irq: i32):
+    val port = if irq < 8: 0x21 else: 0xA1
+    val line = if irq < 8: irq else: irq - 8
+    # val mask = inb(port) & ~(1 << line)
+    # outb(port, mask)
+    pass
