@@ -1,0 +1,313 @@
+# ============================================================================
+# Mock Builder - Mock creation and configuration
+# ============================================================================
+#
+# Mock builder pattern for fluent mock creation and configuration.
+#
+# Workarounds:
+# 1. Nested field mutation requires copy-modify-assign pattern (see record_call)
+# 2. Array indexing: Use i64 parameter + direct index (not `as usize`)
+#    - Integer literals default to i64
+#    - `i64 as usize` cast is NOT supported
+#    - Interpreter handles i64 indexing directly
+#    Example:
+#      fn get_item(index: i64):        # Accept i64 for literals
+#          self.items[index]           # Direct index, no cast needed
+#
+# ============================================================================
+
+# ============================================================================
+# Call Tracking
+# ============================================================================
+
+struct CallRecord:
+    args: [text]
+    timestamp: i64
+    call_number: i32
+
+# ============================================================================
+# Mock Function Tracker
+# ============================================================================
+
+class MockFunction:
+    name: text
+    calls: [CallRecord]
+    return_values: [text]
+    return_index: i32
+    should_panic: bool
+    panic_message: text
+    expectations: [Expectation]
+
+    static fn new(name: text) -> MockFunction:
+        MockFunction(
+            name: name,
+            calls: [],
+            return_values: [],
+            return_index: 0,
+            should_panic: false,
+            panic_message: "",
+            expectations: []
+        )
+
+    me record_call(args: [text]):
+        val record = CallRecord(
+            args: args,
+            timestamp: 0,
+            call_number: self.calls.len() as i32
+        )
+        # Workaround: nested field mutation requires copy-modify-assign
+        var calls = self.calls
+        calls.append(record)
+        self.calls = calls
+
+    me set_return_values(values: [text]):
+        self.return_values = values
+        self.return_index = 0
+
+    me set_panic(message: text):
+        self.should_panic = true
+        self.panic_message = message
+
+    fn next_return_value() -> Option<text>:
+        if self.return_index >= self.return_values.len() as i32:
+            return nil
+        val value = self.return_values[self.return_index as usize]
+        self.return_index = self.return_index + 1
+        Some(value)
+
+    fn call_count() -> i32:
+        self.calls.len() as i32
+
+    fn was_called() -> bool:
+        self.calls.len() > 0
+
+    fn was_called_with(expected_args: [text]) -> bool:
+        for call in self.calls:
+            if call.args.len() == expected_args.len():
+                var matches = true
+                for i in 0..call.args.len():
+                    if call.args[i] != expected_args[i]:
+                        matches = false
+                        break
+                if matches:
+                    return true
+        false
+
+    fn was_called_n_times(times: i32) -> bool:
+        self.call_count() == times
+
+    # Workaround: Use i64 param + direct indexing (i64 as usize not supported)
+    fn get_call(index: i64) -> Option<CallRecord>:
+        if index >= 0 and index < self.calls.len() as i64:
+            Some(self.calls[index])
+        else:
+            nil
+
+    fn get_last_call() -> Option<CallRecord>:
+        if self.calls.len() > 0:
+            Some(self.calls[self.calls.len() - 1])
+        else:
+            nil
+
+    me reset():
+        self.calls = []
+        self.return_values = []
+        self.return_index = 0
+        self.should_panic = false
+        self.panic_message = ""
+        self.expectations = []
+
+    fn verify() -> VerificationResult:
+        for expectation in self.expectations:
+            # Check call count if expected_times > 0
+            if expectation.expected_times > 0:
+                if not self.was_called_n_times(expectation.expected_times):
+                    val msg = "Expected '{self.name}' to be called {expectation.expected_times} times, but was called {self.call_count()} times"
+                    return VerificationResult.failure(msg)
+
+            # Check arguments if specified (single check, no duplication)
+            match expectation.expected_args:
+                Some(args):
+                    if not self.was_called_with(args):
+                        val msg = "Expected '{self.name}' to be called with {args}, but was not"
+                        return VerificationResult.failure(msg)
+                nil: true
+
+        VerificationResult.success()
+
+    me expect_call(times: i32):
+        self.expectations.append(Expectation(
+            method_name: self.name,
+            expected_times: times,
+            expected_args: nil
+        ))
+
+    me expect_call_with(args: [text]):
+        self.expectations.append(Expectation(
+            method_name: self.name,
+            expected_times: 0,
+            expected_args: Some(args)
+        ))
+
+    fn summary() -> text:
+        if self.calls.len() == 0:
+            return "Mock '{self.name}': not called"
+        var parts = ["Mock '{self.name}': called {self.call_count()} time(s)"]
+        for call in self.calls:
+            parts.push("  {call.args}")
+        parts.join("\n") + "\n"
+
+# ============================================================================
+# Expectation and VerificationResult (needed by MockFunction.verify())
+# ============================================================================
+
+struct Expectation:
+    method_name: text
+    expected_times: i32
+    expected_args: Option<[text]>
+
+class VerificationResult:
+    passed: bool
+    error_message: text
+
+    static fn success() -> VerificationResult:
+        VerificationResult(passed: true, error_message: "")
+
+    static fn failure(message: text) -> VerificationResult:
+        VerificationResult(passed: false, error_message: message)
+
+    fn is_ok() -> bool:
+        self.passed
+
+    fn is_err() -> bool:
+        not self.passed
+
+    fn unwrap_err() -> text:
+        self.error_message
+
+# ============================================================================
+# Mock Builder
+# ============================================================================
+
+struct MockBuilder:
+    name: text
+
+    static fn new(name: text) -> MockBuilder:
+        MockBuilder(name: name)
+
+    fn returns(self, values: [text]) -> MockFunction:
+        val result = MockFunction.new(self.name)
+        result.set_return_values(values)
+        result
+
+    fn panics(self, message: text) -> MockFunction:
+        val result = MockFunction.new(self.name)
+        result.set_panic(message)
+        result
+
+    fn build(self) -> MockFunction:
+        MockFunction.new(self.name)
+
+# ============================================================================
+# Mock Registry
+# ============================================================================
+
+struct RegistryEntry:
+    key: text
+    mockfn: MockFunction
+
+class MockRegistry:
+    entries: [RegistryEntry]
+
+    static fn new() -> MockRegistry:
+        MockRegistry(entries: [])
+
+    me register(key: text, mockfn: MockFunction):
+        self.entries.append(RegistryEntry(key: key, mockfn: mockfn))
+
+    fn get(key: text) -> Option<MockFunction>:
+        for entry in self.entries:
+            if entry.key == key:
+                return Some(entry.mockfn)
+        nil
+
+    me reset_all():
+        for entry in self.entries:
+            entry.mockfn.reset()
+
+    fn verify_all() -> bool:
+        true
+
+    fn summary() -> text:
+        var parts = ["Mock Registry:"]
+        for entry in self.entries:
+            parts.push("  " + entry.mockfn.summary())
+        parts.join("\n") + "\n"
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+pub fn create_mock(name: text) -> MockFunction:
+    MockFunction.new(name)
+
+# ============================================================================
+# Mock Policy System
+# ============================================================================
+
+class MockPolicy:
+    mode: text
+    hal_patterns: [text]
+
+    static fn new() -> MockPolicy:
+        MockPolicy(
+            mode: "all",
+            hal_patterns: ["hal", "hardware", "drivers", "io"]
+        )
+
+    me set_mode(newmode: text):
+        self.mode = newmode
+
+    fn is_enabled() -> bool:
+        self.mode != "disabled"
+
+    fn is_allowed_in(layer: text) -> bool:
+        match self.mode:
+            "disabled": false
+            "all": true
+            "hal_only": self.matches_hal(layer)
+            _: false
+
+    fn matches_hal(layer: text) -> bool:
+        for pattern in self.hal_patterns:
+            if layer.contains(pattern):
+                return true
+        false
+
+val _global_mock_policy = MockPolicy.new()
+
+pub fn mock_policy_init(mode: text):
+    _global_mock_policy.set_mode(mode)
+
+pub fn mock_policy_is_enabled() -> bool:
+    _global_mock_policy.is_enabled()
+
+pub fn mock_policy_allow_in_layer(layer: text) -> bool:
+    _global_mock_policy.is_allowed_in(layer)
+
+pub fn mock_policy_disable():
+    _global_mock_policy.set_mode("disabled")
+
+pub fn mock_policy_reset():
+    _global_mock_policy.set_mode("all")
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export CallRecord
+export MockFunction, Expectation, VerificationResult
+export MockBuilder, RegistryEntry, MockRegistry
+export create_mock
+export MockPolicy, mock_policy_init, mock_policy_is_enabled
+export mock_policy_allow_in_layer, mock_policy_disable, mock_policy_reset

@@ -1,0 +1,174 @@
+# Build Watch Mode
+#
+# Watches for file changes and automatically rebuilds
+
+export WatchConfig, WatchResult, FileChangeEvent, default_watch_config
+
+use app.build.types (BuildConfig, BuildResult, BuildProfile, profile_to_string)
+use app.build.orchestrator (orchestrate_build)
+use app.build.metrics (MetricsTracker, print_metrics)
+
+# Watch configuration
+struct WatchConfig:
+    profile: BuildProfile
+    watch_paths: [text]
+    ignore_patterns: [text]
+    debounce_ms: i64
+    clear_console: bool
+    run_tests: bool
+    notify: bool
+
+# Watch result
+struct WatchResult:
+    total_rebuilds: i64
+    successful_rebuilds: i64
+    failed_rebuilds: i64
+    total_duration_ms: i64
+
+impl WatchResult:
+    fn summary() -> text:
+        "Rebuilds: {self.successful_rebuilds}/{self.total_rebuilds} successful"
+
+# File change event
+struct FileChangeEvent:
+    path: text
+    event_type: text  # "modified", "created", "deleted"
+    timestamp: i64
+
+# Watch orchestrator
+class WatchOrchestrator:
+    # Start watching and rebuilding
+    static fn start(config: WatchConfig) -> WatchResult:
+        print "Starting watch mode..."
+        print "Profile: {profile_to_string(config.profile)}"
+        print "Watching paths: {config.watch_paths}"
+        print "Debounce: {config.debounce_ms}ms"
+        print ""
+        print "Press Ctrl+C to stop"
+        print ""
+
+        # Initial build
+        print "[{current_time_str()}] Initial build..."
+        val build_config = create_build_config(config)
+        val initial_result = orchestrate_build(build_config)
+
+        if initial_result.success:
+            print_success_message(initial_result)
+        else:
+            print_error_message(initial_result)
+
+        var total_rebuilds: i64 = 1
+        var successful_rebuilds: i64 = if initial_result.success: 1 else: 0
+        var failed_rebuilds: i64 = if initial_result.success: 0 else: 1
+        var start_time = current_time_ms()
+
+        # Watch loop (simplified - real implementation would use inotify.FSEvents)
+        # TODO: Implement actual file watching with OS-specific APIs
+        print ""
+        print "Watch mode active. Waiting for changes..."
+        print "(Note: Real file watching not yet implemented - this is a placeholder)"
+
+        # For now, return result from initial build
+        WatchResult(
+            total_rebuilds: total_rebuilds,
+            successful_rebuilds: successful_rebuilds,
+            failed_rebuilds: failed_rebuilds,
+            total_duration_ms: current_time_ms() - start_time
+        )
+
+    # Quick watch with defaults
+    static fn quick() -> WatchResult:
+        val config = default_watch_config()
+        WatchOrchestrator.start(config)
+
+# File watcher
+class FileWatcher:
+    # Watch for changes (placeholder for OS-specific implementation)
+    static fn watch(paths: [text], callback: fn(FileChangeEvent)) -> bool:
+        # TODO: Implement using:
+        # - inotify on Linux
+        # - FSEvents on macOS
+        # - ReadDirectoryChangesW on Windows
+        # For now, return false (not implemented)
+        false
+
+    # Check if path should be ignored
+    static fn should_ignore(path: text, patterns: [text]) -> bool:
+        # Check against ignore patterns
+        for pattern in patterns:
+            if path.contains(pattern):
+                return true
+        false
+
+# Debouncer (prevents rebuild on every keystroke)
+class Debouncer:
+    # Debounce events
+    static fn debounce(events: [FileChangeEvent], debounce_ms: i64) -> [FileChangeEvent]:
+        # Group events within debounce window
+        # Return only unique paths
+        # TODO: Implement proper debouncing
+        events
+
+# Create build config from watch config
+fn create_build_config(watch_config: WatchConfig) -> BuildConfig:
+    BuildConfig(
+        profile: watch_config.profile,
+        features: [],
+        workspace_root: "build/rust/ffi_gen",
+        target_dir: "build/rust/ffi_gen/target",
+        jobs: 4,
+        verbose: false
+    )
+
+# Print success message
+fn print_success_message(result: BuildResult):
+    val duration_sec = result.duration_ms / 1000
+    print ""
+    print "✓ Build succeeded in {duration_sec}s"
+    print ""
+
+# Print error message
+fn print_error_message(result: BuildResult):
+    print ""
+    print "✗ Build failed"
+    if result.stderr.len() > 0:
+        print "Errors:"
+        print result.stderr
+    print ""
+
+# Get current time string
+fn current_time_str() -> text:
+    # TODO: Use proper time formatting
+    "12:00:00"
+
+# Get current time in milliseconds
+fn current_time_ms() -> i64:
+    # TODO: Use proper time FFI
+    0
+
+# Default watch configuration
+fn default_watch_config() -> WatchConfig:
+    WatchConfig(
+        profile: BuildProfile.Debug,
+        watch_paths: ["src/", "build/rust/"],
+        ignore_patterns: ["target/", ".git/", "*.swp", "*.tmp"],
+        debounce_ms: 500,
+        clear_console: true,
+        run_tests: false,
+        notify: true
+    )
+
+# Print watch result
+fn print_watch_result(result: WatchResult):
+    print ""
+    print "=========================================="
+    print "Watch Mode Summary"
+    print "=========================================="
+    print ""
+    print result.summary()
+    print ""
+    print "Statistics:"
+    print "  Total rebuilds:      {result.total_rebuilds}"
+    print "  Successful:          {result.successful_rebuilds}"
+    print "  Failed:              {result.failed_rebuilds}"
+    print "  Total duration:      {result.total_duration_ms}ms"
