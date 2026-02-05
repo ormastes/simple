@@ -1,0 +1,460 @@
+# Compile-Time Constant Evaluation
+#
+# Evaluates constant expressions at compile time, used for:
+# - Static assertions: static assert size_of<T>() == N
+# - Const functions: const fn compute_table() -> [i64]
+# - Array sizes: [i64; N] where N is const
+# - Generic const parameters: Array<T, N> where N: const i64
+#
+# This implements a subset of the MIR interpreter optimized for
+# compile-time evaluation with no side effects.
+
+from hir_types import {HirType, SymbolId, HirModule}
+from hir_definitions import {HirExpr, HirExprKind, HirConst, HirStaticAssert}
+from lexer import {Span}
+
+export ConstValue, ConstEvalError, ConstEvaluator
+export eval_const_expr, eval_static_assert
+
+# Constant value types (compile-time evaluated)
+enum ConstValue:
+    Int(value: i64)
+    Float(value: f64)
+    Bool(value: bool)
+    Char(value: char)
+    String(value: text)
+    Unit
+    Array(elements: [ConstValue])
+    Tuple(elements: [ConstValue])
+    Struct(type_name: text, fields: Dict<text, ConstValue>)
+
+impl ConstValue:
+    fn as_int() -> i64?:
+        match self:
+            case ConstValue.Int(v): Some(v)
+            case _: None
+
+    fn as_float() -> f64?:
+        match self:
+            case ConstValue.Float(v): Some(v)
+            case _: None
+
+    fn as_bool() -> bool?:
+        match self:
+            case ConstValue.Bool(v): Some(v)
+            case _: None
+
+    fn as_string() -> text?:
+        match self:
+            case ConstValue.String(v): Some(v)
+            case _: None
+
+    fn to_text() -> text:
+        match self:
+            case ConstValue.Int(v): "{v}"
+            case ConstValue.Float(v): "{v}"
+            case ConstValue.Bool(v): if v: "true" else: "false"
+            case ConstValue.Char(v): "'{v}'"
+            case ConstValue.String(v): "\"{v}\""
+            case ConstValue.Unit: "()"
+            case ConstValue.Array(elems):
+                val parts = elems.map(\e: e.to_text())
+                "[{parts.join(\", \")}]"
+            case ConstValue.Tuple(elems):
+                val parts = elems.map(\e: e.to_text())
+                "({parts.join(\", \")})"
+            case ConstValue.Struct(name, fields):
+                var parts: [text] = []
+                for (k, v) in fields:
+                    parts.push("{k}: {v.to_text()}")
+                "{name} {{ {parts.join(\", \")} }}"
+
+    fn eq(other: ConstValue) -> bool:
+        match (self, other):
+            case (ConstValue.Int(a), ConstValue.Int(b)): a == b
+            case (ConstValue.Float(a), ConstValue.Float(b)): a == b
+            case (ConstValue.Bool(a), ConstValue.Bool(b)): a == b
+            case (ConstValue.Char(a), ConstValue.Char(b)): a == b
+            case (ConstValue.String(a), ConstValue.String(b)): a == b
+            case (ConstValue.Unit, ConstValue.Unit): true
+            case _: false
+
+# Compile-time evaluation errors
+enum ConstEvalError:
+    NotConstant(expr: text, span: Span)
+    UndefinedVariable(name: text, span: Span)
+    TypeError(expected: text, got: text, span: Span)
+    DivisionByZero(span: Span)
+    Overflow(op: text, span: Span)
+    UnsupportedOperation(op: text, span: Span)
+    AssertionFailed(message: text, span: Span)
+    ArrayBoundsError(index: i64, len: i64, span: Span)
+
+impl ConstEvalError:
+    fn message() -> text:
+        match self:
+            case ConstEvalError.NotConstant(expr, _):
+                "expression '{expr}' is not a compile-time constant"
+            case ConstEvalError.UndefinedVariable(name, _):
+                "undefined constant '{name}'"
+            case ConstEvalError.TypeError(expected, got, _):
+                "type error: expected {expected}, got {got}"
+            case ConstEvalError.DivisionByZero(_):
+                "division by zero in constant expression"
+            case ConstEvalError.Overflow(op, _):
+                "arithmetic overflow in '{op}' operation"
+            case ConstEvalError.UnsupportedOperation(op, _):
+                "operation '{op}' not supported in constant expressions"
+            case ConstEvalError.AssertionFailed(msg, _):
+                "static assertion failed: {msg}"
+            case ConstEvalError.ArrayBoundsError(idx, len, _):
+                "array index {idx} out of bounds (length {len})"
+
+    fn span() -> Span:
+        match self:
+            case ConstEvalError.NotConstant(_, s): s
+            case ConstEvalError.UndefinedVariable(_, s): s
+            case ConstEvalError.TypeError(_, _, s): s
+            case ConstEvalError.DivisionByZero(s): s
+            case ConstEvalError.Overflow(_, s): s
+            case ConstEvalError.UnsupportedOperation(_, s): s
+            case ConstEvalError.AssertionFailed(_, s): s
+            case ConstEvalError.ArrayBoundsError(_, _, s): s
+
+# Constant evaluator context
+class ConstEvaluator:
+    module: HirModule
+    constants: Dict<text, ConstValue>    # Named constants in scope
+    type_sizes: Dict<text, i64>          # Type → size in bytes
+    type_aligns: Dict<text, i64>         # Type → alignment
+
+impl ConstEvaluator:
+    static fn new(module: HirModule) -> ConstEvaluator:
+        var eval = ConstEvaluator(
+            module: module,
+            constants: {},
+            type_sizes: {},
+            type_aligns: {}
+        )
+        eval.init_builtin_sizes()
+        eval
+
+    me init_builtin_sizes():
+        # Primitive type sizes
+        self.type_sizes["i8"] = 1
+        self.type_sizes["u8"] = 1
+        self.type_sizes["i16"] = 2
+        self.type_sizes["u16"] = 2
+        self.type_sizes["i32"] = 4
+        self.type_sizes["u32"] = 4
+        self.type_sizes["i64"] = 8
+        self.type_sizes["u64"] = 8
+        self.type_sizes["f32"] = 4
+        self.type_sizes["f64"] = 8
+        self.type_sizes["bool"] = 1
+        self.type_sizes["char"] = 4
+
+        # Primitive type alignments
+        self.type_aligns["i8"] = 1
+        self.type_aligns["u8"] = 1
+        self.type_aligns["i16"] = 2
+        self.type_aligns["u16"] = 2
+        self.type_aligns["i32"] = 4
+        self.type_aligns["u32"] = 4
+        self.type_aligns["i64"] = 8
+        self.type_aligns["u64"] = 8
+        self.type_aligns["f32"] = 4
+        self.type_aligns["f64"] = 8
+        self.type_aligns["bool"] = 1
+        self.type_aligns["char"] = 4
+
+    # Evaluate an expression to a constant value
+    fn eval(expr: HirExpr) -> Result<ConstValue, ConstEvalError>:
+        match expr.kind:
+            # Literals are directly convertible
+            case HirExprKind.IntLit(value, _):
+                Ok(ConstValue.Int(value))
+            case HirExprKind.FloatLit(value, _):
+                Ok(ConstValue.Float(value))
+            case HirExprKind.BoolLit(value):
+                Ok(ConstValue.Bool(value))
+            case HirExprKind.CharLit(value):
+                Ok(ConstValue.Char(value))
+            case HirExprKind.StringLit(value, _):
+                Ok(ConstValue.String(value))
+            case HirExprKind.UnitLit:
+                Ok(ConstValue.Unit)
+
+            # Arrays
+            case HirExprKind.ArrayLit(elements, _):
+                var values: [ConstValue] = []
+                for elem in elements:
+                    match self.eval(elem):
+                        case Ok(v): values.push(v)
+                        case Err(e): return Err(e)
+                Ok(ConstValue.Array(values))
+
+            # Tuples
+            case HirExprKind.TupleLit(elements):
+                var values: [ConstValue] = []
+                for elem in elements:
+                    match self.eval(elem):
+                        case Ok(v): values.push(v)
+                        case Err(e): return Err(e)
+                Ok(ConstValue.Tuple(values))
+
+            # Binary operations
+            case HirExprKind.Binary(op, left, right):
+                self.eval_binary(op, left, right, expr.span)
+
+            # Unary operations
+            case HirExprKind.Unary(op, operand):
+                self.eval_unary(op, operand, expr.span)
+
+            # Variables (must be constants)
+            case HirExprKind.Var(symbol):
+                self.eval_var(symbol, expr.span)
+
+            # Function calls (only const fn or builtins)
+            case HirExprKind.Call(callee, args, _):
+                self.eval_call(callee, args, expr.span)
+
+            # Static method calls (e.g., size_of<T>())
+            case HirExprKind.StaticCall(type_, method, args, _):
+                self.eval_static_call(type_, method, args, expr.span)
+
+            # Conditional expressions
+            case HirExprKind.If(cond, then_, else_):
+                self.eval_if(cond, then_, else_, expr.span)
+
+            case _:
+                Err(ConstEvalError.NotConstant("complex expression", expr.span))
+
+    # Evaluate binary operation
+    fn eval_binary(op: HirBinOp, left: HirExpr, right: HirExpr, span: Span) -> Result<ConstValue, ConstEvalError>:
+        val lhs = self.eval(left)?
+        val rhs = self.eval(right)?
+
+        match (op, lhs, rhs):
+            # Integer arithmetic
+            case (HirBinOp.Add, ConstValue.Int(a), ConstValue.Int(b)):
+                Ok(ConstValue.Int(a + b))
+            case (HirBinOp.Sub, ConstValue.Int(a), ConstValue.Int(b)):
+                Ok(ConstValue.Int(a - b))
+            case (HirBinOp.Mul, ConstValue.Int(a), ConstValue.Int(b)):
+                Ok(ConstValue.Int(a * b))
+            case (HirBinOp.Div, ConstValue.Int(a), ConstValue.Int(b)):
+                if b == 0:
+                    Err(ConstEvalError.DivisionByZero(span))
+                else:
+                    Ok(ConstValue.Int(a / b))
+            case (HirBinOp.Mod, ConstValue.Int(a), ConstValue.Int(b)):
+                if b == 0:
+                    Err(ConstEvalError.DivisionByZero(span))
+                else:
+                    Ok(ConstValue.Int(a % b))
+
+            # Float arithmetic
+            case (HirBinOp.Add, ConstValue.Float(a), ConstValue.Float(b)):
+                Ok(ConstValue.Float(a + b))
+            case (HirBinOp.Sub, ConstValue.Float(a), ConstValue.Float(b)):
+                Ok(ConstValue.Float(a - b))
+            case (HirBinOp.Mul, ConstValue.Float(a), ConstValue.Float(b)):
+                Ok(ConstValue.Float(a * b))
+            case (HirBinOp.Div, ConstValue.Float(a), ConstValue.Float(b)):
+                Ok(ConstValue.Float(a / b))
+
+            # Comparison
+            case (HirBinOp.Eq, ConstValue.Int(a), ConstValue.Int(b)):
+                Ok(ConstValue.Bool(a == b))
+            case (HirBinOp.Ne, ConstValue.Int(a), ConstValue.Int(b)):
+                Ok(ConstValue.Bool(a != b))
+            case (HirBinOp.Lt, ConstValue.Int(a), ConstValue.Int(b)):
+                Ok(ConstValue.Bool(a < b))
+            case (HirBinOp.Le, ConstValue.Int(a), ConstValue.Int(b)):
+                Ok(ConstValue.Bool(a <= b))
+            case (HirBinOp.Gt, ConstValue.Int(a), ConstValue.Int(b)):
+                Ok(ConstValue.Bool(a > b))
+            case (HirBinOp.Ge, ConstValue.Int(a), ConstValue.Int(b)):
+                Ok(ConstValue.Bool(a >= b))
+
+            # Boolean operations
+            case (HirBinOp.And, ConstValue.Bool(a), ConstValue.Bool(b)):
+                Ok(ConstValue.Bool(a and b))
+            case (HirBinOp.Or, ConstValue.Bool(a), ConstValue.Bool(b)):
+                Ok(ConstValue.Bool(a or b))
+
+            # Bitwise operations
+            case (HirBinOp.BitAnd, ConstValue.Int(a), ConstValue.Int(b)):
+                Ok(ConstValue.Int(a & b))
+            case (HirBinOp.BitOr, ConstValue.Int(a), ConstValue.Int(b)):
+                Ok(ConstValue.Int(a | b))
+            case (HirBinOp.BitXor, ConstValue.Int(a), ConstValue.Int(b)):
+                Ok(ConstValue.Int(a xor b))
+            case (HirBinOp.Shl, ConstValue.Int(a), ConstValue.Int(b)):
+                Ok(ConstValue.Int(a << b))
+            case (HirBinOp.Shr, ConstValue.Int(a), ConstValue.Int(b)):
+                Ok(ConstValue.Int(a >> b))
+
+            case _:
+                Err(ConstEvalError.TypeError(
+                    "compatible operands",
+                    "{lhs.to_text()} and {rhs.to_text()}",
+                    span
+                ))
+
+    # Evaluate unary operation
+    fn eval_unary(op: HirUnaryOp, operand: HirExpr, span: Span) -> Result<ConstValue, ConstEvalError>:
+        val value = self.eval(operand)?
+
+        match (op, value):
+            case (HirUnaryOp.Neg, ConstValue.Int(v)):
+                Ok(ConstValue.Int(-v))
+            case (HirUnaryOp.Neg, ConstValue.Float(v)):
+                Ok(ConstValue.Float(-v))
+            case (HirUnaryOp.Not, ConstValue.Bool(v)):
+                Ok(ConstValue.Bool(not v))
+            case (HirUnaryOp.BitNot, ConstValue.Int(v)):
+                Ok(ConstValue.Int(~v))
+            case _:
+                Err(ConstEvalError.TypeError(
+                    "valid operand for unary operator",
+                    value.to_text(),
+                    span
+                ))
+
+    # Evaluate variable reference
+    fn eval_var(symbol: SymbolId, span: Span) -> Result<ConstValue, ConstEvalError>:
+        val sym = self.module.symbols.get(symbol)
+        if not sym.?:
+            return Err(ConstEvalError.UndefinedVariable("<unknown>", span))
+
+        val name = sym.unwrap().name
+        if self.constants.contains_key(name):
+            return Ok(self.constants[name])
+
+        # Look up in module constants
+        for (_, const_) in self.module.constants:
+            if const_.name == name:
+                return self.eval(const_.value)
+
+        Err(ConstEvalError.UndefinedVariable(name, span))
+
+    # Evaluate function call (only builtins for now)
+    fn eval_call(callee: HirExpr, args: [HirCallArg], span: Span) -> Result<ConstValue, ConstEvalError>:
+        # For now, only support builtin functions
+        match callee.kind:
+            case HirExprKind.Var(sym):
+                val func_sym = self.module.symbols.get(sym)
+                if func_sym.?:
+                    val name = func_sym.unwrap().name
+                    return self.eval_builtin(name, args, span)
+            case _:
+                pass
+        Err(ConstEvalError.NotConstant("function call", span))
+
+    # Evaluate static method call (e.g., size_of<T>())
+    fn eval_static_call(type_: HirType, method: text, args: [HirCallArg], span: Span) -> Result<ConstValue, ConstEvalError>:
+        # Handle compile-time intrinsics
+        match method:
+            case "size_of":
+                # size_of<T>() - return size of type
+                val type_name = type_.to_text()
+                if self.type_sizes.contains_key(type_name):
+                    Ok(ConstValue.Int(self.type_sizes[type_name]))
+                else:
+                    Err(ConstEvalError.NotConstant("size_of({type_name})", span))
+
+            case "align_of":
+                # align_of<T>() - return alignment of type
+                val type_name = type_.to_text()
+                if self.type_aligns.contains_key(type_name):
+                    Ok(ConstValue.Int(self.type_aligns[type_name]))
+                else:
+                    Err(ConstEvalError.NotConstant("align_of({type_name})", span))
+
+            case _:
+                Err(ConstEvalError.NotConstant("static call {method}", span))
+
+    # Evaluate builtin function
+    fn eval_builtin(name: text, args: [HirCallArg], span: Span) -> Result<ConstValue, ConstEvalError>:
+        match name:
+            case "size_of":
+                # size_of<T>() with type argument
+                if args.len() == 0:
+                    Err(ConstEvalError.NotConstant("size_of without type argument", span))
+                else:
+                    Err(ConstEvalError.NotConstant("size_of", span))
+
+            case "min":
+                if args.len() != 2:
+                    return Err(ConstEvalError.NotConstant("min requires 2 arguments", span))
+                val a = self.eval(args[0].value)?
+                val b = self.eval(args[1].value)?
+                match (a, b):
+                    case (ConstValue.Int(x), ConstValue.Int(y)):
+                        Ok(ConstValue.Int(if x < y: x else: y))
+                    case _:
+                        Err(ConstEvalError.TypeError("integers", "mixed types", span))
+
+            case "max":
+                if args.len() != 2:
+                    return Err(ConstEvalError.NotConstant("max requires 2 arguments", span))
+                val a = self.eval(args[0].value)?
+                val b = self.eval(args[1].value)?
+                match (a, b):
+                    case (ConstValue.Int(x), ConstValue.Int(y)):
+                        Ok(ConstValue.Int(if x > y: x else: y))
+                    case _:
+                        Err(ConstEvalError.TypeError("integers", "mixed types", span))
+
+            case _:
+                Err(ConstEvalError.NotConstant("function {name}", span))
+
+    # Evaluate conditional
+    fn eval_if(cond: HirExpr, then_: HirBlock, else_: HirBlock?, span: Span) -> Result<ConstValue, ConstEvalError>:
+        val cond_val = self.eval(cond)?
+        match cond_val:
+            case ConstValue.Bool(true):
+                # Evaluate then branch
+                self.eval_block(then_)
+            case ConstValue.Bool(false):
+                if else_.?:
+                    self.eval_block(else_.unwrap())
+                else:
+                    Ok(ConstValue.Unit)
+            case _:
+                Err(ConstEvalError.TypeError("bool", cond_val.to_text(), span))
+
+    # Evaluate block (returns last expression)
+    fn eval_block(block: HirBlock) -> Result<ConstValue, ConstEvalError>:
+        var result = ConstValue.Unit
+        for stmt in block.stmts:
+            match stmt:
+                case HirStmt.Expr(expr):
+                    result = self.eval(expr)?
+                case _:
+                    # Other statements not supported in const context
+                    pass
+        if block.expr.?:
+            result = self.eval(block.expr.unwrap())?
+        Ok(result)
+
+# Convenience function: evaluate a constant expression
+fn eval_const_expr(module: HirModule, expr: HirExpr) -> Result<ConstValue, ConstEvalError>:
+    val evaluator = ConstEvaluator.new(module)
+    evaluator.eval(expr)
+
+# Evaluate a static assertion
+fn eval_static_assert(module: HirModule, assert_: HirStaticAssert) -> Result<(), ConstEvalError>:
+    val evaluator = ConstEvaluator.new(module)
+    val result = evaluator.eval(assert_.condition)?
+
+    match result:
+        case ConstValue.Bool(true):
+            Ok(())
+        case ConstValue.Bool(false):
+            val msg = assert_.message ?? "assertion failed"
+            Err(ConstEvalError.AssertionFailed(msg, assert_.span))
+        case _:
+            Err(ConstEvalError.TypeError("bool", result.to_text(), assert_.span))

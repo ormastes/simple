@@ -1,0 +1,229 @@
+"""
+# Const Functions Specification
+
+**Feature IDs:** #BM-002
+**Category:** Language / Bare-Metal
+**Status:** In Progress
+
+Const functions can be evaluated at compile time, enabling:
+- Compile-time computation of lookup tables
+- Constant initialization without runtime overhead
+- Static assertions with computed values
+
+Syntax:
+    const fn function_name(params) -> ReturnType:
+        # body must only use const-evaluable operations
+
+Restrictions:
+- No mutable references
+- No heap allocations
+- No I/O operations
+- No function pointers (except other const fn)
+- No loops with non-const bounds
+"""
+
+describe "Const Functions":
+    """Compile-time evaluable functions."""
+
+    context "Basic Const Functions":
+        """Simple const function definitions."""
+
+        it "defines a const function":
+            """Const functions are marked with 'const fn'."""
+            const fn add(a: i64, b: i64) -> i64:
+                a + b
+
+            expect(add(2, 3)).to(eq(5))
+
+        it "calls const fn at compile time":
+            """Const fn can be used in static assertions."""
+            const fn square(x: i64) -> i64:
+                x * x
+
+            static assert square(4) == 16
+            expect(square(5)).to(eq(25))
+
+        it "nests const function calls":
+            """Const functions can call other const functions."""
+            const fn double(x: i64) -> i64:
+                x * 2
+
+            const fn quadruple(x: i64) -> i64:
+                double(double(x))
+
+            static assert quadruple(3) == 12
+            expect(quadruple(5)).to(eq(20))
+
+    context "Const Conditionals":
+        """Const functions with control flow."""
+
+        it "evaluates const if expressions":
+            """If expressions with const conditions."""
+            const fn abs(x: i64) -> i64:
+                if x < 0: -x else: x
+
+            static assert abs(-5) == 5
+            static assert abs(5) == 5
+            expect(abs(-42)).to(eq(42))
+
+        it "evaluates const match expressions":
+            """Match expressions at compile time."""
+            const fn sign(x: i64) -> i64:
+                match x:
+                    case _ if x < 0: -1
+                    case _ if x > 0: 1
+                    case _: 0
+
+            static assert sign(-10) == -1
+            static assert sign(10) == 1
+            static assert sign(0) == 0
+            expect(sign(-5)).to(eq(-1))
+
+    context "Const Recursion":
+        """Recursive const functions."""
+
+        it "evaluates factorial at compile time":
+            """Factorial computation."""
+            const fn factorial(n: i64) -> i64:
+                if n <= 1: 1 else: n * factorial(n - 1)
+
+            static assert factorial(5) == 120
+            expect(factorial(6)).to(eq(720))
+
+        it "evaluates fibonacci at compile time":
+            """Fibonacci sequence."""
+            const fn fib(n: i64) -> i64:
+                if n <= 1: n else: fib(n - 1) + fib(n - 2)
+
+            static assert fib(10) == 55
+            expect(fib(12)).to(eq(144))
+
+    context "Const Arrays":
+        """Const functions returning arrays."""
+
+        it "creates const array":
+            """Const array initialization."""
+            const fn make_squares(n: i64) -> [i64]:
+                var result: [i64] = []
+                for i in 0..n:
+                    result.push(i * i)
+                result
+
+            val squares = make_squares(5)
+            expect(squares[0]).to(eq(0))
+            expect(squares[1]).to(eq(1))
+            expect(squares[2]).to(eq(4))
+            expect(squares[3]).to(eq(9))
+            expect(squares[4]).to(eq(16))
+
+    context "Const Type Operations":
+        """Const functions with type intrinsics."""
+
+        it "uses size_of in const fn":
+            """Type size queries in const context."""
+            const fn struct_padding<T, U>() -> i64:
+                val total = size_of<T>() + size_of<U>()
+                # Align to 8 bytes
+                (total + 7) & ~7
+
+            static assert struct_padding<u32, u32>() == 8
+            expect(struct_padding<u8, u8>()).to(eq(8))
+
+        it "uses align_of in const fn":
+            """Alignment queries in const context."""
+            const fn max_align<T, U>() -> i64:
+                val a = align_of<T>()
+                val b = align_of<U>()
+                if a > b: a else: b
+
+            static assert max_align<u64, u32>() == 8
+            expect(max_align<u64, u8>()).to(eq(8))
+
+    context "Use Cases - Lookup Tables":
+        """Real-world const function applications."""
+
+        it "generates CRC lookup table":
+            """CRC32 lookup table at compile time."""
+            const fn crc32_table_entry(index: i64) -> u32:
+                var crc: u32 = index as u32
+                for _ in 0..8:
+                    if (crc & 1) != 0:
+                        crc = (crc >> 1) xor 0xEDB88320
+                    else:
+                        crc = crc >> 1
+                crc
+
+            # Validate a few entries
+            expect(crc32_table_entry(0)).to(eq(0x00000000))
+            expect(crc32_table_entry(1)).to(eq(0x77073096))
+
+        it "generates sin lookup table":
+            """Sine approximation table."""
+            const fn sin_table_entry(index: i64) -> i64:
+                # Simple approximation: index is 0-255, maps to 0-360 degrees
+                # Returns scaled sine value (x1000)
+                val degrees = index * 360 / 256
+                val radians = degrees * 3142 / 180000  # pi/1000
+                # Taylor series approximation
+                radians - (radians * radians * radians) / 6
+
+            # sin(0) ≈ 0
+            expect(sin_table_entry(0)).to(eq(0))
+
+    context "Const Function Restrictions":
+        """What's NOT allowed in const functions."""
+
+        # These tests document restrictions by showing what works
+        # (Testing errors would require compile-error checking)
+
+        it "allows pure arithmetic":
+            const fn pure_math(a: i64, b: i64) -> i64:
+                (a * b) + (a - b) + (a / b) + (a % b)
+
+            expect(pure_math(10, 3)).to(eq(30 + 7 + 3 + 1))
+
+        it "allows pure boolean logic":
+            const fn pure_logic(a: bool, b: bool) -> bool:
+                (a and b) or (not a and not b)
+
+            expect(pure_logic(true, true)).to(be_true())
+            expect(pure_logic(false, false)).to(be_true())
+            expect(pure_logic(true, false)).to(be_false())
+
+        it "allows pure bitwise operations":
+            const fn pure_bits(a: i64, b: i64) -> i64:
+                (a & b) | (a xor b) | (a << 1) | (b >> 1)
+
+            expect(pure_bits(0xFF, 0x0F)).to(eq(0x0F | 0xF0 | 0x1FE | 0x07))
+
+describe "Const Evaluation Context":
+    """Compile-time evaluation environment."""
+
+    context "Constant Propagation":
+        it "propagates constants through expressions":
+            val A: i64 = 10
+            val B: i64 = 20
+            val C: i64 = A + B
+
+            expect(C).to(eq(30))
+
+        it "propagates constants through conditionals":
+            val MAX: i64 = 100
+            val VALUE: i64 = 50
+            val RESULT: i64 = if VALUE < MAX: VALUE else: MAX
+
+            expect(RESULT).to(eq(50))
+
+    context "Type-Level Constants":
+        it "uses constants as array sizes":
+            val SIZE: i64 = 4
+            val arr: [i64; SIZE] = [1, 2, 3, 4]
+
+            expect(arr.len()).to(eq(4))
+
+        it "uses computed constants":
+            val BASE: i64 = 4
+            val SIZE: i64 = BASE * 2
+            val arr: [i64; SIZE] = [1, 2, 3, 4, 5, 6, 7, 8]
+
+            expect(arr.len()).to(eq(8))

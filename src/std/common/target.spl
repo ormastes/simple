@@ -77,6 +77,18 @@ impl TargetArch:
             case TargetArch.Wasm32: "wasm32-unknown-unknown"
             case TargetArch.Wasm64: "wasm64-unknown-unknown"
 
+    # Target triple for bare-metal (no OS) targets
+    fn triple_str_baremetal() -> text:
+        match self:
+            case TargetArch.X86_64: "x86_64-unknown-none"
+            case TargetArch.Aarch64: "aarch64-unknown-none"
+            case TargetArch.X86: "i686-unknown-none"
+            case TargetArch.Arm: "thumbv7m-none-eabi"
+            case TargetArch.Riscv64: "riscv64gc-unknown-none-elf"
+            case TargetArch.Riscv32: "riscv32gc-unknown-none-elf"
+            case TargetArch.Wasm32: "wasm32-unknown-unknown"
+            case TargetArch.Wasm64: "wasm64-unknown-unknown"
+
 # Pointer size
 enum PointerSize:
     Bits32
@@ -101,6 +113,7 @@ enum TargetOS:
     MacOS
     FreeBSD
     None
+    BareMetal   # No OS, direct hardware access (embedded/QEMU)
 
 impl TargetOS:
     static fn host() -> TargetOS:
@@ -122,6 +135,17 @@ impl TargetOS:
             case TargetOS.MacOS: "macos"
             case TargetOS.FreeBSD: "freebsd"
             case TargetOS.None: "none"
+            case TargetOS.BareMetal: "none"  # Same as None for triple
+
+    fn is_baremetal() -> bool:
+        match self:
+            case TargetOS.BareMetal: true
+            case _: false
+
+    fn is_hosted() -> bool:
+        match self:
+            case TargetOS.Linux | TargetOS.Windows | TargetOS.MacOS | TargetOS.FreeBSD: true
+            case _: false
 
 # WebAssembly runtime environment
 enum WasmRuntime:
@@ -178,6 +202,15 @@ impl Target:
     fn is_host() -> bool:
         self.arch == TargetArch.host() and self.os == TargetOS.host()
 
+    fn is_baremetal() -> bool:
+        self.os.is_baremetal()
+
+    fn triple() -> text:
+        if self.os.is_baremetal():
+            self.arch.triple_str_baremetal()
+        else:
+            self.arch.triple_str()
+
     fn to_text() -> text:
         "{self.arch.name()}-{self.os.name()}"
 
@@ -188,6 +221,12 @@ impl Target:
         val arch = TargetArch.parse(parts[0])
         if not arch.?:
             return None
+        # Check for baremetal-* prefix format
+        if s.starts_with("baremetal-"):
+            val arch_part = s.substring(10)  # After "baremetal-"
+            val bare_arch = TargetArch.parse(arch_part)
+            if bare_arch.?:
+                return Some(Target(arch: bare_arch.unwrap(), os: TargetOS.BareMetal, wasm_runtime: None))
         val os = if parts.len() > 1:
             match parts[1].lower():
                 case "linux" | "gnu": TargetOS.Linux
@@ -195,6 +234,7 @@ impl Target:
                 case "macos" | "darwin" | "apple": TargetOS.MacOS
                 case "freebsd": TargetOS.FreeBSD
                 case "none" | "bare" | "unknown" | "wasi": TargetOS.None
+                case "baremetal": TargetOS.BareMetal
                 case _: TargetOS.Any
         else:
             TargetOS.host()
