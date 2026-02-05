@@ -1,0 +1,165 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*-alpha'
+      - 'v*.*.*-beta'
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get version from tag
+        id: get_version
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/v}
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "Version: ${VERSION}"
+
+      - name: Check if runtime binary exists
+        id: check_runtime
+        run: |
+          if [ -f "bin/simple_runtime_local" ]; then
+            echo "runtime_exists=true" >> $GITHUB_OUTPUT
+            echo "✓ Runtime binary found"
+          else
+            echo "runtime_exists=false" >> $GITHUB_OUTPUT
+            echo "⚠ Runtime binary not found - will skip package creation"
+          fi
+
+      - name: Create release package
+        if: steps.check_runtime.outputs.runtime_exists == 'true'
+        run: |
+          VERSION=${{ steps.get_version.outputs.version }}
+          PACKAGE_DIR="simple-${VERSION}"
+
+          echo "Creating release package: ${PACKAGE_DIR}"
+
+          # Create package directory structure
+          mkdir -p "${PACKAGE_DIR}"/{bin,src,doc}
+
+          # Copy runtime binary
+          cp bin/simple_runtime_local "${PACKAGE_DIR}/bin/simple_runtime"
+          cp bin/simple "${PACKAGE_DIR}/bin/"
+          sed -i 's/\.runtime/simple_runtime/' "${PACKAGE_DIR}/bin/simple"
+          chmod +x "${PACKAGE_DIR}/bin/simple"
+          chmod +x "${PACKAGE_DIR}/bin/simple_runtime"
+
+          # Copy sources
+          cp -r src/compiler src/std src/lib src/app src/ffi "${PACKAGE_DIR}/src/"
+
+          # Copy documentation
+          cp -r doc/guide "${PACKAGE_DIR}/doc/"
+          cp README.md "${PACKAGE_DIR}/" 2>/dev/null || echo "No README.md"
+
+          # Create README for package
+          cat > "${PACKAGE_DIR}/README.md" <<'EOF'
+          # Simple Language v${{ steps.get_version.outputs.version }}
+
+          ## Installation
+
+          ```bash
+          export PATH="$PWD/bin:$PATH"
+          ```
+
+          ## Quick Start
+
+          ```bash
+          # Run a Simple script
+          simple script.spl
+
+          # Check version
+          simple --version
+          ```
+
+          ## Package Contents
+
+          - Pre-compiled runtime binary
+          - Complete Simple compiler and standard library
+          - Documentation and guides
+
+          ## Documentation
+
+          - User Guide: `doc/guide/`
+          - Repository: https://github.com/${{ github.repository }}
+
+          ## Support
+
+          - Issues: https://github.com/${{ github.repository }}/issues
+          EOF
+
+          # Create tarball
+          tar -czf "simple-${VERSION}-linux-x86_64.tar.gz" "${PACKAGE_DIR}/"
+
+          # Generate checksum
+          sha256sum "simple-${VERSION}-linux-x86_64.tar.gz" > "simple-${VERSION}-linux-x86_64.tar.gz.sha256"
+
+          # Show package info
+          ls -lh "simple-${VERSION}-linux-x86_64.tar.gz"
+          cat "simple-${VERSION}-linux-x86_64.tar.gz.sha256"
+
+      - name: Extract release notes
+        id: release_notes
+        run: |
+          VERSION=${{ steps.get_version.outputs.version }}
+
+          # Check if release notes file exists
+          if [ -f "release/RELEASE_NOTES_${VERSION}.md" ]; then
+            echo "Using release notes from: release/RELEASE_NOTES_${VERSION}.md"
+            cat "release/RELEASE_NOTES_${VERSION}.md" > release_notes.md
+          elif [ -f "CHANGELOG.md" ]; then
+            echo "Extracting from CHANGELOG.md"
+            awk "/^## \[?${VERSION}\]?/,/^## \[?[0-9]/" CHANGELOG.md | head -n -1 > release_notes.md
+          else
+            echo "Creating default release notes"
+            cat > release_notes.md <<EOF
+          # Simple Language ${VERSION}
+
+          Release of Simple Language ${VERSION}.
+
+          See commit history for details.
+          EOF
+          fi
+
+          echo "Release notes:"
+          cat release_notes.md
+
+      - name: Determine if pre-release
+        id: prerelease
+        run: |
+          VERSION=${{ steps.get_version.outputs.version }}
+          if [[ "${VERSION}" =~ (alpha|beta|rc) ]]; then
+            echo "is_prerelease=true" >> $GITHUB_OUTPUT
+            echo "This is a pre-release"
+          else
+            echo "is_prerelease=false" >> $GITHUB_OUTPUT
+            echo "This is a stable release"
+          fi
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          name: Simple Language v${{ steps.get_version.outputs.version }}
+          body_path: release_notes.md
+          prerelease: ${{ steps.prerelease.outputs.is_prerelease }}
+          files: |
+            simple-${{ steps.get_version.outputs.version }}-linux-x86_64.tar.gz
+            simple-${{ steps.get_version.outputs.version }}-linux-x86_64.tar.gz.sha256
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Release created
+        run: |
+          echo "✓ Release v${{ steps.get_version.outputs.version }} created successfully!"
+          echo "View at: https://github.com/${{ github.repository }}/releases/tag/v${{ steps.get_version.outputs.version }}"
