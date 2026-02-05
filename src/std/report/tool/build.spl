@@ -1,0 +1,501 @@
+# Build Report
+#
+# Reports for build system errors, warnings, and status.
+# Provides structured build diagnostics with timing and dependency info.
+
+import ..level
+import ..location
+import ..report
+
+export BuildReport, BuildResult, BuildStatus, BuildError, BuildWarning, BuildStep, BuildSummary
+
+# =============================================================================
+# BuildStatus: Possible states of a build
+# =============================================================================
+
+enum BuildStatus:
+    Success         # Build completed successfully
+    Failed          # Build failed
+    Cancelled       # Build was cancelled
+    Timeout         # Build timed out
+    InProgress      # Build is running
+
+impl BuildStatus:
+    fn name() -> text:
+        match self:
+            case BuildStatus.Success: "success"
+            case BuildStatus.Failed: "failed"
+            case BuildStatus.Cancelled: "cancelled"
+            case BuildStatus.Timeout: "timeout"
+            case BuildStatus.InProgress: "in_progress"
+
+    fn is_success() -> bool:
+        self == BuildStatus.Success
+
+    fn is_failure() -> bool:
+        match self:
+            case BuildStatus.Failed: true
+            case BuildStatus.Timeout: true
+            case _: false
+
+    fn color() -> text:
+        match self:
+            case BuildStatus.Success: "\x1b[32m"    # Green
+            case BuildStatus.Failed: "\x1b[31m"     # Red
+            case BuildStatus.Cancelled: "\x1b[33m"  # Yellow
+            case BuildStatus.Timeout: "\x1b[35m"    # Magenta
+            case BuildStatus.InProgress: "\x1b[36m" # Cyan
+
+# =============================================================================
+# BuildError: A build error
+# =============================================================================
+
+class BuildError:
+    message: text
+    code: text?                 # Error code (e.g., "E0001")
+    location: SourceLocation?
+    notes: [text]
+    suggestions: [text]
+
+impl BuildError:
+    static fn create(message: text) -> BuildError:
+        BuildError(
+            message: message,
+            code: None,
+            location: None,
+            notes: [],
+            suggestions: []
+        )
+
+    static fn at(message: text, location: SourceLocation) -> BuildError:
+        BuildError(
+            message: message,
+            code: None,
+            location: Some(location),
+            notes: [],
+            suggestions: []
+        )
+
+    fn with_code(code: text) -> BuildError:
+        BuildError(
+            message: self.message,
+            code: Some(code),
+            location: self.location,
+            notes: self.notes,
+            suggestions: self.suggestions
+        )
+
+    fn with_note(note: text) -> BuildError:
+        BuildError(
+            message: self.message,
+            code: self.code,
+            location: self.location,
+            notes: self.notes + [note],
+            suggestions: self.suggestions
+        )
+
+    fn with_suggestion(suggestion: text) -> BuildError:
+        BuildError(
+            message: self.message,
+            code: self.code,
+            location: self.location,
+            notes: self.notes,
+            suggestions: self.suggestions + [suggestion]
+        )
+
+    fn to_report() -> Report:
+        var report = Report.error(self.message)
+            .with_kind(ReportKind.BuildError)
+            .with_source("build")
+
+        if self.code.?:
+            report = report.with_code(self.code.unwrap())
+
+        if self.location.?:
+            report = report.with_location(self.location.unwrap())
+
+        for note in self.notes:
+            report = report.with_note(note)
+
+        for suggestion in self.suggestions:
+            report = report.with_help(suggestion)
+
+        report
+
+    fn format(use_color: bool) -> text:
+        self.to_report().format("", use_color)
+
+    fn format_short() -> text:
+        val loc = if self.location.?:
+            "{self.location.unwrap().format_short()}: "
+        else:
+            ""
+        val code = if self.code.?: "[{self.code.unwrap()}] " else: ""
+        "{loc}error: {code}{self.message}"
+
+# =============================================================================
+# BuildWarning: A build warning
+# =============================================================================
+
+class BuildWarning:
+    message: text
+    code: text?
+    location: SourceLocation?
+    notes: [text]
+
+impl BuildWarning:
+    static fn create(message: text) -> BuildWarning:
+        BuildWarning(
+            message: message,
+            code: None,
+            location: None,
+            notes: []
+        )
+
+    static fn at(message: text, location: SourceLocation) -> BuildWarning:
+        BuildWarning(
+            message: message,
+            code: None,
+            location: Some(location),
+            notes: []
+        )
+
+    fn with_code(code: text) -> BuildWarning:
+        BuildWarning(
+            message: self.message,
+            code: Some(code),
+            location: self.location,
+            notes: self.notes
+        )
+
+    fn with_note(note: text) -> BuildWarning:
+        BuildWarning(
+            message: self.message,
+            code: self.code,
+            location: self.location,
+            notes: self.notes + [note]
+        )
+
+    fn to_report() -> Report:
+        var report = Report.warning(self.message)
+            .with_kind(ReportKind.BuildError)
+            .with_source("build")
+
+        if self.code.?:
+            report = report.with_code(self.code.unwrap())
+
+        if self.location.?:
+            report = report.with_location(self.location.unwrap())
+
+        for note in self.notes:
+            report = report.with_note(note)
+
+        report
+
+    fn format(use_color: bool) -> text:
+        self.to_report().format("", use_color)
+
+    fn format_short() -> text:
+        val loc = if self.location.?:
+            "{self.location.unwrap().format_short()}: "
+        else:
+            ""
+        val code = if self.code.?: "[{self.code.unwrap()}] " else: ""
+        "{loc}warning: {code}{self.message}"
+
+# =============================================================================
+# BuildStep: A step in the build process
+# =============================================================================
+
+class BuildStep:
+    name: text                  # Step name (e.g., "compile", "link")
+    target: text?               # Target being built
+    status: BuildStatus
+    duration_ms: i64
+    errors: [BuildError]
+    warnings: [BuildWarning]
+    output: text?               # Captured output
+
+impl BuildStep:
+    static fn named(name: text) -> BuildStep:
+        BuildStep(
+            name: name,
+            target: None,
+            status: BuildStatus.InProgress,
+            duration_ms: 0,
+            errors: [],
+            warnings: [],
+            output: None
+        )
+
+    static fn for_target(name: text, target: text) -> BuildStep:
+        BuildStep(
+            name: name,
+            target: Some(target),
+            status: BuildStatus.InProgress,
+            duration_ms: 0,
+            errors: [],
+            warnings: [],
+            output: None
+        )
+
+    me complete(status: BuildStatus, duration_ms: i64):
+        self.status = status
+        self.duration_ms = duration_ms
+
+    me add_error(error: BuildError):
+        self.errors.push(error)
+
+    me add_warning(warning: BuildWarning):
+        self.warnings.push(warning)
+
+    me set_output(output: text):
+        self.output = Some(output)
+
+    fn is_success() -> bool:
+        self.status.is_success()
+
+    fn has_errors() -> bool:
+        not self.errors.is_empty()
+
+    fn has_warnings() -> bool:
+        not self.warnings.is_empty()
+
+    fn error_count() -> i64:
+        self.errors.len()
+
+    fn warning_count() -> i64:
+        self.warnings.len()
+
+    fn format(use_color: bool) -> text:
+        val status_color = if use_color: self.status.color() else: ""
+        val bold = if use_color: "\x1b[1m" else: ""
+        val reset = if use_color: "\x1b[0m" else: ""
+
+        var output = "{bold}{self.name}{reset}"
+        if self.target.?:
+            output = output + " ({self.target.unwrap()})"
+        output = output + ": {status_color}{self.status.name()}{reset}"
+        output = output + " ({self.duration_ms}ms)"
+
+        if self.has_errors():
+            output = output + "\n"
+            for error in self.errors:
+                output = output + "  " + error.format_short() + "\n"
+
+        if self.has_warnings():
+            for warning in self.warnings:
+                output = output + "  " + warning.format_short() + "\n"
+
+        output
+
+# =============================================================================
+# BuildResult: Result of a complete build
+# =============================================================================
+
+class BuildResult:
+    status: BuildStatus
+    steps: [BuildStep]
+    duration_ms: i64
+    errors: [BuildError]        # Top-level errors
+    warnings: [BuildWarning]    # Top-level warnings
+    artifacts: [text]           # Produced artifacts (files)
+
+impl BuildResult:
+    static fn success(duration_ms: i64) -> BuildResult:
+        BuildResult(
+            status: BuildStatus.Success,
+            steps: [],
+            duration_ms: duration_ms,
+            errors: [],
+            warnings: [],
+            artifacts: []
+        )
+
+    static fn failed(duration_ms: i64) -> BuildResult:
+        BuildResult(
+            status: BuildStatus.Failed,
+            steps: [],
+            duration_ms: duration_ms,
+            errors: [],
+            warnings: [],
+            artifacts: []
+        )
+
+    me add_step(step: BuildStep):
+        self.steps.push(step)
+        if step.status.is_failure() and self.status == BuildStatus.Success:
+            self.status = BuildStatus.Failed
+
+    me add_error(error: BuildError):
+        self.errors.push(error)
+        self.status = BuildStatus.Failed
+
+    me add_warning(warning: BuildWarning):
+        self.warnings.push(warning)
+
+    me add_artifact(path: text):
+        self.artifacts.push(path)
+
+    fn is_success() -> bool:
+        self.status.is_success()
+
+    fn total_errors() -> i64:
+        var count = self.errors.len()
+        for step in self.steps:
+            count = count + step.error_count()
+        count
+
+    fn total_warnings() -> i64:
+        var count = self.warnings.len()
+        for step in self.steps:
+            count = count + step.warning_count()
+        count
+
+    fn all_errors() -> [BuildError]:
+        var all = self.errors
+        for step in self.steps:
+            for error in step.errors:
+                all.push(error)
+        all
+
+    fn all_warnings() -> [BuildWarning]:
+        var all = self.warnings
+        for step in self.steps:
+            for warning in step.warnings:
+                all.push(warning)
+        all
+
+    fn to_report() -> Report:
+        val level = if self.status.is_success():
+            ReportLevel.Info
+        else:
+            ReportLevel.Error
+
+        val msg = "Build {self.status.name()} in {self.duration_ms}ms"
+
+        var report = match level:
+            case ReportLevel.Error: Report.error(msg)
+            case _: Report.info(msg)
+
+        report = report.with_kind(ReportKind.BuildError).with_source("build")
+
+        if self.total_errors() > 0:
+            report = report.with_note("{self.total_errors()} error(s)")
+        if self.total_warnings() > 0:
+            report = report.with_note("{self.total_warnings()} warning(s)")
+        if not self.artifacts.is_empty():
+            report = report.with_note("{self.artifacts.len()} artifact(s) produced")
+
+        report
+
+    fn format(use_color: bool) -> text:
+        val bold = if use_color: "\x1b[1m" else: ""
+        val status_color = if use_color: self.status.color() else: ""
+        val reset = if use_color: "\x1b[0m" else: ""
+
+        var output = ""
+
+        # Errors first
+        if self.total_errors() > 0:
+            for error in self.all_errors():
+                output = output + error.format(use_color) + "\n"
+
+        # Warnings
+        if self.total_warnings() > 0:
+            for warning in self.all_warnings():
+                output = output + warning.format(use_color) + "\n"
+
+        # Summary
+        output = output + "{bold}Build {status_color}{self.status.name()}{reset}"
+        output = output + " ({self.duration_ms}ms)\n"
+
+        if self.total_errors() > 0:
+            output = output + "  {self.total_errors()} error(s)\n"
+        if self.total_warnings() > 0:
+            output = output + "  {self.total_warnings()} warning(s)\n"
+        if not self.artifacts.is_empty():
+            output = output + "  Artifacts:\n"
+            for artifact in self.artifacts:
+                output = output + "    {artifact}\n"
+
+        output
+
+# =============================================================================
+# BuildSummary: Summary across multiple builds
+# =============================================================================
+
+class BuildSummary:
+    results: [BuildResult]
+    total_duration_ms: i64
+    total_errors: i64
+    total_warnings: i64
+
+impl BuildSummary:
+    static fn empty() -> BuildSummary:
+        BuildSummary(
+            results: [],
+            total_duration_ms: 0,
+            total_errors: 0,
+            total_warnings: 0
+        )
+
+    me add_result(result: BuildResult):
+        self.results.push(result)
+        self.total_duration_ms = self.total_duration_ms + result.duration_ms
+        self.total_errors = self.total_errors + result.total_errors()
+        self.total_warnings = self.total_warnings + result.total_warnings()
+
+    fn has_failures() -> bool:
+        self.results.any(\r: r.status.is_failure())
+
+    fn all_succeeded() -> bool:
+        self.results.all(\r: r.status.is_success())
+
+    fn to_report() -> Report:
+        val level = if self.has_failures():
+            ReportLevel.Error
+        else:
+            ReportLevel.Info
+
+        val successful = self.results.filter(\r: r.is_success()).len()
+        val msg = "{successful}/{self.results.len()} builds succeeded"
+
+        var report = match level:
+            case ReportLevel.Error: Report.error(msg)
+            case _: Report.info(msg)
+
+        report = report.with_source("build")
+
+        if self.total_errors > 0:
+            report = report.with_note("{self.total_errors} total error(s)")
+        if self.total_warnings > 0:
+            report = report.with_note("{self.total_warnings} total warning(s)")
+
+        report
+
+    fn format(use_color: bool) -> text:
+        var output = ""
+        for result in self.results:
+            output = output + result.format(use_color) + "\n"
+        output
+
+# =============================================================================
+# BuildReport: Unified build report (alias for convenience)
+# =============================================================================
+
+class BuildReport:
+    result: BuildResult
+
+impl BuildReport:
+    static fn from_result(result: BuildResult) -> BuildReport:
+        BuildReport(result: result)
+
+    fn is_success() -> bool:
+        self.result.is_success()
+
+    fn to_report() -> Report:
+        self.result.to_report()
+
+    fn format(use_color: bool) -> text:
+        self.result.format(use_color)

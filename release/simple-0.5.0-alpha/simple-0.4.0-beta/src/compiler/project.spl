@@ -1,0 +1,119 @@
+# Project Context
+#
+# Project detection and context management for multi-file compilation.
+# Loads configuration from simple.sdn/simple.toml, resolves modules,
+# and manages features, profiles, and lint/DI/AOP settings.
+#
+# Port of rust/compiler/src/project.rs (521 lines)
+
+use ffi.io*
+
+export ProjectContext, ProjectConfig
+
+# ============================================================================
+# Project Configuration
+# ============================================================================
+
+struct ProjectConfig:
+    """Configuration loaded from simple.sdn or simple.toml."""
+    name: text
+    version: text
+    source_root: text
+    features: [text]
+    profiles: {text: ProfileConfig}
+    lint_overrides: {text: text}    # lint_name -> level
+    di_enabled: bool
+    aop_enabled: bool
+    deterministic: bool
+    layout_config_path: text?
+
+struct ProfileConfig:
+    attributes: [text]
+    imports: [text]
+
+impl ProjectConfig:
+    static fn default(name: text) -> ProjectConfig:
+        ProjectConfig(name: name, version: "0.0.0", source_root: "src",
+                      features: [], profiles: {}, lint_overrides: {},
+                      di_enabled: false, aop_enabled: false,
+                      deterministic: false, layout_config_path: nil)
+
+# ============================================================================
+# Project Context
+# ============================================================================
+
+class ProjectContext:
+    """Holds all project-level configuration for compilation."""
+    root: text
+    source_root: text
+    name: text
+    features: [text]
+    profiles: {text: ProfileConfig}
+    lint_overrides: {text: text}
+    di_enabled: bool
+    aop_enabled: bool
+    deterministic: bool
+    active_profile: text?
+
+impl ProjectContext:
+    static fn from_root(root: text) -> ProjectContext:
+        """Create project context, loading config if available."""
+        val sdn_path = "{root}/simple.sdn"
+        val toml_path = "{root}/simple.toml"
+
+        if file_exists(sdn_path):
+            return ProjectContext.load_from_sdn(root, sdn_path)
+        elif file_exists(toml_path):
+            return ProjectContext.load_from_toml(root, toml_path)
+        else:
+            return ProjectContext.with_defaults(root)
+
+    static fn with_defaults(root: text) -> ProjectContext:
+        val source_root = if file_exists("{root}/src"): "{root}/src" else: root
+        val name = root.split("/").last ?? "unnamed"
+
+        ProjectContext(root: root, source_root: source_root, name: name,
+                       features: [], profiles: {}, lint_overrides: {},
+                       di_enabled: false, aop_enabled: false,
+                       deterministic: false, active_profile: nil)
+
+    static fn load_from_sdn(root: text, path: text) -> ProjectContext:
+        # TODO: Parse SDN manifest
+        ProjectContext.with_defaults(root)
+
+    static fn load_from_toml(root: text, path: text) -> ProjectContext:
+        # TODO: Parse TOML manifest (legacy)
+        ProjectContext.with_defaults(root)
+
+    fn has_feature(name: text) -> bool:
+        self.features.contains(name)
+
+    fn get_profile(name: text) -> ProfileConfig?:
+        if self.profiles.contains_key(name):
+            Some(self.profiles[name])
+        else:
+            nil
+
+    me set_active_profile(name: text):
+        self.active_profile = Some(name)
+
+    fn resolve_module(module_path: text) -> text?:
+        """Resolve a module import path to a file path."""
+        val parts = module_path.split(".")
+        val rel_path = parts.join("/")
+
+        # Try .spl extension first
+        val spl_path = "{self.source_root}/{rel_path}.spl"
+        if file_exists(spl_path):
+            return Some(spl_path)
+
+        # Try __init__.spl in directory
+        val init_path = "{self.source_root}/{rel_path}/__init__.spl"
+        if file_exists(init_path):
+            return Some(init_path)
+
+        nil
+
+    fn source_files() -> [text]:
+        """List all source files in the project."""
+        list_dir_recursive(self.source_root, ".spl")

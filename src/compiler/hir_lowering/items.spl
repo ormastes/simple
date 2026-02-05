@@ -7,6 +7,7 @@ use hir_definitions.*
 use parser.*
 use lexer.Span
 use hir_lowering.types.HirLowering
+use attributes.parse_layout_attrs
 
 # Item Lowering (Functions, Classes, Structs, Enums, Traits, Impls)
 # ============================================================================
@@ -59,6 +60,11 @@ impl HirLowering:
             val hir_const = self.lower_const(const_)
             constants[hir_const.symbol] = hir_const
 
+        # Lower static assertions
+        var static_asserts: [HirStaticAssert] = []
+        for assert_ in module.static_asserts:
+            static_asserts = static_asserts.push(self.lower_static_assert(assert_))
+
         # Lower imports
         var imports: [HirImport] = []
         for imp in module.imports:
@@ -82,7 +88,8 @@ impl HirLowering:
             enums: enums,
             traits: traits,
             impls: impls,
-            constants: constants
+            constants: constants,
+            static_asserts: static_asserts
         )
 
     me declare_module_symbols(module: Module):
@@ -200,7 +207,7 @@ impl HirLowering:
             is_public: effective_public,
             is_method: fn_.is_method,
             is_mutable: fn_.is_mutable,
-            is_const: false,
+            is_const: fn_.is_const,
             doc_comment: fn_.doc_comment,
             span: fn_.span
         )
@@ -251,6 +258,13 @@ impl HirLowering:
         # Compute effective visibility using filename matching
         val effective_public = self.compute_visibility(class_.name, class_.is_public)
 
+        # Parse layout attributes (@repr, @packed, @align)
+        val layout = parse_layout_attrs(class_.attributes)
+        val layout_opt: LayoutAttr? = if layout.layout_kind != LayoutKind.Simple or layout.explicit_align.? or layout.is_packed:
+            Some(layout)
+        else:
+            nil
+
         HirClass(
             symbol: symbol,
             name: class_.name,
@@ -260,6 +274,7 @@ impl HirLowering:
             is_public: effective_public,
             doc_comment: class_.doc_comment,
             span: class_.span,
+            layout_attr: layout_opt,
             is_generic_template: false,
             specialization_of: nil,
             type_bindings: {}
@@ -291,6 +306,7 @@ impl HirLowering:
             is_public: effective_public,
             doc_comment: struct_.doc_comment,
             span: struct_.span,
+            layout_attr: nil,
             is_generic_template: false,
             specialization_of: nil,
             type_bindings: {}
@@ -470,4 +486,14 @@ impl HirLowering:
             is_mutable: const_.is_mutable,
             is_public: effective_public,
             span: const_.span
+        )
+
+    me lower_static_assert(assert_: StaticAssert) -> HirStaticAssert:
+        """Lower static assertion to HIR."""
+        val condition = self.lower_expr(assert_.condition)
+
+        HirStaticAssert(
+            condition: condition,
+            message: assert_.message,
+            span: assert_.span
         )

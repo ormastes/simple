@@ -1,0 +1,548 @@
+# @pending
+"""
+LSP Document Synchronization Tests
+Feature: Language Server Protocol Document Sync
+Category: LSP, Editor Integration
+Status: Complete
+
+Tests for LSP document synchronization including didOpen, didChange,
+and didClose notifications. Validates document caching and updates.
+"""
+# @skip
+
+# Local type definitions (test stubs)
+
+struct Position:
+    line: i64
+    character: i64
+
+struct Range:
+    start: Position
+    end: Position
+
+enum DiagnosticSeverity:
+    Error
+    Warning
+    Information
+    Hint
+
+struct Diagnostic:
+    range: Range
+    severity: DiagnosticSeverity
+    message: str
+    source: str
+
+enum CompletionItemKind:
+    Text = 1
+    Method = 2
+    Function = 3
+    Variable = 6
+    Keyword = 14
+    Struct = 22
+
+struct CompletionItem:
+    label: str
+    kind: i64
+    detail: Option<str>
+    documentation: Option<str>
+    insert_text: Option<str>
+
+
+
+describe "Document Synchronization":
+    """
+    Tests for LSP textDocument/did* notifications.
+    """
+
+    context "didOpen Notification":
+        it "caches new document":
+            var server = LspServer.new()
+            server.state = ServerState.Initialized
+
+            val notification = JsonRpcNotification(
+                method: "textDocument/didOpen",
+                params: Some({
+                    "textDocument": {
+                        "uri": "file:///test.spl",
+                        "languageId": "simple",
+                        "version": 1,
+                        "text": "fn main(): print(\"Hello\")"
+                    }
+                })
+            )
+
+            val result = server.handle_notification(notification)
+            expect result.is_ok()
+
+            # Document should be cached
+            expect server.documents.contains_key("file:///test.spl")
+
+        it "stores document version":
+            var server = LspServer.new()
+            server.state = ServerState.Initialized
+
+            val notification = JsonRpcNotification(
+                method: "textDocument/didOpen",
+                params: Some({
+                    "textDocument": {
+                        "uri": "file:///test.spl",
+                        "languageId": "simple",
+                        "version": 1,
+                        "text": "fn main(): print(\"Hello\")"
+                    }
+                })
+            )
+
+            server.handle_notification(notification)
+
+            val doc_info = server.documents.get("file:///test.spl")
+            expect doc_info.?
+            expect doc_info.unwrap().version == 1
+
+        it "stores document text":
+            var server = LspServer.new()
+            server.state = ServerState.Initialized
+
+            val text = "fn main(): print(\"Hello\")"
+            val notification = JsonRpcNotification(
+                method: "textDocument/didOpen",
+                params: Some({
+                    "textDocument": {
+                        "uri": "file:///test.spl",
+                        "languageId": "simple",
+                        "version": 1,
+                        "text": text
+                    }
+                })
+            )
+
+            server.handle_notification(notification)
+
+            val doc_info = server.documents.get("file:///test.spl")
+            expect doc_info.?
+            expect doc_info.unwrap().text == text
+
+        it "parses document into syntax tree":
+            var server = LspServer.new()
+            server.state = ServerState.Initialized
+
+            val notification = JsonRpcNotification(
+                method: "textDocument/didOpen",
+                params: Some({
+                    "textDocument": {
+                        "uri": "file:///test.spl",
+                        "languageId": "simple",
+                        "version": 1,
+                        "text": "fn main(): print(\"Hello\")"
+                    }
+                })
+            )
+
+            server.handle_notification(notification)
+
+            val doc_info = server.documents.get("file:///test.spl")
+            expect doc_info.?
+            # Tree should be parsed (Some) if parser succeeded
+            # or None if parsing failed
+            val tree_opt = doc_info.unwrap().tree
+            expect tree_opt != nil
+
+        it "returns error if params missing":
+            var server = LspServer.new()
+            server.state = ServerState.Initialized
+
+            val notification = JsonRpcNotification(
+                method: "textDocument/didOpen",
+                params: nil
+            )
+
+            val result = server.handle_notification(notification)
+            expect result.err.?
+
+        it "publishes diagnostics after opening":
+            var server = LspServer.new()
+            server.state = ServerState.Initialized
+
+            val notification = JsonRpcNotification(
+                method: "textDocument/didOpen",
+                params: Some({
+                    "textDocument": {
+                        "uri": "file:///test.spl",
+                        "languageId": "simple",
+                        "version": 1,
+                        "text": "fn main(): print(\"Hello\")"
+                    }
+                })
+            )
+
+            val result = server.handle_notification(notification)
+            expect result.is_ok()
+            # Diagnostics would be published via transport
+            # (actual publishing tested in integration tests)
+
+    context "didChange Notification":
+        it "updates document text":
+            var server = LspServer.new()
+            server.state = ServerState.Initialized
+
+            # First, open document
+            val open_notif = JsonRpcNotification(
+                method: "textDocument/didOpen",
+                params: Some({
+                    "textDocument": {
+                        "uri": "file:///test.spl",
+                        "languageId": "simple",
+                        "version": 1,
+                        "text": "fn main(): print(\"Hello\")"
+                    }
+                })
+            )
+            server.handle_notification(open_notif)
+
+            # Then, change document
+            val new_text = "fn main(): print(\"World\")"
+            val change_notif = JsonRpcNotification(
+                method: "textDocument/didChange",
+                params: Some({
+                    "textDocument": {
+                        "uri": "file:///test.spl",
+                        "version": 2
+                    },
+                    "contentChanges": [
+                        {"text": new_text}
+                    ]
+                })
+            )
+
+            val result = server.handle_notification(change_notif)
+            expect result.is_ok()
+
+            # Document text should be updated
+            val doc_info = server.documents.get("file:///test.spl")
+            expect doc_info.?
+            expect doc_info.unwrap().text == new_text
+
+        it "updates document version":
+            var server = LspServer.new()
+            server.state = ServerState.Initialized
+
+            # Open document
+            val open_notif = JsonRpcNotification(
+                method: "textDocument/didOpen",
+                params: Some({
+                    "textDocument": {
+                        "uri": "file:///test.spl",
+                        "languageId": "simple",
+                        "version": 1,
+                        "text": "fn main(): print(\"Hello\")"
+                    }
+                })
+            )
+            server.handle_notification(open_notif)
+
+            # Change document
+            val change_notif = JsonRpcNotification(
+                method: "textDocument/didChange",
+                params: Some({
+                    "textDocument": {
+                        "uri": "file:///test.spl",
+                        "version": 2
+                    },
+                    "contentChanges": [
+                        {"text": "fn main(): print(\"World\")"}
+                    ]
+                })
+            )
+
+            server.handle_notification(change_notif)
+
+            val doc_info = server.documents.get("file:///test.spl")
+            expect doc_info.?
+            expect doc_info.unwrap().version == 2
+
+        it "re-parses document":
+            var server = LspServer.new()
+            server.state = ServerState.Initialized
+
+            # Open document
+            val open_notif = JsonRpcNotification(
+                method: "textDocument/didOpen",
+                params: Some({
+                    "textDocument": {
+                        "uri": "file:///test.spl",
+                        "languageId": "simple",
+                        "version": 1,
+                        "text": "fn main(): print(\"Hello\")"
+                    }
+                })
+            )
+            server.handle_notification(open_notif)
+
+            # Change document
+            val change_notif = JsonRpcNotification(
+                method: "textDocument/didChange",
+                params: Some({
+                    "textDocument": {
+                        "uri": "file:///test.spl",
+                        "version": 2
+                    },
+                    "contentChanges": [
+                        {"text": "fn main(): print(\"World\")"}
+                    ]
+                })
+            )
+
+            server.handle_notification(change_notif)
+
+            # Tree should be re-parsed
+            val doc_info = server.documents.get("file:///test.spl")
+            expect doc_info.?
+            expect doc_info.unwrap().tree != nil
+
+        it "returns error if params missing":
+            var server = LspServer.new()
+            server.state = ServerState.Initialized
+
+            val notification = JsonRpcNotification(
+                method: "textDocument/didChange",
+                params: nil
+            )
+
+            val result = server.handle_notification(notification)
+            expect result.err.?
+
+        it "returns error if content changes empty":
+            var server = LspServer.new()
+            server.state = ServerState.Initialized
+
+            val notification = JsonRpcNotification(
+                method: "textDocument/didChange",
+                params: Some({
+                    "textDocument": {
+                        "uri": "file:///test.spl",
+                        "version": 2
+                    },
+                    "contentChanges": []
+                })
+            )
+
+            val result = server.handle_notification(notification)
+            expect result.err.?
+
+        it "clears query cache on change":
+            var server = LspServer.new()
+            server.state = ServerState.Initialized
+
+            # Open document
+            val open_notif = JsonRpcNotification(
+                method: "textDocument/didOpen",
+                params: Some({
+                    "textDocument": {
+                        "uri": "file:///test.spl",
+                        "languageId": "simple",
+                        "version": 1,
+                        "text": "fn main(): print(\"Hello\")"
+                    }
+                })
+            )
+            server.handle_notification(open_notif)
+
+            # Change document
+            val change_notif = JsonRpcNotification(
+                method: "textDocument/didChange",
+                params: Some({
+                    "textDocument": {
+                        "uri": "file:///test.spl",
+                        "version": 2
+                    },
+                    "contentChanges": [
+                        {"text": "fn main(): print(\"World\")"}
+                    ]
+                })
+            )
+
+            server.handle_notification(change_notif)
+
+            # Query cache should be cleared
+            # (implementation detail - cache is cleared in handle_did_change)
+
+        it "publishes diagnostics after change":
+            var server = LspServer.new()
+            server.state = ServerState.Initialized
+
+            # Open document
+            val open_notif = JsonRpcNotification(
+                method: "textDocument/didOpen",
+                params: Some({
+                    "textDocument": {
+                        "uri": "file:///test.spl",
+                        "languageId": "simple",
+                        "version": 1,
+                        "text": "fn main(): print(\"Hello\")"
+                    }
+                })
+            )
+            server.handle_notification(open_notif)
+
+            # Change document
+            val change_notif = JsonRpcNotification(
+                method: "textDocument/didChange",
+                params: Some({
+                    "textDocument": {
+                        "uri": "file:///test.spl",
+                        "version": 2
+                    },
+                    "contentChanges": [
+                        {"text": "fn main(): syntax error here"}
+                    ]
+                })
+            )
+
+            val result = server.handle_notification(change_notif)
+            expect result.is_ok()
+            # Diagnostics would be published via transport
+
+    context "didClose Notification":
+        it "removes document from cache":
+            var server = LspServer.new()
+            server.state = ServerState.Initialized
+
+            # Open document
+            val open_notif = JsonRpcNotification(
+                method: "textDocument/didOpen",
+                params: Some({
+                    "textDocument": {
+                        "uri": "file:///test.spl",
+                        "languageId": "simple",
+                        "version": 1,
+                        "text": "fn main(): print(\"Hello\")"
+                    }
+                })
+            )
+            server.handle_notification(open_notif)
+
+            # Verify document is cached
+            expect server.documents.contains_key("file:///test.spl")
+
+            # Close document
+            val close_notif = JsonRpcNotification(
+                method: "textDocument/didClose",
+                params: Some({
+                    "textDocument": {
+                        "uri": "file:///test.spl"
+                    }
+                })
+            )
+
+            val result = server.handle_notification(close_notif)
+            expect result.is_ok()
+
+            # Document should be removed
+            expect not server.documents.contains_key("file:///test.spl")
+
+        it "returns error if params missing":
+            var server = LspServer.new()
+            server.state = ServerState.Initialized
+
+            val notification = JsonRpcNotification(
+                method: "textDocument/didClose",
+                params: nil
+            )
+
+            val result = server.handle_notification(notification)
+            expect result.err.?
+
+        it "handles closing non-existent document":
+            var server = LspServer.new()
+            server.state = ServerState.Initialized
+
+            val close_notif = JsonRpcNotification(
+                method: "textDocument/didClose",
+                params: Some({
+                    "textDocument": {
+                        "uri": "file:///nonexistent.spl"
+                    }
+                })
+            )
+
+            # Should succeed even if document not in cache
+            val result = server.handle_notification(close_notif)
+            expect result.is_ok()
+
+    context "Document Lifecycle":
+        it "supports open → change → close flow":
+            var server = LspServer.new()
+            server.state = ServerState.Initialized
+
+            val uri = "file:///test.spl"
+
+            # Open
+            val open_notif = JsonRpcNotification(
+                method: "textDocument/didOpen",
+                params: Some({
+                    "textDocument": {
+                        "uri": uri,
+                        "languageId": "simple",
+                        "version": 1,
+                        "text": "fn main(): print(\"Hello\")"
+                    }
+                })
+            )
+            server.handle_notification(open_notif)
+            expect server.documents.contains_key(uri)
+
+            # Change multiple times
+            for i in 2..5:
+                val change_notif = JsonRpcNotification(
+                    method: "textDocument/didChange",
+                    params: Some({
+                        "textDocument": {
+                            "uri": uri,
+                            "version": i
+                        },
+                        "contentChanges": [
+                            {"text": "fn main(): print(\"Version {i}\")"}
+                        ]
+                    })
+                )
+                server.handle_notification(change_notif)
+
+            val doc_info = server.documents.get(uri)
+            expect doc_info.?
+            expect doc_info.unwrap().version == 4
+
+            # Close
+            val close_notif = JsonRpcNotification(
+                method: "textDocument/didClose",
+                params: Some({
+                    "textDocument": {"uri": uri}
+                })
+            )
+            server.handle_notification(close_notif)
+            expect not server.documents.contains_key(uri)
+
+        it "supports multiple documents":
+            var server = LspServer.new()
+            server.state = ServerState.Initialized
+
+            # Open multiple documents
+            for i in 1..4:
+                val uri = "file:///test{i}.spl"
+                val open_notif = JsonRpcNotification(
+                    method: "textDocument/didOpen",
+                    params: Some({
+                        "textDocument": {
+                            "uri": uri,
+                            "languageId": "simple",
+                            "version": 1,
+                            "text": "fn main{i}(): print(\"Doc {i}\")"
+                        }
+                    })
+                )
+                server.handle_notification(open_notif)
+
+            # All documents should be cached
+            expect server.documents.len() == 3
+            expect server.documents.contains_key("file:///test1.spl")
+            expect server.documents.contains_key("file:///test2.spl")
+            expect server.documents.contains_key("file:///test3.spl")

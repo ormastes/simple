@@ -1,0 +1,490 @@
+///
+Simple Watch System
+
+File watcher that automatically rebuilds on source changes.
+Reads watch configuration from simple.sdn.
+
+Usage:
+    simple watch.spl                    # Watch and rebuild
+    simple watch.spl --task=<task>      # Watch and run specific task
+    simple watch.spl --debounce=<ms>    # Set debounce delay
+
+Features:
+    - Watches .spl and .sdn files
+    - Debounces rapid changes
+    - Runs build or custom task on change
+    - Smart rebuild (only changed targets)
+///
+
+import std.io
+import std.fs
+import std.process
+import std.args
+import std.time
+import sdn.document.SdnDocument
+
+fn main():
+    io.println("=== Simple Watch System ===")
+    io.println("")
+
+    # Parse arguments
+    val argv = args.get_args()
+    val config = parse_args(argv)
+
+    # Load project configuration
+    val project_config = load_watch_config("simple.sdn")
+
+    io.println("Watching for changes...")
+    io.println("  Patterns: ${project_config.patterns.join(", ")}")
+    io.println("  Debounce: ${project_config.debounce_ms}ms")
+    io.println("  Task: ${config.task}")
+    io.println("")
+    io.println("Press Ctrl+C to stop")
+    io.println("")
+
+    # Initial build
+    io.println("Running initial build...")
+    run_task(config.task)
+    io.println("")
+
+    # Watch loop
+    watch_loop(project_config, config)
+
+struct WatchConfig:
+    task: String
+    debounce_ms: Int
+    verbose: Bool
+
+struct WatchSettings:
+    patterns: List<String>
+    ignore: List<String>
+    debounce_ms: Int
+
+### Argument parsing
+
+fn parse_args(argv: List<String>) -> WatchConfig:
+    var task = "build"
+    var debounce_ms = 500
+    var verbose = False
+
+    for arg in argv[1..]:
+        match arg:
+            case arg if arg.starts_with("--task="):
+                task = arg.split("=")[1]
+            case arg if arg.starts_with("--debounce="):
+                val ms_str = arg.split("=")[1]
+                match ms_str.parse_int():
+                    case Some(ms):
+                        debounce_ms = ms
+                    case None:
+                        io.eprintln("Invalid debounce value: ${ms_str}")
+            case "--verbose":
+                verbose = True
+            case "--help":
+                print_help()
+                process.exit(0)
+            case _:
+                io.eprintln("Unknown argument: ${arg}")
+                print_help()
+                process.exit(1)
+
+    return WatchConfig(
+        task: task,
+        debounce_ms: debounce_ms,
+        verbose: verbose
+    )
+
+fn print_help():
+    io.println("Simple Watch System")
+    io.println("")
+    io.println("USAGE:")
+    io.println("    simple watch.spl [OPTIONS]")
+    io.println("")
+    io.println("OPTIONS:")
+    io.println("    --task=<task>        Task to run on changes (default: build)")
+    io.println("    --debounce=<ms>      Debounce delay in milliseconds (default: 500)")
+    io.println("    --verbose            Verbose output")
+    io.println("    --help               Print this help message")
+    io.println("")
+    io.println("EXAMPLES:")
+    io.println("    simple watch.spl                      # Watch and build")
+    io.println("    simple watch.spl --task=test          # Watch and test")
+    io.println("    simple watch.spl --debounce=1000      # 1 second debounce")
+
+### Configuration loading
+
+fn load_watch_config(path: String) -> WatchSettings:
+    """Load watch configuration from simple.sdn"""
+    match SdnDocument.from_file(path):
+        case Ok(doc):
+            # Extract watch patterns
+            var patterns = ["**/*.spl", "**/*.sdn"]
+            match doc.get("tools.watch.patterns"):
+                case Some(arr):
+                    match arr.as_array():
+                        case Some(list):
+                            patterns = []
+                            for item in list:
+                                match item.as_str():
+                                    case Some(s):
+                                        patterns.push(s)
+                                    case None:
+                                        pass
+                        case None:
+                            pass
+                case None:
+                    pass
+
+            # Extract ignore patterns
+            var ignore = ["build/**", "target/**", "bin_simple/**"]
+            match doc.get("tools.watch.ignore"):
+                case Some(arr):
+                    match arr.as_array():
+                        case Some(list):
+                            ignore = []
+                            for item in list:
+                                match item.as_str():
+                                    case Some(s):
+                                        ignore.push(s)
+                                    case None:
+                                        pass
+                        case None:
+                            pass
+                case None:
+                    pass
+
+            # Extract debounce
+            val debounce_ms = doc.get("tools.watch.debounce_ms")
+                .flatmap(|v| v.as_i64())
+                .unwrap_or(500)
+
+            return WatchSettings(
+                patterns: patterns,
+                ignore: ignore,
+                debounce_ms: debounce_ms
+            )
+
+        case Err(e):
+            io.eprintln("Warning: Failed to load config, using defaults: ${e}")
+            return WatchSettings(
+                patterns: ["**/*.spl", "**/*.sdn"],
+                ignore: ["build/**", "target/**"],
+                debounce_ms: 500
+            )
+
+### Watch loop
+
+fn watch_loop(settings: WatchSettings, config: WatchConfig):
+    """Main watch loop"""
+    var last_change_time = 0
+    var pending_rebuild = False
+
+    loop:
+        # Check for file changes
+        val changed = check_for_changes(settings)
+
+        if changed:
+            val current_time = time.now_ms()
+
+            # Debounce: only rebuild if enough time has passed
+            if current_time - last_change_time > config.debounce_ms:
+                io.println("Change detected, rebuilding...")
+                io.println("")
+
+                run_task(config.task)
+
+                io.println("")
+                io.println("Watching for changes...")
+
+                last_change_time = current_time
+                pending_rebuild = False
+            else:
+                # Still within debounce window
+                pending_rebuild = True
+                last_change_time = current_time
+
+        # Sleep to avoid busy-waiting
+        process.sleep(100)
+
+# Global state for tracking file modification times
+var file_mtimes: Dict<String, Int> = {}
+
+fn check_for_changes(settings: WatchSettings) -> Bool:
+    """Check if any watched files have changed using mtime polling.
+
+    This uses a polling approach with file modification times.
+    While less efficient than native file watchers (inotify, FSEvents),
+    it works cross-platform and is reliable.
+    """
+    var changed = False
+
+    # Find all files matching watch patterns
+    for pattern in settings.patterns:
+        val files = find_files_matching(pattern, settings.ignore)
+
+        for file_path in files:
+            val current_mtime = get_file_mtime(file_path)
+
+            match file_mtimes.get(file_path):
+                case Some(old_mtime):
+                    if current_mtime > old_mtime:
+                        io.println("  Changed: ${file_path}")
+                        file_mtimes[file_path] = current_mtime
+                        changed = True
+                case None:
+                    # New file detected
+                    file_mtimes[file_path] = current_mtime
+                    # Don't mark as changed on first discovery
+
+    return changed
+
+fn find_files_matching(pattern: String, ignore: List<String>) -> List<String>:
+    """Find files matching glob pattern, excluding ignored paths."""
+    # Extract directory and file pattern from glob
+    val parts = pattern.split("/")
+    val dir = if parts.len() > 1 and not parts[0].contains("*"):
+        parts[0]
+    else:
+        "."
+
+    # Use shell glob function to find files
+    import shell
+    val all_files = shell.dir.glob(dir, pattern)
+
+    # Filter out ignored paths
+    var result: List<String> = []
+    for file_path in all_files:
+        var is_ignored = False
+        for ignore_pattern in ignore:
+            if matches_glob(file_path, ignore_pattern):
+                is_ignored = True
+                break
+
+        if not is_ignored:
+            result.push(file_path)
+
+    return result
+
+fn matches_glob(path: String, pattern: String) -> Bool:
+    """Check if path matches a glob pattern (simplified)."""
+    # Handle common patterns
+    if pattern.ends_with("/**"):
+        val prefix = pattern[0..(pattern.len() - 3)]
+        return path.starts_with(prefix)
+    elif pattern.starts_with("**/"):
+        val suffix = pattern[3..]
+        return path.ends_with(suffix) or path.contains("/" + suffix)
+    elif pattern.contains("*"):
+        # Simple wildcard matching
+        val parts = pattern.split("*")
+        if parts.len() == 2:
+            return path.starts_with(parts[0]) and path.ends_with(parts[1])
+
+    return path == pattern
+
+fn get_file_mtime(path: String) -> Int:
+    """Get file modification time in milliseconds."""
+    # Use stat-like functionality via FFI
+    match fs.stat(path):
+        case Ok(stat_info):
+            return stat_info.mtime_ms
+        case Err(_):
+            return 0
+
+### Task execution
+
+fn run_task(task_name: String):
+    """Run a task (build, test, etc.)"""
+    match task_name:
+        case "build":
+            run_build()
+        case "test":
+            run_tests()
+        case "fmt":
+            run_format()
+        case "lint":
+            run_lint()
+        case _:
+            # Run via task runner
+            val result = process.run_command(
+                "simple",
+                ["simple/task.spl", task_name]
+            )
+
+            match result:
+                case Ok(output):
+                    if output.exit_code != 0:
+                        io.eprintln("Task failed with exit code ${output.exit_code}")
+                case Err(e):
+                    io.eprintln("Failed to run task: ${e}")
+
+fn run_build():
+    """Run build task"""
+    val result = process.run_command(
+        "simple",
+        ["simple/build.spl"]
+    )
+
+    match result:
+        case Ok(output):
+            if output.exit_code == 0:
+                io.println("✓ Build successful")
+            else:
+                io.eprintln("✗ Build failed")
+                if output.stderr.len > 0:
+                    io.eprintln(output.stderr)
+        case Err(e):
+            io.eprintln("Failed to run build: ${e}")
+
+fn run_tests():
+    """Run tests"""
+    val result = process.run_command(
+        "cargo",
+        ["test", "--workspace"]
+    )
+
+    match result:
+        case Ok(output):
+            if output.exit_code == 0:
+                io.println("✓ Tests passed")
+            else:
+                io.eprintln("✗ Tests failed")
+        case Err(e):
+            io.eprintln("Failed to run tests: ${e}")
+
+fn run_format():
+    """Run formatter on all .spl files."""
+    io.println("Formatting source files...")
+
+    # Find all .spl files
+    import shell
+    val spl_files = shell.file.find(".", "*.spl", recursive: True)
+
+    # Filter out build/target directories
+    var files_to_format: List<String> = []
+    for file_path in spl_files:
+        if not file_path.contains("/build/") and
+           not file_path.contains("/target/") and
+           not file_path.contains("/bin_simple/"):
+            files_to_format.push(file_path)
+
+    io.println("  Found ${files_to_format.len()} .spl files")
+
+    # Find formatter binary
+    val formatter_paths = [
+        "simple/bin_simple/simple_fmt",
+        "./simple/bin_simple/simple_fmt",
+        "target/debug/simple"
+    ]
+
+    var formatter: Option<String> = None
+    for path in formatter_paths:
+        if fs.exists(path):
+            formatter = Some(path)
+            break
+
+    match formatter:
+        case Some(fmt_path):
+            var formatted_count = 0
+            var error_count = 0
+
+            for file_path in files_to_format:
+                val args = if fmt_path.ends_with("simple_fmt"):
+                    [file_path, "--write"]
+                else:
+                    ["fmt", file_path, "--write"]
+
+                val result = process.run_command(fmt_path, args)
+
+                match result:
+                    case Ok(output):
+                        if output.exit_code == 0:
+                            formatted_count = formatted_count + 1
+                        else:
+                            io.eprintln("  ✗ Failed to format ${file_path}")
+                            error_count = error_count + 1
+                    case Err(e):
+                        io.eprintln("  ✗ Error formatting ${file_path}: ${e}")
+                        error_count = error_count + 1
+
+            if error_count == 0:
+                io.println("✓ Formatted ${formatted_count} files successfully")
+            else:
+                io.eprintln("✗ Formatted ${formatted_count} files, ${error_count} errors")
+        case None:
+            io.eprintln("✗ Formatter not found. Build with: simple build.spl --target=fmt")
+
+fn run_lint():
+    """Run linter on all .spl files."""
+    io.println("Linting source files...")
+
+    # Find all .spl files
+    import shell
+    val spl_files = shell.file.find(".", "*.spl", recursive: True)
+
+    # Filter out build/target directories
+    var files_to_lint: List<String> = []
+    for file_path in spl_files:
+        if not file_path.contains("/build/") and
+           not file_path.contains("/target/") and
+           not file_path.contains("/bin_simple/"):
+            files_to_lint.push(file_path)
+
+    io.println("  Found ${files_to_lint.len()} .spl files")
+
+    # Find linter binary
+    val linter_paths = [
+        "simple/bin_simple/simple_lint",
+        "./simple/bin_simple/simple_lint",
+        "target/debug/simple"
+    ]
+
+    var linter: Option<String> = None
+    for path in linter_paths:
+        if fs.exists(path):
+            linter = Some(path)
+            break
+
+    match linter:
+        case Some(lint_path):
+            var passed_count = 0
+            var warning_count = 0
+            var error_count = 0
+
+            for file_path in files_to_lint:
+                val args = if lint_path.ends_with("simple_lint"):
+                    [file_path]
+                else:
+                    ["lint", file_path]
+
+                val result = process.run_command(lint_path, args)
+
+                match result:
+                    case Ok(output):
+                        if output.exit_code == 0:
+                            passed_count = passed_count + 1
+                        elif output.exit_code == 1:
+                            # Warnings
+                            warning_count = warning_count + 1
+                            if output.stdout.len > 0:
+                                io.println("  ⚠ ${file_path}:")
+                                io.println(output.stdout)
+                        else:
+                            # Errors
+                            error_count = error_count + 1
+                            io.eprintln("  ✗ ${file_path}:")
+                            if output.stderr.len > 0:
+                                io.eprintln(output.stderr)
+                    case Err(e):
+                        io.eprintln("  ✗ Error linting ${file_path}: ${e}")
+                        error_count = error_count + 1
+
+            io.println("")
+            io.println("Lint summary:")
+            io.println("  ✓ Passed: ${passed_count}")
+            if warning_count > 0:
+                io.println("  ⚠ Warnings: ${warning_count}")
+            if error_count > 0:
+                io.eprintln("  ✗ Errors: ${error_count}")
+        case None:
+            io.eprintln("✗ Linter not found. Build with: simple build.spl --target=lint")

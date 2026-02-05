@@ -1,0 +1,145 @@
+# Visibility and Export Model
+#
+# Implements visibility and export rules backed by Lean 4 formal verification.
+# Port of rust/dependency_tracker/src/visibility.rs
+#
+# Proven properties (Lean theorems):
+# 1. private_stays_private: A private symbol cannot become public
+# 2. private_module_restricts: A symbol in a private module cannot become public
+# 3. must_be_exported: A symbol must be explicitly exported to be visible externally
+# 4. meet_comm, meet_assoc: Visibility meet is commutative and associative
+# 5. any_private_means_private: If any ancestor is private, result is private
+# 6. all_public_means_public: All public ancestors means public result
+
+export Visibility, SymbolId, Symbol, ModDecl, DirManifest, ModuleContents
+export visibility_meet, ancestor_visibility, effective_visibility, effective_visibility_with_glob
+
+# Visibility of a declaration or module
+enum Visibility:
+    Public
+    Private
+
+impl Visibility:
+    fn is_public() -> bool:
+        match self:
+            case Visibility.Public: true
+            case _: false
+
+    fn is_private() -> bool:
+        match self:
+            case Visibility.Private: true
+            case _: false
+
+# A symbol identifier
+struct SymbolId:
+    name: text
+
+# A symbol with visibility
+struct Symbol:
+    id: SymbolId
+    visibility: Visibility
+
+impl Symbol:
+    static fn public(name: text) -> Symbol:
+        Symbol(id: SymbolId(name: name), visibility: Visibility.Public)
+
+    static fn private(name: text) -> Symbol:
+        Symbol(id: SymbolId(name: name), visibility: Visibility.Private)
+
+# A module declaration in __init__.spl
+struct ModDecl:
+    name: text
+    is_pub: bool
+
+impl ModDecl:
+    static fn public(name: text) -> ModDecl:
+        ModDecl(name: name, is_pub: true)
+
+    static fn private(name: text) -> ModDecl:
+        ModDecl(name: name, is_pub: false)
+
+# A directory manifest (__init__.spl)
+class DirManifest:
+    name: text
+    children: [ModDecl]
+    exports: [text]     # Set of exported symbol names
+
+impl DirManifest:
+    static fn for_dir(name: text) -> DirManifest:
+        DirManifest(name: name, children: [], exports: [])
+
+    fn is_child_public(child_name: text) -> bool:
+        self.children.any(\d: d.name == child_name and d.is_pub)
+
+    fn is_exported(sym_name: text) -> bool:
+        self.exports.contains(sym_name)
+
+    me add_child(decl: ModDecl):
+        self.children.push(decl)
+
+    me add_export(sym_name: text):
+        self.exports.push(sym_name)
+
+# Module contents: symbols defined in a module file
+class ModuleContents:
+    symbols: [Symbol]
+
+impl ModuleContents:
+    static fn empty() -> ModuleContents:
+        ModuleContents(symbols: [])
+
+    me add_symbol(symbol: Symbol):
+        self.symbols.push(symbol)
+
+    fn symbol_visibility(sym_name: text) -> Visibility?:
+        for s in self.symbols:
+            if s.id.name == sym_name:
+                return Some(s.visibility)
+        None
+
+# Visibility meet operation (intersection)
+# Public AND Public = Public, otherwise Private
+fn visibility_meet(v1: Visibility, v2: Visibility) -> Visibility:
+    match (v1, v2):
+        case (Visibility.Public, Visibility.Public): Visibility.Public
+        case _: Visibility.Private
+
+# Ancestor visibility through a path (fold meet over all)
+fn ancestor_visibility(path: [Visibility]) -> Visibility:
+    var result = Visibility.Public
+    for v in path:
+        result = visibility_meet(result, v)
+    result
+
+# Effective visibility: combines declaration visibility with directory control
+# A symbol is externally visible only if:
+# 1. It is declared pub in its module
+# 2. Its module is declared pub mod in the directory's __init__.spl
+# 3. It's in the export list
+fn effective_visibility(manifest: DirManifest, module_name: text,
+                        mc: ModuleContents, sym_name: text) -> Visibility:
+    val vis = mc.symbol_visibility(sym_name)
+    if not vis.?:
+        return Visibility.Private
+    match vis.unwrap():
+        case Visibility.Private: Visibility.Private
+        case Visibility.Public:
+            if manifest.is_child_public(module_name) and manifest.is_exported(sym_name):
+                Visibility.Public
+            else:
+                Visibility.Private
+
+# Effective visibility with glob export support
+fn effective_visibility_with_glob(manifest: DirManifest, module_name: text,
+                                   mc: ModuleContents, sym_name: text,
+                                   has_glob_export: bool) -> Visibility:
+    val vis = mc.symbol_visibility(sym_name)
+    if not vis.?:
+        return Visibility.Private
+    match vis.unwrap():
+        case Visibility.Private: Visibility.Private
+        case Visibility.Public:
+            if manifest.is_child_public(module_name) and (manifest.is_exported(sym_name) or has_glob_export):
+                Visibility.Public
+            else:
+                Visibility.Private

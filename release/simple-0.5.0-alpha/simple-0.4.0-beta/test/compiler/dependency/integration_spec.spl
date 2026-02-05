@@ -1,0 +1,291 @@
+# Integration tests for Dependency Tracker
+# Task #20: End-to-end testing
+
+use sspec.{describe, it, expect}
+use compiler.dependency.resolution.{Segment, ModPath, FileSystem, resolve}
+use compiler.dependency.visibility.{Visibility, Symbol, effective_visibility}
+use compiler.dependency.macro_import.{MacroSymbol, AutoImport, MacroExports, MacroDirManifest, glob_import}
+use compiler.dependency.graph.{ImportGraph}
+use compiler.dependency.symbol.{SymbolKind, SymbolEntry, SymbolTable}
+
+describe "Dependency Tracker Integration":
+    context "resolution + visibility":
+        it "resolves module and checks visibility":
+            var fs = FileSystem.new()
+            fs.add_file("a.spl")
+            fs.add_file("a/b.spl")
+
+            # Resolve path
+            val mp = ModPath.parse("a.b")
+            match mp:
+                case Some(mod_path):
+                    val result = resolve(fs, ".", mod_path)
+                    match result:
+                        case Some(resolved):
+                            val path_str = resolved.to_string()
+                            expect path_str.contains("a")
+                            expect path_str.contains("b")
+                        case nil:
+                            fail("Expected successful resolution")
+                case nil:
+                    fail("Expected valid ModPath")
+
+            # Check basic visibility
+            val pub_sym = Symbol.pub_symbol("test")
+            val priv_sym = Symbol.priv_symbol("internal")
+
+            val pub_vis = pub_sym.get_visibility()
+            val priv_vis = priv_sym.get_visibility()
+
+            expect pub_vis.to_string() == "Public"
+            expect priv_vis.to_string() == "Private"
+
+    context "resolution + macro import":
+        it "resolves module and filters macros":
+            var fs = FileSystem.new()
+            fs.add_file("mymod.spl")
+            fs.add_file("mymod/__init__.spl")
+
+            val mp = ModPath.parse("mymod")
+            match mp:
+                case Some(mod_path):
+                    val result = resolve(fs, ".", mod_path)
+                    match result:
+                        case Some(_):
+                            # Create exports for resolved module
+                            var exports = MacroExports.new()
+                            exports.add_non_macro(MacroSymbol.value_sym("mymod", "foo"))
+                            exports.add_macro(MacroSymbol.macro_sym("mymod", "mymacro"))
+
+                            # Apply macro filtering
+                            var manifest = MacroDirManifest.new("test")
+                            manifest.add_auto_import(AutoImport.new("mymod", "mymacro"))
+
+                            val imported = glob_import(manifest, exports)
+                            # Should include both foo and mymacro
+                            expect imported.len() >= 2
+                        case nil:
+                            fail("Expected resolution")
+                case nil:
+                    fail("Expected valid ModPath")
+
+    context "graph + resolution":
+        it "builds import graph from resolved modules":
+            var fs = FileSystem.new()
+            fs.add_file("a.spl")
+            fs.add_file("b.spl")
+            fs.add_file("c.spl")
+
+            var graph = ImportGraph.new()
+
+            # Resolve modules
+            val mp_a = ModPath.parse("a")
+            val mp_b = ModPath.parse("b")
+            val mp_c = ModPath.parse("c")
+
+            var a_resolved = false
+            var b_resolved = false
+            var c_resolved = false
+
+            match mp_a:
+                case Some(mod_path):
+                    val result = resolve(fs, ".", mod_path)
+                    match result:
+                        case Some(_):
+                            a_resolved = true
+                        case nil:
+                            ()
+                case nil:
+                    ()
+
+            match mp_b:
+                case Some(mod_path):
+                    val result = resolve(fs, ".", mod_path)
+                    match result:
+                        case Some(_):
+                            b_resolved = true
+                        case nil:
+                            ()
+                case nil:
+                    ()
+
+            match mp_c:
+                case Some(mod_path):
+                    val result = resolve(fs, ".", mod_path)
+                    match result:
+                        case Some(_):
+                            c_resolved = true
+                        case nil:
+                            ()
+                case nil:
+                    ()
+
+            # Add to graph if resolved
+            if a_resolved and b_resolved:
+                graph.add_use("a", "b")
+
+            if b_resolved and c_resolved:
+                graph.add_use("b", "c")
+
+            # Check graph structure
+            expect graph.module_count() >= 2
+
+            # Check for cycles
+            val cycle_result = graph.check_cycles()
+            match cycle_result:
+                case Some(_):
+                    fail("Expected no cycles")
+                case nil:
+                    pass
+
+    context "symbol table + visibility":
+        it "stores symbols with visibility":
+            var table = SymbolTable.new("mymod")
+
+            # Define public symbol
+            val pub_entry = SymbolEntry.local(
+                "public_fn",
+                "mymod.public_fn",
+                SymbolKind.Function,
+                Visibility.Public,
+                "mymod"
+            )
+            table.define(pub_entry)
+
+            # Define private symbol
+            val priv_entry = SymbolEntry.local(
+                "private_fn",
+                "mymod.private_fn",
+                SymbolKind.Function,
+                Visibility.Private,
+                "mymod"
+            )
+            table.define(priv_entry)
+
+            # Get public symbols
+            val pub_syms = table.public_symbols()
+            expect pub_syms.len() == 1
+
+            # Get all symbols
+            val all_syms = table.all_symbols()
+            expect all_syms.len() == 2
+
+    context "full dependency workflow":
+        it "complete dependency tracking scenario":
+            # 1. Setup filesystem
+            var fs = FileSystem.new()
+            fs.add_file("app.spl")
+            fs.add_file("lib.spl")
+            fs.add_file("utils.spl")
+
+            # 2. Build import graph
+            var graph = ImportGraph.new()
+            graph.add_use("app", "lib")
+            graph.add_use("lib", "utils")
+
+            # 3. Check for cycles
+            val cycles = graph.check_cycles()
+            match cycles:
+                case Some(_):
+                    fail("No cycles expected in simple dependency")
+                case nil:
+                    pass
+
+            # 4. Get topological order
+            val topo = graph.topological_order()
+            match topo:
+                case Some(order):
+                    expect order.len() == 3
+                    # utils should come before lib, lib before app
+                case nil:
+                    fail("Expected topological order")
+
+            # 5. Create symbol tables for each module
+            var app_table = SymbolTable.new("app")
+            var lib_table = SymbolTable.new("lib")
+            var utils_table = SymbolTable.new("utils")
+
+            # 6. Define symbols
+            app_table.define(SymbolEntry.local(
+                "main",
+                "app.main",
+                SymbolKind.Function,
+                Visibility.Public,
+                "app"
+            ))
+
+            lib_table.define(SymbolEntry.local(
+                "helper",
+                "lib.helper",
+                SymbolKind.Function,
+                Visibility.Public,
+                "lib"
+            ))
+
+            utils_table.define(SymbolEntry.local(
+                "format",
+                "utils.format",
+                SymbolKind.Function,
+                Visibility.Public,
+                "utils"
+            ))
+
+            # 7. Verify all tables
+            expect app_table.count() == 1
+            expect lib_table.count() == 1
+            expect utils_table.count() == 1
+
+    context "macro imports with graph":
+        it "handles macro imports in dependency graph":
+            # Build graph with macro imports
+            var graph = ImportGraph.new()
+            graph.add_use("a", "b")
+            graph.add_type_use("b", "c")  # Type-only (won't create cycle)
+            graph.add_use("c", "d")
+
+            # Type-only imports don't affect cycles
+            val has_cycles = graph.check_cycles()
+            match has_cycles:
+                case Some(_):
+                    fail("Type-only imports shouldn't create cycles")
+                case nil:
+                    pass
+
+            # Setup macro exports
+            var exports = MacroExports.new()
+            exports.add_macro(MacroSymbol.macro_sym("b", "macro1"))
+            exports.add_non_macro(MacroSymbol.value_sym("b", "func1"))
+
+            # Filter with manifest
+            var manifest = MacroDirManifest.new("test")
+            manifest.add_auto_import(AutoImport.new("b", "macro1"))
+
+            val imported = glob_import(manifest, exports)
+            expect imported.len() == 2  # Both func1 and macro1
+
+    context "transitive dependencies with symbol tables":
+        it "tracks transitive dependencies across modules":
+            # Build dependency graph
+            var graph = ImportGraph.new()
+            graph.add_use("app", "lib1")
+            graph.add_use("app", "lib2")
+            graph.add_use("lib1", "utils")
+            graph.add_use("lib2", "utils")
+
+            # Get transitive imports
+            val app_deps = graph.transitive_imports("app")
+            # app transitively depends on lib1, lib2, utils
+            expect app_deps.len() == 3
+
+            # Create symbol tables
+            var utils_table = SymbolTable.new("utils")
+            utils_table.define(SymbolEntry.local(
+                "shared_fn",
+                "utils.shared_fn",
+                SymbolKind.Function,
+                Visibility.Public,
+                "utils"
+            ))
+
+            # Verify utils symbols are available
+            expect utils_table.has_symbol("shared_fn")

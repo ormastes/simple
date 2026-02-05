@@ -1,0 +1,279 @@
+# Hash - Trait-based hashing for Simple types
+#
+# Provides FNV-1a hashing for strings, Fibonacci/MurmurHash3 for integers,
+# and composable hashing for compound types.
+#
+# This replaces the placeholder hash implementation in Map.
+
+export Hash, FNV_OFFSET, FNV_PRIME
+export hash_combine, hash_array, hash_tuple2, hash_tuple3
+
+# ============================================================================
+# Hash Trait
+# ============================================================================
+
+trait Hash:
+    """Trait for types that can be hashed.
+
+    Implementing types must provide a hash() method that returns
+    a well-distributed 64-bit hash value.
+    """
+    fn hash() -> i64
+
+# ============================================================================
+# FNV-1a Constants
+# ============================================================================
+
+# FNV-1a 64-bit offset basis
+val FNV_OFFSET: i64 = -3750763034362895579  # 0xcbf29ce484222325 as signed i64
+
+# FNV-1a 64-bit prime
+val FNV_PRIME: i64 = 1099511628211  # 0x100000001b3
+
+# ============================================================================
+# Primitive Type Implementations
+# ============================================================================
+
+impl Hash for text:
+    fn hash() -> i64:
+        """FNV-1a hash for strings.
+
+        This is a fast, simple hash with good distribution properties.
+        Suitable for hash tables and general-purpose hashing.
+
+        Time: O(n) where n is string length
+        """
+        var h = FNV_OFFSET
+
+        # Hash each byte
+        for byte in self.bytes():
+            h = h xor (byte as i64)
+            h = h * FNV_PRIME
+
+        h
+
+impl Hash for i32:
+    fn hash() -> i64:
+        """Fibonacci hashing for 32-bit integers.
+
+        Uses the golden ratio to spread values uniformly.
+        """
+        # Multiply by golden ratio's binary representation
+        # This spreads consecutive integers across hash space
+        (self as i64) * -7046029254386353131  # 0x9e3779b97f4a7c15
+
+impl Hash for i64:
+    fn hash() -> i64:
+        """MurmurHash3 finalizer for 64-bit integers.
+
+        Uses avalanche mixing to ensure single-bit changes
+        affect the entire hash.
+        """
+        var h = self
+
+        # MurmurHash3 64-bit finalizer
+        h = h xor (h >> 33)
+        h = h * -49064778989728563  # 0xff51afd7ed558ccd
+        h = h xor (h >> 33)
+        h = h * -4265267296055464877  # 0xc4ceb9fe1a85ec53
+        h = h xor (h >> 33)
+
+        h
+
+impl Hash for i8:
+    fn hash() -> i64:
+        (self as i64) * FNV_PRIME
+
+impl Hash for i16:
+    fn hash() -> i64:
+        (self as i64) * FNV_PRIME
+
+impl Hash for u8:
+    fn hash() -> i64:
+        (self as i64) * FNV_PRIME
+
+impl Hash for u16:
+    fn hash() -> i64:
+        (self as i64) * FNV_PRIME
+
+impl Hash for u32:
+    fn hash() -> i64:
+        (self as i64) * -7046029254386353131
+
+impl Hash for u64:
+    fn hash() -> i64:
+        var h = self as i64
+        h = h xor (h >> 33)
+        h = h * -49064778989728563
+        h = h xor (h >> 33)
+        h
+
+impl Hash for bool:
+    fn hash() -> i64:
+        """Hash boolean values.
+
+        true hashes to 1, false to 0.
+        """
+        if self: 1 else: 0
+
+impl Hash for char:
+    fn hash() -> i64:
+        """Hash a single character using its Unicode code point."""
+        (self.to_u32() as i64) * FNV_PRIME
+
+# ============================================================================
+# Compound Type Implementations
+# ============================================================================
+
+impl<T> Hash for Option<T> where T: Hash:
+    fn hash() -> i64:
+        """Hash optional values.
+
+        None hashes to 0, Some(x) combines x's hash with FNV_PRIME.
+        """
+        match self:
+            case Some(value):
+                # Combine value hash with prime to distinguish from raw value
+                value.hash() * FNV_PRIME
+            case None:
+                0
+
+impl<T, E> Hash for Result<T, E> where T: Hash, E: Hash:
+    fn hash() -> i64:
+        """Hash result values.
+
+        Ok and Err produce different hashes even for same wrapped value.
+        """
+        match self:
+            case Ok(value):
+                # Use different mixing for Ok vs Err
+                value.hash() * FNV_PRIME
+            case Err(error):
+                error.hash() * FNV_PRIME + 1
+
+impl<T> Hash for [T] where T: Hash:
+    fn hash() -> i64:
+        """Hash arrays by combining element hashes.
+
+        Uses FNV-1a to combine hashes, so order matters.
+        Empty array hashes to FNV_OFFSET.
+        """
+        var h = FNV_OFFSET
+
+        for elem in self:
+            h = h xor elem.hash()
+            h = h * FNV_PRIME
+
+        h
+
+# Tuple implementations (up to 4 elements)
+impl<T1, T2> Hash for (T1, T2) where T1: Hash, T2: Hash:
+    fn hash() -> i64:
+        """Hash 2-tuple by combining element hashes."""
+        var h = FNV_OFFSET
+        h = h xor self.0.hash()
+        h = h * FNV_PRIME
+        h = h xor self.1.hash()
+        h = h * FNV_PRIME
+        h
+
+impl<T1, T2, T3> Hash for (T1, T2, T3) where T1: Hash, T2: Hash, T3: Hash:
+    fn hash() -> i64:
+        """Hash 3-tuple by combining element hashes."""
+        var h = FNV_OFFSET
+        h = h xor self.0.hash()
+        h = h * FNV_PRIME
+        h = h xor self.1.hash()
+        h = h * FNV_PRIME
+        h = h xor self.2.hash()
+        h = h * FNV_PRIME
+        h
+
+impl<T1, T2, T3, T4> Hash for (T1, T2, T3, T4) where T1: Hash, T2: Hash, T3: Hash, T4: Hash:
+    fn hash() -> i64:
+        """Hash 4-tuple by combining element hashes."""
+        var h = FNV_OFFSET
+        h = h xor self.0.hash()
+        h = h * FNV_PRIME
+        h = h xor self.1.hash()
+        h = h * FNV_PRIME
+        h = h xor self.2.hash()
+        h = h * FNV_PRIME
+        h = h xor self.3.hash()
+        h = h * FNV_PRIME
+        h
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+pub fn hash_combine(h1: i64, h2: i64) -> i64:
+    """Combine two hash values using FNV-1a.
+
+    Useful for building custom hash implementations.
+
+    Example:
+        val h = hash_combine(x.hash(), y.hash())
+    """
+    var h = h1
+    h = h xor h2
+    h = h * FNV_PRIME
+    h
+
+pub fn hash_array<T>(arr: [T]) -> i64 where T: Hash:
+    """Hash an array of hashable elements.
+
+    Explicit function version of array Hash trait impl.
+    """
+    arr.hash()
+
+pub fn hash_tuple2<T1, T2>(t: (T1, T2)) -> i64 where T1: Hash, T2: Hash:
+    """Hash a 2-tuple.
+
+    Explicit function version for use in generic contexts.
+    """
+    t.hash()
+
+pub fn hash_tuple3<T1, T2, T3>(t: (T1, T2, T3)) -> i64 where T1: Hash, T2: Hash, T3: Hash:
+    """Hash a 3-tuple."""
+    t.hash()
+
+# ============================================================================
+# Floating Point Hashing (requires bit representation)
+# ============================================================================
+
+# TODO[stdlib][P2]: Add f32/f64 hashing once bit representation is available
+# impl Hash for f32:
+#     fn hash() -> i64:
+#         """Hash float by treating bits as integer."""
+#         self.to_bits().hash()
+#
+# impl Hash for f64:
+#     fn hash() -> i64:
+#         """Hash double by treating bits as integer."""
+#         self.to_bits().hash()
+
+# ============================================================================
+# Usage Examples
+# ============================================================================
+
+# String hashing:
+#   "hello".hash()  # Uses FNV-1a
+#
+# Integer hashing:
+#   (42 as i32).hash()  # Fibonacci hashing
+#   (1234567890 as i64).hash()  # MurmurHash3 finalizer
+#
+# Compound types:
+#   Some(42).hash()  # Option hashing
+#   [1, 2, 3].hash()  # Array hashing
+#   ("key", 42).hash()  # Tuple hashing
+#
+# Custom types:
+#   struct Point:
+#       x: i64
+#       y: i64
+#
+#   impl Hash for Point:
+#       fn hash() -> i64:
+#           hash_combine(self.x.hash(), self.y.hash())

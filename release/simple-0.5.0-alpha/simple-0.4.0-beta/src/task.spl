@@ -1,0 +1,293 @@
+///
+Simple Task Runner
+
+Self-hosted task runner for development workflows.
+Reads tasks from simple.sdn and executes them.
+
+Usage:
+    simple task.spl <task>           # Run a task
+    simple task.spl --list           # List all tasks
+    simple task.spl --describe=<task> # Describe a task
+
+Common tasks:
+    build      - Build all targets
+    test       - Run all tests
+    fmt        - Format all source files
+    lint       - Lint all source files
+    clean      - Clean build artifacts
+    check      - Format + lint + test
+///
+
+import std.io
+import std.fs
+import std.process
+import std.args
+import sdn.document.SdnDocument
+
+fn main():
+    val argv = args.get_args()
+
+    if argv.len < 2:
+        print_usage()
+        process.exit(1)
+
+    val command = argv[1]
+
+    match command:
+        case "--list":
+            list_tasks()
+        case arg if arg.starts_with("--describe="):
+            val task_name = arg.split("=")[1]
+            describe_task(task_name)
+        case "--help":
+            print_usage()
+        case task_name:
+            run_task(task_name, argv[2..])
+
+### Task definitions (loaded from simple.sdn or embedded)
+
+struct Task:
+    name: String
+    description: String
+    commands: List<String>
+    depends_on: List<String>
+
+fn get_tasks() -> Dict<String, Task>:
+    """Get available tasks"""
+    var tasks = {}
+
+    # Build task
+    tasks["build"] = Task(
+        name: "build",
+        description: "Build all development tools",
+        commands: ["simple", "simple/build.spl"],
+        depends_on: []
+    )
+
+    # Clean task
+    tasks["clean"] = Task(
+        name: "clean",
+        description: "Clean build artifacts",
+        commands: ["simple", "simple/build.spl", "--clean"],
+        depends_on: []
+    )
+
+    # Test tasks
+    tasks["test"] = Task(
+        name: "test",
+        description: "Run all tests (unit + system + integration)",
+        commands: ["cargo", "test", "--workspace"],
+        depends_on: []
+    )
+
+    tasks["test-unit"] = Task(
+        name: "test-unit",
+        description: "Run unit tests only",
+        commands: ["cargo", "test", "-p", "simple-driver", "simple_stdlib_unit"],
+        depends_on: []
+    )
+
+    tasks["test-system"] = Task(
+        name: "test-system",
+        description: "Run system tests only",
+        commands: ["cargo", "test", "-p", "simple-driver", "simple_stdlib_system"],
+        depends_on: []
+    )
+
+    # Format task
+    tasks["fmt"] = Task(
+        name: "fmt",
+        description: "Format all Simple source files",
+        commands: ["find", "simple", "-name", "*.spl", "-exec", "simple/bin_simple/simple_fmt", "{}", "--write", ";"],
+        depends_on: ["build"]
+    )
+
+    # Lint task
+    tasks["lint"] = Task(
+        name: "lint",
+        description: "Lint all Simple source files",
+        commands: ["find", "simple", "-name", "*.spl", "-exec", "simple/bin_simple/simple_lint", "{}", ";"],
+        depends_on: ["build"]
+    )
+
+    # Check task (format + lint + test)
+    tasks["check"] = Task(
+        name: "check",
+        description: "Run format, lint, and tests",
+        commands: [],
+        depends_on: ["fmt", "lint", "test"]
+    )
+
+    # Rust format
+    tasks["fmt-rust"] = Task(
+        name: "fmt-rust",
+        description: "Format Rust source files",
+        commands: ["cargo", "fmt"],
+        depends_on: []
+    )
+
+    # Rust lint
+    tasks["lint-rust"] = Task(
+        name: "lint-rust",
+        description: "Lint Rust source files",
+        commands: ["cargo", "clippy", "--all-targets", "--", "-D", "warnings"],
+        depends_on: []
+    )
+
+    # Coverage
+    tasks["coverage"] = Task(
+        name: "coverage",
+        description: "Generate test coverage report",
+        commands: ["cargo", "llvm-cov", "--html"],
+        depends_on: []
+    )
+
+    # Development build
+    tasks["dev"] = Task(
+        name: "dev",
+        description: "Quick development build and test",
+        commands: [],
+        depends_on: ["build", "test-unit"]
+    )
+
+    # Full check
+    tasks["ci"] = Task(
+        name: "ci",
+        description: "Full CI check (format, lint, test, coverage)",
+        commands: [],
+        depends_on: ["fmt-rust", "lint-rust", "test", "coverage"]
+    )
+
+    return tasks
+
+### Task execution
+
+fn run_task(task_name: String, extra_args: List<String>):
+    """Run a task by name"""
+    val tasks = get_tasks()
+
+    match tasks.get(task_name):
+        case Some(task):
+            io.println("Running task: ${task.name}")
+            io.println("Description: ${task.description}")
+            io.println("")
+
+            # Run dependencies first
+            for dep in task.depends_on:
+                io.println("Running dependency: ${dep}")
+                run_task(dep, [])
+                io.println("")
+
+            # Run task commands
+            if task.commands.len > 0:
+                execute_commands(task.commands, extra_args)
+            else:
+                io.println("Task ${task_name} completed (no commands)")
+
+        case None:
+            io.eprintln("Error: Task '${task_name}' not found")
+            io.eprintln("")
+            io.eprintln("Run 'simple task.spl --list' to see available tasks")
+            process.exit(1)
+
+fn execute_commands(commands: List<String>, extra_args: List<String>):
+    """Execute a list of commands"""
+    if commands.len == 0:
+        return
+
+    val command = commands[0]
+    var args = commands[1..]
+
+    # Add extra arguments
+    for arg in extra_args:
+        args.push(arg)
+
+    io.println("Executing: ${command} ${args.join(" ")}")
+
+    match process.run_command(command, args):
+        case Ok(output):
+            if output.exit_code == 0:
+                if output.stdout.len > 0:
+                    io.println(output.stdout)
+                io.println("✓ Task completed successfully")
+            else:
+                if output.stderr.len > 0:
+                    io.eprintln(output.stderr)
+                io.eprintln("✗ Task failed with exit code ${output.exit_code}")
+                process.exit(output.exit_code)
+        case Err(e):
+            io.eprintln("✗ Failed to execute command: ${e}")
+            process.exit(1)
+
+### Task information
+
+fn list_tasks():
+    """List all available tasks"""
+    val tasks = get_tasks()
+
+    io.println("Available tasks:")
+    io.println("")
+
+    val task_names = tasks.keys().sort()
+
+    for name in task_names:
+        match tasks.get(name):
+            case Some(task):
+                io.println("  ${task.name.pad_right(15)} - ${task.description}")
+            case None:
+                pass
+
+    io.println("")
+    io.println("Run 'simple task.spl <task>' to execute a task")
+    io.println("Run 'simple task.spl --describe=<task>' for more details")
+
+fn describe_task(task_name: String):
+    """Describe a task in detail"""
+    val tasks = get_tasks()
+
+    match tasks.get(task_name):
+        case Some(task):
+            io.println("Task: ${task.name}")
+            io.println("Description: ${task.description}")
+            io.println("")
+
+            if task.depends_on.len > 0:
+                io.println("Dependencies:")
+                for dep in task.depends_on:
+                    io.println("  - ${dep}")
+                io.println("")
+
+            if task.commands.len > 0:
+                io.println("Commands:")
+                io.println("  ${task.commands.join(" ")}")
+                io.println("")
+
+            io.println("Run with: simple task.spl ${task_name}")
+
+        case None:
+            io.eprintln("Error: Task '${task_name}' not found")
+            process.exit(1)
+
+fn print_usage():
+    io.println("Simple Task Runner")
+    io.println("")
+    io.println("USAGE:")
+    io.println("    simple task.spl <task> [args...]")
+    io.println("    simple task.spl --list")
+    io.println("    simple task.spl --describe=<task>")
+    io.println("")
+    io.println("COMMON TASKS:")
+    io.println("    build        - Build all development tools")
+    io.println("    test         - Run all tests")
+    io.println("    fmt          - Format all source files")
+    io.println("    lint         - Lint all source files")
+    io.println("    check        - Format + lint + test")
+    io.println("    clean        - Clean build artifacts")
+    io.println("    dev          - Quick development build and test")
+    io.println("    ci           - Full CI check")
+    io.println("")
+    io.println("EXAMPLES:")
+    io.println("    simple task.spl build")
+    io.println("    simple task.spl test")
+    io.println("    simple task.spl check")
+    io.println("    simple task.spl --list")

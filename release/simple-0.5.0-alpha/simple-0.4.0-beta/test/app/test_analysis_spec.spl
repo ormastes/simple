@@ -1,0 +1,520 @@
+# @pending
+"""
+Test Analysis Tool - Intensive SSpec Tests
+
+Comprehensive testing for the standalone Simple test analysis CLI tool.
+Tests all error classification, feature extraction, and analysis functionality.
+"""
+
+# @slow
+# @skip: Module import produces trailing "cannot convert dict to int" semantic error causing non-zero exit code despite all 56 tests passing. Compiler type-inference bug in app.test_analysis.main module.
+# Performance note: This test suite takes ~16 seconds due to interpreter overhead.
+# Run with --tag slow to include, or exclude slow tests for quick development cycles.
+
+use app.test_analysis.main.*
+use infra.file_io.{write_file, read_file}
+
+
+# ============================================================================
+# Test Group 1: Error Type Classification
+# ============================================================================
+
+describe "ErrorType Enum":
+    """Tests the ErrorType enum and its methods"""
+
+    it "converts to string correctly":
+        expect(ErrorType.ParseError.to_string()).to(eq("parse_error"))
+        expect(ErrorType.SemanticError.to_string()).to(eq("semantic_error"))
+        expect(ErrorType.FileNotFound.to_string()).to(eq("file_not_found"))
+        expect(ErrorType.Timeout.to_string()).to(eq("timeout"))
+        expect(ErrorType.Utf8Error.to_string()).to(eq("utf8_error"))
+        expect(ErrorType.UnknownError.to_string()).to(eq("unknown_error"))
+
+    it "provides descriptions":
+        expect(ErrorType.ParseError.description()).to(contain("Syntax"))
+        expect(ErrorType.SemanticError.description()).to(contain("semantic"))
+        expect(ErrorType.FileNotFound.description()).to(contain("not found"))
+        expect(ErrorType.Timeout.description()).to(contain("timeout"))
+        expect(ErrorType.Utf8Error.description()).to(contain("encoding"))
+        expect(ErrorType.UnknownError.description()).to(contain("Unrecognized"))
+
+
+describe "Error Classification Function":
+    """Tests classify_error() with various error patterns"""
+
+    context "when classifying parse errors":
+        it "detects explicit parse error":
+            val result = classify_error("parse error: Unexpected token")
+            expect(result.to_string()).to(eq("parse_error"))
+
+        it "detects unexpected token error":
+            val result = classify_error("Unexpected token: expected Fn")
+            expect(result.to_string()).to(eq("parse_error"))
+
+        it "detects syntax error":
+            val result = classify_error("parse error: expected expression, found Default")
+            expect(result.to_string()).to(eq("parse_error"))
+
+    context "when classifying semantic errors":
+        it "detects function not found":
+            val result = classify_error("semantic: function `foo` not found")
+            expect(result.to_string()).to(eq("semantic_error"))
+
+        it "detects method not found":
+            val result = classify_error("method `bar` not found on type")
+            expect(result.to_string()).to(eq("semantic_error"))
+
+        it "detects mutability error":
+            val result = classify_error("cannot modify self in immutable fn")
+            expect(result.to_string()).to(eq("semantic_error"))
+
+        it "detects undefined identifier":
+            val result = classify_error("identifier not found: xyz")
+            expect(result.to_string()).to(eq("semantic_error"))
+
+    context "when classifying file errors":
+        it "detects file not found":
+            val result = classify_error("failed to read: No such file or directory")
+            expect(result.to_string()).to(eq("file_not_found"))
+
+        it "detects directory error":
+            val result = classify_error("No such file or directory (os error 2)")
+            expect(result.to_string()).to(eq("file_not_found"))
+
+    context "when classifying timeout errors":
+        it "detects timeout with 'timed out'":
+            val result = classify_error("Test timed out after 30 seconds")
+            expect(result.to_string()).to(eq("timeout"))
+
+        it "detects timeout with 'timeout'":
+            val result = classify_error("Execution timeout exceeded")
+            expect(result.to_string()).to(eq("timeout"))
+
+    context "when classifying encoding errors":
+        it "detects UTF-8 error":
+            val result = classify_error("stream did not contain valid UTF-8")
+            expect(result.to_string()).to(eq("utf8_error"))
+
+    context "when classifying unknown errors":
+        it "returns unknown for unrecognized patterns":
+            val result = classify_error("Something completely unexpected")
+            expect(result.to_string()).to(eq("unknown_error"))
+
+
+# ============================================================================
+# Test Group 2: Feature Pattern Matching
+# ============================================================================
+
+describe "Feature Patterns":
+    """Tests the feature pattern constants"""
+
+    it "has parser patterns defined":
+        expect(get_parser_patterns().len()).to(be_gte(15))
+
+    it "has semantic patterns defined":
+        expect(get_semantic_patterns().len()).to(be_gte(2))
+
+    it "each pattern has required fields":
+        for pattern in get_parser_patterns():
+            expect(pattern.pattern.len()).to(be_gt(0))
+            expect(pattern.feature.len()).to(be_gt(0))
+            expect(pattern.description.len()).to(be_gt(0))
+
+        for pattern in get_semantic_patterns():
+            expect(pattern.pattern.len()).to(be_gt(0))
+            expect(pattern.feature.len()).to(be_gt(0))
+            expect(pattern.description.len()).to(be_gt(0))
+
+
+describe "Feature Extraction":
+    """Tests extract_needed_features() function"""
+
+    context "when extracting parser features":
+        it "extracts static fields":
+            val features = extract_needed_features("expected Fn, found Static")
+            expect(features).to(contain("static_fields"))
+
+        it "extracts default parameters":
+            val features = extract_needed_features("expected expression, found Default")
+            expect(features).to(contain("default_parameters"))
+
+        it "extracts implicit val/var":
+            val features = extract_needed_features("expected expression, found Assign")
+            expect(features).to(contain("implicit_val_var"))
+
+        it "extracts matrix multiplication":
+            val features = extract_needed_features("expected expression, found At")
+            expect(features).to(contain("matrix_multiplication"))
+
+        it "extracts XOR keyword":
+            val features = extract_needed_features("expected identifier, found Xor")
+            expect(features).to(contain("xor_keyword"))
+
+        it "extracts dict literal syntax":
+            val features = extract_needed_features("expected Comma, found Colon")
+            expect(features).to(contain("dict_literal_syntax"))
+
+        it "extracts val pattern matching":
+            val features = extract_needed_features("expected pattern, found Val")
+            expect(features).to(contain("val_pattern_matching"))
+
+        it "extracts where clause":
+            val features = extract_needed_features("expected identifier, found Where")
+            expect(features).to(contain("where_clause"))
+
+        it "extracts list comprehension":
+            val features = extract_needed_features("expected expression, found For")
+            expect(features).to(contain("list_comprehension"))
+
+        it "extracts parallel operator":
+            val features = extract_needed_features("expected expression, found Slash")
+            expect(features).to(contain("parallel_operator"))
+
+        it "extracts from pattern":
+            val features = extract_needed_features("expected pattern, found From")
+            expect(features).to(contain("from_pattern"))
+
+        it "extracts return expression":
+            val features = extract_needed_features("expected expression, found Return")
+            expect(features).to(contain("return_expression"))
+
+        it "extracts class var fields":
+            val features = extract_needed_features("expected Fn, found Var")
+            expect(features).to(contain("class_var_fields"))
+
+        it "extracts array literal syntax":
+            val features = extract_needed_features("expected RBracket, found Comma")
+            expect(features).to(contain("array_literal_syntax"))
+
+    context "when extracting semantic features":
+        it "extracts string char_at method":
+            val features = extract_needed_features("method `char_at` not found")
+            expect(features).to(contain("string_char_at_method"))
+
+        it "extracts mutability checking":
+            val features = extract_needed_features("cannot modify in immutable fn")
+            expect(features).to(contain("mutability_checking"))
+
+    context "when extracting multiple features":
+        it "extracts all matching features":
+            val error = "expected expression, found Assign and expected Comma, found Colon"
+            val features = extract_needed_features(error)
+            expect(features.len()).to(eq(2))
+            expect(features).to(contain("implicit_val_var"))
+            expect(features).to(contain("dict_literal_syntax"))
+
+    context "when no features match":
+        it "returns empty list":
+            val features = extract_needed_features("generic error message")
+            expect(features.len()).to(eq(0))
+
+
+describe "Feature Description Lookup":
+    """Tests get_feature_description() function"""
+
+    it "returns description for parser features":
+        val desc = get_feature_description("static_fields")
+        expect(desc).to(contain("Static"))
+
+    it "returns description for semantic features":
+        val desc = get_feature_description("mutability_checking")
+        expect(desc).to(contain("mutability"))
+
+    it "returns unknown for invalid feature":
+        val desc = get_feature_description("nonexistent_feature")
+        expect(desc).to(eq("Unknown feature"))
+
+
+# ============================================================================
+# Test Group 3: Test Database Operations
+# ============================================================================
+
+describe "TestRecord Structure":
+    """Tests TestRecord struct"""
+
+    it "creates test record with all fields":
+        val record = TestRecord(
+            test_id: "1",
+            test_name: "test_foo",
+            file: "test/foo_spec.spl",
+            status: "failed",
+            category: "Unit",
+            error_message: "parse error",
+            last_run: "2026-01-30T10:00:00Z"
+        )
+
+        expect(record.test_id).to(eq("1"))
+        expect(record.test_name).to(eq("test_foo"))
+        expect(record.status).to(eq("failed"))
+
+
+describe "Test Database Reading":
+    """Tests read_test_database() function"""
+
+    it "reads valid test database":
+        val test_db = """
+tests |test_id, test_name, file, status, category, error_message, last_run|
+    1, test_one, test1.spl, failed, Unit, "parse error", 2026-01-30T10:00:00Z
+    2, test_two, test2.spl, passed, Unit, "", 2026-01-30T10:00:00Z
+"""
+        write_file("/tmp/test_analysis_test_db.sdn", test_db)
+
+        match read_test_database("/tmp/test_analysis_test_db.sdn"):
+            case Err(e):
+                fail("Should succeed: " + e)
+            case Ok(records):
+                expect(records.len()).to(eq(2))
+                expect(records[0].test_name).to(eq("test_one"))
+                expect(records[0].status).to(eq("failed"))
+                expect(records[1].test_name).to(eq("test_two"))
+                expect(records[1].status).to(eq("passed"))
+
+    it "handles missing file":
+        match read_test_database("/tmp/nonexistent_test_db.sdn"):
+            case Err(e):
+                expect(e).to(contain("Failed to read"))
+            case Ok(_):
+                fail("Should fail for missing file")
+
+    it "handles invalid SDN format":
+        write_file("/tmp/invalid_test_db.sdn", "invalid sdn content")
+
+        match read_test_database("/tmp/invalid_test_db.sdn"):
+            case Err(e):
+                expect(e).to(contain("No tests table"))
+            case Ok(_):
+                # SDN parser might handle gracefully
+                pass
+
+
+describe "Failed Test Filtering":
+    """Tests get_failed_tests() function"""
+
+    it "filters only failed tests":
+        val records = [
+            TestRecord { test_id: "1", test_name: "t1", file: "f1", status: "failed", category: "Unit", error_message: "err1", last_run: "" },
+            TestRecord { test_id: "2", test_name: "t2", file: "f2", status: "passed", category: "Unit", error_message: "", last_run: "" },
+            TestRecord { test_id: "3", test_name: "t3", file: "f3", status: "failed", category: "Unit", error_message: "err3", last_run: "" },
+            TestRecord { test_id: "4", test_name: "t4", file: "f4", status: "skipped", category: "Unit", error_message: "", last_run: "" }
+        ]
+
+        val failed = get_failed_tests(records)
+        expect(failed.len()).to(eq(2))
+        expect(failed[0].test_name).to(eq("t1"))
+        expect(failed[1].test_name).to(eq("t3"))
+
+    it "returns empty list when no failures":
+        val records = [
+            TestRecord { test_id: "1", test_name: "t1", file: "f1", status: "passed", category: "Unit", error_message: "", last_run: "" }
+        ]
+
+        val failed = get_failed_tests(records)
+        expect(failed.len()).to(eq(0))
+
+
+# ============================================================================
+# Test Group 4: Failure Analysis
+# ============================================================================
+
+describe "Failure Statistics":
+    """Tests FailureStats struct"""
+
+    it "creates failure stats with all fields":
+        var error_counts = {}
+        error_counts = error_counts.set("parse_error", 5)
+
+        var feature_counts = {}
+        feature_counts = feature_counts.set("static_fields", 3)
+
+        val stats = FailureStats(
+            total_failed: 5,
+            error_counts: error_counts,
+            feature_counts: feature_counts
+        )
+
+        expect(stats.total_failed).to(eq(5))
+        expect(stats.error_counts.get("parse_error")).to(eq(5))
+        expect(stats.feature_counts.get("static_fields")).to(eq(3))
+
+
+describe "Failure Analysis Function":
+    """Tests analyze_failures() function"""
+
+    it "analyzes test records correctly":
+        val records = [
+            TestRecord { test_id: "1", test_name: "t1", file: "f1", status: "failed", category: "Unit", error_message: "parse error: expected Fn, found Static", last_run: "" },
+            TestRecord { test_id: "2", test_name: "t2", file: "f2", status: "failed", category: "Unit", error_message: "parse error: expected Fn, found Static", last_run: "" },
+            TestRecord { test_id: "3", test_name: "t3", file: "f3", status: "failed", category: "Unit", error_message: "semantic: method not found", last_run: "" },
+            TestRecord { test_id: "4", test_name: "t4", file: "f4", status: "passed", category: "Unit", error_message: "", last_run: "" }
+        ]
+
+        val stats = analyze_failures(records)
+
+        expect(stats.total_failed).to(eq(3))
+        expect(stats.error_counts.get("parse_error")).to(eq(2))
+        expect(stats.error_counts.get("semantic_error")).to(eq(1))
+        expect(stats.feature_counts.get("static_fields")).to(eq(2))
+
+    it "handles empty record list":
+        val records = []
+        val stats = analyze_failures(records)
+
+        expect(stats.total_failed).to(eq(0))
+        expect(stats.error_counts.keys().len()).to(eq(0))
+        expect(stats.feature_counts.keys().len()).to(eq(0))
+
+    it "counts multiple features from same error":
+        val records = [
+            TestRecord(
+                test_id: "1",
+                test_name: "t1",
+                file: "f1",
+                status: "failed",
+                category: "Unit",
+                error_message: "expected expression, found Assign and expected Comma, found Colon",
+                last_run: ""
+            )
+        ]
+
+        val stats = analyze_failures(records)
+
+        expect(stats.total_failed).to(eq(1))
+        expect(stats.feature_counts.get("implicit_val_var")).to(eq(1))
+        expect(stats.feature_counts.get("dict_literal_syntax")).to(eq(1))
+
+
+# ============================================================================
+# Test Group 5: Integration Tests
+# ============================================================================
+
+describe "End-to-End Workflow":
+    """Tests complete analysis workflow"""
+
+    it "performs full analysis on test database":
+        val test_db = """
+tests |test_id, test_name, file, status, category, error_message, last_run|
+    1, parser_static, test/parser/static.spl, failed, System, "parse error: expected Fn, found Static", 2026-01-30T10:00:00Z
+    2, parser_default, test/parser/default.spl, failed, System, "parse error: expected expression, found Default", 2026-01-30T10:00:00Z
+    3, semantic_method, test/core/method.spl, failed, Unit, "semantic: method `char_at` not found", 2026-01-30T10:00:00Z
+    4, passing_test, test/core/pass.spl, passed, Unit, "", 2026-01-30T10:00:00Z
+"""
+        write_file("/tmp/full_analysis_db.sdn", test_db)
+
+        match read_test_database("/tmp/full_analysis_db.sdn"):
+            case Err(e):
+                fail("Failed to read database: " + e)
+            case Ok(records):
+                val stats = analyze_failures(records)
+
+                # Verify statistics
+                expect(stats.total_failed).to(eq(3))
+
+                # Verify error type counts
+                expect(stats.error_counts.get("parse_error")).to(eq(2))
+                expect(stats.error_counts.get("semantic_error")).to(eq(1))
+
+                # Verify feature counts
+                expect(stats.feature_counts.get("static_fields")).to(eq(1))
+                expect(stats.feature_counts.get("default_parameters")).to(eq(1))
+                expect(stats.feature_counts.get("string_char_at_method")).to(eq(1))
+
+    it "filters tests by category":
+        val records = [
+            TestRecord { test_id: "1", test_name: "t1", file: "f1", status: "failed", category: "Unit", error_message: "error1", last_run: "" },
+            TestRecord { test_id: "2", test_name: "t2", file: "f2", status: "failed", category: "System", error_message: "error2", last_run: "" },
+            TestRecord { test_id: "3", test_name: "t3", file: "f3", status: "failed", category: "Unit", error_message: "error3", last_run: "" }
+        ]
+
+        # Count Unit category failures
+        var unit_count = 0
+        for record in records:
+            if record.status == "failed" and record.category == "Unit":
+                unit_count = unit_count + 1
+
+        expect(unit_count).to(eq(2))
+
+
+# ============================================================================
+# Test Group 6: Edge Cases and Error Handling
+# ============================================================================
+
+describe "Edge Cases":
+    """Tests edge cases and boundary conditions"""
+
+    context "when handling empty data":
+        it "handles empty error message":
+            val error_type = classify_error("")
+            expect(error_type.to_string()).to(eq("unknown_error"))
+
+        it "handles empty feature extraction":
+            val features = extract_needed_features("")
+            expect(features.len()).to(eq(0))
+
+    context "when handling very long messages":
+        it "classifies long error messages":
+            val long_error = "parse error: " + "x".repeat(1000)
+            val error_type = classify_error(long_error)
+            expect(error_type.to_string()).to(eq("parse_error"))
+
+    context "when handling special characters":
+        it "handles error with quotes":
+            val error = "parse error: expected '|' found '&'"
+            val error_type = classify_error(error)
+            expect(error_type.to_string()).to(eq("parse_error"))
+
+        it "handles error with newlines":
+            val error = "parse error\nexpected Fn\nfound Static"
+            val features = extract_needed_features(error)
+            expect(features).to(contain("static_fields"))
+
+
+# ============================================================================
+# Test Group 7: Performance Tests
+# ============================================================================
+
+describe "Performance Characteristics":
+    """Tests performance with large datasets"""
+
+    it "handles many test records efficiently":
+        var records = []
+        for i in 0..100:
+            val record = TestRecord(
+                test_id: i.to_string(),
+                test_name: "test_" + i.to_string(),
+                file: "test" + i.to_string() + ".spl",
+                status: "failed",
+                category: "Unit",
+                error_message: "parse error: expected Fn, found Static",
+                last_run: ""
+            )
+            records = records.append(record)
+
+        val stats = analyze_failures(records)
+        expect(stats.total_failed).to(eq(100))
+        expect(stats.feature_counts.get("static_fields")).to(eq(100))
+
+    it "handles many unique features":
+        var records = []
+        val errors = [
+            "expected Fn, found Static",
+            "expected expression, found Default",
+            "expected expression, found Assign",
+            "expected expression, found At",
+            "expected identifier, found Xor"
+        ]
+
+        for i in 0..20:
+            val record = TestRecord(
+                test_id: i.to_string(),
+                test_name: "test_" + i.to_string(),
+                file: "test.spl",
+                status: "failed",
+                category: "Unit",
+                error_message: errors[i % errors.len()],
+                last_run: ""
+            )
+            records = records.append(record)
+
+        val stats = analyze_failures(records)
+        expect(stats.total_failed).to(eq(20))
+        expect(stats.feature_counts.keys().len()).to(be_gte(4))

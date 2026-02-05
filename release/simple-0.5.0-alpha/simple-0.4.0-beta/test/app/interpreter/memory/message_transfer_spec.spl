@@ -1,0 +1,396 @@
+# MessageTransfer Tests
+#
+# Tests for intelligent message transfer between actors.
+
+# @skip
+from message_transfer import {
+    MessageTransfer,
+    TransferResult,
+    TransferStats,
+    ValueWrapper,
+    ValueType,
+    MailboxMessage,
+    send_value,
+    receive_value,
+    estimate_size
+}
+from refc_binary import {
+    SharedHeap,
+    SharedHeapConfig,
+    BinaryRef,
+    SMALL_BINARY_THRESHOLD
+}
+
+describe "ValueWrapper - Inline Types":
+    it "wraps nil":
+        val wrapper = ValueWrapper.InlineNil
+
+        assert not wrapper.is_shared()
+        assert wrapper.estimated_size() == 1
+
+    it "wraps integer":
+        val wrapper = ValueWrapper.InlineInt(42)
+
+        assert not wrapper.is_shared()
+        assert wrapper.estimated_size() == 8
+
+    it "wraps float":
+        val wrapper = ValueWrapper.InlineFloat(3.14)
+
+        assert not wrapper.is_shared()
+        assert wrapper.estimated_size() == 8
+
+    it "wraps bool":
+        val wrapper = ValueWrapper.InlineBool(true)
+
+        assert not wrapper.is_shared()
+        assert wrapper.estimated_size() == 1
+
+    it "wraps small text":
+        val wrapper = ValueWrapper.InlineSmallText("hello")
+
+        assert not wrapper.is_shared()
+        assert wrapper.estimated_size() == 5
+
+    it "wraps small array":
+        val wrapper = ValueWrapper.InlineSmallArray([
+            ValueWrapper.InlineInt(1),
+            ValueWrapper.InlineInt(2)
+        ])
+
+        assert not wrapper.is_shared()
+        assert wrapper.estimated_size() == 16  # 2 * 8 bytes
+
+describe "ValueWrapper - Shared Types":
+    it "wraps shared ref":
+        val ref = BinaryRef.new(1, 0, 1024)
+        val wrapper = ValueWrapper.SharedRef(ref)
+
+        assert wrapper.is_shared()
+        assert wrapper.estimated_size() == 1024
+
+    it "extracts shared refs":
+        val ref = BinaryRef.new(1, 0, 256)
+        val wrapper = ValueWrapper.SharedRef(ref)
+
+        val refs = wrapper.shared_refs()
+
+        assert refs.len() == 1
+        assert refs[0].id == 1
+
+    it "extracts refs from composite":
+        val ref1 = BinaryRef.new(1, 0, 100)
+        val ref2 = BinaryRef.new(2, 0, 200)
+
+        val wrapper = ValueWrapper.Composite([
+            ValueWrapper.SharedRef(ref1),
+            ValueWrapper.InlineInt(42),
+            ValueWrapper.SharedRef(ref2)
+        ])
+
+        val refs = wrapper.shared_refs()
+
+        assert refs.len() == 2
+
+describe "ValueWrapper - Display":
+    it "formats inline types":
+        assert ValueWrapper.InlineNil.fmt() == "nil"
+        assert ValueWrapper.InlineInt(42).fmt().contains("42")
+        assert ValueWrapper.InlineBool(true).fmt().contains("true")
+
+    it "formats shared ref":
+        val ref = BinaryRef.new(1, 0, 256)
+        val wrapper = ValueWrapper.SharedRef(ref)
+
+        assert wrapper.fmt().contains("Shared")
+
+    it "formats composite":
+        val wrapper = ValueWrapper.Composite([
+            ValueWrapper.InlineInt(1),
+            ValueWrapper.InlineInt(2)
+        ])
+
+        assert wrapper.fmt().contains("Composite")
+        assert wrapper.fmt().contains("2")
+
+describe "TransferStats":
+    it "creates empty stats":
+        val stats = TransferStats.new()
+
+        assert stats.total_transfers == 0
+        assert stats.inline_transfers == 0
+        assert stats.shared_transfers == 0
+
+    it "calculates sharing ratio":
+        var stats = TransferStats.new()
+        stats.total_transfers = 10
+        stats.shared_transfers = 4
+
+        assert stats.sharing_ratio() == 0.4
+
+    it "calculates efficiency":
+        var stats = TransferStats.new()
+        stats.inline_bytes = 100
+        stats.shared_bytes = 900
+
+        val eff = stats.efficiency()
+        assert eff == 0.9
+
+    it "handles zero transfers":
+        val stats = TransferStats.new()
+
+        assert stats.sharing_ratio() == 0.0
+        assert stats.efficiency() == 1.0
+
+describe "MessageTransfer - Wrapping Primitives":
+    it "wraps nil":
+        var transfer = MessageTransfer.new()
+
+        val result = transfer.wrap_nil()
+
+        assert result.is_success()
+        match result.unwrap():
+            case InlineNil: assert true
+            case _: assert false
+
+    it "wraps integer":
+        var transfer = MessageTransfer.new()
+
+        val result = transfer.wrap_int(42)
+
+        assert result.is_success()
+        match result.unwrap():
+            case InlineInt(v): assert v == 42
+            case _: assert false
+
+    it "wraps float":
+        var transfer = MessageTransfer.new()
+
+        val result = transfer.wrap_float(3.14)
+
+        assert result.is_success()
+        match result.unwrap():
+            case InlineFloat(_): assert true
+            case _: assert false
+
+    it "wraps bool":
+        var transfer = MessageTransfer.new()
+
+        val result = transfer.wrap_bool(true)
+
+        assert result.is_success()
+        match result.unwrap():
+            case InlineBool(v): assert v == true
+            case _: assert false
+
+describe "MessageTransfer - Wrapping Text":
+    it "wraps small text inline":
+        var transfer = MessageTransfer.new()
+
+        val result = transfer.wrap_text("hello")
+
+        assert result.is_success()
+        match result.unwrap():
+            case InlineSmallText(s): assert s == "hello"
+            case _: assert false
+
+    it "wraps large text as shared":
+        var transfer = MessageTransfer.new()
+
+        # Create text > 64 bytes
+        val large_text = "x".repeat(100)
+        val result = transfer.wrap_text(large_text)
+
+        assert result.is_success()
+        match result.unwrap():
+            case SharedRef(_): assert true
+            case _: assert false
+
+describe "MessageTransfer - Strategy Selection":
+    it "uses hybrid strategy by default":
+        var transfer = MessageTransfer.new()
+
+        # Small value - should be inline
+        val small_result = transfer.wrap_for_send(0, 32, ValueType.Binary)
+        match small_result.unwrap():
+            case SharedRef(_): assert false
+            case _: assert true
+
+    it "always copies with DeepCopy strategy":
+        var transfer = MessageTransfer.always_copy()
+
+        val result = transfer.wrap_for_send(0, 1024, ValueType.Binary)
+
+        # Even large value should not be shared
+        match result.unwrap():
+            case SharedRef(_): assert false
+            case _: assert true
+
+    it "always shares with ShareRef strategy":
+        var transfer = MessageTransfer.always_share()
+
+        val result = transfer.wrap_for_send(0, 32, ValueType.Binary)
+
+        # Even small value should be shared
+        match result.unwrap():
+            case SharedRef(_): assert true
+            case _: assert false
+
+describe "MessageTransfer - Large Values":
+    it "allocates large value in shared heap":
+        val heap = SharedHeap.new(SharedHeapConfig.small())
+        var transfer = MessageTransfer.with_heap(heap)
+
+        val result = transfer.wrap_for_send(0, 1024, ValueType.Binary)
+
+        assert result.is_success()
+        match result.unwrap():
+            case SharedRef(ref):
+                assert ref.length == 1024
+            case _:
+                assert false
+
+    it "tracks shared transfer stats":
+        var transfer = MessageTransfer.new()
+
+        transfer.wrap_for_send(0, 1024, ValueType.Binary)
+
+        val stats = transfer.get_stats()
+        assert stats.shared_transfers == 1
+        assert stats.shared_bytes == 1024
+        assert stats.bytes_saved == 1024
+
+describe "MessageTransfer - Reference Sharing":
+    it "increments refcount when sharing":
+        val heap = SharedHeap.new(SharedHeapConfig.small())
+        var transfer = MessageTransfer.with_heap(heap)
+
+        val result = transfer.wrap_for_send(0, 1024, ValueType.Binary)
+        val wrapper = result.unwrap()
+
+        # Share with another actor
+        transfer.share_wrapper(wrapper)
+
+        # Check refcount increased
+        match wrapper:
+            case SharedRef(ref):
+                val binary = heap.get(ref.id)
+                assert binary.?.refcount == 2
+            case _:
+                assert false
+
+    it "decrements refcount on release":
+        val heap = SharedHeap.new(SharedHeapConfig.small())
+        var transfer = MessageTransfer.with_heap(heap)
+
+        val result = transfer.wrap_for_send(0, 1024, ValueType.Binary)
+        val wrapper = result.unwrap()
+        transfer.share_wrapper(wrapper)
+
+        transfer.release_wrapper(wrapper)
+
+        match wrapper:
+            case SharedRef(ref):
+                val binary = heap.get(ref.id)
+                assert binary.?.refcount == 1
+            case _:
+                assert false
+
+describe "MessageTransfer - Statistics":
+    it "tracks total transfers":
+        var transfer = MessageTransfer.new()
+
+        transfer.wrap_nil()
+        transfer.wrap_int(1)
+        transfer.wrap_int(2)
+
+        val stats = transfer.get_stats()
+        assert stats.total_transfers == 3
+
+    it "tracks inline vs shared":
+        var transfer = MessageTransfer.new()
+
+        transfer.wrap_int(42)  # Inline
+        transfer.wrap_for_send(0, 1024, ValueType.Binary)  # Shared
+
+        val stats = transfer.get_stats()
+        assert stats.inline_transfers == 1
+        assert stats.shared_transfers == 1
+
+    it "reports heap stats":
+        val heap = SharedHeap.new(SharedHeapConfig.small())
+        var transfer = MessageTransfer.with_heap(heap)
+
+        transfer.wrap_for_send(0, 1024, ValueType.Binary)
+
+        val heap_stats = transfer.heap_stats()
+        assert heap_stats.binary_count == 1
+
+describe "TransferResult":
+    it "checks success":
+        val success = TransferResult.Success(ValueWrapper.InlineNil)
+        val failure = TransferResult.OutOfMemory
+
+        assert success.is_success()
+        assert not failure.is_success()
+
+    it "unwraps success":
+        val result = TransferResult.Success(ValueWrapper.InlineInt(42))
+        val wrapper = result.unwrap()
+
+        match wrapper:
+            case InlineInt(v): assert v == 42
+            case _: assert false
+
+    it "gets optional wrapper":
+        val success = TransferResult.Success(ValueWrapper.InlineNil)
+        val failure = TransferResult.OutOfMemory
+
+        assert success.wrapper().?
+        assert not failure.wrapper().?
+
+describe "MailboxMessage":
+    it "creates message":
+        val wrapper = ValueWrapper.InlineInt(42)
+        val msg = MailboxMessage.new(1, Some(10), wrapper)
+
+        assert msg.id == 1
+        assert msg.sender_id == Some(10)
+
+    it "reports size":
+        val wrapper = ValueWrapper.InlineInt(42)
+        val msg = MailboxMessage.new(1, None, wrapper)
+
+        assert msg.size() == 8
+
+    it "detects shared messages":
+        val ref = BinaryRef.new(1, 0, 1024)
+        val wrapper = ValueWrapper.SharedRef(ref)
+        val msg = MailboxMessage.new(1, None, wrapper)
+
+        assert msg.is_shared()
+
+    it "detects inline messages":
+        val wrapper = ValueWrapper.InlineInt(42)
+        val msg = MailboxMessage.new(1, None, wrapper)
+
+        assert not msg.is_shared()
+
+describe "ValueType":
+    it "estimates primitive sizes":
+        assert estimate_size(ValueType.Nil, 0) == 1
+        assert estimate_size(ValueType.Int, 0) == 8
+        assert estimate_size(ValueType.Float, 0) == 8
+        assert estimate_size(ValueType.Bool, 0) == 1
+
+describe "Convenience Functions":
+    it "sends small value":
+        val result = send_value(0, 32, ValueType.Binary)
+
+        assert result.is_success()
+
+    it "sends large value":
+        val result = send_value(0, 1024, ValueType.Binary)
+
+        assert result.is_success()
+        assert result.unwrap().is_shared()

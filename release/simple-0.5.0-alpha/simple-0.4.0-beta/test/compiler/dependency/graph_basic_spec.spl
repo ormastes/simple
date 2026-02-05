@@ -1,0 +1,224 @@
+# Basic tests for ImportGraph structure and operations
+# Tests data structures and basic graph operations (no algorithms yet)
+
+# @skip
+use sspec.{describe, it, expect}
+use compiler.dependency.graph.{
+    ImportKind, ImportEdge, CyclicDependencyError, ImportGraph
+}
+
+describe "ImportKind":
+    context "predicates":
+        it "UseImport is_type_use returns false":
+            val kind = ImportKind.UseImport
+            expect not kind.is_type_use()
+
+        it "TypeUse is_type_use returns true":
+            val kind = ImportKind.TypeUse
+            expect kind.is_type_use()
+
+        it "CommonUse is_type_use returns false":
+            val kind = ImportKind.CommonUse
+            expect not kind.is_type_use()
+
+        it "ExportUse is_type_use returns false":
+            val kind = ImportKind.ExportUse
+            expect not kind.is_type_use()
+
+    context "to_string":
+        it "UseImport to_string":
+            val kind = ImportKind.UseImport
+            expect kind.to_string() == "Use"
+
+        it "TypeUse to_string":
+            val kind = ImportKind.TypeUse
+            expect kind.to_string() == "TypeUse"
+
+        it "CommonUse to_string":
+            val kind = ImportKind.CommonUse
+            expect kind.to_string() == "CommonUse"
+
+        it "ExportUse to_string":
+            val kind = ImportKind.ExportUse
+            expect kind.to_string() == "ExportUse"
+
+describe "ImportEdge":
+    context "construction":
+        it "creates with new":
+            val edge = ImportEdge.new("a", "b", ImportKind.UseImport)
+            val edge_from = edge.get_from()
+            val edge_to = edge.get_to()
+            val edge_kind = edge.get_kind()
+
+            expect edge_from == "a"
+            expect edge_to == "b"
+            expect edge_kind.to_string() == "Use"
+
+    context "equality":
+        it "equal edges":
+            val edge1 = ImportEdge.new("a", "b", ImportKind.UseImport)
+            val edge2 = ImportEdge.new("a", "b", ImportKind.UseImport)
+            expect edge1.equals(edge2)
+
+        it "different from":
+            val edge1 = ImportEdge.new("a", "b", ImportKind.UseImport)
+            val edge2 = ImportEdge.new("c", "b", ImportKind.UseImport)
+            expect not edge1.equals(edge2)
+
+        it "different to":
+            val edge1 = ImportEdge.new("a", "b", ImportKind.UseImport)
+            val edge2 = ImportEdge.new("a", "c", ImportKind.UseImport)
+            expect not edge1.equals(edge2)
+
+        it "different kind":
+            val edge1 = ImportEdge.new("a", "b", ImportKind.UseImport)
+            val edge2 = ImportEdge.new("a", "b", ImportKind.TypeUse)
+            expect not edge1.equals(edge2)
+
+describe "CyclicDependencyError":
+    context "construction":
+        it "creates with cycle":
+            val err = CyclicDependencyError.new(["a", "b", "c", "a"])
+            val err_cycle = err.get_cycle()
+            expect err_cycle.len() == 4
+
+        it "to_string formats message":
+            val err = CyclicDependencyError.new(["a", "b", "a"])
+            val err_msg = err.to_string()
+            expect err_msg.contains("Circular dependency detected")
+            expect err_msg.contains("a -> b -> a")
+
+describe "ImportGraph":
+    context "construction":
+        it "creates empty graph":
+            val graph = ImportGraph.new()
+            expect graph.module_count() == 0
+            expect graph.edge_count() == 0
+
+    context "adding modules":
+        it "add_module adds a module":
+            var graph = ImportGraph.new()
+            graph.add_module("a")
+            expect graph.module_count() == 1
+            expect graph.has_module("a")
+
+        it "add_module idempotent":
+            var graph = ImportGraph.new()
+            graph.add_module("a")
+            graph.add_module("a")
+            expect graph.module_count() == 1
+
+        it "add_module multiple":
+            var graph = ImportGraph.new()
+            graph.add_module("a")
+            graph.add_module("b")
+            graph.add_module("c")
+            expect graph.module_count() == 3
+
+    context "adding imports":
+        it "add_use creates edge":
+            var graph = ImportGraph.new()
+            graph.add_use("a", "b")
+            expect graph.has_import("a", "b")
+
+        it "add_use adds both modules":
+            var graph = ImportGraph.new()
+            graph.add_use("a", "b")
+            expect graph.has_module("a")
+            expect graph.has_module("b")
+            expect graph.module_count() == 2
+
+        it "add_type_use does not create cycle detection edge":
+            var graph = ImportGraph.new()
+            graph.add_type_use("a", "b")
+            expect not graph.has_import("a", "b")
+            expect graph.edge_count() == 1  # Still in detailed_edges
+
+        it "add_common_use creates edge":
+            var graph = ImportGraph.new()
+            graph.add_common_use("a", "b")
+            expect graph.has_import("a", "b")
+
+        it "add_export_use creates edge":
+            var graph = ImportGraph.new()
+            graph.add_export_use("a", "b")
+            expect graph.has_import("a", "b")
+
+    context "imports_of":
+        it "empty for module with no imports":
+            var graph = ImportGraph.new()
+            graph.add_module("a")
+            val imports = graph.imports_of("a")
+            expect imports.len() == 0
+
+        it "returns all imports":
+            var graph = ImportGraph.new()
+            graph.add_use("a", "b")
+            graph.add_use("a", "c")
+            graph.add_use("a", "d")
+
+            val imports = graph.imports_of("a")
+            expect imports.len() == 3
+
+        it "does not include type-only imports":
+            var graph = ImportGraph.new()
+            graph.add_use("a", "b")
+            graph.add_type_use("a", "c")
+
+            val imports = graph.imports_of("a")
+            expect imports.len() == 1
+
+    context "imported_by":
+        it "empty for module not imported":
+            var graph = ImportGraph.new()
+            graph.add_module("a")
+            val importers = graph.imported_by("a")
+            expect importers.len() == 0
+
+        it "returns all importers":
+            var graph = ImportGraph.new()
+            graph.add_use("a", "d")
+            graph.add_use("b", "d")
+            graph.add_use("c", "d")
+
+            val importers = graph.imported_by("d")
+            expect importers.len() == 3
+
+    context "modules":
+        it "returns all modules":
+            var graph = ImportGraph.new()
+            graph.add_module("a")
+            graph.add_module("b")
+            graph.add_module("c")
+
+            val mods = graph.modules()
+            expect mods.len() == 3
+
+        it "includes modules from add_use":
+            var graph = ImportGraph.new()
+            graph.add_use("a", "b")
+
+            val mods = graph.modules()
+            expect mods.len() == 2
+
+    context "all_edges":
+        it "returns all detailed edges":
+            var graph = ImportGraph.new()
+            graph.add_use("a", "b")
+            graph.add_type_use("a", "c")
+            graph.add_common_use("b", "c")
+
+            val edges = graph.all_edges()
+            expect edges.len() == 3
+
+        it "includes type-only edges":
+            var graph = ImportGraph.new()
+            graph.add_type_use("a", "b")
+
+            val edges = graph.all_edges()
+            expect edges.len() == 1
+
+            if edges.len() > 0:
+                val first_edge = edges[0]
+                val edge_kind = first_edge.get_kind()
+                expect edge_kind.is_type_use()

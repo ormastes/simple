@@ -1,0 +1,222 @@
+# @pending
+# ML Engine Metrics BDD Test Specification
+# Feature: Classification and Regression Metrics for Training Engine
+#
+# Tests the Accuracy, Loss, MSE, MAE, and RMSE metrics
+# using the reset/update/compute pattern.
+
+# @skip
+use ml.engine.{Metric, Accuracy, Loss, MSE, MAE, RMSE}
+
+
+describe "ML Engine Metrics":
+    """
+    ## Metrics System Overview
+
+    The ML metrics system provides automatic computation of training and
+    evaluation metrics. All metrics follow the reset/update/compute pattern:
+
+    - **reset()**: Clear accumulated state for new epoch
+    - **update(output)**: Process batch output and accumulate statistics
+    - **compute()**: Calculate final metric value from accumulated state
+
+    This design enables streaming computation without storing all data.
+    """
+
+    describe "Accuracy metric":
+        """
+        Classification accuracy: correct predictions / total predictions.
+
+        Supported output formats:
+        - Dict: {"pred": [...], "labels": [...]}
+        - Dict: {"y_pred": [...], "y_true": [...]}
+        - Tuple: ([predictions], [labels])
+        """
+
+        it "computes accuracy for perfect predictions":
+            val acc = Accuracy()
+            acc.reset()
+            acc.update({"pred": [0, 1, 2], "labels": [0, 1, 2]})
+            expect acc.compute() == 1.0
+
+        it "computes accuracy for partial matches":
+            val acc = Accuracy()
+            acc.reset()
+            acc.update({"pred": [0, 1, 0], "labels": [0, 0, 0]})
+            # 2 correct out of 3: 0.666...
+            val result = acc.compute()
+            expect result > 0.66
+            expect result < 0.67
+
+        it "computes accuracy for all wrong predictions":
+            val acc = Accuracy()
+            acc.reset()
+            acc.update({"pred": [1, 2, 3], "labels": [0, 0, 0]})
+            expect acc.compute() == 0.0
+
+        it "accumulates across multiple batches":
+            val acc = Accuracy()
+            acc.reset()
+            acc.update({"pred": [0, 1], "labels": [0, 1]})  # 2 correct
+            acc.update({"pred": [0, 1], "labels": [1, 0]})  # 0 correct
+            # Total: 2 correct out of 4 = 0.5
+            expect acc.compute() == 0.5
+
+        it "handles empty output gracefully":
+            val acc = Accuracy()
+            acc.reset()
+            acc.update({"pred": [], "labels": []})
+            expect acc.compute() == 0.0
+
+        it "supports y_pred/y_true format":
+            val acc = Accuracy()
+            acc.reset()
+            acc.update({"y_pred": [0, 1, 2], "y_true": [0, 1, 2]})
+            expect acc.compute() == 1.0
+
+        it "resets properly between epochs":
+            val acc = Accuracy()
+            acc.reset()
+            acc.update({"pred": [0], "labels": [0]})
+            expect acc.compute() == 1.0
+
+            acc.reset()
+            acc.update({"pred": [0], "labels": [1]})
+            expect acc.compute() == 0.0
+
+
+    describe "Loss metric":
+        """
+        Average loss metric: tracks mean of loss values from output dict.
+
+        Expected output format: {"loss": <scalar value>}
+        """
+
+        it "computes average loss":
+            val loss = Loss()
+            loss.reset()
+            loss.update({"loss": 1.0})
+            loss.update({"loss": 2.0})
+            loss.update({"loss": 3.0})
+            expect loss.compute() == 2.0
+
+        it "handles single batch":
+            val loss = Loss()
+            loss.reset()
+            loss.update({"loss": 0.5})
+            expect loss.compute() == 0.5
+
+        it "handles empty updates":
+            val loss = Loss()
+            loss.reset()
+            expect loss.compute() == 0.0
+
+        it "ignores output without loss key":
+            val loss = Loss()
+            loss.reset()
+            loss.update({"other": 1.0})
+            expect loss.compute() == 0.0
+
+        it "resets properly between epochs":
+            val loss = Loss()
+            loss.reset()
+            loss.update({"loss": 10.0})
+            expect loss.compute() == 10.0
+
+            loss.reset()
+            loss.update({"loss": 1.0})
+            expect loss.compute() == 1.0
+
+
+    describe "MSE metric":
+        """
+        Mean Squared Error: (1/n) * sum((pred - actual)^2)
+
+        Useful for regression tasks where large errors should be
+        penalized more than small errors.
+        """
+
+        it "computes MSE for perfect predictions":
+            val mse = MSE()
+            mse.reset()
+            mse.update({"pred": [1.0, 2.0, 3.0], "actual": [1.0, 2.0, 3.0]})
+            expect mse.compute() == 0.0
+
+        it "computes MSE for predictions with errors":
+            val mse = MSE()
+            mse.reset()
+            # Errors: 1, 1 -> Squared: 1, 1 -> Mean: 1.0
+            mse.update({"pred": [2.0, 3.0], "actual": [1.0, 2.0]})
+            expect mse.compute() == 1.0
+
+        it "penalizes large errors more":
+            val mse = MSE()
+            mse.reset()
+            # Error of 2 -> Squared: 4
+            mse.update({"pred": [3.0], "actual": [1.0]})
+            expect mse.compute() == 4.0
+
+        it "handles y_pred/y_true format":
+            val mse = MSE()
+            mse.reset()
+            mse.update({"y_pred": [1.0], "y_true": [1.0]})
+            expect mse.compute() == 0.0
+
+
+    describe "MAE metric":
+        """
+        Mean Absolute Error: (1/n) * sum(|pred - actual|)
+
+        More robust to outliers than MSE as it doesn't square errors.
+        """
+
+        it "computes MAE for perfect predictions":
+            val mae = MAE()
+            mae.reset()
+            mae.update({"pred": [1.0, 2.0, 3.0], "actual": [1.0, 2.0, 3.0]})
+            expect mae.compute() == 0.0
+
+        it "computes MAE for predictions with errors":
+            val mae = MAE()
+            mae.reset()
+            # Errors: |2-1| + |3-2| = 1 + 1 = 2 -> Mean: 1.0
+            mae.update({"pred": [2.0, 3.0], "actual": [1.0, 2.0]})
+            expect mae.compute() == 1.0
+
+        it "handles negative errors correctly":
+            val mae = MAE()
+            mae.reset()
+            # Error: |0-2| = 2
+            mae.update({"pred": [0.0], "actual": [2.0]})
+            expect mae.compute() == 2.0
+
+
+    describe "RMSE metric":
+        """
+        Root Mean Squared Error: sqrt((1/n) * sum((pred - actual)^2))
+
+        Same unit as the target variable, making it more interpretable than MSE.
+        """
+
+        it "computes RMSE for perfect predictions":
+            val rmse = RMSE()
+            rmse.reset()
+            rmse.update({"pred": [1.0, 2.0], "actual": [1.0, 2.0]})
+            expect rmse.compute() == 0.0
+
+        it "computes RMSE as square root of MSE":
+            val rmse = RMSE()
+            rmse.reset()
+            # MSE = 4.0 -> RMSE = 2.0
+            rmse.update({"pred": [3.0], "actual": [1.0]})
+            expect rmse.compute() == 2.0
+
+
+    describe "Metric base class":
+        """
+        Base class for custom metrics with reset/update/compute pattern.
+        """
+
+        it "provides default compute returning zero":
+            val metric = Metric()
+            expect metric.compute() == 0.0

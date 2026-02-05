@@ -1,0 +1,150 @@
+# Simple CLI - migrate command
+# Apply code migration rules to Simple source files
+
+use app.cli_util (get_cli_args)
+use app.io.mod (file_exists, file_read, file_write, cwd, dir_walk)
+
+fn print_help():
+    print "Usage: simple migrate [path] [options]"
+    print ""
+    print "Apply migration rules to Simple source files."
+    print ""
+    print "Arguments:"
+    print "  [path]               File or directory (default: src/)"
+    print ""
+    print "Migrations:"
+    print "  --fix-generics       Replace [] generics with <> syntax"
+    print "  --fix-if-let         Replace 'if let' with 'if val'"
+    print "  --all                Apply all migrations"
+    print ""
+    print "Options:"
+    print "  --dry-run            Preview changes without modifying files"
+    print "  -h, --help           Show this help"
+
+fn migrate_generics(content: text) -> (text, i64):
+    # Replace common [] generic patterns with <>
+    # e.g., Option[T] -> Option<T>, List[Int] -> List<Int>
+    var result = content
+    var count = 0
+
+    # Common generic types to migrate
+    val patterns = ["Option[", "Result[", "List[", "Dict[", "Set[", "Vec[", "Map[", "Tuple["]
+    for pat in patterns:
+        val replacement = pat[:-1] + "<"
+        while result.contains(pat):
+            result = result.replace(pat, replacement)
+            # Need to also replace matching ]
+            count = count + 1
+
+    (result, count)
+
+fn migrate_if_let(content: text) -> (text, i64):
+    var result = content
+    var count = 0
+
+    # Replace "if let " with "if val "
+    while result.contains("if let "):
+        result = result.replace("if let ", "if val ")
+        count = count + 1
+
+    # Replace "elif let " with "elif val "
+    while result.contains("elif let "):
+        result = result.replace("elif let ", "elif val ")
+        count = count + 1
+
+    # Replace "while let " with "while val "
+    while result.contains("while let "):
+        result = result.replace("while let ", "while val ")
+        count = count + 1
+
+    (result, count)
+
+fn migrate_file(path: text, fix_generics: bool, fix_if_let: bool, dry_run: bool) -> i64:
+    val content = file_read(path)
+    var result = content
+    var total_changes = 0
+
+    if fix_generics:
+        val (new_content, count) = migrate_generics(result)
+        result = new_content
+        total_changes = total_changes + count
+
+    if fix_if_let:
+        val (new_content, count) = migrate_if_let(result)
+        result = new_content
+        total_changes = total_changes + count
+
+    if total_changes > 0:
+        if dry_run:
+            print "  Would apply {total_changes} migration(s) to {path}"
+        else:
+            file_write(path, result)
+            print "  Applied {total_changes} migration(s) to {path}"
+
+    total_changes
+
+fn main() -> i64:
+    val args = get_cli_args()
+
+    var target_path = ""
+    var fix_generics = false
+    var fix_if_let = false
+    var apply_all = false
+    var dry_run = false
+
+    for arg in args:
+        if arg == "-h" or arg == "--help":
+            print_help()
+            return 0
+        elif arg == "--fix-generics":
+            fix_generics = true
+        elif arg == "--fix-if-let":
+            fix_if_let = true
+        elif arg == "--all":
+            apply_all = true
+        elif arg == "--dry-run":
+            dry_run = true
+        elif not arg.starts_with("-"):
+            target_path = arg
+
+    if apply_all:
+        fix_generics = true
+        fix_if_let = true
+
+    if not fix_generics and not fix_if_let:
+        print "error: no migration rules specified"
+        print "Use --all, --fix-generics, or --fix-if-let"
+        return 1
+
+    val cwd = cwd()
+    if target_path == "":
+        target_path = "{cwd}/src"
+
+    if not file_exists(target_path):
+        print "error: path not found: {target_path}"
+        return 1
+
+    if dry_run:
+        print "DRY RUN - no files will be modified"
+        print ""
+
+    print "Running migrations..."
+
+    var total_changes = 0
+
+    # Check if single file or directory
+    if target_path.ends_with(".spl"):
+        total_changes = migrate_file(target_path, fix_generics, fix_if_let, dry_run)
+    else:
+        val files = dir_walk(target_path)
+        for file in files:
+            if file.ends_with(".spl"):
+                total_changes = total_changes + migrate_file(file, fix_generics, fix_if_let, dry_run)
+
+    print ""
+    if total_changes == 0:
+        print "No migrations needed."
+    else:
+        print "Total: {total_changes} migration(s) applied"
+
+    0

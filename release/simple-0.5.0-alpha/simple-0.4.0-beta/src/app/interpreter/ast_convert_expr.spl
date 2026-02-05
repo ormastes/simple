@@ -1,0 +1,556 @@
+# AST Expression Conversion
+#
+# Converts parse tree (CST) expressions to interpreter AST.
+# Handles all expression types and literals.
+
+import parser.treesitter.tree.{Tree, Node, NodeId, NodeArena}
+import interpreter.ast_types.*
+import interpreter.ast_convert_pattern.{convert_pattern, convert_literal, unescape_string}
+
+# =============================================================================
+# Expression Conversion Functions
+# =============================================================================
+
+fn convert_expression(tree: &Tree, node: Node) -> Result<Expr, String>:
+    match node.kind:
+        # Literals
+        case "integer":
+            match i64.parse(node.text):
+                case Ok(n): return Ok(Expr.Literal(Literal.Int(n)))
+                case Err(_): return Err("Invalid integer: {node.text}")
+        case "float":
+            match f64.parse(node.text):
+                case Ok(f): return Ok(Expr.Literal(Literal.Float(f)))
+                case Err(_): return Err("Invalid float: {node.text}")
+        case "string":
+            val s = unescape_string(node.text)
+            return Ok(Expr.Literal(Literal.String(s)))
+        case "boolean" | "true" | "false":
+            val b = node.text == "true"
+            return Ok(Expr.Literal(Literal.Bool(b)))
+        case "nil" | "none":
+            return Ok(Expr.Literal(Literal.Nil))
+
+        # Identifier
+        case "identifier":
+            return Ok(Expr.Identifier(node.text.clone()))
+
+        # Binary expressions
+        case "binary_expression":
+            return convert_binary_expression(tree, node)
+
+        # Unary expressions
+        case "unary_expression":
+            return convert_unary_expression(tree, node)
+
+        # Call expressions
+        case "call_expression":
+            return convert_call_expression(tree, node)
+
+        # Method call
+        case "method_call":
+            return convert_method_call(tree, node)
+
+        # Index expression
+        case "index_expression":
+            return convert_index_expression(tree, node)
+
+        # Field access
+        case "field_expression":
+            return convert_field_expression(tree, node)
+
+        # Array literal
+        case "array" | "array_literal":
+            return convert_array_literal(tree, node)
+
+        # Dict literal
+        case "dict" | "dict_literal":
+            return convert_dict_literal(tree, node)
+
+        # Tuple literal
+        case "tuple" | "tuple_literal":
+            return convert_tuple_literal(tree, node)
+
+        # Lambda
+        case "lambda" | "lambda_expression":
+            return convert_lambda(tree, node)
+
+        # If expression
+        case "if_expression":
+            return convert_if_expression(tree, node)
+
+        # Match expression
+        case "match_expression":
+            return convert_match_expression(tree, node)
+
+        # Range
+        case "range_expression":
+            return convert_range_expression(tree, node)
+
+        # Parenthesized expression
+        case "parenthesized_expression":
+            for child_id in node.children:
+                match tree.get_node(child_id):
+                    case Some(child):
+                        match convert_expression(tree, child):
+                            case Ok(expr): return Ok(expr)
+                            case Err(_): pass
+                    case None: pass
+            return Err("Empty parenthesized expression")
+
+        # Await expression
+        case "await_expression":
+            for child_id in node.children:
+                match tree.get_node(child_id):
+                    case Some(child):
+                        match convert_expression(tree, child):
+                            case Ok(expr): return Ok(Expr.Await(Box.new(expr)))
+                            case Err(_): pass
+                    case None: pass
+            return Err("Await missing expression")
+
+        # Try expression
+        case "try_expression":
+            for child_id in node.children:
+                match tree.get_node(child_id):
+                    case Some(child):
+                        match convert_expression(tree, child):
+                            case Ok(expr): return Ok(Expr.Try(Box.new(expr)))
+                            case Err(_): pass
+                    case None: pass
+            return Err("Try missing expression")
+
+        case _:
+            return Err("Unknown expression kind: {node.kind}")
+
+fn convert_binary_expression(tree: &Tree, node: Node) -> Result<Expr, String>:
+    var left: Option<Expr> = None
+    var op: Option<BinaryOp> = None
+    var right: Option<Expr> = None
+
+    for child_id in node.children:
+        match tree.get_node(child_id):
+            case Some(child):
+                match child.kind:
+                    case "+" | "plus": op = Some(BinaryOp.Add)
+                    case "-" | "minus": op = Some(BinaryOp.Sub)
+                    case "*" | "star": op = Some(BinaryOp.Mul)
+                    case "/" | "slash": op = Some(BinaryOp.Div)
+                    case "%" | "percent": op = Some(BinaryOp.Mod)
+                    case "**" | "power": op = Some(BinaryOp.Pow)
+                    case "==" | "eq": op = Some(BinaryOp.Eq)
+                    case "!=" | "not_eq": op = Some(BinaryOp.NotEq)
+                    case "<" | "lt": op = Some(BinaryOp.Lt)
+                    case "<=" | "lt_eq": op = Some(BinaryOp.LtEq)
+                    case ">" | "gt": op = Some(BinaryOp.Gt)
+                    case ">=" | "gt_eq": op = Some(BinaryOp.GtEq)
+                    case "and": op = Some(BinaryOp.And)
+                    case "or": op = Some(BinaryOp.Or)
+                    case "&" | "bit_and": op = Some(BinaryOp.BitAnd)
+                    case "|" | "bit_or": op = Some(BinaryOp.BitOr)
+                    case "^" | "bit_xor": op = Some(BinaryOp.BitXor)
+                    case "<<" | "shl": op = Some(BinaryOp.Shl)
+                    case ">>" | "shr": op = Some(BinaryOp.Shr)
+                    case _:
+                        match convert_expression(tree, child):
+                            case Ok(expr):
+                                if left.is_none():
+                                    left = Some(expr)
+                                else:
+                                    right = Some(expr)
+                            case Err(_): pass
+            case None: pass
+
+    match (left, op, right):
+        case (Some(l), Some(o), Some(r)):
+            return Ok(Expr.Binary {
+                op: o,
+                left: Box.new(l),
+                right: Box.new(r)
+            })
+        case _:
+            return Err("Incomplete binary expression")
+
+fn convert_unary_expression(tree: &Tree, node: Node) -> Result<Expr, String>:
+    var op: Option<UnaryOp> = None
+    var operand: Option<Expr> = None
+
+    for child_id in node.children:
+        match tree.get_node(child_id):
+            case Some(child):
+                match child.kind:
+                    case "-" | "minus": op = Some(UnaryOp.Neg)
+                    case "not" | "!": op = Some(UnaryOp.Not)
+                    case "~": op = Some(UnaryOp.BitNot)
+                    case "&": op = Some(UnaryOp.Ref)
+                    case "*": op = Some(UnaryOp.Deref)
+                    case _:
+                        match convert_expression(tree, child):
+                            case Ok(expr): operand = Some(expr)
+                            case Err(_): pass
+            case None: pass
+
+    match (op, operand):
+        case (Some(o), Some(e)):
+            return Ok(Expr.Unary {
+                op: o,
+                operand: Box.new(e)
+            })
+        case _:
+            return Err("Incomplete unary expression")
+
+fn convert_call_expression(tree: &Tree, node: Node) -> Result<Expr, String>:
+    var callee: Option<Expr> = None
+    var args: Array<Expr> = []
+
+    for child_id in node.children:
+        match tree.get_node(child_id):
+            case Some(child):
+                match child.kind:
+                    case "arguments" | "argument_list":
+                        args = convert_arguments(tree, child)
+                    case _:
+                        if callee.is_none():
+                            match convert_expression(tree, child):
+                                case Ok(expr): callee = Some(expr)
+                                case Err(_): pass
+            case None: pass
+
+    match callee:
+        case Some(c):
+            return Ok(Expr.Call {
+                callee: Box.new(c),
+                args: args
+            })
+        case None:
+            return Err("Call missing callee")
+
+fn convert_arguments(tree: &Tree, node: Node) -> Array<Expr>:
+    var args: Array<Expr> = []
+
+    for child_id in node.children:
+        match tree.get_node(child_id):
+            case Some(child):
+                match convert_expression(tree, child):
+                    case Ok(expr): args.push(expr)
+                    case Err(_): pass
+            case None: pass
+
+    return args
+
+fn convert_method_call(tree: &Tree, node: Node) -> Result<Expr, String>:
+    var object: Option<Expr> = None
+    var method = ""
+    var args: Array<Expr> = []
+
+    for child_id in node.children:
+        match tree.get_node(child_id):
+            case Some(child):
+                match child.kind:
+                    case "identifier":
+                        if object.is_some():
+                            method = child.text.clone()
+                    case "arguments" | "argument_list":
+                        args = convert_arguments(tree, child)
+                    case _:
+                        if object.is_none():
+                            match convert_expression(tree, child):
+                                case Ok(expr): object = Some(expr)
+                                case Err(_): pass
+            case None: pass
+
+    match object:
+        case Some(o):
+            return Ok(Expr.MethodCall {
+                object: Box.new(o),
+                method: method,
+                args: args
+            })
+        case None:
+            return Err("Method call missing object")
+
+fn convert_index_expression(tree: &Tree, node: Node) -> Result<Expr, String>:
+    var collection: Option<Expr> = None
+    var index: Option<Expr> = None
+
+    for child_id in node.children:
+        match tree.get_node(child_id):
+            case Some(child):
+                match convert_expression(tree, child):
+                    case Ok(expr):
+                        if collection.is_none():
+                            collection = Some(expr)
+                        else:
+                            index = Some(expr)
+                    case Err(_): pass
+            case None: pass
+
+    match (collection, index):
+        case (Some(c), Some(i)):
+            return Ok(Expr.Index {
+                collection: Box.new(c),
+                index: Box.new(i)
+            })
+        case _:
+            return Err("Incomplete index expression")
+
+fn convert_field_expression(tree: &Tree, node: Node) -> Result<Expr, String>:
+    var object: Option<Expr> = None
+    var field = ""
+
+    for child_id in node.children:
+        match tree.get_node(child_id):
+            case Some(child):
+                match child.kind:
+                    case "identifier":
+                        if object.is_some():
+                            field = child.text.clone()
+                    case _:
+                        if object.is_none():
+                            match convert_expression(tree, child):
+                                case Ok(expr): object = Some(expr)
+                                case Err(_): pass
+            case None: pass
+
+    match object:
+        case Some(o):
+            return Ok(Expr.Field {
+                object: Box.new(o),
+                field: field
+            })
+        case None:
+            return Err("Field access missing object")
+
+fn convert_array_literal(tree: &Tree, node: Node) -> Result<Expr, String>:
+    var elements: Array<Expr> = []
+
+    for child_id in node.children:
+        match tree.get_node(child_id):
+            case Some(child):
+                match convert_expression(tree, child):
+                    case Ok(expr): elements.push(expr)
+                    case Err(_): pass
+            case None: pass
+
+    return Ok(Expr.Array(elements))
+
+fn convert_dict_literal(tree: &Tree, node: Node) -> Result<Expr, String>:
+    var pairs: Array<(Expr, Expr)> = []
+
+    for child_id in node.children:
+        match tree.get_node(child_id):
+            case Some(child):
+                if child.kind == "dict_entry" or child.kind == "key_value_pair":
+                    match convert_dict_entry(tree, child):
+                        case Ok(pair): pairs.push(pair)
+                        case Err(_): pass
+            case None: pass
+
+    return Ok(Expr.Dict(pairs))
+
+fn convert_dict_entry(tree: &Tree, node: Node) -> Result<(Expr, Expr), String>:
+    var key: Option<Expr> = None
+    var value: Option<Expr> = None
+
+    for child_id in node.children:
+        match tree.get_node(child_id):
+            case Some(child):
+                match convert_expression(tree, child):
+                    case Ok(expr):
+                        if key.is_none():
+                            key = Some(expr)
+                        else:
+                            value = Some(expr)
+                    case Err(_): pass
+            case None: pass
+
+    match (key, value):
+        case (Some(k), Some(v)): return Ok((k, v))
+        case _: return Err("Incomplete dict entry")
+
+fn convert_tuple_literal(tree: &Tree, node: Node) -> Result<Expr, String>:
+    var elements: Array<Expr> = []
+
+    for child_id in node.children:
+        match tree.get_node(child_id):
+            case Some(child):
+                match convert_expression(tree, child):
+                    case Ok(expr): elements.push(expr)
+                    case Err(_): pass
+            case None: pass
+
+    return Ok(Expr.Tuple(elements))
+
+fn convert_lambda(tree: &Tree, node: Node) -> Result<Expr, String>:
+    var params: Array<String> = []
+    var body: Option<Expr> = None
+
+    for child_id in node.children:
+        match tree.get_node(child_id):
+            case Some(child):
+                match child.kind:
+                    case "parameters" | "lambda_parameters":
+                        params = convert_lambda_params(tree, child)
+                    case "identifier":
+                        if body.is_none():
+                            params.push(child.text.clone())
+                    case _:
+                        match convert_expression(tree, child):
+                            case Ok(expr): body = Some(expr)
+                            case Err(_): pass
+            case None: pass
+
+    match body:
+        case Some(b):
+            return Ok(Expr.Lambda {
+                params: params,
+                body: Box.new(b)
+            })
+        case None:
+            return Err("Lambda missing body")
+
+fn convert_lambda_params(tree: &Tree, node: Node) -> Array<String>:
+    var params: Array<String> = []
+
+    for child_id in node.children:
+        match tree.get_node(child_id):
+            case Some(child):
+                if child.kind == "identifier":
+                    params.push(child.text.clone())
+            case None: pass
+
+    return params
+
+fn convert_if_expression(tree: &Tree, node: Node) -> Result<Expr, String>:
+    var cond: Option<Expr> = None
+    var then_expr: Option<Expr> = None
+    var else_expr: Option<Expr> = None
+
+    for child_id in node.children:
+        match tree.get_node(child_id):
+            case Some(child):
+                match convert_expression(tree, child):
+                    case Ok(expr):
+                        if cond.is_none():
+                            cond = Some(expr)
+                        elif then_expr.is_none():
+                            then_expr = Some(expr)
+                        else:
+                            else_expr = Some(expr)
+                    case Err(_): pass
+            case None: pass
+
+    match (cond, then_expr, else_expr):
+        case (Some(c), Some(t), Some(e)):
+            return Ok(Expr.If {
+                cond: Box.new(c),
+                then_expr: Box.new(t),
+                else_expr: Box.new(e)
+            })
+        case _:
+            return Err("Incomplete if expression")
+
+fn convert_match_expression(tree: &Tree, node: Node) -> Result<Expr, String>:
+    var value: Option<Expr> = None
+    var cases: Array<(Pattern, Expr)> = []
+
+    for child_id in node.children:
+        match tree.get_node(child_id):
+            case Some(child):
+                match child.kind:
+                    case "case_clause":
+                        match convert_match_arm(tree, child):
+                            case Ok(arm): cases.push(arm)
+                            case Err(_): pass
+                    case _:
+                        if value.is_none():
+                            match convert_expression(tree, child):
+                                case Ok(expr): value = Some(expr)
+                                case Err(_): pass
+            case None: pass
+
+    match value:
+        case Some(v):
+            return Ok(Expr.Match {
+                value: Box.new(v),
+                cases: cases
+            })
+        case None:
+            return Err("Match expression missing value")
+
+fn convert_match_arm(tree: &Tree, node: Node) -> Result<(Pattern, Expr), String>:
+    var pattern: Option<Pattern> = None
+    var body: Option<Expr> = None
+
+    for child_id in node.children:
+        match tree.get_node(child_id):
+            case Some(child):
+                match child.kind:
+                    case "pattern":
+                        match convert_pattern(tree, child):
+                            case Ok(p): pattern = Some(p)
+                            case Err(_): pass
+                    case _:
+                        if pattern.is_some():
+                            match convert_expression(tree, child):
+                                case Ok(expr): body = Some(expr)
+                                case Err(_): pass
+                        else:
+                            match convert_pattern(tree, child):
+                                case Ok(p): pattern = Some(p)
+                                case Err(_): pass
+            case None: pass
+
+    match (pattern, body):
+        case (Some(p), Some(b)): return Ok((p, b))
+        case _: return Err("Incomplete match arm")
+
+fn convert_range_expression(tree: &Tree, node: Node) -> Result<Expr, String>:
+    var start: Option<Expr> = None
+    var end: Option<Expr> = None
+    var inclusive = false
+
+    for child_id in node.children:
+        match tree.get_node(child_id):
+            case Some(child):
+                match child.kind:
+                    case ".." | "range_op":
+                        inclusive = false
+                    case "..=" | "inclusive_range_op":
+                        inclusive = true
+                    case _:
+                        match convert_expression(tree, child):
+                            case Ok(expr):
+                                if start.is_none():
+                                    start = Some(expr)
+                                else:
+                                    end = Some(expr)
+                            case Err(_): pass
+            case None: pass
+
+    match (start, end):
+        case (Some(s), Some(e)):
+            return Ok(Expr.Range {
+                start: Box.new(s),
+                end: Box.new(e),
+                inclusive: inclusive
+            })
+        case _:
+            return Err("Incomplete range expression")
+
+# =============================================================================
+# Exports
+# =============================================================================
+
+export convert_expression
+export convert_binary_expression, convert_unary_expression
+export convert_call_expression, convert_arguments
+export convert_method_call
+export convert_index_expression, convert_field_expression
+export convert_array_literal
+export convert_dict_literal, convert_dict_entry
+export convert_tuple_literal
+export convert_lambda, convert_lambda_params
+export convert_if_expression
+export convert_match_expression, convert_match_arm
+export convert_range_expression

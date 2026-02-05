@@ -1,0 +1,389 @@
+# Testing Infrastructure Integration Example
+# Demonstrates using benchmarking, smoke testing, and mocking together
+
+import std.testing.benchmark as bench
+import std.testing.deployment as smoke
+import std.testing.mock as mock
+import map
+import set
+import time
+
+# ============================================================================
+# Example Service: User Management System
+# ============================================================================
+
+class UserService:
+    db_mock: MockFunction
+    cache_mock: MockFunction
+    email_mock: MockFunction
+
+    fn create_user(user_id: text, name: text, email: text) -> bool:
+        """Create a new user with database, cache, and email.
+
+        This method demonstrates a realistic service that:
+        1. Saves to database
+        2. Updates cache
+        3. Sends welcome email
+        """
+        # Save to database
+        self.db_mock.record_call(["save_user", user_id, name, email])
+
+        # Update cache
+        self.cache_mock.record_call(["set", user_id, name])
+
+        # Send welcome email
+        self.email_mock.record_call(["send_welcome", email])
+
+        true
+
+    fn get_user(user_id: text) -> Option<text>:
+        """Get user from cache or database."""
+        # Try cache first
+        self.cache_mock.record_call(["get", user_id])
+
+        match self.cache_mock.next_return_value():
+            Some(name):
+                return Some(name)
+            None:
+                pass
+
+        # Fall back to database
+        self.db_mock.record_call(["load_user", user_id])
+
+        match self.db_mock.next_return_value():
+            Some(name):
+                # Update cache
+                self.cache_mock.record_call(["set", user_id, name])
+                Some(name)
+            None:
+                None
+
+# ============================================================================
+# Example 1: Unit Testing with Mocks
+# ============================================================================
+
+fn example_unit_testing():
+    print "=== Unit Testing with Mocks ==="
+    print ""
+
+    # Setup mocks
+    val db_mock = mock.create_mock("database")
+    val cache_mock = mock.create_mock("cache")
+    val email_mock = mock.create_mock("email_service")
+
+    val service = UserService(
+        db_mock: db_mock,
+        cache_mock: cache_mock,
+        email_mock: email_mock
+    )
+
+    # Test: Create user
+    print "Test: create_user calls all dependencies"
+    val result = service.create_user("user123", "Alice", "alice@example.com")
+
+    # Verify all mocks were called correctly
+    print "  Database called: {db_mock.was_called()}"
+    print "  Cache called: {cache_mock.was_called()}"
+    print "  Email called: {email_mock.was_called()}"
+
+    # Detailed verification
+    val db_called_correctly = db_mock.was_called_with(
+        ["save_user", "user123", "Alice", "alice@example.com"]
+    )
+    print "  Database called with correct args: {db_called_correctly}"
+
+    print ""
+    print "Mock summaries:"
+    print db_mock.summary()
+    print cache_mock.summary()
+    print email_mock.summary()
+
+# ============================================================================
+# Example 2: Performance Testing with Benchmarks
+# ============================================================================
+
+fn example_performance_testing():
+    print "=== Performance Testing ==="
+    print ""
+
+    # Benchmark: Map vs List for lookups
+    print "Benchmark: Map vs List lookup performance"
+
+    # Setup data
+    val test_data = ["item1", "item2", "item3", "item4", "item5"]
+
+    # Create benchmark suite
+    val benchmarks = Map.new()
+
+    benchmarks.insert("Map lookup", \:
+        val m = Map.new()
+        for item in test_data:
+            m.insert(item, true)
+
+        # Lookup
+        for item in test_data:
+            m.contains_key(item)
+    )
+
+    benchmarks.insert("List contains", \:
+        var list = []
+        for item in test_data:
+            list.append(item)
+
+        # Lookup
+        for item in test_data:
+            list.contains(item)
+    )
+
+    # Run benchmarks
+    val results = bench.compare_default(benchmarks)
+
+    # Show results
+    for (name, stats) in results.entries():
+        print ""
+        print "{name}:"
+        print stats.summary()
+
+# ============================================================================
+# Example 3: Integration Testing with Smoke Tests
+# ============================================================================
+
+fn example_integration_testing():
+    print "=== Integration Testing (Smoke Tests) ==="
+    print ""
+
+    # Setup service
+    val db_mock = mock.MockBuilder.new("database")
+        .returns(["true", "true"])
+    val cache_mock = mock.create_mock("cache")
+    val email_mock = mock.create_mock("email")
+
+    val service = UserService(
+        db_mock: db_mock,
+        cache_mock: cache_mock,
+        email_mock: email_mock
+    )
+
+    # Create smoke test suite
+    val suite = smoke.SmokeTestSuite.new_default()
+        .test("Service can create user", \:
+            service.create_user("user1", "Bob", "bob@example.com")
+        )
+        .test("Database was called", \:
+            db_mock.was_called()
+        )
+        .test("Cache was updated", \:
+            cache_mock.was_called()
+        )
+        .test("Email was sent", \:
+            email_mock.was_called()
+        )
+
+    # Run tests
+    val results = suite.run()
+
+    # Display results
+    print "Smoke test results:"
+    for result in results:
+        print "  " + result.format()
+
+    if suite.all_passed(results):
+        print ""
+        print "✅ All integration tests passed!"
+    else:
+        print ""
+        print "❌ Some integration tests failed!"
+
+# ============================================================================
+# Example 4: End-to-End Testing
+# ============================================================================
+
+fn example_e2e_testing():
+    print "=== End-to-End Testing ==="
+    print ""
+
+    # Mock registry for managing all mocks
+    val registry = mock.MockRegistry.new()
+
+    # Create mocks
+    val db_mock = mock.MockBuilder.new("database")
+        .returns(["true", "Alice", "Bob"])
+    val cache_mock = mock.MockBuilder.new("cache")
+        .returns(["None", "None"])
+    val email_mock = mock.create_mock("email")
+
+    registry.register("db", db_mock)
+    registry.register("cache", cache_mock)
+    registry.register("email", email_mock)
+
+    # Create service
+    val service = UserService(
+        db_mock: db_mock,
+        cache_mock: cache_mock,
+        email_mock: email_mock
+    )
+
+    # Test workflow
+    print "Workflow: Create 2 users and verify"
+
+    # Create first user
+    service.create_user("user1", "Alice", "alice@example.com")
+
+    # Create second user
+    service.create_user("user2", "Bob", "bob@example.com")
+
+    # Verify
+    print "Email service calls: {email_mock.call_count()}"
+    print "Database calls: {db_mock.call_count()}"
+
+    # Benchmark the workflow
+    print ""
+    print "Benchmark: User creation workflow"
+
+    val stats = bench.benchmark_default("create_user", \:
+        service.create_user("userX", "Test", "test@example.com")
+    )
+
+    print stats.summary()
+
+    # Summary
+    print ""
+    print "All mocks summary:"
+    print registry.summary()
+
+# ============================================================================
+# Example 5: Data Structure Testing
+# ============================================================================
+
+fn example_data_structure_testing():
+    print "=== Data Structure Testing ==="
+    print ""
+
+    # Benchmark Set operations
+    val benchmarks = Map.new()
+
+    benchmarks.insert("Set insert 100 items", \:
+        val s = Set.new()
+        for i in 0..100:
+            s.insert("item{i}")
+    )
+
+    benchmarks.insert("Set union", \:
+        val s1 = Set.new()
+        val s2 = Set.new()
+
+        for i in 0..50:
+            s1.insert("item{i}")
+            s2.insert("item{i + 25}")
+
+        s1.union(s2)
+    )
+
+    benchmarks.insert("Set intersection", \:
+        val s1 = Set.new()
+        val s2 = Set.new()
+
+        for i in 0..50:
+            s1.insert("item{i}")
+            s2.insert("item{i + 25}")
+
+        s1.intersection(s2)
+    )
+
+    # Run benchmarks
+    print "Set operation benchmarks:"
+    val results = bench.compare_default(benchmarks)
+
+    for (name, stats) in results.entries():
+        print ""
+        print "{name}:"
+        print "  Mean: {BenchmarkStats.format_time(stats.mean_ns)}"
+
+# ============================================================================
+# Example 6: Comprehensive Test Suite
+# ============================================================================
+
+fn example_comprehensive_suite():
+    print "=== Comprehensive Test Suite ==="
+    print ""
+
+    # Create comprehensive smoke tests
+    val suite = smoke.SmokeTestSuite.new_default()
+
+    # Unit tests
+    .test("Mock creation", \:
+        val m = mock.create_mock("test")
+        m.was_called() == false  # Should start with no calls
+    )
+
+    # Data structure tests
+    .test("Map basic operations", \:
+        val m = Map.new()
+        m.insert("key", "value")
+        m.contains_key("key")
+    )
+
+    .test("Set basic operations", \:
+        val s = Set.new()
+        s.insert("item")
+        s.contains("item")
+    )
+
+    # Performance tests
+    .test("Map insert is fast", \:
+        val start = time.now_micros()
+        val m = Map.new()
+        for i in 0..100:
+            m.insert("key{i}", i)
+        val elapsed = time.now_micros() - start
+
+        elapsed < 10000  # Should take less than 10ms
+    )
+
+    # Run all tests
+    val results = suite.run()
+
+    # Report
+    var passed = 0
+    var failed = 0
+
+    for result in results:
+        print result.format()
+        if result.is_pass():
+            passed = passed + 1
+        else:
+            failed = failed + 1
+
+    print ""
+    print "Results: {passed} passed, {failed} failed"
+
+    if suite.all_passed(results):
+        print "✅ All tests passed!"
+    else:
+        print "❌ Some tests failed!"
+
+# ============================================================================
+# Main Entry Point
+# ============================================================================
+
+fn main():
+    example_unit_testing()
+    print "\n" + "=".repeat(70) + "\n"
+
+    example_performance_testing()
+    print "\n" + "=".repeat(70) + "\n"
+
+    example_integration_testing()
+    print "\n" + "=".repeat(70) + "\n"
+
+    example_e2e_testing()
+    print "\n" + "=".repeat(70) + "\n"
+
+    example_data_structure_testing()
+    print "\n" + "=".repeat(70) + "\n"
+
+    example_comprehensive_suite()
+
+    print "\n" + "=".repeat(70)
+    print "Integration example complete! 🎉"
+    print "=".repeat(70)

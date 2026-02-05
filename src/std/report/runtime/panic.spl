@@ -1,0 +1,446 @@
+# Panic Report
+#
+# Reports for unrecoverable runtime errors (panics) with stack traces.
+# Provides structured panic information for debugging and error handling.
+
+import ..level
+import ..location
+import ..report
+
+export PanicReport, StackFrame, StackTrace, PanicKind
+
+# =============================================================================
+# PanicKind: Categories of panic conditions
+# =============================================================================
+
+enum PanicKind:
+    Assertion           # Assertion failed
+    Unreachable         # Unreachable code reached
+    IndexOutOfBounds    # Array/slice index out of bounds
+    NullPointer         # Null pointer dereference
+    DivisionByZero      # Division or modulo by zero
+    Overflow            # Integer overflow
+    StackOverflow       # Stack overflow
+    OutOfMemory         # Memory allocation failed
+    InvalidState        # Invalid internal state
+    UserPanic           # Explicit panic!() call
+    Unknown             # Unknown panic type
+
+impl PanicKind:
+    fn name() -> text:
+        match self:
+            case PanicKind.Assertion: "assertion failed"
+            case PanicKind.Unreachable: "unreachable code"
+            case PanicKind.IndexOutOfBounds: "index out of bounds"
+            case PanicKind.NullPointer: "null pointer"
+            case PanicKind.DivisionByZero: "division by zero"
+            case PanicKind.Overflow: "integer overflow"
+            case PanicKind.StackOverflow: "stack overflow"
+            case PanicKind.OutOfMemory: "out of memory"
+            case PanicKind.InvalidState: "invalid state"
+            case PanicKind.UserPanic: "panic"
+            case PanicKind.Unknown: "unknown error"
+
+    fn code() -> text:
+        match self:
+            case PanicKind.Assertion: "P0001"
+            case PanicKind.Unreachable: "P0002"
+            case PanicKind.IndexOutOfBounds: "P0003"
+            case PanicKind.NullPointer: "P0004"
+            case PanicKind.DivisionByZero: "P0005"
+            case PanicKind.Overflow: "P0006"
+            case PanicKind.StackOverflow: "P0007"
+            case PanicKind.OutOfMemory: "P0008"
+            case PanicKind.InvalidState: "P0009"
+            case PanicKind.UserPanic: "P0010"
+            case PanicKind.Unknown: "P9999"
+
+    fn is_recoverable() -> bool:
+        # Most panics are not recoverable, but some might be caught
+        match self:
+            case PanicKind.Assertion: false
+            case PanicKind.UserPanic: false
+            case PanicKind.StackOverflow: false
+            case PanicKind.OutOfMemory: false
+            case _: false
+
+# =============================================================================
+# StackFrame: Single frame in a stack trace
+# =============================================================================
+
+struct StackFrame:
+    function_name: text         # Name of the function
+    file: text?                 # Source file (if available)
+    line: i64                   # Line number (0 if unknown)
+    column: i64                 # Column number (0 if unknown)
+    module: text?               # Module name (if available)
+    address: i64                # Memory address (for native frames)
+
+impl StackFrame:
+    # Create a frame with source location
+    static fn at(function_name: text, file: text, line: i64, column: i64) -> StackFrame:
+        StackFrame(
+            function_name: function_name,
+            file: Some(file),
+            line: line,
+            column: column,
+            module: None,
+            address: 0
+        )
+
+    # Create a frame with just function name
+    static fn named(function_name: text) -> StackFrame:
+        StackFrame(
+            function_name: function_name,
+            file: None,
+            line: 0,
+            column: 0,
+            module: None,
+            address: 0
+        )
+
+    # Create a native frame (no source info)
+    static fn native(function_name: text, address: i64) -> StackFrame:
+        StackFrame(
+            function_name: function_name,
+            file: None,
+            line: 0,
+            column: 0,
+            module: None,
+            address: address
+        )
+
+    # Create a frame with module info
+    static fn in_module(function_name: text, module: text) -> StackFrame:
+        StackFrame(
+            function_name: function_name,
+            file: None,
+            line: 0,
+            column: 0,
+            module: Some(module),
+            address: 0
+        )
+
+    fn has_location() -> bool:
+        self.file.? and self.line > 0
+
+    fn has_module() -> bool:
+        self.module.?
+
+    # Convert to SourceLocation if we have file info
+    fn to_location() -> SourceLocation?:
+        if self.file.?:
+            Some(SourceLocation.at(self.file.unwrap(), self.line, self.column))
+        else:
+            None
+
+    # Format for display
+    fn format(index: i64, use_color: bool) -> text:
+        val gray = if use_color: "\x1b[90m" else: ""
+        val bold = if use_color: "\x1b[1m" else: ""
+        val cyan = if use_color: "\x1b[36m" else: ""
+        val reset = if use_color: "\x1b[0m" else: ""
+
+        var output = "{gray}{index}:{reset} {bold}{self.function_name}{reset}"
+
+        if self.module.?:
+            output = output + " {gray}in {self.module.unwrap()}{reset}"
+
+        if self.file.? and self.line > 0:
+            output = output + "\n      {cyan}at {self.file.unwrap()}:{self.line}"
+            if self.column > 0:
+                output = output + ":{self.column}"
+            output = output + "{reset}"
+        elif self.address > 0:
+            output = output + "\n      {gray}at 0x{self.address:x}{reset}"
+
+        output
+
+# =============================================================================
+# StackTrace: Collection of stack frames
+# =============================================================================
+
+class StackTrace:
+    frames: [StackFrame]
+    truncated: bool         # True if trace was truncated due to depth limit
+    max_depth: i64          # Maximum frames recorded
+
+impl StackTrace:
+    static fn empty() -> StackTrace:
+        StackTrace(frames: [], truncated: false, max_depth: 100)
+
+    static fn from_frames(frames: [StackFrame]) -> StackTrace:
+        StackTrace(frames: frames, truncated: false, max_depth: 100)
+
+    static fn with_max_depth(max_depth: i64) -> StackTrace:
+        StackTrace(frames: [], truncated: false, max_depth: max_depth)
+
+    me push(frame: StackFrame):
+        if self.frames.len() < self.max_depth:
+            self.frames.push(frame)
+        else:
+            self.truncated = true
+
+    me push_at(function_name: text, file: text, line: i64, column: i64):
+        self.push(StackFrame.at(function_name, file, line, column))
+
+    fn len() -> i64:
+        self.frames.len()
+
+    fn is_empty() -> bool:
+        self.frames.is_empty()
+
+    fn get(index: i64) -> StackFrame?:
+        if index >= 0 and index < self.frames.len():
+            Some(self.frames[index])
+        else:
+            None
+
+    # Get the top frame (most recent call)
+    fn top() -> StackFrame?:
+        if self.frames.is_empty():
+            None
+        else:
+            Some(self.frames[0])
+
+    # Get the bottom frame (entry point)
+    fn bottom() -> StackFrame?:
+        if self.frames.is_empty():
+            None
+        else:
+            Some(self.frames[self.frames.len() - 1])
+
+    # Format the stack trace
+    fn format(use_color: bool) -> text:
+        val header_color = if use_color: "\x1b[1;33m" else: ""
+        val reset = if use_color: "\x1b[0m" else: ""
+
+        var output = "{header_color}Stack trace:{reset}\n"
+
+        var i = 0
+        for frame in self.frames:
+            output = output + frame.format(i, use_color) + "\n"
+            i = i + 1
+
+        if self.truncated:
+            val gray = if use_color: "\x1b[90m" else: ""
+            output = output + "{gray}... (truncated at {self.max_depth} frames){reset}\n"
+
+        output
+
+# =============================================================================
+# PanicReport: Unrecoverable runtime error
+# =============================================================================
+
+class PanicReport:
+    kind: PanicKind
+    message: text
+    location: SourceLocation?
+    stack_trace: StackTrace?
+    context: Dict<text, text>   # Additional context (variable values, etc.)
+
+impl PanicReport:
+    # Create a panic with message
+    static fn panic(message: text) -> PanicReport:
+        PanicReport(
+            kind: PanicKind.UserPanic,
+            message: message,
+            location: None,
+            stack_trace: None,
+            context: {}
+        )
+
+    # Create an assertion failure
+    static fn assertion(message: text) -> PanicReport:
+        PanicReport(
+            kind: PanicKind.Assertion,
+            message: message,
+            location: None,
+            stack_trace: None,
+            context: {}
+        )
+
+    # Create an unreachable code panic
+    static fn unreachable(location: SourceLocation) -> PanicReport:
+        PanicReport(
+            kind: PanicKind.Unreachable,
+            message: "entered unreachable code",
+            location: Some(location),
+            stack_trace: None,
+            context: {}
+        )
+
+    # Create an index out of bounds panic
+    static fn index_out_of_bounds(index: i64, length: i64) -> PanicReport:
+        var report = PanicReport(
+            kind: PanicKind.IndexOutOfBounds,
+            message: "index {index} out of bounds for length {length}",
+            location: None,
+            stack_trace: None,
+            context: {}
+        )
+        report.context["index"] = "{index}"
+        report.context["length"] = "{length}"
+        report
+
+    # Create a null pointer panic
+    static fn null_pointer(message: text) -> PanicReport:
+        PanicReport(
+            kind: PanicKind.NullPointer,
+            message: message,
+            location: None,
+            stack_trace: None,
+            context: {}
+        )
+
+    # Create a division by zero panic
+    static fn division_by_zero() -> PanicReport:
+        PanicReport(
+            kind: PanicKind.DivisionByZero,
+            message: "attempt to divide by zero",
+            location: None,
+            stack_trace: None,
+            context: {}
+        )
+
+    # Create an overflow panic
+    static fn overflow(operation: text) -> PanicReport:
+        PanicReport(
+            kind: PanicKind.Overflow,
+            message: "integer overflow in {operation}",
+            location: None,
+            stack_trace: None,
+            context: {}
+        )
+
+    # Create a stack overflow panic
+    static fn stack_overflow() -> PanicReport:
+        PanicReport(
+            kind: PanicKind.StackOverflow,
+            message: "stack overflow",
+            location: None,
+            stack_trace: None,
+            context: {}
+        )
+
+    # Create an out of memory panic
+    static fn out_of_memory(requested: i64) -> PanicReport:
+        var report = PanicReport(
+            kind: PanicKind.OutOfMemory,
+            message: "memory allocation of {requested} bytes failed",
+            location: None,
+            stack_trace: None,
+            context: {}
+        )
+        report.context["requested_bytes"] = "{requested}"
+        report
+
+    # ==========================================================================
+    # Builder methods
+    # ==========================================================================
+
+    fn at(file: text, line: i64, column: i64) -> PanicReport:
+        PanicReport(
+            kind: self.kind,
+            message: self.message,
+            location: Some(SourceLocation.at(file, line, column)),
+            stack_trace: self.stack_trace,
+            context: self.context
+        )
+
+    fn with_location(location: SourceLocation) -> PanicReport:
+        PanicReport(
+            kind: self.kind,
+            message: self.message,
+            location: Some(location),
+            stack_trace: self.stack_trace,
+            context: self.context
+        )
+
+    fn with_stack_trace(trace: StackTrace) -> PanicReport:
+        PanicReport(
+            kind: self.kind,
+            message: self.message,
+            location: self.location,
+            stack_trace: Some(trace),
+            context: self.context
+        )
+
+    fn with_context(key: text, value: text) -> PanicReport:
+        var new_context = self.context
+        new_context[key] = value
+        PanicReport(
+            kind: self.kind,
+            message: self.message,
+            location: self.location,
+            stack_trace: self.stack_trace,
+            context: new_context
+        )
+
+    # ==========================================================================
+    # Accessors
+    # ==========================================================================
+
+    fn has_location() -> bool:
+        self.location.?
+
+    fn has_stack_trace() -> bool:
+        self.stack_trace.? and not self.stack_trace.unwrap().is_empty()
+
+    fn has_context() -> bool:
+        not self.context.is_empty()
+
+    # ==========================================================================
+    # Conversion to Report
+    # ==========================================================================
+
+    fn to_report() -> Report:
+        var report = Report.fatal(self.message)
+            .with_code(self.kind.code())
+            .with_kind(ReportKind.Panic)
+            .with_source("runtime")
+
+        if self.location.?:
+            report = report.with_location(self.location.unwrap())
+
+        # Add context as notes
+        for key in self.context.keys():
+            report = report.with_note("{key}: {self.context[key]}")
+
+        report
+
+    # ==========================================================================
+    # Formatting
+    # ==========================================================================
+
+    fn format(use_color: bool) -> text:
+        val red = if use_color: "\x1b[1;31m" else: ""
+        val bold = if use_color: "\x1b[1m" else: ""
+        val gray = if use_color: "\x1b[90m" else: ""
+        val cyan = if use_color: "\x1b[36m" else: ""
+        val reset = if use_color: "\x1b[0m" else: ""
+
+        var output = "{red}panic{reset}[{self.kind.code()}]: {bold}{self.message}{reset}\n"
+
+        if self.location.?:
+            val loc = self.location.unwrap()
+            output = output + "  {cyan}-->{reset} {loc.format_short()}\n"
+
+        # Context
+        if not self.context.is_empty():
+            output = output + "\n{gray}Context:{reset}\n"
+            for key in self.context.keys():
+                output = output + "  {key}: {self.context[key]}\n"
+
+        # Stack trace
+        if self.stack_trace.?:
+            output = output + "\n" + self.stack_trace.unwrap().format(use_color)
+
+        output
+
+    fn format_short() -> text:
+        val loc_str = if self.location.?:
+            "{self.location.unwrap().format_short()}: "
+        else:
+            ""
+        "{loc_str}panic[{self.kind.code()}]: {self.message}"

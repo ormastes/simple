@@ -1,0 +1,393 @@
+# @pending
+"""
+CSV Utilities Tests
+
+Tests for CSV parsing, formatting, validation, and transformation utilities.
+
+Feature:
+  CSV data processing and manipulation
+
+Category:
+  Tooling/Data Processing
+
+Status:
+  Complete
+
+Implementation:
+  All CSV utility functions are provided locally in this test file.
+  This allows tests to be independent of external dependencies.
+"""
+
+
+# =====================================
+# CSV Utility Implementations
+# =====================================
+
+struct CsvData:
+    headers: [text]
+    rows: [[text]]
+
+fn parse_csv_line_quoted(line: text) -> [text]:
+    var result: [text] = []
+    var current = ""
+    var in_quotes = false
+
+    for c in line.chars():
+        val ch = c.to_string()
+        if ch == "\"":
+            in_quotes = not in_quotes
+        else if ch == "," and not in_quotes:
+            result = result + [current.trim()]
+            current = ""
+        else:
+            current = current + ch
+
+    if current.len() > 0 or line.ends_with(","):
+        result = result + [current.trim()]
+
+    result
+
+fn parse_csv(text_content: text) -> [[text]]:
+    var result: [[text]] = []
+    val lines = text_content.split("\n")
+    for line in lines:
+        if line.trim().len() > 0:
+            result = result + [parse_csv_line_quoted(line)]
+    result
+
+fn parse_csv_with_headers(text_content: text) -> Option<CsvData>:
+    val rows = parse_csv(text_content)
+    if rows.len() == 0: return nil
+
+    val headers = rows[0]
+    var data_rows: [[text]] = []
+    for i in 1..rows.len():
+        data_rows = data_rows + [rows[i]]
+
+    Some(CsvData(headers: headers, rows: data_rows))
+
+fn format_csv_line(fields: [text]) -> text:
+    var result: [text] = []
+    for field in fields:
+        result = result + [quote_csv_field(field)]
+    result.join(",")
+
+fn quote_csv_field(field: text) -> text:
+    if field.contains(",") or field.contains("\"") or field.contains("\n"):
+        return "\"" + field.replace("\"", "\"\"") + "\""
+    field
+
+fn format_csv(rows: [[text]]) -> text:
+    var lines: [text] = []
+    for row in rows:
+        lines = lines + [format_csv_line(row)]
+    lines.join("\n")
+
+fn is_rectangular_csv(rows: [[text]]) -> bool:
+    if rows.len() == 0: return true
+    val expected_len = rows[0].len()
+    for row in rows:
+        if row.len() != expected_len:
+            return false
+    true
+
+fn get_column_count(rows: [[text]]) -> i64:
+    if rows.len() == 0: return 0
+    rows[0].len()
+
+fn get_row_count(rows: [[text]]) -> i64:
+    rows.len()
+
+fn get_column(rows: [[text]], idx: i64) -> [text]:
+    var result: [text] = []
+    for row in rows:
+        if idx < row.len():
+            result = result + [row[idx]]
+    result
+
+fn get_column_by_name(data: CsvData, name: text) -> Option<[text]>:
+    var idx = -1
+    for i in 0..data.headers.len():
+        if data.headers[i] == name:
+            idx = i
+    if idx < 0: return nil
+
+    var result: [text] = []
+    for row in data.rows:
+        if idx < row.len():
+            result = result + [row[idx]]
+    Some(result)
+
+fn transpose_csv(rows: [[text]]) -> [[text]]:
+    if rows.len() == 0: return []
+    val num_cols = rows[0].len()
+    var result: [[text]] = []
+
+    for col in 0..num_cols:
+        var new_row: [text] = []
+        for row in rows:
+            if col < row.len():
+                new_row = new_row + [row[col]]
+        result = result + [new_row]
+
+    result
+
+fn filter_rows(data: CsvData, predicate: fn([text]) -> bool) -> CsvData:
+    var filtered: [[text]] = []
+    for row in data.rows:
+        if predicate(row):
+            filtered = filtered + [row]
+    CsvData(headers: data.headers, rows: filtered)
+
+fn count_non_empty_cells(rows: [[text]]) -> i64:
+    var count = 0
+    for row in rows:
+        for cell in row:
+            if cell.len() > 0:
+                count = count + 1
+    count
+
+fn max_field_length(rows: [[text]]) -> i64:
+    var max_len = 0
+    for row in rows:
+        for field in row:
+            if field.len() > max_len:
+                max_len = field.len()
+    max_len
+
+fn format_csv_table(rows: [[text]]) -> text:
+    if rows.len() == 0: return ""
+
+    # Calculate column widths
+    val num_cols = get_column_count(rows)
+    var widths: [i64] = []
+    for i in 0..num_cols:
+        widths = widths + [0]
+
+    for row in rows:
+        for i in 0..row.len():
+            if row[i].len() > widths[i]:
+                widths = widths[..i] + [row[i].len()] + widths[i+1..]
+
+    var result = ""
+    for row in rows:
+        result = result + "|"
+        for i in 0..row.len():
+            val cell = if i < row.len(): row[i] else: ""
+            result = result + " " + cell + " |"
+        result = result + "\n"
+
+    result
+
+fn format_csv_table_with_headers(data: CsvData) -> text:
+    var all_rows = [data.headers] + data.rows
+    var result = format_csv_table([data.headers])
+
+    # Add separator
+    result = result + "|"
+    for h in data.headers:
+        result = result + "---|"
+    result = result + "\n"
+
+    result = result + format_csv_table(data.rows)
+    result
+
+# =====================================
+# BDD Tests
+# =====================================
+
+describe "CSV Utilities":
+    """
+    Comprehensive tests for CSV utility functions covering parsing, formatting,
+    validation, transformation, and table generation capabilities.
+    """
+
+    describe "CSV Parsing":
+        it "parses simple CSV line":
+            val fields = parse_csv_line_quoted("apple,banana,cherry")
+            expect fields.len() == 3
+            expect fields[0] == "apple"
+            expect fields[1] == "banana"
+            expect fields[2] == "cherry"
+
+        it "parses quoted fields":
+            val fields = parse_csv_line_quoted("\"John Doe\",30,\"New York\"")
+            expect fields.len() == 3
+            expect fields[0] == "John Doe"
+            expect fields[1] == "30"
+            expect fields[2] == "New York"
+
+        it "parses comma in quoted field":
+            val fields = parse_csv_line_quoted("\"Smith, John\",Engineer")
+            expect fields.len() == 2
+            expect fields[0] == "Smith, John"
+
+        it "parses multiple rows":
+            val text_content = "Name,Age\nAlice,30\nBob,25"
+            val rows = parse_csv(text_content)
+            expect rows.len() == 3
+            expect rows[0][0] == "Name"
+            expect rows[1][0] == "Alice"
+            expect rows[2][0] == "Bob"
+
+        it "parses with headers":
+            val text_content = "Name,Age,City\nAlice,30,NYC\nBob,25,LA"
+            match parse_csv_with_headers(text_content):
+                case Some(data):
+                    expect data.headers.len() == 3
+                    expect data.headers[0] == "Name"
+                    expect data.rows.len() == 2
+                    expect data.rows[0][0] == "Alice"
+                case nil:
+                    expect false
+
+    describe "CSV Formatting":
+        it "formats simple line":
+            val line = format_csv_line(["apple", "banana", "cherry"])
+            expect line == "apple,banana,cherry"
+
+        it "quotes field with comma":
+            val line = format_csv_line(["Smith, John", "30"])
+            expect line.contains("\"Smith, John\"")
+
+        it "quotes field only when needed":
+            expect quote_csv_field("simple") == "simple"
+
+        it "quotes field with comma":
+            val quoted = quote_csv_field("Smith, John")
+            expect quoted.starts_with("\"")
+            expect quoted.ends_with("\"")
+
+        it "formats full CSV":
+            val rows = [
+                ["Name", "Age"],
+                ["Alice", "30"],
+                ["Bob", "25"]
+            ]
+            val csv = format_csv(rows)
+            expect csv.contains("Name,Age")
+            expect csv.contains("Alice,30")
+            expect csv.contains("Bob,25")
+
+    describe "CSV Validation":
+        it "detects rectangular CSV":
+            val rows = [
+                ["A", "B", "C"],
+                ["1", "2", "3"],
+                ["4", "5", "6"]
+            ]
+            expect is_rectangular_csv(rows)
+
+        it "detects non-rectangular CSV":
+            val rows = [
+                ["A", "B", "C"],
+                ["1", "2"],
+                ["4", "5", "6"]
+            ]
+            expect not is_rectangular_csv(rows)
+
+        it "counts columns":
+            val rows = [["A", "B", "C"]]
+            expect get_column_count(rows) == 3
+
+        it "counts rows":
+            val rows = [["A"], ["B"], ["C"]]
+            expect get_row_count(rows) == 3
+
+    describe "CSV Transformation":
+        it "gets column by index":
+            val rows = [
+                ["Name", "Age"],
+                ["Alice", "30"],
+                ["Bob", "25"]
+            ]
+            val names = get_column(rows, 0)
+            expect names.len() == 3
+            expect names[0] == "Name"
+            expect names[1] == "Alice"
+            expect names[2] == "Bob"
+
+        it "gets column by name":
+            val data = CsvData(
+                headers: ["Name", "Age", "City"],
+                rows: [
+                    ["Alice", "30", "NYC"],
+                    ["Bob", "25", "LA"]
+                ]
+            )
+            match get_column_by_name(data, "Age"):
+                case Some(ages):
+                    expect ages.len() == 2
+                    expect ages[0] == "30"
+                    expect ages[1] == "25"
+                case nil:
+                    expect false
+
+        it "returns nil for unknown column name":
+            val data = CsvData(headers: ["Name", "Age"], rows: [])
+            match get_column_by_name(data, "Country"):
+                case Some(_): expect false
+                case nil: expect true
+
+        it "transposes CSV":
+            val rows = [
+                ["A", "B"],
+                ["1", "2"],
+                ["3", "4"]
+            ]
+            val transposed = transpose_csv(rows)
+            expect transposed.len() == 2
+            expect transposed[0][0] == "A"
+            expect transposed[0][1] == "1"
+            expect transposed[0][2] == "3"
+
+        it "filters rows":
+            val data = CsvData(
+                headers: ["Name", "Age"],
+                rows: [
+                    ["Alice", "30"],
+                    ["Bob", "25"],
+                    ["Charlie", "35"]
+                ]
+            )
+            val filtered = filter_rows(data, \row: row[0].starts_with("A"))
+            expect filtered.rows.len() == 1
+            expect filtered.rows[0][0] == "Alice"
+
+    describe "CSV Statistics":
+        it "counts non-empty cells":
+            val rows = [
+                ["A", "B", ""],
+                ["1", "", "3"]
+            ]
+            val count = count_non_empty_cells(rows)
+            expect count == 4
+
+        it "finds max field length":
+            val rows = [
+                ["Short", "Medium text", "X"],
+                ["A", "Very long text here", "Y"]
+            ]
+            val max_len = max_field_length(rows)
+            expect max_len >= 19
+
+    describe "Table Formatting":
+        it "formats as table":
+            val rows = [
+                ["Name", "Age"],
+                ["Alice", "30"],
+                ["Bob", "25"]
+            ]
+            val table = format_csv_table(rows)
+            expect table.contains("Name")
+            expect table.contains("Alice")
+            expect table.contains("|")
+
+        it "formats table with headers":
+            val data = CsvData(
+                headers: ["ID", "Name"],
+                rows: [["1", "Alice"], ["2", "Bob"]]
+            )
+            val table = format_csv_table_with_headers(data)
+            expect table.contains("ID")
+            expect table.contains("---")

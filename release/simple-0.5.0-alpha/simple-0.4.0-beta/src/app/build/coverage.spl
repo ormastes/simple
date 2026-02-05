@@ -1,0 +1,236 @@
+# Coverage Orchestrator
+#
+# Code coverage integration for the Simple build system.
+# Supports multiple coverage levels and report formats.
+
+# Coverage level
+enum CoverageLevel:
+    Unit          # Unit tests only
+    Integration   # Integration tests only
+    System        # System tests only
+    All           # All test levels
+
+# Coverage format
+enum CoverageFormat:
+    Text          # Plain text summary
+    Html          # HTML report
+    Lcov          # LCOV format for CI
+    Json          # JSON format for tooling
+
+# Coverage configuration
+struct CoverageConfig:
+    level: CoverageLevel
+    format: CoverageFormat
+    output_dir: text
+    threshold: f64        # Minimum coverage percentage (0.0 = no threshold)
+    fail_on_threshold: bool
+    include_doctests: bool
+    workspace: bool       # Cover entire workspace vs single package
+    package: text         # Specific package (empty = workspace)
+
+# Coverage result
+struct CoverageResult:
+    success: bool
+    exit_code: i64
+    coverage_percent: f64
+    lines_covered: i64
+    lines_total: i64
+    report_path: text
+    stdout: text
+    stderr: text
+    met_threshold: bool
+
+impl CoverageResult:
+    fn summary() -> text:
+        "Coverage: {self.coverage_percent}% ({self.lines_covered}/{self.lines_total} lines)"
+
+use app.io.mod (process_run, file_exists, dir_create)
+
+# Coverage orchestrator class
+class Coverage:
+    # Run coverage with configuration
+    static fn run(config: CoverageConfig) -> CoverageResult:
+        # Check if cargo-llvm-cov is available
+        if not is_llvm_cov_installed():
+            return CoverageResult(
+                success: false,
+                exit_code: 1,
+                coverage_percent: 0.0,
+                lines_covered: 0,
+                lines_total: 0,
+                report_path: "",
+                stdout: "",
+                stderr: "cargo-llvm-cov not installed. Run: cargo install cargo-llvm-cov",
+                met_threshold: false
+            )
+
+        # Create output directory
+        if config.output_dir.len() > 0:
+            dir_create(config.output_dir, false)
+
+        # Build cargo-llvm-cov command
+        var args = build_coverage_args(config)
+
+        # Run coverage
+        val (stdout, stderr, exit_code) = process_run("cargo", args)
+
+        # Parse coverage percentage from output
+        val coverage_percent = parse_coverage_percent(stdout)
+        val (lines_covered, lines_total) = parse_coverage_lines(stdout)
+
+        # Check threshold
+        val met_threshold = if config.threshold > 0.0:
+            coverage_percent >= config.threshold
+        else:
+            true
+
+        val success = (exit_code == 0) and (not config.fail_on_threshold or met_threshold)
+
+        # Determine report path
+        val report_path = if config.format == CoverageFormat.Html:
+            "{config.output_dir}/html/index.html"
+        else:
+            ""
+
+        CoverageResult(
+            success: success,
+            exit_code: exit_code,
+            coverage_percent: coverage_percent,
+            lines_covered: lines_covered,
+            lines_total: lines_total,
+            report_path: report_path,
+            stdout: stdout,
+            stderr: stderr,
+            met_threshold: met_threshold
+        )
+
+    # Quick coverage run with defaults
+    static fn quick() -> CoverageResult:
+        Coverage.run(default_coverage_config())
+
+    # Coverage for specific level
+    static fn for_level(level: CoverageLevel) -> CoverageResult:
+        var config = default_coverage_config()
+        config.level = level
+        Coverage.run(config)
+
+# Check if cargo-llvm-cov is installed
+fn is_llvm_cov_installed() -> bool:
+    val (stdout, stderr, exit_code) = process_run("cargo", ["llvm-cov", "--version"])
+    exit_code == 0
+
+# Build coverage arguments for cargo-llvm-cov
+fn build_coverage_args(config: CoverageConfig) -> [text]:
+    var args = ["llvm-cov"]
+
+    # Workspace or package
+    if config.workspace:
+        args = args.merge(["--workspace"])
+    else if config.package.len() > 0:
+        args = args.merge(["-p", config.package])
+
+    # Test level filter
+    match config.level:
+        case CoverageLevel.Unit:
+            args = args.merge(["--lib"])
+        case CoverageLevel.Integration:
+            args = args.merge(["--tests"])
+        case CoverageLevel.System:
+            args = args.merge(["--tests"])
+        case CoverageLevel.All:
+            pass  # No filter = all tests
+
+    # Include doctests
+    if config.include_doctests:
+        args = args.merge(["--doc"])
+
+    # Output format
+    match config.format:
+        case CoverageFormat.Text:
+            pass  # Default output
+        case CoverageFormat.Html:
+            args = args.merge(["--html"])
+            if config.output_dir.len() > 0:
+                args = args.merge(["--output-dir", config.output_dir])
+        case CoverageFormat.Lcov:
+            args = args.merge(["--lcov"])
+            if config.output_dir.len() > 0:
+                args = args.merge(["--output-path", "{config.output_dir}/lcov.info"])
+        case CoverageFormat.Json:
+            args = args.merge(["--json"])
+            if config.output_dir.len() > 0:
+                args = args.merge(["--output-path", "{config.output_dir}/coverage.json"])
+
+    args
+
+# Parse coverage percentage from cargo-llvm-cov output
+fn parse_coverage_percent(output: text) -> f64:
+    # Look for lines like: "TOTAL   1234   567   45.93%"
+    # or "test result: ... coverage: 75.5%"
+
+    # Simple parsing - look for percentage pattern
+    val lines = output.split("\n")
+    for line in lines:
+        if line.contains("%"):
+            # Extract percentage (simplified)
+            # TODO: Implement proper regex or string parsing
+            # For now, return 0.0 as placeholder
+            return 0.0
+    0.0
+
+# Parse lines covered/total from output
+fn parse_coverage_lines(output: text) -> (i64, i64):
+    # Parse output for lines covered and total
+    # Format: "TOTAL   1234   567   45.93%"
+    # Where 1234 = total lines, 567 = covered lines
+
+    # TODO: Implement proper parsing
+    # For now, return 0, 0 as placeholder
+    (0, 0)
+
+# Print coverage result
+fn print_coverage_result(result: CoverageResult):
+    if result.success:
+        print "✓ Coverage: {result.coverage_percent}%"
+        print "  Lines covered: {result.lines_covered}/{result.lines_total}"
+
+        if result.report_path.len() > 0:
+            print "  Report: {result.report_path}"
+
+        if result.met_threshold:
+            print "  ✓ Met coverage threshold"
+        else:
+            print "  ✗ Below coverage threshold"
+    else:
+        print "✗ Coverage failed with exit code {result.exit_code}"
+        if result.stderr.len() > 0:
+            print result.stderr
+
+# Default coverage configuration
+fn default_coverage_config() -> CoverageConfig:
+    CoverageConfig(
+        level: CoverageLevel.All,
+        format: CoverageFormat.Text,
+        output_dir: "coverage",
+        threshold: 0.0,
+        fail_on_threshold: false,
+        include_doctests: false,
+        workspace: true,
+        package: ""
+    )
+
+# Helper: Convert level to string
+fn level_to_string(level: CoverageLevel) -> text:
+    match level:
+        case CoverageLevel.Unit: "unit"
+        case CoverageLevel.Integration: "integration"
+        case CoverageLevel.System: "system"
+        case CoverageLevel.All: "all"
+
+# Helper: Convert format to string
+fn format_to_string(format: CoverageFormat) -> text:
+    match format:
+        case CoverageFormat.Text: "text"
+        case CoverageFormat.Html: "html"
+        case CoverageFormat.Lcov: "lcov"
+        case CoverageFormat.Json: "json"

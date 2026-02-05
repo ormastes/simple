@@ -1,0 +1,322 @@
+# Expression Evaluation
+#
+# All expression evaluation logic.
+# Port of expression dispatch from rust/compiler/src/interpreter*.rs
+
+from literals import {eval_literal}
+from arithmetic import {eval_binary_op, eval_unary_op}
+from collections import {eval_array, eval_dict, eval_tuple}
+from calls import {eval_call, eval_method_call}
+from advanced import {
+    eval_fstring, eval_range, eval_slice, eval_comprehension,
+    eval_optional_chain, eval_null_coalesce,
+    eval_await, eval_spawn, eval_ternary,
+    eval_type_check, eval_type_cast,
+    eval_pipe, eval_compose,
+    eval_set, eval_assignment,
+    eval_enum_variant, eval_struct_literal
+}
+
+export eval_expr, evaluate
+export eval_literal, eval_binary_op, eval_unary_op
+export eval_array, eval_dict, eval_tuple
+export eval_call, eval_method_call
+export eval_loss_block, eval_nograd_block, eval_array_with_suffix
+export eval_fstring, eval_range, eval_slice, eval_comprehension
+export eval_optional_chain, eval_null_coalesce
+export eval_await, eval_spawn, eval_ternary
+export eval_type_check, eval_type_cast
+export eval_pipe, eval_compose
+export eval_set, eval_assignment
+export eval_enum_variant, eval_struct_literal
+
+from ..core import {Interpreter, Value, InterpreterError, RuntimeValue, Closure}
+
+# Main expression evaluator
+fn evaluate(interp: &Interpreter, expr: &Expr) -> Result<Value, InterpreterError>:
+    match expr:
+        case Expr.Literal(lit):
+            return eval_literal(lit)
+
+        case Expr.Identifier(name):
+            match interp.env.get(name):
+                case Some(value): return Ok(value)
+                case None: return Err(InterpreterError.NameError(name.clone()))
+
+        case Expr.Binary(op, left, right):
+            val l = evaluate(interp, left)?
+            val r = evaluate(interp, right)?
+            return eval_binary_op(op, l, r)
+
+        case Expr.Unary(op, operand):
+            val value = evaluate(interp, operand)?
+            return eval_unary_op(op, value)
+
+        case Expr.Call(callee, args):
+            return eval_call(interp, callee, args)
+
+        case Expr.MethodCall(obj, method, args):
+            return eval_method_call(interp, obj, method, args)
+
+        case Expr.Index(collection, index):
+            val coll = evaluate(interp, collection)?
+            val idx = evaluate(interp, index)?
+            return eval_index(coll, idx)
+
+        case Expr.Field(obj, field):
+            val o = evaluate(interp, obj)?
+            return eval_field(o, field)
+
+        case Expr.Array(elements):
+            return eval_array(interp, elements)
+
+        case Expr.Dict(pairs):
+            return eval_dict(interp, pairs)
+
+        case Expr.Tuple(elements):
+            return eval_tuple(interp, elements)
+
+        case Expr.Set(elements):
+            return eval_set(interp, elements)
+
+        case Expr.Lambda(params, body):
+            return eval_lambda(interp, params, body)
+
+        # Format strings
+        case Expr.FString(parts):
+            return eval_fstring(interp, parts)
+
+        # Range expressions
+        case Expr.Range(start, end, inclusive):
+            return eval_range(interp, start, end, inclusive)
+
+        # Slice expressions
+        case Expr.Slice(collection, start, end, step):
+            val coll = evaluate(interp, collection)?
+            val s = if start.?: Some(evaluate(interp, start.unwrap())?) else: None
+            val e = if end.?: Some(evaluate(interp, end.unwrap())?) else: None
+            val st = if step.?: Some(evaluate(interp, step.unwrap())?) else: None
+            return eval_slice(interp, coll, s, e, st)
+
+        # List comprehension
+        case Expr.Comprehension(binding, iterable, filter, body):
+            return eval_comprehension(interp, binding, iterable, filter, body)
+
+        # Optional chaining
+        case Expr.OptionalChain(base, chain):
+            return eval_optional_chain(interp, base, chain)
+
+        # Null coalescing
+        case Expr.NullCoalesce(expr, default):
+            return eval_null_coalesce(interp, expr, default)
+
+        # Await expression
+        case Expr.Await(inner):
+            return eval_await(interp, inner)
+
+        # Spawn expression
+        case Expr.Spawn(inner):
+            return eval_spawn(interp, inner)
+
+        # Ternary
+        case Expr.Ternary(cond, then_expr, else_expr):
+            return eval_ternary(interp, cond, then_expr, else_expr)
+
+        # Type check (is)
+        case Expr.TypeCheck(value, type_name):
+            return eval_type_check(interp, value, type_name)
+
+        # Type cast (as)
+        case Expr.TypeCast(value, type_name):
+            return eval_type_cast(interp, value, type_name)
+
+        # Pipeline operators
+        case Expr.Pipe(value, func):
+            return eval_pipe(interp, value, func)
+
+        case Expr.Compose(f, g):
+            return eval_compose(interp, f, g)
+
+        # Assignment expression
+        case Expr.Assignment(target, value):
+            return eval_assignment(interp, target, value)
+
+        # Enum variant construction
+        case Expr.EnumVariant(enum_name, variant_name, args):
+            return eval_enum_variant(interp, enum_name, variant_name, args)
+
+        # Struct literal construction
+        case Expr.StructLiteral(name, fields):
+            return eval_struct_literal(interp, name, fields)
+
+        # DL blocks
+        case Expr.LossBlock(body):
+            return eval_loss_block(interp, body)
+
+        case Expr.NogradBlock(body):
+            return eval_nograd_block(interp, body)
+
+        case Expr.ArrayLitSuffix(elements, suffix):
+            return eval_array_with_suffix(interp, elements, suffix)
+
+        case _:
+            return Err(InterpreterError.NotImplemented(expr.to_string()))
+
+fn eval_index(coll: Value, idx: Value) -> Result<Value, InterpreterError>:
+    match coll.data:
+        case RuntimeValue.Array(arr):
+            match idx.as_int():
+                case Some(i):
+                    val index = if i < 0: arr.len() as i64 + i else: i
+                    if index >= 0 and index < arr.len() as i64:
+                        return Ok(arr[index as usize].clone())
+                    else:
+                        return Err(InterpreterError.IndexError(i, arr.len()))
+                case None:
+                    return Err(InterpreterError.TypeError("array index must be int".to_string()))
+
+        case RuntimeValue.String(s):
+            match idx.as_int():
+                case Some(i):
+                    val index = if i < 0: s.len() as i64 + i else: i
+                    if index >= 0 and index < s.len() as i64:
+                        val ch = s.chars().nth(index as usize).unwrap()
+                        return Ok(Value.string(ch.to_string()))
+                    else:
+                        return Err(InterpreterError.IndexError(i, s.len()))
+                case None:
+                    return Err(InterpreterError.TypeError("string index must be int".to_string()))
+
+        case RuntimeValue.Dict(d):
+            match d.get(&idx):
+                case Some(v): return Ok(v.clone())
+                case None: return Err(InterpreterError.KeyError(idx.to_string()))
+
+        case RuntimeValue.Tuple(t):
+            match idx.as_int():
+                case Some(i):
+                    val index = if i < 0: t.len() as i64 + i else: i
+                    if index >= 0 and index < t.len() as i64:
+                        return Ok(t[index as usize].clone())
+                    else:
+                        return Err(InterpreterError.IndexError(i, t.len()))
+                case None:
+                    return Err(InterpreterError.TypeError("tuple index must be int".to_string()))
+
+        case _:
+            return Err(InterpreterError.TypeError("value is not indexable".to_string()))
+
+fn eval_field(obj: Value, field: &str) -> Result<Value, InterpreterError>:
+    match obj.data:
+        case RuntimeValue.Struct(name, fields):
+            match fields.get(field):
+                case Some(v): return Ok(v.clone())
+                case None: return Err(InterpreterError.AttributeError(name.clone(), field.to_string()))
+
+        case RuntimeValue.Object(class_name, fields):
+            match fields.get(field):
+                case Some(v): return Ok(v.clone())
+                case None: return Err(InterpreterError.AttributeError(class_name.clone(), field.to_string()))
+
+        case RuntimeValue.Dict(d):
+            val key = Value.string(field.to_string())
+            match d.get(&key):
+                case Some(v): return Ok(v.clone())
+                case None: return Err(InterpreterError.KeyError(field.to_string()))
+
+        case _:
+            return Err(InterpreterError.TypeError("value has no fields".to_string()))
+
+fn eval_lambda(interp: &Interpreter, params: &Array<String>, body: &Expr) -> Result<Value, InterpreterError>:
+    # Capture the current environment for closure
+    val captured_env = interp.env.clone()
+    val closure = Closure {
+        params: params.clone(),
+        body: body.clone(),
+        env: captured_env,
+    }
+    return Ok(Value.closure(closure))
+
+# Alias for main entry point
+fn eval_expr(interp: &Interpreter, expr: &Expr) -> Result<Value, InterpreterError>:
+    return evaluate(interp, expr)
+
+# ============================================================================
+# Tensor/DL Block Evaluation
+# ============================================================================
+
+fn eval_loss_block(interp: &Interpreter, body: &Block) -> Result<Value, InterpreterError>:
+    """Evaluate a loss{ ... } block.
+
+    Loss blocks:
+    1. Enable gradient tracking
+    2. Evaluate the body (uses math block semantics from lexer)
+    3. Call backward() on the result automatically
+
+    Note: Math block features (^ for power, ' for transpose, implicit mul)
+    are already handled by the lexer/parser, so the body is standard AST.
+    """
+    # Save current autograd state (access via global dl config)
+    val prev_autograd = interp.env.get_global("__dl_autograd_enabled")
+    interp.env.set_global("__dl_autograd_enabled", Value.bool_(true))
+
+    # Evaluate the body
+    var result: Value = Value.null()
+    for stmt in body.stmts:
+        result = interp.eval_stmt(stmt)?
+
+    # Auto-backward: if result is a tensor, call backward()
+    # TODO: Re-enable when RuntimeValue.Tensor variant is added
+    # match result.data:
+    #     case RuntimeValue.Tensor(tensor):
+    #         tensor.backward()
+    #     case _:
+    #         # Non-tensor result, no backward needed
+    #         pass
+
+    # Restore previous autograd state
+    if prev_autograd.?:
+        interp.env.set_global("__dl_autograd_enabled", prev_autograd.unwrap())
+    else:
+        interp.env.set_global("__dl_autograd_enabled", Value.bool_(true))
+
+    Ok(result)
+
+fn eval_nograd_block(interp: &Interpreter, body: &Block) -> Result<Value, InterpreterError>:
+    """Evaluate a nograd{ ... } block.
+
+    Nograd blocks:
+    1. Disable gradient tracking (faster, less memory)
+    2. Evaluate the body
+    3. Restore previous autograd state
+
+    Note: Math block features are already handled by the lexer/parser.
+    """
+    # Save current autograd state
+    val prev_autograd = interp.env.get_global("__dl_autograd_enabled")
+    interp.env.set_global("__dl_autograd_enabled", Value.bool_(false))
+
+    # Evaluate the body
+    var result: Value = Value.null()
+    for stmt in body.stmts:
+        result = interp.eval_stmt(stmt)?
+
+    # Restore previous autograd state
+    if prev_autograd.?:
+        interp.env.set_global("__dl_autograd_enabled", prev_autograd.unwrap())
+    else:
+        interp.env.set_global("__dl_autograd_enabled", Value.bool_(true))
+
+    Ok(result)
+
+fn eval_array_with_suffix(interp: &Interpreter, elements: &Array<Expr>, suffix: &TensorSuffix) -> Result<Value, InterpreterError>:
+    """Evaluate an array literal with tensor suffix.
+
+    TODO: Implement tensor operations when RuntimeValue.Tensor variant is added
+
+    Examples:
+    - [1, 2, 3]f32        -> f32 tensor
+    - [1, 2, 3]_f32_gpu   -> f32 tensor on GPU
+    - [1, 2, 3]f32_tr_cuda -> trainable f32 tensor on CUDA
+    """
+    return Err(InterpreterError.NotImplemented("Tensor operations not yet implemented".to_string()))

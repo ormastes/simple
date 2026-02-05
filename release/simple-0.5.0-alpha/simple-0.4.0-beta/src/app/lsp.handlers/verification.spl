@@ -1,0 +1,520 @@
+# Verification Handler
+# Provides Lean verification status, diagnostics, and artifact navigation
+
+import lsp.protocol as protocol
+import lsp.transport as transport
+import parser.treesitter.{Tree, Node, NodeId, Span}
+import io.fs as fs
+
+# Verification status for a symbol
+enum VerificationStatus:
+    Verified       # @verify - fully proven
+    Trusted        # @trusted - axiom
+    Partial        # Has unproven (sorry) theorems
+    Failed         # Verification errors
+    NotVerified    # No verification attributes
+
+# Verification diagnostic severity
+enum VerificationSeverity:
+    Error      # V-* rule violation
+    Warning    # Unproven theorem (sorry)
+    Info       # Verification status information
+
+# Verification diagnostic from Lean codegen
+class VerificationDiagnostic:
+    code: String       # e.g., "V-AOP-001", "V-TERM-001"
+    message: String    # Human-readable error message
+    span: Span         # Source location
+    severity: VerificationSeverity
+    item_name: Option<String>  # Function/class name
+    context: Option<String>    # Additional context
+
+    static fn new(code: String, message: String, span: Span, severity: VerificationSeverity) -> VerificationDiagnostic:
+        VerificationDiagnostic(
+            code: code,
+            message: message,
+            span: span,
+            severity: severity,
+            item_name: None,
+            context: None
+        )
+
+    var fn with_item(name: String) -> VerificationDiagnostic:
+        self.item_name = Some(name)
+        self
+
+    var fn with_context(ctx: String) -> VerificationDiagnostic:
+        self.context = Some(ctx)
+        self
+
+    # Convert to LSP diagnostic format
+    fn to_lsp_diagnostic() -> Dict:
+        val lsp_severity = match self.severity:
+            case Error:
+                protocol.DiagnosticSeverity.Error
+            case Warning:
+                protocol.DiagnosticSeverity.Warning
+            case Info:
+                protocol.DiagnosticSeverity.Information
+
+        val full_message = match self.item_name:
+            case Some(name):
+                match self.context:
+                    case Some(ctx):
+                        "[{self.code}] {self.message} in '{name}': {ctx}"
+                    case None:
+                        "[{self.code}] {self.message} in '{name}'"
+            case None:
+                "[{self.code}] {self.message}"
+
+        {
+            "range": {
+                "start": {
+                    "line": self.span.start_line,
+                    "character": self.span.start_column
+                },
+                "end": {
+                    "line": self.span.end_line,
+                    "character": self.span.end_column
+                }
+            },
+            "severity": lsp_severity,
+            "source": "simple-verify",
+            "code": self.code,
+            "message": full_message
+        }
+
+# Verified symbol information
+class VerifiedSymbol:
+    name: String
+    kind: String           # "function", "class", "module"
+    status: VerificationStatus
+    span: Span
+    lean_file: Option<String>    # Path to generated Lean file
+    theorems: List<String>       # Theorem names
+    unproven_count: Int          # Number of sorry theorems
+    diagnostics: List<VerificationDiagnostic>
+
+    static fn new(name: String, kind: String, span: Span) -> VerifiedSymbol:
+        VerifiedSymbol(
+            name: name,
+            kind: kind,
+            status: VerificationStatus.NotVerified,
+            span: span,
+            lean_file: None,
+            theorems: [],
+            unproven_count: 0,
+            diagnostics: []
+        )
+
+    var fn with_status(status: VerificationStatus) -> VerifiedSymbol:
+        self.status = status
+        self
+
+    var fn with_lean_file(path: String) -> VerifiedSymbol:
+        self.lean_file = Some(path)
+        self
+
+    var fn add_theorem(theorem: String, is_proven: Bool):
+        self.theorems.push(theorem)
+        if not is_proven:
+            self.unproven_count = self.unproven_count + 1
+
+    var fn add_diagnostic(diag: VerificationDiagnostic):
+        self.diagnostics.push(diag)
+
+# Verification context for a document
+class VerificationContext:
+    uri: String
+    symbols: Dict<String, VerifiedSymbol>
+    diagnostics: List<VerificationDiagnostic>
+    lean_output_dir: String
+
+    static fn new(uri: String, lean_output_dir: String) -> VerificationContext:
+        VerificationContext(
+            uri: uri,
+            symbols: {},
+            diagnostics: [],
+            lean_output_dir: lean_output_dir
+        )
+
+    var fn add_symbol(symbol: VerifiedSymbol):
+        self.symbols[symbol.name] = symbol
+
+    var fn add_diagnostic(diag: VerificationDiagnostic):
+        self.diagnostics.push(diag)
+
+    fn get_symbol(name: String) -> Option<VerifiedSymbol>:
+        self.symbols.get(name)
+
+# Check if a node has @verify attribute
+fn has_verify_attribute(tree: Tree, node: Node) -> Bool:
+    # Check for decorators/attributes before the node
+    for child_id in node.children:
+        match tree.arena.get(child_id):
+            case Some(child):
+                if child.kind == "decorator":
+                    if child.text.contains("@verify"):
+                        return true
+            case None:
+                pass
+    false
+
+# Check if a node has @trusted attribute
+fn has_trusted_attribute(tree: Tree, node: Node) -> Bool:
+    for child_id in node.children:
+        match tree.arena.get(child_id):
+            case Some(child):
+                if child.kind == "decorator":
+                    if child.text.contains("@trusted"):
+                        return true
+            case None:
+                pass
+    false
+
+# Extract verification status from node
+fn get_verification_status(tree: Tree, node: Node) -> VerificationStatus:
+    if has_verify_attribute(tree, node):
+        VerificationStatus.Verified
+    else if has_trusted_attribute(tree, node):
+        VerificationStatus.Trusted
+    else:
+        VerificationStatus.NotVerified
+
+# Find all verified symbols in tree
+fn find_verified_symbols(tree: Tree) -> List<VerifiedSymbol>:
+    var symbols: List<VerifiedSymbol> = []
+
+    fn traverse(node_id: NodeId):
+        match tree.arena.get(node_id):
+            case None:
+                return
+            case Some(node):
+                # Check for function definitions
+                if node.kind == "function_def":
+                    val status = get_verification_status(tree, node)
+                    if status != VerificationStatus.NotVerified:
+                        match node.fields.get("name"):
+                            case Some(name_id):
+                                match tree.arena.get(name_id):
+                                    case Some(name_node):
+                                        val symbol = VerifiedSymbol.new(
+                                            name_node.text,
+                                            "function",
+                                            node.span
+                                        ).with_status(status)
+                                        symbols.push(symbol)
+                                    case None:
+                                        pass
+                            case None:
+                                pass
+
+                # Check for class definitions
+                if node.kind == "class_def":
+                    val status = get_verification_status(tree, node)
+                    if status != VerificationStatus.NotVerified:
+                        match node.fields.get("name"):
+                            case Some(name_id):
+                                match tree.arena.get(name_id):
+                                    case Some(name_node):
+                                        val symbol = VerifiedSymbol.new(
+                                            name_node.text,
+                                            "class",
+                                            node.span
+                                        ).with_status(status)
+                                        symbols.push(symbol)
+                                    case None:
+                                        pass
+                            case None:
+                                pass
+
+                # Traverse children
+                for child_id in node.children:
+                    traverse(child_id)
+
+    traverse(tree.root_node)
+    symbols
+
+# Generate verification diagnostics for a document
+fn generate_verification_diagnostics(tree: Tree, uri: String) -> List<VerificationDiagnostic>:
+    var diagnostics: List<VerificationDiagnostic> = []
+    val symbols = find_verified_symbols(tree)
+
+    for symbol in symbols:
+        # Check for common verification issues
+        if symbol.status == VerificationStatus.Verified:
+            # Check for IO in verified context (V-EFFECT-001)
+            val io_calls = find_io_calls_in_symbol(tree, symbol)
+            for io_call in io_calls:
+                val diag = VerificationDiagnostic.new(
+                    "V-EFFECT-001",
+                    "IO operation in verified context",
+                    io_call.span,
+                    VerificationSeverity.Error
+                ).with_item(symbol.name)
+                diagnostics.push(diag)
+
+            # Check for missing termination argument (V-TERM-001)
+            if is_recursive_function(tree, symbol) and not has_decreases_clause(tree, symbol):
+                val diag = VerificationDiagnostic.new(
+                    "V-TERM-001",
+                    "Recursive function missing decreases clause",
+                    symbol.span,
+                    VerificationSeverity.Warning
+                ).with_item(symbol.name)
+                diagnostics.push(diag)
+
+    diagnostics
+
+# Find IO calls within a symbol's scope
+fn find_io_calls_in_symbol(tree: Tree, symbol: VerifiedSymbol) -> List<Node>:
+    var io_calls: List<Node> = []
+    val io_functions = ["print", "println", "read", "readline", "write",
+                        "open", "close", "read_file", "write_file",
+                        "spawn", "send", "recv", "sleep"]
+
+    fn traverse(node_id: NodeId):
+        match tree.arena.get(node_id):
+            case None:
+                return
+            case Some(node):
+                if node.kind == "call":
+                    # Check if this is an IO function call
+                    match node.fields.get("function"):
+                        case Some(func_id):
+                            match tree.arena.get(func_id):
+                                case Some(func_node):
+                                    if io_functions.contains(func_node.text):
+                                        io_calls.push(node)
+                                case None:
+                                    pass
+                        case None:
+                            pass
+
+                for child_id in node.children:
+                    traverse(child_id)
+
+    # Traverse symbol's body
+    # (Simplified - in practice, we'd find the function body node)
+    traverse(tree.root_node)
+
+    io_calls
+
+# Check if a symbol represents a recursive function
+fn is_recursive_function(tree: Tree, symbol: VerifiedSymbol) -> Bool:
+    if symbol.kind != "function":
+        return false
+
+    # Check if function calls itself
+    fn calls_itself(node_id: NodeId, func_name: String) -> Bool:
+        match tree.arena.get(node_id):
+            case None:
+                false
+            case Some(node):
+                if node.kind == "call":
+                    match node.fields.get("function"):
+                        case Some(func_id):
+                            match tree.arena.get(func_id):
+                                case Some(func_node):
+                                    if func_node.text == func_name:
+                                        return true
+                                case None:
+                                    pass
+                        case None:
+                            pass
+
+                for child_id in node.children:
+                    if calls_itself(child_id, func_name):
+                        return true
+
+                false
+
+    calls_itself(tree.root_node, symbol.name)
+
+# Check if a function has a decreases clause
+fn has_decreases_clause(tree: Tree, symbol: VerifiedSymbol) -> Bool:
+    # Look for decreases: clause in function contracts
+    fn find_decreases(node_id: NodeId) -> Bool:
+        match tree.arena.get(node_id):
+            case None:
+                false
+            case Some(node):
+                if node.kind == "contract_clause" and node.text.starts_with("decreases:"):
+                    return true
+
+                for child_id in node.children:
+                    if find_decreases(child_id):
+                        return true
+
+                false
+
+    find_decreases(tree.root_node)
+
+# Get hover content for verified symbol
+fn get_verification_hover_content(symbol: VerifiedSymbol) -> String:
+    val status_icon = match symbol.status:
+        case Verified:
+            "✅"
+        case Trusted:
+            "🔒"
+        case Partial:
+            "⚠️"
+        case Failed:
+            "❌"
+        case NotVerified:
+            ""
+
+    val status_text = match symbol.status:
+        case Verified:
+            "Verified"
+        case Trusted:
+            "Trusted (axiom)"
+        case Partial:
+            "Partially verified"
+        case Failed:
+            "Verification failed"
+        case NotVerified:
+            "Not verified"
+
+    var content = "**{symbol.kind}** `{symbol.name}` {status_icon}\n\n"
+    content = content + "**Verification Status:** {status_text}\n"
+
+    if symbol.theorems.len() > 0:
+        content = content + "\n**Theorems:** {symbol.theorems.len()}"
+        if symbol.unproven_count > 0:
+            content = content + " ({symbol.unproven_count} unproven)"
+        content = content + "\n"
+
+        for theorem in symbol.theorems:
+            content = content + "- `{theorem}`\n"
+
+    match symbol.lean_file:
+        case Some(path):
+            content = content + "\n**Lean file:** [{path}]({path})\n"
+        case None:
+            pass
+
+    if symbol.diagnostics.len() > 0:
+        content = content + "\n**Issues:** {symbol.diagnostics.len()}\n"
+        for diag in symbol.diagnostics:
+            content = content + "- [{diag.code}] {diag.message}\n"
+
+    content
+
+# Get Lean artifact path for a symbol
+fn get_lean_artifact_path(symbol: VerifiedSymbol, output_dir: String) -> Option<String>:
+    match symbol.lean_file:
+        case Some(path):
+            Some(path)
+        case None:
+            # Generate expected path
+            val module_name = symbol.name.replace(".", "_")
+            Some("{output_dir}/{module_name}.lean")
+
+# Handle verification diagnostics for a document
+fn handle_verification_diagnostics(tree: Tree, uri: String) -> Result<List<Dict>, String>:
+    val diagnostics = generate_verification_diagnostics(tree, uri)
+
+    var lsp_diagnostics: List<Dict> = []
+    for diag in diagnostics:
+        lsp_diagnostics.push(diag.to_lsp_diagnostic())
+
+    Ok(lsp_diagnostics)
+
+# Handle hover for verified symbol
+fn handle_verification_hover(tree: Tree, line: Int, column: Int) -> Option<String>:
+    val symbols = find_verified_symbols(tree)
+
+    # Find symbol at position
+    for symbol in symbols:
+        if line >= symbol.span.start_line and line <= symbol.span.end_line:
+            if line == symbol.span.start_line and column < symbol.span.start_column:
+                continue
+            if line == symbol.span.end_line and column > symbol.span.end_column:
+                continue
+
+            return Some(get_verification_hover_content(symbol))
+
+    None
+
+# Handle go-to-definition for Lean artifact
+fn handle_lean_definition(tree: Tree, line: Int, column: Int, output_dir: String) -> Option<Dict>:
+    val symbols = find_verified_symbols(tree)
+
+    # Find symbol at position
+    for symbol in symbols:
+        if line >= symbol.span.start_line and line <= symbol.span.end_line:
+            if line == symbol.span.start_line and column < symbol.span.start_column:
+                continue
+            if line == symbol.span.end_line and column > symbol.span.end_column:
+                continue
+
+            # Get Lean artifact path
+            match get_lean_artifact_path(symbol, output_dir):
+                case Some(path):
+                    # Check if file exists
+                    if fs.exists(path):
+                        return Some({
+                            "uri": "file://{path}",
+                            "range": {
+                                "start": {"line": 0, "character": 0},
+                                "end": {"line": 0, "character": 0}
+                            }
+                        })
+                case None:
+                    pass
+
+    None
+
+# Get all verification symbols for document symbols
+fn get_verification_symbols(tree: Tree) -> List<Dict>:
+    val symbols = find_verified_symbols(tree)
+    var lsp_symbols: List<Dict> = []
+
+    for symbol in symbols:
+        val kind = match symbol.kind:
+            case "function":
+                12  # LSP SymbolKind.Function
+            case "class":
+                5   # LSP SymbolKind.Class
+            case _:
+                13  # LSP SymbolKind.Variable
+
+        val status_suffix = match symbol.status:
+            case Verified:
+                " ✅"
+            case Trusted:
+                " 🔒"
+            case Partial:
+                " ⚠️"
+            case Failed:
+                " ❌"
+            case NotVerified:
+                ""
+
+        lsp_symbols.push({
+            "name": symbol.name + status_suffix,
+            "kind": kind,
+            "range": {
+                "start": {
+                    "line": symbol.span.start_line,
+                    "character": symbol.span.start_column
+                },
+                "end": {
+                    "line": symbol.span.end_line,
+                    "character": symbol.span.end_column
+                }
+            },
+            "selectionRange": {
+                "start": {
+                    "line": symbol.span.start_line,
+                    "character": symbol.span.start_column
+                },
+                "end": {
+                    "line": symbol.span.end_line,
+                    "character": symbol.span.end_column
+                }
+            }
+        })
+
+    lsp_symbols

@@ -1,0 +1,415 @@
+# Performance Module Tests
+#
+# Tests for unified performance configuration, statistics, and benchmarks.
+
+# @skip
+from perf_config import {
+    PerfConfig,
+    PerfProfile,
+    OptimizationLevel,
+    get_config,
+    set_config
+}
+from perf_stats import {
+    PerfStats,
+    ComponentStats,
+    collect_stats,
+    reset_all_stats,
+    format_bytes
+}
+from benchmark import {
+    Benchmark,
+    BenchmarkResult,
+    BenchmarkSuite,
+    BenchmarkConfig,
+    run_benchmark,
+    format_duration
+}
+
+describe "OptimizationLevel":
+    it "provides descriptions":
+        assert OptimizationLevel.Minimal.description().contains("Minimal")
+        assert OptimizationLevel.Balanced.description().contains("Balanced")
+        assert OptimizationLevel.Aggressive.description().contains("Maximum")
+
+describe "PerfProfile":
+    it "converts to config":
+        val config = PerfProfile.Development.to_config()
+
+        assert config.level == OptimizationLevel.Minimal
+        assert config.detailed_stats == true
+
+    it "creates production config":
+        val config = PerfProfile.Production.to_config()
+
+        assert config.level == OptimizationLevel.Balanced
+        assert config.stats_collection_enabled == false
+
+    it "creates low latency config":
+        val config = PerfProfile.LowLatency.to_config()
+
+        assert config.scheduler_config.reductions_per_timeslice == 500
+
+    it "creates high throughput config":
+        val config = PerfProfile.HighThroughput.to_config()
+
+        assert config.scheduler_config.reductions_per_timeslice == 8000
+
+    it "creates memory constrained config":
+        val config = PerfProfile.MemoryConstrained.to_config()
+
+        assert config.mailbox_config.capacity == 50
+
+    it "provides descriptions":
+        assert PerfProfile.Development.description().contains("debugging")
+        assert PerfProfile.Production.description().contains("production")
+
+describe "PerfConfig - Creation":
+    it "creates default config":
+        val config = PerfConfig.default()
+
+        assert config.level == OptimizationLevel.Balanced
+        assert config.symbol_interning_enabled
+        assert config.persistent_collections_enabled
+        assert config.per_actor_gc_enabled
+        assert config.lazy_evaluation_enabled
+
+    it "creates development config":
+        val config = PerfConfig.development()
+
+        assert config.level == OptimizationLevel.Minimal
+        assert not config.persistent_collections_enabled
+        assert config.detailed_stats
+
+    it "creates testing config":
+        val config = PerfConfig.testing()
+
+        assert config.scheduler_config.scheduler_count == 1
+
+    it "creates production config":
+        val config = PerfConfig.production()
+
+        assert not config.stats_collection_enabled
+
+describe "PerfConfig - Builder":
+    it "sets optimization level":
+        val config = PerfConfig.default()
+            .with_optimization_level(OptimizationLevel.Aggressive)
+
+        assert config.level == OptimizationLevel.Aggressive
+
+    it "sets actor heap size":
+        val config = PerfConfig.default()
+            .with_actor_heap_size(1024 * 1024)
+
+        assert config.actor_heap_config.initial_size == 1024 * 1024
+
+    it "sets reductions":
+        val config = PerfConfig.default()
+            .with_reductions(4000)
+
+        assert config.scheduler_config.reductions_per_timeslice == 4000
+
+    it "enables/disables stats":
+        val config = PerfConfig.default()
+            .with_stats_enabled(false)
+
+        assert not config.stats_collection_enabled
+
+    it "sets large binary threshold":
+        val config = PerfConfig.default()
+            .with_large_binary_threshold(128)
+
+        assert config.large_binary_threshold == 128
+
+    it "chains builders":
+        val config = PerfConfig.default()
+            .with_optimization_level(OptimizationLevel.Aggressive)
+            .with_reductions(4000)
+            .with_stats_enabled(true)
+
+        assert config.level == OptimizationLevel.Aggressive
+        assert config.scheduler_config.reductions_per_timeslice == 4000
+        assert config.stats_collection_enabled
+
+describe "PerfConfig - Global":
+    it "gets default global config":
+        val config = get_config()
+
+        assert config.level == OptimizationLevel.Balanced
+
+    it "sets global config":
+        val custom = PerfConfig.development()
+        set_config(custom)
+
+        val retrieved = get_config()
+        assert retrieved.level == OptimizationLevel.Minimal
+
+        # Reset
+        set_config(PerfConfig.default())
+
+describe "ComponentStats":
+    it "creates empty stats":
+        val stats = ComponentStats.new("test", true)
+
+        assert stats.name == "test"
+        assert stats.enabled
+        assert stats.metric_count() == 0
+
+    it "adds metrics":
+        var stats = ComponentStats.new("test", true)
+
+        stats.add_metric("count", 100.0)
+        stats.add_metric("rate", 0.5)
+
+        assert stats.metric_count() == 2
+        assert stats.get_metric("count") == Some(100.0)
+        assert stats.get_metric("rate") == Some(0.5)
+
+    it "formats enabled component":
+        var stats = ComponentStats.new("memory", true)
+        stats.add_metric("used", 1024.0)
+
+        val formatted = stats.fmt()
+        assert formatted.contains("memory")
+        assert formatted.contains("1024")
+
+    it "formats disabled component":
+        val stats = ComponentStats.new("feature", false)
+
+        assert stats.fmt().contains("disabled")
+
+describe "PerfStats":
+    it "creates empty stats":
+        val stats = PerfStats.empty()
+
+        assert stats.total_memory_bytes == 0
+        assert stats.total_gc_count == 0
+
+    it "lists component names":
+        val stats = PerfStats.empty()
+        val names = stats.component_names()
+
+        assert names.contains("symbols")
+        assert names.contains("lazy")
+        assert names.contains("shared_heap")
+
+    it "gets component by name":
+        val stats = PerfStats.empty()
+
+        val lazy = stats.get_component("lazy")
+        assert lazy.?
+        assert lazy.unwrap().name == "lazy"
+
+        val invalid = stats.get_component("invalid")
+        assert not invalid.?
+
+    it "generates summary":
+        val stats = PerfStats.empty()
+        val summary = stats.summary()
+
+        assert summary.contains("Performance Statistics")
+        assert summary.contains("Symbol Interning")
+        assert summary.contains("Lazy Evaluation")
+
+describe "PerfStats - Collection":
+    it "collects stats":
+        val stats = collect_stats()
+
+        # Should have collected from lazy subsystem
+        val lazy = stats.get_component("lazy")
+        assert lazy.?
+
+    it "resets stats":
+        reset_all_stats()
+        val stats = collect_stats()
+
+        # Stats should be reset
+        val lazy = stats.get_component("lazy")
+        assert lazy.?.get_metric("total_created") == Some(0.0)
+
+describe "Formatting Utilities":
+    it "formats bytes":
+        assert format_bytes(500) == "500 B"
+        assert format_bytes(1024).contains("KB")
+        assert format_bytes(1024 * 1024).contains("MB")
+        assert format_bytes(1024 * 1024 * 1024).contains("GB")
+
+    it "formats duration":
+        assert format_duration(500).contains("ns")
+        assert format_duration(5000).contains("µs")
+        assert format_duration(5000000).contains("ms")
+        assert format_duration(5000000000).contains("s")
+
+describe "BenchmarkConfig":
+    it "creates default config":
+        val config = BenchmarkConfig.default()
+
+        assert config.warmup_iterations == 10
+        assert config.iterations == 100
+
+    it "creates quick config":
+        val config = BenchmarkConfig.quick()
+
+        assert config.warmup_iterations == 3
+        assert config.iterations == 20
+
+    it "creates thorough config":
+        val config = BenchmarkConfig.thorough()
+
+        assert config.warmup_iterations == 50
+        assert config.iterations == 1000
+
+describe "BenchmarkResult":
+    it "creates empty result":
+        val result = BenchmarkResult.new("test")
+
+        assert result.name == "test"
+        assert result.iterations == 0
+
+    it "calculates ops per second":
+        var result = BenchmarkResult.new("test")
+        result.mean_time_ns = 1000000  # 1ms
+
+        val ops = result.ops_per_second()
+        assert ops == 1000.0
+
+    it "calculates time in different units":
+        var result = BenchmarkResult.new("test")
+        result.mean_time_ns = 1000000  # 1ms
+
+        assert result.mean_time_us() == 1000.0
+        assert result.mean_time_ms() == 1.0
+
+    it "calculates coefficient of variation":
+        var result = BenchmarkResult.new("test")
+        result.mean_time_ns = 1000
+        result.stddev_ns = 100
+
+        val cv = result.coefficient_of_variation()
+        assert cv == 0.1
+
+    it "generates summary":
+        var result = BenchmarkResult.new("test_op")
+        result.iterations = 100
+        result.mean_time_ns = 1000000
+        result.min_time_ns = 900000
+        result.max_time_ns = 1100000
+
+        val summary = result.summary()
+        assert summary.contains("test_op")
+        assert summary.contains("Iterations: 100")
+
+describe "Benchmark":
+    it "creates simple benchmark":
+        var counter = 0
+        val bench = Benchmark.new("increment", \:
+            counter = counter + 1
+        )
+
+        assert bench.name == "increment"
+
+    it "adds setup function":
+        var setup_called = false
+        val bench = Benchmark.new("test", \: ())
+            .with_setup(\:
+                setup_called = true
+            )
+
+        bench.setup()
+        assert setup_called
+
+    it "adds teardown function":
+        var teardown_called = false
+        val bench = Benchmark.new("test", \: ())
+            .with_teardown(\:
+                teardown_called = true
+            )
+
+        bench.teardown()
+        assert teardown_called
+
+    it "adds description":
+        val bench = Benchmark.new("test", \: ())
+            .with_description("A test benchmark")
+
+        assert bench.description == "A test benchmark"
+
+describe "BenchmarkSuite":
+    it "creates empty suite":
+        val suite = BenchmarkSuite.new("test_suite")
+
+        assert suite.name == "test_suite"
+        assert suite.benchmarks.len() == 0
+
+    it "adds benchmarks":
+        var suite = BenchmarkSuite.new("test_suite")
+
+        suite.add_fn("bench1", \: ())
+        suite.add_fn("bench2", \: ())
+
+        assert suite.benchmarks.len() == 2
+
+    it "sets config for suite":
+        val suite = BenchmarkSuite.new("test")
+            .with_config(BenchmarkConfig.quick())
+
+        assert suite.config.iterations == 20
+
+describe "BenchmarkComparison":
+    it "compares faster result":
+        var baseline = BenchmarkResult.new("baseline")
+        baseline.mean_time_ns = 2000
+
+        var candidate = BenchmarkResult.new("candidate")
+        candidate.mean_time_ns = 1000
+
+        val comparison = baseline.compare_to(candidate)
+
+        assert comparison.is_faster()
+        assert comparison.speedup == 2.0
+
+    it "compares slower result":
+        var baseline = BenchmarkResult.new("baseline")
+        baseline.mean_time_ns = 1000
+
+        var candidate = BenchmarkResult.new("candidate")
+        candidate.mean_time_ns = 2000
+
+        val comparison = baseline.compare_to(candidate)
+
+        assert comparison.is_slower()
+        assert comparison.speedup == 0.5
+
+    it "generates summary":
+        var baseline = BenchmarkResult.new("old")
+        baseline.mean_time_ns = 2000
+
+        var candidate = BenchmarkResult.new("new")
+        candidate.mean_time_ns = 1000
+
+        val comparison = baseline.compare_to(candidate)
+        val summary = comparison.summary()
+
+        assert summary.contains("new")
+        assert summary.contains("old")
+        assert summary.contains("faster")
+
+describe "run_benchmark":
+    it "runs simple benchmark":
+        var counter = 0
+        val result = run_benchmark("counter", 10, \:
+            counter = counter + 1
+        )
+
+        assert result.name == "counter"
+        assert result.iterations == 10
+        assert counter >= 10  # Includes warmup
+
+    it "calculates statistics":
+        val result = run_benchmark("noop", 100, \: ())
+
+        assert result.min_time_ns >= 0
+        assert result.max_time_ns >= result.min_time_ns
+        assert result.mean_time_ns >= result.min_time_ns
+        assert result.mean_time_ns <= result.max_time_ns

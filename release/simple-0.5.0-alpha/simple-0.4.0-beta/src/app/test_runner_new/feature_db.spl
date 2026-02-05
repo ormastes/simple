@@ -1,0 +1,409 @@
+# Feature Database
+#
+# Parse and update feature_db.sdn from test results.
+# Supports SSpec metadata parsing, duplicate detection, sorting, and validation.
+
+use app.io.mod (file_exists, file_read, file_atomic_write, dir_walk)
+use test_db_lock.FileLock
+
+# =========================================================================
+# Constants
+# =========================================================================
+
+val FEATURE_DB_PATH = "doc/feature/feature_db.sdn"
+
+# =========================================================================
+# Feature Record
+# =========================================================================
+
+struct FeatureRecord:
+    id: text
+    category: text
+    name: text
+    description: text
+    spec: text
+    mode_interpreter: text
+    mode_jit: text
+    mode_smf_cranelift: text
+    mode_smf_llvm: text
+    platforms: text
+    status: text
+    valid: bool
+
+# =========================================================================
+# H5: SSpec Metadata Item
+# =========================================================================
+
+struct SSpecItem:
+    id: text
+    name: text
+    category: text
+    modes: List<text>
+    skip_modes: List<text>
+    platforms: List<text>
+    is_ignored: bool
+    file_path: text
+
+# =========================================================================
+# Feature Database
+# =========================================================================
+
+struct FeatureDatabase:
+    features: List<FeatureRecord>
+
+impl FeatureDatabase:
+    static fn empty() -> FeatureDatabase:
+        FeatureDatabase(features: [])
+
+    static fn load() -> FeatureDatabase:
+        if not file_exists(FEATURE_DB_PATH):
+            return FeatureDatabase.empty()
+
+        val content = file_read(FEATURE_DB_PATH)
+        FeatureDatabase.parse(content)
+
+    static fn parse(content: text) -> FeatureDatabase:
+        var features: List<FeatureRecord> = []
+        val lines = content.split("\n")
+        var in_table = false
+
+        for line in lines:
+            val trimmed = line.trim()
+            if trimmed.starts_with("features |"):
+                in_table = true
+                continue
+            if not in_table or trimmed == "" or trimmed.starts_with("#"):
+                # If we hit another table header, stop
+                if in_table and trimmed != "" and not trimmed.starts_with("#") and not trimmed.starts_with(" "):
+                    in_table = false
+                continue
+
+            val fields = parse_feature_fields(trimmed)
+            if fields.len() >= 12:
+                features.push(FeatureRecord(
+                    id: fields[0],
+                    category: fields[1],
+                    name: fields[2],
+                    description: fields[3],
+                    spec: fields[4],
+                    mode_interpreter: fields[5],
+                    mode_jit: fields[6],
+                    mode_smf_cranelift: fields[7],
+                    mode_smf_llvm: fields[8],
+                    platforms: fields[9],
+                    status: fields[10],
+                    valid: fields[11] == "true"
+                ))
+
+        FeatureDatabase(features: features)
+
+    fn find_by_id(id: text) -> i64:
+        var i = 0
+        while i < self.features.len():
+            if self.features[i].id == id:
+                return i
+            i = i + 1
+        -1
+
+    me update_feature(id: text, status: text):
+        val idx = self.find_by_id(id)
+        if idx >= 0:
+            self.features[idx].status = status
+            self.features[idx].valid = true
+
+    me mark_invalid(id: text):
+        val idx = self.find_by_id(id)
+        if idx >= 0:
+            self.features[idx].valid = false
+
+    fn save() -> Result<(), text>:
+        val lock_result = FileLock.acquire(FEATURE_DB_PATH, 10)
+        if lock_result.err.?:
+            return Err(lock_result.unwrap_err())
+        val lock = lock_result.unwrap()
+
+        val content = self.serialize()
+        val success = file_atomic_write(FEATURE_DB_PATH, content)
+        lock.release()
+
+        if success:
+            Ok(())
+        else:
+            Err("Failed to write {FEATURE_DB_PATH}")
+
+    fn serialize() -> text:
+        var lines: List<text> = []
+        lines.push("features |id, category, name, description, spec, mode_interpreter, mode_jit, mode_smf_cranelift, mode_smf_llvm, platforms, status, valid|")
+
+        for f in self.features:
+            val valid_str = if f.valid: "true" else: "false"
+            val desc = quote_if_needed(f.description)
+            val name = quote_if_needed(f.name)
+            val cat = quote_if_needed(f.category)
+            val spec = quote_if_needed(f.spec)
+            lines.push("    {f.id}, {cat}, {name}, {desc}, {spec}, {f.mode_interpreter}, {f.mode_jit}, {f.mode_smf_cranelift}, {f.mode_smf_llvm}, {f.platforms}, {f.status}, {valid_str}")
+
+        lines.join("\n") + "\n"
+
+    # -----------------------------------------------------------------
+    # Category helpers
+    # -----------------------------------------------------------------
+
+    fn categories() -> List<text>:
+        var cats: List<text> = []
+        var seen: Dict<text, bool> = {}
+        for f in self.features:
+            if not seen.contains_key(f.category):
+                cats.push(f.category)
+                seen[f.category] = true
+        cats
+
+    fn features_by_category(category: text) -> List<FeatureRecord>:
+        var result: List<FeatureRecord> = []
+        for f in self.features:
+            if f.category == category and f.valid:
+                result.push(f)
+        result
+
+    fn count_by_status(status: text) -> i64:
+        var count = 0
+        for f in self.features:
+            if f.valid and f.status == status:
+                count = count + 1
+        count
+
+    # -----------------------------------------------------------------
+    # H7: Sort features by semantic numeric/dot-part ID
+    # -----------------------------------------------------------------
+
+    me sort_features():
+        # Insertion sort by feature ID with dot-part numeric comparison
+        var i = 1
+        while i < self.features.len():
+            val key = self.features[i]
+            var j = i - 1
+            while j >= 0 and compare_feature_id(self.features[j].id, key.id) > 0:
+                self.features[j + 1] = self.features[j]
+                j = j - 1
+            self.features[j + 1] = key
+            i = i + 1
+
+    # -----------------------------------------------------------------
+    # H8: Duplicate feature ID detection
+    # -----------------------------------------------------------------
+
+    fn find_duplicates() -> List<text>:
+        var seen: Dict<text, bool> = {}
+        var duplicates: List<text> = []
+        for f in self.features:
+            if seen.contains_key(f.id):
+                duplicates.push(f.id)
+            else:
+                seen[f.id] = true
+        duplicates
+
+    # -----------------------------------------------------------------
+    # M6: Mark orphaned features as invalid
+    # -----------------------------------------------------------------
+
+    me mark_orphaned_features(known_spec_files: List<text>):
+        var spec_set: Dict<text, bool> = {}
+        for path in known_spec_files:
+            spec_set[path] = true
+
+        var i = 0
+        while i < self.features.len():
+            val spec = self.features[i].spec
+            if spec != "" and spec.ends_with(".spl"):
+                if not spec_set.contains_key(spec):
+                    self.features[i].valid = false
+            i = i + 1
+
+# =========================================================================
+# H5: SSpec metadata parsing from source files
+# =========================================================================
+
+fn parse_sspec_metadata(file_path: text) -> List<SSpecItem>:
+    if not file_exists(file_path):
+        return []
+
+    val content = file_read(file_path)
+    val lines = content.split("\n")
+    var items: List<SSpecItem> = []
+
+    var current_id = ""
+    var current_modes: List<text> = []
+    var current_skip_modes: List<text> = []
+    var current_platforms: List<text> = []
+    var current_ignored = false
+
+    var i = 0
+    while i < lines.len():
+        val trimmed = lines[i].trim()
+
+        # Parse attribute annotations
+        if trimmed.starts_with("#["):
+            if trimmed.contains("id("):
+                val id_start = trimmed.index_of("id(\"") ?? -1
+                if id_start >= 0:
+                    val after = trimmed[id_start + 4:]
+                    val id_end = after.index_of("\")") ?? -1
+                    if id_end >= 0:
+                        current_id = after[:id_end]
+
+            if trimmed.contains("modes("):
+                current_modes = parse_attr_list(trimmed, "modes")
+
+            if trimmed.contains("skip_modes("):
+                current_skip_modes = parse_attr_list(trimmed, "skip_modes")
+
+            if trimmed.contains("platforms("):
+                current_platforms = parse_attr_list(trimmed, "platforms")
+
+            if trimmed.contains("ignore"):
+                current_ignored = true
+
+        # Parse describe/feature blocks
+        elif trimmed.starts_with("describe ") or trimmed.starts_with("feature "):
+            val name = extract_quoted_string(trimmed)
+            if current_id != "" or name != "":
+                val cat = extract_category_from_path(file_path)
+                items.push(SSpecItem(
+                    id: if current_id != "": current_id else: name,
+                    name: name,
+                    category: cat,
+                    modes: current_modes,
+                    skip_modes: current_skip_modes,
+                    platforms: current_platforms,
+                    is_ignored: current_ignored,
+                    file_path: file_path
+                ))
+            # Reset attributes for next block
+            current_id = ""
+            current_modes = []
+            current_skip_modes = []
+            current_platforms = []
+            current_ignored = false
+
+        i = i + 1
+
+    items
+
+fn parse_attr_list(line: text, attr_name: text) -> List<text>:
+    val start_pattern = attr_name + "("
+    val start = line.index_of(start_pattern) ?? -1
+    if start < 0:
+        return []
+    val after = line[start + start_pattern.len():]
+    val end = after.index_of(")") ?? -1
+    if end < 0:
+        return []
+    val inner = after[:end]
+    var items: List<text> = []
+    val parts = inner.split(",")
+    for part in parts:
+        val trimmed = part.trim().replace("\"", "")
+        if trimmed != "":
+            items.push(trimmed)
+    items
+
+fn extract_quoted_string(line: text) -> text:
+    val q1 = line.index_of("\"") ?? -1
+    if q1 < 0:
+        return ""
+    val after = line[q1 + 1:]
+    val q2 = after.index_of("\"") ?? -1
+    if q2 < 0:
+        return ""
+    after[:q2]
+
+fn extract_category_from_path(file_path: text) -> text:
+    # Derive category from directory structure
+    # e.g., "src/std/test/features/control_flow/..." -> "control_flow"
+    val parts = file_path.split("/")
+    var i = 0
+    while i < parts.len():
+        if parts[i] == "features" and i + 1 < parts.len():
+            return parts[i + 1]
+        i = i + 1
+    # Fallback: use parent directory name
+    if parts.len() >= 2:
+        return parts[parts.len() - 2]
+    "uncategorized"
+
+# =========================================================================
+# H7: Feature ID comparison (semantic dot-part numeric sort)
+# =========================================================================
+
+fn compare_feature_id(a: text, b: text) -> i64:
+    val a_parts = a.split(".")
+    val b_parts = b.split(".")
+    val max_len = if a_parts.len() > b_parts.len(): a_parts.len() else: b_parts.len()
+    var i = 0
+    while i < max_len:
+        val a_val = if i < a_parts.len(): a_parts[i] else: ""
+        val b_val = if i < b_parts.len(): b_parts[i] else: ""
+        # Try numeric comparison first
+        val a_num = a_val.to_int_or(-1)
+        val b_num = b_val.to_int_or(-1)
+        if a_num >= 0 and b_num >= 0:
+            if a_num != b_num:
+                return a_num - b_num
+        else:
+            # String comparison
+            if a_val < b_val:
+                return -1
+            if a_val > b_val:
+                return 1
+        i = i + 1
+    a_parts.len() - b_parts.len()
+
+# =========================================================================
+# Helpers
+# =========================================================================
+
+fn parse_feature_fields(line: text) -> List<text>:
+    # Reuse CSV-like parsing with quote support
+    var fields: List<text> = []
+    var i = 0
+    var current = ""
+    var in_quote = false
+
+    while i < line.len():
+        val ch = line[i]
+        if in_quote:
+            if ch == "\\" and i + 1 < line.len():
+                current = current + line[i + 1]
+                i = i + 2
+                continue
+            if ch == "\"":
+                in_quote = false
+                i = i + 1
+                continue
+            current = current + ch
+        else:
+            if ch == "\"":
+                in_quote = true
+                i = i + 1
+                continue
+            if ch == ",":
+                fields.push(current.trim())
+                current = ""
+                i = i + 1
+                continue
+            current = current + ch
+        i = i + 1
+
+    fields.push(current.trim())
+    fields
+
+fn quote_if_needed(s: text) -> text:
+    if s == "":
+        return ""
+    if s.contains(",") or s.contains("\"") or s.contains("\n"):
+        val escaped = s.replace("\\", "\\\\").replace("\"", "\\\"")
+        return "\"{escaped}\""
+    s
+
+export FeatureDatabase, FeatureRecord, SSpecItem, FEATURE_DB_PATH
+export parse_sspec_metadata, compare_feature_id, extract_category_from_path

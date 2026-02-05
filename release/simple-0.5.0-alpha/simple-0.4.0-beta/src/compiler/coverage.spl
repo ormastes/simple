@@ -1,0 +1,109 @@
+# Coverage
+#
+# Coverage instrumentation for line, branch, and function tracking.
+# Records which source lines and functions were executed during tests.
+#
+# Port of rust/compiler/src/coverage.rs (129 lines)
+
+export SourceLoc, FunctionCoverage, ModuleCoverage, CoverageStats
+export CoverageCollector, CoverageReport
+
+# ============================================================================
+# Types
+# ============================================================================
+
+struct SourceLoc:
+    file: text
+    line: i64
+    column: i64
+
+struct FunctionCoverage:
+    name: text
+    lines_hit: i64
+    lines_total: i64
+    branches_hit: i64
+    branches_total: i64
+
+struct ModuleCoverage:
+    name: text
+    functions: [FunctionCoverage]
+
+struct CoverageStats:
+    lines_hit: i64
+    lines_total: i64
+    branches_hit: i64
+    branches_total: i64
+    functions_hit: i64
+    functions_total: i64
+
+impl CoverageStats:
+    static fn empty() -> CoverageStats:
+        CoverageStats(lines_hit: 0, lines_total: 0,
+                       branches_hit: 0, branches_total: 0,
+                       functions_hit: 0, functions_total: 0)
+
+    fn line_coverage() -> f64:
+        if self.lines_total == 0: 0.0
+        else: self.lines_hit.to_f64() / self.lines_total.to_f64()
+
+    fn branch_coverage() -> f64:
+        if self.branches_total == 0: 0.0
+        else: self.branches_hit.to_f64() / self.branches_total.to_f64()
+
+    fn function_coverage() -> f64:
+        if self.functions_total == 0: 0.0
+        else: self.functions_hit.to_f64() / self.functions_total.to_f64()
+
+struct CoverageReport:
+    modules: [ModuleCoverage]
+    stats: CoverageStats
+
+# ============================================================================
+# Coverage Collector
+# ============================================================================
+
+class CoverageCollector:
+    """Records coverage data during execution."""
+    line_hits: {text: [i64]}      # file -> hit line numbers
+    function_calls: {text: i64}   # function_name -> call count
+
+impl CoverageCollector:
+    static fn create() -> CoverageCollector:
+        CoverageCollector(line_hits: {}, function_calls: {})
+
+    me record_line(file: text, line: i64):
+        if not self.line_hits.contains_key(file):
+            self.line_hits[file] = []
+        val lines = self.line_hits[file]
+        if not lines.contains(line):
+            self.line_hits[file] = lines.push(line)
+
+    me record_function_call(name: text):
+        if self.function_calls.contains_key(name):
+            self.function_calls[name] = self.function_calls[name] + 1
+        else:
+            self.function_calls[name] = 1
+
+    fn was_function_called(name: text) -> bool:
+        self.function_calls.contains_key(name) and self.function_calls[name] > 0
+
+    fn executed_files() -> [text]:
+        var files: [text] = []
+        for (f, _) in self.line_hits:
+            files = files.push(f)
+        files
+
+    fn stats() -> CoverageStats:
+        CoverageStats.empty()
+
+    me clear():
+        self.line_hits = {}
+        self.function_calls = {}
+
+    fn to_sdn() -> text:
+        var lines: [text] = ["coverage:"]
+        for (file, hit_lines) in self.line_hits:
+            lines = lines.push("  {file}: {hit_lines.len()} lines hit")
+        for (func, count) in self.function_calls:
+            lines = lines.push("  {func}: {count} calls")
+        lines.join("\n")

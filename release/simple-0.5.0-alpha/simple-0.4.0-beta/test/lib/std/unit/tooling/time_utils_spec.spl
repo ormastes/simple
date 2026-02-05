@@ -1,0 +1,823 @@
+# @pending
+"""
+# Time Utilities Specification
+
+**Feature IDs:** #TIME-001 to #TIME-040
+**Category:** Tooling | Time & Duration
+**Difficulty:** 3/5
+**Status:** In Progress
+
+## Overview
+
+This specification covers comprehensive time and duration utility functions:
+1. Duration creation and manipulation (millis, seconds, minutes, hours, days)
+2. Duration arithmetic (add, subtract, multiply, divide)
+3. Duration parsing from strings (e.g., "1h30m45s")
+4. Duration formatting and display
+5. Timestamp and time range operations
+6. Duration comparisons and utilities
+7. Common durations (one_second, one_minute, etc.)
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| Duration | Immutable time span in milliseconds |
+| Timestamp | Point in time (Unix epoch seconds) |
+| Time Range | Span between two timestamps |
+| Components | Break duration into days, hours, minutes, seconds, millis |
+| Parsing | String to duration conversion (e.g., "1h30m") |
+| Formatting | Duration to human-readable string |
+
+## Behavior
+
+- Duration stores milliseconds internally
+- Timestamp represents Unix epoch seconds
+- Duration parsing supports: d=days, h=hours, m=minutes, s=seconds
+- Format output includes only non-zero components or 0s
+- Time ranges are inclusive on both bounds
+- Negative durations are allowed
+"""
+
+
+# =====================================
+# Duration Struct
+# =====================================
+
+struct Duration:
+    millis: i64
+
+impl Duration:
+    static fn from_millis(ms: i64) -> Duration:
+        Duration(millis: ms)
+
+    static fn from_seconds(secs: i64) -> Duration:
+        Duration(millis: secs * 1000)
+
+    static fn from_minutes(mins: i64) -> Duration:
+        Duration(millis: mins * 60 * 1000)
+
+    static fn from_hours(hrs: i64) -> Duration:
+        Duration(millis: hrs * 60 * 60 * 1000)
+
+    static fn from_days(days: i64) -> Duration:
+        Duration(millis: days * 24 * 60 * 60 * 1000)
+
+    fn total_millis() -> i64:
+        self.millis
+
+    fn total_seconds() -> i64:
+        self.millis / 1000
+
+    fn total_minutes() -> i64:
+        self.millis / (60 * 1000)
+
+    fn total_hours() -> i64:
+        self.millis / (60 * 60 * 1000)
+
+    fn total_days() -> i64:
+        self.millis / (24 * 60 * 60 * 1000)
+
+    fn components() -> (i64, i64, i64, i64, i64):
+        var remaining = self.millis
+        val days = remaining / (24 * 60 * 60 * 1000)
+        remaining = remaining % (24 * 60 * 60 * 1000)
+        val hours = remaining / (60 * 60 * 1000)
+        remaining = remaining % (60 * 60 * 1000)
+        val minutes = remaining / (60 * 1000)
+        remaining = remaining % (60 * 1000)
+        val seconds = remaining / 1000
+        val ms = remaining % 1000
+        (days, hours, minutes, seconds, ms)
+
+    fn add(other: Duration) -> Duration:
+        Duration(millis: self.millis + other.millis)
+
+    fn subtract(other: Duration) -> Duration:
+        Duration(millis: self.millis - other.millis)
+
+    fn multiply(factor: i64) -> Duration:
+        Duration(millis: self.millis * factor)
+
+    fn divide(divisor: i64) -> Duration:
+        Duration(millis: self.millis / divisor)
+
+# =====================================
+# Duration Parsing
+# =====================================
+
+fn parse_duration(s: text) -> Option<Duration>:
+    if s.len() == 0:
+        return nil
+    val trimmed = s.replace(" ", "")
+    if trimmed.len() == 0:
+        return nil
+
+    var total_ms: i64 = 0
+    var num_str = ""
+    var has_unit = false
+
+    for c in trimmed.chars():
+        if c >= '0' and c <= '9':
+            num_str = num_str + c.to_string()
+        else:
+            if num_str.len() > 0:
+                val num = parse_i64(num_str)
+                match c.to_string():
+                    case "d": total_ms = total_ms + num * 24 * 60 * 60 * 1000
+                    case "h": total_ms = total_ms + num * 60 * 60 * 1000
+                    case "m": total_ms = total_ms + num * 60 * 1000
+                    case "s": total_ms = total_ms + num * 1000
+                    case _: return nil
+                num_str = ""
+                has_unit = true
+            else:
+                return nil
+
+    if num_str.len() > 0:
+        val num = parse_i64(num_str)
+        if not has_unit:
+            total_ms = total_ms + num * 1000
+        else:
+            return nil
+
+    Some(Duration(millis: total_ms))
+
+fn parse_i64(s: text) -> i64:
+    var result: i64 = 0
+    for c in s.chars():
+        result = result * 10 + (c as i64 - '0' as i64)
+    result
+
+# =====================================
+# Duration Formatting
+# =====================================
+
+fn format_duration(duration: Duration) -> text:
+    val comps = duration.components()
+    val days = comps.0
+    val hours = comps.1
+    val minutes = comps.2
+    val seconds = comps.3
+    var parts: [text] = []
+    if days > 0:
+        parts = parts + ["{days}d"]
+    if hours > 0:
+        parts = parts + ["{hours}h"]
+    if minutes > 0:
+        parts = parts + ["{minutes}m"]
+    if seconds > 0 or parts.len() == 0:
+        parts = parts + ["{seconds}s"]
+    join_texts(parts, "")
+
+fn format_duration_compact(duration: Duration) -> text:
+    format_duration(duration)
+
+fn format_as_seconds(duration: Duration) -> text:
+    "{duration.total_seconds()}s"
+
+fn format_as_minutes(duration: Duration) -> text:
+    val mins = duration.total_minutes()
+    val secs = duration.total_seconds() % 60
+    if secs > 0:
+        return "{mins}m{secs}s"
+    "{mins}m"
+
+fn format_as_hours(duration: Duration) -> text:
+    val hrs = duration.total_hours()
+    val mins = duration.total_minutes() % 60
+    if mins > 0:
+        return "{hrs}h{mins}m"
+    "{hrs}h"
+
+fn join_texts(parts: [text], sep: text) -> text:
+    if parts.len() == 0:
+        return ""
+    var result = parts[0]
+    for i in 1..parts.len():
+        result = result + sep + parts[i]
+    result
+
+# =====================================
+# Time Unit Conversions
+# =====================================
+
+fn millis_to_seconds(ms: i64) -> i64:
+    ms / 1000
+
+fn seconds_to_millis(secs: i64) -> i64:
+    secs * 1000
+
+fn minutes_to_seconds(mins: i64) -> i64:
+    mins * 60
+
+fn hours_to_minutes(hrs: i64) -> i64:
+    hrs * 60
+
+fn days_to_hours(days: i64) -> i64:
+    days * 24
+
+fn hours_to_seconds(hrs: i64) -> i64:
+    hrs * 60 * 60
+
+fn days_to_seconds(days: i64) -> i64:
+    days * 24 * 60 * 60
+
+# =====================================
+# Timestamp Struct
+# =====================================
+
+struct Timestamp:
+    seconds: i64
+
+impl Timestamp:
+    static fn from_seconds(secs: i64) -> Timestamp:
+        Timestamp(seconds: secs)
+
+    fn get_seconds() -> i64:
+        self.seconds
+
+    fn add_duration(duration: Duration) -> Timestamp:
+        Timestamp(seconds: self.seconds + duration.total_seconds())
+
+    fn subtract_duration(duration: Duration) -> Timestamp:
+        Timestamp(seconds: self.seconds - duration.total_seconds())
+
+    fn duration_since(other: Timestamp) -> Duration:
+        Duration.from_seconds(self.seconds - other.seconds)
+
+# =====================================
+# Duration Comparison
+# =====================================
+
+fn duration_equals(d1: Duration, d2: Duration) -> bool:
+    d1.total_millis() == d2.total_millis()
+
+fn duration_greater_than(d1: Duration, d2: Duration) -> bool:
+    d1.total_millis() > d2.total_millis()
+
+fn duration_less_than(d1: Duration, d2: Duration) -> bool:
+    d1.total_millis() < d2.total_millis()
+
+fn duration_max(d1: Duration, d2: Duration) -> Duration:
+    if d1.total_millis() >= d2.total_millis(): d1 else: d2
+
+fn duration_min(d1: Duration, d2: Duration) -> Duration:
+    if d1.total_millis() <= d2.total_millis(): d1 else: d2
+
+# =====================================
+# Common Durations
+# =====================================
+
+fn one_millisecond() -> Duration:
+    Duration.from_millis(1)
+
+fn one_second() -> Duration:
+    Duration.from_seconds(1)
+
+fn one_minute() -> Duration:
+    Duration.from_minutes(1)
+
+fn one_hour() -> Duration:
+    Duration.from_hours(1)
+
+fn one_day() -> Duration:
+    Duration.from_days(1)
+
+# =====================================
+# Duration Utilities
+# =====================================
+
+fn is_zero_duration(duration: Duration) -> bool:
+    duration.total_millis() == 0
+
+fn is_negative_duration(duration: Duration) -> bool:
+    duration.total_millis() < 0
+
+fn duration_abs(duration: Duration) -> Duration:
+    if duration.total_millis() < 0:
+        Duration.from_millis(-duration.total_millis())
+    else:
+        duration
+
+fn duration_negate(duration: Duration) -> Duration:
+    Duration.from_millis(-duration.total_millis())
+
+fn sum_durations(durations: [Duration]) -> Duration:
+    var total: i64 = 0
+    for d in durations:
+        total = total + d.total_millis()
+    Duration.from_millis(total)
+
+fn average_duration(durations: [Duration]) -> Option<Duration>:
+    if durations.len() == 0:
+        return nil
+    val sum = sum_durations(durations)
+    Some(Duration.from_millis(sum.total_millis() / durations.len()))
+
+# =====================================
+# Time Range
+# =====================================
+
+struct TimeRange:
+    start: Timestamp
+    end: Timestamp
+
+impl TimeRange:
+    static fn create(start: Timestamp, end: Timestamp) -> TimeRange:
+        TimeRange(start: start, end: end)
+
+    fn duration() -> Duration:
+        self.end.duration_since(self.start)
+
+    fn contains(ts: Timestamp) -> bool:
+        ts.get_seconds() >= self.start.get_seconds() and ts.get_seconds() <= self.end.get_seconds()
+
+    fn overlaps(other: TimeRange) -> bool:
+        self.start.get_seconds() <= other.end.get_seconds() and self.end.get_seconds() >= other.start.get_seconds()
+
+# =====================================
+# BDD Tests
+# =====================================
+
+describe "Time Utilities":
+    """
+    ## Time and Duration Operations
+
+    Verifies time utility implementations for durations, timestamps,
+    and time range operations with parsing and formatting support.
+    """
+
+    describe "Duration Creation":
+        """
+        ## Duration Creation Methods
+
+        Tests creation of durations from various time units.
+        """
+
+        it "creates from millis":
+            val duration = Duration.from_millis(5000)
+            expect duration.total_millis() == 5000
+
+        it "creates from seconds":
+            val duration = Duration.from_seconds(10)
+            expect duration.total_seconds() == 10
+            expect duration.total_millis() == 10000
+
+        it "creates from minutes":
+            val duration = Duration.from_minutes(5)
+            expect duration.total_minutes() == 5
+            expect duration.total_seconds() == 300
+
+        it "creates from hours":
+            val duration = Duration.from_hours(2)
+            expect duration.total_hours() == 2
+            expect duration.total_minutes() == 120
+
+        it "creates from days":
+            val duration = Duration.from_days(3)
+            expect duration.total_days() == 3
+            expect duration.total_hours() == 72
+
+    describe "Duration Components":
+        """
+        ## Duration Decomposition
+
+        Tests extraction of duration components.
+        """
+
+        it "extracts simple components":
+            val duration = Duration.from_seconds(90)
+            val comps = duration.components()
+            expect comps.0 == 0
+            expect comps.1 == 0
+            expect comps.2 == 1
+            expect comps.3 == 30
+            expect comps.4 == 0
+
+        it "extracts complex components":
+            val ms = (1 * 24 * 60 * 60 * 1000) + (2 * 60 * 60 * 1000) + (30 * 60 * 1000) + (45 * 1000)
+            val duration = Duration.from_millis(ms)
+            val comps = duration.components()
+            expect comps.0 == 1
+            expect comps.1 == 2
+            expect comps.2 == 30
+            expect comps.3 == 45
+
+    describe "Duration Arithmetic":
+        """
+        ## Duration Mathematical Operations
+
+        Tests arithmetic operations on durations.
+        """
+
+        it "adds durations":
+            val d1 = Duration.from_seconds(30)
+            val d2 = Duration.from_seconds(15)
+            val result = d1.add(d2)
+            expect result.total_seconds() == 45
+
+        it "subtracts durations":
+            val d1 = Duration.from_seconds(50)
+            val d2 = Duration.from_seconds(20)
+            val result = d1.subtract(d2)
+            expect result.total_seconds() == 30
+
+        it "multiplies duration":
+            val duration = Duration.from_seconds(10)
+            val result = duration.multiply(3)
+            expect result.total_seconds() == 30
+
+        it "divides duration":
+            val duration = Duration.from_seconds(60)
+            val result = duration.divide(4)
+            expect result.total_seconds() == 15
+
+    describe "Duration Parsing":
+        """
+        ## Duration String Parsing
+
+        Tests parsing duration strings (e.g., "1h30m45s").
+        """
+
+        it "parses seconds":
+            match parse_duration("45s"):
+                case Some(duration): expect duration.total_seconds() == 45
+                case nil: expect false
+
+        it "parses minutes":
+            match parse_duration("5m"):
+                case Some(duration): expect duration.total_minutes() == 5
+                case nil: expect false
+
+        it "parses hours":
+            match parse_duration("2h"):
+                case Some(duration): expect duration.total_hours() == 2
+                case nil: expect false
+
+        it "parses days":
+            match parse_duration("3d"):
+                case Some(duration): expect duration.total_days() == 3
+                case nil: expect false
+
+        it "parses combined duration":
+            match parse_duration("1h30m"):
+                case Some(duration): expect duration.total_minutes() == 90
+                case nil: expect false
+
+        it "parses complex duration":
+            match parse_duration("2d5h30m15s"):
+                case Some(duration):
+                    val comps = duration.components()
+                    expect comps.0 == 2
+                    expect comps.1 == 5
+                    expect comps.2 == 30
+                    expect comps.3 == 15
+                case nil: expect false
+
+        it "parses with spaces":
+            match parse_duration("1h 30m"):
+                case Some(duration): expect duration.total_minutes() == 90
+                case nil: expect false
+
+        it "parses number only as seconds":
+            match parse_duration("30"):
+                case Some(duration): expect duration.total_seconds() == 30
+                case nil: expect false
+
+        it "returns nil for invalid":
+            match parse_duration("invalid"):
+                case Some(_): expect false
+                case nil: expect true
+
+        it "returns nil for empty":
+            match parse_duration(""):
+                case Some(_): expect false
+                case nil: expect true
+
+    describe "Duration Formatting":
+        """
+        ## Duration String Formatting
+
+        Tests formatting durations to human-readable strings.
+        """
+
+        it "formats seconds":
+            val duration = Duration.from_seconds(45)
+            val formatted = format_duration(duration)
+            expect formatted == "45s"
+
+        it "formats minutes":
+            val duration = Duration.from_minutes(5)
+            val formatted = format_duration(duration)
+            expect formatted == "5m"
+
+        it "formats hours":
+            val duration = Duration.from_hours(2)
+            val formatted = format_duration(duration)
+            expect formatted == "2h"
+
+        it "formats combined":
+            val duration = Duration.from_seconds(90)
+            val formatted = format_duration(duration)
+            expect formatted.contains("1m")
+            expect formatted.contains("30s")
+
+        it "formats zero":
+            val duration = Duration.from_millis(0)
+            val formatted = format_duration(duration)
+            expect formatted == "0s"
+
+        it "formats compact":
+            val duration = Duration.from_seconds(90)
+            val formatted = format_duration_compact(duration)
+            expect formatted.contains("1m30s")
+
+        it "formats as seconds":
+            val duration = Duration.from_seconds(123)
+            val formatted = format_as_seconds(duration)
+            expect formatted.contains("123")
+            expect formatted.contains("s")
+
+        it "formats as minutes":
+            val duration = Duration.from_seconds(150)
+            val formatted = format_as_minutes(duration)
+            expect formatted.contains("2m")
+            expect formatted.contains("30s")
+
+        it "formats as hours":
+            val duration = Duration.from_minutes(150)
+            val formatted = format_as_hours(duration)
+            expect formatted.contains("2h")
+            expect formatted.contains("30m")
+
+    describe "Time Unit Conversion":
+        """
+        ## Time Unit Conversion Functions
+
+        Tests basic time unit conversion functions.
+        """
+
+        it "converts millis to seconds":
+            expect millis_to_seconds(5000) == 5
+
+        it "converts seconds to millis":
+            expect seconds_to_millis(10) == 10000
+
+        it "converts minutes to seconds":
+            expect minutes_to_seconds(5) == 300
+
+        it "converts hours to minutes":
+            expect hours_to_minutes(2) == 120
+
+        it "converts days to hours":
+            expect days_to_hours(3) == 72
+
+        it "converts hours to seconds":
+            expect hours_to_seconds(1) == 3600
+
+        it "converts days to seconds":
+            expect days_to_seconds(1) == 86400
+
+    describe "Timestamp":
+        """
+        ## Timestamp Operations
+
+        Tests timestamp creation and operations.
+        """
+
+        it "creates from seconds":
+            val ts = Timestamp.from_seconds(1000000)
+            expect ts.get_seconds() == 1000000
+
+        it "adds duration":
+            val ts = Timestamp.from_seconds(1000)
+            val duration = Duration.from_seconds(500)
+            val new_ts = ts.add_duration(duration)
+            expect new_ts.get_seconds() == 1500
+
+        it "subtracts duration":
+            val ts = Timestamp.from_seconds(1000)
+            val duration = Duration.from_seconds(200)
+            val new_ts = ts.subtract_duration(duration)
+            expect new_ts.get_seconds() == 800
+
+        it "calculates duration since":
+            val ts1 = Timestamp.from_seconds(2000)
+            val ts2 = Timestamp.from_seconds(1000)
+            val duration = ts1.duration_since(ts2)
+            expect duration.total_seconds() == 1000
+
+        it "handles boundary":
+            val ts = Timestamp.from_seconds(0)
+            expect ts.get_seconds() == 0
+
+    describe "Duration Comparison":
+        """
+        ## Duration Comparison Operations
+
+        Tests comparison and min/max functions.
+        """
+
+        it "checks equality":
+            val d1 = Duration.from_seconds(60)
+            val d2 = Duration.from_minutes(1)
+            expect duration_equals(d1=d1, d2=d2)
+
+        it "checks greater than":
+            val d1 = Duration.from_seconds(100)
+            val d2 = Duration.from_seconds(50)
+            expect duration_greater_than(d1=d1, d2=d2)
+
+        it "checks less than":
+            val d1 = Duration.from_seconds(30)
+            val d2 = Duration.from_seconds(60)
+            expect duration_less_than(d1=d1, d2=d2)
+
+        it "finds max":
+            val d1 = Duration.from_seconds(100)
+            val d2 = Duration.from_seconds(50)
+            val max_d = duration_max(d1=d1, d2=d2)
+            expect max_d.total_seconds() == 100
+
+        it "finds min":
+            val d1 = Duration.from_seconds(100)
+            val d2 = Duration.from_seconds(50)
+            val min_d = duration_min(d1=d1, d2=d2)
+            expect min_d.total_seconds() == 50
+
+    describe "Common Durations":
+        """
+        ## Common Duration Constants
+
+        Tests predefined common duration functions.
+        """
+
+        it "one_millisecond":
+            val duration = one_millisecond()
+            expect duration.total_millis() == 1
+
+        it "one_second":
+            val duration = one_second()
+            expect duration.total_seconds() == 1
+
+        it "one_minute":
+            val duration = one_minute()
+            expect duration.total_minutes() == 1
+
+        it "one_hour":
+            val duration = one_hour()
+            expect duration.total_hours() == 1
+
+        it "one_day":
+            val duration = one_day()
+            expect duration.total_days() == 1
+
+    describe "Duration Utilities":
+        """
+        ## Duration Utility Functions
+
+        Tests utility functions for durations.
+        """
+
+        it "checks zero duration":
+            val duration = Duration.from_millis(0)
+            expect is_zero_duration(duration)
+
+        it "checks negative duration":
+            val duration = Duration.from_millis(-1000)
+            expect is_negative_duration(duration)
+
+        it "abs of positive":
+            val duration = Duration.from_seconds(100)
+            val abs_d = duration_abs(duration)
+            expect abs_d.total_seconds() == 100
+
+        it "abs of negative":
+            val duration = Duration.from_millis(-100000)
+            val abs_d = duration_abs(duration)
+            expect abs_d.total_seconds() == 100
+
+        it "negates duration":
+            val duration = Duration.from_seconds(100)
+            val negated = duration_negate(duration)
+            expect negated.total_seconds() == -100
+
+        it "sums durations":
+            val durations = [
+                Duration.from_seconds(10),
+                Duration.from_seconds(20),
+                Duration.from_seconds(30)
+            ]
+            val sum = sum_durations(durations)
+            expect sum.total_seconds() == 60
+
+        it "sums empty list":
+            val durations: [Duration] = []
+            val sum = sum_durations(durations)
+            expect sum.total_millis() == 0
+
+        it "averages durations":
+            val durations = [
+                Duration.from_seconds(10),
+                Duration.from_seconds(20),
+                Duration.from_seconds(30)
+            ]
+            match average_duration(durations):
+                case Some(avg): expect avg.total_seconds() == 20
+                case nil: expect false
+
+        it "average of empty returns nil":
+            val durations: [Duration] = []
+            match average_duration(durations):
+                case Some(_): expect false
+                case nil: expect true
+
+    describe "Time Range":
+        """
+        ## Time Range Operations
+
+        Tests time range containment and overlap detection.
+        """
+
+        it "calculates duration":
+            val start = Timestamp.from_seconds(1000)
+            val end = Timestamp.from_seconds(2000)
+            val range = TimeRange.create(start=start, end=end)
+            val duration = range.duration()
+            expect duration.total_seconds() == 1000
+
+        it "contains timestamp":
+            val start = Timestamp.from_seconds(1000)
+            val end = Timestamp.from_seconds(2000)
+            val range = TimeRange.create(start=start, end=end)
+            val ts_inside = Timestamp.from_seconds(1500)
+            expect range.contains(ts_inside)
+            val ts_outside = Timestamp.from_seconds(3000)
+            expect not range.contains(ts_outside)
+
+        it "detects overlap":
+            val range1 = TimeRange.create(
+                start=Timestamp.from_seconds(1000),
+                end=Timestamp.from_seconds(2000)
+            )
+            val range2 = TimeRange.create(
+                start=Timestamp.from_seconds(1500),
+                end=Timestamp.from_seconds(2500)
+            )
+            expect range1.overlaps(range2)
+            expect range2.overlaps(range1)
+
+        it "detects no overlap":
+            val range1 = TimeRange.create(
+                start=Timestamp.from_seconds(1000),
+                end=Timestamp.from_seconds(2000)
+            )
+            val range2 = TimeRange.create(
+                start=Timestamp.from_seconds(3000),
+                end=Timestamp.from_seconds(4000)
+            )
+            expect not range1.overlaps(range2)
+
+    describe "Round-trip":
+        """
+        ## Parse/Format Round-trip
+
+        Tests that parsing and formatting are consistent.
+        """
+
+        it "parse and format simple":
+            val original = "1h30m45s"
+            match parse_duration(original):
+                case Some(duration):
+                    val formatted = format_duration_compact(duration)
+                    expect formatted == "1h30m45s"
+                case nil: expect false
+
+        it "parse and format complex":
+            val original = "2d5h"
+            match parse_duration(original):
+                case Some(duration):
+                    val formatted = format_duration_compact(duration)
+                    expect formatted.contains("2d")
+                    expect formatted.contains("5h")
+                case nil: expect false
+
+    describe "Edge Cases":
+        """
+        ## Edge Cases and Boundary Conditions
+
+        Tests handling of edge cases.
+        """
+
+        it "handles very large duration":
+            val duration = Duration.from_days(365)
+            expect duration.total_days() == 365
+
+        it "handles zero operations":
+            val zero = Duration.from_millis(0)
+            val d = Duration.from_seconds(100)
+            val added = d.add(zero)
+            expect added.total_seconds() == 100
+            val subtracted = d.subtract(zero)
+            expect subtracted.total_seconds() == 100

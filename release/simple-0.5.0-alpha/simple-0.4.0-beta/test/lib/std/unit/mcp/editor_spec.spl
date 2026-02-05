@@ -1,0 +1,152 @@
+# @pending
+"""
+MCP Editor Module Tests
+Feature: Document Editing via MCP
+Category: MCP, Editor
+Status: In Progress
+
+Tests for the DocumentManager and ManagedDocument types
+providing transactional edit operations for the MCP server.
+"""
+
+
+# ----------- Inline type definitions for testing -----------
+
+class EditResult:
+    success: Bool
+    message: String
+    affected_lines: Int
+
+    static fn ok(message: String, affected: Int) -> EditResult:
+        EditResult(success: true, message: message, affected_lines: affected)
+
+    static fn err(message: String) -> EditResult:
+        EditResult(success: false, message: message, affected_lines: 0)
+
+class ManagedDocument:
+    path: String
+    content: String
+    lines: List<String>
+    version: Int
+    dirty: Bool
+
+    static fn from_content(path: String, content: String) -> ManagedDocument:
+        val lines = content.split("\n")
+        ManagedDocument(
+            path: path,
+            content: content,
+            lines: lines,
+            version: 1,
+            dirty: false
+        )
+
+impl ManagedDocument:
+    me rebuild():
+        self.content = self.lines.join("\n")
+        self.version = self.version + 1
+        self.dirty = true
+
+    fn line_count() -> Int:
+        self.lines.len()
+
+    fn get_lines(start: Int, end: Int) -> String:
+        val s = (start - 1).max(0)
+        val e = end.min(self.lines.len())
+        var result: List<String> = []
+        var line_num = s + 1
+        for i in s..e:
+            result.push("{line_num}: {self.lines[i]}")
+            line_num = line_num + 1
+        result.join("\n")
+
+# ----------- Tests -----------
+
+describe "EditResult":
+    it "creates success result":
+        val r = EditResult.ok("Done", 5)
+        expect(r.success)
+        expect(r.message == "Done")
+        expect(r.affected_lines == 5)
+
+    it "creates error result":
+        val r = EditResult.err("Failed")
+        expect(not r.success)
+        expect(r.message == "Failed")
+        expect(r.affected_lines == 0)
+
+describe "ManagedDocument":
+    context "creation":
+        it "creates from content":
+            val doc = ManagedDocument.from_content("test.spl", "line1\nline2\nline3")
+            expect(doc.path == "test.spl")
+            expect(doc.line_count() == 3)
+            expect(doc.version == 1)
+            expect(not doc.dirty)
+
+        it "handles single line":
+            val doc = ManagedDocument.from_content("one.spl", "single line")
+            expect(doc.line_count() == 1)
+
+        it "handles empty content":
+            val doc = ManagedDocument.from_content("empty.spl", "")
+            expect(doc.line_count() == 1)  # split("") gives [""]
+
+    context "line retrieval":
+        it "gets lines in range":
+            val doc = ManagedDocument.from_content("test.spl", "alpha\nbeta\ngamma\ndelta")
+            val text = doc.get_lines(2, 3)
+            expect(text.contains("beta"))
+            expect(text.contains("gamma"))
+
+        it "handles out of range gracefully":
+            val doc = ManagedDocument.from_content("test.spl", "a\nb\nc")
+            val text = doc.get_lines(1, 100)
+            expect(text.contains("a"))
+            expect(text.contains("c"))
+
+    context "line insertion":
+        it "inserts lines at position":
+            var doc = ManagedDocument.from_content("test.spl", "line1\nline3")
+            val idx = 1  # insert at index 1 (before line3)
+            doc.lines.insert(idx, "line2")
+            doc.rebuild()
+            expect(doc.line_count() == 3)
+            expect(doc.lines[1] == "line2")
+            expect(doc.dirty)
+            expect(doc.version == 2)
+
+    context "line deletion":
+        it "deletes lines":
+            var doc = ManagedDocument.from_content("test.spl", "a\nb\nc\nd")
+            doc.lines.remove(1)  # remove "b"
+            doc.rebuild()
+            expect(doc.line_count() == 3)
+            expect(doc.lines[0] == "a")
+            expect(doc.lines[1] == "c")
+
+    context "line replacement":
+        it "replaces line content":
+            var doc = ManagedDocument.from_content("test.spl", "old1\nold2\nold3")
+            doc.lines[1] = "new2"
+            doc.rebuild()
+            expect(doc.lines[1] == "new2")
+            expect(doc.content.contains("new2"))
+            expect(not doc.content.contains("old2"))
+
+    context "version tracking":
+        it "increments version on rebuild":
+            var doc = ManagedDocument.from_content("test.spl", "a\nb")
+            expect(doc.version == 1)
+            doc.lines.push("c")
+            doc.rebuild()
+            expect(doc.version == 2)
+            doc.lines.push("d")
+            doc.rebuild()
+            expect(doc.version == 3)
+
+        it "marks dirty on rebuild":
+            var doc = ManagedDocument.from_content("test.spl", "a")
+            expect(not doc.dirty)
+            doc.lines.push("b")
+            doc.rebuild()
+            expect(doc.dirty)

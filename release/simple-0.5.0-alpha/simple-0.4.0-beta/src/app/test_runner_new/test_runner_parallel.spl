@@ -1,0 +1,132 @@
+# Parallel Test Execution
+#
+# Spawns test files as subprocesses for parallel execution.
+# Uses process_run_timeout for subprocess management.
+
+use app.io.mod (cpu_count, process_run_timeout, time_now_unix_micros)
+use test_runner_types.{TestOptions, TestFileResult, TestExecutionMode}
+use test_runner_execute.{parse_test_output, find_simple_binary}
+use test_runner_output.print_result
+
+# =========================================================================
+# Parallel Config
+# =========================================================================
+
+struct ParallelConfig:
+    max_workers: i64
+    timeout_ms: i64
+    full_parallel: bool
+
+impl ParallelConfig:
+    static fn from_options(options: TestOptions) -> ParallelConfig:
+        var max_workers = cpu_count()
+        if max_workers < 1:
+            max_workers = 1
+        # Leave 1 core free for system
+        if max_workers > 2:
+            max_workers = max_workers - 1
+
+        ParallelConfig(
+            max_workers: max_workers,
+            timeout_ms: options.timeout * 1000,
+            full_parallel: false
+        )
+
+# =========================================================================
+# Parallel Runner
+# =========================================================================
+
+fn run_tests_parallel(files: List<text>, options: TestOptions) -> List<TestFileResult>:
+    val config = ParallelConfig.from_options(options)
+    val binary = find_simple_binary()
+
+    var results: List<TestFileResult> = []
+    var batch_start = 0
+
+    # Process files in batches of max_workers
+    while batch_start < files.len():
+        val batch_end = min_i64(batch_start + config.max_workers, files.len())
+        var batch_results: List<TestFileResult> = []
+
+        # Run batch - currently sequential due to lack of async spawn
+        # TODO: When rt_process_spawn_async is available, run truly in parallel
+        var i = batch_start
+        while i < batch_end:
+            val file_path = files[i]
+            val result = run_subprocess(binary, file_path, options, config.timeout_ms)
+            print_result(result, options.format)
+            batch_results.push(result)
+
+            # Early exit on fail-fast
+            if options.fail_fast and (result.failed > 0 or result.timed_out):
+                results.merge(batch_results)
+                return results
+
+            i = i + 1
+
+        results.merge(batch_results)
+        batch_start = batch_end
+
+    results
+
+# =========================================================================
+# Subprocess Execution
+# =========================================================================
+
+fn run_subprocess(binary: text, file_path: text, options: TestOptions, timeout_ms: i64) -> TestFileResult:
+    var args: List<text> = [file_path, "--subprocess-mode"]
+
+    if options.only_slow:
+        args.push("--only-slow")
+    if options.only_skipped:
+        args.push("--only-skipped")
+    if options.gc_log:
+        args.push("--gc-log")
+    if options.gc_off:
+        args.push("--gc=off")
+
+    val start = time_now_unix_micros()
+    val result = process_run_timeout(binary, args, timeout_ms)
+    val end = time_now_unix_micros()
+    val duration_ms = (end - start) / 1000
+
+    val stdout = result.0
+    val stderr = result.1
+    val exit_code = result.2
+
+    # Check for timeout
+    if exit_code == -1:
+        return TestFileResult(
+            path: file_path,
+            passed: 0,
+            failed: 0,
+            skipped: 0,
+            duration_ms: duration_ms,
+            error: "Timed out after {timeout_ms}ms",
+            timed_out: true
+        )
+
+    # Parse output
+    val counts = parse_test_output(stdout)
+    val passed = counts.0
+    val failed = counts.1
+
+    val error_msg = if exit_code != 0 and stderr.trim() != "":
+        stderr.trim()
+    else:
+        ""
+
+    TestFileResult(
+        path: file_path,
+        passed: passed,
+        failed: failed,
+        skipped: 0,
+        duration_ms: duration_ms,
+        error: error_msg,
+        timed_out: false
+    )
+
+fn min_i64(a: i64, b: i64) -> i64:
+    if a < b: a else: b
+
+export ParallelConfig, run_tests_parallel
