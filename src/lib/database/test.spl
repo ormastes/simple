@@ -1,0 +1,273 @@
+# Test Database - Domain-specific extension of SdnDatabase
+#
+# Provides test run tracking, performance analysis, and flakiness detection.
+
+use lib.database.mod.{SdnDatabase, SdnTable, SdnRow}
+use lib.database.query.{QueryBuilder, CompareOp}
+use app.io.{rt_timestamp_now, rt_getpid, hostname}
+
+# ============================================================================
+# Enums
+# ============================================================================
+
+enum RunStatus:
+    Running
+    Completed
+    Crashed
+    TimedOut
+    Interrupted
+
+enum TestStatus:
+    Passed
+    Failed
+    Crashed
+    TimedOut
+    Skipped
+
+# ============================================================================
+# Structs
+# ============================================================================
+
+struct TestRun:
+    run_id: text
+    start_time: text
+    end_time: text?
+    pid: i64
+    hostname: text
+    status: RunStatus
+    test_count: i64
+    passed: i64
+    failed: i64
+    crashed: i64
+    timed_out: i64
+
+struct TestResult:
+    test_name: text
+    run_id: text
+    status: TestStatus
+    duration_ms: f64
+    error_message: text?
+    timestamp: text
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+fn load_test_database(path: text) -> TestDatabase?:
+    val db = SdnDatabase.load(path)?
+    Some(TestDatabase(db: db))
+
+fn create_test_database(path: text) -> TestDatabase:
+    val db = SdnDatabase.new(path)
+
+    # Create test_runs table
+    val runs_table = SdnTable.new("test_runs", [
+        "run_id",
+        "start_time",
+        "end_time",
+        "pid",
+        "hostname",
+        "status",
+        "test_count",
+        "passed",
+        "failed",
+        "crashed",
+        "timed_out",
+        "valid"
+    ])
+    db.set_table("test_runs", runs_table)
+
+    # Create test_results table
+    val results_table = SdnTable.new("test_results", [
+        "test_name",
+        "run_id",
+        "status",
+        "duration_ms",
+        "error_message",
+        "timestamp",
+        "valid"
+    ])
+    db.set_table("test_results", results_table)
+
+    TestDatabase(db: db)
+
+# ============================================================================
+# TestDatabase
+# ============================================================================
+
+class TestDatabase:
+    db: SdnDatabase
+
+    # Start new test run
+    me start_run() -> text:
+        val run_id = "run_{rt_timestamp_now()}"
+        val now = timestamp_to_iso(rt_timestamp_now())
+
+        var runs_table_opt = self.db.get_table_mut("test_runs")
+        if not runs_table_opt.?:
+            return ""
+
+        var runs_table = runs_table_opt?
+
+        val row = SdnRow.empty()
+        row.set("run_id", run_id)
+        row.set("start_time", now)
+        row.set("end_time", "")
+        row.set("pid", "{rt_getpid()}")
+        row.set("hostname", hostname())
+        row.set("status", run_status_to_string(RunStatus.Running))
+        row.set("test_count", "0")
+        row.set("passed", "0")
+        row.set("failed", "0")
+        row.set("crashed", "0")
+        row.set("timed_out", "0")
+        row.set("valid", "true")
+
+        runs_table.add_row(row)
+        self.db.set_table("test_runs", runs_table)
+
+        run_id
+
+    # End test run
+    me end_run(run_id: text, status: RunStatus) -> bool:
+        var runs_table_opt = self.db.get_table_mut("test_runs")
+        if not runs_table_opt.?:
+            return false
+
+        var runs_table = runs_table_opt?
+        val row_opt = runs_table.get_row(run_id)
+        if not row_opt.?:
+            return false
+
+        var row = row_opt?
+        val now = timestamp_to_iso(rt_timestamp_now())
+        row.set("end_time", now)
+        row.set("status", run_status_to_string(status))
+
+        runs_table.update_row(run_id, row)
+        self.db.set_table("test_runs", runs_table)
+        true
+
+    # Add test result
+    me add_result(run_id: text, result: TestResult) -> bool:
+        var results_table_opt = self.db.get_table_mut("test_results")
+        if not results_table_opt.?:
+            return false
+
+        var results_table = results_table_opt?
+
+        val row = SdnRow.empty()
+        row.set("test_name", result.test_name)
+        row.set("run_id", run_id)
+        row.set("status", test_status_to_string(result.status))
+        row.set("duration_ms", "{result.duration_ms}")
+        row.set("error_message", result.error_message ?? "")
+        row.set("timestamp", result.timestamp)
+        row.set("valid", "true")
+
+        results_table.add_row(row)
+        self.db.set_table("test_results", results_table)
+        true
+
+    # Get test run
+    fn get_run(run_id: text) -> TestRun?:
+        val runs_table = self.db.get_table("test_runs")?
+        val row = runs_table.get_row(run_id)?
+
+        Some(TestRun(
+            run_id: run_id,
+            start_time: row.get("start_time")?,
+            end_time: row.get("end_time"),
+            pid: row.get_i64("pid")?,
+            hostname: row.get("hostname")?,
+            status: parse_run_status(row.get("status")?),
+            test_count: row.get_i64("test_count")?,
+            passed: row.get_i64("passed")?,
+            failed: row.get_i64("failed")?,
+            crashed: row.get_i64("crashed")?,
+            timed_out: row.get_i64("timed_out")?
+        ))
+
+    # Get recent runs
+    fn recent_runs(n: i64) -> [TestRun]:
+        val runs_table = self.db.get_table("test_runs")?
+        var result = []
+
+        var count = 0
+        for row in runs_table.valid_rows():
+            if count >= n:
+                break
+
+            val run_id = row.get("id")?
+            val run = self.get_run(run_id)?
+            result.push(run)
+            count = count + 1
+
+        result
+
+    # Get test result
+    fn get_result(test_name: text, run_id: text) -> TestResult?:
+        val results_table = self.db.get_table("test_results")?
+
+        for row in results_table.rows:
+            if row.get("test_name")? == test_name and row.get("run_id")? == run_id:
+                val duration_str = row.get("duration_ms")?
+                val duration = duration_str.to_float()
+
+                return Some(TestResult(
+                    test_name: test_name,
+                    run_id: run_id,
+                    status: parse_test_status(row.get("status")?),
+                    duration_ms: duration,
+                    error_message: row.get("error_message"),
+                    timestamp: row.get("timestamp")?
+                ))
+
+        None
+
+    # Save database
+    me save() -> bool:
+        self.db.save()
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+fn run_status_to_string(status: RunStatus) -> text:
+    match status:
+        RunStatus.Running: "running"
+        RunStatus.Completed: "completed"
+        RunStatus.Crashed: "crashed"
+        RunStatus.TimedOut: "timed_out"
+        RunStatus.Interrupted: "interrupted"
+
+fn parse_run_status(s: text) -> RunStatus:
+    match s:
+        "running": RunStatus.Running
+        "completed": RunStatus.Completed
+        "crashed": RunStatus.Crashed
+        "timed_out": RunStatus.TimedOut
+        "interrupted": RunStatus.Interrupted
+        _: RunStatus.Running
+
+fn test_status_to_string(status: TestStatus) -> text:
+    match status:
+        TestStatus.Passed: "passed"
+        TestStatus.Failed: "failed"
+        TestStatus.Crashed: "crashed"
+        TestStatus.TimedOut: "timed_out"
+        TestStatus.Skipped: "skipped"
+
+fn parse_test_status(s: text) -> TestStatus:
+    match s:
+        "passed": TestStatus.Passed
+        "failed": TestStatus.Failed
+        "crashed": TestStatus.Crashed
+        "timed_out": TestStatus.TimedOut
+        "skipped": TestStatus.Skipped
+        _: TestStatus.Failed
+
+fn timestamp_to_iso(micros: i64) -> text:
+    # Simple ISO format: YYYY-MM-DD HH:MM:SS
+    # For now, return raw timestamp as string
+    "{micros}"

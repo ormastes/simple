@@ -1,0 +1,275 @@
+# Database Query Intensive Testing
+# Tests for bug database query operations and filtering
+
+use lib.database.mod.{StringInterner, SdnTable, SdnRow, SdnDatabase}
+use lib.database.bug.{BugDatabase, Bug, BugSeverity, BugStatus}
+use test.lib.database_fixtures.{generate_simple_bug, cleanup_test_file}
+
+describe "BugDatabase Queries - Intensive":
+    context "basic queries":
+        it "retrieves all bugs":
+            val test_file = "/tmp/test_query_all.sdn"
+            cleanup_test_file(test_file)
+
+            var bugdb = create_bug_database(test_file)
+            for i in 0..100:
+                bugdb.add_bug(generate_simple_bug("bug_{i}"))
+
+            val all_bugs = bugdb.all_bugs()
+            assert all_bugs.len() == 100
+
+            cleanup_test_file(test_file)
+
+        it "retrieves open bugs":
+            val test_file = "/tmp/test_query_open.sdn"
+            cleanup_test_file(test_file)
+
+            var bugdb = create_bug_database(test_file)
+
+            # Add mix of statuses
+            for i in 0..25:
+                bugdb.add_bug(Bug(
+                    id: "open_{i}",
+                    severity: BugSeverity.P2,
+                    status: BugStatus.Open,
+                    title: "Open bug {i}",
+                    description: ["Test"],
+                    file: "test.spl",
+                    line: 100,
+                    reproducible_by: "test",
+                    fix_strategy: [],
+                    investigation_log: [],
+                    created_at: 1738724000000000,
+                    updated_at: 1738724000000000,
+                    valid: true
+                ))
+
+            for i in 0..25:
+                bugdb.add_bug(Bug(
+                    id: "fixed_{i}",
+                    severity: BugSeverity.P2,
+                    status: BugStatus.Fixed,
+                    title: "Fixed bug {i}",
+                    description: ["Test"],
+                    file: "test.spl",
+                    line: 100,
+                    reproducible_by: "test",
+                    fix_strategy: [],
+                    investigation_log: [],
+                    created_at: 1738724000000000,
+                    updated_at: 1738724000000000,
+                    valid: true
+                ))
+
+            val open_bugs = bugdb.open_bugs()
+            assert open_bugs.len() == 25
+
+            # Verify all are open
+            for bug in open_bugs:
+                assert bug.status == BugStatus.Open
+
+            cleanup_test_file(test_file)
+
+        it "gets bug statistics":
+            val test_file = "/tmp/test_query_stats.sdn"
+            cleanup_test_file(test_file)
+
+            var bugdb = create_bug_database(test_file)
+
+            # Add bugs with variety
+            val severities = [BugSeverity.P0, BugSeverity.P1, BugSeverity.P2, BugSeverity.P3]
+            val statuses = [BugStatus.Open, BugStatus.Investigating, BugStatus.Fixed, BugStatus.Closed]
+
+            for i in 0..100:
+                val severity = severities[i % 4]
+                val status = statuses[(i / 4) % 4]
+                bugdb.add_bug(Bug(
+                    id: "bug_{i}",
+                    severity: severity,
+                    status: status,
+                    title: "Bug {i}",
+                    description: ["Test"],
+                    file: "test.spl",
+                    line: 100 + i,
+                    reproducible_by: "test_{i}",
+                    fix_strategy: [],
+                    investigation_log: [],
+                    created_at: 1738724000000000,
+                    updated_at: 1738724000000000,
+                    valid: true
+                ))
+
+            val stats = bugdb.stats()
+            assert stats.total == 100
+
+            cleanup_test_file(test_file)
+
+    context "manual filtering":
+        it "filters bugs by severity manually":
+            val test_file = "/tmp/test_filter_severity.sdn"
+            cleanup_test_file(test_file)
+
+            var bugdb = create_bug_database(test_file)
+
+            # Add bugs with different severities
+            for i in 0..25:
+                bugdb.add_bug(Bug(
+                    id: "p0_{i}",
+                    severity: BugSeverity.P0,
+                    status: BugStatus.Open,
+                    title: "Critical bug {i}",
+                    description: ["Critical"],
+                    file: "test.spl",
+                    line: 100,
+                    reproducible_by: "test",
+                    fix_strategy: [],
+                    investigation_log: [],
+                    created_at: 1738724000000000,
+                    updated_at: 1738724000000000,
+                    valid: true
+                ))
+
+            for i in 0..75:
+                bugdb.add_bug(Bug(
+                    id: "p2_{i}",
+                    severity: BugSeverity.P2,
+                    status: BugStatus.Open,
+                    title: "Normal bug {i}",
+                    description: ["Normal"],
+                    file: "test.spl",
+                    line: 100,
+                    reproducible_by: "test",
+                    fix_strategy: [],
+                    investigation_log: [],
+                    created_at: 1738724000000000,
+                    updated_at: 1738724000000000,
+                    valid: true
+                ))
+
+            # Filter manually
+            val all_bugs = bugdb.all_bugs()
+            var p0_count = 0
+            for bug in all_bugs:
+                if bug.severity == BugSeverity.P0:
+                    p0_count = p0_count + 1
+
+            assert p0_count == 25
+
+            cleanup_test_file(test_file)
+
+        it "filters bugs by file field":
+            val test_file = "/tmp/test_filter_file.sdn"
+            cleanup_test_file(test_file)
+
+            var bugdb = create_bug_database(test_file)
+
+            # Add bugs in different files
+            for i in 0..20:
+                bugdb.add_bug(Bug(
+                    id: "parser_{i}",
+                    severity: BugSeverity.P1,
+                    status: BugStatus.Open,
+                    title: "Parser bug {i}",
+                    description: ["Parser issue"],
+                    file: "src/parser/mod.spl",
+                    line: 100 + i,
+                    reproducible_by: "test",
+                    fix_strategy: [],
+                    investigation_log: [],
+                    created_at: 1738724000000000,
+                    updated_at: 1738724000000000,
+                    valid: true
+                ))
+
+            for i in 0..30:
+                bugdb.add_bug(Bug(
+                    id: "other_{i}",
+                    severity: BugSeverity.P2,
+                    status: BugStatus.Open,
+                    title: "Other bug {i}",
+                    description: ["Other issue"],
+                    file: "src/other/mod.spl",
+                    line: 100,
+                    reproducible_by: "test",
+                    fix_strategy: [],
+                    investigation_log: [],
+                    created_at: 1738724000000000,
+                    updated_at: 1738724000000000,
+                    valid: true
+                ))
+
+            # Filter manually
+            val all_bugs = bugdb.all_bugs()
+            var parser_bugs = 0
+            for bug in all_bugs:
+                if bug.file == "src/parser/mod.spl":
+                    parser_bugs = parser_bugs + 1
+
+            assert parser_bugs == 20
+
+            cleanup_test_file(test_file)
+
+    context "bulk operations":
+        it "handles retrieving 1K bugs":
+            val test_file = "/tmp/test_bulk_1k.sdn"
+            cleanup_test_file(test_file)
+
+            var bugdb = create_bug_database(test_file)
+            for i in 0..1000:
+                bugdb.add_bug(generate_simple_bug("bug_{i}"))
+
+            val all_bugs = bugdb.all_bugs()
+            assert all_bugs.len() == 1000
+
+            cleanup_test_file(test_file)
+
+        it "handles mixed status queries with 500 bugs":
+            val test_file = "/tmp/test_bulk_mixed.sdn"
+            cleanup_test_file(test_file)
+
+            var bugdb = create_bug_database(test_file)
+
+            val statuses = [BugStatus.Open, BugStatus.Investigating, BugStatus.Fixed, BugStatus.Closed]
+
+            for i in 0..500:
+                val status = statuses[i % 4]
+                bugdb.add_bug(Bug(
+                    id: "bug_{i}",
+                    severity: BugSeverity.P2,
+                    status: status,
+                    title: "Bug {i}",
+                    description: ["Test"],
+                    file: "test.spl",
+                    line: 100,
+                    reproducible_by: "test",
+                    fix_strategy: [],
+                    investigation_log: [],
+                    created_at: 1738724000000000,
+                    updated_at: 1738724000000000,
+                    valid: true
+                ))
+
+            # Count by status
+            val all_bugs = bugdb.all_bugs()
+            var open_count = 0
+            var investigating_count = 0
+            var fixed_count = 0
+            var closed_count = 0
+
+            for bug in all_bugs:
+                if bug.status == BugStatus.Open:
+                    open_count = open_count + 1
+                elif bug.status == BugStatus.Investigating:
+                    investigating_count = investigating_count + 1
+                elif bug.status == BugStatus.Fixed:
+                    fixed_count = fixed_count + 1
+                elif bug.status == BugStatus.Closed:
+                    closed_count = closed_count + 1
+
+            # Each status should have 125 bugs
+            assert open_count == 125
+            assert investigating_count == 125
+            assert fixed_count == 125
+            assert closed_count == 125
+
+            cleanup_test_file(test_file)

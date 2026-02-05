@@ -1,0 +1,300 @@
+# Database Test Fixtures and Generators
+# Provides reusable test data generators for intensive testing
+
+use std.collections.dict
+use lib.database.core
+use lib.database.bug
+
+# Direct extern declarations (workaround for transitive import bug)
+extern fn rt_timestamp_now() -> i64
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+
+fn file_exists(path: text) -> bool:
+    rt_file_exists(path)
+
+fn file_delete(path: text) -> bool:
+    rt_file_delete(path)
+
+fn file_write(path: text, content: text) -> bool:
+    rt_file_write_text(path, content)
+
+fn file_read(path: text) -> text:
+    rt_file_read_text(path)
+
+export generate_simple_string, generate_unicode_string, generate_long_string
+export generate_special_chars_string, generate_empty_or_whitespace
+export generate_simple_row, generate_row_with_many_fields, generate_row_with_long_values
+export generate_row_with_unicode
+export generate_simple_bug, generate_bug_with_severity, generate_bug_with_status
+export generate_complex_bug
+export generate_table_with_rows, generate_table_with_unicode_rows
+export generate_bug_database, generate_bug_database_with_variety
+export cleanup_test_file, cleanup_test_files
+export get_test_strings, get_test_severities, get_test_statuses
+export assert_row_equals, assert_bug_equals
+
+# --- String Generators ---
+
+fn generate_simple_string(prefix: text, index: i64) -> text:
+    "{prefix}_{index}"
+
+fn generate_unicode_string(index: i64) -> text:
+    "测试_{index}_🚀_עברית"
+
+fn generate_long_string(length: i64) -> text:
+    var result = ""
+    for i in 0..length:
+        result = result + "x"
+    result
+
+fn generate_special_chars_string(index: i64) -> text:
+    "test\t{index}\nnewline\r\nwindows"
+
+fn generate_empty_or_whitespace(index: i64) -> text:
+    if index % 3 == 0:
+        ""
+    elif index % 3 == 1:
+        "   "
+    else:
+        "\t\n  "
+
+# --- Row Generators ---
+
+fn generate_simple_row(id: text) -> SdnRow:
+    var row = SdnRow.empty()
+    row.set("id", id)
+    row.set("name", "test_{id}")
+    row.set("value", "100")
+    row
+
+fn generate_row_with_many_fields(id: text, field_count: i64) -> SdnRow:
+    var row = SdnRow.empty()
+    row.set("id", id)
+    for i in 0..field_count:
+        row.set("field_{i}", "value_{i}")
+    row
+
+fn generate_row_with_long_values(id: text) -> SdnRow:
+    val long_value = generate_long_string(10000)
+    var row = SdnRow.empty()
+    row.set("id", id)
+    row.set("description", long_value)
+    row.set("notes", long_value)
+    row
+
+fn generate_row_with_unicode(id: text) -> SdnRow:
+    var row = SdnRow.empty()
+    row.set("id", id)
+    row.set("name", "测试用户_{id}")
+    row.set("emoji", "🚀🎉✨")
+    row.set("hebrew", "שלום")
+    row.set("arabic", "مرحبا")
+    row
+
+# --- Bug Generators ---
+
+fn generate_simple_bug(id: text) -> Bug:
+    Bug(
+        id: id,
+        severity: BugSeverity.P2,
+        status: BugStatus.Open,
+        title: "Test bug {id}",
+        description: ["Test description for {id}"],
+        file: "test/file.spl",
+        line: 100,
+        reproducible_by: "test_{id}",
+        fix_strategy: [],
+        investigation_log: [],
+        created_at: "2026-02-05T00:00:00",
+        updated_at: "2026-02-05T00:00:00",
+        valid: true
+    )
+
+fn generate_bug_with_severity(id: text, severity: BugSeverity) -> Bug:
+    Bug(
+        id: id,
+        severity: severity,
+        status: BugStatus.Open,
+        title: "Test bug {id} severity {severity}",
+        description: ["Test description"],
+        file: "test/file.spl",
+        line: 100,
+        reproducible_by: "test_{id}",
+        fix_strategy: [],
+        investigation_log: [],
+        created_at: "2026-02-05T00:00:00",
+        updated_at: "2026-02-05T00:00:00",
+        valid: true
+    )
+
+fn generate_bug_with_status(id: text, status: BugStatus) -> Bug:
+    Bug(
+        id: id,
+        severity: BugSeverity.P2,
+        status: status,
+        title: "Test bug {id} status {status}",
+        description: ["Test description"],
+        file: "test/file.spl",
+        line: 100,
+        reproducible_by: "test_{id}",
+        fix_strategy: [],
+        investigation_log: [],
+        created_at: "2026-02-05T00:00:00",
+        updated_at: "2026-02-05T00:00:00",
+        valid: true
+    )
+
+fn generate_complex_bug(id: text) -> Bug:
+    Bug(
+        id: id,
+        severity: BugSeverity.P0,
+        status: BugStatus.Investigating,
+        title: "Complex bug {id} with unicode 🐛 and newlines\nin title",
+        description: [
+            "First line of description",
+            "Second line with unicode: 测试",
+            "Third line with special chars: \t\n\r",
+            generate_long_string(1000)
+        ],
+        file: "src/complex/path/to/file.spl",
+        line: 12345,
+        reproducible_by: "complex_test_{id}",
+        fix_strategy: [
+            "Step 1: Investigate",
+            "Step 2: Fix",
+            "Step 3: Test"
+        ],
+        investigation_log: [
+            "2026-02-05: Started investigation",
+            "2026-02-05: Found root cause",
+            "2026-02-05: Proposed fix"
+        ],
+        created_at: "2026-02-05T00:00:00",
+        updated_at: "2026-02-05T00:00:00",
+        valid: true
+    )
+
+# --- Table Generators ---
+
+fn generate_table_with_rows(table_name: text, row_count: i64) -> SdnTable:
+    var table = SdnTable.new(table_name, ["id", "name", "value"])
+
+    for i in 0..row_count:
+        val row = generate_simple_row("row_{i}")
+        table.add_row(row)
+
+    table
+
+fn generate_table_with_unicode_rows(table_name: text, row_count: i64) -> SdnTable:
+    var table = SdnTable.new(table_name, ["id", "name", "emoji", "hebrew", "arabic"])
+
+    for i in 0..row_count:
+        val row = generate_row_with_unicode("row_{i}")
+        table.add_row(row)
+
+    table
+
+# --- Database Generators ---
+
+fn generate_bug_database(bug_count: i64) -> BugDatabase:
+    val temp_path = "/tmp/test_bugdb_generated.sdn"
+    var bugdb = create_bug_database(temp_path)
+
+    for i in 0..bug_count:
+        val bug = generate_simple_bug("bug_{i}")
+        bugdb.add_bug(bug)
+
+    bugdb
+
+fn generate_bug_database_with_variety(total: i64) -> BugDatabase:
+    val temp_path = "/tmp/test_bugdb_variety.sdn"
+    var bugdb = create_bug_database(temp_path)
+
+    # Add bugs with different severities
+    val severities = [BugSeverity.P0, BugSeverity.P1, BugSeverity.P2, BugSeverity.P3]
+    val statuses = [BugStatus.Open, BugStatus.Investigating, BugStatus.Fixed, BugStatus.Closed]
+
+    for i in 0..total:
+        val severity = severities[i % 4]
+        val status = statuses[(i / 4) % 4]
+
+        val bug = Bug(
+            id: "bug_{i}",
+            severity: severity,
+            status: status,
+            title: "Bug {i} - severity {severity}",
+            description: ["Description for bug {i}"],
+            file: "test/file_{i % 10}.spl",
+            line: 100 + i,
+            reproducible_by: "test_{i}",
+            fix_strategy: [],
+            investigation_log: [],
+            created_at: rt_timestamp_now(),
+            updated_at: rt_timestamp_now(),
+            valid: true
+        )
+
+        bugdb.add_bug(bug)
+
+    bugdb
+
+# --- Cleanup Helpers ---
+
+fn cleanup_test_file(path: text):
+    if file_exists(path):
+        file_delete(path)
+
+fn cleanup_test_files(paths: [text]):
+    for path in paths:
+        cleanup_test_file(path)
+
+# --- Test Data Collections ---
+
+fn get_test_strings() -> [text]:
+    [
+        "",
+        " ",
+        "simple",
+        "with spaces",
+        "with\ttabs",
+        "with\nnewlines",
+        "unicode: 测试",
+        "emoji: 🚀🎉",
+        "hebrew: שלום",
+        "arabic: مرحبا",
+        generate_long_string(1000),
+        generate_long_string(10000)
+    ]
+
+fn get_test_severities() -> [BugSeverity]:
+    [BugSeverity.P0, BugSeverity.P1, BugSeverity.P2, BugSeverity.P3]
+
+fn get_test_statuses() -> [BugStatus]:
+    [BugStatus.Open, BugStatus.Investigating, BugStatus.Fixed, BugStatus.Closed]
+
+# --- Assertion Helpers ---
+
+fn assert_row_equals(actual: SdnRow, expected: SdnRow):
+    # Compare field counts
+    val actual_fields = dict_keys(actual.fields)
+    val expected_fields = dict_keys(expected.fields)
+    assert actual_fields.len() == expected_fields.len()
+
+    # Compare all field values
+    for key in expected_fields:
+        val expected_val = expected.get(key)
+        val actual_val = actual.get(key)
+        assert expected_val == actual_val
+
+fn assert_bug_equals(actual: Bug, expected: Bug):
+    assert actual.id == expected.id
+    assert actual.severity == expected.severity
+    assert actual.status == expected.status
+    assert actual.title == expected.title
+    assert actual.file == expected.file
+    assert actual.line == expected.line
+    assert actual.reproducible_by == expected.reproducible_by
+    assert actual.valid == expected.valid

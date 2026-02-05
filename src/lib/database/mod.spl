@@ -1,0 +1,333 @@
+# Unified Database Library - Core Module
+#
+# Provides shared infrastructure for Bug DB, Test DB, and Feature DB:
+# - StringInterner: Efficient string deduplication
+# - SdnTable/SdnRow: In-memory SDN table representation
+# - SdnDatabase: Base class for all databases
+
+use app.io.{file_read, file_write, file_exists, rt_file_rename}
+
+# ============================================================================
+# StringInterner - Efficient string deduplication
+# ============================================================================
+
+class StringInterner:
+    strings: Dict<text, i32>    # string -> id
+    reverse: Dict<i32, text>    # id -> string
+    next_id: i32
+
+    # Create empty interner
+    static fn empty() -> StringInterner:
+        StringInterner(strings: {}, reverse: {}, next_id: 0)
+
+    # Intern a string, return its ID
+    me intern(s: text) -> i32:
+        if self.strings.contains_key(s):
+            self.strings[s]
+        else:
+            val id = self.next_id
+            self.strings[s] = id
+            self.reverse[id] = s
+            self.next_id = self.next_id + 1
+            id
+
+    # Get string by ID
+    fn get(id: i32) -> text?:
+        if self.reverse.contains_key(id):
+            Some(self.reverse[id])
+        else:
+            None
+
+    # Load from SDN table
+    static fn from_sdn(table: SdnTable) -> StringInterner:
+        val interner = StringInterner.empty()
+        for row in table.rows:
+            if val Some(id_str) = row.get("id"):
+                if val Some(value) = row.get("value"):
+                    val id = id_str.to_int()
+                    interner.strings[value] = id
+                    interner.reverse[id] = value
+                    if id >= interner.next_id:
+                        interner.next_id = id + 1
+        interner
+
+    # Export to SDN table
+    fn to_sdn() -> SdnTable:
+        val table = SdnTable.new("strings", ["id", "value"])
+        for (id, value) in self.reverse:
+            val row = SdnRow.empty()
+            row.set("id", "{id}")
+            row.set("value", value)
+            table.add_row(row)
+        table
+
+# ============================================================================
+# SdnRow - Single row in SDN table
+# ============================================================================
+
+struct SdnRow:
+    fields: Dict<text, text>
+
+    # Create empty row
+    static fn empty() -> SdnRow:
+        SdnRow(fields: {})
+
+    # Get field value
+    fn get(column: text) -> text?:
+        if self.fields.contains_key(column):
+            Some(self.fields[column])
+        else:
+            None
+
+    # Get as i64
+    fn get_i64(column: text) -> i64?:
+        val value = self.get(column)?
+        Some(value.to_int())
+
+    # Get as bool
+    fn get_bool(column: text) -> bool?:
+        val value = self.get(column)?
+        if value == "true":
+            Some(true)
+        elif value == "false":
+            Some(false)
+        else:
+            None
+
+    # Set field value
+    me set(column: text, value: text):
+        self.fields[column] = value
+
+    # Check if has column
+    fn has(column: text) -> bool:
+        self.fields.contains_key(column)
+
+# ============================================================================
+# SdnTable - In-memory representation of SDN table
+# ============================================================================
+
+class SdnTable:
+    name: text
+    columns: [text]
+    rows: [SdnRow]
+    index: Dict<text, i64>      # Primary key -> row index
+
+    # Create new table
+    static fn new(name: text, columns: [text]) -> SdnTable:
+        SdnTable(name: name, columns: columns, rows: [], index: {})
+
+    # Parse from SDN format
+    static fn parse(content: text) -> SdnTable?:
+        val lines = content.split("\n")
+        if not lines.?:
+            return None
+
+        # Find table header line (format: "table_name |col1, col2, col3|")
+        var header_idx = -1
+        var table_name = ""
+        var columns = []
+
+        for (i, line) in lines.enumerate():
+            val trimmed = line.trim()
+            if trimmed.contains("|") and not trimmed.starts_with("#"):
+                # Parse header
+                val parts = trimmed.split("|")
+                if parts.len() >= 3:
+                    table_name = parts[0].trim()
+                    val col_part = parts[1].trim()
+                    columns = col_part.split(",").map(\c: c.trim())
+                    header_idx = i
+                    break
+
+        if header_idx == -1:
+            return None
+
+        # Parse rows
+        val table = SdnTable.new(table_name, columns)
+        for i in (header_idx + 1)..lines.len():
+            val line = lines[i].trim()
+            if not line.? or line.starts_with("#"):
+                continue
+
+            # Parse row (format: "    val1, val2, val3")
+            val parts = line.split(",")
+            if parts.len() != columns.len():
+                continue
+
+            val row = SdnRow.empty()
+            for (j, col) in columns.enumerate():
+                val value = parts[j].trim()
+                row.set(col, value)
+
+            table.add_row(row)
+
+        Some(table)
+
+    # Export to SDN format
+    fn to_sdn() -> text:
+        var result = "{self.name} |"
+        result = result + self.columns.join(", ")
+        result = result + "|\n"
+
+        for row in self.rows:
+            result = result + "    "
+            var values = []
+            for col in self.columns:
+                val value = row.get(col) ?? ""
+                values.push(value)
+            result = result + values.join(", ")
+            result = result + "\n"
+
+        result
+
+    # Add row
+    me add_row(row: SdnRow) -> bool:
+        # If has primary key (id field), add to index
+        if row.has("id"):
+            val id = row.get("id")?
+            self.index[id] = self.rows.len()
+
+        self.rows.push(row)
+        true
+
+    # Update row by primary key
+    me update_row(key: text, row: SdnRow) -> bool:
+        if not self.index.contains_key(key):
+            return false
+
+        val idx = self.index[key]
+        self.rows[idx] = row
+        true
+
+    # Get row by primary key
+    fn get_row(key: text) -> SdnRow?:
+        if not self.index.contains_key(key):
+            return None
+
+        val idx = self.index[key]
+        Some(self.rows[idx])
+
+    # Soft delete (set valid=false)
+    me mark_deleted(key: text) -> bool:
+        if not self.index.contains_key(key):
+            return false
+
+        val idx = self.index[key]
+        self.rows[idx].set("valid", "false")
+        true
+
+    # Get all valid rows (where valid=true or no valid field)
+    fn valid_rows() -> [SdnRow]:
+        self.rows.filter(\r: r.get_bool("valid") ?? true)
+
+    # Rebuild index after loading
+    me rebuild_index():
+        self.index.clear()
+        for (i, row) in self.rows.enumerate():
+            if row.has("id"):
+                val id = row.get("id")?
+                self.index[id] = i
+
+# ============================================================================
+# SdnDatabase - Base class for all databases
+# ============================================================================
+
+class SdnDatabase:
+    path: text
+    interner: StringInterner
+    tables: Dict<text, SdnTable>
+    modified: bool
+
+    # Create new database
+    static fn new(path: text) -> SdnDatabase:
+        SdnDatabase(
+            path: path,
+            interner: StringInterner.empty(),
+            tables: {},
+            modified: false
+        )
+
+    # Load existing database
+    static fn load(path: text) -> SdnDatabase?:
+        if not file_exists(path):
+            return None
+
+        val content = file_read(path)
+        if not content.?:
+            return None
+
+        val db = SdnDatabase.new(path)
+
+        # Parse all tables from file
+        # Format: multiple tables separated by blank lines
+        val sections = content.split("\n\n")
+        for section in sections:
+            if not section.trim().?:
+                continue
+
+            val table = SdnTable.parse(section)?
+
+            # Special handling for strings table
+            if table.name == "strings":
+                db.interner = StringInterner.from_sdn(table)
+            else:
+                table.rebuild_index()
+                db.tables[table.name] = table
+
+        db.modified = false
+        Some(db)
+
+    # Save to disk (atomic via temp file)
+    me save() -> bool:
+        var content = ""
+
+        # Write strings table first
+        val strings_table = self.interner.to_sdn()
+        content = content + strings_table.to_sdn() + "\n\n"
+
+        # Write all other tables
+        for (name, table) in self.tables:
+            content = content + table.to_sdn() + "\n\n"
+
+        # Atomic write via temp file
+        val temp_path = self.path + ".tmp"
+        if not file_write(temp_path, content):
+            return false
+
+        # Move temp to actual file (atomic on Unix)
+        if not rt_file_rename(temp_path, self.path):
+            return false
+
+        self.modified = false
+        true
+
+    # Get table by name
+    fn get_table(name: text) -> SdnTable?:
+        if self.tables.contains_key(name):
+            Some(self.tables[name])
+        else:
+            None
+
+    # Get mutable table reference
+    me get_table_mut(name: text) -> SdnTable?:
+        if self.tables.contains_key(name):
+            Some(self.tables[name])
+        else:
+            None
+
+    # Add or update table
+    me set_table(name: text, table: SdnTable):
+        self.tables[name] = table
+        self.modified = true
+
+    # String interning helpers
+    me intern(s: text) -> i32:
+        self.modified = true
+        self.interner.intern(s)
+
+    fn resolve(id: i32) -> text?:
+        self.interner.get(id)
+
+    # Validation (override in subclasses)
+    fn validate() -> [text]:
+        []

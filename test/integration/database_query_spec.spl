@@ -1,0 +1,253 @@
+# Database Query Builder Tests
+#
+# Tests fluent query API for database queries
+
+use lib.database.mod.{SdnDatabase, SdnTable, SdnRow}
+use lib.database.query.{QueryBuilder, CompareOp}
+
+describe "QueryBuilder":
+    it "filters rows by equality":
+        # Create test database
+        val db = SdnDatabase.new("/tmp/test_query.sdn")
+        val table = SdnTable.new("users", ["id", "name", "age"])
+
+        # Add test data
+        for i in 0..5:
+            val row = SdnRow.empty()
+            row.set("id", "{i}")
+            row.set("name", "user_{i}")
+            row.set("age", "{20 + i}")
+            table.add_row(row)
+
+        db.set_table("users", table)
+
+        # Query with filter
+        val query = QueryBuilder(db: db, table_name: "users")
+        val results = query.filter_by("name", CompareOp.Eq, "user_2").execute()
+
+        assert results.len() == 1
+        assert results[0].get("name")? == "user_2"
+
+    it "filters rows by comparison operators":
+        val db = SdnDatabase.new("/tmp/test_query_compare.sdn")
+        val table = SdnTable.new("items", ["id", "price"])
+
+        # Add items with different prices
+        for i in 0..10:
+            val row = SdnRow.empty()
+            row.set("id", "item_{i}")
+            row.set("price", "{i * 10}")
+            table.add_row(row)
+
+        db.set_table("items", table)
+
+        # Query: price > 50
+        val query_gt = QueryBuilder(db: db, table_name: "items")
+        val results_gt = query_gt.filter_by("price", CompareOp.Gt, "50").execute()
+
+        # Should get items 6-9 (prices 60, 70, 80, 90)
+        assert results_gt.len() == 4
+
+        # Query: price < 30
+        val query_lt = QueryBuilder(db: db, table_name: "items")
+        val results_lt = query_lt.filter_by("price", CompareOp.Lt, "30").execute()
+
+        # Should get items 0-2 (prices 0, 10, 20)
+        assert results_lt.len() == 3
+
+    it "filters rows by contains operator":
+        val db = SdnDatabase.new("/tmp/test_query_contains.sdn")
+        val table = SdnTable.new("files", ["path", "extension"])
+
+        # Add files
+        val files = [
+            ("src/main.spl", "spl"),
+            ("test/test.spl", "spl"),
+            ("README.md", "md"),
+            ("src/lib.rs", "rs"),
+        ]
+
+        for file in files:
+            val row = SdnRow.empty()
+            row.set("path", file.0)
+            row.set("extension", file.1)
+            table.add_row(row)
+
+        db.set_table("files", table)
+
+        # Query: path contains "src"
+        val query = QueryBuilder(db: db, table_name: "files")
+        val results = query.filter_by("path", CompareOp.Contains, "src").execute()
+
+        assert results.len() == 2
+        assert results[0].get("path")?.contains("src")
+
+    it "filters with in operator":
+        val db = SdnDatabase.new("/tmp/test_query_in.sdn")
+        val table = SdnTable.new("bugs", ["id", "status"])
+
+        # Add bugs with different statuses
+        val statuses = ["Open", "Fixed", "Open", "Closed", "Open", "Fixed"]
+        for i in 0..6:
+            val row = SdnRow.empty()
+            row.set("id", "bug_{i}")
+            row.set("status", statuses[i])
+            table.add_row(row)
+
+        db.set_table("bugs", table)
+
+        # Query: status in ["Open", "Closed"]
+        val query = QueryBuilder(db: db, table_name: "bugs")
+        val results = query.filter_in("status", ["Open", "Closed"]).execute()
+
+        # Should get 4 bugs (3 Open + 1 Closed)
+        assert results.len() == 4
+
+    it "chains multiple filters":
+        val db = SdnDatabase.new("/tmp/test_query_chain.sdn")
+        val table = SdnTable.new("products", ["name", "category", "price"])
+
+        # Add products
+        val products = [
+            ("Laptop", "Electronics", "1000"),
+            ("Mouse", "Electronics", "20"),
+            ("Desk", "Furniture", "300"),
+            ("Chair", "Furniture", "150"),
+            ("Monitor", "Electronics", "400"),
+        ]
+
+        for product in products:
+            val row = SdnRow.empty()
+            row.set("name", product.0)
+            row.set("category", product.1)
+            row.set("price", product.2)
+            table.add_row(row)
+
+        db.set_table("products", table)
+
+        # Query: Electronics AND price > 100
+        val query = QueryBuilder(db: db, table_name: "products")
+        val results = query
+            .filter_by("category", CompareOp.Eq, "Electronics")
+            .filter_by("price", CompareOp.Gt, "100")
+            .execute()
+
+        # Should get Laptop and Monitor
+        assert results.len() == 2
+
+    it "filters only valid rows":
+        val db = SdnDatabase.new("/tmp/test_query_valid.sdn")
+        val table = SdnTable.new("data", ["id", "value", "valid"])
+
+        # Add rows (some invalid)
+        for i in 0..5:
+            val row = SdnRow.empty()
+            row.set("id", "{i}")
+            row.set("value", "data_{i}")
+            row.set("valid", if i % 2 == 0: "true" else "false")
+            table.add_row(row)
+
+        db.set_table("data", table)
+
+        # Query with only_valid()
+        val query = QueryBuilder(db: db, table_name: "data")
+        val results = query.only_valid().execute()
+
+        # Should get only valid rows (0, 2, 4)
+        assert results.len() == 3
+
+    it "orders results ascending":
+        val db = SdnDatabase.new("/tmp/test_query_order_asc.sdn")
+        val table = SdnTable.new("scores", ["name", "score"])
+
+        # Add unsorted scores
+        val scores = [("Alice", "85"), ("Bob", "92"), ("Charlie", "78"), ("Diana", "95")]
+        for score in scores:
+            val row = SdnRow.empty()
+            row.set("name", score.0)
+            row.set("score", score.1)
+            table.add_row(row)
+
+        db.set_table("scores", table)
+
+        # Query ordered by score ascending
+        val query = QueryBuilder(db: db, table_name: "scores")
+        val results = query.order_by("score", desc: false).execute()
+
+        # Should be: Charlie (78), Alice (85), Bob (92), Diana (95)
+        assert results[0].get("name")? == "Charlie"
+        assert results[3].get("name")? == "Diana"
+
+    it "orders results descending":
+        val db = SdnDatabase.new("/tmp/test_query_order_desc.sdn")
+        val table = SdnTable.new("scores", ["name", "score"])
+
+        # Add scores
+        val scores = [("Alice", "85"), ("Bob", "92"), ("Charlie", "78"), ("Diana", "95")]
+        for score in scores:
+            val row = SdnRow.empty()
+            row.set("name", score.0)
+            row.set("score", score.1)
+            table.add_row(row)
+
+        db.set_table("scores", table)
+
+        # Query ordered by score descending
+        val query = QueryBuilder(db: db, table_name: "scores")
+        val results = query.order_by("score", desc: true).execute()
+
+        # Should be: Diana (95), Bob (92), Alice (85), Charlie (78)
+        assert results[0].get("name")? == "Diana"
+        assert results[3].get("name")? == "Charlie"
+
+    it "limits number of results":
+        val db = SdnDatabase.new("/tmp/test_query_take.sdn")
+        val table = SdnTable.new("logs", ["id", "message"])
+
+        # Add many rows
+        for i in 0..20:
+            val row = SdnRow.empty()
+            row.set("id", "{i}")
+            row.set("message", "log_{i}")
+            table.add_row(row)
+
+        db.set_table("logs", table)
+
+        # Query with take(5)
+        val query = QueryBuilder(db: db, table_name: "logs")
+        val results = query.take(5).execute()
+
+        assert results.len() == 5
+
+    it "combines filter, order, and limit":
+        val db = SdnDatabase.new("/tmp/test_query_combo.sdn")
+        val table = SdnTable.new("tasks", ["id", "priority", "status"])
+
+        # Add tasks
+        for i in 0..10:
+            val row = SdnRow.empty()
+            row.set("id", "task_{i}")
+            row.set("priority", "{i % 3}")  # Priority 0, 1, 2
+            row.set("status", if i % 2 == 0: "open" else "closed")
+            table.add_row(row)
+
+        db.set_table("tasks", table)
+
+        # Query: open tasks, ordered by priority desc, top 3
+        val query = QueryBuilder(db: db, table_name: "tasks")
+        val results = query
+            .filter_by("status", CompareOp.Eq, "open")
+            .order_by("priority", desc: true)
+            .take(3)
+            .execute()
+
+        assert results.len() == 3
+        assert results[0].get("status")? == "open"
+
+    it "returns empty for non-existent table":
+        val db = SdnDatabase.new("/tmp/test_query_missing.sdn")
+
+        val query = QueryBuilder(db: db, table_name: "non_existent")
+        val results = query.execute()
+
+        assert results.len() == 0

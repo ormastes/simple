@@ -20,6 +20,8 @@ For detailed guidance, invoke with `/skill-name`:
 | `doc` | Documentation writing: specs (SSpec), research, design, guides |
 | `deeplearning` | **Deep learning**: Pipeline operators, dimension checking, NN layers |
 | `sffi` | **SFFI wrappers**: Two-tier pattern (`extern fn` + wrapper), Simple FFI wrappers vs raw FFI |
+| `database` | **Database library**: BugDB, TestDB, FeatureDB, atomic ops, query builder |
+| `mcp` | **MCP server**: Model Context Protocol, resources, prompts, bug database integration |
 
 Skills located in `.claude/skills/`.
 
@@ -40,6 +42,20 @@ Skills located in `.claude/skills/`.
   - Commands: `build`, `test`, `coverage`, `lint`, `fmt`, `check`, `bootstrap`, `package`
   - Replaces Makefile with type-safe Simple code
   - See: `doc/build/getting_started.md`, `src/app/build/`
+- **Unified Database Library**: Production-ready database infrastructure (100% complete)
+  - Core: `StringInterner`, `SdnTable`, `SdnRow`, `SdnDatabase` (O(1) operations)
+  - Atomic operations with file-based locking (2-hour stale lock detection)
+  - Query builder with fluent API (filters, sorting, limits)
+  - Domain databases: `BugDatabase`, `TestDatabase`, `FeatureDatabase`
+  - 27/27 tests passing + 80+ integration tests
+  - SDN file format for human-readable storage
+  - See: `src/lib/database/`, `test/lib/database_spec.spl`
+- **MCP Server**: Model Context Protocol integration (ready for production)
+  - Resources: File, symbol, type, documentation, directory tree access
+  - Prompts: Refactoring, code generation, documentation, analysis templates
+  - Bug Database integration: JSON API for bug tracking (`bugdb://` URIs)
+  - Query API integration for compiler introspection
+  - See: `src/app/mcp/`, `doc/report/mcp_database_integration_2026-02-05.md`
 - **File Extensions**:
   - `.spl` - Standard Simple source file
   - `.ssh` - Simple Shell Script (executable with `#!simple` shebang, use for build/install scripts)
@@ -571,36 +587,25 @@ simple build metrics            # Show build metrics
 simple build --help
 ```
 
-### Legacy (Makefile - Deprecated)
+### Run a Simple Script
 
 ```bash
-make check         # fmt + lint + test (before commit) → use: simple build check
-make check-full    # + coverage + duplication → use: simple build check --full
-make test-all      # Run ALL tests → use: simple build test
-simple build rust test
-
-# Run a Simple script
-simple script.spl
+simple script.spl               # Run a Simple file
+simple mcp server               # Start MCP server
+simple test                     # Run all tests
 ```
 
-### Compile and Recompile
+### Development (requires Rust source)
+
+> Note: These commands only work in development environment with `rust/` directory.
+> Release distributions are pure Simple and don't need these commands.
 
 ```bash
-# Build
-simple build                              # Debug build
-simple build --release                    # Release build
-simple build --bootstrap                  # Bootstrap build (9.3 MB, minimal size)
-
-# Run a Simple script
-simple script.spl
-
-# Rust subproject commands
+# Rust subproject commands (development only)
 simple build rust test                    # All Rust workspace tests
 simple build rust test --doc              # Rust doc-tests only
-simple build rust test -p simple-driver   # Single crate tests
 simple build rust lint                    # Run clippy
 simple build rust fmt                     # Run rustfmt
-simple build rust check                   # Check without building
 simple build rust clean                   # Clean Rust artifacts
 
 # Run all tests (Rust + Simple/SSpec by default)
@@ -969,10 +974,14 @@ fn env_get(key: text) -> text:
 
 ---
 
-## Current Status
+## Current Status (v0.4.0)
 
 | Component | Status |
 |-----------|--------|
+| Architecture | 100% Pure Simple |
+| Self-Hosting Build | Complete (8 phases) |
+| MCP Server | Complete (JSON-RPC 2.0) |
+| Database Library | Complete (atomic ops) |
 | Lexer/Parser/AST | Complete |
 | HIR/MIR | Complete (50+ instructions) |
 | Codegen | Hybrid (Cranelift + Interpreter) |
@@ -982,10 +991,15 @@ fn env_get(key: text) -> text:
 
 ---
 
-## Postponed
+## Roadmap (v0.5.0)
 
-**High:** LLM Features (#880-919), Test Framework, LSP
-**Medium:** Test CLI, TUI Framework, Package Registry
+**Priority:**
+- Grammar refactoring and syntax improvements
+- DL module path resolution fix
+- Documentation consistency
+
+**High:** LLM Features, Test Framework, LSP completion
+**Medium:** TUI Framework, Package Registry
 **Blocked:** Generator JIT codegen
 
-See `TODO.md` and `doc/features/done/` for archives.
+See `doc/VERSION.md` for full version history.

@@ -1,0 +1,141 @@
+# Query Builder for SDN Databases
+#
+# Provides fluent query interface with filtering, sorting, and limiting.
+
+use lib.database.mod.{SdnTable, SdnRow}
+
+# ============================================================================
+# Compare Operators
+# ============================================================================
+
+enum CompareOp:
+    Eq           # Equal
+    Ne           # Not equal
+    Gt           # Greater than
+    Ge           # Greater or equal
+    Lt           # Less than
+    Le           # Less or equal
+    Contains     # String contains
+    StartsWith   # String starts with
+    EndsWith     # String ends with
+
+# ============================================================================
+# Filter
+# ============================================================================
+
+struct Filter:
+    field: text
+    op: CompareOp
+    value: text
+
+    # Check if row matches filter
+    fn matches(row: SdnRow) -> bool:
+        val field_value = row.get(self.field)
+        if not field_value.?:
+            return false
+
+        val fv = field_value?
+        match self.op:
+            CompareOp.Eq: fv == self.value
+            CompareOp.Ne: fv != self.value
+            CompareOp.Gt: fv > self.value
+            CompareOp.Ge: fv >= self.value
+            CompareOp.Lt: fv < self.value
+            CompareOp.Le: fv <= self.value
+            CompareOp.Contains: fv.contains(self.value)
+            CompareOp.StartsWith: fv.starts_with(self.value)
+            CompareOp.EndsWith: fv.ends_with(self.value)
+
+# ============================================================================
+# QueryBuilder
+# ============================================================================
+
+class QueryBuilder:
+    table: SdnTable
+    filters: [Filter]
+    sort_field: text?
+    sort_desc: bool
+    limit_count: i64?
+
+    # Create query builder for table
+    static fn for_table(table: SdnTable) -> QueryBuilder:
+        QueryBuilder(
+            table: table,
+            filters: [],
+            sort_field: None,
+            sort_desc: false,
+            limit_count: None
+        )
+
+    # Add filter condition
+    me filter_by(field: text, op: CompareOp, value: text) -> QueryBuilder:
+        self.filters.push(Filter(field: field, op: op, value: value))
+        self
+
+    # Filter by multiple values (field IN (values))
+    me filter_in(field: text, values: [text]) -> QueryBuilder:
+        # Add OR filters for each value
+        # Note: This is simplified - proper implementation would group OR conditions
+        for value in values:
+            self.filters.push(Filter(field: field, op: CompareOp.Eq, value: value))
+        self
+
+    # Exclude soft-deleted rows (valid=true)
+    me only_valid() -> QueryBuilder:
+        self.filter_by("valid", CompareOp.Eq, "true")
+
+    # Sort results
+    me order_by(field: text, desc: bool) -> QueryBuilder:
+        self.sort_field = Some(field)
+        self.sort_desc = desc
+        self
+
+    # Limit results
+    me take(n: i64) -> QueryBuilder:
+        self.limit_count = Some(n)
+        self
+
+    # Execute query
+    fn execute() -> [SdnRow]:
+        var results = self.table.rows
+
+        # Apply filters
+        for filter in self.filters:
+            results = results.filter(\row: filter.matches(row))
+
+        # Apply sorting
+        if self.sort_field.?:
+            val field = self.sort_field?
+            results = if self.sort_desc:
+                results.sort_by(\row: row.get(field) ?? "").reverse()
+            else:
+                results.sort_by(\row: row.get(field) ?? "")
+
+        # Apply limit
+        if self.limit_count.?:
+            val limit = self.limit_count?
+            results = results.take(limit)
+
+        results
+
+    # Count results
+    fn count() -> i64:
+        self.execute().len()
+
+    # Check if any match
+    fn exists() -> bool:
+        self.count() > 0
+
+# ============================================================================
+# Extension for SdnDatabase
+# ============================================================================
+
+# Add query() method to SdnDatabase
+# Note: In actual implementation, this would be in mod.spl as method on SdnDatabase
+# For now, we provide standalone function
+
+use lib.database.mod.{SdnDatabase}
+
+fn query_table(db: SdnDatabase, table_name: text) -> QueryBuilder?:
+    val table = db.get_table(table_name)?
+    Some(QueryBuilder.for_table(table))

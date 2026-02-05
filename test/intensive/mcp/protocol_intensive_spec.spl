@@ -1,0 +1,441 @@
+# MCP Protocol Intensive Testing
+# Comprehensive tests for JSON-RPC protocol, request/response handling
+
+use std.io.file
+use src.app.mcp.main
+use test.intensive.helpers.mcp_fixtures
+
+describe "MCP Protocol - Intensive":
+    context "initialization":
+        it "handles initialize request correctly":
+            val request = build_initialize_request(1)
+
+            # Request should be valid JSON
+            assert request.?
+            assert json_contains(request, "initialize")
+            assert json_contains(request, "protocolVersion")
+
+        it "validates protocol version":
+            val request = build_initialize_request(1)
+
+            assert json_contains(request, "2024-11-05")
+
+        it "includes client info":
+            val request = build_initialize_request(1)
+
+            assert json_contains(request, "clientInfo")
+            assert json_contains(request, "test-client")
+
+        it "includes capabilities":
+            val request = build_initialize_request(1)
+
+            assert json_contains(request, "capabilities")
+
+        it "has correct JSON-RPC version":
+            val request = build_initialize_request(1)
+
+            assert_valid_json_rpc(request)
+
+    context "resources/list requests":
+        it "builds valid resources/list request":
+            val request = build_resources_list_request(2)
+
+            assert_valid_json_rpc(request)
+            assert json_contains(request, "resources/list")
+            assert_has_id(request, 2)
+
+        it "handles multiple sequential list requests":
+            for i in 0..10:
+                val request = build_resources_list_request(i)
+                assert_valid_json_rpc(request)
+                assert_has_id(request, i)
+
+    context "resources/read requests":
+        it "builds valid resources/read request":
+            val uri = "file:///test.spl"
+            val request = build_resources_read_request(3, uri)
+
+            assert_valid_json_rpc(request)
+            assert json_contains(request, "resources/read")
+            assert json_contains(request, uri)
+
+        it "handles various URI schemes":
+            val uris = get_test_uris()
+
+            for i in 0..uris.length():
+                val uri = uris[i]
+                val request = build_resources_read_request(10 + i, uri)
+                assert json_contains(request, uri)
+
+        it "handles file URIs":
+            val uri = build_file_uri("src/main.spl")
+            val request = build_resources_read_request(20, uri)
+
+            assert json_contains(request, "file://")
+            assert json_contains(request, "src/main.spl")
+
+        it "handles symbol URIs":
+            val uri = build_symbol_uri("src/main.spl", "main")
+            val request = build_resources_read_request(21, uri)
+
+            assert json_contains(request, "symbol://")
+
+        it "handles type URIs":
+            val uri = build_type_uri("String")
+            val request = build_resources_read_request(22, uri)
+
+            assert json_contains(request, "type://")
+            assert json_contains(request, "String")
+
+        it "handles bugdb URIs":
+            val uris = [
+                build_bugdb_uri("all"),
+                build_bugdb_uri("open"),
+                build_bugdb_uri("critical"),
+                build_bugdb_uri("stats")
+            ]
+
+            for i in 0..uris.length():
+                val uri = uris[i]
+                val request = build_resources_read_request(30 + i, uri)
+                assert json_contains(request, "bugdb://")
+
+    context "prompts/list requests":
+        it "builds valid prompts/list request":
+            val request = build_prompts_list_request(40)
+
+            assert_valid_json_rpc(request)
+            assert json_contains(request, "prompts/list")
+
+    context "prompts/get requests":
+        it "builds valid prompts/get request":
+            val request = build_prompts_get_request(41, "refactor-extract-function", [])
+
+            assert_valid_json_rpc(request)
+            assert json_contains(request, "prompts/get")
+            assert json_contains(request, "refactor-extract-function")
+
+        it "handles various prompt names":
+            val names = get_test_prompt_names()
+
+            for i in 0..names.length():
+                val name = names[i]
+                val request = build_prompts_get_request(50 + i, name, [])
+                assert json_contains(request, name)
+
+        it "includes prompt arguments":
+            val args = [
+                jpair("file", jstr("test.spl")),
+                jpair("line", jnum(42))
+            ]
+            val request = build_prompts_get_request(60, "analyze", args)
+
+            assert json_contains(request, "arguments")
+            assert json_contains(request, "test.spl")
+
+    context "response building":
+        it "builds valid success response":
+            val result = jobj([jpair("status", jstr("ok"))])
+            val response = build_success_response(1, result)
+
+            assert_valid_json_rpc(response)
+            assert_has_id(response, 1)
+            assert_has_result(response)
+
+        it "builds valid error response":
+            val response = build_error_response(2, -32600, "Invalid Request")
+
+            assert_valid_json_rpc(response)
+            assert_has_id(response, 2)
+            assert_has_error(response)
+            assert json_contains(response, "Invalid Request")
+
+        it "handles various error codes":
+            val error_codes = [
+                (-32700, "Parse error"),
+                (-32600, "Invalid Request"),
+                (-32601, "Method not found"),
+                (-32602, "Invalid params"),
+                (-32603, "Internal error")
+            ]
+
+            for i in 0..error_codes.length():
+                val (code, message) = error_codes[i]
+                val response = build_error_response(70 + i, code, message)
+                assert_has_error(response)
+
+    context "invalid requests":
+        it "builds invalid method request":
+            val request = build_invalid_request(100)
+
+            assert_valid_json_rpc(request)
+            assert json_contains(request, "invalid/method")
+
+        it "detects malformed JSON":
+            val malformed = build_malformed_json()
+
+            # Should not be valid JSON
+            assert not json_contains(malformed, "\"jsonrpc\":\"2.0\"}")
+
+    context "request ID handling":
+        it "handles sequential IDs":
+            for i in 0..100:
+                val request = build_resources_list_request(i)
+                assert_has_id(request, i)
+
+        it "handles large IDs":
+            val request = build_resources_list_request(999999)
+            assert_has_id(request, 999999)
+
+        it "handles ID 0":
+            val request = build_resources_list_request(0)
+            assert_has_id(request, 0)
+
+    context "JSON structure validation":
+        it "validates object structure":
+            val request = build_initialize_request(1)
+
+            # Should have required top-level fields
+            assert json_contains_key(request, "jsonrpc")
+            assert json_contains_key(request, "id")
+            assert json_contains_key(request, "method")
+
+        it "validates nested objects":
+            val request = build_initialize_request(1)
+
+            # Should have nested params
+            assert json_contains_key(request, "params")
+            assert json_contains(request, "protocolVersion")
+
+        it "validates arrays":
+            val items = [jstr("item1"), jstr("item2"), jstr("item3")]
+            val array = jarray(items)
+
+            assert str_contains(array, "[")
+            assert str_contains(array, "]")
+            assert str_contains(array, "item1")
+            assert str_contains(array, "item2")
+
+    context "special characters in JSON":
+        it "escapes quotes in strings":
+            val text = "test with \"quotes\""
+            val json_str = jstr(text)
+
+            assert str_contains(json_str, "\\\"")
+
+        it "escapes newlines in strings":
+            val text = "line1\nline2"
+            val json_str = jstr(text)
+
+            assert str_contains(json_str, "\\n")
+
+        it "escapes tabs in strings":
+            val text = "col1\tcol2"
+            val json_str = jstr(text)
+
+            assert str_contains(json_str, "\\t")
+
+        it "escapes backslashes in strings":
+            val text = "path\\to\\file"
+            val json_str = jstr(text)
+
+            assert str_contains(json_str, "\\\\")
+
+        it "handles unicode in JSON":
+            val text = "测试 🚀"
+            val json_str = jstr(text)
+
+            # Unicode should be preserved
+            assert str_contains(json_str, "测试")
+
+    context "resource data structures":
+        it "builds valid file resource":
+            val resource = build_file_resource(
+                "file:///test.spl",
+                "test.spl",
+                "Test file"
+            )
+
+            assert json_contains(resource, "file:///test.spl")
+            assert json_contains(resource, "test.spl")
+            assert json_contains(resource, "Test file")
+            assert json_contains(resource, "text/plain")
+
+        it "builds valid symbol resource":
+            val resource = build_symbol_resource(
+                "symbol://test.spl#main",
+                "main"
+            )
+
+            assert json_contains(resource, "symbol://test.spl#main")
+            assert json_contains(resource, "main")
+
+        it "builds valid bugdb resource":
+            val resource = build_bugdb_resource(
+                "bugdb://all",
+                "All Bugs"
+            )
+
+            assert json_contains(resource, "bugdb://all")
+            assert json_contains(resource, "All Bugs")
+            assert json_contains(resource, "application/json")
+
+    context "prompt data structures":
+        it "builds valid prompt info":
+            val args = [
+                build_prompt_argument("file", "File path", true),
+                build_prompt_argument("line", "Line number", false)
+            ]
+            val prompt = build_prompt_info(
+                "test-prompt",
+                "Test prompt description",
+                args
+            )
+
+            assert json_contains(prompt, "test-prompt")
+            assert json_contains(prompt, "Test prompt description")
+            assert json_contains(prompt, "arguments")
+
+        it "handles required vs optional arguments":
+            val required = build_prompt_argument("file", "File", true)
+            val optional = build_prompt_argument("depth", "Depth", false)
+
+            assert json_contains(required, "\"required\":true")
+            assert json_contains(optional, "\"required\":false")
+
+describe "Bug Database JSON - Intensive":
+    context "bug JSON serialization":
+        it "builds valid bug JSON":
+            val bug_json = build_bug_json(
+                "bug_001",
+                "P0",
+                "Open",
+                "Test bug"
+            )
+
+            assert json_contains(bug_json, "bug_001")
+            assert json_contains(bug_json, "P0")
+            assert json_contains(bug_json, "Open")
+            assert json_contains(bug_json, "Test bug")
+
+        it "includes all bug fields":
+            val bug_json = build_bug_json(
+                "bug_002",
+                "P1",
+                "Investigating",
+                "Another bug"
+            )
+
+            assert json_contains_key(bug_json, "id")
+            assert json_contains_key(bug_json, "severity")
+            assert json_contains_key(bug_json, "status")
+            assert json_contains_key(bug_json, "title")
+            assert json_contains_key(bug_json, "file")
+            assert json_contains_key(bug_json, "line")
+
+        it "handles bug arrays":
+            val bugs = [
+                ("bug_1", "P0", "Open", "First"),
+                ("bug_2", "P1", "Fixed", "Second"),
+                ("bug_3", "P2", "Closed", "Third")
+            ]
+            val array_json = build_bug_array_json(bugs)
+
+            assert str_contains(array_json, "[")
+            assert str_contains(array_json, "]")
+            assert json_contains(array_json, "bug_1")
+            assert json_contains(array_json, "bug_2")
+            assert json_contains(array_json, "bug_3")
+
+        it "handles empty bug array":
+            val empty_array = build_bug_array_json([])
+
+            assert empty_array == "[]"
+
+    context "statistics JSON":
+        it "builds valid stats JSON":
+            val stats_json = build_bugdb_stats_json(100, 50, 10)
+
+            assert json_contains(stats_json, "\"total\":100")
+            assert json_contains(stats_json, "\"open\":50")
+            assert json_contains(stats_json, "\"critical\":10")
+
+        it "includes all stat fields":
+            val stats_json = build_bugdb_stats_json(100, 50, 10)
+
+            assert json_contains_key(stats_json, "total")
+            assert json_contains_key(stats_json, "open")
+            assert json_contains_key(stats_json, "investigating")
+            assert json_contains_key(stats_json, "fixed")
+            assert json_contains_key(stats_json, "closed")
+            assert json_contains_key(stats_json, "critical")
+
+describe "JSON Extraction - Intensive":
+    context "string extraction":
+        it "extracts simple string values":
+            val json = jobj([jpair("name", jstr("Alice"))])
+            val value = extract_json_string(json, "name")
+
+            assert value == "Alice"
+
+        it "extracts string with spaces":
+            val json = jobj([jpair("title", jstr("Test Title"))])
+            val value = extract_json_string(json, "title")
+
+            assert value == "Test Title"
+
+        it "extracts unicode strings":
+            val json = jobj([jpair("text", jstr("测试 🚀"))])
+            val value = extract_json_string(json, "text")
+
+            assert value == "测试 🚀"
+
+        it "handles missing keys":
+            val json = jobj([jpair("name", jstr("Alice"))])
+            val value = extract_json_string(json, "nonexistent")
+
+            assert value == ""
+
+    context "number extraction":
+        it "extracts simple numbers":
+            val json = jobj([jpair("count", jnum(42))])
+            val value = extract_json_number(json, "count")
+
+            assert value == 42
+
+        it "extracts zero":
+            val json = jobj([jpair("count", jnum(0))])
+            val value = extract_json_number(json, "count")
+
+            assert value == 0
+
+        it "handles missing keys":
+            val json = jobj([jpair("count", jnum(42))])
+            val value = extract_json_number(json, "nonexistent")
+
+            assert value == 0
+
+    context "key existence checks":
+        it "detects existing keys":
+            val json = jobj([
+                jpair("name", jstr("Alice")),
+                jpair("age", jnum(30))
+            ])
+
+            assert json_contains_key(json, "name")
+            assert json_contains_key(json, "age")
+
+        it "detects missing keys":
+            val json = jobj([jpair("name", jstr("Alice"))])
+
+            assert not json_contains_key(json, "nonexistent")
+
+        it "handles nested keys":
+            val nested = jobj([
+                jpair("user", jobj([
+                    jpair("name", jstr("Alice"))
+                ]))
+            ])
+
+            assert json_contains_key(nested, "user")
+            assert json_contains_key(nested, "name")

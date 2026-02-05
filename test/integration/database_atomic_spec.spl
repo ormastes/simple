@@ -1,0 +1,190 @@
+# Database Atomic Operations Tests
+#
+# Tests atomic file operations and locking mechanisms
+
+use lib.database.atomic.{atomic_read, atomic_write, atomic_append, FileLock}
+use app.io.{file_exists, file_delete, file_read, rt_timestamp_now}
+
+describe "Atomic File Operations":
+    it "writes file atomically":
+        val path = "/tmp/test_atomic_write.txt"
+
+        # Clean up if exists
+        if file_exists(path):
+            file_delete(path)
+
+        # Write atomically
+        val result = atomic_write(path, "test content")
+        assert result
+
+        # Verify file exists and has correct content
+        assert file_exists(path)
+        val content = file_read(path)
+        assert content == "test content"
+
+        # Cleanup
+        file_delete(path)
+
+    it "reads file atomically":
+        val path = "/tmp/test_atomic_read.txt"
+
+        # Setup test file
+        atomic_write(path, "atomic read test")
+
+        # Read atomically
+        val content = atomic_read(path)
+        assert content.?
+        assert content? == "atomic read test"
+
+        # Cleanup
+        file_delete(path)
+
+    it "appends to file atomically":
+        val path = "/tmp/test_atomic_append.txt"
+
+        # Setup
+        atomic_write(path, "line 1\n")
+
+        # Append
+        val result = atomic_append(path, "line 2\n")
+        assert result
+
+        # Verify
+        val content = file_read(path)
+        assert content.contains("line 1")
+        assert content.contains("line 2")
+
+        # Cleanup
+        file_delete(path)
+
+    it "handles missing file on read":
+        val content = atomic_read("/nonexistent/file.txt")
+        assert not content.?
+
+    it "creates lock file":
+        val resource = "/tmp/test_lock_resource.txt"
+        val lock_path = "{resource}.lock"
+
+        # Clean up if exists
+        if file_exists(lock_path):
+            file_delete(lock_path)
+
+        # Create lock
+        val lock = FileLock(resource: resource, lock_path: lock_path, locked_at: rt_timestamp_now())
+        val acquired = lock.acquire()
+        assert acquired
+        assert file_exists(lock_path)
+
+        # Release lock
+        lock.release()
+        assert not file_exists(lock_path)
+
+    it "detects stale locks":
+        val resource = "/tmp/test_stale_lock.txt"
+        val lock_path = "{resource}.lock"
+
+        # Create old lock (2.5 hours ago)
+        val two_hours_ago = rt_timestamp_now() - (2 * 60 * 60 * 1000000) - (30 * 60 * 1000000)
+        atomic_write(lock_path, "{two_hours_ago}")
+
+        # Try to acquire lock
+        val lock = FileLock(resource: resource, lock_path: lock_path, locked_at: rt_timestamp_now())
+        val acquired = lock.acquire()
+
+        # Should succeed because lock is stale
+        assert acquired
+
+        # Cleanup
+        lock.release()
+
+    it "respects fresh locks":
+        val resource = "/tmp/test_fresh_lock.txt"
+        val lock_path = "{resource}.lock"
+
+        # Create lock 1
+        val lock1 = FileLock(resource: resource, lock_path: lock_path, locked_at: rt_timestamp_now())
+        val acquired1 = lock1.acquire()
+        assert acquired1
+
+        # Try to acquire lock 2 (should fail)
+        val lock2 = FileLock(resource: resource, lock_path: lock_path, locked_at: rt_timestamp_now())
+        val acquired2 = lock2.acquire()
+        assert not acquired2
+
+        # Release lock 1
+        lock1.release()
+
+        # Now lock 2 should succeed
+        val acquired3 = lock2.acquire()
+        assert acquired3
+
+        # Cleanup
+        lock2.release()
+
+describe "Concurrent File Access":
+    it "prevents data corruption with atomic writes":
+        val path = "/tmp/test_concurrent_writes.txt"
+
+        # Simulate multiple writes
+        for i in 0..10:
+            atomic_write(path, "write_{i}")
+
+        # File should have the last write
+        val content = file_read(path)
+        assert content == "write_9"
+
+        # Cleanup
+        file_delete(path)
+
+    it "allows multiple readers":
+        val path = "/tmp/test_multiple_readers.txt"
+
+        # Setup
+        atomic_write(path, "shared content")
+
+        # Multiple reads should all succeed
+        for i in 0..5:
+            val content = atomic_read(path)
+            assert content.?
+            assert content? == "shared content"
+
+        # Cleanup
+        file_delete(path)
+
+describe "Lock File Format":
+    it "stores timestamp in lock file":
+        val resource = "/tmp/test_lock_format.txt"
+        val lock_path = "{resource}.lock"
+
+        # Acquire lock
+        val lock = FileLock(resource: resource, lock_path: lock_path, locked_at: rt_timestamp_now())
+        lock.acquire()
+
+        # Read lock file
+        val lock_content = file_read(lock_path)
+
+        # Should be a number (timestamp)
+        assert lock_content.len() > 0
+
+        # Cleanup
+        lock.release()
+
+    it "overwrites stale lock":
+        val resource = "/tmp/test_overwrite_lock.txt"
+        val lock_path = "{resource}.lock"
+
+        # Create stale lock
+        val old_time = rt_timestamp_now() - (3 * 60 * 60 * 1000000)
+        atomic_write(lock_path, "{old_time}")
+
+        # Acquire should overwrite
+        val lock = FileLock(resource: resource, lock_path: lock_path, locked_at: rt_timestamp_now())
+        lock.acquire()
+
+        # Lock file should have new timestamp
+        val lock_content = file_read(lock_path)
+        val lock_time = lock_content.to_int() ?? 0
+        assert lock_time > old_time
+
+        # Cleanup
+        lock.release()

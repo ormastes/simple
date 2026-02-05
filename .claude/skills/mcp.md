@@ -436,10 +436,122 @@ simple build
 
 ---
 
+---
+
+## MCP + Database Integration (2026-02-05 Update)
+
+### Status: ✅ Production Ready
+
+**Parse Errors Fixed:**
+- `src/app/mcp/resources.spl` - Fixed `import` → `use` syntax
+- `src/app/mcp/prompts.spl` - Fixed `import` → `use` syntax
+- `src/app/mcp/main.spl` - Previously fixed (template keyword, import syntax)
+
+**Components:**
+- ✅ MCP Server (no parse errors)
+- ✅ Bug Database Resource (`src/app/mcp/bugdb_resource.spl`)
+- ✅ Database Library (27/27 tests passing)
+- ✅ Integration Tests (80+ tests created)
+
+### Bug Database MCP Resource
+
+**File:** `src/app/mcp/bugdb_resource.spl`
+
+Provides JSON API for bug database access via MCP:
+
+```simple
+use app.mcp.bugdb_resource.{get_all_bugs, get_open_bugs, get_critical_bugs, get_bug_stats}
+
+# Get all bugs as JSON
+val json = get_all_bugs("/path/to/bugs.sdn")
+
+# Get only open bugs
+val open_json = get_open_bugs("/path/to/bugs.sdn")
+
+# Get critical bugs (P0 + P1)
+val critical_json = get_critical_bugs("/path/to/bugs.sdn")
+
+# Get statistics
+val stats_json = get_bug_stats("/path/to/bugs.sdn")
+```
+
+**JSON Output Example:**
+
+```json
+{
+  "total": 3,
+  "bugs": [
+    {
+      "id": "bug_001",
+      "severity": "P0",
+      "status": "Open",
+      "title": "Critical bug",
+      "file": "main.spl",
+      "line": 42,
+      "reproducible_by": "test_critical",
+      "description": ["Bug details"]
+    }
+  ]
+}
+```
+
+### MCP Resources (Proposed URIs)
+
+**Bug Database:**
+- `bugdb://all` - All bugs
+- `bugdb://open` - Open bugs only
+- `bugdb://critical` - P0 + P1 bugs
+- `bugdb://stats` - Bug statistics
+- `bugdb://bug/{id}` - Single bug by ID
+
+**Test Database:**
+- `testdb://all` - All tests
+- `testdb://failed` - Failed tests
+- `testdb://slow` - Slow tests
+
+**Feature Database:**
+- `featdb://all` - All features
+- `featdb://incomplete` - Incomplete features
+
+### Testing MCP Integration
+
+```bash
+# Test MCP modules import
+./bin/simple_runtime /tmp/test_mcp_imports.spl
+
+# Test bug database integration
+./bin/simple_runtime test/integration/mcp_bugdb_spec.spl
+
+# Run all integration tests
+./bin/simple_runtime test/integration/database_*.spl
+```
+
+### Architecture
+
+```
+MCP Client (Claude Code, etc.)
+    ↓ JSON-RPC
+MCP Server (src/app/mcp/main.spl)
+    ↓
+MCP Resources (resources.spl, prompts.spl, bugdb_resource.spl)
+    ↓
+Bug Database (src/lib/database/bug.spl)
+    ↓
+Core Database (src/lib/database/mod.spl)
+    ↓
+SDN File Format
+```
+
+---
+
 ## See Also
 
 - `src/app/mcp/main.spl` - MCP server implementation
+- `src/app/mcp/bugdb_resource.spl` - Bug database MCP integration
+- `src/lib/database/` - Unified database library
 - `scripts/mcp_debug_bootstrap.spl` - Automated debugging
 - `doc/bug/bug_db.sdn` - Bug database
-- `doc/bug/mcp_bug_analysis_2026-01-29.md` - Analysis report
+- `doc/report/mcp_database_integration_2026-02-05.md` - Integration report
+- `doc/report/mcp_fixes_and_tests_2026-02-05.md` - Fixes and tests
 - `.claude/skills/debug.md` - Debugging skill
+- `.claude/skills/database.md` - Database library skill

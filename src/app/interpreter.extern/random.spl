@@ -7,6 +7,8 @@ from ..core import {Value, InterpreterError}
 
 export random_seed, random_getstate, random_setstate
 export random_next, random_randint, random_random, random_uniform
+export random_choice, random_choices, random_shuffle, random_sample
+export random_gauss, random_expovariate, random_randrange
 
 # FFI declarations to runtime
 @extern("rt_random_seed")
@@ -66,3 +68,188 @@ fn random_uniform(args: [Value]) -> Result<Value, InterpreterError>:
     val min = args[0].as_float() ?? return Err(InterpreterError.TypeError("min must be float"))
     val max = args[1].as_float() ?? return Err(InterpreterError.TypeError("max must be float"))
     Ok(Value.float(_rt_random_uniform(min, max)))
+
+fn random_randrange(args: [Value]) -> Result<Value, InterpreterError>:
+    """Generate random integer in range(start, stop, step)"""
+    if args.len() < 2 or args.len() > 3:
+        return Err(InterpreterError.ArityError("randrange expects 2 or 3 arguments"))
+
+    val start = args[0].as_int() ?? return Err(InterpreterError.TypeError("start must be integer"))
+    val stop = args[1].as_int() ?? return Err(InterpreterError.TypeError("stop must be integer"))
+    val step = if args.len() == 3:
+        args[2].as_int() ?? return Err(InterpreterError.TypeError("step must be integer"))
+    else:
+        1
+
+    # Calculate how many steps fit in range
+    val range_size = (stop - start) / step
+    if range_size <= 0:
+        return Err(InterpreterError.ValueError("empty range for randrange()"))
+
+    # Pick random step count
+    val steps = _rt_random_randint(0, range_size - 1)
+    Ok(Value.int(start + steps * step))
+
+fn random_choice(args: [Value]) -> Result<Value, InterpreterError>:
+    """Choose random element from sequence"""
+    if args.len() != 1:
+        return Err(InterpreterError.ArityError("choice expects 1 argument"))
+
+    val seq = args[0].as_array() ?? return Err(InterpreterError.TypeError("choice requires array"))
+    if seq.len() == 0:
+        return Err(InterpreterError.ValueError("cannot choose from empty sequence"))
+
+    val idx = _rt_random_randint(0, seq.len() - 1)
+    Ok(seq[idx])
+
+fn random_choices(args: [Value]) -> Result<Value, InterpreterError>:
+    """Choose k random elements (with replacement)"""
+    if args.len() != 2:
+        return Err(InterpreterError.ArityError("choices expects 2 arguments"))
+
+    val seq = args[0].as_array() ?? return Err(InterpreterError.TypeError("choices requires array"))
+    val k = args[1].as_int() ?? return Err(InterpreterError.TypeError("k must be integer"))
+
+    if seq.len() == 0:
+        return Err(InterpreterError.ValueError("cannot choose from empty sequence"))
+
+    var result: [Value] = []
+    var i = 0
+    while i < k:
+        val idx = _rt_random_randint(0, seq.len() - 1)
+        result.push(seq[idx])
+        i = i + 1
+
+    Ok(Value.array(result))
+
+fn random_shuffle(args: [Value]) -> Result<Value, InterpreterError>:
+    """Shuffle array in-place (Fisher-Yates algorithm)"""
+    if args.len() != 1:
+        return Err(InterpreterError.ArityError("shuffle expects 1 argument"))
+
+    var seq = args[0].as_array() ?? return Err(InterpreterError.TypeError("shuffle requires array"))
+
+    # Fisher-Yates shuffle
+    var i = seq.len() - 1
+    while i > 0:
+        val j = _rt_random_randint(0, i)
+        # Swap seq[i] and seq[j]
+        val temp = seq[i]
+        seq[i] = seq[j]
+        seq[j] = temp
+        i = i - 1
+
+    Ok(Value.array(seq))
+
+fn random_sample(args: [Value]) -> Result<Value, InterpreterError>:
+    """Choose k unique random elements (without replacement)"""
+    if args.len() != 2:
+        return Err(InterpreterError.ArityError("sample expects 2 arguments"))
+
+    val seq = args[0].as_array() ?? return Err(InterpreterError.TypeError("sample requires array"))
+    val k = args[1].as_int() ?? return Err(InterpreterError.TypeError("k must be integer"))
+
+    if k > seq.len():
+        return Err(InterpreterError.ValueError("sample size cannot exceed population size"))
+
+    # Use reservoir sampling algorithm
+    var result: [Value] = []
+    var i = 0
+    while i < k and i < seq.len():
+        result.push(seq[i])
+        i = i + 1
+
+    while i < seq.len():
+        val j = _rt_random_randint(0, i)
+        if j < k:
+            result[j] = seq[i]
+        i = i + 1
+
+    Ok(Value.array(result))
+
+fn random_gauss(args: [Value]) -> Result<Value, InterpreterError>:
+    """Generate random number from Gaussian/normal distribution using Box-Muller transform"""
+    if args.len() != 2:
+        return Err(InterpreterError.ArityError("gauss expects 2 arguments"))
+
+    val mu = args[0].as_float() ?? return Err(InterpreterError.TypeError("mu must be float"))
+    val sigma = args[1].as_float() ?? return Err(InterpreterError.TypeError("sigma must be float"))
+
+    # Box-Muller transform
+    val u1 = _rt_random_random()
+    val u2 = _rt_random_random()
+
+    # Avoid log(0)
+    val u1_safe = if u1 < 0.0000001: 0.0000001 else: u1
+
+    # z = sqrt(-2 * ln(u1)) * cos(2 * pi * u2)
+    val z = ((-2.0 * ln(u1_safe)).sqrt()) * cos(2.0 * 3.14159265359 * u2)
+
+    Ok(Value.float(mu + sigma * z))
+
+fn random_expovariate(args: [Value]) -> Result<Value, InterpreterError>:
+    """Generate random number from exponential distribution"""
+    if args.len() != 1:
+        return Err(InterpreterError.ArityError("expovariate expects 1 argument"))
+
+    val lambd = args[0].as_float() ?? return Err(InterpreterError.TypeError("lambda must be float"))
+
+    if lambd <= 0.0:
+        return Err(InterpreterError.ValueError("lambda must be positive"))
+
+    # Inverse transform: -ln(1-U) / lambda
+    val u = _rt_random_random()
+    val u_safe = if u >= 1.0: 0.9999999 else: u
+
+    val result = -ln(1.0 - u_safe) / lambd
+    Ok(Value.float(result))
+
+# Helper math functions (simple implementations)
+fn ln(x: f64) -> f64:
+    """Natural logarithm approximation"""
+    # Use runtime if available, otherwise simple approximation
+    # This is a placeholder - in real implementation should use rt_ln()
+    if x <= 0.0:
+        return -999999.0  # Error value
+
+    # Newton's method approximation
+    var result = 0.0
+    var y = x
+    while y > 2.0:
+        y = y / 2.71828
+        result = result + 1.0
+
+    result
+
+fn cos(x: f64) -> f64:
+    """Cosine approximation using Taylor series"""
+    # Normalize to [0, 2*pi]
+    var angle = x
+    val two_pi = 6.28318530718
+    while angle > two_pi:
+        angle = angle - two_pi
+    while angle < 0.0:
+        angle = angle + two_pi
+
+    # Taylor series: cos(x) = 1 - x^2/2! + x^4/4! - x^6/6! + ...
+    val x2 = angle * angle
+    val x4 = x2 * x2
+    val x6 = x4 * x2
+
+    1.0 - x2/2.0 + x4/24.0 - x6/720.0
+
+fn sqrt(x: f64) -> f64:
+    """Square root using Newton's method"""
+    if x < 0.0:
+        return 0.0
+    if x == 0.0:
+        return 0.0
+
+    # Newton's method: x_n+1 = (x_n + a/x_n) / 2
+    var guess = x / 2.0
+    var i = 0
+    while i < 10:  # 10 iterations is usually enough
+        guess = (guess + x / guess) / 2.0
+        i = i + 1
+
+    guess

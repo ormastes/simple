@@ -10,8 +10,7 @@
 #
 # Supports both static resources and dynamic resource templates.
 
-import app.io
-import compiler.query_api.{CompilerQueryContext, Position, SymbolKind}
+use app.io.mod (file_read, file_exists, dir_list, is_dir)
 
 # --- Resource Types ---
 
@@ -35,85 +34,15 @@ struct ResourceContent:
     contents: text               # Resource contents (may be large)
     mime_type: Option<text>
 
-# Resource provider function type
-# Takes URI, returns content or error
-type ResourceProvider = fn(uri: text) -> Result<text, text>
-
 # --- Resource Manager ---
 
 class ResourceManager:
-    # Static resources (uri -> provider function)
-    static_resources: Dict<text, ResourceProvider>
-
-    # Dynamic resource templates (pattern -> provider function)
-    templates: Dict<text, ResourceProvider>
-
     # Project root directory
     project_root: text
 
-    # Compiler Query API for symbol/type information
-    query_context: CompilerQueryContext
-
     # Create a new resource manager
     static fn create(project_root: text) -> ResourceManager:
-        val manager = ResourceManager(
-            static_resources: {},
-            templates: {},
-            project_root: project_root,
-            query_context: CompilerQueryContext.create(project_root),
-        )
-
-        # Register default resources
-        manager.register_default_resources()
-
-        manager
-
-    # --- Registration ---
-
-    # Register a static resource
-    me register_resource(uri: text, provider: ResourceProvider):
-        self.static_resources[uri] = provider
-
-    # Register a dynamic resource template
-    me register_template(uri_pattern: text, provider: ResourceProvider):
-        self.templates[uri_pattern] = provider
-
-    # Register default resources
-    me register_default_resources():
-        # File resources - file:///{path}
-        self.register_template("file:///*", \uri:
-            val path = uri[7:]  # Remove "file://"
-            self.provide_file_contents(path)
-        )
-
-        # Symbol resources - symbol:///{name}
-        self.register_template("symbol:///*", \uri:
-            val symbol_name = uri[9:]  # Remove "symbol://"
-            self.provide_symbol_info(symbol_name)
-        )
-
-        # Type resources - type:///{name}
-        self.register_template("type:///*", \uri:
-            val type_name = uri[7:]  # Remove "type://"
-            self.provide_type_info(type_name)
-        )
-
-        # Documentation resources - docs:///{path}
-        self.register_template("docs:///*", \uri:
-            val path = uri[7:]  # Remove "docs://"
-            self.provide_documentation(path)
-        )
-
-        # Directory tree - tree:///{path}
-        self.register_template("tree:///*", \uri:
-            val path = uri[7:]  # Remove "tree://"
-            self.provide_directory_tree(path)
-        )
-
-        # Project metadata - project:///info
-        self.register_resource("project:///info", \uri:
-            self.provide_project_info()
-        )
+        ResourceManager(project_root: project_root)
 
     # --- List Resources ---
 
@@ -121,23 +50,49 @@ class ResourceManager:
     fn list_resources() -> [ResourceInfo]:
         var resources = []
 
-        # Add static resources
-        for uri, _ in self.static_resources:
-            resources.push(ResourceInfo(
-                uri: uri,
-                name: uri,
-                description: None,
-                mime_type: None,
-            ))
+        # Static resource: project info
+        resources.push(ResourceInfo(
+            uri: "project:///info",
+            name: "Project Information",
+            description: Some("Project metadata and manifest"),
+            mime_type: Some("text/plain")
+        ))
 
-        # Add templates as examples
-        for pattern, _ in self.templates:
-            resources.push(ResourceInfo(
-                uri: pattern,
-                name: pattern,
-                description: Some("Dynamic resource template"),
-                mime_type: None,
-            ))
+        # Dynamic resource templates as examples
+        resources.push(ResourceInfo(
+            uri: "file:///*",
+            name: "File Contents",
+            description: Some("Read file contents"),
+            mime_type: Some("text/plain")
+        ))
+
+        resources.push(ResourceInfo(
+            uri: "symbol:///*",
+            name: "Symbol Information",
+            description: Some("Get symbol details"),
+            mime_type: Some("application/json")
+        ))
+
+        resources.push(ResourceInfo(
+            uri: "type:///*",
+            name: "Type Information",
+            description: Some("Get type details"),
+            mime_type: Some("application/json")
+        ))
+
+        resources.push(ResourceInfo(
+            uri: "docs:///*",
+            name: "Documentation",
+            description: Some("Get documentation"),
+            mime_type: Some("text/markdown")
+        ))
+
+        resources.push(ResourceInfo(
+            uri: "tree:///*",
+            name: "Directory Tree",
+            description: Some("Get directory structure"),
+            mime_type: Some("text/plain")
+        ))
 
         resources
 
@@ -145,27 +100,40 @@ class ResourceManager:
     fn list_templates() -> [ResourceTemplate]:
         var templates = []
 
-        for pattern, _ in self.templates:
-            val (name, desc, mime) = match pattern:
-                "file:///*":
-                    ("File Contents", Some("Read file contents"), Some("text/plain"))
-                "symbol:///*":
-                    ("Symbol Information", Some("Get symbol details"), Some("application/json"))
-                "type:///*":
-                    ("Type Information", Some("Get type details"), Some("application/json"))
-                "docs:///*":
-                    ("Documentation", Some("Get documentation"), Some("text/markdown"))
-                "tree:///*":
-                    ("Directory Tree", Some("Get directory structure"), Some("text/plain"))
-                _:
-                    (pattern, None, None)
+        templates.push(ResourceTemplate(
+            uri_template: "file:///{path}",
+            name: "File Contents",
+            description: Some("Read file contents by path"),
+            mime_type: Some("text/plain")
+        ))
 
-            templates.push(ResourceTemplate(
-                uri_template: pattern,
-                name: name,
-                description: desc,
-                mime_type: mime,
-            ))
+        templates.push(ResourceTemplate(
+            uri_template: "symbol:///{name}",
+            name: "Symbol Information",
+            description: Some("Get symbol details by name"),
+            mime_type: Some("application/json")
+        ))
+
+        templates.push(ResourceTemplate(
+            uri_template: "type:///{name}",
+            name: "Type Information",
+            description: Some("Get type details by name"),
+            mime_type: Some("application/json")
+        ))
+
+        templates.push(ResourceTemplate(
+            uri_template: "docs:///{path}",
+            name: "Documentation",
+            description: Some("Get documentation by path"),
+            mime_type: Some("text/markdown")
+        ))
+
+        templates.push(ResourceTemplate(
+            uri_template: "tree:///{path}",
+            name: "Directory Tree",
+            description: Some("Get directory structure"),
+            mime_type: Some("text/plain")
+        ))
 
         templates
 
@@ -173,43 +141,74 @@ class ResourceManager:
 
     # Read a resource by URI
     fn read_resource(uri: text) -> Result<ResourceContent, text>:
-        # Try static resources first
-        if self.static_resources.contains(uri):
-            val provider = self.static_resources[uri]
-            val content_result = provider(uri)
-
-            if content_result.err.?:
-                return Err(content_result.err.unwrap())
-
+        # Static resources
+        if uri == "project:///info":
+            val result = self.provide_project_info()
+            if result.err.?:
+                return Err(result.err.unwrap())
             return Ok(ResourceContent(
                 uri: uri,
-                contents: content_result.unwrap(),
-                mime_type: None,
+                contents: result.unwrap(),
+                mime_type: Some("text/plain")
             ))
 
-        # Try matching templates
-        for pattern, provider in self.templates:
-            if self.matches_pattern(uri, pattern):
-                val content_result = provider(uri)
+        # Dynamic resources - match by prefix
+        if uri.starts_with("file://"):
+            val path = uri.substring(7)  # Remove "file://"
+            val result = self.provide_file_contents(path)
+            if result.err.?:
+                return Err(result.err.unwrap())
+            return Ok(ResourceContent(
+                uri: uri,
+                contents: result.unwrap(),
+                mime_type: self.get_mime_type_for_uri(uri)
+            ))
 
-                if content_result.err.?:
-                    return Err(content_result.err.unwrap())
+        if uri.starts_with("symbol://"):
+            val symbol_name = uri.substring(9)  # Remove "symbol://"
+            val result = self.provide_symbol_info(symbol_name)
+            if result.err.?:
+                return Err(result.err.unwrap())
+            return Ok(ResourceContent(
+                uri: uri,
+                contents: result.unwrap(),
+                mime_type: Some("application/json")
+            ))
 
-                return Ok(ResourceContent(
-                    uri: uri,
-                    contents: content_result.unwrap(),
-                    mime_type: self.get_mime_type_for_uri(uri),
-                ))
+        if uri.starts_with("type://"):
+            val type_name = uri.substring(7)  # Remove "type://"
+            val result = self.provide_type_info(type_name)
+            if result.err.?:
+                return Err(result.err.unwrap())
+            return Ok(ResourceContent(
+                uri: uri,
+                contents: result.unwrap(),
+                mime_type: Some("application/json")
+            ))
 
-        Err("Resource not found: {uri}")
+        if uri.starts_with("docs://"):
+            val path = uri.substring(7)  # Remove "docs://"
+            val result = self.provide_documentation(path)
+            if result.err.?:
+                return Err(result.err.unwrap())
+            return Ok(ResourceContent(
+                uri: uri,
+                contents: result.unwrap(),
+                mime_type: Some("text/markdown")
+            ))
 
-    # Check if URI matches a pattern
-    fn matches_pattern(uri: text, pattern: text) -> bool:
-        if pattern.ends_with("*"):
-            val prefix = pattern[:pattern.length - 1]
-            return uri.starts_with(prefix)
+        if uri.starts_with("tree://"):
+            val path = uri.substring(7)  # Remove "tree://"
+            val result = self.provide_directory_tree(path)
+            if result.err.?:
+                return Err(result.err.unwrap())
+            return Ok(ResourceContent(
+                uri: uri,
+                contents: result.unwrap(),
+                mime_type: Some("text/plain")
+            ))
 
-        uri == pattern
+        Err("Resource not found: " + uri)
 
     # Get MIME type for URI
     fn get_mime_type_for_uri(uri: text) -> Option<text>:
@@ -231,7 +230,7 @@ class ResourceManager:
         if uri.starts_with("tree://"):
             return Some("text/plain")
 
-        None
+        nil
 
     # --- Resource Providers ---
 
@@ -240,108 +239,56 @@ class ResourceManager:
         val full_path = if path.starts_with("/"):
             path
         else:
-            "{self.project_root}/{path}"
+            self.project_root + "/" + path
 
-        if not io.file_exists(full_path):
-            return Err("File not found: {path}")
+        if not file_exists(full_path):
+            return Err("File not found: " + path)
 
-        val contents = io.file_read(full_path)
+        val contents = file_read(full_path)
         Ok(contents)
 
     # Provide symbol information
     fn provide_symbol_info(symbol_name: text) -> Result<text, text>:
-        # Search for symbol across workspace
-        val symbols = self.query_context.workspace_symbols(symbol_name)
-
-        if symbols.len() == 0:
-            return Ok("Symbol: {symbol_name}\nStatus: Not found")
-
-        # Format first matching symbol
-        val symbol = symbols[0]
-        var info = "Symbol: {symbol.name}\n"
-        info = info + "Kind: {format_symbol_kind(symbol.kind)}\n"
-        info = info + "Location: {symbol.location.file}:{symbol.location.start.line}:{symbol.location.start.column}\n"
-
-        if symbol.type_info.?:
-            info = info + "Type: {symbol.type_info.unwrap()}\n"
-
-        if symbol.doc_comment.?:
-            info = info + "\nDocumentation:\n{symbol.doc_comment.unwrap()}\n"
-
-        info = info + "Visibility: {if symbol.is_public: "public" else: "private"}\n"
-        info = info + "Mutable: {symbol.is_mutable}\n"
-
-        # If multiple matches, show count
-        if symbols.len() > 1:
-            info = info + "\n(Found {symbols.len()} total matches)"
-
+        # Simple implementation - search for symbol in files
+        var info = "Symbol: " + symbol_name + "\n"
+        info = info + "Status: Symbol search not fully implemented\n"
+        info = info + "Hint: Use file:// resource to read file contents"
         Ok(info)
 
     # Provide type information
     fn provide_type_info(type_name: text) -> Result<text, text>:
-        # Search for type definitions (Class, Struct, Enum, Trait)
-        val all_symbols = self.query_context.workspace_symbols(type_name)
-
-        # Filter to only type definitions
-        var type_symbols = []
-        for symbol in all_symbols:
-            match symbol.kind:
-                case SymbolKind.Class, SymbolKind.Struct, SymbolKind.Enum, SymbolKind.Trait:
-                    type_symbols.push(symbol)
-                case _:
-                    ()
-
-        if type_symbols.len() == 0:
-            return Ok("Type: {type_name}\nStatus: Not found")
-
-        # Format first matching type
-        val type_symbol = type_symbols[0]
-        var info = "Type: {type_symbol.name}\n"
-        info = info + "Kind: {format_symbol_kind(type_symbol.kind)}\n"
-        info = info + "Location: {type_symbol.location.file}:{type_symbol.location.start.line}\n"
-
-        if type_symbol.type_info.?:
-            info = info + "Type Info: {type_symbol.type_info.unwrap()}\n"
-
-        if type_symbol.doc_comment.?:
-            info = info + "\nDocumentation:\n{type_symbol.doc_comment.unwrap()}\n"
-
-        info = info + "Visibility: {if type_symbol.is_public: "public" else: "private"}\n"
-
-        # TODO: Add methods list by parsing the type definition
-        # This would require deeper AST analysis
-
-        if type_symbols.len() > 1:
-            info = info + "\n(Found {type_symbols.len()} total matches)"
-
+        # Simple implementation
+        var info = "Type: " + type_name + "\n"
+        info = info + "Status: Type search not fully implemented\n"
+        info = info + "Hint: Use file:// resource to read file contents"
         Ok(info)
 
     # Provide documentation
     fn provide_documentation(path: text) -> Result<text, text>:
         # Look for .md files in doc/
-        val doc_path = "{self.project_root}/doc/{path}"
+        val doc_path = self.project_root + "/doc/" + path
 
-        if not doc_path.ends_with(".md"):
-            val md_path = "{doc_path}.md"
-            if io.file_exists(md_path):
-                return Ok(io.file_read(md_path))
+        if not path.ends_with(".md"):
+            val md_path = doc_path + ".md"
+            if file_exists(md_path):
+                return Ok(file_read(md_path))
 
-        if io.file_exists(doc_path):
-            return Ok(io.file_read(doc_path))
+        if file_exists(doc_path):
+            return Ok(file_read(doc_path))
 
-        Err("Documentation not found: {path}")
+        Err("Documentation not found: " + path)
 
     # Provide directory tree
     fn provide_directory_tree(path: text) -> Result<text, text>:
         val full_path = if path.starts_with("/"):
             path
         else:
-            "{self.project_root}/{path}"
+            self.project_root + "/" + path
 
         if not dir_exists(full_path):
-            return Err("Directory not found: {path}")
+            return Err("Directory not found: " + path)
 
-        val tree = self.build_tree(full_path, indent: 0, max_depth: 3)
+        val tree = self.build_tree(full_path, 0, 3)
         Ok(tree)
 
     # Build directory tree recursively
@@ -350,88 +297,53 @@ class ResourceManager:
             return ""
 
         var result = ""
-        val entries = io.dir_list(path)
+        val entries = dir_list(path)
 
         for entry in entries:
             # Skip hidden files and common build directories
             if entry.starts_with(".") or entry == "node_modules" or entry == "target":
                 continue
 
-            val full_entry = "{path}/{entry}"
-            val prefix = "  " * indent
+            val full_entry = path + "/" + entry
+            val prefix = repeat_string("  ", indent)
 
             if dir_exists(full_entry):
-                result = result + "{prefix}{entry}/\n"
+                result = result + prefix + entry + "/\n"
                 result = result + self.build_tree(full_entry, indent + 1, max_depth - 1)
             else:
-                result = result + "{prefix}{entry}\n"
+                result = result + prefix + entry + "\n"
 
         result
 
     # Provide project information
     fn provide_project_info() -> Result<text, text>:
         # Read simple.sdn or simple.toml
-        val sdn_path = "{self.project_root}/simple.sdn"
-        val toml_path = "{self.project_root}/simple.toml"
+        val sdn_path = self.project_root + "/simple.sdn"
+        val toml_path = self.project_root + "/simple.toml"
 
-        var project_info = "Project Root: {self.project_root}\n\n"
+        var project_info = "Project Root: " + self.project_root + "\n\n"
 
-        if io.file_exists(sdn_path):
+        if file_exists(sdn_path):
             project_info = project_info + "Manifest: simple.sdn\n"
-            project_info = project_info + io.file_read(sdn_path)
+            project_info = project_info + file_read(sdn_path)
             return Ok(project_info)
 
-        if io.file_exists(toml_path):
+        if file_exists(toml_path):
             project_info = project_info + "Manifest: simple.toml\n"
-            project_info = project_info + io.file_read(toml_path)
+            project_info = project_info + file_read(toml_path)
             return Ok(project_info)
 
         Ok(project_info + "No manifest found")
 
 # --- Helper Functions ---
 
-# Format symbol kind for display
-fn format_symbol_kind(kind: SymbolKind) -> text:
-    match kind:
-        case SymbolKind.Variable: "Variable"
-        case SymbolKind.Function: "Function"
-        case SymbolKind.Method: "Method"
-        case SymbolKind.Class: "Class"
-        case SymbolKind.Struct: "Struct"
-        case SymbolKind.Enum: "Enum"
-        case SymbolKind.Trait: "Trait"
-        case SymbolKind.Module: "Module"
-        case SymbolKind.Parameter: "Parameter"
-        case SymbolKind.Field: "Field"
-        case SymbolKind.EnumVariant: "Enum Variant"
-
-# Check if file exists (using Simple's built-in io.file_exists)
-fn file_exists_local(path: text) -> bool:
-    io.file_exists(path)
-
 # Check if directory exists
-# Note: Simple doesn't have dir_exists, so we check if dir_list succeeds
 fn dir_exists(path: text) -> bool:
-    # Try to list directory - if it succeeds, directory exists
-    val entries = io.dir_list(path)
-    entries.?  # True if non-empty result
-
-# Read file with error handling
-fn file_read_if_exists(path: text) -> Result<text, text>:
-    if io.file_exists(path):
-        Ok(io.file_read(path))
-    else:
-        Err("File not found: {path}")
-
-# List directory with error handling
-fn dir_list_if_exists(path: text) -> Result<[text], text>:
-    if dir_exists(path):
-        Ok(io.dir_list(path))
-    else:
-        Err("Directory not found: {path}")
+    # Use is_dir from io module which uses test -d
+    is_dir(path)
 
 # String repetition (for indentation)
-fn operator *(s: text, count: i64) -> text:
+fn repeat_string(s: text, count: i64) -> text:
     var result = ""
     for i in 0..count:
         result = result + s

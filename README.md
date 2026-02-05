@@ -31,24 +31,30 @@ A statically typed programming language with Python-like syntax, modern safety f
 ### Installation
 
 ```bash
-# Build from source (using Simple's self-hosting build system)
+# Download release (Pure Simple - no build required)
+wget https://github.com/anthropics/simple/releases/download/v0.4.0/simple-0.4.0-linux-x86_64.tar.gz
+tar -xzf simple-0.4.0-linux-x86_64.tar.gz
+cd simple-0.4.0
+
+# Add to PATH
+export PATH="$PWD/bin:$PATH"
+
+# Verify installation
+simple --version
+```
+
+### From Source (with existing runtime)
+
+```bash
+# If you already have simple_runtime binary
+export PATH="$PWD/bin:$PATH"
 simple build --release
-
-# First-time setup (bootstrap from Rust)
-cd rust && cargo build --release
-
-# Binary location
-./rust/target/release/simple_runtime
-
-# (Optional) Add to PATH
-export PATH="$PWD/bin/wrappers:$PATH"
 ```
 
 ### Build with GPU Support
 
 ```bash
 simple build --release --features=vulkan
-# Or for first-time: cd rust && cargo build --release --features vulkan
 ```
 
 ### Your First Program
@@ -782,53 +788,46 @@ See [doc/spec/README.md](doc/spec/README.md) for the complete specification inde
 
 ```
 simple/
-├── src/                      # Rust compiler implementation
-│   ├── parser/               # Lexer and parser
-│   ├── type/                 # Type checker with Hindley-Milner inference
-│   ├── compiler/             # HIR, MIR, and codegen
-│   │   ├── hir/              # High-level IR (type-checked)
-│   │   ├── mir/              # Mid-level IR (50+ instructions)
-│   │   ├── codegen/          # Cranelift backend
-│   │   └── interpreter/      # Fallback interpreter
-│   ├── loader/               # SMF binary loader
-│   ├── runtime/              # GC and runtime support
-│   │   ├── value/            # Runtime value system
-│   │   └── memory/           # Memory management (GC, no-GC)
-│   └── driver/               # CLI and execution
+├── bin/                      # CLI entry points
+│   ├── simple               # Main CLI (shell wrapper)
+│   ├── simple_runtime       # Runtime binary
+│   └── bootstrap/           # Minimal bootstrap binaries
 │
-├── simple/                   # Simple language workspace
-│   ├── app/                  # Self-hosted applications (formatter, linter, LSP)
-│   ├── std_lib/              # Standard library (written in Simple)
-│   │   ├── src/              # Library source (.spl files)
-│   │   └── test/             # Library tests (unit, system, integration)
-│   └── bin_simple/           # Compiled Simple executables
+├── src/                      # Simple source code (100% Simple)
+│   ├── app/                  # Applications
+│   │   ├── cli/             # Main CLI dispatcher
+│   │   ├── build/           # Self-hosting build system
+│   │   ├── mcp/             # MCP server (Model Context Protocol)
+│   │   ├── lsp/             # Language server protocol
+│   │   ├── io/              # SFFI wrappers (file, process, etc.)
+│   │   └── ...              # 50+ tool modules
+│   ├── lib/                  # Libraries
+│   │   ├── database/        # Unified database (BugDB, TestDB, etc.)
+│   │   └── pure/            # Pure Simple DL (tensor, autograd, nn)
+│   ├── std/                  # Standard library
+│   │   ├── src/             # Library source
+│   │   └── test/            # Library tests
+│   └── compiler/             # Compiler infrastructure
+│       ├── backend/         # Code generation
+│       ├── inference/       # Type inference
+│       └── parser/          # Parser and treesitter
 │
-├── doc/                      # Documentation (349+ files)
-│   ├── spec/                 # Language specifications (50 files)
-│   │   ├── README.md         # Comprehensive spec index
-│   │   ├── parser/           # Grammar documentation (6 files)
-│   │   ├── testing/          # Test framework specs (6 files)
-│   │   ├── tooling/          # Development tool specs (5 files)
-│   │   ├── gpu_simd/         # GPU & SIMD specs (13 files)
-│   │   └── graphics_3d/      # 3D graphics specs
-│   ├── guides/               # Practical how-to guides (15 files)
-│   │   └── README.md         # Guide index by purpose
-│   ├── plans/                # Implementation roadmap (55 files)
-│   │   └── README.md         # Plan index with status
-│   ├── research/             # Design explorations (43 files)
-│   │   └── README.md         # Research index by topic
-│   ├── architecture/         # System design principles
-│   ├── features/             # Feature catalog and history
-│   ├── status/               # Implementation tracking (69 files)
-│   └── report/               # Session reports and summaries
+├── examples/                 # Example programs
+│   ├── pure_nn/             # Deep learning examples
+│   └── gpu/vulkan/          # GPU computing examples
 │
-├── verification/             # Lean 4 formal verification
-│   ├── memory_model_drf/     # SC-DRF memory model
-│   └── memory_capabilities/  # Reference capability verification
+├── test/                     # Test suites
+│   ├── integration/         # Integration tests
+│   ├── system/              # System tests
+│   └── intensive/           # Intensive feature tests
 │
-├── tests/                    # Integration and system tests
-└── examples/                 # Example programs
-    └── gpu/vulkan/           # GPU computing examples
+├── doc/                      # Documentation
+│   ├── spec/                # Language specifications
+│   ├── guide/               # User guides
+│   ├── design/              # Design documents
+│   └── report/              # Session reports
+│
+└── verification/             # Lean 4 formal verification
 ```
 
 ---
@@ -847,26 +846,23 @@ simple build --release
 # With GPU support
 simple build --release --features=vulkan
 
-# Run all Rust tests
-simple build rust test
-
-# Run stdlib tests
-simple build rust test -p simple-driver simple_stdlib
+# Bootstrap build (minimal 9.3MB)
+simple build --bootstrap
 ```
 
 ### Testing
 
-Simple uses a comprehensive test strategy with multiple levels:
+Simple uses a comprehensive test strategy:
 
 ```bash
-# All tests (Rust + Simple)
-simple build test
+# All tests
+simple test
 
-# Rust tests only
-simple build rust test
+# Run specific test file
+simple test path/to/spec.spl
 
-# Rust doc-tests
-simple build rust test --doc
+# With verbose output
+simple test --verbose
 
 # Coverage reports
 simple build coverage
