@@ -1,0 +1,264 @@
+# Optimization Passes Test Suite
+#
+# Tests for real optimization logic implemented in Simple.
+
+use optimization_passes.*
+use mir_data.*
+
+feature "Constant Folding":
+    spec "folds integer addition":
+        val engine = OptimizationEngine.create(OptimizationLevel.Basic)
+
+        # 2 + 3 should fold to 5
+        val left = MirOperand.const_int(2)
+        val right = MirOperand.const_int(3)
+        val result = engine.try_fold_binop(MirBinOp.Add, left, right)
+
+        assert result.?
+        match result.unwrap():
+            case Int(5): assert true
+            case _: assert false, "Expected Int(5)"
+
+    spec "folds integer multiplication":
+        val engine = OptimizationEngine.create(OptimizationLevel.Basic)
+
+        # 6 * 7 should fold to 42
+        val left = MirOperand.const_int(6)
+        val right = MirOperand.const_int(7)
+        val result = engine.try_fold_binop(MirBinOp.Mul, left, right)
+
+        assert result.?
+        match result.unwrap():
+            case Int(42): assert true
+            case _: assert false
+
+    spec "folds float operations":
+        val engine = OptimizationEngine.create(OptimizationLevel.Basic)
+
+        # 3.14 * 2.0 should fold to 6.28
+        val left = MirOperand.const_float(3.14)
+        val right = MirOperand.const_float(2.0)
+        val result = engine.try_fold_binop(MirBinOp.Mul, left, right)
+
+        assert result.?
+        # Check approximate equality for floats
+        match result.unwrap():
+            case Float(f):
+                assert f > 6.27 and f < 6.29
+            case _:
+                assert false
+
+feature "Algebraic Simplifications":
+    spec "eliminates addition by zero":
+        val engine = OptimizationEngine.create(OptimizationLevel.Standard)
+
+        # x + 0 should become just x
+        val x = LocalId(id: 1)
+        val x_operand = MirOperand.copy(x)
+        val zero = MirOperand.const_int(0)
+        val dest = LocalId(id: 2)
+
+        val result = engine.simplify_binop(dest, MirBinOp.Add, x_operand, zero, nil)
+
+        assert result.?
+        match result.unwrap().kind:
+            case Copy(d, s):
+                assert d.id == 2
+                assert s.id == 1
+            case _:
+                assert false, "Expected Copy instruction"
+
+    spec "eliminates multiplication by one":
+        val engine = OptimizationEngine.create(OptimizationLevel.Standard)
+
+        # x * 1 should become just x
+        val x = LocalId(id: 1)
+        val x_operand = MirOperand.copy(x)
+        val one = MirOperand.const_int(1)
+        val dest = LocalId(id: 2)
+
+        val result = engine.simplify_binop(dest, MirBinOp.Mul, x_operand, one, nil)
+
+        assert result.?
+        match result.unwrap().kind:
+            case Copy(_, _): assert true
+            case _: assert false
+
+    spec "eliminates multiplication by zero":
+        val engine = OptimizationEngine.create(OptimizationLevel.Standard)
+        engine.type_map[2] = MirType.i64()
+
+        # x * 0 should become 0
+        val x = LocalId(id: 1)
+        val x_operand = MirOperand.copy(x)
+        val zero = MirOperand.const_int(0)
+        val dest = LocalId(id: 2)
+
+        val result = engine.simplify_binop(dest, MirBinOp.Mul, x_operand, zero, nil)
+
+        assert result.?
+        match result.unwrap().kind:
+            case Const(_, Int(0), _): assert true
+            case _: assert false, "Expected Const(0)"
+
+    spec "eliminates shift by zero":
+        val engine = OptimizationEngine.create(OptimizationLevel.Standard)
+
+        # x << 0 should become x
+        val x = LocalId(id: 1)
+        val x_operand = MirOperand.copy(x)
+        val zero = MirOperand.const_int(0)
+        val dest = LocalId(id: 2)
+
+        val result = engine.simplify_binop(dest, MirBinOp.Shl, x_operand, zero, nil)
+
+        assert result.?
+        match result.unwrap().kind:
+            case Copy(_, _): assert true
+            case _: assert false
+
+feature "Strength Reduction":
+    spec "reduces multiply by 2 to shift":
+        val engine = OptimizationEngine.create(OptimizationLevel.Standard)
+
+        # x * 2 should become x << 1
+        val x = LocalId(id: 1)
+        val x_operand = MirOperand.copy(x)
+        val two = MirOperand.const_int(2)
+        val dest = LocalId(id: 2)
+
+        val result = engine.strength_reduce_binop(dest, MirBinOp.Mul, x_operand, two, nil)
+
+        assert result.?
+        match result.unwrap().kind:
+            case BinOp(_, Shl, _, shift_amt):
+                # Should shift by 1
+                match shift_amt.kind:
+                    case Const(Int(1), _): assert true
+                    case _: assert false
+            case _:
+                assert false, "Expected shift instruction"
+
+    spec "reduces multiply by 4 to shift by 2":
+        val engine = OptimizationEngine.create(OptimizationLevel.Standard)
+
+        # x * 4 should become x << 2
+        val x = LocalId(id: 1)
+        val x_operand = MirOperand.copy(x)
+        val four = MirOperand.const_int(4)
+        val dest = LocalId(id: 2)
+
+        val result = engine.strength_reduce_binop(dest, MirBinOp.Mul, x_operand, four, nil)
+
+        assert result.?
+        match result.unwrap().kind:
+            case BinOp(_, Shl, _, shift_amt):
+                match shift_amt.kind:
+                    case Const(Int(2), _): assert true
+                    case _: assert false
+            case _:
+                assert false
+
+    spec "does not reduce non-power-of-2":
+        val engine = OptimizationEngine.create(OptimizationLevel.Standard)
+
+        # x * 3 should NOT be strength reduced (not power of 2)
+        val x = LocalId(id: 1)
+        val x_operand = MirOperand.copy(x)
+        val three = MirOperand.const_int(3)
+        val dest = LocalId(id: 2)
+
+        val result = engine.strength_reduce_binop(dest, MirBinOp.Mul, x_operand, three, nil)
+
+        assert not result.?  # No optimization applied
+
+feature "Helper Functions":
+    spec "log2_if_power_of_2 works correctly":
+        val engine = OptimizationEngine.create(OptimizationLevel.Basic)
+
+        assert engine.log2_if_power_of_2(1) == Some(0)
+        assert engine.log2_if_power_of_2(2) == Some(1)
+        assert engine.log2_if_power_of_2(4) == Some(2)
+        assert engine.log2_if_power_of_2(8) == Some(3)
+        assert engine.log2_if_power_of_2(16) == Some(4)
+        assert engine.log2_if_power_of_2(1024) == Some(10)
+
+        # Non-powers of 2
+        assert not engine.log2_if_power_of_2(3).?
+        assert not engine.log2_if_power_of_2(5).?
+        assert not engine.log2_if_power_of_2(6).?
+        assert not engine.log2_if_power_of_2(7).?
+        assert not engine.log2_if_power_of_2(0).?
+        assert not engine.log2_if_power_of_2(-1).?
+
+    spec "is_zero works correctly":
+        val engine = OptimizationEngine.create(OptimizationLevel.Basic)
+
+        assert engine.is_zero(MirConstValue.Int(0))
+        assert not engine.is_zero(MirConstValue.Int(1))
+        assert engine.is_zero(MirConstValue.Float(0.0))
+        assert not engine.is_zero(MirConstValue.Float(1.0))
+
+    spec "is_one works correctly":
+        val engine = OptimizationEngine.create(OptimizationLevel.Basic)
+
+        assert engine.is_one(MirConstValue.Int(1))
+        assert not engine.is_one(MirConstValue.Int(0))
+        assert engine.is_one(MirConstValue.Float(1.0))
+        assert not engine.is_one(MirConstValue.Float(0.0))
+
+feature "Optimization Stats":
+    spec "tracks constant folding":
+        val engine = OptimizationEngine.create(OptimizationLevel.Basic)
+
+        # Fold some constants
+        val left = MirOperand.const_int(2)
+        val right = MirOperand.const_int(3)
+        engine.try_fold_binop(MirBinOp.Add, left, right)
+
+        # Stats should not be updated by try_fold (only by optimize_binop)
+        # But we can test that the stats structure works
+        assert engine.stats.total() >= 0
+
+    spec "formats stats nicely":
+        val stats = OptimizationStats.create()
+        val text = stats.to_text()
+
+        # Should contain key headers
+        assert text.contains("Optimization Statistics")
+        assert text.contains("Constant Optimizations")
+        assert text.contains("Algebraic Optimizations")
+
+feature "Optimization Levels":
+    spec "level none skips optimizations":
+        val engine = OptimizationEngine.create(OptimizationLevel.None)
+
+        # Create a simple function
+        val func = MirFunction(
+            symbol: SymbolId(id: 0),
+            name: "test",
+            signature: MirSignature(params: [], return_type: MirType.i64(), is_variadic: false),
+            locals: [],
+            blocks: [],
+            entry_block: BlockId(id: 0),
+            span: nil,
+            generic_params: [],
+            is_generic_template: false,
+            specialization_of: nil,
+            type_bindings: {}
+        )
+
+        val result = engine.optimize_function(func)
+
+        # Should return unchanged
+        assert result.name == "test"
+
+    spec "level basic applies constant folding":
+        val engine = OptimizationEngine.create(OptimizationLevel.Basic)
+
+        # Basic level should do constant folding
+        val left = MirOperand.const_int(2)
+        val right = MirOperand.const_int(3)
+        val result = engine.try_fold_binop(MirBinOp.Add, left, right)
+
+        assert result.?

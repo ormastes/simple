@@ -1,0 +1,429 @@
+# EasyFix Report
+#
+# Machine-applicable fix suggestions integrated with the unified reporting system.
+# Provides EasyFixReport class and adapters for legacy EasyFix types.
+
+import ..level
+import ..location
+import ..report
+
+export EasyFixReport, Replacement, FixApplicator, FixResult
+
+# =============================================================================
+# Replacement: A single text substitution
+# =============================================================================
+
+class Replacement:
+    file: text
+    span: Span              # Byte range to replace
+    line: i64               # Line number (for display)
+    column: i64             # Column number (for display)
+    new_text: text          # Replacement text
+
+impl Replacement:
+    # Create a replacement at a specific location
+    static fn at(file: text, start: i64, end: i64, line: i64, column: i64, new_text: text) -> Replacement:
+        Replacement(
+            file: file,
+            span: Span.from_range(start, end),
+            line: line,
+            column: column,
+            new_text: new_text
+        )
+
+    # Create a replacement from a SourceLocation
+    static fn from_location(location: SourceLocation, new_text: text) -> Replacement:
+        Replacement(
+            file: location.file,
+            span: location.span,
+            line: location.line,
+            column: location.column,
+            new_text: new_text
+        )
+
+    # Create an insertion (zero-length span)
+    static fn insert_at(file: text, pos: i64, line: i64, column: i64, new_text: text) -> Replacement:
+        Replacement(
+            file: file,
+            span: Span.at(pos),
+            line: line,
+            column: column,
+            new_text: new_text
+        )
+
+    # Create a deletion (empty new_text)
+    static fn delete_at(file: text, start: i64, end: i64, line: i64, column: i64) -> Replacement:
+        Replacement(
+            file: file,
+            span: Span.from_range(start, end),
+            line: line,
+            column: column,
+            new_text: ""
+        )
+
+    # Get the start byte position
+    fn start() -> i64:
+        self.span.start
+
+    # Get the end byte position
+    fn end() -> i64:
+        self.span.end
+
+    # Check if this is an insertion (zero-length span)
+    fn is_insertion() -> bool:
+        self.span.is_empty()
+
+    # Check if this is a deletion (empty new_text)
+    fn is_deletion() -> bool:
+        self.new_text.is_empty() and not self.span.is_empty()
+
+    # Check if this replacement overlaps with another
+    fn overlaps(other: Replacement) -> bool:
+        self.file == other.file and self.span.overlaps(other.span)
+
+    # Format for display
+    fn format() -> text:
+        "{self.file}:{self.line}:{self.column} [{self.span.start}..{self.span.end}] -> \"{self.new_text}\""
+
+    # Convert to SourceLocation
+    fn to_location() -> SourceLocation:
+        SourceLocation.from_span(
+            self.file,
+            self.span,
+            self.line,
+            self.column,
+            0,
+            0
+        )
+
+# =============================================================================
+# EasyFixReport: Machine-applicable fix integrated with Report
+# =============================================================================
+
+class EasyFixReport:
+    # Unique identifier for this fix (e.g., "L:print_in_test_spec:42")
+    id: text
+
+    # Human-readable description
+    description: text
+
+    # The replacements to apply
+    replacements: [Replacement]
+
+    # Confidence level
+    confidence: FixConfidence
+
+    # Associated report (optional - the diagnostic that triggered this fix)
+    associated_report: Report?
+
+impl EasyFixReport:
+    # Create a new EasyFixReport
+    static fn create(id: text, description: text, confidence: FixConfidence) -> EasyFixReport:
+        EasyFixReport(
+            id: id,
+            description: description,
+            replacements: [],
+            confidence: confidence,
+            associated_report: None
+        )
+
+    # Create with MachineApplicable confidence (safe to auto-apply)
+    static fn safe(id: text, description: text) -> EasyFixReport:
+        EasyFixReport.create(id, description, FixConfidence.MachineApplicable)
+
+    # Create with MaybeIncorrect confidence
+    static fn likely(id: text, description: text) -> EasyFixReport:
+        EasyFixReport.create(id, description, FixConfidence.MaybeIncorrect)
+
+    # Create with Unspecified confidence
+    static fn uncertain(id: text, description: text) -> EasyFixReport:
+        EasyFixReport.create(id, description, FixConfidence.Unspecified)
+
+    # ==========================================================================
+    # Builder methods
+    # ==========================================================================
+
+    fn with_replacement(replacement: Replacement) -> EasyFixReport:
+        EasyFixReport(
+            id: self.id,
+            description: self.description,
+            replacements: self.replacements + [replacement],
+            confidence: self.confidence,
+            associated_report: self.associated_report
+        )
+
+    fn with_replacements(replacements: [Replacement]) -> EasyFixReport:
+        EasyFixReport(
+            id: self.id,
+            description: self.description,
+            replacements: self.replacements + replacements,
+            confidence: self.confidence,
+            associated_report: self.associated_report
+        )
+
+    fn with_report(report: Report) -> EasyFixReport:
+        EasyFixReport(
+            id: self.id,
+            description: self.description,
+            replacements: self.replacements,
+            confidence: self.confidence,
+            associated_report: Some(report)
+        )
+
+    fn with_confidence(confidence: FixConfidence) -> EasyFixReport:
+        EasyFixReport(
+            id: self.id,
+            description: self.description,
+            replacements: self.replacements,
+            confidence: confidence,
+            associated_report: self.associated_report
+        )
+
+    # ==========================================================================
+    # Mutable methods
+    # ==========================================================================
+
+    me add_replacement(replacement: Replacement):
+        self.replacements.push(replacement)
+
+    me add_replacement_at(file: text, start: i64, end: i64, line: i64, column: i64, new_text: text):
+        self.replacements.push(Replacement.at(file, start, end, line, column, new_text))
+
+    # ==========================================================================
+    # Accessors
+    # ==========================================================================
+
+    fn is_safe() -> bool:
+        self.confidence.is_safe_to_auto_apply()
+
+    fn is_likely() -> bool:
+        self.confidence.is_likely_correct()
+
+    fn has_replacements() -> bool:
+        not self.replacements.is_empty()
+
+    fn replacement_count() -> i64:
+        self.replacements.len()
+
+    fn files_affected() -> [text]:
+        var files: [text] = []
+        for rep in self.replacements:
+            if not files.contains(rep.file):
+                files.push(rep.file)
+        files
+
+    # Get the primary location (first replacement's location)
+    fn primary_location() -> SourceLocation?:
+        if self.replacements.is_empty():
+            None
+        else:
+            Some(self.replacements[0].to_location())
+
+    # ==========================================================================
+    # Conversion to Report
+    # ==========================================================================
+
+    fn to_report() -> Report:
+        var report = Report.info(self.description)
+            .with_code(self.id)
+            .with_kind(ReportKind.FixSuggestion)
+
+        # Add primary location if available
+        if self.primary_location().?:
+            report = report.with_location(self.primary_location().unwrap())
+
+        # Convert replacements to suggestions
+        for rep in self.replacements:
+            val suggestion = Suggestion.with_confidence(
+                rep.to_location(),
+                rep.new_text,
+                "Replace with: {rep.new_text}",
+                self.confidence
+            )
+            report = report.with_suggestion(suggestion)
+
+        report
+
+    # ==========================================================================
+    # Formatting
+    # ==========================================================================
+
+    fn format() -> text:
+        val header = "[{self.id}] {self.description} (confidence: {self.confidence.name()})"
+        var parts = [header]
+        for rep in self.replacements:
+            parts.push("  " + rep.format())
+        parts.join("\n")
+
+    fn format_short() -> text:
+        "[{self.id}] {self.description}"
+
+# =============================================================================
+# FixResult: Result of applying fixes
+# =============================================================================
+
+class FixResult:
+    applied: i64
+    skipped: i64
+    failed: i64
+    modified_files: [text]
+    details: [text]
+    errors: [text]
+
+impl FixResult:
+    static fn empty() -> FixResult:
+        FixResult(
+            applied: 0,
+            skipped: 0,
+            failed: 0,
+            modified_files: [],
+            details: [],
+            errors: []
+        )
+
+    me record_applied(fix: EasyFixReport):
+        self.applied = self.applied + 1
+        self.details.push("Applied: {fix.format_short()}")
+        for file in fix.files_affected():
+            if not self.modified_files.contains(file):
+                self.modified_files.push(file)
+
+    me record_skipped(fix: EasyFixReport, reason: text):
+        self.skipped = self.skipped + 1
+        self.details.push("Skipped: {fix.format_short()} - {reason}")
+
+    me record_failed(fix: EasyFixReport, error: text):
+        self.failed = self.failed + 1
+        self.errors.push("Failed: {fix.format_short()} - {error}")
+
+    fn is_success() -> bool:
+        self.failed == 0
+
+    fn total_processed() -> i64:
+        self.applied + self.skipped + self.failed
+
+    fn format(dry_run: bool) -> text:
+        val prefix = if dry_run: "Would apply" else: "Applied"
+        var parts: [text] = []
+
+        parts.push("{prefix} {self.applied} fix(es)")
+
+        if self.skipped > 0:
+            parts.push("Skipped {self.skipped} fix(es)")
+
+        if self.failed > 0:
+            parts.push("Failed {self.failed} fix(es)")
+
+        for detail in self.details:
+            parts.push("  " + detail)
+
+        if not self.modified_files.is_empty():
+            val verb = if dry_run: "Would modify" else: "Modified"
+            parts.push("{verb} {self.modified_files.len()} file(s):")
+            for file in self.modified_files:
+                parts.push("  " + file)
+
+        for error in self.errors:
+            parts.push("  ERROR: " + error)
+
+        parts.join("\n")
+
+# =============================================================================
+# FixApplicator: Applies fixes to source code
+# =============================================================================
+
+class FixApplicator:
+    sources: Dict<text, text>
+
+impl FixApplicator:
+    static fn with_sources(sources: Dict<text, text>) -> FixApplicator:
+        FixApplicator(sources: sources)
+
+    static fn empty() -> FixApplicator:
+        FixApplicator(sources: {})
+
+    me add_source(path: text, content: text):
+        self.sources[path] = content
+
+    # Apply a single fix
+    fn apply_fix(fix: EasyFixReport) -> Result<Dict<text, text>, text>:
+        self.apply_fixes([fix])
+
+    # Apply multiple fixes
+    fn apply_fixes(fixes: [EasyFixReport]) -> Result<Dict<text, text>, text>:
+        # Collect all replacements grouped by file
+        var by_file: Dict<text, [Replacement]> = {}
+
+        for fix in fixes:
+            for rep in fix.replacements:
+                if not by_file.has(rep.file):
+                    by_file[rep.file] = []
+                by_file[rep.file].push(rep)
+
+        var results: Dict<text, text> = {}
+
+        for file in by_file.keys():
+            if not self.sources.has(file):
+                return Err("File not found in sources: {file}")
+
+            val source = self.sources[file]
+            var replacements = by_file[file]
+
+            # Sort by start position descending (apply from end to avoid offset shifts)
+            replacements = self.sort_replacements_descending(replacements)
+
+            # Check for overlapping spans
+            val overlap_error = self.check_overlaps(replacements, file)
+            if overlap_error.?:
+                return Err(overlap_error.unwrap())
+
+            # Apply replacements from end to start
+            var new_source = source
+            for rep in replacements:
+                if rep.start() >= 0 and rep.end() <= new_source.len():
+                    new_source = new_source.slice(0, rep.start()) + rep.new_text + new_source.slice(rep.end())
+
+            results[file] = new_source
+
+        Ok(results)
+
+    # Sort replacements by start position (descending)
+    fn sort_replacements_descending(replacements: [Replacement]) -> [Replacement]:
+        var sorted = replacements
+        var i = 0
+        while i < sorted.len():
+            var j = i + 1
+            while j < sorted.len():
+                if sorted[i].start() < sorted[j].start():
+                    val temp = sorted[i]
+                    sorted[i] = sorted[j]
+                    sorted[j] = temp
+                j = j + 1
+            i = i + 1
+        sorted
+
+    # Check for overlapping replacements
+    fn check_overlaps(replacements: [Replacement], file: text) -> text?:
+        var i = 0
+        while i < replacements.len() - 1:
+            val curr = replacements[i]
+            val next = replacements[i + 1]
+            # curr.start >= next.start (sorted descending)
+            if next.end() > curr.start():
+                return Some("Conflicting replacements in {file}: spans [{next.start()}..{next.end()}] and [{curr.start()}..{curr.end()}] overlap")
+            i = i + 1
+        None
+
+    # Filter fixes by confidence level
+    static fn filter_by_confidence(fixes: [EasyFixReport], min_confidence: FixConfidence) -> [EasyFixReport]:
+        match min_confidence:
+            case FixConfidence.MachineApplicable:
+                fixes.filter(\f: f.is_safe())
+            case FixConfidence.MaybeIncorrect:
+                fixes.filter(\f: f.is_likely())
+            case _:
+                fixes
+
+    # Filter fixes by ID prefix
+    static fn filter_by_id(fixes: [EasyFixReport], id_prefix: text) -> [EasyFixReport]:
+        fixes.filter(\f: f.id.starts_with(id_prefix))

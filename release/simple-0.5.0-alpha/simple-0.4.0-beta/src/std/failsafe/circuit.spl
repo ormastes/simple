@@ -1,0 +1,222 @@
+# Fail-Safe Circuit Breaker
+# Pure Simple implementation - no FFI dependencies
+
+use core.*
+use std.failsafe.core.*
+
+# ============================================================================
+# CIRCUIT STATE
+# ============================================================================
+
+pub enum CircuitState:
+    Closed
+    Open
+    HalfOpen
+
+    pub fn to_string() -> text:
+        match self:
+            case Closed: "closed"
+            case Open: "open"
+            case HalfOpen: "half_open"
+
+# ============================================================================
+# CIRCUIT BREAKER CONFIG
+# ============================================================================
+
+pub class CircuitBreakerConfig:
+    pub failure_threshold: i64
+    pub success_threshold: i64
+    pub half_open_max_requests: i64
+
+    static fn default() -> CircuitBreakerConfig:
+        return CircuitBreakerConfig(5, 3, 3)
+
+    static fn strict() -> CircuitBreakerConfig:
+        return CircuitBreakerConfig(3, 5, 1)
+
+    static fn permissive() -> CircuitBreakerConfig:
+        return CircuitBreakerConfig(10, 2, 5)
+
+# ============================================================================
+# CIRCUIT BREAKER
+# ============================================================================
+
+pub class CircuitBreaker:
+    pub name: text
+    pub config: CircuitBreakerConfig
+    pub state: CircuitState
+    pub failure_count: i64
+    pub success_count: i64
+    pub half_open_requests: i64
+    pub stats: CircuitBreakerStats
+
+    static fn new(name: text, config: CircuitBreakerConfig) -> CircuitBreaker:
+        return CircuitBreaker(
+            name,
+            config,
+            CircuitState.Closed,
+            0,
+            0,
+            0,
+            CircuitBreakerStats.new()
+        )
+
+    static fn default(name: text) -> CircuitBreaker:
+        return CircuitBreaker.new(name, CircuitBreakerConfig.default())
+
+    pub me allow_request() -> bool:
+        match self.state:
+            case CircuitState.Closed:
+                return true
+            case CircuitState.Open:
+                # Transition to half-open for testing
+                self.state = CircuitState.HalfOpen
+                self.half_open_requests = 1
+                self.stats.half_open_count = self.stats.half_open_count + 1
+                return true
+            case CircuitState.HalfOpen:
+                if self.half_open_requests < self.config.half_open_max_requests:
+                    self.half_open_requests = self.half_open_requests + 1
+                    return true
+                return false
+
+    pub me record_success():
+        self.stats.success_count = self.stats.success_count + 1
+
+        match self.state:
+            case CircuitState.Closed:
+                self.failure_count = 0
+            case CircuitState.HalfOpen:
+                self.success_count = self.success_count + 1
+                if self.success_count >= self.config.success_threshold:
+                    self.transition_to_closed()
+            case CircuitState.Open:
+                pass
+
+    pub me record_failure():
+        self.stats.failure_count = self.stats.failure_count + 1
+
+        match self.state:
+            case CircuitState.Closed:
+                self.failure_count = self.failure_count + 1
+                if self.failure_count >= self.config.failure_threshold:
+                    self.transition_to_open()
+            case CircuitState.HalfOpen:
+                self.transition_to_open()
+            case CircuitState.Open:
+                pass
+
+    me transition_to_open():
+        self.state = CircuitState.Open
+        self.stats.open_count = self.stats.open_count + 1
+
+    me transition_to_closed():
+        self.state = CircuitState.Closed
+        self.failure_count = 0
+        self.success_count = 0
+        self.stats.close_count = self.stats.close_count + 1
+
+    pub me reset():
+        self.state = CircuitState.Closed
+        self.failure_count = 0
+        self.success_count = 0
+        self.half_open_requests = 0
+
+    pub me force_open():
+        self.state = CircuitState.Open
+        self.stats.open_count = self.stats.open_count + 1
+
+    pub fn is_open() -> bool:
+        return self.state == CircuitState.Open
+
+# ============================================================================
+# CIRCUIT BREAKER STATS
+# ============================================================================
+
+pub class CircuitBreakerStats:
+    pub success_count: i64
+    pub failure_count: i64
+    pub rejected_count: i64
+    pub open_count: i64
+    pub half_open_count: i64
+    pub close_count: i64
+
+    static fn new() -> CircuitBreakerStats:
+        return CircuitBreakerStats(0, 0, 0, 0, 0, 0)
+
+    pub fn total_requests() -> i64:
+        return self.success_count + self.failure_count
+
+    pub fn failure_rate() -> f64:
+        val total = self.total_requests()
+        if total == 0:
+            return 0.0
+        return self.failure_count as f64 / total as f64
+
+    pub fn success_rate() -> f64:
+        return 1.0 - self.failure_rate()
+
+# ============================================================================
+# EXECUTE WITH CIRCUIT BREAKER
+# ============================================================================
+
+pub fn execute_with_circuit_breaker<T>(
+    breaker: CircuitBreaker,
+    operation: fn() -> FailSafeResult<T>
+) -> FailSafeResult<T>:
+    if not breaker.allow_request():
+        breaker.stats.rejected_count = breaker.stats.rejected_count + 1
+        return FailSafeResult.Err(
+            FailSafeError.new(ErrorCategory.RateLimit, "Circuit breaker open")
+                .with_retry(1000)
+        )
+
+    match operation():
+        case FailSafeResult.Ok(v):
+            breaker.record_success()
+            return FailSafeResult.Ok(v)
+        case FailSafeResult.Err(e):
+            breaker.record_failure()
+            return FailSafeResult.Err(e)
+
+pub fn execute_with_fallback<T>(
+    breaker: CircuitBreaker,
+    operation: fn() -> FailSafeResult<T>,
+    fallback: fn() -> FailSafeResult<T>
+) -> FailSafeResult<T>:
+    if not breaker.allow_request():
+        breaker.stats.rejected_count = breaker.stats.rejected_count + 1
+        return fallback()
+
+    match operation():
+        case FailSafeResult.Ok(v):
+            breaker.record_success()
+            return FailSafeResult.Ok(v)
+        case FailSafeResult.Err(_):
+            breaker.record_failure()
+            return fallback()
+
+# ============================================================================
+# CIRCUIT BREAKER REGISTRY
+# ============================================================================
+
+pub class CircuitBreakerRegistry:
+    pub breakers: Dict<text, CircuitBreaker>
+    pub default_config: CircuitBreakerConfig
+
+    static fn new() -> CircuitBreakerRegistry:
+        return CircuitBreakerRegistry({}, CircuitBreakerConfig.default())
+
+    pub me get(name: text) -> CircuitBreaker:
+        match self.breakers.get(name):
+            case Some(b): return b
+            case nil:
+                val breaker = CircuitBreaker.new(name, self.default_config)
+                self.breakers.set(name, breaker)
+                return breaker
+
+    pub me reset_all():
+        for name in self.breakers.keys():
+            match self.breakers.get(name):
+                case Some(b): b.reset()
+                case nil: pass

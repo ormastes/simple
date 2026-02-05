@@ -1,0 +1,279 @@
+# @pending
+"""
+# Optional Chaining Specification
+
+**Feature IDs:** #OPERATORS-OPTIONAL-CHAIN
+**Category:** Syntax
+**Status:** Implemented
+
+Optional chaining (`?.`) provides safe navigation through potentially-nil
+values in object graphs and method call chains. It automatically propagates
+None values through the chain without requiring manual null checks at each step.
+
+## Syntax
+
+```simple
+obj?.field               # Safe field access - returns Option
+obj?.method()            # Safe method call - returns Option
+obj?.field?.nested?.deep # Safe chaining - short-circuits on None
+```
+
+## Key Behaviors
+
+- Optional chaining returns Option<T> for chained operations
+- Returns None immediately if any intermediate value is None
+- Prevents null pointer exceptions and NullPointerException-style errors
+- Works with both field access and method calls
+- Can be chained multiple times
+- Integrates with null coalescing (`??`) for fallback values
+"""
+
+
+
+describe "Optional Chaining":
+    """
+    Verifies that optional chaining operator (`?.`) safely navigates object
+    graphs and method chains. Tests cover field access, method calls, chaining
+    multiple operations, and integration with null coalescing.
+    """
+
+    context "optional field access":
+        it "returns Some when value is present":
+            class Profile:
+                bio: text
+
+            class User:
+                name: text
+                profile: Option<Profile>
+
+            val profile_obj = Profile(bio: "Hello")
+            val user = User(name: "Alice", profile: Some(profile_obj))
+            val result = user.profile?.bio
+            expect result == Some("Hello")
+
+        it "returns None when intermediate value is None":
+            class Profile:
+                bio: text
+
+            class User:
+                name: text
+                profile: Option<Profile>
+
+            val user = User(name: "Bob", profile: None)
+            val result = user.profile?.bio
+            expect result == None
+
+        it "works with deeply nested structures":
+            class Address:
+                city: text
+
+            class Profile:
+                address: Option<Address>
+
+            class User:
+                profile: Option<Profile>
+
+            val user = User(profile: Some(Profile(address: Some(Address(city: "NYC")))))
+            # Access profile through optional chaining
+            val profile_opt = user.profile
+            expect profile_opt != None
+
+        it "short-circuits on first None in chain":
+            class Address:
+                city: text
+
+            class Profile:
+                address: Option<Address>
+
+            class User:
+                profile: Option<Profile>
+
+            val user = User(profile: None)
+            val result = user.profile?.address?.city
+            # Returns None at first None, doesn't try deeper access
+            expect result == None
+
+    context "optional method calls":
+        it "calls method when value is Some":
+            class Container:
+                value: i64
+
+                fn get_doubled(): self.value * 2
+
+            val opt = Some(Container(value: 21))
+            val result = opt?.get_doubled()
+            expect result == Some(42)
+
+        it "returns None when Option is None":
+            class Container:
+                value: i64
+
+                fn get_doubled(): self.value * 2
+
+            val opt: Option<Container> = None
+            val result = opt?.get_doubled()
+            expect result == None
+
+        it "works with chained method calls":
+            class Wrapper:
+                value: i64
+
+                fn increment(): Wrapper(value: self.value + 1)
+
+            val wrapped = Wrapper(value: 1)
+            val opt = Some(wrapped)
+            val result = opt?.increment()?.increment()
+            # Each ? check wraps result in Option
+            expect result == Some(Wrapper(value: 3))
+
+        it "handles methods with parameters":
+            class Calculator:
+                value: i64
+
+                fn add(x: i64): self.value + x
+
+            val calc_opt = Some(Calculator(value: 10))
+            val result = calc_opt?.add(5)
+            expect result == Some(15)
+
+    context "chaining field and method access":
+        it "combines field and method access":
+            class Data:
+                count: i64
+
+                fn double_count(): self.count * 2
+
+            class Container:
+                data: Option<Data>
+
+            val container = Container(data: Some(Data(count: 5)))
+            val result = container.data?.double_count()
+            expect result == Some(10)
+
+        it "chains field access followed by field access":
+            class Inner:
+                name: text
+
+            class Middle:
+                inner: Option<Inner>
+
+            class Outer:
+                middle: Middle
+
+            val outer = Outer(middle: Middle(inner: Some(Inner(name: "test"))))
+            val result = outer.middle.inner?.name
+            expect result == Some("test")
+
+    context "with null coalescing operator":
+        it "provides fallback when chaining returns None":
+            class Profile:
+                bio: text
+
+            class User:
+                profile: Option<Profile>
+
+            val user: User = User(profile: None)
+            val result = user.profile?.bio ?? "No bio"
+            # Optional chaining returns None, ?? provides fallback
+            expect result == "No bio"
+
+        it "uses actual value when chaining succeeds":
+            class Profile:
+                bio: text
+
+            class User:
+                profile: Option<Profile>
+
+            val user = User(profile: Some(Profile(bio: "Developer")))
+            val result = user.profile?.bio ?? "No bio"
+            expect result == "Developer"
+
+        it "chains multiple fallbacks":
+            class Settings:
+                theme: Option<text>
+
+            class User:
+                settings: Option<Settings>
+
+            val user = User(settings: None)
+            val result = user.settings?.theme ?? "dark"
+            expect result == "dark"
+
+    context "type preservation":
+        it "wraps return value in Option":
+            class Service:
+                fn status() -> i64: 200
+
+            val service_opt = Some(Service())
+            val result = service_opt?.status()
+            # Result is Option<i64>, not i64
+            expect result == Some(200)
+
+        it "preserves complex types through chaining":
+            class DataContainer:
+                items: List<i64>
+
+                fn get_items(): self.items
+
+            val container_opt = Some(DataContainer(items: [1, 2, 3]))
+            val result = container_opt?.get_items()
+            expect result == Some([1, 2, 3])
+
+    context "integration with other features":
+        it "works with collection methods":
+            class Item:
+                name: text
+
+            class Inventory:
+                items: List<Item>
+
+                fn find_item(name: text) -> Option<Item>:
+                    self.items.filter(\i: i.name == name).first
+
+            val inventory_opt = Some(Inventory(items: [Item(name: "sword"), Item(name: "shield")]))
+            val result = inventory_opt?.find_item("sword")
+            expect result == Some(Item(name: "sword"))
+
+        it "handles None in collection operations":
+            class Item:
+                name: text
+
+            class Inventory:
+                items: List<Item>
+
+                fn find_item(name: text) -> Option<Item>:
+                    self.items.filter(\i: i.name == name).first
+
+            val inventory_opt: Option<Inventory> = None
+            val result = inventory_opt?.find_item("sword")
+            expect result == None
+
+    context "practical usage patterns":
+        it "simplifies conditional access patterns":
+            class User:
+                name: text
+                email: Option<text>
+
+            val user = User(name: "Alice", email: Some("alice@example.com"))
+            # Without optional chaining: would need unwrap or match
+            val email = user.email?.upper()
+            expect email == Some("ALICE@EXAMPLE.COM")
+
+        it "provides defensive programming in data processing":
+            class LogEntry:
+                message: text
+                details: Option<text>
+
+            val log = LogEntry(message: "Error", details: Some("File not found"))
+            # Direct access to details, then optional chaining
+            val detail = log.details
+            expect detail == Some("File not found")
+
+        it "enables safe navigation in unknown data structures":
+            class Config:
+                settings: Option<Dict<text, text>>
+
+            val config = Config(settings: Some({"key": "value"}))
+            # Safe to access even if settings is None
+            val key_exists = config.settings?.get("key")
+            expect key_exists == Some("value")

@@ -1,0 +1,696 @@
+# Tensor - N-dimensional array type for mathematical operations
+#
+# Provides:
+# - Tensor<T, N> base type with element type T and rank N
+# - Matrix<T>, Vector<T>, Scalar<T> type aliases
+# - Reduction operations (sum, mean, std, etc.)
+# - Transpose operations (.T, .t)
+# - Shape manipulation (reshape, permute, squeeze, unsqueeze)
+#
+# Backend: PyTorch (torch.Tensor)
+
+# ============================================================================
+# Device Type
+# ============================================================================
+
+enum Device:
+    """Compute device for tensor operations."""
+    CPU
+    CUDA(index: i64)
+
+    static fn cpu() -> Device:
+        Device.CPU
+
+    static fn cuda(index: i64 = 0) -> Device:
+        Device.CUDA(index)
+
+    fn to_string(self) -> text:
+        match self:
+            case CPU: "cpu"
+            case CUDA(i): "cuda:{i}"
+
+# ============================================================================
+# Data Type
+# ============================================================================
+
+enum DType:
+    """Element data type for tensors."""
+    F16     # float16
+    F32     # float32
+    F64     # float64
+    I8      # int8
+    I16     # int16
+    I32     # int32
+    I64     # int64
+    U8      # uint8
+    Bool    # boolean
+    Complex64   # complex64
+    Complex128  # complex128
+
+    fn to_string(self) -> text:
+        match self:
+            case F16: "float16"
+            case F32: "float32"
+            case F64: "float64"
+            case I8: "int8"
+            case I16: "int16"
+            case I32: "int32"
+            case I64: "int64"
+            case U8: "uint8"
+            case Bool: "bool"
+            case Complex64: "complex64"
+            case Complex128: "complex128"
+
+# ============================================================================
+# Tensor Type
+# ============================================================================
+
+struct Tensor<T, const N: i64>:
+    """N-dimensional tensor with element type T and rank N.
+
+    The base type for all tensor operations. Backed by PyTorch tensors.
+
+    Type parameters:
+        T: Element type (f32, f64, i32, i64, etc.)
+        N: Rank (number of dimensions)
+
+    Example:
+        val A: Tensor<f64, 2> = tensor.zeros([3, 4])
+        val x: Tensor<f64, 1> = tensor.ones([4])
+        val y = A @ x  # Matrix-vector multiply
+    """
+    _handle: i64    # Internal PyTorch tensor handle
+    _shape: [i64]   # Cached shape
+    _device: Device
+
+    # ========================================================================
+    # Properties
+    # ========================================================================
+
+    fn shape(self) -> [i64]:
+        """Get tensor shape as array of dimension sizes."""
+        self._shape
+
+    fn ndim() -> i64:
+        """Get number of dimensions (rank)."""
+        N
+
+    fn numel(self) -> i64:
+        """Get total number of elements."""
+        var total = 1
+        for d in self._shape:
+            total = total * d
+        total
+
+    fn device(self) -> Device:
+        """Get compute device."""
+        self._device
+
+    fn dtype() -> DType:
+        """Get element data type."""
+        # TODO: Return actual dtype from handle
+        DType.F64
+
+    # ========================================================================
+    # Transpose Operations
+    # ========================================================================
+
+    fn T(self) -> Tensor<T, N>:
+        """Transpose (swap last two dimensions).
+
+        For 2D tensors, this is standard matrix transpose.
+        For higher-rank tensors, swaps the last two dimensions.
+
+        Example:
+            val A = [[1, 2], [3, 4]]
+            val At = A.T  # [[1, 3], [2, 4]]
+        """
+        self.transpose(-2, -1)
+
+    fn t(self) -> Tensor<T, N>:
+        """Alias for T() - transpose last two dimensions."""
+        self.T()
+
+    fn transpose(self, dim0: i64, dim1: i64) -> Tensor<T, N>:
+        """Swap two dimensions.
+
+        Args:
+            dim0: First dimension to swap
+            dim1: Second dimension to swap
+
+        Returns:
+            Tensor with dimensions swapped
+
+        Example:
+            val A = tensor.zeros([2, 3, 4])
+            val B = A.transpose(0, 2)  # shape [4, 3, 2]
+        """
+        # FFI: torch.transpose(self, dim0, dim1)
+        @ffi("torch.transpose", self._handle, dim0, dim1)
+
+    fn permute(self, dims: [i64]) -> Tensor<T, N>:
+        """Permute dimensions according to given order.
+
+        Args:
+            dims: New order of dimensions
+
+        Returns:
+            Tensor with permuted dimensions
+
+        Example:
+            val A = tensor.zeros([2, 3, 4])
+            val B = A.permute([2, 0, 1])  # shape [4, 2, 3]
+        """
+        @ffi("torch.permute", self._handle, dims)
+
+    # ========================================================================
+    # Global Reductions
+    # ========================================================================
+
+    fn sum(self) -> T:
+        """Sum of all elements.
+
+        Example:
+            val x = [1.0, 2.0, 3.0, 4.0]
+            print x.sum  # 10.0
+        """
+        @ffi("torch.sum", self._handle)
+
+    fn mean(self) -> T:
+        """Mean of all elements.
+
+        Example:
+            val x = [1.0, 2.0, 3.0, 4.0]
+            print x.mean  # 2.5
+        """
+        @ffi("torch.mean", self._handle)
+
+    fn prod(self) -> T:
+        """Product of all elements.
+
+        Example:
+            val x = [1.0, 2.0, 3.0, 4.0]
+            print x.prod  # 24.0
+        """
+        @ffi("torch.prod", self._handle)
+
+    fn min(self) -> T:
+        """Minimum element.
+
+        Example:
+            val x = [3.0, 1.0, 4.0, 1.0, 5.0]
+            print x.min  # 1.0
+        """
+        @ffi("torch.min", self._handle)
+
+    fn max(self) -> T:
+        """Maximum element.
+
+        Example:
+            val x = [3.0, 1.0, 4.0, 1.0, 5.0]
+            print x.max  # 5.0
+        """
+        @ffi("torch.max", self._handle)
+
+    fn std(self) -> T:
+        """Standard deviation of all elements.
+
+        Example:
+            val x = [1.0, 2.0, 3.0, 4.0]
+            print x.std  # ~1.29
+        """
+        @ffi("torch.std", self._handle)
+
+    fn var(self) -> T:
+        """Variance of all elements.
+
+        Example:
+            val x = [1.0, 2.0, 3.0, 4.0]
+            print x.var  # ~1.67
+        """
+        @ffi("torch.var", self._handle)
+
+    fn norm(self, p: f64 = 2.0) -> T:
+        """Lp norm of all elements.
+
+        Args:
+            p: Norm order (default: 2 for Euclidean norm)
+
+        Example:
+            val x = [3.0, 4.0]
+            print x.norm()  # 5.0 (Euclidean)
+            print x.norm(1) # 7.0 (Manhattan)
+        """
+        @ffi("torch.norm", self._handle, p)
+
+    fn any(self) -> bool:
+        """True if any element is truthy."""
+        @ffi("torch.any", self._handle)
+
+    fn all(self) -> bool:
+        """True if all elements are truthy."""
+        @ffi("torch.all", self._handle)
+
+    # ========================================================================
+    # Axis Reductions
+    # ========================================================================
+
+    fn sum(self, axis: i64, keepdim: bool = false) -> Tensor<T, ?>:
+        """Sum along axis.
+
+        Args:
+            axis: Dimension to reduce
+            keepdim: If true, keep reduced dimension as size 1
+
+        Example:
+            val A = [[1, 2], [3, 4]]
+            print A.sum(axis: 0)  # [4, 6]
+            print A.sum(axis: 1)  # [3, 7]
+        """
+        @ffi("torch.sum", self._handle, axis, keepdim)
+
+    fn mean(self, axis: i64, keepdim: bool = false) -> Tensor<T, ?>:
+        """Mean along axis.
+
+        Args:
+            axis: Dimension to reduce
+            keepdim: If true, keep reduced dimension as size 1
+
+        Example:
+            val A = [[1.0, 2.0], [3.0, 4.0]]
+            print A.mean(axis: 0)  # [2.0, 3.0]
+        """
+        @ffi("torch.mean", self._handle, axis, keepdim)
+
+    fn std(self, axis: i64, keepdim: bool = false) -> Tensor<T, ?>:
+        """Standard deviation along axis."""
+        @ffi("torch.std", self._handle, axis, keepdim)
+
+    fn var(self, axis: i64, keepdim: bool = false) -> Tensor<T, ?>:
+        """Variance along axis."""
+        @ffi("torch.var", self._handle, axis, keepdim)
+
+    fn min(self, axis: i64, keepdim: bool = false) -> (Tensor<T, ?>, Tensor<i64, ?>):
+        """Minimum along axis.
+
+        Returns:
+            Tuple of (values, indices)
+
+        Example:
+            val A = [[3, 1], [4, 2]]
+            val (vals, idx) = A.min(axis: 1)
+            print vals  # [1, 2]
+            print idx   # [1, 1]
+        """
+        @ffi("torch.min", self._handle, axis, keepdim)
+
+    fn max(self, axis: i64, keepdim: bool = false) -> (Tensor<T, ?>, Tensor<i64, ?>):
+        """Maximum along axis.
+
+        Returns:
+            Tuple of (values, indices)
+
+        Example:
+            val A = [[3, 1], [4, 2]]
+            val (vals, idx) = A.max(axis: 1)
+            print vals  # [3, 4]
+            print idx   # [0, 0]
+        """
+        @ffi("torch.max", self._handle, axis, keepdim)
+
+    fn argmin(self, axis: i64) -> Tensor<i64, ?>:
+        """Index of minimum along axis.
+
+        Example:
+            val A = [[3, 1], [4, 2]]
+            print A.argmin(axis: 1)  # [1, 1]
+        """
+        @ffi("torch.argmin", self._handle, axis)
+
+    fn argmax(self, axis: i64) -> Tensor<i64, ?>:
+        """Index of maximum along axis.
+
+        Example:
+            val A = [[3, 1], [4, 2]]
+            print A.argmax(axis: 1)  # [0, 0]
+        """
+        @ffi("torch.argmax", self._handle, axis)
+
+    fn cumsum(self, axis: i64) -> Tensor<T, N>:
+        """Cumulative sum along axis."""
+        @ffi("torch.cumsum", self._handle, axis)
+
+    fn cumprod(self, axis: i64) -> Tensor<T, N>:
+        """Cumulative product along axis."""
+        @ffi("torch.cumprod", self._handle, axis)
+
+    # ========================================================================
+    # Shape Manipulation
+    # ========================================================================
+
+    fn reshape(self, shape: [i64]) -> Tensor<T, ?>:
+        """Reshape tensor to new shape.
+
+        Args:
+            shape: New shape (use -1 for inferred dimension)
+
+        Example:
+            val A = tensor.zeros([2, 3])
+            val B = A.reshape([6])
+            val C = A.reshape([3, -1])  # [3, 2]
+        """
+        @ffi("torch.reshape", self._handle, shape)
+
+    fn view(self, shape: [i64]) -> Tensor<T, ?>:
+        """View tensor with new shape (must be contiguous).
+
+        Same as reshape but requires contiguous memory.
+        """
+        @ffi("torch.view", self._handle, shape)
+
+    fn flatten(self, start_dim: i64 = 0, end_dim: i64 = -1) -> Tensor<T, ?>:
+        """Flatten dimensions from start_dim to end_dim."""
+        @ffi("torch.flatten", self._handle, start_dim, end_dim)
+
+    fn squeeze(self, dim: i64? = nil) -> Tensor<T, ?>:
+        """Remove dimensions of size 1.
+
+        Args:
+            dim: Specific dimension to squeeze, or None for all
+
+        Example:
+            val A = tensor.zeros([1, 3, 1, 4])
+            print A.squeeze().shape      # [3, 4]
+            print A.squeeze(0).shape     # [3, 1, 4]
+        """
+        if dim.?:
+            @ffi("torch.squeeze", self._handle, dim.unwrap())
+        else:
+            @ffi("torch.squeeze", self._handle)
+
+    fn unsqueeze(self, dim: i64) -> Tensor<T, ?>:
+        """Add dimension of size 1 at position.
+
+        Example:
+            val x = [1, 2, 3]  # shape [3]
+            print x.unsqueeze(0).shape  # [1, 3]
+            print x.unsqueeze(1).shape  # [3, 1]
+        """
+        @ffi("torch.unsqueeze", self._handle, dim)
+
+    fn expand(self, shape: [i64]) -> Tensor<T, ?>:
+        """Expand tensor to larger shape (broadcast)."""
+        @ffi("torch.expand", self._handle, shape)
+
+    fn repeat(self, repeats: [i64]) -> Tensor<T, ?>:
+        """Repeat tensor along dimensions."""
+        @ffi("torch.repeat", self._handle, repeats)
+
+    # ========================================================================
+    # Elementwise Math Functions
+    # ========================================================================
+
+    fn abs(self) -> Tensor<T, N>:
+        """Absolute value."""
+        @ffi("torch.abs", self._handle)
+
+    fn sqrt(self) -> Tensor<T, N>:
+        """Square root."""
+        @ffi("torch.sqrt", self._handle)
+
+    fn exp(self) -> Tensor<T, N>:
+        """Exponential."""
+        @ffi("torch.exp", self._handle)
+
+    fn log(self) -> Tensor<T, N>:
+        """Natural logarithm."""
+        @ffi("torch.log", self._handle)
+
+    fn log2(self) -> Tensor<T, N>:
+        """Base-2 logarithm."""
+        @ffi("torch.log2", self._handle)
+
+    fn log10(self) -> Tensor<T, N>:
+        """Base-10 logarithm."""
+        @ffi("torch.log10", self._handle)
+
+    fn sin(self) -> Tensor<T, N>:
+        """Sine."""
+        @ffi("torch.sin", self._handle)
+
+    fn cos(self) -> Tensor<T, N>:
+        """Cosine."""
+        @ffi("torch.cos", self._handle)
+
+    fn tan(self) -> Tensor<T, N>:
+        """Tangent."""
+        @ffi("torch.tan", self._handle)
+
+    fn asin(self) -> Tensor<T, N>:
+        """Arc sine."""
+        @ffi("torch.asin", self._handle)
+
+    fn acos(self) -> Tensor<T, N>:
+        """Arc cosine."""
+        @ffi("torch.acos", self._handle)
+
+    fn atan(self) -> Tensor<T, N>:
+        """Arc tangent."""
+        @ffi("torch.atan", self._handle)
+
+    fn sinh(self) -> Tensor<T, N>:
+        """Hyperbolic sine."""
+        @ffi("torch.sinh", self._handle)
+
+    fn cosh(self) -> Tensor<T, N>:
+        """Hyperbolic cosine."""
+        @ffi("torch.cosh", self._handle)
+
+    fn tanh(self) -> Tensor<T, N>:
+        """Hyperbolic tangent."""
+        @ffi("torch.tanh", self._handle)
+
+    fn floor(self) -> Tensor<T, N>:
+        """Floor (round down)."""
+        @ffi("torch.floor", self._handle)
+
+    fn ceil(self) -> Tensor<T, N>:
+        """Ceiling (round up)."""
+        @ffi("torch.ceil", self._handle)
+
+    fn round(self) -> Tensor<T, N>:
+        """Round to nearest integer."""
+        @ffi("torch.round", self._handle)
+
+    fn sign(self) -> Tensor<T, N>:
+        """Sign (-1, 0, or 1)."""
+        @ffi("torch.sign", self._handle)
+
+    fn clamp(self, min: T? = nil, max: T? = nil) -> Tensor<T, N>:
+        """Clamp values to range [min, max]."""
+        @ffi("torch.clamp", self._handle, min, max)
+
+    fn relu(self) -> Tensor<T, N>:
+        """Rectified linear unit: max(0, x)."""
+        @ffi("torch.relu", self._handle)
+
+    fn sigmoid(self) -> Tensor<T, N>:
+        """Sigmoid: 1 / (1 + exp(-x))."""
+        @ffi("torch.sigmoid", self._handle)
+
+    fn softmax(self, dim: i64) -> Tensor<T, N>:
+        """Softmax along dimension."""
+        @ffi("torch.softmax", self._handle, dim)
+
+    # ========================================================================
+    # Linear Algebra
+    # ========================================================================
+
+    fn det(self) -> T:
+        """Determinant (2D tensor only)."""
+        @ffi("torch.linalg.det", self._handle)
+
+    fn inv(self) -> Tensor<T, N>:
+        """Matrix inverse (2D tensor only)."""
+        @ffi("torch.linalg.inv", self._handle)
+
+    fn solve(self, b: Tensor<T, ?>) -> Tensor<T, ?>:
+        """Solve linear system Ax = b."""
+        @ffi("torch.linalg.solve", self._handle, b._handle)
+
+    fn eig(self) -> (Tensor<T, ?>, Tensor<T, ?>):
+        """Eigenvalues and eigenvectors."""
+        @ffi("torch.linalg.eig", self._handle)
+
+    fn svd(self) -> (Tensor<T, ?>, Tensor<T, ?>, Tensor<T, ?>):
+        """Singular value decomposition: U, S, V."""
+        @ffi("torch.linalg.svd", self._handle)
+
+    fn qr(self) -> (Tensor<T, ?>, Tensor<T, ?>):
+        """QR decomposition."""
+        @ffi("torch.linalg.qr", self._handle)
+
+    fn cholesky(self) -> Tensor<T, N>:
+        """Cholesky decomposition."""
+        @ffi("torch.linalg.cholesky", self._handle)
+
+    fn trace(self) -> T:
+        """Sum of diagonal elements."""
+        @ffi("torch.trace", self._handle)
+
+    fn diag(self, offset: i64 = 0) -> Tensor<T, ?>:
+        """Extract diagonal or create diagonal matrix."""
+        @ffi("torch.diag", self._handle, offset)
+
+    # ========================================================================
+    # Device Operations
+    # ========================================================================
+
+    fn to(self, device: Device) -> Tensor<T, N>:
+        """Move tensor to device."""
+        @ffi("torch.to", self._handle, device.to_string())
+
+    fn cpu(self) -> Tensor<T, N>:
+        """Move tensor to CPU."""
+        self.to(Device.CPU)
+
+    fn cuda(self, index: i64 = 0) -> Tensor<T, N>:
+        """Move tensor to CUDA GPU."""
+        self.to(Device.CUDA(index))
+
+    fn contiguous(self) -> Tensor<T, N>:
+        """Return contiguous tensor."""
+        @ffi("torch.contiguous", self._handle)
+
+    fn clone(self) -> Tensor<T, N>:
+        """Create a copy of the tensor."""
+        @ffi("torch.clone", self._handle)
+
+    fn detach(self) -> Tensor<T, N>:
+        """Detach from computation graph."""
+        @ffi("torch.detach", self._handle)
+
+
+# ============================================================================
+# Type Aliases
+# ============================================================================
+
+type Matrix<T> = Tensor<T, 2>
+type Vector<T> = Tensor<T, 1>
+type Scalar<T> = Tensor<T, 0>
+
+# Concrete type aliases for common use cases
+type Mat = Matrix<f64>
+type Vec = Vector<f64>
+type MatF32 = Matrix<f32>
+type VecF32 = Vector<f32>
+type MatI64 = Matrix<i64>
+type VecI64 = Vector<i64>
+
+
+# ============================================================================
+# Tensor Construction Functions
+# ============================================================================
+
+fn zeros<T>(shape: [i64], device: Device = Device.CPU) -> Tensor<T, ?>:
+    """Create tensor filled with zeros.
+
+    Example:
+        val A = zeros<f64>([3, 4])
+        val B = zeros<f32>([2, 3], device: Device.cuda())
+    """
+    @ffi("torch.zeros", shape, device.to_string())
+
+fn ones<T>(shape: [i64], device: Device = Device.CPU) -> Tensor<T, ?>:
+    """Create tensor filled with ones."""
+    @ffi("torch.ones", shape, device.to_string())
+
+fn full<T>(shape: [i64], value: T, device: Device = Device.CPU) -> Tensor<T, ?>:
+    """Create tensor filled with value."""
+    @ffi("torch.full", shape, value, device.to_string())
+
+fn eye<T>(n: i64, m: i64? = nil, device: Device = Device.CPU) -> Matrix<T>:
+    """Create identity matrix.
+
+    Args:
+        n: Number of rows
+        m: Number of columns (default: n)
+    """
+    @ffi("torch.eye", n, m ?? n, device.to_string())
+
+fn arange<T>(start: T, end: T, step: T = 1, device: Device = Device.CPU) -> Vector<T>:
+    """Create 1D tensor with evenly spaced values.
+
+    Example:
+        val x = arange(0, 10, 2)  # [0, 2, 4, 6, 8]
+    """
+    @ffi("torch.arange", start, end, step, device.to_string())
+
+fn linspace<T>(start: T, end: T, steps: i64, device: Device = Device.CPU) -> Vector<T>:
+    """Create 1D tensor with linearly spaced values.
+
+    Example:
+        val x = linspace(0.0, 1.0, 5)  # [0.0, 0.25, 0.5, 0.75, 1.0]
+    """
+    @ffi("torch.linspace", start, end, steps, device.to_string())
+
+fn logspace<T>(start: T, end: T, steps: i64, base: f64 = 10.0, device: Device = Device.CPU) -> Vector<T>:
+    """Create 1D tensor with logarithmically spaced values."""
+    @ffi("torch.logspace", start, end, steps, base, device.to_string())
+
+fn rand<T>(shape: [i64], device: Device = Device.CPU) -> Tensor<T, ?>:
+    """Create tensor with uniform random values in [0, 1)."""
+    @ffi("torch.rand", shape, device.to_string())
+
+fn randn<T>(shape: [i64], device: Device = Device.CPU) -> Tensor<T, ?>:
+    """Create tensor with standard normal random values."""
+    @ffi("torch.randn", shape, device.to_string())
+
+fn randint<T>(low: i64, high: i64, shape: [i64], device: Device = Device.CPU) -> Tensor<T, ?>:
+    """Create tensor with uniform random integers in [low, high)."""
+    @ffi("torch.randint", low, high, shape, device.to_string())
+
+
+# ============================================================================
+# Tensor Operations (Free Functions)
+# ============================================================================
+
+fn stack<T, N>(tensors: [Tensor<T, N>], dim: i64 = 0) -> Tensor<T, ?>:
+    """Stack tensors along new dimension."""
+    @ffi("torch.stack", tensors, dim)
+
+fn cat<T, N>(tensors: [Tensor<T, N>], dim: i64 = 0) -> Tensor<T, N>:
+    """Concatenate tensors along existing dimension."""
+    @ffi("torch.cat", tensors, dim)
+
+fn vstack<T, N>(tensors: [Tensor<T, N>]) -> Tensor<T, ?>:
+    """Stack tensors vertically (along dim 0)."""
+    @ffi("torch.vstack", tensors)
+
+fn hstack<T, N>(tensors: [Tensor<T, N>]) -> Tensor<T, ?>:
+    """Stack tensors horizontally (along dim 1)."""
+    @ffi("torch.hstack", tensors)
+
+fn where<T, N>(condition: Tensor<bool, N>, x: Tensor<T, N>, y: Tensor<T, N>) -> Tensor<T, N>:
+    """Element-wise selection based on condition."""
+    @ffi("torch.where", condition._handle, x._handle, y._handle)
+
+fn einsum<T>(equation: text, tensors: [Tensor<T, ?>]) -> Tensor<T, ?>:
+    """Einstein summation.
+
+    Example:
+        val C = einsum("ij,jk->ik", [A, B])  # Matrix multiply
+        val trace = einsum("ii->", [A])       # Trace
+    """
+    @ffi("torch.einsum", equation, tensors)
+
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export Tensor, Matrix, Vector, Scalar
+export Mat, Vec, MatF32, VecF32, MatI64, VecI64
+export Device, DType
+export zeros, ones, full, eye, arange, linspace, logspace, rand, randn, randint
+export stack, cat, vstack, hstack, where, einsum

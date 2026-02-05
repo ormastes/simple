@@ -1,0 +1,350 @@
+"""
+# Backend Orchestration Integration Tests
+
+Tests that the Simple orchestration layer properly connects to Rust FFI
+for backend selection, optimization passes, and error handling.
+
+This verifies the FFI wrapper pattern is working correctly.
+"""
+
+use sspec.{describe, it, expect, context}
+use compiler.backend.backend_selector.{
+    BackendKind,
+    TargetArch,
+    BackendOptions,
+    BackendSelector,
+    select_backend_auto,
+    select_backend_for_script,
+    select_backend_for_build,
+    select_backend_for_test
+}
+use compiler.backend.optimization_passes.{
+    OptimizationLevel,
+    OptimizationPass,
+    PassRegistry,
+    PassConfig
+}
+use compiler.backend.codegen_errors.{
+    CodegenErrorKind,
+    CodegenError,
+    ErrorRecoveryStrategy,
+    ErrorContext
+}
+
+describe "Backend Orchestration FFI Integration":
+    """
+    Verify FFI connections between Simple orchestration and Rust execution.
+    """
+
+    context "BackendOptions":
+        it "creates JIT options with correct defaults":
+            val opts = BackendOptions.jit()
+
+            expect opts.kind == BackendKind.Jit
+            expect opts.target == TargetArch.Host
+            expect opts.optimization == OptimizationLevel.Speed
+            expect opts.is_pic == true  # JIT needs PIC
+            expect not opts.output_path.?
+
+        it "creates AOT options with correct defaults":
+            val opts = BackendOptions.aot("output.o")
+
+            expect opts.kind == BackendKind.Aot
+            expect opts.target == TargetArch.Host
+            expect opts.optimization == OptimizationLevel.Speed
+            expect opts.is_pic == true  # AOT defaults to PIC
+            expect opts.output_path.? == true
+
+        it "allows configuring PIC":
+            val opts = BackendOptions.aot("output.o")
+                .with_pic(false)
+
+            expect opts.is_pic == false
+
+        it "allows configuring target architecture":
+            val opts = BackendOptions.jit()
+                .with_target(TargetArch.Aarch64)
+
+            expect opts.target == TargetArch.Aarch64
+
+        it "allows configuring optimization level":
+            val opts = BackendOptions.jit()
+                .with_optimization(OptimizationLevel.Size)
+
+            expect opts.optimization == OptimizationLevel.Size
+
+    context "BackendSelector":
+        it "correctly identifies JIT backend":
+            val opts = BackendOptions.jit()
+            val selector = BackendSelector.new(opts)
+
+            expect selector.should_use_jit() == true
+            expect selector.should_use_aot() == false
+            expect selector.should_use_interpreter() == false
+
+        it "correctly identifies AOT backend":
+            val opts = BackendOptions.aot("output.o")
+            val selector = BackendSelector.new(opts)
+
+            expect selector.should_use_jit() == false
+            expect selector.should_use_aot() == true
+            expect selector.should_use_interpreter() == false
+
+        it "maps optimization levels to strings correctly":
+            val speed = BackendSelector.new(
+                BackendOptions.jit().with_optimization(OptimizationLevel.Speed)
+            )
+            expect speed.optimization_level_string() == "speed"
+
+            val size = BackendSelector.new(
+                BackendOptions.jit().with_optimization(OptimizationLevel.Size)
+            )
+            expect size.optimization_level_string() == "size_and_speed"
+
+            val none = BackendSelector.new(
+                BackendOptions.jit().with_optimization(OptimizationLevel.None)
+            )
+            expect none.optimization_level_string() == "none"
+
+        it "returns correct target codes":
+            val x86 = BackendSelector.new(
+                BackendOptions.jit().with_target(TargetArch.X86_64)
+            )
+            expect x86.target_code() == 0
+
+            val arm = BackendSelector.new(
+                BackendOptions.jit().with_target(TargetArch.Aarch64)
+            )
+            expect arm.target_code() == 1
+
+            val riscv = BackendSelector.new(
+                BackendOptions.jit().with_target(TargetArch.Riscv64)
+            )
+            expect riscv.target_code() == 2
+
+    context "Host Target Detection FFI":
+        it "detects host architecture via FFI":
+            val opts = BackendOptions.jit()  # Uses Host target
+            val selector = BackendSelector.new(opts)
+
+            val code = selector.target_code()
+
+            # Should return valid target code (0, 1, or 2)
+            expect code >= 0
+            expect code <= 2
+
+            # Log what was detected
+            val arch = match code:
+                case 0: "x86_64"
+                case 1: "aarch64"
+                case 2: "riscv64"
+                case _: "unknown"
+
+            print "Detected host architecture: {arch}"
+
+    context "OptimizationPass":
+        it "creates pass with correct fields":
+            val pass = OptimizationPass.new(
+                "test_pass",
+                true,
+                10,
+                "Test optimization pass"
+            )
+
+            expect pass.name == "test_pass"
+            expect pass.enabled == true
+            expect pass.priority == 10
+            expect pass.description == "Test optimization pass"
+
+    context "PassRegistry":
+        it "creates default registry with speed passes":
+            val registry = PassRegistry.default()
+
+            expect registry.level == OptimizationLevel.Speed
+            expect registry.passes.len() > 0
+
+            val enabled = registry.enabled_passes()
+            expect enabled.len() > 0
+
+        it "creates registry for each optimization level":
+            val none_reg = PassRegistry.for_level(OptimizationLevel.None)
+            expect none_reg.passes.len() == 0
+
+            val speed_reg = PassRegistry.for_level(OptimizationLevel.Speed)
+            expect speed_reg.passes.len() > 0
+
+            val size_reg = PassRegistry.for_level(OptimizationLevel.Size)
+            expect size_reg.passes.len() > 0
+
+        it "enables pass and returns true for valid pass":
+            var registry = PassRegistry.for_level(OptimizationLevel.Speed)
+
+            val result = registry.enable_pass("constant_folding")
+
+            expect result == true
+
+        it "returns false for invalid pass name":
+            var registry = PassRegistry.for_level(OptimizationLevel.Speed)
+
+            val result = registry.enable_pass("nonexistent_pass")
+
+            expect result == false
+
+        it "disables pass and returns true for valid pass":
+            var registry = PassRegistry.for_level(OptimizationLevel.Speed)
+
+            val result = registry.disable_pass("inlining")
+
+            expect result == true
+
+        it "returns pass names correctly":
+            val registry = PassRegistry.for_level(OptimizationLevel.Speed)
+            val names = registry.pass_names()
+
+            expect names.len() > 0
+            expect names.contains("constant_folding")
+
+    context "PassConfig":
+        it "creates default config":
+            val config = PassConfig.default()
+
+            expect config.verify_ir == false
+            expect config.print_ir == false
+            expect config.timing == false
+
+        it "creates debug config with verification":
+            val config = PassConfig.debug()
+
+            expect config.verify_ir == true
+            expect config.print_ir == true
+            expect config.timing == true
+
+    context "CodegenError":
+        it "creates module init error":
+            val err = CodegenError.module_init("failed to initialize")
+
+            expect err.kind == CodegenErrorKind.ModuleInitFailed
+            expect err.message == "failed to initialize"
+
+        it "creates function compile error":
+            val err = CodegenError.function_compile("main", "invalid IR")
+
+            expect err.kind == CodegenErrorKind.FunctionCompileFailed
+            expect err.message == "invalid IR"
+            expect err.function_name.? == true
+
+        it "creates verification failed error":
+            val err = CodegenError.verification_failed("test_fn", "block not sealed")
+
+            expect err.kind == CodegenErrorKind.VerificationFailed
+            expect err.message == "IR verification failed"
+            expect err.function_name.? == true
+            expect err.cause.? == true
+
+        it "creates name conflict error":
+            val err = CodegenError.name_conflict("print", "runtime function")
+
+            expect err.kind == CodegenErrorKind.NameConflict
+            expect err.message.contains("print")
+            expect err.message.contains("runtime function")
+
+        it "formats error with all context":
+            val err = CodegenError.function_compile("main", "compilation failed")
+                .with_cause("missing return value")
+
+            val formatted = err.format()
+
+            expect formatted.contains("main")
+            expect formatted.contains("compilation failed")
+            expect formatted.contains("missing return value")
+
+        it "formats error without optional fields":
+            val err = CodegenError.module_init("init failed")
+
+            val formatted = err.format()
+
+            expect formatted.contains("Codegen Error")
+            expect formatted.contains("init failed")
+
+    context "ErrorContext":
+        it "tracks errors":
+            val strategy = ErrorRecoveryStrategy.lenient()
+            var ctx = ErrorContext.new(strategy)
+
+            val err1 = CodegenError.module_init("error 1")
+            ctx.add_error(err1)
+
+            expect ctx.has_errors() == true
+            expect ctx.errors.len() == 1
+
+        it "continues on errors with lenient strategy":
+            val strategy = ErrorRecoveryStrategy.lenient()
+            var ctx = ErrorContext.new(strategy)
+
+            expect ctx.should_continue() == true
+
+            val err = CodegenError.module_init("error")
+            ctx.add_error(err)
+
+            expect ctx.should_continue() == true
+
+        it "stops on first error with strict strategy":
+            val strategy = ErrorRecoveryStrategy.strict()
+            var ctx = ErrorContext.new(strategy)
+
+            val err = CodegenError.module_init("error")
+            ctx.add_error(err)
+
+            expect ctx.should_continue() == false
+
+        it "generates error summary":
+            val strategy = ErrorRecoveryStrategy.lenient()
+            var ctx = ErrorContext.new(strategy)
+
+            val err1 = CodegenError.module_init("error 1")
+            val err2 = CodegenError.function_compile("main", "error 2")
+
+            ctx.add_error(err1)
+            ctx.add_error(err2)
+
+            val summary = ctx.error_summary()
+
+            expect summary.contains("2 error")
+            expect summary.contains("error 1")
+            expect summary.contains("error 2")
+
+    context "Auto-Selection Functions":
+        it "selects JIT for scripts":
+            val opts = select_backend_for_script()
+
+            expect opts.kind == BackendKind.Jit
+            expect opts.optimization == OptimizationLevel.Speed
+
+        it "selects AOT for builds":
+            val opts = select_backend_for_build()
+
+            expect opts.kind == BackendKind.Aot
+            expect opts.optimization == OptimizationLevel.Speed
+
+        it "selects JIT with coverage for tests":
+            val opts = select_backend_for_test()
+
+            expect opts.kind == BackendKind.Jit
+            expect opts.enable_coverage == true
+
+        it "auto-selects based on context":
+            # Debug mode with no output file -> JIT debug
+            val debug_jit = select_backend_auto(
+                has_output_file: false,
+                is_debug: true
+            )
+            expect debug_jit.kind == BackendKind.Jit
+            expect debug_jit.optimization == OptimizationLevel.Debug
+
+            # Release mode with output file -> AOT speed
+            val release_aot = select_backend_auto(
+                has_output_file: true,
+                is_debug: false
+            )
+            expect release_aot.kind == BackendKind.Aot
+            expect release_aot.optimization == OptimizationLevel.Speed

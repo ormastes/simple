@@ -1,0 +1,442 @@
+# @pending
+# @skip
+"""
+Comprehensive Decorator Tests
+
+Tests for decorator pattern implementation including:
+- CachedFunction with various argument patterns
+- LoggedFunction with complex call scenarios
+- DeprecatedFunction with warning behavior
+- Decorator composition and edge cases
+"""
+
+use core.decorators.{CachedFunction, LoggedFunction, DeprecatedFunction, TimeoutFunction}
+
+describe "CachedFunction Comprehensive Tests":
+    """
+    Comprehensive tests for the CachedFunction decorator which memoizes
+    function results based on input arguments.
+    """
+
+    describe "Basic caching":
+        it "caches 0-argument functions":
+            var call_count = 0
+            fn expensive():
+                call_count = call_count + 1
+                return 42
+
+            val cached = CachedFunction(expensive)
+
+            # First call
+            val result1 = cached.__call__()
+            expect(result1).to eq(42)
+            expect(call_count).to eq(1)
+
+            # Second call should hit cache
+            val result2 = cached.__call__()
+            expect(result2).to eq(42)
+            expect(call_count).to eq(1)  # Still 1 - cache hit!
+
+            # Verify cache stats
+            val info = cached.cache_info()
+            expect(info["hits"]).to eq(1)
+            expect(info["misses"]).to eq(1)
+
+        it "caches 1-argument functions":
+            var call_count = 0
+            fn square(x):
+                call_count = call_count + 1
+                return x * x
+
+            val cached = CachedFunction(square)
+
+            # First call with 5
+            val result1 = cached.__call__(5)
+            expect(result1).to eq(25)
+            expect(call_count).to eq(1)
+
+            # Second call with 5 should hit cache
+            val result2 = cached.__call__(5)
+            expect(result2).to eq(25)
+            expect(call_count).to eq(1)
+
+            # Call with different argument
+            val result3 = cached.__call__(3)
+            expect(result3).to eq(9)
+            expect(call_count).to eq(2)
+
+            # Verify cache stats
+            val info = cached.cache_info()
+            expect(info["hits"]).to eq(1)
+            expect(info["misses"]).to eq(2)
+            expect(info["size"]).to eq(2)
+
+        it "caches 2-argument functions":
+            var call_count = 0
+            fn add(a, b):
+                call_count = call_count + 1
+                return a + b
+
+            val cached = CachedFunction(add)
+
+            val result1 = cached.__call__(2, 3)
+            expect(result1).to eq(5)
+            expect(call_count).to eq(1)
+
+            val result2 = cached.__call__(2, 3)
+            expect(result2).to eq(5)
+            expect(call_count).to eq(1)  # Cache hit
+
+            val result3 = cached.__call__(4, 5)
+            expect(result3).to eq(9)
+            expect(call_count).to eq(2)
+
+        it "caches 3-argument functions":
+            var call_count = 0
+            fn sum3(a, b, c):
+                call_count = call_count + 1
+                return a + b + c
+
+            val cached = CachedFunction(sum3)
+
+            val result1 = cached.__call__(1, 2, 3)
+            expect(result1).to eq(6)
+            expect(call_count).to eq(1)
+
+            val result2 = cached.__call__(1, 2, 3)
+            expect(result2).to eq(6)
+            expect(call_count).to eq(1)  # Cache hit
+
+    describe "Cache management":
+        it "clears cache correctly":
+            var call_count = 0
+            fn double(x):
+                call_count = call_count + 1
+                return x * 2
+
+            val cached = CachedFunction(double)
+
+            # Build cache
+            cached.__call__(5)
+            cached.__call__(5)  # Cache hit
+            cached.__call__(10)
+
+            expect(call_count).to eq(2)
+            val info1 = cached.cache_info()
+            expect(info1["hits"]).to eq(1)
+            expect(info1["size"]).to eq(2)
+
+            # Clear cache
+            cached.clear_cache()
+
+            # Verify cache is empty
+            val info2 = cached.cache_info()
+            expect(info2["hits"]).to eq(0)
+            expect(info2["misses"]).to eq(0)
+            expect(info2["size"]).to eq(0)
+
+            # Next call should miss cache
+            cached.__call__(5)
+            expect(call_count).to eq(3)
+
+        it "handles different argument orders as different cache entries":
+            fn concat(a, b):
+                return to_string(a) + to_string(b)
+
+            val cached = CachedFunction(concat)
+
+            val result1 = cached.__call__(1, 2)
+            val result2 = cached.__call__(2, 1)
+
+            expect(result1).to_not eq(result2)
+
+            val info = cached.cache_info()
+            expect(info["size"]).to eq(2)
+
+    describe "Edge cases":
+        it "caches nil return values":
+            var call_count = 0
+            fn returns_nil():
+                call_count = call_count + 1
+                return nil
+
+            val cached = CachedFunction(returns_nil)
+
+            val result1 = cached.__call__()
+            expect(result1).to eq(nil)
+            expect(call_count).to eq(1)
+
+            val result2 = cached.__call__()
+            expect(result2).to eq(nil)
+            expect(call_count).to eq(1)  # Should still cache nil
+
+        it "caches negative numbers":
+            fn negate(x):
+                return -x
+
+            val cached = CachedFunction(negate)
+
+            val result1 = cached.__call__(-5)
+            expect(result1).to eq(5)
+
+            val result2 = cached.__call__(-5)
+            expect(result2).to eq(5)
+
+            val info = cached.cache_info()
+            expect(info["hits"]).to eq(1)
+
+describe "LoggedFunction Comprehensive Tests":
+    """
+    Comprehensive tests for the LoggedFunction decorator which logs
+    function calls including arguments and return values.
+    """
+
+    describe "Basic logging":
+        it "logs 0-argument functions":
+            fn get_value():
+                return 42
+
+            val logged = LoggedFunction(get_value)
+            val result = logged.__call__()
+
+            # Should log call and return
+            # (Output verification would require capturing stdout)
+            expect(result).to eq(42)
+
+        it "logs 1-argument functions":
+            fn double(x):
+                return x * 2
+
+            val logged = LoggedFunction(double)
+            val result = logged.__call__(21)
+
+            expect(result).to eq(42)
+
+        it "logs 2-argument functions":
+            fn multiply(x, y):
+                return x * y
+
+            val logged = LoggedFunction(multiply)
+            val result = logged.__call__(6, 7)
+
+            expect(result).to eq(42)
+
+        it "logs multiple calls":
+            fn increment(x):
+                return x + 1
+
+            val logged = LoggedFunction(increment)
+
+            val result1 = logged.__call__(1)
+            val result2 = logged.__call__(2)
+            val result3 = logged.__call__(3)
+
+            expect(result1).to eq(2)
+            expect(result2).to eq(3)
+            expect(result3).to eq(4)
+
+    describe "Edge cases":
+        it "logs nil arguments":
+            fn identity(x):
+                return x
+
+            val logged = LoggedFunction(identity)
+            val result = logged.__call__(nil)
+
+            expect(result).to eq(nil)
+
+        it "logs nil return values":
+            fn returns_nil():
+                return nil
+
+            val logged = LoggedFunction(returns_nil)
+            val result = logged.__call__()
+
+            expect(result).to eq(nil)
+
+describe "DeprecatedFunction Comprehensive Tests":
+    """
+    Comprehensive tests for the DeprecatedFunction decorator which shows
+    deprecation warnings when wrapped functions are called.
+    """
+
+    describe "Warning behavior":
+        it "shows warning on first call":
+            var call_count = 0
+            fn old_api(x):
+                call_count = call_count + 1
+                return x + 1
+
+            val deprecated = DeprecatedFunction(old_api, "Use new_api() instead")
+
+            val result1 = deprecated.__call__(5)
+            expect(result1).to eq(6)
+            expect(call_count).to eq(1)
+
+            # Second call should not show warning again
+            val result2 = deprecated.__call__(10)
+            expect(result2).to eq(11)
+            expect(call_count).to eq(2)
+
+        it "handles 0-argument functions":
+            fn legacy_get():
+                return 99
+
+            val deprecated = DeprecatedFunction(legacy_get, "Old getter")
+            val result = deprecated.__call__()
+
+            expect(result).to eq(99)
+
+        it "handles 2-argument functions":
+            fn old_add(a, b):
+                return a + b
+
+            val deprecated = DeprecatedFunction(old_add, "Use operator + instead")
+            val result = deprecated.__call__(20, 22)
+
+            expect(result).to eq(42)
+
+        it "handles multiple arguments":
+            fn old_sum(a, b, c):
+                return a + b + c
+
+            val deprecated = DeprecatedFunction(old_sum, "Use sum() function")
+            val result = deprecated.__call__(10, 15, 17)
+
+            expect(result).to eq(42)
+
+    describe "Message handling":
+        it "shows custom message when provided":
+            fn old_func():
+                return 1
+
+            val deprecated = DeprecatedFunction(old_func, "Custom message here")
+            deprecated.__call__()
+            # Message should be printed
+
+        it "shows default message when no message provided":
+            fn another_old_func():
+                return 2
+
+            val deprecated = DeprecatedFunction(another_old_func, nil)
+            deprecated.__call__()
+            # Default deprecation message should be printed
+
+describe "Decorator Composition":
+    """
+    Tests for combining multiple decorators on the same function.
+    """
+
+    it "combines caching and logging":
+        var call_count = 0
+        fn expensive(x):
+            call_count = call_count + 1
+            return x * x
+
+        # Apply logging first, then caching
+        val logged = LoggedFunction(expensive)
+        val cached = CachedFunction(logged.__call__)
+
+        val result1 = cached.__call__(5)
+        expect(result1).to eq(25)
+        expect(call_count).to eq(1)
+
+        val result2 = cached.__call__(5)
+        expect(result2).to eq(25)
+        expect(call_count).to eq(1)  # Cache hit - no new call
+
+    it "combines deprecation and caching":
+        var call_count = 0
+        fn old_expensive(x):
+            call_count = call_count + 1
+            return x * 2
+
+        val deprecated = DeprecatedFunction(old_expensive, "Old function")
+        val cached = CachedFunction(deprecated.__call__)
+
+        val result1 = cached.__call__(10)
+        expect(result1).to eq(20)
+        expect(call_count).to eq(1)
+
+        val result2 = cached.__call__(10)
+        expect(result2).to eq(20)
+        expect(call_count).to eq(1)  # Cache hit
+
+describe "TimeoutFunction Tests":
+    """
+    Tests for TimeoutFunction decorator (placeholder until threading support).
+    """
+
+    it "calls function without timeout enforcement":
+        fn quick_func(x):
+            return x + 1
+
+        val timeout = TimeoutFunction(quick_func, 5)
+        val result = timeout.__call__(41)
+
+        expect(result).to eq(42)
+
+    it "returns TimeoutResult.Success":
+        fn another_func(x):
+            return x * 2
+
+        val timeout = TimeoutFunction(another_func, 5)
+        val result = timeout.call_with_result(21)
+
+        # Should be Success variant
+        expect(result.is_success()).to be_true()
+        expect(result.unwrap()).to eq(42)
+
+describe "Variadic Argument Forwarding":
+    """
+    Tests specifically for variadic parameter forwarding through decorators.
+    """
+
+    it "forwards 0 arguments":
+        fn no_args():
+            return "no args"
+
+        val cached = CachedFunction(no_args)
+        expect(cached.__call__()).to eq("no args")
+
+    it "forwards 1 argument":
+        fn one_arg(x):
+            return x
+
+        val cached = CachedFunction(one_arg)
+        expect(cached.__call__(42)).to eq(42)
+
+    it "forwards 2 arguments":
+        fn two_args(a, b):
+            return a + b
+
+        val cached = CachedFunction(two_args)
+        expect(cached.__call__(20, 22)).to eq(42)
+
+    it "forwards 3 arguments":
+        fn three_args(a, b, c):
+            return a + b + c
+
+        val cached = CachedFunction(three_args)
+        expect(cached.__call__(10, 15, 17)).to eq(42)
+
+    it "forwards 5 arguments":
+        fn five_args(a, b, c, d, e):
+            return a + b + c + d + e
+
+        val cached = CachedFunction(five_args)
+        expect(cached.__call__(5, 10, 8, 9, 10)).to eq(42)
+
+    it "forwards mixed type arguments":
+        fn mixed(num, text, flag):
+            if flag:
+                return to_string(num) + text
+            else:
+                return text + to_string(num)
+
+        val logged = LoggedFunction(mixed)
+        val result1 = logged.__call__(42, " is the answer", true)
+        val result2 = logged.__call__(42, "The answer is ", false)
+
+        expect(result1).to eq("42 is the answer")
+        expect(result2).to eq("The answer is 42")

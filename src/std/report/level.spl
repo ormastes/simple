@@ -1,0 +1,219 @@
+# Report Level
+#
+# Unified severity levels for all reports in the Simple language.
+# Levels are configurable and can be overridden per-code or per-category.
+
+export ReportLevel, LevelConfig
+
+# =============================================================================
+# ReportLevel: Unified severity levels
+# =============================================================================
+
+enum ReportLevel:
+    Debug       # Detailed diagnostic info (hidden by default)
+    Info        # Informational messages
+    Warning     # Potential issues, suspicious but valid code
+    Error       # Compilation/runtime failures
+    Fatal       # Unrecoverable errors (stops execution)
+
+impl ReportLevel:
+    # Get the string name of this level
+    fn name() -> text:
+        match self:
+            case ReportLevel.Debug: "debug"
+            case ReportLevel.Info: "info"
+            case ReportLevel.Warning: "warning"
+            case ReportLevel.Error: "error"
+            case ReportLevel.Fatal: "fatal"
+
+    # Get the short name (1-5 chars) for compact display
+    fn short_name() -> text:
+        match self:
+            case ReportLevel.Debug: "DEBUG"
+            case ReportLevel.Info: "INFO"
+            case ReportLevel.Warning: "WARN"
+            case ReportLevel.Error: "ERROR"
+            case ReportLevel.Fatal: "FATAL"
+
+    # Get the numeric value (for comparison)
+    fn value() -> i64:
+        match self:
+            case ReportLevel.Debug: 0
+            case ReportLevel.Info: 1
+            case ReportLevel.Warning: 2
+            case ReportLevel.Error: 3
+            case ReportLevel.Fatal: 4
+
+    # Get ANSI color code for terminal output
+    fn color() -> text:
+        match self:
+            case ReportLevel.Debug: "\x1b[90m"      # Gray
+            case ReportLevel.Info: "\x1b[36m"       # Cyan
+            case ReportLevel.Warning: "\x1b[1;33m"  # Bold Yellow
+            case ReportLevel.Error: "\x1b[1;31m"    # Bold Red
+            case ReportLevel.Fatal: "\x1b[1;35m"    # Bold Magenta
+
+    # Check if this level is at least as severe as another
+    fn is_at_least(other: ReportLevel) -> bool:
+        self.value() >= other.value()
+
+    # Check if this level is more severe than another
+    fn is_more_severe_than(other: ReportLevel) -> bool:
+        self.value() > other.value()
+
+    # Check if this level is an error or fatal
+    fn is_error() -> bool:
+        match self:
+            case ReportLevel.Error: true
+            case ReportLevel.Fatal: true
+            case _: false
+
+    # Check if this level causes compilation failure
+    fn is_failure() -> bool:
+        self.is_error()
+
+    # Parse from string (case-insensitive)
+    static fn parse(s: text) -> ReportLevel?:
+        val lower = s.lower()
+        match lower:
+            case "debug": Some(ReportLevel.Debug)
+            case "info": Some(ReportLevel.Info)
+            case "warning": Some(ReportLevel.Warning)
+            case "warn": Some(ReportLevel.Warning)
+            case "error": Some(ReportLevel.Error)
+            case "err": Some(ReportLevel.Error)
+            case "fatal": Some(ReportLevel.Fatal)
+            case _: None
+
+# =============================================================================
+# LevelConfig: Configuration for level overrides
+# =============================================================================
+
+class LevelConfig:
+    # Minimum level to display (filter reports below this)
+    min_level: ReportLevel
+
+    # Treat warnings as errors (-Werror)
+    warnings_as_errors: bool
+
+    # Per-code level overrides: code -> level
+    # e.g., "L:print_in_test_spec" -> Info (downgrade)
+    # e.g., "E0001" -> Warning (upgrade from error is not allowed)
+    code_overrides: Dict<text, ReportLevel>
+
+    # Per-pattern overrides: pattern -> level (supports wildcards)
+    # e.g., "*deprecated*" -> Error
+    pattern_overrides: [(text, ReportLevel)]
+
+impl LevelConfig:
+    # Create default configuration
+    static fn default_config() -> LevelConfig:
+        LevelConfig(
+            min_level: ReportLevel.Info,
+            warnings_as_errors: false,
+            code_overrides: {},
+            pattern_overrides: []
+        )
+
+    # Create strict configuration (warnings as errors, show all)
+    static fn strict() -> LevelConfig:
+        LevelConfig(
+            min_level: ReportLevel.Debug,
+            warnings_as_errors: true,
+            code_overrides: {},
+            pattern_overrides: []
+        )
+
+    # Create quiet configuration (only errors)
+    static fn quiet() -> LevelConfig:
+        LevelConfig(
+            min_level: ReportLevel.Error,
+            warnings_as_errors: false,
+            code_overrides: {},
+            pattern_overrides: []
+        )
+
+    # Get the effective level for a report code
+    fn effective_level(original: ReportLevel, code: text?) -> ReportLevel:
+        var level = original
+
+        # Apply warnings_as_errors
+        if self.warnings_as_errors and level == ReportLevel.Warning:
+            level = ReportLevel.Error
+
+        # Check code overrides first (more specific)
+        if code.?:
+            val code_val = code.unwrap()
+            if self.code_overrides.has(code_val):
+                val override = self.code_overrides[code_val]
+                # Only allow downgrading, not upgrading errors
+                if not original.is_error() or not override.is_more_severe_than(original):
+                    level = override
+
+        # Check pattern overrides
+        if code.?:
+            val code_val = code.unwrap()
+            for entry in self.pattern_overrides:
+                val pattern = entry.0
+                val override_level = entry.1
+                if self.matches_pattern(code_val, pattern):
+                    if not original.is_error() or not override_level.is_more_severe_than(original):
+                        level = override_level
+                    break
+
+        level
+
+    # Check if a report should be displayed based on min_level
+    fn should_display(level: ReportLevel) -> bool:
+        level.is_at_least(self.min_level)
+
+    # Simple wildcard pattern matching (* matches any sequence)
+    fn matches_pattern(value: text, pattern: text) -> bool:
+        if pattern == "*":
+            return true
+
+        if not pattern.contains("*"):
+            return value == pattern
+
+        # Split pattern by * and check if parts appear in order
+        val parts = pattern.split("*")
+        var pos = 0
+
+        for i in 0..parts.len():
+            val part = parts[i]
+            if part.is_empty():
+                continue
+
+            if i == 0:
+                # First part must be at start
+                if not value.starts_with(part):
+                    return false
+                pos = part.len()
+            elif i == parts.len() - 1:
+                # Last part must be at end
+                if not value.ends_with(part):
+                    return false
+            else:
+                # Middle parts must appear somewhere
+                val idx = value.index_of(part, pos)
+                if idx < 0:
+                    return false
+                pos = idx + part.len()
+
+        true
+
+    # Add a code override
+    me set_code_level(code: text, level: ReportLevel):
+        self.code_overrides[code] = level
+
+    # Add a pattern override
+    me add_pattern_override(pattern: text, level: ReportLevel):
+        self.pattern_overrides.push((pattern, level))
+
+    # Set minimum level
+    me set_min_level(level: ReportLevel):
+        self.min_level = level
+
+    # Enable/disable warnings as errors
+    me set_warnings_as_errors(enabled: bool):
+        self.warnings_as_errors = enabled

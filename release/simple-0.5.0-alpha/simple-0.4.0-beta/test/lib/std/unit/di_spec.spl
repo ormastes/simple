@@ -1,0 +1,209 @@
+# @pending
+# DI Module Tests
+#
+# Tests for dependency injection container.
+
+# @skip
+describe "Profile":
+    describe "name()":
+        it "returns test for Test":
+            val p = Profile.Test
+            expect p.name() == "test"
+
+        it "returns dev for Dev":
+            val p = Profile.Dev
+            expect p.name() == "dev"
+
+        it "returns prod for Prod":
+            val p = Profile.Prod
+            expect p.name() == "prod"
+
+        it "returns sdn for Sdn":
+            val p = Profile.Sdn
+            expect p.name() == "sdn"
+
+        it "returns custom name for Custom":
+            val p = Profile.Custom("custom_profile")
+            expect p.name() == "custom_profile"
+
+    describe "from_text()":
+        it "parses test":
+            val p = Profile.from_text("test")
+            expect p == Profile.Test
+
+        it "parses dev":
+            val p = Profile.from_text("dev")
+            expect p == Profile.Dev
+
+        it "parses prod":
+            val p = Profile.from_text("prod")
+            expect p == Profile.Prod
+
+        it "parses sdn":
+            val p = Profile.from_text("sdn")
+            expect p == Profile.Sdn
+
+        it "treats unknown as Custom":
+            val p = Profile.from_text("unknown")
+            expect p == Profile.Custom("unknown")
+
+describe "Container":
+    describe "empty()":
+        it "has dev profile":
+            val c = Container.empty()
+            expect c.profile == "dev"
+
+        it "has no bindings":
+            val c = Container.empty()
+            expect c.bindings.len() == 0
+
+    describe "with_profile()":
+        it "sets profile correctly":
+            val c = Container.with_profile("test")
+            expect c.profile == "test"
+
+        it "registers default bindings":
+            val c = Container.with_profile("test")
+            expect c.has("InstructionModule") == true
+
+    describe "for_test()":
+        it "has test profile":
+            val c = Container.for_test()
+            expect c.profile == "test"
+
+        it "has MockInstructionModule binding":
+            val c = Container.for_test()
+            expect c.has("InstructionModule") == true
+
+    describe "for_dev()":
+        it "has dev profile":
+            val c = Container.for_dev()
+            expect c.profile == "dev"
+
+    describe "for_prod()":
+        it "has prod profile":
+            val c = Container.for_prod()
+            expect c.profile == "prod"
+
+    describe "for_sdn()":
+        it "has sdn profile":
+            val c = Container.for_sdn()
+            expect c.profile == "sdn"
+
+        it "has NoOpInstructionModule binding":
+            val c = Container.for_sdn()
+            expect c.has("InstructionModule") == true
+
+    describe "bind()":
+        it "registers new binding":
+            var c = Container.empty()
+            c.bind("TestService", \: "test_value", false)
+            expect c.has("TestService") == true
+
+    describe "bind_instance()":
+        it "registers pre-created instance":
+            var c = Container.empty()
+            c.bind_instance("Config", LogConfig.testing())
+            expect c.has("Config") == true
+
+    describe "resolve()":
+        it "returns bound instance":
+            var c = Container.empty()
+            c.bind_instance("Value", 42)
+            val result = c.resolve<i64>("Value")
+            expect result.is_ok() == true
+
+        it "returns error for unknown binding":
+            val c = Container.empty()
+            val result = c.resolve<i64>("Unknown")
+            expect result.is_err() == true
+
+    describe "has()":
+        it "returns true for existing binding":
+            var c = Container.empty()
+            c.bind("Service", \: "value", false)
+            expect c.has("Service") == true
+
+        it "returns false for missing binding":
+            val c = Container.empty()
+            expect c.has("Missing") == false
+
+describe "InstructionModule":
+    describe "MockInstructionModule":
+        it "allows all instructions":
+            val module = MockInstructionModule()
+            val inst = HirInstruction.Call("test", [])
+            expect module.is_allowed(inst) == true
+
+        it "has correct name":
+            val module = MockInstructionModule()
+            expect module.name() == "MockInstructionModule"
+
+    describe "NoOpInstructionModule":
+        it "allows LoadConst":
+            val module = NoOpInstructionModule()
+            val inst = HirInstruction.LoadConst(Value.Int(42))
+            expect module.is_allowed(inst) == true
+
+        it "allows ArrayNew":
+            val module = NoOpInstructionModule()
+            val inst = HirInstruction.ArrayNew([])
+            expect module.is_allowed(inst) == true
+
+        it "allows DictNew":
+            val module = NoOpInstructionModule()
+            val inst = HirInstruction.DictNew([])
+            expect module.is_allowed(inst) == true
+
+        it "blocks Call":
+            val module = NoOpInstructionModule()
+            val inst = HirInstruction.Call("test", [])
+            expect module.is_allowed(inst) == false
+
+        it "blocks LoadLocal":
+            val module = NoOpInstructionModule()
+            val inst = HirInstruction.LoadLocal(0)
+            expect module.is_allowed(inst) == false
+
+        it "blocks StoreLocal":
+            val module = NoOpInstructionModule()
+            val inst = HirInstruction.StoreLocal(0)
+            expect module.is_allowed(inst) == false
+
+        it "has correct name":
+            val module = NoOpInstructionModule()
+            expect module.name() == "NoOpInstructionModule"
+
+describe "HirInstruction":
+    describe "kind()":
+        it "returns LoadConst for LoadConst":
+            val inst = HirInstruction.LoadConst(Value.Int(1))
+            expect inst.kind() == "LoadConst"
+
+        it "returns Call for Call":
+            val inst = HirInstruction.Call("fn", [])
+            expect inst.kind() == "Call"
+
+        it "returns ArrayNew for ArrayNew":
+            val inst = HirInstruction.ArrayNew([])
+            expect inst.kind() == "ArrayNew"
+
+describe "Global Container":
+    describe "init_container()":
+        it "initializes with profile":
+            init_container("test")
+            val c = get_container()
+            expect c.profile == "test"
+
+    describe "get_container()":
+        it "creates dev container if not initialized":
+            # Reset global container
+            global_container = None
+            val c = get_container()
+            expect c.profile == "dev"
+
+    describe "resolve()":
+        it "resolves from global container":
+            init_container("test")
+            val result = resolve<InstructionModule>("InstructionModule")
+            expect result.is_ok() == true

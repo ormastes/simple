@@ -1,0 +1,425 @@
+# @pending
+"""
+# Rust-to-Simple FFI Specification
+
+**Feature IDs:** #FFI-001 - #FFI-050
+**Category:** Runtime
+**Difficulty:** 4/5
+**Status:** Implemented
+
+## Overview
+
+The Simple language provides a comprehensive Foreign Function Interface (FFI)
+system that enables bidirectional communication between Rust and Simple code.
+This specification tests the core FFI functionality.
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| RuntimeValue | 64-bit tagged value (3-bit tag + 61-bit payload) |
+| BridgeValue | C-compatible wrapper for complex types |
+| Extern Function | Function implemented in Rust, callable from Simple |
+| Symbol Registry | Maps function names to Rust function pointers |
+
+## Behavior
+
+- FFI functions use C calling convention (extern C)
+- RuntimeValue passed by value (64 bits, no allocation)
+- Complex types allocated on heap, pointer stored in RuntimeValue
+- Type marshalling handled automatically for primitive types
+
+## Implementation Notes
+
+FFI functions are organized in phases under src/rust/runtime/src/value/ffi/:
+- Phase 1: Core value operations
+- Phase 2: Hash and concurrent structures
+- Phase 3: Interpreter bridge, contracts
+- Phase 4-13: Math, file I/O, networking, GPU, etc.
+
+Total: 562+ FFI functions across 50+ modules.
+"""
+
+# ============================================================================
+# Extern FFI Function Declarations
+# ============================================================================
+
+# Value operations
+extern fn rt_value_int(v)
+extern fn rt_value_float(v)
+extern fn rt_value_bool(v)
+extern fn rt_value_nil()
+extern fn rt_value_as_int(rv)
+extern fn rt_value_as_float(rv)
+extern fn rt_value_as_bool(rv)
+extern fn rt_value_is_nil(rv)
+extern fn rt_value_type_tag(rv)
+
+# Array operations
+extern fn rt_array_new(capacity)
+extern fn rt_array_push(arr, v)
+extern fn rt_array_get(arr, idx)
+extern fn rt_array_set(arr, idx, v)
+extern fn rt_array_pop(arr)
+extern fn rt_array_clear(arr)
+extern fn rt_array_len(arr)
+
+# Dictionary operations
+extern fn rt_dict_new()
+extern fn rt_dict_set(dict, key, v)
+extern fn rt_dict_get(dict, key)
+extern fn rt_dict_len(dict)
+extern fn rt_dict_clear(dict)
+extern fn rt_dict_keys(dict)
+extern fn rt_dict_values(dict)
+
+# String operations
+extern fn rt_string_new(s)
+extern fn rt_string_concat(a, b)
+extern fn rt_string_len(s)
+extern fn rt_string_eq(a, b)
+
+# Math operations
+extern fn rt_math_sin(x)
+extern fn rt_math_cos(x)
+extern fn rt_math_tan(x)
+extern fn rt_math_sqrt(x)
+extern fn rt_math_pow(base, exp)
+extern fn rt_math_log(x)
+extern fn rt_math_exp(x)
+
+# Environment operations
+extern fn rt_env_get(name)
+extern fn rt_env_set(name, value)
+extern fn rt_env_exists(name)
+extern fn rt_env_remove(name)
+extern fn rt_env_home()
+extern fn rt_env_temp()
+extern fn rt_env_all()
+
+# Configuration operations
+extern fn rt_set_debug_mode(enabled)
+extern fn rt_is_debug_mode_enabled()
+extern fn rt_set_macro_trace(enabled)
+extern fn rt_is_macro_trace_enabled()
+
+# Error handling
+extern fn rt_function_not_found(name)
+extern fn rt_method_not_found(type_name, method)
+extern fn rt_is_error(rv)
+
+# Type tags (constants)
+const TAG_INT: u8 = 0
+const TAG_HEAP: u8 = 1
+const TAG_FLOAT: u8 = 2
+const TAG_SPECIAL: u8 = 3
+
+# ============================================================================
+# Value Creation and Extraction
+# ============================================================================
+
+describe "FFI Value Operations":
+    """
+    ## Core Value Operations
+
+    RuntimeValue is the fundamental type for FFI communication.
+    These functions create and extract values from RuntimeValue.
+    """
+
+    context "integer values":
+        it "creates and extracts positive integers":
+            val rv = rt_value_int(42)
+            val result = rt_value_as_int(rv)
+            expect(result).to(eq(42))
+
+        it "creates and extracts negative integers":
+            val rv = rt_value_int(-100)
+            val result = rt_value_as_int(rv)
+            expect(result).to(eq(-100))
+
+        it "creates and extracts zero":
+            val rv = rt_value_int(0)
+            val result = rt_value_as_int(rv)
+            expect(result).to(eq(0))
+
+    context "float values":
+        it "creates and extracts floats":
+            val rv = rt_value_float(3.14)
+            val result = rt_value_as_float(rv)
+            expect(result).to(be_close_to(3.14, 0.001))
+
+    context "boolean values":
+        it "creates and extracts true":
+            val rv = rt_value_bool(true)
+            val result = rt_value_as_bool(rv)
+            expect(result).to(eq(true))
+
+        it "creates and extracts false":
+            val rv = rt_value_bool(false)
+            val result = rt_value_as_bool(rv)
+            expect(result).to(eq(false))
+
+    context "nil values":
+        it "creates nil value":
+            val rv = rt_value_nil()
+            expect(rt_value_is_nil(rv)).to(eq(true))
+
+        it "non-nil values return false":
+            val rv = rt_value_int(42)
+            expect(rt_value_is_nil(rv)).to(eq(false))
+
+
+# ============================================================================
+# Array Operations
+# ============================================================================
+
+describe "FFI Array Operations":
+    """
+    ## Array Operations
+
+    Arrays are heap-allocated collections accessible through FFI.
+    """
+
+    context "array creation":
+        it "creates empty array with capacity":
+            val arr = rt_array_new(10)
+            expect(rt_array_len(arr)).to(eq(0))
+
+    context "array manipulation":
+        it "pushes and retrieves elements":
+            val arr = rt_array_new(10)
+            rt_array_push(arr, rt_value_int(42))
+            rt_array_push(arr, rt_value_int(100))
+
+            val first = rt_array_get(arr, 0)
+            val second = rt_array_get(arr, 1)
+
+            expect(rt_value_as_int(first)).to(eq(42))
+            expect(rt_value_as_int(second)).to(eq(100))
+
+        it "sets elements at index":
+            val arr = rt_array_new(10)
+            rt_array_push(arr, rt_value_int(1))
+            rt_array_set(arr, 0, rt_value_int(999))
+
+            val result = rt_array_get(arr, 0)
+            expect(rt_value_as_int(result)).to(eq(999))
+
+        it "pops elements":
+            val arr = rt_array_new(10)
+            rt_array_push(arr, rt_value_int(1))
+            rt_array_push(arr, rt_value_int(2))
+
+            val popped = rt_array_pop(arr)
+            expect(rt_value_as_int(popped)).to(eq(2))
+            expect(rt_array_len(arr)).to(eq(1))
+
+        it "clears array":
+            val arr = rt_array_new(10)
+            rt_array_push(arr, rt_value_int(1))
+            rt_array_push(arr, rt_value_int(2))
+
+            rt_array_clear(arr)
+            expect(rt_array_len(arr)).to(eq(0))
+
+
+# ============================================================================
+# Dictionary Operations
+# ============================================================================
+
+describe "FFI Dictionary Operations":
+    """
+    ## Dictionary Operations
+
+    Dictionaries (hash maps) are heap-allocated key-value stores.
+    """
+
+    context "dictionary creation":
+        it "creates empty dictionary":
+            val dict = rt_dict_new()
+            expect(rt_dict_len(dict)).to(eq(0))
+
+    context "dictionary manipulation":
+        it "sets and retrieves values":
+            val dict = rt_dict_new()
+            val key = rt_string_new("name")
+            val value = rt_string_new("Alice")
+
+            rt_dict_set(dict, key, value)
+            val result = rt_dict_get(dict, key)
+
+            expect(rt_string_eq(result, value)).to(eq(true))
+
+        it "tracks length correctly":
+            val dict = rt_dict_new()
+            rt_dict_set(dict, rt_string_new("a"), rt_value_int(1))
+            rt_dict_set(dict, rt_string_new("b"), rt_value_int(2))
+
+            expect(rt_dict_len(dict)).to(eq(2))
+
+
+# ============================================================================
+# String Operations
+# ============================================================================
+
+describe "FFI String Operations":
+    """
+    ## String Operations
+
+    Strings are heap-allocated UTF-8 sequences.
+    """
+
+    it "creates string from literal":
+        val s = rt_string_new("Hello")
+        expect(rt_string_len(s)).to(eq(5))
+
+    it "concatenates two strings":
+        val a = rt_string_new("Hello, ")
+        val b = rt_string_new("World!")
+        val result = rt_string_concat(a, b)
+
+        expect(rt_string_len(result)).to(eq(13))
+
+
+# ============================================================================
+# Math Operations
+# ============================================================================
+
+describe "FFI Math Operations":
+    """
+    ## Math Operations
+
+    Trigonometric, logarithmic, and power functions implemented in Rust.
+    """
+
+    context "trigonometric functions":
+        it "computes sin(0) equals 0":
+            val result = rt_math_sin(0.0)
+            expect(result).to(be_close_to(0.0, 0.0001))
+
+        it "computes cos(0) equals 1":
+            val result = rt_math_cos(0.0)
+            expect(result).to(be_close_to(1.0, 0.0001))
+
+    context "power and logarithm":
+        it "computes power":
+            val result = rt_math_pow(2.0, 3.0)
+            expect(result).to(be_close_to(8.0, 0.0001))
+
+        it "computes square root":
+            val result = rt_math_sqrt(16.0)
+            expect(result).to(be_close_to(4.0, 0.0001))
+
+
+# ============================================================================
+# Environment Operations
+# ============================================================================
+
+describe "FFI Environment Operations":
+    """
+    ## Environment Variable Operations
+
+    Access to system environment variables through FFI.
+    """
+
+    it "gets home directory":
+        val home = rt_env_home()
+        expect(rt_value_is_nil(home)).to(eq(false))
+
+    it "gets temp directory":
+        val temp = rt_env_temp()
+        expect(rt_value_is_nil(temp)).to(eq(false))
+
+    it "sets and checks environment variable existence":
+        val name = "SIMPLE_FFI_TEST_VAR"
+        val value = "test_value_12345"
+
+        rt_env_set(name, value)
+        expect(rt_env_exists(name)).to(eq(true))
+
+        # Cleanup
+        rt_env_remove(name)
+        expect(rt_env_exists(name)).to(eq(false))
+
+
+# ============================================================================
+# Runtime Configuration
+# ============================================================================
+
+describe "FFI Runtime Configuration":
+    """
+    ## Runtime Configuration
+
+    Global runtime settings accessible through FFI.
+    """
+
+    it "toggles debug mode":
+        val original = rt_is_debug_mode_enabled()
+
+        rt_set_debug_mode(true)
+        expect(rt_is_debug_mode_enabled()).to(eq(true))
+
+        rt_set_debug_mode(false)
+        expect(rt_is_debug_mode_enabled()).to(eq(false))
+
+        # Restore original
+        rt_set_debug_mode(original)
+
+    it "toggles macro trace":
+        val original = rt_is_macro_trace_enabled()
+
+        rt_set_macro_trace(true)
+        expect(rt_is_macro_trace_enabled()).to(eq(true))
+
+        rt_set_macro_trace(false)
+        expect(rt_is_macro_trace_enabled()).to(eq(false))
+
+        # Restore original
+        rt_set_macro_trace(original)
+
+
+# ============================================================================
+# Type Tags
+# ============================================================================
+
+describe "FFI Type Tags":
+    """
+    ## Type Tag Operations
+
+    RuntimeValue includes a 3-bit type tag for runtime type checking.
+    """
+
+    it "identifies integer type":
+        val rv = rt_value_int(42)
+        val tag = rt_value_type_tag(rv)
+        expect(tag).to(eq(TAG_INT))
+
+    it "identifies float type":
+        val rv = rt_value_float(3.14)
+        val tag = rt_value_type_tag(rv)
+        expect(tag).to(eq(TAG_FLOAT))
+
+    it "identifies nil/special type":
+        val rv = rt_value_nil()
+        val tag = rt_value_type_tag(rv)
+        expect(tag).to(eq(TAG_SPECIAL))
+
+
+# ============================================================================
+# Error Handling
+# ============================================================================
+
+describe "FFI Error Handling":
+    """
+    ## Error Handling
+
+    FFI functions report errors through RuntimeValue or panic bridge.
+    """
+
+    it "reports function not found":
+        val error = rt_function_not_found("nonexistent_function")
+        expect(rt_is_error(error)).to(eq(true))
+
+    it "reports method not found":
+        val error = rt_method_not_found("SomeType", "missing_method")
+        expect(rt_is_error(error)).to(eq(true))

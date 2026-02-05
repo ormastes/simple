@@ -1,0 +1,438 @@
+# ActorScheduler Tests
+#
+# Tests for reductions-based fair scheduling.
+
+# @skip
+from actor_scheduler import {
+    ActorScheduler,
+    SchedulerConfig,
+    SchedulerStats,
+    ActorContext,
+    ActorPriority,
+    ActorState,
+    RunQueue
+}
+
+describe "SchedulerConfig":
+    it "creates default config":
+        val config = SchedulerConfig.default()
+
+        assert config.reductions_per_timeslice == 2000
+        assert config.scheduler_count == 4
+        assert config.work_stealing_enabled
+        assert config.priority_scheduling
+
+    it "creates single-threaded config":
+        val config = SchedulerConfig.single_threaded()
+
+        assert config.scheduler_count == 1
+        assert not config.work_stealing_enabled
+
+    it "creates low-latency config":
+        val config = SchedulerConfig.low_latency()
+
+        assert config.reductions_per_timeslice == 500
+
+    it "creates high-throughput config":
+        val config = SchedulerConfig.high_throughput()
+
+        assert config.reductions_per_timeslice == 8000
+        assert not config.priority_scheduling
+
+describe "ActorPriority":
+    it "converts to i64":
+        assert ActorPriority.Max.to_i64() == 0
+        assert ActorPriority.High.to_i64() == 1
+        assert ActorPriority.Normal.to_i64() == 2
+        assert ActorPriority.Low.to_i64() == 3
+
+    it "converts from i64":
+        assert ActorPriority.from_i64(0) == ActorPriority.Max
+        assert ActorPriority.from_i64(1) == ActorPriority.High
+        assert ActorPriority.from_i64(2) == ActorPriority.Normal
+        assert ActorPriority.from_i64(99) == ActorPriority.Low  # Default
+
+    it "compares priorities":
+        assert ActorPriority.Max.cmp(ActorPriority.High) < 0
+        assert ActorPriority.Normal.cmp(ActorPriority.Low) < 0
+        assert ActorPriority.Low.cmp(ActorPriority.Max) > 0
+
+describe "ActorState":
+    it "checks alive status":
+        assert ActorState.Runnable.is_alive()
+        assert ActorState.Running.is_alive()
+        assert ActorState.Waiting.is_alive()
+        assert ActorState.Suspended.is_alive()
+        assert not ActorState.Exiting.is_alive()
+        assert not ActorState.Dead.is_alive()
+
+    it "checks can_run status":
+        assert ActorState.Runnable.can_run()
+        assert not ActorState.Running.can_run()
+        assert not ActorState.Waiting.can_run()
+        assert not ActorState.Dead.can_run()
+
+    it "formats for display":
+        assert ActorState.Runnable.fmt() == "runnable"
+        assert ActorState.Dead.fmt() == "dead"
+
+describe "RunQueue":
+    it "creates empty queue":
+        val queue = RunQueue.new()
+
+        assert queue.is_empty()
+        assert queue.len() == 0
+
+    it "enqueues by priority":
+        var queue = RunQueue.new()
+
+        queue.enqueue(1, ActorPriority.Normal)
+        queue.enqueue(2, ActorPriority.High)
+        queue.enqueue(3, ActorPriority.Low)
+
+        assert queue.len() == 3
+        assert queue.len_by_priority(ActorPriority.Normal) == 1
+        assert queue.len_by_priority(ActorPriority.High) == 1
+        assert queue.len_by_priority(ActorPriority.Low) == 1
+
+    it "dequeues by priority order":
+        var queue = RunQueue.new()
+
+        queue.enqueue(1, ActorPriority.Low)
+        queue.enqueue(2, ActorPriority.Normal)
+        queue.enqueue(3, ActorPriority.Max)
+
+        # Should get max priority first
+        val first = queue.dequeue()
+        assert first.unwrap() == 3
+
+        val second = queue.dequeue()
+        assert second.unwrap() == 2
+
+        val third = queue.dequeue()
+        assert third.unwrap() == 1
+
+    it "returns None when empty":
+        var queue = RunQueue.new()
+        val result = queue.dequeue()
+
+        assert not result.?
+
+    it "removes specific actor":
+        var queue = RunQueue.new()
+
+        queue.enqueue(1, ActorPriority.Normal)
+        queue.enqueue(2, ActorPriority.Normal)
+        queue.enqueue(3, ActorPriority.Normal)
+
+        queue.remove(2)
+
+        assert queue.len() == 2
+
+describe "ActorContext":
+    it "creates with defaults":
+        val ctx = ActorContext.with_defaults(1, Some("test"), 2000)
+
+        assert ctx.id == 1
+        assert ctx.name == Some("test")
+        assert ctx.priority == ActorPriority.Normal
+        assert ctx.state == ActorState.Runnable
+        assert ctx.reductions_left == 2000
+
+    it "consumes reductions":
+        var ctx = ActorContext.with_defaults(1, None, 2000)
+
+        val exhausted1 = ctx.consume_reductions(500)
+        assert not exhausted1
+        assert ctx.reductions_left == 1500
+
+        val exhausted2 = ctx.consume_reductions(2000)
+        assert exhausted2
+        assert ctx.reductions_left < 0
+
+    it "resets reductions":
+        var ctx = ActorContext.with_defaults(1, None, 2000)
+
+        ctx.consume_reductions(2000)
+        ctx.reset_reductions(2000)
+
+        assert ctx.reductions_left == 2000
+        assert ctx.timeslice_count == 1
+
+    it "transitions states":
+        var ctx = ActorContext.with_defaults(1, None, 2000)
+
+        ctx.set_running()
+        assert ctx.state == ActorState.Running
+
+        ctx.set_waiting()
+        assert ctx.state == ActorState.Waiting
+
+        ctx.set_suspended()
+        assert ctx.state == ActorState.Suspended
+
+        ctx.set_runnable()
+        assert ctx.state == ActorState.Runnable
+
+        ctx.set_dead()
+        assert ctx.state == ActorState.Dead
+
+    it "manages links":
+        var ctx = ActorContext.with_defaults(1, None, 2000)
+
+        ctx.link(2)
+        ctx.link(3)
+
+        assert ctx.links.len() == 2
+
+        ctx.unlink(2)
+
+        assert ctx.links.len() == 1
+        assert ctx.links[0] == 3
+
+    it "manages monitors":
+        var ctx = ActorContext.with_defaults(1, None, 2000)
+
+        ctx.monitor(5)
+        ctx.add_monitored_by(10)
+
+        assert ctx.monitors.len() == 1
+        assert ctx.monitored_by.len() == 1
+
+        ctx.demonitor(5)
+        ctx.remove_monitored_by(10)
+
+        assert ctx.monitors.len() == 0
+        assert ctx.monitored_by.len() == 0
+
+    it "formats for display":
+        val ctx = ActorContext.with_defaults(1, Some("worker"), 2000)
+        val str = ctx.fmt()
+
+        assert str.contains("Actor")
+        assert str.contains("worker")
+
+describe "ActorScheduler - Spawning":
+    it "spawns actors":
+        var scheduler = ActorScheduler.default()
+
+        val id1 = scheduler.spawn_actor(Some("actor1"))
+        val id2 = scheduler.spawn_actor(Some("actor2"))
+
+        assert id1 == 0
+        assert id2 == 1
+        assert scheduler.actor_count() == 2
+
+    it "spawns with priority":
+        var scheduler = ActorScheduler.default()
+
+        val id = scheduler.spawn_with_priority(Some("high"), ActorPriority.High)
+        val act = scheduler.get_actor(id)
+
+        assert act.?.priority == ActorPriority.High
+
+    it "updates stats on spawn":
+        var scheduler = ActorScheduler.default()
+
+        scheduler.spawn_actor(nil)
+        scheduler.spawn_actor(nil)
+
+        val stats = scheduler.get_stats()
+        assert stats.total_actors_created == 2
+        assert stats.current_actor_count == 2
+        assert stats.peak_actor_count == 2
+
+describe "ActorScheduler - Termination":
+    it "terminates actors":
+        var scheduler = ActorScheduler.default()
+
+        val id = scheduler.spawn_actor(Some("test"))
+        scheduler.terminate(id)
+
+        val act = scheduler.get_actor(id)
+        assert act.?.state == ActorState.Dead
+
+    it "updates stats on termination":
+        var scheduler = ActorScheduler.default()
+
+        val id = scheduler.spawn_actor(nil)
+        scheduler.terminate(id)
+
+        val stats = scheduler.get_stats()
+        assert stats.total_actors_terminated == 1
+        assert stats.current_actor_count == 0
+
+describe "ActorScheduler - Scheduling":
+    it "runs one timeslice":
+        var scheduler = ActorScheduler.default()
+        scheduler.spawn_actor(nil)
+
+        val did_work = scheduler.run_one_timeslice()
+
+        assert did_work
+
+    it "returns false when no runnable":
+        var scheduler = ActorScheduler.default()
+
+        val did_work = scheduler.run_one_timeslice()
+
+        assert not did_work
+
+    it "tracks context switches":
+        var scheduler = ActorScheduler.default()
+        scheduler.spawn_actor(nil)
+
+        scheduler.run_one_timeslice()
+        scheduler.run_one_timeslice()
+
+        val stats = scheduler.get_stats()
+        assert stats.total_context_switches >= 2
+
+    it "runs until idle":
+        var scheduler = ActorScheduler.new(SchedulerConfig.single_threaded())
+
+        # Spawn actors
+        scheduler.spawn_actor(nil)
+        scheduler.spawn_actor(nil)
+
+        scheduler.start()
+        scheduler.run_n_timeslices(5)
+
+        val stats = scheduler.get_stats()
+        assert stats.total_timeslices == 5
+
+    it "checks runnable status":
+        var scheduler = ActorScheduler.default()
+
+        assert not scheduler.has_runnable()
+
+        scheduler.spawn_actor(nil)
+        assert scheduler.has_runnable()
+
+describe "ActorScheduler - Wake/Suspend":
+    it "suspends actor":
+        var scheduler = ActorScheduler.default()
+        val id = scheduler.spawn_actor(nil)
+
+        scheduler.suspend_actor(id)
+
+        val act = scheduler.get_actor(id)
+        assert act.?.state == ActorState.Suspended
+
+    it "resumes actor":
+        var scheduler = ActorScheduler.default()
+        val id = scheduler.spawn_actor(nil)
+
+        scheduler.suspend_actor(id)
+        scheduler.resume_actor(id)
+
+        val act = scheduler.get_actor(id)
+        assert act.?.state == ActorState.Runnable
+
+describe "ActorScheduler - Messaging":
+    it "sends message":
+        var scheduler = ActorScheduler.default()
+        val id = scheduler.spawn_actor(nil)
+
+        val success = scheduler.send_message(id, 12345, 100, nil)
+
+        assert success
+
+        val act = scheduler.get_actor(id)
+        assert act.?.mailbox.total_size() == 1
+
+    it "sends high priority message":
+        var scheduler = ActorScheduler.default()
+        val id = scheduler.spawn_actor(nil)
+
+        val success = scheduler.send_high_priority(id, 12345, 100, nil)
+
+        assert success
+
+    it "fails to send to nonexistent actor":
+        var scheduler = ActorScheduler.default()
+
+        val success = scheduler.send_message(999, 12345, 100, nil)
+
+        assert not success
+
+describe "ActorScheduler - Linking":
+    it "links actors":
+        var scheduler = ActorScheduler.default()
+        val id1 = scheduler.spawn_actor(nil)
+        val id2 = scheduler.spawn_actor(nil)
+
+        scheduler.link_actors(id1, id2)
+
+        val act1 = scheduler.get_actor(id1)
+        val act2 = scheduler.get_actor(id2)
+
+        assert act1.?.links.contains(id2)
+        assert act2.?.links.contains(id1)
+
+    it "unlinks actors":
+        var scheduler = ActorScheduler.default()
+        val id1 = scheduler.spawn_actor(nil)
+        val id2 = scheduler.spawn_actor(nil)
+
+        scheduler.link_actors(id1, id2)
+        scheduler.unlink_actors(id1, id2)
+
+        val act1 = scheduler.get_actor(id1)
+        assert not act1.?.links.contains(id2)
+
+describe "ActorScheduler - Monitoring":
+    it "sets up monitoring":
+        var scheduler = ActorScheduler.default()
+        val monitor_id = scheduler.spawn_actor(Some("monitor"))
+        val target_id = scheduler.spawn_actor(Some("target"))
+
+        scheduler.monitor_actor(monitor_id, target_id)
+
+        val mon = scheduler.get_actor(monitor_id)
+        val tgt = scheduler.get_actor(target_id)
+
+        assert mon.?.monitors.contains(target_id)
+        assert tgt.?.monitored_by.contains(monitor_id)
+
+    it "removes monitoring":
+        var scheduler = ActorScheduler.default()
+        val monitor_id = scheduler.spawn_actor(nil)
+        val target_id = scheduler.spawn_actor(nil)
+
+        scheduler.monitor_actor(monitor_id, target_id)
+        scheduler.demonitor_actor(monitor_id, target_id)
+
+        val mon = scheduler.get_actor(monitor_id)
+        assert not mon.?.monitors.contains(target_id)
+
+describe "ActorScheduler - Statistics":
+    it "reports utilization":
+        var scheduler = ActorScheduler.default()
+        scheduler.spawn_actor(nil)
+        scheduler.run_one_timeslice()
+
+        val stats = scheduler.get_stats()
+        # With no timing, utilization is 0%
+        assert stats.utilization() >= 0.0
+
+    it "tracks reductions":
+        var scheduler = ActorScheduler.default()
+        scheduler.spawn_actor(nil)
+        scheduler.run_one_timeslice()
+
+        val stats = scheduler.get_stats()
+        assert stats.total_reductions_executed == 2000
+
+describe "ActorScheduler - Display":
+    it "formats scheduler for display":
+        val scheduler = ActorScheduler.default()
+        val str = scheduler.fmt()
+
+        assert str.contains("ActorScheduler")
+
+    it "formats stats for display":
+        val stats = SchedulerStats.new()
+        val str = stats.fmt()
+
+        assert str.contains("SchedulerStats")

@@ -1,0 +1,331 @@
+# JIT instantiation at load-time.
+#
+# This module handles on-demand instantiation of generic templates
+# when resolving missing symbols during runtime loading.
+#
+# Phase 5: Load-Time JIT Instantiation
+
+use ./compiler_ffi.*
+use ./jit_context.JitCompilationContext
+
+# ============================================================================
+# Result Types
+# ============================================================================
+
+enum JitInstantiationResult:
+    """Result of JIT instantiation attempt."""
+    Success(code: [u8], symbol: text, address: i64?)
+    NotFound(symbol: text)
+    CircularDependency(cycle: [text])
+    CompilationError(message: text)
+    UpdateFailed(symbol: text, error: text)
+
+impl JitInstantiationResult:
+    fn is_success() -> bool:
+        match self:
+            case Success(_, _, _): true
+            case _: false
+
+    fn is_error() -> bool:
+        match self:
+            case CompilationError(_): true
+            case CircularDependency(_): true
+            case UpdateFailed(_, _): true
+            case _: false
+
+# ============================================================================
+# Configuration
+# ============================================================================
+
+struct JitInstantiatorConfig:
+    """Configuration for JIT instantiation."""
+    update_smf: bool
+    max_depth: i32
+    enabled: bool
+    verbose: bool
+
+impl JitInstantiatorConfig:
+    static fn default() -> JitInstantiatorConfig:
+        JitInstantiatorConfig(
+            update_smf: true,
+            max_depth: 50,
+            enabled: true,
+            verbose: false
+        )
+
+# ============================================================================
+# Simplified Metadata Types (FFI-friendly)
+# ============================================================================
+
+struct LoadedMetadata:
+    """Simplified metadata for FFI (no complex compiler types)."""
+    possible: [PossibleInstantiation]
+    instantiations: [InstantiationRecord]
+
+struct PossibleInstantiation:
+    """A possible generic instantiation."""
+    template_name: text
+    type_args: text
+    mangled_name: text
+
+struct InstantiationRecord:
+    """A recorded instantiation."""
+    id: i32
+    template_name: text
+    type_args: text
+    mangled_name: text
+    from_file: text
+    from_loc: text
+    to_obj: text
+    status: text
+
+# ============================================================================
+# JIT Instantiator
+# ============================================================================
+
+struct JitInstantiator:
+    """JIT instantiator for load-time template instantiation."""
+    config: JitInstantiatorConfig
+    compiler_ctx: CompilerContext  # FFI handle
+    loaded_metadata: Dict<text, LoadedMetadata>  # Simplified metadata
+    in_progress: Set<text>
+    depth: i32
+    jit_cache: Dict<text, ([u8], i64)>
+    symbol_table: Dict<text, i64>
+
+impl JitInstantiator:
+    static fn new(config: JitInstantiatorConfig) -> JitInstantiator:
+        """Create a new JIT instantiator."""
+        JitInstantiator(
+            config: config,
+            compiler_ctx: CompilerContext.create(),  # FFI handle
+            loaded_metadata: {},
+            in_progress: {},
+            depth: 0,
+            jit_cache: {},
+            symbol_table: {}
+        )
+
+    me load_smf_metadata(smf_path: text) -> Result<(), text>:
+        """Load note.sdn metadata from an SMF file."""
+        val metadata = self.read_note_sdn_from_file(smf_path)?
+        self.loaded_metadata[smf_path] = metadata
+        Ok(())
+
+    fn read_note_sdn_from_file(smf_path: text) -> Result<LoadedMetadata, text>:
+        """Read note.sdn section from SMF file."""
+        # TODO: Implement proper SMF section parsing
+        # For now, placeholder implementation
+        Ok(LoadedMetadata(possible: [], instantiations: []))
+
+    fn can_jit_instantiate(symbol: text) -> bool:
+        """Check if a symbol can be JIT-instantiated."""
+        if not self.config.enabled:
+            return false
+
+        for (_, metadata) in self.loaded_metadata:
+            for poss in metadata.possible:
+                if poss.mangled_name == symbol:
+                    return true
+        false
+
+    fn find_possible(symbol: text) -> (text, PossibleInstantiation)?:
+        """Find possible instantiation for a symbol."""
+        for (path, metadata) in self.loaded_metadata:
+            for entry in metadata.possible:
+                if entry.mangled_name == symbol:
+                    return Some((path, entry))
+        None
+
+    me try_jit_instantiate(symbol: text) -> JitInstantiationResult:
+        """Try to JIT-instantiate a missing symbol."""
+        if not self.config.enabled:
+            return JitInstantiationResult.NotFound(symbol)
+
+        # Check depth limit
+        if self.depth >= self.config.max_depth:
+            return JitInstantiationResult.CompilationError(
+                "Maximum JIT depth ({self.config.max_depth}) exceeded"
+            )
+
+        # Check cache
+        if self.jit_cache.contains_key(symbol):
+            val (code, address) = self.jit_cache[symbol]
+            return JitInstantiationResult.Success(
+                code: code,
+                symbol: symbol,
+                address: Some(address)
+            )
+
+        # Check for cycle
+        if self.in_progress.contains(symbol):
+            val cycle = self.in_progress.to_list()
+            return JitInstantiationResult.CircularDependency(cycle)
+
+        # Find possible entry
+        val found = self.find_possible(symbol)
+        if not found.?:
+            return JitInstantiationResult.NotFound(symbol)
+
+        val (smf_path, entry) = found.unwrap()
+
+        # Start JIT compilation
+        self.in_progress = self.in_progress.insert(symbol)
+        self.depth = self.depth + 1
+
+        if self.config.verbose:
+            print "[jit] JIT-compiling {symbol} from {smf_path}"
+
+        val result = self.do_jit_compile(entry, smf_path)
+
+        # Cleanup
+        self.in_progress = self.in_progress.remove(symbol)
+        self.depth = self.depth - 1
+
+        result
+
+    me do_jit_compile(entry: PossibleInstantiation, smf_path: text) -> JitInstantiationResult:
+        """Perform JIT compilation via FFI."""
+        # TODO: Load actual template bytes from SMF TemplateCode section
+        # For now, placeholder with empty template bytes
+        val template_bytes = TemplateBytes(
+            bytes: [],  # TODO: Load from SMF
+            name: entry.template_name,
+            param_count: entry.type_args.split(",").len() as i32
+        )
+
+        # Parse type args from string to TypeInfo
+        val type_args = entry.type_args.split(",")
+            .map(\s: type_from_string(s.trim()))
+
+        # Compile via FFI
+        val code_result = self.compiler_ctx.instantiate(template_bytes, type_args)
+
+        match code_result:
+            case Ok(compiled_code):
+                val address: i64 = 0  # TODO: Allocate executable memory and get real address
+
+                # Cache the result
+                self.jit_cache[entry.mangled_name] = (compiled_code, address)
+
+                # Register in symbol table
+                self.symbol_table[entry.mangled_name] = address
+
+                # Update SMF file if configured
+                if self.config.update_smf:
+                    val update_result = self.update_smf_note_sdn(smf_path, entry)
+                    if update_result.is_err():
+                        return JitInstantiationResult.UpdateFailed(
+                            symbol: entry.mangled_name,
+                            error: update_result.unwrap_err()
+                        )
+
+                JitInstantiationResult.Success(
+                    code: compiled_code,
+                    symbol: entry.mangled_name,
+                    address: Some(address)
+                )
+
+            case Err(msg):
+                JitInstantiationResult.CompilationError(msg)
+
+    me update_smf_note_sdn(smf_path: text, entry: PossibleInstantiation) -> Result<(), text>:
+        """Update note.sdn in SMF file after JIT compilation."""
+        # TODO: Implement proper SMF update
+        if self.config.verbose:
+            print "[jit] Would update {smf_path}: {entry.mangled_name} moved to instantiations"
+
+        # Update local metadata
+        if self.loaded_metadata.contains_key(smf_path):
+            var metadata = self.loaded_metadata[smf_path]
+
+            # Remove from possible
+            metadata.possible = metadata.possible.filter(\p: p.mangled_name != entry.mangled_name)
+
+            # Add to instantiations
+            val new_inst = InstantiationRecord(
+                id: metadata.instantiations.len() as i32,
+                template_name: entry.template_name,
+                type_args: entry.type_args,
+                mangled_name: entry.mangled_name,
+                from_file: smf_path,
+                from_loc: "{smf_path}:0:0:jit",
+                to_obj: "jit_memory",
+                status: "jit_compiled"
+            )
+            metadata.instantiations = metadata.instantiations.push(new_inst)
+
+            self.loaded_metadata[smf_path] = metadata
+
+        Ok(())
+
+    fn stats() -> JitStats:
+        """Get JIT statistics."""
+        JitStats(
+            cached_count: self.jit_cache.len(),
+            loaded_smf_count: self.loaded_metadata.len()
+        )
+
+# ============================================================================
+# Statistics
+# ============================================================================
+
+struct JitStats:
+    """JIT instantiation statistics."""
+    cached_count: i32
+    loaded_smf_count: i32
+
+# ============================================================================
+# Symbol Resolver
+# ============================================================================
+
+struct JitSymbolResolver:
+    """Symbol resolver that integrates JIT instantiation."""
+    jit: JitInstantiator
+    symbols: Dict<text, i64>
+
+impl JitSymbolResolver:
+    static fn new(config: JitInstantiatorConfig) -> JitSymbolResolver:
+        """Create a new JIT symbol resolver."""
+        JitSymbolResolver(
+            jit: JitInstantiator.new(config),
+            symbols: {}
+        )
+
+    me register(name: text, address: i64):
+        """Register a symbol."""
+        self.symbols[name] = address
+
+    me resolve(name: text) -> i64?:
+        """Resolve a symbol, JIT-compiling if necessary."""
+        # Check primary table first
+        if self.symbols.contains_key(name):
+            return Some(self.symbols[name])
+
+        # Try JIT instantiation
+        val result = self.jit.try_jit_instantiate(name)
+        match result:
+            case Success(_, symbol, address):
+                if address.?:
+                    self.symbols[symbol] = address.unwrap()
+                    return address
+                None
+            case _:
+                None
+
+    me load_smf(path: text) -> Result<(), text>:
+        """Load metadata from SMF file."""
+        self.jit.load_smf_metadata(path)
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export JitInstantiationResult
+export JitInstantiatorConfig
+export JitInstantiator
+export JitStats
+export JitSymbolResolver
+export LoadedMetadata
+export PossibleInstantiation
+export InstantiationRecord

@@ -1,0 +1,509 @@
+# @pending
+"""
+# Capture Buffer and Virtual Register Remapping Specification
+
+**Feature IDs:** #VREGMAP-001 to #VREGMAP-020
+**Category:** Runtime | Memory Management
+**Difficulty:** 4/5
+**Status:** Planned
+
+## Overview
+
+This specification covers advanced virtual register (vreg) remapping and capture
+buffer management at the runtime level. These are internal optimization features
+that affect how the interpreter manages memory and registers during function
+execution.
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| Virtual Register (vreg) | Compiler-internal register representing values during execution |
+| Capture Buffer | Runtime buffer capturing values into closure/lambda scopes |
+| Remapping | Optimization to reuse vregs across code regions |
+| Live Range | Set of instructions where a vreg is actively used |
+| Interference | Two vregs conflict if their live ranges overlap |
+
+## Behavior
+
+- Virtual registers are allocated for each value in the program
+- Capture buffers copy values from outer scope into closure scope
+- Remapping allows vregs to be reused when live ranges don't overlap
+- Optimization reduces memory pressure and improves cache locality
+- All changes are transparent to the user - language behavior unchanged
+
+## Related Specifications
+
+- [Closures and Lambdas](closures_spec.spl) - Capture semantics
+- [Memory Management](memory_management_spec.spl) - GC and allocation
+- [Function Calls](function_calls_spec.spl) - Call conventions
+"""
+
+
+
+# ============================================================================
+# Test Group 1: Basic Capture Buffer Creation
+# ============================================================================
+
+describe "Capture Buffer Creation":
+    """
+    ## Basic Capture Buffer Creation
+
+    Tests that capture buffers are created correctly when closures capture
+    variables from outer scope.
+    """
+
+    it "creates capture buffer for single captured variable":
+        val x = 10
+        val closure = \: x
+        expect closure() == 10
+
+    it "creates capture buffer for multiple variables":
+        val a = 5
+        val b = 15
+        val closure = \: a + b
+        expect closure() == 20
+
+    it "captures variable in nested closure":
+        val outer = 100
+        val f = \: \: outer
+        val inner = f()
+        expect inner() == 100
+
+    it "captures in lambda with parameters":
+        val factor = 2
+        val double = \x: x * factor
+        expect double(5) == 10
+
+
+# ============================================================================
+# Test Group 2: Capture Buffer Scope Isolation
+# ============================================================================
+
+describe "Capture Buffer Scope Isolation":
+    """
+    ## Capture Buffer Scope Isolation
+
+    Tests that captured buffers correctly isolate values from different scopes.
+    """
+
+    it "captures value at definition time":
+        val x = 10
+        val closure = \: x
+        # x may be modified after, but closure retains captured value
+        expect closure() == 10
+
+    it "captures in loop iteration":
+        var closures = []
+        for i in [0, 1, 2]:
+            closures.push(\: i)
+        # Each closure captures its own i value
+        expect closures.len() == 3
+
+    it "captures different scopes separately":
+        val x = 1
+        val f = \: x
+        val y = 2
+        val g = \: y
+        expect f() == 1
+        expect g() == 2
+
+
+# ============================================================================
+# Test Group 3: Virtual Register Allocation
+# ============================================================================
+
+describe "Virtual Register Allocation":
+    """
+    ## Virtual Register Allocation
+
+    Tests basic virtual register allocation for values.
+    """
+
+    it "allocates vreg for simple variable":
+        val x = 42
+        expect x == 42
+
+    it "allocates vreg for expression result":
+        val result = 10 + 20
+        expect result == 30
+
+    it "allocates vregs for multiple values":
+        val a = 1
+        val b = 2
+        val c = 3
+        expect a + b + c == 6
+
+    it "allocates vreg for array element":
+        val arr = [10, 20, 30]
+        val first = arr[0]
+        expect first == 10
+
+
+# ============================================================================
+# Test Group 4: Virtual Register Reuse Across Scopes
+# ============================================================================
+
+describe "Virtual Register Reuse":
+    """
+    ## Virtual Register Reuse
+
+    Tests that virtual registers are reused when values don't interfere.
+    """
+
+    it "reuses vreg in sequential statements":
+        val a = 10
+        val b = 20          # a is dead, can reuse its vreg
+        expect b == 20
+
+    it "reuses vreg after value is no longer needed":
+        var x = 5
+        x = x + 10          # Old value can be reused
+        expect x == 15
+
+    it "does not reuse interfering vregs":
+        val a = 10
+        val b = a + 20      # a is still live, must use different vreg
+        expect b == 30
+
+    it "reuses vregs in branches":
+        val cond = true
+        val x = if cond: 10 else: 20
+        expect x == 10
+
+
+# ============================================================================
+# Test Group 5: Live Range Analysis
+# ============================================================================
+
+describe "Live Range Analysis":
+    """
+    ## Live Range Analysis
+
+    Tests correct identification of variable live ranges.
+    """
+
+    it "detects live range of simple variable":
+        val x = 5
+        val y = x + 1       # x is live here
+        expect y == 6
+
+    it "detects live range extends to final use":
+        val a = 10
+        val b = 20
+        val c = a + b       # Both a and b are live
+        expect c == 30
+
+    it "detects live range ends after last use":
+        val temp = 100
+        val result = temp * 2  # temp is dead after this
+        expect result == 200
+
+    it "handles nested live ranges":
+        val outer = 5
+        val inner = outer + 10
+        val combined = outer + inner
+        expect combined == 20
+
+
+# ============================================================================
+# Test Group 6: Register Remapping in Loops
+# ============================================================================
+
+describe "Register Remapping in Loops":
+    """
+    ## Register Remapping in Loops
+
+    Tests virtual register remapping optimization in loop contexts.
+    """
+
+    it "remaps vregs in loop iterations":
+        var sum = 0
+        for i in [1, 2, 3]:
+            val local = i * 2    # Can reuse vreg each iteration
+            sum = sum + local
+        expect sum == 12
+
+    it "handles nested loops with remapping":
+        var count = 0
+        for i in [0, 1]:
+            for j in [0, 1]:
+                count = count + 1
+        expect count == 4
+
+    it "preserves values across loop iterations":
+        var accumulated = []
+        for i in [1, 2, 3]:
+            accumulated.push(i)
+        expect accumulated.len() == 3
+
+
+# ============================================================================
+# Test Group 7: Capture Buffer with Remapped Registers
+# ============================================================================
+
+describe "Capture Buffer with Remapped Registers":
+    """
+    ## Capture Buffer with Remapped Registers
+
+    Tests interaction between capture buffers and vreg remapping.
+    """
+
+    it "captures value despite vreg reuse":
+        val captured = 42
+        val closure = \: captured
+        # Even if captured's vreg was reused, closure should work
+        expect closure() == 42
+
+    it "captures multiple values with remapping":
+        val a = 10
+        val b = 20
+        val f = \: a + b
+        # Both a and b are captured
+        expect f() == 30
+
+    it "captures in loop with vreg remapping":
+        var closures = []
+        for i in [10, 20, 30]:
+            val current = i
+            closures.push(\: current)
+        expect closures.len() == 3
+
+
+# ============================================================================
+# Test Group 8: Register Interference Detection
+# ============================================================================
+
+describe "Register Interference Detection":
+    """
+    ## Register Interference Detection
+
+    Tests that interference between vregs is correctly identified.
+    """
+
+    it "detects interference between live ranges":
+        val a = 10
+        val b = a + 5       # a interferes with b
+        val c = a + b       # All three interfere
+        expect c == 25
+
+    it "detects no interference for sequential values":
+        val a = 10
+        val _ = a
+        val b = 20          # No interference - a is dead
+        expect b == 20
+
+    it "handles complex interference patterns":
+        val a = 1
+        val b = a + 1
+        val c = a + b
+        val d = b + c
+        expect d == 5
+
+
+# ============================================================================
+# Test Group 9: Capture Buffer Cleanup
+# ============================================================================
+
+describe "Capture Buffer Cleanup":
+    """
+    ## Capture Buffer Cleanup
+
+    Tests that capture buffers are properly managed during execution.
+    """
+
+    it "maintains captured values across calls":
+        val base = 100
+        val add = \x: base + x
+        expect add(5) == 105
+        expect add(10) == 110
+        expect add(5) == 105
+
+    it "isolates different capture buffers":
+        fn make_closure(x):
+            \: x
+        val f1 = make_closure(1)
+        val f2 = make_closure(2)
+        expect f1() == 1
+        expect f2() == 2
+
+    it "handles closure returning closure":
+        val make_adder = \n: \x: n + x
+        val add5 = make_adder(5)
+        expect add5(3) == 8
+
+
+# ============================================================================
+# Test Group 10: Register Spillage
+# ============================================================================
+
+describe "Register Spillage":
+    """
+    ## Register Spillage
+
+    Tests behavior when too many values are live (spillage to stack/memory).
+    """
+
+    it "handles many live values":
+        val a = 1
+        val b = 2
+        val c = 3
+        val d = 4
+        val e = 5
+        val result = a + b + c + d + e
+        expect result == 15
+
+    it "handles complex expressions with many values":
+        val result = ((1 + 2) * (3 + 4)) + ((5 + 6) * (7 + 8))
+        expect result == 153
+
+
+# ============================================================================
+# Test Group 11: Function Call and Register Preservation
+# ============================================================================
+
+describe "Register Preservation Across Calls":
+    """
+    ## Register Preservation Across Calls
+
+    Tests that values are preserved across function calls.
+    """
+
+    it "preserves local values across function call":
+        fn double(x):
+            x * 2
+
+        val a = 10
+        val b = double(5)
+        val c = a + b
+        expect c == 20
+
+    it "preserves values in nested calls":
+        fn f(x):
+            x + 1
+
+        fn g(x):
+            f(x) * 2
+
+        val base = 5
+        val result = g(base)
+        expect result == 12
+
+
+# ============================================================================
+# Test Group 12: Optimization Effects (Observable Behavior)
+# ============================================================================
+
+describe "Optimization Observable Effects":
+    """
+    ## Optimization Observable Effects
+
+    Tests that optimization doesn't change observable behavior.
+    """
+
+    it "produces correct result after vreg reuse":
+        val arr = [1, 2, 3, 4, 5]
+        var sum = 0
+        for i in arr:
+            sum = sum + i
+        expect sum == 15
+
+    it "preserves value semantics":
+        val x = 42
+        val y = x
+        expect y == 42
+
+    it "maintains mutation semantics":
+        var count = 0
+        count = count + 1
+        count = count + 1
+        expect count == 2
+
+
+# ============================================================================
+# Test Group 13: Closure Capture Buffer Edge Cases
+# ============================================================================
+
+describe "Closure Capture Edge Cases":
+    """
+    ## Closure Capture Edge Cases
+
+    Tests edge cases in capture buffer handling.
+    """
+
+    it "captures in deeply nested closures":
+        val deep_val = 1
+        val deep_fn1 = \: deep_val
+        val deep_fn2 = \: deep_fn1()
+        val deep_fn3 = \: deep_fn2()
+        expect deep_fn3() == 1
+
+    it "captures the same variable multiple times":
+        val triple_val = 10
+        val triple_fn = \: triple_val + triple_val + triple_val
+        expect triple_fn() == 30
+
+    it "captures from multiple scopes via lambda":
+        val outer = 100
+        val make_inner = \:
+            val inner = outer + 1
+            \: inner
+        val inner_f = make_inner()
+        expect inner_f() == 101
+
+
+# ============================================================================
+# Test Group 14: Memory Layout and Alignment
+# ============================================================================
+
+describe "Capture Buffer Memory Layout":
+    """
+    ## Capture Buffer Memory Layout
+
+    Tests that capture buffers maintain correct memory alignment.
+    """
+
+    it "stores mixed-type captures":
+        val i = 10
+        val f = 3.14
+        val s = "text"
+        val closure = \: "{i}, {f}, {s}"
+        val result = closure()
+        expect result == "10, 3.14, text"
+
+    it "captures different sized values":
+        val a: i32 = 1
+        val b: i64 = 2
+        val closure = \: a + b
+        expect closure() == 3
+
+
+# ============================================================================
+# Test Group 15: Performance Characteristics
+# ============================================================================
+
+describe "Performance Characteristics":
+    """
+    ## Performance Characteristics
+
+    Tests performance-related behavior (correctness, not timing).
+    """
+
+    it "processes many captures efficiently":
+        val values = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+        var sum = 0
+        for v in values:
+            sum = sum + v
+        expect sum == 55
+
+    it "handles array of closures":
+        var closures = []
+        for i in [0, 1, 2, 3, 4]:
+            val current = i
+            closures.push(\: current)
+        expect closures.len() == 5
+
+    it "processes filtered captures":
+        val values = [1, 2, 3, 4, 5]
+        val evens = values.filter(\x: x % 2 == 0)
+        expect evens.len() == 2

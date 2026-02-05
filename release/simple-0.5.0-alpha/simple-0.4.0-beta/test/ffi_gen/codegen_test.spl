@@ -1,0 +1,160 @@
+# @pending
+# FFI Generator - Codegen Verification Test
+#
+# Tests that the Rust code generator produces valid extern "C" wrapper code.
+# Run: simple test/ffi_gen/codegen_test.spl
+
+use app.ffi_gen.parser (parse_lib_externs)
+use app.ffi_gen.rust_codegen (generate)
+use app.ffi_gen.cargo_gen (generate)
+use app.ffi_gen.type_mapping (simple_to_rust, is_primitive, is_string, is_object_handle)
+
+# ============================================================================
+# Type Mapping Tests
+# ============================================================================
+
+fn test_type_mapping():
+    # Primitives
+    assert simple_to_rust("i32") == "i32", "i32 mapping"
+    assert simple_to_rust("i64") == "i64", "i64 mapping"
+    assert simple_to_rust("f64") == "f64", "f64 mapping"
+    assert simple_to_rust("bool") == "bool", "bool mapping"
+
+    # Strings
+    assert simple_to_rust("text") == "String", "text mapping"
+    assert simple_to_rust("str") == "String", "str mapping"
+    assert simple_to_rust("String") == "String", "String mapping"
+
+    # Complex types
+    assert simple_to_rust("Option<i32>") == "Option<i32>", "Option mapping"
+    assert simple_to_rust("[i32]") == "Vec<i32>", "Array mapping"
+
+    # Object handles
+    assert simple_to_rust("Regex") == "Regex", "Object handle mapping"
+
+    # Classification
+    assert is_primitive("i32") == true, "i32 is primitive"
+    assert is_primitive("text") == false, "text is not primitive"
+    assert is_string("text") == true, "text is string"
+    assert is_string("i32") == false, "i32 is not string"
+    assert is_object_handle("Regex") == true, "Regex is object handle"
+    assert is_object_handle("i32") == false, "i32 is not object handle"
+    assert is_object_handle("text") == false, "text is not object handle"
+
+    print "PASS: test_type_mapping"
+
+# ============================================================================
+# Rust Codegen Tests
+# ============================================================================
+
+fn test_rust_codegen_contains_wrappers():
+    val source = "@Lib(lang: \"rust\", name: \"regex\", version: \"1.10\")\nextern class Regex:\n    static fn new(pattern: text) -> Regex\n    fn is_match(input: text) -> bool\n"
+
+    val specs = parse_lib_externs(source, "test.spl")
+    val rust_code = rust_codegen.generate(specs)
+
+    # Check it contains key elements
+    assert rust_code.contains("use regex;"), "Should contain crate import"
+    assert rust_code.contains("Regex_new"), "Should contain static constructor wrapper"
+    assert rust_code.contains("Regex_is_match"), "Should contain method wrapper"
+    assert rust_code.contains("Regex_destroy"), "Should contain destructor"
+    assert rust_code.contains("extern \"C\""), "Should contain extern C ABI"
+    assert rust_code.contains("#[no_mangle]"), "Should contain no_mangle attribute"
+    assert rust_code.contains("Box::into_raw"), "Should use Box::into_raw for object construction"
+    assert rust_code.contains("Box::from_raw"), "Should use Box::from_raw for destruction"
+
+    print "PASS: test_rust_codegen_contains_wrappers"
+
+fn test_rust_codegen_string_params():
+    val source = "@Lib(lang: \"rust\", name: \"mylib\", version: \"0.1\")\nextern class MyClass:\n    static fn from_str(s: text) -> MyClass\n"
+
+    val specs = parse_lib_externs(source, "test.spl")
+    val rust_code = rust_codegen.generate(specs)
+
+    # String params should use ptr+len pattern
+    assert rust_code.contains("s_ptr: *const u8"), "Should have string ptr param"
+    assert rust_code.contains("s_len: u64"), "Should have string len param"
+    assert rust_code.contains("from_utf8_unchecked"), "Should convert bytes to str"
+
+    print "PASS: test_rust_codegen_string_params"
+
+fn test_rust_codegen_bool_return():
+    val source = "@Lib(lang: \"rust\", name: \"mylib\", version: \"0.1\")\nextern class Checker:\n    fn check() -> bool\n"
+
+    val specs = parse_lib_externs(source, "test.spl")
+    val rust_code = rust_codegen.generate(specs)
+
+    # Bool return should be u8
+    assert rust_code.contains("-> u8"), "Bool return should be u8 in C ABI"
+    assert rust_code.contains("as u8"), "Should cast bool to u8"
+
+    print "PASS: test_rust_codegen_bool_return"
+
+fn test_rust_codegen_mutable_method():
+    val source = "@Lib(lang: \"rust\", name: \"mylib\", version: \"0.1\")\nextern class Buffer:\n    me push(value: i64)\n"
+
+    val specs = parse_lib_externs(source, "test.spl")
+    val rust_code = rust_codegen.generate(specs)
+
+    # Mutable methods should use &mut *ptr
+    assert rust_code.contains("&mut *ptr"), "Should use mutable borrow for me methods"
+
+    print "PASS: test_rust_codegen_mutable_method"
+
+# ============================================================================
+# Cargo.toml Generation Tests
+# ============================================================================
+
+fn test_cargo_gen_basic():
+    val source = "@Lib(lang: \"rust\", name: \"regex\", version: \"1.10\")\nextern class Regex:\n    static fn new(pattern: text) -> Regex\n"
+
+    val specs = parse_lib_externs(source, "test.spl")
+    val cargo = cargo_gen.generate(specs, "2021")
+
+    assert cargo.contains("[package]"), "Should have package section"
+    assert cargo.contains("edition = \"2021\""), "Should have edition 2021"
+    assert cargo.contains("[lib]"), "Should have lib section"
+    assert cargo.contains("cdylib"), "Should produce cdylib"
+    assert cargo.contains("[dependencies]"), "Should have dependencies"
+    assert cargo.contains("regex = \"1.10\""), "Should have regex dependency"
+
+    print "PASS: test_cargo_gen_basic"
+
+fn test_cargo_gen_with_features():
+    val source = "@Lib(lang: \"rust\", name: \"serde_json\", version: \"1.0\", features: [\"preserve_order\", \"raw_value\"])\nextern class JsonValue:\n    static fn parse(s: text) -> JsonValue\n"
+
+    val specs = parse_lib_externs(source, "test.spl")
+    val cargo = cargo_gen.generate(specs, "2021")
+
+    assert cargo.contains("serde_json"), "Should have serde_json dependency"
+    assert cargo.contains("preserve_order"), "Should have preserve_order feature"
+    assert cargo.contains("raw_value"), "Should have raw_value feature"
+
+    print "PASS: test_cargo_gen_with_features"
+
+fn test_cargo_gen_custom_edition():
+    val source = "@Lib(lang: \"rust\", name: \"mylib\", version: \"0.1\")\nextern class MyClass:\n    static fn create() -> MyClass\n"
+
+    val specs = parse_lib_externs(source, "test.spl")
+    val cargo = cargo_gen.generate(specs, "2024")
+
+    assert cargo.contains("edition = \"2024\""), "Should use custom edition 2024"
+
+    print "PASS: test_cargo_gen_custom_edition"
+
+# ============================================================================
+# Entry Point
+# ============================================================================
+
+fn main() -> i64:
+    test_type_mapping()
+    test_rust_codegen_contains_wrappers()
+    test_rust_codegen_string_params()
+    test_rust_codegen_bool_return()
+    test_rust_codegen_mutable_method()
+    test_cargo_gen_basic()
+    test_cargo_gen_with_features()
+    test_cargo_gen_custom_edition()
+    print ""
+    print "All codegen tests passed."
+    0

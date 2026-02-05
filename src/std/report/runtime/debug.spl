@@ -1,0 +1,369 @@
+# Debug Log
+#
+# Runtime debug logging with configurable levels and structured output.
+# Provides a unified logging interface for runtime diagnostics.
+
+import ..level
+import ..location
+import ..report
+
+export DebugLog, LogEntry, Logger, LogTarget
+
+# =============================================================================
+# LogTarget: Where to send log output
+# =============================================================================
+
+enum LogTarget:
+    Stdout          # Standard output
+    Stderr          # Standard error
+    File            # Log file
+    Memory          # In-memory buffer (for testing)
+    None            # Discard logs
+
+impl LogTarget:
+    fn name() -> text:
+        match self:
+            case LogTarget.Stdout: "stdout"
+            case LogTarget.Stderr: "stderr"
+            case LogTarget.File: "file"
+            case LogTarget.Memory: "memory"
+            case LogTarget.None: "none"
+
+# =============================================================================
+# LogEntry: Single log entry
+# =============================================================================
+
+struct LogEntry:
+    level: ReportLevel
+    message: text
+    timestamp: i64              # Unix timestamp (milliseconds)
+    location: SourceLocation?   # Source location if available
+    module: text?               # Module name
+    context: Dict<text, text>   # Structured context fields
+
+impl LogEntry:
+    # Create a log entry
+    static fn create(level: ReportLevel, message: text) -> LogEntry:
+        LogEntry(
+            level: level,
+            message: message,
+            timestamp: 0,  # Will be set by logger
+            location: None,
+            module: None,
+            context: {}
+        )
+
+    # Create with timestamp
+    static fn with_timestamp(level: ReportLevel, message: text, timestamp: i64) -> LogEntry:
+        LogEntry(
+            level: level,
+            message: message,
+            timestamp: timestamp,
+            location: None,
+            module: None,
+            context: {}
+        )
+
+    fn at(file: text, line: i64, column: i64) -> LogEntry:
+        LogEntry(
+            level: self.level,
+            message: self.message,
+            timestamp: self.timestamp,
+            location: Some(SourceLocation.at(file, line, column)),
+            module: self.module,
+            context: self.context
+        )
+
+    fn in_module(module: text) -> LogEntry:
+        LogEntry(
+            level: self.level,
+            message: self.message,
+            timestamp: self.timestamp,
+            location: self.location,
+            module: Some(module),
+            context: self.context
+        )
+
+    fn with_field(key: text, value: text) -> LogEntry:
+        var new_context = self.context
+        new_context[key] = value
+        LogEntry(
+            level: self.level,
+            message: self.message,
+            timestamp: self.timestamp,
+            location: self.location,
+            module: self.module,
+            context: new_context
+        )
+
+    # Convert to Report
+    fn to_report() -> Report:
+        var report = match self.level:
+            case ReportLevel.Debug: Report.debug(self.message)
+            case ReportLevel.Info: Report.info(self.message)
+            case ReportLevel.Warning: Report.warning(self.message)
+            case ReportLevel.Error: Report.error(self.message)
+            case ReportLevel.Fatal: Report.fatal(self.message)
+
+        report = report.with_kind(ReportKind.DebugLog).with_source("runtime")
+
+        if self.location.?:
+            report = report.with_location(self.location.unwrap())
+
+        if self.module.?:
+            report = report.with_note("module: {self.module.unwrap()}")
+
+        for key in self.context.keys():
+            report = report.with_note("{key}: {self.context[key]}")
+
+        report
+
+    # Format timestamp (simple ISO-like format)
+    fn format_timestamp() -> text:
+        if self.timestamp == 0:
+            return ""
+        # Simple format: just show the timestamp value
+        # In a real implementation, this would format as ISO 8601
+        "[{self.timestamp}]"
+
+    # Format for display
+    fn format(use_color: bool) -> text:
+        val level_color = if use_color: self.level.color() else: ""
+        val gray = if use_color: "\x1b[90m" else: ""
+        val reset = if use_color: "\x1b[0m" else: ""
+
+        var output = ""
+
+        # Timestamp
+        if self.timestamp > 0:
+            output = output + "{gray}{self.format_timestamp()}{reset} "
+
+        # Level
+        output = output + "{level_color}{self.level.short_name()}{reset} "
+
+        # Module
+        if self.module.?:
+            output = output + "{gray}[{self.module.unwrap()}]{reset} "
+
+        # Message
+        output = output + self.message
+
+        # Location
+        if self.location.?:
+            output = output + " {gray}({self.location.unwrap().format_short()}){reset}"
+
+        # Context fields
+        if not self.context.is_empty():
+            var fields: [text] = []
+            for key in self.context.keys():
+                fields.push("{key}={self.context[key]}")
+            output = output + " {gray}{{{fields.join(\", \")}}}{reset}"
+
+        output
+
+# =============================================================================
+# Logger: Configurable logging interface
+# =============================================================================
+
+class Logger:
+    name: text
+    min_level: ReportLevel
+    target: LogTarget
+    entries: [LogEntry]         # For Memory target
+    include_location: bool      # Auto-capture source location
+    include_timestamp: bool     # Include timestamps
+
+impl Logger:
+    # Create a logger with a name
+    static fn named(name: text) -> Logger:
+        Logger(
+            name: name,
+            min_level: ReportLevel.Info,
+            target: LogTarget.Stderr,
+            entries: [],
+            include_location: false,
+            include_timestamp: true
+        )
+
+    # Create a debug logger (captures all levels)
+    static fn debug_logger(name: text) -> Logger:
+        Logger(
+            name: name,
+            min_level: ReportLevel.Debug,
+            target: LogTarget.Stderr,
+            entries: [],
+            include_location: true,
+            include_timestamp: true
+        )
+
+    # Create an in-memory logger (for testing)
+    static fn memory(name: text) -> Logger:
+        Logger(
+            name: name,
+            min_level: ReportLevel.Debug,
+            target: LogTarget.Memory,
+            entries: [],
+            include_location: false,
+            include_timestamp: false
+        )
+
+    # ==========================================================================
+    # Configuration
+    # ==========================================================================
+
+    me set_level(level: ReportLevel):
+        self.min_level = level
+
+    me set_target(target: LogTarget):
+        self.target = target
+
+    me enable_location():
+        self.include_location = true
+
+    me disable_location():
+        self.include_location = false
+
+    me enable_timestamp():
+        self.include_timestamp = true
+
+    me disable_timestamp():
+        self.include_timestamp = false
+
+    # ==========================================================================
+    # Logging methods
+    # ==========================================================================
+
+    fn should_log(level: ReportLevel) -> bool:
+        level.is_at_least(self.min_level)
+
+    me log(entry: LogEntry):
+        if not self.should_log(entry.level):
+            return
+
+        var final_entry = entry
+        if self.include_timestamp and final_entry.timestamp == 0:
+            # In a real implementation, get actual timestamp
+            final_entry = LogEntry(
+                level: entry.level,
+                message: entry.message,
+                timestamp: 0,  # Would be actual timestamp
+                location: entry.location,
+                module: entry.module,
+                context: entry.context
+            )
+
+        match self.target:
+            case LogTarget.Memory:
+                self.entries.push(final_entry)
+            case LogTarget.None:
+                pass
+            case _:
+                # Would output to target
+                pass
+
+    me debug(message: text):
+        self.log(LogEntry.create(ReportLevel.Debug, message).in_module(self.name))
+
+    me info(message: text):
+        self.log(LogEntry.create(ReportLevel.Info, message).in_module(self.name))
+
+    me warn(message: text):
+        self.log(LogEntry.create(ReportLevel.Warning, message).in_module(self.name))
+
+    me error(message: text):
+        self.log(LogEntry.create(ReportLevel.Error, message).in_module(self.name))
+
+    me debug_at(message: text, file: text, line: i64, column: i64):
+        self.log(LogEntry.create(ReportLevel.Debug, message)
+            .in_module(self.name)
+            .at(file, line, column))
+
+    me info_at(message: text, file: text, line: i64, column: i64):
+        self.log(LogEntry.create(ReportLevel.Info, message)
+            .in_module(self.name)
+            .at(file, line, column))
+
+    # ==========================================================================
+    # Accessors (for Memory target)
+    # ==========================================================================
+
+    fn get_entries() -> [LogEntry]:
+        self.entries
+
+    fn entry_count() -> i64:
+        self.entries.len()
+
+    fn clear_entries():
+        self.entries = []
+
+    fn has_errors() -> bool:
+        self.entries.any(\e: e.level.is_error())
+
+    fn has_warnings() -> bool:
+        self.entries.any(\e: e.level == ReportLevel.Warning)
+
+    fn filter_by_level(level: ReportLevel) -> [LogEntry]:
+        self.entries.filter(\e: e.level == level)
+
+    # ==========================================================================
+    # Formatting
+    # ==========================================================================
+
+    fn format_entries(use_color: bool) -> text:
+        var lines: [text] = []
+        for entry in self.entries:
+            lines.push(entry.format(use_color))
+        lines.join("\n")
+
+# =============================================================================
+# DebugLog: Static logging utilities
+# =============================================================================
+
+class DebugLog:
+    # Global minimum level (can be configured at startup)
+    static var global_min_level: ReportLevel = ReportLevel.Info
+
+    # Create a quick debug report
+    static fn debug(message: text) -> Report:
+        Report.debug(message)
+            .with_kind(ReportKind.DebugLog)
+            .with_source("runtime")
+
+    # Create a quick info report
+    static fn info(message: text) -> Report:
+        Report.info(message)
+            .with_kind(ReportKind.DebugLog)
+            .with_source("runtime")
+
+    # Create a quick warning report
+    static fn warn(message: text) -> Report:
+        Report.warning(message)
+            .with_kind(ReportKind.DebugLog)
+            .with_source("runtime")
+
+    # Create a quick error report
+    static fn error(message: text) -> Report:
+        Report.error(message)
+            .with_kind(ReportKind.DebugLog)
+            .with_source("runtime")
+
+    # Create with location
+    static fn debug_at(message: text, file: text, line: i64, column: i64) -> Report:
+        DebugLog.debug(message).at(file, line, column)
+
+    static fn info_at(message: text, file: text, line: i64, column: i64) -> Report:
+        DebugLog.info(message).at(file, line, column)
+
+    static fn warn_at(message: text, file: text, line: i64, column: i64) -> Report:
+        DebugLog.warn(message).at(file, line, column)
+
+    static fn error_at(message: text, file: text, line: i64, column: i64) -> Report:
+        DebugLog.error(message).at(file, line, column)
+
+    # Set global minimum level
+    static fn set_global_level(level: ReportLevel):
+        DebugLog.global_min_level = level
+
+    # Check if a level should be logged globally
+    static fn should_log(level: ReportLevel) -> bool:
+        level.is_at_least(DebugLog.global_min_level)

@@ -1,0 +1,337 @@
+# Effect System
+#
+# Async/sync effect inference with Tarjan SCC for mutual recursion,
+# Promise wrapping, and await inference.
+# Port of rust/type/src/effects.rs
+
+export Effect, EffectEnv, CallGraph, SccResult
+export contains_suspension, contains_suspension_node, contains_suspension_expr
+export infer_function_effect, calls_async_function
+export build_effect_env, infer_mutual_effects
+export validate_sync_constraint
+export needs_promise_wrapping, ReturnWrapMode, PromiseTypeInfo
+export AwaitMode, needs_await, needs_await_typed, TypedAwaitMode
+export statement_needs_await, validate_suspension_context
+export build_call_graph, tarjan_scc, propagate_effects_transitive
+
+# Effect: Sync or Async
+enum Effect:
+    Sync
+    Async
+
+# Effect environment: function name -> Effect
+# Using Dict<text, Effect> as EffectEnv alias
+struct EffectEnv:
+    map: Dict<text, Effect>
+
+impl EffectEnv:
+    static fn empty() -> EffectEnv:
+        EffectEnv(map: {})
+
+    fn get(name: text) -> Effect?:
+        if self.map.has(name):
+            Some(self.map[name])
+        else:
+            None
+
+    me set(name: text, effect: Effect):
+        self.map[name] = effect
+
+    fn has(name: text) -> bool:
+        self.map.has(name)
+
+    fn keys() -> [text]:
+        self.map.keys()
+
+# ================================================================
+# Suspension Detection
+# ================================================================
+
+# Check if a function body contains suspension points (await, yield, channel ops)
+fn contains_suspension(body_tags: [text]) -> bool:
+    for tag in body_tags:
+        if tag == "Await" or tag == "Yield" or tag == "ChannelSend" or tag == "ChannelRecv":
+            return true
+    false
+
+# Check if a node tag represents a suspension
+fn contains_suspension_node(tag: text) -> bool:
+    tag == "Await" or tag == "Yield" or tag == "ChannelSend" or tag == "ChannelRecv"
+
+# Check if an expression tag represents a suspension
+fn contains_suspension_expr(tag: text) -> bool:
+    tag == "Await" or tag == "Yield"
+
+# ================================================================
+# Effect Inference
+# ================================================================
+
+# Infer effect of a single function given its body tags and known env
+fn infer_function_effect(body_tags: [text], env: EffectEnv) -> Effect:
+    # Direct suspension => Async
+    if contains_suspension(body_tags):
+        return Effect.Async
+    # Calls to known async functions => Async
+    for tag in body_tags:
+        if calls_async_function(tag, env):
+            return Effect.Async
+    Effect.Sync
+
+# Check if a call tag refers to an async function in the env
+fn calls_async_function(call_name: text, env: EffectEnv) -> bool:
+    val effect = env.get(call_name)
+    if effect.?:
+        match effect.unwrap():
+            case Effect.Async: true
+            case Effect.Sync: false
+    else:
+        false
+
+# ================================================================
+# Fixed-Point Iteration (build_effect_env)
+# ================================================================
+
+# Build effect environment from a set of function definitions.
+# Each function is (name, body_tags, called_functions).
+fn build_effect_env(functions: [(text, [text], [text])]) -> EffectEnv:
+    var env = EffectEnv.empty()
+
+    # Initialize all as Sync
+    for func in functions:
+        env.set(func.0, Effect.Sync)
+
+    # Fixed-point iteration
+    var changed = true
+    while changed:
+        changed = false
+        for func in functions:
+            val name = func.0
+            val body_tags = func.1
+            val called = func.2
+            val new_effect = infer_function_effect(body_tags, env)
+            val old = env.get(name)
+            if old.? and old.unwrap() != new_effect:
+                env.set(name, new_effect)
+                changed = true
+
+    env
+
+# Infer effects for mutually recursive functions using fixed-point
+fn infer_mutual_effects(function_names: [text], body_tags_map: Dict<text, [text]>,
+                        call_map: Dict<text, [text]>, env: EffectEnv) -> EffectEnv:
+    var result = EffectEnv.empty()
+    # Copy existing env
+    for key in env.keys():
+        val effect = env.get(key)
+        if effect.?:
+            result.set(key, effect.unwrap())
+
+    # Initialize all as Sync
+    for name in function_names:
+        result.set(name, Effect.Sync)
+
+    # Fixed-point
+    var changed = true
+    while changed:
+        changed = false
+        for name in function_names:
+            val tags = if body_tags_map.has(name): body_tags_map[name] else: []
+            val new_effect = infer_function_effect(tags, result)
+            val old = result.get(name)
+            if old.? and old.unwrap() != new_effect:
+                result.set(name, new_effect)
+                changed = true
+
+    result
+
+# ================================================================
+# Sync Constraint Validation
+# ================================================================
+
+# Validate that a function marked sync doesn't contain suspension
+fn validate_sync_constraint(name: text, declared_effect: Effect,
+                            body_tags: [text], env: EffectEnv) -> Result<(), text>:
+    match declared_effect:
+        case Effect.Sync:
+            val inferred = infer_function_effect(body_tags, env)
+            match inferred:
+                case Effect.Async:
+                    Err("function '{name}' declared sync but contains async operations")
+                case Effect.Sync:
+                    Ok(())
+        case Effect.Async:
+            Ok(())
+
+# ================================================================
+# Promise Wrapping
+# ================================================================
+
+enum ReturnWrapMode:
+    NoWrap
+    WrapInPromise
+    AlreadyPromise
+
+struct PromiseTypeInfo:
+    inner_type: text
+    is_promise: bool
+
+# Determine if an async function's return needs Promise wrapping
+fn needs_promise_wrapping(return_type_tag: text, effect: Effect) -> ReturnWrapMode:
+    match effect:
+        case Effect.Sync: ReturnWrapMode.NoWrap
+        case Effect.Async:
+            if return_type_tag == "Promise" or return_type_tag == "Future":
+                ReturnWrapMode.AlreadyPromise
+            else:
+                ReturnWrapMode.WrapInPromise
+
+# ================================================================
+# Await Inference
+# ================================================================
+
+enum AwaitMode:
+    NoAwait
+    InsertAwait
+    AlreadyAwaited
+
+enum TypedAwaitMode:
+    NoAwait
+    InsertAwait(promise_inner: text)
+    AlreadyAwaited
+
+# Check if an expression needs an await inserted
+fn needs_await(expr_tag: text, callee_name: text, env: EffectEnv) -> AwaitMode:
+    if expr_tag == "Await":
+        return AwaitMode.AlreadyAwaited
+    val effect = env.get(callee_name)
+    if effect.?:
+        match effect.unwrap():
+            case Effect.Async: AwaitMode.InsertAwait
+            case Effect.Sync: AwaitMode.NoAwait
+    else:
+        AwaitMode.NoAwait
+
+# Typed version of await inference
+fn needs_await_typed(expr_tag: text, callee_name: text, env: EffectEnv,
+                     return_type: text) -> TypedAwaitMode:
+    if expr_tag == "Await":
+        return TypedAwaitMode.AlreadyAwaited
+    val effect = env.get(callee_name)
+    if effect.?:
+        match effect.unwrap():
+            case Effect.Async: TypedAwaitMode.InsertAwait(promise_inner: return_type)
+            case Effect.Sync: TypedAwaitMode.NoAwait
+    else:
+        TypedAwaitMode.NoAwait
+
+# Check if a statement needs await
+fn statement_needs_await(stmt_tag: text, called_functions: [text], env: EffectEnv) -> bool:
+    for name in called_functions:
+        val effect = env.get(name)
+        if effect.?:
+            match effect.unwrap():
+                case Effect.Async: return true
+                case Effect.Sync: pass
+    false
+
+# Validate that suspension points are inside async context
+fn validate_suspension_context(body_tags: [text], is_async: bool) -> Result<(), text>:
+    if not is_async:
+        for tag in body_tags:
+            if contains_suspension_node(tag):
+                return Err("suspension point '{tag}' outside async context")
+    Ok(())
+
+# ================================================================
+# Call Graph and Tarjan SCC
+# ================================================================
+
+struct CallGraph:
+    nodes: [text]
+    edges: Dict<text, [text]>
+
+impl CallGraph:
+    static fn from_functions(functions: [(text, [text])]) -> CallGraph:
+        var nodes = []
+        var edges = {}
+        for func in functions:
+            nodes.push(func.0)
+            edges[func.0] = func.1
+        CallGraph(nodes: nodes, edges: edges)
+
+struct SccResult:
+    components: [[text]]
+
+# Tarjan's strongly connected components algorithm
+fn tarjan_scc(graph: CallGraph) -> SccResult:
+    var index_counter = 0
+    var stack = []
+    var on_stack = {}
+    var indices = {}
+    var lowlinks = {}
+    var result = []
+
+    fn strongconnect(v: text):
+        indices[v] = index_counter
+        lowlinks[v] = index_counter
+        index_counter = index_counter + 1
+        stack.push(v)
+        on_stack[v] = true
+
+        val neighbors = if graph.edges.has(v): graph.edges[v] else: []
+        for w in neighbors:
+            if not indices.has(w):
+                strongconnect(w)
+                if lowlinks[w] < lowlinks[v]:
+                    lowlinks[v] = lowlinks[w]
+            elif on_stack.has(w) and on_stack[w]:
+                if indices[w] < lowlinks[v]:
+                    lowlinks[v] = indices[w]
+
+        # Root of SCC
+        if lowlinks[v] == indices[v]:
+            var component = []
+            var done = false
+            while not done:
+                val w = stack.pop()
+                on_stack[w] = false
+                component.push(w)
+                if w == v:
+                    done = true
+            result.push(component)
+
+    for node in graph.nodes:
+        if not indices.has(node):
+            strongconnect(node)
+
+    SccResult(components: result)
+
+# Propagate effects transitively through SCCs
+fn propagate_effects_transitive(graph: CallGraph, env: EffectEnv,
+                                 body_tags_map: Dict<text, [text]>) -> EffectEnv:
+    val sccs = tarjan_scc(graph)
+    var result = EffectEnv.empty()
+
+    # Copy existing env
+    for key in env.keys():
+        val effect = env.get(key)
+        if effect.?:
+            result.set(key, effect.unwrap())
+
+    # Process each SCC
+    for component in sccs.components:
+        if component.len() == 1:
+            val name = component[0]
+            val tags = if body_tags_map.has(name): body_tags_map[name] else: []
+            val effect = infer_function_effect(tags, result)
+            result.set(name, effect)
+        else:
+            # Mutual recursion: use fixed-point within SCC
+            val scc_env = infer_mutual_effects(component, body_tags_map,
+                                                graph.edges, result)
+            for name in component:
+                val effect = scc_env.get(name)
+                if effect.?:
+                    result.set(name, effect.unwrap())
+
+    result

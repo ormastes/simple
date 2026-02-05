@@ -1,0 +1,360 @@
+# @pending
+"""
+MCP Task Lifecycle Tests
+Feature: MCP Task Management
+Category: MCP, Async
+Status: In Progress
+
+Tests for task lifecycle management and progress tracking.
+"""
+
+use std.mcp.core.tasks.*
+use std.mcp.core.error_handler.*
+
+describe "TaskStatus":
+    it "converts to string":
+        expect(TaskStatus.Pending.to_string() == "pending")
+        expect(TaskStatus.Running.to_string() == "running")
+        expect(TaskStatus.Completed.to_string() == "completed")
+        expect(TaskStatus.Failed.to_string() == "failed")
+        expect(TaskStatus.Cancelled.to_string() == "cancelled")
+        expect(TaskStatus.TimedOut.to_string() == "timed_out")
+
+    it "identifies terminal states":
+        expect(not TaskStatus.Pending.is_terminal())
+        expect(not TaskStatus.Running.is_terminal())
+        expect(TaskStatus.Completed.is_terminal())
+        expect(TaskStatus.Failed.is_terminal())
+        expect(TaskStatus.Cancelled.is_terminal())
+        expect(TaskStatus.TimedOut.is_terminal())
+
+describe "TaskPriority":
+    it "converts to string":
+        expect(TaskPriority.Low.to_string() == "low")
+        expect(TaskPriority.Normal.to_string() == "normal")
+        expect(TaskPriority.High.to_string() == "high")
+        expect(TaskPriority.Critical.to_string() == "critical")
+
+    it "converts to numeric":
+        expect(TaskPriority.Low.to_i64() == 0)
+        expect(TaskPriority.Normal.to_i64() == 1)
+        expect(TaskPriority.High.to_i64() == 2)
+        expect(TaskPriority.Critical.to_i64() == 3)
+
+describe "TaskProgress":
+    it "creates basic progress":
+        val progress = TaskProgress.new(50)
+        expect(progress.current == 50)
+
+    it "adds total for percentage":
+        val progress = TaskProgress.new(25).with_total(100)
+        expect(progress.current == 25)
+
+        match progress.total:
+            case Some(t):
+                expect(t == 100)
+            case nil:
+                expect(false)
+
+        match progress.percentage:
+            case Some(p):
+                expect(p == 25.0)
+            case nil:
+                expect(false)
+
+    it "adds message":
+        val progress = TaskProgress.new(10).with_message("Processing...")
+
+        match progress.message:
+            case Some(m):
+                expect(m == "Processing...")
+            case nil:
+                expect(false)
+
+    it "converts to dict":
+        val progress = TaskProgress.new(50).with_total(100).with_message("Half done")
+        val dict = progress.to_dict()
+
+        expect(dict.get("current") == 50)
+        expect(dict.has_key("total"))
+        expect(dict.has_key("message"))
+        expect(dict.has_key("percentage"))
+
+describe "Task":
+    it "creates new task":
+        val task = Task.new("task_1", "test_operation")
+        expect(task.id == "task_1")
+        expect(task.operation == "test_operation")
+        expect(task.status == TaskStatus.Pending)
+        expect(task.priority == TaskPriority.Normal)
+
+    it "sets priority":
+        val task = Task.new("task_1", "op").with_priority(TaskPriority.High)
+        expect(task.priority == TaskPriority.High)
+
+    it "sets timeout":
+        val task = Task.new("task_1", "op").with_timeout(5000)
+
+        match task.timeout_ms:
+            case Some(t):
+                expect(t == 5000)
+            case nil:
+                expect(false)
+
+    it "checks running state":
+        var task = Task.new("task_1", "op")
+        expect(not task.is_running())
+
+        # Simulate starting
+        task.status = TaskStatus.Running
+        expect(task.is_running())
+
+    it "checks complete state":
+        var task = Task.new("task_1", "op")
+        expect(not task.is_complete())
+
+        task.status = TaskStatus.Completed
+        expect(task.is_complete())
+
+        task.status = TaskStatus.Failed
+        expect(task.is_complete())
+
+    it "converts to dict":
+        val task = Task.new("task_1", "test").with_priority(TaskPriority.High)
+        val dict = task.to_dict()
+
+        expect(dict.get("id") == "task_1")
+        expect(dict.get("operation") == "test")
+        expect(dict.get("status") == "pending")
+        expect(dict.get("priority") == "high")
+
+describe "TaskError":
+    it "creates error":
+        val error = TaskError.new("ERR_001", "Something went wrong")
+        expect(error.code == "ERR_001")
+        expect(error.message == "Something went wrong")
+        expect(not error.retryable)
+
+    it "adds details":
+        val error = TaskError.new("ERR", "msg").with_details("extra info")
+
+        match error.details:
+            case Some(d):
+                expect(d == "extra info")
+            case nil:
+                expect(false)
+
+    it "marks as retryable":
+        val error = TaskError.new("ERR", "msg").as_retryable()
+        expect(error.retryable)
+
+    it "converts to MCP error":
+        val error = TaskError.new("timeout", "Operation timed out")
+        val mcp_error = error.to_mcp_error()
+        expect(mcp_error.category == ErrorCategory.Tool)
+
+describe "TaskManager":
+    it "creates task manager":
+        val manager = TaskManager.new()
+        expect(manager.running_count == 0)
+        expect(manager.max_concurrent_tasks == 10)
+
+    it "creates task":
+        var manager = TaskManager.new()
+        val task_id = manager.create_task("test_operation")
+        expect(task_id.starts_with("task_"))
+
+        match manager.get_task(task_id):
+            case Some(task):
+                expect(task.operation == "test_operation")
+                expect(task.status == TaskStatus.Pending)
+            case nil:
+                expect(false)
+
+    it "creates task with options":
+        var manager = TaskManager.new()
+        val task_id = manager.create_task_with_options(
+            "important_op",
+            TaskPriority.Critical,
+            Some(30000)
+        )
+
+        match manager.get_task(task_id):
+            case Some(task):
+                expect(task.priority == TaskPriority.Critical)
+                match task.timeout_ms:
+                    case Some(t):
+                        expect(t == 30000)
+                    case nil:
+                        expect(false)
+            case nil:
+                expect(false)
+
+    it "starts task":
+        var manager = TaskManager.new()
+        val task_id = manager.create_task("op")
+
+        val result = manager.start_task(task_id)
+        match result:
+            case Ok(_):
+                expect(true)
+            case Err(_):
+                expect(false)
+
+        match manager.get_task(task_id):
+            case Some(task):
+                expect(task.status == TaskStatus.Running)
+                expect(task.started_at.is_some())
+            case nil:
+                expect(false)
+
+        expect(manager.running_count == 1)
+
+    it "updates progress":
+        var manager = TaskManager.new()
+        val task_id = manager.create_task("op")
+        manager.start_task(task_id)
+
+        val result = manager.update_progress(task_id, 50, 100)
+        match result:
+            case Ok(_):
+                expect(true)
+            case Err(_):
+                expect(false)
+
+        match manager.get_task(task_id):
+            case Some(task):
+                match task.progress:
+                    case Some(p):
+                        expect(p.current == 50)
+                    case nil:
+                        expect(false)
+            case nil:
+                expect(false)
+
+    it "updates progress with message":
+        var manager = TaskManager.new()
+        val task_id = manager.create_task("op")
+        manager.start_task(task_id)
+
+        val result = manager.update_progress_with_message(task_id, 75, 100, "Almost done")
+        match result:
+            case Ok(_):
+                expect(true)
+            case Err(_):
+                expect(false)
+
+    it "completes task":
+        var manager = TaskManager.new()
+        val task_id = manager.create_task("op")
+        manager.start_task(task_id)
+
+        val result = manager.complete_task(task_id, "success")
+        match result:
+            case Ok(_):
+                expect(true)
+            case Err(_):
+                expect(false)
+
+        match manager.get_task(task_id):
+            case Some(task):
+                expect(task.status == TaskStatus.Completed)
+                expect(task.completed_at.is_some())
+            case nil:
+                expect(false)
+
+        expect(manager.running_count == 0)
+
+    it "fails task":
+        var manager = TaskManager.new()
+        val task_id = manager.create_task("op")
+        manager.start_task(task_id)
+
+        val error = TaskError.new("ERR", "Failed")
+        val result = manager.fail_task(task_id, error)
+
+        match result:
+            case Ok(_):
+                expect(true)
+            case Err(_):
+                expect(false)
+
+        match manager.get_task(task_id):
+            case Some(task):
+                expect(task.status == TaskStatus.Failed)
+                expect(task.error.is_some())
+            case nil:
+                expect(false)
+
+    it "cancels task":
+        var manager = TaskManager.new()
+        val task_id = manager.create_task("op")
+        manager.start_task(task_id)
+
+        val result = manager.cancel_task(task_id)
+        match result:
+            case Ok(_):
+                expect(true)
+            case Err(_):
+                expect(false)
+
+        match manager.get_task(task_id):
+            case Some(task):
+                expect(task.status == TaskStatus.Cancelled)
+            case nil:
+                expect(false)
+
+    it "lists all tasks":
+        var manager = TaskManager.new()
+        manager.create_task("op1")
+        manager.create_task("op2")
+        manager.create_task("op3")
+
+        val tasks = manager.list_tasks()
+        expect(tasks.len() == 3)
+
+    it "lists tasks by status":
+        var manager = TaskManager.new()
+        val id1 = manager.create_task("op1")
+        val id2 = manager.create_task("op2")
+        manager.create_task("op3")
+
+        manager.start_task(id1)
+        manager.start_task(id2)
+
+        val running = manager.list_tasks_by_status(TaskStatus.Running)
+        expect(running.len() == 2)
+
+        val pending = manager.list_tasks_by_status(TaskStatus.Pending)
+        expect(pending.len() == 1)
+
+    it "respects max concurrent tasks":
+        var manager = TaskManager.new()
+        manager.max_concurrent_tasks = 2
+
+        val id1 = manager.create_task("op1")
+        val id2 = manager.create_task("op2")
+        val id3 = manager.create_task("op3")
+
+        manager.start_task(id1)
+        manager.start_task(id2)
+
+        val result = manager.start_task(id3)
+        match result:
+            case Ok(_):
+                expect(false)
+            case Err(e):
+                expect(e.category == ErrorCategory.RateLimit)
+
+    it "cleans up completed tasks":
+        var manager = TaskManager.new()
+        val id1 = manager.create_task("op1")
+        val id2 = manager.create_task("op2")
+
+        manager.start_task(id1)
+        manager.complete_task(id1, "done")
+
+        # Wait a bit for cleanup
+        manager.cleanup_completed(0)  # Cleanup immediately
+
+        expect(manager.list_tasks().len() == 1)

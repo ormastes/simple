@@ -27,6 +27,8 @@ enum BackendKind:
     Wasm        # WebAssembly output
     Lean        # Lean 4 verification export
     Interpreter # Debug interpreter
+    Cuda        # NVIDIA CUDA (PTX output)
+    Vulkan      # Vulkan compute (SPIR-V output)
 
 impl BackendKind:
     fn to_text() -> text:
@@ -36,6 +38,8 @@ impl BackendKind:
             case Wasm: "wasm"
             case Lean: "lean"
             case Interpreter: "interpreter"
+            case Cuda: "cuda"
+            case Vulkan: "vulkan"
 
     fn supports_target(target: CodegenTarget) -> bool:
         """Check if this backend supports a target."""
@@ -50,6 +54,10 @@ impl BackendKind:
                 true  # Lean export is target-independent
             case Interpreter:
                 true  # Interpreter works for all
+            case Cuda:
+                target.is_gpu()  # CUDA only for GPU targets
+            case Vulkan:
+                target.is_gpu()  # Vulkan only for GPU targets
 
     fn supports_optimization(level: OptimizationLevel) -> bool:
         """Check if this backend supports an optimization level."""
@@ -64,6 +72,16 @@ impl BackendKind:
                 level == OptimizationLevel.None  # No optimization for verification
             case Interpreter:
                 true
+            case Cuda:
+                true  # CUDA supports all levels
+            case Vulkan:
+                true  # Vulkan supports all levels
+
+    fn is_gpu_backend() -> bool:
+        """Check if this is a GPU backend."""
+        match self:
+            case Cuda | Vulkan: true
+            case _: false
 
 # ============================================================================
 # Codegen Target
@@ -85,6 +103,10 @@ enum CodegenTarget:
     Wasm32
     Wasm64
 
+    # GPU targets
+    CudaPtx(compute_cap: (i64, i64))    # NVIDIA CUDA (e.g., (8, 6) for SM 8.6)
+    VulkanSpirv(version: (i64, i64))    # Vulkan SPIR-V (e.g., (1, 3) for Vulkan 1.3)
+
     # Host (detected at runtime)
     Host
 
@@ -99,6 +121,8 @@ impl CodegenTarget:
             case Riscv32: "riscv32"
             case Wasm32: "wasm32"
             case Wasm64: "wasm64"
+            case CudaPtx(cap): "cuda-sm{cap.0}{cap.1}"
+            case VulkanSpirv(ver): "vulkan-{ver.0}.{ver.1}"
             case Host: "host"
 
     fn is_64bit() -> bool:
@@ -116,6 +140,36 @@ impl CodegenTarget:
             case Wasm32 | Wasm64: true
             case _: false
 
+    fn is_gpu() -> bool:
+        """Check if this is a GPU target."""
+        match self:
+            case CudaPtx(_) | VulkanSpirv(_): true
+            case _: false
+
+    fn is_cuda() -> bool:
+        """Check if this is a CUDA target."""
+        match self:
+            case CudaPtx(_): true
+            case _: false
+
+    fn is_vulkan() -> bool:
+        """Check if this is a Vulkan target."""
+        match self:
+            case VulkanSpirv(_): true
+            case _: false
+
+    fn cuda_compute_capability() -> (i64, i64)?:
+        """Get CUDA compute capability if this is a CUDA target."""
+        match self:
+            case CudaPtx(cap): Some(cap)
+            case _: nil
+
+    fn vulkan_version() -> (i64, i64)?:
+        """Get Vulkan version if this is a Vulkan target."""
+        match self:
+            case VulkanSpirv(ver): Some(ver)
+            case _: nil
+
     static fn from_text(s: text) -> CodegenTarget?:
         """Parse target from string."""
         match s:
@@ -128,7 +182,25 @@ impl CodegenTarget:
             case "wasm32": Some(CodegenTarget.Wasm32)
             case "wasm64": Some(CodegenTarget.Wasm64)
             case "host": Some(CodegenTarget.Host)
+            case "cuda" | "cuda-sm70": Some(CodegenTarget.CudaPtx((7, 0)))
+            case "cuda-sm75": Some(CodegenTarget.CudaPtx((7, 5)))
+            case "cuda-sm80": Some(CodegenTarget.CudaPtx((8, 0)))
+            case "cuda-sm86": Some(CodegenTarget.CudaPtx((8, 6)))
+            case "cuda-sm89": Some(CodegenTarget.CudaPtx((8, 9)))
+            case "cuda-sm90": Some(CodegenTarget.CudaPtx((9, 0)))
+            case "vulkan" | "vulkan-1.3": Some(CodegenTarget.VulkanSpirv((1, 3)))
+            case "vulkan-1.2": Some(CodegenTarget.VulkanSpirv((1, 2)))
+            case "vulkan-1.1": Some(CodegenTarget.VulkanSpirv((1, 1)))
+            case "vulkan-1.0": Some(CodegenTarget.VulkanSpirv((1, 0)))
             case _: nil
+
+    static fn cuda(major: i64, minor: i64) -> CodegenTarget:
+        """Create CUDA target with specific compute capability."""
+        CodegenTarget.CudaPtx((major, minor))
+
+    static fn vulkan(major: i64, minor: i64) -> CodegenTarget:
+        """Create Vulkan target with specific version."""
+        CodegenTarget.VulkanSpirv((major, minor))
 
 # ============================================================================
 # Build Mode
@@ -515,7 +587,11 @@ fn select_backend(target: CodegenTarget, preferred: BackendKind?) -> BackendKind
         return preferred.unwrap()
 
     # Auto-select based on target only (no build mode consideration)
-    if target.is_wasm():
+    if target.is_cuda():
+        BackendKind.Cuda
+    elif target.is_vulkan():
+        BackendKind.Vulkan
+    elif target.is_wasm():
         BackendKind.Wasm
     elif target.is_32bit():
         BackendKind.Llvm
@@ -587,7 +663,16 @@ fn available_backends() -> [BackendKind]:
         BackendKind.Llvm,
         BackendKind.Wasm,
         BackendKind.Lean,
-        BackendKind.Interpreter
+        BackendKind.Interpreter,
+        BackendKind.Cuda,
+        BackendKind.Vulkan
+    ]
+
+fn gpu_backends() -> [BackendKind]:
+    """Get list of GPU backends."""
+    [
+        BackendKind.Cuda,
+        BackendKind.Vulkan
     ]
 
 fn backend_for_name(name: text) -> BackendKind?:
@@ -598,6 +683,8 @@ fn backend_for_name(name: text) -> BackendKind?:
         case "wasm": Some(BackendKind.Wasm)
         case "lean": Some(BackendKind.Lean)
         case "interpreter": Some(BackendKind.Interpreter)
+        case "cuda" | "ptx": Some(BackendKind.Cuda)
+        case "vulkan" | "spirv": Some(BackendKind.Vulkan)
         case _: nil
 
 # ============================================================================
@@ -608,4 +695,4 @@ export BackendKind, CodegenTarget, OptimizationLevel
 export CompileOptions, CompiledModule, CompiledSymbol, SymbolKind
 export CompileError, Backend
 export format_mir_module, select_backend
-export available_backends, backend_for_name
+export available_backends, gpu_backends, backend_for_name

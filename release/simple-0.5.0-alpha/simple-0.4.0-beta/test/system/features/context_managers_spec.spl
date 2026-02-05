@@ -1,0 +1,300 @@
+# @pending
+"""
+# Context Managers Specification
+
+**Feature IDs:** #CONTEXT-MANAGER
+**Category:** Language
+**Status:** Implemented
+
+Context managers provide a way to safely acquire and release resources using
+the `with` statement. They implement the resource protocol with `__enter__()` and
+`__exit__()` methods, ensuring cleanup code runs reliably even when exceptions occur.
+
+## Syntax
+
+```simple
+with resource as alias:
+    # code using alias
+    # __exit__ is called after this block
+```
+
+## Key Behaviors
+
+- `__enter__()` is called on entry, its return value is bound to alias
+- `__exit__()` is always called, even if an exception occurs
+- Alias binding can coexist with parser special handling (e.g., cast expressions)
+- Clean separation between resource acquisition and usage
+- Exception safety: cleanup always happens
+"""
+
+
+
+describe "Context Managers":
+    """
+    Verifies that context managers provide safe resource acquisition and
+    cleanup through the `with` statement. Tests cover basic entry/exit
+    semantics, alias binding, and integration with other language features.
+    """
+
+    context "basic context manager protocol":
+        it "calls __enter__ and binds result to alias":
+            class Resource:
+                value: i64
+
+                fn __enter__() -> i64:
+                    self.value + 10
+
+                fn __exit__(exc):
+                    pass
+
+            var captured = 0
+            with Resource(5) as alias:
+                captured = alias
+
+            expect captured == 15
+
+        it "calls __exit__ after block completes":
+            class Resource:
+                value: i64
+                exited: bool = false
+
+                fn __enter__() -> i64:
+                    self.value
+
+                fn __exit__(exc):
+                    exited = true
+
+            val resource = Resource(value: 42)
+            with resource as alias:
+                pass
+
+            expect resource.exited == true
+
+    context "alias binding and reuse":
+        it "reuses identifier when parser sees cast-style syntax":
+            class Resource:
+                value: i64
+
+                fn __enter__() -> i64:
+                    self.value + 1
+
+                fn __exit__(exc):
+                    pass
+
+            var result = 0
+            with Resource(2) as alias:
+                val inner = alias
+                result = inner
+
+            expect result == 3
+
+        it "properly binds alias in nested contexts":
+            class Resource:
+                value: i64
+
+                fn __enter__() -> i64:
+                    self.value * 2
+
+                fn __exit__(exc):
+                    pass
+
+            var results = []
+            with Resource(5) as x:
+                results.push(x)
+                with Resource(3) as y:
+                    results.push(y)
+                results.push(x)
+
+            expect results == [10, 6, 10]
+
+    context "resource cleanup":
+        it "runs cleanup code after block":
+            class Resource:
+                cleanup_count: i64 = 0
+
+                fn __enter__() -> i64:
+                    0
+
+                fn __exit__(exc):
+                    cleanup_count = cleanup_count + 1
+
+            val resource = Resource()
+            with resource as x:
+                pass
+
+            expect resource.cleanup_count == 1
+
+        it "runs cleanup even after multiple operations":
+            class Resource:
+                operations: i64 = 0
+                exit_called: bool = false
+
+                fn __enter__() -> i64:
+                    0
+
+                fn __exit__(exc):
+                    exit_called = true
+
+            val resource = Resource()
+            with resource as x:
+                resource.operations = 1
+                resource.operations = 2
+                resource.operations = 3
+
+            expect resource.operations == 3
+            expect resource.exit_called == true
+
+    context "using acquired values":
+        it "can use alias from __enter__ return value":
+            class Config:
+                filename: text
+                content: text = ""
+
+                fn __enter__() -> text:
+                    "loaded content"
+
+                fn __exit__(exc):
+                    pass
+
+            var loaded = ""
+            with Config(filename: "test.txt") as data:
+                loaded = data
+
+            expect loaded == "loaded content"
+
+        it "can call methods on alias":
+            class Handler:
+                fn __enter__() -> Handler:
+                    self
+
+                fn __exit__(exc):
+                    pass
+
+                fn process() -> i64:
+                    42
+
+            var result = 0
+            with Handler() as handler:
+                result = handler.process()
+
+            expect result == 42
+
+    context "exception handling":
+        it "passes exception info to __exit__":
+            class Resource:
+                exception_passed: bool = false
+
+                fn __enter__() -> i64:
+                    0
+
+                fn __exit__(exc):
+                    # exc is the exception or None
+                    exception_passed = exc != None
+
+            val resource = Resource()
+            with resource as x:
+                pass
+
+            # No exception occurred, so exc should be None
+            expect resource.exception_passed == false
+
+        it "always calls __exit__ for resource cleanup":
+            class Resource:
+                exit_was_called: bool = false
+
+                fn __enter__() -> i64:
+                    42
+
+                fn __exit__(exc):
+                    exit_was_called = true
+
+            val resource = Resource()
+            val result = 0
+            with resource as value:
+                # Some operation
+                val temp = value + 1
+
+            expect resource.exit_was_called == true
+
+    context "multiple resources":
+        it "can nest multiple context managers":
+            class Resource:
+                id: i64
+                exited: bool = false
+
+                fn __enter__() -> i64:
+                    self.id
+
+                fn __exit__(exc):
+                    exited = true
+
+            val r1 = Resource(id: 1)
+            val r2 = Resource(id: 2)
+            var results = []
+
+            with r1 as x:
+                results.push(x)
+                with r2 as y:
+                    results.push(y)
+
+            expect results == [1, 2]
+            expect r1.exited == true
+            expect r2.exited == true
+
+        it "cleans up in reverse order":
+            class Resource:
+                id: i64
+                exit_order: List<i64> = []
+
+                fn __enter__() -> i64:
+                    self.id
+
+                fn __exit__(exc):
+                    # Append to shared list to track order
+                    pass
+
+            # Ideally, exits happen in reverse: 2 then 1
+            # Implementation dependent on execution model
+
+    context "practical patterns":
+        it "implements file-like resource pattern":
+            class File:
+                filename: text
+                is_open: bool = false
+
+                fn __enter__() -> text:
+                    is_open = true
+                    "file content"
+
+                fn __exit__(exc):
+                    is_open = false
+
+            val file = File(filename: "data.txt")
+            var content = ""
+
+            with file as data:
+                expect file.is_open == true
+                content = data
+
+            expect file.is_open == false
+            expect content == "file content"
+
+        it "ensures state is restored on exit":
+            class StateManager:
+                state: text = "initial"
+
+                fn __enter__() -> text:
+                    state = "active"
+                    state
+
+                fn __exit__(exc):
+                    state = "cleaned"
+
+            val manager = StateManager()
+            var temp = ""
+
+            with manager as state:
+                temp = state
+                expect manager.state == "active"
+
+            expect manager.state == "cleaned"

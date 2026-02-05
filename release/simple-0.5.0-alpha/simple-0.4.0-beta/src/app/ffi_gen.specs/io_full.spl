@@ -1,0 +1,283 @@
+# I/O Module - Full Specification
+#
+# Complete specification for generating io.rs with:
+# - File I/O operations
+# - Directory operations
+# - Environment variables
+# - Glob pattern matching
+#
+# Usage: simple ffi-gen --gen-module specs/io_full.spl
+
+use app.ffi_gen.types*
+use app.ffi_gen.module_gen (ModuleBuilder)
+
+# ============================================================================
+# Module Specification
+# ============================================================================
+
+fn io_module() -> ModuleSpec:
+    var builder = ModuleBuilder.start("io")
+        .doc("I/O Operations FFI\n\nComplete file, directory, environment, and glob operations.")
+
+    # Imports
+    builder = builder
+        .add_import("std::fs")
+        .add_import("std::env")
+        .add_import("std::path::Path")
+        .add_import_items("std::ffi", ["CStr", "CString"])
+        .add_import("std::os::raw::c_char")
+        .add_import("glob::glob")
+
+    # File I/O functions
+    builder = builder
+        .add_fn(fn_rt_file_exists())
+        .add_fn(fn_rt_file_read_text())
+        .add_fn(fn_rt_file_write_text())
+        .add_fn(fn_rt_file_copy())
+        .add_fn(fn_rt_file_delete())
+        .add_fn(fn_rt_file_atomic_write())
+
+    # Directory functions
+    builder = builder
+        .add_fn(fn_rt_dir_create())
+        .add_fn(fn_rt_dir_create_all())
+        .add_fn(fn_rt_dir_list())
+        .add_fn(fn_rt_dir_walk())
+        .add_fn(fn_rt_dir_remove())
+
+    # Environment functions
+    builder = builder
+        .add_fn(fn_rt_env_cwd())
+        .add_fn(fn_rt_env_home())
+        .add_fn(fn_rt_env_get())
+        .add_fn(fn_rt_env_set())
+
+    # Glob function
+    builder = builder
+        .add_fn(fn_rt_glob())
+
+    builder.build()
+
+# ============================================================================
+# File I/O Functions
+# ============================================================================
+
+fn fn_rt_file_exists() -> FFIFnSpec:
+    var spec = FFIFnSpec.unsafe_extern_c("rt_file_exists",
+        [FFIParamSpec.raw_ptr("path", "*const c_char")],
+        "bool",
+        "let path_str = CStr::from_ptr(path as *const i8).to_string_lossy();\n" +
+        "Path::new(path_str.as_ref()).exists()"
+    )
+    spec.doc = "Check if file exists"
+    spec
+
+fn fn_rt_file_read_text() -> FFIFnSpec:
+    var spec = FFIFnSpec.unsafe_extern_c("rt_file_read_text",
+        [FFIParamSpec.raw_ptr("path", "*const c_char")],
+        "*mut c_char",
+        "let path_str = CStr::from_ptr(path as *const i8).to_string_lossy();\n" +
+        "match fs::read_to_string(path_str.as_ref()) {\n" +
+        "    Ok(s) => CString::new(s).ok().map(|c| c.into_raw()).unwrap_or(std::ptr::null_mut()),\n" +
+        "    Err(_) => std::ptr::null_mut(),\n" +
+        "}"
+    )
+    spec.doc = "Read entire file as text"
+    spec
+
+fn fn_rt_file_write_text() -> FFIFnSpec:
+    var spec = FFIFnSpec.unsafe_extern_c("rt_file_write_text",
+        [FFIParamSpec.raw_ptr("path", "*const c_char"), FFIParamSpec.raw_ptr("content", "*const c_char")],
+        "bool",
+        "let path_str = CStr::from_ptr(path as *const i8).to_string_lossy();\n" +
+        "let content_str = CStr::from_ptr(content as *const i8).to_string_lossy();\n" +
+        "fs::write(path_str.as_ref(), content_str.as_ref()).is_ok()"
+    )
+    spec.doc = "Write text to file"
+    spec
+
+fn fn_rt_file_copy() -> FFIFnSpec:
+    var spec = FFIFnSpec.unsafe_extern_c("rt_file_copy",
+        [FFIParamSpec.raw_ptr("src", "*const c_char"), FFIParamSpec.raw_ptr("dst", "*const c_char")],
+        "bool",
+        "let src_str = CStr::from_ptr(src as *const i8).to_string_lossy();\n" +
+        "let dst_str = CStr::from_ptr(dst as *const i8).to_string_lossy();\n" +
+        "fs::copy(src_str.as_ref(), dst_str.as_ref()).is_ok()"
+    )
+    spec.doc = "Copy file"
+    spec
+
+fn fn_rt_file_delete() -> FFIFnSpec:
+    var spec = FFIFnSpec.unsafe_extern_c("rt_file_delete",
+        [FFIParamSpec.raw_ptr("path", "*const c_char")],
+        "bool",
+        "let path_str = CStr::from_ptr(path as *const i8).to_string_lossy();\n" +
+        "fs::remove_file(path_str.as_ref()).is_ok()"
+    )
+    spec.doc = "Delete file"
+    spec
+
+fn fn_rt_file_atomic_write() -> FFIFnSpec:
+    var spec = FFIFnSpec.unsafe_extern_c("rt_file_atomic_write",
+        [FFIParamSpec.raw_ptr("path", "*const c_char"), FFIParamSpec.raw_ptr("content", "*const c_char")],
+        "bool",
+        "let path_str = CStr::from_ptr(path as *const i8).to_string_lossy();\n" +
+        "let content_str = CStr::from_ptr(content as *const i8).to_string_lossy();\n" +
+        "let temp_path = format!(\"{}.tmp\", path_str);\n" +
+        "if fs::write(&temp_path, content_str.as_ref()).is_err() { return false; }\n" +
+        "fs::rename(&temp_path, path_str.as_ref()).is_ok()"
+    )
+    spec.doc = "Atomic write (write to temp, then rename)"
+    spec
+
+# ============================================================================
+# Directory Functions
+# ============================================================================
+
+fn fn_rt_dir_create() -> FFIFnSpec:
+    var spec = FFIFnSpec.unsafe_extern_c("rt_dir_create",
+        [FFIParamSpec.raw_ptr("path", "*const c_char"), FFIParamSpec.simple("recursive", "bool")],
+        "bool",
+        "let path_str = CStr::from_ptr(path as *const i8).to_string_lossy();\n" +
+        "if recursive {\n" +
+        "    fs::create_dir_all(path_str.as_ref()).is_ok()\n" +
+        "} else {\n" +
+        "    fs::create_dir(path_str.as_ref()).is_ok()\n" +
+        "}"
+    )
+    spec.doc = "Create directory"
+    spec
+
+fn fn_rt_dir_create_all() -> FFIFnSpec:
+    var spec = FFIFnSpec.unsafe_extern_c("rt_dir_create_all",
+        [FFIParamSpec.raw_ptr("path", "*const c_char")],
+        "bool",
+        "let path_str = CStr::from_ptr(path as *const i8).to_string_lossy();\n" +
+        "fs::create_dir_all(path_str.as_ref()).is_ok()"
+    )
+    spec.doc = "Create directory recursively"
+    spec
+
+fn fn_rt_dir_list() -> FFIFnSpec:
+    var spec = FFIFnSpec.unsafe_extern_c("rt_dir_list",
+        [FFIParamSpec.raw_ptr("path", "*const c_char")],
+        "*mut c_char",
+        "let path_str = CStr::from_ptr(path as *const i8).to_string_lossy();\n" +
+        "match fs::read_dir(path_str.as_ref()) {\n" +
+        "    Ok(entries) => {\n" +
+        "        let names: Vec<String> = entries\n" +
+        "            .filter_map(|e| e.ok())\n" +
+        "            .map(|e| e.file_name().to_string_lossy().to_string())\n" +
+        "            .collect();\n" +
+        "        let joined = names.join(\"\\n\");\n" +
+        "        CString::new(joined).ok().map(|c| c.into_raw()).unwrap_or(std::ptr::null_mut())\n" +
+        "    }\n" +
+        "    Err(_) => std::ptr::null_mut(),\n" +
+        "}"
+    )
+    spec.doc = "List directory entries (newline-separated)"
+    spec
+
+fn fn_rt_dir_walk() -> FFIFnSpec:
+    var spec = FFIFnSpec.unsafe_extern_c("rt_dir_walk",
+        [FFIParamSpec.raw_ptr("_path", "*const c_char")],
+        "*mut c_char",
+        "// TODO: Implement recursive directory walk\n" +
+        "std::ptr::null_mut()"
+    )
+    spec.doc = "Walk directory recursively"
+    spec
+
+fn fn_rt_dir_remove() -> FFIFnSpec:
+    var spec = FFIFnSpec.unsafe_extern_c("rt_dir_remove",
+        [FFIParamSpec.raw_ptr("path", "*const c_char"), FFIParamSpec.simple("recursive", "bool")],
+        "bool",
+        "let path_str = CStr::from_ptr(path as *const i8).to_string_lossy();\n" +
+        "if recursive {\n" +
+        "    fs::remove_dir_all(path_str.as_ref()).is_ok()\n" +
+        "} else {\n" +
+        "    fs::remove_dir(path_str.as_ref()).is_ok()\n" +
+        "}"
+    )
+    spec.doc = "Remove directory"
+    spec
+
+# ============================================================================
+# Environment Functions
+# ============================================================================
+
+fn fn_rt_env_cwd() -> FFIFnSpec:
+    var spec = FFIFnSpec.extern_c("rt_env_cwd",
+        [],
+        "*mut c_char",
+        "env::current_dir()\n" +
+        "    .ok()\n" +
+        "    .and_then(|p| CString::new(p.to_string_lossy().to_string()).ok())\n" +
+        "    .map(|c| c.into_raw())\n" +
+        "    .unwrap_or(std::ptr::null_mut())"
+    )
+    spec.doc = "Get current working directory"
+    spec
+
+fn fn_rt_env_home() -> FFIFnSpec:
+    var spec = FFIFnSpec.extern_c("rt_env_home",
+        [],
+        "*mut c_char",
+        "env::var(\"HOME\")\n" +
+        "    .ok()\n" +
+        "    .and_then(|s| CString::new(s).ok())\n" +
+        "    .map(|c| c.into_raw())\n" +
+        "    .unwrap_or(std::ptr::null_mut())"
+    )
+    spec.doc = "Get home directory"
+    spec
+
+fn fn_rt_env_get() -> FFIFnSpec:
+    var spec = FFIFnSpec.unsafe_extern_c("rt_env_get",
+        [FFIParamSpec.raw_ptr("key", "*const c_char")],
+        "*mut c_char",
+        "let key_str = CStr::from_ptr(key as *const i8).to_string_lossy();\n" +
+        "env::var(key_str.as_ref())\n" +
+        "    .ok()\n" +
+        "    .and_then(|s| CString::new(s).ok())\n" +
+        "    .map(|c| c.into_raw())\n" +
+        "    .unwrap_or(std::ptr::null_mut())"
+    )
+    spec.doc = "Get environment variable"
+    spec
+
+fn fn_rt_env_set() -> FFIFnSpec:
+    var spec = FFIFnSpec.unsafe_extern_c("rt_env_set",
+        [FFIParamSpec.raw_ptr("key", "*const c_char"), FFIParamSpec.raw_ptr("value", "*const c_char")],
+        "bool",
+        "let key_str = CStr::from_ptr(key as *const i8).to_string_lossy();\n" +
+        "let val_str = CStr::from_ptr(value as *const i8).to_string_lossy();\n" +
+        "env::set_var(key_str.as_ref(), val_str.as_ref());\n" +
+        "true"
+    )
+    spec.doc = "Set environment variable"
+    spec
+
+# ============================================================================
+# Glob Function
+# ============================================================================
+
+fn fn_rt_glob() -> FFIFnSpec:
+    var spec = FFIFnSpec.unsafe_extern_c("rt_glob",
+        [FFIParamSpec.raw_ptr("pattern", "*const c_char")],
+        "*mut c_char",
+        "let pattern_str = CStr::from_ptr(pattern as *const i8).to_string_lossy();\n" +
+        "match glob(pattern_str.as_ref()) {\n" +
+        "    Ok(paths) => {\n" +
+        "        let files: Vec<String> = paths\n" +
+        "            .filter_map(|p| p.ok())\n" +
+        "            .map(|p| p.to_string_lossy().to_string())\n" +
+        "            .collect();\n" +
+        "        let joined = files.join(\"\\n\");\n" +
+        "        CString::new(joined).ok().map(|c| c.into_raw()).unwrap_or(std::ptr::null_mut())\n" +
+        "    }\n" +
+        "    Err(_) => std::ptr::null_mut(),\n" +
+        "}"
+    )
+    spec.doc = "Find files matching glob pattern"
+    spec

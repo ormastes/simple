@@ -1,0 +1,291 @@
+# Test Runner File Discovery and Utilities
+#
+# File discovery, filtering, shuffling, and skip feature tracking.
+
+use test_runner_types.*
+use app.io.mod (path_basename, file_read, file_exists, dir_walk)
+
+# =========================================================================
+# ANSI Stripping
+# =========================================================================
+
+fn strip_ansi(s: text) -> text:
+    # ANSI codes like ESC[32m contain digits but are separated from content
+    # by the 'm' terminator, so extract_number_before won't pick them up
+    # because it scans backwards from keyword and stops at non-digit chars.
+    # A full implementation needs char code access (ESC = 0x1b = 27).
+    # TODO: Implement proper ANSI stripping when rt_char_code FFI is available
+    s
+
+# =========================================================================
+# File Type Checking
+# =========================================================================
+
+fn is_test_file(path: text) -> bool:
+    val name = path_basename(path)
+    if not name.ends_with(".spl"):
+        return false
+    name.contains("_spec.") or name.contains("_test.")
+
+fn matches_level(path: text, level: TestLevel) -> bool:
+    match level:
+        case TestLevel.All:
+            true
+        case TestLevel.Unit:
+            not path.contains("/integration/") and not path.contains("/system/")
+        case TestLevel.Integration:
+            path.contains("/integration/")
+        case TestLevel.System:
+            path.contains("/system/")
+
+# =========================================================================
+# File Content Utilities
+# =========================================================================
+
+fn read_file_content(file_path: text) -> text:
+    val result = file_read(file_path)
+    result ?? ""
+
+fn file_has_slow_test(file_path: text) -> bool:
+    val content = read_file_content(file_path)
+    content.contains("slow_it ")
+
+fn file_has_skip_tag(file_path: text) -> bool:
+    val content = read_file_content(file_path)
+    content.contains("tag: \"skip\"") or content.contains("tag: 'skip'")
+
+fn file_has_pending_tag(file_path: text) -> bool:
+    val content = read_file_content(file_path)
+    content.contains("# @pending") or content.contains("tag: \"pending\"") or content.contains("tag: 'pending'")
+
+fn file_has_ignored_test(file_path: text) -> bool:
+    val content = read_file_content(file_path)
+    content.contains("slow_it ") or content.contains("tag: \"skip\"") or content.contains("tag: 'skip'") or content.contains("# @pending") or content.contains("tag: \"pending\"") or content.contains("tag: 'pending'")
+
+fn file_has_tag(file_path: text, tag: text) -> bool:
+    if tag == "":
+        return true
+    val content = read_file_content(file_path)
+    content.contains("tag: \"{tag}\"") or content.contains("tag: '{tag}'")
+
+# =========================================================================
+# Test File Discovery
+# =========================================================================
+
+fn discover_test_files(base_path: text, options: TestOptions) -> List<text>:
+    # If path is a single file, use it directly
+    if base_path.ends_with(".spl"):
+        if file_exists(base_path) and is_test_file(base_path):
+            return [base_path]
+        return []
+    val all_files = dir_walk(base_path)
+    # Check if we need content-based filtering at all
+    val needs_content = options.list_ignored or options.only_slow or options.only_skipped or options.tag != ""
+    var test_files: List<text> = []
+    for f in all_files:
+        if not is_test_file(f):
+            continue
+        if not matches_level(f, options.level):
+            continue
+        # Read file content once for @skip check and content-based filters
+        val content = read_file_content(f)
+        # Skip files with # @skip or # @pending unless running --only-skipped
+        if not options.only_skipped:
+            if content.contains("# @skip") or content.contains("# @pending"):
+                continue
+        # Content-based filters
+        if needs_content:
+            # --list-ignored: only show files with ignored tests
+            if options.list_ignored:
+                val has_ignored = content.contains("slow_it ") or content.contains("tag: \"skip\"") or content.contains("tag: 'skip'") or content.contains("# @pending") or content.contains("tag: \"pending\"") or content.contains("tag: 'pending'")
+                if not has_ignored:
+                    continue
+            # Filter by --only-slow (unless --all)
+            if options.only_slow and not options.run_all:
+                if not content.contains("slow_it "):
+                    continue
+            # Filter by --only-skipped
+            if options.only_skipped:
+                if not (content.contains("tag: \"skip\"") or content.contains("tag: 'skip'")):
+                    continue
+            # Filter by --tag
+            if options.tag != "":
+                if not (content.contains("tag: \"{options.tag}\"") or content.contains("tag: '{options.tag}'")):
+                    continue
+        test_files.push(f)
+
+    # Apply seed shuffle
+    if options.has_seed:
+        test_files = shuffle_files(test_files, options.seed)
+
+    test_files
+
+# =========================================================================
+# Deterministic Shuffle (hash-based, matches Rust runner)
+# =========================================================================
+
+fn simple_hash(s: text, seed: i64) -> i64:
+    # Simple hash using small multipliers to avoid overflow
+    var hash = seed * 31 + 7
+    var i = 0
+    while i < s.len():
+        val ch = s[i:i + 1]
+        var byte_val = 0
+        if ch >= "a" and ch <= "z":
+            byte_val = 97
+        elif ch >= "A" and ch <= "Z":
+            byte_val = 65
+        elif ch >= "0" and ch <= "9":
+            byte_val = 48
+        elif ch == "/":
+            byte_val = 47
+        elif ch == "_":
+            byte_val = 95
+        elif ch == ".":
+            byte_val = 46
+        else:
+            byte_val = 42
+        hash = (hash * 31 + byte_val) % 1000000007
+        i = i + 1
+    hash
+
+fn shuffle_files(files: List<text>, seed: i64) -> List<text>:
+    # Compute hashes for each file
+    var hashes: List<i64> = []
+    for f in files:
+        hashes.push(simple_hash(f, seed))
+
+    # Build index array
+    var n = files.len()
+    var idx: List<i64> = []
+    var j = 0
+    while j < n:
+        idx.push(j)
+        j = j + 1
+
+    # Shell sort by hash - O(n log²n) instead of O(n²)
+    var gap = n / 2
+    while gap > 0:
+        var i = gap
+        while i < n:
+            val tmp_idx = idx[i]
+            val tmp_hash = hashes[tmp_idx]
+            var k = i
+            while k >= gap and hashes[idx[k - gap]] > tmp_hash:
+                idx[k] = idx[k - gap]
+                k = k - gap
+            idx[k] = tmp_idx
+            i = i + 1
+        gap = gap / 2
+
+    var result: List<text> = []
+    var k = 0
+    while k < n:
+        result.push(files[idx[k]])
+        k = k + 1
+    result
+
+# =========================================================================
+# Skip Features
+# =========================================================================
+
+fn extract_skip_feature_info(file_path: text) -> SkipFeatureInfo:
+    val content = read_file_content(file_path)
+    val lines = content.split("\n")
+    var title = ""
+    var feature_ids = ""
+    var category = ""
+    var status = "Unknown"
+
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.starts_with("# ") and title == "":
+            title = trimmed.replace("# ", "")
+        elif trimmed.starts_with("**Feature IDs:**"):
+            feature_ids = trimmed.replace("**Feature IDs:**", "").trim()
+        elif trimmed.starts_with("**Category:**"):
+            category = trimmed.replace("**Category:**", "").trim()
+        elif trimmed.starts_with("**Status:**"):
+            status = trimmed.replace("**Status:**", "").trim()
+
+    SkipFeatureInfo(
+        file_path: file_path,
+        title: title,
+        feature_ids: feature_ids,
+        category: category,
+        status: status
+    )
+
+fn print_skip_features(files: List<text>, planned_only: bool):
+    var features: List<SkipFeatureInfo> = []
+    for f in files:
+        val info = extract_skip_feature_info(f)
+        if planned_only:
+            val s = info.status.lower()
+            if s.contains("planned") or s.contains("tbd") or s == "unknown":
+                features.push(info)
+        else:
+            features.push(info)
+
+    var label = "Skipped Features"
+    if planned_only:
+        label = "Planned Features"
+    print ""
+    print "{label} ({features.len()} of {files.len()} files)"
+    print "==============================================================="
+    print ""
+
+    for feat in features:
+        var line = "  {feat.title}"
+        if feat.feature_ids != "":
+            line = line + " ({feat.feature_ids})"
+        print line
+        print "    File:     {feat.file_path}"
+        if feat.category != "":
+            print "    Category: {feat.category}"
+        print "    Status:   {feat.status}"
+        print ""
+
+    print "Total: {features.len()} features"
+
+# =========================================================================
+# Discovery Summary / List Mode
+# =========================================================================
+
+fn print_discovery_summary(files: List<text>, options: TestOptions):
+    if options.list_skip_features:
+        print_skip_features(files, options.planned_only)
+        return
+
+    print "Discovered {files.len()} test file(s)"
+    for f in files:
+        if options.show_tags:
+            # Read file content ONCE for all tag checks
+            val content = read_file_content(f)
+            var tags: List<text> = []
+            if content.contains("slow_it "):
+                tags.push("slow")
+            if content.contains("tag: \"skip\"") or content.contains("tag: 'skip'"):
+                tags.push("skip")
+            if content.contains("# @pending") or content.contains("tag: \"pending\"") or content.contains("tag: 'pending'"):
+                tags.push("pending")
+            if tags.len() > 0:
+                val tag_str = tags.join(", ")
+                print "  {f}  [{tag_str}]"
+            else:
+                print "  {f}"
+        else:
+            print "  {f}"
+
+# =========================================================================
+# Exports
+# =========================================================================
+
+export strip_ansi
+export is_test_file, matches_level
+export read_file_content
+export file_has_slow_test, file_has_skip_tag, file_has_ignored_test, file_has_tag
+export discover_test_files
+export simple_hash, shuffle_files
+export extract_skip_feature_info, print_skip_features
+export print_discovery_summary

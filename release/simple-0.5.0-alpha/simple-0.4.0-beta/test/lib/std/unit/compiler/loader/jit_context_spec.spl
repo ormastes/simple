@@ -1,0 +1,410 @@
+"""
+# JIT Compilation Context Specification
+
+**Feature IDs:** #1041-1045
+**Category:** Tooling
+**Difficulty:** 3/5
+**Status:** In Progress
+
+## Overview
+
+JitCompilationContext implements CompilationContext for load-time JIT instantiation.
+It loads templates from SMF TemplateCode sections and provides:
+- Template lookup from SMF
+- Boundary-only contract mode (lighter than full contracts)
+- Type registry management
+- AOP and DI configuration integration
+- Instantiation recording
+
+## Key Features
+
+- CompilationContext trait implementation for JIT
+- SMF template loading
+- Lighter contract mode for JIT (Boundary only)
+- Integration with AopWeaver and DiContainer
+- InstantiationEntry recording
+
+## Implementation
+
+File: `/home/ormastes/dev/pub/simple/src/compiler/loader/jit_context.spl`
+
+## Architecture
+
+```
+JitCompilationContext (implements CompilationContext)
+├── smf_templates: Dict<text, GenericTemplate>
+├── type_reg: TypeRegistry
+├── smf_aop_config: AopWeaver?
+├── smf_di_config: DiContainer?
+└── recorded: [InstantiationEntry]
+```
+"""
+
+import std.spec
+
+
+# ============================================================================
+# Test Group 1: Construction
+# ============================================================================
+
+describe "JitCompilationContext Construction":
+    """
+    ## Context Creation
+
+    Validates JitCompilationContext.from_smf().
+    """
+
+    it "creates with empty templates":
+        val ctx = JitCompilationContext.from_smf({}, None, None)
+
+        expect(ctx.has_template("any_template")).to(be_false())
+        expect(ctx.recorded.len()).to(eq(0))
+
+    it "creates with templates":
+        var templates: Dict<text, GenericTemplate> = {}
+        templates["Vec"] = create_test_template("Vec", ["T"])
+
+        val ctx = JitCompilationContext.from_smf(templates, None, None)
+
+        expect(ctx.has_template("Vec")).to(be_true())
+
+    it "creates with AOP config":
+        val aop = create_mock_aop_weaver()
+        val ctx = JitCompilationContext.from_smf({}, Some(aop), None)
+
+        val result = ctx.aop_weaver()
+        expect(result.?).to(be_true())
+
+    it "creates with DI config":
+        val di = create_mock_di_container()
+        val ctx = JitCompilationContext.from_smf({}, None, Some(di))
+
+        val result = ctx.di_container()
+        expect(result.?).to(be_true())
+
+    it "creates with both AOP and DI":
+        val aop = create_mock_aop_weaver()
+        val di = create_mock_di_container()
+        val ctx = JitCompilationContext.from_smf({}, Some(aop), Some(di))
+
+        expect(ctx.aop_weaver().?).to(be_true())
+        expect(ctx.di_container().?).to(be_true())
+
+    it "initializes empty type registry":
+        val ctx = JitCompilationContext.from_smf({}, None, None)
+
+        val type_reg = ctx.type_registry()
+        # TODO: Verify TypeRegistry.empty() properties
+        pass
+
+    it "initializes empty recorded list":
+        val ctx = JitCompilationContext.from_smf({}, None, None)
+
+        expect(ctx.recorded.len()).to(eq(0))
+
+
+# ============================================================================
+# Test Group 2: Template Loading
+# ============================================================================
+
+describe "JitCompilationContext Template Loading":
+    """
+    ## Template Management
+
+    Validates load_template() and has_template().
+    """
+
+    context "when loading templates":
+        """
+        ### Scenario: Template Lookup
+
+        Tests load_template() for SMF templates.
+        """
+
+        it "loads existing template":
+            var templates: Dict<text, GenericTemplate> = {}
+            val vec_template = create_test_template("Vec", ["T"])
+            templates["Vec"] = vec_template
+
+            val ctx = JitCompilationContext.from_smf(templates, None, None)
+
+            val result = ctx.load_template("Vec")
+            expect(result.ok.?).to(be_true())
+
+            val loaded = result.unwrap()
+            expect(loaded.name).to(eq("Vec"))
+
+        it "returns error for missing template":
+            val ctx = JitCompilationContext.from_smf({}, None, None)
+
+            val result = ctx.load_template("Missing")
+            expect(result.err.?).to(be_true())
+
+            val error = result.unwrap_err()
+            expect(error).to(contain("not in SMF"))
+            expect(error).to(contain("Missing"))
+
+    context "when checking template existence":
+        """
+        ### Scenario: Template Presence Check
+
+        Tests has_template() for quick lookup.
+        """
+
+        it "returns true for existing template":
+            var templates: Dict<text, GenericTemplate> = {}
+            templates["Vec"] = create_test_template("Vec", ["T"])
+
+            val ctx = JitCompilationContext.from_smf(templates, None, None)
+
+            expect(ctx.has_template("Vec")).to(be_true())
+
+        it "returns false for missing template":
+            val ctx = JitCompilationContext.from_smf({}, None, None)
+
+            expect(ctx.has_template("Missing")).to(be_false())
+
+        it "checks multiple templates":
+            var templates: Dict<text, GenericTemplate> = {}
+            templates["Vec"] = create_test_template("Vec", ["T"])
+            templates["Option"] = create_test_template("Option", ["T"])
+
+            val ctx = JitCompilationContext.from_smf(templates, None, None)
+
+            expect(ctx.has_template("Vec")).to(be_true())
+            expect(ctx.has_template("Option")).to(be_true())
+            expect(ctx.has_template("Result")).to(be_false())
+
+
+# ============================================================================
+# Test Group 3: Compilation Context Interface
+# ============================================================================
+
+describe "JitCompilationContext Interface":
+    """
+    ## CompilationContext Trait Methods
+
+    Validates CompilationContext trait implementation.
+    """
+
+    context "when getting contract mode":
+        """
+        ### Scenario: Contract Mode
+
+        JIT uses Boundary contract mode (lighter than full).
+        """
+
+        it "returns Boundary contract mode":
+            val ctx = JitCompilationContext.from_smf({}, None, None)
+
+            val mode = ctx.contract_mode()
+            expect(mode).to(eq(ContractMode.Boundary))
+
+    context "when getting instantiation mode":
+        """
+        ### Scenario: Instantiation Mode
+
+        JIT uses JitTime instantiation mode.
+        """
+
+        it "returns JitTime instantiation mode":
+            val ctx = JitCompilationContext.from_smf({}, None, None)
+
+            val mode = ctx.instantiation_mode()
+            expect(mode).to(eq(InstantiationMode.JitTime))
+
+    context "when getting coverage setting":
+        """
+        ### Scenario: Coverage
+
+        JIT disables coverage (performance optimization).
+        """
+
+        it "returns false for coverage":
+            val ctx = JitCompilationContext.from_smf({}, None, None)
+
+            expect(ctx.coverage_enabled()).to(be_false())
+
+    context "when getting type registry":
+        """
+        ### Scenario: Type Registry
+
+        Tests type_registry() access.
+        """
+
+        it "returns type registry":
+            val ctx = JitCompilationContext.from_smf({}, None, None)
+
+            val type_reg = ctx.type_registry()
+            # Type registry should be initialized
+            # TODO: Add TypeRegistry validation
+            pass
+
+    context "when getting DI container":
+        """
+        ### Scenario: DI Container Access
+
+        Tests di_container() optional access.
+        """
+
+        it "returns None when no DI config":
+            val ctx = JitCompilationContext.from_smf({}, None, None)
+
+            val di = ctx.di_container()
+            expect(di.?).to(be_false())
+
+        it "returns DI config when provided":
+            val di_mock = create_mock_di_container()
+            val ctx = JitCompilationContext.from_smf({}, None, Some(di_mock))
+
+            val di = ctx.di_container()
+            expect(di.?).to(be_true())
+
+    context "when getting AOP weaver":
+        """
+        ### Scenario: AOP Weaver Access
+
+        Tests aop_weaver() optional access.
+        """
+
+        it "returns None when no AOP config":
+            val ctx = JitCompilationContext.from_smf({}, None, None)
+
+            val aop = ctx.aop_weaver()
+            expect(aop.?).to(be_false())
+
+        it "returns AOP config when provided":
+            val aop_mock = create_mock_aop_weaver()
+            val ctx = JitCompilationContext.from_smf({}, None, Some(aop_mock))
+
+            val aop = ctx.aop_weaver()
+            expect(aop.?).to(be_true())
+
+
+# ============================================================================
+# Test Group 4: Template Compilation (Stub Tests)
+# ============================================================================
+
+describe "JitCompilationContext Template Compilation":
+    """
+    ## Template Compilation
+
+    Validates compile_template() wrapper.
+
+    Note: Requires compile_specialized_template() integration.
+    """
+
+    it "compiles template with type args":
+        # TODO: Create test template and type args
+        # val ctx = JitCompilationContext.from_smf(templates, None, None)
+        # val template = create_test_template("Vec", ["T"])
+        # val type_args = [ConcreteType(name: "i64")]
+        # val result = ctx.compile_template(template, type_args)
+        # expect(result.ok.?).to(be_true())
+        pass
+
+    it "uses Boundary contract mode":
+        # TODO: Verify compile_specialized_template called with ContractMode.Boundary
+        pass
+
+    it "disables coverage":
+        # TODO: Verify compile_specialized_template called with coverage=false
+        pass
+
+    it "passes AOP config":
+        # TODO: Verify AOP weaver passed to compilation
+        pass
+
+    it "passes DI config":
+        # TODO: Verify DI container passed to compilation
+        pass
+
+
+# ============================================================================
+# Test Group 5: Instantiation Recording
+# ============================================================================
+
+describe "JitCompilationContext Instantiation Recording":
+    """
+    ## Recording Instantiations
+
+    Validates record_instantiation() for tracking compiled templates.
+    """
+
+    it "records single instantiation":
+        var ctx = JitCompilationContext.from_smf({}, None, None)
+
+        val entry = create_test_instantiation_entry("Vec$i64")
+        ctx.record_instantiation(entry)
+
+        expect(ctx.recorded.len()).to(eq(1))
+        expect(ctx.recorded[0].mangled_name).to(eq("Vec$i64"))
+
+    it "records multiple instantiations":
+        var ctx = JitCompilationContext.from_smf({}, None, None)
+
+        val entry1 = create_test_instantiation_entry("Vec$i64")
+        val entry2 = create_test_instantiation_entry("Vec$f64")
+
+        ctx.record_instantiation(entry1)
+        ctx.record_instantiation(entry2)
+
+        expect(ctx.recorded.len()).to(eq(2))
+        expect(ctx.recorded[0].mangled_name).to(eq("Vec$i64"))
+        expect(ctx.recorded[1].mangled_name).to(eq("Vec$f64"))
+
+    it "appends to recorded list":
+        var ctx = JitCompilationContext.from_smf({}, None, None)
+
+        expect(ctx.recorded.len()).to(eq(0))
+
+        ctx.record_instantiation(create_test_instantiation_entry("A"))
+        expect(ctx.recorded.len()).to(eq(1))
+
+        ctx.record_instantiation(create_test_instantiation_entry("B"))
+        expect(ctx.recorded.len()).to(eq(2))
+
+        ctx.record_instantiation(create_test_instantiation_entry("C"))
+        expect(ctx.recorded.len()).to(eq(3))
+
+
+# ============================================================================
+# Helper Code
+# ============================================================================
+
+fn create_test_template(name: text, type_params: [text]) -> GenericTemplate:
+    """Create a test GenericTemplate."""
+    GenericTemplate(
+        name: name,
+        type_params: type_params,
+        ast_data: nil  # Placeholder
+    )
+
+fn create_test_instantiation_entry(mangled: text) -> InstantiationEntry:
+    """Create a test InstantiationEntry."""
+    InstantiationEntry(
+        id: 0,
+        template: "Vec",
+        type_args: "i64",
+        mangled_name: mangled,
+        from_file: "test.spl",
+        from_loc: "10:5",
+        to_obj: "test.smf",
+        status: "completed"
+    )
+
+fn create_mock_aop_weaver() -> AopWeaver:
+    """Create a mock AopWeaver for testing.
+
+    TODO: Implement proper mock when AopWeaver is available.
+    """
+    # Placeholder
+    nil
+
+fn create_mock_di_container() -> DiContainer:
+    """Create a mock DiContainer for testing.
+
+    TODO: Implement proper mock when DiContainer is available.
+    """
+    # Placeholder
+    nil

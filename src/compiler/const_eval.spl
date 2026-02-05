@@ -10,7 +10,7 @@
 # compile-time evaluation with no side effects.
 
 from hir_types import {HirType, SymbolId, HirModule}
-from hir_definitions import {HirExpr, HirExprKind, HirConst, HirStaticAssert}
+from hir_definitions import {HirExpr, HirExprKind, HirConst, HirStaticAssert, HirStmt, HirStmtKind, HirBlock, HirFunction, HirCallArg}
 from lexer import {Span}
 
 export ConstValue, ConstEvalError, ConstEvaluator
@@ -121,12 +121,17 @@ impl ConstEvalError:
             case ConstEvalError.AssertionFailed(_, s): s
             case ConstEvalError.ArrayBoundsError(_, _, s): s
 
+# Maximum recursion depth for const function calls
+val MAX_CONST_CALL_DEPTH: i64 = 100
+
 # Constant evaluator context
 class ConstEvaluator:
     module: HirModule
     constants: Dict<text, ConstValue>    # Named constants in scope
     type_sizes: Dict<text, i64>          # Type → size in bytes
     type_aligns: Dict<text, i64>         # Type → alignment
+    locals: Dict<text, ConstValue>       # Local variable bindings (for const fn params)
+    call_depth: i64                       # Current recursion depth
 
 impl ConstEvaluator:
     static fn new(module: HirModule) -> ConstEvaluator:
@@ -134,7 +139,9 @@ impl ConstEvaluator:
             module: module,
             constants: {},
             type_sizes: {},
-            type_aligns: {}
+            type_aligns: {},
+            locals: {},
+            call_depth: 0
         )
         eval.init_builtin_sizes()
         eval
@@ -330,6 +337,12 @@ impl ConstEvaluator:
             return Err(ConstEvalError.UndefinedVariable("<unknown>", span))
 
         val name = sym.unwrap().name
+
+        # Check local variables first (function parameters)
+        if self.locals.contains_key(name):
+            return Ok(self.locals[name])
+
+        # Check named constants
         if self.constants.contains_key(name):
             return Ok(self.constants[name])
 
@@ -340,18 +353,68 @@ impl ConstEvaluator:
 
         Err(ConstEvalError.UndefinedVariable(name, span))
 
-    # Evaluate function call (only builtins for now)
+    # Evaluate function call (builtins and user-defined const functions)
     fn eval_call(callee: HirExpr, args: [HirCallArg], span: Span) -> Result<ConstValue, ConstEvalError>:
-        # For now, only support builtin functions
         match callee.kind:
             case HirExprKind.Var(sym):
                 val func_sym = self.module.symbols.get(sym)
                 if func_sym.?:
                     val name = func_sym.unwrap().name
-                    return self.eval_builtin(name, args, span)
+                    # Try builtin first
+                    val builtin_result = self.eval_builtin(name, args, span)
+                    match builtin_result:
+                        case Ok(_):
+                            return builtin_result
+                        case _:
+                            # Try user-defined const function
+                            return self.eval_const_fn_call(sym, args, span)
             case _:
                 pass
         Err(ConstEvalError.NotConstant("function call", span))
+
+    # Evaluate a call to a user-defined const function
+    fn eval_const_fn_call(func_sym: SymbolId, args: [HirCallArg], span: Span) -> Result<ConstValue, ConstEvalError>:
+        # Check recursion depth
+        if self.call_depth >= MAX_CONST_CALL_DEPTH:
+            return Err(ConstEvalError.NotConstant("exceeded max const call depth", span))
+
+        # Look up the function in the module
+        if not self.module.functions.contains_key(func_sym):
+            return Err(ConstEvalError.NotConstant("function not found", span))
+
+        val func = self.module.functions[func_sym]
+
+        # Ensure function is marked const
+        if not func.is_const:
+            return Err(ConstEvalError.NotConstant("function is not const", span))
+
+        # Check argument count
+        if args.len() != func.params.len():
+            return Err(ConstEvalError.NotConstant("wrong number of arguments", span))
+
+        # Evaluate arguments and bind to parameters
+        var saved_locals = self.locals
+        self.locals = {}
+
+        var arg_idx = 0
+        while arg_idx < args.len():
+            val arg = args[arg_idx]
+            val param = func.params[arg_idx]
+            val arg_val = self.eval(arg.value)?
+            self.locals[param.name] = arg_val
+            arg_idx = arg_idx + 1
+
+        # Increment call depth
+        self.call_depth = self.call_depth + 1
+
+        # Evaluate function body
+        val result = self.eval_block(func.body)
+
+        # Restore state
+        self.call_depth = self.call_depth - 1
+        self.locals = saved_locals
+
+        result
 
     # Evaluate static method call (e.g., size_of<T>())
     fn eval_static_call(type_: HirType, method: text, args: [HirCallArg], span: Span) -> Result<ConstValue, ConstEvalError>:
@@ -430,14 +493,22 @@ impl ConstEvaluator:
     fn eval_block(block: HirBlock) -> Result<ConstValue, ConstEvalError>:
         var result = ConstValue.Unit
         for stmt in block.stmts:
-            match stmt:
-                case HirStmt.Expr(expr):
+            match stmt.kind:
+                case HirStmtKind.Expr(expr):
                     result = self.eval(expr)?
+                case HirStmtKind.Let(symbol, _, init):
+                    # Evaluate initializer and bind to local
+                    val sym = self.module.symbols.get(symbol)
+                    if sym.?:
+                        val name = sym.unwrap().name
+                        val value = self.eval(init)?
+                        self.locals[name] = value
+                    result = ConstValue.Unit
                 case _:
                     # Other statements not supported in const context
-                    pass
-        if block.expr.?:
-            result = self.eval(block.expr.unwrap())?
+                    result = ConstValue.Unit
+        if block.value.?:
+            result = self.eval(block.value.unwrap())?
         Ok(result)
 
 # Convenience function: evaluate a constant expression

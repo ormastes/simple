@@ -1,0 +1,577 @@
+# AST Statement Conversion
+#
+# Converts parse tree (CST) statements to interpreter AST.
+# Handles statements, patterns, and structural definitions.
+
+import parser.treesitter.tree.{Tree, Node, NodeId, NodeArena}
+import interpreter.ast_types.*
+import interpreter.ast_convert_pattern.{convert_pattern, convert_struct_pattern, convert_field_pattern, convert_enum_pattern}
+import interpreter.ast_convert_expr.convert_expression
+
+# =============================================================================
+# Internal Conversion Helpers - Statements
+# =============================================================================
+
+fn convert_import(tree: &Tree, node: Node) -> Result<Import, String>:
+    var path = ""
+    var names: Array<String> = []
+    var alias: Option<String> = None
+
+    for child_id in node.children:
+        match tree.get_node(child_id):
+            case Some(child):
+                match child.kind:
+                    case "module_path":
+                        path = child.text.clone()
+                    case "import_names":
+                        names = parse_import_names(tree, child)
+                    case "import_alias":
+                        alias = Some(child.text.clone())
+                    case _: pass
+            case None: pass
+
+    return Ok(Import {
+        path: path,
+        names: names,
+        alias: alias
+    })
+
+fn parse_import_names(tree: &Tree, node: Node) -> Array<String>:
+    var names: Array<String> = []
+    for child_id in node.children:
+        match tree.get_node(child_id):
+            case Some(child):
+                if child.kind == "identifier":
+                    names.push(child.text.clone())
+            case None: pass
+    return names
+
+fn convert_statement(tree: &Tree, node: Node) -> Result<Statement, String>:
+    match node.kind:
+        case "let_statement" | "val_statement":
+            return convert_let_statement(tree, node)
+        case "var_statement":
+            return convert_var_statement(tree, node)
+        case "return_statement":
+            return convert_return_statement(tree, node)
+        case "if_statement":
+            return convert_if_statement(tree, node)
+        case "match_statement":
+            return convert_match_statement(tree, node)
+        case "for_statement":
+            return convert_for_statement(tree, node)
+        case "while_statement":
+            return convert_while_statement(tree, node)
+        case "loop_statement":
+            return convert_loop_statement(tree, node)
+        case "break_statement":
+            return Ok(Statement.Break)
+        case "continue_statement":
+            return Ok(Statement.Continue)
+        case "pass_statement":
+            return Ok(Statement.Pass)
+        case "function_def":
+            return convert_function_def(tree, node)
+        case "struct_def":
+            return convert_struct_def(tree, node)
+        case "enum_def":
+            return convert_enum_def(tree, node)
+        case "impl_def":
+            return convert_impl_def(tree, node)
+        case "expression_statement":
+            # Import expression converter from ast_convert_expr module
+            for child_id in node.children:
+                match tree.get_node(child_id):
+                    case Some(child):
+                        match convert_expression(tree, child):
+                            case Ok(expr): return Ok(Statement.Expression(expr))
+                            case Err(e): return Err(e)
+                    case None: pass
+            return Err("Empty expression statement")
+        case _:
+            # Try as expression
+            match convert_expression(tree, node):
+                case Ok(expr): return Ok(Statement.Expression(expr))
+                case Err(e): return Err("Unknown statement kind: {node.kind}")
+
+fn convert_let_statement(tree: &Tree, node: Node) -> Result<Statement, String>:
+    var name = ""
+    var type_annotation: Option<String> = None
+    var value: Option<Expr> = None
+
+    for child_id in node.children:
+        match tree.get_node(child_id):
+            case Some(child):
+                match child.kind:
+                    case "identifier":
+                        name = child.text.clone()
+                    case "type_annotation":
+                        type_annotation = Some(child.text.clone())
+                    case _:
+                        match convert_expression(tree, child):
+                            case Ok(expr): value = Some(expr)
+                            case Err(_): pass
+            case None: pass
+
+    match value:
+        case Some(v):
+            return Ok(Statement.Let(LetBinding {
+                name: name,
+                type_annotation: type_annotation,
+                value: v,
+                mutable: false
+            }))
+        case None:
+            return Err("Let statement missing value")
+
+fn convert_var_statement(tree: &Tree, node: Node) -> Result<Statement, String>:
+    var name = ""
+    var type_annotation: Option<String> = None
+    var value: Option<Expr> = None
+
+    for child_id in node.children:
+        match tree.get_node(child_id):
+            case Some(child):
+                match child.kind:
+                    case "identifier":
+                        name = child.text.clone()
+                    case "type_annotation":
+                        type_annotation = Some(child.text.clone())
+                    case _:
+                        match convert_expression(tree, child):
+                            case Ok(expr): value = Some(expr)
+                            case Err(_): pass
+            case None: pass
+
+    match value:
+        case Some(v):
+            return Ok(Statement.Let(LetBinding {
+                name: name,
+                type_annotation: type_annotation,
+                value: v,
+                mutable: true
+            }))
+        case None:
+            return Err("Var statement missing value")
+
+fn convert_return_statement(tree: &Tree, node: Node) -> Result<Statement, String>:
+    for child_id in node.children:
+        match tree.get_node(child_id):
+            case Some(child):
+                match convert_expression(tree, child):
+                    case Ok(expr): return Ok(Statement.Return(Some(expr)))
+                    case Err(_): pass
+            case None: pass
+
+    return Ok(Statement.Return(None))
+
+fn convert_if_statement(tree: &Tree, node: Node) -> Result<Statement, String>:
+    var cond: Option<Expr> = None
+    var then_block: Option<Block> = None
+    var else_block: Option<Block> = None
+
+    for child_id in node.children:
+        match tree.get_node(child_id):
+            case Some(child):
+                match child.kind:
+                    case "condition":
+                        match convert_expression(tree, child):
+                            case Ok(expr): cond = Some(expr)
+                            case Err(_): pass
+                    case "then_block" | "block":
+                        if cond.is_some() and then_block.is_none():
+                            match convert_block(tree, child):
+                                case Ok(blk): then_block = Some(blk)
+                                case Err(_): pass
+                    case "else_block":
+                        match convert_block(tree, child):
+                            case Ok(blk): else_block = Some(blk)
+                            case Err(_): pass
+                    case _:
+                        if cond.is_none():
+                            match convert_expression(tree, child):
+                                case Ok(expr): cond = Some(expr)
+                                case Err(_): pass
+            case None: pass
+
+    match (cond, then_block):
+        case (Some(c), Some(tb)):
+            return Ok(Statement.If {
+                cond: c,
+                then_block: tb,
+                else_block: else_block
+            })
+        case _:
+            return Err("If statement missing condition or body")
+
+fn convert_match_statement(tree: &Tree, node: Node) -> Result<Statement, String>:
+    var value: Option<Expr> = None
+    var cases: Array<MatchCase> = []
+
+    for child_id in node.children:
+        match tree.get_node(child_id):
+            case Some(child):
+                match child.kind:
+                    case "match_value":
+                        match convert_expression(tree, child):
+                            case Ok(expr): value = Some(expr)
+                            case Err(_): pass
+                    case "case_clause":
+                        match convert_case_clause(tree, child):
+                            case Ok(mc): cases.push(mc)
+                            case Err(_): pass
+                    case _:
+                        if value.is_none():
+                            match convert_expression(tree, child):
+                                case Ok(expr): value = Some(expr)
+                                case Err(_): pass
+            case None: pass
+
+    match value:
+        case Some(v):
+            return Ok(Statement.Match {
+                value: v,
+                cases: cases
+            })
+        case None:
+            return Err("Match statement missing value")
+
+fn convert_case_clause(tree: &Tree, node: Node) -> Result<MatchCase, String>:
+    var pattern: Option<Pattern> = None
+    var guard: Option<Expr> = None
+    var body: Option<Block> = None
+
+    for child_id in node.children:
+        match tree.get_node(child_id):
+            case Some(child):
+                match child.kind:
+                    case "pattern":
+                        match convert_pattern(tree, child):
+                            case Ok(p): pattern = Some(p)
+                            case Err(_): pass
+                    case "guard":
+                        match convert_expression(tree, child):
+                            case Ok(expr): guard = Some(expr)
+                            case Err(_): pass
+                    case "block":
+                        match convert_block(tree, child):
+                            case Ok(blk): body = Some(blk)
+                            case Err(_): pass
+                    case _:
+                        if pattern.is_none():
+                            match convert_pattern(tree, child):
+                                case Ok(p): pattern = Some(p)
+                                case Err(_): pass
+            case None: pass
+
+    match (pattern, body):
+        case (Some(p), Some(b)):
+            return Ok(MatchCase {
+                pattern: p,
+                guard: guard,
+                body: b
+            })
+        case _:
+            return Err("Case clause missing pattern or body")
+
+fn convert_for_statement(tree: &Tree, node: Node) -> Result<Statement, String>:
+    var pattern: Option<Pattern> = None
+    var iterable: Option<Expr> = None
+    var body: Option<Block> = None
+
+    for child_id in node.children:
+        match tree.get_node(child_id):
+            case Some(child):
+                match child.kind:
+                    case "pattern" | "identifier":
+                        match convert_pattern(tree, child):
+                            case Ok(p): pattern = Some(p)
+                            case Err(_): pass
+                    case "iterable":
+                        match convert_expression(tree, child):
+                            case Ok(expr): iterable = Some(expr)
+                            case Err(_): pass
+                    case "block":
+                        match convert_block(tree, child):
+                            case Ok(blk): body = Some(blk)
+                            case Err(_): pass
+                    case _:
+                        if iterable.is_none() and pattern.is_some():
+                            match convert_expression(tree, child):
+                                case Ok(expr): iterable = Some(expr)
+                                case Err(_): pass
+            case None: pass
+
+    match (pattern, iterable, body):
+        case (Some(p), Some(i), Some(b)):
+            return Ok(Statement.For {
+                pattern: p,
+                iterable: i,
+                body: b
+            })
+        case _:
+            return Err("For statement missing pattern, iterable, or body")
+
+fn convert_while_statement(tree: &Tree, node: Node) -> Result<Statement, String>:
+    var cond: Option<Expr> = None
+    var body: Option<Block> = None
+
+    for child_id in node.children:
+        match tree.get_node(child_id):
+            case Some(child):
+                match child.kind:
+                    case "condition":
+                        match convert_expression(tree, child):
+                            case Ok(expr): cond = Some(expr)
+                            case Err(_): pass
+                    case "block":
+                        match convert_block(tree, child):
+                            case Ok(blk): body = Some(blk)
+                            case Err(_): pass
+                    case _:
+                        if cond.is_none():
+                            match convert_expression(tree, child):
+                                case Ok(expr): cond = Some(expr)
+                                case Err(_): pass
+            case None: pass
+
+    match (cond, body):
+        case (Some(c), Some(b)):
+            return Ok(Statement.While {
+                cond: c,
+                body: b
+            })
+        case _:
+            return Err("While statement missing condition or body")
+
+fn convert_loop_statement(tree: &Tree, node: Node) -> Result<Statement, String>:
+    for child_id in node.children:
+        match tree.get_node(child_id):
+            case Some(child):
+                if child.kind == "block":
+                    match convert_block(tree, child):
+                        case Ok(blk): return Ok(Statement.Loop(blk))
+                        case Err(e): return Err(e)
+            case None: pass
+
+    return Err("Loop statement missing body")
+
+fn convert_function_def(tree: &Tree, node: Node) -> Result<Statement, String>:
+    var name = ""
+    var params: Array<Param> = []
+    var return_type: Option<String> = None
+    var body: Option<Block> = None
+
+    for child_id in node.children:
+        match tree.get_node(child_id):
+            case Some(child):
+                match child.kind:
+                    case "identifier" | "function_name":
+                        name = child.text.clone()
+                    case "parameters":
+                        params = convert_parameters(tree, child)
+                    case "return_type":
+                        return_type = Some(child.text.clone())
+                    case "block":
+                        match convert_block(tree, child):
+                            case Ok(blk): body = Some(blk)
+                            case Err(_): pass
+            case None: pass
+
+    match body:
+        case Some(b):
+            return Ok(Statement.FunctionDef {
+                name: name,
+                params: params,
+                return_type: return_type,
+                body: b
+            })
+        case None:
+            return Err("Function missing body")
+
+fn convert_parameters(tree: &Tree, node: Node) -> Array<Param>:
+    var params: Array<Param> = []
+
+    for child_id in node.children:
+        match tree.get_node(child_id):
+            case Some(child):
+                if child.kind == "parameter":
+                    match convert_parameter(tree, child):
+                        case Ok(p): params.push(p)
+                        case Err(_): pass
+            case None: pass
+
+    return params
+
+fn convert_parameter(tree: &Tree, node: Node) -> Result<Param, String>:
+    var name = ""
+    var type_annotation: Option<String> = None
+    var default_value: Option<Expr> = None
+
+    for child_id in node.children:
+        match tree.get_node(child_id):
+            case Some(child):
+                match child.kind:
+                    case "identifier":
+                        name = child.text.clone()
+                    case "type_annotation":
+                        type_annotation = Some(child.text.clone())
+                    case "default_value":
+                        match convert_expression(tree, child):
+                            case Ok(expr): default_value = Some(expr)
+                            case Err(_): pass
+            case None: pass
+
+    return Ok(Param {
+        name: name,
+        type_annotation: type_annotation,
+        default_value: default_value
+    })
+
+fn convert_struct_def(tree: &Tree, node: Node) -> Result<Statement, String>:
+    var name = ""
+    var fields: Array<StructField> = []
+
+    for child_id in node.children:
+        match tree.get_node(child_id):
+            case Some(child):
+                match child.kind:
+                    case "identifier" | "type_identifier":
+                        name = child.text.clone()
+                    case "struct_field":
+                        match convert_struct_field(tree, child):
+                            case Ok(f): fields.push(f)
+                            case Err(_): pass
+            case None: pass
+
+    return Ok(Statement.StructDef {
+        name: name,
+        fields: fields
+    })
+
+fn convert_struct_field(tree: &Tree, node: Node) -> Result<StructField, String>:
+    var name = ""
+    var type_annotation = ""
+
+    for child_id in node.children:
+        match tree.get_node(child_id):
+            case Some(child):
+                match child.kind:
+                    case "identifier":
+                        name = child.text.clone()
+                    case "type_annotation" | "type":
+                        type_annotation = child.text.clone()
+            case None: pass
+
+    return Ok(StructField {
+        name: name,
+        type_annotation: type_annotation,
+        default_value: None
+    })
+
+fn convert_enum_def(tree: &Tree, node: Node) -> Result<Statement, String>:
+    var name = ""
+    var variants: Array<EnumVariant> = []
+
+    for child_id in node.children:
+        match tree.get_node(child_id):
+            case Some(child):
+                match child.kind:
+                    case "identifier" | "type_identifier":
+                        name = child.text.clone()
+                    case "enum_variant":
+                        match convert_enum_variant(tree, child):
+                            case Ok(v): variants.push(v)
+                            case Err(_): pass
+            case None: pass
+
+    return Ok(Statement.EnumDef {
+        name: name,
+        variants: variants
+    })
+
+fn convert_enum_variant(tree: &Tree, node: Node) -> Result<EnumVariant, String>:
+    var name = ""
+    var fields: Option<Array<StructField>> = None
+
+    for child_id in node.children:
+        match tree.get_node(child_id):
+            case Some(child):
+                match child.kind:
+                    case "identifier":
+                        name = child.text.clone()
+                    case "variant_fields":
+                        fields = Some(convert_variant_fields(tree, child))
+            case None: pass
+
+    return Ok(EnumVariant {
+        name: name,
+        fields: fields
+    })
+
+fn convert_variant_fields(tree: &Tree, node: Node) -> Array<StructField>:
+    var fields: Array<StructField> = []
+
+    for child_id in node.children:
+        match tree.get_node(child_id):
+            case Some(child):
+                if child.kind == "struct_field":
+                    match convert_struct_field(tree, child):
+                        case Ok(f): fields.push(f)
+                        case Err(_): pass
+            case None: pass
+
+    return fields
+
+fn convert_impl_def(tree: &Tree, node: Node) -> Result<Statement, String>:
+    var type_name = ""
+    var trait_name: Option<String> = None
+    var methods: Array<Statement> = []
+
+    for child_id in node.children:
+        match tree.get_node(child_id):
+            case Some(child):
+                match child.kind:
+                    case "type_identifier":
+                        type_name = child.text.clone()
+                    case "trait_name":
+                        trait_name = Some(child.text.clone())
+                    case "function_def":
+                        match convert_function_def(tree, child):
+                            case Ok(stmt): methods.push(stmt)
+                            case Err(_): pass
+            case None: pass
+
+    return Ok(Statement.ImplDef {
+        type_name: type_name,
+        trait_name: trait_name,
+        methods: methods
+    })
+
+fn convert_block(tree: &Tree, node: Node) -> Result<Block, String>:
+    var statements: Array<Statement> = []
+
+    for child_id in node.children:
+        match tree.get_node(child_id):
+            case Some(child):
+                match convert_statement(tree, child):
+                    case Ok(stmt): statements.push(stmt)
+                    case Err(_): pass
+            case None: pass
+
+    return Ok(Block { statements: statements })
+
+# =============================================================================
+# Exports
+# =============================================================================
+
+export convert_import, parse_import_names
+export convert_statement
+export convert_let_statement, convert_var_statement, convert_return_statement
+export convert_if_statement, convert_match_statement, convert_case_clause
+export convert_for_statement, convert_while_statement, convert_loop_statement
+export convert_function_def, convert_parameters, convert_parameter
+export convert_struct_def, convert_struct_field
+export convert_enum_def, convert_enum_variant, convert_variant_fields
+export convert_impl_def
+export convert_block

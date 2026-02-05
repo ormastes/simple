@@ -1,0 +1,454 @@
+"""
+Test Failure Analysis CLI Tool
+
+Analyzes test failures, classifies errors, and prioritizes feature implementation.
+Can be run standalone or integrated with test runner.
+
+Usage:
+    simple test-analysis [command] [options]
+
+Commands:
+    classify <error_message>           - Classify an error type
+    extract <error_message>            - Extract needed features
+    analyze                            - Analyze all failures
+    details [--category=X] [--limit=N] - Show failed test details
+    features                           - Cross-reference with features
+"""
+
+use std.cli.{Args, Command}
+use std.io.{print, print}
+use infra.file_io.{read_file, write_file}
+use sdn.*
+
+# ============================================================================
+# Error Classification
+# ============================================================================
+
+pub enum ErrorType:
+    ParseError
+    SemanticError
+    FileNotFound
+    Timeout
+    Utf8Error
+    UnknownError
+
+impl ErrorType:
+    fn to_string() -> text:
+        match self:
+            case ParseError: "parse_error"
+            case SemanticError: "semantic_error"
+            case FileNotFound: "file_not_found"
+            case Timeout: "timeout"
+            case Utf8Error: "utf8_error"
+            case UnknownError: "unknown_error"
+
+    fn description() -> text:
+        match self:
+            case ParseError: "Syntax parsing error"
+            case SemanticError: "Type checking or semantic analysis error"
+            case FileNotFound: "Test file not found"
+            case Timeout: "Test execution timeout"
+            case Utf8Error: "File encoding error"
+            case UnknownError: "Unrecognized error type"
+
+pub fn classify_error(error_msg: text) -> ErrorType:
+    """Classify error message into specific type"""
+    if error_msg.contains("parse error") or error_msg.contains("Unexpected token"):
+        return ErrorType.ParseError
+    elif error_msg.contains("semantic:") or error_msg.contains("not found") or error_msg.contains("cannot modify"):
+        return ErrorType.SemanticError
+    elif error_msg.contains("No such file or directory"):
+        return ErrorType.FileNotFound
+    elif error_msg.contains("timed out") or error_msg.contains("timeout"):
+        return ErrorType.Timeout
+    elif error_msg.contains("stream did not contain valid UTF-8"):
+        return ErrorType.Utf8Error
+    else:
+        return ErrorType.UnknownError
+
+# ============================================================================
+# Feature Extraction
+# ============================================================================
+
+pub struct FeaturePattern:
+    pattern: text
+    feature: text
+    description: text
+
+pub fn get_parser_patterns() -> List<FeaturePattern>:
+    """Get list of parser feature patterns"""
+    [
+        FeaturePattern { pattern: "expected Fn, found Static", feature: "static_fields", description: "Static field declarations" },
+        FeaturePattern { pattern: "expected expression, found Default", feature: "default_parameters", description: "Default function parameters" },
+        FeaturePattern { pattern: "expected expression, found Assign", feature: "implicit_val_var", description: "Implicit val/var declarations" },
+        FeaturePattern { pattern: "expected expression, found At", feature: "matrix_multiplication", description: "Matrix multiplication operator @" },
+        FeaturePattern { pattern: "expected identifier, found Xor", feature: "xor_keyword", description: "XOR keyword operator" },
+        FeaturePattern { pattern: "expected Comma, found Colon", feature: "dict_literal_syntax", description: "Dict literal with colons" },
+        FeaturePattern { pattern: "expected pattern, found Val", feature: "val_pattern_matching", description: "Pattern matching with val" },
+        FeaturePattern { pattern: "expected identifier, found Where", feature: "where_clause", description: "Where clause syntax" },
+        FeaturePattern { pattern: "expected expression, found For", feature: "list_comprehension", description: "List comprehension" },
+        FeaturePattern { pattern: "found Val", feature: "pub_val_declaration", description: "Public val declarations" },
+        FeaturePattern { pattern: "expected expression, found Slash", feature: "parallel_operator", description: "Parallel operator //" },
+        FeaturePattern { pattern: "expected pattern, found From", feature: "from_pattern", description: "From keyword in patterns" },
+        FeaturePattern { pattern: "expected expression, found Return", feature: "return_expression", description: "Return in expression position" },
+        FeaturePattern { pattern: "expected Fn, found Var", feature: "class_var_fields", description: "Class var fields" },
+        FeaturePattern { pattern: "expected RBracket, found Comma", feature: "array_literal_syntax", description: "Array literal syntax" },
+        FeaturePattern { pattern: "expected expression, found Indent", feature: "indented_block_expression", description: "Indented block expressions" },
+        FeaturePattern { pattern: "Unexpected character: '`'", feature: "backtick_in_docstring", description: "Backtick character support" }
+    ]
+
+pub fn get_semantic_patterns() -> List<FeaturePattern>:
+    """Get list of semantic feature patterns"""
+    [
+        FeaturePattern { pattern: "method `char_at` not found", feature: "string_char_at_method", description: "String char_at method" },
+        FeaturePattern { pattern: "cannot modify", feature: "mutability_checking", description: "Enhanced mutability checking" }
+    ]
+
+pub fn extract_needed_features(error_msg: text) -> List<text>:
+    """Extract needed features from error message"""
+    var features = []
+    # Normalize newlines to ", " so multiline errors match single-line patterns
+    val normalized = error_msg.replace("\n", ", ")
+
+    # Check parser patterns
+    for pattern in get_parser_patterns():
+        if normalized.contains(pattern.pattern):
+            features = features.append(pattern.feature)
+
+    # Check semantic patterns
+    for pattern in get_semantic_patterns():
+        if normalized.contains(pattern.pattern):
+            features = features.append(pattern.feature)
+
+    features
+
+pub fn get_feature_description(feature_name: text) -> text:
+    """Get description for a feature"""
+    for pattern in get_parser_patterns():
+        if pattern.feature == feature_name:
+            return pattern.description
+
+    for pattern in get_semantic_patterns():
+        if pattern.feature == feature_name:
+            return pattern.description
+
+    "Unknown feature"
+
+# ============================================================================
+# Test Database Query
+# ============================================================================
+
+pub struct TestRecord:
+    test_id: text
+    test_name: text
+    file: text
+    status: text
+    category: text
+    error_message: text
+    last_run: text
+
+pub struct FailureStats:
+    total_failed: i64
+    error_counts: Dict<text, i64>
+    feature_counts: Dict<text, i64>
+
+pub fn read_test_database(path: text) -> Result<List<TestRecord>, text>:
+    """Read test database from SDN file"""
+    match read_file(path):
+        case Err(e): Err("Failed to read test database: " + e)
+        case Ok(content):
+            val doc = parse(content)
+            val table_opt = doc.get_table("tests")
+
+            if not table_opt.?:
+                return Err("No tests table found in database")
+
+            val table = table_opt.unwrap()
+            var records = []
+
+            for row in table.rows():
+                val record = TestRecord {
+                    test_id: row.get("test_id") ?? "",
+                    test_name: row.get("test_name") ?? "",
+                    file: row.get("file") ?? "",
+                    status: row.get("status") ?? "",
+                    category: row.get("category") ?? "",
+                    error_message: row.get("error_message") ?? "",
+                    last_run: row.get("last_run") ?? ""
+                }
+                records = records.append(record)
+
+            Ok(records)
+
+pub fn get_failed_tests(records: List<TestRecord>) -> List<TestRecord>:
+    """Filter to only failed tests"""
+    var failed = []
+    for record in records:
+        if record.status == "failed":
+            failed = failed.append(record)
+    failed
+
+pub fn analyze_failures(records: List<TestRecord>) -> FailureStats:
+    """Analyze failure patterns"""
+    var total_failed = 0
+    var error_counts = {}
+    var feature_counts = {}
+
+    for record in records:
+        if record.status == "failed":
+            total_failed = total_failed + 1
+
+            # Count error types
+            val error_type = classify_error(record.error_message).to_string()
+            val current_count = error_counts.get(error_type) ?? 0
+            error_counts = error_counts.set(error_type, current_count + 1)
+
+            # Count needed features
+            val features = extract_needed_features(record.error_message)
+            for feature in features:
+                val feat_count = feature_counts.get(feature) ?? 0
+                feature_counts = feature_counts.set(feature, feat_count + 1)
+
+    FailureStats {
+        total_failed: total_failed,
+        error_counts: error_counts,
+        feature_counts: feature_counts
+    }
+
+# ============================================================================
+# Output Formatting
+# ============================================================================
+
+pub fn print_classification_report(error_msg: text):
+    """Print error classification report"""
+    val error_type = classify_error(error_msg)
+
+    print("\n=== Error Classification ===")
+    print("Type: " + error_type.to_string())
+    print("Description: " + error_type.description())
+    print("\nError Message:")
+    print("  " + error_msg)
+
+pub fn print_feature_report(error_msg: text):
+    """Print feature extraction report"""
+    val features = extract_needed_features(error_msg)
+
+    print("\n=== Feature Extraction ===")
+    if features.len() == 0:
+        print("No specific features identified")
+    else:
+        print("Found " + features.len().to_string() + " needed features:")
+        for feature in features:
+            print("  - " + feature + ": " + get_feature_description(feature))
+
+pub fn print_failure_analysis(stats: FailureStats):
+    """Print comprehensive failure analysis"""
+    print("\n" + "=".repeat(60))
+    print("FAILURE ANALYSIS REPORT")
+    print("=".repeat(60))
+
+    print("\nTotal Failed Tests: " + stats.total_failed.to_string())
+
+    # Error type breakdown
+    print("\n--- Failures by Error Type ---")
+    print("")
+    print("| Error Type       | Count | Percentage |")
+    print("|------------------|-------|------------|")
+
+    for error_type in stats.error_counts.keys():
+        val count = stats.error_counts.get(error_type)
+        val pct = if stats.total_failed > 0:
+            (count * 100) / stats.total_failed
+        else:
+            0
+
+        print("| " + error_type.pad_right(17) + "| " + count.to_string().pad_right(6) + "| " + pct.to_string() + "% |")
+
+    # Feature priority ranking
+    print("\n--- Most Needed Features ---")
+    print("")
+    print("| Feature                  | Tests | Priority |")
+    print("|--------------------------|-------|----------|")
+
+    # Sort features by count (manual bubble sort)
+    var feature_list = []
+    for feature in stats.feature_counts.keys():
+        feature_list = feature_list.append([feature, stats.feature_counts.get(feature)])
+
+    var n = feature_list.len()
+    for i in 0..n:
+        for j in 0..(n - i - 1):
+            if feature_list[j][1] < feature_list[j + 1][1]:
+                val temp = feature_list[j]
+                feature_list[j] = feature_list[j + 1]
+                feature_list[j + 1] = temp
+
+    # Print top 20 features
+    var rank = 0
+    for item in feature_list:
+        rank = rank + 1
+        val feature = item[0]
+        val count = item[1]
+
+        val priority = if count >= 10:
+            "Critical"
+        elif count >= 5:
+            "High"
+        elif count >= 2:
+            "Medium"
+        else:
+            "Low"
+
+        print("| " + feature.pad_right(25) + "| " + count.to_string().pad_right(6) + "| " + priority + " |")
+
+        if rank >= 20:
+            break
+
+    print("\n" + "=".repeat(60))
+
+pub fn print_test_details(records: List<TestRecord>, category_filter: text, limit: i64):
+    """Print detailed test information"""
+    var count = 0
+
+    print("\n=== Failed Test Details ===")
+    print("")
+
+    for record in records:
+        if record.status != "failed":
+            continue
+
+        if category_filter.? and record.category != category_filter:
+            continue
+
+        count = count + 1
+        if count > limit:
+            break
+
+        print("\n" + "-".repeat(60))
+        print("Test: " + record.test_name)
+        print("File: " + record.file)
+        print("Category: " + record.category)
+
+        val error_type = classify_error(record.error_message)
+        print("Error Type: " + error_type.to_string())
+
+        val features = extract_needed_features(record.error_message)
+        if features.len() > 0:
+            print("Needed Features: " + features.join(", "))
+
+        print("\nError Message:")
+        print("  " + record.error_message)
+
+# ============================================================================
+# CLI Commands
+# ============================================================================
+
+pub fn cmd_classify(args: Args):
+    """Classify command: Classify an error message"""
+    if args.positional.len() < 2:
+        print("Error: Missing error message")
+        print("Usage: simple test-analysis classify <error_message>")
+        return
+
+    val error_msg = args.positional[1]
+    print_classification_report(error_msg)
+
+pub fn cmd_extract(args: Args):
+    """Extract command: Extract needed features"""
+    if args.positional.len() < 2:
+        print("Error: Missing error message")
+        print("Usage: simple test-analysis extract <error_message>")
+        return
+
+    val error_msg = args.positional[1]
+    print_feature_report(error_msg)
+
+pub fn cmd_analyze(args: Args):
+    """Analyze command: Full failure analysis"""
+    val db_path = args.get("db") ?? "doc/test/test_db.sdn"
+
+    match read_test_database(db_path):
+        case Err(e):
+            print("Error: " + e)
+            return
+        case Ok(records):
+            val stats = analyze_failures(records)
+            print_failure_analysis(stats)
+
+pub fn cmd_details(args: Args):
+    """Details command: Show detailed test information"""
+    val db_path = args.get("db") ?? "doc/test/test_db.sdn"
+    val category_filter = args.get("category") ?? ""
+    val limit_str = args.get("limit") ?? "20"
+    val limit = limit_str.to_i64() ?? 20
+
+    match read_test_database(db_path):
+        case Err(e):
+            print("Error: " + e)
+            return
+        case Ok(records):
+            print_test_details(records, category_filter, limit)
+
+pub fn cmd_features(args: Args):
+    """Features command: Cross-reference with feature database"""
+    print("\n=== Feature Cross-Reference ===")
+    print("(This would cross-reference with doc/feature/feature_db.sdn)")
+    print("Not implemented yet - use MCP tool find_features_for_failed_tests")
+
+pub fn print_help():
+    """Print help message"""
+    print("""
+Test Failure Analysis CLI Tool
+
+USAGE:
+    simple test-analysis [COMMAND] [OPTIONS]
+
+COMMANDS:
+    classify <error>    Classify error type
+    extract <error>     Extract needed features
+    analyze            Analyze all failures
+    details            Show failed test details
+    features           Cross-reference features
+    help               Show this help
+
+OPTIONS:
+    --db=PATH          Path to test database (default: doc/test/test_db.sdn)
+    --category=CAT     Filter by category
+    --limit=N          Limit results (default: 20)
+
+EXAMPLES:
+    # Analyze all failures
+    simple test-analysis analyze
+
+    # Classify specific error
+    simple test-analysis classify "parse error: expected Fn, found Static"
+
+    # Show Unit test failures only
+    simple test-analysis details --category=Unit --limit=10
+
+    # Extract features from error
+    simple test-analysis extract "expected expression, found At"
+""")
+
+# ============================================================================
+# Main Entry Point
+# ============================================================================
+
+pub fn main(args: Args):
+    """Main entry point"""
+    if args.positional.len() == 0 or args.positional[0] == "help":
+        print_help()
+        return
+
+    val command = args.positional[0]
+
+    match command:
+        case "classify": cmd_classify(args)
+        case "extract": cmd_extract(args)
+        case "analyze": cmd_analyze(args)
+        case "details": cmd_details(args)
+        case "features": cmd_features(args)
+        case "help": print_help()
+        case _:
+            print("Error: Unknown command: " + command)
+            print("Run 'simple test-analysis help' for usage")

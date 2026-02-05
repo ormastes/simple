@@ -1,0 +1,566 @@
+# Atomic Operations Module
+#
+# Provides thread-safe atomic operations for concurrent programming.
+# All operations use hardware-level atomic instructions for lock-free synchronization.
+#
+# Architecture:
+# - AtomicI64: 64-bit signed integer atomics
+# - AtomicUsize: Platform-sized unsigned atomics (for indices/sizes)
+# - AtomicBool: Boolean atomics (for flags)
+# - Memory ordering: Relaxed, Acquire, Release, AcqRel, SeqCst
+#
+# Memory Ordering Semantics:
+# - Relaxed: No synchronization, just atomicity
+# - Acquire: Prevents reordering of subsequent reads
+# - Release: Prevents reordering of previous writes
+# - AcqRel: Both Acquire + Release
+# - SeqCst: Sequentially consistent (strongest guarantee)
+
+# ============================================================================
+# Memory Ordering
+# ============================================================================
+
+enum MemoryOrdering:
+    """Memory ordering constraints for atomic operations.
+
+    Determines how memory operations around an atomic operation can be reordered
+    by the compiler or CPU.
+    """
+    Relaxed  # No ordering constraints (just atomicity)
+    Acquire  # Load-acquire: prevents reordering of subsequent reads
+    Release  # Store-release: prevents reordering of previous writes
+    AcqRel   # Both acquire and release (for read-modify-write)
+    SeqCst   # Sequentially consistent (total order)
+
+# ============================================================================
+# FFI Declarations
+# ============================================================================
+
+# Atomic I64 operations
+# extern fn atomic_i64_new(value: i64) -> i64  # Returns opaque handle
+# extern fn atomic_i64_load(handle: i64, ordering: i32) -> i64
+# extern fn atomic_i64_store(handle: i64, value: i64, ordering: i32)
+# extern fn atomic_i64_swap(handle: i64, value: i64, ordering: i32) -> i64
+# extern fn atomic_i64_compare_exchange(
+#     handle: i64,
+#     expected: i64,
+#     new: i64,
+#     success_order: i32,
+#     failure_order: i32
+# ) -> (bool, i64)  # (success, old_value)
+# extern fn atomic_i64_compare_exchange_weak(
+#     handle: i64,
+#     expected: i64,
+#     new: i64,
+#     success_order: i32,
+#     failure_order: i32
+# ) -> (bool, i64)
+# extern fn atomic_i64_fetch_add(handle: i64, value: i64, ordering: i32) -> i64
+# extern fn atomic_i64_fetch_sub(handle: i64, value: i64, ordering: i32) -> i64
+# extern fn atomic_i64_fetch_and(handle: i64, value: i64, ordering: i32) -> i64
+# extern fn atomic_i64_fetch_or(handle: i64, value: i64, ordering: i32) -> i64
+# extern fn atomic_i64_fetch_xor(handle: i64, value: i64, ordering: i32) -> i64
+
+# Atomic Usize operations
+# extern fn atomic_usize_new(value: i64) -> i64
+# extern fn atomic_usize_load(handle: i64, ordering: i32) -> i64
+# extern fn atomic_usize_store(handle: i64, value: i64, ordering: i32)
+# extern fn atomic_usize_swap(handle: i64, value: i64, ordering: i32) -> i64
+# extern fn atomic_usize_compare_exchange(
+#     handle: i64,
+#     expected: i64,
+#     new: i64,
+#     success_order: i32,
+#     failure_order: i32
+# ) -> (bool, i64)
+# extern fn atomic_usize_fetch_add(handle: i64, value: i64, ordering: i32) -> i64
+# extern fn atomic_usize_fetch_sub(handle: i64, value: i64, ordering: i32) -> i64
+
+# Atomic Bool operations
+# extern fn atomic_bool_new(value: bool) -> i64
+# extern fn atomic_bool_load(handle: i64, ordering: i32) -> bool
+# extern fn atomic_bool_store(handle: i64, value: bool, ordering: i32)
+# extern fn atomic_bool_swap(handle: i64, value: bool, ordering: i32) -> bool
+# extern fn atomic_bool_compare_exchange(
+#     handle: i64,
+#     expected: bool,
+#     new: bool,
+#     success_order: i32,
+#     failure_order: i32
+# ) -> (bool, bool)
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+fn ordering_to_i32(ordering: MemoryOrdering) -> i32:
+    """Convert MemoryOrdering enum to i32 for FFI."""
+    match ordering:
+        case Relaxed: 0
+        case Acquire: 1
+        case Release: 2
+        case AcqRel: 3
+        case SeqCst: 4
+
+# ============================================================================
+# AtomicI64
+# ============================================================================
+
+class AtomicI64:
+    """64-bit signed integer with atomic operations.
+
+    All operations are lock-free and thread-safe. Uses hardware atomic instructions.
+
+    Example:
+        val counter = AtomicI64(0)
+        counter.fetch_add(1, MemoryOrdering.SeqCst)
+        val value = counter.load(MemoryOrdering.SeqCst)
+    """
+    handle: i64  # Opaque handle to Rust AtomicI64
+
+    static fn new(value: i64) -> AtomicI64:
+        """Create a new atomic integer with initial value."""
+        AtomicI64(handle: atomic_i64_new(value))
+
+    fn load(ordering: MemoryOrdering) -> i64:
+        """Load value with specified memory ordering.
+
+        Args:
+            ordering: Memory ordering constraint
+
+        Returns:
+            Current value
+
+        Valid orderings: Acquire, SeqCst, Relaxed
+        """
+        atomic_i64_load(self.handle, ordering_to_i32(ordering))
+
+    me store(value: i64, ordering: MemoryOrdering):
+        """Store value with specified memory ordering.
+
+        Args:
+            value: New value to store
+            ordering: Memory ordering constraint
+
+        Valid orderings: Release, SeqCst, Relaxed
+        """
+        atomic_i64_store(self.handle, value, ordering_to_i32(ordering))
+
+    me swap(value: i64, ordering: MemoryOrdering) -> i64:
+        """Atomically swap value, returning old value.
+
+        Args:
+            value: New value to store
+            ordering: Memory ordering constraint
+
+        Returns:
+            Old value before swap
+
+        Valid orderings: All
+        """
+        atomic_i64_swap(self.handle, value, ordering_to_i32(ordering))
+
+    me compare_exchange(
+        expected: i64,
+        new: i64,
+        success_order: MemoryOrdering,
+        failure_order: MemoryOrdering
+    ) -> Result<i64, i64>:
+        """Compare-and-swap operation.
+
+        Atomically:
+        - If current value == expected, store new and return Ok(expected)
+        - Otherwise, return Err(current_value)
+
+        Args:
+            expected: Expected current value
+            new: New value if comparison succeeds
+            success_order: Ordering if CAS succeeds
+            failure_order: Ordering if CAS fails
+
+        Returns:
+            Ok(old_value) if swap succeeded
+            Err(current_value) if swap failed
+
+        Example:
+            val atomic = AtomicI64(10)
+            match atomic.compare_exchange(10, 20, SeqCst, SeqCst):
+                case Ok(old): print "Swapped from {old} to 20"
+                case Err(current): print "Failed, current value is {current}"
+        """
+        val (success, old_value) = atomic_i64_compare_exchange(
+            self.handle,
+            expected,
+            new,
+            ordering_to_i32(success_order),
+            ordering_to_i32(failure_order)
+        )
+
+        if success:
+            Ok(old_value)
+        else:
+            Err(old_value)
+
+    me compare_exchange_weak(
+        expected: i64,
+        new: i64,
+        success_order: MemoryOrdering,
+        failure_order: MemoryOrdering
+    ) -> Result<i64, i64>:
+        """Weak compare-and-swap (may spuriously fail).
+
+        Like compare_exchange, but allowed to fail spuriously even if
+        current == expected. Use in a loop for better performance.
+
+        Args:
+            expected: Expected current value
+            new: New value if comparison succeeds
+            success_order: Ordering if CAS succeeds
+            failure_order: Ordering if CAS fails
+
+        Returns:
+            Ok(old_value) if swap succeeded
+            Err(current_value) if swap failed (may be spurious)
+
+        Example:
+            # Retry loop (typical weak CAS pattern)
+            var expected = atomic.load(Relaxed)
+            while true:
+                match atomic.compare_exchange_weak(expected, new_value, Release, Relaxed):
+                    case Ok(_): break
+                    case Err(current):
+                        expected = current
+                        # Try again with updated expected value
+        """
+        val (success, old_value) = atomic_i64_compare_exchange_weak(
+            self.handle,
+            expected,
+            new,
+            ordering_to_i32(success_order),
+            ordering_to_i32(failure_order)
+        )
+
+        if success:
+            Ok(old_value)
+        else:
+            Err(old_value)
+
+    me fetch_add(value: i64, ordering: MemoryOrdering) -> i64:
+        """Atomically add value, returning old value.
+
+        Args:
+            value: Value to add
+            ordering: Memory ordering constraint
+
+        Returns:
+            Old value before addition
+
+        Example:
+            val counter = AtomicI64(10)
+            val old = counter.fetch_add(5, SeqCst)
+            # old == 10, counter.load() == 15
+        """
+        atomic_i64_fetch_add(self.handle, value, ordering_to_i32(ordering))
+
+    me fetch_sub(value: i64, ordering: MemoryOrdering) -> i64:
+        """Atomically subtract value, returning old value.
+
+        Args:
+            value: Value to subtract
+            ordering: Memory ordering constraint
+
+        Returns:
+            Old value before subtraction
+        """
+        atomic_i64_fetch_sub(self.handle, value, ordering_to_i32(ordering))
+
+    me fetch_and(value: i64, ordering: MemoryOrdering) -> i64:
+        """Atomically bitwise AND value, returning old value.
+
+        Args:
+            value: Value to AND with
+            ordering: Memory ordering constraint
+
+        Returns:
+            Old value before AND operation
+        """
+        atomic_i64_fetch_and(self.handle, value, ordering_to_i32(ordering))
+
+    me fetch_or(value: i64, ordering: MemoryOrdering) -> i64:
+        """Atomically bitwise OR value, returning old value.
+
+        Args:
+            value: Value to OR with
+            ordering: Memory ordering constraint
+
+        Returns:
+            Old value before OR operation
+        """
+        atomic_i64_fetch_or(self.handle, value, ordering_to_i32(ordering))
+
+    me fetch_xor(value: i64, ordering: MemoryOrdering) -> i64:
+        """Atomically bitwise XOR value, returning old value.
+
+        Args:
+            value: Value to XOR with
+            ordering: Memory ordering constraint
+
+        Returns:
+            Old value before XOR operation
+        """
+        atomic_i64_fetch_xor(self.handle, value, ordering_to_i32(ordering))
+
+    me increment(ordering: MemoryOrdering) -> i64:
+        """Atomically increment by 1, returning old value.
+
+        Convenience method equivalent to fetch_add(1, ordering).
+
+        Args:
+            ordering: Memory ordering constraint
+
+        Returns:
+            Old value before increment
+        """
+        self.fetch_add(1, ordering)
+
+    me decrement(ordering: MemoryOrdering) -> i64:
+        """Atomically decrement by 1, returning old value.
+
+        Convenience method equivalent to fetch_sub(1, ordering).
+
+        Args:
+            ordering: Memory ordering constraint
+
+        Returns:
+            Old value before decrement
+        """
+        self.fetch_sub(1, ordering)
+
+# ============================================================================
+# AtomicUsize
+# ============================================================================
+
+class AtomicUsize:
+    """Platform-sized unsigned integer with atomic operations.
+
+    Used for array indices, collection sizes, and other non-negative counts.
+    All operations are lock-free and thread-safe.
+
+    Example:
+        val size = AtomicUsize(0)
+        size.fetch_add(1, MemoryOrdering.Relaxed)
+        val count = size.load(MemoryOrdering.Relaxed)
+    """
+    handle: i64  # Opaque handle to Rust AtomicUsize
+
+    static fn new(value: i64) -> AtomicUsize:
+        """Create a new atomic usize with initial value.
+
+        Args:
+            value: Initial value (must be non-negative)
+        """
+        AtomicUsize(handle: atomic_usize_new(value))
+
+    fn load(ordering: MemoryOrdering) -> i64:
+        """Load value with specified memory ordering."""
+        atomic_usize_load(self.handle, ordering_to_i32(ordering))
+
+    me store(value: i64, ordering: MemoryOrdering):
+        """Store value with specified memory ordering."""
+        atomic_usize_store(self.handle, value, ordering_to_i32(ordering))
+
+    me swap(value: i64, ordering: MemoryOrdering) -> i64:
+        """Atomically swap value, returning old value."""
+        atomic_usize_swap(self.handle, value, ordering_to_i32(ordering))
+
+    me compare_exchange(
+        expected: i64,
+        new: i64,
+        success_order: MemoryOrdering,
+        failure_order: MemoryOrdering
+    ) -> Result<i64, i64>:
+        """Compare-and-swap operation (see AtomicI64 docs)."""
+        val (success, old_value) = atomic_usize_compare_exchange(
+            self.handle,
+            expected,
+            new,
+            ordering_to_i32(success_order),
+            ordering_to_i32(failure_order)
+        )
+
+        if success:
+            Ok(old_value)
+        else:
+            Err(old_value)
+
+    me fetch_add(value: i64, ordering: MemoryOrdering) -> i64:
+        """Atomically add value, returning old value."""
+        atomic_usize_fetch_add(self.handle, value, ordering_to_i32(ordering))
+
+    me fetch_sub(value: i64, ordering: MemoryOrdering) -> i64:
+        """Atomically subtract value, returning old value."""
+        atomic_usize_fetch_sub(self.handle, value, ordering_to_i32(ordering))
+
+    me increment(ordering: MemoryOrdering) -> i64:
+        """Atomically increment by 1, returning old value."""
+        self.fetch_add(1, ordering)
+
+    me decrement(ordering: MemoryOrdering) -> i64:
+        """Atomically decrement by 1, returning old value."""
+        self.fetch_sub(1, ordering)
+
+# ============================================================================
+# AtomicBool
+# ============================================================================
+
+class AtomicBool:
+    """Boolean with atomic operations.
+
+    Used for flags, locks, and other boolean state in concurrent code.
+    All operations are lock-free and thread-safe.
+
+    Example:
+        val flag = AtomicBool(false)
+        flag.store(true, MemoryOrdering.Release)
+        if flag.load(MemoryOrdering.Acquire):
+            print "Flag is set"
+    """
+    handle: i64  # Opaque handle to Rust AtomicBool
+
+    static fn new(value: bool) -> AtomicBool:
+        """Create a new atomic boolean with initial value."""
+        AtomicBool(handle: atomic_bool_new(value))
+
+    fn load(ordering: MemoryOrdering) -> bool:
+        """Load value with specified memory ordering."""
+        atomic_bool_load(self.handle, ordering_to_i32(ordering))
+
+    me store(value: bool, ordering: MemoryOrdering):
+        """Store value with specified memory ordering."""
+        atomic_bool_store(self.handle, value, ordering_to_i32(ordering))
+
+    me swap(value: bool, ordering: MemoryOrdering) -> bool:
+        """Atomically swap value, returning old value."""
+        atomic_bool_swap(self.handle, value, ordering_to_i32(ordering))
+
+    me compare_exchange(
+        expected: bool,
+        new: bool,
+        success_order: MemoryOrdering,
+        failure_order: MemoryOrdering
+    ) -> Result<bool, bool>:
+        """Compare-and-swap operation.
+
+        Atomically:
+        - If current value == expected, store new and return Ok(expected)
+        - Otherwise, return Err(current_value)
+
+        Example (spinlock):
+            val lock = AtomicBool(false)
+
+            fn acquire():
+                while true:
+                    match lock.compare_exchange(false, true, Acquire, Relaxed):
+                        case Ok(_): break  # Acquired lock
+                        case Err(_): pass  # Retry
+
+            fn release():
+                lock.store(false, Release)
+        """
+        val (success, old_value) = atomic_bool_compare_exchange(
+            self.handle,
+            expected,
+            new,
+            ordering_to_i32(success_order),
+            ordering_to_i32(failure_order)
+        )
+
+        if success:
+            Ok(old_value)
+        else:
+            Err(old_value)
+
+    me fetch_and(value: bool, ordering: MemoryOrdering) -> bool:
+        """Atomically logical AND value, returning old value.
+
+        Args:
+            value: Value to AND with
+            ordering: Memory ordering constraint
+
+        Returns:
+            Old value before AND operation
+        """
+        val old = self.load(ordering)
+        self.store(old and value, ordering)
+        old
+
+    me fetch_or(value: bool, ordering: MemoryOrdering) -> bool:
+        """Atomically logical OR value, returning old value.
+
+        Args:
+            value: Value to OR with
+            ordering: Memory ordering constraint
+
+        Returns:
+            Old value before OR operation
+        """
+        val old = self.load(ordering)
+        self.store(old or value, ordering)
+        old
+
+    me fetch_not(ordering: MemoryOrdering) -> bool:
+        """Atomically negate value, returning old value.
+
+        Args:
+            ordering: Memory ordering constraint
+
+        Returns:
+            Old value before negation
+        """
+        val old = self.load(ordering)
+        self.store(not old, ordering)
+        old
+
+# ============================================================================
+# Fence Operations
+# ============================================================================
+
+# extern fn atomic_fence(ordering: i32)
+
+fn fence(ordering: MemoryOrdering):
+    """Emit a memory fence.
+
+    Prevents the compiler and CPU from reordering memory operations across the fence.
+
+    Args:
+        ordering: Memory ordering constraint (Acquire, Release, AcqRel, or SeqCst)
+
+    Use cases:
+    - Acquire fence: Prevents reads from moving before the fence
+    - Release fence: Prevents writes from moving after the fence
+    - AcqRel fence: Both acquire and release
+    - SeqCst fence: Sequentially consistent ordering
+
+    Example:
+        # Release-acquire synchronization without atomics
+        # Thread 1:
+        data = 42
+        fence(Release)
+        ready = true
+
+        # Thread 2:
+        while not ready: pass
+        fence(Acquire)
+        print data  # Guaranteed to see 42
+    """
+    atomic_fence(ordering_to_i32(ordering))
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export MemoryOrdering
+export AtomicI64
+export AtomicUsize
+export AtomicBool
+export fence

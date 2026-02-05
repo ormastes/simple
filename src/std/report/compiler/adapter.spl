@@ -1,0 +1,299 @@
+# Adapter Module
+#
+# Provides adapters for backward compatibility with legacy diagnostic types.
+# Converts between old Diagnostic/EasyFix types and new Report/EasyFixReport types.
+
+import ..level
+import ..location
+import ..report
+import .easy_fix
+import .diagnostic
+
+export DiagnosticAdapter, LegacySeverity, LegacyDiagnostic, LegacyEasyFix
+
+# =============================================================================
+# LegacySeverity: Maps to old Severity enum
+# =============================================================================
+
+enum LegacySeverity:
+    Error
+    Warning
+    Note
+    Help
+
+impl LegacySeverity:
+    fn to_report_level() -> ReportLevel:
+        match self:
+            case LegacySeverity.Error: ReportLevel.Error
+            case LegacySeverity.Warning: ReportLevel.Warning
+            case LegacySeverity.Note: ReportLevel.Info
+            case LegacySeverity.Help: ReportLevel.Info
+
+    static fn from_report_level(level: ReportLevel) -> LegacySeverity:
+        match level:
+            case ReportLevel.Error: LegacySeverity.Error
+            case ReportLevel.Fatal: LegacySeverity.Error
+            case ReportLevel.Warning: LegacySeverity.Warning
+            case ReportLevel.Info: LegacySeverity.Note
+            case ReportLevel.Debug: LegacySeverity.Note
+
+# =============================================================================
+# LegacyDiagnostic: Wrapper for legacy Diagnostic compatibility
+# =============================================================================
+
+class LegacyDiagnostic:
+    severity: LegacySeverity
+    code: text?
+    message: text
+    labels: [(SourceLocation, text, bool)]  # (location, message, primary)
+    notes: [text]
+    help: [text]
+    file: text?
+    easy_fix: EasyFixReport?
+
+impl LegacyDiagnostic:
+    static fn error(message: text) -> LegacyDiagnostic:
+        LegacyDiagnostic(
+            severity: LegacySeverity.Error,
+            code: None,
+            message: message,
+            labels: [],
+            notes: [],
+            help: [],
+            file: None,
+            easy_fix: None
+        )
+
+    static fn warning(message: text) -> LegacyDiagnostic:
+        LegacyDiagnostic(
+            severity: LegacySeverity.Warning,
+            code: None,
+            message: message,
+            labels: [],
+            notes: [],
+            help: [],
+            file: None,
+            easy_fix: None
+        )
+
+    fn with_code(code: text) -> LegacyDiagnostic:
+        LegacyDiagnostic(
+            severity: self.severity,
+            code: Some(code),
+            message: self.message,
+            labels: self.labels,
+            notes: self.notes,
+            help: self.help,
+            file: self.file,
+            easy_fix: self.easy_fix
+        )
+
+    fn with_file(file: text) -> LegacyDiagnostic:
+        LegacyDiagnostic(
+            severity: self.severity,
+            code: self.code,
+            message: self.message,
+            labels: self.labels,
+            notes: self.notes,
+            help: self.help,
+            file: Some(file),
+            easy_fix: self.easy_fix
+        )
+
+    fn with_label(location: SourceLocation, message: text) -> LegacyDiagnostic:
+        LegacyDiagnostic(
+            severity: self.severity,
+            code: self.code,
+            message: self.message,
+            labels: self.labels + [(location, message, true)],
+            notes: self.notes,
+            help: self.help,
+            file: self.file,
+            easy_fix: self.easy_fix
+        )
+
+    fn with_secondary_label(location: SourceLocation, message: text) -> LegacyDiagnostic:
+        LegacyDiagnostic(
+            severity: self.severity,
+            code: self.code,
+            message: self.message,
+            labels: self.labels + [(location, message, false)],
+            notes: self.notes,
+            help: self.help,
+            file: self.file,
+            easy_fix: self.easy_fix
+        )
+
+    fn with_note(note: text) -> LegacyDiagnostic:
+        LegacyDiagnostic(
+            severity: self.severity,
+            code: self.code,
+            message: self.message,
+            labels: self.labels,
+            notes: self.notes + [note],
+            help: self.help,
+            file: self.file,
+            easy_fix: self.easy_fix
+        )
+
+    fn with_help(help_msg: text) -> LegacyDiagnostic:
+        LegacyDiagnostic(
+            severity: self.severity,
+            code: self.code,
+            message: self.message,
+            labels: self.labels,
+            notes: self.notes,
+            help: self.help + [help_msg],
+            file: self.file,
+            easy_fix: self.easy_fix
+        )
+
+    fn with_easy_fix(fix: EasyFixReport) -> LegacyDiagnostic:
+        LegacyDiagnostic(
+            severity: self.severity,
+            code: self.code,
+            message: self.message,
+            labels: self.labels,
+            notes: self.notes,
+            help: self.help,
+            file: self.file,
+            easy_fix: Some(fix)
+        )
+
+    # Convert to new Report
+    fn to_report() -> Report:
+        var report = match self.severity:
+            case LegacySeverity.Error: Report.error(self.message)
+            case LegacySeverity.Warning: Report.warning(self.message)
+            case LegacySeverity.Note: Report.info(self.message)
+            case LegacySeverity.Help: Report.info(self.message)
+
+        if self.code.?:
+            report = report.with_code(self.code.unwrap())
+
+        for label_tuple in self.labels:
+            val location = label_tuple.0
+            val message = label_tuple.1
+            val is_primary = label_tuple.2
+            if is_primary:
+                report = report.with_primary_label(location, message)
+            else:
+                report = report.with_secondary_label(location, message)
+
+        for note in self.notes:
+            report = report.with_note(note)
+
+        for h in self.help:
+            report = report.with_help(h)
+
+        if self.easy_fix.?:
+            val fix = self.easy_fix.unwrap()
+            for rep in fix.replacements:
+                val suggestion = Suggestion.with_confidence(
+                    rep.to_location(),
+                    rep.new_text,
+                    fix.description,
+                    fix.confidence
+                )
+                report = report.with_suggestion(suggestion)
+
+        report
+
+    # Convert to CompilerDiagnostic
+    fn to_compiler_diagnostic() -> CompilerDiagnostic:
+        var diag = CompilerDiagnostic.from_report(self.to_report())
+        if self.easy_fix.?:
+            diag = diag.with_easy_fix(self.easy_fix.unwrap())
+        diag
+
+# =============================================================================
+# LegacyEasyFix: Wrapper for legacy EasyFix compatibility
+# =============================================================================
+
+class LegacyEasyFix:
+    id: text
+    description: text
+    replacements: [(text, i64, i64, i64, i64, text)]  # (file, start, end, line, col, new_text)
+    confidence: FixConfidence
+
+impl LegacyEasyFix:
+    static fn create(id: text, description: text, confidence: FixConfidence) -> LegacyEasyFix:
+        LegacyEasyFix(
+            id: id,
+            description: description,
+            replacements: [],
+            confidence: confidence
+        )
+
+    me add_replacement(file: text, start: i64, end: i64, line: i64, column: i64, new_text: text):
+        self.replacements.push((file, start, end, line, column, new_text))
+
+    fn to_easy_fix_report() -> EasyFixReport:
+        var report = EasyFixReport.create(self.id, self.description, self.confidence)
+        for rep_tuple in self.replacements:
+            val replacement = Replacement.at(
+                rep_tuple.0,  # file
+                rep_tuple.1,  # start
+                rep_tuple.2,  # end
+                rep_tuple.3,  # line
+                rep_tuple.4,  # column
+                rep_tuple.5   # new_text
+            )
+            report = report.with_replacement(replacement)
+        report
+
+# =============================================================================
+# DiagnosticAdapter: Static methods for conversions
+# =============================================================================
+
+class DiagnosticAdapter:
+    # Convert old Severity string to ReportLevel
+    static fn severity_to_level(severity: text) -> ReportLevel:
+        match severity.lower():
+            case "error": ReportLevel.Error
+            case "warning": ReportLevel.Warning
+            case "note": ReportLevel.Info
+            case "help": ReportLevel.Info
+            case _: ReportLevel.Warning
+
+    # Convert ReportLevel to old Severity string
+    static fn level_to_severity(level: ReportLevel) -> text:
+        match level:
+            case ReportLevel.Error: "error"
+            case ReportLevel.Fatal: "error"
+            case ReportLevel.Warning: "warning"
+            case ReportLevel.Info: "note"
+            case ReportLevel.Debug: "note"
+
+    # Convert old FixConfidence string to FixConfidence enum
+    static fn confidence_from_string(s: text) -> FixConfidence:
+        match s.lower():
+            case "safe": FixConfidence.MachineApplicable
+            case "likely": FixConfidence.MaybeIncorrect
+            case "uncertain": FixConfidence.Unspecified
+            case "machine_applicable": FixConfidence.MachineApplicable
+            case "maybe_incorrect": FixConfidence.MaybeIncorrect
+            case "has_placeholders": FixConfidence.HasPlaceholders
+            case _: FixConfidence.Unspecified
+
+    # Create Report from old-style diagnostic fields
+    static fn from_fields(
+        severity: text,
+        code: text?,
+        message: text,
+        file: text?,
+        line: i64,
+        column: i64
+    ) -> Report:
+        var report = match severity.lower():
+            case "error": Report.error(message)
+            case "warning": Report.warning(message)
+            case _: Report.info(message)
+
+        if code.?:
+            report = report.with_code(code.unwrap())
+
+        if file.?:
+            report = report.at(file.unwrap(), line, column)
+
+        report

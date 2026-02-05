@@ -1,0 +1,1268 @@
+# Lexer - Simple Language Lexical Analyzer
+#
+# Tokenizes Simple source code into a stream of tokens.
+# Features:
+# - Full Unicode support
+# - String interpolation
+# - Indentation-based blocks
+# - Comment handling
+# - Error recovery
+#
+# Token type definitions are in lexer_types.spl
+
+use lexer_types.*
+
+struct Lexer:
+    """Tokenizer for Simple source code."""
+    source: text
+    pos: i64            # Current byte position
+    line: i64           # Current line (1-based)
+    col: i64            # Current column (1-based)
+    indent_stack: [i64] # Stack of indentation levels
+    pending_dedents: i64 # Number of dedents to emit
+    at_line_start: bool # Are we at the start of a line?
+    paren_depth: i64    # Nested parentheses depth (suppress newlines inside)
+    in_math_block: bool # Inside m{} math block (enables ^ as power)
+    math_brace_depth: i64 # Brace depth within math block
+    prev_token_kind: TokenKind  # Previous token kind (for implicit mul)
+    pending_token: Token?       # Token to emit after ImplicitMul
+    generic_depth: i64  # Track <> nesting for >> disambiguation
+
+    # Block system fields
+    block_registry: BlockRegistry?  # Registry of block definitions (lazy-loaded)
+    current_block_kind: text?       # Kind of current block (e.g., "m", "loss", "sh")
+    current_lexer_mode: LexerMode  # Current lexer mode (Normal, Math, Raw, Custom)
+    in_raw_block: bool             # Inside a raw-mode block (sh{}, sql{})
+    raw_block_start: i64           # Start position of raw block payload
+    block_brace_depth: i64         # Brace depth tracking for blocks
+
+impl Lexer:
+    static fn new(source: text) -> Lexer:
+        Lexer(
+            source: source,
+            pos: 0,
+            line: 1,
+            col: 1,
+            indent_stack: [0],  # Start with zero indentation
+            pending_dedents: 0,
+            at_line_start: true,
+            paren_depth: 0,
+            in_math_block: false,
+            math_brace_depth: 0,
+            prev_token_kind: TokenKind.Eof,
+            pending_token: nil,
+            generic_depth: 0,
+            # Block system initialization (lazy-loaded to avoid circular deps)
+            block_registry: nil,  # Loaded on first use via get_block_registry()
+            current_block_kind: nil,
+            current_lexer_mode: LexerMode.Normal,
+            in_raw_block: false,
+            raw_block_start: 0,
+            block_brace_depth: 0
+        )
+
+    static fn with_registry(source: text, registry: BlockRegistry) -> Lexer:
+        """Create lexer with a custom block registry."""
+        Lexer(
+            source: source,
+            pos: 0,
+            line: 1,
+            col: 1,
+            indent_stack: [0],
+            pending_dedents: 0,
+            at_line_start: true,
+            paren_depth: 0,
+            in_math_block: false,
+            math_brace_depth: 0,
+            prev_token_kind: TokenKind.Eof,
+            pending_token: nil,
+            generic_depth: 0,
+            block_registry: Some(registry),  # Pre-loaded with custom registry
+            current_block_kind: nil,
+            current_lexer_mode: LexerMode.Normal,
+            in_raw_block: false,
+            raw_block_start: 0,
+            block_brace_depth: 0
+        )
+
+    # ========================================================================
+    # Block Registry Access (Lazy Loading)
+    # ========================================================================
+
+    me get_block_registry() -> BlockRegistry:
+        """Get block registry, lazy-loading on first access.
+
+        This avoids circular dependency at module load time:
+        - lexer → blocks → builtin → hir → parser → lexer (cycle!)
+
+        By deferring block_registry() call until runtime, the cycle is broken.
+        """
+        if not self.block_registry.?:
+            # Import happens at runtime, not module load time
+            use blocks.{block_registry}
+            self.block_registry = Some(block_registry())
+        self.block_registry.unwrap()
+
+    # ========================================================================
+    # Implicit Multiplication (m{} only)
+    # ========================================================================
+
+    me maybe_insert_implicit_mul(token: Token) -> Token:
+        """Check if implicit multiplication is needed before this token.
+
+        In math mode only, insert implicit mul for patterns like:
+        - 2x     (number followed by identifier)
+        - 2(x)   (number followed by lparen)
+        - (a)(b) (rparen followed by lparen)
+        - (a)x   (rparen followed by identifier)
+        """
+        if not self.in_math_block:
+            self.prev_token_kind = token.kind
+            return token
+
+        val needs_implicit_mul = match (self.prev_token_kind, token.kind):
+            # number followed by identifier: 2x
+            case (IntLit, Ident) | (FloatLit, Ident): true
+            # number followed by lparen: 2(x+1)
+            case (IntLit, LParen) | (FloatLit, LParen): true
+            # rparen followed by identifier: (x+1)y
+            case (RParen, Ident): true
+            # rparen followed by lparen: (a)(b)
+            case (RParen, LParen): true
+            # identifier followed by lparen could be function call, skip
+            case _: false
+
+        if needs_implicit_mul:
+            # Store current token, return ImplicitMul
+            self.pending_token = Some(token)
+            val mul_token = Token.new(
+                TokenKind.ImplicitMul,
+                Span.new(token.span.start, token.span.start, token.span.line, token.span.col),
+                ""
+            )
+            self.prev_token_kind = TokenKind.ImplicitMul
+            return mul_token
+        else:
+            self.prev_token_kind = token.kind
+            return token
+
+    # ========================================================================
+    # Main Tokenization
+    # ========================================================================
+
+    me next_token() -> Token:
+        """Get the next token from the source, with implicit multiplication."""
+        # Return pending token if we inserted ImplicitMul
+        if self.pending_token.?:
+            val token = self.pending_token.unwrap()
+            self.pending_token = None
+            self.prev_token_kind = token.kind
+            return token
+
+        # Get the actual token
+        val token = self.scan_token()
+
+        # Check for implicit multiplication
+        return self.maybe_insert_implicit_mul(token)
+
+    me scan_token() -> Token:
+        """Scan the next token (internal, without implicit mul check)."""
+
+        # Emit pending dedents first
+        if self.pending_dedents > 0:
+            self.pending_dedents = self.pending_dedents - 1
+            return Token.new(
+                TokenKind.Dedent,
+                Span.new(self.pos, self.pos, self.line, self.col),
+                ""
+            )
+
+        # Handle raw mode block payload
+        # After entering a raw block and seeing {, scan the entire payload
+        if self.in_raw_block and self.block_brace_depth == 1 and self.raw_block_start == -1:
+            # We're inside a raw block after {, scan payload
+            self.raw_block_start = 0  # Reset to prevent re-scanning
+            return self.scan_raw_block_payload()
+
+        # Handle indentation at line start
+        if self.at_line_start:
+            val indent_token = self.handle_indentation()
+            if indent_token.?:
+                return indent_token.unwrap()
+
+        # Skip whitespace (but not newlines)
+        self.skip_horizontal_whitespace()
+
+        # Check for EOF
+        if self.is_at_end():
+            return Token.eof(self.pos, self.line)
+
+        # Get current character
+        val c = self.peek()
+        val start = self.pos
+        val line = self.line
+        val col = self.col
+
+        # Handle different token types
+        match c:
+            # Newline
+            case "\n":
+                return self.scan_newline()
+
+            # Comments
+            case '#':
+                return self.scan_comment()
+
+            # String literals (and transpose in math mode)
+            case '"':
+                return self.scan_string()
+            case '\'':
+                if self.in_math_block:
+                    # In math mode, single quote is transpose operator
+                    self.advance()
+                    return Token.new(
+                        TokenKind.Transpose,
+                        Span.new(start, self.pos, line, col),
+                        "'"
+                    )
+                else:
+                    return self.scan_string()
+
+            # Numbers
+            case '0' | '1' | '2' | '3' | '4' | '5' | '6' | '7' | '8' | '9':
+                return self.scan_number()
+
+            # Identifiers and keywords
+            case 'a' | 'b' | 'c' | 'd' | 'e' | 'f' | 'g' | 'h' | 'i' | 'j'
+               | 'k' | 'l' | 'm' | 'n' | 'o' | 'p' | 'q' | 'r' | 's' | 't'
+               | 'u' | 'v' | 'w' | 'x' | 'y' | 'z'
+               | 'A' | 'B' | 'C' | 'D' | 'E' | 'F' | 'G' | 'H' | 'I' | 'J'
+               | 'K' | 'L' | 'M' | 'N' | 'O' | 'P' | 'Q' | 'R' | 'S' | 'T'
+               | 'U' | 'V' | 'W' | 'X' | 'Y' | 'Z'
+               | '_':
+                return self.scan_identifier()
+
+            # Operators and delimiters
+            case _:
+                return self.scan_operator_or_delimiter()
+
+    fn peek() -> char:
+        """Peek at current character without consuming."""
+        if self.is_at_end():
+            return "\0"
+        self.source[self.pos]
+
+    fn peek_next() -> char:
+        """Peek at next character without consuming."""
+        if self.pos + 1 >= self.source.len():
+            return "\0"
+        self.source[self.pos + 1]
+
+    me advance() -> char:
+        """Consume and return current character."""
+        val c = self.peek()
+        self.pos = self.pos + 1
+        if c == "\n":
+            self.line = self.line + 1
+            self.col = 1
+            self.at_line_start = true
+        else:
+            self.col = self.col + 1
+        c
+
+    fn is_at_end() -> bool:
+        """Check if we've reached end of source."""
+        self.pos >= self.source.len()
+
+    # ========================================================================
+    # Indentation Handling
+    # ========================================================================
+
+    me handle_indentation() -> Token?:
+        """Handle indentation at the start of a line."""
+        self.at_line_start = false
+
+        # Skip blank lines and comments
+        while not self.is_at_end():
+            val c = self.peek()
+            if c == "\n":
+                self.advance()
+                continue
+            if c == '#':
+                self.skip_to_eol()
+                continue
+            break
+
+        if self.is_at_end():
+            return None
+
+        # Count leading whitespace
+        val start_pos = self.pos
+        var indent = 0
+        while not self.is_at_end():
+            val c = self.peek()
+            if c == ' ':
+                indent = indent + 1
+                self.advance()
+            elif c == "\t":
+                # Tab = 4 spaces
+                indent = indent + 4
+                self.advance()
+            else:
+                break
+
+        val current_indent = self.indent_stack[self.indent_stack.len() - 1]
+
+        if indent > current_indent:
+            # Increase indentation
+            self.indent_stack = self.indent_stack.push(indent)
+            return Some(Token.new(
+                TokenKind.Indent,
+                Span.new(start_pos, self.pos, self.line, 1),
+                ""
+            ))
+        elif indent < current_indent:
+            # Decrease indentation - may need multiple dedents
+            while self.indent_stack.len() > 1:
+                val top = self.indent_stack[self.indent_stack.len() - 1]
+                if indent >= top:
+                    break
+                self.indent_stack = self.indent_stack.pop()
+                self.pending_dedents = self.pending_dedents + 1
+
+            if self.pending_dedents > 0:
+                self.pending_dedents = self.pending_dedents - 1
+                return Some(Token.new(
+                    TokenKind.Dedent,
+                    Span.new(start_pos, self.pos, self.line, 1),
+                    ""
+                ))
+
+        nil
+
+    # ========================================================================
+    # Whitespace and Comments
+    # ========================================================================
+
+    me skip_horizontal_whitespace():
+        """Skip spaces and tabs (not newlines)."""
+        while not self.is_at_end():
+            val c = self.peek()
+            if c == ' ' or c == "\t":
+                self.advance()
+            else:
+                break
+
+    me skip_to_eol():
+        """Skip to end of line."""
+        while not self.is_at_end() and self.peek() != "\n":
+            self.advance()
+
+    me scan_newline() -> Token:
+        """Scan a newline token."""
+        val start = self.pos
+        val line = self.line
+        val col = self.col
+        self.advance()  # Consume "\n"
+
+        # Suppress newlines inside parentheses
+        if self.paren_depth > 0:
+            return self.next_token()
+
+        Token.new(
+            TokenKind.Newline,
+            Span.new(start, self.pos, line, col),
+            "\n"
+        )
+
+    me scan_comment() -> Token:
+        """Scan a comment (skip it and get next token)."""
+        val start = self.pos
+        self.advance()  # Consume '#'
+
+        # Check for doc comment (##)
+        if self.peek() == '#':
+            self.advance()
+            # Doc comment - could preserve for documentation
+
+        self.skip_to_eol()
+
+        # Comments are skipped, get next token
+        self.next_token()
+
+    # ========================================================================
+    # Literals
+    # ========================================================================
+
+    me scan_string() -> Token:
+        """Scan a string literal."""
+        val start = self.pos
+        val line = self.line
+        val col = self.col
+        val quote = self.advance()
+
+        # Check for raw string (r"...")
+        var is_raw = false
+        if start > 0 and self.source[start - 1] == 'r':
+            is_raw = true
+
+        # Check for triple-quoted string
+        var triple = false
+        if self.peek() == quote and self.peek_next() == quote:
+            self.advance()
+            self.advance()
+            triple = true
+
+        var content = ""
+        while not self.is_at_end():
+            val c = self.peek()
+
+            if triple:
+                # Triple-quoted: look for closing """
+                if c == quote and self.peek_next() == quote:
+                    val next2 = if self.pos + 2 < self.source.len(): self.source[self.pos + 2] else: "\0"
+                    if next2 == quote:
+                        self.advance()
+                        self.advance()
+                        self.advance()
+                        break
+                content = content + c.to_string()
+                self.advance()
+            else:
+                # Single-quoted
+                if c == quote:
+                    self.advance()
+                    break
+                if c == "\n":
+                    # Unterminated string
+                    return Token.new(
+                        TokenKind.Error,
+                        Span.new(start, self.pos, line, col),
+                        "unterminated string"
+                    )
+                if c == '\\' and not is_raw:
+                    self.advance()
+                    val escaped = self.scan_escape_sequence()
+                    content = content + escaped
+                else:
+                    content = content + c.to_string()
+                    self.advance()
+
+        Token.new(
+            if is_raw: TokenKind.RawStringLit else: TokenKind.StringLit,
+            Span.new(start, self.pos, line, col),
+            content
+        )
+
+    me scan_escape_sequence() -> text:
+        """Scan an escape sequence after backslash."""
+        if self.is_at_end():
+            return "\\"
+
+        val c = self.advance()
+        match c:
+            case 'n': "\n"
+            case 'r': "\r"
+            case 't': "\t"
+            case '\\': "\\"
+            case '"': "\""
+            case '\'': "'"
+            case '0': "\0"
+            case 'x':
+                # Hex escape: \xNN
+                self.scan_hex_escape(2)
+            case 'u':
+                # Unicode escape: \uNNNN
+                self.scan_hex_escape(4)
+            case _:
+                # Unknown escape, keep as-is
+                "\\" + c.to_string()
+
+    me scan_hex_escape(digits: i64) -> text:
+        """Scan a hex escape sequence."""
+        var hex = ""
+        for _ in 0..digits:
+            if self.is_at_end():
+                break
+            val c = self.peek()
+            if is_hex_digit(c):
+                hex = hex + c.to_string()
+                self.advance()
+            else:
+                break
+
+        # Convert hex to character
+        # TODO: Implement hex to char conversion
+        hex
+
+    me scan_number() -> Token:
+        """Scan a number literal (int or float)."""
+        val start = self.pos
+        val line = self.line
+        val col = self.col
+
+        # Check for hex, binary, or octal
+        if self.peek() == '0' and not self.is_at_end():
+            val next = self.peek_next()
+            if next == 'x' or next == 'X':
+                return self.scan_hex_number(start, line, col)
+            if next == 'b' or next == 'B':
+                return self.scan_binary_number(start, line, col)
+            if next == 'o' or next == 'O':
+                return self.scan_octal_number(start, line, col)
+
+        # Decimal number
+        self.scan_decimal_number(start, line, col)
+
+    me scan_decimal_number(start: i64, line: i64, col: i64) -> Token:
+        """Scan a decimal number."""
+        # Integer part
+        while not self.is_at_end() and is_digit(self.peek()):
+            self.advance()
+
+        # Check for float
+        var is_float = false
+        if self.peek() == '.' and is_digit(self.peek_next()):
+            is_float = true
+            self.advance()  # Consume '.'
+            while not self.is_at_end() and is_digit(self.peek()):
+                self.advance()
+
+        # Check for exponent
+        val c = self.peek()
+        if c == 'e' or c == 'E':
+            is_float = true
+            self.advance()
+            if self.peek() == '+' or self.peek() == '-':
+                self.advance()
+            while not self.is_at_end() and is_digit(self.peek()):
+                self.advance()
+
+        val text = self.source[start:self.pos]
+        Token.new(
+            if is_float: TokenKind.FloatLit else: TokenKind.IntLit,
+            Span.new(start, self.pos, line, col),
+            text
+        )
+
+    me scan_hex_number(start: i64, line: i64, col: i64) -> Token:
+        """Scan a hexadecimal number (0x...)."""
+        self.advance()  # Consume '0'
+        self.advance()  # Consume 'x'
+
+        while not self.is_at_end() and is_hex_digit(self.peek()):
+            self.advance()
+
+        val text = self.source[start:self.pos]
+        Token.new(TokenKind.IntLit, Span.new(start, self.pos, line, col), text)
+
+    me scan_binary_number(start: i64, line: i64, col: i64) -> Token:
+        """Scan a binary number (0b...)."""
+        self.advance()  # Consume '0'
+        self.advance()  # Consume 'b'
+
+        while not self.is_at_end():
+            val c = self.peek()
+            if c == '0' or c == '1':
+                self.advance()
+            else:
+                break
+
+        val text = self.source[start:self.pos]
+        Token.new(TokenKind.IntLit, Span.new(start, self.pos, line, col), text)
+
+    me scan_octal_number(start: i64, line: i64, col: i64) -> Token:
+        """Scan an octal number (0o...)."""
+        self.advance()  # Consume '0'
+        self.advance()  # Consume 'o'
+
+        while not self.is_at_end():
+            val c = self.peek()
+            if c >= '0' and c <= '7':
+                self.advance()
+            else:
+                break
+
+        val text = self.source[start:self.pos]
+        Token.new(TokenKind.IntLit, Span.new(start, self.pos, line, col), text)
+
+    # ========================================================================
+    # Identifiers and Keywords
+    # ========================================================================
+
+    me scan_identifier() -> Token:
+        """Scan an identifier or keyword."""
+        val start = self.pos
+        val line = self.line
+        val col = self.col
+
+        # Check for raw string prefix
+        if self.peek() == 'r' and (self.peek_next() == '"' or self.peek_next() == '\''):
+            self.advance()  # Consume 'r'
+            return self.scan_string()
+
+        # Try to detect a registered block: kind{
+        val block_result = self.try_scan_block_start(start, line, col)
+        if block_result.?:
+            return block_result.unwrap()
+
+        # Regular identifier scanning
+        while not self.is_at_end():
+            val c = self.peek()
+            if is_ident_char(c):
+                self.advance()
+            else:
+                break
+
+        val text = self.source[start:self.pos]
+        val kind = keyword_kind(text)
+
+        Token.new(kind, Span.new(start, self.pos, line, col), text)
+
+    me try_scan_block_start(start: i64, line: i64, col: i64) -> Token?:
+        """Try to detect and handle a registered block keyword followed by {.
+
+        Returns Some(Token) if a block was detected, None otherwise.
+        Uses the block registry to determine lexer mode.
+        """
+        val lbrace = r"{".char_at(0)
+        # Peek ahead to find the identifier
+        var peek_pos = self.pos
+        while peek_pos < self.source.len():
+            val c = self.source[peek_pos]
+            if is_ident_char(c):
+                peek_pos = peek_pos + 1
+            else:
+                break
+
+        if peek_pos == self.pos:
+            return None  # No identifier found
+
+        val ident = self.source[self.pos:peek_pos]
+
+        # Check if followed by {
+        if peek_pos >= self.source.len() or self.source[peek_pos] != lbrace:
+            return None  # Not a block
+
+        # Check if this identifier is a registered block (lazy-loads registry)
+        val block_def = self.get_block_registry().lookup(ident)
+        if not block_def.?:
+            return None  # Not a registered block
+
+        # It's a registered block! Consume the identifier
+        while self.pos < peek_pos:
+            self.advance()
+
+        val blk = block_def.unwrap()
+        val mode = blk.lexer_mode()
+
+        # Enter block mode
+        self.current_block_kind = Some(ident)
+        self.current_lexer_mode = mode
+        self.block_brace_depth = 0
+
+        # Apply lexer mode
+        match mode:
+            case LexerMode.Math:
+                self.in_math_block = true
+                self.math_brace_depth = 0
+            case LexerMode.Raw:
+                self.in_raw_block = true
+                self.raw_block_start = 0  # Will be set when { is consumed
+            case LexerMode.Normal:
+                pass  # Normal mode, no special handling
+            case LexerMode.Custom(config):
+                # Apply custom config
+                if config.enable_power_caret or config.enable_transpose:
+                    self.in_math_block = true
+                    self.math_brace_depth = 0
+
+        # Return BlockStart token with the block kind
+        Some(Token.new(TokenKind.BlockStart, Span.new(start, self.pos, line, col), ident))
+
+    # ========================================================================
+    # Block Mode Methods
+    # ========================================================================
+
+    me scan_raw_block_payload() -> Token:
+        """Scan a raw block payload (everything between { and matching }).
+
+        Used for Raw mode blocks like sh{}, sql{} where the content
+        should not be tokenized.
+        """
+        val lbrace = r"{".char_at(0)
+        val rbrace = r"}".char_at(0)
+        val start = self.pos
+        val line = self.line
+        val col = self.col
+        var brace_depth = 1
+
+        while not self.is_at_end() and brace_depth > 0:
+            val c = self.peek()
+            if c == lbrace:
+                brace_depth = brace_depth + 1
+            elif c == rbrace:
+                brace_depth = brace_depth - 1
+                if brace_depth == 0:
+                    break  # Don't consume the closing brace
+            self.advance()
+
+        val payload = self.source[start:self.pos]
+        Token.new(TokenKind.BlockPayload, Span.new(start, self.pos, line, col), payload)
+
+    fn is_in_block() -> bool:
+        """Check if currently inside a block."""
+        self.current_block_kind.?
+
+    fn current_block() -> text?:
+        """Get the current block kind, if any."""
+        self.current_block_kind
+
+    fn is_math_mode() -> bool:
+        """Check if in math mode (^, ' operators enabled)."""
+        self.in_math_block
+
+    fn is_raw_mode() -> bool:
+        """Check if in raw mode (no tokenization)."""
+        self.in_raw_block
+
+    me enter_block(kind: text, mode: LexerMode):
+        """Enter a block with the specified mode.
+
+        Used by the parser to manually enter block mode.
+        """
+        self.current_block_kind = Some(kind)
+        self.current_lexer_mode = mode
+        self.block_brace_depth = 0
+
+        match mode:
+            case LexerMode.Math:
+                self.in_math_block = true
+                self.math_brace_depth = 0
+            case LexerMode.Raw:
+                self.in_raw_block = true
+            case LexerMode.Normal:
+                pass
+            case LexerMode.Custom(config):
+                if config.enable_power_caret or config.enable_transpose:
+                    self.in_math_block = true
+                    self.math_brace_depth = 0
+
+    me exit_block():
+        """Exit the current block and reset to normal mode."""
+        self.current_block_kind = None
+        self.current_lexer_mode = LexerMode.Normal
+        self.in_math_block = false
+        self.math_brace_depth = 0
+        self.in_raw_block = false
+        self.block_brace_depth = 0
+
+    # ========================================================================
+    # Operators and Delimiters
+    # ========================================================================
+
+    me scan_operator_or_delimiter() -> Token:
+        """Scan an operator or delimiter."""
+        val start = self.pos
+        val line = self.line
+        val col = self.col
+        val c = self.advance()
+
+        val kind = match c:
+            # Single character
+            case '+':
+                if self.peek() == '=':
+                    self.advance()
+                    TokenKind.PlusEq
+                else:
+                    TokenKind.Plus
+            case '-':
+                if self.peek() == '>':
+                    self.advance()
+                    TokenKind.Arrow
+                elif self.peek() == '=':
+                    self.advance()
+                    TokenKind.MinusEq
+                else:
+                    TokenKind.Minus
+            case '*':
+                if self.peek() == '*':
+                    self.advance()
+                    TokenKind.StarStar
+                elif self.peek() == '=':
+                    self.advance()
+                    TokenKind.StarEq
+                else:
+                    TokenKind.Star
+            case '/':
+                if self.peek() == '/':
+                    self.advance()
+                    TokenKind.Parallel
+                elif self.peek() == '=':
+                    self.advance()
+                    TokenKind.SlashEq
+                else:
+                    TokenKind.Slash
+            case '%':
+                if self.peek() == '=':
+                    self.advance()
+                    TokenKind.PercentEq
+                else:
+                    TokenKind.Percent
+            case '=':
+                if self.peek() == '=':
+                    self.advance()
+                    TokenKind.Eq
+                elif self.peek() == '>':
+                    self.advance()
+                    TokenKind.FatArrow
+                else:
+                    TokenKind.Assign
+            case '!':
+                if self.peek() == '=':
+                    self.advance()
+                    TokenKind.NotEq
+                else:
+                    TokenKind.Bang
+            case '<':
+                if self.peek() == '<':
+                    self.advance()
+                    TokenKind.ComposeBack
+                elif self.peek() == '=':
+                    self.advance()
+                    TokenKind.LtEq
+                else:
+                    # Track generic depth: < after Ident likely opens a generic
+                    if self.prev_token_kind == TokenKind.Ident:
+                        self.generic_depth = self.generic_depth + 1
+                    TokenKind.Lt
+            case '>':
+                if self.peek() == '>' and self.generic_depth == 0:
+                    self.advance()
+                    TokenKind.Compose
+                elif self.peek() == '=':
+                    self.advance()
+                    TokenKind.GtEq
+                else:
+                    # Track generic depth: > closes a generic
+                    if self.generic_depth > 0:
+                        self.generic_depth = self.generic_depth - 1
+                    TokenKind.Gt
+            case '&':
+                if self.peek() == '&':
+                    self.advance()
+                    TokenKind.AmpAmp
+                else:
+                    TokenKind.Ampersand
+            case '|':
+                if self.peek() == '>':
+                    self.advance()
+                    TokenKind.PipeForward
+                elif self.peek() == '|':
+                    self.advance()
+                    TokenKind.PipePipe
+                else:
+                    TokenKind.Pipe
+            case '^':
+                if self.in_math_block:
+                    # Inside m{} block, ^ is power operator
+                    TokenKind.Caret
+                else:
+                    # Outside m{} block, ^ returns error
+                    return Token.new(
+                        TokenKind.Error,
+                        Span.new(start, self.pos, line, col),
+                        "'^' only valid inside m{} math blocks (use '**' for power, 'xor' for bitwise XOR)"
+                    )
+            case '~':
+                if self.peek() == '>':
+                    self.advance()
+                    TokenKind.LayerConnect
+                else:
+                    TokenKind.Tilde
+            case '?':
+                if self.peek() == '.':
+                    self.advance()
+                    TokenKind.QuestionDot
+                elif self.peek() == '?':
+                    self.advance()
+                    TokenKind.QuestionQuestion
+                else:
+                    TokenKind.Question
+            case '.':
+                if self.peek() == '.':
+                    self.advance()
+                    if self.peek() == '.':
+                        self.advance()
+                        TokenKind.Ellipsis
+                    elif self.peek() == '=':
+                        self.advance()
+                        TokenKind.DotDotEq
+                    else:
+                        TokenKind.DotDot
+                elif self.peek() == '?':
+                    self.advance()
+                    TokenKind.DotQuestion
+                elif self.peek() == '+':
+                    self.advance()
+                    TokenKind.DotPlus
+                elif self.peek() == '-':
+                    self.advance()
+                    TokenKind.DotMinus
+                elif self.peek() == '*':
+                    self.advance()
+                    TokenKind.DotStar
+                elif self.peek() == '/':
+                    self.advance()
+                    TokenKind.DotSlash
+                elif self.peek() == '^':
+                    self.advance()
+                    TokenKind.DotCaret
+                else:
+                    TokenKind.Dot
+            case ',':
+                TokenKind.Comma
+            case ':':
+                TokenKind.Colon
+            case ';':
+                TokenKind.Semicolon
+            case '(':
+                self.paren_depth = self.paren_depth + 1
+                TokenKind.LParen
+            case ')':
+                self.paren_depth = max(0, self.paren_depth - 1)
+                TokenKind.RParen
+            case '{':
+                self.paren_depth = self.paren_depth + 1
+                if self.in_math_block:
+                    self.math_brace_depth = self.math_brace_depth + 1
+                # Track block depth
+                if self.current_block_kind.?:
+                    self.block_brace_depth = self.block_brace_depth + 1
+                    # For raw mode blocks, mark that we need to capture payload
+                    # Use -1 as marker (next scan_token will start capturing)
+                    if self.in_raw_block and self.block_brace_depth == 1:
+                        self.raw_block_start = -1  # Signal to scan payload on next token
+                TokenKind.LBrace
+            case '}':
+                self.paren_depth = max(0, self.paren_depth - 1)
+                if self.in_math_block:
+                    self.math_brace_depth = self.math_brace_depth - 1
+                    if self.math_brace_depth < 0:
+                        # Exiting math block
+                        self.in_math_block = false
+                        self.math_brace_depth = 0
+                # Handle block exit
+                if self.current_block_kind.?:
+                    self.block_brace_depth = self.block_brace_depth - 1
+                    if self.block_brace_depth < 0:
+                        # Exiting the block
+                        val block_kind = self.current_block_kind.unwrap()
+                        self.current_block_kind = None
+                        self.current_lexer_mode = LexerMode.Normal
+                        self.in_raw_block = false
+                        self.block_brace_depth = 0
+                        # Return BlockEnd token
+                        return Token.new(TokenKind.BlockEnd, Span.new(start, self.pos, line, col), block_kind)
+                TokenKind.RBrace
+            case '[':
+                self.paren_depth = self.paren_depth + 1
+                TokenKind.LBracket
+            case ']':
+                self.paren_depth = max(0, self.paren_depth - 1)
+                # Check for array suffix after ]
+                val suffix = self.try_scan_array_suffix()
+                if suffix.?:
+                    return Token.new(TokenKind.ArraySuffix, Span.new(start, self.pos, line, col), suffix.unwrap())
+                TokenKind.RBracket
+            case '@':
+                TokenKind.At
+            case '$':
+                TokenKind.Dollar
+            case '\\':
+                TokenKind.Backslash
+            case '_':
+                TokenKind.Underscore
+            case _:
+                TokenKind.Error
+
+        val text = self.source[start:self.pos]
+        Token.new(kind, Span.new(start, self.pos, line, col), text)
+
+    # ========================================================================
+    # Array Suffix Scanning
+    # ========================================================================
+
+    me try_scan_array_suffix() -> text?:
+        """Scan optional suffix after ]: f32, _f32_gpu, f32_tr_gpu.
+
+        Returns the suffix string if found, None otherwise.
+        Valid suffixes:
+        - DType: f16, f32, f64, bf16, i8, i16, i32, i64, u8, u16, u32, u64
+        - Device: cpu, gpu, cuda, cuda0, cuda1, etc.
+        - Modifier: tr (trainable), pin (pinned)
+        - Backend: native, torch
+
+        Format: [_]dtype[_device][_modifier][_backend] or any combination
+        Examples: f32, _f32, f32_gpu, _f32_tr_gpu, _tr_cuda
+        """
+        val start = self.pos
+        var suffix = ""
+
+        # Skip optional leading underscore
+        if self.peek() == '_':
+            suffix = suffix + "_"
+            self.advance()
+
+        # Check for dtype first: f16, f32, f64, bf16, i8, i16, i32, i64, u8, u16, u32, u64
+        val dtype = self.try_scan_dtype()
+        if dtype.?:
+            suffix = suffix + dtype.unwrap()
+        elif suffix == "":
+            # No underscore and no dtype means no suffix
+            self.pos = start
+            return None
+
+        # Scan remaining suffix parts: _tr, _gpu, _cpu, _cuda, _pin, _native, _torch
+        while self.peek() == '_':
+            val underscore_pos = self.pos
+            self.advance()  # Consume '_'
+
+            val part = self.try_scan_suffix_part()
+            if part.?:
+                suffix = suffix + "_" + part.unwrap()
+            else:
+                # Invalid suffix part, rollback the underscore
+                self.pos = underscore_pos
+                break
+
+        if suffix.len() > 0 and suffix != "_":
+            Some(suffix)
+        else:
+            self.pos = start
+            nil
+
+    me try_scan_dtype() -> text?:
+        """Try to scan a dtype: f16, f32, f64, bf16, i8, i16, i32, i64, u8, u16, u32, u64."""
+        val start = self.pos
+        val c = self.peek()
+
+        match c:
+            case 'f':
+                # f16, f32, f64
+                self.advance()
+                if self.peek() == '1' and self.peek_next() == '6':
+                    self.advance()
+                    self.advance()
+                    return Some("f16")
+                elif self.peek() == '3' and self.peek_next() == '2':
+                    self.advance()
+                    self.advance()
+                    return Some("f32")
+                elif self.peek() == '6' and self.peek_next() == '4':
+                    self.advance()
+                    self.advance()
+                    return Some("f64")
+                else:
+                    self.pos = start
+                    return None
+
+            case 'b':
+                # bf16
+                self.advance()
+                if self.peek() == 'f' and self.peek_next() == '1':
+                    self.advance()  # f
+                    self.advance()  # 1
+                    if self.peek() == '6':
+                        self.advance()
+                        return Some("bf16")
+                self.pos = start
+                return None
+
+            case 'i':
+                # i8, i16, i32, i64
+                self.advance()
+                if self.peek() == '8' and not is_digit(self.peek_next()):
+                    self.advance()
+                    return Some("i8")
+                elif self.peek() == '1' and self.peek_next() == '6':
+                    self.advance()
+                    self.advance()
+                    return Some("i16")
+                elif self.peek() == '3' and self.peek_next() == '2':
+                    self.advance()
+                    self.advance()
+                    return Some("i32")
+                elif self.peek() == '6' and self.peek_next() == '4':
+                    self.advance()
+                    self.advance()
+                    return Some("i64")
+                else:
+                    self.pos = start
+                    return None
+
+            case 'u':
+                # u8, u16, u32, u64
+                self.advance()
+                if self.peek() == '8' and not is_digit(self.peek_next()):
+                    self.advance()
+                    return Some("u8")
+                elif self.peek() == '1' and self.peek_next() == '6':
+                    self.advance()
+                    self.advance()
+                    return Some("u16")
+                elif self.peek() == '3' and self.peek_next() == '2':
+                    self.advance()
+                    self.advance()
+                    return Some("u32")
+                elif self.peek() == '6' and self.peek_next() == '4':
+                    self.advance()
+                    self.advance()
+                    return Some("u64")
+                else:
+                    self.pos = start
+                    return None
+
+            case _:
+                nil
+
+    me try_scan_suffix_part() -> text?:
+        """Try to scan a suffix part after underscore: tr, gpu, cpu, cuda, cuda0, pin, native, torch."""
+        val start = self.pos
+
+        # Scan alphanumeric identifier
+        var part = ""
+        while not self.is_at_end() and (is_alpha(self.peek()) or is_digit(self.peek())):
+            part = part + self.peek().to_string()
+            self.advance()
+
+        # Check if it's a valid suffix part
+        match part:
+            case "tr" | "pin":
+                # Modifiers
+                Some(part)
+            case "cpu" | "gpu":
+                # Devices
+                Some(part)
+            case "native" | "torch":
+                # Backends
+                Some(part)
+            case _:
+                # Check for cuda with optional digit(s)
+                if part.starts_with("cuda"):
+                    Some(part)
+                else:
+                    # Not a valid suffix part, rollback
+                    self.pos = start
+                    nil
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+fn is_digit(c: char) -> bool:
+    c >= '0' and c <= '9'
+
+fn is_hex_digit(c: char) -> bool:
+    (c >= '0' and c <= '9') or (c >= 'a' and c <= 'f') or (c >= 'A' and c <= 'F')
+
+fn is_alpha(c: char) -> bool:
+    (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z')
+
+fn is_ident_start(c: char) -> bool:
+    is_alpha(c) or c == '_'
+
+fn is_ident_char(c: char) -> bool:
+    is_alpha(c) or is_digit(c) or c == '_'
+
+fn keyword_kind(text: text) -> TokenKind:
+    """Look up keyword from text, or return Ident."""
+    match text:
+        # Declarations
+        case "fn": TokenKind.KwFn
+        case "val": TokenKind.KwVal
+        case "var": TokenKind.KwVar
+        case "struct": TokenKind.KwStruct
+        case "class": TokenKind.KwClass
+        case "enum": TokenKind.KwEnum
+        case "trait": TokenKind.KwTrait
+        case "impl": TokenKind.KwImpl
+        case "type": TokenKind.KwType
+        case "mod": TokenKind.KwMod
+        case "pub": TokenKind.KwPub
+        case "static": TokenKind.KwStatic
+        case "me": TokenKind.KwMe
+        case "extern": TokenKind.KwExtern
+
+        # Control flow
+        case "if": TokenKind.KwIf
+        case "else": TokenKind.KwElse
+        case "elif": TokenKind.KwElif
+        case "match": TokenKind.KwMatch
+        case "case": TokenKind.KwCase
+        case "for": TokenKind.KwFor
+        case "while": TokenKind.KwWhile
+        case "loop": TokenKind.KwLoop
+        case "break": TokenKind.KwBreak
+        case "continue": TokenKind.KwContinue
+        case "return": TokenKind.KwReturn
+        case "yield": TokenKind.KwYield
+        case "await": TokenKind.KwAwait
+        case "async": TokenKind.KwAsync
+
+        # Expressions
+        case "in": TokenKind.KwIn
+        case "is": TokenKind.KwIs
+        case "as": TokenKind.KwAs
+        case "not": TokenKind.KwNot
+        case "and": TokenKind.KwAnd
+        case "or": TokenKind.KwOr
+        case "xor": TokenKind.KwXor
+        case "try": TokenKind.KwTry
+        case "catch": TokenKind.KwCatch
+        case "throw": TokenKind.KwThrow
+        case "with": TokenKind.KwWith
+
+        # Imports
+        case "import": TokenKind.KwImport
+        case "export": TokenKind.KwExport
+        case "from": TokenKind.KwFrom
+
+        # Special
+        case "self": TokenKind.KwSelf
+        case "super": TokenKind.KwSuper
+        case "None": TokenKind.KwNone
+        case "Some": TokenKind.KwSome
+        case "Ok": TokenKind.KwOk
+        case "Err": TokenKind.KwErr
+        case "loss": TokenKind.KwLoss
+        case "nograd": TokenKind.KwNograd
+
+        # Literals
+        case "true": TokenKind.BoolLit
+        case "false": TokenKind.BoolLit
+        case "nil": TokenKind.NilLit
+
+        case _: TokenKind.Ident
+
+fn min(a: i64, b: i64) -> i64:
+    if a < b: a else: b
+
+fn max(a: i64, b: i64) -> i64:
+    if a > b: a else: b
+
+fn merge_spans(s1: Span, s2: Span) -> Span:
+    """Merge two spans into one covering both."""
+    val start_ = if s1.start < s2.start: s1.start else: s2.start
+    val end_ = if s1.end > s2.end: s1.end else: s2.end
+    val line_ = if s1.line < s2.line: s1.line else: s2.line
+    val col_ = if s1.line <= s2.line: s1.col else: s2.col
+    Span.new(start_, end_, line_, col_)
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export TokenKind, Token, Span, Lexer
+export is_digit, is_hex_digit, is_alpha, is_ident_start, is_ident_char, keyword_kind
+export min, max, merge_spans

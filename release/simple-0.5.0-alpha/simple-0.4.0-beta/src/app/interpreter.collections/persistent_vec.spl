@@ -1,0 +1,613 @@
+# Persistent Vector (RRB-Tree)
+#
+# Relaxed Radix Balanced Tree implementation for immutable vectors.
+# Provides O(log32 n) random access and updates with structural sharing.
+#
+# Key features:
+# - Immutable: Updates return new vector, original unchanged
+# - Structural sharing: Only modified path is copied
+# - Efficient: O(log32 n) ≈ O(7) for random access
+# - Fast iteration: O(n) sequential access
+# - Efficient append: O(1) amortized at tail
+#
+# Based on "RRB-Trees: Efficient Immutable Vectors" by Bagwell & Rompf (2011)
+
+use std.array_builder.ArrayBuilder
+
+export PersistentVec, PersistentVecIter
+
+# ============================================================================
+# Constants
+# ============================================================================
+
+val BITS: i64 = 5
+val BRANCH_FACTOR: i64 = 32  # 2^5
+val MASK: i64 = 31           # 0b11111
+
+# ============================================================================
+# Node Types
+# ============================================================================
+
+enum VecNode<T>:
+    """Node in the persistent vector tree.
+
+    Leaf: Contains actual elements (up to 32)
+    Branch: Contains child nodes (up to 32)
+    """
+    Leaf(elements: [T])
+    Branch(children: [VecNode<T>])
+
+impl VecNode<T>:
+    fn is_leaf() -> bool:
+        match self:
+            case Leaf(_): true
+            case Branch(_): false
+
+    fn count() -> i64:
+        """Count elements in this subtree."""
+        match self:
+            case Leaf(elements): elements.len()
+            case Branch(children):
+                var total: i64 = 0
+                for child in children:
+                    total = total + child.count()
+                total
+
+    fn get_at(index: i64, shift: i64) -> T?:
+        """Get element at index."""
+        match self:
+            case Leaf(elements):
+                if index < elements.len():
+                    Some(elements[index])
+                else:
+                    None
+            case Branch(children):
+                val child_idx = (index >> shift) & MASK
+                if child_idx < children.len():
+                    children[child_idx].get_at(index, shift - BITS)
+                else:
+                    None
+
+    fn update_at(index: i64, value: T, shift: i64) -> VecNode<T>:
+        """Update element at index, returning new node."""
+        match self:
+            case Leaf(elements):
+                val new_elements = array_update(elements, index, value)
+                VecNode.Leaf(new_elements)
+            case Branch(children):
+                val child_idx = (index >> shift) & MASK
+                val new_child = children[child_idx].update_at(index, value, shift - BITS)
+                val new_children = array_update(children, child_idx, new_child)
+                VecNode.Branch(new_children)
+
+    fn push_tail(tail: [T], size: i64, shift: i64) -> VecNode<T>:
+        """Push a new tail node, returning updated tree."""
+        match self:
+            case Leaf(_):
+                # Should not happen at leaf level during push
+                self
+            case Branch(children):
+                if shift == BITS:
+                    # At the level above leaves
+                    val new_leaf = VecNode.Leaf(tail)
+                    val new_children = children.push(new_leaf)
+                    VecNode.Branch(new_children)
+                else:
+                    val subidx = ((size - 1) >> shift) & MASK
+                    if subidx < children.len():
+                        # Descend into existing child
+                        val new_child = children[subidx].push_tail(tail, size, shift - BITS)
+                        val new_children = array_update(children, subidx, new_child)
+                        VecNode.Branch(new_children)
+                    else:
+                        # Create new child
+                        val new_child = new_path(shift - BITS, tail)
+                        val new_children = children.push(new_child)
+                        VecNode.Branch(new_children)
+
+    fn collect_elements(result: [T]) -> [T]:
+        """Collect all elements into a list."""
+        match self:
+            case Leaf(elements):
+                var acc = result
+                for elem in elements:
+                    acc = acc.push(elem)
+                acc
+            case Branch(children):
+                var acc = result
+                for child in children:
+                    acc = child.collect_elements(acc)
+                acc
+
+    fn pop_tail(size: i64, shift: i64) -> VecNode<T>:
+        """Remove last leaf from tree - O(log n).
+
+        Recursively descends to the last populated position and removes it.
+        Collapses empty branches on the way back up.
+
+        Args:
+            size: Current total size of vector (before pop)
+            shift: Current shift level (depth * BITS)
+
+        Returns:
+            New tree with last leaf removed, or empty branch if this was last
+        """
+        match self:
+            case Leaf(_):
+                # Shouldn't happen - pop_tail only called on branches
+                # Return empty branch to signal removal
+                VecNode.Branch([])
+
+            case Branch(children):
+                # Calculate which child contains the last element
+                val subidx = ((size - 1) >> shift) & MASK
+
+                if shift > BITS:
+                    # Not at leaf level yet - recurse down
+                    val new_child = children[subidx as i64].pop_tail(size, shift - BITS)
+
+                    # Check if child became empty
+                    match new_child:
+                        case Branch(new_children):
+                            if new_children.len() == 0:
+                                # Child is now empty - remove it
+                                if subidx == 0:
+                                    # Was only child - return empty
+                                    VecNode.Branch([])
+                                else:
+                                    # Remove this child from array
+                                    val trimmed = children[0..subidx as i64]
+                                    VecNode.Branch(trimmed)
+                            else:
+                                # Update child in place
+                                val updated_children = array_update(children, subidx as i64, new_child)
+                                VecNode.Branch(updated_children)
+                        case _:
+                            # Update child
+                            val updated_children = array_update(children, subidx as i64, new_child)
+                            VecNode.Branch(updated_children)
+                else:
+                    # At level above leaves - remove last leaf
+                    if subidx == 0:
+                        # Last leaf was only child - return empty
+                        VecNode.Branch([])
+                    else:
+                        # Remove last child
+                        val trimmed = children[0..subidx as i64]
+                        VecNode.Branch(trimmed)
+
+fn new_path<T>(shift: i64, tail: [T]) -> VecNode<T>:
+    """Create a new path from root to tail."""
+    if shift == 0:
+        VecNode.Leaf(tail)
+    else:
+        VecNode.Branch([new_path(shift - BITS, tail)])
+
+# ============================================================================
+# PersistentVec - Public API
+# ============================================================================
+
+struct PersistentVec<T>:
+    """Immutable persistent vector using RRB-tree.
+
+    All operations return a new vector, leaving the original unchanged.
+    Memory efficient through structural sharing.
+
+    Example:
+        val vec1 = PersistentVec.new()
+        val vec2 = vec1.push(1)
+        val vec3 = vec2.push(2).push(3)
+
+        # vec1 is still empty
+        # vec2 has [1]
+        # vec3 has [1, 2, 3]
+    """
+    size: i64
+    shift: i64           # Tree depth * BITS
+    root: VecNode<T>
+    tail: [T]            # Tail buffer for efficient append
+
+impl PersistentVec<T>:
+    # --------------------------------------------------------------------------
+    # Construction
+    # --------------------------------------------------------------------------
+
+    static fn new() -> PersistentVec<T>:
+        """Create an empty persistent vector."""
+        PersistentVec(
+            size: 0,
+            shift: BITS,
+            root: VecNode.Branch([]),
+            tail: []
+        )
+
+    static fn from_array(arr: [T]) -> PersistentVec<T>:
+        """Create a vector from an array."""
+        var vec = PersistentVec.new()
+        for elem in arr:
+            vec = vec.push(elem)
+        vec
+
+    static fn of(items: [T]) -> PersistentVec<T>:
+        """Create a vector from items (alias for from_array)."""
+        PersistentVec.from_array(items)
+
+    # --------------------------------------------------------------------------
+    # Queries
+    # --------------------------------------------------------------------------
+
+    fn len() -> i64:
+        """Number of elements in the vector."""
+        self.size
+
+    fn is_empty() -> bool:
+        """Check if vector is empty."""
+        self.size == 0
+
+    fn get(index: i64) -> T?:
+        """Get element at index, or None if out of bounds.
+
+        Supports negative indexing: -1 = last, -2 = second to last, etc.
+
+        Time: O(log32 n) ≈ O(7)
+        """
+        # Normalize negative index
+        val idx = if index < 0: self.size + index else: index
+
+        if idx < 0 or idx >= self.size:
+            None
+        elif idx >= self.tail_offset():
+            # Element is in tail
+            Some(self.tail[idx - self.tail_offset()])
+        else:
+            # Element is in tree
+            self.root.get_at(idx, self.shift)
+
+    fn first() -> T?:
+        """Get first element."""
+        self.get(0)
+
+    fn last() -> T?:
+        """Get last element."""
+        if self.size == 0:
+            None
+        else:
+            self.get(self.size - 1)
+
+    fn contains(item: T) -> bool:
+        """Check if vector contains item."""
+        for elem in self.to_array():
+            if elem == item:
+                return true
+        false
+
+    # --------------------------------------------------------------------------
+    # Modification (returns new vector)
+    # --------------------------------------------------------------------------
+
+    fn push(value: T) -> PersistentVec<T>:
+        """Append an element, returning a new vector.
+
+        Time: O(1) amortized, O(log32 n) worst case
+        """
+        if self.tail.len() < BRANCH_FACTOR:
+            # Room in tail, just append
+            val new_tail = self.tail.push(value)
+            PersistentVec(
+                size: self.size + 1,
+                shift: self.shift,
+                root: self.root,
+                tail: new_tail
+            )
+        else:
+            # Tail is full, push into tree
+            val new_root = if self.size == BRANCH_FACTOR:
+                # Tree is empty, create first level
+                VecNode.Branch([VecNode.Leaf(self.tail)])
+            elif ((self.size >> BITS) > (1 << self.shift)):
+                # Tree is full, need to grow
+                val new_path_node = new_path(self.shift, self.tail)
+                VecNode.Branch([self.root, new_path_node])
+            else:
+                self.root.push_tail(self.tail, self.size, self.shift)
+
+            val new_shift = if ((self.size >> BITS) > (1 << self.shift)):
+                self.shift + BITS
+            else:
+                self.shift
+
+            PersistentVec(
+                size: self.size + 1,
+                shift: new_shift,
+                root: new_root,
+                tail: [value]
+            )
+
+    fn set(index: i64, value: T) -> PersistentVec<T>:
+        """Update element at index, returning a new vector.
+
+        Time: O(log32 n)
+        """
+        val idx = if index < 0: self.size + index else: index
+
+        if idx < 0 or idx >= self.size:
+            self  # Out of bounds, return unchanged
+
+        elif idx >= self.tail_offset():
+            # Update in tail
+            val tail_idx = idx - self.tail_offset()
+            val new_tail = array_update(self.tail, tail_idx, value)
+            PersistentVec(
+                size: self.size,
+                shift: self.shift,
+                root: self.root,
+                tail: new_tail
+            )
+        else:
+            # Update in tree
+            val new_root = self.root.update_at(idx, value, self.shift)
+            PersistentVec(
+                size: self.size,
+                shift: self.shift,
+                root: new_root,
+                tail: self.tail
+            )
+
+    fn pop() -> PersistentVec<T>:
+        """Remove last element, returning a new vector - O(log n).
+
+        Returns empty vector if already empty.
+
+        Strategy:
+        1. If tail has > 1 element, just shrink tail
+        2. If tail has 1 element, extract new tail from tree
+        3. Remove last leaf node from tree
+        4. Shrink tree height if needed
+        """
+        if self.size == 0:
+            self
+        elif self.size == 1:
+            PersistentVec.new()
+        elif self.tail.len() > 1:
+            # Easy case - just shrink tail
+            val new_tail = self.tail[0:self.tail.len() - 1]
+            PersistentVec(
+                size: self.size - 1,
+                shift: self.shift,
+                root: self.root,
+                tail: new_tail
+            )
+        else:
+            # Hard case - tail has 1 element, need to extract from tree
+            # This is O(log n) tree manipulation, not O(n) array conversion
+            val new_size = self.size - 1
+            val tail_offset = self.tail_offset_for_size(new_size)
+
+            # Extract new tail from the last leaf in tree
+            val new_tail = self.extract_tail_at_offset(tail_offset)
+
+            # Remove the last leaf from tree
+            val new_root = self.pop_tail_from_tree(new_size, self.shift)
+
+            # Check if we can shrink tree height
+            val new_shift = if self.should_shrink_tree(new_root, new_size):
+                if self.shift > BITS: self.shift - BITS else: self.shift
+            else:
+                self.shift
+
+            # Get actual root after potential shrinking
+            val final_root = if new_shift < self.shift:
+                match new_root:
+                    case Branch(children):
+                        if children.len() == 1: children[0] else: new_root
+                    case _: new_root
+            else:
+                new_root
+
+            PersistentVec(
+                size: new_size,
+                shift: new_shift,
+                root: final_root,
+                tail: new_tail
+            )
+
+    # --------------------------------------------------------------------------
+    # Bulk operations
+    # --------------------------------------------------------------------------
+
+    fn concat(other: PersistentVec<T>) -> PersistentVec<T>:
+        """Concatenate two vectors."""
+        val arr1 = self.to_array()
+        val arr2 = other.to_array()
+        var combined: [T] = []
+        for elem in arr1:
+            combined = combined.push(elem)
+        for elem in arr2:
+            combined = combined.push(elem)
+        PersistentVec.from_array(combined)
+
+    fn map<U>(f: fn(T) -> U) -> PersistentVec<U>:
+        """Transform each element."""
+        val arr = self.to_array()
+        var mapped: [U] = []
+        for elem in arr:
+            mapped = mapped.push(f(elem))
+        PersistentVec.from_array(mapped)
+
+    fn filter(predicate: fn(T) -> bool) -> PersistentVec<T>:
+        """Keep elements matching predicate."""
+        val arr = self.to_array()
+        var filtered: [T] = []
+        for elem in arr:
+            if predicate(elem):
+                filtered = filtered.push(elem)
+        PersistentVec.from_array(filtered)
+
+    fn fold<U>(init: U, f: fn(U, T) -> U) -> U:
+        """Fold/reduce over elements."""
+        var acc = init
+        for elem in self.to_array():
+            acc = f(acc, elem)
+        acc
+
+    fn take(n: i64) -> PersistentVec<T>:
+        """Take first n elements."""
+        val arr = self.to_array()
+        val count = if n > self.size: self.size else: n
+        PersistentVec.from_array(arr[0:count])
+
+    fn drop(n: i64) -> PersistentVec<T>:
+        """Drop first n elements."""
+        val arr = self.to_array()
+        val start = if n > self.size: self.size else: n
+        PersistentVec.from_array(arr[start:])
+
+    fn slice(start: i64, end: i64) -> PersistentVec<T>:
+        """Get a slice of the vector."""
+        val arr = self.to_array()
+        val s = if start < 0: 0 else: start
+        val e = if end > self.size: self.size else: end
+        PersistentVec.from_array(arr[s:e])
+
+    fn reverse() -> PersistentVec<T>:
+        """Reverse the vector."""
+        val arr = self.to_array()
+        var reversed: [T] = []
+        var i = arr.len() - 1
+        while i >= 0:
+            reversed = reversed.push(arr[i])
+            i = i - 1
+        PersistentVec.from_array(reversed)
+
+    # --------------------------------------------------------------------------
+    # Conversion
+    # --------------------------------------------------------------------------
+
+    fn to_array() -> [T]:
+        """Convert to a regular array."""
+        var result = self.root.collect_elements([])
+        for elem in self.tail:
+            result = result.push(elem)
+        result
+
+    # --------------------------------------------------------------------------
+    # Internal helpers
+    # --------------------------------------------------------------------------
+
+    fn tail_offset() -> i64:
+        """Compute the index where tail starts."""
+        if self.size < BRANCH_FACTOR:
+            0
+        else:
+            ((self.size - 1) >> BITS) << BITS
+
+    fn tail_offset_for_size(size: i64) -> i64:
+        """Compute tail offset for a given size."""
+        if size < BRANCH_FACTOR:
+            0
+        else:
+            ((size - 1) >> BITS) << BITS
+
+    fn extract_tail_at_offset(offset: i64) -> [T]:
+        """Extract elements from tree to form new tail - O(log n).
+
+        Extracts elements starting at offset up to (but not including)
+        the last element in the vector.
+        """
+        var builder = ArrayBuilder.new()
+
+        var i = offset
+        while i < self.size - 1:
+            match self.root.get_at(i, self.shift):
+                case Some(elem):
+                    builder.push_safe(elem)
+                case None:
+                    break
+            i = i + 1
+
+        builder.build()
+
+    fn pop_tail_from_tree(size: i64, level: i64) -> VecNode<T>:
+        """Remove last leaf from tree - O(log n).
+
+        Recursively descends tree to remove the last populated leaf.
+        """
+        self.root.pop_tail(size, level)
+
+    fn should_shrink_tree(root: VecNode<T>, new_size: i64) -> bool:
+        """Check if tree should shrink by one level.
+
+        Tree shrinks when root has only one child after removal.
+        """
+        match root:
+            case Branch(children):
+                # If root has only 1 child and we're above minimum height
+                children.len() == 1 and self.shift > BITS
+            case Leaf(_):
+                false
+
+# ============================================================================
+# Iterator
+# ============================================================================
+
+struct PersistentVecIter<T>:
+    """Iterator over PersistentVec elements."""
+    vec: PersistentVec<T>
+    index: i64
+
+impl PersistentVecIter<T>:
+    static fn new(vec: PersistentVec<T>) -> PersistentVecIter<T>:
+        PersistentVecIter(vec: vec, index: 0)
+
+    fn next() -> T?:
+        if self.index >= self.vec.len():
+            None
+        else:
+            val elem = self.vec.get(self.index)
+            self.index = self.index + 1
+            elem
+
+    fn has_next() -> bool:
+        self.index < self.vec.len()
+
+impl Iterable<T> for PersistentVec<T>:
+    fn iter() -> PersistentVecIter<T>:
+        PersistentVecIter.new(self)
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+fn array_update<T>(arr: [T], index: i64, value: T) -> [T]:
+    """Update value at index, returning new array.
+
+    Optimized with ArrayBuilder - O(n) with single allocation.
+    """
+    var builder = ArrayBuilder.with_capacity(arr.len())
+
+    for i in 0..arr.len():
+        if i == index:
+            builder.push_unchecked(value)
+        else:
+            builder.push_unchecked(arr[i])
+
+    builder.build()
+
+# ============================================================================
+# Display / Debug
+# ============================================================================
+
+impl Display for PersistentVec<T>:
+    fn fmt() -> text:
+        val elements = self.to_array()
+        if elements.is_empty():
+            "PersistentVec[]"
+        else:
+            var parts: [text] = []
+            for elem in elements:
+                parts = parts.push("{elem}")
+            "PersistentVec[" + parts.join(", ") + "]"
+
+impl Debug for PersistentVec<T>:
+    fn debug() -> text:
+        "PersistentVec(size={self.size}, shift={self.shift})"
