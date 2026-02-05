@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0-rc.1] - 2026-02-05
+
+### Added
+- Simple scripts (.spl) for build and install (replaced .ssh extension)
+- Symlink `bin/simple_runtime` → `bin/simple` for backward compatibility
+- Release skill for guided release process
+- Enhanced GitHub Actions testing (verifies both binaries and symlink)
+
+### Changed
+- Bootstrap packages now use `bin/simple` as main binary (13MB optimized)
+- GitHub Actions prefers Simple scripts over bash (self-hosting)
+- File extension policy: use `.spl` for all Simple code, not `.ssh`
+- Binary size reduced: 13MB (bootstrap) vs 32MB (regular)
+- Install script handles both old and new package formats
+
+### Fixed
+- Symlink creation in bootstrap packages
+- Install script backward compatibility
+- Build script consistency between local and GitHub Actions
+
 ## [0.4.0-beta.6] - 2026-02-04
 
 ### Major: Self-Hosting & Native Compilation

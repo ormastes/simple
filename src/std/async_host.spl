@@ -13,10 +13,11 @@
 #   use std.async_host.*
 #
 #   val runtime = HostRuntime.new()
-#   val handle = runtime.spawn(async: fetch_data())
+#   val handle = runtime.run_task(async: fetch_data())
 #   val result = await handle.join()
 
 use std.async_core.*
+use std.async_sffi.*
 
 # ============================================================================
 # Waker - Task Wake Notification
@@ -134,12 +135,15 @@ impl HostFuture<T>:
         """Transform future value."""
         match self.state:
             case FutureState.Ready(v):
-                HostFuture<U>.ready(f(v))
+                val result: HostFuture<U> = HostFuture.ready(f(v))
+                result
             case FutureState.Pending:
                 # Create mapped future
-                HostFuture<U>.pending()
+                val pending: HostFuture<U> = HostFuture.pending()
+                pending
             case FutureState.Failed(e):
-                HostFuture<U>.failed(e)
+                val failed: HostFuture<U> = HostFuture.failed(e)
+                failed
 
     fn then<U>(f: fn(T) -> HostFuture<U>) -> HostFuture<U>:
         """Chain futures (flatMap)."""
@@ -147,9 +151,11 @@ impl HostFuture<T>:
             case FutureState.Ready(v):
                 f(v)
             case FutureState.Pending:
-                HostFuture<U>.pending()
+                val pending: HostFuture<U> = HostFuture.pending()
+                pending
             case FutureState.Failed(e):
-                HostFuture<U>.failed(e)
+                val failed: HostFuture<U> = HostFuture.failed(e)
+                failed
 
 # Note: HostFuture implements FutureCore<T> via duck typing
 
@@ -164,7 +170,7 @@ class HostPromise<T>:
 
     static fn new() -> (HostFuture<T>, HostPromise<T>):
         """Create future-promise pair."""
-        val future = HostFuture<T>.pending()
+        val future: HostFuture<T> = HostFuture.pending()
         val promise = HostPromise(future: future, completed: false)
         (future, promise)
 
@@ -237,11 +243,16 @@ class HostTaskHandle<T>:
         """Awaitable join (returns future)."""
         if self.is_finished():
             match self.result:
-                case Some(v): HostFuture<T>.ready(v)
-                case None: HostFuture<T>.failed(AsyncError.JoinError("no result"))
+                case Some(v):
+                    val ready: HostFuture<T> = HostFuture.ready(v)
+                    ready
+                case None:
+                    val failed: HostFuture<T> = HostFuture.failed(AsyncError.JoinError("no result"))
+                    failed
         else:
             # Return pending future linked to this task
-            HostFuture<T>.pending()
+            val pending: HostFuture<T> = HostFuture.pending()
+            pending
 
     me cancel():
         """Request task cancellation."""
@@ -272,7 +283,7 @@ class HostJoinSet<T>:
         var set = HostJoinSet<i64>.new()
 
         for i in 0..10:
-            set.spawn(\: compute(i))
+            set.add_task(\: compute(i))
 
         while val Some((id, result)) = await set.join_next():
             print "Task {id}: {result}"
@@ -290,8 +301,8 @@ class HostJoinSet<T>:
     fn is_empty() -> bool:
         self.handles.is_empty()
 
-    me spawn(f: fn() -> T) -> usize:
-        """Spawn task into set."""
+    me add_task(f: fn() -> T) -> usize:
+        """Add task into set."""
         val id = task_alloc_id()
         val handle = HostTaskHandle(
             task_id: id,
@@ -304,9 +315,9 @@ class HostJoinSet<T>:
         self.handles = self.handles.push(handle)
         id
 
-    me spawn_with_priority(f: fn() -> T, priority: Priority) -> usize:
-        """Spawn task with priority."""
-        self.spawn(f)  # Priority handled by scheduler
+    me add_task_with_priority(f: fn() -> T, priority: Priority) -> usize:
+        """Add task with priority."""
+        self.add_task(f)  # Priority handled by scheduler
 
     fn try_join_next() -> Option<(usize, T)>:
         """Non-blocking: get next completed result."""
@@ -334,12 +345,15 @@ class HostJoinSet<T>:
         """Awaitable: get next completed result."""
         match self.try_join_next():
             case Some(result):
-                HostFuture<Option<(usize, T)>>.ready(Some(result))
+                val ready: HostFuture<Option<(usize, T)>> = HostFuture.ready(Some(result))
+                ready
             case None:
                 if self.is_empty():
-                    HostFuture<Option<(usize, T)>>.ready(nil)
+                    val ready_nil: HostFuture<Option<(usize, T)>> = HostFuture.ready(nil)
+                    ready_nil
                 else:
-                    HostFuture<Option<(usize, T)>>.pending()
+                    val pending: HostFuture<Option<(usize, T)>> = HostFuture.pending()
+                    pending
 
     me cancel_all():
         """Cancel all tasks."""
@@ -408,12 +422,15 @@ class HostFuturesUnordered<T>:
         """Awaitable: get next completed result."""
         match self.try_next():
             case Some(value):
-                HostFuture<Option<T>>.ready(Some(value))
+                val ready: HostFuture<Option<T>> = HostFuture.ready(Some(value))
+                ready
             case None:
                 if self.is_empty():
-                    HostFuture<Option<T>>.ready(nil)
+                    val ready_nil: HostFuture<Option<T>> = HostFuture.ready(nil)
+                    ready_nil
                 else:
-                    HostFuture<Option<T>>.pending()
+                    val pending: HostFuture<Option<T>> = HostFuture.pending()
+                    pending
 
     fn poll_next(cx: Context) -> Poll<Option<T>>:
         """Poll with context."""
@@ -427,15 +444,7 @@ class HostFuturesUnordered<T>:
                     self.waker = Some(cx.waker())
                     Poll.Pending
 
-impl FuturesUnorderedCore<T> for HostFuturesUnordered<T>:
-    fn len() -> usize:
-        self.len()
-
-    fn is_empty() -> bool:
-        self.is_empty()
-
-    fn try_next() -> Option<T>:
-        self.try_next()
+# Note: HostFuturesUnordered implements FuturesUnorderedCore<T> via duck typing
 
 # ============================================================================
 # WorkStealingQueue - Per-Scheduler Queue
@@ -526,8 +535,8 @@ impl HostScheduler:
         """Create scheduler with default worker count (4)."""
         HostScheduler.new(4)
 
-    me spawn(priority: Priority, poll_fn: fn() -> Poll<()>) -> usize:
-        """Spawn task with priority."""
+    me schedule(priority: Priority, poll_fn: fn() -> Poll<()>) -> usize:
+        """Schedule task with priority."""
         val id = self.next_id
         self.next_id = self.next_id + 1
 
@@ -543,15 +552,19 @@ impl HostScheduler:
 
         # Add to appropriate queue based on priority
         if priority == Priority.Critical:
-            self.global_queue = [id] ++ self.global_queue  # Front
+            # Prepend for high priority
+            var new_queue = [id]
+            for task in self.global_queue:
+                new_queue = new_queue.push(task)
+            self.global_queue = new_queue
         else:
             self.global_queue = self.global_queue.push(id)
 
         id
 
-    me spawn_on_worker(worker_id: usize, poll_fn: fn() -> Poll<()>) -> usize:
-        """Spawn on specific worker."""
-        val id = self.spawn(Priority.Normal, poll_fn)
+    me schedule_on_worker(worker_id: usize, poll_fn: fn() -> Poll<()>) -> usize:
+        """Schedule on specific worker."""
+        val id = self.schedule(Priority.Normal, poll_fn)
         if worker_id < self.worker_count:
             self.workers[worker_id].push(id)
         id
@@ -646,15 +659,7 @@ impl HostScheduler:
             case None:
                 pass
 
-impl SchedulerCore for HostScheduler:
-    fn has_runnable() -> bool:
-        self.has_runnable()
-
-    fn run_one() -> bool:
-        self.run_one()
-
-    fn is_idle() -> bool:
-        self.is_idle()
+# Note: HostScheduler implements SchedulerCore via duck typing
 
 # ============================================================================
 # HostRuntime - Complete Runtime
@@ -668,7 +673,7 @@ class HostRuntime:
     Example:
         val runtime = HostRuntime.new()
 
-        val handle = runtime.spawn(async:
+        val handle = runtime.run_task(async:
             val data = await fetch(url)
             process(data)
         )
@@ -690,9 +695,9 @@ class HostRuntime:
             next_id: 0
         )
 
-    me spawn<T>(f: fn() -> T) -> HostTaskHandle<T>:
-        """Spawn task and return handle."""
-        val id = self.scheduler.spawn(Priority.Normal, \: Poll.Ready(()))
+    me run_task<T>(f: fn() -> T) -> HostTaskHandle<T>:
+        """Run task and return handle."""
+        val id = self.scheduler.schedule(Priority.Normal, \: Poll.Ready(()))
         HostTaskHandle(
             task_id: id,
             state: TaskState.Pending,
@@ -702,9 +707,9 @@ class HostRuntime:
             wakers: []
         )
 
-    me spawn_with_priority<T>(f: fn() -> T, priority: Priority) -> HostTaskHandle<T>:
-        """Spawn with specific priority."""
-        val id = self.scheduler.spawn(priority, \: Poll.Ready(()))
+    me run_task_with_priority<T>(f: fn() -> T, priority: Priority) -> HostTaskHandle<T>:
+        """Run with specific priority."""
+        val id = self.scheduler.schedule(priority, \: Poll.Ready(()))
         HostTaskHandle(
             task_id: id,
             state: TaskState.Pending,
@@ -741,23 +746,27 @@ fn join_all<T>(futures: [HostFuture<T>]) -> HostFuture<[T]>:
                 all_ready = false
 
     if all_ready:
-        HostFuture<[T]>.ready(results)
+        val ready: HostFuture<[T]> = HostFuture.ready(results)
+        ready
     else:
-        HostFuture<[T]>.pending()
+        val pending: HostFuture<[T]> = HostFuture.pending()
+        pending
 
 fn select<T>(futures: [HostFuture<T>]) -> HostFuture<(usize, T)>:
     """Return first completed future with index."""
     for idx in 0..futures.len():
         match futures[idx].poll():
             case Poll.Ready(v):
-                return HostFuture<(usize, T)>.ready((idx, v))
+                val ready: HostFuture<(usize, T)> = HostFuture.ready((idx, v))
+                return ready
             case Poll.Pending:
                 pass
-    HostFuture<(usize, T)>.pending()
+    val pending: HostFuture<(usize, T)> = HostFuture.pending()
+    pending
 
 fn race<T>(futures: [HostFuture<T>]) -> HostFuture<T>:
     """Return first completed future (discards index)."""
-    select(futures).map(\(idx, v): v)
+    select(futures).map(\pair: pair.1)
 
 fn timeout<T>(future: HostFuture<T>, millis: usize) -> HostFuture<Result<T, AsyncError>>:
     """Add timeout to future."""
@@ -765,11 +774,13 @@ fn timeout<T>(future: HostFuture<T>, millis: usize) -> HostFuture<Result<T, Asyn
     future.map(\v: Ok(v))
 
 # ============================================================================
-# FFI Functions
+# SFFI Functions (Pure Simple - No FFI Required!)
 # ============================================================================
-
-extern fn task_alloc_id() -> usize
-extern fn waker_signal(scheduler_ref: usize, task_id: usize)
+#
+# All FFI functions are now Pure Simple implementations from async_sffi:
+# - task_alloc_id() - Simple counter
+# - waker_signal()  - Simple registry
+# - No external FFI needed!
 
 # ============================================================================
 # Exports

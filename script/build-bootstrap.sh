@@ -138,11 +138,18 @@ mkdir -p "$TMP_DIR/lib/simple/app"
 echo -e "${GREEN}✓ Directory structure created${NC}"
 echo ""
 
-# Step 5: Copy runtime binary
+# Step 5: Copy runtime binary and create symlink
 echo -e "${GREEN}Step 3/7: Copying runtime binary...${NC}"
 cp "$RUNTIME_PATH" "$TMP_DIR/bin/simple"
 chmod 755 "$TMP_DIR/bin/simple"
+
+# Create symlink for backward compatibility
+cd "$TMP_DIR/bin"
+ln -sf simple simple_runtime
+cd - > /dev/null
+
 echo -e "${GREEN}✓ Runtime copied${NC}"
+echo -e "${GREEN}✓ Symlink created: bin/simple_runtime → bin/simple${NC}"
 echo ""
 
 # Step 6: Copy stdlib files
@@ -250,6 +257,9 @@ install:
     - name: simple
       target: bin/simple
       type: executable
+    - name: simple_runtime
+      target: bin/simple_runtime
+      type: symlink
 
   paths:
     runtime: lib/simple/

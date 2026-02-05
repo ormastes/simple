@@ -1,130 +1,101 @@
-# Simple Language Installer (Simple)
+#!simple
+# Simple Language Installer
 #
 # Installs Simple language to system or user directory.
 #
 # Usage:
-#   simple install.spl [--prefix=/usr/local]
+#   ./install.ssh [--prefix=/usr/local]
+#   simple install.ssh [--prefix=/usr/local]
 
 extern fn rt_env_cwd() -> text
-extern fn rt_env_get(name: text) -> text
-extern fn rt_env_home() -> text
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_file_copy(src: text, dst: text) -> bool
 extern fn rt_dir_create(path: text, recursive: bool) -> bool
 extern fn rt_dir_walk(path: text) -> [text]
+extern fn rt_process_run(cmd: text, args: [text]) -> text
 
 fn main():
-    val args = get_args()
-    val prefix = get_prefix(args)
-    # TODO: Replace direct FFI call with wrapper (env_cwd) from app.io or compiler.ffi
+    val prefix = "/usr/local"  # TODO: parse --prefix arg
     val script_dir = rt_env_cwd()
 
     print "Simple Language Installer"
     print "========================="
     print ""
-    print "Installing to: {prefix}"
+    print "Installing to: " + prefix
     print ""
 
     # Create directories
     print "Creating directories..."
-    # TODO: Replace direct FFI call with wrapper (dir_create) from app.io or compiler.ffi
     rt_dir_create(prefix + "/bin", true)
-    # TODO: Replace direct FFI call with wrapper (dir_create) from app.io or compiler.ffi
     rt_dir_create(prefix + "/lib", true)
-    # TODO: Replace direct FFI call with wrapper (dir_create) from app.io or compiler.ffi
     rt_dir_create(prefix + "/include", true)
-    # TODO: Replace direct FFI call with wrapper (dir_create) from app.io or compiler.ffi
     rt_dir_create(prefix + "/share/simple/src", true)
 
     # Install runtime binary
     print "Installing binaries..."
     val runtime_src = script_dir + "/bin/simple_runtime"
     val runtime_dst = prefix + "/bin/simple_runtime"
-    # TODO: Replace direct FFI call with wrapper (file_exists) from app.io or compiler.ffi
     if rt_file_exists(runtime_src):
-        # TODO: Replace direct FFI call with wrapper (file_copy) from app.io or compiler.ffi
         rt_file_copy(runtime_src, runtime_dst)
+        rt_process_run("chmod", ["+x", runtime_dst])
         print "  Installed simple_runtime"
     else:
         print "  ERROR: simple_runtime not found"
         return
 
     # Create CLI wrapper
-    val wrapper = "#!/bin/sh
-SHARE_DIR=\"{prefix}/share/simple\"
-RUNTIME=\"{prefix}/bin/simple_runtime\"
-export LD_LIBRARY_PATH=\"{prefix}/lib:$LD_LIBRARY_PATH\"
-exec \"$RUNTIME\" \"$SHARE_DIR/src/app/cli/main.spl\" \"$@\"
-"
-    # TODO: Replace direct FFI call with wrapper (file_write_text) from app.io or compiler.ffi
-    rt_file_write_text(prefix + "/bin/simple", wrapper)
+    val wrapper = "#!/bin/sh\nSHARE_DIR=\"" + prefix + "/share/simple\"\nRUNTIME=\"" + prefix + "/bin/simple_runtime\"\nexport LD_LIBRARY_PATH=\"" + prefix + "/lib:$LD_LIBRARY_PATH\"\nexec \"$RUNTIME\" \"$SHARE_DIR/src/app/cli/main.spl\" \"$@\"\n"
+    val wrapper_path = prefix + "/bin/simple"
+    rt_file_write_text(wrapper_path, wrapper)
+    rt_process_run("chmod", ["+x", wrapper_path])
     print "  Installed simple CLI wrapper"
 
     # Install libraries
     print "Installing libraries..."
     val lib_src = script_dir + "/lib/libsimple_ffi_wrapper.so"
-    # TODO: Replace direct FFI call with wrapper (file_exists) from app.io or compiler.ffi
     if rt_file_exists(lib_src):
-        # TODO: Replace direct FFI call with wrapper (file_copy) from app.io or compiler.ffi
         rt_file_copy(lib_src, prefix + "/lib/libsimple_ffi_wrapper.so")
         print "  Installed libsimple_ffi_wrapper.so"
 
     # Install headers
     print "Installing headers..."
     val header_src = script_dir + "/include/simple_ffi.h"
-    # TODO: Replace direct FFI call with wrapper (file_exists) from app.io or compiler.ffi
     if rt_file_exists(header_src):
-        # TODO: Replace direct FFI call with wrapper (file_copy) from app.io or compiler.ffi
         rt_file_copy(header_src, prefix + "/include/simple_ffi.h")
         print "  Installed simple_ffi.h"
 
     # Install source files
     print "Installing source files..."
-    copy_dir(script_dir + "/src", prefix + "/share/simple/src")
+    copy_source_tree(script_dir + "/src", prefix + "/share/simple/src")
 
     print ""
     print "Installation complete!"
     print ""
     print "Add to PATH if needed:"
-    print "  export PATH=\"{prefix}/bin:$PATH\""
+    print "  export PATH=\"" + prefix + "/bin:$PATH\""
     print ""
     print "Test installation:"
     print "  simple --version"
 
-fn get_prefix(args: [text]) -> text:
-    for arg in args:
-        if arg.starts_with("--prefix="):
-            return arg.slice(9)
-    "/usr/local"
-
-fn get_args() -> [text]:
-    # TODO: Get actual CLI args
-    []
-
-fn copy_dir(src: text, dst: text):
-    # TODO: Replace direct FFI call with wrapper (dir_create) from app.io or compiler.ffi
-    rt_dir_create(dst, true)
-    # TODO: Replace direct FFI call with wrapper (dir_walk) from app.io or compiler.ffi
+fn copy_source_tree(src: text, dst: text):
     val files = rt_dir_walk(src)
     var count = 0
-    for file in files:
-        if file.ends_with(".spl"):
-            val rel_path = file.slice(src.len() + 1)
-            val dst_file = dst + "/" + rel_path
-            # Create parent directory
+    for f in files:
+        if f.ends_with(".spl") or f.ends_with(".ssh"):
+            val rel = f.slice(src.len() + 1)
+            val dst_file = dst + "/" + rel
             val parent = get_parent(dst_file)
-            # TODO: Replace direct FFI call with wrapper (dir_create) from app.io or compiler.ffi
             rt_dir_create(parent, true)
-            # TODO: Replace direct FFI call with wrapper (file_copy) from app.io or compiler.ffi
-            rt_file_copy(file, dst_file)
+            rt_file_copy(f, dst_file)
             count = count + 1
-    print "  Copied {count} source files"
+    print "  Copied " + count.to_text() + " source files"
 
-fn get_parent(path: text) -> text:
-    val last_slash = path.rfind("/")
-    if last_slash >= 0:
-        path.slice(0, last_slash)
-    else:
-        "."
+fn get_parent(p: text) -> text:
+    var i = p.len() - 1
+    while i >= 0:
+        if p.char_at(i) == "/":
+            return p.slice(0, i)
+        i = i - 1
+    "."

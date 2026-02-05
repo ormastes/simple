@@ -377,6 +377,14 @@ impl MirLowering:
             case Yield(value):
                 self.lower_yield(value)
 
+            # Unsafe block - lower the body, no special handling
+            case UnsafeBlock(body):
+                self.lower_block(body) ?? self.builder.new_temp(MirType.unit())
+
+            # Inline assembly
+            case InlineAsm(asm):
+                self.lower_inline_asm(asm)
+
             case _:
                 self.error("unsupported MIR expression: {expr.kind}", nil)
                 nil
@@ -913,6 +921,53 @@ impl MirLowering:
         ], MirType.i64())
 
         result ?? self.builder.new_temp(MirType.i64())
+
+    me lower_inline_asm(asm: HirAsm) -> LocalId:
+        """Lower inline assembly from HIR to MIR.
+
+        Converts HIR inline assembly constraints to MIR operands.
+        """
+        # Lower all constraint value expressions to MIR operands
+        var inputs: [MirAsmOperand] = []
+        var outputs: [MirAsmOperand] = []
+
+        for constraint in asm.constraints:
+            # Lower the HIR expression to a local
+            val value_local = self.lower_expr(constraint.value)
+            val mir_operand = mir_operand_copy(value_local)
+
+            val asm_operand = MirAsmOperand(
+                name: constraint.name,
+                kind: constraint.kind,
+                location: constraint.location,
+                operand: mir_operand
+            )
+
+            # Categorize as input or output
+            match constraint.kind:
+                case In:
+                    inputs.push(asm_operand)
+                case Out | LateOut:
+                    outputs.push(asm_operand)
+                case InOut:
+                    # InOut constraints appear in both lists
+                    inputs.push(asm_operand)
+                    outputs.push(asm_operand)
+
+        # Emit inline assembly instruction
+        self.builder.emit(MirInst(
+            kind: MirInstKind.InlineAsm(
+                asm_template: asm.asm_template,
+                is_volatile: asm.is_volatile,
+                inputs: inputs,
+                outputs: outputs,
+                clobbers: asm.clobbers
+            ),
+            span: Some(asm.span)
+        ))
+
+        # Return a unit value (inline asm doesn't produce a value directly)
+        self.builder.new_temp(MirType.unit())
 
     me error(message: text, span: Span?):
         """Record a lowering error."""

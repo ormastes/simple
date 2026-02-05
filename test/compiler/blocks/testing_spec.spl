@@ -1,0 +1,432 @@
+# Testing Framework Tests - Test Helpers for Blocks
+#
+# Tests for compiler.blocks.testing module
+# Test helpers, mocking, and assertions
+
+use std.test
+use compiler.blocks.testing.{
+    test_parse, test_parse_error, test_validate, test_const_eval, test_no_const_eval,
+    mock_block,
+    assert_block_registered, assert_block_not_registered,
+    assert_parse_succeeds, assert_parse_fails,
+    assert_value_type, assert_validation_passes, assert_validation_fails
+}
+use compiler.blocks.easy.{block, block_with_validation, const_block}
+use compiler.blocks.value.{BlockValue}
+use compiler.blocks.modes.{LexerMode}
+use compiler.blocks.registry.{register_block, unregister_block, with_block}
+use compiler.blocks.definition.{ConstValue}
+
+describe "Testing - test_parse()":
+
+    it "succeeds for valid parse":
+        val simple = block("simple_parse", LexerMode.Raw, \text:
+            Ok(BlockValue.Raw(text.trim()))
+        )
+
+        with_block(simple, \:
+            # Should not throw
+            test_parse("simple_parse", "  content  ", BlockValue.Raw("content"))
+        )
+
+    it "fails for parse mismatch":
+        val mismatch = block("mismatch", LexerMode.Raw, \text:
+            Ok(BlockValue.Raw("different"))
+        )
+
+        with_block(mismatch, \:
+            val result = try:
+                test_parse("mismatch", "input", BlockValue.Raw("input"))
+                "no error"
+            catch e:
+                "error"
+
+            assert result == "error"
+        )
+
+describe "Testing - test_parse_error()":
+
+    it "succeeds when parse fails as expected":
+        val failing = block("failing_test", LexerMode.Raw, \text:
+            if text.contains("error"):
+                Err("Found error keyword")
+            else:
+                Ok(BlockValue.Raw(text))
+        )
+
+        with_block(failing, \:
+            # Should not throw
+            test_parse_error("failing_test", "error", "error keyword")
+        )
+
+    it "fails when parse succeeds unexpectedly":
+        val succeeds = block("succeeds_test", LexerMode.Raw, \text:
+            Ok(BlockValue.Raw(text))
+        )
+
+        with_block(succeeds, \:
+            val result = try:
+                test_parse_error("succeeds_test", "test", "should fail")
+                "no error"
+            catch e:
+                "error"
+
+            assert result == "error"
+        )
+
+    it "checks error message substring":
+        val custom_error = block("custom_err", LexerMode.Raw, \text:
+            Err("Custom error: invalid syntax")
+        )
+
+        with_block(custom_error, \:
+            # Should succeed with substring match
+            test_parse_error("custom_err", "test", "invalid syntax")
+
+            # Should fail with wrong substring
+            val result = try:
+                test_parse_error("custom_err", "test", "wrong message")
+                "no error"
+            catch e:
+                "error"
+
+            assert result == "error"
+        )
+
+describe "Testing - test_validate()":
+
+    it "succeeds for expected validation errors":
+        val validated = block_with_validation("validated_test", LexerMode.Raw,
+            \text: Ok(BlockValue.Custom("Number", 42)),
+            \value: ["Error 1", "Error 2"]
+        )
+
+        with_block(validated, \:
+            test_validate("validated_test",
+                BlockValue.Custom("Number", 42),
+                ["Error 1", "Error 2"]
+            )
+        )
+
+    it "fails for wrong error count":
+        val two_errors = block_with_validation("two_err", LexerMode.Raw,
+            \text: Ok(BlockValue.Raw(text)),
+            \value: ["Error 1", "Error 2"]
+        )
+
+        with_block(two_errors, \:
+            val result = try:
+                test_validate("two_err", BlockValue.Raw("test"), ["Error 1"])
+                "no error"
+            catch e:
+                "error"
+
+            assert result == "error"
+        )
+
+describe "Testing - test_const_eval()":
+
+    it "succeeds for expected const value":
+        val const_int = const_block("const_int", LexerMode.Raw,
+            \text: Ok(BlockValue.Custom("Int", 42)),
+            \value: Some(ConstValue.Int(42))
+        )
+
+        with_block(const_int, \:
+            test_const_eval("const_int",
+                BlockValue.Custom("Int", 42),
+                ConstValue.Int(42)
+            )
+        )
+
+    it "fails when eval returns None":
+        val no_eval = block("no_eval_test", LexerMode.Raw, \text:
+            Ok(BlockValue.Raw(text))
+        )
+
+        with_block(no_eval, \:
+            val result = try:
+                test_const_eval("no_eval_test",
+                    BlockValue.Raw("test"),
+                    ConstValue.String("test")
+                )
+                "no error"
+            catch e:
+                "error"
+
+            assert result == "error"
+        )
+
+describe "Testing - test_no_const_eval()":
+
+    it "succeeds when block has no const eval":
+        val no_const = block("no_const_test", LexerMode.Raw, \text:
+            Ok(BlockValue.Raw(text))
+        )
+
+        with_block(no_const, \:
+            test_no_const_eval("no_const_test", BlockValue.Raw("test"))
+        )
+
+    it "fails when block returns const value":
+        val has_const = const_block("has_const", LexerMode.Raw,
+            \text: Ok(BlockValue.Raw(text)),
+            \value: Some(ConstValue.String("const"))
+        )
+
+        with_block(has_const, \:
+            val result = try:
+                test_no_const_eval("has_const", BlockValue.Raw("test"))
+                "no error"
+            catch e:
+                "error"
+
+            assert result == "error"
+        )
+
+describe "Testing - mock_block()":
+
+    it "creates simple mock block":
+        val mock = mock_block("mockblock", \text:
+            Ok(BlockValue.Raw("mocked: " + text))
+        )
+
+        assert mock.kind() == "mockblock"
+
+        val ctx = BlockContext.test("input")
+        val result = mock.parse_payload("input", ctx)
+
+        assert result.ok.?
+        match result.unwrap():
+            case Raw(text):
+                assert text == "mocked: input"
+            case _:
+                assert false
+
+    it "can be used with scoped registration":
+        val mock = mock_block("scopedmock", \text:
+            Ok(BlockValue.Custom("Mock", text))
+        )
+
+        with_block(mock, \:
+            assert is_block_registered("scopedmock")
+
+            val ctx = BlockContext.test("test")
+            val result = mock.parse_payload("test", ctx)
+            assert result.ok.?
+        )
+
+describe "Testing - Assertion Helpers":
+
+    it "assert_block_registered() checks registration":
+        val temp = block("temp_reg", LexerMode.Raw, \t: Ok(BlockValue.Raw(t)))
+
+        with_block(temp, \:
+            # Should not throw
+            assert_block_registered("temp_reg")
+        )
+
+        # Should throw after unregistration
+        val result = try:
+            assert_block_registered("temp_reg")
+            "no error"
+        catch e:
+            "error"
+
+        assert result == "error"
+
+    it "assert_block_not_registered() checks non-registration":
+        # Should not throw for non-existent block
+        assert_block_not_registered("nonexistent_block")
+
+        # Should throw for registered block
+        val temp = block("temp_not_reg", LexerMode.Raw, \t: Ok(BlockValue.Raw(t)))
+
+        with_block(temp, \:
+            val result = try:
+                assert_block_not_registered("temp_not_reg")
+                "no error"
+            catch e:
+                "error"
+
+            assert result == "error"
+        )
+
+    it "assert_parse_succeeds() returns parsed value":
+        val parser = block("parser_succ", LexerMode.Raw, \text:
+            Ok(BlockValue.Custom("Parsed", text.upper()))
+        )
+
+        with_block(parser, \:
+            val value = assert_parse_succeeds("parser_succ", "hello")
+
+            match value:
+                case Custom("Parsed", text):
+                    assert text == "HELLO"
+                case _:
+                    assert false
+        )
+
+    it "assert_parse_fails() returns error":
+        val fails = block("parser_fails", LexerMode.Raw, \text:
+            Err("Always fails")
+        )
+
+        with_block(fails, \:
+            val error = assert_parse_fails("parser_fails", "test")
+
+            assert error.message.contains("fails")
+        )
+
+    it "assert_value_type() checks type":
+        val raw = BlockValue.Raw("test")
+        val custom = BlockValue.Custom("MyType", {})
+
+        # Should not throw
+        assert_value_type(raw, "Raw")
+        assert_value_type(custom, "MyType")
+
+        # Should throw for wrong type
+        val result = try:
+            assert_value_type(raw, "Custom")
+            "no error"
+        catch e:
+            "error"
+
+        assert result == "error"
+
+    it "assert_validation_passes() checks no errors":
+        val no_errors = block_with_validation("no_err", LexerMode.Raw,
+            \text: Ok(BlockValue.Raw(text)),
+            \value: []  # No errors
+        )
+
+        with_block(no_errors, \:
+            # Should not throw
+            assert_validation_passes("no_err", BlockValue.Raw("test"))
+        )
+
+    it "assert_validation_fails() checks for errors":
+        val has_errors = block_with_validation("has_err", LexerMode.Raw,
+            \text: Ok(BlockValue.Raw(text)),
+            \value: ["Error message"]
+        )
+
+        with_block(has_errors, \:
+            # Should not throw
+            assert_validation_fails("has_err", BlockValue.Raw("test"))
+        )
+
+describe "Testing - Integration":
+
+    it "combines multiple test helpers":
+        val integrated = block_with_validation("integrated", LexerMode.Raw,
+            \text:
+                if text.len() > 0:
+                    Ok(BlockValue.Custom("Text", text))
+                else:
+                    Err("Empty text")
+            ,
+            \value:
+                match value:
+                    case Custom("Text", text):
+                        if text.len() < 5:
+                            ["Text too short"]
+                        else:
+                            []
+                    case _:
+                        ["Wrong type"]
+        )
+
+        with_block(integrated, \:
+            # Test successful parse
+            val value = assert_parse_succeeds("integrated", "hello world")
+            assert_value_type(value, "Text")
+
+            # Test validation passes for long text
+            assert_validation_passes("integrated", BlockValue.Custom("Text", "long enough"))
+
+            # Test validation fails for short text
+            assert_validation_fails("integrated", BlockValue.Custom("Text", "hi"))
+
+            # Test parse error for empty
+            test_parse_error("integrated", "", "Empty")
+        )
+
+    it "works with mock blocks":
+        val mock = mock_block("mock_int", \text:
+            if text == "valid":
+                Ok(BlockValue.Custom("Valid", text))
+            else:
+                Err("Invalid input")
+        )
+
+        with_block(mock, \:
+            # Test success case
+            val value = assert_parse_succeeds("mock_int", "valid")
+            assert_value_type(value, "Valid")
+
+            # Test error case
+            assert_parse_fails("mock_int", "invalid")
+        )
+
+describe "Testing - Edge Cases":
+
+    it "handles empty payloads":
+        val empty = block("empty_test", LexerMode.Raw, \text:
+            Ok(BlockValue.Raw(text))
+        )
+
+        with_block(empty, \:
+            test_parse("empty_test", "", BlockValue.Raw(""))
+        )
+
+    it "handles large payloads":
+        val large = block("large_test", LexerMode.Raw, \text:
+            Ok(BlockValue.Custom("Large", text.len()))
+        )
+
+        with_block(large, \:
+            val big_text = "x" * 10000
+            val value = assert_parse_succeeds("large_test", big_text)
+
+            match value:
+                case Custom("Large", len):
+                    assert len == 10000
+                case _:
+                    assert false
+        )
+
+    it "handles unicode in tests":
+        val unicode = block("unicode_test", LexerMode.Raw, \text:
+            Ok(BlockValue.Custom("Unicode", text))
+        )
+
+        with_block(unicode, \:
+            val value = assert_parse_succeeds("unicode_test", "Hello 世界 🌍")
+
+            match value:
+                case Custom("Unicode", text):
+                    assert text.contains("世界")
+                case _:
+                    assert false
+        )
+
+    it "handles complex error messages":
+        val complex_err = block("complex", LexerMode.Raw, \text:
+            Err("Error: Expected format <key>:<value>, got: " + text)
+        )
+
+        with_block(complex_err, \:
+            # Should match substring
+            test_parse_error("complex", "bad", "Expected format")
+            test_parse_error("complex", "bad", "got: bad")
+        )
+
+# ============================================================================
+# Feature Tags
+# ============================================================================
+
+tags: [compiler, blocks, testing, meta-tests]
+priority: high
+status: complete

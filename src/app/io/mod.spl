@@ -6,6 +6,7 @@ extern fn rt_cli_get_args() -> [str]
 extern fn rt_exit(code: i64)
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 extern fn rt_cli_run_tests(args: [str], gc_log: bool, gc_off: bool) -> i64
+extern fn rt_compile_to_llvm_ir(source_file: text, target_triple: text, bare_metal: bool) -> (text, text, i64)
 
 export file_exists, file_read, file_write, file_copy, file_delete, file_atomic_write
 export file_append, file_modified_time, file_remove, file_hash_sha256, file_read_lines
@@ -22,6 +23,7 @@ export timestamp_hour, timestamp_minute, timestamp_second
 export getpid, hostname, cpu_count, path_basename
 export get_args, exit, cli_get_args, cli_exit, cli_file_exists
 export cli_replay, cli_constr, cli_check, cli_compile, cli_todo_scan, cli_gen_lean, cli_info
+export rt_compile_to_llvm_ir
 export cli_run_code, cli_run_file, cli_watch_file, cli_run_repl, cli_run_tests
 export cli_run_lint, cli_run_fmt, cli_run_fix, cli_run_verify, cli_run_migrate
 export cli_run_mcp, cli_run_diff, cli_run_query, cli_run_spec_coverage
@@ -31,7 +33,7 @@ export cli_handle_web, cli_handle_diagram, cli_handle_run, cli_handle_linkers
 export cli_read_file, context_generate, context_stats, settlement_main
 export fault_set_stack_overflow_detection, fault_set_max_recursion_depth
 export fault_set_timeout, fault_set_execution_limit
-export eprintln
+export eprint
 export math_exp, math_ln, math_sqrt, math_cos, math_sin, math_random
 
 # ============================================================================
@@ -520,7 +522,244 @@ fn cli_check(args: [str]) -> i64:
     cli_not_implemented("Type checker")
 
 fn cli_compile(args: [str]) -> i64:
-    cli_not_implemented("Compiler")
+    # Parse: simple compile [options] <source.spl>
+    # Options:
+    #   --target=<target>        Target architecture (e.g., baremetal-x86)
+    #   --emit=<format>          Output format: llvm-ir, object, elf (default: elf)
+    #   -o <output>              Output file path
+    #   --help                   Show help
+
+    # Default values
+    var source_file: text = ""
+    var output_file: text = ""
+    var target: text = ""
+    var emit: text = "elf"
+    var verbose: bool = false
+
+    # Parse arguments (skip first arg if it's "compile")
+    var i = 0
+    if args.len() > 0 and args[0] == "compile":
+        i = 1
+
+    while i < args.len():
+        val arg = args[i]
+
+        if arg == "--help" or arg == "-h":
+            print "Simple Compiler"
+            print ""
+            print "Usage: simple compile [options] <source.spl>"
+            print ""
+            print "Options:"
+            print "  --target=<target>     Target: baremetal-x86, baremetal-arm, etc."
+            print "  --emit=<format>       Output: llvm-ir, object, elf (default: elf)"
+            print "  -o <output>           Output file path"
+            print "  --verbose, -v         Verbose output"
+            print "  --help, -h            Show this help"
+            print ""
+            print "Examples:"
+            print "  simple compile hello.spl"
+            print "  simple compile --target=baremetal-x86 --emit=llvm-ir kernel.spl"
+            print "  simple compile --target=baremetal-x86 -o kernel.elf main.spl"
+            return 0
+        elif arg.starts_with("--target="):
+            target = arg.substring(9)
+        elif arg.starts_with("--emit="):
+            emit = arg.substring(7)
+        elif arg == "-o":
+            i = i + 1
+            if i < args.len():
+                output_file = args[i]
+            else:
+                eprint("Error: -o requires an argument")
+                return 1
+        elif arg == "--verbose" or arg == "-v":
+            verbose = true
+        elif not arg.starts_with("-"):
+            # Positional argument - source file
+            if source_file == "":
+                source_file = arg
+            else:
+                eprint("Error: Multiple source files not supported")
+                return 1
+        else:
+            eprint("Error: Unknown option: {arg}")
+            return 1
+
+        i = i + 1
+
+    # Validate required arguments
+    if source_file == "":
+        eprint("Error: No source file specified")
+        eprint("Usage: simple compile [options] <source.spl>")
+        return 1
+
+    # Check if source file exists
+    if not file_exists(source_file):
+        eprint("Error: Source file not found: {source_file}")
+        return 1
+
+    # Handle bare-metal compilation
+    if target.starts_with("baremetal-"):
+        return compile_baremetal(source_file, target, emit, output_file, verbose)
+
+    # Handle normal compilation
+    eprint("Error: Non-bare-metal compilation not yet implemented")
+    eprint("Hint: Use --target=baremetal-x86 for bare-metal targets")
+    return 1
+
+# Bare-metal compilation using BaremetalBuilder
+fn compile_baremetal(source_file: text, target: text, emit: text, output_file: text, verbose: bool) -> i64:
+    # Import would be: use app.build.baremetal (BaremetalConfig, BaremetalBuilder)
+    # But for now, we'll shell out to the build system
+
+    if verbose:
+        print "Compiling {source_file} for {target}"
+        print "  Emit: {emit}"
+        if output_file != "":
+            print "  Output: {output_file}"
+
+    # For now, call the build system via shell
+    # TODO: Import and use BaremetalBuilder directly once module imports work
+
+    # Determine architecture from target
+    val arch = if target == "baremetal-x86":
+        "i686"
+    elif target == "baremetal-x86_64":
+        "x86_64"
+    elif target == "baremetal-arm":
+        "armv7"
+    elif target == "baremetal-aarch64":
+        "aarch64"
+    elif target == "baremetal-riscv32":
+        "riscv32"
+    elif target == "baremetal-riscv64":
+        "riscv64"
+    else:
+        eprint("Error: Unknown bare-metal target: {target}")
+        eprint("Supported: baremetal-x86, baremetal-x86_64, baremetal-arm,")
+        eprint("           baremetal-aarch64, baremetal-riscv32, baremetal-riscv64")
+        return 1
+
+    # Create output directory
+    if not dir_create("build/baremetal", true):
+        eprint("Error: Failed to create build/baremetal directory")
+        return 1
+
+    # Determine target triple from architecture
+    val target_triple = arch + "-unknown-none"
+
+    if verbose:
+        print "Compiling Simple → LLVM IR (pure Simple compiler)..."
+        print "  Target triple: {target_triple}"
+
+    # Step 1: Compile Simple source to LLVM IR using pure Simple compiler
+    # TODO: Import and use compiler.driver and compiler.backend.llvm_backend
+    # For now, return helpful error message
+
+    val llvm_ir = ""
+    val error_msg = "Pure Simple compilation not yet wired up.\n\n\
+To complete this, we need to:\n\
+1. Import compiler.driver (CompilerDriver, compile_file)\n\
+2. Import compiler.backend.llvm_backend (LlvmBackend, MirToLlvm)\n\
+3. Compile source → MIR using CompilerDriver\n\
+4. Translate MIR → LLVM IR using MirToLlvm.translate_module()\n\
+5. Return the textual LLVM IR\n\n\
+The LLVM backend already generates textual IR in pure Simple!\n\
+See: src/compiler/backend/llvm_backend.spl line 790\n\n\
+This is ~20-30 lines of Simple code to wire up.\n\
+No Rust FFI needed - it's pure Simple!"
+
+    if llvm_ir == "":
+        eprint("Error: Compilation not yet wired up")
+        eprint(error_msg)
+        return 1
+
+    # Write LLVM IR to file
+    val base_name = source_file.replace(".spl", "").replace("/", "_")
+    val ir_file = "build/baremetal/{base_name}.ll"
+    if not file_write(ir_file, llvm_ir):
+        eprint("Error: Failed to write LLVM IR to {ir_file}")
+        return 1
+
+    if verbose:
+        print "  Generated: {ir_file}"
+
+    # If only emitting LLVM IR, stop here
+    if emit == "llvm-ir":
+        if output_file != "":
+            if not file_copy(ir_file, output_file):
+                eprint("Error: Failed to copy to {output_file}")
+                return 1
+            print "Output: {output_file}"
+        else:
+            print "Output: {ir_file}"
+        return 0
+
+    # Step 2: Compile LLVM IR to object file using llc
+    if verbose:
+        print "Compiling LLVM IR → Object file..."
+
+    val obj_file = "build/baremetal/{base_name}.o"
+    val (llc_out, llc_err, llc_exit) = process_run("llc", [
+        "--filetype=obj",
+        "--relocation-model=static",
+        ir_file,
+        "-o", obj_file
+    ])
+
+    if llc_exit != 0:
+        eprint("Error: llc compilation failed")
+        eprint(llc_err)
+        return 1
+
+    if verbose:
+        print "  Generated: {obj_file}"
+
+    # If only emitting object file, stop here
+    if emit == "object":
+        if output_file != "":
+            if not file_copy(obj_file, output_file):
+                eprint("Error: Failed to copy to {output_file}")
+                return 1
+            print "Output: {output_file}"
+        else:
+            print "Output: {obj_file}"
+        return 0
+
+    # Step 3: Link to ELF binary using ld
+    if verbose:
+        print "Linking Object → ELF binary..."
+
+    val elf_file = if output_file != "":
+        output_file
+    else:
+        "build/baremetal/kernel.elf"
+
+    # Generate linker script if needed
+    # For now, assume linker script exists at build/baremetal/linker.ld
+    val linker_script = "build/baremetal/linker.ld"
+
+    val (ld_out, ld_err, ld_exit) = process_run("ld", [
+        "-T", linker_script,
+        "-nostdlib",
+        "--entry=_start",
+        obj_file,
+        "-o", elf_file
+    ])
+
+    if ld_exit != 0:
+        eprint("Error: Linking failed")
+        eprint(ld_err)
+        eprint("")
+        eprint("Note: Linker script should be at: {linker_script}")
+        eprint("Generate it using: simple linker-gen boards/qemu_x86.sdn")
+        return 1
+
+    if verbose:
+        print "  Generated: {elf_file}"
+
+    print "Success: {elf_file}"
+    return 0
 
 fn cli_info(args: [str]) -> i64:
     cli_not_implemented("Info tool")
@@ -550,7 +789,7 @@ fn fault_set_timeout(secs: i64):
 fn fault_set_execution_limit(limit: i64):
     ()
 
-fn eprintln(msg: text):
+fn eprint(msg: text):
     print "[STDERR] {msg}"
 
 # ============================================================================

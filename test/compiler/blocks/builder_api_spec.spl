@@ -1,0 +1,476 @@
+# Builder API Tests - Fluent Block Building
+#
+# Tests for compiler.blocks.builder module
+# Tier 2 API: BlockBuilder with fluent interface
+
+use std.test
+use compiler.blocks.builder.{BlockBuilder}
+use compiler.blocks.value.{BlockValue}
+use compiler.blocks.modes.{LexerMode, SyntaxFeatures}
+use compiler.blocks.context.{BlockContext}
+use compiler.blocks.registry.{with_block}
+use compiler.blocks.definition.{ConstValue}
+
+describe "BlockBuilder - Construction":
+
+    it "creates builder with new()":
+        val builder = BlockBuilder.new("testblock")
+
+        # Should have defaults
+        assert builder._kind == "testblock"
+        assert builder._mode.is_raw()  # Default mode
+        assert not builder._parser.?  # Parser not set yet
+
+    it "requires parser to be set":
+        val builder = BlockBuilder.new("noparser")
+
+        # Should panic when building without parser
+        val result = try:
+            builder.build()
+            "success"
+        catch e:
+            "error"
+
+        assert result == "error"
+
+    it "builds successfully with parser":
+        val block_def = BlockBuilder.new("simple")
+            .simple_parser(\text: Ok(BlockValue.Raw(text)))
+            .build()
+
+        assert block_def.kind() == "simple"
+
+describe "BlockBuilder - Lexer Modes":
+
+    it "supports raw_text() shortcut":
+        val block_def = BlockBuilder.new("raw")
+            .raw_text()
+            .simple_parser(\t: Ok(BlockValue.Raw(t)))
+            .build()
+
+        assert block_def.lexer_mode().is_raw()
+
+    it "supports math_mode() shortcut":
+        val block_def = BlockBuilder.new("math")
+            .math_mode()
+            .simple_parser(\t: Ok(BlockValue.Raw(t)))
+            .build()
+
+        assert block_def.lexer_mode().is_math()
+
+    it "supports normal_mode() shortcut":
+        val block_def = BlockBuilder.new("normal")
+            .normal_mode()
+            .simple_parser(\t: Ok(BlockValue.Raw(t)))
+            .build()
+
+        assert block_def.lexer_mode().is_normal()
+
+    it "supports explicit lexer_mode()":
+        val block_def = BlockBuilder.new("explicit")
+            .lexer_mode(LexerMode.Math)
+            .simple_parser(\t: Ok(BlockValue.Raw(t)))
+            .build()
+
+        assert block_def.lexer_mode().is_math()
+
+describe "BlockBuilder - Feature Control":
+
+    it "enables individual features":
+        val block_def = BlockBuilder.new("feature")
+            .enable_feature("power_caret")
+            .enable_feature("matrix_mul")
+            .simple_parser(\t: Ok(BlockValue.Raw(t)))
+            .build()
+
+        val features = block_def.syntax_features()
+        assert features.power_caret
+        assert features.matrix_mul
+        assert not features.transpose_quote  # Not enabled
+
+    it "disables features":
+        val block_def = BlockBuilder.new("disable")
+            .enable_all_math()  # Enable all
+            .disable_feature("power_caret")  # Then disable one
+            .simple_parser(\t: Ok(BlockValue.Raw(t)))
+            .build()
+
+        val features = block_def.syntax_features()
+        assert not features.power_caret  # Disabled
+        assert features.transpose_quote  # Still enabled
+        assert features.matrix_mul  # Still enabled
+
+    it "enables all math features with preset":
+        val block_def = BlockBuilder.new("allmath")
+            .enable_all_math()
+            .simple_parser(\t: Ok(BlockValue.Raw(t)))
+            .build()
+
+        val features = block_def.syntax_features()
+        assert features.power_caret
+        assert features.transpose_quote
+        assert features.implicit_multiplication
+        assert features.broadcast_ops
+        assert features.matrix_mul
+
+    it "enables pipeline features with preset":
+        val block_def = BlockBuilder.new("pipeline")
+            .enable_pipelines()
+            .simple_parser(\t: Ok(BlockValue.Raw(t)))
+            .build()
+
+        val features = block_def.syntax_features()
+        assert features.pipe_forward
+        assert features.composition
+
+    it "enables deep learning features":
+        val block_def = BlockBuilder.new("dl")
+            .enable_deep_learning()
+            .simple_parser(\t: Ok(BlockValue.Raw(t)))
+            .build()
+
+        val features = block_def.syntax_features()
+        assert features.auto_backward
+
+describe "BlockBuilder - Parser Configuration":
+
+    it "supports simple_parser with simple signature":
+        val block_def = BlockBuilder.new("simple")
+            .simple_parser(\text:
+                if text.?.  :
+                    Ok(BlockValue.Raw(text))
+                else:
+                    Err("Empty text")
+            )
+            .build()
+
+        val ctx = BlockContext.test("hello")
+        val result = block_def.parse_payload("hello", ctx)
+        assert result.ok.?
+
+        val ctx2 = BlockContext.test("")
+        val result2 = block_def.parse_payload("", ctx2)
+        assert result2.err.?
+
+    it "supports parser with full signature":
+        val block_def = BlockBuilder.new("full")
+            .parser(\payload, ctx:
+                # Can access context
+                if ctx.is_top_level:
+                    Ok(BlockValue.Custom("TopLevel", payload))
+                else:
+                    Ok(BlockValue.Custom("Nested", payload))
+            )
+            .build()
+
+        val ctx = BlockContext.test("test").at_top_level()
+        val result = block_def.parse_payload("test", ctx)
+
+        assert result.ok.?
+        match result.unwrap():
+            case Custom("TopLevel", _):
+                pass  # Expected
+            case _:
+                assert false
+
+describe "BlockBuilder - Validation":
+
+    it "supports simple_validator":
+        val block_def = BlockBuilder.new("validated")
+            .simple_parser(\text:
+                val len = text.len()
+                Ok(BlockValue.Custom("Text", len))
+            )
+            .simple_validator(\value:
+                match value:
+                    case Custom("Text", len):
+                        if len < 5:
+                            ["Text too short (min 5 chars)"]
+                        elif len > 100:
+                            ["Text too long (max 100 chars)"]
+                        else:
+                            []
+                    case _:
+                        ["Wrong type"]
+            )
+            .build()
+
+        val ctx = BlockContext.test("")
+
+        # Valid
+        val valid = BlockValue.Custom("Text", 10)
+        assert block_def.validate(valid, ctx).len() == 0
+
+        # Too short
+        val short = BlockValue.Custom("Text", 3)
+        assert block_def.validate(short, ctx).len() == 1
+
+        # Too long
+        val long = BlockValue.Custom("Text", 150)
+        assert block_def.validate(long, ctx).len() == 1
+
+    it "supports validator with full signature":
+        val block_def = BlockBuilder.new("fullval")
+            .simple_parser(\t: Ok(BlockValue.Raw(t)))
+            .validator(\value, ctx:
+                # Can use context in validation
+                var errors = []
+                if ctx.is_top_level and not value.is_raw():
+                    errors = errors.push(BlockError.validation("Top-level must be raw"))
+                errors
+            )
+            .build()
+
+        val ctx = BlockContext.test("").at_top_level()
+        val errors = block_def.validate(BlockValue.Raw("ok"), ctx)
+        assert errors.len() == 0
+
+    it "has no validation by default":
+        val block_def = BlockBuilder.new("noval")
+            .simple_parser(\t: Ok(BlockValue.Raw(t)))
+            .build()
+
+        val ctx = BlockContext.test("")
+        val errors = block_def.validate(BlockValue.Raw("test"), ctx)
+        assert errors.len() == 0
+
+describe "BlockBuilder - Compile-Time Evaluation":
+
+    it "supports const_eval":
+        val block_def = BlockBuilder.new("const")
+            .simple_parser(\t: Ok(BlockValue.Custom("Const", t)))
+            .const_eval(\value:
+                match value:
+                    case Custom("Const", "42"):
+                        Some(ConstValue.Int(42))
+                    case Custom("Const", "true"):
+                        Some(ConstValue.Bool(true))
+                    case _:
+                        nil
+            )
+            .build()
+
+        # Evaluates to const
+        val const_val = block_def.eval_const(BlockValue.Custom("Const", "42"))
+        assert const_val.?
+
+        # Returns nil for non-const
+        val non_const = block_def.eval_const(BlockValue.Custom("Const", "variable"))
+        assert not non_const.?
+
+    it "has no const_eval by default":
+        val block_def = BlockBuilder.new("noconst")
+            .simple_parser(\t: Ok(BlockValue.Raw(t)))
+            .build()
+
+        val result = block_def.eval_const(BlockValue.Raw("test"))
+        assert not result.?
+
+describe "BlockBuilder - IDE Support":
+
+    it "supports highlighter":
+        val block_def = BlockBuilder.new("highlight")
+            .simple_parser(\t: Ok(BlockValue.Raw(t)))
+            .highlighter(\text:
+                # Simple highlighter - find "keyword"
+                if text.contains("keyword"):
+                    [HighlightToken(start: 0, end: 7, kind: HighlightKind.Keyword)]
+                else:
+                    []
+            )
+            .build()
+
+        val tokens = block_def.highlight("keyword found")
+        assert tokens.len() == 1
+
+    it "supports completer":
+        val block_def = BlockBuilder.new("complete")
+            .simple_parser(\t: Ok(BlockValue.Raw(t)))
+            .completer(\text, cursor:
+                # Simple completer
+                [
+                    Completion(
+                        label: "complete",
+                        kind: CompletionKind.Keyword,
+                        detail: nil,
+                        insert_text: nil,
+                        documentation: nil
+                    )
+                ]
+            )
+            .build()
+
+        val completions = block_def.completions("com", 3)
+        assert completions.len() == 1
+        assert completions[0].label == "complete"
+
+    it "supports hover_provider":
+        val block_def = BlockBuilder.new("hover")
+            .simple_parser(\t: Ok(BlockValue.Raw(t)))
+            .hover_provider(\text, cursor:
+                Some(HoverInfo(
+                    contents: "Hover information",
+                    range: Some((cursor, cursor + 5))
+                ))
+            )
+            .build()
+
+        val hover = block_def.hover("text", 0)
+        assert hover.?
+        assert hover.unwrap().contents == "Hover information"
+
+    it "has no IDE support by default":
+        val block_def = BlockBuilder.new("noide")
+            .simple_parser(\t: Ok(BlockValue.Raw(t)))
+            .build()
+
+        assert block_def.highlight("test").len() == 0
+        assert block_def.completions("test", 0).len() == 0
+        assert not block_def.hover("test", 0).?
+
+describe "BlockBuilder - Documentation":
+
+    it "supports doc() for description":
+        val block_def = BlockBuilder.new("documented")
+            .doc("This is a documented block")
+            .simple_parser(\t: Ok(BlockValue.Raw(t)))
+            .build()
+
+        assert block_def.description() == "This is a documented block"
+
+    it "supports example() for examples":
+        val block_def = BlockBuilder.new("examples")
+            .simple_parser(\t: Ok(BlockValue.Raw(t)))
+            .example("code1", "Example 1")
+            .example("code2", "Example 2", output: "output2")
+            .build()
+
+        val examples = block_def.examples()
+        assert examples.len() == 2
+        assert examples[0].code == "code1"
+        assert examples[1].output.? and examples[1].output.unwrap() == "output2"
+
+    it "has default description if not set":
+        val block_def = BlockBuilder.new("default")
+            .simple_parser(\t: Ok(BlockValue.Raw(t)))
+            .build()
+
+        val desc = block_def.description()
+        assert desc.contains("default")
+
+describe "BlockBuilder - Method Chaining":
+
+    it "chains multiple configuration methods":
+        val block_def = BlockBuilder.new("chained")
+            .raw_text()
+            .enable_feature("power_caret")
+            .enable_feature("matrix_mul")
+            .simple_parser(\t: Ok(BlockValue.Raw(t)))
+            .simple_validator(\v: [])
+            .const_eval(\v: nil)
+            .doc("Chained configuration")
+            .example("test", "Test example")
+            .build()
+
+        assert block_def.kind() == "chained"
+        assert block_def.lexer_mode().is_raw()
+        assert block_def.syntax_features().power_caret
+        assert block_def.description() == "Chained configuration"
+        assert block_def.examples().len() == 1
+
+    it "preserves order of operations":
+        val block_def = BlockBuilder.new("order")
+            .enable_all_math()  # Enable all
+            .disable_feature("power_caret")  # Disable one
+            .enable_feature("power_caret")  # Re-enable
+            .simple_parser(\t: Ok(BlockValue.Raw(t)))
+            .build()
+
+        assert block_def.syntax_features().power_caret  # Should be enabled
+
+describe "BlockBuilder - Integration":
+
+    it "works with scoped registration":
+        val block_def = BlockBuilder.new("scoped")
+            .raw_text()
+            .simple_parser(\t: Ok(BlockValue.Custom("Scoped", t)))
+            .build()
+
+        with_block(block_def, \:
+            assert is_block_registered("scoped")
+
+            val ctx = BlockContext.test("test")
+            val result = block_def.parse_payload("test", ctx)
+            assert result.ok.?
+        )
+
+        assert not is_block_registered("scoped")
+
+    it "produces working block definition":
+        val sql = BlockBuilder.new("sql")
+            .raw_text()
+            .simple_parser(\text:
+                # Simulated SQL parser
+                Ok(BlockValue.Custom("SQL", text.trim()))
+            )
+            .simple_validator(\value:
+                match value:
+                    case Custom("SQL", query):
+                        if not query.starts_with("SELECT"):
+                            ["Query must start with SELECT"]
+                        else:
+                            []
+                    case _:
+                        ["Expected SQL query"]
+            )
+            .build()
+
+        val ctx = BlockContext.test("")
+
+        # Valid SQL
+        val valid = BlockValue.Custom("SQL", "SELECT * FROM users")
+        assert sql.validate(valid, ctx).len() == 0
+
+        # Invalid SQL
+        val invalid = BlockValue.Custom("SQL", "DELETE FROM users")
+        assert sql.validate(invalid, ctx).len() == 1
+
+describe "BlockBuilder - Edge Cases":
+
+    it "handles empty configuration":
+        val minimal = BlockBuilder.new("minimal")
+            .simple_parser(\t: Ok(BlockValue.Raw(t)))
+            .build()
+
+        # Should have all defaults
+        assert minimal.lexer_mode().is_raw()
+        assert not minimal.syntax_features().power_caret
+        assert minimal.validate(BlockValue.Raw(""), BlockContext.test("")).len() == 0
+
+    it "handles feature enable/disable patterns":
+        val toggle = BlockBuilder.new("toggle")
+            .enable_feature("power_caret")
+            .enable_feature("power_caret")  # Enable twice
+            .disable_feature("power_caret")  # Then disable
+            .enable_feature("power_caret")  # Then enable again
+            .simple_parser(\t: Ok(BlockValue.Raw(t)))
+            .build()
+
+        assert toggle.syntax_features().power_caret  # Should end up enabled
+
+    it "handles unknown features gracefully":
+        val unknown = BlockBuilder.new("unknown")
+            .enable_feature("nonexistent_feature")  # Should not error
+            .simple_parser(\t: Ok(BlockValue.Raw(t)))
+            .build()
+
+        # Should still build successfully
+        assert unknown.kind() == "unknown"
+
+# ============================================================================
+# Feature Tags
+# ============================================================================
+
+tags: [compiler, blocks, builder-api, tier2]
+priority: high
+status: complete

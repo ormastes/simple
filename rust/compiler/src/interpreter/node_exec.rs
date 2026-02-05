@@ -671,7 +671,17 @@ fn exec_assignment(
 
         // Case 1: Plain identifier: arr[i] = value
         if let Expr::Identifier(container_name) = receiver.as_ref() {
-            if let Some(container) = env.get(container_name).cloned() {
+            // Try local env first
+            let container_opt = env.get(container_name).cloned();
+            // Try module globals if not in local env
+            let is_global = container_opt.is_none();
+            let container = if let Some(c) = container_opt {
+                Some(c)
+            } else {
+                MODULE_GLOBALS.with(|cell| cell.borrow().get(container_name).cloned())
+            };
+
+            if let Some(container) = container {
                 let new_container = match container {
                     Value::Array(mut arr) => {
                         let idx = index_val.as_int()? as usize;
@@ -724,7 +734,15 @@ fn exec_assignment(
                         ));
                     }
                 };
-                env.insert(container_name.clone(), new_container);
+
+                // Update the correct storage
+                if is_global {
+                    MODULE_GLOBALS.with(|cell| {
+                        cell.borrow_mut().insert(container_name.clone(), new_container);
+                    });
+                } else {
+                    env.insert(container_name.clone(), new_container);
+                }
                 Ok(Control::Next)
             } else {
                 // E1001 - Undefined Variable

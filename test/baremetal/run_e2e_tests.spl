@@ -1,0 +1,85 @@
+# End-to-End Bare-Metal Test Runner
+#
+# Compiles and runs bare-metal tests in QEMU
+#
+# Usage:
+#   simple test/baremetal/run_e2e_tests.spl
+
+from app.build.baremetal import {BaremetalConfig, BaremetalBuilder, QemuRunner}
+from app.io.mod import {print}
+
+fn run_test(test_name: text, source_file: text) -> bool:
+    print "Running test: {test_name}"
+    print "  Source: {source_file}"
+
+    # Create bare-metal config for QEMU x86
+    var config = BaremetalConfig.qemu_x86()
+
+    # Build the test
+    val builder = BaremetalBuilder.new(config)
+    val build_result = builder.build([source_file])
+
+    if not build_result.success:
+        print "  [FAIL] Build failed:"
+        print "    {build_result.stderr}"
+        return false
+
+    print "  [OK] Build successful ({build_result.duration_ms}ms)"
+
+    # Run in QEMU (30 second timeout)
+    val runner = QemuRunner.new(config, 30000)
+    val kernel_path = "{config.output_dir}/kernel.elf"
+    val test_result = runner.run(kernel_path)
+
+    if not test_result.success:
+        print "  [FAIL] Test failed:"
+        print "    Exit code: {test_result.exit_code}"
+        print "    Output: {test_result.stdout}"
+        return false
+
+    print "  [PASS] Test passed"
+    print "    Tests run: {test_result.tests_run}"
+    print "    Tests passed: {test_result.tests_passed}"
+    print "    Tests failed: {test_result.tests_failed}"
+    print "    Output:"
+    for line in test_result.stdout.lines():
+        print "      {line}"
+
+    true
+
+fn main():
+    print "=== Bare-Metal End-to-End Tests ==="
+    print ""
+
+    var total = 0
+    var passed = 0
+
+    # Test 1: Simple Hello
+    total = total + 1
+    if run_test("Simple Hello", "test/baremetal/e2e_simple_hello.spl"):
+        passed = passed + 1
+    print ""
+
+    # Test 2: ASM Constraints
+    total = total + 1
+    if run_test("ASM Constraints", "test/baremetal/e2e_asm_constraints.spl"):
+        passed = passed + 1
+    print ""
+
+    # Test 3: Full QEMU Test
+    total = total + 1
+    if run_test("Hello QEMU", "test/baremetal/e2e_hello_qemu.spl"):
+        passed = passed + 1
+    print ""
+
+    # Summary
+    print "=== Test Summary ==="
+    print "  Total:  {total}"
+    print "  Passed: {passed}"
+    print "  Failed: {total - passed}"
+    print ""
+
+    if passed == total:
+        print "All tests PASSED!"
+    else:
+        print "Some tests FAILED!"
