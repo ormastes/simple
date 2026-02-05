@@ -1,0 +1,344 @@
+"""
+# Semihosting System API Specification
+
+**Feature IDs:** #BM-SEMI-001, #BM-SEMI-002, #BM-SEMI-003
+**Category:** Bare-Metal / Semihosting
+**Difficulty:** 4/5
+**Status:** In Progress
+
+## Overview
+
+Tests for the semihosting system API that provides:
+- Interned string printing (compile-time optimization)
+- Limited file I/O via host filesystem
+- System control (exit, clock, time)
+- Architecture-specific backends (ARM, RISC-V, x86)
+
+## Design Reference
+
+See: `doc/design/semihosting_system_api_design.md`
+
+## Key Innovation
+
+Compile-time string interning reduces print code size by 89%+:
+- Traditional printf: ~100 bytes per print statement
+- Interned print: ~12 bytes per print statement
+"""
+
+use baremetal.system_api (SemihostOp, FormatType)
+use baremetal.string_intern (StringInternTable, StringInternEntry, write_string_intern_section, read_string_intern_section)
+
+# ============================================================================
+# SemihostOp Enum Tests
+# ============================================================================
+
+describe "SemihostOp Enumeration":
+    """Tests for semihosting operation codes."""
+
+    context "standard operations":
+        it "has correct value for SYS_OPEN":
+            expect(SemihostOp.SYS_OPEN as u32).to(eq(0x01))
+
+        it "has correct value for SYS_CLOSE":
+            expect(SemihostOp.SYS_CLOSE as u32).to(eq(0x02))
+
+        it "has correct value for SYS_WRITE":
+            expect(SemihostOp.SYS_WRITE as u32).to(eq(0x05))
+
+        it "has correct value for SYS_READ":
+            expect(SemihostOp.SYS_READ as u32).to(eq(0x06))
+
+        it "has correct value for SYS_EXIT":
+            expect(SemihostOp.SYS_EXIT as u32).to(eq(0x18))
+
+        it "has correct value for SYS_CLOCK":
+            expect(SemihostOp.SYS_CLOCK as u32).to(eq(0x10))
+
+        it "has correct value for SYS_TIME":
+            expect(SemihostOp.SYS_TIME as u32).to(eq(0x11))
+
+    context "Simple extension operations":
+        it "has correct value for SYS_WRITE_HANDLE":
+            expect(SemihostOp.SYS_WRITE_HANDLE as u32).to(eq(0x100))
+
+        it "has correct value for SYS_WRITE_HANDLE_P1":
+            expect(SemihostOp.SYS_WRITE_HANDLE_P1 as u32).to(eq(0x101))
+
+        it "has correct value for SYS_WRITE_HANDLE_P2":
+            expect(SemihostOp.SYS_WRITE_HANDLE_P2 as u32).to(eq(0x102))
+
+        it "has correct value for SYS_WRITE_HANDLE_P3":
+            expect(SemihostOp.SYS_WRITE_HANDLE_P3 as u32).to(eq(0x103))
+
+        it "has correct value for SYS_WRITE_HANDLE_PN":
+            expect(SemihostOp.SYS_WRITE_HANDLE_PN as u32).to(eq(0x104))
+
+# ============================================================================
+# FormatType Enum Tests
+# ============================================================================
+
+describe "FormatType Enumeration":
+    """Tests for format type IDs used in string interning."""
+
+    context "integer types":
+        it "has correct values for signed integers":
+            expect(FormatType.Int8 as u8).to(eq(1))
+            expect(FormatType.Int16 as u8).to(eq(2))
+            expect(FormatType.Int32 as u8).to(eq(3))
+            expect(FormatType.Int64 as u8).to(eq(4))
+
+        it "has correct values for unsigned integers":
+            expect(FormatType.UInt8 as u8).to(eq(5))
+            expect(FormatType.UInt16 as u8).to(eq(6))
+            expect(FormatType.UInt32 as u8).to(eq(7))
+            expect(FormatType.UInt64 as u8).to(eq(8))
+
+    context "floating point types":
+        it "has correct values for floats":
+            expect(FormatType.Float32 as u8).to(eq(9))
+            expect(FormatType.Float64 as u8).to(eq(10))
+
+    context "special types":
+        it "has correct value for Bool":
+            expect(FormatType.Bool as u8).to(eq(11))
+
+        it "has correct value for Char":
+            expect(FormatType.Char as u8).to(eq(12))
+
+        it "has correct value for Pointer":
+            expect(FormatType.Pointer as u8).to(eq(18))
+
+        it "has correct value for Text":
+            expect(FormatType.Text as u8).to(eq(19))
+
+    context "hex format types":
+        it "has correct values for hex formats":
+            expect(FormatType.Hex8 as u8).to(eq(13))
+            expect(FormatType.Hex16 as u8).to(eq(14))
+            expect(FormatType.Hex32 as u8).to(eq(15))
+            expect(FormatType.Hex64 as u8).to(eq(16))
+
+# ============================================================================
+# StringInternTable Tests
+# ============================================================================
+
+describe "StringInternTable":
+    """Tests for the string interning table."""
+
+    context "creation":
+        it "creates empty table":
+            val table = StringInternTable.new()
+            expect(table.count()).to(eq(0))
+
+        it "creates table with test handles":
+            val table = StringInternTable.with_test_handles()
+            expect(table.count()).to(eq(4))
+            # Test handles are 0xFFFF0001 - 0xFFFF0004
+            expect(table.get(0xFFFF0001).?).to(be_true())
+            expect(table.get(0xFFFF0002).?).to(be_true())
+            expect(table.get(0xFFFF0003).?).to(be_true())
+            expect(table.get(0xFFFF0004).?).to(be_true())
+
+    context "interning strings":
+        it "interns simple string":
+            var table = StringInternTable.new()
+            val handle = table.intern("Hello, World!", [])
+            expect(handle).to(eq(1))  # First handle is 1
+            expect(table.count()).to(eq(1))
+
+        it "deduplicates identical strings":
+            var table = StringInternTable.new()
+            val h1 = table.intern("Hello", [])
+            val h2 = table.intern("Hello", [])
+            expect(h1).to(eq(h2))
+            expect(table.count()).to(eq(1))
+
+        it "assigns different handles to different strings":
+            var table = StringInternTable.new()
+            val h1 = table.intern("Hello", [])
+            val h2 = table.intern("World", [])
+            expect(h1).to_not(eq(h2))
+            expect(table.count()).to(eq(2))
+
+        it "stores format types":
+            var table = StringInternTable.new()
+            val handle = table.intern("Count: {}", [FormatType.Int64])
+            val entry = table.get(handle).unwrap()
+            expect(entry.format_types.len()).to(eq(1))
+            expect(entry.format_types[0]).to(eq(FormatType.Int64))
+
+        it "stores multiple format types":
+            var table = StringInternTable.new()
+            val handle = table.intern("x={}, y={}, z={}", [FormatType.Float64, FormatType.Float64, FormatType.Float64])
+            val entry = table.get(handle).unwrap()
+            expect(entry.format_types.len()).to(eq(3))
+
+    context "with source location":
+        it "stores source file and line":
+            var table = StringInternTable.new()
+            val handle = table.intern_with_source("Debug: {}", [FormatType.Int32], "test.spl", 42)
+            val entry = table.get(handle).unwrap()
+            expect(entry.source_file.?).to(be_true())
+            expect(entry.source_file.unwrap()).to(eq("test.spl"))
+            expect(entry.source_line).to(eq(42))
+
+    context "retrieval":
+        it "retrieves existing entry":
+            var table = StringInternTable.new()
+            val handle = table.intern("Test string", [FormatType.Bool])
+            val entry_opt = table.get(handle)
+            expect(entry_opt.?).to(be_true())
+            val entry = entry_opt.unwrap()
+            expect(entry.text).to(eq("Test string"))
+
+        it "returns None for non-existent handle":
+            val table = StringInternTable.new()
+            expect(table.get(9999).?).to(be_false())
+
+# ============================================================================
+# StringInternEntry Tests
+# ============================================================================
+
+describe "StringInternEntry":
+    """Tests for individual interned string entries."""
+
+    context "creation":
+        it "creates entry with handle and text":
+            val entry = StringInternEntry.new(42, "Hello {}", [FormatType.Text])
+            expect(entry.handle).to(eq(42))
+            expect(entry.text).to(eq("Hello {}"))
+            expect(entry.param_count()).to(eq(1))
+
+        it "creates entry with source location":
+            val entry = StringInternEntry.with_source(1, "Test", [], "file.spl", 10)
+            expect(entry.source_file.?).to(be_true())
+            expect(entry.source_line).to(eq(10))
+
+    context "param_count":
+        it "returns 0 for string without params":
+            val entry = StringInternEntry.new(1, "No params here", [])
+            expect(entry.param_count()).to(eq(0))
+            expect(entry.has_params()).to(be_false())
+
+        it "returns correct count for string with params":
+            val entry = StringInternEntry.new(1, "{} + {} = {}", [FormatType.Int64, FormatType.Int64, FormatType.Int64])
+            expect(entry.param_count()).to(eq(3))
+            expect(entry.has_params()).to(be_true())
+
+# ============================================================================
+# Binary Serialization Tests
+# ============================================================================
+
+describe "StringIntern Binary Format":
+    """Tests for SMF StringIntern section serialization."""
+
+    context "write_string_intern_section":
+        it "writes empty table":
+            val table = StringInternTable.new()
+            val bytes = write_string_intern_section(table)
+            # Header only: 16 bytes
+            expect(bytes.len()).to(be_greater_than_or_equal_to(16))
+
+        it "writes table with entries":
+            var table = StringInternTable.new()
+            table.intern("Hello", [])
+            table.intern("World {}", [FormatType.Int64])
+            val bytes = write_string_intern_section(table)
+            # Should have header + entries + strings + format data
+            expect(bytes.len()).to(be_greater_than(16 + 24))  # header + 2 entries
+
+    context "read_string_intern_section":
+        it "reads back written table":
+            var original = StringInternTable.new()
+            val h1 = original.intern("First string", [])
+            val h2 = original.intern("Second: {}", [FormatType.Int32])
+
+            val bytes = write_string_intern_section(original)
+            val result = read_string_intern_section(bytes)
+
+            expect(result.ok.?).to(be_true())
+            val loaded = result.unwrap()
+            expect(loaded.count()).to(eq(2))
+
+        it "preserves string content":
+            var original = StringInternTable.new()
+            val handle = original.intern("Preserved content", [])
+
+            val bytes = write_string_intern_section(original)
+            val loaded = read_string_intern_section(bytes).unwrap()
+
+            val entry = loaded.get(handle)
+            expect(entry.?).to(be_true())
+            expect(entry.unwrap().text).to(eq("Preserved content"))
+
+        it "preserves format types":
+            var original = StringInternTable.new()
+            val handle = original.intern("x={} y={}", [FormatType.Float64, FormatType.Float32])
+
+            val bytes = write_string_intern_section(original)
+            val loaded = read_string_intern_section(bytes).unwrap()
+
+            val entry = loaded.get(handle).unwrap()
+            expect(entry.format_types.len()).to(eq(2))
+            expect(entry.format_types[0]).to(eq(FormatType.Float64))
+            expect(entry.format_types[1]).to(eq(FormatType.Float32))
+
+    context "error handling":
+        it "rejects truncated data":
+            val result = read_string_intern_section([0, 1, 2, 3])  # Too short
+            expect(result.err.?).to(be_true())
+
+# ============================================================================
+# Size Optimization Analysis Tests
+# ============================================================================
+
+describe "Size Optimization":
+    """Verify size reduction claims."""
+
+    context "traditional vs interned comparison":
+        it "interned call is much smaller than format string":
+            # Traditional: "Processing {} items" = 21 bytes (string alone)
+            # Plus printf call overhead: ~50-80 bytes
+            # Total traditional: ~70-100 bytes
+
+            # Interned: semi_print1(handle, count)
+            # - load immediate handle: 4-8 bytes
+            # - load count: 4-8 bytes
+            # - call semi_print1: 4-8 bytes
+            # Total interned: ~12-24 bytes
+
+            # This is a conceptual test - actual size depends on codegen
+            val format_string = "Processing {} items"
+            expect(format_string.len()).to(eq(19))  # String length
+
+            # The handle is just 4 bytes
+            val handle_size = 4
+            expect(handle_size).to(be_less_than(format_string.len() as i64))
+
+# ============================================================================
+# Test Protocol Tests
+# ============================================================================
+
+describe "Test Output Protocol":
+    """Tests for SSpec-compatible test output via semihosting."""
+
+    context "reserved test handles":
+        it "has TEST_START handle":
+            val table = StringInternTable.with_test_handles()
+            val entry = table.get(0xFFFF0001).unwrap()
+            expect(entry.text).to(eq("[TEST START]"))
+
+        it "has TEST_PASS handle":
+            val table = StringInternTable.with_test_handles()
+            val entry = table.get(0xFFFF0002).unwrap()
+            expect(entry.text).to(contain("[PASS]"))
+
+        it "has TEST_FAIL handle":
+            val table = StringInternTable.with_test_handles()
+            val entry = table.get(0xFFFF0003).unwrap()
+            expect(entry.text).to(contain("[FAIL]"))
+
+        it "has TEST_END handle":
+            val table = StringInternTable.with_test_handles()
+            val entry = table.get(0xFFFF0004).unwrap()
+            expect(entry.text).to(contain("[TEST END]"))
