@@ -11,9 +11,9 @@ use test_runner_args.parse_test_args
 use test_runner_files.{discover_test_files, print_discovery_summary, strip_ansi}
 use test_runner_execute.{run_test_file_interpreter, run_test_file_smf, run_test_file_native, run_test_file_safe_mode}
 use test_runner_output.{print_result, print_summary}
-use test_db_core.{TestDatabase, micros_to_rfc3339}
+use test_db_compat.{TestDatabase, micros_to_rfc3339}  # Using compatibility layer
 use test_db_types.*
-use feature_db.FeatureDatabase
+use lib.database.feature.{FeatureDatabase, load_feature_database, create_feature_database, FeatureStatus}
 use doc_generator.generate_all_docs
 use rust_test_runner.{run_rust_tests, RustTestResult}
 
@@ -371,7 +371,8 @@ fn update_test_database(result: TestRunResult, run_start: i64, run_end: i64):
         return
 
     # Generate documentation (M3: includes feature DB auto-update)
-    val fdb = FeatureDatabase.load()
+    val fdb_opt = load_feature_database("doc/feature/feature_db.sdn")
+    var fdb = if fdb_opt.?: fdb_opt? else: create_feature_database("doc/feature/feature_db.sdn")
     # M3: Auto-update feature status from test results
     update_features_from_tests(fdb, result)
     fdb.save()
@@ -388,20 +389,21 @@ fn update_features_from_tests(fdb: FeatureDatabase, result: TestRunResult):
         if file_result.failed > 0 or file_result.timed_out:
             failed_files[file_result.path] = true
 
-    # Update features that reference spec files
-    var i = 0
-    while i < fdb.features.len():
-        val spec = fdb.features[i].spec
+    # Get all features and update status based on test results
+    val all_features = fdb.all_features()
+    for feature in all_features:
+        val spec = feature.spec_file
         if spec != "" and spec.ends_with(".spl"):
             if failed_files.contains_key(spec):
-                fdb.features[i].status = "failed"
+                # Test failed - mark feature as failed
+                fdb.update_feature_status(feature.id, FeatureStatus.Failed)
             else:
-                # If the spec was in test results and passed, mark complete
+                # Check if spec was in test results and passed
                 for file_result in result.files:
                     if file_result.path == spec and file_result.failed == 0 and not file_result.timed_out:
-                        if fdb.features[i].status != "complete":
-                            fdb.features[i].status = "complete"
-        i = i + 1
+                        # Test passed - mark feature as done if not already
+                        if feature.pure_status != FeatureStatus.Done:
+                            fdb.update_feature_status(feature.id, FeatureStatus.Done)
 
 # =========================================================================
 # Exports

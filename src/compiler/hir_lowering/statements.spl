@@ -1,0 +1,137 @@
+# HIR Lowering - Statement Lowering
+#
+# This module handles lowering of statements from AST to HIR.
+
+use hir_types.*
+use hir_definitions.*
+use parser.*
+use lexer.Span
+use hir_lowering.types.HirLowering
+
+# Statement Lowering
+# ============================================================================
+
+impl HirLowering:
+    me lower_stmt(s: Stmt) -> HirStmt:
+        """Lower statement to HIR."""
+        # Workaround: Capture self reference to ensure it's available in match arms
+        val lowerer = self
+        val kind = match s.kind:
+            case StmtKind.Expr(expr):
+                HirStmtKind.Expr(self.lower_expr(expr))
+
+            case StmtKind.Val(name, type_, init):
+                val hir_type = type_.map(\t: self.lower_type(t))
+                val hir_init = self.lower_expr(init)
+                # Workaround: Store symbols in local var to avoid interpreter bug
+                var symbols_table = self.symbols
+                val symbol = symbols_table.define(name, SymbolKind.Variable, hir_type, s.span, false, false)
+                self.symbols = symbols_table
+                HirStmtKind.Let(symbol, hir_type, hir_init)
+
+            case StmtKind.Var(name, type_, init):
+                val hir_type = type_.map(\t: self.lower_type(t))
+                val hir_init = init.map(\i: self.lower_expr(i)) ?? HirExpr(kind: HirExprKind.NilLit, type_: nil, span: s.span)
+                # Workaround: Store symbols in local var to avoid interpreter bug
+                var symbols_table = self.symbols
+                val symbol = symbols_table.define(name, SymbolKind.Variable, hir_type, s.span, false, true)
+                self.symbols = symbols_table
+                HirStmtKind.Let(symbol, hir_type, hir_init)
+
+            case StmtKind.Assign(target, op, value):
+                val hir_op = op.map(\o: match o:
+                    case AssignOp.Add: HirAssignOp.Add
+                    case AssignOp.Sub: HirAssignOp.Sub
+                    case AssignOp.Mul: HirAssignOp.Mul
+                    case AssignOp.Div: HirAssignOp.Div
+                    case AssignOp.Mod: HirAssignOp.Mod
+                )
+                HirStmtKind.Assign(self.lower_expr(target), hir_op, self.lower_expr(value))
+
+            case StmtKind.For(var_, iter, body):
+                # Workaround: Store symbols in local var to avoid interpreter bug
+                var symbols_table = self.symbols
+                symbols_table.push_scope(ScopeKind.Loop)
+                self.symbols = symbols_table
+                self.loop_depth = self.loop_depth + 1
+                symbols_table = self.symbols
+                val symbol = symbols_table.define(var_, SymbolKind.Variable, nil, s.span, false, false)
+                self.symbols = symbols_table
+                val hir_iter = self.lower_expr(iter)
+                val hir_body = self.lower_block(body)
+                self.loop_depth = self.loop_depth - 1
+                symbols_table = self.symbols
+                symbols_table.pop_scope()
+                self.symbols = symbols_table
+                # Desugar to loop
+                HirStmtKind.Expr(HirExpr(
+                    kind: HirExprKind.For(symbol, hir_iter, hir_body, nil),
+                    type_: nil,
+                    span: s.span
+                ))
+
+            case StmtKind.While(cond, body):
+                self.loop_depth = self.loop_depth + 1
+                val hir_cond = self.lower_expr(cond)
+                val hir_body = self.lower_block(body)
+                self.loop_depth = self.loop_depth - 1
+                HirStmtKind.Expr(HirExpr(
+                    kind: HirExprKind.While(hir_cond, hir_body, nil),
+                    type_: nil,
+                    span: s.span
+                ))
+
+            case StmtKind.Loop(body):
+                self.loop_depth = self.loop_depth + 1
+                val hir_body = self.lower_block(body)
+                self.loop_depth = self.loop_depth - 1
+                HirStmtKind.Expr(HirExpr(
+                    kind: HirExprKind.Loop(hir_body, nil),
+                    type_: nil,
+                    span: s.span
+                ))
+
+            case StmtKind.Return(value):
+                HirStmtKind.Expr(HirExpr(
+                    kind: HirExprKind.Return(value.map(\v: self.lower_expr(v))),
+                    type_: nil,
+                    span: s.span
+                ))
+
+            case StmtKind.Break(label):
+                HirStmtKind.Expr(HirExpr(
+                    kind: HirExprKind.Break(label, nil),
+                    type_: nil,
+                    span: s.span
+                ))
+
+            case StmtKind.Continue(label):
+                HirStmtKind.Expr(HirExpr(
+                    kind: HirExprKind.Continue(label),
+                    type_: nil,
+                    span: s.span
+                ))
+
+            case StmtKind.Yield(value):
+                HirStmtKind.Expr(HirExpr(
+                    kind: HirExprKind.Yield(value.map(\v: self.lower_expr(v))),
+                    type_: nil,
+                    span: s.span
+                ))
+
+            case StmtKind.Throw(value):
+                HirStmtKind.Expr(HirExpr(
+                    kind: HirExprKind.Throw(self.lower_expr(value)),
+                    type_: nil,
+                    span: s.span
+                ))
+
+            case _:
+                self.error("unsupported statement kind", s.span)
+                HirStmtKind.Expr(HirExpr(
+                    kind: HirExprKind.Error,
+                    type_: nil,
+                    span: s.span
+                ))
+
+        HirStmt(kind: kind, span: s.span)

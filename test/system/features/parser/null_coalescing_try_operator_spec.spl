@@ -1,0 +1,232 @@
+"""
+# Null Coalescing and Try Operator Parser Specification
+
+**Feature IDs:** #PARSER-NULL-001
+**Category:** Parser / Operators
+**Difficulty:** 3/5
+**Status:** In Progress
+
+## Overview
+
+Tests for the `??` (null coalescing) and `?` (try) operators in various contexts.
+These operators should work correctly in:
+- Simple expressions
+- Return statements
+- For loop bodies
+- If expression bodies
+- Match arms
+
+## Known Issues
+
+The following patterns cause parse errors:
+1. `val x = expr ?? return Err(...)` - "expected expression, found Return"
+2. `val x = expr?` inside for loop body - may cause issues
+3. `val x = if cond: Some(fn()?) else: None` - "expected identifier, found Val"
+
+## Workarounds
+
+Use explicit if/else or match instead of operators in these contexts.
+"""
+
+describe "Null Coalescing Operator (??)":
+    """Basic null coalescing operator tests."""
+
+    context "simple expressions":
+        it "returns left value when present":
+            val opt: i64? = Some(42)
+            val result = opt ?? 0
+            expect(result).to(eq(42))
+
+        it "returns right value when None":
+            val opt: i64? = None
+            val result = opt ?? 99
+            expect(result).to(eq(99))
+
+        it "chains multiple coalescing":
+            val a: i64? = None
+            val b: i64? = None
+            val c: i64? = Some(10)
+            val result = a ?? b ?? c ?? 0
+            expect(result).to(eq(10))
+
+    context "with function calls":
+        it "evaluates right side lazily":
+            var counter = 0
+            fn increment() -> i64:
+                counter = counter + 1
+                counter
+
+            val opt: i64? = Some(5)
+            val result = opt ?? increment()
+            expect(result).to(eq(5))
+            expect(counter).to(eq(0))
+
+        it "calls right side when None":
+            var counter = 0
+            fn increment() -> i64:
+                counter = counter + 1
+                counter
+
+            val opt: i64? = None
+            val result = opt ?? increment()
+            expect(result).to(eq(1))
+            expect(counter).to(eq(1))
+
+describe "Try Operator (?)":
+    """Basic try operator tests."""
+
+    context "with Result type":
+        it "unwraps Ok value":
+            fn get_ok() -> Result<i64, text>:
+                Ok(42)
+
+            fn use_ok() -> Result<i64, text>:
+                val x = get_ok()?
+                Ok(x + 1)
+
+            val result = use_ok()
+            match result:
+                case Ok(v): expect(v).to(eq(43))
+                case Err(_): fail("Expected Ok")
+
+        it "propagates Err":
+            fn get_err() -> Result<i64, text>:
+                Err("error")
+
+            fn use_err() -> Result<i64, text>:
+                val x = get_err()?
+                Ok(x + 1)
+
+            val result = use_err()
+            match result:
+                case Ok(_): fail("Expected Err")
+                case Err(e): expect(e).to(eq("error"))
+
+    context "with Option type":
+        it "unwraps Some value":
+            fn get_some() -> i64?:
+                Some(42)
+
+            fn use_some() -> i64?:
+                val x = get_some()?
+                Some(x + 1)
+
+            val result = use_some()
+            match result:
+                case Some(v): expect(v).to(eq(43))
+                case None: fail("Expected Some")
+
+        it "propagates None":
+            fn get_none() -> i64?:
+                None
+
+            fn use_none() -> i64?:
+                val x = get_none()?
+                Some(x + 1)
+
+            val result = use_none()
+            match result:
+                case Some(_): fail("Expected None")
+                case None: pass
+
+describe "Parser Edge Cases":
+    """Document known parser limitations with ?? and ?."""
+
+    context "workaround patterns":
+        """These patterns work correctly."""
+
+        it "explicit if/else instead of ?? return":
+            fn parse_value(s: text) -> Result<i64, text>:
+                val opt = s.parse_int()
+                if not opt.?:
+                    return Err("parse failed")
+                val value = opt.unwrap()
+                Ok(value)
+
+            val result = parse_value("42")
+            match result:
+                case Ok(v): expect(v).to(eq(42))
+                case Err(_): fail("Expected Ok")
+
+        it "match instead of ? in for loop":
+            fn sum_parsed(items: [text]) -> Result<i64, text>:
+                var total = 0
+                for item in items:
+                    val result = item.parse_int()
+                    match result:
+                        case Some(n): total = total + n
+                        case None: return Err("parse failed: {item}")
+                Ok(total)
+
+            val result = sum_parsed(["1", "2", "3"])
+            match result:
+                case Ok(v): expect(v).to(eq(6))
+                case Err(_): fail("Expected Ok")
+
+        it "explicit match for optional config":
+            fn parse_config(dict: Dict<text, text>) -> Result<i64, text>:
+                var timeout: i64? = None
+                if dict["timeout"].?:
+                    val timeout_str = dict["timeout"].unwrap()
+                    val parsed = timeout_str.parse_int()
+                    match parsed:
+                        case Some(t): timeout = Some(t)
+                        case None: return Err("invalid timeout")
+                Ok(timeout ?? 30)
+
+            var config: Dict<text, text> = {}
+            config["timeout"] = "60"
+            val result = parse_config(config)
+            match result:
+                case Ok(v): expect(v).to(eq(60))
+                case Err(_): fail("Expected Ok")
+
+    skip context "known parser bugs":
+        """These patterns currently fail to parse - skipped until fixed."""
+
+        skip it "?? return Err pattern":
+            """
+            BUG: This causes "expected expression, found Return"
+            The parser doesn't handle return in ?? right-hand side.
+            """
+            fn parse_with_default(s: text) -> Result<i64, text>:
+                # This line causes parse error:
+                # val value = s.parse_int() ?? return Err("parse failed")
+                # Workaround:
+                val opt = s.parse_int()
+                if not opt.?:
+                    return Err("parse failed")
+                Ok(opt.unwrap())
+
+            pass  # Test is skipped
+
+        skip it "? in if-expression body":
+            """
+            BUG: This causes "expected identifier, found Val"
+            The parser doesn't handle ? inside if-expression bodies.
+            """
+            fn parse_optional(dict: Dict<text, text>) -> Result<i64?, text>:
+                # This causes parse error:
+                # val result = if dict["value"].?:
+                #     Some(parse_value(dict["value"].unwrap())?)
+                # else:
+                #     None
+                # Workaround: use explicit match
+                pass
+
+            pass  # Test is skipped
+
+        skip it "? in for loop with Result":
+            """
+            BUG: The ? operator may not work correctly in for loop bodies.
+            """
+            fn process_all(items: [text]) -> Result<i64, text>:
+                var total = 0
+                # This may cause issues:
+                # for item in items:
+                #     val n = item.parse_int()?  # ? in for loop
+                #     total = total + n
+                # Workaround: use match
+                pass
+
+            pass  # Test is skipped

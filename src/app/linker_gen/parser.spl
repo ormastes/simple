@@ -131,43 +131,76 @@ fn parse_board(path: text) -> Result<BoardConfig, ParseError>:
 
 # Parse board config from SDN value
 fn parse_board_sdn(sdn: SdnValue) -> Result<BoardConfig, ParseError>:
-    val dict = sdn.as_dict() ?? return Err(ParseError.ParseFailed("Expected dict at root"))
+    val dict_opt = sdn.as_dict()
+    if not dict_opt.?:
+        return Err(ParseError.ParseFailed("Expected dict at root"))
+    val dict = dict_opt.unwrap()
 
     # Parse board section
-    val board_dict = dict["board"]?.as_dict() ?? return Err(ParseError.MissingField("board"))
-    val name = board_dict["name"]?.as_text() ?? return Err(ParseError.MissingField("board.name"))
-    val arch = board_dict["arch"]?.as_text() ?? return Err(ParseError.MissingField("board.arch"))
-    val target = board_dict["target"]?.as_text() ?? return Err(ParseError.MissingField("board.target"))
+    val board_opt = dict["board"]?.as_dict()
+    if not board_opt.?:
+        return Err(ParseError.MissingField("board"))
+    val board_dict = board_opt.unwrap()
+
+    val name_opt = board_dict["name"]?.as_text()
+    if not name_opt.?:
+        return Err(ParseError.MissingField("board.name"))
+    val name = name_opt.unwrap()
+
+    val arch_opt = board_dict["arch"]?.as_text()
+    if not arch_opt.?:
+        return Err(ParseError.MissingField("board.arch"))
+    val arch = arch_opt.unwrap()
+
+    val target_opt = board_dict["target"]?.as_text()
+    if not target_opt.?:
+        return Err(ParseError.MissingField("board.target"))
+    val target = target_opt.unwrap()
+
     val description = board_dict["description"]?.as_text() ?? ""
 
     # Parse memory regions
-    val memory_dict = dict["memory"]?.as_dict() ?? return Err(ParseError.MissingField("memory"))
+    val memory_dict_opt = dict["memory"]?.as_dict()
+    if not memory_dict_opt.?:
+        return Err(ParseError.MissingField("memory"))
+    val memory_dict = memory_dict_opt.unwrap()
     var memory: [MemoryRegion] = []
     for (region_name, region_val) in memory_dict:
-        val region = parse_memory_region(region_name, region_val)?
-        memory.push(region)
+        val region_result = parse_memory_region(region_name, region_val)
+        match region_result:
+            case Ok(region): memory.push(region)
+            case Err(e): return Err(e)
 
     # Parse sections
-    val sections_dict = dict["sections"]?.as_dict() ?? return Err(ParseError.MissingField("sections"))
+    val sections_dict_opt = dict["sections"]?.as_dict()
+    if not sections_dict_opt.?:
+        return Err(ParseError.MissingField("sections"))
+    val sections_dict = sections_dict_opt.unwrap()
     var sections: [Section] = []
     for (section_name, section_val) in sections_dict:
-        val section = parse_section(section_name, section_val)?
-        sections.push(section)
+        val section_result = parse_section(section_name, section_val)
+        match section_result:
+            case Ok(section): sections.push(section)
+            case Err(e): return Err(e)
 
     # Parse entry point
     val entry = dict["entry"]?.as_text() ?? "_start"
 
     # Parse QEMU config (optional)
-    val qemu = if dict["qemu"].?:
-        Some(parse_qemu_config(dict["qemu"].unwrap())?)
-    else:
-        None
+    var qemu: QemuConfig? = None
+    if dict["qemu"].?:
+        val qemu_result = parse_qemu_config(dict["qemu"].unwrap())
+        match qemu_result:
+            case Ok(config): qemu = Some(config)
+            case Err(e): return Err(e)
 
     # Parse multiboot config (optional)
-    val multiboot = if dict["multiboot"].?:
-        Some(parse_multiboot_config(dict["multiboot"].unwrap())?)
-    else:
-        None
+    var multiboot: MultibootConfig? = None
+    if dict["multiboot"].?:
+        val multiboot_result = parse_multiboot_config(dict["multiboot"].unwrap())
+        match multiboot_result:
+            case Ok(config): multiboot = Some(config)
+            case Err(e): return Err(e)
 
     Ok(BoardConfig(
         name: name,
@@ -183,10 +216,23 @@ fn parse_board_sdn(sdn: SdnValue) -> Result<BoardConfig, ParseError>:
 
 # Parse a memory region
 fn parse_memory_region(name: text, val: SdnValue) -> Result<MemoryRegion, ParseError>:
-    val dict = val.as_dict() ?? return Err(ParseError.InvalidValue("memory.{name}", "expected dict"))
+    val dict_opt = val.as_dict()
+    if not dict_opt.?:
+        return Err(ParseError.InvalidValue("memory.{name}", "expected dict"))
+    val dict = dict_opt.unwrap()
 
-    val origin = parse_address(dict["origin"]?.as_text() ?? "0") ?? return Err(ParseError.InvalidValue("memory.{name}.origin", "invalid address"))
-    val length = parse_size(dict["length"]?.as_text() ?? "0") ?? return Err(ParseError.InvalidValue("memory.{name}.length", "invalid size"))
+    val origin_str = dict["origin"]?.as_text() ?? "0"
+    val origin_opt = parse_address(origin_str)
+    if not origin_opt.?:
+        return Err(ParseError.InvalidValue("memory.{name}.origin", "invalid address"))
+    val origin = origin_opt.unwrap()
+
+    val length_str = dict["length"]?.as_text() ?? "0"
+    val length_opt = parse_size(length_str)
+    if not length_opt.?:
+        return Err(ParseError.InvalidValue("memory.{name}.length", "invalid size"))
+    val length = length_opt.unwrap()
+
     val perms_str = dict["permissions"]?.as_text() ?? "rwx"
     val description = dict["description"]?.as_text() ?? ""
 
@@ -208,17 +254,26 @@ fn parse_memory_region(name: text, val: SdnValue) -> Result<MemoryRegion, ParseE
 
 # Parse a section definition
 fn parse_section(name: text, val: SdnValue) -> Result<Section, ParseError>:
-    val dict = val.as_dict() ?? return Err(ParseError.InvalidValue("sections.{name}", "expected dict"))
+    val dict_opt = val.as_dict()
+    if not dict_opt.?:
+        return Err(ParseError.InvalidValue("sections.{name}", "expected dict"))
+    val dict = dict_opt.unwrap()
 
-    val memory = dict["memory"]?.as_text() ?? return Err(ParseError.MissingField("sections.{name}.memory"))
+    val memory_opt = dict["memory"]?.as_text()
+    if not memory_opt.?:
+        return Err(ParseError.MissingField("sections.{name}.memory"))
+    val memory = memory_opt.unwrap()
+
     val address = if dict["address"].?:
-        Some(parse_address(dict["address"].unwrap().as_text() ?? "0") ?? 0)
+        val addr_str = dict["address"].unwrap().as_text() ?? "0"
+        Some(parse_address(addr_str) ?? 0)
     else:
         None
     val align = parse_size(dict["align"]?.as_text() ?? "1") ?? 1
     val section_type = dict["type"]?.as_text() ?? "progbits"
     val size = if dict["size"].?:
-        Some(parse_size(dict["size"].unwrap().as_text() ?? "0") ?? 0)
+        val size_str = dict["size"].unwrap().as_text() ?? "0"
+        Some(parse_size(size_str) ?? 0)
     else:
         None
     val keep = dict["keep"]?.as_bool() ?? false
@@ -248,7 +303,10 @@ fn parse_section(name: text, val: SdnValue) -> Result<Section, ParseError>:
 
 # Parse QEMU config
 fn parse_qemu_config(val: SdnValue) -> Result<QemuConfig, ParseError>:
-    val dict = val.as_dict() ?? return Err(ParseError.InvalidValue("qemu", "expected dict"))
+    val dict_opt = val.as_dict()
+    if not dict_opt.?:
+        return Err(ParseError.InvalidValue("qemu", "expected dict"))
+    val dict = dict_opt.unwrap()
 
     val machine = dict["machine"]?.as_text() ?? "pc"
     val cpu = dict["cpu"]?.as_text() ?? "qemu32"
@@ -261,10 +319,12 @@ fn parse_qemu_config(val: SdnValue) -> Result<QemuConfig, ParseError>:
     var isa_iosize: i64 = 0x04
 
     if dict["isa_debug_exit"].?:
-        val isa_dict = dict["isa_debug_exit"].unwrap().as_dict() ?? {}
-        isa_enabled = isa_dict["enabled"]?.as_bool() ?? false
-        isa_iobase = parse_address(isa_dict["iobase"]?.as_text() ?? "0xF4") ?? 0xF4
-        isa_iosize = parse_address(isa_dict["iosize"]?.as_text() ?? "0x04") ?? 0x04
+        val isa_dict_opt = dict["isa_debug_exit"].unwrap().as_dict()
+        if isa_dict_opt.?:
+            val isa_dict = isa_dict_opt.unwrap()
+            isa_enabled = isa_dict["enabled"]?.as_bool() ?? false
+            isa_iobase = parse_address(isa_dict["iobase"]?.as_text() ?? "0xF4") ?? 0xF4
+            isa_iosize = parse_address(isa_dict["iosize"]?.as_text() ?? "0x04") ?? 0x04
 
     Ok(QemuConfig(
         machine: machine,
@@ -278,7 +338,10 @@ fn parse_qemu_config(val: SdnValue) -> Result<QemuConfig, ParseError>:
 
 # Parse multiboot config
 fn parse_multiboot_config(val: SdnValue) -> Result<MultibootConfig, ParseError>:
-    val dict = val.as_dict() ?? return Err(ParseError.InvalidValue("multiboot", "expected dict"))
+    val dict_opt = val.as_dict()
+    if not dict_opt.?:
+        return Err(ParseError.InvalidValue("multiboot", "expected dict"))
+    val dict = dict_opt.unwrap()
 
     val version = dict["version"]?.as_int() ?? 1
     val flags = parse_address(dict["flags"]?.as_text() ?? "0") ?? 0

@@ -1,0 +1,451 @@
+# HIR Lowering - Item Lowering
+#
+# This module handles lowering of top-level items (functions, classes, structs, enums, traits, impls) from AST to HIR.
+
+use hir_types.*
+use hir_definitions.*
+use parser.*
+use lexer.Span
+use hir_lowering.types.HirLowering
+
+# Item Lowering (Functions, Classes, Structs, Enums, Traits, Impls)
+# ============================================================================
+
+impl HirLowering:
+    me lower_module(module: Module) -> HirModule:
+        """Lower a parsed module to HIR."""
+        # First pass: declare all top-level symbols
+        self.declare_module_symbols(module)
+
+        # Second pass: lower definitions
+        var functions: Dict<SymbolId, HirFunction> = {}
+        var classes: Dict<SymbolId, HirClass> = {}
+        var structs: Dict<SymbolId, HirStruct> = {}
+        var enums: Dict<SymbolId, HirEnum> = {}
+        var traits: Dict<SymbolId, HirTrait> = {}
+        var impls: [HirImpl] = []
+        var constants: Dict<SymbolId, HirConst> = {}
+
+        for name in module.functions.keys():
+            val fn_ = module.functions[name]
+            val hir_fn = self.lower_function(fn_)
+            functions[hir_fn.symbol] = hir_fn
+
+        for name in module.classes.keys():
+            val class_ = module.classes[name]
+            val hir_class = self.lower_class(class_)
+            classes[hir_class.symbol] = hir_class
+
+        for name in module.structs.keys():
+            val struct_ = module.structs[name]
+            val hir_struct = self.lower_struct(struct_)
+            structs[hir_struct.symbol] = hir_struct
+
+        for name in module.enums.keys():
+            val enum_ = module.enums[name]
+            val hir_enum = self.lower_enum(enum_)
+            enums[hir_enum.symbol] = hir_enum
+
+        for name in module.traits.keys():
+            val trait_ = module.traits[name]
+            val hir_trait = self.lower_trait(trait_)
+            traits[hir_trait.symbol] = hir_trait
+
+        for impl_ in module.impls:
+            impls = impls.push(self.lower_impl(impl_))
+
+        for name in module.constants.keys():
+            val const_ = module.constants[name]
+            val hir_const = self.lower_const(const_)
+            constants[hir_const.symbol] = hir_const
+
+        # Lower imports
+        var imports: [HirImport] = []
+        for imp in module.imports:
+            imports = imports.push(self.lower_import(imp))
+
+        # Collect exports
+        var exports: [text] = []
+        for exp in module.exports:
+            for item in exp.items:
+                exports = exports.push(item)
+
+        HirModule(
+            name: module.name,
+            path: "",
+            imports: imports,
+            exports: exports,
+            symbols: self.symbols,
+            functions: functions,
+            classes: classes,
+            structs: structs,
+            enums: enums,
+            traits: traits,
+            impls: impls,
+            constants: constants
+        )
+
+    me declare_module_symbols(module: Module):
+        """Declare all top-level symbols."""
+        # Workaround: Store symbols table in local var to avoid interpreter bug
+        var symbols_table = self.symbols
+
+        for name in module.functions.keys():
+            val fn_ = module.functions[name]
+            symbols_table.define(name, SymbolKind.Function, nil, fn_.span, fn_.is_public, false)
+
+        for name in module.classes.keys():
+            val class_ = module.classes[name]
+            symbols_table.define(name, SymbolKind.Class, nil, class_.span, class_.is_public, false)
+
+        for name in module.structs.keys():
+            val struct_ = module.structs[name]
+            symbols_table.define(name, SymbolKind.Struct, nil, struct_.span, struct_.is_public, false)
+
+        for name in module.enums.keys():
+            val enum_ = module.enums[name]
+            symbols_table.define(name, SymbolKind.Enum, nil, enum_.span, enum_.is_public, false)
+
+        for name in module.traits.keys():
+            val trait_ = module.traits[name]
+            symbols_table.define(name, SymbolKind.Trait, nil, trait_.span, trait_.is_public, false)
+
+        for name in module.constants.keys():
+            val const_ = module.constants[name]
+            symbols_table.define(name, SymbolKind.Const, nil, const_.span, const_.is_public, const_.is_mutable)
+
+        # Declare impl methods
+        for impl_ in module.impls:
+            for name in impl_.methods.keys():
+                val fn_ = impl_.methods[name]
+                symbols_table.define(name, SymbolKind.Method, nil, fn_.span, fn_.is_public, false)
+
+        self.symbols = symbols_table
+
+    me lower_import(imp: Import) -> HirImport:
+        """Lower import declaration."""
+        var items: [HirImportItem] = []
+        for item in imp.items:
+            items = items.push(HirImportItem(
+                name: item.name,
+                alias: item.alias,
+                resolved: nil
+            ))
+
+        HirImport(
+            module_path: imp.module,
+            items: items,
+            span: imp.span
+        )
+
+    me lower_function(fn_: Function) -> HirFunction:
+        """Lower function to HIR."""
+        # Workaround: Store symbols in local var first to avoid interpreter bug
+        # where chained method calls corrupt 'self'
+        var symbols_table = self.symbols
+        val fn_symbol_id = symbols_table.lookup(fn_.name).unwrap()
+
+        # Workaround: Create the Some value separately to avoid interpreter bug
+        val opt_fn_id: SymbolId? = Some(fn_symbol_id)
+        self.current_function = opt_fn_id
+
+        # Re-get symbols from self after field modification
+        symbols_table = self.symbols
+        symbols_table.push_scope(ScopeKind.Function)
+        self.symbols = symbols_table
+
+        # Lower type parameters
+        var type_params: [HirTypeParam] = []
+        for tp in fn_.type_params:
+            type_params = type_params.push(self.lower_type_param(tp))
+
+        # Lower parameters
+        var params: [HirParam] = []
+        for p in fn_.params:
+            params = params.push(self.lower_param(p))
+
+        # Lower return type — use explicit check instead of .map() ?? default
+        # to avoid crash with null coalescing on Option.map result
+        var return_type = HirType(kind: HirTypeKind.Unit, span: fn_.span)
+        if fn_.return_type.?:
+            val mapped = fn_.return_type.map(\t: self.lower_type(t))
+            if mapped.?:
+                return_type = mapped.unwrap()
+
+        # Lower body
+        val body = self.lower_block(fn_.body)
+
+        # Workaround: Store symbols in local var to avoid interpreter bug
+        symbols_table = self.symbols
+        symbols_table.pop_scope()
+        self.symbols = symbols_table
+        self.current_function = None
+
+        HirFunction(
+            symbol: fn_symbol_id,
+            name: fn_.name,
+            type_params: type_params,
+            params: params,
+            return_type: return_type,
+            body: body,
+            effects: [],
+            is_async: fn_.is_async,
+            is_static: fn_.is_static,
+            is_public: fn_.is_public,
+            is_method: fn_.is_method,
+            is_mutable: fn_.is_mutable,
+            doc_comment: fn_.doc_comment,
+            span: fn_.span
+        )
+
+    me lower_param(p: Param) -> HirParam:
+        """Lower function parameter."""
+        val type_ = p.type_.map(\t: self.lower_type(t)) ?? HirType(kind: HirTypeKind.Infer(0, 0), span: p.span)
+        # Workaround: Store symbols in local var to avoid interpreter bug
+        var symbols_table = self.symbols
+        val symbol = symbols_table.define(p.name, SymbolKind.Parameter, Some(type_), p.span, false, false)
+        self.symbols = symbols_table
+
+        HirParam(
+            symbol: symbol,
+            name: p.name,
+            type_: type_,
+            default: p.default.map(\e: self.lower_expr(e)),
+            span: p.span
+        )
+
+    me lower_class(class_: Class) -> HirClass:
+        """Lower class to HIR."""
+        # Workaround: Store symbols in local var to avoid interpreter bug
+        var symbols_table = self.symbols
+        val symbol = symbols_table.lookup(class_.name).unwrap()
+
+        symbols_table.push_scope(ScopeKind.Class)
+        self.symbols = symbols_table
+
+        var type_params: [HirTypeParam] = []
+        for tp in class_.type_params:
+            type_params = type_params.push(self.lower_type_param(tp))
+
+        var fields: [HirField] = []
+        for f in class_.fields:
+            fields = fields.push(self.lower_field(f))
+
+        var methods: Dict<text, SymbolId> = {}
+        for name in class_.methods.keys():
+            val fn_ = class_.methods[name]
+            val hir_fn = self.lower_function(fn_)
+            methods[name] = hir_fn.symbol
+
+        symbols_table = self.symbols
+        symbols_table.pop_scope()
+        self.symbols = symbols_table
+
+        HirClass(
+            symbol: symbol,
+            name: class_.name,
+            type_params: type_params,
+            fields: fields,
+            methods: methods,
+            is_public: class_.is_public,
+            doc_comment: class_.doc_comment,
+            span: class_.span,
+            is_generic_template: false,
+            specialization_of: nil,
+            type_bindings: {}
+        )
+
+    me lower_struct(struct_: Struct) -> HirStruct:
+        """Lower struct to HIR."""
+        # Workaround: Store symbols in local var to avoid interpreter bug
+        var symbols_table = self.symbols
+        val symbol = symbols_table.lookup(struct_.name).unwrap()
+        self.symbols = symbols_table
+
+        var type_params: [HirTypeParam] = []
+        for tp in struct_.type_params:
+            type_params = type_params.push(self.lower_type_param(tp))
+
+        var fields: [HirField] = []
+        for f in struct_.fields:
+            fields = fields.push(self.lower_field(f))
+
+        HirStruct(
+            symbol: symbol,
+            name: struct_.name,
+            type_params: type_params,
+            fields: fields,
+            is_public: struct_.is_public,
+            doc_comment: struct_.doc_comment,
+            span: struct_.span,
+            is_generic_template: false,
+            specialization_of: nil,
+            type_bindings: {}
+        )
+
+    me lower_field(f: Field) -> HirField:
+        """Lower field to HIR."""
+        val type_ = self.lower_type(f.type_)
+        # Workaround: Store symbols in local var to avoid interpreter bug
+        var symbols_table = self.symbols
+        val symbol = symbols_table.define(f.name, SymbolKind.Field, Some(type_), f.span, f.is_public, false)
+        self.symbols = symbols_table
+
+        HirField(
+            symbol: symbol,
+            name: f.name,
+            type_: type_,
+            default: f.default.map(\e: self.lower_expr(e)),
+            is_public: f.is_public,
+            span: f.span
+        )
+
+    me lower_enum(enum_: Enum) -> HirEnum:
+        """Lower enum to HIR."""
+        val symbol = self.symbols.lookup(enum_.name).unwrap()
+
+        var type_params: [HirTypeParam] = []
+        for tp in enum_.type_params:
+            type_params = type_params.push(self.lower_type_param(tp))
+
+        var variants: [HirVariant] = []
+        for v in enum_.variants:
+            variants = variants.push(self.lower_variant(v))
+
+        HirEnum(
+            symbol: symbol,
+            name: enum_.name,
+            type_params: type_params,
+            variants: variants,
+            is_public: enum_.is_public,
+            doc_comment: enum_.doc_comment,
+            span: enum_.span,
+            is_generic_template: false,
+            specialization_of: nil,
+            type_bindings: {}
+        )
+
+    me lower_variant(v: Variant) -> HirVariant:
+        """Lower enum variant."""
+        val symbol = self.symbols.define(v.name, SymbolKind.EnumVariant, nil, v.span, true, false)
+
+        val kind = match v.kind:
+            case Unit:
+                HirVariantKind.Unit
+            case Tuple(types):
+                var hir_types: [HirType] = []
+                for t in types:
+                    hir_types = hir_types.push(self.lower_type(t))
+                HirVariantKind.Tuple(hir_types)
+            case Struct(fields):
+                var hir_fields: [HirField] = []
+                for f in fields:
+                    hir_fields = hir_fields.push(self.lower_field(f))
+                HirVariantKind.Struct(hir_fields)
+
+        HirVariant(
+            symbol: symbol,
+            name: v.name,
+            kind: kind,
+            span: v.span
+        )
+
+    me lower_trait(trait_: Trait) -> HirTrait:
+        """Lower trait to HIR."""
+        val symbol = self.symbols.lookup(trait_.name).unwrap()
+
+        self.symbols.push_scope(ScopeKind.Class)
+
+        var type_params: [HirTypeParam] = []
+        for tp in trait_.type_params:
+            type_params = type_params.push(self.lower_type_param(tp))
+
+        # Lower supertraits
+        var supertraits: [HirType] = []
+        for st in trait_.super_traits:
+            supertraits = supertraits.push(self.lower_type(st))
+
+        # Lower where clause
+        var where_clause: [HirTraitBound] = []
+        for bound in trait_.where_clause:
+            where_clause = where_clause.push(self.lower_trait_bound(bound))
+
+        # Separate methods into abstract (no body) and defaults (with body)
+        var abstract_methods: [HirFunction] = []
+        var defaults: [HirFunction] = []
+        for m in trait_.methods:
+            val hir_fn = self.lower_function(m)
+            # Check if method has a body (default implementation)
+            # Function.body is a Block, check if it has statements
+            if m.body.stmts.is_empty() and m.body.value.is_none():
+                abstract_methods = abstract_methods.push(hir_fn)
+            else:
+                defaults = defaults.push(hir_fn)
+
+        self.symbols.pop_scope()
+
+        HirTrait(
+            symbol: symbol,
+            name: trait_.name,
+            type_params: type_params,
+            methods: abstract_methods,
+            supertraits: supertraits,
+            defaults: defaults,
+            where_clause: where_clause,
+            is_public: trait_.is_public,
+            doc_comment: trait_.doc_comment,
+            span: trait_.span,
+            is_generic_template: false,
+            specialization_of: nil,
+            type_bindings: {}
+        )
+
+    me lower_impl(impl_: Impl) -> HirImpl:
+        """Lower impl block to HIR."""
+        self.symbols.push_scope(ScopeKind.Impl)
+
+        # Lower generic type parameters
+        var type_params: [HirTypeParam] = []
+        for tp in impl_.type_params:
+            type_params = type_params.push(self.lower_type_param(tp))
+
+        # Lower where clause
+        var where_clause: [HirTraitBound] = []
+        for bound in impl_.where_clause:
+            where_clause = where_clause.push(self.lower_trait_bound(bound))
+
+        val type_ = self.lower_type(impl_.type_)
+        val trait_ = impl_.trait_.map(\t: self.lower_type(t))
+
+        var methods: Dict<text, SymbolId> = {}
+        for name in impl_.methods.keys():
+            val fn_ = impl_.methods[name]
+            val hir_fn = self.lower_function(fn_)
+            methods[name] = hir_fn.symbol
+
+        self.symbols.pop_scope()
+
+        HirImpl(
+            type_: type_,
+            trait_: trait_,
+            type_params: type_params,
+            where_clause: where_clause,
+            methods: methods,
+            span: impl_.span
+        )
+
+    me lower_const(const_: Const) -> HirConst:
+        """Lower constant to HIR."""
+        val symbol = self.symbols.lookup(const_.name).unwrap()
+        val type_ = const_.type_.map(\t: self.lower_type(t)) ?? HirType(kind: HirTypeKind.Infer(0, 0), span: const_.span)
+        val value = self.lower_expr(const_.value)
+
+        HirConst(
+            symbol: symbol,
+            name: const_.name,
+            type_: type_,
+            value: value,
+            is_mutable: const_.is_mutable,
+            is_public: const_.is_public,
+            span: const_.span
+        )
