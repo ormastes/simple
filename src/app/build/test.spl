@@ -10,8 +10,9 @@
 
 use app.build.types (TestConfig, TestResult, TestResults)
 use app.build.cargo (Cargo, print_test_result)
+use app.build.baremetal (BaremetalConfig, QemuRunner)
 
-use app.io.mod (cli_run_tests)
+use app.io.mod (cli_run_tests, file_exists)
 
 # Test orchestrator class
 class TestOrchestrator:
@@ -69,6 +70,7 @@ fn run_serial_optimized_impl(config: TestConfig, start_time: i64) -> TestResults
                     rust: rust_result,
                     doc: empty_test_result(),
                     simple: empty_test_result(),
+                    baremetal: empty_test_result(),
                     total_duration_ms: total_duration
                 )
         else:
@@ -115,10 +117,18 @@ fn run_serial_optimized_impl(config: TestConfig, start_time: i64) -> TestResults
         val end_time = current_time_ms()
         val total_duration = end_time - start_time
 
+        # Run bare-metal tests if enabled
+        var baremetal_result = empty_test_result()
+        if config.baremetal:
+            print "\n=== Running Bare-Metal Tests (QEMU) ==="
+            baremetal_result = run_baremetal_tests(config)
+            print_test_result(baremetal_result)
+
         TestResults(
             rust: rust_result,
             doc: doc_result,
             simple: simple_result,
+            baremetal: baremetal_result,
             total_duration_ms: total_duration
         )
 
@@ -142,6 +152,7 @@ fn run_serial_impl(config: TestConfig, start_time: i64) -> TestResults:
                     rust: rust_result,
                     doc: empty_test_result(),
                     simple: empty_test_result(),
+                    baremetal: empty_test_result(),
                     total_duration_ms: total_duration
                 )
 
@@ -159,6 +170,7 @@ fn run_serial_impl(config: TestConfig, start_time: i64) -> TestResults:
                     rust: rust_result,
                     doc: doc_result,
                     simple: empty_test_result(),
+                    baremetal: empty_test_result(),
                     total_duration_ms: total_duration
                 )
 
@@ -172,10 +184,18 @@ fn run_serial_impl(config: TestConfig, start_time: i64) -> TestResults:
         val end_time = current_time_ms()
         val total_duration = end_time - start_time
 
+        # Run bare-metal tests if enabled
+        var baremetal_result = empty_test_result()
+        if config.baremetal:
+            print "\n=== Running Bare-Metal Tests (QEMU) ==="
+            baremetal_result = run_baremetal_tests(config)
+            print_test_result(baremetal_result)
+
         TestResults(
             rust: rust_result,
             doc: doc_result,
             simple: simple_result,
+            baremetal: baremetal_result,
             total_duration_ms: total_duration
         )
 
@@ -278,6 +298,9 @@ fn print_test_results(results: TestResults):
         "Simple Tests:",
         "  Run: {results.simple.tests_run}, Passed: {results.simple.tests_passed}, Failed: {results.simple.tests_failed}",
         "",
+        "Bare-Metal Tests (QEMU):",
+        "  Run: {results.baremetal.tests_run}, Passed: {results.baremetal.tests_passed}, Failed: {results.baremetal.tests_failed}",
+        "",
         "Total:",
         "  Run: {results.total_tests()}, Passed: {results.total_passed()}, Failed: {results.total_failed()}",
         "  Duration: {results.total_duration_ms}ms"
@@ -304,8 +327,49 @@ fn default_test_config() -> TestConfig:
         parallel: false,  # Keep serial as default until parallel is tested
         rust_only: false,
         doc_only: false,
-        simple_only: false
+        simple_only: false,
+        baremetal: false,
+        baremetal_board: "qemu_x86",
+        baremetal_timeout: 30000
     )
+
+# Run bare-metal tests in QEMU
+fn run_baremetal_tests(config: TestConfig) -> TestResult:
+    if not config.baremetal:
+        return empty_test_result()
+
+    val board_file = "boards/{config.baremetal_board}.sdn"
+    if not file_exists(board_file):
+        return TestResult(
+            success: false,
+            exit_code: 1,
+            stdout: "",
+            stderr: "Board file not found: {board_file}",
+            tests_run: 0,
+            tests_passed: 0,
+            tests_failed: 0
+        )
+
+    # Create bare-metal config
+    var bm_config = BaremetalConfig.qemu_x86()
+    bm_config.board_file = board_file
+
+    # Kernel path for tests
+    val kernel_path = "build/baremetal/kernel.elf"
+    if not file_exists(kernel_path):
+        return TestResult(
+            success: false,
+            exit_code: 1,
+            stdout: "",
+            stderr: "Bare-metal kernel not found: {kernel_path}\nRun 'simple build baremetal' first.",
+            tests_run: 0,
+            tests_passed: 0,
+            tests_failed: 0
+        )
+
+    # Create QEMU runner and execute
+    val runner = QemuRunner.new(bm_config, config.baremetal_timeout)
+    runner.run(kernel_path)
 
 # ============================================================================
 # PHASE 1 OPTIMIZATIONS COMPLETE + PURE SIMPLE OPTIMIZATIONS

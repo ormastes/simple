@@ -1,0 +1,387 @@
+# Feature Database Utilities Tests
+
+use lib.database.feature_utils.*
+use lib.database.feature.{Feature, FeatureStatus}
+use app.io.{file_write}
+
+describe "Feature Utilities":
+    context "SSpec Metadata Parsing":
+        it "extracts id from attribute":
+            val content = """
+#[id("feature_001")]
+describe "My Feature":
+    pass
+"""
+            # Create temp file
+            val temp_path = "/tmp/test_sspec_id.spl"
+            file_write(temp_path, content)
+
+            val items = parse_sspec_metadata(temp_path)
+            expect items.len() == 1
+            expect items[0].id == "feature_001"
+            expect items[0].name == "My Feature"
+
+        it "extracts modes from attribute":
+            val content = """
+#[modes("pure", "hybrid")]
+describe "Multi-mode Feature":
+    pass
+"""
+            val temp_path = "/tmp/test_sspec_modes.spl"
+            file_write(temp_path, content)
+
+            val items = parse_sspec_metadata(temp_path)
+            expect items.len() == 1
+            expect items[0].modes.len() == 2
+            expect items[0].modes[0] == "pure"
+            expect items[0].modes[1] == "hybrid"
+
+        it "extracts skip_modes from attribute":
+            val content = """
+#[skip_modes("jit")]
+describe "Skip JIT Feature":
+    pass
+"""
+            val temp_path = "/tmp/test_sspec_skip.spl"
+            file_write(temp_path, content)
+
+            val items = parse_sspec_metadata(temp_path)
+            expect items.len() == 1
+            expect items[0].skip_modes.len() == 1
+            expect items[0].skip_modes[0] == "jit"
+
+        it "extracts platforms from attribute":
+            val content = """
+#[platforms("linux", "macos")]
+describe "Platform-specific Feature":
+    pass
+"""
+            val temp_path = "/tmp/test_sspec_platforms.spl"
+            file_write(temp_path, content)
+
+            val items = parse_sspec_metadata(temp_path)
+            expect items.len() == 1
+            expect items[0].platforms.len() == 2
+            expect items[0].platforms[0] == "linux"
+
+        it "detects ignore attribute":
+            val content = """
+#[ignore]
+describe "Ignored Feature":
+    pass
+"""
+            val temp_path = "/tmp/test_sspec_ignore.spl"
+            file_write(temp_path, content)
+
+            val items = parse_sspec_metadata(temp_path)
+            expect items.len() == 1
+            expect items[0].is_ignored == true
+
+        it "handles multiple attributes":
+            val content = """
+#[id("multi_001")]
+#[modes("pure", "hybrid", "llvm")]
+#[platforms("linux")]
+describe "Complex Feature":
+    pass
+"""
+            val temp_path = "/tmp/test_sspec_multi.spl"
+            file_write(temp_path, content)
+
+            val items = parse_sspec_metadata(temp_path)
+            expect items.len() == 1
+            expect items[0].id == "multi_001"
+            expect items[0].modes.len() == 3
+            expect items[0].platforms.len() == 1
+
+        it "parses multiple describe blocks":
+            val content = """
+#[id("f1")]
+describe "Feature 1":
+    pass
+
+#[id("f2")]
+describe "Feature 2":
+    pass
+"""
+            val temp_path = "/tmp/test_sspec_multiple.spl"
+            file_write(temp_path, content)
+
+            val items = parse_sspec_metadata(temp_path)
+            expect items.len() == 2
+            expect items[0].id == "f1"
+            expect items[1].id == "f2"
+
+        it "uses name as fallback id":
+            val content = """
+describe "Auto ID Feature":
+    pass
+"""
+            val temp_path = "/tmp/test_sspec_auto_id.spl"
+            file_write(temp_path, content)
+
+            val items = parse_sspec_metadata(temp_path)
+            expect items.len() == 1
+            expect items[0].id == "Auto ID Feature"
+            expect items[0].name == "Auto ID Feature"
+
+        it "handles empty file":
+            val temp_path = "/tmp/test_sspec_empty.spl"
+            file_write(temp_path, "")
+
+            val items = parse_sspec_metadata(temp_path)
+            expect items.len() == 0
+
+        it "handles missing file":
+            val items = parse_sspec_metadata("/nonexistent/file.spl")
+            expect items.len() == 0
+
+    context "Attribute List Parsing":
+        it "parses single value":
+            val result = parse_attr_list("modes(\"pure\")", "modes")
+            expect result.len() == 1
+            expect result[0] == "pure"
+
+        it "parses multiple values":
+            val result = parse_attr_list("modes(\"pure\", \"hybrid\", \"llvm\")", "modes")
+            expect result.len() == 3
+            expect result[0] == "pure"
+            expect result[1] == "hybrid"
+            expect result[2] == "llvm"
+
+        it "handles whitespace":
+            val result = parse_attr_list("modes( \"pure\" , \"hybrid\" )", "modes")
+            expect result.len() == 2
+            expect result[0] == "pure"
+            expect result[1] == "hybrid"
+
+        it "returns empty for missing attribute":
+            val result = parse_attr_list("other(\"value\")", "modes")
+            expect result.len() == 0
+
+        it "returns empty for malformed":
+            val result = parse_attr_list("modes(unclosed", "modes")
+            expect result.len() == 0
+
+    context "String Extraction":
+        it "extracts quoted string":
+            val result = extract_quoted_string("describe \"My Feature\":")
+            expect result == "My Feature"
+
+        it "handles escaped quotes":
+            val result = extract_quoted_string("describe \"Feature with \\\"quotes\\\"\":")
+            expect result == "Feature with \\\"quotes\\\""
+
+        it "returns empty for no quotes":
+            val result = extract_quoted_string("describe NoQuotes:")
+            expect result == ""
+
+        it "returns empty for unclosed quote":
+            val result = extract_quoted_string("describe \"Unclosed")
+            expect result == ""
+
+    context "Category Extraction":
+        it "extracts from features directory":
+            val result = extract_category_from_path("test/system/features/control_flow/loops_spec.spl")
+            expect result == "control_flow"
+
+        it "extracts from nested path":
+            val result = extract_category_from_path("src/features/parser/expr_spec.spl")
+            expect result == "parser"
+
+        it "uses parent directory as fallback":
+            val result = extract_category_from_path("test/my_category/spec.spl")
+            expect result == "my_category"
+
+        it "handles single level path":
+            val result = extract_category_from_path("spec.spl")
+            expect result == "uncategorized"
+
+    context "Feature ID Comparison":
+        it "sorts numeric IDs correctly":
+            expect compare_feature_id("1", "2") < 0
+            expect compare_feature_id("2", "1") > 0
+            expect compare_feature_id("5", "5") == 0
+
+        it "sorts dotted IDs semantically":
+            expect compare_feature_id("1.2", "1.10") < 0
+            expect compare_feature_id("1.10", "1.2") > 0
+            expect compare_feature_id("1.5", "1.5") == 0
+
+        it "handles multi-level versions":
+            expect compare_feature_id("1.2.3", "1.2.10") < 0
+            expect compare_feature_id("1.10.1", "1.2.20") > 0
+
+        it "handles different lengths":
+            expect compare_feature_id("1.2", "1.2.1") < 0
+            expect compare_feature_id("1.2.1", "1.2") > 0
+
+        it "handles alpha-numeric IDs":
+            expect compare_feature_id("a.1", "a.2") < 0
+            expect compare_feature_id("b.1", "a.10") > 0
+
+        it "handles pure string IDs":
+            expect compare_feature_id("alpha", "beta") < 0
+            expect compare_feature_id("gamma", "beta") > 0
+
+    context "Feature Sorting":
+        it "sorts features by semantic ID":
+            val features = [
+                Feature(
+                    id: "1.10", category: "Test", name: "F1", description: "",
+                    spec_file: "", pure_status: FeatureStatus.Done,
+                    hybrid_status: FeatureStatus.Done, llvm_status: FeatureStatus.Done,
+                    created_at: "", updated_at: "", valid: true
+                ),
+                Feature(
+                    id: "1.2", category: "Test", name: "F2", description: "",
+                    spec_file: "", pure_status: FeatureStatus.Done,
+                    hybrid_status: FeatureStatus.Done, llvm_status: FeatureStatus.Done,
+                    created_at: "", updated_at: "", valid: true
+                ),
+                Feature(
+                    id: "1.3", category: "Test", name: "F3", description: "",
+                    spec_file: "", pure_status: FeatureStatus.Done,
+                    hybrid_status: FeatureStatus.Done, llvm_status: FeatureStatus.Done,
+                    created_at: "", updated_at: "", valid: true
+                )
+            ]
+
+            val sorted = sort_features_by_id(features)
+            expect sorted[0].id == "1.2"
+            expect sorted[1].id == "1.3"
+            expect sorted[2].id == "1.10"
+
+        it "preserves original array":
+            val features = [
+                Feature(
+                    id: "3", category: "Test", name: "F3", description: "",
+                    spec_file: "", pure_status: FeatureStatus.Done,
+                    hybrid_status: FeatureStatus.Done, llvm_status: FeatureStatus.Done,
+                    created_at: "", updated_at: "", valid: true
+                ),
+                Feature(
+                    id: "1", category: "Test", name: "F1", description: "",
+                    spec_file: "", pure_status: FeatureStatus.Done,
+                    hybrid_status: FeatureStatus.Done, llvm_status: FeatureStatus.Done,
+                    created_at: "", updated_at: "", valid: true
+                )
+            ]
+
+            val sorted = sort_features_by_id(features)
+            expect features[0].id == "3"  # Original unchanged
+            expect sorted[0].id == "1"     # Sorted copy
+
+    context "Duplicate Detection":
+        it "finds duplicate IDs":
+            val features = [
+                Feature(
+                    id: "dup", category: "Test", name: "First", description: "",
+                    spec_file: "", pure_status: FeatureStatus.Done,
+                    hybrid_status: FeatureStatus.Done, llvm_status: FeatureStatus.Done,
+                    created_at: "", updated_at: "", valid: true
+                ),
+                Feature(
+                    id: "unique", category: "Test", name: "Unique", description: "",
+                    spec_file: "", pure_status: FeatureStatus.Done,
+                    hybrid_status: FeatureStatus.Done, llvm_status: FeatureStatus.Done,
+                    created_at: "", updated_at: "", valid: true
+                ),
+                Feature(
+                    id: "dup", category: "Test", name: "Second", description: "",
+                    spec_file: "", pure_status: FeatureStatus.Done,
+                    hybrid_status: FeatureStatus.Done, llvm_status: FeatureStatus.Done,
+                    created_at: "", updated_at: "", valid: true
+                )
+            ]
+
+            val dups = find_duplicate_ids(features)
+            expect dups.len() == 1
+            expect dups[0] == "dup"
+
+        it "returns empty for no duplicates":
+            val features = [
+                Feature(
+                    id: "f1", category: "Test", name: "F1", description: "",
+                    spec_file: "", pure_status: FeatureStatus.Done,
+                    hybrid_status: FeatureStatus.Done, llvm_status: FeatureStatus.Done,
+                    created_at: "", updated_at: "", valid: true
+                ),
+                Feature(
+                    id: "f2", category: "Test", name: "F2", description: "",
+                    spec_file: "", pure_status: FeatureStatus.Done,
+                    hybrid_status: FeatureStatus.Done, llvm_status: FeatureStatus.Done,
+                    created_at: "", updated_at: "", valid: true
+                )
+            ]
+
+            val dups = find_duplicate_ids(features)
+            expect dups.len() == 0
+
+    context "Orphaned Feature Detection":
+        it "marks features with missing spec files as invalid":
+            val features = [
+                Feature(
+                    id: "f1", category: "Test", name: "Valid", description: "",
+                    spec_file: "existing.spl", pure_status: FeatureStatus.Done,
+                    hybrid_status: FeatureStatus.Done, llvm_status: FeatureStatus.Done,
+                    created_at: "", updated_at: "", valid: true
+                ),
+                Feature(
+                    id: "f2", category: "Test", name: "Missing", description: "",
+                    spec_file: "missing.spl", pure_status: FeatureStatus.Done,
+                    hybrid_status: FeatureStatus.Done, llvm_status: FeatureStatus.Done,
+                    created_at: "", updated_at: "", valid: true
+                )
+            ]
+
+            val known_files = ["existing.spl"]
+            val updated = mark_orphaned_features(features, known_files)
+
+            expect updated[0].valid == true   # existing.spl found
+            expect updated[1].valid == false  # missing.spl not found
+
+        it "preserves valid status for found files":
+            val features = [
+                Feature(
+                    id: "f1", category: "Test", name: "F1", description: "",
+                    spec_file: "found.spl", pure_status: FeatureStatus.Done,
+                    hybrid_status: FeatureStatus.Done, llvm_status: FeatureStatus.Done,
+                    created_at: "", updated_at: "", valid: true
+                )
+            ]
+
+            val known_files = ["found.spl"]
+            val updated = mark_orphaned_features(features, known_files)
+
+            expect updated[0].valid == true
+
+        it "ignores features with empty spec file":
+            val features = [
+                Feature(
+                    id: "f1", category: "Test", name: "No Spec", description: "",
+                    spec_file: "", pure_status: FeatureStatus.Done,
+                    hybrid_status: FeatureStatus.Done, llvm_status: FeatureStatus.Done,
+                    created_at: "", updated_at: "", valid: true
+                )
+            ]
+
+            val known_files: [text] = []
+            val updated = mark_orphaned_features(features, known_files)
+
+            expect updated[0].valid == true  # Empty spec file ignored
+
+        it "ignores non-.spl files":
+            val features = [
+                Feature(
+                    id: "f1", category: "Test", name: "MD File", description: "",
+                    spec_file: "README.md", pure_status: FeatureStatus.Done,
+                    hybrid_status: FeatureStatus.Done, llvm_status: FeatureStatus.Done,
+                    created_at: "", updated_at: "", valid: true
+                )
+            ]
+
+            val known_files: [text] = []
+            val updated = mark_orphaned_features(features, known_files)
+
+            expect updated[0].valid == true  # .md file ignored
