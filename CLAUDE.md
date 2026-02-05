@@ -504,6 +504,73 @@ version = "1.0.0"
 
 ---
 
+## Project Directory Structure
+
+### Standardized Directories
+
+All directories follow consistent naming conventions:
+
+| Directory | Purpose | Convention | Gitignored |
+|-----------|---------|------------|------------|
+| `examples/` | Example scripts and demos | **Plural** | No |
+| `script/` | Build and utility scripts | **Singular** | No |
+| `doc/` | Documentation root | **Singular** | No |
+| `doc/architecture/` | Architecture docs | **Full name** (not `arch/`) | No |
+| `doc/feature/` | Auto-generated feature docs | **Singular** (category) | No |
+| `doc/spec/tooling/` | Tool specifications | **Plural** (collection) | No |
+| `test/` | Test files | **Singular** | No |
+| `src/` | Source code | **Singular** | No |
+| `build/` | Build artifacts | **Singular** | Yes (`/build/`) |
+| `.coverage/` | Runtime coverage data | **Hidden** (dotfile) | Yes (`.coverage/`) |
+
+### Coverage Output Locations
+
+Two types of coverage with separate locations:
+
+**Runtime Coverage (Simple interpreter decision/condition/path coverage):**
+- **Location**: `.coverage/coverage.sdn`
+- **Tool**: Simple runtime with `SIMPLE_COVERAGE=1`
+- **Format**: SDN (Simple Data Notation)
+- **Config**: `rust/lib/std/src/tooling/coverage.spl` line 100
+
+**Build Coverage (Rust code line/branch coverage):**
+- **Location**: `build/coverage/`
+  - HTML: `build/coverage/html/index.html`
+  - LCOV: `build/coverage/lcov.info`
+  - JSON: `build/coverage/coverage.json`
+- **Tool**: `cargo-llvm-cov` via `simple build coverage`
+- **Format**: HTML/LCOV/JSON
+- **Config**: `src/app/build/coverage.spl` line 367
+
+### Directory Naming Rules
+
+✅ **DO:**
+- Use **plural** for collections: `examples/`, `tooling/`
+- Use **singular** for categories: `feature/`, `script/`, `doc/`
+- Use **full names**: `architecture/` not `arch/`
+- Keep build artifacts in `build/`: `build/coverage/`, `build/release/`
+- Use **dotfiles** for runtime data: `.coverage/`
+
+❌ **DON'T:**
+- Create duplicate directories (e.g., both `example/` and `examples/`)
+- Use abbreviations (e.g., `arch/` instead of `architecture/`)
+- Scatter coverage outputs (use `.coverage/` for runtime, `build/coverage/` for build)
+- Put build artifacts at root level
+
+### Deleted Directories (Consolidated)
+
+The following directories were removed during refactoring (2026-02-05):
+- `example/` → consolidated into `examples/`
+- `scripts/` → consolidated into `script/`
+- `coverage/` and `coverage_new/` → replaced by `build/coverage/`
+- `doc/arch/` → consolidated into `doc/architecture/`
+- `doc/features/` → consolidated into `doc/feature/`
+- `doc/spec/tools/` → consolidated into `doc/spec/tooling/`
+- `src/src/` → deleted (nested artifact)
+- Empty test directories: `test/basic/`, `test/benchmark/`, `test/unit/`
+
+---
+
 ## Documentation
 
 **Bug Reports:** `doc/bug_report.md`

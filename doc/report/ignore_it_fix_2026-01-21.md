@@ -225,7 +225,7 @@ The fix itself is sound and follows the correct logic:
 
 ## Architecture Impact
 
-This fix clarifies the test status data flow documented in `doc/arch/test_runner_architecture.md`:
+This fix clarifies the test status data flow documented in `doc/architecture/test_runner_architecture.md`:
 
 ```
 Example.is_ignored = true
