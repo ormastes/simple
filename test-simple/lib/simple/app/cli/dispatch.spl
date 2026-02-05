@@ -1,0 +1,601 @@
+# CLI Command Dispatch - Simple Implementation
+#
+# Table-driven command dispatch system that replaces rust/driver/src/main.rs
+#
+# Architecture:
+# 1. Check environment variable override → call Rust handler
+# 2. Check if args require Rust handler → call Rust handler
+# 3. Try Simple app implementation → execute .spl file
+# 4. Fallback to Rust handler if Simple app fails
+#
+# Migration from: rust/driver/src/main.rs (731 lines, 48 commands)
+#
+# VERIFICATION:
+# - Performance: All commands must execute in <25ms overhead vs Rust
+# - Robustness: Identical error handling and messages
+# - Logic: Differential testing (Simple vs Rust) for all commands
+
+export CommandEntry, COMMAND_TABLE
+export dispatch_command, find_command
+
+use app.io (env_get, cli_run_file)
+
+# ============================================================================
+# Command Table Types
+# ============================================================================
+
+struct CommandEntry:
+    """Single command table entry.
+
+    Each entry defines:
+    - name: CLI command name (e.g., "compile", "test")
+    - app_path: Path to Simple implementation (e.g., "src/app/compile/main.spl")
+    - env_override: Environment variable to force Rust (e.g., "SIMPLE_COMPILE_RUST")
+    - needs_rust_flags: Flags that require Rust handler (e.g., ["--json", "--fix"])
+
+    Example:
+        CommandEntry(
+            name: "compile",
+            app_path: "src/app/compile/main.spl",
+            env_override: "SIMPLE_COMPILE_RUST",
+            needs_rust_flags: []
+        )
+    """
+    name: text
+    app_path: text
+    env_override: text
+    needs_rust_flags: [text]
+
+impl CommandEntry:
+    fn should_use_rust(args: [text]) -> bool:
+        """Check if this invocation requires Rust handler.
+
+        Returns true if:
+        1. Environment override is set (e.g., SIMPLE_COMPILE_RUST=1)
+        2. Any command args match needs_rust_flags
+
+        Example:
+            entry.should_use_rust(["lint", "--json"])  # true if needs_rust_flags contains "--json"
+        """
+        # Check env override
+        if self.env_override.len() > 0:
+            val env_val = env_get(self.env_override)
+            if env_val.len() > 0:
+                return true
+
+        # Check if any args require Rust
+        if self.needs_rust_flags.len() > 0:
+            for arg in args:
+                for flag in self.needs_rust_flags:
+                    if arg == flag or arg.starts_with(flag):
+                        return true
+
+        false
+
+    fn has_simple_impl() -> bool:
+        """Check if Simple implementation exists."""
+        self.app_path.len() > 0
+
+# ============================================================================
+# Command Table - 48 Commands (Port of rust/driver/src/main.rs:169-540)
+# ============================================================================
+
+val COMMAND_TABLE: [CommandEntry] = [
+    # -------------------------------------------------------------------------
+    # Compilation Commands
+    # -------------------------------------------------------------------------
+
+    CommandEntry(
+        name: "compile",
+        app_path: "src/app/compile/main.spl",
+        env_override: "SIMPLE_COMPILE_RUST",
+        needs_rust_flags: []
+    ),
+
+    CommandEntry(
+        name: "targets",
+        app_path: "src/app/targets/main.spl",
+        env_override: "SIMPLE_TARGETS_RUST",
+        needs_rust_flags: []
+    ),
+
+    CommandEntry(
+        name: "linkers",
+        app_path: "src/app/linkers/main.spl",
+        env_override: "SIMPLE_LINKERS_RUST",
+        needs_rust_flags: []
+    ),
+
+    # -------------------------------------------------------------------------
+    # Web Framework
+    # -------------------------------------------------------------------------
+
+    CommandEntry(
+        name: "web",
+        app_path: "src/app/web/main.spl",
+        env_override: "SIMPLE_WEB_RUST",
+        needs_rust_flags: []
+    ),
+
+    # -------------------------------------------------------------------------
+    # File Watching
+    # -------------------------------------------------------------------------
+
+    CommandEntry(
+        name: "watch",
+        app_path: "src/app/watch/main.spl",
+        env_override: "SIMPLE_WATCH_RUST",
+        needs_rust_flags: []
+    ),
+
+    # -------------------------------------------------------------------------
+    # Testing - Currently Rust-only (cargo test integration)
+    # -------------------------------------------------------------------------
+
+    CommandEntry(
+        name: "test",
+        app_path: "",  # No Simple impl yet (complex cargo integration)
+        env_override: "",
+        needs_rust_flags: []
+    ),
+
+    # -------------------------------------------------------------------------
+    # Code Quality
+    # -------------------------------------------------------------------------
+
+    CommandEntry(
+        name: "lint",
+        app_path: "src/app/lint/main.spl",
+        env_override: "SIMPLE_LINT_RUST",
+        needs_rust_flags: ["--json", "--fix"]
+    ),
+
+    CommandEntry(
+        name: "fix",
+        app_path: "src/app/fix/main.spl",
+        env_override: "SIMPLE_FIX_RUST",
+        needs_rust_flags: ["--fix", "--fix-all", "--fix-dry-run", "--fix-interactive"]
+    ),
+
+    CommandEntry(
+        name: "fmt",
+        app_path: "src/app/formatter/main.spl",
+        env_override: "SIMPLE_FMT_RUST",
+        needs_rust_flags: ["--json"]
+    ),
+
+    CommandEntry(
+        name: "check",
+        app_path: "src/app/check/main.spl",
+        env_override: "SIMPLE_CHECK_RUST",
+        needs_rust_flags: []
+    ),
+
+    # -------------------------------------------------------------------------
+    # Localization
+    # -------------------------------------------------------------------------
+
+    CommandEntry(
+        name: "i18n",
+        app_path: "src/app/i18n/main.spl",
+        env_override: "SIMPLE_I18N_RUST",
+        needs_rust_flags: []
+    ),
+
+    # -------------------------------------------------------------------------
+    # Migration and Tooling
+    # -------------------------------------------------------------------------
+
+    CommandEntry(
+        name: "migrate",
+        app_path: "src/app/migrate/main.spl",
+        env_override: "SIMPLE_MIGRATE_RUST",
+        needs_rust_flags: []
+    ),
+
+    CommandEntry(
+        name: "mcp",
+        app_path: "src/app/mcp/main.spl",
+        env_override: "SIMPLE_MCP_RUST",
+        needs_rust_flags: []
+    ),
+
+    CommandEntry(
+        name: "diff",
+        app_path: "src/app/diff/main.spl",
+        env_override: "SIMPLE_DIFF_RUST",
+        needs_rust_flags: []
+    ),
+
+    CommandEntry(
+        name: "context",
+        app_path: "src/app/context/main.spl",
+        env_override: "SIMPLE_CONTEXT_RUST",
+        needs_rust_flags: []
+    ),
+
+    CommandEntry(
+        name: "constr",
+        app_path: "src/app/constr/main.spl",
+        env_override: "SIMPLE_CONSTR_RUST",
+        needs_rust_flags: []
+    ),
+
+    # -------------------------------------------------------------------------
+    # Analysis and Querying
+    # -------------------------------------------------------------------------
+
+    CommandEntry(
+        name: "query",
+        app_path: "src/app/query/main.spl",
+        env_override: "SIMPLE_QUERY_RUST",
+        needs_rust_flags: []
+    ),
+
+    CommandEntry(
+        name: "info",
+        app_path: "src/app/info/main.spl",
+        env_override: "SIMPLE_INFO_RUST",
+        needs_rust_flags: []
+    ),
+
+    CommandEntry(
+        name: "spec-coverage",
+        app_path: "src/app/spec_coverage/main.spl",
+        env_override: "SIMPLE_SPEC_COVERAGE_RUST",
+        needs_rust_flags: []
+    ),
+
+    CommandEntry(
+        name: "replay",
+        app_path: "src/app/replay/main.spl",
+        env_override: "SIMPLE_REPLAY_RUST",
+        needs_rust_flags: []
+    ),
+
+    # -------------------------------------------------------------------------
+    # Code Generation
+    # -------------------------------------------------------------------------
+
+    CommandEntry(
+        name: "gen-lean",
+        app_path: "src/app/gen_lean/main.spl",
+        env_override: "SIMPLE_GEN_LEAN_RUST",
+        needs_rust_flags: []
+    ),
+
+    CommandEntry(
+        name: "feature-gen",
+        app_path: "src/app/feature_gen/main.spl",
+        env_override: "SIMPLE_FEATURE_GEN_RUST",
+        needs_rust_flags: []
+    ),
+
+    CommandEntry(
+        name: "task-gen",
+        app_path: "src/app/task_gen/main.spl",
+        env_override: "SIMPLE_TASK_GEN_RUST",
+        needs_rust_flags: []
+    ),
+
+    CommandEntry(
+        name: "spec-gen",
+        app_path: "src/app/spec_gen/main.spl",
+        env_override: "SIMPLE_SPEC_GEN_RUST",
+        needs_rust_flags: []
+    ),
+
+    CommandEntry(
+        name: "todo-scan",
+        app_path: "src/app/todo_scan/main.spl",
+        env_override: "SIMPLE_TODO_SCAN_RUST",
+        needs_rust_flags: []
+    ),
+
+    CommandEntry(
+        name: "todo-gen",
+        app_path: "src/app/todo_gen/main.spl",
+        env_override: "SIMPLE_TODO_GEN_RUST",
+        needs_rust_flags: []
+    ),
+
+    CommandEntry(
+        name: "sspec-docgen",
+        app_path: "src/app/sspec_docgen/main.spl",
+        env_override: "SIMPLE_SSPEC_DOCGEN_RUST",
+        needs_rust_flags: []
+    ),
+
+    # -------------------------------------------------------------------------
+    # Documentation
+    # -------------------------------------------------------------------------
+
+    CommandEntry(
+        name: "brief",
+        app_path: "src/app/brief/main.spl",
+        env_override: "SIMPLE_BRIEF_RUST",
+        needs_rust_flags: []
+    ),
+
+    CommandEntry(
+        name: "dashboard",
+        app_path: "src/app/dashboard/main.spl",
+        env_override: "SIMPLE_DASHBOARD_RUST",
+        needs_rust_flags: []
+    ),
+
+    # -------------------------------------------------------------------------
+    # Package Management
+    # -------------------------------------------------------------------------
+
+    CommandEntry(
+        name: "init",
+        app_path: "src/app/init/main.spl",
+        env_override: "SIMPLE_INIT_RUST",
+        needs_rust_flags: []
+    ),
+
+    CommandEntry(
+        name: "install",
+        app_path: "src/app/install/main.spl",
+        env_override: "SIMPLE_INSTALL_RUST",
+        needs_rust_flags: []
+    ),
+
+    CommandEntry(
+        name: "publish",
+        app_path: "src/app/publish/main.spl",
+        env_override: "SIMPLE_PUBLISH_RUST",
+        needs_rust_flags: []
+    ),
+
+    CommandEntry(
+        name: "add",
+        app_path: "src/app/add/main.spl",
+        env_override: "SIMPLE_ADD_RUST",
+        needs_rust_flags: []
+    ),
+
+    CommandEntry(
+        name: "remove",
+        app_path: "src/app/remove/main.spl",
+        env_override: "SIMPLE_REMOVE_RUST",
+        needs_rust_flags: []
+    ),
+
+    CommandEntry(
+        name: "search",
+        app_path: "src/app/search/main.spl",
+        env_override: "SIMPLE_SEARCH_RUST",
+        needs_rust_flags: []
+    ),
+
+    CommandEntry(
+        name: "deps",
+        app_path: "src/app/deps/main.spl",
+        env_override: "SIMPLE_DEPS_RUST",
+        needs_rust_flags: []
+    ),
+
+    CommandEntry(
+        name: "list",
+        app_path: "src/app/list/main.spl",
+        env_override: "SIMPLE_LIST_RUST",
+        needs_rust_flags: []
+    ),
+
+    CommandEntry(
+        name: "tree",
+        app_path: "src/app/tree/main.spl",
+        env_override: "SIMPLE_TREE_RUST",
+        needs_rust_flags: []
+    ),
+
+    # -------------------------------------------------------------------------
+    # Build System
+    # -------------------------------------------------------------------------
+
+    CommandEntry(
+        name: "build",
+        app_path: "src/app/build/main.spl",
+        env_override: "SIMPLE_BUILD_RUST",
+        needs_rust_flags: []
+    ),
+
+    CommandEntry(
+        name: "run",
+        app_path: "src/app/run/main.spl",
+        env_override: "SIMPLE_RUN_RUST",
+        needs_rust_flags: []
+    ),
+
+    CommandEntry(
+        name: "clean",
+        app_path: "src/app/clean/main.spl",
+        env_override: "SIMPLE_CLEAN_RUST",
+        needs_rust_flags: []
+    ),
+
+    # -------------------------------------------------------------------------
+    # Benchmarking
+    # -------------------------------------------------------------------------
+
+    CommandEntry(
+        name: "bench",
+        app_path: "src/app/bench/main.spl",
+        env_override: "SIMPLE_BENCH_RUST",
+        needs_rust_flags: []
+    ),
+
+    # -------------------------------------------------------------------------
+    # REPL and Execution
+    # -------------------------------------------------------------------------
+
+    CommandEntry(
+        name: "repl",
+        app_path: "src/app/repl/main.spl",
+        env_override: "SIMPLE_REPL_RUST",
+        needs_rust_flags: []
+    ),
+
+    CommandEntry(
+        name: "verify",
+        app_path: "src/app/verify/main.spl",
+        env_override: "SIMPLE_VERIFY_RUST",
+        needs_rust_flags: []
+    ),
+
+    # -------------------------------------------------------------------------
+    # Qualification
+    # -------------------------------------------------------------------------
+
+    CommandEntry(
+        name: "qualify-ignore",
+        app_path: "src/app/qualify_ignore/main.spl",
+        env_override: "SIMPLE_QUALIFY_IGNORE_RUST",
+        needs_rust_flags: []
+    ),
+]
+
+# ============================================================================
+# Dispatch Functions
+# ============================================================================
+
+fn find_command(cmd: text) -> CommandEntry?:
+    """Find command entry by name.
+
+    Args:
+        cmd: Command name to search for
+
+    Returns:
+        Some(entry) if found, None otherwise
+
+    Example:
+        find_command("compile")  # Some(CommandEntry(...))
+        find_command("invalid")  # None
+    """
+    for entry in COMMAND_TABLE:
+        if entry.name == cmd:
+            return Some(entry)
+    None
+
+fn dispatch_command(entry: CommandEntry, args: [text], gc_log: bool, gc_off: bool) -> i64:
+    """Dispatch a command: Simple-first with Rust fallback.
+
+    Execution order:
+    1. Check if should use Rust (env override or special flags)
+    2. Try Simple implementation (if exists)
+    3. Fallback to Rust (if Simple fails or doesn't exist)
+
+    Args:
+        entry: Command table entry
+        args: Full command-line arguments (including command name)
+        gc_log: Enable GC logging
+        gc_off: Disable GC
+
+    Returns:
+        Exit code (0 = success, non-zero = error)
+
+    Example:
+        dispatch_command(compile_entry, ["compile", "file.spl"], false, false)
+
+    PERFORMANCE VERIFICATION:
+    - Target: <10ms overhead vs direct Rust handler
+    - Measured via: time simple compile --help
+    """
+    # 1. Check if Rust handler is required
+    if entry.should_use_rust(args):
+        return dispatch_to_rust(entry.name, args, gc_log, gc_off)
+
+    # 2. Try Simple app implementation
+    if entry.has_simple_impl():
+        match try_simple_app(entry.app_path, args, gc_log, gc_off):
+            case Some(code):
+                return code
+            case None:
+                pass  # Fall through to Rust fallback
+
+    # 3. Fallback to Rust handler
+    dispatch_to_rust(entry.name, args, gc_log, gc_off)
+
+fn try_simple_app(app_path: text, args: [text], gc_log: bool, gc_off: bool) -> i64?:
+    """Try to execute Simple app implementation.
+
+    Args:
+        app_path: Path to Simple app (e.g., "src/app/compile/main.spl")
+        args: Command-line arguments
+        gc_log: Enable GC logging
+        gc_off: Disable GC
+
+    Returns:
+        Some(exit_code) if execution succeeded
+        None if app doesn't exist or failed to load
+
+    ROBUSTNESS VERIFICATION:
+    - Must handle missing files gracefully
+    - Must catch parse/compile errors in app
+    - Must not crash on invalid apps
+    """
+    # cli_run_file returns i64 (exit code)
+    # Negative values indicate errors (file not found, parse error, etc.)
+    val code = cli_run_file(app_path, args, gc_log, gc_off)
+    if code >= 0:
+        Some(code)  # Success (including non-zero exit codes from the app)
+    else:
+        None  # Error loading/running app, fallback to Rust
+
+# ============================================================================
+# FFI Bridge to Rust Fallback
+# ============================================================================
+
+fn dispatch_to_rust(cmd: text, args: [text], gc_log: bool, gc_off: bool) -> i64:
+    """Report error - Rust fallback removed.
+
+    All commands must be implemented in Simple.
+    Rust fallback has been removed per CLAUDE.md:
+    - ❌ No manual .rs files
+    - ❌ No FFI wrappers for commands
+    - ✅ Only core syscall FFI allowed
+
+    Args:
+        cmd: Command name
+        args: Full command-line arguments
+        gc_log: Enable GC logging
+        gc_off: Disable GC
+
+    Returns:
+        Always returns 1 (error)
+    """
+    print "error: command '{cmd}' not implemented in Simple"
+    print "hint: Add Simple implementation at src/app/{cmd}/main.spl"
+    1
+
+# ============================================================================
+# Statistics and Debugging
+# ============================================================================
+
+fn command_count() -> i64:
+    """Get total number of registered commands."""
+    COMMAND_TABLE.len() as i64
+
+fn simple_impl_count() -> i64:
+    """Get number of commands with Simple implementations."""
+    COMMAND_TABLE.filter(\e: e.has_simple_impl()).len() as i64
+
+fn coverage_percentage() -> f64:
+    """Get percentage of commands implemented in Simple."""
+    val total = command_count() as f64
+    val simple = simple_impl_count() as f64
+    (simple / total) * 100.0
+
+fn print_dispatch_stats():
+    """Print command dispatch statistics."""
+    val total = command_count()
+    val simple = simple_impl_count()
+    val coverage = coverage_percentage()
+
+    print "Command Dispatch Statistics:"
+    print "  Total commands: {total}"
+    print "  Simple implementations: {simple}"
+    print "  Rust-only: {total - simple}"
+    print "  Coverage: {coverage:.1f}%"

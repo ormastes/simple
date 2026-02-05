@@ -1,0 +1,327 @@
+# Experiment Run - Lifecycle, metrics, system info
+#
+# A Run tracks a single experiment execution:
+#   - Config snapshot (frozen at start)
+#   - Scalar metrics (step-indexed)
+#   - System info (hostname, VCS hash, timestamp)
+#   - Status (running, completed, failed, interrupted)
+#   - Tags and notes
+
+use std.exp.config
+use std.exp.storage
+use std.db_atomic.{atomic_write, DbConfig}
+
+extern fn rt_time_now_unix_micros() -> i64
+extern fn rt_env_get(key: str) -> str
+extern fn rt_process_run(cmd: str) -> str
+
+# ============================================================================
+# Run Status
+# ============================================================================
+
+enum RunStatus:
+    """Status of an experiment run."""
+    Running
+    Completed
+    Failed
+    Interrupted
+
+impl RunStatus:
+    fn to_text() -> text:
+        match self:
+            case Running: "running"
+            case Completed: "completed"
+            case Failed: "failed"
+            case Interrupted: "interrupted"
+
+    static fn from_text(s: text) -> RunStatus:
+        match s:
+            case "running": RunStatus.Running
+            case "completed": RunStatus.Completed
+            case "failed": RunStatus.Failed
+            case "interrupted": RunStatus.Interrupted
+            case _: RunStatus.Failed
+
+# ============================================================================
+# System Info
+# ============================================================================
+
+struct SystemInfo:
+    """System information captured at run start."""
+    hostname: text
+    vcs_hash: text?
+    start_time: text
+    start_time_micros: i64
+
+impl SystemInfo:
+    static fn capture() -> SystemInfo:
+        """Capture current system info."""
+        # TODO: Replace direct FFI call with wrapper (env_get) from app.io or compiler.ffi
+        val hostname = rt_env_get("HOSTNAME")
+        # TODO: Replace direct FFI call with wrapper (time_now_unix_micros) from app.io or compiler.ffi
+        val micros = rt_time_now_unix_micros()
+        SystemInfo(
+            hostname: if hostname == "": "unknown" else: hostname,
+            vcs_hash: nil,
+            start_time: "{micros}",
+            start_time_micros: micros
+        )
+
+# ============================================================================
+# Metric Entry
+# ============================================================================
+
+struct MetricEntry:
+    """A single metric log entry."""
+    name: text
+    value: f64
+    step: i64
+    timestamp: text
+
+# ============================================================================
+# Run
+# ============================================================================
+
+struct Run:
+    """An experiment run."""
+    run_id: text
+    config: ExpConfig
+    system_info: SystemInfo
+    status: RunStatus
+    tags: [text]
+    notes: [text]
+    metrics: Dict<text, [MetricEntry]>
+
+impl Run:
+    me log_metric(name: text, value: f64, step: i64):
+        """Log a scalar metric at a given step."""
+        val entry = MetricEntry(
+            name: name,
+            value: value,
+            step: step,
+            # TODO: Replace direct FFI call with wrapper (time_now_unix_micros) from app.io or compiler.ffi
+            timestamp: "{rt_time_now_unix_micros()}"
+        )
+        # Append to in-memory metrics
+        if not self.metrics.contains_key(name):
+            self.metrics[name] = []
+        self.metrics[name].push(entry)
+
+        # Append to event log
+        var data: Dict<text, text> = {}
+        data["name"] = name
+        data["value"] = "{value}"
+        data["step"] = "{step}"
+        val event = Event(
+            timestamp: entry.timestamp,
+            kind: "metric",
+            data: data
+        )
+        append_event(self.run_id, event)
+
+    me add_tag(tag: text):
+        """Add a tag to the run."""
+        self.tags.push(tag)
+        var data: Dict<text, text> = {}
+        data["tag"] = tag
+        # TODO: Replace direct FFI call with wrapper (time_now_unix_micros) from app.io or compiler.ffi
+        val event = Event(timestamp: "{rt_time_now_unix_micros()}", kind: "tag", data: data)
+        append_event(self.run_id, event)
+
+    me add_note(note: text):
+        """Add a note to the run."""
+        self.notes.push(note)
+        var data: Dict<text, text> = {}
+        data["note"] = note
+        # TODO: Replace direct FFI call with wrapper (time_now_unix_micros) from app.io or compiler.ffi
+        val event = Event(timestamp: "{rt_time_now_unix_micros()}", kind: "note", data: data)
+        append_event(self.run_id, event)
+
+    fn get_metric(name: text) -> [MetricEntry]:
+        """Get all entries for a metric."""
+        self.metrics[name] ?? []
+
+    fn get_last_metric(name: text) -> f64?:
+        """Get the last logged value for a metric."""
+        val entries = self.get_metric(name)
+        if entries.?:
+            Some(entries[-1].value)
+        else:
+            nil
+
+    me complete():
+        """Mark run as completed."""
+        self.status = RunStatus.Completed
+        finish_run(self)
+
+    me fail(reason: text):
+        """Mark run as failed."""
+        self.status = RunStatus.Failed
+        var data: Dict<text, text> = {}
+        data["reason"] = reason
+        # TODO: Replace direct FFI call with wrapper (time_now_unix_micros) from app.io or compiler.ffi
+        val event = Event(timestamp: "{rt_time_now_unix_micros()}", kind: "fail", data: data)
+        append_event(self.run_id, event)
+        finish_run(self)
+
+    fn elapsed_micros() -> i64:
+        """Get elapsed time since run start."""
+        # TODO: Replace direct FFI call with wrapper (time_now_unix_micros) from app.io or compiler.ffi
+        rt_time_now_unix_micros() - self.system_info.start_time_micros
+
+# ============================================================================
+# Run Lifecycle
+# ============================================================================
+
+pub fn start_run(config: ExpConfig, tags: [text]) -> Run:
+    """Start a new experiment run.
+
+    Creates run directory, writes config snapshot, and initializes event log.
+    Run ID = hash(config + VCS hash).
+    """
+    init_exp_dir()
+
+    val system_info = SystemInfo.capture()
+    val vcs = system_info.vcs_hash ?? "unknown"
+    val run_id = generate_run_id(config, vcs)
+
+    ensure_run_dir(run_id)
+
+    # Write config snapshot
+    val config_path = "{run_dir_path(run_id)}/config.sdn"
+    val config_content = config.to_sdn()
+    write_file(config_path, config_content)
+
+    # Write initial metadata
+    var meta: Dict<text, text> = {}
+    meta["status"] = "running"
+    meta["start_time"] = system_info.start_time
+    meta["hostname"] = system_info.hostname
+    if system_info.vcs_hash.?:
+        meta["vcs_hash"] = system_info.vcs_hash.unwrap()
+    meta["config_hash"] = config.hash()
+    meta["tags"] = tags.join(", ")
+    write_run_meta(run_id, meta)
+
+    # Log start event
+    var data: Dict<text, text> = {}
+    data["config_hash"] = config.hash()
+    val event = Event(timestamp: system_info.start_time, kind: "start", data: data)
+    append_event(run_id, event)
+
+    # Update index
+    update_index(run_id, "running", tags)
+
+    Run(
+        run_id: run_id,
+        config: config,
+        system_info: system_info,
+        status: RunStatus.Running,
+        tags: tags,
+        notes: [],
+        metrics: {}
+    )
+
+pub fn resume_run(run_id: text) -> Result<Run, text>:
+    """Resume an existing run by loading its state."""
+    if not run_exists(run_id):
+        return Err("Run not found: {run_id}")
+
+    val meta = read_run_meta(run_id)
+    val config_path = "{run_dir_path(run_id)}/config.sdn"
+    val config_result = load_sdn_config(config_path)
+    val config = if config_result.is_ok():
+        config_result.unwrap()
+    else:
+        ExpConfig.empty()
+
+    val events = read_events(run_id)
+
+    # Rebuild metrics from events
+    var metrics: Dict<text, [MetricEntry]> = {}
+    var tags: [text] = []
+    var notes: [text] = []
+    for event in events:
+        match event.kind:
+            case "metric":
+                val name = event.data["name"] ?? ""
+                val value_str = event.data["value"] ?? "0"
+                val step_str = event.data["step"] ?? "0"
+                # TODO: parse value and step properly
+                ()
+            case "tag":
+                val tag = event.data["tag"] ?? ""
+                if tag.?:
+                    tags.push(tag)
+            case "note":
+                val note = event.data["note"] ?? ""
+                if note.?:
+                    notes.push(note)
+            case _: ()
+
+    val status = RunStatus.from_text(meta["status"] ?? "running")
+    val system_info = SystemInfo(
+        hostname: meta["hostname"] ?? "",
+        vcs_hash: if (meta["vcs_hash"] ?? "").?: Some(meta["vcs_hash"].unwrap()) else: nil,
+        start_time: meta["start_time"] ?? "",
+        start_time_micros: 0
+    )
+
+    Ok(Run(
+        run_id: run_id,
+        config: config,
+        system_info: system_info,
+        status: status,
+        tags: tags,
+        notes: notes,
+        metrics: metrics
+    ))
+
+fn finish_run(run: Run):
+    """Finalize a run: update metadata and index."""
+    var meta: Dict<text, text> = {}
+    meta["status"] = run.status.to_text()
+    meta["start_time"] = run.system_info.start_time
+    # TODO: Replace direct FFI call with wrapper (time_now_unix_micros) from app.io or compiler.ffi
+    meta["end_time"] = "{rt_time_now_unix_micros()}"
+    meta["hostname"] = run.system_info.hostname
+    if run.system_info.vcs_hash.?:
+        meta["vcs_hash"] = run.system_info.vcs_hash.unwrap()
+    meta["config_hash"] = run.config.hash()
+    meta["tags"] = run.tags.join(", ")
+    write_run_meta(run.run_id, meta)
+
+    # Log end event
+    var data: Dict<text, text> = {}
+    data["status"] = run.status.to_text()
+    data["elapsed_micros"] = "{run.elapsed_micros()}"
+    # TODO: Replace direct FFI call with wrapper (time_now_unix_micros) from app.io or compiler.ffi
+    val event = Event(timestamp: "{rt_time_now_unix_micros()}", kind: "end", data: data)
+    append_event(run.run_id, event)
+
+    update_index(run.run_id, run.status.to_text(), run.tags)
+
+fn generate_run_id(config: ExpConfig, vcs_hash: text) -> text:
+    """Generate deterministic run ID from config hash + VCS hash + timestamp."""
+    val config_hash = config.hash()
+    # TODO: Replace direct FFI call with wrapper (time_now_unix_micros) from app.io or compiler.ffi
+    val ts = "{rt_time_now_unix_micros()}"
+    val combined = "{config_hash}:{vcs_hash}:{ts}"
+    # Use timestamp-based ID since we don't have SHA256 FFI yet
+    # TODO: Replace direct FFI call with wrapper (time_now_unix_micros) from app.io or compiler.ffi
+    val micros = rt_time_now_unix_micros()
+    "{micros}"[-12:]
+
+fn write_file(path: text, content: text):
+    """Atomically write file with backup."""
+    val result = atomic_write(path, content, DbConfig.defaults())
+    if result.err.?:
+        eprintln("[WARNING] Failed to write {path}: {result.unwrap_err()}")
+        return
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export RunStatus, SystemInfo, MetricEntry, Run
+export start_run, resume_run

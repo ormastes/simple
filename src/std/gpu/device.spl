@@ -9,17 +9,11 @@ use app.io.vulkan_ffi.*
 # GPU Backend Selection
 # ============================================================================
 
-"""
-Available GPU backends.
-"""
 enum GpuBackend:
-    Cuda       # NVIDIA CUDA
-    Vulkan     # Vulkan compute
-    NoGpu      # No GPU available
+    Cuda
+    Vulkan
+    NoGpu
 
-"""
-Detect which GPU backends are available.
-"""
 fn detect_backends() -> [GpuBackend]:
     var backends: [GpuBackend] = []
     if cuda_available():
@@ -28,10 +22,6 @@ fn detect_backends() -> [GpuBackend]:
         backends.push(GpuBackend.Vulkan)
     backends
 
-"""
-Get the preferred GPU backend.
-Order of preference: CUDA > Vulkan.
-"""
 fn preferred_backend() -> GpuBackend:
     if cuda_available():
         GpuBackend.Cuda
@@ -44,34 +34,23 @@ fn preferred_backend() -> GpuBackend:
 # Unified GPU Device
 # ============================================================================
 
-"""
-Unified GPU device abstraction.
-Works with both CUDA and Vulkan backends.
-"""
 struct Gpu:
     backend: GpuBackend
     device_id: i64
     is_initialized: bool
 
-"""
-Get the default GPU (uses preferred backend and device 0).
-"""
 fn gpu_default() -> Gpu:
     val backend = preferred_backend()
-    match backend:
-        case Cuda:
-            cuda_set_device(0)
-            Gpu(backend: backend, device_id: 0, is_initialized: true)
-        case Vulkan:
-            vulkan_init()
-            vulkan_select_device(0)
-            Gpu(backend: backend, device_id: 0, is_initialized: true)
-        case NoGpu:
-            Gpu(backend: backend, device_id: -1, is_initialized: false)
+    if backend == GpuBackend.Cuda:
+        cuda_set_device(0)
+        Gpu(backend: backend, device_id: 0, is_initialized: true)
+    elif backend == GpuBackend.Vulkan:
+        vulkan_init()
+        vulkan_select_device(0)
+        Gpu(backend: backend, device_id: 0, is_initialized: true)
+    else:
+        Gpu(backend: backend, device_id: -1, is_initialized: false)
 
-"""
-Get a CUDA device by ID.
-"""
 fn gpu_cuda(id: i64) -> Gpu:
     if not cuda_available():
         Gpu(backend: GpuBackend.NoGpu, device_id: -1, is_initialized: false)
@@ -79,9 +58,6 @@ fn gpu_cuda(id: i64) -> Gpu:
         cuda_set_device(id)
         Gpu(backend: GpuBackend.Cuda, device_id: id, is_initialized: true)
 
-"""
-Get a Vulkan device by ID.
-"""
 fn gpu_vulkan(id: i64) -> Gpu:
     if not vulkan_available():
         Gpu(backend: GpuBackend.NoGpu, device_id: -1, is_initialized: false)
@@ -91,74 +67,55 @@ fn gpu_vulkan(id: i64) -> Gpu:
         Gpu(backend: GpuBackend.Vulkan, device_id: id, is_initialized: true)
 
 impl Gpu:
-    """
-    Check if this GPU device is valid and usable.
-    """
     fn is_valid() -> bool:
         self.is_initialized and self.backend != GpuBackend.NoGpu
 
-    """
-    Get the name of this GPU device.
-    """
     fn name() -> text:
         if not self.is_valid():
             "No GPU"
+        elif self.backend == GpuBackend.Cuda:
+            val info = cuda_device_info(self.device_id)
+            info.name
+        elif self.backend == GpuBackend.Vulkan:
+            val info = vulkan_device_info(self.device_id)
+            info.name
         else:
-            match self.backend:
-                case Cuda:
-                    val info = cuda_device_info(self.device_id)
-                    info.name
-                case Vulkan:
-                    val info = vulkan_device_info(self.device_id)
-                    info.name
-                case NoGpu:
-                    "No GPU"
+            "No GPU"
 
-    """
-    Get the total memory of this GPU device in bytes.
-    """
     fn total_memory() -> i64:
         if not self.is_valid():
             0
+        elif self.backend == GpuBackend.Cuda:
+            val info = cuda_device_info(self.device_id)
+            info.total_memory
+        elif self.backend == GpuBackend.Vulkan:
+            val info = vulkan_device_info(self.device_id)
+            info.total_memory
         else:
-            match self.backend:
-                case Cuda:
-                    val info = cuda_device_info(self.device_id)
-                    info.total_memory
-                case Vulkan:
-                    val info = vulkan_device_info(self.device_id)
-                    info.total_memory
-                case NoGpu:
-                    0
+            0
 
-    """
-    Get backend-specific information.
-    """
     fn backend_name() -> text:
-        match self.backend:
-            case Cuda: "CUDA"
-            case Vulkan: "Vulkan"
-            case NoGpu: "None"
+        if self.backend == GpuBackend.Cuda:
+            "CUDA"
+        elif self.backend == GpuBackend.Vulkan:
+            "Vulkan"
+        else:
+            "None"
 
-    """
-    Synchronize (wait for all operations on this device to complete).
-    """
-    fn sync() -> bool:
+    fn wait_for_idle() -> bool:
         if not self.is_valid():
             true
+        elif self.backend == GpuBackend.Cuda:
+            cuda_sync()
+        elif self.backend == GpuBackend.Vulkan:
+            vulkan_wait_idle()
         else:
-            match self.backend:
-                case Cuda: cuda_sync()
-                case Vulkan: vulkan_wait_idle()
-                case NoGpu: true
+            true
 
 # ============================================================================
 # Device Enumeration
 # ============================================================================
 
-"""
-List all available GPU devices across all backends.
-"""
 struct GpuDeviceEntry:
     backend: GpuBackend
     device_id: i64
@@ -167,43 +124,22 @@ struct GpuDeviceEntry:
 
 fn list_all_gpus() -> [GpuDeviceEntry]:
     var devices: [GpuDeviceEntry] = []
-
-    # Enumerate CUDA devices
     if cuda_available():
         val count = cuda_device_count()
         for i in 0..count:
             val info = cuda_device_info(i)
-            devices.push(GpuDeviceEntry(
-                backend: GpuBackend.Cuda,
-                device_id: i,
-                name: info.name,
-                memory: info.total_memory
-            ))
-
-    # Enumerate Vulkan devices
+            devices.push(GpuDeviceEntry(backend: GpuBackend.Cuda, device_id: i, name: info.name, memory: info.total_memory))
     if vulkan_available():
         vulkan_init()
         val count = vulkan_device_count()
         for i in 0..count:
             val info = vulkan_device_info(i)
-            devices.push(GpuDeviceEntry(
-                backend: GpuBackend.Vulkan,
-                device_id: i,
-                name: info.name,
-                memory: info.total_memory
-            ))
-
+            devices.push(GpuDeviceEntry(backend: GpuBackend.Vulkan, device_id: i, name: info.name, memory: info.total_memory))
     devices
 
-"""
-Check if any GPU is available.
-"""
 fn gpu_available() -> bool:
     cuda_available() or vulkan_available()
 
-"""
-Get the total number of GPUs across all backends.
-"""
 fn gpu_count() -> i64:
     var count: i64 = 0
     if cuda_available():
