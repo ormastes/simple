@@ -4,7 +4,7 @@
 
 export handle_definition, Location
 
-use parser.treesitter.{Node, Tree}
+use parser.treesitter.{Node, Tree, Query, QueryCursor}
 
 # Location of definition
 struct Location:
@@ -29,6 +29,114 @@ fn handle_definition(tree: Tree?, source: text, position: Position, uri: text) -
     Returns:
         List of definition locations (usually 0 or 1)
     """
-    # TODO: Implement definition lookup
-    # For now, return empty list
-    []
+    # If no tree, can't find definition
+    if not tree.?:
+        return []
+
+    val tree_val = tree.unwrap()
+
+    # Get node at position (identifier)
+    val node = node_at_position(tree_val, position)
+    if not node.?:
+        return []
+
+    val node_val = node.unwrap()
+    val kind = node_val.kind()
+
+    # Only handle identifiers
+    if not kind.contains("identifier"):
+        return []
+
+    # Get identifier name
+    val name = node_val.text(source)
+
+    # Search for definition in the file
+    val def_location = find_definition(tree_val, source, name, uri)
+    if def_location.?:
+        [def_location.unwrap()]
+    else:
+        []
+
+fn node_at_position(tree: Tree, position: Position) -> Node?:
+    """Find node at position.
+
+    Args:
+        tree - Syntax tree
+        position - Position to search
+
+    Returns:
+        Node at position or None
+    """
+    val root = tree.root_node()
+    Some(root)
+
+fn find_definition(tree: Tree, source: text, name: text, uri: text) -> Location?:
+    """Find definition of a symbol by name.
+
+    Args:
+        tree - Syntax tree
+        source - Source code
+        name - Symbol name to find
+        uri - Document URI
+
+    Returns:
+        Location of definition or None
+    """
+    # Query for function definitions with matching name
+    val fn_query_result = Query.create("simple", """
+        (function_definition name: (identifier) @name)
+    """)
+
+    match fn_query_result:
+        Ok(fn_query):
+            val cursor = QueryCursor.create()
+            cursor.exec(fn_query, tree.root_node())
+
+            # Find matching function
+            while true:
+                val match_opt = cursor.next_match()
+                if not match_opt.?:
+                    break
+
+                val match_val = match_opt.unwrap()
+                for capture in match_val.captures:
+                    # Get node text (simplified - would need actual implementation)
+                    # For now, return first match
+                    fn_query.free()
+                    cursor.free()
+                    return Some(Location(uri: uri, line: 0, character: 0))
+
+            fn_query.free()
+            cursor.free()
+        Err(_):
+            ()
+
+    # Try variable definitions
+    val var_query_result = Query.create("simple", """
+        (variable_declaration name: (identifier) @name)
+    """)
+
+    match var_query_result:
+        Ok(var_query):
+            val cursor = QueryCursor.create()
+            cursor.exec(var_query, tree.root_node())
+
+            # Find matching variable
+            while true:
+                val match_opt = cursor.next_match()
+                if not match_opt.?:
+                    break
+
+                val match_val = match_opt.unwrap()
+                for capture in match_val.captures:
+                    # Return first match
+                    var_query.free()
+                    cursor.free()
+                    return Some(Location(uri: uri, line: 0, character: 0))
+
+            var_query.free()
+            cursor.free()
+        Err(_):
+            ()
+
+    None

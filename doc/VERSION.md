@@ -86,7 +86,9 @@ src/
 - [ ] Training loop utilities
 
 ### Known Issues (0.4.0)
-- DL examples (`examples/pure_nn/`) have module import issues - `lib.pure.*` paths not resolving
+- DL examples (`examples/pure_nn/`) cannot run due to interpreter limitation: static method calls on generic types not supported (`PureTensor<T>.from_data(...)` fails with "unsupported path call")
+  - **Import issue FIXED**: Module paths now resolve correctly with `lib.pure.tensor.{...}` syntax
+  - **Remaining issue**: Interpreter needs support for generic type static methods
 - Some test specs have parse errors with newer syntax features
 
 #### Documentation Updates

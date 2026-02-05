@@ -10,6 +10,7 @@
 
 # Use Simple SDN library directly (no FFI needed)
 use sdn.{SdnValue, to_sdn, to_json, parse}
+use std.json.{JsonValue}
 
 # File I/O helpers
 use app.io.mod (file_read, file_write, file_exists, cli_get_args, cli_exit)
@@ -67,10 +68,49 @@ fn sdn_from_json(path: text) -> text:
         print "error: Failed to read file: {path}"
         return ""
 
-    # TODO: Parse JSON and convert to SDN
-    # For now, return error message
-    print "error: JSON to SDN conversion not yet implemented"
-    ""
+    # Parse JSON
+    match JsonValue.parse(content):
+        Ok(json_value):
+            # Convert to SDN
+            val sdn_value = json_to_sdn(json_value)
+            # Serialize to SDN format
+            to_sdn(sdn_value)
+        Err(e):
+            print "error: Failed to parse JSON: {e}"
+            ""
+
+fn json_to_sdn(json: JsonValue) -> SdnValue:
+    """Convert JsonValue to SdnValue.
+
+    Args:
+        json - JSON value to convert
+
+    Returns:
+        Equivalent SDN value
+    """
+    match json:
+        case JsonValue.Null:
+            SdnValue.Null
+        case JsonValue.Bool(b):
+            SdnValue.Bool(b)
+        case JsonValue.Number(n):
+            # Check if it's an integer
+            if n == n.floor():
+                SdnValue.Int(n.to_i64())
+            else:
+                SdnValue.Float(n)
+        case JsonValue.String(s):
+            SdnValue.String(s)
+        case JsonValue.Array(arr):
+            var sdn_arr: [SdnValue] = []
+            for item in arr:
+                sdn_arr.push(json_to_sdn(item))
+            SdnValue.Array(sdn_arr)
+        case JsonValue.Object(obj):
+            var sdn_dict: Dict<text, SdnValue> = {}
+            for key, value in obj:
+                sdn_dict[key] = json_to_sdn(value)
+            SdnValue.Dict(sdn_dict)
 
 fn sdn_get(path: text, key: text) -> text:
     """Get value at path from SDN file"""
@@ -88,11 +128,71 @@ fn sdn_get(path: text, key: text) -> text:
 
 fn sdn_set(path: text, key: text, value_str: text) -> i64:
     """Set value at path in SDN file"""
-    # TODO: Implement set functionality
-    # This requires mutable document API which isn't easily accessible
-    # without SdnDocument.from_file() working
-    print "error: Set operation not yet implemented"
-    1
+    # Load the file
+    match load_sdn_file(path):
+        Ok(root):
+            # Parse the value string
+            val new_value = parse_sdn_value(value_str)
+
+            # Set the value at the path
+            var modified_root = root
+            if set_value_at_path(modified_root, key, new_value):
+                # Write back to file
+                val formatted = to_sdn(modified_root)
+                if file_write(path, formatted):
+                    0
+                else:
+                    print "error: Failed to write file: {path}"
+                    1
+            else:
+                print "error: Failed to set value at path '{key}'"
+                1
+        Err(e):
+            print "error: {e}"
+            1
+
+fn set_value_at_path(root: SdnValue, path: text, value: SdnValue) -> bool:
+    """Set value at a dot-separated path in SDN structure.
+
+    Args:
+        root - Root SDN value (must be dict)
+        path - Dot-separated path (e.g., "user.name")
+        value - Value to set
+
+    Returns:
+        true if successful, false otherwise
+    """
+    # Split path by dots
+    val parts = path.split(".")
+
+    if parts.len() == 0:
+        return false
+
+    # Navigate to the parent and set the final key
+    match root:
+        case SdnValue.Dict(dict):
+            if parts.len() == 1:
+                # Direct assignment
+                dict[parts[0]] = value
+                return true
+            else:
+                # Navigate deeper
+                val key = parts[0]
+                if not dict.contains_key(key):
+                    # Create intermediate dict
+                    dict[key] = SdnValue.empty_dict()
+
+                # Get or create nested dict
+                match dict[key]:
+                    case SdnValue.Dict(_):
+                        # Recursive call with rest of path
+                        val rest_path = parts[1..].join(".")
+                        return set_value_at_path(dict[key], rest_path, value)
+                    case _:
+                        # Can't navigate into non-dict
+                        return false
+        case _:
+            return false
 
 fn sdn_fmt(path: text) -> i64:
     """Format SDN file (rewrites with proper formatting)"""

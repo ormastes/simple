@@ -181,11 +181,96 @@ fn parse_coverage_percent(output: text) -> f64:
     val lines = output.split("\n")
     for line in lines:
         if line.contains("%"):
-            # Extract percentage (simplified)
-            # TODO: Implement proper regex or string parsing
-            # For now, return 0.0 as placeholder
-            return 0.0
+            # Find the percentage value
+            # Look for pattern: "XX.XX%" or "XX%"
+            val trimmed = line.trim()
+
+            # Try to find percentage sign and work backwards
+            val pct_idx = trimmed.index_of("%")
+            if pct_idx.?:
+                val idx = pct_idx.unwrap()
+                # Extract digits before %
+                var start = idx - 1
+                var num_str = ""
+
+                # Go backwards to find the start of the number
+                while start >= 0:
+                    val ch = trimmed[start]
+                    if ch >= '0' and ch <= '9':
+                        num_str = ch + num_str
+                        start = start - 1
+                    elif ch == '.':
+                        num_str = ch + num_str
+                        start = start - 1
+                    elif num_str.len() > 0:
+                        # Hit a non-digit after finding digits - done
+                        break
+                    else:
+                        # Still looking for first digit
+                        start = start - 1
+
+                # Try to parse the number
+                if num_str.len() > 0:
+                    # Simple string to float conversion
+                    match parse_float(num_str):
+                        Some(pct):
+                            return pct
+                        None:
+                            continue
     0.0
+
+fn parse_float(s: text) -> f64?:
+    """Simple float parser for coverage percentages."""
+    if s.len() == 0:
+        return None
+
+    # Handle format: "123.45" or "123"
+    if s.contains("."):
+        val parts = s.split(".")
+        if parts.len() == 2:
+            # Parse integer and decimal parts
+            val int_part = parse_int(parts[0])
+            val dec_part = parse_int(parts[1])
+
+            if int_part.? and dec_part.?:
+                val int_val = int_part.unwrap().to_f64()
+                val dec_val = dec_part.unwrap().to_f64()
+                val dec_places = parts[1].len().to_f64()
+                val divisor = power_of_10(dec_places)
+                return Some(int_val + (dec_val / divisor))
+    else:
+        # Just an integer
+        match parse_int(s):
+            Some(n):
+                return Some(n.to_f64())
+            None:
+                return None
+
+    None
+
+fn parse_int(s: text) -> i64?:
+    """Simple integer parser."""
+    if s.len() == 0:
+        return None
+
+    var result: i64 = 0
+    for ch in s:
+        if ch >= '0' and ch <= '9':
+            val digit = (ch.to_i64() - '0'.to_i64())
+            result = result * 10 + digit
+        else:
+            return None
+
+    Some(result)
+
+fn power_of_10(exp: f64) -> f64:
+    """Calculate 10^exp for small exponents."""
+    var result = 1.0
+    var i = 0.0
+    while i < exp:
+        result = result * 10.0
+        i = i + 1.0
+    result
 
 # Parse lines covered/total from output
 fn parse_coverage_lines(output: text) -> (i64, i64):
@@ -193,9 +278,60 @@ fn parse_coverage_lines(output: text) -> (i64, i64):
     # Format: "TOTAL   1234   567   45.93%"
     # Where 1234 = total lines, 567 = covered lines
 
-    # TODO: Implement proper parsing
-    # For now, return 0, 0 as placeholder
+    # Look for TOTAL line
+    val lines = output.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.starts_with("TOTAL"):
+            # Parse numbers from TOTAL line
+            # Format: "TOTAL   <total>   <covered>   <percent>%"
+            val parts = trimmed.split_whitespace()
+
+            # Need at least: ["TOTAL", total, covered, percent]
+            if parts.len() >= 4:
+                # parts[1] = total lines
+                # parts[2] = covered lines
+                match parse_int(parts[1]):
+                    Some(total):
+                        match parse_int(parts[2]):
+                            Some(covered):
+                                return (covered, total)
+                            None:
+                                continue
+                    None:
+                        continue
+
+    # Try alternative format: "lines......: 75.5% (567 of 1234 lines)"
+    for line in lines:
+        if line.contains("lines") and line.contains("of"):
+            # Extract numbers from "567 of 1234"
+            val parts = line.split_whitespace()
+            var i = 0
+            while i < parts.len() - 2:
+                if parts[i + 1] == "of":
+                    # Found pattern: "number of number"
+                    match parse_int(parts[i]):
+                        Some(covered):
+                            match parse_int(parts[i + 2]):
+                                Some(total):
+                                    return (covered, total)
+                                None:
+                                    ()
+                        None:
+                            ()
+                i = i + 1
+
     (0, 0)
+
+fn split_whitespace(s: text) -> [text]:
+    """Split string by whitespace, removing empty parts."""
+    val all_parts = s.split(" ")
+    var result: [text] = []
+    for part in all_parts:
+        val trimmed = part.trim()
+        if trimmed.len() > 0:
+            result.push(trimmed)
+    result
 
 # Print coverage result - OPTIMIZED VERSION
 fn print_coverage_result(result: CoverageResult):
