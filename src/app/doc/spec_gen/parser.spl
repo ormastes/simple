@@ -1,0 +1,193 @@
+# Spec Generator - Parser Module
+# Parses _spec.spl files and extracts test cases
+
+use app.io
+use app.doc.spec_gen.types (SpecFile, TestCase)
+
+export parse_spec_file, extract_imports, parse_metadata, extract_test_cases, extract_test_name
+
+fn parse_spec_file(filepath: text) -> SpecFile:
+    """Parse a _spec.spl file and extract documentation"""
+    if not file_exists(filepath):
+        return SpecFile(
+            path: filepath,
+            header_docstring: "",
+            metadata: [],
+            test_cases: []
+        )
+
+    val content = file_read(filepath)
+
+    # Extract header docstring (first """ ... """)
+    val header = extract_header_docstring(content)
+    val metadata = parse_metadata(header)
+
+    # Extract test cases
+    val test_cases = extract_test_cases(content)
+
+    SpecFile(
+        path: filepath,
+        header_docstring: header,
+        metadata: metadata,
+        test_cases: test_cases
+    )
+
+fn extract_header_docstring(content: text) -> text:
+    """Extract first triple-quoted docstring"""
+    val start = content.find("\"\"\"")
+    if start < 0:
+        return ""
+
+    val after_start = content.substring(start + 3, content.len())
+    val end = after_start.find("\"\"\"")
+    if end < 0:
+        return ""
+
+    after_start.substring(0, end).trim()
+
+fn extract_imports(content: text) -> [text]:
+    """Extract import statements to identify local symbols"""
+    var imports = []
+    val lines = content.split("\n")
+
+    for line in lines:
+        val trimmed = line.trim()
+
+        # Pattern: import Symbol from module
+        if trimmed.starts_with("import ") and trimmed.contains(" from "):
+            val parts = trimmed.split(" from ")
+            if parts.len() > 0:
+                val import_part = parts[0].replace("import ", "").trim()
+                if import_part.len() > 0:
+                    imports = imports + [import_part]
+
+        # Pattern: from module import Symbol
+        if trimmed.starts_with("from ") and trimmed.contains(" import "):
+            val parts = trimmed.split(" import ")
+            if parts.len() > 1:
+                val import_part = parts[1].trim()
+                if import_part.len() > 0:
+                    imports = imports + [import_part]
+
+    imports
+
+fn parse_metadata(docstring: text) -> [(text, text)]:
+    """Parse metadata from docstring header"""
+    var metadata = []
+    val lines = docstring.split("\n")
+
+    for line in lines:
+        # Pattern: **Key:** value
+        if line.contains("**") and line.contains(":**"):
+            val parts = line.split(":**")
+            if parts.len() >= 2:
+                val key = parts[0].replace("**", "").trim()
+                val value = parts[1].replace("**", "").trim()
+                if key.len() > 0:
+                    metadata = metadata + [(key, value)]
+
+    metadata
+
+fn extract_test_cases(content: text) -> [TestCase]:
+    """Extract all test cases from the file"""
+    var cases = []
+    val lines = content.split("\n")
+
+    var i = 0
+    while i < lines.len():
+        val line = lines[i]
+
+        # Look for ## Test: markers
+        if line.trim().starts_with("## Test:"):
+            val section = line.trim().substring(8, line.trim().len()).trim()
+
+            # Extract line number if present
+            var line_num = 0
+            var clean_section = section
+            if section.contains("(Line"):
+                # Try to extract number
+                val parts = section.split("(Line")
+                if parts.len() > 1:
+                    val num_part = parts[1].split(")")[0].trim().replace("~", "")
+                    line_num = num_part.parse_int().unwrap_or(0)
+                    clean_section = parts[0].trim()
+
+            # Look ahead for docstring and code
+            var j = i + 1
+            var test_docstring = ""
+            var test_name = ""
+            var test_code_lines = []
+
+            # Skip blank lines, extract docstring
+            while j < lines.len():
+                val stripped = lines[j].trim()
+
+                if stripped.starts_with("\"\"\""):
+                    # Extract multi-line docstring
+                    j = j + 1
+                    while j < lines.len() and not lines[j].trim().starts_with("\"\"\""):
+                        test_docstring = test_docstring + lines[j] + "\n"
+                        j = j + 1
+                    test_docstring = test_docstring.trim()
+                    j = j + 1  # Skip closing """
+                    continue
+
+                # Look for test or function definition
+                if stripped.starts_with("test \"") or stripped.starts_with("fn "):
+                    test_name = extract_test_name(lines[j])
+
+                    # Extract code until next ## Test: or end
+                    val code_start = j
+                    j = j + 1
+                    while j < lines.len() and not lines[j].trim().starts_with("## Test:"):
+                        test_code_lines = test_code_lines + [lines[j]]
+                        j = j + 1
+
+                    break
+
+                if stripped == "":
+                    j = j + 1
+                else:
+                    j = j + 1
+                    if (j - i) > 20:  # Don't search too far
+                        break
+
+            # Create test case if we found code
+            if test_name.len() > 0 and test_code_lines.len() > 0:
+                val code = test_code_lines.join("\n").trim()
+                val tc = TestCase(
+                    name: test_name,
+                    section: clean_section,
+                    line_number: line_num,
+                    docstring: test_docstring,
+                    code: code,
+                    symbols: [],
+                    related_tests: []
+                )
+                cases = cases + [tc]
+                i = j - 1
+
+        i = i + 1
+
+    cases
+
+fn extract_test_name(line: text) -> text:
+    """Extract test name from test or function definition"""
+    val trimmed = line.trim()
+
+    # test "name":
+    if trimmed.starts_with("test \""):
+        val start = trimmed.find("\"")
+        val after = trimmed.substring(start + 1, trimmed.len())
+        val end = after.find("\"")
+        if end > 0:
+            return after.substring(0, end)
+
+    # fn name():
+    if trimmed.starts_with("fn "):
+        val after_fn = trimmed.substring(3, trimmed.len())
+        val paren = after_fn.find("(")
+        if paren > 0:
+            return after_fn.substring(0, paren).trim()
+
+    "unnamed_test"
