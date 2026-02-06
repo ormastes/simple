@@ -3,6 +3,7 @@
 //! This module consolidates common test patterns to reduce duplication
 //! across runner_tests.rs, runner_async_tests.rs, and other test files.
 
+use std::time::Duration;
 use simple_driver::interpreter::{Interpreter, RunConfig, RunningType};
 
 // ============================================================================
@@ -36,6 +37,7 @@ pub fn run_on(backend: Backend, src: &str, expected: i32) {
             RunConfig {
                 running_type: backend.running_type(),
                 in_memory: !matches!(backend, Backend::Aot),
+                timeout: Some(Duration::from_secs(30)),
                 ..Default::default()
             },
         )
@@ -58,6 +60,7 @@ pub fn run_on_stdout(backend: Backend, src: &str, expected: &str) {
                 running_type: backend.running_type(),
                 in_memory: !matches!(backend, Backend::Aot),
                 capture_output: true,
+                timeout: Some(Duration::from_secs(30)),
                 ..Default::default()
             },
         )
@@ -78,6 +81,7 @@ pub fn run_on_error(backend: Backend, src: &str, err_substr: &str) {
         RunConfig {
             running_type: backend.running_type(),
             in_memory: !matches!(backend, Backend::Aot),
+            timeout: Some(Duration::from_secs(30)),
             ..Default::default()
         },
     ) {
@@ -147,6 +151,7 @@ pub fn run_expect(src: &str, expected: i32) {
             RunConfig {
                 running_type: RunningType::Both,
                 in_memory: true,
+                timeout: Some(Duration::from_secs(30)),
                 ..Default::default()
             },
         )
@@ -166,6 +171,7 @@ pub fn run_expect_all(src: &str, expected: i32) {
             RunConfig {
                 running_type: RunningType::All,
                 in_memory: true,
+                timeout: Some(Duration::from_secs(60)),  // AOT needs more time
                 ..Default::default()
             },
         )
@@ -182,6 +188,7 @@ pub fn run_expect_all_optional(src: &str, expected: i32) -> bool {
         RunConfig {
             running_type: RunningType::All,
             in_memory: true,
+            timeout: Some(Duration::from_secs(60)),  // AOT needs more time
             ..Default::default()
         },
     ) {
@@ -213,6 +220,7 @@ pub fn run_expect_interp(src: &str, expected: i32) {
             RunConfig {
                 running_type: RunningType::Interpreter,
                 in_memory: true,
+                timeout: Some(Duration::from_secs(30)),
                 ..Default::default()
             },
         )
@@ -237,6 +245,7 @@ fn run_interpreter(src: &str) -> Result<simple_driver::interpreter::RunResult, S
         RunConfig {
             running_type: RunningType::Interpreter,
             in_memory: true,
+            timeout: Some(Duration::from_secs(30)),
             ..Default::default()
         },
     )
@@ -361,6 +370,7 @@ fn run_with_capture(src: &str) -> Result<simple_driver::interpreter::RunResult, 
             running_type: RunningType::Interpreter,
             in_memory: true,
             capture_output: true,
+            timeout: Some(Duration::from_secs(30)),
             ..Default::default()
         },
     )
@@ -409,6 +419,7 @@ fn run_wasm(src: &str) -> Result<simple_driver::interpreter::RunResult, String> 
         RunConfig {
             running_type: RunningType::Wasm,
             in_memory: false, // WASM needs temp files
+            timeout: Some(Duration::from_secs(60)),  // WASM compilation needs more time
             ..Default::default()
         },
     )
@@ -440,6 +451,7 @@ pub fn run_expect_wasm_output(src: &str, expected_stdout: &str) {
                 running_type: RunningType::Wasm,
                 in_memory: false,
                 capture_output: true,
+                timeout: Some(Duration::from_secs(60)),  // WASM compilation needs more time
                 ..Default::default()
             },
         )
@@ -477,6 +489,7 @@ pub fn run_expect_all_including_wasm(src: &str, expected: i32) {
                 RunConfig {
                     running_type: RunningType::Compiler,
                     in_memory: true,
+                    timeout: Some(Duration::from_secs(30)),
                     ..Default::default()
                 },
             )
@@ -549,6 +562,7 @@ pub fn run_with_io(src: &str, stdin: &str, expected_stdout: &str) {
                 in_memory: true,
                 capture_output: true,
                 stdin: stdin.to_string(),
+                timeout: Some(Duration::from_secs(30)),
                 ..Default::default()
             },
         )
